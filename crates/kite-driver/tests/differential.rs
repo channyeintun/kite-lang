@@ -136,6 +136,12 @@ fn main() {
          \x20 io.print(where_is(P{ x: 1, y: 5 }))\n}\n",
     ),
     (
+        "strings",
+        "fn greet(name: str) -> str {\n  return \"hello, \" + name\n}\n\
+         fn main() {\n  io.print(greet(\"world\"))\n  io.print(\"a\" + \"b\" + \"c\")\n\
+         \x20 io.print(\"x\" == \"x\")\n  io.print(\"x\" == \"y\")\n  io.print(\"x\" != \"y\")\n}\n",
+    ),
+    (
         "evaluation-order",
         "fn step(n: int) -> int {\n  io.print(n)\n  return n\n}\nfn main() {\n  let x = step(1) + step(2)\n  io.print(x)\n}\n",
     ),

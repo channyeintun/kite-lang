@@ -21,9 +21,17 @@ pub fn generate_glue(strings: &[String], wasm_path: &str) -> String {
 // Kite programs reach the host through a declared boundary rather than an
 // ambient runtime, so everything the module can do is visible in this file.
 
+// String constants. A `str` is an index into this table, which is why the
+// module needs no linear memory. Concatenation appends, so the table grows.
 const STRINGS = [
 {table}
 ];
+
+function intern(s) {{
+  const existing = STRINGS.indexOf(s);
+  if (existing !== -1) return existing;
+  return STRINGS.push(s) - 1;
+}}
 
 /// Where output goes. Replace to capture it.
 export let write = (line) => console.log(line);
@@ -41,6 +49,8 @@ function imports() {{
         write(Number.isFinite(v) && Number.isInteger(v) ? v.toFixed(1) : String(v)),
       print_bool: (v) => write(v ? "true" : "false"),
       print_str: (i) => write(STRINGS[i]),
+      str_concat: (a, b) => intern(STRINGS[a] + STRINGS[b]),
+      str_eq: (a, b) => (STRINGS[a] === STRINGS[b] ? 1 : 0),
     }},
   }};
 }}

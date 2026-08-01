@@ -67,14 +67,6 @@ pub fn unsupported(program: &mir::Program, types: &Types) -> Vec<Unsupported> {
                         mir::Rvalue::Binary { op, .. } => {
                             if matches!(
                                 op,
-                                kite_hir::BinOp::ConcatStr
-                                    | kite_hir::BinOp::EqStr
-                                    | kite_hir::BinOp::NeStr
-                            ) {
-                                note("string comparison and concatenation");
-                            }
-                            if matches!(
-                                op,
                                 kite_hir::BinOp::EqValue | kite_hir::BinOp::NeValue
                             ) {
                                 note("structural equality on aggregates");

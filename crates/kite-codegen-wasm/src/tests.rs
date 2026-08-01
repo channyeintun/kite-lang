@@ -385,12 +385,18 @@ fn unlowered_constructs_are_reported() {
     assert!(gaps("fn main() {\n  let a: Option<int> = nil\n}\n")
         .contains(&"optionals".to_string()));
 
-    assert!(gaps("fn main() {\n  io.print(\"a\" + \"b\")\n}\n")
-        .contains(&"string comparison and concatenation".to_string()));
+    assert!(gaps("fn main() {\n  let xs: [str] = []\n}\n").contains(&"slices".to_string()));
 }
 
 /// Everything the backend *does* lower must report no gaps, or the check would
 /// be refusing working programs.
+/// A `str` is a table index, so its operations are host calls. They lower.
+#[test]
+fn string_operations_lower() {
+    valid("fn main() {\n  io.print(\"a\" + \"b\")\n  io.print(\"x\" == \"y\")\n  io.print(\"x\" != \"y\")\n}\n");
+    assert!(gaps("fn main() {\n  io.print(\"a\" + \"b\")\n}\n").is_empty());
+}
+
 #[test]
 fn supported_programs_report_no_gaps() {
     assert!(gaps(HELLO).is_empty());

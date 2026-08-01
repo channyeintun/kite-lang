@@ -218,6 +218,9 @@ way.
 5. Trait objects with typed function-reference vtables
 6. `extern` declarations driving the glue, rather than a fixed import list
 
+String concatenation and comparison lower as host calls, since a `str` is an
+index into a table the glue holds and the glue grows it.
+
 Also still to lower: slices, optionals, tuples, maps, and the fallible-pair
 representation error handling uses.
 

@@ -48,16 +48,31 @@ mod support;
 pub use glue::generate_glue;
 pub use support::{unsupported, Unsupported};
 
-/// Host functions the module imports. Deliberately small: the standard library
-/// replaces them from Phase 6.
-const IMPORTS: [(&str, ValType); 4] = [
-    ("print_int", ValType::I64),
-    ("print_float", ValType::F64),
-    ("print_bool", ValType::I32),
-    ("print_str", ValType::I32),
+/// Host functions the module imports, as (name, params, results).
+///
+/// Deliberately small: the standard library replaces them from Phase 6. String
+/// operations live here because a `str` is an index into a table the host
+/// holds — which is also why the module needs no linear memory.
+const IMPORTS: [(&str, &[ValType], &[ValType]); 6] = [
+    ("print_int", &[ValType::I64], &[]),
+    ("print_float", &[ValType::F64], &[]),
+    ("print_bool", &[ValType::I32], &[]),
+    ("print_str", &[ValType::I32], &[]),
+    ("str_concat", &[ValType::I32, ValType::I32], &[ValType::I32]),
+    ("str_eq", &[ValType::I32, ValType::I32], &[ValType::I32]),
 ];
 
 const IMPORT_COUNT: u32 = IMPORTS.len() as u32;
+
+/// Import indices, by position in [`IMPORTS`].
+mod host {
+    pub const PRINT_INT: u32 = 0;
+    pub const PRINT_FLOAT: u32 = 1;
+    pub const PRINT_BOOL: u32 = 2;
+    pub const PRINT_STR: u32 = 3;
+    pub const STR_CONCAT: u32 = 4;
+    pub const STR_EQ: u32 = 5;
+}
 
 pub struct WasmModule {
     pub bytes: Vec<u8>,
@@ -115,8 +130,10 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
 
     // ---- types -------------------------------------------------------------
     let mut type_section = TypeSection::new();
-    for (_, param) in IMPORTS.iter() {
-        type_section.ty().function([*param], []);
+    for (_, params, results) in IMPORTS.iter() {
+        type_section
+            .ty()
+            .function(params.iter().copied(), results.iter().copied());
     }
 
     // Every aggregate goes in one `rec` group: a field may name a type declared
@@ -190,7 +207,7 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
 
     // ---- imports -----------------------------------------------------------
     let mut imports = ImportSection::new();
-    for (i, (name, _)) in IMPORTS.iter().enumerate() {
+    for (i, (name, _, _)) in IMPORTS.iter().enumerate() {
         imports.import("kite", name, EntityType::Function(i as u32));
     }
     module.section(&imports);
@@ -405,7 +422,21 @@ impl<'a> Emitter<'a> {
             mir::Rvalue::Binary { op, lhs, rhs } => {
                 self.operand(func, lhs);
                 self.operand(func, rhs);
-                self.binop(func, *op);
+                // A `str` is a table index, so its operations are host calls
+                // rather than instructions.
+                match op {
+                    BinOp::ConcatStr => {
+                        func.instruction(&Instruction::Call(host::STR_CONCAT));
+                    }
+                    BinOp::EqStr => {
+                        func.instruction(&Instruction::Call(host::STR_EQ));
+                    }
+                    BinOp::NeStr => {
+                        func.instruction(&Instruction::Call(host::STR_EQ));
+                        func.instruction(&Instruction::I32Eqz);
+                    }
+                    _ => self.binop(func, *op),
+                }
                 return true;
             }
 
@@ -522,12 +553,12 @@ impl<'a> Emitter<'a> {
                 // The host function is chosen by the argument's type. The
                 // import list is small on purpose; `Display` replaces it later.
                 let import = if self.is_str(arg) {
-                    3
+                    host::PRINT_STR
                 } else {
                     match self.operand_type(arg) {
-                        ValType::I64 => 0,
-                        ValType::F64 => 1,
-                        _ => 2,
+                        ValType::I64 => host::PRINT_INT,
+                        ValType::F64 => host::PRINT_FLOAT,
+                        _ => host::PRINT_BOOL,
                     }
                 };
                 self.operand(func, arg);
@@ -628,8 +659,10 @@ impl<'a> Emitter<'a> {
             GeFloat => Instruction::F64Ge,
             EqBool => Instruction::I32Eq,
             NeBool => Instruction::I32Ne,
-            // Not lowered yet.
-            EqStr | NeStr | ConcatStr | EqValue | NeValue => Instruction::Unreachable,
+            // Handled by a host call before this table is consulted.
+            EqStr | NeStr | ConcatStr => Instruction::Unreachable,
+            // Structural equality on aggregates is not lowered yet.
+            EqValue | NeValue => Instruction::Unreachable,
             // MIR has already turned these into branches.
             And | Or => Instruction::Unreachable,
         };
