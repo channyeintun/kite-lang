@@ -123,13 +123,17 @@ types are structurally equal, so `struct Circle { r: float }` and
 cannot separate them. Only types reachable through a `dyn` carry the tag, so a
 program that never forms a trait object pays nothing for the mechanism.
 
+Deep equality is a generated function per aggregate type — Wasm has no
+instruction for it — emitted only for types a program actually compares.
+
 Every program in the differential corpus is compiled to **both** the bytecode
 VM and Wasm, run on both, and the outputs compared. `--emit wasm` reports
-anything it cannot lower rather than producing a module that traps.
+anything it cannot lower rather than producing a module that traps; today it
+refuses nothing the language can express.
 
 **Not yet:** closures, generics, and string interpolation.
 
-434 tests, plus an annotated compile-fail corpus.
+435 tests, plus an annotated compile-fail corpus.
 
 ```bash
 kitec run     file.kite      # compile and run

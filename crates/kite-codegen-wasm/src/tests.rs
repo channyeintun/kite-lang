@@ -413,6 +413,37 @@ fn main() {
 }
 ";
 
+/// Deep equality is a generated function per aggregate type. A type is only
+/// given one when the program compares it, and the comparison recurses into
+/// components — so a struct holding a slice needs the slice's function too.
+#[test]
+fn structural_equality_generates_one_function_per_type() {
+    let src = "struct P {\n  x: int\n  tags: [str]\n}\n\
+               fn main() {\n  let a = P{x: 1, tags: [\"a\"]}\n\
+               \x20 let b = P{x: 1, tags: [\"a\"]}\n  io.print(a == b)\n  io.print(a != b)\n}\n";
+    valid(src);
+    assert!(gaps(src).is_empty());
+
+    // Enums compare tags first, so different variants are never equal.
+    valid(
+        "enum E {\n  A\n  B(int)\n  C(str, int)\n}\n\
+         fn main() {\n  io.print(E.A == E.B(1))\n  io.print(E.C(\"x\", 1) == E.C(\"x\", 1))\n}\n",
+    );
+
+    // Optionals: absent equals absent, present compares payloads.
+    valid(
+        "struct P {\n  x: int\n}\n\
+         fn main() {\n  let a: Option<P> = P{x: 1}\n  let b: Option<P> = nil\n\
+         \x20 io.print(a == b)\n}\n",
+    );
+
+    // A program that compares nothing deep generates nothing.
+    let shallow = "fn main() {\n  io.print(1 == 2)\n}\n";
+    let deep = "struct P {\n  x: int\n}\n\
+                fn main() {\n  io.print(P{x: 1} == P{x: 2})\n}\n";
+    assert!(valid(shallow).size() < valid(deep).size());
+}
+
 /// Trait objects lower to a tag comparison in a per-method dispatcher.
 #[test]
 fn trait_objects_validate() {

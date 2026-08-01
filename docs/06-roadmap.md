@@ -262,9 +262,18 @@ all down here, and a cast-based dispatch would silently pick the wrong body.
 Only types that appear in some vtable carry the tag, so a program without `dyn`
 is byte-for-byte what it was before trait objects existed.
 
-**All nine examples now compile to WebAssembly and agree with the bytecode VM.**
+Structural equality on aggregates is a generated function per type, because
+Wasm has no deep-equality instruction. A struct compares fields, an enum
+compares tags then payloads, a slice compares lengths then elements, an
+optional compares presence then payloads. Each returns at the first
+difference, and the functions call each other, so a struct holding a slice of
+structs compares correctly at any depth. They are emitted only for types a
+program actually compares.
 
-Still to lower: structural equality on aggregates. The rvalue match in the backend has **no catch-all**, so adding a
+**All nine examples compile to WebAssembly and agree with the bytecode VM, and
+every construct the language has now lowers.** The only thing `--emit wasm`
+still refuses is a function-typed value, which the language cannot produce yet
+either — closures are Phase 2 work that has not landed. The rvalue match in the backend has **no catch-all**, so adding a
 form to MIR fails to compile rather than silently producing a module that
 traps.
 
@@ -395,7 +404,7 @@ none.
 | 1 — Vertical slice | ✅ complete |
 | 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, trait objects, slices, optionals, tuples, maps. ❌ closures, generics |
 | 3 — Error handling | ✅ complete |
-| 4 — WebAssembly backend | ✅ everything the language has, including trait objects — all nine examples run on both backends. ❌ JS String Builtins |
+| 4 — WebAssembly backend | ✅ every construct the language has, all nine examples, both backends agreeing. ❌ JS String Builtins (an optimisation, not a gap) |
 | 5 — Concurrency | ❌ not started |
 | 6 — Standard library | ❌ not started |
 | 7 — Layout engine and DOM renderer | ❌ not started |

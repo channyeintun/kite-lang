@@ -50,17 +50,7 @@ pub fn unsupported(program: &mir::Program, types: &Types) -> Vec<Unsupported> {
         for block in &f.blocks {
             for stmt in &block.stmts {
                 match stmt {
-                    mir::Inst::Assign { value, .. } => match value {
-                        mir::Rvalue::Binary { op, .. } => {
-                            if matches!(
-                                op,
-                                kite_hir::BinOp::EqValue | kite_hir::BinOp::NeValue
-                            ) {
-                                note("structural equality on aggregates");
-                            }
-                        }
-                        _ => {}
-                    },
+                    mir::Inst::Assign { .. } => {}
                     mir::Inst::SetField { .. }
                     | mir::Inst::SetIndex { .. }
                     | mir::Inst::SlicePush { .. }

@@ -199,6 +199,30 @@ fn main() {
          \x20 let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })\n}\n",
     ),
     (
+        "structural-equality",
+        "struct Point {\n  x: int\n  y: int\n}\n\
+         struct Line {\n  a: Point\n  b: Point\n  label: str\n}\n\
+         enum Shape {\n  Dot\n  Seg(Point, Point)\n  Named(str)\n}\n\
+         fn main() {\n\
+         \x20 let p = Point{x: 1, y: 2}\n  let q = Point{x: 1, y: 2}\n\
+         \x20 let r = Point{x: 9, y: 2}\n\
+         \x20 io.print(p == q)\n  io.print(p == r)\n  io.print(p != r)\n\
+         \x20 io.print(Line{a: p, b: r, label: \"one\"} == Line{a: q, b: r, label: \"one\"})\n\
+         \x20 io.print(Line{a: p, b: r, label: \"one\"} == Line{a: q, b: r, label: \"two\"})\n\
+         \x20 io.print([1, 2, 3] == [1, 2, 3])\n  io.print([1, 2, 3] == [1, 2, 4])\n\
+         \x20 io.print([1, 2, 3] == [1, 2])\n\
+         \x20 io.print((1, \"a\", true) == (1, \"a\", true))\n\
+         \x20 io.print((1, \"a\", true) == (1, \"b\", true))\n\
+         \x20 io.print(Shape.Seg(p, r) == Shape.Seg(q, r))\n\
+         \x20 io.print(Shape.Seg(p, r) == Shape.Named(\"x\"))\n\
+         \x20 io.print(Shape.Dot == Shape.Dot)\n\
+         \x20 io.print(Shape.Named(\"x\") == Shape.Named(\"x\"))\n\
+         \x20 let o1: Option<Point> = p\n  let o2: Option<Point> = q\n\
+         \x20 let o3: Option<Point> = nil\n\
+         \x20 io.print(o1 == o2)\n  io.print(o1 == o3)\n\
+         \x20 io.print([p, q] == [q, p])\n  io.print([p, q] == [q, r])\n}\n",
+    ),
+    (
         "trait-objects",
         "trait Shape {\n  fn area(self) -> int\n  fn sides(self) -> int\n}\n\
          struct Circle {\n  r: int\n}\nstruct Square {\n  s: int\n}\n\

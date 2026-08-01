@@ -43,6 +43,7 @@ use wasm_encoder::{
     Module, RefType, StorageType, SubType, TypeSection, ValType,
 };
 
+mod eq;
 mod glue;
 mod support;
 pub use glue::generate_glue;
@@ -583,6 +584,12 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     }
     let dispatch_base = IMPORT_COUNT + program.fns.len() as u32;
 
+    // Structural equality: one generated function per aggregate type a program
+    // actually compares. They may call each other, so all are declared before
+    // any is emitted.
+    let eq_fns = eq::collect(program, types);
+    let eq_base = dispatch_base + dispatchers.len() as u32;
+
     let mut fn_type_index = Vec::with_capacity(program.fns.len());
     for (i, f) in program.fns.iter().enumerate() {
         let params: Vec<ValType> = (0..f.param_count)
@@ -592,11 +599,19 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
         fn_type_index.push(fn_type_base + i as u32);
         type_section.ty().function(params, results);
     }
-    let mut dispatch_type_index = Vec::with_capacity(dispatchers.len());
-    for (i, d) in dispatchers.iter().enumerate() {
-        dispatch_type_index.push(fn_type_base + program.fns.len() as u32 + i as u32);
+    let mut extra_type_index = Vec::with_capacity(dispatchers.len() + eq_fns.len());
+    let mut next_fn_type = fn_type_base + program.fns.len() as u32;
+    for d in &dispatchers {
+        extra_type_index.push(next_fn_type);
+        next_fn_type += 1;
         let results: Vec<ValType> = wasm_result_with(d.ret, types, &layout).into_iter().collect();
         type_section.ty().function(d.params.iter().copied(), results);
+    }
+    for e in &eq_fns {
+        extra_type_index.push(next_fn_type);
+        next_fn_type += 1;
+        let (params, results) = eq::signature(e.ty, types, &layout);
+        type_section.ty().function(params, results);
     }
     module.section(&type_section);
 
@@ -609,7 +624,7 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
 
     // ---- functions ---------------------------------------------------------
     let mut functions = FunctionSection::new();
-    for idx in fn_type_index.iter().chain(&dispatch_type_index) {
+    for idx in fn_type_index.iter().chain(&extra_type_index) {
         functions.function(*idx);
     }
     module.section(&functions);
@@ -630,11 +645,23 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     // whole table is needed before any body is emitted.
     let fn_returns: Vec<TyId> = program.fns.iter().map(|f| f.ret).collect();
     let mut code = CodeSection::new();
+    let eq_builder = eq::EqBuilder { types, layout: &layout, base: eq_base, fns: &eq_fns };
     for f in &program.fns {
-        code.function(&compile_fn(f, types, &fn_returns, &layout, dispatch_base, &dispatchers));
+        code.function(&compile_fn(
+            f,
+            types,
+            &fn_returns,
+            &layout,
+            dispatch_base,
+            &dispatchers,
+            &eq_builder,
+        ));
     }
     for d in &dispatchers {
         code.function(&compile_dispatcher(d, &layout));
+    }
+    for e in &eq_fns {
+        code.function(&eq_builder.build(e.ty));
     }
     module.section(&code);
 
@@ -801,6 +828,7 @@ fn compile_fn(
     layout: &TypeLayout,
     dispatch_base: u32,
     dispatchers: &[Dispatcher],
+    eq: &eq::EqBuilder,
 ) -> Function {
     // Locals beyond the parameters, plus one synthetic program counter.
     let mut locals: Vec<(u32, ValType)> = Vec::new();
@@ -885,6 +913,7 @@ fn compile_fn(
             fn_returns,
             dispatch_base,
             dispatchers,
+            eq,
             layout,
             current_dst: None,
             pc,
@@ -919,6 +948,7 @@ struct Emitter<'a> {
     /// Where the dispatchers start in the function index space.
     dispatch_base: u32,
     dispatchers: &'a [Dispatcher],
+    eq: &'a eq::EqBuilder<'a>,
     layout: &'a TypeLayout,
     /// The local a rvalue is being assigned into, when there is one. A slice
     /// construction takes its element type from there.
@@ -1055,6 +1085,17 @@ impl<'a> Emitter<'a> {
                     BinOp::NeStr => {
                         func.instruction(&Instruction::Call(host::STR_EQ));
                         func.instruction(&Instruction::I32Eqz);
+                    }
+                    // Deep equality on an aggregate: a generated function per
+                    // type, because Wasm has no instruction for it.
+                    BinOp::EqValue | BinOp::NeValue => {
+                        match self.operand_ty(lhs).and_then(|t| self.eq.index_of(t)) {
+                            Some(i) => func.instruction(&Instruction::Call(i)),
+                            None => func.instruction(&Instruction::Unreachable),
+                        };
+                        if matches!(op, BinOp::NeValue) {
+                            func.instruction(&Instruction::I32Eqz);
+                        }
                     }
                     _ => self.binop(func, *op),
                 }
@@ -1762,6 +1803,15 @@ impl<'a> Emitter<'a> {
 
     /// The record type an operand holds, whether a struct or a tuple. Both are
     /// positional records once lowered.
+    /// The type an operand holds, when it is a local. A literal never has an
+    /// aggregate type, so this is all deep equality needs.
+    fn operand_ty(&self, o: &mir::Operand) -> Option<TyId> {
+        match o {
+            mir::Operand::Local(l) => Some(self.f.locals[l.index()].ty),
+            _ => None,
+        }
+    }
+
     /// The record an operand holds, and how far its fields are shifted by an
     /// identity tag. Tuples never dispatch, so they are never shifted.
     fn record_of(&self, o: &mir::Operand) -> Option<(u32, u32)> {
