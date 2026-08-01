@@ -1,0 +1,188 @@
+//! Differential testing across backends.
+//!
+//! Every program is compiled twice — to bytecode and to WebAssembly — and run
+//! on both. The outputs must match.
+//!
+//! This is the highest-value test in the tree. Two independent implementations
+//! that must agree finds codegen bugs almost for free, and codegen bugs are the
+//! hardest class to find any other way. It is also the reason the bytecode VM
+//! was built before the Wasm backend even though Wasm is the point of the
+//! project.
+//!
+//! The Wasm half needs Node. When Node is absent the module is still compiled
+//! and validated; only the execution comparison is skipped, and the test says
+//! so rather than silently passing.
+
+use kite_driver::{compile, Emit};
+use std::process::Command;
+
+/// Programs exercised on both backends. Each must use only what the Wasm
+/// backend lowers today: numbers, booleans, strings, functions, control flow.
+const PROGRAMS: &[(&str, &str)] = &[
+    (
+        "phase-one",
+        "\
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+fn main() {
+    let x = add(2, 3)
+    if x > 4 {
+        io.print(\"big\")
+    }
+    for i in 0..x {
+        io.print(i)
+    }
+}
+",
+    ),
+    (
+        "arithmetic",
+        "fn main() {\n  io.print(2 + 3 * 4 - 10 / 2 % 3)\n  io.print(1.5 + 2.5 * 2.0)\n  io.print(-7)\n}\n",
+    ),
+    (
+        "comparison",
+        "fn main() {\n  io.print(1 < 2)\n  io.print(2.0 >= 3.0)\n  io.print(true != false)\n  io.print(!false)\n}\n",
+    ),
+    (
+        "bitwise",
+        "fn main() {\n  io.print(12 & 10)\n  io.print(12 | 10)\n  io.print(12 ^ 10)\n  io.print(1 << 4)\n  io.print(256 >> 4)\n  io.print(6 & 3 == 2)\n}\n",
+    ),
+    (
+        "loops",
+        "fn main() {\n  for i in 0..3 {\n    io.print(i)\n  }\n  for i in 0..=2 {\n    io.print(i)\n  }\n  var n = 0\n  for n < 3 {\n    io.print(n)\n    n += 1\n  }\n}\n",
+    ),
+    (
+        "continue-advances",
+        "fn main() {\n  for i in 0..5 {\n    if i == 2 {\n      continue\n    }\n    io.print(i)\n  }\n}\n",
+    ),
+    (
+        "labelled-jumps",
+        "fn main() {\n  outer: for i in 0..3 {\n    for j in 0..3 {\n      if j == 1 {\n        continue outer\n      }\n      io.print(i * 10 + j)\n    }\n  }\n}\n",
+    ),
+    (
+        "recursion",
+        "fn fact(n: int) -> int {\n  if n <= 1 {\n    return 1\n  }\n  return n * fact(n - 1)\n}\nfn main() {\n  io.print(fact(10))\n}\n",
+    ),
+    (
+        "mutual-recursion",
+        "fn is_even(n: int) -> bool {\n  if n == 0 {\n    return true\n  }\n  return is_odd(n - 1)\n}\nfn is_odd(n: int) -> bool {\n  if n == 0 {\n    return false\n  }\n  return is_even(n - 1)\n}\nfn main() {\n  io.print(is_even(10))\n  io.print(is_odd(7))\n}\n",
+    ),
+    (
+        "short-circuit",
+        "fn main() {\n  let a = true\n  let b = false\n  io.print(a && b)\n  io.print(a || b)\n}\n",
+    ),
+    (
+        "if-expression",
+        "fn main() {\n  let label = if 12 > 10 { \"big\" } else { \"small\" }\n  io.print(label)\n}\n",
+    ),
+    (
+        "nested-calls",
+        "fn add(a: int, b: int) -> int {\n  return a + b\n}\nfn main() {\n  io.print(add(add(1, 2), add(3, 4)))\n}\n",
+    ),
+    (
+        "evaluation-order",
+        "fn step(n: int) -> int {\n  io.print(n)\n  return n\n}\nfn main() {\n  let x = step(1) + step(2)\n  io.print(x)\n}\n",
+    ),
+];
+
+fn run_on_vm(name: &str, src: &str) -> String {
+    let c = compile(format!("{}.kite", name), src, Emit::Check);
+    assert!(
+        !c.failed(),
+        "{} does not compile:\n{}",
+        name,
+        c.render_diagnostics()
+    );
+    let mut out = Vec::new();
+    c.run(&mut out)
+        .unwrap_or_else(|t| panic!("{} trapped on the VM: {}", name, t));
+    String::from_utf8(out).expect("output is valid UTF-8")
+}
+
+fn node_available() -> bool {
+    Command::new("node")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+fn run_on_wasm(name: &str, src: &str, dir: &std::path::Path) -> String {
+    let c = compile(format!("{}.kite", name), src, Emit::Wasm);
+    assert!(
+        !c.failed(),
+        "{} does not compile to wasm:\n{}",
+        name,
+        c.render_diagnostics()
+    );
+    let module = c.wasm.as_ref().expect("a wasm module");
+
+    std::fs::write(dir.join("app.wasm"), &module.bytes).expect("write wasm");
+    std::fs::write(
+        dir.join("app.js"),
+        kite_driver::generate_glue(&module.strings, "app.wasm"),
+    )
+    .expect("write glue");
+    std::fs::write(
+        dir.join("run.mjs"),
+        "import { readFile } from \"node:fs/promises\";\n\
+         import { run, setWriter } from \"./app.js\";\n\
+         const out = [];\n\
+         setWriter((l) => out.push(l));\n\
+         await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n",
+    )
+    .expect("write runner");
+
+    let output = Command::new("node")
+        .arg(dir.join("run.mjs"))
+        .output()
+        .expect("node runs");
+    assert!(
+        output.status.success(),
+        "{} failed under node:\n{}",
+        name,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("output is valid UTF-8")
+}
+
+#[test]
+fn both_backends_agree() {
+    if !node_available() {
+        eprintln!("skipping the wasm half: node is not on PATH");
+        // The modules are still built and validated by kite-codegen-wasm's own
+        // tests, so this is a reduced check rather than no check.
+        for (name, src) in PROGRAMS {
+            let _ = run_on_vm(name, src);
+        }
+        return;
+    }
+
+    let root = std::env::temp_dir().join(format!("kite-diff-{}", std::process::id()));
+    let mut mismatches = Vec::new();
+
+    for (name, src) in PROGRAMS {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).expect("create work directory");
+
+        let vm = run_on_vm(name, src);
+        let wasm = run_on_wasm(name, src, &dir);
+
+        if vm != wasm {
+            mismatches.push(format!(
+                "{}:\n  vm:   {:?}\n  wasm: {:?}",
+                name, vm, wasm
+            ));
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(
+        mismatches.is_empty(),
+        "{} backend disagreement(s):\n\n{}",
+        mismatches.len(),
+        mismatches.join("\n\n")
+    );
+}

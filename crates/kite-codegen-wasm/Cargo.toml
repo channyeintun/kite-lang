@@ -1,22 +1,23 @@
 [package]
-name = "kite-driver"
+name = "kite-codegen-wasm"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Compiler pipeline orchestration for Kite"
+description = "WasmGC code generator for Kite"
 
 [dependencies]
+kite-mir.workspace = true
+kite-hir.workspace = true
+wasm-encoder = "0.255.0"
+
+[dev-dependencies]
 kite-span.workspace = true
 kite-diag.workspace = true
 kite-lexer.workspace = true
-kite-ast.workspace = true
 kite-parser.workspace = true
 kite-resolve.workspace = true
 kite-types.workspace = true
-kite-hir.workspace = true
-kite-mir.workspace = true
-kite-codegen-kbc.workspace = true
-kite-codegen-wasm.workspace = true
-kite-vm.workspace = true
+wasmparser = "0.255.0"
+wasmprinter = "0.255.0"

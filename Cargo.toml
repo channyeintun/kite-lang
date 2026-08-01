@@ -11,6 +11,7 @@ members = [
     "crates/kite-hir",
     "crates/kite-mir",
     "crates/kite-codegen-kbc",
+    "crates/kite-codegen-wasm",
     "crates/kite-vm",
     "crates/kite-driver",
     "bin/kitec",
@@ -34,6 +35,7 @@ kite-types = { path = "crates/kite-types" }
 kite-hir = { path = "crates/kite-hir" }
 kite-mir = { path = "crates/kite-mir" }
 kite-codegen-kbc = { path = "crates/kite-codegen-kbc" }
+kite-codegen-wasm = { path = "crates/kite-codegen-wasm" }
 kite-vm = { path = "crates/kite-vm" }
 kite-driver = { path = "crates/kite-driver" }
 

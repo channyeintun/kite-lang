@@ -50,7 +50,7 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 
 | Target | Backend | Status |
 |---|---|---|
-| `wasm32-gc` | WasmGC via `wasm-encoder` | Primary — the reference implementation |
+| `wasm32-gc` | WasmGC via `wasm-encoder` | Primary. Numbers, control flow, and calls lower today; aggregates in progress |
 | `kbc` | Register-based bytecode + interpreter | Dev loop, embedding, REPL |
 | `native-*` | Cranelift AOT (aarch64, x86-64) | Desktop and CLI applications |
 
@@ -68,9 +68,15 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 
 ## Status
 
-**Phase 1 complete. Phase 2 substantially complete** — structs, enums,
-`match` with exhaustiveness, traits with default methods. See
+**Phases 1–3 complete. Phase 4 started.** Structs, enums, `match` with
+exhaustiveness, traits, slices, optionals, enforced error handling, and a
+WebAssembly backend for the numeric and control-flow core. See
 [docs/06-roadmap.md](docs/06-roadmap.md) for what comes next.
+
+```bash
+kitec build examples/hello.kite --emit wasm --out dist
+# wrote dist/app.wasm (346 bytes) and dist/app.js
+```
 
 ```bash
 cargo run --bin kitec -- run examples/hello.kite

@@ -16,7 +16,8 @@ USAGE:
     kitec build <file.kite>          compile and report what was produced
 
 OPTIONS:
-    --emit <stage>    print an intermediate form: check, ast, hir, mir, kbc
+    --emit <stage>    check, ast, hir, mir, kbc, wasm
+    --out <dir>       where `--emit wasm` writes app.wasm and app.js
     --explain <CODE>  explain a diagnostic code, e.g. --explain E0301
     --version
     --help
@@ -44,6 +45,7 @@ fn main() -> ExitCode {
     let mut command = None;
     let mut path = None;
     let mut emit = None;
+    let mut out_dir = None;
     let mut i = 0;
 
     while i < args.len() {
@@ -64,6 +66,13 @@ fn main() -> ExitCode {
                     ));
                 };
                 emit = Some(e);
+                i += 2;
+            }
+            "--out" => {
+                let Some(v) = args.get(i + 1) else {
+                    return fail("`--out` needs a directory");
+                };
+                out_dir = Some(v.clone());
                 i += 2;
             }
             "run" | "check" | "build" if command.is_none() => {
@@ -103,6 +112,30 @@ fn main() -> ExitCode {
 
     if !result.output.is_empty() {
         print!("{}", result.output);
+    }
+
+    // `--emit wasm` writes artefacts rather than printing them.
+    if let Some(module) = &result.wasm {
+        let dir = out_dir.as_deref().unwrap_or(".");
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            return fail(&format!("cannot create `{}`: {}", dir, e));
+        }
+        let wasm_path = format!("{}/app.wasm", dir);
+        let js_path = format!("{}/app.js", dir);
+        if let Err(e) = std::fs::write(&wasm_path, &module.bytes) {
+            return fail(&format!("cannot write `{}`: {}", wasm_path, e));
+        }
+        let glue = kite_driver::generate_glue(&module.strings, "app.wasm");
+        if let Err(e) = std::fs::write(&js_path, glue) {
+            return fail(&format!("cannot write `{}`: {}", js_path, e));
+        }
+        eprintln!(
+            "wrote {} ({} bytes) and {}",
+            wasm_path,
+            module.bytes.len(),
+            js_path
+        );
+        return ExitCode::SUCCESS;
     }
 
     match command.as_str() {

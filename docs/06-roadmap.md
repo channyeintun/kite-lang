@@ -170,30 +170,49 @@ valid. `?.` and the `?T` type sigil went with it; the optional type is spelled
 
 ---
 
-## Phase 4 — WasmGC backend (6–8 weeks)
+## Phase 4 — WebAssembly backend 🟡 **step 1 of 6 complete**
 
-`kite-codegen-wasm` via `wasm-encoder`. The type mapping is specified in
-[docs/03 §7](03-compiler-architecture.md#7-wasmgc-lowering).
+`kite-codegen-wasm` emits WebAssembly directly via `wasm-encoder` — no LLVM.
 
-Order within the phase:
+**Done — step 1: functions, locals, arithmetic, control flow.**
 
-1. Functions, locals, arithmetic, control flow
+```bash
+kitec build examples/hello.kite --emit wasm --out dist
+# wrote dist/app.wasm (346 bytes) and dist/app.js
+```
+
+**346 bytes**, against a 10 KB budget. Shipping no garbage collector is what
+makes that reachable, and it is the single reason this design was not viable
+before WasmGC reached cross-browser baseline.
+
+Every emitted module is validated with `wasmparser` in the test suite, so a
+codegen bug fails in CI rather than in a browser.
+
+**The differential test is live and it paid immediately.** Every program in
+`crates/kite-driver/tests/differential.rs` is compiled to *both* bytecode and
+Wasm, run on both, and the outputs compared. It caught two codegen bugs on its
+first run: a unit-returning call being stored to a local that had nothing on the
+stack, and a fallthrough `return` pushing a unit placeholder in a non-unit
+function.
+
+**MIR is a CFG and Wasm has no `goto`**, so the backend uses a dispatch loop:
+one `loop` of nested `block`s entered through a `br_table` on a synthetic
+program counter. It handles an arbitrary CFG including irreducible ones. A
+relooper that recovers `if`/`loop` structure would produce tighter code and is
+the obvious later improvement.
+
+**Remaining steps:**
+
 2. GC structs and arrays
 3. Enums via `br_on_cast` subtyping
-4. `str` as `externref` with JS String Builtins
-5. Trait objects with typed function reference vtables
-6. `extern` declarations and generated JS glue
+4. `str` as `externref` with JS String Builtins (today a constant index into a
+   table the glue holds, which needs no linear memory at all)
+5. Trait objects with typed function-reference vtables
+6. `extern` declarations driving the glue, rather than a fixed import list
 
-Set up differential testing against the VM on day one of this phase: every
-program in the test corpus runs on both, and outputs must match. This is where
-that investment pays.
-
-Validate every emitted module with `wasmparser` in CI. Run the corpus in headless
-Chrome, Firefox, and Safari — Safari's Wasm implementation differs enough to
-catch real bugs, and it is the target most likely to be neglected.
-
-**Exit criterion:** a Kite program runs in all three browsers, and `hello world`
-is under 10 KB.
+**Exit criterion:** a Kite program runs in Chrome, Firefox, and Safari, and
+`hello world` is under 10 KB. The size half is met; browser verification waits
+on the remaining lowering steps.
 
 ---
 

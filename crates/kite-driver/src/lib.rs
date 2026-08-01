@@ -8,6 +8,7 @@ use kite_span::{FileId, SourceMap};
 use std::io::Write;
 use std::path::Path;
 
+pub use kite_codegen_wasm::generate_glue;
 pub use kite_vm::Trap;
 
 /// How far to run the pipeline, and what to hand back.
@@ -20,6 +21,8 @@ pub enum Emit {
     Mir,
     /// Disassembled bytecode.
     Kbc,
+    /// A WebAssembly module, plus the JavaScript glue that instantiates it.
+    Wasm,
 }
 
 impl Emit {
@@ -30,11 +33,12 @@ impl Emit {
             "hir" => Emit::Hir,
             "mir" => Emit::Mir,
             "kbc" => Emit::Kbc,
+            "wasm" => Emit::Wasm,
             _ => return None,
         })
     }
 
-    pub const NAMES: [&'static str; 5] = ["check", "ast", "hir", "mir", "kbc"];
+    pub const NAMES: [&'static str; 6] = ["check", "ast", "hir", "mir", "kbc", "wasm"];
 }
 
 pub struct Compilation {
@@ -43,6 +47,8 @@ pub struct Compilation {
     /// The requested artefact, rendered. Empty for [`Emit::Check`].
     pub output: String,
     chunk: Option<kite_codegen_kbc::Chunk>,
+    /// The compiled WebAssembly module, when `--emit wasm` was requested.
+    pub wasm: Option<kite_codegen_wasm::WasmModule>,
 }
 
 impl Compilation {
@@ -74,9 +80,9 @@ pub fn compile(path: impl AsRef<Path>, src: &str, emit: Emit) -> Compilation {
     let mut sources = SourceMap::new();
     let file = sources.add(path.as_ref(), src);
     let mut diags = DiagBag::new();
-    let (output, chunk) = run_passes(file, src, emit, &mut diags);
+    let (output, chunk, wasm) = run_passes(file, src, emit, &mut diags);
 
-    let mut c = Compilation { sources, diags, output, chunk };
+    let mut c = Compilation { sources, diags, output, chunk, wasm };
     c.diags.sort(&c.sources);
     c
 }
@@ -86,12 +92,16 @@ fn run_passes(
     src: &str,
     emit: Emit,
     diags: &mut DiagBag,
-) -> (String, Option<kite_codegen_kbc::Chunk>) {
+) -> (
+    String,
+    Option<kite_codegen_kbc::Chunk>,
+    Option<kite_codegen_wasm::WasmModule>,
+) {
     let tokens = kite_lexer::tokenize(file, src, diags);
     let ast = kite_parser::parse(file, src, &tokens, diags);
 
     if emit == Emit::Ast {
-        return (format!("{:#?}\n", ast), None);
+        return (format!("{:#?}\n", ast), None, None);
     }
 
     // Resolution and checking still run after a syntax error — the parser
@@ -101,23 +111,28 @@ fn run_passes(
     let hir = kite_types::check(&ast, &resolved, src, diags);
 
     if emit == Emit::Hir {
-        return (hir.to_string(), None);
+        return (hir.to_string(), None, None);
     }
     if diags.has_errors() {
-        return (String::new(), None);
+        return (String::new(), None, None);
     }
 
     let mir = kite_mir::lower(&hir);
     if emit == Emit::Mir {
-        return (mir.render(&hir.types).to_string(), None);
+        return (mir.render(&hir.types).to_string(), None, None);
+    }
+
+    if emit == Emit::Wasm {
+        let module = kite_codegen_wasm::compile(&mir, &hir.types);
+        return (String::new(), None, Some(module));
     }
 
     let chunk = kite_codegen_kbc::compile(&mir);
     if emit == Emit::Kbc {
-        return (chunk.to_string(), Some(chunk));
+        return (chunk.to_string(), Some(chunk), None);
     }
 
-    (String::new(), Some(chunk))
+    (String::new(), Some(chunk), None)
 }
 
 #[cfg(test)]
@@ -131,8 +146,11 @@ mod tests {
             let emit = Emit::parse(name).unwrap();
             let c = compile("t.kite", src, emit);
             assert!(!c.failed(), "{} failed:\n{}", name, c.render_diagnostics());
-            if emit != Emit::Check {
-                assert!(!c.output.is_empty(), "{} produced no output", name);
+            match emit {
+                Emit::Check => {}
+                // Wasm is bytes, not text.
+                Emit::Wasm => assert!(c.wasm.is_some(), "wasm produced no module"),
+                _ => assert!(!c.output.is_empty(), "{} produced no output", name),
             }
         }
     }
@@ -156,7 +174,7 @@ mod tests {
         for n in Emit::NAMES {
             assert!(Emit::parse(n).is_some(), "{} does not parse", n);
         }
-        assert!(Emit::parse("wasm").is_none());
+        assert!(Emit::parse("native").is_none());
     }
 
     #[test]
