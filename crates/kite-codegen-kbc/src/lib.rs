@@ -25,6 +25,7 @@ pub enum Native {
     IoPrint,
     DrawRect,
     DrawText,
+    TextWidth,
 }
 
 impl Native {
@@ -33,6 +34,7 @@ impl Native {
             Builtin::IoPrint => Native::IoPrint,
             Builtin::DrawRect => Native::DrawRect,
             Builtin::DrawText => Native::DrawText,
+            Builtin::TextWidth => Native::TextWidth,
         }
     }
 
@@ -41,6 +43,7 @@ impl Native {
             Native::IoPrint => "io.print",
             Native::DrawRect => "draw.rect",
             Native::DrawText => "draw.text",
+            Native::TextWidth => "text.width",
         }
     }
 }

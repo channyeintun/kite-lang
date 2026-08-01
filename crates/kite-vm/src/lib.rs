@@ -127,6 +127,10 @@ impl Value {
     }
 }
 
+/// The width of one character with no font to ask. Matches the generated
+/// glue's default, so the two backends measure text the same way under test.
+const NOMINAL_ADVANCE: f64 = 8.0;
+
 /// `f64` to `i64` the way Wasm's `i64.trunc_sat_f64_s` does: towards zero,
 /// clamped at the ends, and zero for NaN. Rust's `as` already has exactly this
 /// behaviour, which is why this is a named function rather than a comment.
@@ -1024,6 +1028,21 @@ impl<'a> Vm<'a> {
                 let a = |i: usize| self.regs[base + arg_base as usize + i].clone();
                 let _ = writeln!(self.out, "text {} {} {} {}", a(0), a(1), a(2), a(3));
                 Ok(Value::Unit)
+            }
+
+            // No font here, so the nominal advance stands. This is the same
+            // number the generated glue uses by default, which is what keeps a
+            // layout comparable across backends under test — a browser installs
+            // a real measurer and gets different, better numbers.
+            Native::TextWidth => {
+                let v = self.regs[base + arg_base as usize].clone();
+                let Value::Str(s) = &v else {
+                    return Err(Trap::TypeConfusion {
+                        op: "text.width",
+                        found: v.type_name(),
+                    });
+                };
+                Ok(Value::Float(s.chars().count() as f64 * NOMINAL_ADVANCE))
             }
 
             Native::IoPrint => {

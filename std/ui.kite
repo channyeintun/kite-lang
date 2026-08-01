@@ -153,27 +153,27 @@ pub fn text_of(name: str, base: Style, body: str) -> Node {
 
 // ---- measurement ----------------------------------------------------------
 
-/// The advance width of one character, in the same units as everything else.
+/// The height of one line, in the same units as everything else.
 ///
-/// Real text needs shaping — ligatures, kerning, script-specific joining — and
-/// none of that can happen here, because the compiler has no font. This is a
-/// placeholder with a name that says so, and every number it produces is wrong
-/// for proportional text. It is right often enough to lay a tree out and see
-/// the shape, which is what it is for until Phase 8 brings a shaper.
-pub fn nominal_advance() -> float {
-  return 8.0
-}
-
+/// Still a constant: a host that could report its font's ascent and descent
+/// would give a better one, and asking for that is the next thing measurement
+/// should learn.
 pub fn nominal_line_height() -> float {
   return 16.0
 }
 
+/// How much space a run of text needs.
+///
+/// The width comes from the host, because only the host has the font — and two
+/// hosts may legitimately disagree, which is what different fonts are. Under a
+/// runtime with no font at all the answer is a nominal advance per character,
+/// which is wrong for proportional text and consistent, so a layout stays
+/// comparable across backends.
+///
+/// This measures a run, not a paragraph: there is no wrapping yet, and a long
+/// label overflows its box rather than breaking.
 pub fn text_size(body: str) -> Size {
-  let chars = body.len()
-  return Size{
-    width: intToFloat(chars) * nominal_advance(),
-    height: nominal_line_height(),
-  }
+  return Size{width: text.width(body), height: nominal_line_height()}
 }
 
 /// Kite performs no implicit numeric conversion, so this is written out.

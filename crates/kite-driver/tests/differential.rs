@@ -199,6 +199,17 @@ fn main() {
          \x20 let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })\n}\n",
     ),
     (
+        "text-measurement",
+        "// Measurement is a host call, so a runtime with no font answers with a\n\
+         // nominal advance — the same one on both backends, which is what keeps\n\
+         // a layout comparable under test.\n\
+         fn main() {\n\
+         \x20 io.print(text.width(\"\"))\n  io.print(text.width(\"abc\"))\n\
+         \x20 io.print(text.width(\"héllo\"))\n  io.print(text.width(\"日本語\"))\n\
+         \x20 let s = \"ab\" + \"cd\"\n  io.print(text.width(s))\n\
+         \x20 io.print(text.width(s) > text.width(\"a\"))\n}\n",
+    ),
+    (
         "guard-clause-narrowing",
         "// `if x == nil { return }` leaves only the path where `x` is there,\n\
          // so it reads as a `T` for the rest of the block.\n\

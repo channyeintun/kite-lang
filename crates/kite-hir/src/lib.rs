@@ -377,6 +377,8 @@ pub enum Builtin {
     DrawRect,
     /// `draw.text(x, y, body, colour)`
     DrawText,
+    /// `text.width(body)` — a host call, because only the host has the font.
+    TextWidth,
 }
 
 impl Builtin {
@@ -385,6 +387,7 @@ impl Builtin {
             Builtin::IoPrint => "io.print",
             Builtin::DrawRect => "draw.rect",
             Builtin::DrawText => "draw.text",
+            Builtin::TextWidth => "text.width",
         }
     }
 }

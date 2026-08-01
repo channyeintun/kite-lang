@@ -50,6 +50,14 @@ pub enum BuiltinFn {
     /// `draw.text(x, y, body, colour)` — a run of text with its baseline-left
     /// origin at `(x, y)`.
     DrawText,
+    /// `text.width(body)` — how wide a run of text will be, in the same units
+    /// drawing uses.
+    ///
+    /// Measurement is a host call because only the host knows the font. Two
+    /// hosts can legitimately disagree — that is what different fonts *are* —
+    /// so a layout is a function of where it runs, and pretending otherwise is
+    /// how text ends up clipped.
+    TextWidth,
 }
 
 impl BuiltinFn {
@@ -59,6 +67,7 @@ impl BuiltinFn {
             "errors.new" => Some(BuiltinFn::ErrorsNew),
             "draw.rect" => Some(BuiltinFn::DrawRect),
             "draw.text" => Some(BuiltinFn::DrawText),
+            "text.width" => Some(BuiltinFn::TextWidth),
             _ => None,
         }
     }
@@ -69,6 +78,7 @@ impl BuiltinFn {
             BuiltinFn::ErrorsNew => "errors.new",
             BuiltinFn::DrawRect => "draw.rect",
             BuiltinFn::DrawText => "draw.text",
+            BuiltinFn::TextWidth => "text.width",
         }
     }
 
@@ -76,6 +86,7 @@ impl BuiltinFn {
         match self {
             BuiltinFn::IoPrint | BuiltinFn::ErrorsNew => 1,
             BuiltinFn::DrawRect | BuiltinFn::DrawText => 5,
+            BuiltinFn::TextWidth => 1,
         }
     }
 }

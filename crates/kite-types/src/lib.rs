@@ -2269,6 +2269,23 @@ impl<'a> Checker<'a> {
             // Handled above, but named here so adding a builtin fails to
             // compile rather than falling through to something else.
             BuiltinFn::DrawRect | BuiltinFn::DrawText => self.draw_call(b, args, span),
+
+            BuiltinFn::TextWidth => {
+                if args.len() != 1 {
+                    self.arity_error("text.width", args.len(), 1, span, None);
+                }
+                let mut hargs = Vec::with_capacity(1);
+                for a in args {
+                    let e = self.expr(a, Some(TyId::STR));
+                    self.expect_ty(e.ty, TyId::STR, e.span, None);
+                    hargs.push(e);
+                }
+                hir::Expr {
+                    kind: ExprKind::CallBuiltin { builtin: Builtin::TextWidth, args: hargs },
+                    ty: TyId::FLOAT,
+                    span,
+                }
+            }
             BuiltinFn::ErrorsNew => {
                 if args.len() != 1 {
                     self.arity_error("errors.new", args.len(), 1, span, None);

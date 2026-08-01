@@ -55,7 +55,7 @@ pub use support::{unsupported, Unsupported};
 /// Deliberately small: the standard library replaces them from Phase 6. String
 /// operations live here because a `str` is an index into a table the host
 /// holds — which is also why the module needs no linear memory.
-const IMPORTS: [(&str, &[ValType], &[ValType]); 12] = [
+const IMPORTS: [(&str, &[ValType], &[ValType]); 13] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
@@ -77,6 +77,7 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 12] = [
         &[],
     ),
     ("draw_text", &[ValType::F64, ValType::F64, ValType::I32, ValType::I64], &[]),
+    ("measure_text", &[ValType::I32], &[ValType::F64]),
 ];
 
 const IMPORT_COUNT: u32 = IMPORTS.len() as u32;
@@ -103,6 +104,7 @@ mod host {
     pub const STR_LEN: u32 = 9;
     pub const DRAW_RECT: u32 = 10;
     pub const DRAW_TEXT: u32 = 11;
+    pub const MEASURE_TEXT: u32 = 12;
 }
 
 pub struct WasmModule {
@@ -1526,10 +1528,10 @@ impl<'a> Emitter<'a> {
                 return true;
             }
 
-            // Every builtin returns unit today.
             mir::Rvalue::CallBuiltin { builtin, args } => {
                 self.builtin(func, *builtin, args);
-                return false;
+                // Drawing returns nothing; measuring returns a width.
+                return matches!(builtin, Builtin::TextWidth);
             }
 
             mir::Rvalue::StructNew { struct_id, fields } => {
@@ -1893,6 +1895,12 @@ impl<'a> Emitter<'a> {
                     self.operand(func, a);
                 }
                 func.instruction(&Instruction::Call(host::DRAW_TEXT));
+            }
+            Builtin::TextWidth => {
+                for a in args {
+                    self.operand(func, a);
+                }
+                func.instruction(&Instruction::Call(host::MEASURE_TEXT));
             }
         }
     }

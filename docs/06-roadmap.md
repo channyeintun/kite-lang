@@ -233,11 +233,16 @@ should not have to avoid them. That is file-level opt-in rather than a module
 system: the names arrive unqualified and a program cannot ask for some and not
 others.
 
-**Text measurement is a placeholder**, and named so: `nominal_advance` returns
-a fixed 8 units per character. Real text needs shaping, and shaping needs a
-font, which arrives with the canvas renderer in Phase 8. Every width it
-produces is wrong for proportional text and right often enough to see the shape
-of a tree.
+**Text is measured by the host**, through `text.width`, because only the host
+has the font — and two hosts can legitimately disagree, which is what different
+fonts *are*. A browser measures with `measureText` in the font it will draw
+with, so the layout matches what is painted. A runtime with no font answers
+with a nominal advance per character; the bytecode VM and the generated glue
+use the same one, so a layout stays comparable across backends under test.
+
+This measures a *run*, not a paragraph: there is no wrapping yet, and a long
+label overflows its box rather than breaking. Line height is still a constant,
+which a host reporting its font's ascent and descent would improve.
 
 ### Rendering
 

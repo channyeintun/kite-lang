@@ -51,7 +51,7 @@ const showBool = (v) => (v ? "true" : "false");
 // something went, because neither decides.
 
 const hex = (colour) => '#' + (colour >>> 0).toString(16).padStart(6, '0');
-const FONT = '16px ui-monospace, monospace';
+export const FONT = '16px ui-monospace, monospace';
 
 // The default: describe each call. Useful under Node, and the same text the
 // bytecode VM writes, so the two backends can be compared without a browser.
@@ -113,6 +113,29 @@ export function canvasRenderer(ctx) {{
   }};
 }}
 
+// How wide a run of text is. Only the host knows the font, so this is the
+// host's answer — and two hosts may legitimately differ, which is what
+// different fonts are.
+//
+// The default is the nominal advance, matching the bytecode VM, so a layout is
+// comparable across backends under test. A page that draws installs a real
+// measurer and gets numbers that match what it will actually paint.
+const NOMINAL_ADVANCE = 8;
+export let measure = (body) => [...body].length * NOMINAL_ADVANCE;
+
+export function setMeasure(fn) {{
+  measure = fn;
+}}
+
+/// Measure with a canvas, in the font the renderers draw with. A canvas is
+/// used even for the DOM renderer: `measureText` is the same shaping the
+/// browser applies to a text node, and it costs no layout.
+export function fontMeasure(font) {{
+  const ctx = document.createElement('canvas').getContext('2d');
+  ctx.font = font;
+  return (body) => ctx.measureText(body).width;
+}}
+
 export let renderer = textRenderer;
 
 export function setRenderer(r) {{
@@ -137,6 +160,7 @@ function imports() {{
       str_eq: (a, b) => (STRINGS[a] === STRINGS[b] ? 1 : 0),
       draw_rect: (x, y, w, h, colour) => renderer.rect(x, y, w, h, Number(colour)),
       draw_text: (x, y, i, colour) => renderer.text(x, y, STRINGS[i], Number(colour)),
+      measure_text: (i) => measure(STRINGS[i]),
       // Interpolation shares its formatting with printing, so a value cannot
       // look one way in `io.print(x)` and another in `"\(x)"`.
       str_of_int: (v) => intern(showInt(v)),
@@ -218,8 +242,11 @@ pub fn generate_page(title: &str) -> String {
 </main>
 
 <script type="module">
-  import {{ instantiate, setRenderer, setWriter, isApplication,
-            domRenderer, canvasRenderer, textRenderer }} from "./app.js";
+  import {{ instantiate, setRenderer, setWriter, isApplication, setMeasure,
+            fontMeasure, FONT, domRenderer, canvasRenderer, textRenderer }} from "./app.js";
+
+  // Measure in the font that will be drawn, before anything is laid out.
+  setMeasure(fontMeasure(FONT));
 
   const stage = document.getElementById("stage");
   const buttons = {{
