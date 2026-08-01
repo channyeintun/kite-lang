@@ -662,12 +662,22 @@ and there are two ways in.
 language Linguist already knows.
 
 ```
-*.kite linguist-language=Go
+*.kite linguist-language=Rust
 ```
 
-This is a lie that reads well — Kite is not Go, but the keyword set and brace
-style overlap enough that the colours land in sensible places, and it costs one
-line. `linguist-detectable` makes `.kite` files count towards the repository's
+Rust is much the closest fit. It shares `fn`, `let`, `match`, `struct`, `enum`,
+`trait`, `impl`, `pub`, `use`, `as`, `type`, `self`, `dyn`, `async` and `await`
+outright, and the shapes line up as well — `-> T`, `Option<T>`, `[T]` and
+`struct X { field: T }` all parse the way a reader expects. What misses is
+small: `var` and `check` are not Rust keywords, `nil` is `None` there, and
+`\(x)` interpolation goes uncoloured.
+
+Go was the other candidate and is a worse one: it shares perhaps ten keywords,
+has no `match`, `trait`, `impl` or `enum`, and would colour `chan`, `go`,
+`defer` and `select` — none of which Kite has, and three of which it
+deliberately does not.
+
+`linguist-detectable` makes `.kite` files count towards the repository's
 language statistics.
 
 **Properly, later:** adding Kite to Linguist needs a submitted TextMate grammar
@@ -720,7 +730,7 @@ none.
 | 12 — Cryptography | ❌ not started; bindings to the host, never implementations |
 | 13 — Documentation site | ❌ not started; the specification exists, somewhere to read it does not |
 | 14 — Editor support | ❌ not started; a TextMate grammar is the first piece and GitHub needs it too |
-| 15 — Distribution | ❌ not started; `.gitattributes` maps `.kite` onto Go's highlighting today |
+| 15 — Distribution | ❌ not started; `.gitattributes` maps `.kite` onto Rust's highlighting today |
 
 406 tests, an annotated compile-fail corpus, and a differential corpus that runs
 every program on both backends and compares.
