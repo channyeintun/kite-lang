@@ -548,3 +548,181 @@ fn main() {
 ";
     assert_eq!(lines(src), vec!["1", "2", "3"]);
 }
+
+// ---- structs --------------------------------------------------------------
+
+const RECT: &str = "\
+struct Rect {
+    width: int
+    height: int
+    var label: str
+}
+
+impl Rect {
+    fn area(self) -> int {
+        return self.width * self.height
+    }
+
+    fn scaled(self, factor: int) -> Rect {
+        return Rect{ ..self, width: self.width * factor }
+    }
+
+    fn rename(var self, name: str) {
+        self.label = name
+    }
+
+    fn square(side: int) -> Rect {
+        return Rect{ width: side, height: side, label: \"square\" }
+    }
+}
+";
+
+fn with_rect(body: &str) -> Vec<String> {
+    lines(&format!("{}\nfn main() {{\n{}\n}}\n", RECT, body))
+}
+
+#[test]
+fn a_struct_literal_and_field_read() {
+    assert_eq!(
+        with_rect("  let r = Rect{ width: 3, height: 4, label: \"first\" }\n  io.print(r.width)\n  io.print(r.label)"),
+        vec!["3", "first"]
+    );
+}
+
+#[test]
+fn a_method_reads_through_self() {
+    assert_eq!(
+        with_rect("  let r = Rect{ width: 3, height: 4, label: \"x\" }\n  io.print(r.area())"),
+        vec!["12"]
+    );
+}
+
+#[test]
+fn an_associated_function_is_called_through_the_type() {
+    assert_eq!(with_rect("  io.print(Rect.square(5).area())"), vec!["25"]);
+}
+
+/// `..base` produces a new value and leaves the original alone.
+#[test]
+fn functional_update_copies_the_untouched_fields() {
+    assert_eq!(
+        with_rect(
+            "  let r = Rect{ width: 3, height: 4, label: \"first\" }\n\
+             \x20 let big = r.scaled(10)\n  io.print(big.width)\n  io.print(big.height)\n\
+             \x20 io.print(big.label)\n  io.print(r.width)"
+        ),
+        vec!["30", "4", "first", "3"]
+    );
+}
+
+/// Structs are references: a method taking `var self` mutates the value the
+/// caller is holding, not a copy. This is the whole reason Kite has no
+/// value-versus-pointer receiver distinction.
+#[test]
+fn mutation_through_a_reference_is_visible_to_the_caller() {
+    assert_eq!(
+        with_rect(
+            "  let r = Rect{ width: 1, height: 1, label: \"before\" }\n\
+             \x20 r.rename(\"after\")\n  io.print(r.label)"
+        ),
+        vec!["after"]
+    );
+}
+
+#[test]
+fn assignment_copies_the_reference_not_the_contents() {
+    assert_eq!(
+        with_rect(
+            "  let a = Rect{ width: 1, height: 1, label: \"one\" }\n\
+             \x20 let b = a\n  b.rename(\"two\")\n  io.print(a.label)"
+        ),
+        vec!["two"]
+    );
+}
+
+#[test]
+fn a_var_field_can_be_assigned_directly() {
+    assert_eq!(
+        with_rect(
+            "  let r = Rect{ width: 1, height: 1, label: \"one\" }\n\
+             \x20 r.label = \"two\"\n  io.print(r.label)"
+        ),
+        vec!["two"]
+    );
+}
+
+#[test]
+fn structs_nest() {
+    let src = "\
+struct Inner {
+    n: int
+}
+struct Outer {
+    inner: Inner
+    tag: str
+}
+fn main() {
+    let o = Outer{ inner: Inner{ n: 42 }, tag: \"t\" }
+    io.print(o.inner.n)
+    io.print(o.tag)
+}
+";
+    assert_eq!(lines(src), vec!["42", "t"]);
+}
+
+#[test]
+fn a_struct_may_be_passed_to_and_returned_from_a_function() {
+    let src = "\
+struct P {
+    x: int
+}
+fn bump(p: P) -> P {
+    return P{ x: p.x + 1 }
+}
+fn main() {
+    let a = P{ x: 1 }
+    io.print(bump(bump(a)).x)
+    io.print(a.x)
+}
+";
+    assert_eq!(lines(src), vec!["3", "1"]);
+}
+
+/// Two structs are equal when their fields are, per the specification.
+#[test]
+fn struct_equality_is_structural() {
+    let src = "\
+struct P {
+    x: int
+    y: int
+}
+fn main() {
+    let a = P{ x: 1, y: 2 }
+    let b = P{ x: 1, y: 2 }
+    let c = P{ x: 9, y: 2 }
+    io.print(a == b)
+    io.print(a == c)
+}
+";
+    assert_eq!(lines(src), vec!["true", "false"]);
+}
+
+/// A recursive struct needs no boxing annotation, because every Kite aggregate
+/// is already a GC reference. The self-reference is only *declared* here;
+/// building a chain needs optionals, which arrive later in Phase 2.
+#[test]
+fn a_recursive_struct_declaration_is_accepted() {
+    let src = "\
+struct Node {
+    value: int
+    children: [Node]
+}
+fn describe(n: Node) -> int {
+    return n.value
+}
+fn main() {
+    io.print(1)
+}
+";
+    assert_eq!(lines(src), vec!["1"]);
+}

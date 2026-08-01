@@ -459,3 +459,172 @@ fn main() {
     assert_eq!(c.program.fns[0].ret, TyId::INT);
     assert_eq!(c.program.fns[0].param_count, 2);
 }
+
+// ---- structs --------------------------------------------------------------
+
+const RECT: &str = "\
+struct Rect {
+    width: int
+    var label: str
+}
+";
+
+fn with_rect(body: &str) -> Ctx {
+    run(&format!("{}\nfn main() {{\n{}\n}}\n", RECT, body))
+}
+
+fn ok_rect(body: &str) -> Ctx {
+    let c = with_rect(body);
+    assert!(!c.diags.has_errors(), "unexpected diagnostics:\n{}", c.render());
+    c
+}
+
+#[test]
+fn a_complete_struct_literal_checks() {
+    ok_rect("  let r = Rect{ width: 1, label: \"x\" }\n  io.print(r.width)");
+}
+
+/// Kite has no zero values, so a forgotten field is an error rather than a
+/// silent `0`. This is the specification's stated reason for the rule.
+#[test]
+fn a_missing_field_is_rejected_and_names_it() {
+    let c = with_rect("  let r = Rect{ width: 1 }");
+    assert!(c.has("E0200"), "{}", c.render());
+    let out = c.render();
+    assert!(out.contains("`label`"), "{}", out);
+    assert!(out.contains("no zero values"), "{}", out);
+}
+
+#[test]
+fn an_unknown_field_lists_the_real_ones() {
+    let c = with_rect("  let r = Rect{ width: 1, label: \"x\", height: 2 }");
+    assert!(c.has("E0200"), "{}", c.render());
+    assert!(c.render().contains("width, label"), "{}", c.render());
+}
+
+#[test]
+fn a_duplicated_field_is_rejected() {
+    let c = with_rect("  let r = Rect{ width: 1, width: 2, label: \"x\" }");
+    assert!(c.has("E0112"), "{}", c.render());
+}
+
+#[test]
+fn a_field_type_mismatch_is_reported() {
+    let c = with_rect("  let r = Rect{ width: \"wide\", label: \"x\" }");
+    assert!(c.has("E0200"), "{}", c.render());
+}
+
+/// `..base` supplies the fields the literal omits.
+#[test]
+fn functional_update_fills_the_gaps() {
+    ok_rect("  let a = Rect{ width: 1, label: \"x\" }\n  let b = Rect{ ..a, width: 2 }");
+}
+
+#[test]
+fn reading_an_unknown_field_lists_the_real_ones() {
+    let c = with_rect("  let r = Rect{ width: 1, label: \"x\" }\n  io.print(r.height)");
+    assert!(c.has("E0200"), "{}", c.render());
+    assert!(c.render().contains("width, label"), "{}", c.render());
+}
+
+#[test]
+fn a_primitive_has_no_fields() {
+    let c = with_rect("  let n = 1\n  io.print(n.x)");
+    assert!(c.has("E0200"), "{}", c.render());
+    assert!(c.render().contains("has no fields"), "{}", c.render());
+}
+
+// ---- field mutability -----------------------------------------------------
+
+#[test]
+fn a_var_field_may_be_assigned() {
+    ok_rect("  let r = Rect{ width: 1, label: \"x\" }\n  r.label = \"y\"");
+}
+
+/// Fields are immutable by default. The message explains both fixes, because
+/// building a new value is usually the better one.
+#[test]
+fn an_immutable_field_cannot_be_assigned() {
+    let c = with_rect("  let r = Rect{ width: 1, label: \"x\" }\n  r.width = 2");
+    assert!(c.has("E0114"), "{}", c.render());
+    let out = c.render();
+    assert!(out.contains("declared immutable here"), "{}", out);
+    assert!(out.contains("var width"), "{}", out);
+    assert!(out.contains("..old"), "{}", out);
+}
+
+// ---- methods --------------------------------------------------------------
+
+const SHAPES: &str = "\
+struct Sq {
+    side: int
+}
+
+impl Sq {
+    fn area(self) -> int {
+        return self.side * self.side
+    }
+    fn make(n: int) -> Sq {
+        return Sq{ side: n }
+    }
+}
+";
+
+fn with_shapes(body: &str) -> Ctx {
+    run(&format!("{}\nfn main() {{\n{}\n}}\n", SHAPES, body))
+}
+
+#[test]
+fn methods_and_associated_functions_check() {
+    let c = with_shapes("  io.print(Sq.make(3).area())");
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+#[test]
+fn an_unknown_method_lists_the_real_ones() {
+    let c = with_shapes("  let s = Sq{ side: 1 }\n  io.print(s.perimeter())");
+    assert!(c.has("E0205"), "{}", c.render());
+    assert!(c.render().contains("area, make"), "{}", c.render());
+}
+
+#[test]
+fn calling_a_field_suggests_dropping_the_parentheses() {
+    let c = with_shapes("  let s = Sq{ side: 1 }\n  io.print(s.side())");
+    assert!(c.has("E0205"), "{}", c.render());
+    assert!(c.render().contains("is a field, not a method"), "{}", c.render());
+}
+
+#[test]
+fn calling_an_associated_function_as_a_method_is_reported() {
+    let c = with_shapes("  let s = Sq{ side: 1 }\n  io.print(s.make(2).side)");
+    assert!(c.has("E0205"), "{}", c.render());
+    assert!(c.render().contains("associated function"), "{}", c.render());
+}
+
+#[test]
+fn calling_a_method_as_an_associated_function_is_reported() {
+    let c = with_shapes("  io.print(Sq.area())");
+    assert!(c.has("E0205"), "{}", c.render());
+    assert!(c.render().contains("not an associated function"), "{}", c.render());
+}
+
+#[test]
+fn self_outside_a_method_is_reported() {
+    let c = run("fn f() {\n  io.print(self)\n}\n");
+    assert!(c.has("E0111"), "{}", c.render());
+}
+
+#[test]
+fn a_type_name_is_not_a_value() {
+    let c = with_rect("  let r = Rect");
+    assert!(c.has("E0200"), "{}", c.render());
+    assert!(c.render().contains("is a type, not a value"), "{}", c.render());
+}
+
+#[test]
+fn a_local_shadows_a_module_path() {
+    // A local named `io` wins over the `io.print` builtin, which is why the
+    // resolver checks locals before dotted names.
+    let c = run("struct B {\n  print: int\n}\nfn main() {\n  let io = B{ print: 7 }\n  let n = io.print\n}\n");
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}

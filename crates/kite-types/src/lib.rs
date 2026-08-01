@@ -18,7 +18,7 @@
 use kite_ast as ast;
 use kite_diag::{codes, DiagBag, Diagnostic, Fix};
 use kite_hir as hir;
-use kite_hir::{Builtin, ExprKind, TyId, Types};
+use kite_hir::{Builtin, ExprKind, TyId, TyKind, Types};
 use kite_resolve::{BuiltinFn, Res, ResolveMap};
 use kite_span::Span;
 
@@ -31,36 +31,113 @@ pub fn check(
     let mut types = Types::new();
     let mut fns = Vec::new();
 
-    // Signatures first, so calls can be checked in either direction.
+    // Declare every nominal type before filling any of them in, so mutually
+    // recursive definitions can refer to each other. Every Kite aggregate is a
+    // GC reference, so recursion needs no annotation from the user.
+    let mut type_ids: Vec<Option<TypeTarget>> = Vec::new();
+    for decl in &resolved.types {
+        let target = match decl.kind {
+            kite_resolve::TypeKind::Struct => Some(TypeTarget::Struct(
+                types.declare_struct(decl.name.clone(), true, decl.span),
+            )),
+            kite_resolve::TypeKind::Enum => Some(TypeTarget::Enum(
+                types.declare_enum(decl.name.clone(), true, decl.span),
+            )),
+            kite_resolve::TypeKind::Trait => Some(TypeTarget::Trait(
+                types.declare_trait(decl.name.clone(), true, decl.span),
+            )),
+            kite_resolve::TypeKind::Alias => None,
+        };
+        type_ids.push(target);
+    }
+
+    // Now fill in fields and variants, resolving their types against the
+    // arena, which already knows every name.
+    for (i, decl) in resolved.types.iter().enumerate() {
+        match (type_ids[i], &file.items[decl.decl_index]) {
+            (Some(TypeTarget::Struct(sid)), ast::Item::Struct(s)) => {
+                let fields = s
+                    .fields
+                    .iter()
+                    .map(|f| kite_hir::FieldDef {
+                        name: f.name.name.clone(),
+                        ty: resolve_named_ty(&f.ty, resolved, &type_ids, &mut types, diags),
+                        mutable: f.is_var,
+                        is_pub: f.is_pub,
+                        span: f.span,
+                    })
+                    .collect();
+                types.set_struct_fields(sid, fields);
+            }
+            _ => {}
+        }
+    }
+
+    // Signatures next, so calls can be checked in either direction.
     let mut sigs = Vec::new();
     for sig in &resolved.fns {
-        let ast::Item::Fn(f) = &file.items[sig.decl_index] else {
-            unreachable!("signature index points at a function")
+        let (params, ret, fallible, name_span, self_ty) = match sig.owner {
+            None => {
+                let ast::Item::Fn(f) = &file.items[sig.decl_index] else {
+                    unreachable!("a free-function signature points at a function")
+                };
+                let params = f
+                    .params
+                    .iter()
+                    .map(|p| resolve_named_ty(&p.ty, resolved, &type_ids, &mut types, diags))
+                    .collect();
+                let ret = match &f.ret {
+                    None => TyId::UNIT,
+                    Some(r) => {
+                        resolve_named_ty(r.value_type(), resolved, &type_ids, &mut types, diags)
+                    }
+                };
+                (
+                    params,
+                    ret,
+                    f.ret.as_ref().is_some_and(|r| r.is_fallible()),
+                    f.name.span,
+                    None,
+                )
+            }
+            Some(owner) => {
+                let ast::Item::Impl(imp) = &file.items[owner.impl_index] else {
+                    unreachable!("a method signature points at an impl block")
+                };
+                let m = &imp.methods[owner.method_index];
+                let params = m
+                    .params
+                    .iter()
+                    .map(|p| resolve_named_ty(&p.ty, resolved, &type_ids, &mut types, diags))
+                    .collect();
+                let ret = match &m.ret {
+                    None => TyId::UNIT,
+                    Some(r) => {
+                        resolve_named_ty(r.value_type(), resolved, &type_ids, &mut types, diags)
+                    }
+                };
+                let self_ty = if owner.takes_self {
+                    Some(named_ty(type_ids[owner.type_index as usize], &mut types))
+                } else {
+                    None
+                };
+                (
+                    params,
+                    ret,
+                    m.ret.as_ref().is_some_and(|r| r.is_fallible()),
+                    m.name.span,
+                    self_ty,
+                )
+            }
         };
-        let params: Vec<TyId> = f
-            .params
-            .iter()
-            .map(|p| resolve_ty(&p.ty, &mut types, diags))
-            .collect();
-        let ret = match &f.ret {
-            None => TyId::UNIT,
-            Some(r) => resolve_ty(r.value_type(), &mut types, diags),
-        };
-        sigs.push(Signature {
-            params,
-            ret,
-            fallible: f.ret.as_ref().is_some_and(|r| r.is_fallible()),
-            name_span: f.name.span,
-        });
+        sigs.push(Signature { params, ret, fallible, name_span, self_ty });
     }
 
     for (i, sig) in resolved.fns.iter().enumerate() {
-        let ast::Item::Fn(f) = &file.items[sig.decl_index] else {
-            unreachable!()
-        };
         let mut checker = Checker {
             resolved,
             sigs: &sigs,
+            type_ids: &type_ids,
             types: &mut types,
             src,
             diags,
@@ -69,7 +146,42 @@ pub fn check(
             init: Vec::new(),
             loop_depth: 0,
         };
-        let func = checker.check_fn(f, &sigs[i]);
+        let func = match sig.owner {
+            None => {
+                let ast::Item::Fn(f) = &file.items[sig.decl_index] else {
+                    unreachable!()
+                };
+                checker.check_body(
+                    &f.name.name,
+                    f.is_pub,
+                    f.is_async,
+                    &f.params,
+                    Some(&f.body),
+                    f.body.span,
+                    f.span,
+                    &sigs[i],
+                    false,
+                )
+            }
+            Some(owner) => {
+                let ast::Item::Impl(imp) = &file.items[owner.impl_index] else {
+                    unreachable!()
+                };
+                let m = &imp.methods[owner.method_index];
+                let body_span = m.body.as_ref().map(|b| b.span).unwrap_or(m.span);
+                checker.check_body(
+                    &m.name.name,
+                    m.is_pub,
+                    m.is_async,
+                    &m.params,
+                    m.body.as_ref(),
+                    body_span,
+                    m.span,
+                    &sigs[i],
+                    owner.takes_self,
+                )
+            }
+        };
         fns.push(func);
     }
 
@@ -80,16 +192,27 @@ pub fn check(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum TypeTarget {
+    Struct(kite_hir::StructId),
+    Enum(kite_hir::EnumId),
+    Trait(kite_hir::TraitId),
+}
+
 struct Signature {
     params: Vec<TyId>,
     ret: TyId,
     fallible: bool,
     name_span: Span,
+    /// For a method, the type its `self` has.
+    self_ty: Option<TyId>,
 }
 
 struct Checker<'a> {
     resolved: &'a ResolveMap,
     sigs: &'a [Signature],
+    /// Arena handles for each entry in `resolved.types`, parallel by index.
+    type_ids: &'a [Option<TypeTarget>],
     /// The interned type arena, built up as declarations are checked.
     types: &'a mut Types,
     src: &'a str,
@@ -147,28 +270,49 @@ impl Flow {
 impl<'a> Checker<'a> {
     // ---- functions --------------------------------------------------------
 
-    fn check_fn(&mut self, f: &ast::FnDecl, sig: &Signature) -> hir::Function {
+    #[allow(clippy::too_many_arguments)]
+    fn check_body(
+        &mut self,
+        name: &str,
+        is_pub: bool,
+        is_async: bool,
+        params: &[ast::Param],
+        body: Option<&ast::Block>,
+        body_span: Span,
+        span: Span,
+        sig: &Signature,
+        takes_self: bool,
+    ) -> hir::Function {
         let infos = &self.resolved.locals[self.fn_index];
 
-        // Every local gets a slot up front; parameter types come from the
-        // signature and the rest are filled in as their `let` is checked.
+        // Every local gets a slot up front. A method's `self` is local 0, so
+        // its declared parameters are offset by one.
+        let offset = usize::from(takes_self);
         self.locals = infos
             .iter()
             .enumerate()
-            .map(|(i, info)| hir::Local {
-                name: info.name.clone(),
-                ty: sig.params.get(i).copied().unwrap_or(TyId::ERROR),
-                mutable: info.mutable,
-                span: info.span,
-                synthetic: info.synthetic,
+            .map(|(i, info)| {
+                let ty = if takes_self && i == 0 {
+                    sig.self_ty.unwrap_or(TyId::ERROR)
+                } else {
+                    sig.params.get(i - offset).copied().unwrap_or(TyId::ERROR)
+                };
+                hir::Local {
+                    name: info.name.clone(),
+                    ty,
+                    mutable: info.mutable,
+                    span: info.span,
+                    synthetic: info.synthetic,
+                }
             })
             .collect();
 
-        // Parameters always hold a value; everything else starts unassigned
-        // and is marked as its `let` or `var` is checked.
+        let param_count = params.len() + offset;
+
+        // Parameters always hold a value; everything else starts unassigned.
         self.init = (0..self.locals.len())
             .map(|i| {
-                if i < f.params.len() {
+                if i < param_count {
                     Init::Assigned
                 } else {
                     Init::Unassigned
@@ -176,31 +320,35 @@ impl<'a> Checker<'a> {
             })
             .collect();
 
-        let (body, flow) = self.block(&f.body, sig);
+        let (hir_body, flow) = match body {
+            Some(b) => self.block(b, sig),
+            // A trait method with no default body. Nothing to check.
+            None => (hir::Block::default(), Flow::Diverges),
+        };
 
-        if sig.ret != TyId::UNIT && flow == Flow::Falls {
+        if body.is_some() && sig.ret != TyId::UNIT && flow == Flow::Falls {
             self.diags.push(
                 Diagnostic::error(codes::E0203, "not every path returns a value")
                     .with_primary(
-                        Span::empty_at(f.body.span.file, f.body.span.end.saturating_sub(1)),
+                        Span::empty_at(body_span.file, body_span.end.saturating_sub(1)),
                         "control reaches the end of the function here",
                     )
                     .with_secondary(
-                        f.ret.as_ref().map(|r| r.span()).unwrap_or(sig.name_span),
+                        sig.name_span,
                         format!("`{}` declared here", self.types.name(sig.ret)),
                     ),
             );
         }
 
         hir::Function {
-            name: f.name.name.clone(),
-            is_pub: f.is_pub,
-            is_async: f.is_async,
-            param_count: f.params.len(),
+            name: name.to_string(),
+            is_pub,
+            is_async,
+            param_count,
             locals: std::mem::take(&mut self.locals),
             ret: sig.ret,
-            body,
-            span: f.span,
+            body: hir_body,
+            span,
         }
     }
 
@@ -235,6 +383,10 @@ impl<'a> Checker<'a> {
             ast::Stmt::Return(r) => self.return_stmt(r, sig),
             ast::Stmt::If(i) => self.if_stmt(i, sig),
             ast::Stmt::For(f) => self.for_stmt(f, sig),
+            ast::Stmt::Match(m) => {
+                self.not_yet(m.span, "`match`", "enums and match arrive next in Phase 2");
+                None
+            }
 
             ast::Stmt::Break { label, span } => Some((
                 hir::Stmt::Break { label: label.as_ref().map(|l| l.name.clone()), span: *span },
@@ -345,11 +497,14 @@ impl<'a> Checker<'a> {
     }
 
     fn assign_stmt(&mut self, a: &ast::AssignStmt, _sig: &Signature) -> Option<(hir::Stmt, Flow)> {
+        if let ast::Expr::Field { base, name, optional, span } = &a.target {
+            return self.assign_field(base, name, *optional, *span, a);
+        }
         let ast::Expr::Path(p) = &a.target else {
             self.not_yet(
                 a.target.span(),
-                "assignment to fields and indices",
-                "structs and slices arrive in Phase 2",
+                "assignment to this expression",
+                "indexing arrives later in Phase 2",
             );
             return None;
         };
@@ -691,12 +846,54 @@ impl<'a> Checker<'a> {
                 self.not_yet(*span, "`nil`", "optionals arrive in Phase 2");
                 self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
-            ast::Expr::SelfExpr(span) => {
-                self.not_yet(*span, "`self`", "methods arrive in Phase 2");
-                self.lit(ExprKind::Error, TyId::ERROR, *span)
+            // A method's receiver is local 0, which is what makes a method
+            // call and a plain call the same thing after checking.
+            ast::Expr::SelfExpr(span) => match self.sigs[self.fn_index].self_ty {
+                Some(ty) => hir::Expr {
+                    kind: ExprKind::Local(hir::LocalId(0)),
+                    ty,
+                    span: *span,
+                },
+                None => {
+                    self.diags.push(
+                        Diagnostic::error(codes::E0111, "`self` outside a method")
+                            .with_primary(*span, "no receiver here")
+                            .with_note(
+                                "only a method declared with `self` as its first parameter has \
+                                 a receiver",
+                            ),
+                    );
+                    self.lit(ExprKind::Error, TyId::ERROR, *span)
+                }
+            },
+            ast::Expr::Field { base, name, optional, span } => {
+                // A dotted static path in value position is not a field read.
+                match self.resolved.lookup_use(*span) {
+                    Some(Res::Builtin(_)) | Some(Res::Fn(_)) => {
+                        self.not_yet(
+                            *span,
+                            "using a function as a value",
+                            "closures arrive later in Phase 2",
+                        );
+                        self.lit(ExprKind::Error, TyId::ERROR, *span)
+                    }
+                    Some(Res::Variant(..)) => {
+                        self.not_yet(*span, "enum variants", "enums arrive next in Phase 2");
+                        self.lit(ExprKind::Error, TyId::ERROR, *span)
+                    }
+                    _ => self.field_access(base, name, *optional, *span),
+                }
             }
-            ast::Expr::Field { span, .. } => {
-                self.not_yet(*span, "field access", "structs arrive in Phase 2");
+
+            ast::Expr::StructLit(lit) => self.struct_literal(lit),
+
+            ast::Expr::Match(m) => {
+                self.not_yet(m.span, "`match`", "enums and match arrive next in Phase 2");
+                self.lit(ExprKind::Error, TyId::ERROR, m.span)
+            }
+
+            ast::Expr::Map { span, .. } => {
+                self.not_yet(*span, "map literals", "maps arrive later in Phase 2");
                 self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
             ast::Expr::Index { span, .. } => {
@@ -755,12 +952,28 @@ impl<'a> Checker<'a> {
                 }
             }
             Some(Res::Fn(_)) | Some(Res::Builtin(_)) => {
-                // Naming a function without calling it needs function types.
+                // Naming a function without calling it needs closures.
                 self.not_yet(
                     p.span,
                     "using a function as a value",
-                    "function types arrive in Phase 2",
+                    "closures arrive later in Phase 2",
                 );
+                self.lit(ExprKind::Error, TyId::ERROR, p.span)
+            }
+            Some(Res::Type(ti)) => {
+                let name = self.resolved.type_decl(ti).name.clone();
+                self.diags.push(
+                    Diagnostic::error(codes::E0200, format!("`{}` is a type, not a value", name))
+                        .with_primary(p.span, "a type name cannot stand alone here")
+                        .with_note(format!(
+                            "to build one, write a struct literal such as `{}{{ … }}`",
+                            name
+                        )),
+                );
+                self.lit(ExprKind::Error, TyId::ERROR, p.span)
+            }
+            Some(Res::Variant(..)) => {
+                self.not_yet(p.span, "enum variants", "enums arrive next in Phase 2");
                 self.lit(ExprKind::Error, TyId::ERROR, p.span)
             }
             // Resolution already reported this.
@@ -769,6 +982,25 @@ impl<'a> Checker<'a> {
     }
 
     fn call(&mut self, callee: &ast::Expr, args: &[ast::Expr], span: Span) -> hir::Expr {
+        // `a.b(…)` is a method call unless the resolver already decided the
+        // dotted name is static — a builtin, a variant, or an associated
+        // function on a type.
+        if let ast::Expr::Field { base, name, optional, span: fspan } = callee {
+            if !*optional {
+                return match self.resolved.lookup_use(*fspan) {
+                    Some(Res::Builtin(b)) => self.builtin_call(b, args, span),
+                    Some(Res::Type(ti)) => {
+                        self.associated_call_named(ti, &name.name, *fspan, args, span)
+                    }
+                    Some(Res::Variant(..)) => {
+                        self.not_yet(span, "enum variants", "enums arrive next in Phase 2");
+                        self.lit(ExprKind::Error, TyId::ERROR, span)
+                    }
+                    _ => self.method_call(base, name, args, span),
+                };
+            }
+        }
+
         let ast::Expr::Path(p) = callee else {
             self.not_yet(callee.span(), "calling an arbitrary expression", "Phase 2");
             return self.lit(ExprKind::Error, TyId::ERROR, span);
@@ -807,31 +1039,7 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            Some(Res::Builtin(BuiltinFn::IoPrint)) => {
-                if args.len() != 1 {
-                    self.arity_error("io.print", args.len(), 1, span, None);
-                }
-                let mut hargs = Vec::new();
-                for a in args {
-                    let e = self.expr(a, None);
-                    if !self.types.is_printable(e.ty) && !self.types.is_poisoned(e.ty) {
-                        self.diags.push(
-                            Diagnostic::error(
-                                codes::E0200,
-                                format!("`io.print` cannot print a `{}`", self.types.name(e.ty)),
-                            )
-                            .with_primary(e.span, format!("this is {}", self.types.with_article(e.ty)))
-                            .with_note("`io.print` accepts int, float, bool, and str"),
-                        );
-                    }
-                    hargs.push(e);
-                }
-                hir::Expr {
-                    kind: ExprKind::CallBuiltin { builtin: Builtin::IoPrint, args: hargs },
-                    ty: TyId::UNIT,
-                    span,
-                }
-            }
+            Some(Res::Builtin(b)) => self.builtin_call(b, args, span),
 
             Some(Res::Local(id)) => {
                 let ty = self.locals[id as usize].ty;
@@ -843,8 +1051,554 @@ impl<'a> Checker<'a> {
                 self.lit(ExprKind::Error, TyId::ERROR, span)
             }
 
+            Some(Res::Type(ti)) => self.associated_call(ti, p, args, span),
+
+            Some(Res::Variant(..)) => {
+                self.not_yet(span, "enum variants", "enums arrive next in Phase 2");
+                self.lit(ExprKind::Error, TyId::ERROR, span)
+            }
+
             None => self.lit(ExprKind::Error, TyId::ERROR, span),
         }
+    }
+
+    fn builtin_call(&mut self, b: BuiltinFn, args: &[ast::Expr], span: Span) -> hir::Expr {
+        match b {
+            BuiltinFn::IoPrint => {
+                if args.len() != 1 {
+                    self.arity_error("io.print", args.len(), 1, span, None);
+                }
+                let mut hargs = Vec::new();
+                for a in args {
+                    let e = self.expr(a, None);
+                    if !self.types.is_printable(e.ty) && !self.types.is_poisoned(e.ty) {
+                        let article = self.types.with_article(e.ty);
+                        self.diags.push(
+                            Diagnostic::error(
+                                codes::E0200,
+                                format!(
+                                    "`io.print` cannot print a `{}`",
+                                    self.types.name(e.ty)
+                                ),
+                            )
+                            .with_primary(e.span, format!("this is {}", article))
+                            .with_note(
+                                "`io.print` accepts int, float, bool, and str; the `Display` \
+                                 trait replaces this in Phase 6",
+                            ),
+                        );
+                    }
+                    hargs.push(e);
+                }
+                hir::Expr {
+                    kind: ExprKind::CallBuiltin { builtin: Builtin::IoPrint, args: hargs },
+                    ty: TyId::UNIT,
+                    span,
+                }
+            }
+        }
+    }
+
+    /// `receiver.method(args)`.
+    fn method_call(
+        &mut self,
+        base: &ast::Expr,
+        name: &ast::Ident,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> hir::Expr {
+        let receiver = self.expr(base, None);
+        if self.types.is_poisoned(receiver.ty) {
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+
+        let Some(ti) = self.type_index_of(receiver.ty) else {
+            let found = self.types.with_article(receiver.ty);
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0205,
+                    format!("`{}` has no methods", self.types.name(receiver.ty)),
+                )
+                .with_primary(receiver.span, format!("this is {}", found))
+                .with_secondary(name.span, "no method can be called here"),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        };
+
+        let Some(fn_index) = self.resolved.method_on(ti, &name.name) else {
+            let type_name = self.resolved.type_decl(ti).name.clone();
+            let mut d = Diagnostic::error(
+                codes::E0205,
+                format!("`{}` has no method `{}`", type_name, name.name),
+            )
+            .with_primary(name.span, "no such method");
+
+            // A field of the same name is the likely intent.
+            if let TyKind::Struct(sid) = *self.types.kind(receiver.ty) {
+                if self.types.struct_def(sid).field(&name.name).is_some() {
+                    d = d.with_note(format!(
+                        "`{}` is a field, not a method; write it without `()`",
+                        name.name
+                    ));
+                }
+            }
+            let methods: Vec<String> = self
+                .resolved
+                .methods_of(ti)
+                .iter()
+                .map(|i| self.resolved.fns[*i as usize].name.clone())
+                .collect();
+            if !methods.is_empty() {
+                d = d.with_note(format!("`{}` has: {}", type_name, methods.join(", ")));
+            }
+            self.diags.push(d);
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        };
+
+        let owner = self.resolved.fns[fn_index as usize]
+            .owner
+            .expect("a method has an owner");
+        if !owner.takes_self {
+            let type_name = self.resolved.type_decl(ti).name.clone();
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0205,
+                    format!("`{}` is an associated function, not a method", name.name),
+                )
+                .with_primary(name.span, "takes no `self`")
+                .with_note(format!("call it as `{}.{}(…)`", type_name, name.name)),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+
+        let sig_params = self.sigs[fn_index as usize].params.clone();
+        let ret = self.sigs[fn_index as usize].ret;
+        let decl_span = self.sigs[fn_index as usize].name_span;
+
+        if args.len() != sig_params.len() {
+            self.arity_error(&name.name, args.len(), sig_params.len(), span, Some(decl_span));
+        }
+
+        // The receiver becomes the first argument, which is exactly how `self`
+        // is stored: local 0.
+        let mut hargs = vec![receiver];
+        for (i, a) in args.iter().enumerate() {
+            let want = sig_params.get(i).copied();
+            let e = self.expr(a, want);
+            if let Some(w) = want {
+                self.expect_ty(e.ty, w, e.span, Some(decl_span));
+            }
+            hargs.push(e);
+        }
+
+        hir::Expr {
+            kind: ExprKind::Call { callee: hir::FnId(fn_index), args: hargs },
+            ty: ret,
+            span,
+        }
+    }
+
+    /// `Rect.square(2.0)` — an associated function, called through the type.
+    fn associated_call(
+        &mut self,
+        ti: u32,
+        p: &ast::Path,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> hir::Expr {
+        let name = p.last().name.clone();
+        self.associated_call_named(ti, &name, p.span, args, span)
+    }
+
+    fn associated_call_named(
+        &mut self,
+        ti: u32,
+        method_name: &str,
+        path_span: Span,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> hir::Expr {
+        let type_name = self.resolved.type_decl(ti).name.clone();
+        let method_name = method_name.to_string();
+        let p_span = path_span;
+
+        let Some(fn_index) = self.resolved.method_on(ti, &method_name) else {
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0205,
+                    format!("`{}` has no associated function `{}`", type_name, method_name),
+                )
+                .with_primary(p_span, "no such function"),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        };
+
+        let owner = self.resolved.fns[fn_index as usize]
+            .owner
+            .expect("a method has an owner");
+        if owner.takes_self {
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0205,
+                    format!("`{}` is a method, not an associated function", method_name),
+                )
+                .with_primary(p_span, "takes `self`")
+                .with_note(format!("call it on a value: `value.{}(…)`", method_name)),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+
+        let sig_params = self.sigs[fn_index as usize].params.clone();
+        let ret = self.sigs[fn_index as usize].ret;
+        let decl_span = self.sigs[fn_index as usize].name_span;
+
+        if args.len() != sig_params.len() {
+            let full = format!("{}.{}", type_name, method_name);
+            self.arity_error(&full, args.len(), sig_params.len(), span, Some(decl_span));
+        }
+
+        let mut hargs = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let want = sig_params.get(i).copied();
+            let e = self.expr(a, want);
+            if let Some(w) = want {
+                self.expect_ty(e.ty, w, e.span, Some(decl_span));
+            }
+            hargs.push(e);
+        }
+
+        hir::Expr {
+            kind: ExprKind::Call { callee: hir::FnId(fn_index), args: hargs },
+            ty: ret,
+            span,
+        }
+    }
+
+    /// The `resolved.types` index for a nominal type, if it has one.
+    fn type_index_of(&self, ty: TyId) -> Option<u32> {
+        let target = match *self.types.kind(ty) {
+            TyKind::Struct(s) => TypeTarget::Struct(s),
+            TyKind::Enum(e) => TypeTarget::Enum(e),
+            _ => return None,
+        };
+        self.type_ids
+            .iter()
+            .position(|t| match (t, target) {
+                (Some(TypeTarget::Struct(a)), TypeTarget::Struct(b)) => *a == b,
+                (Some(TypeTarget::Enum(a)), TypeTarget::Enum(b)) => *a == b,
+                _ => false,
+            })
+            .map(|i| i as u32)
+    }
+
+    // ---- structs ----------------------------------------------------------
+
+    /// `Point{ x: 1.0, y: 2.0 }`.
+    ///
+    /// Every field must be given unless `..base` supplies the rest. There are
+    /// no zero values in Kite, which removes Go's most common production bug:
+    /// a forgotten field silently becoming `0`, `""`, or `nil`.
+    fn struct_literal(&mut self, lit: &ast::StructLit) -> hir::Expr {
+        let Some(Res::Type(ti)) = self.resolved.lookup_use(lit.path.span) else {
+            return self.lit(ExprKind::Error, TyId::ERROR, lit.span);
+        };
+        let Some(TypeTarget::Struct(sid)) = self.type_ids[ti as usize] else {
+            let kind = self.resolved.type_decl(ti).kind.describe();
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0200,
+                    format!("`{}` is not a struct", lit.path.name()),
+                )
+                .with_primary(lit.path.span, format!("this is a {}", kind)),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, lit.span);
+        };
+
+        let struct_ty = self.types.struct_ty(sid);
+        let field_count = self.types.struct_def(sid).fields.len();
+
+        // `Point{ ..p, y: 5.0 }` starts from an existing value.
+        let base = lit.base.as_ref().map(|b| self.expr(b, Some(struct_ty)));
+        if let Some(b) = &base {
+            if !self.types.satisfies(b.ty, struct_ty) && !self.types.is_poisoned(b.ty) {
+                let (found, want) = (self.types.name(b.ty), self.types.name(struct_ty));
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0200,
+                        format!("expected `{}`, found `{}`", want, found),
+                    )
+                    .with_primary(b.span, format!("`..` needs a `{}`", want)),
+                );
+            }
+        }
+
+        // Resolve each written field to its declared position.
+        let mut given: Vec<Option<hir::Expr>> = (0..field_count).map(|_| None).collect();
+        for init in &lit.fields {
+            let found = self
+                .types
+                .struct_def(sid)
+                .field(&init.name.name)
+                .map(|(i, f)| (i, f.ty, f.is_pub, f.span));
+
+            let Some((index, ty, _is_pub, decl_span)) = found else {
+                let name = self.types.struct_def(sid).name.clone();
+                let known: Vec<String> = self
+                    .types
+                    .struct_def(sid)
+                    .fields
+                    .iter()
+                    .map(|f| f.name.clone())
+                    .collect();
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0200,
+                        format!("`{}` has no field `{}`", name, init.name.name),
+                    )
+                    .with_primary(init.name.span, "no such field")
+                    .with_note(format!("`{}` has: {}", name, known.join(", "))),
+                );
+                let _ = self.expr(&init.value, None);
+                continue;
+            };
+
+            if given[index].is_some() {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0112,
+                        format!("field `{}` is given more than once", init.name.name),
+                    )
+                    .with_primary(init.name.span, "duplicated here"),
+                );
+            }
+            let value = self.expr(&init.value, Some(ty));
+            self.expect_ty(value.ty, ty, value.span, Some(decl_span));
+            given[index] = Some(value);
+        }
+
+        // Fill the gaps from `..base`, or report them.
+        let mut fields = Vec::with_capacity(field_count);
+        let mut missing = Vec::new();
+        for (i, slot) in given.into_iter().enumerate() {
+            match slot {
+                Some(e) => fields.push(e),
+                None if base.is_some() => {
+                    let ty = self.types.struct_def(sid).fields[i].ty;
+                    // Each gap re-reads the base. Evaluating it once and
+                    // projecting is a MIR concern, not a semantic one.
+                    let base_expr = self.clone_base_read(lit, struct_ty);
+                    fields.push(hir::Expr {
+                        kind: ExprKind::FieldGet {
+                            base: Box::new(base_expr),
+                            index: i as u32,
+                        },
+                        ty,
+                        span: lit.span,
+                    });
+                }
+                None => missing.push(self.types.struct_def(sid).fields[i].name.clone()),
+            }
+        }
+
+        if !missing.is_empty() {
+            let name = self.types.struct_def(sid).name.clone();
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0200,
+                    format!(
+                        "missing field{} {} in `{}`",
+                        if missing.len() == 1 { "" } else { "s" },
+                        missing
+                            .iter()
+                            .map(|m| format!("`{}`", m))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        name
+                    ),
+                )
+                .with_primary(lit.span, "every field must be given")
+                .with_note(
+                    "Kite has no zero values: a struct literal that omits a field is an error, \
+                     not a silent default",
+                ),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, lit.span);
+        }
+
+        hir::Expr {
+            kind: ExprKind::StructNew { struct_id: sid, fields },
+            ty: struct_ty,
+            span: lit.span,
+        }
+    }
+
+    /// Re-read the `..base` expression for a gap in a functional update.
+    fn clone_base_read(&mut self, lit: &ast::StructLit, struct_ty: TyId) -> hir::Expr {
+        match &lit.base {
+            Some(b) => self.expr(b, Some(struct_ty)),
+            None => self.lit(ExprKind::Error, TyId::ERROR, lit.span),
+        }
+    }
+
+    /// `p.x`
+    fn field_access(
+        &mut self,
+        base: &ast::Expr,
+        name: &ast::Ident,
+        optional: bool,
+        span: Span,
+    ) -> hir::Expr {
+        if optional {
+            self.not_yet(span, "optional chaining", "optionals arrive later in Phase 2");
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+
+        let obj = self.expr(base, None);
+        if self.types.is_poisoned(obj.ty) {
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+
+        let TyKind::Struct(sid) = *self.types.kind(obj.ty) else {
+            let found = self.types.with_article(obj.ty);
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0200,
+                    format!("`{}` has no fields", self.types.name(obj.ty)),
+                )
+                .with_primary(obj.span, format!("this is {}", found))
+                .with_secondary(name.span, "field access needs a struct"),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        };
+
+        match self.types.struct_def(sid).field(&name.name).map(|(i, f)| (i, f.ty)) {
+            Some((index, ty)) => hir::Expr {
+                kind: ExprKind::FieldGet { base: Box::new(obj), index: index as u32 },
+                ty,
+                span,
+            },
+            None => {
+                let sname = self.types.struct_def(sid).name.clone();
+                let known: Vec<String> = self
+                    .types
+                    .struct_def(sid)
+                    .fields
+                    .iter()
+                    .map(|f| f.name.clone())
+                    .collect();
+                let mut d = Diagnostic::error(
+                    codes::E0200,
+                    format!("`{}` has no field `{}`", sname, name.name),
+                )
+                .with_primary(name.span, "no such field");
+                if self.resolved.method_on(0, &name.name).is_some() {
+                    d = d.with_note("this is a method; call it with `()`");
+                }
+                d = d.with_note(if known.is_empty() {
+                    format!("`{}` has no fields", sname)
+                } else {
+                    format!("`{}` has: {}", sname, known.join(", "))
+                });
+                self.diags.push(d);
+                self.lit(ExprKind::Error, TyId::ERROR, span)
+            }
+        }
+    }
+
+    fn assign_field(
+        &mut self,
+        base: &ast::Expr,
+        name: &ast::Ident,
+        optional: bool,
+        span: Span,
+        a: &ast::AssignStmt,
+    ) -> Option<(hir::Stmt, Flow)> {
+        if optional {
+            self.not_yet(span, "assignment through `?.`", "optionals arrive later");
+            return None;
+        }
+
+        let obj = self.expr(base, None);
+        if self.types.is_poisoned(obj.ty) {
+            return None;
+        }
+
+        let TyKind::Struct(sid) = *self.types.kind(obj.ty) else {
+            let found = self.types.with_article(obj.ty);
+            self.diags.push(
+                Diagnostic::error(codes::E0200, "only a struct has fields to assign")
+                    .with_primary(obj.span, format!("this is {}", found)),
+            );
+            return None;
+        };
+
+        let found = self
+            .types
+            .struct_def(sid)
+            .field(&name.name)
+            .map(|(i, f)| (i, f.ty, f.mutable, f.span));
+        let Some((index, ty, mutable, decl_span)) = found else {
+            let sname = self.types.struct_def(sid).name.clone();
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0200,
+                    format!("`{}` has no field `{}`", sname, name.name),
+                )
+                .with_primary(name.span, "no such field"),
+            );
+            return None;
+        };
+
+        if !mutable {
+            let sname = self.types.struct_def(sid).name.clone();
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0114,
+                    format!("cannot assign to immutable field `{}`", name.name),
+                )
+                .with_primary(name.span, "this field cannot change")
+                .with_secondary(decl_span, "declared immutable here")
+                .with_note(format!(
+                    "fields are immutable unless marked `var`; write `var {}: {}` on `{}`, or \
+                     build a new value with `{}{{ ..old, {}: new }}`",
+                    name.name,
+                    self.types.name(ty),
+                    sname,
+                    sname,
+                    name.name
+                )),
+            );
+            return None;
+        }
+
+        let value = self.expr(&a.value, Some(ty));
+        let value = match a.op.to_binary() {
+            None => {
+                self.expect_ty(value.ty, ty, value.span, Some(decl_span));
+                value
+            }
+            Some(binop) => {
+                let current = hir::Expr {
+                    kind: ExprKind::FieldGet {
+                        base: Box::new(self.expr(base, None)),
+                        index: index as u32,
+                    },
+                    ty,
+                    span,
+                };
+                self.binary(binop, current, value, a.span)
+            }
+        };
+
+        Some((
+            hir::Stmt::SetField {
+                base: obj,
+                index: index as u32,
+                value,
+                span: a.span,
+            },
+            Flow::Falls,
+        ))
     }
 
     fn if_expr(
@@ -996,6 +1750,10 @@ impl<'a> Checker<'a> {
             (B::Eq, TyId::STR) => Some((H::EqStr, TyId::BOOL)),
             (B::Ne, TyId::STR) => Some((H::NeStr, TyId::BOOL)),
 
+            // Aggregates compare structurally, per the specification.
+            (B::Eq, _) if self.types.is_equatable(t) => Some((H::EqValue, TyId::BOOL)),
+            (B::Ne, _) if self.types.is_equatable(t) => Some((H::NeValue, TyId::BOOL)),
+
             _ => None,
         };
 
@@ -1013,6 +1771,12 @@ impl<'a> Checker<'a> {
             }
             if op.is_comparison() && !self.types.is_ordered(t) {
                 d = d.with_note(format!("`{}` is not ordered", self.types.name(t)));
+            }
+            if matches!(op, B::Eq | B::Ne) && !self.types.is_equatable(t) {
+                d = d.with_note(
+                    "equality is structural, so every field must itself be equatable; \
+                     functions and trait objects are not",
+                );
             }
             self.diags.push(d);
             return hir::Expr { kind: ExprKind::Error, ty: TyId::ERROR, span };
@@ -1214,6 +1978,112 @@ fn short_circuit(op: ast::BinaryOp) -> Option<hir::BinOp> {
         ast::BinaryOp::And => Some(hir::BinOp::And),
         ast::BinaryOp::Or => Some(hir::BinOp::Or),
         _ => None,
+    }
+}
+
+/// The arena type for a declared name.
+fn named_ty(target: Option<TypeTarget>, types: &mut Types) -> TyId {
+    match target {
+        Some(TypeTarget::Struct(s)) => types.struct_ty(s),
+        Some(TypeTarget::Enum(e)) => types.enum_ty(e),
+        Some(TypeTarget::Trait(t)) => types.dyn_ty(t),
+        None => TyId::ERROR,
+    }
+}
+
+/// Resolve a surface type, consulting the module's declared types before
+/// falling back to the primitives.
+fn resolve_named_ty(
+    t: &ast::Type,
+    resolved: &ResolveMap,
+    type_ids: &[Option<TypeTarget>],
+    types: &mut Types,
+    diags: &mut DiagBag,
+) -> TyId {
+    match t {
+        ast::Type::Path(p) if p.is_simple() => {
+            if let Some(prim) = Types::primitive_from_name(p.name()) {
+                return prim;
+            }
+            match resolved.type_by_name(p.name()) {
+                Some(i) => match type_ids[i as usize] {
+                    Some(TypeTarget::Trait(_)) => {
+                        diags.push(
+                            Diagnostic::error(
+                                codes::E0204,
+                                format!("`{}` is a trait, not a type", p.name()),
+                            )
+                            .with_primary(p.span, "traits name behaviour, not values")
+                            .with_note(format!(
+                                "write `dyn {}` for a trait object, or use it as a bound",
+                                p.name()
+                            )),
+                        );
+                        TyId::ERROR
+                    }
+                    other => named_ty(other, types),
+                },
+                None => resolve_ty(t, types, diags),
+            }
+        }
+        ast::Type::Slice { elem, .. } => {
+            let e = resolve_named_ty(elem, resolved, type_ids, types, diags);
+            types.slice_of(e)
+        }
+        ast::Type::Map { key, value, .. } => {
+            let k = resolve_named_ty(key, resolved, type_ids, types, diags);
+            let v = resolve_named_ty(value, resolved, type_ids, types, diags);
+            types.map_of(k, v)
+        }
+        ast::Type::Optional { inner, .. } => {
+            let i = resolve_named_ty(inner, resolved, type_ids, types, diags);
+            types.optional_of(i)
+        }
+        ast::Type::Tuple { elems, .. } => {
+            let es: Vec<TyId> = elems
+                .iter()
+                .map(|e| resolve_named_ty(e, resolved, type_ids, types, diags))
+                .collect();
+            if es.is_empty() {
+                TyId::UNIT
+            } else {
+                types.tuple_of(es)
+            }
+        }
+        ast::Type::Fn { params, ret, .. } => {
+            let ps: Vec<TyId> = params
+                .iter()
+                .map(|p| resolve_named_ty(p, resolved, type_ids, types, diags))
+                .collect();
+            let r = match ret {
+                Some(r) => resolve_named_ty(r, resolved, type_ids, types, diags),
+                None => TyId::UNIT,
+            };
+            types.fn_of(ps, r)
+        }
+        ast::Type::Dyn { path, span } => match resolved.type_by_name(path.name()) {
+            Some(i) => match type_ids[i as usize] {
+                Some(TypeTarget::Trait(tr)) => types.dyn_ty(tr),
+                _ => {
+                    diags.push(
+                        Diagnostic::error(
+                            codes::E0204,
+                            format!("`{}` is not a trait", path.name()),
+                        )
+                        .with_primary(*span, "`dyn` needs a trait"),
+                    );
+                    TyId::ERROR
+                }
+            },
+            None => {
+                diags.push(
+                    Diagnostic::error(codes::E0204, format!("unknown trait `{}`", path.name()))
+                        .with_primary(*span, "no such trait"),
+                );
+                TyId::ERROR
+            }
+        },
+        other => resolve_ty(other, types, diags),
     }
 }
 

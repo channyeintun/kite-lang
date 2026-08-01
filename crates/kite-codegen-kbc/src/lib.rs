@@ -90,10 +90,19 @@ pub enum Op {
     NeBool { dst: Reg, a: Reg, b: Reg },
     EqStr { dst: Reg, a: Reg, b: Reg },
     NeStr { dst: Reg, a: Reg, b: Reg },
+    /// Structural comparison, used for aggregates.
+    EqValue { dst: Reg, a: Reg, b: Reg },
+    NeValue { dst: Reg, a: Reg, b: Reg },
 
     // ---- control ----------------------------------------------------------
     Jump { target: u32 },
     JumpIfFalse { cond: Reg, target: u32 },
+
+    // ---- aggregates -------------------------------------------------------
+    /// Field values occupy `base .. base + count`, in declaration order.
+    NewStruct { dst: Reg, struct_id: u32, base: Reg, count: u8 },
+    GetField { dst: Reg, obj: Reg, index: u16 },
+    SetField { obj: Reg, index: u16, src: Reg },
 
     /// Arguments occupy `base .. base + argc`.
     Call { dst: Reg, func: u32, base: Reg, argc: u8 },
@@ -162,6 +171,8 @@ pub fn binop_instruction(op: BinOp) -> Option<fn(Reg, Reg, Reg) -> Op> {
         NeBool => |dst, a, b| Op::NeBool { dst, a, b },
         EqStr => |dst, a, b| Op::EqStr { dst, a, b },
         NeStr => |dst, a, b| Op::NeStr { dst, a, b },
+        EqValue => |dst, a, b| Op::EqValue { dst, a, b },
+        NeValue => |dst, a, b| Op::NeValue { dst, a, b },
         And | Or => return None,
     })
 }
@@ -255,7 +266,20 @@ impl fmt::Display for Op {
             NeBool { dst, a, b } => bin(f, "ne.bool", dst, a, b),
             EqStr { dst, a, b } => bin(f, "eq.str", dst, a, b),
             NeStr { dst, a, b } => bin(f, "ne.str", dst, a, b),
+            EqValue { dst, a, b } => bin(f, "eq.value", dst, a, b),
+            NeValue { dst, a, b } => bin(f, "ne.value", dst, a, b),
 
+            NewStruct { dst, struct_id, base, count } => write!(
+                f,
+                "{:<12} r{}, struct{}, r{}, {}",
+                "new.struct", dst, struct_id, base, count
+            ),
+            GetField { dst, obj, index } => {
+                write!(f, "{:<12} r{}, r{}, {}", "get.field", dst, obj, index)
+            }
+            SetField { obj, index, src } => {
+                write!(f, "{:<12} r{}, {}, r{}", "set.field", obj, index, src)
+            }
             Jump { target } => write!(f, "{:<12} {}", "jump", target),
             JumpIfFalse { cond, target } => write!(f, "{:<12} r{}, {}", "jump.false", cond, target),
             Call { dst, func: fi, base, argc } => {

@@ -28,6 +28,7 @@ fn compile_fn(func: &mir::Function) -> FnProto {
         .map(|s| match s {
             mir::Inst::Assign { value: mir::Rvalue::Call { args, .. }, .. }
             | mir::Inst::Assign { value: mir::Rvalue::CallBuiltin { args, .. }, .. } => args.len(),
+            mir::Inst::Assign { value: mir::Rvalue::StructNew { fields, .. }, .. } => fields.len(),
             _ => 0,
         })
         .max()
@@ -101,8 +102,15 @@ impl<'a> Emitter<'a> {
     // ---- statements -------------------------------------------------------
 
     fn stmt(&mut self, s: &mir::Inst) {
-        let mir::Inst::Assign { dst, value } = s;
-        let dst = reg(*dst);
+        let (dst, value) = match s {
+            mir::Inst::Assign { dst, value } => (reg(*dst), value),
+            mir::Inst::SetField { base, index, value } => {
+                let obj = self.operand_reg(base, 0);
+                let src = self.operand_reg(value, 1);
+                self.code.push(Op::SetField { obj, index: *index as u16, src });
+                return;
+            }
+        };
 
         match value {
             mir::Rvalue::Use(o) => self.load_into(dst, o),
@@ -141,6 +149,23 @@ impl<'a> Emitter<'a> {
                     base: self.arg_base,
                     argc: args.len() as u8,
                 });
+            }
+
+            // Field values are staged in the same consecutive window the call
+            // convention uses, so no separate mechanism is needed.
+            mir::Rvalue::StructNew { struct_id, fields } => {
+                self.stage_args(fields);
+                self.code.push(Op::NewStruct {
+                    dst,
+                    struct_id: struct_id.0,
+                    base: self.arg_base,
+                    count: fields.len() as u8,
+                });
+            }
+
+            mir::Rvalue::FieldGet { base, index } => {
+                let obj = self.operand_reg(base, 0);
+                self.code.push(Op::GetField { dst, obj, index: *index as u16 });
             }
         }
     }

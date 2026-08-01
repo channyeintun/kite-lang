@@ -89,6 +89,26 @@ fn sexp(e: &Expr, src: &str) -> String {
         }
         Expr::Closure { .. } => "(closure)".into(),
         Expr::If { .. } => "(if)".into(),
+        Expr::Map { entries, .. } => {
+            let a: Vec<_> = entries
+                .iter()
+                .map(|e| format!("{}: {}", sexp(&e.key, src), sexp(&e.value, src)))
+                .collect();
+            format!("(map {})", a.join(" "))
+        }
+        Expr::StructLit(s) => {
+            let a: Vec<_> = s
+                .fields
+                .iter()
+                .map(|f| format!("{}: {}", f.name.name, sexp(&f.value, src)))
+                .collect();
+            let base = match &s.base {
+                Some(b) => format!("..{} ", sexp(b, src)),
+                None => String::new(),
+            };
+            format!("({}{{{}{}}})", s.path.name(), base, a.join(" "))
+        }
+        Expr::Match(m) => format!("(match {} {} arms)", sexp(&m.scrutinee, src), m.arms.len()),
         Expr::Error(_) => "(error)".into(),
     }
 }
@@ -192,21 +212,21 @@ fn range_is_loosest() {
 
 #[test]
 fn postfix_binds_tighter_than_prefix() {
-    // The negation wraps the whole postfix chain, not just its head. Note
-    // `x.foo` is a *path* here (see the test below), so it prints unsplit.
-    assert_eq!(expr_sexp("-x.foo"), "(- x.foo)");
-    // Where the base is not a plain name it is a genuine field access, and the
-    // grouping is visible.
+    // The negation wraps the whole postfix chain, not just its head.
+    assert_eq!(expr_sexp("-x.foo"), "(- (. x foo))");
     assert_eq!(expr_sexp("-f(a).b"), "(- (. (call f a) b))");
     assert_eq!(expr_sexp("!f(x)"), "(! (call f x))");
     assert_eq!(expr_sexp("-a[0]"), "(- (index a 0))");
 }
 
+/// `.` always produces a field access. Whether `io.print` is really a module
+/// path rather than a field of a local named `io` is a resolution question, so
+/// the parser does not try to answer it.
 #[test]
-fn dotted_names_form_a_path_not_a_field_access() {
-    // `io.print` must resolve as one name, so resolution can find the builtin.
-    assert_eq!(expr_sexp("io.print"), "io.print");
-    assert_eq!(expr_sexp("io.print(x)"), "(call io.print x)");
+fn dotted_names_are_field_accesses() {
+    assert_eq!(expr_sexp("io.print"), "(. io print)");
+    assert_eq!(expr_sexp("io.print(x)"), "(call (. io print) x)");
+    assert_eq!(expr_sexp("a.b.c"), "(. (. a b) c)");
 }
 
 #[test]
@@ -398,4 +418,144 @@ fn error_points_where_the_missing_text_goes() {
     let p = parse_src("fn f() {\n    let x =\n}\n");
     let out = p.render();
     assert!(out.contains("expected an expression"), "{}", out);
+}
+
+// ---- Phase 2 declarations -------------------------------------------------
+
+#[test]
+fn parses_a_struct_with_pub_and_var_fields() {
+    let p = ok("pub struct Rect {\n    pub width: float\n    height: float\n    pub var label: str\n}\n");
+    let Item::Struct(s) = &p.file.items[0] else {
+        panic!("expected a struct")
+    };
+    assert!(s.is_pub);
+    assert_eq!(s.fields.len(), 3);
+    assert!(s.fields[0].is_pub && !s.fields[0].is_var);
+    assert!(!s.fields[1].is_pub);
+    assert!(s.fields[2].is_var, "`var` field not recorded");
+}
+
+#[test]
+fn parses_enum_variant_payload_forms() {
+    let p = ok("enum Shape {\n    Circle(radius: float)\n    Rect(float, float)\n    Point\n}\n");
+    let Item::Enum(e) = &p.file.items[0] else {
+        panic!("expected an enum")
+    };
+    assert_eq!(e.variants.len(), 3);
+    assert!(matches!(e.variants[0].payload, VariantPayload::Named(_)));
+    assert!(matches!(e.variants[1].payload, VariantPayload::Positional(_)));
+    assert!(matches!(e.variants[2].payload, VariantPayload::Unit));
+}
+
+#[test]
+fn parses_a_trait_with_a_default_method() {
+    let p = ok("pub trait Display {\n    fn show(self) -> str\n    fn label(self) -> str {\n        return \"x\"\n    }\n}\n");
+    let Item::Trait(tr) = &p.file.items[0] else {
+        panic!("expected a trait")
+    };
+    assert_eq!(tr.methods.len(), 2);
+    assert!(tr.methods[0].body.is_none(), "declaration-only method");
+    assert!(tr.methods[1].body.is_some(), "default method");
+}
+
+#[test]
+fn parses_inherent_and_trait_impls() {
+    let p = ok("impl Rect {\n    fn area(self) -> float {\n        return 1.0\n    }\n}\nimpl Display for Rect {\n    fn show(self) -> str {\n        return \"r\"\n    }\n}\n");
+    let Item::Impl(a) = &p.file.items[0] else { panic!() };
+    let Item::Impl(b) = &p.file.items[1] else { panic!() };
+    assert!(a.trait_path.is_none());
+    assert_eq!(b.trait_path.as_ref().unwrap().name(), "Display");
+    assert_eq!(b.self_ty.name(), "Rect");
+}
+
+#[test]
+fn parses_self_receivers() {
+    let p = ok("impl R {\n    fn a(self) {\n    }\n    fn b(var self) {\n    }\n    fn c(x: int) {\n    }\n}\n");
+    let Item::Impl(i) = &p.file.items[0] else { panic!() };
+    assert!(i.methods[0].self_param.as_ref().is_some_and(|s| !s.is_var));
+    assert!(i.methods[1].self_param.as_ref().is_some_and(|s| s.is_var));
+    assert!(i.methods[2].self_param.is_none(), "associated function");
+}
+
+#[test]
+fn parses_generic_parameters_with_bounds() {
+    let p = ok("struct Cache<K: Hash, V> {\n    n: int\n}\n");
+    let Item::Struct(s) = &p.file.items[0] else { panic!() };
+    assert_eq!(s.generics.len(), 2);
+    assert_eq!(s.generics[0].bounds.len(), 1);
+    assert!(s.generics[1].bounds.is_empty());
+}
+
+// ---- struct literals ------------------------------------------------------
+
+#[test]
+fn parses_struct_literals_including_functional_update() {
+    assert_eq!(expr_sexp("Point{ x: 1, y: 2 }"), "(Point{x: 1 y: 2})");
+    assert_eq!(expr_sexp("Point{ ..p, y: 5 }"), "(Point{..p y: 5})");
+}
+
+#[test]
+fn struct_literal_shorthand_repeats_the_name() {
+    assert_eq!(expr_sexp("Point{ x, y }"), "(Point{x: x y: y})");
+}
+
+/// The specification's parsing note: a struct literal is not permitted in an
+/// `if`/`for`/`match` scrutinee, where `{` opens the body.
+#[test]
+fn a_brace_in_a_condition_opens_the_body_not_a_literal() {
+    let p = ok("fn f() {\n    if p {\n        io.print(1)\n    }\n}\n");
+    let fns = p.fns();
+    assert!(matches!(fns[0].body.stmts[0], Stmt::If(_)));
+}
+
+#[test]
+fn a_parenthesised_struct_literal_works_in_a_condition() {
+    ok("fn f() {\n    if (Point{ x: 1 }) == p {\n    }\n}\n");
+}
+
+// ---- match ----------------------------------------------------------------
+
+#[test]
+fn parses_match_with_guards_and_alternation() {
+    let p = ok("fn f() {\n    match n {\n        0 => io.print(1),\n        1 | 2 => io.print(2),\n        x if x > 9 => io.print(3),\n        _ => io.print(4),\n    }\n}\n");
+    let fns = p.fns();
+    let Stmt::Match(m) = &fns[0].body.stmts[0] else {
+        panic!("expected a match")
+    };
+    assert_eq!(m.arms.len(), 4);
+    assert!(matches!(m.arms[1].pattern, Pattern::Or { .. }));
+    assert!(m.arms[2].guard.is_some());
+    assert!(matches!(m.arms[3].pattern, Pattern::Wildcard(_)));
+}
+
+#[test]
+fn parses_pattern_forms() {
+    let p = ok("fn f() {\n    match v {\n        Circle(r) => a(),\n        Rect(w: x, h: y) => b(),\n        Point{ x: 0, y } => c(),\n        (a, b) => d(),\n        4..=9 => e(),\n        nil => g(),\n        -1 => h(),\n    }\n}\n");
+    let fns = p.fns();
+    let Stmt::Match(m) = &fns[0].body.stmts[0] else { panic!() };
+    assert!(matches!(&m.arms[0].pattern, Pattern::Variant { args: PatternArgs::Positional(_), .. }));
+    assert!(matches!(&m.arms[1].pattern, Pattern::Variant { args: PatternArgs::Named(_), .. }));
+    assert!(matches!(m.arms[2].pattern, Pattern::Struct { .. }));
+    assert!(matches!(m.arms[3].pattern, Pattern::Tuple { .. }));
+    assert!(matches!(m.arms[4].pattern, Pattern::Range { inclusive: true, .. }));
+    assert!(matches!(m.arms[5].pattern, Pattern::Nil(_)));
+    assert!(matches!(m.arms[6].pattern, Pattern::Literal(_)));
+}
+
+#[test]
+fn match_arms_may_use_blocks_and_omit_trailing_commas() {
+    ok("fn f() {\n    match n {\n        0 => {\n            io.print(1)\n        }\n        _ => io.print(2)\n    }\n}\n");
+}
+
+#[test]
+fn parses_match_as_an_expression() {
+    let p = ok("fn f() {\n    let d = match s {\n        0 => \"zero\",\n        _ => \"other\",\n    }\n}\n");
+    let fns = p.fns();
+    let Stmt::Let(l) = &fns[0].body.stmts[0] else { panic!() };
+    assert!(matches!(l.init, Some(Expr::Match(_))));
+}
+
+#[test]
+fn parses_map_literals() {
+    assert_eq!(expr_sexp("{\"a\": 1, \"b\": 2}"), "(map \"a\": 1 \"b\": 2)");
 }

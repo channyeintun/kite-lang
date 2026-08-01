@@ -1,0 +1,9 @@
+struct Rect {
+    width: int
+    height: int
+}
+
+fn main() {
+    let r = Rect{ width: 1 }   //~ ERROR E0200
+    io.print(r.width)
+}

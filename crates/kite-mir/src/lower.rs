@@ -165,6 +165,11 @@ impl<'a> FnLowerer<'a> {
                 let v = self.rvalue(value);
                 self.assign(Local(local.0), v);
             }
+            hir::Stmt::SetField { base, index, value, .. } => {
+                let b = self.operand(base);
+                let v = self.operand(value);
+                self.emit(Inst::SetField { base: b, index: *index, value: v });
+            }
             hir::Stmt::Expr(e) => {
                 // Evaluated for its effects. A call still has to happen.
                 let v = self.rvalue(e);
@@ -388,6 +393,14 @@ impl<'a> FnLowerer<'a> {
             hir::ExprKind::CallBuiltin { builtin, args } => {
                 let args = args.iter().map(|a| self.operand(a)).collect();
                 Rvalue::CallBuiltin { builtin: *builtin, args }
+            }
+            hir::ExprKind::StructNew { struct_id, fields } => {
+                let fields = fields.iter().map(|a| self.operand(a)).collect();
+                Rvalue::StructNew { struct_id: *struct_id, fields }
+            }
+            hir::ExprKind::FieldGet { base, index } => {
+                let b = self.operand(base);
+                Rvalue::FieldGet { base: b, index: *index }
             }
             _ => Rvalue::Use(self.operand(e)),
         }

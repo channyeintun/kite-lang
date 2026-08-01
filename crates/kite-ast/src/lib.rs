@@ -43,6 +43,11 @@ pub struct Use {
 #[derive(Debug)]
 pub enum Item {
     Fn(FnDecl),
+    Struct(StructDecl),
+    Enum(EnumDecl),
+    Trait(TraitDecl),
+    Impl(ImplDecl),
+    TypeAlias(TypeAlias),
     /// A declaration the parser could not recover into a real item.
     Error(Span),
 }
@@ -51,9 +56,164 @@ impl Item {
     pub fn span(&self) -> Span {
         match self {
             Item::Fn(f) => f.span,
+            Item::Struct(s) => s.span,
+            Item::Enum(e) => e.span,
+            Item::Trait(t) => t.span,
+            Item::Impl(i) => i.span,
+            Item::TypeAlias(a) => a.span,
             Item::Error(s) => *s,
         }
     }
+
+    /// The declared name, where the item has one. `impl` blocks do not.
+    pub fn name(&self) -> Option<&Ident> {
+        match self {
+            Item::Fn(f) => Some(&f.name),
+            Item::Struct(s) => Some(&s.name),
+            Item::Enum(e) => Some(&e.name),
+            Item::Trait(t) => Some(&t.name),
+            Item::TypeAlias(a) => Some(&a.name),
+            Item::Impl(_) | Item::Error(_) => None,
+        }
+    }
+
+    /// What kind of thing this is, for diagnostics.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Item::Fn(_) => "function",
+            Item::Struct(_) => "struct",
+            Item::Enum(_) => "enum",
+            Item::Trait(_) => "trait",
+            Item::Impl(_) => "impl block",
+            Item::TypeAlias(_) => "type alias",
+            Item::Error(_) => "item",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Type declarations
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct StructDecl {
+    pub is_pub: bool,
+    pub name: Ident,
+    pub generics: Vec<GenericParam>,
+    pub fields: Vec<FieldDecl>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct FieldDecl {
+    pub is_pub: bool,
+    /// Declared `var`. Fields are immutable by default, which is what removes
+    /// the value-versus-pointer distinction and makes most types `Share`.
+    pub is_var: bool,
+    pub name: Ident,
+    pub ty: Type,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct EnumDecl {
+    pub is_pub: bool,
+    pub name: Ident,
+    pub generics: Vec<GenericParam>,
+    pub variants: Vec<VariantDecl>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct VariantDecl {
+    pub name: Ident,
+    pub payload: VariantPayload,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub enum VariantPayload {
+    /// `Point`
+    Unit,
+    /// `Circle(radius: float)`
+    Named(Vec<FieldDecl>),
+    /// `Number(float)`
+    Positional(Vec<Type>),
+}
+
+impl VariantPayload {
+    pub fn len(&self) -> usize {
+        match self {
+            VariantPayload::Unit => 0,
+            VariantPayload::Named(f) => f.len(),
+            VariantPayload::Positional(t) => t.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+#[derive(Debug)]
+pub struct TypeAlias {
+    pub is_pub: bool,
+    pub name: Ident,
+    pub generics: Vec<GenericParam>,
+    pub ty: Type,
+    pub span: Span,
+}
+
+// ---------------------------------------------------------------------------
+// Traits and implementations
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct TraitDecl {
+    pub is_pub: bool,
+    pub name: Ident,
+    pub generics: Vec<GenericParam>,
+    pub methods: Vec<MethodDecl>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct ImplDecl {
+    pub generics: Vec<GenericParam>,
+    /// Present for `impl Trait for Type`; absent for an inherent `impl Type`.
+    pub trait_path: Option<TypePath>,
+    pub self_ty: TypePath,
+    pub methods: Vec<MethodDecl>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct MethodDecl {
+    pub is_pub: bool,
+    pub is_async: bool,
+    pub name: Ident,
+    /// Absent for an associated function such as `Rect.square(2.0)`.
+    pub self_param: Option<SelfParam>,
+    pub params: Vec<Param>,
+    pub ret: Option<RetType>,
+    /// Absent for a trait method with no default body.
+    pub body: Option<Block>,
+    pub span: Span,
+    pub sig_span: Span,
+}
+
+#[derive(Debug)]
+pub struct SelfParam {
+    /// `var self` — required to mutate a `var` field.
+    pub is_var: bool,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct GenericParam {
+    pub name: Ident,
+    pub bounds: Vec<TypePath>,
+    pub span: Span,
 }
 
 #[derive(Debug)]
@@ -184,6 +344,7 @@ pub enum Stmt {
     Defer { expr: Expr, span: Span },
     If(IfStmt),
     For(ForStmt),
+    Match(MatchExpr),
     Break { label: Option<Ident>, span: Span },
     Continue { label: Option<Ident>, span: Span },
     Expr(Expr),
@@ -204,6 +365,7 @@ impl Stmt {
             | Stmt::Error(span) => *span,
             Stmt::If(s) => s.span,
             Stmt::For(s) => s.span,
+            Stmt::Match(m) => m.span,
             Stmt::Expr(e) => e.span(),
         }
     }
@@ -382,8 +544,145 @@ pub enum Expr {
     Paren { inner: Box<Expr>, span: Span },
     Tuple { elems: Vec<Expr>, span: Span },
     Slice { elems: Vec<Expr>, span: Span },
+    /// `{"a": 1}`
+    Map { entries: Vec<MapEntry>, span: Span },
+    /// `Point{ x: 1.0, y: 2.0 }`, optionally with `..base`.
+    StructLit(StructLit),
+    Match(MatchExpr),
     Closure { params: Vec<ClosureParam>, body: Box<ClosureBody>, span: Span },
     Error(Span),
+}
+
+#[derive(Debug)]
+pub struct MapEntry {
+    pub key: Expr,
+    pub value: Expr,
+}
+
+#[derive(Debug)]
+pub struct StructLit {
+    pub path: TypePath,
+    /// `Point{ ..p, y: 5.0 }` — produces a new value, never mutates `p`.
+    pub base: Option<Box<Expr>>,
+    pub fields: Vec<FieldInit>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct FieldInit {
+    pub name: Ident,
+    pub value: Expr,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct MatchExpr {
+    pub scrutinee: Box<Expr>,
+    pub arms: Vec<MatchArm>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    /// `Rect(w, h) if w == h => ...`
+    pub guard: Option<Expr>,
+    pub body: MatchBody,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub enum MatchBody {
+    Expr(Expr),
+    Block(Block),
+}
+
+impl MatchBody {
+    pub fn span(&self) -> Span {
+        match self {
+            MatchBody::Expr(e) => e.span(),
+            MatchBody::Block(b) => b.span,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Patterns
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub enum Pattern {
+    /// `_`
+    Wildcard(Span),
+    Nil(Span),
+    /// An integer, float, string, char, or boolean literal.
+    Literal(Expr),
+    /// `4..=9`
+    Range { start: Expr, end: Expr, inclusive: bool, span: Span },
+    /// A lowercase name binds; an uppercase one may name a unit variant, which
+    /// resolution decides.
+    Binding(Ident),
+    /// `Circle(radius)` or `Circle(radius: r)`
+    Variant { path: TypePath, args: PatternArgs, span: Span },
+    /// `Point{ x: 0.0, y }`
+    Struct { path: TypePath, fields: Vec<FieldPattern>, rest: bool, span: Span },
+    /// `(a, b)`
+    Tuple { elems: Vec<Pattern>, span: Span },
+    /// `1 | 2 | 3`
+    Or { alts: Vec<Pattern>, span: Span },
+    Error(Span),
+}
+
+impl Pattern {
+    pub fn span(&self) -> Span {
+        match self {
+            Pattern::Wildcard(s) | Pattern::Nil(s) | Pattern::Error(s) => *s,
+            Pattern::Literal(e) => e.span(),
+            Pattern::Range { span, .. }
+            | Pattern::Variant { span, .. }
+            | Pattern::Struct { span, .. }
+            | Pattern::Tuple { span, .. }
+            | Pattern::Or { span, .. } => *span,
+            Pattern::Binding(i) => i.span,
+        }
+    }
+
+    /// Whether this pattern matches every value, which is what makes a `match`
+    /// exhaustive without listing variants.
+    pub fn is_irrefutable(&self) -> bool {
+        match self {
+            Pattern::Wildcard(_) | Pattern::Binding(_) => true,
+            Pattern::Or { alts, .. } => alts.iter().any(|a| a.is_irrefutable()),
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum PatternArgs {
+    Positional(Vec<Pattern>),
+    Named(Vec<(Ident, Pattern)>),
+}
+
+impl PatternArgs {
+    pub fn len(&self) -> usize {
+        match self {
+            PatternArgs::Positional(p) => p.len(),
+            PatternArgs::Named(p) => p.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+#[derive(Debug)]
+pub struct FieldPattern {
+    pub name: Ident,
+    /// Absent for the shorthand `Point{ x }`, which binds `x`.
+    pub pattern: Option<Pattern>,
+    pub span: Span,
 }
 
 impl Expr {
@@ -409,8 +708,11 @@ impl Expr {
             | Expr::Paren { span, .. }
             | Expr::Tuple { span, .. }
             | Expr::Slice { span, .. }
+            | Expr::Map { span, .. }
             | Expr::Closure { span, .. } => *span,
             Expr::Path(p) => p.span,
+            Expr::StructLit(s) => s.span,
+            Expr::Match(m) => m.span,
         }
     }
 
@@ -438,6 +740,9 @@ impl Expr {
             Expr::Binary { .. } => "a binary expression",
             Expr::Unary { .. } => "a unary expression",
             Expr::Range { .. } => "a range",
+            Expr::StructLit(_) => "a struct literal",
+            Expr::Match(_) => "a match",
+            Expr::Map { .. } => "a map literal",
             Expr::Closure { .. } => "a closure",
             _ => "an expression",
         }

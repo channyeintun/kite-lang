@@ -11,6 +11,7 @@
 
 use kite_codegen_kbc::{Chunk, Native, Op, Reg};
 use std::fmt;
+use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
 
@@ -18,13 +19,41 @@ use std::rc::Rc;
 /// the host stack.
 pub const MAX_FRAMES: usize = 2048;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Value {
     Unit,
     Int(i64),
     Float(f64),
     Bool(bool),
     Str(Rc<str>),
+    /// A struct instance. Kite aggregates are GC references, so assignment
+    /// copies the handle; `RefCell` is what lets a `var` field be written
+    /// through one. The checker has already proved only `var` fields are.
+    Struct(Rc<StructValue>),
+}
+
+#[derive(Debug)]
+pub struct StructValue {
+    pub struct_id: u32,
+    pub fields: RefCell<Vec<Value>>,
+}
+
+/// Structural equality, per the specification: two structs are equal when
+/// their fields are. Reference identity is `ptr.same`, not `==`.
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Unit, Value::Unit) => true,
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::Struct(a), Value::Struct(b)) => {
+                a.struct_id == b.struct_id && *a.fields.borrow() == *b.fields.borrow()
+            }
+            _ => false,
+        }
+    }
 }
 
 impl Value {
@@ -35,6 +64,7 @@ impl Value {
             Value::Float(_) => "float",
             Value::Bool(_) => "bool",
             Value::Str(_) => "str",
+            Value::Struct(_) => "struct",
         }
     }
 }
@@ -54,6 +84,17 @@ impl fmt::Display for Value {
             }
             Value::Bool(v) => write!(f, "{}", v),
             Value::Str(s) => write!(f, "{}", s),
+            Value::Struct(s) => {
+                // Debug-shaped output until the `Display` trait lands.
+                write!(f, "{{")?;
+                for (i, v) in s.fields.borrow().iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "}}")
+            }
         }
     }
 }
@@ -358,6 +399,17 @@ impl<'a> Vm<'a> {
                     ))
                 }
 
+                // Structural comparison. `Value`'s `PartialEq` walks
+                // aggregates field by field.
+                Op::EqValue { dst, a, b } => {
+                    let (x, y) = (self.get(base, a), self.get(base, b));
+                    self.set(base, dst, Value::Bool(x == y));
+                }
+                Op::NeValue { dst, a, b } => {
+                    let (x, y) = (self.get(base, a), self.get(base, b));
+                    self.set(base, dst, Value::Bool(x != y));
+                }
+
                 // ---- control ---------------------------------------------
                 Op::Jump { target } => {
                     self.frames.last_mut().unwrap().pc = target as usize;
@@ -374,6 +426,49 @@ impl<'a> Vm<'a> {
                         })
                     }
                 },
+
+                Op::NewStruct { dst, struct_id, base: arg_base, count } => {
+                    let mut fields = Vec::with_capacity(count as usize);
+                    for i in 0..count as usize {
+                        fields.push(self.regs[base + arg_base as usize + i].clone());
+                    }
+                    self.set(
+                        base,
+                        dst,
+                        Value::Struct(Rc::new(StructValue {
+                            struct_id,
+                            fields: RefCell::new(fields),
+                        })),
+                    );
+                }
+
+                Op::GetField { dst, obj, index } => match self.get(base, obj) {
+                    Value::Struct(s) => {
+                        let v = s.fields.borrow()[index as usize].clone();
+                        self.set(base, dst, v);
+                    }
+                    other => {
+                        return Err(Trap::TypeConfusion {
+                            op: "field access",
+                            found: other.type_name(),
+                        })
+                    }
+                },
+
+                Op::SetField { obj, index, src } => {
+                    let value = self.get(base, src);
+                    match self.get(base, obj) {
+                        Value::Struct(s) => {
+                            s.fields.borrow_mut()[index as usize] = value;
+                        }
+                        other => {
+                            return Err(Trap::TypeConfusion {
+                                op: "field assignment",
+                                found: other.type_name(),
+                            })
+                        }
+                    }
+                }
 
                 Op::Call { dst, func: callee, base: arg_base, argc } => {
                     self.call(callee, base, arg_base, argc, dst)?;

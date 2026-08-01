@@ -91,6 +91,16 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Inside any bracketed context a `{` can only be a struct or map literal,
+    /// never a body, so the suppression is lifted. This is what makes the
+    /// specification's advice work: parenthesise the literal.
+    fn in_brackets<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = std::mem::replace(&mut self.no_struct_literal, 0);
+        let r = f(self);
+        self.no_struct_literal = saved;
+        r
+    }
+
     /// Newlines are insignificant here — inside a delimited construct, or
     /// between the statements of a block.
     fn skip_newlines(&mut self) {
@@ -246,12 +256,322 @@ impl<'a> Parser<'a> {
         let is_pub = self.eat(T::Pub);
         let is_async = self.eat(T::Async);
 
-        if self.at(T::Fn) {
-            return self.parse_fn(is_pub, is_async, start).map(Item::Fn);
+        match self.peek() {
+            T::Fn => self.parse_fn(is_pub, is_async, start).map(Item::Fn),
+            T::Struct if !is_async => self.parse_struct(is_pub, start).map(Item::Struct),
+            T::Enum if !is_async => self.parse_enum(is_pub, start).map(Item::Enum),
+            T::Trait if !is_async => self.parse_trait(is_pub, start).map(Item::Trait),
+            T::Impl if !is_async => self.parse_impl(start).map(Item::Impl),
+            T::Type if !is_async => self.parse_type_alias(is_pub, start).map(Item::TypeAlias),
+            _ if is_async => {
+                self.error_expected("`fn` after `async`");
+                None
+            }
+            _ => {
+                self.error_expected("a declaration");
+                None
+            }
+        }
+    }
+
+    /// `<T, U: Bound>`
+    fn parse_generics(&mut self) -> Option<Vec<GenericParam>> {
+        if !self.at(T::Lt) {
+            return Some(Vec::new());
+        }
+        self.bump();
+        let mut params = Vec::new();
+        while !self.at(T::Gt) && !self.at_end() {
+            let start = self.span();
+            let name = self.ident()?;
+            let mut bounds = Vec::new();
+            if self.eat(T::Colon) {
+                bounds.push(self.parse_type_path()?);
+                while self.eat(T::Plus) {
+                    bounds.push(self.parse_type_path()?);
+                }
+            }
+            params.push(GenericParam { name, bounds, span: start.to(self.prev_span()) });
+            if !self.eat(T::Comma) {
+                break;
+            }
+        }
+        self.expect(T::Gt)?;
+        Some(params)
+    }
+
+    fn parse_struct(&mut self, is_pub: bool, start: Span) -> Option<StructDecl> {
+        self.bump(); // `struct`
+        let name = self.ident()?;
+        let generics = self.parse_generics()?;
+        self.expect(T::LBrace)?;
+
+        let mut fields = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.at(T::RBrace) || self.at_end() {
+                break;
+            }
+            let before = self.pos;
+            match self.parse_field_decl() {
+                Some(f) => fields.push(f),
+                None => self.synchronize_in_braces(),
+            }
+            if self.pos == before {
+                self.bump();
+            }
+        }
+        let end = self.expect(T::RBrace)?;
+        Some(StructDecl { is_pub, name, generics, fields, span: start.to(end) })
+    }
+
+    fn parse_field_decl(&mut self) -> Option<FieldDecl> {
+        let start = self.span();
+        let is_pub = self.eat(T::Pub);
+        let is_var = self.eat(T::Var);
+        let name = self.ident()?;
+        self.expect(T::Colon)?;
+        let ty = self.parse_type()?;
+        let span = start.to(self.prev_span());
+        self.expect_terminator();
+        Some(FieldDecl { is_pub, is_var, name, ty, span })
+    }
+
+    fn parse_enum(&mut self, is_pub: bool, start: Span) -> Option<EnumDecl> {
+        self.bump(); // `enum`
+        let name = self.ident()?;
+        let generics = self.parse_generics()?;
+        self.expect(T::LBrace)?;
+
+        let mut variants = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.at(T::RBrace) || self.at_end() {
+                break;
+            }
+            let before = self.pos;
+            match self.parse_variant() {
+                Some(v) => variants.push(v),
+                None => self.synchronize_in_braces(),
+            }
+            if self.pos == before {
+                self.bump();
+            }
+        }
+        let end = self.expect(T::RBrace)?;
+        Some(EnumDecl { is_pub, name, generics, variants, span: start.to(end) })
+    }
+
+    fn parse_variant(&mut self) -> Option<VariantDecl> {
+        let start = self.span();
+        let name = self.ident()?;
+
+        let payload = if self.at(T::LParen) {
+            self.bump();
+            self.skip_newlines();
+            // `Circle(radius: float)` is named; `Number(float)` positional.
+            // One token of lookahead past the first name decides.
+            let named = self.at(T::Ident) && self.peek_at(1) == T::Colon;
+            let payload = if named {
+                let mut fields = Vec::new();
+                while !self.at(T::RParen) && !self.at_end() {
+                    let f_start = self.span();
+                    let f_name = self.ident()?;
+                    self.expect(T::Colon)?;
+                    let ty = self.parse_type()?;
+                    fields.push(FieldDecl {
+                        is_pub: true,
+                        is_var: false,
+                        name: f_name,
+                        ty,
+                        span: f_start.to(self.prev_span()),
+                    });
+                    self.skip_newlines();
+                    if !self.eat(T::Comma) {
+                        break;
+                    }
+                    self.skip_newlines();
+                }
+                VariantPayload::Named(fields)
+            } else {
+                let mut tys = Vec::new();
+                while !self.at(T::RParen) && !self.at_end() {
+                    tys.push(self.parse_type()?);
+                    self.skip_newlines();
+                    if !self.eat(T::Comma) {
+                        break;
+                    }
+                    self.skip_newlines();
+                }
+                VariantPayload::Positional(tys)
+            };
+            self.expect(T::RParen)?;
+            payload
+        } else {
+            VariantPayload::Unit
+        };
+
+        let span = start.to(self.prev_span());
+        self.expect_terminator();
+        Some(VariantDecl { name, payload, span })
+    }
+
+    fn parse_trait(&mut self, is_pub: bool, start: Span) -> Option<TraitDecl> {
+        self.bump(); // `trait`
+        let name = self.ident()?;
+        let generics = self.parse_generics()?;
+        self.expect(T::LBrace)?;
+        let methods = self.parse_method_list()?;
+        let end = self.expect(T::RBrace)?;
+        Some(TraitDecl { is_pub, name, generics, methods, span: start.to(end) })
+    }
+
+    fn parse_impl(&mut self, start: Span) -> Option<ImplDecl> {
+        self.bump(); // `impl`
+        let generics = self.parse_generics()?;
+        let first = self.parse_type_path()?;
+
+        // `impl Trait for Type` versus an inherent `impl Type`.
+        let (trait_path, self_ty) = if self.eat(T::For) {
+            let target = self.parse_type_path()?;
+            (Some(first), target)
+        } else {
+            (None, first)
+        };
+
+        self.expect(T::LBrace)?;
+        let methods = self.parse_method_list()?;
+        let end = self.expect(T::RBrace)?;
+        Some(ImplDecl { generics, trait_path, self_ty, methods, span: start.to(end) })
+    }
+
+    fn parse_method_list(&mut self) -> Option<Vec<MethodDecl>> {
+        let mut methods = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.at(T::RBrace) || self.at_end() {
+                break;
+            }
+            let before = self.pos;
+            match self.parse_method() {
+                Some(m) => methods.push(m),
+                None => self.synchronize_in_braces(),
+            }
+            if self.pos == before {
+                self.bump();
+            }
+        }
+        Some(methods)
+    }
+
+    fn parse_method(&mut self) -> Option<MethodDecl> {
+        let start = self.span();
+        let is_pub = self.eat(T::Pub);
+        let is_async = self.eat(T::Async);
+        self.expect(T::Fn)?;
+        let name = self.ident()?;
+        let _generics = self.parse_generics()?;
+
+        self.expect(T::LParen)?;
+        self.skip_newlines();
+
+        // A receiver, if present, is the first parameter.
+        let self_param = if self.at(T::SelfKw) || (self.at(T::Var) && self.peek_at(1) == T::SelfKw)
+        {
+            let s_start = self.span();
+            let is_var = self.eat(T::Var);
+            self.bump(); // `self`
+            Some(SelfParam { is_var, span: s_start.to(self.prev_span()) })
+        } else {
+            None
+        };
+        if self_param.is_some() && !self.at(T::RParen) {
+            self.expect(T::Comma)?;
         }
 
-        self.error_expected("a declaration");
-        None
+        let mut params = Vec::new();
+        self.skip_newlines();
+        while !self.at(T::RParen) && !self.at_end() {
+            let p_start = self.span();
+            let is_var = self.eat(T::Var);
+            let p_name = self.ident()?;
+            self.expect(T::Colon)?;
+            let ty = self.parse_type()?;
+            params.push(Param { is_var, name: p_name, ty, span: p_start.to(self.prev_span()) });
+            self.skip_newlines();
+            if !self.eat(T::Comma) {
+                break;
+            }
+            self.skip_newlines();
+        }
+        self.expect(T::RParen)?;
+
+        let ret = if self.eat(T::Arrow) {
+            Some(self.parse_return_type()?)
+        } else {
+            None
+        };
+        let sig_span = start.to(self.prev_span());
+
+        // A trait method may declare no body.
+        let body = if self.at(T::LBrace) {
+            Some(self.parse_block()?)
+        } else {
+            self.expect_terminator();
+            None
+        };
+
+        let span = start.to(self.prev_span());
+        Some(MethodDecl {
+            is_pub,
+            is_async,
+            name,
+            self_param,
+            params,
+            ret,
+            body,
+            span,
+            sig_span,
+        })
+    }
+
+    fn parse_type_alias(&mut self, is_pub: bool, start: Span) -> Option<TypeAlias> {
+        self.bump(); // `type`
+        let name = self.ident()?;
+        let generics = self.parse_generics()?;
+        self.expect(T::Eq)?;
+        let ty = self.parse_type()?;
+        let span = start.to(self.prev_span());
+        self.expect_terminator();
+        Some(TypeAlias { is_pub, name, generics, ty, span })
+    }
+
+    /// Recover to the next member boundary inside a braced declaration body,
+    /// without consuming the closing brace.
+    fn synchronize_in_braces(&mut self) {
+        self.panicking = false;
+        let mut depth = 0i32;
+        loop {
+            match self.peek() {
+                T::Eof => return,
+                T::RBrace if depth <= 0 => return,
+                T::Newline if depth <= 0 => {
+                    self.bump();
+                    return;
+                }
+                T::LBrace | T::LParen | T::LBracket => {
+                    depth += 1;
+                    self.bump();
+                }
+                T::RBrace | T::RParen | T::RBracket => {
+                    depth -= 1;
+                    self.bump();
+                }
+                _ => {
+                    self.bump();
+                }
+            }
+        }
     }
 
     fn parse_fn(&mut self, is_pub: bool, is_async: bool, start: Span) -> Option<FnDecl> {
@@ -461,6 +781,10 @@ impl<'a> Parser<'a> {
             T::Return => self.parse_return(start),
             T::If => Some(Stmt::If(self.parse_if()?)),
             T::For => Some(Stmt::For(self.parse_for(None, start)?)),
+            T::Match => {
+                let m = self.parse_match()?;
+                Some(Stmt::Match(m))
+            }
             T::Check => {
                 self.bump();
                 let expr = self.parse_expr()?;
@@ -679,6 +1003,226 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_match(&mut self) -> Option<MatchExpr> {
+        let start = self.span();
+        self.bump(); // `match`
+
+        self.no_struct_literal += 1;
+        let scrutinee = self.parse_expr();
+        self.no_struct_literal -= 1;
+        let scrutinee = scrutinee?;
+
+        self.expect(T::LBrace)?;
+        let mut arms = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.at(T::RBrace) || self.at_end() {
+                break;
+            }
+            let before = self.pos;
+            match self.parse_match_arm() {
+                Some(a) => arms.push(a),
+                None => self.synchronize_in_braces(),
+            }
+            if self.pos == before {
+                self.bump();
+            }
+        }
+        let end = self.expect(T::RBrace)?;
+
+        Some(MatchExpr {
+            scrutinee: Box::new(scrutinee),
+            arms,
+            span: start.to(end),
+        })
+    }
+
+    fn parse_match_arm(&mut self) -> Option<MatchArm> {
+        let start = self.span();
+        let pattern = self.parse_pattern()?;
+
+        // `Rect(w, h) if w == h => ...`
+        let guard = if self.eat(T::If) {
+            self.no_struct_literal += 1;
+            let g = self.parse_expr();
+            self.no_struct_literal -= 1;
+            Some(g?)
+        } else {
+            None
+        };
+
+        self.expect(T::FatArrow)?;
+
+        let body = if self.at(T::LBrace) {
+            MatchBody::Block(self.parse_block()?)
+        } else {
+            MatchBody::Expr(self.parse_expr()?)
+        };
+
+        // A trailing comma is optional; a newline ends the arm either way.
+        self.eat(T::Comma);
+        let span = start.to(self.prev_span());
+        Some(MatchArm { pattern, guard, body, span })
+    }
+
+    fn parse_pattern(&mut self) -> Option<Pattern> {
+        let start = self.span();
+        let first = self.parse_single_pattern()?;
+        if !self.at(T::Pipe) {
+            return Some(first);
+        }
+        let mut alts = vec![first];
+        while self.eat(T::Pipe) {
+            alts.push(self.parse_single_pattern()?);
+        }
+        Some(Pattern::Or { alts, span: start.to(self.prev_span()) })
+    }
+
+    fn parse_single_pattern(&mut self) -> Option<Pattern> {
+        let start = self.span();
+        match self.peek() {
+            T::Underscore => Some(Pattern::Wildcard(self.bump().span)),
+            T::Nil => Some(Pattern::Nil(self.bump().span)),
+
+            T::Int | T::Float | T::Str | T::Char | T::True | T::False | T::Minus => {
+                let lit = self.parse_pattern_literal()?;
+                if self.at(T::DotDot) || self.at(T::DotDotEq) {
+                    let inclusive = self.at(T::DotDotEq);
+                    self.bump();
+                    let end = self.parse_pattern_literal()?;
+                    return Some(Pattern::Range {
+                        start: lit,
+                        end,
+                        inclusive,
+                        span: start.to(self.prev_span()),
+                    });
+                }
+                Some(Pattern::Literal(lit))
+            }
+
+            T::LParen => {
+                self.bump();
+                let mut elems = Vec::new();
+                self.skip_newlines();
+                while !self.at(T::RParen) && !self.at_end() {
+                    elems.push(self.parse_pattern()?);
+                    self.skip_newlines();
+                    if !self.eat(T::Comma) {
+                        break;
+                    }
+                    self.skip_newlines();
+                }
+                let end = self.expect(T::RParen)?;
+                Some(Pattern::Tuple { elems, span: start.to(end) })
+            }
+
+            T::Ident => {
+                // A bare name binds. A name followed by `(`, `{`, or `.` names
+                // a variant or a struct; resolution decides which.
+                let is_path = matches!(self.peek_at(1), T::LParen | T::LBrace | T::Dot);
+                if !is_path {
+                    return Some(Pattern::Binding(self.ident()?));
+                }
+                let path = self.parse_type_path()?;
+
+                if self.at(T::LParen) {
+                    self.bump();
+                    self.skip_newlines();
+                    let named = self.at(T::Ident) && self.peek_at(1) == T::Colon;
+                    let args = if named {
+                        let mut fields = Vec::new();
+                        while !self.at(T::RParen) && !self.at_end() {
+                            let name = self.ident()?;
+                            self.expect(T::Colon)?;
+                            let p = self.parse_pattern()?;
+                            fields.push((name, p));
+                            self.skip_newlines();
+                            if !self.eat(T::Comma) {
+                                break;
+                            }
+                            self.skip_newlines();
+                        }
+                        PatternArgs::Named(fields)
+                    } else {
+                        let mut pats = Vec::new();
+                        while !self.at(T::RParen) && !self.at_end() {
+                            pats.push(self.parse_pattern()?);
+                            self.skip_newlines();
+                            if !self.eat(T::Comma) {
+                                break;
+                            }
+                            self.skip_newlines();
+                        }
+                        PatternArgs::Positional(pats)
+                    };
+                    let end = self.expect(T::RParen)?;
+                    return Some(Pattern::Variant { path, args, span: start.to(end) });
+                }
+
+                if self.at(T::LBrace) {
+                    self.bump();
+                    let mut fields = Vec::new();
+                    let mut rest = false;
+                    self.skip_newlines();
+                    while !self.at(T::RBrace) && !self.at_end() {
+                        if self.eat(T::DotDot) {
+                            rest = true;
+                            self.skip_newlines();
+                            break;
+                        }
+                        let f_start = self.span();
+                        let name = self.ident()?;
+                        // `Point{ x }` is shorthand that binds `x`.
+                        let pattern = if self.eat(T::Colon) {
+                            Some(self.parse_pattern()?)
+                        } else {
+                            None
+                        };
+                        fields.push(FieldPattern {
+                            name,
+                            pattern,
+                            span: f_start.to(self.prev_span()),
+                        });
+                        self.skip_newlines();
+                        if !self.eat(T::Comma) {
+                            break;
+                        }
+                        self.skip_newlines();
+                    }
+                    let end = self.expect(T::RBrace)?;
+                    return Some(Pattern::Struct { path, fields, rest, span: start.to(end) });
+                }
+
+                // A dotted path with no payload, such as `Status.Active`.
+                Some(Pattern::Variant {
+                    span: path.span,
+                    path,
+                    args: PatternArgs::Positional(Vec::new()),
+                })
+            }
+
+            _ => {
+                self.error_expected("a pattern");
+                None
+            }
+        }
+    }
+
+    /// A literal usable in a pattern, including a negative number.
+    fn parse_pattern_literal(&mut self) -> Option<Expr> {
+        let start = self.span();
+        if self.eat(T::Minus) {
+            let inner = self.parse_primary()?;
+            let span = start.to(inner.span());
+            return Some(Expr::Unary {
+                op: UnaryOp::Neg,
+                operand: Box::new(inner),
+                span,
+            });
+        }
+        self.parse_primary()
+    }
+
     fn parse_expr_or_assign(&mut self, start: Span) -> Option<Stmt> {
         let lhs = self.parse_expr()?;
 
@@ -827,20 +1371,15 @@ impl<'a> Parser<'a> {
                     self.bump();
                     let name = self.ident()?;
                     let span = expr.span().to(name.span);
-                    // A dotted chain of plain names is a path (`io.print`),
-                    // not a field access; resolution decides which.
-                    expr = match (optional, expr) {
-                        (false, Expr::Path(mut p)) => {
-                            p.segments.push(name);
-                            p.span = span;
-                            Expr::Path(p)
-                        }
-                        (_, base) => Expr::Field {
-                            base: Box::new(base),
-                            name,
-                            optional,
-                            span,
-                        },
+                    // `.` always produces a field access. Whether `io.print` is
+                    // really a module path rather than a field of a local is a
+                    // resolution question, not a syntactic one, so the resolver
+                    // decides and records its answer against this span.
+                    expr = Expr::Field {
+                        base: Box::new(expr),
+                        name,
+                        optional,
+                        span,
                     };
                 }
                 T::LParen => {
@@ -848,7 +1387,7 @@ impl<'a> Parser<'a> {
                     let mut args = Vec::new();
                     self.skip_newlines();
                     while !self.at(T::RParen) && !self.at_end() {
-                        args.push(self.parse_expr()?);
+                        args.push(self.in_brackets(|p| p.parse_expr())?);
                         self.skip_newlines();
                         if !self.eat(T::Comma) {
                             break;
@@ -861,7 +1400,7 @@ impl<'a> Parser<'a> {
                 }
                 T::LBracket => {
                     self.bump();
-                    let index = self.parse_expr()?;
+                    let index = self.in_brackets(|p| p.parse_expr())?;
                     let end = self.expect(T::RBracket)?;
                     let span = expr.span().to(end);
                     expr = Expr::Index {
@@ -869,6 +1408,20 @@ impl<'a> Parser<'a> {
                         index: Box::new(index),
                         span,
                     };
+                }
+                // `Point{ x: 1.0 }`. Suppressed inside an `if`/`for`/`match`
+                // scrutinee, where `{` opens the body; the specification tells
+                // the user to parenthesise in that position.
+                T::LBrace if self.no_struct_literal == 0 => {
+                    let Expr::Path(p) = &expr else {
+                        return Some(expr);
+                    };
+                    let path = TypePath {
+                        segments: p.segments.clone(),
+                        args: Vec::new(),
+                        span: p.span,
+                    };
+                    expr = Expr::StructLit(self.parse_struct_literal(path)?);
                 }
                 _ => return Some(expr),
             }
@@ -938,13 +1491,13 @@ impl<'a> Parser<'a> {
                     let end = self.bump().span;
                     return Some(Expr::Tuple { elems: Vec::new(), span: span.to(end) });
                 }
-                let first = self.parse_expr()?;
+                let first = self.in_brackets(|p| p.parse_expr())?;
                 self.skip_newlines();
                 if self.eat(T::Comma) {
                     let mut elems = vec![first];
                     self.skip_newlines();
                     while !self.at(T::RParen) && !self.at_end() {
-                        elems.push(self.parse_expr()?);
+                        elems.push(self.in_brackets(|p| p.parse_expr())?);
                         self.skip_newlines();
                         if !self.eat(T::Comma) {
                             break;
@@ -962,7 +1515,7 @@ impl<'a> Parser<'a> {
                 let mut elems = Vec::new();
                 self.skip_newlines();
                 while !self.at(T::RBracket) && !self.at_end() {
-                    elems.push(self.parse_expr()?);
+                    elems.push(self.in_brackets(|p| p.parse_expr())?);
                     self.skip_newlines();
                     if !self.eat(T::Comma) {
                         break;
@@ -972,12 +1525,74 @@ impl<'a> Parser<'a> {
                 let end = self.expect(T::RBracket)?;
                 Some(Expr::Slice { elems, span: span.to(end) })
             }
+            T::Match => Some(Expr::Match(self.parse_match()?)),
+            T::LBrace if self.no_struct_literal == 0 => self.parse_map_literal(),
             T::Pipe | T::PipePipe => Some(self.parse_closure()?),
             _ => {
                 self.error_expected("an expression");
                 None
             }
         }
+    }
+
+    /// The `{ .. }` of a struct literal. `path` has already been consumed.
+    fn parse_struct_literal(&mut self, path: TypePath) -> Option<StructLit> {
+        let start = path.span;
+        self.bump(); // `{`
+        self.skip_newlines();
+
+        // `Point{ ..p, y: 5.0 }` produces a new value; it never mutates `p`.
+        let base = if self.eat(T::DotDot) {
+            let b = self.parse_expr()?;
+            self.skip_newlines();
+            self.eat(T::Comma);
+            self.skip_newlines();
+            Some(Box::new(b))
+        } else {
+            None
+        };
+
+        let mut fields = Vec::new();
+        while !self.at(T::RBrace) && !self.at_end() {
+            let f_start = self.span();
+            let name = self.ident()?;
+            // `Point{ x }` is shorthand for `Point{ x: x }`.
+            let value = if self.eat(T::Colon) {
+                self.parse_expr()?
+            } else {
+                Expr::Path(Path { span: name.span, segments: vec![name.clone()] })
+            };
+            fields.push(FieldInit { name, value, span: f_start.to(self.prev_span()) });
+            self.skip_newlines();
+            if !self.eat(T::Comma) {
+                break;
+            }
+            self.skip_newlines();
+        }
+        let end = self.expect(T::RBrace)?;
+        Some(StructLit { path, base, fields, span: start.to(end) })
+    }
+
+    /// `{"a": 1, "b": 2}`. Kite has no block expressions, so a `{` in
+    /// expression position is unambiguously a map.
+    fn parse_map_literal(&mut self) -> Option<Expr> {
+        let start = self.span();
+        self.bump(); // `{`
+        let mut entries = Vec::new();
+        self.skip_newlines();
+        while !self.at(T::RBrace) && !self.at_end() {
+            let key = self.parse_expr()?;
+            self.expect(T::Colon)?;
+            let value = self.parse_expr()?;
+            entries.push(MapEntry { key, value });
+            self.skip_newlines();
+            if !self.eat(T::Comma) {
+                break;
+            }
+            self.skip_newlines();
+        }
+        let end = self.expect(T::RBrace)?;
+        Some(Expr::Map { entries, span: start.to(end) })
     }
 
     fn parse_closure(&mut self) -> Option<Expr> {

@@ -1,0 +1,7 @@
+struct P {
+    x: int
+}
+
+fn main() {
+    let p = P      //~ ERROR E0200
+}

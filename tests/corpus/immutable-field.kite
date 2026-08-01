@@ -1,0 +1,9 @@
+struct Rect {
+    width: int
+    var label: str
+}
+
+fn main() {
+    let r = Rect{ width: 1, label: "x" }
+    r.width = 2      //~ ERROR E0114
+}

@@ -106,6 +106,8 @@ pub enum Stmt {
     /// `let` / `var`. `init` is absent for deferred initialisation.
     Let { local: LocalId, init: Option<Expr>, span: Span },
     Assign { local: LocalId, value: Expr, span: Span },
+    /// `p.label = "x"` — only reachable for a field declared `var`.
+    SetField { base: Expr, index: u32, value: Expr, span: Span },
     Expr(Expr),
     Return { value: Option<Expr>, span: Span },
     If { cond: Expr, then: Block, else_: Option<Block>, span: Span },
@@ -151,6 +153,12 @@ pub enum ExprKind {
     Unary { op: UnOp, operand: Box<Expr> },
     /// `if c { a } else { b }` in value position.
     If { cond: Box<Expr>, then: Box<Expr>, else_: Box<Expr> },
+    /// `Point{ x: 1.0, y: 2.0 }`. Fields are in declaration order, and all of
+    /// them are present — Kite has no zero values, so a literal that omits one
+    /// never reaches HIR.
+    StructNew { struct_id: StructId, fields: Vec<Expr> },
+    /// `p.x`, by field position.
+    FieldGet { base: Box<Expr>, index: u32 },
     /// Produced where a type error was already reported. Poisons downstream
     /// checks so one mistake yields one diagnostic.
     Error,
@@ -206,6 +214,11 @@ pub enum BinOp {
     NeBool,
     EqStr,
     NeStr,
+    /// Structural comparison for aggregates. Two structs are equal when their
+    /// fields are; there is no reference-equality operator in the surface
+    /// language.
+    EqValue,
+    NeValue,
     /// Short-circuiting. MIR lowers these to branches, not to instructions.
     And,
     Or,
@@ -277,6 +290,9 @@ impl Program {
                 None => writeln!(f, "let _{}", local.0),
             },
             Stmt::Assign { local, value, .. } => writeln!(f, "_{} = {}", local.0, self.expr(value)),
+            Stmt::SetField { base, index, value, .. } => {
+                writeln!(f, "{}.{} = {}", self.expr(base), index, self.expr(value))
+            }
             Stmt::Expr(e) => writeln!(f, "{}", self.expr(e)),
             Stmt::Return { value: Some(e), .. } => writeln!(f, "return {}", self.expr(e)),
             Stmt::Return { value: None, .. } => writeln!(f, "return"),
@@ -346,6 +362,11 @@ impl Program {
                 self.expr(then),
                 self.expr(else_)
             ),
+            ExprKind::StructNew { struct_id, fields } => {
+                let a: Vec<String> = fields.iter().map(|x| self.expr(x)).collect();
+                format!("{}{{{}}}", self.types.struct_def(*struct_id).name, a.join(", "))
+            }
+            ExprKind::FieldGet { base, index } => format!("{}.{}", self.expr(base), index),
             ExprKind::Error => "<error>".to_string(),
         }
     }

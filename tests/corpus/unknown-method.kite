@@ -1,0 +1,14 @@
+struct Sq {
+    side: int
+}
+
+impl Sq {
+    fn area(self) -> int {
+        return self.side * self.side
+    }
+}
+
+fn main() {
+    let s = Sq{ side: 2 }
+    io.print(s.perimeter())   //~ ERROR E0205
+}

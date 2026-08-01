@@ -9,7 +9,7 @@
 //! optimisation passes want; the bytecode backend maps locals to registers
 //! directly and does not need it.
 
-use kite_hir::{BinOp, Builtin, TyId, Types, UnOp};
+use kite_hir::{BinOp, Builtin, StructId, TyId, Types, UnOp};
 use kite_span::Span;
 use std::fmt;
 
@@ -91,6 +91,9 @@ pub struct BasicBlock {
 #[derive(Debug)]
 pub enum Inst {
     Assign { dst: Local, value: Rvalue },
+    /// Write through a reference. Separate from `Assign` because the
+    /// destination is a heap slot rather than a local.
+    SetField { base: Operand, index: u32, value: Operand },
 }
 
 #[derive(Debug)]
@@ -100,6 +103,8 @@ pub enum Rvalue {
     Unary { op: UnOp, operand: Operand },
     Call { callee: FnId, args: Vec<Operand> },
     CallBuiltin { builtin: Builtin, args: Vec<Operand> },
+    StructNew { struct_id: StructId, fields: Vec<Operand> },
+    FieldGet { base: Operand, index: u32 },
 }
 
 #[derive(Clone, Debug)]
@@ -218,6 +223,9 @@ impl fmt::Display for Inst {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Inst::Assign { dst, value } => write!(f, "_{} = {}", dst.0, value),
+            Inst::SetField { base, index, value } => {
+                write!(f, "{}.{} = {}", base, index, value)
+            }
         }
     }
 }
@@ -238,6 +246,12 @@ impl fmt::Display for Rvalue {
                 write_operands(f, args)?;
                 write!(f, ")")
             }
+            Rvalue::StructNew { struct_id, fields } => {
+                write!(f, "struct{}{{", struct_id.0)?;
+                write_operands(f, fields)?;
+                write!(f, "}}")
+            }
+            Rvalue::FieldGet { base, index } => write!(f, "{}.{}", base, index),
         }
     }
 }

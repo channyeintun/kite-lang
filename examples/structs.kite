@@ -1,0 +1,39 @@
+struct Rect {
+    width: int
+    height: int
+    var label: str
+}
+
+impl Rect {
+    fn area(self) -> int {
+        return self.width * self.height
+    }
+
+    fn scaled(self, factor: int) -> Rect {
+        return Rect{ ..self, width: self.width * factor }
+    }
+
+    fn rename(var self, name: str) {
+        self.label = name
+    }
+
+    fn square(side: int) -> Rect {
+        return Rect{ width: side, height: side, label: "square" }
+    }
+}
+
+fn main() {
+    let r = Rect{ width: 3, height: 4, label: "first" }
+    io.print(r.area())
+    io.print(r.label)
+
+    let big = r.scaled(10)
+    io.print(big.area())
+    io.print(big.label)
+
+    let sq = Rect.square(5)
+    io.print(sq.area())
+
+    r.rename("renamed")
+    io.print(r.label)
+}
