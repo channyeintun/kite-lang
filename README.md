@@ -114,8 +114,9 @@ kitec build examples/hello.kite --emit wasm --out dist
 # wrote dist/app.wasm (426 bytes), dist/app.js and dist/index.html
 ```
 
-A program with a user interface writes its layout with `std/ui.kite` and draws
-through four host calls. The generated page runs the same module against a DOM
+`examples/todo.kite` is a task list with a text field, buttons and checkboxes,
+navigable with the keyboard alone. A program with a user interface writes its
+layout with `std/ui.kite` and draws through four host calls. The generated page runs the same module against a DOM
 renderer, a canvas renderer, and a text renderer, switched live — the program
 cannot tell which is running.
 

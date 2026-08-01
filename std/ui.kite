@@ -93,6 +93,11 @@ pub struct Frame {
     pub inner: Rect
     /// How deep in the tree, which is the order to paint in.
     pub depth: int
+    /// The node's own text, or empty for a box. Carried here so a painter can
+    /// draw what the node *says* without being told again — a widget's caption
+    /// is written once, in the tree, and a paint list that restated it would
+    /// be a second place for it to be wrong.
+    pub content: str
 }
 
 // ---- construction ---------------------------------------------------------
@@ -432,7 +437,18 @@ fn arrange(node: Node, rect: Rect, depth: int) -> [Frame] {
         height: maxf(0.0, rect.height - vertical(pad)),
     }
 
-    var frames = [Frame{ name: node.name, rect: rect, inner: inner, depth: depth }]
+    var frames = [
+        Frame {
+            name: node.name,
+            rect: rect,
+            inner: inner,
+            depth: depth,
+            content: match node.content {
+                Text(body) => body,
+                Empty => "",
+            },
+        },
+    ]
     if node.children.len() == 0 {
         return frames
     }
@@ -511,6 +527,8 @@ pub fn rect_contains(rect: Rect, x: float, y: float) -> bool {
 // what stops a renderer from being able to move anything.
 
 pub struct Paint {
+    /// Draw the node's own text rather than one supplied here.
+    pub own: bool
     /// The frame's `name`, which is how a paint finds its box.
     pub name: str
     /// `0xRRGGBB`, or nil to draw no background.
@@ -520,16 +538,26 @@ pub struct Paint {
     pub ink: int
 }
 
+/// Draw whatever the node says, in this colour.
+///
+/// The caption of a button is in the tree, where it was written. A paint list
+/// that repeated it would be a second place for it to be wrong, and the two
+/// disagreeing is how a label ends up saying something the layout was never
+/// measured for.
+pub fn ink(name: str, colour: int) -> Paint {
+    return Paint{ own: true, name: name, fill: nil, label: nil, ink: colour }
+}
+
 pub fn fill(name: str, colour: int) -> Paint {
-    return Paint{ name: name, fill: colour, label: nil, ink: 0x000000 }
+    return Paint{ own: false, name: name, fill: colour, label: nil, ink: 0x000000 }
 }
 
 pub fn label(name: str, body: str, colour: int) -> Paint {
-    return Paint{ name: name, fill: nil, label: body, ink: colour }
+    return Paint{ own: false, name: name, fill: nil, label: body, ink: colour }
 }
 
 pub fn filled_label(name: str, body: str, background: int, colour: int) -> Paint {
-    return Paint{ name: name, fill: background, label: body, ink: colour }
+    return Paint{ own: false, name: name, fill: background, label: body, ink: colour }
 }
 
 fn paint_for(paints: [Paint], name: str) -> Option<Paint> {
@@ -561,7 +589,10 @@ fn draw_one(frame: Frame, p: Paint) {
     if background != nil {
         draw.rect(r.x, r.y, r.width, r.height, background)
     }
-    let body = p.label
+    var body = p.label
+    if p.own {
+        body = frame.content
+    }
     if body == nil {
         return
     }
@@ -631,6 +662,7 @@ pub fn paint_scrolled(
                         rect: r,
                         inner: shifted(frame.inner, dx, dy),
                         depth: frame.depth,
+                        content: frame.content,
                     },
                     found,
                 )
@@ -654,4 +686,192 @@ pub fn hit_scrolled(
         return nil
     }
     return hit(frames, x - viewport.x, y - viewport.y + offset)
+}
+
+// ---- widgets ----------------------------------------------------------------
+//
+// A widget here is a **function that returns a node**, and interaction is a
+// function that returns a new model. There is no widget object with internal
+// state, and no place to hide one: Kite has no mutable globals, so a widget
+// that remembered something would have to be handed it, which is what the
+// model already is.
+//
+// What the set buys over writing boxes by hand is the *names*: a button is a
+// box named `button:save`, and the paint list, the hit test and the focus
+// order all agree about that name without anyone restating it.
+
+/// How a control is drawn: the ordinary state, the one under the pointer, and
+/// the one holding focus.
+pub struct Theme {
+    pub background: int
+    pub surface: int
+    pub ink: int
+    pub muted: int
+    pub accent: int
+    pub focus: int
+}
+
+pub fn dark_theme() -> Theme {
+    return Theme{
+        background: 0x141821,
+        surface: 0x1e2531,
+        ink: 0xe6e9ef,
+        muted: 0x8d95a3,
+        accent: 0x3f7de0,
+        focus: 0xe0a13f,
+    }
+}
+
+pub fn light_theme() -> Theme {
+    return Theme{
+        background: 0xfbfbf9,
+        surface: 0xeceae4,
+        ink: 0x1a1c20,
+        muted: 0x5b6068,
+        accent: 0x2c5fb8,
+        focus: 0xb8442c,
+    }
+}
+
+/// A control's name, which is how everything else refers to it.
+///
+/// The prefix says what kind it is, so a hit test can answer "a button was
+/// clicked, and it was `save`" from the name alone rather than from a parallel
+/// table that has to be kept in step.
+pub fn button(id: str) -> str {
+    return "button:\(id)"
+}
+
+pub fn field(id: str) -> str {
+    return "field:\(id)"
+}
+
+pub fn checkbox(id: str) -> str {
+    return "checkbox:\(id)"
+}
+
+/// The id inside a control's name, or nil when the name is not a control's.
+pub fn control_id(name: str, kind: str) -> Option<str> {
+    let prefix = "\(kind):"
+    if !starts_with(name, prefix) {
+        return nil
+    }
+    return name.slice(prefix.len(), name.len())
+}
+
+/// A button: a box with a label inside it, sized to the label plus padding.
+pub fn button_node(id: str, caption: str) -> Node {
+    return box_of(
+        button(id),
+        padded(sized(style(), text_size(caption).width + 24.0, line_height() + 12.0), 6.0),
+        [text_of("\(button(id)):caption", style(), caption)],
+    )
+}
+
+/// A single-line text field. The caret is drawn as part of the text, because a
+/// caret is a glyph like any other until there is a scene graph to animate it
+/// separately.
+pub fn field_node(id: str, value: str, width: float, focused: bool) -> Node {
+    let shown = if focused { "\(value)|" } else { value }
+    return box_of(
+        field(id),
+        padded(sized(style(), width, line_height() + 12.0), 6.0),
+        [text_of("\(field(id)):value", style(), shown)],
+    )
+}
+
+/// A checkbox and its label, side by side.
+pub fn checkbox_node(id: str, caption: str, checked: bool) -> Node {
+    let mark = if checked { "[x]" } else { "[ ]" }
+    return box_of(
+        checkbox(id),
+        spaced(padded(Style{..row(), align: Align.Center }, 4.0), 8.0),
+        [
+            text_of("\(checkbox(id)):mark", style(), mark),
+            text_of("\(checkbox(id)):caption", style(), caption),
+        ],
+    )
+}
+
+/// Everything a control needs painted, given the theme and what has focus.
+pub fn control_paints(theme: Theme, names: [str], focused: str) -> [Paint] {
+    var out: [Paint] = []
+    for name in names {
+        let background = if name == focused { theme.focus } else { theme.surface }
+        out.push(fill(name, background))
+        out.push(ink("\(name):caption", theme.ink))
+        out.push(ink("\(name):value", theme.ink))
+        out.push(ink("\(name):mark", theme.ink))
+    }
+    return out
+}
+
+/// The control a point is inside, or nil.
+///
+/// Frames are read last-first by `hit`, so the innermost thing under the
+/// pointer wins — but a control is a box, and what a caller wants is the box
+/// rather than the label inside it. This walks up by name.
+pub fn control_at(frames: [Frame], x: float, y: float) -> Option<str> {
+    let found = hit(frames, x, y)
+    if found == nil {
+        return nil
+    }
+    let name = found.name
+    // `button:save:caption` is part of `button:save`.
+    let at = name.index_of(":")
+    if at < 0 {
+        return nil
+    }
+    let rest = name.slice(at + 1, name.len())
+    let inner = rest.index_of(":")
+    if inner < 0 {
+        return name
+    }
+    return name.slice(0, at + 1 + inner)
+}
+
+/// The next control in focus order, wrapping at the end.
+///
+/// Focus order is the order the controls were listed, which is the order they
+/// were laid out — a separate tab order is a second thing to keep in step, and
+/// the two disagreeing is how a form becomes unusable with a keyboard.
+pub fn next_focus(names: [str], focused: str) -> str {
+    if names.len() == 0 {
+        return ""
+    }
+    let at = position(names, |n: str| n == focused)
+    if at < 0 {
+        return names[0]
+    }
+    return names[(at + 1) % names.len()]
+}
+
+pub fn previous_focus(names: [str], focused: str) -> str {
+    if names.len() == 0 {
+        return ""
+    }
+    let at = position(names, |n: str| n == focused)
+    if at <= 0 {
+        return names[names.len() - 1]
+    }
+    return names[at - 1]
+}
+
+/// Text with a key applied to it, for a focused field.
+///
+/// The keys a text field must understand are the ones a keyboard sends, and
+/// `Backspace` is the only one that is not simply itself. Everything longer
+/// than one character is a named key this does not act on, which is what keeps
+/// `ArrowLeft` from being typed into the box.
+pub fn typed(value: str, key: str) -> str {
+    if key == "Backspace" {
+        if value.len() == 0 {
+            return value
+        }
+        return value.slice(0, value.len() - 1)
+    }
+    if key.len() != 1 {
+        return value
+    }
+    return value + key
 }

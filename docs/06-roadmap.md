@@ -648,11 +648,25 @@ each yield an optional, which is more typing and no less safe.
 
 ---
 
-## Phase 7 — Layout engine and DOM renderer 🟡 **the loop works; the diff does not**
+## Phase 7 — Layout engine and DOM renderer 🟡 **the application runs; the diff does not**
 
 Done: the flexbox subset in `std/ui.kite`, the Elm-shaped update loop, the DOM
-renderer, and events — click, key, wheel, pointer move, down, up, and resize,
-all through one door.
+renderer, events — click, key, wheel, pointer move, down, up, and resize, all
+through one door — and a **widget layer**: buttons, text fields, checkboxes, a
+theme, focus order, and hit-testing that answers with the control rather than
+the label inside it.
+
+A widget is a function that returns a node, and interaction is a function that
+returns a new model. There is no widget object with internal state and nowhere
+to hide one, because Kite has no mutable globals — a widget that remembered
+something would have to be handed it, which is what the model already is.
+
+`examples/todo.kite` is the task-list application this phase asks for, and it
+was driven in a browser with the keyboard alone: typing into the focused field,
+`Enter` to add, `Tab` to move, space to toggle. Under the canvas renderer the
+same text reaches the parallel tree. **VoiceOver has not been run against it**,
+so the accessibility half of the exit criterion is claimed no further than
+that.
 
 A frame is **recorded before it is painted**, and an identical one is not
 painted at all: a pointer moving over nothing costs one comparison rather than
@@ -660,9 +674,8 @@ a rebuilt tree. That is the half of damage tracking a model that did not change
 needs. Finding *which* rectangle changed needs a retained scene graph that
 survives between frames, and that is not written.
 
-**Remaining:** the retained scene graph and its diff; a widget set (there are
-boxes and text, and everything else is a program's own); keyboard navigation
-and focus; validation against Taffy's fixtures. Layout is over ordinary slices
+**Remaining:** the retained scene graph and its diff; validation against
+Taffy's fixtures; and a real screen-reader pass. Layout is over ordinary slices
 rather than flat buffers, which is the shape `buffer.F64` exists to change and
 has not yet.
 
@@ -1007,7 +1020,7 @@ none.
 | 4 — WebAssembly backend | ✅ every construct the language has, on both backends, compared. ❌ JS String Builtins (an optimisation, not a gap) |
 | 5 — Concurrency | ✅ `async`/`await`, the state machine, `Task<T>`, the combinators, `Share`. ❌ real parallelism on any target — the platform forbids it today |
 | 6 — Standard library | ✅ modules, and ten of them written in Kite, tested on both backends. ❌ `json.decode<T>` and the derivation machinery it needs |
-| 7 — Layout and DOM renderer | 🟡 layout, events and the update loop; a frame that did not change is not repainted. ❌ retained scene graph, widget set, focus |
+| 7 — Layout and DOM renderer | 🟡 layout, events, the update loop, a widget set with focus, and a keyboard-driven task list; a frame that did not change is not repainted. ❌ retained scene graph and its diff, screen-reader verification |
 | 8 — Canvas renderer | 🟡 draws, measures in the real font, hidden-overlay input, a parallel tree for a screen reader, UAX #14 subset. ❌ shaping, bidi, glyph atlas, per-rectangle damage, golden images |
 | 9 — Native backend | ❌ not written. `kitec bundle` produces one self-contained executable, which is packaging rather than code generation |
 | 10 — Tooling | 🟡 fmt, doc, fix, test, bundle, pkg, `--explain`, and the language server. ❌ version resolution across dependencies |

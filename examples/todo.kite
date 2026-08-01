@@ -1,0 +1,216 @@
+// A task list, with a keyboard.
+//
+// This is the application the roadmap's Phase 7 asks for: something a person
+// could use, driven entirely by the same `init`/`view`/`update` shape every
+// Kite application has, and navigable without a pointer.
+//
+// The model never crosses the host boundary as data. It is a Wasm reference
+// the page holds and hands back, opaque to JavaScript — which is what lets it
+// be any Kite type at all, and why `update` returns a new model rather than
+// changing one.
+
+use std/ui
+
+struct Task {
+    title: str
+    done: bool
+}
+
+struct Model {
+    tasks: [Task]
+    draft: str
+    focused: str
+    message: str
+}
+
+// The events the page sends. One door, so a new kind is a new constant.
+fn EVENT_CLICK() -> int {
+    return 0
+}
+
+fn EVENT_KEY() -> int {
+    return 1
+}
+
+pub fn init() -> Model {
+    return Model{
+        tasks: [
+            Task { title: "read the specification", done: true },
+            Task { title: "write something in Kite", done: false },
+        ],
+        draft: "",
+        focused: ui.field("draft"),
+        message: "tab moves, enter adds, space toggles",
+    }
+}
+
+/// Every control, in the order they are laid out — which is also the order tab
+/// moves through them, because a separate tab order is a second thing to keep
+/// in step.
+fn controls(model: Model) -> [str] {
+    var out: [str] = [ui.field("draft"), ui.button("add")]
+    for i in 0..model.tasks.len() {
+        out.push(ui.checkbox("task\(i)"))
+    }
+    return out
+}
+
+fn view_node(model: Model) -> ui.Node {
+    var rows: [ui.Node] = []
+    for i in 0..model.tasks.len() {
+        let task = model.tasks[i]
+        rows.push(ui.checkbox_node("task\(i)", task.title, task.done))
+    }
+
+    let header = ui.box_of(
+        "header",
+        ui.spaced(ui.padded(ui.Style{..ui.row(), align: ui.Align.Center }, 12.0), 8.0),
+        [
+            ui.field_node("draft", model.draft, 260.0, model.focused == ui.field("draft")),
+            ui.button_node("add", "add"),
+        ],
+    )
+
+    let list = ui.box_of(
+        "list",
+        ui.spaced(ui.padded(ui.Style{..ui.column(), align: ui.Align.Stretch }, 12.0), 4.0),
+        rows,
+    )
+
+    let done = count(model.tasks, |t: Task| t.done)
+    let status = ui.box_of(
+        "status",
+        ui.spaced(ui.padded(ui.column(), 12.0), 4.0),
+        [
+            ui.text_of("status:count", ui.style(), "\(done) of \(model.tasks.len()) done"),
+            ui.text_of("status:hint", ui.style(), model.message),
+        ],
+    )
+
+    return ui.box_of(
+        "app",
+        ui.Style {..ui.column(), align: ui.Align.Stretch },
+        [header, list, status],
+    )
+}
+
+pub fn view(model: Model) {
+    let theme = ui.dark_theme()
+    let frames = ui.layout(view_node(model), ui.Size{ width: 640.0, height: 360.0 })
+
+    var paints: [ui.Paint] = [ui.fill("app", theme.background)]
+    for paint in ui.control_paints(theme, controls(model), model.focused) {
+        paints.push(paint)
+    }
+    paints.push(ui.ink("status:count", theme.ink))
+    paints.push(ui.ink("status:hint", theme.muted))
+    ui.paint(frames, paints)
+}
+
+pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
+    if event == EVENT_CLICK() {
+        return clicked(model, x, y)
+    }
+    if event == EVENT_KEY() {
+        return pressed(model, key)
+    }
+    return model
+}
+
+fn clicked(model: Model, x: float, y: float) -> Model {
+    let frames = ui.layout(view_node(model), ui.Size{ width: 640.0, height: 360.0 })
+    let hit = ui.control_at(frames, x, y)
+    if hit == nil {
+        return model
+    }
+    let focused = Model{..model, focused: hit }
+    if hit == ui.button("add") {
+        return added(focused)
+    }
+    let box = ui.control_id(hit, "checkbox")
+    if box != nil {
+        return toggled(focused, box)
+    }
+    return Model{..focused, message: "typing goes to the field" }
+}
+
+fn pressed(model: Model, key: str) -> Model {
+    if key == "Tab" {
+        return Model{..model, focused: ui.next_focus(controls(model), model.focused) }
+    }
+    if key == "ArrowDown" {
+        return Model{..model, focused: ui.next_focus(controls(model), model.focused) }
+    }
+    if key == "ArrowUp" {
+        return Model{..model, focused: ui.previous_focus(controls(model), model.focused) }
+    }
+    if key == "Enter" {
+        if model.focused == ui.field("draft") {
+            return added(model)
+        }
+        if model.focused == ui.button("add") {
+            return added(model)
+        }
+    }
+    let box = ui.control_id(model.focused, "checkbox")
+    if box != nil {
+        if key == " " {
+            return toggled(model, box)
+        }
+        return model
+    }
+    if model.focused == ui.field("draft") {
+        return Model{..model, draft: ui.typed(model.draft, key) }
+    }
+    return model
+}
+
+fn added(model: Model) -> Model {
+    let title = model.draft.trim()
+    if title.len() == 0 {
+        return Model{..model, message: "nothing to add" }
+    }
+    return Model{
+        ..model,
+        tasks: concat(model.tasks, [Task{ title: title, done: false }]),
+        draft: "",
+        message: "added \(title)",
+    }
+}
+
+fn toggled(model: Model, id: str) -> Model {
+    var out: [Task] = []
+    for i in 0..model.tasks.len() {
+        let task = model.tasks[i]
+        if "task\(i)" == id {
+            out.push(Task{..task, done: !task.done })
+        } else {
+            out.push(task)
+        }
+    }
+    return Model{..model, tasks: out, message: "toggled" }
+}
+
+// A `main` so the example runs on the bytecode target too, where there is no
+// page to click on: it drives the same `update` the page does, which is what
+// keeps this testable without a browser.
+fn main() {
+    var model = init()
+    model = update(model, EVENT_KEY(), 0.0, 0.0, "b")
+    model = update(model, EVENT_KEY(), 0.0, 0.0, "u")
+    model = update(model, EVENT_KEY(), 0.0, 0.0, "y")
+    model = update(model, EVENT_KEY(), 0.0, 0.0, " ")
+    model = update(model, EVENT_KEY(), 0.0, 0.0, "milk")
+    model = update(model, EVENT_KEY(), 0.0, 0.0, "Enter")
+    io.print("draft is now \"\(model.draft)\", \(model.tasks.len()) tasks")
+    io.print(model.message)
+
+    model = update(model, EVENT_KEY(), 0.0, 0.0, "Tab")
+    io.print("focus: \(model.focused)")
+    model = update(model, EVENT_KEY(), 0.0, 0.0, "Tab")
+    io.print("focus: \(model.focused)")
+    model = update(model, EVENT_KEY(), 0.0, 0.0, " ")
+    io.print("first task done: \(model.tasks[0].done)")
+
+    view(model)
+}
