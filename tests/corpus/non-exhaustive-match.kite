@@ -1,0 +1,15 @@
+enum Shape {
+    Circle(radius: int)
+    Rect(width: int, height: int)
+    Point
+}
+
+fn describe(s: Shape) -> str {
+    return match s {   //~ ERROR E0210
+        Circle(r) => "circle",
+    }
+}
+
+fn main() {
+    io.print(describe(Point))
+}

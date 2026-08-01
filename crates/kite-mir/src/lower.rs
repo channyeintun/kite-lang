@@ -1,7 +1,7 @@
 //! HIR to MIR: control flow becomes a graph.
 
 use crate::*;
-use kite_hir::TyId;
+use kite_hir::TyId as Ty;
 use kite_hir as hir;
 use std::collections::HashMap;
 
@@ -394,6 +394,10 @@ impl<'a> FnLowerer<'a> {
                 let args = args.iter().map(|a| self.operand(a)).collect();
                 Rvalue::CallBuiltin { builtin: *builtin, args }
             }
+            hir::ExprKind::EnumNew { enum_id, variant, fields } => {
+                let fields = fields.iter().map(|a| self.operand(a)).collect();
+                Rvalue::EnumNew { enum_id: *enum_id, variant: *variant, fields }
+            }
             hir::ExprKind::StructNew { struct_id, fields } => {
                 let fields = fields.iter().map(|a| self.operand(a)).collect();
                 Rvalue::StructNew { struct_id: *struct_id, fields }
@@ -423,6 +427,13 @@ impl<'a> FnLowerer<'a> {
             hir::ExprKind::Binary { op, lhs, rhs } if op.is_short_circuit() => {
                 Operand::Local(self.short_circuit(*op, lhs, rhs))
             }
+            hir::ExprKind::Match { scrutinee, arms } => {
+                Operand::Local(self.match_expr(scrutinee, arms, e.ty))
+            }
+            hir::ExprKind::Block(b) => {
+                self.block(b);
+                Operand::Unit
+            }
             _ => {
                 let v = self.rvalue(e);
                 let t = self.temp(e.ty);
@@ -430,6 +441,292 @@ impl<'a> FnLowerer<'a> {
                 Operand::Local(t)
             }
         }
+    }
+
+    // ---- match ------------------------------------------------------------
+
+    /// Arms are tested in order, each falling through to the next on failure.
+    ///
+    /// ```text
+    ///   test_0: <pattern test> ? bind_0 : test_1
+    ///   bind_0: <bind names> ; <guard> ? body_0 : test_1
+    ///   body_0: result = <body> ; goto join
+    ///   ...
+    ///   fail:   unreachable        <- exhaustiveness proved this is dead
+    ///   join:
+    /// ```
+    ///
+    /// A decision tree that shares tests across arms is an optimisation MIR can
+    /// add later; sequential testing is what makes the semantics obvious.
+    fn match_expr(
+        &mut self,
+        scrutinee: &hir::Expr,
+        arms: &[hir::MatchArm],
+        result_ty: Ty,
+    ) -> Local {
+        let subject = self.operand(scrutinee);
+        let result = self.temp(result_ty);
+        let join = self.new_block();
+
+        // The checker proved the arms cover every value, so falling past the
+        // last one cannot happen.
+        let fail = self.new_block();
+
+        for (i, arm) in arms.iter().enumerate() {
+            let next = if i + 1 < arms.len() {
+                self.new_block()
+            } else {
+                fail
+            };
+
+            let body_bb = self.new_block();
+            self.test_pattern(&arm.pattern, &subject, body_bb, next);
+
+            self.switch_to(body_bb);
+            // Bindings are written only once the pattern has matched, so a
+            // failed arm never leaves a half-written local behind.
+            self.bind_pattern(&arm.pattern, &subject);
+
+            if let Some(g) = &arm.guard {
+                let guarded = self.new_block();
+                let c = self.operand(g);
+                self.terminate(Terminator::Branch {
+                    cond: c,
+                    then: guarded,
+                    else_: next,
+                });
+                self.switch_to(guarded);
+            }
+
+            let v = self.operand(&arm.body);
+            self.assign(result, Rvalue::Use(v));
+            self.terminate(Terminator::Goto(join));
+
+            if next != fail {
+                self.switch_to(next);
+            }
+        }
+
+        self.switch_to(fail);
+        self.terminate(Terminator::Unreachable);
+
+        self.switch_to(join);
+        result
+    }
+
+    /// Branch to `on_match` when `pattern` accepts `subject`, else `on_fail`.
+    fn test_pattern(
+        &mut self,
+        pattern: &hir::Pattern,
+        subject: &Operand,
+        on_match: BlockId,
+        on_fail: BlockId,
+    ) {
+        if pattern.is_irrefutable() {
+            self.terminate(Terminator::Goto(on_match));
+            return;
+        }
+
+        match pattern {
+            hir::Pattern::Int(v) => self.test_eq(subject, Operand::Int(*v), BinOp::EqInt, on_match, on_fail),
+            hir::Pattern::Float(v) => {
+                self.test_eq(subject, Operand::Float(*v), BinOp::EqFloat, on_match, on_fail)
+            }
+            hir::Pattern::Bool(v) => {
+                self.test_eq(subject, Operand::Bool(*v), BinOp::EqBool, on_match, on_fail)
+            }
+            hir::Pattern::Str(s) => {
+                let id = self.strings.intern(s);
+                self.test_eq(subject, Operand::Str(id), BinOp::EqStr, on_match, on_fail)
+            }
+
+            hir::Pattern::IntRange { start, end, inclusive } => {
+                let lo = self.temp(Ty::BOOL);
+                self.assign(
+                    lo,
+                    Rvalue::Binary {
+                        op: BinOp::GeInt,
+                        lhs: subject.clone(),
+                        rhs: Operand::Int(*start),
+                    },
+                );
+                let upper = self.new_block();
+                self.terminate(Terminator::Branch {
+                    cond: Operand::Local(lo),
+                    then: upper,
+                    else_: on_fail,
+                });
+
+                self.switch_to(upper);
+                let hi = self.temp(Ty::BOOL);
+                self.assign(
+                    hi,
+                    Rvalue::Binary {
+                        op: if *inclusive { BinOp::LeInt } else { BinOp::LtInt },
+                        lhs: subject.clone(),
+                        rhs: Operand::Int(*end),
+                    },
+                );
+                self.terminate(Terminator::Branch {
+                    cond: Operand::Local(hi),
+                    then: on_match,
+                    else_: on_fail,
+                });
+            }
+
+            hir::Pattern::Variant { variant, fields, .. } => {
+                let tag = self.temp(Ty::INT);
+                self.assign(tag, Rvalue::TagOf { base: subject.clone() });
+                let hit = self.temp(Ty::BOOL);
+                self.assign(
+                    hit,
+                    Rvalue::Binary {
+                        op: BinOp::EqInt,
+                        lhs: Operand::Local(tag),
+                        rhs: Operand::Int(*variant as i64),
+                    },
+                );
+
+                // Nested patterns are tested only once the tag matches, so
+                // reading a payload is always safe.
+                let refutable: Vec<(usize, &hir::Pattern)> = fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| !p.is_irrefutable())
+                    .collect();
+
+                if refutable.is_empty() {
+                    self.terminate(Terminator::Branch {
+                        cond: Operand::Local(hit),
+                        then: on_match,
+                        else_: on_fail,
+                    });
+                    return;
+                }
+
+                let payload_bb = self.new_block();
+                self.terminate(Terminator::Branch {
+                    cond: Operand::Local(hit),
+                    then: payload_bb,
+                    else_: on_fail,
+                });
+                self.switch_to(payload_bb);
+                self.test_fields(subject, &refutable, on_match, on_fail);
+            }
+
+            hir::Pattern::Struct { fields, .. } => {
+                let refutable: Vec<(usize, &hir::Pattern)> = fields
+                    .iter()
+                    .filter(|(_, p)| !p.is_irrefutable())
+                    .map(|(i, p)| (*i as usize, p))
+                    .collect();
+                if refutable.is_empty() {
+                    self.terminate(Terminator::Goto(on_match));
+                    return;
+                }
+                self.test_fields(subject, &refutable, on_match, on_fail);
+            }
+
+            // Any alternative matching is enough.
+            hir::Pattern::Or(alts) => {
+                for (i, alt) in alts.iter().enumerate() {
+                    let next = if i + 1 < alts.len() {
+                        self.new_block()
+                    } else {
+                        on_fail
+                    };
+                    self.test_pattern(alt, subject, on_match, next);
+                    if next != on_fail {
+                        self.switch_to(next);
+                    }
+                }
+            }
+
+            hir::Pattern::Wildcard | hir::Pattern::Binding(_) => {
+                self.terminate(Terminator::Goto(on_match));
+            }
+        }
+    }
+
+    fn test_fields(
+        &mut self,
+        subject: &Operand,
+        fields: &[(usize, &hir::Pattern)],
+        on_match: BlockId,
+        on_fail: BlockId,
+    ) {
+        for (n, (index, sub)) in fields.iter().enumerate() {
+            let slot = self.temp(Ty::ERROR);
+            self.assign(
+                slot,
+                Rvalue::FieldGet { base: subject.clone(), index: *index as u32 },
+            );
+            let target = if n + 1 < fields.len() {
+                self.new_block()
+            } else {
+                on_match
+            };
+            self.test_pattern(sub, &Operand::Local(slot), target, on_fail);
+            if target != on_match {
+                self.switch_to(target);
+            }
+        }
+    }
+
+    fn test_eq(
+        &mut self,
+        subject: &Operand,
+        constant: Operand,
+        op: BinOp,
+        on_match: BlockId,
+        on_fail: BlockId,
+    ) {
+        let c = self.temp(Ty::BOOL);
+        self.assign(
+            c,
+            Rvalue::Binary { op, lhs: subject.clone(), rhs: constant },
+        );
+        self.terminate(Terminator::Branch {
+            cond: Operand::Local(c),
+            then: on_match,
+            else_: on_fail,
+        });
+    }
+
+    /// Write the pattern's bindings, once it is known to have matched.
+    fn bind_pattern(&mut self, pattern: &hir::Pattern, subject: &Operand) {
+        match pattern {
+            hir::Pattern::Binding(local) => {
+                self.assign(Local(local.0), Rvalue::Use(subject.clone()));
+            }
+            hir::Pattern::Variant { fields, .. } => {
+                for (i, sub) in fields.iter().enumerate() {
+                    self.bind_field(sub, subject, i as u32);
+                }
+            }
+            hir::Pattern::Struct { fields, .. } => {
+                for (i, sub) in fields {
+                    self.bind_field(sub, subject, *i);
+                }
+            }
+            // Every alternative of an or-pattern must bind the same names, so
+            // binding through the first is enough.
+            hir::Pattern::Or(alts) => {
+                if let Some(first) = alts.first() {
+                    self.bind_pattern(first, subject);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn bind_field(&mut self, sub: &hir::Pattern, subject: &Operand, index: u32) {
+        if matches!(sub, hir::Pattern::Wildcard) {
+            return;
+        }
+        let slot = self.temp(Ty::ERROR);
+        self.assign(slot, Rvalue::FieldGet { base: subject.clone(), index });
+        self.bind_pattern(sub, &Operand::Local(slot));
     }
 
     /// `a && b` must not evaluate `b` when `a` is false, so it becomes a

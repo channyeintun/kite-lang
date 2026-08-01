@@ -28,7 +28,8 @@ fn compile_fn(func: &mir::Function) -> FnProto {
         .map(|s| match s {
             mir::Inst::Assign { value: mir::Rvalue::Call { args, .. }, .. }
             | mir::Inst::Assign { value: mir::Rvalue::CallBuiltin { args, .. }, .. } => args.len(),
-            mir::Inst::Assign { value: mir::Rvalue::StructNew { fields, .. }, .. } => fields.len(),
+            mir::Inst::Assign { value: mir::Rvalue::StructNew { fields, .. }, .. }
+            | mir::Inst::Assign { value: mir::Rvalue::EnumNew { fields, .. }, .. } => fields.len(),
             _ => 0,
         })
         .max()
@@ -166,6 +167,22 @@ impl<'a> Emitter<'a> {
             mir::Rvalue::FieldGet { base, index } => {
                 let obj = self.operand_reg(base, 0);
                 self.code.push(Op::GetField { dst, obj, index: *index as u16 });
+            }
+
+            mir::Rvalue::EnumNew { enum_id, variant, fields } => {
+                self.stage_args(fields);
+                self.code.push(Op::NewEnum {
+                    dst,
+                    enum_id: enum_id.0,
+                    variant: *variant,
+                    base: self.arg_base,
+                    count: fields.len() as u8,
+                });
+            }
+
+            mir::Rvalue::TagOf { base } => {
+                let obj = self.operand_reg(base, 0);
+                self.code.push(Op::TagOf { dst, obj });
             }
         }
     }

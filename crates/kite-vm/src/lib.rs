@@ -30,12 +30,21 @@ pub enum Value {
     /// copies the handle; `RefCell` is what lets a `var` field be written
     /// through one. The checker has already proved only `var` fields are.
     Struct(Rc<StructValue>),
+    /// An enum value: which variant, and its payload.
+    Enum(Rc<EnumValue>),
 }
 
 #[derive(Debug)]
 pub struct StructValue {
     pub struct_id: u32,
     pub fields: RefCell<Vec<Value>>,
+}
+
+#[derive(Debug)]
+pub struct EnumValue {
+    pub enum_id: u32,
+    pub variant: u32,
+    pub fields: Vec<Value>,
 }
 
 /// Structural equality, per the specification: two structs are equal when
@@ -51,6 +60,9 @@ impl PartialEq for Value {
             (Value::Struct(a), Value::Struct(b)) => {
                 a.struct_id == b.struct_id && *a.fields.borrow() == *b.fields.borrow()
             }
+            (Value::Enum(a), Value::Enum(b)) => {
+                a.enum_id == b.enum_id && a.variant == b.variant && a.fields == b.fields
+            }
             _ => false,
         }
     }
@@ -65,6 +77,7 @@ impl Value {
             Value::Bool(_) => "bool",
             Value::Str(_) => "str",
             Value::Struct(_) => "struct",
+            Value::Enum(_) => "enum",
         }
     }
 }
@@ -94,6 +107,20 @@ impl fmt::Display for Value {
                     write!(f, "{}", v)?;
                 }
                 write!(f, "}}")
+            }
+            Value::Enum(e) => {
+                write!(f, "#{}", e.variant)?;
+                if e.fields.is_empty() {
+                    return Ok(());
+                }
+                write!(f, "(")?;
+                for (i, v) in e.fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, ")")
             }
         }
     }
@@ -447,6 +474,12 @@ impl<'a> Vm<'a> {
                         let v = s.fields.borrow()[index as usize].clone();
                         self.set(base, dst, v);
                     }
+                    // An enum payload is read the same way; the checker has
+                    // already proved the variant matches.
+                    Value::Enum(e) => {
+                        let v = e.fields[index as usize].clone();
+                        self.set(base, dst, v);
+                    }
                     other => {
                         return Err(Trap::TypeConfusion {
                             op: "field access",
@@ -469,6 +502,28 @@ impl<'a> Vm<'a> {
                         }
                     }
                 }
+
+                Op::NewEnum { dst, enum_id, variant, base: arg_base, count } => {
+                    let mut fields = Vec::with_capacity(count as usize);
+                    for i in 0..count as usize {
+                        fields.push(self.regs[base + arg_base as usize + i].clone());
+                    }
+                    self.set(
+                        base,
+                        dst,
+                        Value::Enum(Rc::new(EnumValue { enum_id, variant, fields })),
+                    );
+                }
+
+                Op::TagOf { dst, obj } => match self.get(base, obj) {
+                    Value::Enum(e) => self.set(base, dst, Value::Int(e.variant as i64)),
+                    other => {
+                        return Err(Trap::TypeConfusion {
+                            op: "match",
+                            found: other.type_name(),
+                        })
+                    }
+                },
 
                 Op::Call { dst, func: callee, base: arg_base, argc } => {
                     self.call(callee, base, arg_base, argc, dst)?;

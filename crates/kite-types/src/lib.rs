@@ -22,6 +22,8 @@ use kite_hir::{Builtin, ExprKind, TyId, TyKind, Types};
 use kite_resolve::{BuiltinFn, Res, ResolveMap};
 use kite_span::Span;
 
+mod exhaustive;
+
 pub fn check(
     file: &ast::SourceFile,
     resolved: &ResolveMap,
@@ -55,6 +57,53 @@ pub fn check(
     // arena, which already knows every name.
     for (i, decl) in resolved.types.iter().enumerate() {
         match (type_ids[i], &file.items[decl.decl_index]) {
+            (Some(TypeTarget::Enum(eid)), ast::Item::Enum(e)) => {
+                let variants = e
+                    .variants
+                    .iter()
+                    .map(|v| {
+                        let (fields, named) = match &v.payload {
+                            ast::VariantPayload::Unit => (Vec::new(), false),
+                            ast::VariantPayload::Named(fs) => (
+                                fs.iter()
+                                    .map(|f| kite_hir::FieldDef {
+                                        name: f.name.name.clone(),
+                                        ty: resolve_named_ty(
+                                            &f.ty, resolved, &type_ids, &mut types, diags,
+                                        ),
+                                        mutable: false,
+                                        is_pub: true,
+                                        span: f.span,
+                                    })
+                                    .collect(),
+                                true,
+                            ),
+                            ast::VariantPayload::Positional(tys) => (
+                                tys.iter()
+                                    .enumerate()
+                                    .map(|(i, ty)| kite_hir::FieldDef {
+                                        name: i.to_string(),
+                                        ty: resolve_named_ty(
+                                            ty, resolved, &type_ids, &mut types, diags,
+                                        ),
+                                        mutable: false,
+                                        is_pub: true,
+                                        span: ty.span(),
+                                    })
+                                    .collect(),
+                                false,
+                            ),
+                        };
+                        kite_hir::VariantDef {
+                            name: v.name.name.clone(),
+                            fields,
+                            named,
+                            span: v.span,
+                        }
+                    })
+                    .collect();
+                types.set_enum_variants(eid, variants);
+            }
             (Some(TypeTarget::Struct(sid)), ast::Item::Struct(s)) => {
                 let fields = s
                     .fields
@@ -384,8 +433,9 @@ impl<'a> Checker<'a> {
             ast::Stmt::If(i) => self.if_stmt(i, sig),
             ast::Stmt::For(f) => self.for_stmt(f, sig),
             ast::Stmt::Match(m) => {
-                self.not_yet(m.span, "`match`", "enums and match arrive next in Phase 2");
-                None
+                let e = self.match_expr(m, None);
+                let flow = if e.ty == TyId::NEVER { Flow::Diverges } else { Flow::Falls };
+                Some((hir::Stmt::Expr(e), flow))
             }
 
             ast::Stmt::Break { label, span } => Some((
@@ -825,7 +875,9 @@ impl<'a> Checker<'a> {
                 self.binary(*op, l, r, *span)
             }
 
-            ast::Expr::Call { callee, args, span } => self.call(callee, args, *span),
+            ast::Expr::Call { callee, args, arg_names, span } => {
+                self.call(callee, args, arg_names, *span)
+            }
 
             ast::Expr::If { cond, then, else_, span } => self.if_expr(cond, then, else_, *span),
 
@@ -877,9 +929,8 @@ impl<'a> Checker<'a> {
                         );
                         self.lit(ExprKind::Error, TyId::ERROR, *span)
                     }
-                    Some(Res::Variant(..)) => {
-                        self.not_yet(*span, "enum variants", "enums arrive next in Phase 2");
-                        self.lit(ExprKind::Error, TyId::ERROR, *span)
+                    Some(Res::Variant(ti, vi)) => {
+                        self.variant_value(ti, vi, &[], &[], *span, *span)
                     }
                     _ => self.field_access(base, name, *optional, *span),
                 }
@@ -887,10 +938,7 @@ impl<'a> Checker<'a> {
 
             ast::Expr::StructLit(lit) => self.struct_literal(lit),
 
-            ast::Expr::Match(m) => {
-                self.not_yet(m.span, "`match`", "enums and match arrive next in Phase 2");
-                self.lit(ExprKind::Error, TyId::ERROR, m.span)
-            }
+            ast::Expr::Match(m) => self.match_expr(m, expected),
 
             ast::Expr::Map { span, .. } => {
                 self.not_yet(*span, "map literals", "maps arrive later in Phase 2");
@@ -972,16 +1020,44 @@ impl<'a> Checker<'a> {
                 );
                 self.lit(ExprKind::Error, TyId::ERROR, p.span)
             }
-            Some(Res::Variant(..)) => {
-                self.not_yet(p.span, "enum variants", "enums arrive next in Phase 2");
-                self.lit(ExprKind::Error, TyId::ERROR, p.span)
-            }
+            // A unit variant used as a value: `Status.Active`.
+            Some(Res::Variant(ti, vi)) => self.variant_value(ti, vi, &[], &[], p.span, p.span),
             // Resolution already reported this.
             None => self.lit(ExprKind::Error, TyId::ERROR, p.span),
         }
     }
 
-    fn call(&mut self, callee: &ast::Expr, args: &[ast::Expr], span: Span) -> hir::Expr {
+    fn call(
+        &mut self,
+        callee: &ast::Expr,
+        args: &[ast::Expr],
+        arg_names: &[Option<ast::Ident>],
+        span: Span,
+    ) -> hir::Expr {
+        // Named arguments exist only for named-payload variant construction.
+        // Everywhere else, a function needing many optional inputs takes a
+        // struct, which is the specification's answer.
+        let named_variant = matches!(
+            self.resolved.lookup_use(match callee {
+                ast::Expr::Path(p) => p.span,
+                ast::Expr::Field { span, .. } => *span,
+                _ => span,
+            }),
+            Some(Res::Variant(..))
+        );
+        if !named_variant {
+            if let Some(n) = arg_names.iter().flatten().next() {
+                self.diags.push(
+                    Diagnostic::error(codes::E0113, "functions do not take named arguments")
+                        .with_primary(n.span, "named argument here")
+                        .with_note(
+                            "Kite has no named arguments; a function needing many optional \
+                             inputs takes a struct, whose literal names every field anyway",
+                        ),
+                );
+            }
+        }
+
         // `a.b(…)` is a method call unless the resolver already decided the
         // dotted name is static — a builtin, a variant, or an associated
         // function on a type.
@@ -992,9 +1068,8 @@ impl<'a> Checker<'a> {
                     Some(Res::Type(ti)) => {
                         self.associated_call_named(ti, &name.name, *fspan, args, span)
                     }
-                    Some(Res::Variant(..)) => {
-                        self.not_yet(span, "enum variants", "enums arrive next in Phase 2");
-                        self.lit(ExprKind::Error, TyId::ERROR, span)
+                    Some(Res::Variant(ti, vi)) => {
+                        self.variant_value(ti, vi, args, arg_names, *fspan, span)
                     }
                     _ => self.method_call(base, name, args, span),
                 };
@@ -1053,9 +1128,8 @@ impl<'a> Checker<'a> {
 
             Some(Res::Type(ti)) => self.associated_call(ti, p, args, span),
 
-            Some(Res::Variant(..)) => {
-                self.not_yet(span, "enum variants", "enums arrive next in Phase 2");
-                self.lit(ExprKind::Error, TyId::ERROR, span)
+            Some(Res::Variant(ti, vi)) => {
+                self.variant_value(ti, vi, args, arg_names, p.span, span)
             }
 
             None => self.lit(ExprKind::Error, TyId::ERROR, span),
@@ -1289,6 +1363,571 @@ impl<'a> Checker<'a> {
                 _ => false,
             })
             .map(|i| i as u32)
+    }
+
+    // ---- enums ------------------------------------------------------------
+
+    /// `Circle(radius: 1.0)`, `Number(3.0)`, or a unit variant like `Point`.
+    fn variant_value(
+        &mut self,
+        ti: u32,
+        vi: u32,
+        args: &[ast::Expr],
+        arg_names: &[Option<ast::Ident>],
+        path_span: Span,
+        span: Span,
+    ) -> hir::Expr {
+        let Some(TypeTarget::Enum(eid)) = self.type_ids[ti as usize] else {
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        };
+        let enum_ty = self.types.enum_ty(eid);
+
+        let (enum_name, variant_name, field_tys, named, decl_span) = {
+            let def = self.types.enum_def(eid);
+            let v = &def.variants[vi as usize];
+            (
+                def.name.clone(),
+                v.name.clone(),
+                v.fields.iter().map(|f| f.ty).collect::<Vec<_>>(),
+                v.named,
+                v.span,
+            )
+        };
+
+        if args.len() != field_tys.len() {
+            let full = format!("{}.{}", enum_name, variant_name);
+            if field_tys.is_empty() {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0113,
+                        format!("`{}` carries no payload", full),
+                    )
+                    .with_primary(span, "written with arguments")
+                    .with_secondary(decl_span, "declared as a unit variant")
+                    .with_note(format!("write it as `{}` on its own", variant_name)),
+                );
+            } else {
+                self.arity_error(&full, args.len(), field_tys.len(), span, Some(decl_span));
+            }
+            let _ = named;
+            for a in args {
+                let _ = self.expr(a, None);
+            }
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+
+        // Named arguments are placed by name; positional ones by order.
+        let field_names: Vec<String> = {
+            let def = self.types.enum_def(eid);
+            def.variants[vi as usize]
+                .fields
+                .iter()
+                .map(|f| f.name.clone())
+                .collect()
+        };
+
+        let mut slots: Vec<Option<hir::Expr>> = (0..field_tys.len()).map(|_| None).collect();
+        for (i, a) in args.iter().enumerate() {
+            let index = match arg_names.get(i).and_then(|n| n.as_ref()) {
+                None => i,
+                Some(n) => match field_names.iter().position(|f| *f == n.name) {
+                    Some(x) => x,
+                    None => {
+                        self.diags.push(
+                            Diagnostic::error(
+                                codes::E0200,
+                                format!("`{}` has no field `{}`", variant_name, n.name),
+                            )
+                            .with_primary(n.span, "no such field")
+                            .with_note(format!(
+                                "`{}` carries: {}",
+                                variant_name,
+                                field_names.join(", ")
+                            )),
+                        );
+                        let _ = self.expr(a, None);
+                        continue;
+                    }
+                },
+            };
+            let want = field_tys[index];
+            let e = self.expr(a, Some(want));
+            self.expect_ty(e.ty, want, e.span, Some(decl_span));
+            slots[index] = Some(e);
+        }
+
+        let mut fields = Vec::with_capacity(field_tys.len());
+        for (i, slot) in slots.into_iter().enumerate() {
+            match slot {
+                Some(e) => fields.push(e),
+                None => {
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0113,
+                            format!("missing field `{}` in `{}`", field_names[i], variant_name),
+                        )
+                        .with_primary(span, "every payload field must be given"),
+                    );
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
+                }
+            }
+        }
+        let _ = path_span;
+
+        hir::Expr {
+            kind: ExprKind::EnumNew { enum_id: eid, variant: vi, fields },
+            ty: enum_ty,
+            span,
+        }
+    }
+
+    // ---- match ------------------------------------------------------------
+
+    fn match_expr(&mut self, m: &ast::MatchExpr, expected: Option<TyId>) -> hir::Expr {
+        let scrutinee = self.expr(&m.scrutinee, None);
+        let scrut_ty = scrutinee.ty;
+
+        if m.arms.is_empty() {
+            self.diags.push(
+                Diagnostic::error(codes::E0210, "a `match` needs at least one arm")
+                    .with_primary(m.span, "no arms")
+                    .with_note("an empty match can never produce a value"),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, m.span);
+        }
+
+        let entry_init = self.init.clone();
+        let mut arms = Vec::with_capacity(m.arms.len());
+        let mut result_ty: Option<TyId> = None;
+        let mut arm_spans: Vec<(Span, TyId)> = Vec::new();
+
+        for arm in &m.arms {
+            self.init = entry_init.clone();
+            let pattern = self.pattern(&arm.pattern, scrut_ty);
+
+            let guard = arm.guard.as_ref().map(|g| {
+                let c = self.expr(g, Some(TyId::BOOL));
+                if !self.types.satisfies(c.ty, TyId::BOOL) && !self.types.is_poisoned(c.ty) {
+                    let article = self.types.with_article(c.ty);
+                    self.diags.push(
+                        Diagnostic::error(codes::E0202, "a match guard must be `bool`")
+                            .with_primary(c.span, format!("this is {}", article)),
+                    );
+                }
+                c
+            });
+
+            let body = match &arm.body {
+                ast::MatchBody::Expr(e) => self.expr(e, expected.or(result_ty)),
+                ast::MatchBody::Block(b) => self.match_block(b, expected.or(result_ty)),
+            };
+
+            if body.ty != TyId::NEVER && !self.types.is_poisoned(body.ty) {
+                match result_ty {
+                    None => result_ty = Some(body.ty),
+                    Some(want) if !self.types.satisfies(body.ty, want) => {
+                        let (a, b) = (self.types.name(want), self.types.name(body.ty));
+                        let mut d = Diagnostic::error(
+                            codes::E0200,
+                            "match arms have different types",
+                        )
+                        .with_primary(body.span, format!("this arm is a `{}`", b));
+                        if let Some((s, _)) = arm_spans.first() {
+                            d = d.with_secondary(*s, format!("this arm is a `{}`", a));
+                        }
+                        d = d.with_note("every arm of a `match` must produce the same type");
+                        self.diags.push(d);
+                    }
+                    Some(_) => {}
+                }
+            }
+            arm_spans.push((body.span, body.ty));
+
+            arms.push(hir::MatchArm {
+                pattern,
+                guard,
+                body,
+                span: arm.span,
+            });
+        }
+
+        // A binding introduced by one arm's pattern is not in scope after the
+        // match, so the entry state is what survives.
+        self.init = entry_init;
+
+        self.check_exhaustive(m, &arms, scrut_ty);
+
+        let ty = result_ty.unwrap_or(TyId::UNIT);
+        hir::Expr {
+            kind: ExprKind::Match {
+                scrutinee: Box::new(scrutinee),
+                arms,
+            },
+            ty,
+            span: m.span,
+        }
+    }
+
+    /// A block arm. A block that ends in an expression yields it; otherwise the
+    /// arm produces unit.
+    fn match_block(&mut self, b: &ast::Block, expected: Option<TyId>) -> hir::Expr {
+        match b.stmts.as_slice() {
+            [ast::Stmt::Expr(e)] => self.expr(e, expected),
+            _ => {
+                let sig = self.current_signature();
+                let (block, flow) = self.block(b, &sig);
+                // A block arm runs for its effects, so it produces unit — or
+                // never, when it always diverges.
+                let ty = if flow == Flow::Diverges { TyId::NEVER } else { TyId::UNIT };
+                hir::Expr { kind: ExprKind::Block(block), ty, span: b.span }
+            }
+        }
+    }
+
+    /// The enclosing function's signature, so a nested block still checks
+    /// `return` against the right type.
+    fn current_signature(&self) -> Signature {
+        let s = &self.sigs[self.fn_index];
+        Signature {
+            params: s.params.clone(),
+            ret: s.ret,
+            fallible: s.fallible,
+            name_span: s.name_span,
+            self_ty: s.self_ty,
+        }
+    }
+
+    // ---- patterns ---------------------------------------------------------
+
+    /// Check a pattern against the scrutinee's type and bind its names.
+    fn pattern(&mut self, p: &ast::Pattern, scrut: TyId) -> hir::Pattern {
+        match p {
+            ast::Pattern::Wildcard(_) => hir::Pattern::Wildcard,
+
+            ast::Pattern::Binding(name) => match self.resolved.lookup_binding(name.span) {
+                Some(local) => {
+                    self.locals[local as usize].ty = scrut;
+                    self.init[local as usize] = Init::Assigned;
+                    hir::Pattern::Binding(hir::LocalId(local))
+                }
+                // Resolution decided this names a unit variant.
+                None => match self.resolved.lookup_use(name.span) {
+                    Some(Res::Variant(ti, vi)) => {
+                        self.variant_pattern(ti, vi, None, scrut, name.span)
+                    }
+                    _ => hir::Pattern::Wildcard,
+                },
+            },
+
+            ast::Pattern::Literal(e) => {
+                let lit = self.expr(e, Some(scrut));
+                self.expect_ty(lit.ty, scrut, lit.span, None);
+                match lit.kind {
+                    ExprKind::Int(v) => hir::Pattern::Int(v),
+                    ExprKind::Float(v) => hir::Pattern::Float(v),
+                    ExprKind::Str(s) => hir::Pattern::Str(s),
+                    ExprKind::Bool(b) => hir::Pattern::Bool(b),
+                    ExprKind::Unary { op: hir::UnOp::NegInt, operand } => match operand.kind {
+                        ExprKind::Int(v) => hir::Pattern::Int(-v),
+                        _ => hir::Pattern::Wildcard,
+                    },
+                    ExprKind::Unary { op: hir::UnOp::NegFloat, operand } => match operand.kind {
+                        ExprKind::Float(v) => hir::Pattern::Float(-v),
+                        _ => hir::Pattern::Wildcard,
+                    },
+                    _ => {
+                        self.diags.push(
+                            Diagnostic::error(codes::E0100, "only a literal may appear here")
+                                .with_primary(e.span(), "not a literal")
+                                .with_note("patterns match against constants, not expressions"),
+                        );
+                        hir::Pattern::Wildcard
+                    }
+                }
+            }
+
+            ast::Pattern::Range { start, end, inclusive, span } => {
+                let a = self.expr(start, Some(TyId::INT));
+                let b = self.expr(end, Some(TyId::INT));
+                match (&a.kind, &b.kind) {
+                    (ExprKind::Int(x), ExprKind::Int(y)) => {
+                        if x > y {
+                            self.diags.push(
+                                Diagnostic::warning(codes::E0210, "this range is empty")
+                                    .with_primary(*span, format!("{}..{} matches nothing", x, y)),
+                            );
+                        }
+                        hir::Pattern::IntRange {
+                            start: *x,
+                            end: *y,
+                            inclusive: *inclusive,
+                        }
+                    }
+                    _ => {
+                        self.not_yet(*span, "non-integer range patterns", "Phase 2");
+                        hir::Pattern::Wildcard
+                    }
+                }
+            }
+
+            ast::Pattern::Variant { path, args, span } => {
+                match self.resolved.lookup_use(path.span) {
+                    Some(Res::Variant(ti, vi)) => {
+                        self.variant_pattern(ti, vi, Some(args), scrut, *span)
+                    }
+                    Some(Res::Type(ti)) => match self.type_ids[ti as usize] {
+                        Some(TypeTarget::Struct(_)) => {
+                            self.not_yet(*span, "struct call patterns", "use `Name{ … }`");
+                            hir::Pattern::Wildcard
+                        }
+                        _ => hir::Pattern::Wildcard,
+                    },
+                    _ => hir::Pattern::Wildcard,
+                }
+            }
+
+            ast::Pattern::Struct { path, fields, span, .. } => {
+                let Some(Res::Type(ti)) = self.resolved.lookup_use(path.span) else {
+                    return hir::Pattern::Wildcard;
+                };
+                let Some(TypeTarget::Struct(sid)) = self.type_ids[ti as usize] else {
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0200,
+                            format!("`{}` is not a struct", path.name()),
+                        )
+                        .with_primary(*span, "struct patterns need a struct"),
+                    );
+                    return hir::Pattern::Wildcard;
+                };
+
+                let struct_ty = self.types.struct_ty(sid);
+                if !self.types.satisfies(struct_ty, scrut) && !self.types.is_poisoned(scrut) {
+                    let (a, b) = (self.types.name(scrut), self.types.name(struct_ty));
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0200,
+                            format!("this pattern matches `{}`, not `{}`", b, a),
+                        )
+                        .with_primary(*span, "type mismatch in pattern"),
+                    );
+                    return hir::Pattern::Wildcard;
+                }
+
+                let mut out = Vec::new();
+                for f in fields {
+                    let found = self
+                        .types
+                        .struct_def(sid)
+                        .field(&f.name.name)
+                        .map(|(i, d)| (i, d.ty));
+                    let Some((index, fty)) = found else {
+                        let sname = self.types.struct_def(sid).name.clone();
+                        self.diags.push(
+                            Diagnostic::error(
+                                codes::E0200,
+                                format!("`{}` has no field `{}`", sname, f.name.name),
+                            )
+                            .with_primary(f.name.span, "no such field"),
+                        );
+                        continue;
+                    };
+                    let sub = match &f.pattern {
+                        Some(p) => self.pattern(p, fty),
+                        // `Point{ x }` binds `x` to the field's value.
+                        None => match self.resolved.lookup_binding(f.name.span) {
+                            Some(local) => {
+                                self.locals[local as usize].ty = fty;
+                                self.init[local as usize] = Init::Assigned;
+                                hir::Pattern::Binding(hir::LocalId(local))
+                            }
+                            None => hir::Pattern::Wildcard,
+                        },
+                    };
+                    out.push((index as u32, sub));
+                }
+                hir::Pattern::Struct { struct_id: sid, fields: out }
+            }
+
+            ast::Pattern::Or { alts, .. } => {
+                hir::Pattern::Or(alts.iter().map(|a| self.pattern(a, scrut)).collect())
+            }
+
+            ast::Pattern::Tuple { span, .. } => {
+                self.not_yet(*span, "tuple patterns", "tuples arrive later in Phase 2");
+                hir::Pattern::Wildcard
+            }
+            ast::Pattern::Nil(span) => {
+                self.not_yet(*span, "`nil` patterns", "optionals arrive later in Phase 2");
+                hir::Pattern::Wildcard
+            }
+            ast::Pattern::Error(_) => hir::Pattern::Wildcard,
+        }
+    }
+
+    fn variant_pattern(
+        &mut self,
+        ti: u32,
+        vi: u32,
+        args: Option<&ast::PatternArgs>,
+        scrut: TyId,
+        span: Span,
+    ) -> hir::Pattern {
+        let Some(TypeTarget::Enum(eid)) = self.type_ids[ti as usize] else {
+            return hir::Pattern::Wildcard;
+        };
+        let enum_ty = self.types.enum_ty(eid);
+
+        if !self.types.satisfies(enum_ty, scrut) && !self.types.is_poisoned(scrut) {
+            let (want, got) = (self.types.name(scrut), self.types.name(enum_ty));
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0200,
+                    format!("this pattern matches `{}`, not `{}`", got, want),
+                )
+                .with_primary(span, "type mismatch in pattern")
+                .with_note(format!("the value being matched is {}", self.types.with_article(scrut))),
+            );
+            return hir::Pattern::Wildcard;
+        }
+
+        let (variant_name, field_tys, field_names, decl_span) = {
+            let def = self.types.enum_def(eid);
+            let v = &def.variants[vi as usize];
+            (
+                v.name.clone(),
+                v.fields.iter().map(|f| f.ty).collect::<Vec<_>>(),
+                v.fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
+                v.span,
+            )
+        };
+
+        let sub = match args {
+            None | Some(ast::PatternArgs::Positional(_)) if field_tys.is_empty() => {
+                if let Some(ast::PatternArgs::Positional(ps)) = args {
+                    if !ps.is_empty() {
+                        self.diags.push(
+                            Diagnostic::error(
+                                codes::E0113,
+                                format!("`{}` carries no payload", variant_name),
+                            )
+                            .with_primary(span, "written with a payload pattern")
+                            .with_secondary(decl_span, "declared as a unit variant"),
+                        );
+                    }
+                }
+                Vec::new()
+            }
+
+            None => {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0113,
+                        format!(
+                            "`{}` carries {} value{}",
+                            variant_name,
+                            field_tys.len(),
+                            if field_tys.len() == 1 { "" } else { "s" }
+                        ),
+                    )
+                    .with_primary(span, "the payload must be matched too")
+                    .with_secondary(decl_span, "declared here")
+                    .with_note(format!(
+                        "write `{}({})` to bind it, or `{}(_)` to ignore it",
+                        variant_name,
+                        field_names.join(", "),
+                        variant_name
+                    )),
+                );
+                field_tys.iter().map(|_| hir::Pattern::Wildcard).collect()
+            }
+
+            Some(ast::PatternArgs::Positional(ps)) => {
+                if ps.len() != field_tys.len() {
+                    self.arity_error(
+                        &variant_name,
+                        ps.len(),
+                        field_tys.len(),
+                        span,
+                        Some(decl_span),
+                    );
+                    field_tys.iter().map(|_| hir::Pattern::Wildcard).collect()
+                } else {
+                    ps.iter()
+                        .zip(&field_tys)
+                        .map(|(p, ty)| self.pattern(p, *ty))
+                        .collect()
+                }
+            }
+
+            Some(ast::PatternArgs::Named(named)) => {
+                let mut out: Vec<hir::Pattern> =
+                    field_tys.iter().map(|_| hir::Pattern::Wildcard).collect();
+                for (name, p) in named {
+                    match field_names.iter().position(|f| *f == name.name) {
+                        Some(i) => out[i] = self.pattern(p, field_tys[i]),
+                        None => {
+                            self.diags.push(
+                                Diagnostic::error(
+                                    codes::E0200,
+                                    format!("`{}` has no field `{}`", variant_name, name.name),
+                                )
+                                .with_primary(name.span, "no such field")
+                                .with_note(format!(
+                                    "`{}` carries: {}",
+                                    variant_name,
+                                    field_names.join(", ")
+                                )),
+                            );
+                        }
+                    }
+                }
+                out
+            }
+        };
+
+        hir::Pattern::Variant { enum_id: eid, variant: vi, fields: sub }
+    }
+
+    fn check_exhaustive(&mut self, m: &ast::MatchExpr, arms: &[hir::MatchArm], scrut: TyId) {
+        if self.types.is_poisoned(scrut) {
+            return;
+        }
+        // A guarded arm may fail at run time, so it cannot make a match
+        // exhaustive and is excluded from the coverage set.
+        let unguarded: Vec<&hir::Pattern> = arms
+            .iter()
+            .filter(|a| a.guard.is_none())
+            .map(|a| &a.pattern)
+            .collect();
+
+        let missing = exhaustive::missing_patterns(scrut, &unguarded, self.types);
+        if missing.is_empty() {
+            return;
+        }
+
+        let names: Vec<String> = missing.iter().map(|x| format!("`{}`", x.0)).collect();
+        let all_guarded = !arms.is_empty() && arms.iter().all(|a| a.guard.is_some());
+
+        let mut d = Diagnostic::error(
+            codes::E0210,
+            format!(
+                "non-exhaustive match: {} not covered",
+                names.join(", ")
+            ),
+        )
+        .with_primary(m.scrutinee.span(), "this value is not fully matched")
+        .with_note(
+            "exhaustiveness is what makes adding a variant safe: the compiler shows you every \
+             place that must change",
+        );
+        if all_guarded {
+            d = d.with_note(
+                "every arm here has a guard, and a guard may fail at run time, so none of them \
+                 counts towards coverage",
+            );
+        }
+        self.diags.push(d);
     }
 
     // ---- structs ----------------------------------------------------------

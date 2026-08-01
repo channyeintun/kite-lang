@@ -9,7 +9,7 @@
 //! optimisation passes want; the bytecode backend maps locals to registers
 //! directly and does not need it.
 
-use kite_hir::{BinOp, Builtin, StructId, TyId, Types, UnOp};
+use kite_hir::{BinOp, Builtin, EnumId, StructId, TyId, Types, UnOp};
 use kite_span::Span;
 use std::fmt;
 
@@ -105,6 +105,9 @@ pub enum Rvalue {
     CallBuiltin { builtin: Builtin, args: Vec<Operand> },
     StructNew { struct_id: StructId, fields: Vec<Operand> },
     FieldGet { base: Operand, index: u32 },
+    EnumNew { enum_id: EnumId, variant: u32, fields: Vec<Operand> },
+    /// The variant index of an enum value, for dispatching a `match`.
+    TagOf { base: Operand },
 }
 
 #[derive(Clone, Debug)]
@@ -252,6 +255,12 @@ impl fmt::Display for Rvalue {
                 write!(f, "}}")
             }
             Rvalue::FieldGet { base, index } => write!(f, "{}.{}", base, index),
+            Rvalue::EnumNew { enum_id, variant, fields } => {
+                write!(f, "enum{}#{}(", enum_id.0, variant)?;
+                write_operands(f, fields)?;
+                write!(f, ")")
+            }
+            Rvalue::TagOf { base } => write!(f, "tag {}", base),
         }
     }
 }

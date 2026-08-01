@@ -159,9 +159,59 @@ pub enum ExprKind {
     StructNew { struct_id: StructId, fields: Vec<Expr> },
     /// `p.x`, by field position.
     FieldGet { base: Box<Expr>, index: u32 },
+    /// `Circle(radius: 1.0)`, or a unit variant such as `Point`.
+    EnumNew { enum_id: EnumId, variant: u32, fields: Vec<Expr> },
+    /// Exhaustive by construction: the checker has already proved every value
+    /// is covered, so lowering needs no fallback arm.
+    Match { scrutinee: Box<Expr>, arms: Vec<MatchArm> },
+    /// A block in expression position — a `match` arm written with braces.
+    /// Runs for its effects and produces unit.
+    Block(Block),
     /// Produced where a type error was already reported. Poisons downstream
     /// checks so one mistake yields one diagnostic.
     Error,
+}
+
+#[derive(Debug)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    /// Locals the pattern binds, in the order the pattern introduces them.
+    pub guard: Option<Expr>,
+    pub body: Expr,
+    pub span: Span,
+}
+
+/// A resolved pattern. Names are already bound to local slots, and variants to
+/// positions, so lowering is a mechanical walk.
+#[derive(Debug)]
+pub enum Pattern {
+    /// `_`, and any binding — both match everything. A binding also writes the
+    /// scrutinee into its local.
+    Wildcard,
+    Binding(LocalId),
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bool(bool),
+    /// `4..=9`
+    IntRange { start: i64, end: i64, inclusive: bool },
+    /// `Circle(r)`. Sub-patterns are in declaration order, one per field.
+    Variant { enum_id: EnumId, variant: u32, fields: Vec<Pattern> },
+    /// `Point{ x: 0.0, y }`. Only the named fields are tested.
+    Struct { struct_id: StructId, fields: Vec<(u32, Pattern)> },
+    /// `1 | 2 | 3`
+    Or(Vec<Pattern>),
+}
+
+impl Pattern {
+    /// Whether this pattern matches every value, so no test is needed.
+    pub fn is_irrefutable(&self) -> bool {
+        match self {
+            Pattern::Wildcard | Pattern::Binding(_) => true,
+            Pattern::Or(alts) => alts.iter().any(|a| a.is_irrefutable()),
+            _ => false,
+        }
+    }
 }
 
 /// Functions provided by the compiler rather than written in Kite. Phase 1 has
@@ -367,6 +417,20 @@ impl Program {
                 format!("{}{{{}}}", self.types.struct_def(*struct_id).name, a.join(", "))
             }
             ExprKind::FieldGet { base, index } => format!("{}.{}", self.expr(base), index),
+            ExprKind::EnumNew { enum_id, variant, fields } => {
+                let def = self.types.enum_def(*enum_id);
+                let a: Vec<String> = fields.iter().map(|x| self.expr(x)).collect();
+                format!(
+                    "{}.{}({})",
+                    def.name,
+                    def.variants[*variant as usize].name,
+                    a.join(", ")
+                )
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                format!("(match {} {} arms)", self.expr(scrutinee), arms.len())
+            }
+            ExprKind::Block(b) => format!("(block {} stmts)", b.stmts.len()),
             ExprKind::Error => "<error>".to_string(),
         }
     }

@@ -533,7 +533,15 @@ pub enum Expr {
     SelfExpr(Span),
     Unary { op: UnaryOp, operand: Box<Expr>, span: Span },
     Binary { op: BinaryOp, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
-    Call { callee: Box<Expr>, args: Vec<Expr>, span: Span },
+    /// `f(a, b)`, or `Circle(radius: 2.0)` for a named-payload variant.
+    /// `arg_names` is the same length as `args`; entries are `None` for
+    /// positional arguments.
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+        arg_names: Vec<Option<Ident>>,
+        span: Span,
+    },
     Field { base: Box<Expr>, name: Ident, optional: bool, span: Span },
     Index { base: Box<Expr>, index: Box<Expr>, span: Span },
     Range { start: Box<Expr>, end: Box<Expr>, inclusive: bool, span: Span },

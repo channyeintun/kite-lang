@@ -1385,8 +1385,19 @@ impl<'a> Parser<'a> {
                 T::LParen => {
                     self.bump();
                     let mut args = Vec::new();
+                    let mut arg_names = Vec::new();
                     self.skip_newlines();
                     while !self.at(T::RParen) && !self.at_end() {
+                        // `Circle(radius: 2.0)` names its payload field. A
+                        // plain `f(x)` does not.
+                        let name = if self.at(T::Ident) && self.peek_at(1) == T::Colon {
+                            let n = self.ident()?;
+                            self.bump(); // `:`
+                            Some(n)
+                        } else {
+                            None
+                        };
+                        arg_names.push(name);
                         args.push(self.in_brackets(|p| p.parse_expr())?);
                         self.skip_newlines();
                         if !self.eat(T::Comma) {
@@ -1396,7 +1407,7 @@ impl<'a> Parser<'a> {
                     }
                     let end = self.expect(T::RParen)?;
                     let span = expr.span().to(end);
-                    expr = Expr::Call { callee: Box::new(expr), args, span };
+                    expr = Expr::Call { callee: Box::new(expr), args, arg_names, span };
                 }
                 T::LBracket => {
                     self.bump();

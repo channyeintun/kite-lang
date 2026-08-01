@@ -1,0 +1,7 @@
+fn main() {
+    let n = 1
+    let d = match n {
+        0 => 1,
+        _ => "other",   //~ ERROR E0200
+    }
+}

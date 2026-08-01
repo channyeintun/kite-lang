@@ -628,3 +628,130 @@ fn a_local_shadows_a_module_path() {
     let c = run("struct B {\n  print: int\n}\nfn main() {\n  let io = B{ print: 7 }\n  let n = io.print\n}\n");
     assert!(!c.diags.has_errors(), "{}", c.render());
 }
+
+// ---- enums and match ------------------------------------------------------
+
+const SHAPE: &str = "\
+enum Shape {
+    Circle(radius: int)
+    Rect(width: int, height: int)
+    Point
+}
+";
+
+fn with_shape(body: &str) -> Ctx {
+    run(&format!("{}\nfn main() {{\n{}\n}}\n", SHAPE, body))
+}
+
+#[test]
+fn a_match_covering_every_variant_checks() {
+    let c = with_shape(
+        "  let d = match Point {\n    Circle(r) => 1,\n    Rect(w, h) => 2,\n    Point => 3,\n  }",
+    );
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+/// The Phase 2 exit criterion: the missing variants are named.
+#[test]
+fn a_non_exhaustive_match_names_the_missing_variants() {
+    let c = with_shape("  let d = match Point {\n    Circle(r) => 1,\n  }");
+    assert!(c.has("E0210"), "{}", c.render());
+    let out = c.render();
+    assert!(out.contains("`Rect(_, _)`"), "{}", out);
+    assert!(out.contains("`Point`"), "{}", out);
+}
+
+#[test]
+fn a_wildcard_makes_a_match_exhaustive() {
+    let c = with_shape("  let d = match Point {\n    Circle(r) => 1,\n    _ => 0,\n  }");
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+/// A guard may fail at run time, so a guarded arm cannot make a match
+/// exhaustive. The message says so.
+#[test]
+fn guarded_arms_do_not_count_towards_coverage() {
+    let c = with_shape(
+        "  let d = match Point {\n    Circle(r) if r > 0 => 1,\n    Rect(w, h) if w > 0 => 2,\n    Point if true => 3,\n  }",
+    );
+    assert!(c.has("E0210"), "{}", c.render());
+    assert!(c.render().contains("guard may fail at run time"), "{}", c.render());
+}
+
+#[test]
+fn an_int_match_needs_a_catch_all() {
+    let c = run("fn main() {\n  let n = 1\n  let d = match n {\n    0 => \"a\",\n    1 => \"b\",\n  }\n}\n");
+    assert!(c.has("E0210"), "{}", c.render());
+}
+
+#[test]
+fn a_bool_match_is_exhaustive_with_both_values() {
+    let c = run("fn main() {\n  let b = true\n  let d = match b {\n    true => 1,\n    false => 2,\n  }\n}\n");
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+#[test]
+fn match_arms_must_agree_on_type() {
+    let c = with_shape("  let d = match Point {\n    Circle(r) => 1,\n    _ => \"x\",\n  }");
+    assert!(c.has("E0200"), "{}", c.render());
+    assert!(c.render().contains("different types"), "{}", c.render());
+}
+
+#[test]
+fn a_guard_must_be_bool() {
+    let c = with_shape("  let d = match Point {\n    Circle(r) if r => 1,\n    _ => 0,\n  }");
+    assert!(c.has("E0202"), "{}", c.render());
+}
+
+#[test]
+fn a_payload_pattern_must_match_the_variants_arity() {
+    let c = with_shape("  let d = match Point {\n    Rect(w) => 1,\n    _ => 0,\n  }");
+    assert!(c.has("E0113"), "{}", c.render());
+}
+
+/// Forgetting the payload is a common slip, so the message shows both fixes.
+#[test]
+fn omitting_a_payload_pattern_suggests_both_forms() {
+    let c = with_shape("  let d = match Point {\n    Circle => 1,\n    _ => 0,\n  }");
+    assert!(c.has("E0113"), "{}", c.render());
+    let out = c.render();
+    assert!(out.contains("Circle(radius)"), "{}", out);
+    assert!(out.contains("Circle(_)"), "{}", out);
+}
+
+#[test]
+fn a_unit_variant_rejects_a_payload() {
+    let c = with_shape("  let d = match Point {\n    Point(x) => 1,\n    _ => 0,\n  }");
+    assert!(c.has("E0113"), "{}", c.render());
+}
+
+#[test]
+fn variant_construction_checks_payload_types() {
+    let c = with_shape("  let s = Circle(radius: \"big\")");
+    assert!(c.has("E0200"), "{}", c.render());
+}
+
+#[test]
+fn an_unknown_payload_field_lists_the_real_ones() {
+    let c = with_shape("  let s = Circle(diameter: 2)");
+    assert!(c.has("E0200"), "{}", c.render());
+    assert!(c.render().contains("radius"), "{}", c.render());
+}
+
+/// Named arguments exist only for variant payloads. Everywhere else the answer
+/// is a struct, whose literal names every field anyway.
+#[test]
+fn functions_reject_named_arguments() {
+    let c = run("fn f(a: int) {\n}\nfn main() {\n  f(a: 1)\n}\n");
+    assert!(c.has("E0113"), "{}", c.render());
+    assert!(c.render().contains("no named arguments"), "{}", c.render());
+}
+
+#[test]
+fn matching_the_wrong_enum_is_reported() {
+    let c = run(&format!(
+        "{}\nenum Other {{\n  Alpha\n}}\nfn main() {{\n  let d = match Point {{\n    Alpha => 1,\n    _ => 0,\n  }}\n}}\n",
+        SHAPE
+    ));
+    assert!(c.has("E0200"), "{}", c.render());
+}

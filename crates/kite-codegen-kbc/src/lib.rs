@@ -102,6 +102,10 @@ pub enum Op {
     /// Field values occupy `base .. base + count`, in declaration order.
     NewStruct { dst: Reg, struct_id: u32, base: Reg, count: u8 },
     GetField { dst: Reg, obj: Reg, index: u16 },
+    /// Payload values occupy `base .. base + count`.
+    NewEnum { dst: Reg, enum_id: u32, variant: u32, base: Reg, count: u8 },
+    /// The variant index of an enum value, as an int.
+    TagOf { dst: Reg, obj: Reg },
     SetField { obj: Reg, index: u16, src: Reg },
 
     /// Arguments occupy `base .. base + argc`.
@@ -277,6 +281,12 @@ impl fmt::Display for Op {
             GetField { dst, obj, index } => {
                 write!(f, "{:<12} r{}, r{}, {}", "get.field", dst, obj, index)
             }
+            NewEnum { dst, enum_id, variant, base, count } => write!(
+                f,
+                "{:<12} r{}, enum{}#{}, r{}, {}",
+                "new.enum", dst, enum_id, variant, base, count
+            ),
+            TagOf { dst, obj } => write!(f, "{:<12} r{}, r{}", "tag", dst, obj),
             SetField { obj, index, src } => {
                 write!(f, "{:<12} r{}, {}, r{}", "set.field", obj, index, src)
             }

@@ -726,3 +726,194 @@ fn main() {
 ";
     assert_eq!(lines(src), vec!["1"]);
 }
+
+// ---- enums and match ------------------------------------------------------
+
+const SHAPE: &str = "\
+enum Shape {
+    Circle(radius: int)
+    Rect(width: int, height: int)
+    Point
+}
+";
+
+fn with_shape(body: &str) -> Vec<String> {
+    lines(&format!("{}\nfn main() {{\n{}\n}}\n", SHAPE, body))
+}
+
+#[test]
+fn a_unit_variant_round_trips() {
+    assert_eq!(
+        with_shape("  let p = Point\n  io.print(match p {\n    Point => \"point\",\n    _ => \"other\",\n  })"),
+        vec!["point"]
+    );
+}
+
+#[test]
+fn a_named_payload_is_constructed_and_destructured() {
+    assert_eq!(
+        with_shape("  let c = Circle(radius: 7)\n  io.print(match c {\n    Circle(r) => r,\n    _ => 0,\n  })"),
+        vec!["7"]
+    );
+}
+
+#[test]
+fn named_arguments_may_be_written_out_of_order() {
+    assert_eq!(
+        with_shape("  let r = Rect(height: 4, width: 3)\n  io.print(match r {\n    Rect(w, h) => w * 10 + h,\n    _ => 0,\n  })"),
+        vec!["34"]
+    );
+}
+
+#[test]
+fn named_patterns_bind_by_field_name() {
+    assert_eq!(
+        with_shape("  let r = Rect(width: 3, height: 4)\n  io.print(match r {\n    Rect(height: h, width: w) => w * 10 + h,\n    _ => 0,\n  })"),
+        vec!["34"]
+    );
+}
+
+#[test]
+fn arms_are_tried_in_order_and_guards_can_fail_through() {
+    let src = format!(
+        "{}\nfn describe(s: Shape) -> str {{\n    return match s {{\n        Circle(r) => \"circle\",\n        Rect(w, h) if w == h => \"square\",\n        Rect(w, h) => \"rect\",\n        Point => \"point\",\n    }}\n}}\nfn main() {{\n    io.print(describe(Circle(radius: 1)))\n    io.print(describe(Rect(width: 2, height: 2)))\n    io.print(describe(Rect(width: 2, height: 3)))\n    io.print(describe(Point))\n}}\n",
+        SHAPE
+    );
+    assert_eq!(lines(&src), vec!["circle", "square", "rect", "point"]);
+}
+
+#[test]
+fn literal_alternation_and_range_patterns() {
+    let src = "\
+fn classify(n: int) -> str {
+    return match n {
+        0 => \"zero\",
+        1 | 2 | 3 => \"small\",
+        4..=9 => \"medium\",
+        _ => \"large\",
+    }
+}
+fn main() {
+    io.print(classify(0))
+    io.print(classify(2))
+    io.print(classify(9))
+    io.print(classify(10))
+}
+";
+    assert_eq!(lines(src), vec!["zero", "small", "medium", "large"]);
+}
+
+#[test]
+fn an_exclusive_range_pattern_excludes_its_end() {
+    let src = "\
+fn f(n: int) -> str {
+    return match n {
+        0..3 => \"in\",
+        _ => \"out\",
+    }
+}
+fn main() {
+    io.print(f(2))
+    io.print(f(3))
+}
+";
+    assert_eq!(lines(src), vec!["in", "out"]);
+}
+
+#[test]
+fn a_negative_literal_pattern_matches() {
+    let src = "\
+fn f(n: int) -> str {
+    return match n {
+        -1 => \"minus one\",
+        _ => \"other\",
+    }
+}
+fn main() {
+    io.print(f(-1))
+    io.print(f(1))
+}
+";
+    assert_eq!(lines(src), vec!["minus one", "other"]);
+}
+
+#[test]
+fn match_works_as_a_statement_for_its_effects() {
+    assert_eq!(
+        with_shape("  match Point {\n    Point => {\n      io.print(\"unit\")\n    }\n    _ => {\n      io.print(\"other\")\n    }\n  }"),
+        vec!["unit"]
+    );
+}
+
+#[test]
+fn a_binding_pattern_captures_the_whole_value() {
+    let src = "\
+fn f(n: int) -> int {
+    return match n {
+        0 => 100,
+        other => other * 2,
+    }
+}
+fn main() {
+    io.print(f(0))
+    io.print(f(21))
+}
+";
+    assert_eq!(lines(src), vec!["100", "42"]);
+}
+
+#[test]
+fn a_struct_pattern_tests_and_binds_fields() {
+    let src = "\
+struct P {
+    x: int
+    y: int
+}
+fn f(p: P) -> str {
+    return match p {
+        P{ x: 0, y: 0 } => \"origin\",
+        P{ x: 0, y } => \"on y\",
+        P{ x, y } => \"elsewhere\",
+    }
+}
+fn main() {
+    io.print(f(P{ x: 0, y: 0 }))
+    io.print(f(P{ x: 0, y: 5 }))
+    io.print(f(P{ x: 1, y: 5 }))
+}
+";
+    assert_eq!(lines(src), vec!["origin", "on y", "elsewhere"]);
+}
+
+#[test]
+fn enum_equality_is_structural() {
+    assert_eq!(
+        with_shape(
+            "  io.print(Circle(radius: 1) == Circle(radius: 1))\n\
+             \x20 io.print(Circle(radius: 1) == Circle(radius: 2))\n\
+             \x20 io.print(Circle(radius: 1) == Point)"
+        ),
+        vec!["true", "false", "false"]
+    );
+}
+
+#[test]
+fn a_recursive_enum_needs_no_boxing_annotation() {
+    let src = "\
+enum Tree {
+    Leaf(int)
+    Node(left: Tree, right: Tree)
+}
+fn total(t: Tree) -> int {
+    return match t {
+        Leaf(n) => n,
+        Node(l, r) => total(l) + total(r),
+    }
+}
+fn main() {
+    let t = Node(left: Node(left: Leaf(1), right: Leaf(2)), right: Leaf(3))
+    io.print(total(t))
+}
+";
+    assert_eq!(lines(src), vec!["6"]);
+}
