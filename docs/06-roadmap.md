@@ -100,17 +100,42 @@ miserable.
 
 ---
 
-## Phase 2 — The type system (6–8 weeks)
+## Phase 2 — The type system
 
-Add: `struct`, `enum`, `match` with exhaustiveness, `trait`, `impl`, generics
-with monomorphisation, `[T]`, `{K: V}`, `?T`, closures.
-
-This is the largest single phase and the one where the specification will be
-found wrong in places. Expect to amend it.
-
-**Exit criterion:** the `Shape`/`Display` example from
+**Exit criterion met.** The `Shape` example from
 [spec §10](../SPECIFICATION.md#10-traits) runs, and a non-exhaustive `match`
-reports exactly which variants are missing.
+reports exactly which variants are missing, by name and arity:
+
+```
+error[E0210]: non-exhaustive match: `Rect(_, _)`, `Point` not covered
+```
+
+**Done:** the interned type arena, `struct` with methods and associated
+functions, `enum` with named and positional payloads, `match` with guards,
+alternation, ranges and struct patterns, exhaustiveness checking, `trait` with
+default methods, and nominal `impl` validation.
+
+**Remaining:** `[T]`, `{K: V}`, `?T`, tuples, closures, generics with
+monomorphisation, `dyn Trait` dispatch, and string interpolation. Each is
+additive; none changes what already works.
+
+Four things came out differently from this plan:
+
+- **`a.b` is no longer folded into a path by the parser.** Whether `io.print`
+  names a module or a field of a local called `io` is a *resolution* question.
+  The parser emits a field access unconditionally and the resolver records its
+  answer against that span. The old design could not express a local shadowing
+  a module path; a test now covers it.
+- **Struct-literal suppression resets inside brackets.** The specification tells
+  users to parenthesise a literal in an `if` condition. Without the reset that
+  advice did not work.
+- **Named call arguments exist, narrowly.** The specification writes
+  `LoadError.Missing(path: path)`, so named-payload variant construction needs
+  them. They are rejected everywhere else, with a note pointing at structs.
+- **`match` lowers to sequential arm tests, not a decision tree.** Bindings are
+  written only after a pattern matches, so a failed arm never leaves a
+  half-written local behind. Sharing tests across arms is an optimisation for
+  later; this is the version whose semantics are obvious.
 
 ---
 
