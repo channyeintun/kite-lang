@@ -1,0 +1,342 @@
+(* ===================================================================
+   Kite — complete grammar
+   Version 0.1 draft, August 2026
+
+   Notation:
+     A B      sequence
+     A | B    alternation
+     [ A ]    optional
+     { A }    zero or more
+     ( A )    grouping
+     "a"      terminal
+     (* … *)  comment
+
+   NEWLINE is significant: it terminates a statement unless the
+   preceding token is an operator, an open delimiter, or a comma.
+   The lexer applies this rule; the grammar below treats statements
+   as newline-terminated and omits NEWLINE for readability.
+   =================================================================== *)
+
+
+(* ------------------------------------------------------------------
+   Compilation unit
+   ------------------------------------------------------------------ *)
+
+SourceFile   = { UseDecl } { Declaration } ;
+
+UseDecl      = "use" ModulePath [ "as" Ident ] ;
+ModulePath   = Ident { "/" Ident } ;
+
+Declaration  = [ "pub" ] ( FnDecl
+                         | StructDecl
+                         | EnumDecl
+                         | TraitDecl
+                         | ImplDecl
+                         | TypeAlias
+                         | ExternDecl ) ;
+
+
+(* ------------------------------------------------------------------
+   Functions
+   ------------------------------------------------------------------ *)
+
+FnDecl       = [ "async" ] "fn" Ident [ Generics ] "(" [ Params ] ")"
+               [ "->" ReturnType ] Block ;
+
+Params       = Param { "," Param } [ "," ] ;
+Param        = [ "var" ] Ident ":" Type ;
+
+ReturnType   = Type
+             | "(" Type "," "error" ")" ;   (* fallible result *)
+
+Generics     = "<" GenericParam { "," GenericParam } ">" ;
+GenericParam = Ident [ ":" TraitBounds ] ;
+TraitBounds  = TypePath { "+" TypePath } ;
+
+
+(* ------------------------------------------------------------------
+   Types
+   ------------------------------------------------------------------ *)
+
+StructDecl   = "struct" Ident [ Generics ] "{" { FieldDecl } "}" ;
+FieldDecl    = [ "pub" ] [ "var" ] Ident ":" Type ;
+
+EnumDecl     = "enum" Ident [ Generics ] "{" { VariantDecl } "}" ;
+VariantDecl  = Ident [ "(" VariantPayload ")" ] ;
+VariantPayload
+             = NamedFields | PositionalFields ;
+NamedFields  = Ident ":" Type { "," Ident ":" Type } [ "," ] ;
+PositionalFields
+             = Type { "," Type } [ "," ] ;
+
+TypeAlias    = "type" Ident [ Generics ] "=" Type ;
+
+Type         = "?" Type                              (* optional        *)
+             | "[" Type "]"                          (* slice           *)
+             | "[" IntLit "]" Type                   (* array           *)
+             | "{" Type ":" Type "}"                 (* map             *)
+             | "(" Type { "," Type } ")"             (* tuple           *)
+             | "fn" "(" [ TypeList ] ")" [ "->" Type ]
+             | "dyn" TypePath                        (* trait object    *)
+             | TypePath ;
+
+TypePath     = [ Ident "." ] Ident [ TypeArgs ] ;
+TypeArgs     = "<" Type { "," Type } ">" ;
+TypeList     = Type { "," Type } [ "," ] ;
+
+
+(* ------------------------------------------------------------------
+   Traits and implementations
+   ------------------------------------------------------------------ *)
+
+TraitDecl    = "trait" Ident [ Generics ] "{" { TraitMember } "}" ;
+TraitMember  = [ "pub" ] TraitFn ;
+TraitFn      = [ "async" ] "fn" Ident [ Generics ]
+               "(" [ SelfParam [ "," Params ] | Params ] ")"
+               [ "->" ReturnType ] [ Block ] ;   (* Block = default impl *)
+
+SelfParam    = [ "var" ] "self" ;
+
+ImplDecl     = "impl" [ Generics ] TypePath [ "for" TypePath ]
+               "{" { ImplMember } "}" ;
+ImplMember   = [ "pub" ] MethodDecl ;
+MethodDecl   = [ "async" ] "fn" Ident [ Generics ]
+               "(" [ SelfParam [ "," Params ] | Params ] ")"
+               [ "->" ReturnType ] Block ;
+
+ExternDecl   = HostAttr "extern" "fn" Ident
+               "(" [ Params ] ")" [ "->" Type ] ;
+HostAttr     = "@" "host" "(" StringLit ")" ;
+
+
+(* ------------------------------------------------------------------
+   Statements
+   ------------------------------------------------------------------ *)
+
+Block        = "{" { Statement } "}" ;
+
+Statement    = LetStmt
+             | VarStmt
+             | AssignStmt
+             | CheckStmt
+             | DeferStmt
+             | ReturnStmt
+             | BreakStmt
+             | ContinueStmt
+             | IfStmt
+             | ForStmt
+             | MatchStmt
+             | ExprStmt ;
+
+LetStmt      = "let" Binding [ ":" Type ] [ "=" Expr ] ;
+VarStmt      = "var" Ident [ ":" Type ] "=" Expr ;
+
+Binding      = Ident
+             | "(" BindElem { "," BindElem } ")" ;   (* destructuring *)
+BindElem     = Ident | "_" ;
+
+AssignStmt   = LValue AssignOp Expr ;
+LValue       = Ident { "." Ident | "[" Expr "]" } ;
+AssignOp     = "=" | "+=" | "-=" | "*=" | "/=" | "%=" ;
+
+CheckStmt    = "check" Expr ;
+
+DeferStmt    = "defer" Expr ;
+
+ReturnStmt   = "return" [ ReturnValue ] ;
+ReturnValue  = Expr
+             | Expr "," Expr            (* value, nil    — success *)
+             | "_" "," Expr ;           (* _,     err    — failure *)
+
+BreakStmt    = "break" [ Label ] ;
+ContinueStmt = "continue" [ Label ] ;
+Label        = Ident ;
+
+IfStmt       = "if" Expr Block { "else" "if" Expr Block } [ "else" Block ] ;
+
+ForStmt      = [ Label ":" ] "for" ForHeader Block ;
+ForHeader    = Binding "in" Expr        (* iterate      *)
+             | Expr                     (* conditional  *)
+             | (* empty *) ;            (* unconditional *)
+
+MatchStmt    = "match" Expr "{" { MatchArm } "}" ;
+MatchArm     = Pattern [ "if" Expr ] "=>" ( Expr | Block ) [ "," ] ;
+
+ExprStmt     = Expr ;
+
+
+(* ------------------------------------------------------------------
+   Patterns
+   ------------------------------------------------------------------ *)
+
+Pattern      = OrPattern ;
+OrPattern    = SinglePattern { "|" SinglePattern } ;
+
+SinglePattern
+             = "_"                                      (* wildcard   *)
+             | "nil"
+             | Literal
+             | Literal ".." [ "=" ] Literal              (* range      *)
+             | Ident                                     (* binding    *)
+             | TypePath [ "(" PatternArgs ")" ]          (* variant    *)
+             | TypePath "{" FieldPatterns "}"            (* struct     *)
+             | "(" Pattern { "," Pattern } ")" ;         (* tuple      *)
+
+PatternArgs  = Pattern { "," Pattern } [ "," ]
+             | Ident ":" Pattern { "," Ident ":" Pattern } [ "," ] ;
+
+FieldPatterns
+             = FieldPattern { "," FieldPattern } [ "," ] [ ".." ] ;
+FieldPattern = Ident [ ":" Pattern ] ;
+
+
+(* ------------------------------------------------------------------
+   Expressions — precedence climbing, loosest to tightest
+   ------------------------------------------------------------------ *)
+
+Expr         = CoalesceExpr ;
+
+CoalesceExpr = OrExpr [ "??" CoalesceExpr ] ;          (* right assoc  *)
+OrExpr       = AndExpr { "||" AndExpr } ;
+AndExpr      = CmpExpr { "&&" CmpExpr } ;
+CmpExpr      = BitExpr [ CmpOp BitExpr ] ;             (* non-assoc    *)
+CmpOp        = "==" | "!=" | "<" | "<=" | ">" | ">=" ;
+BitExpr      = ShiftExpr { ( "&" | "^" | "|" ) ShiftExpr } ;
+ShiftExpr    = AddExpr { ( "<<" | ">>" ) AddExpr } ;
+AddExpr      = MulExpr { ( "+" | "-" ) MulExpr } ;
+MulExpr      = CastExpr { ( "*" | "/" | "%" ) CastExpr } ;
+CastExpr     = UnaryExpr { "as" Type } ;
+UnaryExpr    = [ "-" | "!" | "await" ] PostfixExpr ;
+
+PostfixExpr  = PrimaryExpr { Postfix } ;
+Postfix      = "." Ident
+             | "?" "." Ident                          (* optional chain *)
+             | "(" [ Args ] ")"                       (* call           *)
+             | "[" Expr "]"                           (* index          *)
+             | "[" [ Expr ] ".." [ Expr ] "]" ;       (* slice          *)
+
+Args         = Expr { "," Expr } [ "," ] ;
+
+PrimaryExpr  = Literal
+             | Ident
+             | "self"
+             | "(" Expr ")"
+             | TupleLit
+             | SliceLit
+             | MapLit
+             | StructLit
+             | Closure
+             | IfExpr
+             | MatchExpr
+             | RangeExpr ;
+
+TupleLit     = "(" Expr "," [ Expr { "," Expr } ] ")" ;
+SliceLit     = "[" [ Expr { "," Expr } [ "," ] ] "]" ;
+MapLit       = "{" [ MapEntry { "," MapEntry } [ "," ] ] "}" ;
+MapEntry     = Expr ":" Expr ;
+
+StructLit    = TypePath "{" [ StructBody ] "}" ;
+StructBody   = [ ".." Expr "," ] FieldInit { "," FieldInit } [ "," ]
+             | ".." Expr [ "," ] ;
+FieldInit    = Ident ":" Expr ;
+
+Closure      = "|" [ ClosureParams ] "|" ( Block | [ "->" Type ] Expr ) ;
+ClosureParams
+             = ClosureParam { "," ClosureParam } ;
+ClosureParam = Ident [ ":" Type ] ;
+
+IfExpr       = "if" Expr Block "else" ( Block | IfExpr ) ;
+MatchExpr    = "match" Expr "{" { MatchArm } "}" ;
+RangeExpr    = Expr ".." [ "=" ] Expr ;
+
+
+(* ------------------------------------------------------------------
+   Literals and lexical elements
+   ------------------------------------------------------------------ *)
+
+Literal      = IntLit | FloatLit | StringLit | CharLit
+             | "true" | "false" | "nil" ;
+
+IntLit       = DecInt | HexInt | OctInt | BinInt ;
+DecInt       = Digit { Digit | "_" } [ IntSuffix ] ;
+HexInt       = "0x" HexDigit { HexDigit | "_" } [ IntSuffix ] ;
+OctInt       = "0o" OctDigit { OctDigit | "_" } [ IntSuffix ] ;
+BinInt       = "0b" BinDigit { BinDigit | "_" } [ IntSuffix ] ;
+IntSuffix    = "i8" | "i16" | "i32" | "i64"
+             | "u8" | "u16" | "u32" | "u64" ;
+
+FloatLit     = Digit { Digit | "_" } "." Digit { Digit | "_" }
+               [ Exponent ] [ FloatSuffix ] ;
+Exponent     = ( "e" | "E" ) [ "+" | "-" ] Digit { Digit } ;
+FloatSuffix  = "f32" | "f64" ;
+
+StringLit    = SimpleString | MultiString ;
+SimpleString = '"' { StringElem } '"' ;
+MultiString  = '"""' NEWLINE { AnyChar } '"""' ;
+StringElem   = Char
+             | Escape
+             | Interpolation ;
+Interpolation
+             = "\" "(" Expr ")" ;
+Escape       = "\" ( "n" | "t" | "r" | "0" | "\" | '"' | "'"
+                   | "u" "{" HexDigit { HexDigit } "}" ) ;
+
+CharLit      = "'" ( Char | Escape ) "'" ;
+
+Ident        = XIDStart { XIDContinue } ;   (* Unicode; NFC-normalised *)
+
+Comment      = LineComment | DocComment ;
+LineComment  = "//" { AnyCharButNewline } ;
+DocComment   = "///" { AnyCharButNewline } ;
+
+
+(* ------------------------------------------------------------------
+   Reserved words — 26
+   ------------------------------------------------------------------ *)
+
+Keyword = "async"  | "await"  | "as"     | "break"  | "check"
+        | "continue"| "defer" | "else"   | "enum"   | "false"
+        | "fn"     | "for"    | "if"     | "impl"   | "in"
+        | "let"    | "match"  | "nil"    | "pub"    | "return"
+        | "self"   | "struct" | "trait"  | "true"   | "type"
+        | "use" ;
+
+(* Contextual, not reserved — usable as identifiers:
+     dyn, error, Self
+   `dyn` is only special before a type path in type position.
+   `error` is a built-in type alias, shadowable by a user binding.
+   `Self` is only bound inside trait and impl bodies.                 *)
+
+
+(* ------------------------------------------------------------------
+   Notes on parsing
+   ------------------------------------------------------------------ *)
+
+(*
+  1. StructLit vs Block ambiguity.
+     `if x { … }` — is `x { … }` a struct literal?
+     Resolved as Go and Rust do: struct literals are not permitted in
+     the condition position of if/for/match without parentheses.
+     Write `if (Point{x: 1.0, y: 2.0}).is_origin() { … }`.
+
+  2. Closure vs bitwise-or.
+     `|` opens a closure only in expression-start position. In infix
+     position it is always bitwise or. The parser knows which by
+     position, requiring no lookahead.
+
+  3. Range vs field access.
+     `0..10` — the lexer emits ".." as one token, so `0.` is never
+     scanned as a float when followed by a second dot. Maximal munch
+     on "..=" as well.
+
+  4. Non-associative comparison.
+     `a < b < c` is a parse error, not a silent bug. CmpExpr admits at
+     most one CmpOp.
+
+  5. `await` binds as a prefix unary operator, tighter than any binary
+     operator: `await f() + 1` is `(await f()) + 1`.
+
+  6. Return arity.
+     `return a, b` is valid only when the function's declared return
+     type is `(T, error)`. Enforced in the type checker, not here.
+*)

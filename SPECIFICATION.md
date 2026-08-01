@@ -1,0 +1,1433 @@
+# The Kite Language Specification
+
+**Version:** 0.1 (draft)
+**Date:** August 2026
+**Status:** Design document. Not yet implemented.
+
+---
+
+## Table of contents
+
+1. [Design rationale](#1-design-rationale)
+2. [Lexical structure](#2-lexical-structure)
+3. [Types](#3-types)
+4. [Declarations and visibility](#4-declarations-and-visibility)
+5. [Expressions](#5-expressions)
+6. [Statements and control flow](#6-statements-and-control-flow)
+7. [Error handling](#7-error-handling)
+8. [Structs and methods](#8-structs-and-methods)
+9. [Enums and pattern matching](#9-enums-and-pattern-matching)
+10. [Traits](#10-traits)
+11. [Generics](#11-generics)
+12. [Concurrency](#12-concurrency)
+13. [Modules and packages](#13-modules-and-packages)
+14. [Memory model](#14-memory-model)
+15. [Foreign function interface](#15-foreign-function-interface)
+16. [Diagnostics](#16-diagnostics)
+17. [Deliberate omissions](#17-deliberate-omissions)
+
+---
+
+## 1. Design rationale
+
+### 1.1 The concept budget
+
+A language's difficulty is not measured in keywords but in **concepts that must
+be held simultaneously to read a line of code**. Go has 25 keywords but requires
+a beginner to understand goroutines, channels, `select`, value-versus-pointer
+receivers, nil interfaces versus nil pointers, and slice aliasing. Kite's budget
+is spent as follows, and this list is complete:
+
+1. `let` / `var` — immutable and mutable bindings
+2. Primitive types, slices, maps, tuples, optionals
+3. `fn` — functions, including closures
+4. `if` / `for` / `match` — control flow
+5. `struct` + `impl` — data and its methods
+6. `enum` — alternatives
+7. `trait` — shared behaviour
+8. `(T, error)` — fallible results
+9. `async` / `await` — operations that take time
+10. `pub` + modules — encapsulation
+
+There is no eleventh concept. Everything else in this document is a consequence
+of these ten.
+
+### 1.2 Why explicitness beats terseness here
+
+Kite assumes code is read far more often than written, and that a significant
+share of it is drafted with machine assistance. Under those assumptions the
+costs invert:
+
+- **Typing cost approaches zero.** Verbosity that would have been a burden in
+  1995 is now nearly free to produce.
+- **Reading cost dominates.** A reader — human or machine — must be able to
+  determine what a line does without holding the rest of the file in memory.
+- **Hidden control flow is the expensive thing.** An exception that unwinds
+  through six frames, an implicit conversion, an overloaded operator, a
+  destructor with side effects: each forces the reader to consult code that is
+  not on screen.
+
+Kite therefore has **no** exceptions, **no** operator overloading, **no**
+implicit numeric conversion, **no** destructors, **no** macros, and **no**
+function overloading. Every call is visible. Every failure path is visible.
+Every allocation site is an expression you can point at.
+
+### 1.3 Why immutable by default
+
+This decision, made once, pays three times:
+
+1. **It eliminates the pointer/value distinction.** Go beginners must learn when
+   to write `func (p *Point)` versus `func (p Point)`. In Kite structs are always
+   GC references and always passed by reference, but you cannot mutate one unless
+   its fields were declared `var`. The confusing case disappears.
+2. **It maps exactly onto WasmGC.** A WasmGC `struct` type declares a mutability
+   flag *per field*. Kite's `var` marker on a field is the same bit. Immutable
+   fields let the engine hoist and constant-fold loads without alias analysis.
+3. **It makes most types thread-shareable for free.** See
+   [§12.4](#124-the-share-marker). A deeply immutable value is safe to share by
+   construction. Because immutability is the default, the overwhelming majority
+   of user types qualify without the user ever thinking about it.
+
+---
+
+## 2. Lexical structure
+
+### 2.1 Source encoding
+
+Source files are UTF-8. The file extension is `.kite`. Identifiers may contain
+any Unicode `XID_Start` / `XID_Continue` characters, so non-Latin identifiers are
+supported. Source is normalised to NFC before comparison, so visually identical
+identifiers are the same identifier.
+
+### 2.2 Keywords
+
+Twenty-six, complete:
+
+```
+async    await    as       break    check    continue
+defer    else     enum     false    fn       for
+if       impl     in       let      match    nil
+pub      return   self     struct   trait    true
+type     use
+```
+
+Notably absent, and deliberately: `class`, `new`, `delete`, `null`, `void`,
+`throw`, `try`, `catch`, `finally`, `switch`, `case`, `default`, `while`, `do`,
+`goto`, `static`, `const`, `volatile`, `interface`, `extends`, `implements`,
+`super`, `this`, `go`, `chan`, `select`, `defer`-with-panic, `unsafe`, `macro`.
+
+### 2.3 Comments
+
+```kite
+// Line comment.
+
+/// Documentation comment. Attaches to the following declaration.
+/// Markdown is permitted. Code fences are extracted and compiled as tests.
+```
+
+There are no block comments. Nested block comments are a recurring source of
+lexer bugs and editors have made line-commenting a single keystroke since 1998.
+
+### 2.4 Literals
+
+```kite
+42            // int
+42i32         // typed integer literal
+1_000_000     // underscores permitted as separators
+0xFF  0o755  0b1010_1101
+3.14          // float (f64)
+2.5f32
+'a'  '\n'  '\u{1F600}'      // char — one Unicode scalar value
+"hello"                      // str
+"line\nbreak"
+"""
+multi-line string, leading indentation stripped
+to match the closing delimiter
+"""
+true  false
+nil
+```
+
+String interpolation uses `\(expr)`:
+
+```kite
+let name = "world"
+io.print("hello, \(name), you are \(age) years old")
+```
+
+Interpolation calls `Display.show` on the operand. It is not `printf`; there is
+no format-string language to learn and no format-string injection surface.
+
+### 2.5 Semicolon insertion
+
+Statements are newline-terminated. Semicolons are never written. A statement
+continues onto the next line when the line ends in an operator, an open
+delimiter, or a comma. This is the same rule as Swift and Kotlin, and unlike
+JavaScript's it has no hazardous cases because Kite has no prefix-`(` or
+prefix-`[` expression statements.
+
+---
+
+## 3. Types
+
+### 3.1 Primitives
+
+| Type | Description | Wasm representation |
+|---|---|---|
+| `bool` | `true` / `false` | `i32` |
+| `int` | 64-bit signed; the default integer | `i64` |
+| `i8` `i16` `i32` `i64` | Sized signed integers | `i32` / `i64` |
+| `u8` `u16` `u32` `u64` | Sized unsigned integers | `i32` / `i64` |
+| `byte` | Alias for `u8` | `i32` |
+| `float` | 64-bit IEEE-754; the default float | `f64` |
+| `f32` `f64` | Sized floats | `f32` / `f64` |
+| `char` | One Unicode scalar value | `i32` |
+| `str` | Immutable UTF-8 string | `externref` (JS string) or `array i8` |
+
+**There are no implicit numeric conversions.** `let x: i64 = my_i32` is a
+compile error; write `my_i32 as i64`. Integer overflow traps in debug builds and
+wraps in release builds, matching the default most users expect while keeping
+release performance predictable. `math.wrapping_add` and `math.checked_add` are
+available when the behaviour must be explicit regardless of build mode.
+
+**On `str`:** on the web target, `str` lowers to a JavaScript string reference
+using the **JS String Builtins** proposal, which is baseline in all browsers as
+of 2025. This means passing a string to a DOM API costs nothing — no copy, no
+encoding pass, no glue code. On native and bytecode targets, `str` is a
+GC-managed UTF-8 byte array. Kite programs cannot observe the difference:
+`str` is indexed by grapheme-safe operations only, never by byte offset.
+
+### 3.2 Composite types
+
+```kite
+[T]           // slice — growable, GC-managed sequence
+[N]T          // array — fixed length N, known at compile time
+{K: V}        // map — hash map with deterministic iteration order
+(A, B, C)     // tuple
+?T            // optional — either a T or nil
+fn(A, B) -> C // function type
+```
+
+Maps iterate in **insertion order**. Go randomises map iteration to prevent
+reliance on order; Kite instead guarantees an order, which is cheaper to reason
+about and removes an entire class of nondeterministic test failure.
+
+### 3.3 Optionals
+
+`?T` is the only place `nil` may appear other than the `error` slot
+([§7](#7-error-handling)). There is no null reference. A `Config` is always a
+`Config`; a `?Config` might be nil, and the compiler will not let you use it as a
+`Config` until you have handled that.
+
+```kite
+let maybe: ?User = users.find(id)
+
+let name = maybe?.name              // ?str — optional chaining
+let display = maybe?.name ?? "anon" // str — default operator
+
+match maybe {
+    nil  => io.print("not found"),
+    user => io.print(user.name),    // `user` is bound as User, not ?User
+}
+```
+
+`??` also works on fallible results ([§7.5](#75-defaulting)), where it means the
+same thing: *"or else this."*
+
+### 3.4 Type declarations
+
+```kite
+type UserId = int                   // alias — interchangeable with int
+type Celsius = float                // alias
+
+pub struct Point {
+    x: float
+    y: float
+}
+
+pub enum Status {
+    Active
+    Suspended(reason: str)
+    Deleted(at: Timestamp, by: UserId)
+}
+```
+
+---
+
+## 4. Declarations and visibility
+
+### 4.1 Bindings
+
+```kite
+let x = 42              // immutable; type inferred as int
+let y: float = 3.0      // immutable, explicit type
+var count = 0           // mutable
+count = count + 1
+
+let z: int              // declaration without initialiser
+if condition {
+    z = 1
+} else {
+    z = 2
+}
+// `z` is definitely-assigned here and immutable from now on
+```
+
+Deferred initialisation of a `let` is permitted provided the compiler can prove
+exactly one assignment occurs on every path before first use. This removes the
+main reason people reach for `var`.
+
+Shadowing within a nested scope is permitted. Shadowing within the *same* scope
+is an error — it is almost always a typo.
+
+### 4.2 Visibility
+
+`pub` is the only visibility modifier. There are exactly two levels:
+
+- **Unmarked** — visible within the declaring module (a directory).
+- **`pub`** — visible to anything that imports the module.
+
+`pub` applies to modules, functions, types, struct fields, enum variants, traits,
+and trait methods. A `pub struct` with unmarked fields is an opaque type: callers
+can hold it and pass it, but cannot read, construct, or destructure it.
+
+```kite
+pub struct Connection {
+    pub host: str       // readable by importers
+    socket: Socket      // module-private
+    var retries: int    // module-private and mutable
+}
+```
+
+There is no `protected`, no `internal`, no friend declarations, and no
+crate/package distinction layered on top. Two levels have proven sufficient in
+Go for fifteen years.
+
+### 4.3 Functions
+
+```kite
+pub fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+fn greet(name: str) {           // no return type means it returns nothing
+    io.print("hello \(name)")
+}
+
+pub fn divide(a: int, b: int) -> (int, error) {
+    if b == 0 {
+        return _, errors.new("division by zero")
+    }
+    return a / b, nil
+}
+```
+
+Parameters are immutable inside the body unless declared `var`. There are no
+default arguments, no variadic parameters, no named arguments at call sites, and
+no overloading. If a function needs many optional inputs, it takes a struct:
+
+```kite
+pub struct RequestOptions {
+    method: str
+    timeout: Duration
+    headers: {str: str}
+}
+
+pub fn request(url: str, opts: RequestOptions) -> (Response, error)
+
+// call site
+let (res, err) = http.request(url, RequestOptions{
+    method:  "POST",
+    timeout: time.seconds(30),
+    headers: {"content-type": "application/json"},
+})
+```
+
+Struct literals require field names, so this reads as well as named arguments
+would, using machinery the language already has.
+
+### 4.4 Closures
+
+```kite
+let double = |x: int| -> int { return x * 2 }
+let double = |x| x * 2                       // types inferred, expression body
+
+let total = items.fold(0, |acc, item| acc + item.price)
+```
+
+Closures capture by reference to the GC-managed binding. Because `let` bindings
+are immutable, the vast majority of captures are trivially safe. Capturing a
+`var` binding in a closure that outlives its scope is permitted — the binding is
+promoted to a heap cell — but such a closure is not `Share`
+([§12.4](#124-the-share-marker)).
+
+---
+
+## 5. Expressions
+
+### 5.1 Operator precedence
+
+Highest to lowest:
+
+| Level | Operators | Associativity |
+|---|---|---|
+| 1 | `a.b`  `a?.b`  `a(…)`  `a[…]` | left |
+| 2 | `-a`  `!a` | prefix |
+| 3 | `as` | left |
+| 4 | `*`  `/`  `%` | left |
+| 5 | `+`  `-` | left |
+| 6 | `<<`  `>>` | left |
+| 7 | `&`  `^`  `\|` | left |
+| 8 | `==` `!=` `<` `<=` `>` `>=` | non-associative |
+| 9 | `&&` | left |
+| 10 | `\|\|` | left |
+| 11 | `??` | right |
+
+Bitwise operators bind tighter than comparison, unlike C. `a & b == c` means
+`(a & b) == c`, which is what everyone intends and C gets wrong. Comparison is
+non-associative: `a < b < c` is a syntax error, not a silent bug.
+
+### 5.2 Equality
+
+`==` is structural for all types: two structs are equal when their fields are
+equal, two slices when their elements are. There is no reference equality
+operator in the surface language; `ptr.same(a, b)` exists in the standard library
+for the rare case that needs it.
+
+Floating-point `==` follows IEEE-754, so `nan != nan`. The compiler emits a
+warning when both operands of `==` are statically known to be floats and neither
+is a literal, suggesting `math.approx_eq`.
+
+### 5.3 Struct literals
+
+```kite
+let p = Point{ x: 1.0, y: 2.0 }
+
+// functional update — produces a new value, does not mutate
+let q = Point{ ..p, y: 5.0 }
+```
+
+All fields must be given unless `..base` is used. There are no zero values in
+Kite — a struct literal that omits a field without `..` is a compile error. This
+removes Go's most common production bug, where a forgotten field silently
+becomes `0`, `""`, or `nil`.
+
+### 5.4 Slices and maps
+
+```kite
+let xs = [1, 2, 3]
+let ys: [int] = []
+let m = {"a": 1, "b": 2}
+
+xs[0]                 // int — bounds-checked, traps on failure
+xs.get(0)             // ?int — bounds-checked, returns nil on failure
+xs[1..3]              // [int] — subslice, half-open
+xs.len()              // int
+m["a"]                // ?int — map indexing always yields an optional
+```
+
+Map indexing returns `?V`, never a zero value. Slice indexing with `[]` traps on
+out-of-bounds because that is a program bug, not a runtime condition; `.get()` is
+provided for the case where it genuinely is a runtime condition.
+
+---
+
+## 6. Statements and control flow
+
+### 6.1 `if`
+
+```kite
+if x > 10 {
+    io.print("big")
+} else if x > 5 {
+    io.print("medium")
+} else {
+    io.print("small")
+}
+```
+
+Parentheses around the condition are not permitted. Braces are always required.
+The condition must be `bool` — there is no truthiness.
+
+`if` is also an expression when every branch yields a value and an `else` is
+present:
+
+```kite
+let label = if x > 10 { "big" } else { "small" }
+```
+
+### 6.2 `for`
+
+`for` is the only loop keyword. It has three forms.
+
+```kite
+// 1. Iterate anything implementing Iterate
+for item in items {
+    io.print(item)
+}
+
+for i in 0..10 { }          // range, half-open: 0 through 9
+for i in 0..=10 { }         // inclusive range
+
+for (key, value) in m { }   // maps yield tuples
+for (i, item) in items.enumerate() { }
+
+// 2. Conditional
+for count < 10 {
+    count = count + 1
+}
+
+// 3. Unconditional
+for {
+    if done { break }
+}
+```
+
+There is no C-style three-clause `for`, no `while`, and no `do…while`. Labelled
+`break` and `continue` are supported for nested loops:
+
+```kite
+outer: for row in grid {
+    for cell in row {
+        if cell.empty { continue outer }
+    }
+}
+```
+
+### 6.3 `defer`
+
+```kite
+fn process(path: str) -> (Data, error) {
+    let (file, err) = fs.open(path)
+    check err
+    defer file.close()
+
+    // ... any return from here closes the file
+}
+```
+
+Deferred calls run in reverse order of registration when the enclosing function
+returns, by any path. Unlike Go, `defer` cannot modify the return value — it is
+purely for release of resources, which is the only use that survives scrutiny.
+
+### 6.4 `match`
+
+See [§9](#9-enums-and-pattern-matching).
+
+---
+
+## 7. Error handling
+
+This is the part of Kite that differs most from its influences, so the reasoning
+is given in full.
+
+### 7.1 The problem being solved
+
+Go's `(T, error)` convention is correct in philosophy: errors are ordinary
+values, every failure point is visible in the source, and there is no invisible
+unwinding. Its flaws are not in the shape but in the enforcement:
+
+1. **An error can be silently dropped.** `v, _ := f()` compiles, and so does
+   simply never testing `err`.
+2. **The value is valid-looking on the error path.** When `f` fails, `v` is the
+   zero value — `0`, `""`, `nil` — and it flows onward indistinguishably from a
+   real result. This is the mechanism behind a large share of production nil
+   dereferences.
+3. **There is no exhaustiveness.** Nothing checks that you handled the error at
+   all.
+
+In 2025 the Go team formally announced they will pursue **no further
+error-handling syntax proposals**, closing the door on fixing this within Go. So
+the shape is worth keeping and the enforcement is worth adding.
+
+### 7.2 The `error` type
+
+```kite
+pub trait Error {
+    fn message(self) -> str
+    fn cause(self) -> ?error { return nil }
+}
+```
+
+`error` is a built-in alias for `?dyn Error`: either `nil`, or some value
+implementing `Error`. Any type can implement `Error`.
+
+```kite
+pub struct NotFound {
+    pub resource: str
+    pub id: str
+}
+
+impl Error for NotFound {
+    fn message(self) -> str {
+        return "\(self.resource) \(self.id) not found"
+    }
+}
+```
+
+### 7.3 Correlated results and taint analysis
+
+A function returning `(T, error)` returns a **correlated pair**. The compiler
+tracks two flow-sensitive states across the function body:
+
+- The error binding is **Unchecked** or **Checked**.
+- The value binding is **Tainted** or **Clean**.
+
+The rules:
+
+> **R1.** After `let (v, e) = f()`, `e` is Unchecked and `v` is Tainted.
+>
+> **R2.** Reading a Tainted binding is a compile error (`E0301`).
+>
+> **R3.** An Unchecked binding going out of scope is a compile error (`E0302`).
+>
+> **R4.** On any path where the compiler proves `e == nil`, `e` becomes Checked
+> and `v` becomes Clean.
+>
+> **R5.** On any path where `e != nil`, `e` becomes Checked and `v` remains
+> Tainted permanently. The value slot on an error path holds no value at all —
+> not a zero value — and cannot be read.
+
+The analysis is a standard forward dataflow pass over the control-flow graph,
+run after type checking. It is not a borrow checker; it has no notion of
+ownership, aliasing, or lifetimes, and it terminates in a single pass because the
+lattice has height two.
+
+In practice:
+
+```kite
+fn load_user(id: UserId) -> (User, error) {
+    let (raw, err) = db.query("SELECT ...", id)
+    // raw: Tainted    err: Unchecked
+
+    if err != nil {
+        return _, err       // raw is still Tainted here — cannot be used
+    }
+    // raw: Clean     err: Checked
+
+    return parse_user(raw)
+}
+```
+
+Attempting to skip the check:
+
+```kite
+fn broken(id: UserId) -> User {
+    let (raw, err) = db.query("SELECT ...", id)
+    return parse_user(raw)
+}
+```
+
+```
+error[E0301]: `raw` is used before `err` has been checked
+   ┌─ users.kite:3:23
+   │
+ 2 │     let (raw, err) = db.query("SELECT ...", id)
+   │          ---  --- this error is never checked
+   │          │
+   │          `raw` is only valid when `err` is nil
+ 3 │     return parse_user(raw)
+   │                       ^^^ used here while still tainted
+   │
+help: check the error first
+   │
+ 3 │     check err
+ 4 │     return parse_user(raw)
+   │
+```
+
+### 7.4 The `check` keyword
+
+The propagation case — *"if this failed, my caller should deal with it"* — is
+the overwhelming majority of error handling in real code. It gets one keyword:
+
+```kite
+check err
+```
+
+which is defined as exactly:
+
+```kite
+if err != nil {
+    return _, err
+}
+```
+
+`check` is only valid inside a function whose last return component is `error`.
+`_` in a return's value position means *no value*; it is not a zero value and
+the correlated pair records the error branch.
+
+This is deliberately **not** Rust's `?`. A postfix `?` disappears into the middle
+of an expression and permits nesting failures inside a larger expression. `check`
+occupies its own line, is greppable, and preserves Go's central virtue: you can
+scan the left margin of a function and see every place it can fail.
+
+```kite
+pub fn load_config(path: str) -> (Config, error) {
+    let (bytes, err) = fs.read(path)
+    check err
+
+    let (text, err) = str.from_utf8(bytes)
+    check err
+
+    let (cfg, err) = toml.parse(text)
+    check err
+
+    return cfg, nil
+}
+```
+
+Rebinding `err` in the same scope is permitted, and is the one exception to the
+same-scope shadowing rule in [§4.1](#41-bindings) — but only because the previous
+`err` is provably Checked at that point.
+
+### 7.5 Defaulting
+
+To handle a failure by substituting a value, discarding the error deliberately:
+
+```kite
+let port = config.get_int("port") ?? 8080
+```
+
+`??` on a `(T, error)` evaluates the left side; if the error is nil it yields the
+value, otherwise it yields the right side. The error is discarded, and this is
+visible in the source.
+
+### 7.6 Adding context
+
+```kite
+let (bytes, err) = fs.read(path)
+check errors.wrap(err, "loading config from \(path)")
+```
+
+`errors.wrap` returns nil when given nil, so this composes with `check` directly.
+`errors.chain(err)` walks the `cause` chain, and `errors.is<T>(err)` /
+`errors.as<T>(err)` test and extract concrete error types.
+
+### 7.7 Unrecoverable failures
+
+Some conditions are not errors — they are bugs. Array index out of range,
+integer division by zero, an exhausted invariant. These **trap**: the Wasm
+`unreachable` instruction on the web target, `abort` on native. A trap is not
+catchable. There is no `recover`, no panic handler, and no unwinding.
+
+`assert(cond, msg)` traps when `cond` is false. It is compiled out in release
+builds; `require(cond, msg)` is the always-on variant.
+
+This is a deliberate rejection of Go's `panic`/`recover`, which creates a second,
+invisible error-propagation channel alongside the visible one.
+
+---
+
+## 8. Structs and methods
+
+### 8.1 Declaration
+
+```kite
+pub struct Rect {
+    pub width:  float
+    pub height: float
+    pub var label: str      // mutable field
+}
+```
+
+Struct values are GC-managed references. Assignment copies the reference, not the
+contents. Because fields are immutable unless marked `var`, this is
+indistinguishable from value semantics for the majority of types, without the
+copying cost or the pointer/value receiver distinction.
+
+### 8.2 Methods
+
+```kite
+impl Rect {
+    pub fn area(self) -> float {
+        return self.width * self.height
+    }
+
+    pub fn scaled(self, factor: float) -> Rect {
+        return Rect{ ..self, width: self.width * factor, height: self.height * factor }
+    }
+
+    pub fn rename(var self, name: str) {
+        self.label = name       // permitted: `var self` and `label` is `var`
+    }
+
+    // Associated function — no self
+    pub fn square(side: float) -> Rect {
+        return Rect{ width: side, height: side, label: "" }
+    }
+}
+```
+
+`self` is immutable unless the method declares `var self`. A method with `var
+self` cannot be called on a binding the caller does not own mutably.
+
+`Rect.square(2.0)` calls the associated function; `r.area()` calls the method.
+
+Multiple `impl` blocks for the same type are permitted within a module. A type's
+inherent methods must be declared in the module that declares the type — there
+are no extension methods, so `x.foo()` can always be resolved by looking at where
+`x`'s type is defined.
+
+---
+
+## 9. Enums and pattern matching
+
+### 9.1 Enums
+
+```kite
+pub enum Shape {
+    Circle(radius: float)
+    Rect(width: float, height: float)
+    Point
+}
+
+pub enum Json {
+    Null
+    Bool(bool)
+    Number(float)
+    Text(str)
+    Array([Json])
+    Object({str: Json})
+}
+```
+
+Variants may carry named or positional payloads. Enums are recursive by default —
+`Json` above needs no boxing annotation, because every Kite aggregate is already
+a GC reference.
+
+### 9.2 `match`
+
+```kite
+let description = match shape {
+    Circle(radius) => "circle of radius \(radius)",
+    Rect(w, h) if w == h => "square of side \(w)",
+    Rect(w, h) => "rect \(w)x\(h)",
+    Point => "a point",
+}
+```
+
+`match` is exhaustive. Omitting a variant is a compile error that names the
+missing variants:
+
+```
+error[E0210]: non-exhaustive match
+   ┌─ shapes.kite:4:22
+   │
+ 4 │     let d = match shape {
+   │                   ^^^^^ variants `Point` and `Rect` not covered
+   │
+help: add the missing arms, or a catch-all `_ =>`
+```
+
+Exhaustiveness is what makes adding an enum variant safe: the compiler shows you
+every place that must change.
+
+### 9.3 Patterns
+
+```kite
+match value {
+    0            => "zero",              // literal
+    1 | 2 | 3    => "small",             // alternation
+    4..=9        => "medium",            // range
+    n if n < 0   => "negative",          // guard
+    _            => "large",             // wildcard
+}
+
+match point {
+    Point{ x: 0.0, y: 0.0 } => "origin",   // struct pattern
+    Point{ x: 0.0, y }      => "on y axis at \(y)",
+    Point{ x, y }           => "at \(x),\(y)",
+}
+
+match pair {
+    (nil, nil)   => "neither",
+    (a, nil)     => "first only",
+    (nil, b)     => "second only",
+    (a, b)       => "both",
+}
+```
+
+Bindings introduced by patterns are immutable. There is no `ref` or `mut` in
+patterns because there are no references to bind.
+
+---
+
+## 10. Traits
+
+### 10.1 Declaration and implementation
+
+```kite
+pub trait Display {
+    fn show(self) -> str
+}
+
+pub trait Comparable {
+    fn compare(self, other: Self) -> Ordering
+
+    // Default methods
+    fn less_than(self, other: Self) -> bool {
+        return self.compare(other) == Ordering.Less
+    }
+}
+
+impl Display for Rect {
+    fn show(self) -> str {
+        return "Rect(\(self.width) x \(self.height))"
+    }
+}
+```
+
+Trait implementation is **explicit and nominal**, unlike Go's structural
+interfaces. The reasoning: structural satisfaction produces error messages that
+name the missing method but cannot name the intent, and it makes accidental
+satisfaction possible. `impl Display for Rect` is a statement the author made on
+purpose, and the compiler can say "`Rect` does not implement `Display`" with a
+precise place to point at.
+
+`Self` inside a trait refers to the implementing type.
+
+### 10.2 Coherence
+
+A trait implementation is permitted only in the module that declares the trait or
+the module that declares the type. This is the orphan rule, and it guarantees
+that a given (trait, type) pair has exactly one implementation program-wide,
+which is what makes trait resolution decidable and separate compilation possible.
+
+### 10.3 Static and dynamic dispatch
+
+```kite
+// Static — monomorphised at compile time, zero-cost, no indirection
+fn render<T: Display>(item: T) {
+    io.print(item.show())
+}
+
+// Dynamic — one machine-code copy, indirect call through a vtable
+fn render_all(items: [dyn Display]) {
+    for item in items {
+        io.print(item.show())
+    }
+}
+```
+
+`dyn Trait` is required to be explicit. A heterogeneous collection needs `dyn`;
+a generic function does not. On the Wasm target, `dyn Trait` lowers to a WasmGC
+struct holding the data reference plus a vtable of typed function references
+(from the typed-function-references feature ratified in Wasm 3.0), so the
+indirect call is type-checked by the engine rather than through a signature
+table.
+
+Not every trait can be made `dyn`. A trait is **object-safe** when no method
+takes or returns `Self` by value and no method is generic. Non-object-safe traits
+can still be used as generic bounds; the error message says which method is
+responsible.
+
+### 10.4 Built-in traits
+
+Derived automatically where possible, listed here because they define the
+language's structural operations:
+
+| Trait | Meaning | Auto-derived |
+|---|---|---|
+| `Eq` | `==` and `!=` | Yes, structurally |
+| `Ord` | `<` `<=` `>` `>=` | Yes, when all fields are `Ord` |
+| `Hash` | Usable as a map key | Yes, when all fields are `Hash` |
+| `Display` | String interpolation, `io.print` | No — must be written |
+| `Debug` | `\(x:?)` and diagnostics | Yes, structurally |
+| `Iterate` | `for x in …` | No |
+| `Share` | Safe to move across tasks | Yes, inferred — see [§12.4](#124-the-share-marker) |
+
+`Display` is deliberately not derived. How a type presents itself to a human is a
+design decision, not a mechanical one.
+
+---
+
+## 11. Generics
+
+```kite
+pub fn map<T, U>(items: [T], f: fn(T) -> U) -> [U] {
+    var out: [U] = []
+    for item in items {
+        out.push(f(item))
+    }
+    return out
+}
+
+pub struct Cache<K: Hash, V> {
+    var entries: {K: V}
+    capacity: int
+}
+
+impl<K: Hash, V> Cache<K, V> {
+    pub fn get(self, key: K) -> ?V {
+        return self.entries[key]
+    }
+}
+```
+
+Generics are **monomorphised**: each distinct instantiation produces its own
+specialised code. This gives static dispatch and full inlining, at the cost of
+binary size when a generic function is instantiated at many types.
+
+Because binary size is a first-order concern on the web, the compiler applies
+**identical-code-folding** after monomorphisation: instantiations whose generated
+Wasm bodies are byte-identical (very common — `[User]` and `[Post]` produce the
+same code when the operations are all reference moves) are merged into one
+function. Where folding is not possible and the instantiation count is large, the
+compiler emits a size warning naming the function, and `dyn` is the suggested
+remedy.
+
+There are no associated types, no higher-kinded types, no const generics, no
+variance annotations, and no specialisation in version 1.0. Each of these buys
+expressiveness at a real cost in error-message quality; none is required for
+application software.
+
+---
+
+## 12. Concurrency
+
+### 12.1 What is being rejected, and why
+
+Kite has **no goroutines, no channels, and no `select`**. These are the parts of
+Go that most reliably confuse newcomers: a channel is simultaneously a queue, a
+synchronisation primitive, and a control-flow construct, and getting its
+buffering and closing semantics wrong produces deadlocks that are invisible in
+the source.
+
+Kite has **no threads in the user-facing language either**. It has one concept:
+
+> Some operations take time. Mark them `async`, and `await` them.
+
+### 12.2 The model
+
+```kite
+pub async fn fetch_user(id: UserId) -> (User, error) {
+    let (res, err) = await http.get("/api/users/\(id)")
+    check err
+
+    let (user, err) = await json.decode<User>(res.body)
+    check err
+
+    return user, nil
+}
+```
+
+An `async fn` returns a `Task<T>`. `await` suspends until it completes. Calling
+an `async fn` without `await` starts it and yields the `Task` — this is how
+concurrency is expressed:
+
+```kite
+// Sequential — 200ms total
+let (a, err) = await fetch_user(1)
+check err
+let (b, err) = await fetch_user(2)
+check err
+
+// Concurrent — 100ms total
+let ta = fetch_user(1)
+let tb = fetch_user(2)
+let ((a, ea), (b, eb)) = await task.both(ta, tb)
+check ea
+check eb
+```
+
+`task.all([...])`, `task.race([...])`, and `task.timeout(t, duration)` cover the
+remaining combinators. There is no channel type; a `Task<T>` *is* the
+one-shot result channel, and it is awaited rather than received from.
+
+### 12.3 Parallelism: the surface is thread-agnostic
+
+**`async` says nothing about how many threads exist.** That is a property of the
+runtime, and Kite's runtime is multi-threaded wherever the platform permits:
+
+| Target | Scheduler | Real parallelism |
+|---|---|---|
+| `native-*` | Work-stealing pool, one worker per core | **Yes, today** |
+| `kbc` (bytecode VM) | Work-stealing pool | **Yes, today** |
+| `wasm32-gc` (web) | Cooperative loop on the main thread; `task.parallel` offloads to an isolate pool backed by Web Workers | **Partially, today** |
+| `wasm32-gc` (web, future) | Same work-stealing pool as native | **Yes, when shared-everything-threads ships** |
+
+The web restriction is not a design choice. WasmGC references **cannot currently
+cross a thread boundary at all** — there is no way to share a reference value
+between Wasm threads. The
+[shared-everything-threads proposal](https://github.com/WebAssembly/shared-everything-threads)
+exists precisely to fix this and is still a **draft**. This is why Kotlin/Wasm's
+`Dispatchers.Default` and `Dispatchers.IO` silently execute on the main thread,
+and why Flutter's multi-threaded web rendering requires COOP/COEP headers and
+still cannot share its object graph.
+
+**The point of specifying `Share` now is that Kite programs become parallel on
+the web the day that proposal ships, without a source change.** The type system
+already enforces the invariant the proposal will require. This is the single
+most important forward-compatibility decision in the language.
+
+For CPU-bound work on the web today, `task.parallel` runs a function in a
+separate isolate. Because its argument and result must be `Share`, and `Share`
+values are deeply immutable, they serialise safely across `postMessage` — and
+when true shared-heap threads arrive, the identical code stops serialising and
+starts sharing:
+
+```kite
+let results = await task.parallel(chunks, |chunk| {
+    return heavy_transform(chunk)     // chunk and result must be Share
+})
+```
+
+### 12.4 The `Share` marker
+
+`Share` is an auto-derived marker trait meaning *"a value of this type may be
+moved to another thread or isolate."*
+
+A type is `Share` when:
+
+- it is a primitive, or
+- it is a `str`, or
+- it is a struct or enum **all of whose fields are `Share` and none of which is
+  `var`**, or
+- it is a slice, map, or tuple of `Share` elements, or
+- it is explicitly wrapped: `sync.Mutex<T>`, `sync.Atomic<T>`, `sync.Channel<T>`.
+
+A type is **not** `Share` when it has a `var` field anywhere in its transitive
+structure, or when it holds a host reference (a DOM node, a canvas context, a
+file handle).
+
+Because struct fields are immutable by default, **most user types are `Share`
+without the author doing anything or knowing the trait exists.** The marker only
+becomes visible when it is violated:
+
+```
+error[E0520]: `Counter` cannot be moved to another task
+   ┌─ worker.kite:12:31
+   │
+12 │     await task.parallel(items, |c| c.tick())
+   │                                    ^ `Counter` is not Share
+   │
+   ┌─ counter.kite:2:5
+   │
+ 2 │     var count: int
+   │     --- because this field is mutable, `Counter` may not be shared
+   │
+help: two values of a mutable type in two threads is a data race. Either
+      make `count` immutable and return a new Counter, or wrap the type
+      in `sync.Mutex<Counter>` to serialise access.
+```
+
+Kite therefore has **no data races by construction**, on every target, with no
+annotation burden in the common case. This is the same insight as Rust's `Send`
+and Swift 6's `Sendable`, made nearly invisible by choosing immutability as the
+default.
+
+### 12.5 Implementation
+
+`async fn` compiles to a state machine: the function body is split at each
+`await` into a resumable coroutine object, with locals that live across a
+suspension point stored in a WasmGC struct. This is the same transformation
+Rust, C#, and Kotlin use, and it requires no Wasm features beyond those ratified
+in 3.0.
+
+The [stack-switching proposal](https://github.com/WebAssembly/stack-switching)
+would permit a cheaper implementation using real coroutine stacks. It is
+post-3.0 and not yet shipped. Kite's semantics are compatible with either
+lowering, so adopting it later is a compiler change with no language change.
+
+---
+
+## 13. Modules and packages
+
+### 13.1 Structure
+
+A **module** is a directory. Every `.kite` file in it contributes to the same
+namespace — there are no per-file imports of sibling files and no header/
+implementation split.
+
+```
+myapp/
+  kite.toml
+  src/
+    main.kite
+    config/
+      load.kite
+      schema.kite      // same module as load.kite
+    ui/
+      app.kite
+      theme.kite
+```
+
+```kite
+use config
+use ui
+use std/http
+use std/json as j
+
+fn main() {
+    let (cfg, err) = config.load("app.toml")
+    check err
+    ui.run(ui.App{ config: cfg })
+}
+```
+
+Imports are always qualified by module name at the use site. There is no
+wildcard import and no way to bring a bare name into scope. `config.load` always
+tells you where `load` came from.
+
+### 13.2 Manifest
+
+```toml
+[package]
+name    = "myapp"
+version = "0.1.0"
+
+[targets]
+web    = { entry = "src/main.kite", renderer = "dom" }
+native = { entry = "src/main.kite" }
+
+[dependencies]
+markdown = { git = "https://github.com/example/kite-markdown", tag = "v1.2.0" }
+```
+
+Dependencies are resolved to a lockfile with content hashes. There is no
+post-install script mechanism, no transitive-dependency hoisting, and no way for
+a dependency to execute code at build time — the supply-chain attack surface that
+has repeatedly compromised npm is absent by construction rather than by policy.
+
+### 13.3 Cycles
+
+Module cycles are an error. Cyclic dependencies make separate compilation,
+incremental rebuilds, and initialisation order all harder, and every cycle can be
+broken by extracting the shared part.
+
+---
+
+## 14. Memory model
+
+Kite is garbage-collected on every target. There is no manual allocation, no
+`free`, no ownership, no borrowing, and no lifetimes.
+
+| Target | Collector |
+|---|---|
+| `wasm32-gc` | **The host engine's collector.** WasmGC objects are allocated with `struct.new` / `array.new` and traced by V8, SpiderMonkey, or JavaScriptCore directly. Kite ships no collector in the binary. |
+| `native-*` | Precise tracing collector: generational, non-moving in v1. Type maps emitted by the compiler give exact root and field information. |
+| `kbc` | Same collector as native. |
+
+Delegating collection to the browser engine on the web target is the single
+largest binary-size win available in 2026, and it is why this design was not
+viable before WasmGC reached cross-browser baseline in Safari 18.2.
+
+**Known consequences of WasmGC's current shape**, accepted deliberately:
+
+- **No interior pointers.** A reference always points to the head of an object.
+  Kite has no `&x.field`, so this is unobservable.
+- **No unboxed aggregates inside arrays.** `[Point]` is an array of references to
+  `Point` objects, not a flat buffer of `(f64, f64)`. For numeric work where the
+  layout matters, `buffer.F64` provides a flat typed buffer over linear memory,
+  which is the escape hatch used by the layout engine and the canvas renderer.
+- **No weak references or finalizers.** A `Cache` that must not retain its
+  entries uses an explicit eviction policy rather than weak keys.
+
+---
+
+## 15. Foreign function interface
+
+The web target has no direct DOM access — no Wasm proposal for calling Web IDL
+without JavaScript glue has been standardised, and none is imminent. Kite
+therefore defines a narrow, generated host boundary rather than pretending it
+does not exist.
+
+```kite
+@host("dom")
+extern fn create_element(tag: str) -> HostRef
+
+@host("dom")
+extern fn set_attribute(node: HostRef, name: str, value: str)
+```
+
+`HostRef` is an opaque handle (`externref` on the web). It is not `Share`, cannot
+be forged, and cannot be dereferenced from Kite code.
+
+The compiler generates the JavaScript glue module from the `extern` declarations,
+so the boundary is declared once, in Kite, and the glue cannot drift from it.
+Because `str` is already a JavaScript string via JS String Builtins, string
+arguments cross with no marshalling.
+
+Application code does not use `extern` directly. It is the mechanism by which
+`std/dom`, `std/canvas`, and `std/net` are built.
+
+---
+
+## 16. Diagnostics
+
+Error message quality is a language design constraint in Kite, not a
+post-implementation concern. Several decisions in this specification — nominal
+traits over structural, explicit `dyn`, no implicit conversions, no overloading —
+were made because they let the compiler produce a message that names one cause
+and one fix.
+
+Every diagnostic carries a stable code (`E0301`), a primary span, secondary spans
+explaining *why*, and where possible a machine-applicable fix.
+
+```
+error[E0114]: cannot assign to immutable binding `total`
+   ┌─ cart.kite:14:5
+   │
+ 9 │     let total = 0
+   │         ----- declared immutable here
+   ⋮
+14 │     total = total + item.price
+   │     ^^^^^ cannot assign
+   │
+help: make the binding mutable
+   │
+ 9 │     var total = 0
+   │     ~~~
+```
+
+Requirements on the implementation:
+
+- **One error per cause.** A single missing brace must not produce forty errors.
+  The parser recovers at statement and declaration boundaries.
+- **Type errors name the source of the expectation**, not just the mismatch —
+  the parameter or return type that created the constraint gets a secondary span.
+- **`--explain E0301`** prints the full rationale for the rule.
+- **`kite fix`** applies every machine-applicable suggestion.
+- **Source maps** are emitted for the Wasm target so browser stack traces name
+  `.kite` files and lines.
+
+---
+
+## 17. Deliberate omissions
+
+Each of these was considered and rejected. Recording the reasoning prevents them
+being re-litigated, and makes it clear when a decision should be revisited.
+
+| Omitted | Reasoning |
+|---|---|
+| Exceptions | A second, invisible control-flow graph. Errors are values. |
+| `panic` / `recover` | Same reason. Unrecoverable failures trap. |
+| Inheritance | Composition plus traits covers the cases; inheritance adds a mutable, non-local type hierarchy. |
+| Operator overloading | `a + b` must be a machine addition or a string concatenation, never a database call. |
+| Function overloading | One name, one signature. Makes go-to-definition exact and error messages precise. |
+| Implicit conversions | Every numeric conversion is a lossy decision that should be visible. |
+| Macros | An unbounded second language inside the language. Code generation is a build step. |
+| `null` | Replaced by `?T`. |
+| Zero values | Replaced by mandatory struct literal fields. Removes Go's most common production bug. |
+| Pointers and references | GC references only. Eliminates the value/pointer receiver distinction. |
+| Lifetimes and borrowing | The cost that stops Rust being a mainstream application language. |
+| Goroutines and channels | Replaced by `async`/`await` and `Task<T>`. |
+| Structural interfaces | Nominal `impl` produces better errors and prevents accidental satisfaction. |
+| Associated / higher-kinded types | Expressiveness that application code does not need, at real cost to error quality. |
+| Reflection | Compile-time derivation instead. Keeps dead-code elimination sound, which matters for binary size. |
+| `unsafe` | Would break the trap-on-bug guarantee. Host access goes through `extern`. |
+| Global mutable state | Module-level bindings are immutable. State is passed explicitly or held by the runtime. |
+| Postfix `?` for errors | Permits failure to hide mid-expression. `check` occupies its own line. |
+| Block comments | Nesting bugs, no benefit over line comments. |
+| `while` | `for cond {}` covers it. |
+| Ternary `?:` | `if` is an expression. |
+
+---
+
+## Appendix A — A complete program
+
+```kite
+use std/io
+use std/fs
+use std/json
+use std/http
+
+pub struct Task {
+    pub id:    int
+    pub title: str
+    pub var done: bool
+}
+
+impl Display for Task {
+    fn show(self) -> str {
+        let mark = if self.done { "x" } else { " " }
+        return "[\(mark)] \(self.id). \(self.title)"
+    }
+}
+
+pub enum LoadError {
+    Missing(path: str)
+    Malformed(path: str, detail: str)
+}
+
+impl Error for LoadError {
+    fn message(self) -> str {
+        return match self {
+            Missing(path)           => "no task file at \(path)",
+            Malformed(path, detail) => "\(path) is not valid task JSON: \(detail)",
+        }
+    }
+}
+
+pub fn load(path: str) -> ([Task], error) {
+    if !fs.exists(path) {
+        return _, LoadError.Missing(path: path)
+    }
+
+    let (bytes, err) = fs.read(path)
+    check errors.wrap(err, "reading \(path)")
+
+    let (tasks, err) = json.decode<[Task]>(bytes)
+    if err != nil {
+        return _, LoadError.Malformed(path: path, detail: err.message())
+    }
+
+    return tasks, nil
+}
+
+pub async fn sync(tasks: [Task], endpoint: str) -> (int, error) {
+    var uploaded = 0
+
+    let pending = tasks.filter(|t| !t.done)
+    for chunk in pending.chunks(20) {
+        let (res, err) = await http.post(endpoint, json.encode(chunk))
+        check errors.wrap(err, "uploading \(chunk.len()) tasks")
+
+        if res.status != 200 {
+            return _, errors.new("server returned \(res.status)")
+        }
+        uploaded = uploaded + chunk.len()
+    }
+
+    return uploaded, nil
+}
+
+pub async fn main() {
+    let (tasks, err) = load("tasks.json")
+    if err != nil {
+        io.error("could not load tasks: \(err.message())")
+        return
+    }
+
+    for task in tasks {
+        io.print(task.show())
+    }
+
+    let count = await sync(tasks, "https://api.example.com/tasks") ?? 0
+    io.print("synced \(count) tasks")
+}
+```
+
+---
+
+## Appendix B — Keyword census
+
+| Keyword | Purpose |
+|---|---|
+| `async` `await` | Concurrency |
+| `as` | Explicit conversion |
+| `break` `continue` `for` `if` `else` `match` `return` | Control flow |
+| `check` | Error propagation |
+| `defer` | Scope-exit release |
+| `enum` `struct` `trait` `type` | Type declaration |
+| `false` `true` `nil` | Literals |
+| `fn` | Function declaration |
+| `impl` | Method and trait implementation |
+| `in` | Iteration |
+| `let` `var` | Bindings |
+| `pub` | Visibility |
+| `self` | Receiver |
+| `use` | Import |
+
+**Total: 26.** Go has 25, C has 32, Rust has 39, Swift has over 90.
