@@ -1556,7 +1556,11 @@ impl<'a> Checker<'a> {
             }
             ast::Expr::Slice { elems, span } => self.slice_literal(elems, expected, *span),
             ast::Expr::Closure { span, .. } => {
-                self.not_yet(*span, "closures", "arrives in Phase 2");
+                self.not_yet(
+                    *span,
+                    "a closure",
+                    "closures are the last part of Phase 2; see docs/06-roadmap.md",
+                );
                 self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
             ast::Expr::Error(span) => self.lit(ExprKind::Error, TyId::ERROR, *span),
@@ -1765,11 +1769,28 @@ impl<'a> Checker<'a> {
 
             Some(Res::Local(id)) => {
                 let ty = self.locals[id as usize].ty;
-                self.diags.push(
+                let decl = self.locals[id as usize].span;
+                // A local whose type *is* a function is a different failure
+                // from one that is not: the call is well-formed and it is the
+                // compiler that cannot do it yet. Saying "not a function" of a
+                // `fn(int) -> int` reads as a contradiction, because it is one.
+                let d = if matches!(self.types.kind(ty), TyKind::Fn { .. }) {
+                    Diagnostic::error(
+                        codes::E0200,
+                        "calling a function value is not implemented yet".to_string(),
+                    )
+                    .with_primary(p.span, format!("`{}` holds {}", p.text(), self.types.with_article(ty)))
+                    .with_secondary(decl, "declared here")
+                    .with_note(
+                        "calling a value rather than a named function arrives with closures; \
+                         see docs/06-roadmap.md",
+                    )
+                } else {
                     Diagnostic::error(codes::E0205, format!("`{}` is not a function", p.text()))
                         .with_primary(p.span, format!("this is {}", self.types.with_article(ty)))
-                        .with_secondary(self.locals[id as usize].span, "declared here"),
-                );
+                        .with_secondary(decl, "declared here")
+                };
+                self.diags.push(d);
                 self.lit(ExprKind::Error, TyId::ERROR, span)
             }
 
