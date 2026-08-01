@@ -149,9 +149,15 @@ impl Mono<'_> {
     }
 
     fn expr(&mut self, e: &mut Expr) {
-        if let ExprKind::Call { callee, targs, .. } = &mut e.kind {
+        // Both forms name a function by index, so both need the same treatment:
+        // renumbered when it moved, specialised when it is a template.
+        let target = match &mut e.kind {
+            ExprKind::Call { callee, targs, .. } => Some((callee, targs)),
+            ExprKind::ClosureNew { func, targs, .. } => Some((func, targs)),
+            _ => None,
+        };
+        if let Some((callee, targs)) = target {
             if targs.is_empty() {
-                // Not generic: only the renumbering applies.
                 if let Some(new) = self.moved.get(&callee.0) {
                     *callee = FnId(*new);
                 }
@@ -227,7 +233,7 @@ fn substitute_expr(e: &mut Expr, targs: &[TyId], types: &mut Types) {
         // A nested generic call's own type arguments may mention this
         // function's parameters — `f<T>` calling `g<[T]>` — so they substitute
         // too, before the call is instantiated.
-        ExprKind::Call { targs: inner, .. } => {
+        ExprKind::Call { targs: inner, .. } | ExprKind::ClosureNew { targs: inner, .. } => {
             for t in inner.iter_mut() {
                 *t = subst(*t, targs, types);
             }
@@ -328,7 +334,7 @@ fn expr_children(k: &mut ExprKind) -> Vec<&mut Expr> {
         | ExprKind::TupleNew { elems: args }
         | ExprKind::MapNew { entries: args }
         | ExprKind::SliceNew { elems: args } => args.iter_mut().collect(),
-        ExprKind::ClosureNew { captures: args, .. } => args.iter_mut().collect(),
+        ExprKind::ClosureNew { captures, .. } => captures.iter_mut().collect(),
         ExprKind::CallClosure { callee, args } => {
             let mut v = vec![&mut **callee];
             v.extend(args.iter_mut());

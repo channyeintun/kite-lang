@@ -1,0 +1,98 @@
+// Closures.
+//
+// A closure is a function value written inline. Its body is lifted into a
+// function of its own, whose leading parameters are the values it captured —
+// so a closure is a pair of code and captured data, and everything after the
+// type checker sees only ordinary functions.
+//
+// Captures are by value, taken when the closure is made. That is why a closure
+// returned from a function keeps working after the call that made it has
+// returned, and it is why capturing a `var` is refused: a closure that could
+// see later writes would be action at a distance, and one that silently could
+// not would be a bug waiting to happen.
+
+pub fn apply(f: fn(int) -> int, x: int) -> int {
+  return f(x)
+}
+
+pub fn twice(f: fn(int) -> int, x: int) -> int {
+  return f(f(x))
+}
+
+// Returning a closure. `n` is copied into it, so each adder has its own.
+pub fn adder(n: int) -> fn(int) -> int {
+  return |x: int| x + n
+}
+
+// A higher-order generic function. The closure passed in is specialised
+// alongside the instantiation it belongs to, so `map` over `[int]` and over
+// `[str]` are two different compiled functions with no dispatch between them.
+pub fn map<T>(items: [T], f: fn(T) -> T) -> [T] {
+  var out: [T] = []
+  for item in items {
+    out.push(f(item))
+  }
+  return out
+}
+
+pub fn keep<T>(items: [T], test: fn(T) -> bool) -> [T] {
+  var out: [T] = []
+  for item in items {
+    if test(item) {
+      out.push(item)
+    }
+  }
+  return out
+}
+
+fn main() {
+  // A parameter's type comes from where the closure is used, so `x` needs no
+  // annotation when the context says what it is.
+  io.print(apply(|x: int| x * 2, 21))
+  io.print(twice(|x: int| x + 1, 40))
+
+  // Each adder captured its own `n`.
+  let add5 = adder(5)
+  let add100 = adder(100)
+  io.print(apply(add5, 1))
+  io.print(apply(add100, 1))
+  io.print(apply(add5, 1))
+
+  // A block body needs `-> T`: there is nothing else to check its `return`
+  // statements against.
+  let sign = |n: int| -> str {
+    if n < 0 {
+      return "negative"
+    }
+    if n == 0 {
+      return "zero"
+    }
+    return "positive"
+  }
+  io.print(sign(-4))
+  io.print(sign(0))
+  io.print(sign(7))
+
+  // Capturing. `factor` is copied in when the closure is made.
+  let factor = 3
+  let scale = |x: int| x * factor
+  io.print(apply(scale, 7))
+
+  let doubled = map([1, 2, 3], |n: int| n * 2)
+  io.print("\(doubled.len()) items, first \(doubled[0]), last \(doubled[2])")
+
+  let shouted = map(["hi", "there"], |s: str| s + "!")
+  io.print(shouted[0])
+  io.print(shouted[1])
+
+  let big = keep([1, 8, 3, 9, 2], |n: int| n > 4)
+  io.print("\(big.len()) kept: \(big[0]) and \(big[1])")
+
+  // A closure inside a closure, capturing from two levels out.
+  let offset = 1000
+  let nested = |x: int| -> int {
+    let inner = |y: int| y + offset
+    return apply(inner, x)
+  }
+  io.print(apply(nested, 7))
+}

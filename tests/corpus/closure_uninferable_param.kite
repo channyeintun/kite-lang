@@ -1,0 +1,7 @@
+// A closure's parameter types come from where it is used. With nothing to take
+// them from, they must be annotated.
+
+fn main() {
+  let f = |x| x * 2 //~ ERROR E0211
+  io.print(f(3))
+}

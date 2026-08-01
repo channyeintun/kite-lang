@@ -374,12 +374,57 @@ fn gaps(src: &str) -> Vec<String> {
         .collect()
 }
 
-/// A construct the backend cannot lower must be *reported*, not silently
-/// compiled into a module that traps at run time. Closures are the one left.
+/// Every construct the language can express now lowers.
+///
+/// The scan that would report a gap is still wired in — a backend that quietly
+/// emits a trapping module for something it cannot do is the failure this
+/// module exists to prevent — but it has nothing left to say.
 #[test]
-fn unlowered_constructs_are_reported() {
-    assert!(gaps("fn apply(f: fn(int) -> int) {\n}\nfn main() {\n}\n")
-        .contains(&"function values".to_string()));
+fn nothing_the_language_can_express_is_refused() {
+    let everything = "\
+trait Shape {
+  fn area(self) -> int
+}
+struct Sq {
+  s: int
+}
+enum E {
+  A
+  B(int)
+}
+impl Shape for Sq {
+  fn area(self) -> int {
+    return self.s * self.s
+  }
+}
+fn pick<T>(xs: [T]) -> Option<T> {
+  if xs.len() == 0 {
+    return nil
+  }
+  return xs[0]
+}
+fn call(f: fn(int) -> int, x: int) -> int {
+  return f(x)
+}
+fn main() {
+  let base = 10
+  io.print(call(|x: int| x + base, 5))
+  io.print(pick([1, 2]) == pick([1, 2]))
+  var m = {\"a\": 1}
+  m[\"b\"] = 2
+  io.print(m.len())
+  let shapes: [dyn Shape] = [Sq{s: 3}]
+  for s in shapes {
+    io.print(\"area \\(s.area())\")
+  }
+  io.print(match E.B(4) {
+    A => 0
+    B(n) => n
+  })
+}
+";
+    valid(everything);
+    assert!(gaps(everything).is_empty(), "unexpected gaps: {:?}", gaps(everything));
 }
 
 const SHAPES: &str = "\

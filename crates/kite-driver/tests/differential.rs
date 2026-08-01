@@ -199,6 +199,37 @@ fn main() {
          \x20 let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })\n}\n",
     ),
     (
+        "closures",
+        "fn apply(f: fn(int) -> int, x: int) -> int {\n  return f(x)\n}\n\
+         fn twice(f: fn(int) -> int, x: int) -> int {\n  return f(f(x))\n}\n\
+         fn make_adder(n: int) -> fn(int) -> int {\n  return |x: int| x + n\n}\n\
+         fn main() {\n\
+         \x20 let double = |x: int| x * 2\n  io.print(apply(double, 21))\n\
+         \x20 io.print(twice(double, 3))\n\
+         \x20 let base = 100\n  io.print(apply(|x: int| x + base, 5))\n\
+         \x20 let add5 = make_adder(5)\n  let add9 = make_adder(9)\n\
+         \x20 io.print(apply(add5, 1))\n  io.print(apply(add9, 1))\n\
+         \x20 io.print(apply(add5, 1))\n\
+         \x20 let classify = |n: int| -> str {\n    if n < 0 {\n      return \"neg\"\n    }\n\
+         \x20   if n == 0 {\n      return \"zero\"\n    }\n    return \"pos\"\n  }\n\
+         \x20 io.print(classify(-3))\n  io.print(classify(0))\n  io.print(classify(9))\n\
+         \x20 let outer = |x: int| -> int {\n    let inner = |y: int| y + base\n\
+         \x20   return apply(inner, x)\n  }\n  io.print(apply(outer, 7))\n}\n",
+    ),
+    (
+        "closures-in-generics",
+        "fn transform<T>(xs: [T], f: fn(T) -> T) -> [T] {\n  var out: [T] = []\n\
+         \x20 for x in xs {\n    out.push(f(x))\n  }\n  return out\n}\n\
+         fn describe<T>(x: T, show: fn(T) -> str) -> str {\n  return \"v: \" + show(x)\n}\n\
+         fn main() {\n\
+         \x20 let d = transform([1, 2, 3], |n: int| n * 2)\n\
+         \x20 io.print(d.len())\n  io.print(d[0])\n  io.print(d[2])\n\
+         \x20 let s = transform([\"a\", \"b\"], |x: str| x + \"!\")\n\
+         \x20 io.print(s[0])\n  io.print(s[1])\n\
+         \x20 io.print(describe(7, |n: int| \"\\(n)\"))\n\
+         \x20 io.print(describe(true, |b: bool| if b { \"yes\" } else { \"no\" }))\n}\n",
+    ),
+    (
         "generics",
         "fn first<T>(xs: [T]) -> Option<T> {\n  if xs.len() == 0 {\n    return nil\n  }\n\
          \x20 return xs[0]\n}\n\

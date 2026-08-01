@@ -237,6 +237,7 @@ pub fn check(
             resolved,
             sigs: &sigs,
             lifted: Vec::new(),
+            lifted_base: lifted.len(),
             closure_span: None,
             captures: Vec::new(),
             generic_defs: sigs[i].generics.clone(),
@@ -428,9 +429,13 @@ fn declare_generics(
 struct Checker<'a> {
     resolved: &'a ResolveMap,
     sigs: &'a [Signature],
-    /// Functions lifted out of closure literals, appended after every declared
-    /// function.
+    /// Functions lifted out of this function's closure literals.
     lifted: Vec<hir::Function>,
+    /// How many were already lifted out of earlier declarations. Ids are handed
+    /// out before the lists are joined, so each checker has to know where its
+    /// own share starts — without this, two functions' first closures both
+    /// claim the same id.
+    lifted_base: usize,
     /// The source region of the closure being checked. A local declared
     /// outside it is a capture.
     ///
@@ -1725,7 +1730,13 @@ impl<'a> Checker<'a> {
                 span,
             })
             .collect();
-        hir::Expr { kind: ExprKind::ClosureNew { func, captures: capture_exprs }, ty, span }
+        // A closure inside a generic function is specialised with it.
+        let targs = self.generic_defs.iter().map(|g| g.ty).collect();
+        hir::Expr {
+            kind: ExprKind::ClosureNew { func, captures: capture_exprs, targs },
+            ty,
+            span,
+        }
     }
 
     /// Move a closure body into a function of its own.
@@ -1765,7 +1776,9 @@ impl<'a> Checker<'a> {
             // Named per enclosing function, so two closures in different
             // functions do not both come out as `closure#0` in a dump.
             name: format!("{}#closure{}", self.resolved.fns[self.fn_index].name, index),
-            generic_count: 0,
+            // A closure written inside `f<T>` mentions `T`, so its lifted body
+            // is a template exactly as `f` is.
+            generic_count: self.generic_defs.len(),
             is_pub: false,
             is_async: false,
             param_count: captures.len() + params.len(),
@@ -1775,8 +1788,9 @@ impl<'a> Checker<'a> {
             span,
         });
         // Lifted functions are appended after every declared one, so their ids
-        // start where the declared ones end.
-        hir::FnId(self.resolved.fns.len() as u32 + index as u32)
+        // start where the declared ones end — offset by everything lifted out
+        // of the declarations checked before this one.
+        hir::FnId(self.resolved.fns.len() as u32 + (self.lifted_base + index) as u32)
     }
 
     fn set_local_ty(&mut self, id: u32, ty: TyId) {

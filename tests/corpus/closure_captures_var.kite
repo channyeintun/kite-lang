@@ -1,0 +1,13 @@
+// Captures are by value and taken when the closure is made. A `var` cannot be
+// captured, because a closure that could see later writes would be action at a
+// distance and one that silently could not would be a bug waiting to happen.
+
+fn apply(f: fn(int) -> int, x: int) -> int {
+  return f(x)
+}
+
+fn main() {
+  var total = 0
+  let add = |x: int| x + total //~ ERROR E0211
+  io.print(apply(add, 1))
+}

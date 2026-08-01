@@ -131,7 +131,7 @@ VM and Wasm, run on both, and the outputs compared. `--emit wasm` reports
 anything it cannot lower rather than producing a module that traps; today it
 refuses nothing the language can express.
 
-**Not yet:** closures, and type parameters on structs, enums and traits — generic *functions* work, with bounds and inference.
+**Not yet:** type parameters on structs, enums and traits. Generic *functions* work, with bounds and inference, and so do closures.
 
 440 tests, plus an annotated compile-fail corpus.
 

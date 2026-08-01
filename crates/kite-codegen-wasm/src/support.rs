@@ -64,10 +64,11 @@ pub fn unsupported(program: &mir::Program, types: &Types) -> Vec<Unsupported> {
 }
 
 /// The construct name for a type this target cannot represent.
-fn unsupported_type(ty: kite_hir::TyId, types: &Types) -> Option<&'static str> {
-    use kite_hir::TyKind::*;
-    match types.kind(ty) {
-        Fn { .. } => Some("function values"),
-        _ => None,
-    }
+///
+/// Nothing the language can express is refused today. The check stays because
+/// the next construct added will need it, and because a backend that silently
+/// emits a trapping module for something it cannot do is the failure mode this
+/// whole module exists to prevent.
+fn unsupported_type(_ty: kite_hir::TyId, _types: &Types) -> Option<&'static str> {
+    None
 }

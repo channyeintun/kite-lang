@@ -1,0 +1,11 @@
+// A block-bodied closure that promised a value must produce one on every path,
+// the same as a named function.
+
+fn main() {
+  let f = |n: int| -> str { //~ ERROR E0211
+    if n > 0 {
+      return "positive"
+    }
+  }
+  io.print(f(1))
+}

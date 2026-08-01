@@ -282,6 +282,15 @@ impl Types {
 
     /// A generic parameter. Interned by index and name, so the same parameter
     /// of the same declaration is always the same `TyId`.
+    /// An existing function type, without interning a new one. Used where the
+    /// arena is shared and immutable — a backend, which can only ever ask about
+    /// types the front end already made.
+    pub fn find_fn(&self, params: &[TyId], ret: TyId) -> Option<TyId> {
+        self.index
+            .get(&TyKind::Fn { params: params.to_vec(), ret })
+            .copied()
+    }
+
     pub fn param_ty(&mut self, index: u32, name: &str) -> TyId {
         let name: &'static str = match self.param_names.iter().find(|n| **n == name) {
             Some(n) => n,

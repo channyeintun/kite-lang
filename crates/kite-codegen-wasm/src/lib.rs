@@ -39,7 +39,8 @@ use kite_hir::{BinOp, Builtin, TyId, TyKind, Types, UnOp};
 use kite_mir as mir;
 use wasm_encoder::{
     BlockType, CodeSection, CompositeInnerType, CompositeType, EntityType, ExportKind,
-    ExportSection, FieldType, Function, FunctionSection, HeapType, ImportSection, Instruction,
+    ElementSection, Elements, ExportSection, FieldType, Function, FunctionSection, HeapType,
+    ImportSection, Instruction,
     Module, RefType, StorageType, SubType, TypeSection, ValType,
 };
 
@@ -69,6 +70,14 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 9] = [
 ];
 
 const IMPORT_COUNT: u32 = IMPORTS.len() as u32;
+
+/// The type a closure's captured environment is seen as from outside. Two
+/// closures of one Kite type capture different things, so the environment is
+/// opaque at the call site and each thunk casts it back to its own record.
+const ANY_REF: ValType = ValType::Ref(RefType {
+    nullable: true,
+    heap_type: HeapType::Abstract { shared: false, ty: wasm_encoder::AbstractHeapType::Any },
+});
 
 /// Import indices, by position in [`IMPORTS`].
 mod host {
@@ -130,6 +139,19 @@ struct TypeLayout {
     object_record: u32,
     /// Types carrying a tag, by [`kite_hir::TypeTag::encode`].
     tagged: std::collections::HashSet<u32>,
+    /// Per distinct `fn(..) -> ..` type: the uniform signature every closure of
+    /// that type is called through, and the record a closure value is.
+    ///
+    /// The signature takes the captured environment as an `anyref` first
+    /// parameter. Two closures of the same Kite type capture different things,
+    /// so the environment cannot be in the signature — which is the whole
+    /// reason a closure is a pair of a function reference and an opaque
+    /// environment rather than just a function reference.
+    closure_sig: std::collections::HashMap<TyId, u32>,
+    closure_record: std::collections::HashMap<TyId, u32>,
+    /// Per lifted function reached by a `ClosureNew`: the record holding its
+    /// captures, and how many of its leading parameters they are.
+    env_record: std::collections::HashMap<u32, (u32, usize)>,
 }
 
 #[derive(Clone, Copy)]
@@ -171,6 +193,10 @@ impl TypeLayout {
     /// payload.
     fn variant_type(&self, id: kite_hir::EnumId, variant: u32) -> u32 {
         self.enum_base[id.index()] + 1 + variant
+    }
+
+    fn closure_type(&self, ty: TyId) -> Option<u32> {
+        self.closure_record.get(&ty).copied()
     }
 
     fn option_type(&self, payload: TyId) -> Option<u32> {
@@ -323,7 +349,36 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
         .flat_map(|v| v.entries.iter())
         .map(|e| e.tag.encode())
         .collect();
-    let object_record = IMPORT_COUNT;
+    // Every distinct function type a program mentions, and every lifted
+    // function a `ClosureNew` builds. Signature types are declared before the
+    // aggregate group because a closure record holds a reference to one, and a
+    // type may only name types declared before it or in its own group.
+    let mut fn_types: Vec<TyId> = Vec::new();
+    let mut envs: Vec<(u32, usize)> = Vec::new();
+    for f in &program.fns {
+        for l in &f.locals {
+            if matches!(types.kind(l.ty), TyKind::Fn { .. }) && !fn_types.contains(&l.ty) {
+                fn_types.push(l.ty);
+            }
+        }
+        for b in &f.blocks {
+            for s in &b.stmts {
+                if let mir::Inst::Assign {
+                    value: mir::Rvalue::ClosureNew { func, captures }, ..
+                } = s
+                {
+                    if !envs.iter().any(|(g, _)| *g == func.0) {
+                        envs.push((func.0, captures.len()));
+                    }
+                }
+            }
+        }
+    }
+    fn_types.sort_by_key(|t| t.0);
+    envs.sort_by_key(|(f, _)| *f);
+
+    let sig_base = IMPORT_COUNT;
+    let object_record = sig_base + fn_types.len() as u32;
     let struct_base = object_record + 1;
     let mut next = struct_base + types.struct_count() as u32;
     let mut enum_base = Vec::with_capacity(types.enum_count());
@@ -336,6 +391,13 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     let mut layout = TypeLayout {
         object_record,
         tagged,
+        closure_sig: fn_types
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (*t, sig_base + i as u32))
+            .collect(),
+        closure_record: std::collections::HashMap::new(),
+        env_record: std::collections::HashMap::new(),
         struct_base,
         enum_base,
         option_box: std::collections::HashMap::new(),
@@ -377,7 +439,15 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
         );
         next += 3;
     }
-    let aggregate_count = next - IMPORT_COUNT;
+    for ty in &fn_types {
+        layout.closure_record.insert(*ty, next);
+        next += 1;
+    }
+    for (func, count) in &envs {
+        layout.env_record.insert(*func, (next, *count));
+        next += 1;
+    }
+    let aggregate_count = next - object_record;
 
     // ---- types -------------------------------------------------------------
     let mut type_section = TypeSection::new();
@@ -385,6 +455,18 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
         type_section
             .ty()
             .function(params.iter().copied(), results.iter().copied());
+    }
+
+    // Closure signatures. These sit outside the aggregate group and before it,
+    // because a closure record holds a reference to one.
+    for ty in &fn_types {
+        let TyKind::Fn { params, ret } = types.kind(*ty) else {
+            unreachable!("only function types are collected here")
+        };
+        let mut ps = vec![ANY_REF];
+        ps.extend(params.iter().map(|p| val_type_with(*p, types, &layout)));
+        let results: Vec<ValType> = wasm_result_with(*ret, types, &layout).into_iter().collect();
+        type_section.ty().function(ps, results);
     }
 
     // Every aggregate goes in one `rec` group: a field may name a type declared
@@ -559,13 +641,49 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
             }
         }
 
+        // A closure value: which code to run, and the environment to run it
+        // with. Both fields are immutable — a closure is a value, and rebinding
+        // one replaces it rather than editing it.
+        for ty in &fn_types {
+            let sig = layout.closure_sig[ty];
+            group.push(struct_subtype(
+                vec![
+                    FieldType {
+                        element_type: StorageType::Val(ValType::Ref(RefType {
+                            nullable: true,
+                            heap_type: HeapType::Concrete(sig),
+                        })),
+                        mutable: false,
+                    },
+                    FieldType { element_type: StorageType::Val(ANY_REF), mutable: false },
+                ],
+                None,
+                true,
+            ));
+        }
+
+        // One environment record per lifted function, holding what it captured.
+        for (func, (_, count)) in envs.iter().map(|(f, c)| (f, (0u32, *c))) {
+            let lifted = &program.fns[*func as usize];
+            let fields: Vec<FieldType> = lifted.locals[..count]
+                .iter()
+                .map(|l| FieldType {
+                    element_type: StorageType::Val(val_type_with(l.ty, types, &layout)),
+                    mutable: false,
+                })
+                .collect();
+            group.push(struct_subtype(fields, None, true));
+        }
+
         type_section.ty().rec(group);
     }
 
     // Indices are computed rather than read back: `TypeSection::len` counts a
     // `rec` group as one entry, not as the types inside it, so trusting it here
     // would collide function types with every struct after the first.
-    let fn_type_base = IMPORT_COUNT + aggregate_count;
+    // Signature types come between the imports and the aggregate group, so a
+    // function type index is past both.
+    let fn_type_base = object_record + aggregate_count;
     // Dispatchers: one per trait method, taking the receiver as a reference to
     // the tagged root. They live above the user functions in the index space.
     let mut dispatchers: Vec<Dispatcher> = Vec::new();
@@ -598,6 +716,14 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     let eq_fns = eq::collect(program, types);
     let eq_base = dispatch_base + dispatchers.len() as u32;
 
+    // One thunk per lifted function: it takes the environment as an `anyref`,
+    // casts it back to that function's own record, and calls the lifted
+    // function with the captures unpacked ahead of the arguments. This is what
+    // lets every closure of one Kite type share a single call signature while
+    // capturing different things.
+    let thunk_base = eq_base + eq_fns.len() as u32;
+    let thunk_fns: Vec<u32> = envs.iter().map(|(f, _)| *f).collect();
+
     let mut fn_type_index = Vec::with_capacity(program.fns.len());
     for (i, f) in program.fns.iter().enumerate() {
         let params: Vec<ValType> = (0..f.param_count)
@@ -620,6 +746,12 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
         next_fn_type += 1;
         let (params, results) = eq::signature(e.ty, types, &layout);
         type_section.ty().function(params, results);
+    }
+    // A thunk is declared with the shared signature of the type it serves,
+    // which already exists — no new function type is needed.
+    for (func, _) in &envs {
+        let ty = closure_ty_of(*func, program, types);
+        extra_type_index.push(layout.closure_sig[&ty]);
     }
     module.section(&type_section);
 
@@ -648,6 +780,17 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     }
     module.section(&exports);
 
+    // ---- elements ----------------------------------------------------------
+    // `ref.func` may only name a function that has been declared for it. The
+    // segment is declarative: it reserves nothing and initialises no table, it
+    // only says which functions a reference may be taken to.
+    if !envs.is_empty() {
+        let mut elements = ElementSection::new();
+        let indices: Vec<u32> = (0..envs.len() as u32).map(|i| thunk_base + i).collect();
+        elements.declared(Elements::Functions(indices.as_slice().into()));
+        module.section(&elements);
+    }
+
     // ---- code --------------------------------------------------------------
     // A call's result type decides whether the value has to be stored, so the
     // whole table is needed before any body is emitted.
@@ -663,6 +806,9 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
             dispatch_base,
             &dispatchers,
             &eq_builder,
+            program,
+            &thunk_fns,
+            thunk_base,
         ));
     }
     for d in &dispatchers {
@@ -670,6 +816,9 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     }
     for e in &eq_fns {
         code.function(&eq_builder.build(e.ty));
+    }
+    for (func, count) in &envs {
+        code.function(&compile_thunk(*func, *count, program, types, &layout));
     }
     module.section(&code);
 
@@ -742,6 +891,14 @@ fn val_type_with(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
             nullable: true,
             heap_type: HeapType::Concrete(layout.error_record),
         }),
+        // A function value is a closure record: code plus environment.
+        TyKind::Fn { .. } => match layout.closure_type(ty) {
+            Some(idx) => ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(idx),
+            }),
+            None => ValType::I32,
+        },
         // A trait object is a reference to the tagged root. The value is
         // unchanged from its concrete form; only the static type widens, and
         // WasmGC subtyping makes that free.
@@ -775,6 +932,61 @@ fn val_type_with(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
         // becomes `externref` carrying the JS string with no copy.
         _ => ValType::I32,
     }
+}
+
+/// The Kite function type a lifted function is called through: its parameters
+/// past the captures, and its return type.
+fn closure_ty_of(func: u32, program: &mir::Program, types: &Types) -> TyId {
+    let lifted = &program.fns[func as usize];
+    let count = program
+        .fns
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flat_map(|b| b.stmts.iter())
+        .find_map(|s| match s {
+            mir::Inst::Assign { value: mir::Rvalue::ClosureNew { func: g, captures }, .. }
+                if g.0 == func =>
+            {
+                Some(captures.len())
+            }
+            _ => None,
+        })
+        .unwrap_or(0);
+    let params: Vec<TyId> = lifted.locals[count..lifted.param_count].iter().map(|l| l.ty).collect();
+    // `types` is shared and immutable here, so the type must already exist —
+    // and it does: the local holding the closure has it.
+    types.find_fn(&params, lifted.ret).unwrap_or(TyId::ERROR)
+}
+
+/// The wrapper that gives every closure of one Kite type the same signature.
+fn compile_thunk(
+    func: u32,
+    count: usize,
+    program: &mir::Program,
+    types: &Types,
+    layout: &TypeLayout,
+) -> Function {
+    let mut f = Function::new(Vec::new());
+    let lifted = &program.fns[func as usize];
+    let (env_record, _) = layout.env_record[&func];
+
+    // The captures, read back out of the environment.
+    for i in 0..count {
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(env_record)));
+        f.instruction(&Instruction::StructGet {
+            struct_type_index: env_record,
+            field_index: i as u32,
+        });
+    }
+    // Then the arguments, which follow the environment parameter.
+    for i in 0..(lifted.param_count - count) {
+        f.instruction(&Instruction::LocalGet(1 + i as u32));
+    }
+    f.instruction(&Instruction::Call(IMPORT_COUNT + func));
+    f.instruction(&Instruction::End);
+    let _ = types;
+    f
 }
 
 /// A trait method's dispatcher: the receiver's stored tag chooses which
@@ -837,6 +1049,9 @@ fn compile_fn(
     dispatch_base: u32,
     dispatchers: &[Dispatcher],
     eq: &eq::EqBuilder,
+    program: &mir::Program,
+    thunks: &[u32],
+    thunk_base: u32,
 ) -> Function {
     // Locals beyond the parameters, plus one synthetic program counter.
     let mut locals: Vec<(u32, ValType)> = Vec::new();
@@ -922,6 +1137,9 @@ fn compile_fn(
             dispatch_base,
             dispatchers,
             eq,
+            program,
+            thunks,
+            thunk_base,
             layout,
             current_dst: None,
             pc,
@@ -957,6 +1175,11 @@ struct Emitter<'a> {
     dispatch_base: u32,
     dispatchers: &'a [Dispatcher],
     eq: &'a eq::EqBuilder<'a>,
+    /// The whole program, for reading a lifted function's signature back.
+    program: &'a mir::Program,
+    /// Lifted functions with a thunk, in emission order.
+    thunks: &'a [u32],
+    thunk_base: u32,
     layout: &'a TypeLayout,
     /// The local a rvalue is being assigned into, when there is one. A slice
     /// construction takes its element type from there.
@@ -1156,12 +1379,58 @@ impl<'a> Emitter<'a> {
                 }
             }
 
-            // Closures are not lowered yet. The driver refuses any program
-            // with a function-typed value before codegen runs, so these are
-            // defensive rather than reachable.
-            mir::Rvalue::ClosureNew { .. } | mir::Rvalue::CallClosure { .. } => {
-                func.instruction(&Instruction::Unreachable);
+            mir::Rvalue::ClosureNew { func: callee, captures } => {
+                let record = self
+                    .closure_record_for(callee.0)
+                    .unwrap_or(self.layout.object_record);
+                let Some((env_record, _)) = self.layout.env_record.get(&callee.0).copied() else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                let Some(thunk) = self.thunk_of(callee.0) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                func.instruction(&Instruction::RefFunc(thunk));
+                for c in captures {
+                    self.operand(func, c);
+                }
+                func.instruction(&Instruction::StructNew(env_record));
+                func.instruction(&Instruction::StructNew(record));
                 return true;
+            }
+
+            mir::Rvalue::CallClosure { callee, args } => {
+                let Some(ty) = self.operand_ty(callee) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                let (Some(record), Some(sig)) =
+                    (self.layout.closure_type(ty), self.layout.closure_sig.get(&ty).copied())
+                else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                // Environment, then arguments, then the code to run — which is
+                // the order `call_ref` reads them in.
+                self.operand(func, callee);
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: record,
+                    field_index: 1,
+                });
+                for a in args {
+                    self.operand(func, a);
+                }
+                self.operand(func, callee);
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: record,
+                    field_index: 0,
+                });
+                func.instruction(&Instruction::CallRef(sig));
+                let TyKind::Fn { ret, .. } = self.types.kind(ty) else {
+                    return true;
+                };
+                return *ret != TyId::UNIT;
             }
 
             mir::Rvalue::ToStr { operand, from } => {
@@ -1836,6 +2105,17 @@ impl<'a> Emitter<'a> {
 
     /// The record type an operand holds, whether a struct or a tuple. Both are
     /// positional records once lowered.
+    /// The closure record a lifted function's values are, and the index of its
+    /// thunk. Both are keyed by the lifted function, because its captures fix
+    /// the environment's shape.
+    fn closure_record_for(&self, func: u32) -> Option<u32> {
+        self.layout.closure_type(closure_ty_of(func, self.program, self.types))
+    }
+
+    fn thunk_of(&self, func: u32) -> Option<u32> {
+        self.thunks.iter().position(|f| *f == func).map(|i| self.thunk_base + i as u32)
+    }
+
     /// The type an operand holds, when it is a local. A literal never has an
     /// aggregate type, so this is all deep equality needs.
     fn operand_ty(&self, o: &mir::Operand) -> Option<TyId> {

@@ -507,7 +507,7 @@ impl<'a> FnLowerer<'a> {
                 let args = args.iter().map(|a| self.operand(a)).collect();
                 Rvalue::CallVirtual { trait_id: *trait_id, method: *method, args }
             }
-            hir::ExprKind::ClosureNew { func, captures } => Rvalue::ClosureNew {
+            hir::ExprKind::ClosureNew { func, captures, .. } => Rvalue::ClosureNew {
                 func: FnId(func.0),
                 captures: captures.iter().map(|c| self.operand(c)).collect(),
             },

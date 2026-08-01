@@ -228,7 +228,11 @@ pub enum ExprKind {
     /// A closure value: the lifted function, plus the values it captured.
     /// Captures are by value and evaluated here, at the point the closure is
     /// made — not when it runs.
-    ClosureNew { func: FnId, captures: Vec<Expr> },
+    ///
+    /// `targs` are the enclosing function's type arguments. A closure written
+    /// inside `f<T>` mentions `T`, and its lifted body is a separate function,
+    /// so it is specialised alongside every instantiation of `f`.
+    ClosureNew { func: FnId, captures: Vec<Expr>, targs: Vec<TyId> },
     /// Calling a function value. The callee's captures are passed ahead of the
     /// arguments, which is why a lifted function takes them as leading
     /// parameters rather than as a separate environment record.
@@ -571,7 +575,7 @@ impl Program {
                 )
             }
             ExprKind::ToStr { value } => format!("(str {})", self.expr(value)),
-            ExprKind::ClosureNew { func, captures } => {
+            ExprKind::ClosureNew { func, captures, .. } => {
                 let c: Vec<String> = captures.iter().map(|x| self.expr(x)).collect();
                 format!("closure fn{}[{}]", func.0, c.join(", "))
             }

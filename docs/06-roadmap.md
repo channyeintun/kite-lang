@@ -134,7 +134,19 @@ the receiver is concrete and the vtable finds the right body — but the tag
 comparison is avoidable, and devirtualising after monomorphisation is a
 worthwhile follow-up.
 
-**Remaining:** closures, and type parameters on structs, enums and traits.
+**Also done:** closures. The body is lifted into a function of its own whose
+leading parameters are what it captured, so nothing after the type checker
+knows closures exist. Captures are by value, taken when the closure is made —
+which is why a returned closure works, and why capturing a `var` is refused.
+
+In WebAssembly a closure is a record of a typed function reference and an
+opaque environment. Two closures of one Kite type capture different things, so
+the environment cannot be in the shared signature; each lifted function gets a
+thunk that casts the environment back to its own record and unpacks it. Calls
+go through `call_ref`, and the thunks are named in a declarative element
+segment because `ref.func` may only reference a function declared for it.
+
+**Remaining in Phase 2:** type parameters on structs, enums and traits.
 
 Four things came out differently from this plan:
 
@@ -285,10 +297,11 @@ difference, and the functions call each other, so a struct holding a slice of
 structs compares correctly at any depth. They are emitted only for types a
 program actually compares.
 
-**All nine examples compile to WebAssembly and agree with the bytecode VM, and
-every construct the language has now lowers.** The only thing `--emit wasm`
-still refuses is a function-typed value, which the language cannot produce yet
-either — closures are Phase 2 work that has not landed. The rvalue match in the backend has **no catch-all**, so adding a
+**All eleven examples compile to WebAssembly and agree with the bytecode VM,
+and every construct the language has now lowers.** `--emit wasm` refuses
+nothing the language can express. The scan that would report a gap is still
+wired in, because a backend that quietly emits a trapping module for something
+it cannot do is the failure that check exists to prevent. The rvalue match in the backend has **no catch-all**, so adding a
 form to MIR fails to compile rather than silently producing a module that
 traps.
 
@@ -417,9 +430,9 @@ none.
 |---|---|
 | 0 — Specification review | ✅ done, and the spec was amended four times by what the code found |
 | 1 — Vertical slice | ✅ complete |
-| 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, trait objects, slices, optionals, tuples, maps, interpolation, generic functions with bounds. ❌ closures, generic types |
+| 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, trait objects, slices, optionals, tuples, maps, interpolation, generic functions with bounds, closures. ❌ generic types |
 | 3 — Error handling | ✅ complete |
-| 4 — WebAssembly backend | ✅ every construct the language has, all nine examples, both backends agreeing. ❌ JS String Builtins (an optimisation, not a gap) |
+| 4 — WebAssembly backend | ✅ every construct the language has, all eleven examples, both backends agreeing. ❌ JS String Builtins (an optimisation, not a gap) |
 | 5 — Concurrency | ❌ not started |
 | 6 — Standard library | ❌ not started |
 | 7 — Layout engine and DOM renderer | ❌ not started |
