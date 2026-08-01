@@ -68,7 +68,8 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 
 ## Status
 
-**Phase 1 complete** — the vertical slice runs end to end. See
+**Phase 1 complete. Phase 2 substantially complete** — structs, enums,
+`match` with exhaustiveness, traits with default methods. See
 [docs/06-roadmap.md](docs/06-roadmap.md) for what comes next.
 
 ```bash
@@ -91,16 +92,22 @@ fn main() {
 }
 ```
 
-Working today: the full lexer (all 27 keywords, newline termination, Unicode
-identifiers), parser with error recovery, name resolution, bidirectional type
-checking, definite-assignment analysis, MIR with explicit basic blocks,
-register-based bytecode, and a VM. 212 tests, plus an annotated compile-fail
-corpus.
+```bash
+cargo run --bin kitec -- run examples/shapes.kite   # enums and match
+cargo run --bin kitec -- run examples/traits.kite   # traits and defaults
+cargo run --bin kitec -- run examples/structs.kite  # structs and methods
+```
 
-The language subset is `int`/`float`/`bool`/`str`, functions, `let`/`var`,
-`if`/`else`, the three `for` forms with labelled `break`/`continue`, and
-`io.print`. Structs, enums, traits, and generics are Phase 2; error handling
-with `check` is Phase 3; the WasmGC backend is Phase 4.
+Working today: `int`/`float`/`bool`/`str`, functions, `let`/`var`,
+`if`/`else`, the three `for` forms with labelled `break`/`continue`, structs
+with methods and associated functions, enums with named and positional
+payloads, `match` with guards, alternation, ranges, and struct patterns,
+exhaustiveness checking that names the missing variants, and traits with
+default methods. 317 tests, plus an annotated compile-fail corpus.
+
+Not yet: slices, maps, optionals, tuples, closures, generics, `dyn Trait`
+dispatch, and string interpolation — the rest of Phase 2. Error handling with
+`check` is Phase 3; the WasmGC backend is Phase 4.
 
 ```bash
 kitec run     file.kite      # compile and run

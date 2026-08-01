@@ -1,0 +1,42 @@
+struct Rect {
+    width: int
+    height: int
+}
+
+struct Circle {
+    radius: int
+}
+
+pub trait Shape {
+    fn area(self) -> int
+
+    fn describe(self) -> str {
+        return "a shape"
+    }
+}
+
+impl Shape for Rect {
+    fn area(self) -> int {
+        return self.width * self.height
+    }
+
+    fn describe(self) -> str {
+        return "a rectangle"
+    }
+}
+
+impl Shape for Circle {
+    fn area(self) -> int {
+        return 3 * self.radius * self.radius
+    }
+}
+
+fn main() {
+    let r = Rect{ width: 3, height: 4 }
+    let c = Circle{ radius: 2 }
+
+    io.print(r.area())
+    io.print(r.describe())
+    io.print(c.area())
+    io.print(c.describe())
+}

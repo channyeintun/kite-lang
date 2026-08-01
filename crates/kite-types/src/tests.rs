@@ -755,3 +755,100 @@ fn matching_the_wrong_enum_is_reported() {
     ));
     assert!(c.has("E0200"), "{}", c.render());
 }
+
+// ---- traits ---------------------------------------------------------------
+
+const TRAITED: &str = "\
+struct P {
+    n: int
+}
+trait Shape {
+    fn area(self) -> int
+    fn describe(self) -> str {
+        return \"a shape\"
+    }
+}
+";
+
+#[test]
+fn a_complete_trait_impl_checks() {
+    let c = run(&format!(
+        "{}\nimpl Shape for P {{\n  fn area(self) -> int {{\n    return self.n\n  }}\n}}\nfn main() {{\n  io.print(P{{ n: 1 }}.area())\n}}\n",
+        TRAITED
+    ));
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+#[test]
+fn a_missing_required_method_is_reported() {
+    let c = run(&format!(
+        "{}\nimpl Shape for P {{\n}}\nfn main() {{\n}}\n",
+        TRAITED
+    ));
+    assert!(c.has("E0200"), "{}", c.render());
+    assert!(c.render().contains("`area`"), "{}", c.render());
+}
+
+/// A method with a default need not be provided.
+#[test]
+fn a_defaulted_method_may_be_omitted() {
+    let c = run(&format!(
+        "{}\nimpl Shape for P {{\n  fn area(self) -> int {{\n    return 1\n  }}\n}}\nfn main() {{\n  io.print(P{{ n: 1 }}.describe())\n}}\n",
+        TRAITED
+    ));
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+#[test]
+fn a_method_the_trait_does_not_declare_is_rejected() {
+    let c = run(&format!(
+        "{}\nimpl Shape for P {{\n  fn area(self) -> int {{\n    return 1\n  }}\n  fn extra(self) -> int {{\n    return 2\n  }}\n}}\nfn main() {{\n}}\n",
+        TRAITED
+    ));
+    assert!(c.has("E0200"), "{}", c.render());
+    assert!(c.render().contains("inherent"), "{}", c.render());
+}
+
+#[test]
+fn a_wrong_parameter_count_is_reported() {
+    let c = run(&format!(
+        "{}\nimpl Shape for P {{\n  fn area(self, extra: int) -> int {{\n    return 1\n  }}\n}}\nfn main() {{\n}}\n",
+        TRAITED
+    ));
+    assert!(c.has("E0113"), "{}", c.render());
+}
+
+#[test]
+fn a_missing_receiver_is_reported() {
+    let c = run(&format!(
+        "{}\nimpl Shape for P {{\n  fn area() -> int {{\n    return 1\n  }}\n}}\nfn main() {{\n}}\n",
+        TRAITED
+    ));
+    assert!(c.has("E0200"), "{}", c.render());
+    assert!(c.render().contains("receiver"), "{}", c.render());
+}
+
+/// Exactly one implementation per trait and type is what makes trait
+/// resolution decidable.
+#[test]
+fn implementing_a_trait_twice_for_one_type_is_rejected() {
+    let c = run(&format!(
+        "{}\nimpl Shape for P {{\n  fn area(self) -> int {{\n    return 1\n  }}\n}}\nimpl Shape for P {{\n  fn area(self) -> int {{\n    return 2\n  }}\n}}\nfn main() {{\n}}\n",
+        TRAITED
+    ));
+    assert!(c.has("E0112"), "{}", c.render());
+    assert!(c.render().contains("decidable"), "{}", c.render());
+}
+
+#[test]
+fn a_trait_is_not_a_type() {
+    let c = run(&format!("{}\nfn f(s: Shape) {{\n}}\nfn main() {{\n}}\n", TRAITED));
+    assert!(c.has("E0204"), "{}", c.render());
+    assert!(c.render().contains("dyn Shape"), "{}", c.render());
+}
+
+#[test]
+fn implementing_an_unknown_trait_is_reported() {
+    let c = run("struct P {\n  n: int\n}\nimpl Nope for P {\n}\nfn main() {\n}\n");
+    assert!(c.has("E0204"), "{}", c.render());
+}

@@ -917,3 +917,138 @@ fn main() {
 ";
     assert_eq!(lines(src), vec!["6"]);
 }
+
+// ---- traits ---------------------------------------------------------------
+
+/// The `Shape` example from SPECIFICATION.md section 10, which is the Phase 2
+/// exit criterion.
+#[test]
+fn the_specification_trait_example_runs() {
+    let src = "\
+struct Rect {
+    width: int
+    height: int
+}
+struct Circle {
+    radius: int
+}
+
+pub trait Shape {
+    fn area(self) -> int
+
+    fn describe(self) -> str {
+        return \"a shape\"
+    }
+}
+
+impl Shape for Rect {
+    fn area(self) -> int {
+        return self.width * self.height
+    }
+    fn describe(self) -> str {
+        return \"a rectangle\"
+    }
+}
+
+impl Shape for Circle {
+    fn area(self) -> int {
+        return 3 * self.radius * self.radius
+    }
+}
+
+fn main() {
+    let r = Rect{ width: 3, height: 4 }
+    let c = Circle{ radius: 2 }
+    io.print(r.area())
+    io.print(r.describe())
+    io.print(c.area())
+    io.print(c.describe())
+}
+";
+    assert_eq!(lines(src), vec!["12", "a rectangle", "12", "a shape"]);
+}
+
+/// A default method's body lives in the trait but runs against the
+/// implementing type's `self`.
+#[test]
+fn a_default_method_sees_the_implementing_types_fields() {
+    let src = "\
+struct P {
+    n: int
+}
+trait Doubler {
+    fn value(self) -> int
+    fn doubled(self) -> int {
+        return self.value() * 2
+    }
+}
+impl Doubler for P {
+    fn value(self) -> int {
+        return self.n
+    }
+}
+fn main() {
+    io.print(P{ n: 21 }.doubled())
+}
+";
+    assert_eq!(lines(src), vec!["42"]);
+}
+
+#[test]
+fn one_type_may_implement_several_traits() {
+    let src = "\
+struct P {
+    n: int
+}
+trait A {
+    fn a(self) -> int
+}
+trait B {
+    fn b(self) -> int
+}
+impl A for P {
+    fn a(self) -> int {
+        return self.n
+    }
+}
+impl B for P {
+    fn b(self) -> int {
+        return self.n * 2
+    }
+}
+fn main() {
+    let p = P{ n: 5 }
+    io.print(p.a())
+    io.print(p.b())
+}
+";
+    assert_eq!(lines(src), vec!["5", "10"]);
+}
+
+#[test]
+fn inherent_and_trait_methods_coexist() {
+    let src = "\
+struct P {
+    n: int
+}
+trait T {
+    fn viaTrait(self) -> int
+}
+impl P {
+    fn inherent(self) -> int {
+        return self.n + 1
+    }
+}
+impl T for P {
+    fn viaTrait(self) -> int {
+        return self.n + 2
+    }
+}
+fn main() {
+    let p = P{ n: 1 }
+    io.print(p.inherent())
+    io.print(p.viaTrait())
+}
+";
+    assert_eq!(lines(src), vec!["2", "3"]);
+}

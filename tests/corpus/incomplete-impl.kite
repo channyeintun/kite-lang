@@ -1,0 +1,14 @@
+struct P {
+    n: int
+}
+
+trait Shape {
+    fn area(self) -> int
+}
+
+impl Shape for P {   //~ ERROR E0200
+}
+
+fn main() {
+    io.print(1)
+}

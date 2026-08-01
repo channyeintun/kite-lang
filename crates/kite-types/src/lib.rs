@@ -104,6 +104,32 @@ pub fn check(
                     .collect();
                 types.set_enum_variants(eid, variants);
             }
+            (Some(TypeTarget::Trait(tid)), ast::Item::Trait(tr)) => {
+                let methods = tr
+                    .methods
+                    .iter()
+                    .map(|m| kite_hir::TraitMethodDef {
+                        name: m.name.name.clone(),
+                        params: m
+                            .params
+                            .iter()
+                            .map(|p| {
+                                resolve_named_ty(&p.ty, resolved, &type_ids, &mut types, diags)
+                            })
+                            .collect(),
+                        ret: match &m.ret {
+                            None => TyId::UNIT,
+                            Some(r) => resolve_named_ty(
+                                r.value_type(), resolved, &type_ids, &mut types, diags,
+                            ),
+                        },
+                        takes_self: m.self_param.is_some(),
+                        has_default: m.body.is_some(),
+                        span: m.name.span,
+                    })
+                    .collect();
+                types.set_trait_methods(tid, methods);
+            }
             (Some(TypeTarget::Struct(sid)), ast::Item::Struct(s)) => {
                 let fields = s
                     .fields
@@ -150,10 +176,14 @@ pub fn check(
                 )
             }
             Some(owner) => {
-                let ast::Item::Impl(imp) = &file.items[owner.impl_index] else {
-                    unreachable!("a method signature points at an impl block")
+                // A default method's body lives in the trait declaration, not
+                // in the `impl` block that inherited it.
+                let methods = match &file.items[owner.impl_index] {
+                    ast::Item::Impl(imp) => &imp.methods,
+                    ast::Item::Trait(tr) => &tr.methods,
+                    _ => unreachable!("a method signature points at an impl or a trait"),
                 };
-                let m = &imp.methods[owner.method_index];
+                let m = &methods[owner.method_index];
                 let params = m
                     .params
                     .iter()
@@ -181,6 +211,8 @@ pub fn check(
         };
         sigs.push(Signature { params, ret, fallible, name_span, self_ty });
     }
+
+    check_impls(file, resolved, &type_ids, &types, diags);
 
     for (i, sig) in resolved.fns.iter().enumerate() {
         let mut checker = Checker {
@@ -213,10 +245,12 @@ pub fn check(
                 )
             }
             Some(owner) => {
-                let ast::Item::Impl(imp) = &file.items[owner.impl_index] else {
-                    unreachable!()
+                let methods = match &file.items[owner.impl_index] {
+                    ast::Item::Impl(imp) => &imp.methods,
+                    ast::Item::Trait(tr) => &tr.methods,
+                    _ => unreachable!("a method signature points at an impl or a trait"),
                 };
-                let m = &imp.methods[owner.method_index];
+                let m = &methods[owner.method_index];
                 let body_span = m.body.as_ref().map(|b| b.span).unwrap_or(m.span);
                 checker.check_body(
                     &m.name.name,
@@ -2617,6 +2651,139 @@ fn short_circuit(op: ast::BinaryOp) -> Option<hir::BinOp> {
         ast::BinaryOp::And => Some(hir::BinOp::And),
         ast::BinaryOp::Or => Some(hir::BinOp::Or),
         _ => None,
+    }
+}
+
+/// Verify every `impl Trait for Type` block: the trait is implemented once,
+/// every required method is present, and each signature matches.
+fn check_impls(
+    file: &ast::SourceFile,
+    resolved: &ResolveMap,
+    type_ids: &[Option<TypeTarget>],
+    types: &Types,
+    diags: &mut DiagBag,
+) {
+    // (trait index, type index) -> the span that first claimed it. Exactly one
+    // implementation per pair is what makes trait resolution decidable.
+    let mut claimed: std::collections::HashMap<(u32, u32), Span> =
+        std::collections::HashMap::new();
+
+    for item in &file.items {
+        let ast::Item::Impl(imp) = item else { continue };
+        let Some(tp) = &imp.trait_path else { continue };
+
+        let (Some(ti), Some(target)) = (
+            resolved.type_by_name(tp.name()),
+            resolved.type_by_name(imp.self_ty.name()),
+        ) else {
+            continue;
+        };
+        let Some(TypeTarget::Trait(tid)) = type_ids[ti as usize] else {
+            continue;
+        };
+
+        if let Some(&prev) = claimed.get(&(ti, target)) {
+            diags.push(
+                Diagnostic::error(
+                    codes::E0112,
+                    format!(
+                        "`{}` is implemented for `{}` more than once",
+                        tp.name(),
+                        imp.self_ty.name()
+                    ),
+                )
+                .with_primary(imp.span, "duplicate implementation")
+                .with_secondary(prev, "first implemented here")
+                .with_note(
+                    "exactly one implementation per trait and type is what makes trait \
+                     resolution decidable and separate compilation possible",
+                ),
+            );
+            continue;
+        }
+        claimed.insert((ti, target), imp.span);
+
+        let def = types.trait_def(tid);
+
+        // Every method without a default must be provided.
+        let mut missing = Vec::new();
+        for m in &def.methods {
+            if m.has_default {
+                continue;
+            }
+            if !imp.methods.iter().any(|x| x.name.name == m.name) {
+                missing.push(m.name.clone());
+            }
+        }
+        if !missing.is_empty() {
+            diags.push(
+                Diagnostic::error(
+                    codes::E0200,
+                    format!(
+                        "`{}` does not implement {} of `{}`",
+                        imp.self_ty.name(),
+                        missing
+                            .iter()
+                            .map(|m| format!("`{}`", m))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        tp.name()
+                    ),
+                )
+                .with_primary(imp.span, "incomplete implementation")
+                .with_secondary(def.span, "trait declared here"),
+            );
+        }
+
+        // Every provided method must belong to the trait, and match its shape.
+        for m in &imp.methods {
+            let Some((_, decl)) = def.method(&m.name.name) else {
+                diags.push(
+                    Diagnostic::error(
+                        codes::E0200,
+                        format!("`{}` is not a method of `{}`", m.name.name, tp.name()),
+                    )
+                    .with_primary(m.name.span, "not declared by the trait")
+                    .with_note(
+                        "a trait implementation may only define the trait's methods; put \
+                         anything else in an inherent `impl` block",
+                    ),
+                );
+                continue;
+            };
+
+            if decl.takes_self != m.self_param.is_some() {
+                diags.push(
+                    Diagnostic::error(
+                        codes::E0200,
+                        format!("`{}` has the wrong receiver", m.name.name),
+                    )
+                    .with_primary(m.sig_span, if decl.takes_self {
+                        "the trait declares this with `self`"
+                    } else {
+                        "the trait declares this without `self`"
+                    })
+                    .with_secondary(decl.span, "declared here"),
+                );
+            }
+
+            if decl.params.len() != m.params.len() {
+                diags.push(
+                    Diagnostic::error(
+                        codes::E0113,
+                        format!(
+                            "`{}` takes {} parameter{}, but the trait declares {}",
+                            m.name.name,
+                            m.params.len(),
+                            if m.params.len() == 1 { "" } else { "s" },
+                            decl.params.len()
+                        ),
+                    )
+                    .with_primary(m.sig_span, "signature does not match")
+                    .with_secondary(decl.span, "declared here"),
+                );
+            }
+        }
     }
 }
 

@@ -105,13 +105,17 @@ pub struct FnSig {
 pub struct MethodOwner {
     /// Index into [`ResolveMap::types`].
     pub type_index: u32,
-    /// Index into `SourceFile::items` for the enclosing `impl`.
+    /// Index into `SourceFile::items` for the block holding the body — an
+    /// `impl`, or the `trait` itself when this is an inherited default.
     pub impl_index: usize,
-    /// Position within that impl's method list.
+    /// Position within that block's method list.
     pub method_index: usize,
     pub takes_self: bool,
     /// The trait being implemented, if this is a trait impl.
     pub trait_index: Option<u32>,
+    /// True when the body comes from a trait's default method rather than
+    /// from the `impl` block. The body is shared; only the receiver differs.
+    pub is_default: bool,
 }
 
 /// A local slot within one function.
@@ -292,6 +296,7 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
 
             Item::Impl(imp) => {
                 let target = imp.self_ty.name();
+                let _ = &seen;
                 let Some(type_index) = map.type_by_name(target) else {
                     diags.push(
                         Diagnostic::error(codes::E0204, format!("unknown type `{}`", target))
@@ -343,8 +348,42 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                             method_index: mi,
                             takes_self: m.self_param.is_some(),
                             trait_index,
+                            is_default: false,
                         }),
                     });
+                }
+
+                // A trait's default method becomes a method on the
+                // implementing type unless the impl overrode it. The body is
+                // the trait's; only the receiver differs.
+                if let Some(ti) = trait_index {
+                    let trait_item = map.types[ti as usize].decl_index;
+                    if let Item::Trait(tr) = &file.items[trait_item] {
+                        for (mi, m) in tr.methods.iter().enumerate() {
+                            if m.body.is_none() {
+                                continue;
+                            }
+                            let overridden =
+                                imp.methods.iter().any(|x| x.name.name == m.name.name);
+                            if overridden {
+                                continue;
+                            }
+                            map.fns.push(FnSig {
+                                name: m.name.name.clone(),
+                                param_count: m.params.len(),
+                                decl_index: trait_item,
+                                span: m.name.span,
+                                owner: Some(MethodOwner {
+                                    type_index,
+                                    impl_index: trait_item,
+                                    method_index: mi,
+                                    takes_self: m.self_param.is_some(),
+                                    trait_index: Some(ti),
+                                    is_default: true,
+                                }),
+                            });
+                        }
+                    }
                 }
             }
 
@@ -369,10 +408,12 @@ fn resolve_bodies(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) 
                 r.locals
             }
             Some(o) => {
-                let Item::Impl(imp) = &file.items[o.impl_index] else {
-                    unreachable!("a method signature points at an impl block")
+                let methods = match &file.items[o.impl_index] {
+                    Item::Impl(imp) => &imp.methods,
+                    Item::Trait(tr) => &tr.methods,
+                    _ => unreachable!("a method signature points at an impl or trait"),
                 };
-                let m = &imp.methods[o.method_index];
+                let m = &methods[o.method_index];
                 let mut r = FnResolver::new(map, diags);
                 r.resolve_fn(&m.params, m.body.as_ref(), o.takes_self);
                 r.locals
