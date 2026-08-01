@@ -533,6 +533,13 @@ pub enum BinOp {
     NeBool,
     EqStr,
     NeStr,
+    /// Ordering on strings, by code point. A host call on the Wasm target,
+    /// because a `str` there is the host's string and only the host can look
+    /// inside one.
+    LtStr,
+    LeStr,
+    GtStr,
+    GeStr,
     /// Structural comparison for aggregates. Two structs are equal when their
     /// fields are; there is no reference-equality operator in the surface
     /// language.

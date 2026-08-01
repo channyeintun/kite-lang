@@ -1540,7 +1540,16 @@ impl<'a> Parser<'a> {
             match self.peek() {
                 T::Dot => {
                     self.bump();
-                    let name = self.ident()?;
+                    // `pair.0` — a tuple's elements are positional, so the
+                    // "name" after the dot is a number. It is kept as text
+                    // from here on, because a field is a field.
+                    let name = if self.at(T::Int) {
+                        let span = self.span();
+                        self.bump();
+                        Ident::new(self.text(span), span)
+                    } else {
+                        self.ident()?
+                    };
                     let span = expr.span().to(name.span);
                     // `.` always produces a field access. Whether `io.print` is
                     // really a module path rather than a field of a local is a

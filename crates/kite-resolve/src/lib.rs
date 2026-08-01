@@ -335,6 +335,11 @@ impl ResolveMap {
         let name = self.modules.canonical(name);
         self.find_fn(&qualify(module, &name))
             .or_else(|| self.find_fn(&name))
+            // The prelude is last, so a program's own `take` wins — and the
+            // prelude's own calls to `take` find the prelude's, because its
+            // module is tried first. Shadowing a prelude name used to break
+            // the prelude.
+            .or_else(|| self.find_fn(&qualify(PRELUDE, &name)))
     }
 
     fn find_fn(&self, name: &str) -> Option<u32> {
@@ -348,6 +353,7 @@ impl ResolveMap {
         let name = self.modules.canonical(name);
         self.find_type(&qualify(module, &name))
             .or_else(|| self.find_type(&name))
+            .or_else(|| self.find_type(&qualify(PRELUDE, &name)))
     }
 
     fn find_type(&self, name: &str) -> Option<u32> {
@@ -426,6 +432,13 @@ impl ResolveMap {
             .map(|i| i as u32)
     }
 }
+
+/// The module the prelude's declarations belong to.
+///
+/// It is a module like any other, which is what lets its own calls resolve to
+/// its own names — and it is searched last from everywhere else, which is what
+/// lets a program shadow one of its names without breaking it.
+pub const PRELUDE: &str = "prelude";
 
 /// The qualified form of a name declared in `module`.
 fn qualify(module: &str, name: &str) -> String {
@@ -774,9 +787,9 @@ impl<'a> FnResolver<'a> {
             }
             _ => return,
         };
-        // The root module holds the program and the prelude, which are in
-        // scope everywhere by construction.
-        if module.is_empty() || module == self.module || is_pub {
+        // The root module is the program's own, and the prelude is in scope
+        // everywhere by construction.
+        if module.is_empty() || module == PRELUDE || module == self.module || is_pub {
             return;
         }
         let module = module.to_string();

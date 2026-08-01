@@ -945,6 +945,30 @@ impl<'a> Vm<'a> {
                     self.set(base, dst, value);
                 }
 
+                // Ordering on strings, by code point: Rust's `str` ordering is
+                // exactly that, and the glue's is too, so the two backends
+                // sort the same way.
+                Op::LtStr { dst, a, b }
+                | Op::LeStr { dst, a, b }
+                | Op::GtStr { dst, a, b }
+                | Op::GeStr { dst, a, b } => {
+                    let (x, y) = (self.get(base, a), self.get(base, b));
+                    let (Value::Str(x), Value::Str(y)) = (&x, &y) else {
+                        return Err(Trap::TypeConfusion {
+                            op: "string comparison",
+                            found: x.type_name(),
+                        });
+                    };
+                    let ordering = x.as_ref().cmp(y.as_ref());
+                    let result = match proto.code[pc] {
+                        Op::LtStr { .. } => ordering.is_lt(),
+                        Op::LeStr { .. } => ordering.is_le(),
+                        Op::GtStr { .. } => ordering.is_gt(),
+                        _ => ordering.is_ge(),
+                    };
+                    self.set(base, dst, Value::Bool(result));
+                }
+
                 Op::MapKeys { dst, obj } | Op::MapValues { dst, obj } => {
                     let keys = matches!(proto.code[pc], Op::MapKeys { .. });
                     let m = self.get(base, obj);

@@ -140,6 +140,11 @@ pub enum Op {
     NeBool { dst: Reg, a: Reg, b: Reg },
     EqStr { dst: Reg, a: Reg, b: Reg },
     NeStr { dst: Reg, a: Reg, b: Reg },
+    /// Ordering on strings, by code point.
+    LtStr { dst: Reg, a: Reg, b: Reg },
+    LeStr { dst: Reg, a: Reg, b: Reg },
+    GtStr { dst: Reg, a: Reg, b: Reg },
+    GeStr { dst: Reg, a: Reg, b: Reg },
     /// Structural comparison, used for aggregates.
     EqValue { dst: Reg, a: Reg, b: Reg },
     NeValue { dst: Reg, a: Reg, b: Reg },
@@ -288,6 +293,10 @@ pub fn binop_instruction(op: BinOp) -> Option<fn(Reg, Reg, Reg) -> Op> {
         EqBool => |dst, a, b| Op::EqBool { dst, a, b },
         NeBool => |dst, a, b| Op::NeBool { dst, a, b },
         EqStr => |dst, a, b| Op::EqStr { dst, a, b },
+        LtStr => |dst, a, b| Op::LtStr { dst, a, b },
+        LeStr => |dst, a, b| Op::LeStr { dst, a, b },
+        GtStr => |dst, a, b| Op::GtStr { dst, a, b },
+        GeStr => |dst, a, b| Op::GeStr { dst, a, b },
         NeStr => |dst, a, b| Op::NeStr { dst, a, b },
         EqValue => |dst, a, b| Op::EqValue { dst, a, b },
         NeValue => |dst, a, b| Op::NeValue { dst, a, b },
@@ -354,6 +363,10 @@ impl fmt::Display for Op {
             CallExtern { dst, index, base, argc } => {
                 write!(f, "{:<12} r{}, host{}, r{}, {}", "call.host", dst, index, base, argc)
             }
+            LtStr { dst, a, b } => bin(f, "lt.str", dst, a, b),
+            LeStr { dst, a, b } => bin(f, "le.str", dst, a, b),
+            GtStr { dst, a, b } => bin(f, "gt.str", dst, a, b),
+            GeStr { dst, a, b } => bin(f, "ge.str", dst, a, b),
             MapKeys { dst, obj } => un(f, "map.keys", dst, obj),
             MapValues { dst, obj } => un(f, "map.values", dst, obj),
             PairValue { dst, obj } => write!(f, "{:<12} r{}, r{}", "pair.value", dst, obj),

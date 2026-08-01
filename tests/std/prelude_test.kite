@@ -37,6 +37,42 @@ fn checks() -> [error] {
     out.push(test.equal_int(if tail == nil { -1 } else { tail }, 8, "last"))
     out.push(test.is_true(first(empty) == nil, "first of an empty slice"))
 
+    // ---- ordering ----
+    out.push(test.equal_ints(sorted([3, 1, 2], |a: int, b: int| a<b), [1, 2, 3], "sorted"))
+    out.push(test.equal_strs(
+            sorted(["pear", "fig", "apple"], |a: str, b: str| a<b),
+            ["apple", "fig", "pear"],
+            "sorted by code point",
+        ))
+    out.push(test.equal_ints(sorted(empty, |a: int, b: int| a<b), empty, "sorting nothing"))
+    // Stability: two items the comparison does not separate keep their order.
+    let pairs = [(2, "first"), (1, "x"), (2, "second")]
+    let by_number = sorted(pairs, |a: (int, str), b: (int, str)| a.0 <b.0)
+    out.push(test.equal_str(by_number[1].1, "first", "the sort is stable"))
+    out.push(test.equal_str(by_number[2].1, "second", "the sort is stable"))
+
+    let smallest = min_by([3, 1, 2], |a: int, b: int| a<b)
+    out.push(test.equal_int(if smallest == nil { -1 } else { smallest }, 1, "min_by"))
+    let largest = max_by([3, 1, 2], |a: int, b: int| a<b)
+    out.push(test.equal_int(if largest == nil { -1 } else { largest }, 3, "max_by"))
+    out.push(test.is_true(min_by(empty, |a: int, b: int| a<b) == nil, "min_by of nothing"))
+
+    out.push(test.equal_int(zip([1, 2, 3], [4, 5]).len(), 2, "zip stops at the shorter"))
+    out.push(test.equal_int(zip([1, 2], [3, 4])[1].1, 4, "zip pairs up"))
+    out.push(test.equal_ints(flatten([[1, 2], [3]]), [1, 2, 3], "flatten"))
+    out.push(test.equal_int(position([4, 5, 6], |n: int| n == 5), 1, "position"))
+    out.push(test.equal_int(position([4], |n: int| n == 9), -1, "position misses"))
+    out.push(test.is_true(includes([1, 2], 2), "includes"))
+    out.push(test.equal_ints(unique([1, 2, 1, 3, 2]), [1, 2, 3], "unique keeps the first"))
+    out.push(test.equal_int(chunked([1, 2, 3, 4, 5], 2).len(), 3, "chunked"))
+    out.push(test.equal_ints(chunked([1, 2, 3], 2)[1], [3], "the last chunk is what is left"))
+    out.push(test.equal_int(chunked([1], 0).len(), 0, "chunks of nothing"))
+
+    // ---- strings ----
+    out.push(test.is_true("apple" < "banana", "strings order by code point"))
+    out.push(test.is_true("Z" < "a", "upper case sorts before lower"))
+    out.push(test.is_false("b" <= "a", "and the other way"))
+
     // ---- numbers ----
     out.push(test.equal_int(abs(-3), 3, "abs"))
     out.push(test.equal_int(min(2, 5), 2, "min"))

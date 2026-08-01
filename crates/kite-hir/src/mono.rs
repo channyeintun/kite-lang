@@ -14,7 +14,7 @@
 //! Substituting here is one pass over expression trees, rather than a
 //! substitution threaded through every step of lowering.
 
-use crate::{Block, EnumId, Expr, ExprKind, FnId, Function, Local, Pattern, Program, Stmt,
+use crate::{BinOp, Block, EnumId, Expr, ExprKind, FnId, Function, Local, Pattern, Program, Stmt,
             StructId, TyId, TyKind, Types};
 use std::collections::HashMap;
 
@@ -328,6 +328,61 @@ fn stmt_blocks(s: &mut Stmt) -> Vec<&mut Block> {
         | Stmt::Return { .. }
         | Stmt::Break { .. }
         | Stmt::Continue { .. } => vec![],
+    }
+}
+
+/// Turn structural equality on a primitive into the primitive's own
+/// comparison.
+///
+/// `==` inside a generic function is checked as `EqValue`, because the operand
+/// type is a parameter and nothing is known about it. Once specialisation has
+/// replaced the parameter, the type *is* known — and a backend that generates
+/// a comparison function per aggregate has nothing to generate for an `int`.
+/// The bytecode VM would happily compare two tagged values and never notice
+/// the difference, which is exactly the kind of divergence the differential
+/// suite exists to catch.
+pub fn specialise_equality(program: &mut Program) {
+    let mut types = std::mem::take(&mut program.types);
+    for f in &mut program.fns {
+        let mut block = std::mem::take(&mut f.body);
+        specialise_block(&mut block, &mut types);
+        f.body = block;
+    }
+    program.types = types;
+}
+
+fn specialise_block(block: &mut Block, types: &mut Types) {
+    for stmt in &mut block.stmts {
+        for inner in stmt_blocks(stmt) {
+            specialise_block(inner, types);
+        }
+        for expr in stmt_exprs(stmt) {
+            specialise_expr(expr, types);
+        }
+    }
+}
+
+fn specialise_expr(expr: &mut Expr, types: &mut Types) {
+    if let ExprKind::Binary { op, lhs, .. } = &mut expr.kind {
+        if matches!(op, BinOp::EqValue | BinOp::NeValue) {
+            let equal = matches!(op, BinOp::EqValue);
+            let specific = match types.kind(lhs.ty) {
+                TyKind::Int => Some(if equal { BinOp::EqInt } else { BinOp::NeInt }),
+                TyKind::Float => Some(if equal { BinOp::EqFloat } else { BinOp::NeFloat }),
+                TyKind::Bool => Some(if equal { BinOp::EqBool } else { BinOp::NeBool }),
+                TyKind::Str => Some(if equal { BinOp::EqStr } else { BinOp::NeStr }),
+                _ => None,
+            };
+            if let Some(specific) = specific {
+                *op = specific;
+            }
+        }
+    }
+    for child in expr_children(&mut expr.kind) {
+        specialise_expr(child, types);
+    }
+    for block in expr_blocks(&mut expr.kind) {
+        specialise_block(block, types);
     }
 }
 

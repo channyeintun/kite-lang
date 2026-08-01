@@ -215,56 +215,22 @@ fn run_passes(
     // items and the prelude's are the root module.
     let mut item_modules: Vec<String> = vec![String::new(); ast.items.len()];
 
-    // The prelude's declarations join the program as ordinary ones, except
-    // where the program declares the same name. A prelude that could not be
-    // shadowed would make every name in it permanently unusable, so the
-    // program's own definition simply wins — silently, because that is what a
-    // prelude is for.
-    let own: std::collections::HashSet<String> = ast
-        .items
-        .iter()
-        .filter_map(|i| i.declared_name())
-        .map(|s| s.to_string())
-        .collect();
-    let mut from_library: std::collections::HashMap<String, Span> =
-        std::collections::HashMap::new();
-
+    // The prelude is a module like any other, and its declarations are
+    // qualified like any other's. What makes it the prelude is only that its
+    // names are searched from everywhere without being written — and that it
+    // is searched *last*, so a program declaring its own `take` shadows the
+    // prelude's without breaking the prelude, whose own calls find its own
+    // first.
     {
         let text = sources.text(prelude).to_string();
         let tokens = kite_lexer::tokenize(prelude, &text, diags);
-        let parsed = kite_parser::parse(prelude, &text, &tokens, diags);
-        let mut keep = Vec::with_capacity(parsed.items.len());
-        for item in parsed.items {
-            let Some(name) = item.declared_name().map(|s| s.to_string()) else {
-                keep.push(item);
-                continue;
-            };
-            if own.contains(&name) {
-                continue;
-            }
-            // One prelude declaration shadowing another is a bug in the
-            // standard library: the first file is left calling a name that no
-            // longer means what it did.
-            if let Some(first) = from_library.get(&name) {
-                diags.push(
-                    kite_diag::Diagnostic::error(
-                        kite_diag::codes::E0112,
-                        format!("the standard library declares `{}` twice", name),
-                    )
-                    .with_primary(item.span(), "declared again here")
-                    .with_secondary(*first, "first declared here")
-                    .with_note(
-                        "one library file shadowing another would leave the first calling a \
-                         name that no longer means what it did — rename one of them",
-                    ),
-                );
-                continue;
-            }
-            from_library.insert(name, item.span());
-            keep.push(item);
-        }
-        item_modules.extend(std::iter::repeat_n(String::new(), keep.len()));
-        ast.items.extend(keep);
+        let mut parsed = kite_parser::parse(prelude, &text, &tokens, diags);
+        modules::qualify_items(kite_resolve::PRELUDE, &mut parsed.items);
+        item_modules.extend(std::iter::repeat_n(
+            kite_resolve::PRELUDE.to_string(),
+            parsed.items.len(),
+        ));
+        ast.items.extend(parsed.items);
     }
 
     // Each module's declarations are merged qualified, so `load` in module
@@ -308,6 +274,10 @@ fn run_passes(
     // The prelude is in every program; without this a `hello world` would
     // carry every helper it never mentions.
     kite_hir::mono::prune(&mut hir);
+    // `==` inside a generic function was checked as a structural comparison,
+    // because nothing was known about the type. Now that specialisation has
+    // made it concrete, a primitive gets the primitive's own comparison.
+    kite_hir::mono::specialise_equality(&mut hir);
 
     let mut mir = kite_mir::lower(&hir);
     // `async fn` becomes a starter and a resume function here, once, so both
@@ -361,7 +331,10 @@ fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Inde
         }
         let label = signature_text(sources, f.span, f.param_count);
         index.symbols.push(Symbol {
-            name: f.name.clone(),
+            // The name as it is *written*: a prelude name is spelled without
+            // its module, and offering `prelude.filter` to someone typing
+            // `fil` would be offering something that does not compile.
+            name: spelled(&f.name),
             at: f.span,
             kind: if f.is_extern { "host function" } else { "function" },
             label,
@@ -370,7 +343,7 @@ fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Inde
     }
     for t in &resolved.types {
         index.symbols.push(Symbol {
-            name: t.name.clone(),
+            name: spelled(&t.name),
             at: t.span,
             kind: t.kind.describe(),
             label: format!("{} {}", t.kind.describe(), t.name),
@@ -402,6 +375,17 @@ fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Inde
     index.uses.sort_by_key(|u| (u.at.file.0, u.at.start));
     index.symbols.sort_by_key(|s| (s.at.file.0, s.at.start));
     index
+}
+
+/// How a declared name is written at a use site.
+///
+/// Every module's names are qualified, and that is how they are written — but
+/// the prelude's are in scope without saying so, which is what makes it the
+/// prelude.
+fn spelled(name: &str) -> String {
+    name.strip_prefix(&format!("{}.", kite_resolve::PRELUDE))
+        .unwrap_or(name)
+        .to_string()
 }
 
 /// The first line of a declaration, which is its signature.

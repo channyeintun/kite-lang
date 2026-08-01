@@ -343,3 +343,157 @@ pub fn or_else<T>(value: Option<T>, fallback: T) -> T {
 pub fn is_some<T>(value: Option<T>) -> bool {
     return value != nil
 }
+
+// ---- ordering ---------------------------------------------------------------
+//
+// Sorting takes a comparison rather than requiring an `Ord` implementation.
+// Kite has no associated types and no operator overloading, so a comparison
+// written at the call site is both the simplest thing that works and the one
+// that reads: `sorted(people, |a, b| a.age < b.age)` says what order it is in.
+
+/// `items` in the order `less` puts them, which is stable: two items `less`
+/// does not separate keep the order they were given in.
+///
+/// Merge sort rather than quicksort, because stability is worth more than the
+/// constant factor for the sizes application code sorts, and because a
+/// quicksort's worst case is a sorted input, which application code has a lot
+/// of.
+pub fn sorted<T>(items: [T], less: fn(T, T) -> bool) -> [T] {
+    if items.len() <= 1 {
+        return items
+    }
+    let middle = items.len() / 2
+    let left = sorted(take(items, middle), less)
+    let right = sorted(drop(items, middle), less)
+    return merge(left, right, less)
+}
+
+fn merge<T>(left: [T], right: [T], less: fn(T, T) -> bool) -> [T] {
+    var out: [T] = []
+    var i = 0
+    var j = 0
+    for i < left.len() {
+        if j >= right.len() {
+            out.push(left[i])
+            i += 1
+        } else {
+            // `less(right, left)` rather than `!less(left, right)`: an item
+            // the comparison does not separate goes left, which is what makes
+            // this stable.
+            if less(right[j], left[i]) {
+                out.push(right[j])
+                j += 1
+            } else {
+                out.push(left[i])
+                i += 1
+            }
+        }
+    }
+    for j < right.len() {
+        out.push(right[j])
+        j += 1
+    }
+    return out
+}
+
+/// The item `less` puts first, or nil for an empty slice.
+pub fn min_by<T>(items: [T], less: fn(T, T) -> bool) -> Option<T> {
+    if items.len() == 0 {
+        return nil
+    }
+    var best = items[0]
+    for item in items {
+        if less(item, best) {
+            best = item
+        }
+    }
+    return best
+}
+
+pub fn max_by<T>(items: [T], less: fn(T, T) -> bool) -> Option<T> {
+    if items.len() == 0 {
+        return nil
+    }
+    var best = items[0]
+    for item in items {
+        if less(best, item) {
+            best = item
+        }
+    }
+    return best
+}
+
+// ---- more slices ------------------------------------------------------------
+
+/// Pairs, up to the length of the shorter side.
+pub fn zip<A, B>(left: [A], right: [B]) -> [(A, B)] {
+    var out: [(A, B)] = []
+    for i in 0..min(left.len(), right.len()) {
+        out.push((left[i], right[i]))
+    }
+    return out
+}
+
+/// One slice out of many.
+pub fn flatten<T>(groups: [[T]]) -> [T] {
+    var out: [T] = []
+    for group in groups {
+        for item in group {
+            out.push(item)
+        }
+    }
+    return out
+}
+
+/// The first position `test` accepts, or -1. A position rather than an
+/// optional, because -1 is what a caller compares against and an optional
+/// would need unwrapping before it could be used as an index anyway.
+pub fn position<T>(items: [T], test: fn(T) -> bool) -> int {
+    for i in 0..items.len() {
+        if test(items[i]) {
+            return i
+        }
+    }
+    return -1
+}
+
+/// Whether `items` holds something equal to `wanted`.
+pub fn includes<T>(items: [T], wanted: T) -> bool {
+    for item in items {
+        if item == wanted {
+            return true
+        }
+    }
+    return false
+}
+
+/// `items` with later duplicates removed, keeping the first of each.
+pub fn unique<T>(items: [T]) -> [T] {
+    var out: [T] = []
+    for item in items {
+        if !includes(out, item) {
+            out.push(item)
+        }
+    }
+    return out
+}
+
+/// `items` in groups of at most `size`. The last group is whatever is left.
+pub fn chunked<T>(items: [T], size: int) -> [[T]] {
+    var out: [[T]] = []
+    if size <= 0 {
+        return out
+    }
+    var group: [T] = []
+    for item in items {
+        group.push(item)
+        if group.len() == size {
+            out.push(group)
+            group = []
+        }
+    }
+    if group.len() > 0 {
+        out.push(group)
+    }
+    return out
+}

@@ -55,13 +55,15 @@ pub use support::{unsupported, Unsupported};
 /// Deliberately small: the standard library replaces them from Phase 6. String
 /// operations live here because a `str` is an index into a table the host
 /// holds — which is also why the module needs no linear memory.
-const IMPORTS: [(&str, &[ValType], &[ValType]); 24] = [
+const IMPORTS: [(&str, &[ValType], &[ValType]); 25] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
     ("print_str", &[ValType::I32], &[]),
     ("str_concat", &[ValType::I32, ValType::I32], &[ValType::I32]),
     ("str_eq", &[ValType::I32, ValType::I32], &[ValType::I32]),
+    // -1, 0 or 1, by code point. One import serves all four comparisons.
+    ("str_compare", &[ValType::I32, ValType::I32], &[ValType::I64]),
     // Rendering for `\(expr)`. These share their formatting with the `print_*`
     // imports, so a value looks the same however it reaches the host.
     ("str_of_int", &[ValType::I64], &[ValType::I32]),
@@ -220,6 +222,9 @@ fn used_imports(program: &mir::Program, types: &Types, eq_fns: &[eq::EqFn]) -> H
                     mir::Rvalue::Binary { op, .. } => match op {
                         BinOp::ConcatStr => mark(host::STR_CONCAT),
                         BinOp::EqStr | BinOp::NeStr => mark(host::STR_EQ),
+                        BinOp::LtStr | BinOp::LeStr | BinOp::GtStr | BinOp::GeStr => {
+                            mark(host::STR_COMPARE)
+                        }
                         _ => {}
                     },
                     mir::Rvalue::ToStr { from, .. } => match types.kind(*from) {
@@ -267,24 +272,25 @@ mod host {
     pub const PRINT_STR: u32 = 3;
     pub const STR_CONCAT: u32 = 4;
     pub const STR_EQ: u32 = 5;
-    pub const STR_OF_INT: u32 = 6;
-    pub const STR_OF_FLOAT: u32 = 7;
-    pub const STR_OF_BOOL: u32 = 8;
-    pub const STR_LEN: u32 = 9;
-    pub const DRAW_RECT: u32 = 10;
-    pub const DRAW_TEXT: u32 = 11;
-    pub const MEASURE_TEXT: u32 = 12;
-    pub const LINE_HEIGHT: u32 = 13;
-    pub const STR_SLICE: u32 = 14;
-    pub const STR_INDEX_OF: u32 = 15;
-    pub const STR_TRIM: u32 = 16;
-    pub const DRAW_CLIP: u32 = 17;
-    pub const DRAW_UNCLIP: u32 = 18;
-    pub const TASK_SPAWN: u32 = 19;
-    pub const TASK_WAKE_AT: u32 = 20;
-    pub const TASK_PARK: u32 = 21;
-    pub const TASK_WAIT_HOST: u32 = 22;
-    pub const TIME_NOW: u32 = 23;
+    pub const STR_COMPARE: u32 = 6;
+    pub const STR_OF_INT: u32 = 7;
+    pub const STR_OF_FLOAT: u32 = 8;
+    pub const STR_OF_BOOL: u32 = 9;
+    pub const STR_LEN: u32 = 10;
+    pub const DRAW_RECT: u32 = 11;
+    pub const DRAW_TEXT: u32 = 12;
+    pub const MEASURE_TEXT: u32 = 13;
+    pub const LINE_HEIGHT: u32 = 14;
+    pub const STR_SLICE: u32 = 15;
+    pub const STR_INDEX_OF: u32 = 16;
+    pub const STR_TRIM: u32 = 17;
+    pub const DRAW_CLIP: u32 = 18;
+    pub const DRAW_UNCLIP: u32 = 19;
+    pub const TASK_SPAWN: u32 = 20;
+    pub const TASK_WAKE_AT: u32 = 21;
+    pub const TASK_PARK: u32 = 22;
+    pub const TASK_WAIT_HOST: u32 = 23;
+    pub const TIME_NOW: u32 = 24;
 }
 
 pub struct WasmModule {
@@ -1688,6 +1694,18 @@ impl<'a> Emitter<'a> {
                         func.instruction(&Instruction::Call(self.hosts.at(host::STR_EQ)));
                         func.instruction(&Instruction::I32Eqz);
                     }
+                    // One host call answers all four: it returns -1, 0 or 1,
+                    // and the comparison is then an integer one.
+                    BinOp::LtStr | BinOp::LeStr | BinOp::GtStr | BinOp::GeStr => {
+                        func.instruction(&Instruction::Call(self.hosts.at(host::STR_COMPARE)));
+                        func.instruction(&Instruction::I64Const(0));
+                        func.instruction(&match op {
+                            BinOp::LtStr => Instruction::I64LtS,
+                            BinOp::LeStr => Instruction::I64LeS,
+                            BinOp::GtStr => Instruction::I64GtS,
+                            _ => Instruction::I64GeS,
+                        });
+                    }
                     // Deep equality on an aggregate: a generated function per
                     // type, because Wasm has no instruction for it.
                     BinOp::EqValue | BinOp::NeValue => {
@@ -2835,7 +2853,7 @@ impl<'a> Emitter<'a> {
             EqBool => Instruction::I32Eq,
             NeBool => Instruction::I32Ne,
             // Handled by a host call before this table is consulted.
-            EqStr | NeStr | ConcatStr => Instruction::Unreachable,
+            EqStr | NeStr | ConcatStr | LtStr | LeStr | GtStr | GeStr => Instruction::Unreachable,
             // Structural equality on aggregates is not lowered yet.
             EqValue | NeValue => Instruction::Unreachable,
             // MIR has already turned these into branches.

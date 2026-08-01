@@ -348,6 +348,12 @@ function imports() {{
       print_str: (i) => write(STRINGS[i]),
       str_concat: (a, b) => intern(STRINGS[a] + STRINGS[b]),
       str_eq: (a, b) => (STRINGS[a] === STRINGS[b] ? 1 : 0),
+      // By code point, which is what `<` on JavaScript strings compares and
+      // what Rust's `str` ordering compares — so the two backends sort the
+      // same way. It is *not* alphabetical order in every language; collation
+      // is a table and a locale, and neither belongs in an operator.
+      str_compare: (a, b) =>
+        STRINGS[a] < STRINGS[b] ? -1n : STRINGS[a] > STRINGS[b] ? 1n : 0n,
       draw_rect: (x, y, w, h, colour) => renderer.rect(x, y, w, h, Number(colour)),
       draw_text: (x, y, i, colour) => renderer.text(x, y, STRINGS[i], Number(colour)),
       draw_clip: (x, y, w, h) => renderer.clip(x, y, w, h),

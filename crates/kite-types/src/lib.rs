@@ -4840,7 +4840,10 @@ impl<'a> Checker<'a> {
                 // Most types satisfy it without their author knowing it
                 // exists, which is what makes data races impossible here
                 // without an annotation burden.
-                if self.types.trait_def(*bound).name == "Share" {
+                // The prelude is a module, so its trait is `prelude.Share` —
+                // and a program that declares its own `Share` gets the same
+                // treatment, exactly as it does for `Display`.
+                if last_segment(&self.types.trait_def(*bound).name) == "Share" {
                     if !self.types.is_share(*t) {
                         self.report_not_share(*t, &g.name, span, g.span);
                     }
@@ -5584,6 +5587,37 @@ impl<'a> Checker<'a> {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
 
+        // A tuple's elements are positional: `pair.0` reads the first.
+        if let TyKind::Tuple(elems) = self.types.kind(obj.ty).clone() {
+            match name.name.parse::<usize>() {
+                Ok(index) if index < elems.len() => {
+                    return hir::Expr {
+                        kind: ExprKind::FieldGet { base: Box::new(obj), index: index as u32 },
+                        ty: elems[index],
+                        span,
+                    }
+                }
+                _ => {
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0200,
+                            format!(
+                                "a `{}` has no `{}`",
+                                self.types.name(obj.ty),
+                                name.name
+                            ),
+                        )
+                        .with_primary(name.span, "not an element of this tuple")
+                        .with_note(format!(
+                            "its elements are 0 to {}, or take it apart with `let (a, b) = …`",
+                            elems.len().saturating_sub(1)
+                        )),
+                    );
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
+                }
+            }
+        }
+
         let TyKind::Struct(sid) = *self.types.kind(obj.ty) else {
             let found = self.types.with_article(obj.ty);
             self.diags.push(
@@ -5883,10 +5917,28 @@ impl<'a> Checker<'a> {
             (B::Ne, TyId::BOOL) => Some((H::NeBool, TyId::BOOL)),
             (B::Eq, TyId::STR) => Some((H::EqStr, TyId::BOOL)),
             (B::Ne, TyId::STR) => Some((H::NeStr, TyId::BOOL)),
+            // By code point, which is what sorting a list of names needs and
+            // is *not* what a person means by alphabetical order in every
+            // language. Collation is a table and a locale, and neither belongs
+            // in an operator.
+            (B::Lt, TyId::STR) => Some((H::LtStr, TyId::BOOL)),
+            (B::Le, TyId::STR) => Some((H::LeStr, TyId::BOOL)),
+            (B::Gt, TyId::STR) => Some((H::GtStr, TyId::BOOL)),
+            (B::Ge, TyId::STR) => Some((H::GeStr, TyId::BOOL)),
 
             // Aggregates compare structurally, per the specification.
             (B::Eq, _) if self.types.is_equatable(t) => Some((H::EqValue, TyId::BOOL)),
             (B::Ne, _) if self.types.is_equatable(t) => Some((H::NeValue, TyId::BOOL)),
+            // Two values of the same type parameter. `Eq` is derived for
+            // every type structurally, so this holds for whatever the
+            // parameter turns out to be — and monomorphisation has replaced it
+            // with a concrete type long before any backend sees it.
+            (B::Eq, _) if matches!(self.types.kind(t), TyKind::Param { .. }) => {
+                Some((H::EqValue, TyId::BOOL))
+            }
+            (B::Ne, _) if matches!(self.types.kind(t), TyKind::Param { .. }) => {
+                Some((H::NeValue, TyId::BOOL))
+            }
 
             _ => None,
         };
@@ -6775,6 +6827,11 @@ fn dedent_block(body: &str) -> String {
         .map(|line| line.strip_prefix(indent).unwrap_or(line.trim_start_matches([' ', '\t'])))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The last segment of a possibly-qualified name.
+fn last_segment(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
 }
 
 /// A dotted name's text, for diagnostics about a qualified call.
