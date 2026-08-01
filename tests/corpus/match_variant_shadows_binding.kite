@@ -7,21 +7,21 @@
 // second half: `Fast` is never covered by `Slow`, so omitting it is caught.
 
 enum Mode {
-  Slow
-  Fast
+    Slow
+    Fast
 }
 
 enum Speed {
-  Slow
-  Quick
+    Slow
+    Quick
 }
 
 fn describe(m: Mode) -> int {
-  return match m { //~ ERROR E0210
-    Slow => 1
-  }
+    return match m { //~ ERROR E0210
+        Slow => 1
+    }
 }
 
 fn main() {
-  io.print(describe(Mode.Fast))
+    io.print(describe(Mode.Fast))
 }

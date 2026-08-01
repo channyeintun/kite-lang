@@ -3,5 +3,5 @@ fn add(a: int, b: int) -> int {
 }
 
 fn main() {
-    io.print(add(a: 1, b: 2))   //~ ERROR E0113
+    io.print(add(a: 1, b: 2)) //~ ERROR E0113
 }

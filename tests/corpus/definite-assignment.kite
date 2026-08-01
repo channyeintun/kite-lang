@@ -3,5 +3,5 @@ fn main() {
     if true {
         z = 1
     }
-    io.print(z)      //~ ERROR E0110
+    io.print(z) //~ ERROR E0110
 }

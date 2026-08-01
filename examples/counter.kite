@@ -15,62 +15,62 @@
 use std/ui
 
 pub struct Model {
-  pub count: int
-  pub last: str
+    pub count: int
+    pub last: str
 }
 
 pub fn init() -> Model {
-  return Model{count: 0, last: "nothing yet"}
+    return Model{ count: 0, last: "nothing yet" }
 }
 
 fn tile(name: str, caption: str, width: float) -> ui.Node {
-  return ui.text_of(name, ui.padded(ui.sized(ui.style(), width, 32.0), 8.0), caption)
+    return ui.text_of(name, ui.padded(ui.sized(ui.style(), width, 32.0), 8.0), caption)
 }
 
 fn ui_of(model: Model) -> ui.Node {
-  let controls = ui.box_of(
-    "controls",
-    ui.spaced(ui.Style{..ui.row(), align: ui.Align.Center}, 8.0),
-    [
-      tile("minus", "  -  ", 48.0),
-      tile("count", "\(model.count)", 96.0),
-      tile("plus", "  +  ", 48.0),
-      tile("reset", " reset ", 72.0),
-    ],
-  )
+    let controls = ui.box_of(
+        "controls",
+        ui.spaced(ui.Style{..ui.row(), align: ui.Align.Center }, 8.0),
+        [
+            tile("minus", "  -  ", 48.0),
+            tile("count", "\(model.count)", 96.0),
+            tile("plus", "  +  ", 48.0),
+            tile("reset", " reset ", 72.0),
+        ],
+    )
 
-  return ui.box_of(
-    "app",
-    ui.spaced(ui.padded(ui.Style{..ui.column(), align: ui.Align.Start}, 16.0), 12.0),
-    [
-      ui.text_of("title", ui.style(), "Counter"),
-      controls,
-      ui.text_of("status", ui.style(), "last action: \(model.last)"),
-      ui.text_of("hint", ui.style(), "click, or press + - r; the model lives inside the module"),
-    ],
-  )
+    return ui.box_of(
+        "app",
+        ui.spaced(ui.padded(ui.Style{..ui.column(), align: ui.Align.Start }, 16.0), 12.0),
+        [
+            ui.text_of("title", ui.style(), "Counter"),
+            controls,
+            ui.text_of("status", ui.style(), "last action: \(model.last)"),
+            ui.text_of("hint", ui.style(), "click, or press + - r; the model lives inside the module"),
+        ],
+    )
 }
 
 fn palette(model: Model) -> [ui.Paint] {
-  let accent = if model.count > 0 { 0x3b82f6 } else { 0x2a2f3a }
-  return [
-    ui.fill("app", 0x14161a),
-    ui.label("title", "Counter", 0xf5f7fa),
-    ui.filled_label("minus", "  -  ", 0x2a2f3a, 0xc9d1dc),
-    ui.filled_label("count", "\(model.count)", accent, 0xffffff),
-    ui.filled_label("plus", "  +  ", 0x2a2f3a, 0xc9d1dc),
-    ui.filled_label("reset", " reset ", 0x3a2a2a, 0xdcc9c9),
-    ui.label("status", "last action: \(model.last)", 0x8b93a1),
-    ui.label("hint", "click, or press + - r; the model lives inside the module", 0x5c6472),
-  ]
+    let accent = if model.count > 0 { 0x3b82f6 } else { 0x2a2f3a }
+    return [
+        ui.fill("app", 0x14161a),
+        ui.label("title", "Counter", 0xf5f7fa),
+        ui.filled_label("minus", "  -  ", 0x2a2f3a, 0xc9d1dc),
+        ui.filled_label("count", "\(model.count)", accent, 0xffffff),
+        ui.filled_label("plus", "  +  ", 0x2a2f3a, 0xc9d1dc),
+        ui.filled_label("reset", " reset ", 0x3a2a2a, 0xdcc9c9),
+        ui.label("status", "last action: \(model.last)", 0x8b93a1),
+        ui.label("hint", "click, or press + - r; the model lives inside the module", 0x5c6472),
+    ]
 }
 
 fn frames_of(model: Model) -> [ui.Frame] {
-  return ui.layout(ui_of(model), ui.Size{width: 640.0, height: 240.0})
+    return ui.layout(ui_of(model), ui.Size{ width: 640.0, height: 240.0 })
 }
 
 pub fn view(model: Model) {
-  ui.paint(frames_of(model), palette(model))
+    ui.paint(frames_of(model), palette(model))
 }
 
 /// The only way the model changes.
@@ -80,57 +80,57 @@ pub fn view(model: Model) {
 /// event is a new constant rather than a new export, and a program that
 /// ignores a kind never matches on it.
 pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
-  if event == 0 {
-    // A guard clause narrows for the rest of the block, so `target` reads as a
-    // `Frame` below without being unwrapped.
-    let target = ui.hit(frames_of(model), x, y)
-    if target == nil {
-      return model
+    if event == 0 {
+        // A guard clause narrows for the rest of the block, so `target` reads as a
+        // `Frame` below without being unwrapped.
+        let target = ui.hit(frames_of(model), x, y)
+        if target == nil {
+            return model
+        }
+        return act(model, target.name)
     }
-    return act(model, target.name)
-  }
-  if event == 1 {
-    return press(model, key)
-  }
-  return model
+    if event == 1 {
+        return press(model, key)
+    }
+    return model
 }
 
 /// The keyboard reaches the same actions the buttons do, which is what stops
 /// the two drifting apart.
 fn press(model: Model, key: str) -> Model {
-  if key == "+" || key == "=" || key == "ArrowUp" {
-    return act(model, "plus")
-  }
-  if key == "-" || key == "ArrowDown" {
-    return act(model, "minus")
-  }
-  if key == "r" || key == "R" {
-    return act(model, "reset")
-  }
-  return model
+    if key == "+" || key == "=" || key == "ArrowUp" {
+        return act(model, "plus")
+    }
+    if key == "-" || key == "ArrowDown" {
+        return act(model, "minus")
+    }
+    if key == "r" || key == "R" {
+        return act(model, "reset")
+    }
+    return model
 }
 
 fn act(model: Model, name: str) -> Model {
-  if name == "plus" {
-    return Model{count: model.count + 1, last: "increment"}
-  }
-  if name == "minus" {
-    return Model{count: model.count - 1, last: "decrement"}
-  }
-  if name == "reset" {
-    return Model{count: 0, last: "reset"}
-  }
-  return Model{..model, last: "clicked \(name)"}
+    if name == "plus" {
+        return Model{ count: model.count + 1, last: "increment" }
+    }
+    if name == "minus" {
+        return Model{ count: model.count - 1, last: "decrement" }
+    }
+    if name == "reset" {
+        return Model{ count: 0, last: "reset" }
+    }
+    return Model{..model, last: "clicked \(name)" }
 }
 
 // `main` lets the same program run under `kitec run`, which draws once to text
 // and is how the differential suite sees it.
 fn main() {
-  var model = init()
-  view(model)
-  model = update(model, 0, 300.0, 60.0, "")
-  view(model)
-  model = update(model, 1, 0.0, 0.0, "+")
-  model = update(model, 1, 0.0, 0.0, "+")
-  view(model)
+    var model = init()
+    view(model)
+    model = update(model, 0, 300.0, 60.0, "")
+    view(model)
+    model = update(model, 1, 0.0, 0.0, "+")
+    model = update(model, 1, 0.0, 0.0, "+")
+    view(model)
 }

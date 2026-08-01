@@ -25,17 +25,17 @@ pub fn render(d: &Diagnostic, sources: &SourceMap) -> String {
     // ---- header -----------------------------------------------------------
     match d.code {
         Some(c) => {
-            let _ = write!(out, "{}[{}]: {}\n", d.severity.label(), c, d.message);
+            let _ = writeln!(out, "{}[{}]: {}", d.severity.label(), c, d.message);
         }
         None => {
-            let _ = write!(out, "{}: {}\n", d.severity.label(), d.message);
+            let _ = writeln!(out, "{}: {}", d.severity.label(), d.message);
         }
     }
 
     let anchor = d.primary_span().or_else(|| d.labels.first().map(|l| l.span));
     let Some(anchor) = anchor else {
         for note in &d.notes {
-            let _ = write!(out, "  = note: {}\n", note);
+            let _ = writeln!(out, "  = note: {}", note);
         }
         return out;
     };
@@ -56,9 +56,9 @@ pub fn render(d: &Diagnostic, sources: &SourceMap) -> String {
     // ---- location ---------------------------------------------------------
     let file = sources.file(anchor.file);
     let lc = file.line_col(anchor.start);
-    let _ = write!(
+    let _ = writeln!(
         out,
-        "{:>w$}┌─ {}:{}:{}\n",
+        "{:>w$}┌─ {}:{}:{}",
         "",
         file.name.display(),
         lc.line,
@@ -71,13 +71,13 @@ pub fn render(d: &Diagnostic, sources: &SourceMap) -> String {
     // ---- notes ------------------------------------------------------------
     if !d.notes.is_empty() {
         for note in &d.notes {
-            let _ = write!(out, "{:>w$}= note: {}\n", "", note, w = gutter + 1);
+            let _ = writeln!(out, "{:>w$}= note: {}", "", note, w = gutter + 1);
         }
     }
 
     // ---- fixes ------------------------------------------------------------
     for fix in &d.fixes {
-        let _ = write!(out, "help: {}\n", fix.message);
+        let _ = writeln!(out, "help: {}", fix.message);
         render_fix(&mut out, sources, fix, gutter);
     }
 

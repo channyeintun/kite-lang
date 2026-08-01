@@ -1,13 +1,13 @@
 // A generic declaration is not a type. `Box` says nothing about what it holds.
 
 struct Box<T> {
-  value: T
+    value: T
 }
 
 fn take(b: Box) -> int { //~ ERROR E0208
-  return 0
+    return 0
 }
 
 fn main() {
-  io.print(take(Box{value: 1}))
+    io.print(take(Box{ value: 1 }))
 }

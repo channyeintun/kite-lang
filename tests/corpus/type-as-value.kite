@@ -3,5 +3,5 @@ struct P {
 }
 
 fn main() {
-    let p = P      //~ ERROR E0200
+    let p = P //~ ERROR E0200
 }

@@ -1,0 +1,100 @@
+#!/usr/bin/env sh
+# Install `kitec` and `kite-lsp`.
+#
+#   curl -fsSL https://kite-lang.org/install.sh | sh
+#
+# It downloads one archive, checks it against the release's own checksum file,
+# and unpacks two binaries. Nothing is compiled, nothing is run from the
+# archive, and a checksum that does not match stops the install rather than
+# warning about it.
+
+set -eu
+
+REPO="${KITE_REPO:-channyeintun/kite-lang}"
+VERSION="${KITE_VERSION:-latest}"
+PREFIX="${KITE_PREFIX:-$HOME/.local/bin}"
+
+say() { printf '%s\n' "$*"; }
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+need() { command -v "$1" >/dev/null 2>&1 || die "this needs \`$1\` on PATH"; }
+need uname
+need tar
+
+case "$(uname -s)" in
+  Darwin) os=apple-darwin ;;
+  Linux) os=unknown-linux-musl ;;
+  *) die "no prebuilt binary for $(uname -s); build from source with \`cargo build --release\`" ;;
+esac
+
+case "$(uname -m)" in
+  arm64 | aarch64) arch=aarch64 ;;
+  x86_64 | amd64) arch=x86_64 ;;
+  *) die "no prebuilt binary for $(uname -m)" ;;
+esac
+
+target="$arch-$os"
+
+if command -v curl >/dev/null 2>&1; then
+  fetch() { curl -fsSL "$1" -o "$2"; }
+elif command -v wget >/dev/null 2>&1; then
+  fetch() { wget -qO "$2" "$1"; }
+else
+  die "this needs \`curl\` or \`wget\`"
+fi
+
+if [ "$VERSION" = "latest" ]; then
+  base="https://github.com/$REPO/releases/latest/download"
+else
+  base="https://github.com/$REPO/releases/download/$VERSION"
+fi
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+# The archive's name carries the version, which `latest` does not know. The
+# checksum file lists every archive in the release, so it is the thing to read
+# first.
+say "reading the release's checksums…"
+fetch "$base/SHA256SUMS" "$work/SHA256SUMS" || die "cannot reach $base"
+archive="$(awk -v t="$target" '$2 ~ t { print $2 }' "$work/SHA256SUMS" | head -n 1)"
+[ -n "$archive" ] || die "this release has no binary for $target"
+
+say "downloading $archive…"
+fetch "$base/$archive" "$work/$archive"
+
+say "checking it…"
+expected="$(awk -v a="$archive" '$2 == a { print $1 }' "$work/SHA256SUMS")"
+if command -v shasum >/dev/null 2>&1; then
+  actual="$(shasum -a 256 "$work/$archive" | cut -d' ' -f1)"
+elif command -v sha256sum >/dev/null 2>&1; then
+  actual="$(sha256sum "$work/$archive" | cut -d' ' -f1)"
+else
+  die "this needs \`shasum\` or \`sha256sum\` to verify the download"
+fi
+[ "$expected" = "$actual" ] || die "checksum mismatch — refusing to install
+  expected $expected
+  found    $actual"
+
+tar xzf "$work/$archive" -C "$work"
+mkdir -p "$PREFIX"
+for binary in kitec kite-lsp; do
+  found="$(find "$work" -name "$binary" -type f | head -n 1)"
+  [ -n "$found" ] || die "the archive has no \`$binary\`"
+  install -m 755 "$found" "$PREFIX/$binary" 2>/dev/null || {
+    cp "$found" "$PREFIX/$binary"
+    chmod 755 "$PREFIX/$binary"
+  }
+  say "installed $PREFIX/$binary"
+done
+
+case ":$PATH:" in
+  *":$PREFIX:"*) ;;
+  *) say ""
+     say "$PREFIX is not on your PATH. Add it:"
+     say "    export PATH=\"$PREFIX:\$PATH\"" ;;
+esac
+
+say ""
+say "$("$PREFIX/kitec" --version)"
+say "try:  kitec run hello.kite"

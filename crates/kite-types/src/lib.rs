@@ -3091,7 +3091,7 @@ impl<'a> Checker<'a> {
         if self.types.slice_elem(receiver.ty).is_some() {
             return self
                 .slice_method(base, receiver, name, args, span)
-                .unwrap_or_else(|| hir::Expr {
+                .unwrap_or(hir::Expr {
                     kind: ExprKind::Error,
                     ty: TyId::ERROR,
                     span,
@@ -4227,6 +4227,7 @@ impl<'a> Checker<'a> {
         Some(self.types.instantiate_enum(template, &solved))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn variant_value(
         &mut self,
         ti: u32,
@@ -5775,7 +5776,7 @@ impl<'a> Checker<'a> {
         // syntactically — a value that came *straight* from `crypto` — which
         // catches the shape people actually write and claims nothing about the
         // ones it cannot see.
-        if matches!(hop, H::EqStr | H::NeStr) && (self.from_crypto(&l) || self.from_crypto(&r)) {
+        if matches!(hop, H::EqStr | H::NeStr) && (self.came_from_crypto(&l) || self.came_from_crypto(&r)) {
             self.diags.push(
                 Diagnostic::warning(codes::E0600, "comparing a secret with `==`")
                     .with_primary(span, "this comparison stops at the first difference")
@@ -5812,7 +5813,7 @@ impl<'a> Checker<'a> {
     /// stopped anywhere would give people confidence it has not earned. This
     /// catches the shape people write — comparing a freshly computed digest or
     /// token — says what to write instead, and claims nothing more.
-    fn from_crypto(&self, e: &hir::Expr) -> bool {
+    fn came_from_crypto(&self, e: &hir::Expr) -> bool {
         match &e.kind {
             ExprKind::Call { callee, .. } => self
                 .resolved

@@ -3,10 +3,10 @@
 // turbofish to supply it by hand.
 
 fn make<T>() -> Option<T> {
-  return nil
+    return nil
 }
 
 fn main() {
-  let x = make() //~ ERROR E0209
-  io.print(if x == nil { 0 } else { 1 })
+    let x = make() //~ ERROR E0209
+    io.print(if x == nil { 0 } else { 1 })
 }

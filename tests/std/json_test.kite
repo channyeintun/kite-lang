@@ -29,10 +29,10 @@ fn checks() -> [error] {
     out.push(test.equal_str(roundtrip("{}"), "{}", "an empty object"))
     out.push(test.equal_str(roundtrip("[1,[2,[3]]]"), "[1,[2,[3]]]", "nesting"))
     out.push(test.equal_str(
-        roundtrip("{\"b\": 1, \"a\": 2}"),
-        "{\"b\":1,\"a\":2}",
-        "objects keep insertion order",
-    ))
+            roundtrip("{\"b\": 1, \"a\": 2}"),
+            "{\"b\":1,\"a\":2}",
+            "objects keep insertion order",
+        ))
     out.push(test.equal_str(roundtrip("\"a\\nb\""), "\"a\\nb\"", "an escape survives a round trip"))
 
     let doc = parsed("{\"name\": \"kite\", \"n\": 3, \"tags\": [\"a\", \"b\"], \"deep\": {\"x\": true}}")

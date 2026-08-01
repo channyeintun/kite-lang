@@ -2,27 +2,27 @@
 // known at the call site, so its own methods are not reachable through one.
 
 trait Shape {
-  fn area(self) -> int
+    fn area(self) -> int
 }
 
 struct Circle {
-  r: int
+    r: int
 }
 
 impl Shape for Circle {
-  fn area(self) -> int {
-    return self.r * self.r
-  }
+    fn area(self) -> int {
+        return self.r * self.r
+    }
 }
 
 impl Circle {
-  fn radius(self) -> int {
-    return self.r
-  }
+    fn radius(self) -> int {
+        return self.r
+    }
 }
 
 fn main() {
-  let s: dyn Shape = Circle{r: 2}
-  io.print(s.area())
-  io.print(s.radius()) //~ ERROR E0205
+    let s: dyn Shape = Circle{ r: 2 }
+    io.print(s.area())
+    io.print(s.radius()) //~ ERROR E0205
 }

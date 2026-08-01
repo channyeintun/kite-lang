@@ -4,6 +4,6 @@ struct Rect {
 }
 
 fn main() {
-    let r = Rect{ width: 1 }   //~ ERROR E0200
+    let r = Rect{ width: 1 } //~ ERROR E0200
     io.print(r.width)
 }

@@ -12,7 +12,7 @@ impl Shape for P {
     }
 }
 
-impl Shape for P {   //~ ERROR E0112
+impl Shape for P { //~ ERROR E0112
     fn area(self) -> int {
         return 2
     }

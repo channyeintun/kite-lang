@@ -1,5 +1,5 @@
 fn main() {
     let x = 1
-    let x = 2        //~ ERROR E0112
+    let x = 2 //~ ERROR E0112
     io.print(x)
 }

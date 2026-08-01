@@ -11,7 +11,7 @@ pub struct Item {
 }
 
 pub fn item(name: str, price: int, count: int) -> Item {
-    return Item{name: name, price: price, count: count}
+    return Item{ name: name, price: price, count: count }
 }
 
 // Unmarked, so it is private to this module: a program that imports

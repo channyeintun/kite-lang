@@ -20,7 +20,7 @@ pub struct F64 {
 }
 
 pub fn f64(stride: int) -> F64 {
-    return F64{values: [], stride: max(stride, 1)}
+    return F64{ values: [], stride: max(stride, 1) }
 }
 
 /// How many records the buffer holds.
@@ -45,14 +45,14 @@ pub fn record(b: F64, index: int) -> [float] {
 /// A buffer with one record appended. Buffers are values, like slices: this
 /// produces a new one rather than editing the one it was given.
 pub fn push(b: F64, values: [float]) -> F64 {
-    return F64{values: concat(b.values, values), stride: b.stride}
+    return F64{ values: concat(b.values, values), stride: b.stride }
 }
 
 /// A buffer with one number replaced.
 pub fn set(b: F64, record: int, field: int, value: float) -> F64 {
     var out = b.values
     out[record * b.stride + field] = value
-    return F64{values: out, stride: b.stride}
+    return F64{ values: out, stride: b.stride }
 }
 
 /// Every value of one field, across every record — the column form, which is

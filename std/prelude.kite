@@ -18,7 +18,7 @@
 /// wrong more often than it was right — a `Password` that printed its field is
 /// the obvious case.
 pub trait Display {
-  fn show(self) -> str
+    fn show(self) -> str
 }
 
 /// A value of this type may be moved to another task or isolate.
@@ -40,219 +40,219 @@ pub trait Share {
 /// A new slice with `f` applied to every item. The result need not have the
 /// same element type: `map(people, |p: Person| p.name)` is `[str]`.
 pub fn map<T, U>(items: [T], f: fn(T) -> U) -> [U] {
-  var out: [U] = []
-  for item in items {
-    out.push(f(item))
-  }
-  return out
+    var out: [U] = []
+    for item in items {
+        out.push(f(item))
+    }
+    return out
 }
 
 /// Combine every item into one value, left to right.
 pub fn fold<T, A>(items: [T], initial: A, f: fn(A, T) -> A) -> A {
-  var total = initial
-  for item in items {
-    total = f(total, item)
-  }
-  return total
+    var total = initial
+    for item in items {
+        total = f(total, item)
+    }
+    return total
 }
 
 /// The items `test` accepts, in order.
 pub fn filter<T>(items: [T], test: fn(T) -> bool) -> [T] {
-  var out: [T] = []
-  for item in items {
-    if test(item) {
-      out.push(item)
+    var out: [T] = []
+    for item in items {
+        if test(item) {
+            out.push(item)
+        }
     }
-  }
-  return out
+    return out
 }
 
 /// Whether any item satisfies `test`. Stops at the first that does.
 pub fn any<T>(items: [T], test: fn(T) -> bool) -> bool {
-  for item in items {
-    if test(item) {
-      return true
+    for item in items {
+        if test(item) {
+            return true
+        }
     }
-  }
-  return false
+    return false
 }
 
 /// Whether every item satisfies `test`. Vacuously true for an empty slice,
 /// which is the convention every language settles on because the alternative
 /// breaks the identity `all(a + b) == all(a) and all(b)`.
 pub fn all<T>(items: [T], test: fn(T) -> bool) -> bool {
-  for item in items {
-    if !test(item) {
-      return false
+    for item in items {
+        if !test(item) {
+            return false
+        }
     }
-  }
-  return true
+    return true
 }
 
 /// How many items satisfy `test`.
 pub fn count<T>(items: [T], test: fn(T) -> bool) -> int {
-  var n = 0
-  for item in items {
-    if test(item) {
-      n += 1
+    var n = 0
+    for item in items {
+        if test(item) {
+            n += 1
+        }
     }
-  }
-  return n
+    return n
 }
 
 /// The first item satisfying `test`, or nil.
 pub fn find<T>(items: [T], test: fn(T) -> bool) -> Option<T> {
-  for item in items {
-    if test(item) {
-      return item
+    for item in items {
+        if test(item) {
+            return item
+        }
     }
-  }
-  return nil
+    return nil
 }
 
 /// The first item, or nil for an empty slice.
 pub fn first<T>(items: [T]) -> Option<T> {
-  if items.len() == 0 {
-    return nil
-  }
-  return items[0]
+    if items.len() == 0 {
+        return nil
+    }
+    return items[0]
 }
 
 /// The last item, or nil for an empty slice.
 pub fn last<T>(items: [T]) -> Option<T> {
-  if items.len() == 0 {
-    return nil
-  }
-  return items[items.len() - 1]
+    if items.len() == 0 {
+        return nil
+    }
+    return items[items.len() - 1]
 }
 
 /// The items in the opposite order.
 pub fn reversed<T>(items: [T]) -> [T] {
-  var out: [T] = []
-  var i = items.len() - 1
-  for i >= 0 {
-    out.push(items[i])
-    i -= 1
-  }
-  return out
+    var out: [T] = []
+    var i = items.len() - 1
+    for i >= 0 {
+        out.push(items[i])
+        i -= 1
+    }
+    return out
 }
 
 /// `items`, then `other`. Neither is modified: slices are values.
 pub fn concat<T>(items: [T], other: [T]) -> [T] {
-  var out: [T] = []
-  for item in items {
-    out.push(item)
-  }
-  for item in other {
-    out.push(item)
-  }
-  return out
+    var out: [T] = []
+    for item in items {
+        out.push(item)
+    }
+    for item in other {
+        out.push(item)
+    }
+    return out
 }
 
 /// At most `n` items from the front. A negative `n` yields nothing rather than
 /// trapping, because `take` describes an amount and a negative amount is none.
 pub fn take<T>(items: [T], n: int) -> [T] {
-  var out: [T] = []
-  for i in 0..items.len() {
-    if i >= n {
-      return out
+    var out: [T] = []
+    for i in 0..items.len() {
+        if i >= n{
+            return out
+        }
+        out.push(items[i])
     }
-    out.push(items[i])
-  }
-  return out
+    return out
 }
 
 /// Everything after the first `n` items.
 pub fn drop<T>(items: [T], n: int) -> [T] {
-  var out: [T] = []
-  for i in 0..items.len() {
-    if i >= n {
-      out.push(items[i])
+    var out: [T] = []
+    for i in 0..items.len() {
+        if i >= n{
+            out.push(items[i])
+        }
     }
-  }
-  return out
+    return out
 }
 
 // ---- numbers --------------------------------------------------------------
 
 /// The distance from zero.
 pub fn abs(x: int) -> int {
-  if x < 0 {
-    return 0 - x
-  }
-  return x
+    if x < 0 {
+        return 0 - x
+    }
+    return x
 }
 
 pub fn absf(x: float) -> float {
-  if x < 0.0 {
-    return 0.0 - x
-  }
-  return x
+    if x < 0.0 {
+        return 0.0 - x
+    }
+    return x
 }
 
 pub fn min(a: int, b: int) -> int {
-  if a < b {
-    return a
-  }
-  return b
+    if a < b {
+        return a
+    }
+    return b
 }
 
 pub fn max(a: int, b: int) -> int {
-  if a > b {
-    return a
-  }
-  return b
+    if a > b {
+        return a
+    }
+    return b
 }
 
 pub fn minf(a: float, b: float) -> float {
-  if a < b {
-    return a
-  }
-  return b
+    if a < b {
+        return a
+    }
+    return b
 }
 
 pub fn maxf(a: float, b: float) -> float {
-  if a > b {
-    return a
-  }
-  return b
+    if a > b {
+        return a
+    }
+    return b
 }
 
 /// `x` held within `[low, high]`.
 pub fn clamp(x: int, low: int, high: int) -> int {
-  return min(max(x, low), high)
+    return min(max(x, low), high)
 }
 
 pub fn clampf(x: float, low: float, high: float) -> float {
-  return minf(maxf(x, low), high)
+    return minf(maxf(x, low), high)
 }
 
 /// Floating-point equality within a tolerance. Comparing floats with `==` is
 /// almost never what is meant, which is why the compiler warns and points here.
 pub fn approx_eq(a: float, b: float, tolerance: float) -> bool {
-  return absf(a - b) <= tolerance
+    return absf(a - b) <= tolerance
 }
 
 /// Whether `x` divides evenly by `by`.
 pub fn divides(x: int, by: int) -> bool {
-  return x % by == 0
+    return x % by == 0
 }
 
 /// The sum of a slice of numbers.
 pub fn sum(items: [int]) -> int {
-  var total = 0
-  for item in items {
-    total = total + item
-  }
-  return total
+    var total = 0
+    for item in items {
+        total = total + item
+    }
+    return total
 }
 
 pub fn sumf(items: [float]) -> float {
-  var total = 0.0
-  for item in items {
-    total = total + item
-  }
-  return total
+    var total = 0.0
+    for item in items {
+        total = total + item
+    }
+    return total
 }
 
 // ---- strings --------------------------------------------------------------
@@ -264,21 +264,21 @@ pub fn sumf(items: [float]) -> float {
 
 /// Whether `needle` appears anywhere in `s`.
 pub fn contains(s: str, needle: str) -> bool {
-  return s.index_of(needle) >= 0
+    return s.index_of(needle) >= 0
 }
 
 pub fn starts_with(s: str, prefix: str) -> bool {
-  if prefix.len() > s.len() {
-    return false
-  }
-  return s.slice(0, prefix.len()) == prefix
+    if prefix.len() > s.len() {
+        return false
+    }
+    return s.slice(0, prefix.len()) == prefix
 }
 
 pub fn ends_with(s: str, suffix: str) -> bool {
-  if suffix.len() > s.len() {
-    return false
-  }
-  return s.slice(s.len() - suffix.len(), s.len()) == suffix
+    if suffix.len() > s.len() {
+        return false
+    }
+    return s.slice(s.len() - suffix.len(), s.len()) == suffix
 }
 
 /// `s` cut at every occurrence of `sep`.
@@ -286,60 +286,60 @@ pub fn ends_with(s: str, suffix: str) -> bool {
 /// An empty separator would have no answer — every position is an occurrence —
 /// so it yields the whole string rather than looping.
 pub fn split(s: str, sep: str) -> [str] {
-  var out: [str] = []
-  if sep.len() == 0 {
-    out.push(s)
-    return out
-  }
-  var rest = s
-  for rest.len() > 0 {
-    let at = rest.index_of(sep)
-    if at < 0 {
-      out.push(rest)
-      return out
+    var out: [str] = []
+    if sep.len() == 0 {
+        out.push(s)
+        return out
     }
-    out.push(rest.slice(0, at))
-    rest = rest.slice(at + sep.len(), rest.len())
-  }
-  out.push("")
-  return out
+    var rest = s
+    for rest.len() > 0 {
+        let at = rest.index_of(sep)
+        if at < 0 {
+            out.push(rest)
+            return out
+        }
+        out.push(rest.slice(0, at))
+        rest = rest.slice(at + sep.len(), rest.len())
+    }
+    out.push("")
+    return out
 }
 
 /// The pieces joined with `sep` between them.
 pub fn join(pieces: [str], sep: str) -> str {
-  var out = ""
-  for i in 0..pieces.len() {
-    if i > 0 {
-      out = out + sep
+    var out = ""
+    for i in 0..pieces.len() {
+        if i > 0 {
+            out = out + sep
+        }
+        out = out + pieces[i]
     }
-    out = out + pieces[i]
-  }
-  return out
+    return out
 }
 
 /// `s` with every occurrence of `from` replaced by `to`.
 pub fn replace(s: str, from: str, to: str) -> str {
-  return join(split(s, from), to)
+    return join(split(s, from), to)
 }
 
 /// The words of `s`, with runs of spaces collapsed.
 pub fn words(s: str) -> [str] {
-  return filter(split(s.trim(), " "), |w: str| w.len() > 0)
+    return filter(split(s.trim(), " "), |w: str| w.len()> 0)
 }
 
 // ---- optionals ------------------------------------------------------------
 
 /// The value, or `fallback` when there is none.
 pub fn or_else<T>(value: Option<T>, fallback: T) -> T {
-  // Testing for presence is what narrows: on this branch the compiler knows
-  // the value is there, so it reads as a `T` with no unwrapping written.
-  if value != nil {
-    return value
-  }
-  return fallback
+    // Testing for presence is what narrows: on this branch the compiler knows
+    // the value is there, so it reads as a `T` with no unwrapping written.
+    if value != nil {
+        return value
+    }
+    return fallback
 }
 
 /// Whether an optional holds a value.
 pub fn is_some<T>(value: Option<T>) -> bool {
-  return value != nil
+    return value != nil
 }

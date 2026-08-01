@@ -456,7 +456,7 @@ mod tests {
     fn a_compiled_program_runs() {
         let c = compile("t.kite", "fn main() {\n  io.print(7)\n}\n", Emit::Check);
         let mut out = Vec::new();
-        assert_eq!(c.run(&mut out).unwrap(), true);
+        assert!(c.run(&mut out).unwrap());
         assert_eq!(String::from_utf8(out).unwrap(), "7\n");
     }
 }

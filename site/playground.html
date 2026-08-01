@@ -63,21 +63,19 @@ const SAMPLES = {
 }
 
 fn main() {
+    // Testing the error is what makes the value readable. Move the
+    // \`io.print(n)\` above this \`if\` and the compiler refuses it: on the
+    // failure path there is no value at all, not a zero.
     let (n, err) = divide(10, 2)
-    check_it(err)
+    if err != nil {
+        io.print("failed: \\(err.message())")
+        return
+    }
     io.print(n)
 
-    // Reading \`m\` before checking \`e\` is a compile error: on the failure
-    // path there is no value at all, not a zero.
     let (m, e) = divide(1, 0)
     if e != nil {
         io.print("failed: \\(e.message())")
-    }
-}
-
-fn check_it(err: error) {
-    if err != nil {
-        io.print("unexpected: \\(err.message())")
     }
 }
 `,

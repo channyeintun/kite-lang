@@ -792,13 +792,12 @@ impl<'a> Parser<'a> {
             let save = self.pos;
             self.bump();
             let first = self.parse_type()?;
-            if self.eat(T::Comma) {
-                if self.at(T::Ident) && self.text_at(self.pos) == "error" {
+            if self.eat(T::Comma)
+                && self.at(T::Ident) && self.text_at(self.pos) == "error" {
                     self.bump();
                     let end = self.expect(T::RParen)?;
                     return Some(RetType::Fallible { value: first, span: start.to(end) });
                 }
-            }
             self.pos = save;
         }
         Some(RetType::Simple(self.parse_type()?))
@@ -1438,6 +1437,7 @@ impl<'a> Parser<'a> {
     fn parse_expr_bp(&mut self, min_bp: u8) -> Option<Expr> {
         let mut lhs = self.parse_prefix()?;
 
+        #[allow(clippy::while_let_loop)]
         loop {
             let Some(op) = InfixOp::from_token(self.peek()) else {
                 break;

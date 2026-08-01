@@ -122,7 +122,7 @@ pub unsafe extern "C" fn kite_emit(
 /// As [`kite_run`].
 #[no_mangle]
 pub unsafe extern "C" fn kite_format(ptr: *const u8, len: usize) -> *mut u8 {
-    answer(with_source(ptr, len, |src| kite_fmt::format(src)))
+    answer(with_source(ptr, len, kite_fmt::format))
 }
 
 /// The program's reference, from its doc comments.

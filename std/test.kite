@@ -33,21 +33,21 @@ pub fn is_false(cond: bool, what: str) -> error {
 }
 
 pub fn equal_int(found: int, want: int, what: str) -> error {
-    if found == want {
+    if found == want{
         return nil
     }
     return errors.new("\(what): expected \(want), found \(found)")
 }
 
 pub fn equal_str(found: str, want: str, what: str) -> error {
-    if found == want {
+    if found == want{
         return nil
     }
     return errors.new("\(what): expected \"\(want)\", found \"\(found)\"")
 }
 
 pub fn equal_bool(found: bool, want: bool, what: str) -> error {
-    if found == want {
+    if found == want{
         return nil
     }
     return errors.new("\(what): expected \(want), found \(found)")
@@ -57,21 +57,21 @@ pub fn equal_bool(found: bool, want: bool, what: str) -> error {
 /// almost never what is meant — the compiler warns about `==` on floats for
 /// the same reason.
 pub fn equal_float(found: float, want: float, tolerance: float, what: str) -> error {
-    if absf(found - want) <= tolerance {
+    if absf(found - want) <= tolerance{
         return nil
     }
     return errors.new("\(what): expected \(want) ± \(tolerance), found \(found)")
 }
 
 pub fn equal_ints(found: [int], want: [int], what: str) -> error {
-    if found == want {
+    if found == want{
         return nil
     }
     return errors.new("\(what): expected [\(join_ints(want))], found [\(join_ints(found))]")
 }
 
 pub fn equal_strs(found: [str], want: [str], what: str) -> error {
-    if found == want {
+    if found == want{
         return nil
     }
     return errors.new("\(what): expected [\(join(want, ", "))], found [\(join(found, ", "))]")

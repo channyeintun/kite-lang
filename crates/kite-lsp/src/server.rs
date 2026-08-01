@@ -177,7 +177,7 @@ impl Server {
         let Some(offset) = position_of(message, &text) else {
             return Reply::result(Json::Null);
         };
-        let compiled = compile(&path_of(&uri), &text, Emit::Check);
+        let compiled = compile(path_of(&uri), &text, Emit::Check);
         let Some(found) = compiled
             .index
             .uses
@@ -235,7 +235,7 @@ impl Server {
     fn completion(&self, message: &Json) -> Reply {
         let uri = uri_of(message).unwrap_or_default();
         let text = self.text(&uri);
-        let compiled = compile(&path_of(&uri), &text, Emit::Check);
+        let compiled = compile(path_of(&uri), &text, Emit::Check);
         let mut items = Vec::new();
         for keyword in kite_lexer::KEYWORDS {
             items.push(Json::object(vec![

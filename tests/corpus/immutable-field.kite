@@ -5,5 +5,5 @@ struct Rect {
 
 fn main() {
     let r = Rect{ width: 1, label: "x" }
-    r.width = 2      //~ ERROR E0114
+    r.width = 2 //~ ERROR E0114
 }

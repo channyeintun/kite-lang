@@ -1062,7 +1062,7 @@ impl<'a> Vm<'a> {
                         });
                     };
                     let _ = argc;
-                    let out = string_op(op, s, |i| a(i))?;
+                    let out = string_op(op, s, a)?;
                     self.set(base, dst, out);
                 }
 

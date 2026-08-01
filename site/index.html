@@ -27,7 +27,7 @@
     hides control flow.
   </p>
 
-<pre><code class="kite">fn main() {
+<pre><code class="kite sketch">fn main() {
     let (cfg, err) = config.load("app.toml")
     check err
 
@@ -67,7 +67,7 @@
     it — and the value on a failure path is a zero value that flows onward
     looking valid.
   </p>
-<pre><code class="kite">fn load_user(id: int) -> (User, error) {
+<pre><code class="kite sketch">fn load_user(id: int) -> (User, error) {
     let (raw, err) = db.query("SELECT ...", id)
     // `raw` cannot be read yet: on the failure path there is no value at all.
     check err
@@ -86,7 +86,7 @@
     yields a <code>Task&lt;T&gt;</code>, which is how two things happen at
     once. There are no channels, no goroutines and no <code>select</code>.
   </p>
-<pre><code class="kite">let a = fetch("alpha", 100)
+<pre><code class="kite sketch">let a = fetch("alpha", 100)
 let b = fetch("beta", 50)
 let (first, second) = await task.both(a, b)   // 100ms, not 150
 </code></pre>
@@ -94,6 +94,30 @@ let (first, second) = await task.both(a, b)   // 100ms, not 150
     The source never says how many threads exist. <code>Share</code> — a
     marker the compiler infers structurally — is what will make the same
     program parallel on the web the day shared-everything-threads ships.
+  </p>
+
+  <h3>Exhaustive matching, and a compiler that names what is missing</h3>
+<pre><code class="kite">enum Shape {
+    Circle(radius: float)
+    Rect(width: float, height: float)
+    Point
+}
+
+fn area(s: Shape) -> float {
+    return match s {
+        Circle(r) => 3.14159 * r * r,
+        Rect(w, h) => w * h,
+        Point => 0.0,
+    }
+}
+
+fn main() {
+    io.print(area(Shape.Rect(width: 2.0, height: 3.0)))
+}
+</code></pre>
+  <p>
+    Leave out <code>Point</code> and the error names it. That is what makes
+    adding a variant safe: the compiler shows every place that must change.
   </p>
 
   <h3>Immutable by default</h3>

@@ -10,5 +10,5 @@ pub fn total(items: [Item]) -> int {
 }
 
 pub fn restock(items: [Item], threshold: int) -> [Item] {
-    return filter(items, |it: Item| it.count < threshold)
+    return filter(items, |it: Item| it.count<threshold)
 }

@@ -71,7 +71,7 @@ pub async fn timeout<T>(work: Task<T>, ms: int) -> Option<T> {
         if task.finished(work) {
             return task.get(work)
         }
-        if time.now() >= deadline {
+        if time.now() >= deadline{
             return nil
         }
         task.wake_at(deadline)

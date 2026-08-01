@@ -40,16 +40,16 @@ async fn checks() -> [error] {
     out.push(test.equal_int(time.now() - start, 100, "concurrent, not sequential"))
 
     out.push(test.equal_strs(
-        await task.all([work("x", 20), work("y", 10)]),
-        ["x", "y"],
-        "all keeps the order it was given",
-    ))
+            await task.all([work("x", 20), work("y", 10)]),
+            ["x", "y"],
+            "all keeps the order it was given",
+        ))
 
     out.push(test.equal_str(
-        await task.race([work("fast", 5), work("slow", 500)]),
-        "fast",
-        "race",
-    ))
+            await task.race([work("fast", 5), work("slow", 500)]),
+            "fast",
+            "race",
+        ))
 
     let late = await task.timeout(work("late", 900), 50)
     out.push(test.is_true(late == nil, "timeout gives up"))

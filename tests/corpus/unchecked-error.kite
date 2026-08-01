@@ -3,6 +3,6 @@ fn load() -> (int, error) {
 }
 
 fn main() {
-    let (v, err) = load()   //~ ERROR E0302
+    let (v, err) = load() //~ ERROR E0302
     io.print(1)
 }

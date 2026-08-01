@@ -3,6 +3,6 @@ fn takes_int(n: int) {
 }
 
 fn main() {
-    takes_int(1.5)   //~ ERROR E0200
-    let mixed = 1 + 1.5   //~ ERROR E0201
+    takes_int(1.5) //~ ERROR E0200
+    let mixed = 1 + 1.5 //~ ERROR E0201
 }

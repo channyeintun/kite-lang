@@ -1383,6 +1383,9 @@ fn wasm_result_with(ty: TyId, types: &Types, layout: &TypeLayout) -> Option<ValT
     (ty != TyId::UNIT).then(|| val_type_with(ty, types, layout))
 }
 
+// Everything a body needs to be emitted, and all of it is genuinely per-call:
+// bundling it into a struct would be the same arguments with a name.
+#[allow(clippy::too_many_arguments)]
 fn compile_fn(
     f: &mir::Function,
     types: &Types,

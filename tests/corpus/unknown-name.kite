@@ -1,4 +1,4 @@
 fn main() {
     let total = 1
-    io.print(totl)   //~ ERROR E0111
+    io.print(totl) //~ ERROR E0111
 }

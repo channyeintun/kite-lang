@@ -8,75 +8,75 @@
 use std/ui
 
 fn app() -> ui.Node {
-  let header = ui.box_of(
-    "header",
-    ui.spaced(ui.padded(ui.Style{..ui.row(), align: ui.Align.Center, justify: ui.Justify.SpaceBetween}, 12.0), 8.0),
-    [
-      ui.text_of("title", ui.style(), "Kite"),
-      ui.text_of("subtitle", ui.style(), "layout demo"),
-    ],
-  )
-
-  let sidebar = ui.box_of(
-    "sidebar",
-    ui.spaced(ui.padded(ui.Style{..ui.column(), width: 160.0}, 8.0), 6.0),
-    [
-      ui.text_of("nav-home", ui.style(), "Home"),
-      ui.text_of("nav-files", ui.style(), "Files"),
-      ui.text_of("nav-settings", ui.style(), "Settings"),
-    ],
-  )
-
-  let content = ui.box_of(
-    "content",
-    ui.grown(ui.padded(ui.Style{..ui.column(), align: ui.Align.Stretch}, 16.0), 1.0),
-    [
-      ui.text_of("heading", ui.style(), "Welcome back"),
-      ui.text_of("body", ui.grown(ui.style(), 1.0), "Everything below was placed by std/ui.kite."),
-      ui.box_of(
-        "actions",
-        ui.spaced(ui.Style{..ui.row(), justify: ui.Justify.End}, 8.0),
+    let header = ui.box_of(
+        "header",
+        ui.spaced(ui.padded(ui.Style{..ui.row(), align: ui.Align.Center, justify: ui.Justify.SpaceBetween }, 12.0), 8.0),
         [
-          ui.text_of("cancel", ui.style(), "Cancel"),
-          ui.text_of("confirm", ui.style(), "Confirm"),
+            ui.text_of("title", ui.style(), "Kite"),
+            ui.text_of("subtitle", ui.style(), "layout demo"),
         ],
-      ),
-    ],
-  )
+    )
 
-  let body = ui.box_of("body", ui.Style{..ui.row(), align: ui.Align.Stretch, grow: 1.0}, [sidebar, content])
+    let sidebar = ui.box_of(
+        "sidebar",
+        ui.spaced(ui.padded(ui.Style{..ui.column(), width: 160.0 }, 8.0), 6.0),
+        [
+            ui.text_of("nav-home", ui.style(), "Home"),
+            ui.text_of("nav-files", ui.style(), "Files"),
+            ui.text_of("nav-settings", ui.style(), "Settings"),
+        ],
+    )
 
-  return ui.box_of("app", ui.Style{..ui.column(), align: ui.Align.Stretch}, [header, body])
+    let content = ui.box_of(
+        "content",
+        ui.grown(ui.padded(ui.Style{..ui.column(), align: ui.Align.Stretch }, 16.0), 1.0),
+        [
+            ui.text_of("heading", ui.style(), "Welcome back"),
+            ui.text_of("body", ui.grown(ui.style(), 1.0), "Everything below was placed by std/ui.kite."),
+            ui.box_of(
+                "actions",
+                ui.spaced(ui.Style{..ui.row(), justify: ui.Justify.End }, 8.0),
+                [
+                    ui.text_of("cancel", ui.style(), "Cancel"),
+                    ui.text_of("confirm", ui.style(), "Confirm"),
+                ],
+            ),
+        ],
+    )
+
+    let body = ui.box_of("body", ui.Style{..ui.row(), align: ui.Align.Stretch, grow: 1.0 }, [sidebar, content])
+
+    return ui.box_of("app", ui.Style{..ui.column(), align: ui.Align.Stretch }, [header, body])
 }
 
 fn indent(depth: int) -> str {
-  var pad = ""
-  for i in 0..depth {
-    pad = pad + "  "
-  }
-  return pad
+    var pad = ""
+    for i in 0..depth {
+        pad = pad + "  "
+    }
+    return pad
 }
 
 fn show(frame: ui.Frame) {
-  let r = frame.rect
-  io.print("\(indent(frame.depth))\(frame.name)  x=\(r.x) y=\(r.y) w=\(r.width) h=\(r.height)")
+    let r = frame.rect
+    io.print("\(indent(frame.depth))\(frame.name)  x=\(r.x) y=\(r.y) w=\(r.width) h=\(r.height)")
 }
 
 fn main() {
-  let frames = ui.layout(app(), ui.Size{width: 640.0, height: 360.0})
+    let frames = ui.layout(app(), ui.Size{ width: 640.0, height: 360.0 })
 
-  io.print("laid out \(frames.len()) boxes into 640x360")
-  for frame in frames {
-    show(frame)
-  }
+    io.print("laid out \(frames.len()) boxes into 640x360")
+    for frame in frames {
+        show(frame)
+    }
 
-  // Hit testing walks the same frames, last match first, because the last
-  // frame painted is the one on top.
-  let target = ui.hit(frames, 600.0, 330.0)
-  if target != nil {
-    io.print("point (600, 330) is inside \(target.name)")
-  }
+    // Hit testing walks the same frames, last match first, because the last
+    // frame painted is the one on top.
+    let target = ui.hit(frames, 600.0, 330.0)
+    if target != nil {
+        io.print("point (600, 330) is inside \(target.name)")
+    }
 
-  let outside = ui.hit(frames, 900.0, 900.0)
-  io.print("point (900, 900) hits something: \(is_some(outside))")
+    let outside = ui.hit(frames, 900.0, 900.0)
+    io.print("point (900, 900) hits something: \(is_some(outside))")
 }

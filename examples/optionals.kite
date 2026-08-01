@@ -23,7 +23,7 @@ fn main() {
     io.print(if first == nil { -1 } else { first })
 
     io.print(match find(1) {
-        nil => "none",
-        u => u.name,
-    })
+            nil => "none",
+            u => u.name,
+        })
 }

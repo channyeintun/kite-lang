@@ -1,0 +1,105 @@
+# Binaries, on a tag.
+#
+# A compiler nobody can install is a compiler nobody uses. One file, no runtime
+# dependency: Kite ships no garbage collector and links no LLVM, so there is no
+# reason it should need anything alongside it.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: musl needs a cross linker
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
+      - name: build
+        env:
+          # Reproducible: the same source gives the same binary, because a
+          # compiler is exactly the artefact where "trusting trust" is not a
+          # hypothetical.
+          SOURCE_DATE_EPOCH: "0"
+          RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/kite -C debuginfo=0"
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --locked -p kitec -p kite-lsp --target ${{ matrix.target }}
+      - name: package
+        shell: bash
+        run: |
+          set -e
+          name="kite-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          for binary in kitec kite-lsp; do
+            if [ -f "target/${{ matrix.target }}/release/$binary.exe" ]; then
+              cp "target/${{ matrix.target }}/release/$binary.exe" "dist/$name/"
+            else
+              cp "target/${{ matrix.target }}/release/$binary" "dist/$name/"
+            fi
+          done
+          cp README.md SPECIFICATION.md "dist/$name/"
+          cd dist
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            7z a "$name.zip" "$name" > /dev/null
+            certutil -hashfile "$name.zip" SHA256 | sed -n 2p | tr -d ' \r' > "$name.zip.sha256"
+          else
+            tar czf "$name.tar.gz" "$name"
+            shasum -a 256 "$name.tar.gz" | cut -d' ' -f1 > "$name.tar.gz.sha256"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*.*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - name: one file of checksums
+        run: |
+          cd dist
+          rm -f SHA256SUMS
+          for f in *.tar.gz *.zip; do
+            [ -e "$f" ] || continue
+            printf '%s  %s\n' "$(cat "$f.sha256")" "$f" >> SHA256SUMS
+          done
+          cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+          body: |
+            Binaries for macOS, Linux (static, musl) and Windows.
+
+            Verify what you downloaded before running it:
+
+            ```
+            shasum -a 256 -c SHA256SUMS --ignore-missing
+            ```

@@ -5,7 +5,7 @@ enum Shape {
 }
 
 fn describe(s: Shape) -> str {
-    return match s {   //~ ERROR E0210
+    return match s { //~ ERROR E0210
         Circle(r) => "circle",
     }
 }

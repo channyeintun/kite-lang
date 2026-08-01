@@ -1,10 +1,10 @@
 // One parameter, two arguments that disagree about what it is.
 
 fn same<T>(a: T, b: T) -> T {
-  return a
+    return a
 }
 
 fn main() {
-  io.print(same(1, 2))
-  io.print(same(1, "two")) //~ ERROR E0209
+    io.print(same(1, 2))
+    io.print(same(1, "two")) //~ ERROR E0209
 }

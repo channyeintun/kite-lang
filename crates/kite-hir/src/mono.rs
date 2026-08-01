@@ -398,150 +398,6 @@ fn expr_blocks(k: &mut ExprKind) -> Vec<&mut Block> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{FnId, TyId, TyKind};
-
-    fn template(name: &str, generic_count: usize, ret: TyId) -> Function {
-        Function {
-            name: name.into(),
-            generic_count,
-            is_free: true,
-            is_pub: false,
-            is_async: false,
-            param_count: 0,
-            locals: Vec::new(),
-            ret,
-            body: Block::default(),
-            span: kite_span::Span::new(kite_span::FileId(0), 0, 0),
-        }
-    }
-
-    fn call(callee: u32, targs: Vec<TyId>) -> Expr {
-        Expr {
-            kind: ExprKind::Call { callee: FnId(callee), args: Vec::new(), targs },
-            ty: TyId::UNIT,
-            span: kite_span::Span::new(kite_span::FileId(0), 0, 0),
-        }
-    }
-
-    /// Two call sites with different type arguments produce two functions; a
-    /// third repeating one of them reuses it.
-    #[test]
-    fn one_copy_per_distinct_argument_set() {
-        let mut p = Program::default();
-        let param = p.types.param_ty(0, "T");
-        p.fns.push(template("id", 1, param));
-        let mut main = template("main", 0, TyId::UNIT);
-        main.body.stmts = vec![
-            Stmt::Expr(call(0, vec![TyId::INT])),
-            Stmt::Expr(call(0, vec![TyId::STR])),
-            Stmt::Expr(call(0, vec![TyId::INT])),
-        ];
-        p.fns.push(main);
-        p.entry = Some(FnId(1));
-
-        monomorphise(&mut p);
-
-        // `main` plus two specialisations; the template itself is gone.
-        assert_eq!(p.fns.len(), 3);
-        assert_eq!(p.fns[0].name, "main");
-        assert_eq!(p.entry, Some(FnId(0)));
-        let names: Vec<&str> = p.fns[1..].iter().map(|f| f.name.as_str()).collect();
-        assert!(names.contains(&"id<int>"), "got {:?}", names);
-        assert!(names.contains(&"id<str>"), "got {:?}", names);
-
-        // Each copy's return type is its own argument, not the parameter.
-        for f in &p.fns[1..] {
-            assert!(!matches!(p.types.kind(f.ret), TyKind::Param { .. }));
-            assert_eq!(f.generic_count, 0);
-        }
-    }
-
-    /// A program with no generic function is left exactly as it was — including
-    /// its function numbering, which nothing else should have to think about.
-    #[test]
-    fn a_program_without_generics_is_untouched() {
-        let mut p = Program::default();
-        p.fns.push(template("a", 0, TyId::UNIT));
-        p.fns.push(template("b", 0, TyId::INT));
-        p.entry = Some(FnId(1));
-
-        monomorphise(&mut p);
-
-        assert_eq!(p.fns.len(), 2);
-        assert_eq!(p.fns[0].name, "a");
-        assert_eq!(p.entry, Some(FnId(1)));
-    }
-
-    /// Only what a program can reach survives. The prelude is compiled into
-    /// every program, so this is what keeps a `hello world` small.
-    #[test]
-    fn unreachable_functions_are_dropped() {
-        let mut p = Program::default();
-        p.fns.push(template("used", 0, TyId::UNIT));
-        p.fns.push(template("unused", 0, TyId::UNIT));
-        let mut main = template("main", 0, TyId::UNIT);
-        main.body.stmts = vec![Stmt::Expr(call(0, Vec::new()))];
-        p.fns.push(main);
-        p.entry = Some(FnId(2));
-
-        prune(&mut p);
-
-        let names: Vec<&str> = p.fns.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, vec!["used", "main"]);
-        assert_eq!(p.entry, Some(FnId(1)));
-        // The surviving call was renumbered with everything else.
-        let Stmt::Expr(e) = &p.fns[1].body.stmts[0] else { panic!("expected a call") };
-        let ExprKind::Call { callee, .. } = &e.kind else { panic!("expected a call") };
-        assert_eq!(*callee, FnId(0));
-    }
-
-    /// A trait object can reach any method in its vtable, so those are roots
-    /// even when nothing calls them by name.
-    #[test]
-    fn vtable_methods_are_roots() {
-        use crate::{TypeTag, VTable, VTableEntry};
-        let mut p = Program::default();
-        p.fns.push(template("area", 0, TyId::INT));
-        p.fns.push(template("main", 0, TyId::UNIT));
-        p.entry = Some(FnId(1));
-        p.vtables.push(VTable {
-            trait_id: crate::TraitId(0),
-            entries: vec![VTableEntry {
-                tag: TypeTag::Struct(crate::StructId(0)),
-                methods: vec![FnId(0)],
-            }],
-        });
-
-        prune(&mut p);
-
-        assert_eq!(p.fns.len(), 2, "a vtable method is reachable");
-        assert_eq!(p.vtables[0].entries[0].methods[0], FnId(0));
-    }
-
-    /// Substitution rebuilds composite types around the parameter rather than
-    /// replacing only a bare `T`.
-    #[test]
-    fn substitution_reaches_inside_composites() {
-        let mut types = Types::new();
-        let t = types.param_ty(0, "T");
-        let slice_of_t = types.slice_of(t);
-        let opt = types.optional_of(slice_of_t);
-
-        let concrete = subst(opt, &[TyId::STR], &mut types);
-
-        let TyKind::Optional(inner) = *types.kind(concrete) else {
-            panic!("expected an optional, got {}", types.name(concrete))
-        };
-        let TyKind::Slice(elem) = *types.kind(inner) else {
-            panic!("expected a slice, got {}", types.name(inner))
-        };
-        assert_eq!(elem, TyId::STR);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Local renumbering
 //
@@ -774,5 +630,149 @@ fn renumber_call_expr(e: &mut Expr, map: &HashMap<u32, u32>) {
     }
     for b in expr_blocks(&mut e.kind) {
         renumber_calls(b, map);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{FnId, TyId, TyKind};
+
+    fn template(name: &str, generic_count: usize, ret: TyId) -> Function {
+        Function {
+            name: name.into(),
+            generic_count,
+            is_free: true,
+            is_pub: false,
+            is_async: false,
+            param_count: 0,
+            locals: Vec::new(),
+            ret,
+            body: Block::default(),
+            span: kite_span::Span::new(kite_span::FileId(0), 0, 0),
+        }
+    }
+
+    fn call(callee: u32, targs: Vec<TyId>) -> Expr {
+        Expr {
+            kind: ExprKind::Call { callee: FnId(callee), args: Vec::new(), targs },
+            ty: TyId::UNIT,
+            span: kite_span::Span::new(kite_span::FileId(0), 0, 0),
+        }
+    }
+
+    /// Two call sites with different type arguments produce two functions; a
+    /// third repeating one of them reuses it.
+    #[test]
+    fn one_copy_per_distinct_argument_set() {
+        let mut p = Program::default();
+        let param = p.types.param_ty(0, "T");
+        p.fns.push(template("id", 1, param));
+        let mut main = template("main", 0, TyId::UNIT);
+        main.body.stmts = vec![
+            Stmt::Expr(call(0, vec![TyId::INT])),
+            Stmt::Expr(call(0, vec![TyId::STR])),
+            Stmt::Expr(call(0, vec![TyId::INT])),
+        ];
+        p.fns.push(main);
+        p.entry = Some(FnId(1));
+
+        monomorphise(&mut p);
+
+        // `main` plus two specialisations; the template itself is gone.
+        assert_eq!(p.fns.len(), 3);
+        assert_eq!(p.fns[0].name, "main");
+        assert_eq!(p.entry, Some(FnId(0)));
+        let names: Vec<&str> = p.fns[1..].iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"id<int>"), "got {:?}", names);
+        assert!(names.contains(&"id<str>"), "got {:?}", names);
+
+        // Each copy's return type is its own argument, not the parameter.
+        for f in &p.fns[1..] {
+            assert!(!matches!(p.types.kind(f.ret), TyKind::Param { .. }));
+            assert_eq!(f.generic_count, 0);
+        }
+    }
+
+    /// A program with no generic function is left exactly as it was — including
+    /// its function numbering, which nothing else should have to think about.
+    #[test]
+    fn a_program_without_generics_is_untouched() {
+        let mut p = Program::default();
+        p.fns.push(template("a", 0, TyId::UNIT));
+        p.fns.push(template("b", 0, TyId::INT));
+        p.entry = Some(FnId(1));
+
+        monomorphise(&mut p);
+
+        assert_eq!(p.fns.len(), 2);
+        assert_eq!(p.fns[0].name, "a");
+        assert_eq!(p.entry, Some(FnId(1)));
+    }
+
+    /// Only what a program can reach survives. The prelude is compiled into
+    /// every program, so this is what keeps a `hello world` small.
+    #[test]
+    fn unreachable_functions_are_dropped() {
+        let mut p = Program::default();
+        p.fns.push(template("used", 0, TyId::UNIT));
+        p.fns.push(template("unused", 0, TyId::UNIT));
+        let mut main = template("main", 0, TyId::UNIT);
+        main.body.stmts = vec![Stmt::Expr(call(0, Vec::new()))];
+        p.fns.push(main);
+        p.entry = Some(FnId(2));
+
+        prune(&mut p);
+
+        let names: Vec<&str> = p.fns.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["used", "main"]);
+        assert_eq!(p.entry, Some(FnId(1)));
+        // The surviving call was renumbered with everything else.
+        let Stmt::Expr(e) = &p.fns[1].body.stmts[0] else { panic!("expected a call") };
+        let ExprKind::Call { callee, .. } = &e.kind else { panic!("expected a call") };
+        assert_eq!(*callee, FnId(0));
+    }
+
+    /// A trait object can reach any method in its vtable, so those are roots
+    /// even when nothing calls them by name.
+    #[test]
+    fn vtable_methods_are_roots() {
+        use crate::{TypeTag, VTable, VTableEntry};
+        let mut p = Program::default();
+        p.fns.push(template("area", 0, TyId::INT));
+        p.fns.push(template("main", 0, TyId::UNIT));
+        p.entry = Some(FnId(1));
+        p.vtables.push(VTable {
+            trait_id: crate::TraitId(0),
+            entries: vec![VTableEntry {
+                tag: TypeTag::Struct(crate::StructId(0)),
+                methods: vec![FnId(0)],
+            }],
+        });
+
+        prune(&mut p);
+
+        assert_eq!(p.fns.len(), 2, "a vtable method is reachable");
+        assert_eq!(p.vtables[0].entries[0].methods[0], FnId(0));
+    }
+
+    /// Substitution rebuilds composite types around the parameter rather than
+    /// replacing only a bare `T`.
+    #[test]
+    fn substitution_reaches_inside_composites() {
+        let mut types = Types::new();
+        let t = types.param_ty(0, "T");
+        let slice_of_t = types.slice_of(t);
+        let opt = types.optional_of(slice_of_t);
+
+        let concrete = subst(opt, &[TyId::STR], &mut types);
+
+        let TyKind::Optional(inner) = *types.kind(concrete) else {
+            panic!("expected an optional, got {}", types.name(concrete))
+        };
+        let TyKind::Slice(elem) = *types.kind(inner) else {
+            panic!("expected a slice, got {}", types.name(inner))
+        };
+        assert_eq!(elem, TyId::STR);
     }
 }

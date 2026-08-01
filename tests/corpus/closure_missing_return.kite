@@ -2,10 +2,10 @@
 // the same as a named function.
 
 fn main() {
-  let f = |n: int| -> str { //~ ERROR E0211
-    if n > 0 {
-      return "positive"
+    let f = |n: int| -> str { //~ ERROR E0211
+        if n > 0 {
+            return "positive"
+        }
     }
-  }
-  io.print(f(1))
+    io.print(f(1))
 }

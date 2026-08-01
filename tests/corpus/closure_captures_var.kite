@@ -3,11 +3,11 @@
 // distance and one that silently could not would be a bug waiting to happen.
 
 fn apply(f: fn(int) -> int, x: int) -> int {
-  return f(x)
+    return f(x)
 }
 
 fn main() {
-  var total = 0
-  let add = |x: int| x + total //~ ERROR E0211
-  io.print(apply(add, 1))
+    var total = 0
+    let add = |x: int| x + total //~ ERROR E0211
+    io.print(apply(add, 1))
 }

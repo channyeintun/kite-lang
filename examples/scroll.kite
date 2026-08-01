@@ -10,123 +10,123 @@
 use std/ui
 
 pub struct Model {
-  pub offset: float
-  pub selected: str
+    pub offset: float
+    pub selected: str
 }
 
 pub fn init() -> Model {
-  return Model{offset: 0.0, selected: "none"}
+    return Model{ offset: 0.0, selected: "none" }
 }
 
 fn viewport() -> ui.Rect {
-  return ui.Rect{x: 16.0, y: 56.0, width: 380.0, height: 240.0}
+    return ui.Rect{ x: 16.0, y: 56.0, width: 380.0, height: 240.0 }
 }
 
 fn row(i: int) -> ui.Node {
-  return ui.text_of(
-    "row-\(i)",
-    ui.padded(ui.Style{..row_style(), width: 380.0}, 6.0),
-    "\(i). " + label_for(i),
-  )
+    return ui.text_of(
+        "row-\(i)",
+        ui.padded(ui.Style{..row_style(), width: 380.0 }, 6.0),
+        "\(i). " + label_for(i),
+    )
 }
 
 fn row_style() -> ui.Style {
-  return ui.style()
+    return ui.style()
 }
 
 fn label_for(i: int) -> str {
-  if divides(i, 15) {
-    return "fizzbuzz — a row long enough to show that wrapping and scrolling are separate concerns"
-  }
-  if divides(i, 3) {
-    return "fizz"
-  }
-  if divides(i, 5) {
-    return "buzz"
-  }
-  return "an ordinary row"
+    if divides(i, 15) {
+        return "fizzbuzz — a row long enough to show that wrapping and scrolling are separate concerns"
+    }
+    if divides(i, 3) {
+        return "fizz"
+    }
+    if divides(i, 5) {
+        return "buzz"
+    }
+    return "an ordinary row"
 }
 
 fn content() -> ui.Node {
-  var rows: [ui.Node] = []
-  for i in 1..31 {
-    rows.push(row(i))
-  }
-  return ui.box_of("list", ui.spaced(ui.Style{..ui.column(), align: ui.Align.Stretch}, 4.0), rows)
+    var rows: [ui.Node] = []
+    for i in 1..31 {
+        rows.push(row(i))
+    }
+    return ui.box_of("list", ui.spaced(ui.Style{..ui.column(), align: ui.Align.Stretch }, 4.0), rows)
 }
 
 fn frames_of() -> [ui.Frame] {
-  return ui.layout(content(), ui.Size{width: 380.0, height: 240.0})
+    return ui.layout(content(), ui.Size{ width: 380.0, height: 240.0 })
 }
 
 fn palette(model: Model) -> [ui.Paint] {
-  var out = [
-    ui.fill("list", 0x14161a),
-  ]
-  for i in 1..31 {
-    let name = "row-\(i)"
-    let chosen = name == model.selected
-    let background = if chosen { 0x3b82f6 } else { 0x1a1e25 }
-    let ink = if chosen { 0xffffff } else { 0xc9d1dc }
-    out.push(ui.filled_label(name, "\(i). " + label_for(i), background, ink))
-  }
-  return out
+    var out = [
+        ui.fill("list", 0x14161a),
+    ]
+    for i in 1..31 {
+        let name = "row-\(i)"
+        let chosen = name == model.selected
+        let background = if chosen { 0x3b82f6 } else { 0x1a1e25 }
+        let ink = if chosen { 0xffffff } else { 0xc9d1dc }
+        out.push(ui.filled_label(name, "\(i). " + label_for(i), background, ink))
+    }
+    return out
 }
 
 pub fn view(model: Model) {
-  let v = viewport()
-  draw.rect(0.0, 0.0, 640.0, 320.0, 0x0b0d10)
-  draw.text(16.0, 16.0, "Scroll with the wheel or arrow keys; click a row", 0x8b93a1)
-  draw.text(16.0, 32.0, "offset \(model.offset), selected \(model.selected)", 0x5c6472)
-  draw.rect(v.x, v.y, v.width, v.height, 0x14161a)
-  ui.paint_scrolled(frames_of(), palette(model), v, model.offset)
+    let v = viewport()
+    draw.rect(0.0, 0.0, 640.0, 320.0, 0x0b0d10)
+    draw.text(16.0, 16.0, "Scroll with the wheel or arrow keys; click a row", 0x8b93a1)
+    draw.text(16.0, 32.0, "offset \(model.offset), selected \(model.selected)", 0x5c6472)
+    draw.rect(v.x, v.y, v.width, v.height, 0x14161a)
+    ui.paint_scrolled(frames_of(), palette(model), v, model.offset)
 }
 
 pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
-  let frames = frames_of()
-  let box = ui.Size{width: viewport().width, height: viewport().height}
+    let frames = frames_of()
+    let box = ui.Size{ width: viewport().width, height: viewport().height }
 
-  if event == 0 {
-    let target = ui.hit_scrolled(frames, viewport(), model.offset, x, y)
-    if target == nil {
-      return model
+    if event == 0 {
+        let target = ui.hit_scrolled(frames, viewport(), model.offset, x, y)
+        if target == nil {
+            return model
+        }
+        return Model{..model, selected: target.name }
     }
-    return Model{..model, selected: target.name}
-  }
 
-  if event == 1 {
-    return Model{..model, offset: ui.clamp_scroll(model.offset + step(key), frames, box)}
-  }
+    if event == 1 {
+        return Model{..model, offset: ui.clamp_scroll(model.offset + step(key), frames, box) }
+    }
 
-  // Event 2 is a wheel: `y` carries the distance.
-  if event == 2 {
-    return Model{..model, offset: ui.clamp_scroll(model.offset + y, frames, box)}
-  }
+    // Event 2 is a wheel: `y` carries the distance.
+    if event == 2 {
+        return Model{..model, offset: ui.clamp_scroll(model.offset + y, frames, box) }
+    }
 
-  return model
+    return model
 }
 
 fn step(key: str) -> float {
-  if key == "ArrowDown" || key == "j" {
-    return 40.0
-  }
-  if key == "ArrowUp" || key == "k" {
-    return 0.0 - 40.0
-  }
-  if key == "PageDown" || key == " " {
-    return 200.0
-  }
-  if key == "PageUp" {
-    return 0.0 - 200.0
-  }
-  return 0.0
+    if key == "ArrowDown" || key == "j" {
+        return 40.0
+    }
+    if key == "ArrowUp" || key == "k" {
+        return 0.0 - 40.0
+    }
+    if key == "PageDown" || key == " " {
+        return 200.0
+    }
+    if key == "PageUp" {
+        return 0.0 - 200.0
+    }
+    return 0.0
 }
 
 fn main() {
-  var model = init()
-  view(model)
-  model = update(model, 1, 0.0, 0.0, "PageDown")
-  io.print("after PageDown: offset \(model.offset)")
-  model = update(model, 0, 100.0, 100.0, "")
-  io.print("clicked: \(model.selected)")
+    var model = init()
+    view(model)
+    model = update(model, 1, 0.0, 0.0, "PageDown")
+    io.print("after PageDown: offset \(model.offset)")
+    model = update(model, 0, 100.0, 100.0, "")
+    io.print("clicked: \(model.selected)")
 }

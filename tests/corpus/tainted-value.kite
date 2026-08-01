@@ -4,7 +4,7 @@ fn load() -> (int, error) {
 
 fn main() {
     let (v, err) = load()
-    io.print(v)             //~ ERROR E0301
+    io.print(v) //~ ERROR E0301
     if err != nil {
         io.print(0)
     }

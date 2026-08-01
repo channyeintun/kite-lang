@@ -90,8 +90,12 @@ impl Formatter<'_> {
                 break;
             }
 
+            // Comments first: each keeps the blank lines around it, and the
+            // gap this token sees is then measured from the last one rather
+            // than from before them all — which is what moved a blank line
+            // from above a doc comment to below it.
+            self.comments_before(token.span.start);
             let gap = self.gap_before(token.span.start);
-            self.comments_before(token.span.start, gap.breaks > 0);
 
             let closing = matches!(token.kind, T::RBrace | T::RBracket | T::RParen);
             if closing {
@@ -141,11 +145,25 @@ impl Formatter<'_> {
         }
         // Nothing between a name and its argument list, its index, or a dot.
         if matches!(kind, T::LParen | T::LBracket)
-            && matches!(prev, T::Ident | T::RParen | T::RBracket | T::SelfKw)
+            && matches!(prev, T::Ident | T::RParen | T::RBracket | T::SelfKw | T::Gt)
         {
             return false;
         }
+        // `fn(T) -> U`, the type. A declaration is `fn name(`, so a `(`
+        // straight after `fn` is always a function type.
+        if kind == T::LParen && prev == T::Fn {
+            return false;
+        }
         if matches!(kind, T::Comma | T::Colon | T::Dot | T::DotDot | T::DotDotEq) {
+            return false;
+        }
+        // `use std/task` is a path, not a division.
+        if self.current_line().trim_start().starts_with("use ")
+            && matches!(kind, T::Slash)
+        {
+            return false;
+        }
+        if prev == T::Slash && self.current_line().trim_start().starts_with("use ") {
             return false;
         }
         if matches!(prev, T::Dot | T::DotDot | T::DotDotEq | T::At | T::Bang | T::LParen | T::LBracket)
@@ -164,7 +182,11 @@ impl Formatter<'_> {
         if prev == T::Minus && self.minus_was_prefix() {
             return false;
         }
-        // Type arguments are tight: `Option<int>`, `Box<Box<int>>`.
+        // Type arguments are tight: `Option<int>`, `Box<Box<int>>`, and the
+        // parameter list of `impl<T>` or `fn f<T>`.
+        if kind == T::Lt && prev == T::Impl {
+            return false;
+        }
         if kind == T::Lt && prev == T::Ident && self.in_type_position() {
             return false;
         }
@@ -221,28 +243,24 @@ impl Formatter<'_> {
 
     /// Whether the name before a `{` is a struct literal's rather than a
     /// declaration's.
+    ///
+    /// `ui.Style{ … }` is a literal and `-> ui.Node {` is a return type, and
+    /// the token immediately before the name is a `.` in both. So the name is
+    /// stripped off the line and what precedes *it* decides — and the test is
+    /// for a *value* position, because those are a short list and everything
+    /// else is a declaration or a block.
     fn is_literal_head(&self) -> bool {
-        matches!(
-            self.prev2,
-            Some(T::Eq)
-                | Some(T::LParen)
-                | Some(T::LBracket)
-                | Some(T::Comma)
-                | Some(T::Return)
-                | Some(T::Dot)
-                | Some(T::Colon)
-                | Some(T::FatArrow)
-                | Some(T::Plus)
-                | Some(T::Minus)
-                | Some(T::Star)
-                | Some(T::Slash)
-                | Some(T::EqEq)
-                | Some(T::Ne)
-                | Some(T::AmpAmp)
-                | Some(T::PipePipe)
-                | Some(T::Check)
-                | Some(T::Await)
-        )
+        let line = self.current_line();
+        let head = line
+            .trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '.')
+            .trim_end();
+        if head.is_empty() {
+            return false;
+        }
+        ["=", "(", "[", ",", ":", "=>", "+", "-", "*", "/", "&&", "||", "==", "!=", "return",
+         "check", "await", "push"]
+            .iter()
+            .any(|token| head.ends_with(token))
     }
 
     /// Whether the tail of this line reads as a type rather than a value.
@@ -299,25 +317,14 @@ impl Formatter<'_> {
     /// One that sat at the end of a line stays at the end of that line; one on
     /// a line of its own gets a line of its own, indented with the code it
     /// belongs to.
-    fn comments_before(&mut self, at: u32, breaks_after: bool) {
+    fn comments_before(&mut self, at: u32) {
         while self.next_comment < self.comments.len() {
             let c = self.comments[self.next_comment];
             if c.span.start >= at {
                 break;
             }
             self.next_comment += 1;
-            let text = self.text(c.span).trim_end().to_string();
-            let own_line = self.gap_before(c.span.start).breaks > 0 || !self.line_started;
-            if own_line {
-                self.end_line();
-                self.start_line();
-            } else {
-                self.out.push(' ');
-            }
-            self.out.push_str(&text);
-            self.prev_end = c.span.end;
-            self.end_line();
-            let _ = breaks_after;
+            self.write_comment(c);
         }
     }
 
@@ -325,18 +332,27 @@ impl Formatter<'_> {
         while self.next_comment < self.comments.len() {
             let c = self.comments[self.next_comment];
             self.next_comment += 1;
-            let text = self.text(c.span).trim_end().to_string();
-            let own_line = self.gap_before(c.span.start).breaks > 0 || !self.line_started;
-            if own_line {
-                self.end_line();
-                self.start_line();
-            } else {
-                self.out.push(' ');
-            }
-            self.out.push_str(&text);
-            self.prev_end = c.span.end;
-            self.end_line();
+            self.write_comment(c);
         }
+    }
+
+    /// A comment, where the author put it: at the end of the line it was on,
+    /// or on a line of its own with the blank lines around it kept.
+    fn write_comment(&mut self, c: Comment) {
+        let text = self.text(c.span).trim_end().to_string();
+        let gap = self.gap_before(c.span.start);
+        if gap.breaks == 0 && self.line_started {
+            self.out.push(' ');
+        } else {
+            self.end_line();
+            if gap.breaks > 1 {
+                self.out.push('\n');
+            }
+            self.start_line();
+        }
+        self.out.push_str(&text);
+        self.prev_end = c.span.end;
+        self.end_line();
     }
 
     /// What the source held between the last token and `at`.

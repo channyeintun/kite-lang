@@ -53,10 +53,10 @@ fn checks() -> [error] {
     out.push(test.failed(err, "a failing call"))
     let wrapped = errors.wrap(err, "starting up")
     out.push(test.equal_str(
-        errors.message_or(wrapped, "?"),
-        "starting up: no such file",
-        "wrap adds context",
-    ))
+            errors.message_or(wrapped, "?"),
+            "starting up: no such file",
+            "wrap adds context",
+        ))
     out.push(test.is_true(errors.wrap(nil, "context") == nil, "wrap passes nil through"))
     out.push(test.is_true(errors.mentions(wrapped, "no such file"), "mentions"))
 

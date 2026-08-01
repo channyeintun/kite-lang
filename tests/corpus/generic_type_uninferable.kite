@@ -4,11 +4,11 @@
 // `let m: Maybe<int> = Maybe.None` is the fix.
 
 enum Maybe<T> {
-  None
-  Some(T)
+    None
+    Some(T)
 }
 
 fn main() {
-  let m = Maybe.None //~ ERROR E0209
-  io.print(1)
+    let m = Maybe.None //~ ERROR E0209
+    io.print(1)
 }

@@ -19,7 +19,7 @@ fn checks() -> [error] {
     out.push(test.is_true(all([2, 4], |n: int| n % 2 == 0), "all"))
     let empty: [int] = []
     out.push(test.is_true(all(empty, |n: int| false), "all is vacuously true"))
-    out.push(test.equal_int(count([1, 2, 3], |n: int| n > 1), 2, "count"))
+    out.push(test.equal_int(count([1, 2, 3], |n: int| n> 1), 2, "count"))
     out.push(test.equal_ints(reversed([1, 2, 3]), [3, 2, 1], "reversed"))
     out.push(test.equal_ints(concat([1], [2, 3]), [1, 2, 3], "concat"))
     out.push(test.equal_ints(take([1, 2, 3], 2), [1, 2], "take"))
@@ -27,9 +27,9 @@ fn checks() -> [error] {
     out.push(test.equal_ints(drop([1, 2, 3], 2), [3], "drop"))
     out.push(test.equal_int(sum([1, 2, 3]), 6, "sum"))
 
-    let found = find([1, 2, 3], |n: int| n > 1)
+    let found = find([1, 2, 3], |n: int| n> 1)
     out.push(test.equal_int(if found == nil { -1 } else { found }, 2, "find"))
-    let missing = find([1], |n: int| n > 9)
+    let missing = find([1], |n: int| n> 9)
     out.push(test.is_true(missing == nil, "find yields nil"))
     let head = first([7, 8])
     out.push(test.equal_int(if head == nil { -1 } else { head }, 7, "first"))

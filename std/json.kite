@@ -15,7 +15,7 @@ pub enum Json {
     Number(float)
     Text(str)
     Array([Json])
-    Object({str: Json})
+    Object({ str: Json })
 }
 
 /// How far a parse got, and what it produced.
@@ -62,7 +62,7 @@ fn parse_value(input: str, at: int) -> (Step, error) {
     if c == "\"" {
         let (text, err) = parse_string(input, at)
         check err
-        return Step{value: Json.Text(text.text), next: text.next}, nil
+        return Step{ value: Json.Text(text.text), next: text.next }, nil
     }
     if c == "t" {
         return keyword(input, at, "true", Json.Bool(true))
@@ -81,17 +81,17 @@ fn keyword(input: str, at: int, word: str, value: Json) -> (Step, error) {
     if end > input.len() {
         return _, errors.new("json: unexpected end of input")
     }
-    if input.slice(at, end) != word {
+    if input.slice(at, end) != word{
         return _, errors.new("json: expected `\(word)` at \(at)")
     }
-    return Step{value: value, next: end}, nil
+    return Step{ value: value, next: end }, nil
 }
 
 fn parse_object(input: str, at: int) -> (Step, error) {
-    var entries: {str: Json} = {}
+    var entries: { str: Json } = { }
     var i = skip_space(input, at + 1)
     if peek(input, i) == "}" {
-        return Step{value: Json.Object(entries), next: i + 1}, nil
+        return Step{ value: Json.Object(entries), next: i + 1 }, nil
     }
     for {
         let (key, err) = parse_string(input, i)
@@ -109,7 +109,7 @@ fn parse_object(input: str, at: int) -> (Step, error) {
             i = skip_space(input, i + 1)
         } else {
             if c == "}" {
-                return Step{value: Json.Object(entries), next: i + 1}, nil
+                return Step{ value: Json.Object(entries), next: i + 1 }, nil
             }
             return _, errors.new("json: expected `,` or `}` at \(i)")
         }
@@ -120,7 +120,7 @@ fn parse_array(input: str, at: int) -> (Step, error) {
     var items: [Json] = []
     var i = skip_space(input, at + 1)
     if peek(input, i) == "]" {
-        return Step{value: Json.Array(items), next: i + 1}, nil
+        return Step{ value: Json.Array(items), next: i + 1 }, nil
     }
     for {
         let (step, err) = parse_value(input, i)
@@ -132,7 +132,7 @@ fn parse_array(input: str, at: int) -> (Step, error) {
             i = skip_space(input, i + 1)
         } else {
             if c == "]" {
-                return Step{value: Json.Array(items), next: i + 1}, nil
+                return Step{ value: Json.Array(items), next: i + 1 }, nil
             }
             return _, errors.new("json: expected `,` or `]` at \(i)")
         }
@@ -148,7 +148,7 @@ fn parse_string(input: str, at: int) -> (Text, error) {
     for i < input.len() {
         let c = input.slice(i, i + 1)
         if c == "\"" {
-            return Text{text: out, next: i + 1}, nil
+            return Text{ text: out, next: i + 1 }, nil
         }
         if c == "\\" {
             let e = peek(input, i + 1)
@@ -195,7 +195,7 @@ fn parse_number(input: str, at: int) -> (Step, error) {
         value = value * 10.0 + (d as float)
         i = i + 1
     }
-    if i == start {
+    if i == start{
         return _, errors.new("json: expected a number at \(at)")
     }
     if peek(input, i) == "." {
@@ -225,7 +225,7 @@ fn parse_number(input: str, at: int) -> (Step, error) {
     if negative {
         value = 0.0 - value
     }
-    return Step{value: Json.Number(value), next: i}, nil
+    return Step{ value: Json.Number(value), next: i }, nil
 }
 
 /// The multiplier an exponent stands for, and where it ended.
@@ -310,7 +310,7 @@ pub fn stringify(value: Json) -> str {
     }
 }
 
-fn pairs(entries: {str: Json}) -> [str] {
+fn pairs(entries: { str: Json }) -> [str] {
     var out: [str] = []
     // Insertion order, which the specification guarantees for a map — so a
     // document read and written again keeps its field order.
@@ -324,7 +324,7 @@ fn pairs(entries: {str: Json}) -> [str] {
 /// `1` mean the same thing to everything that reads it.
 fn number(n: float) -> str {
     let whole = n as int
-    if (whole as float) == n {
+    if (whole as float) == n{
         return "\(whole)"
     }
     return "\(n)"
@@ -378,7 +378,7 @@ fn indent_value(value: Json, depth: int) -> str {
     }
 }
 
-fn indented_pairs(entries: {str: Json}, depth: int) -> [str] {
+fn indented_pairs(entries: { str: Json }, depth: int) -> [str] {
     let pad = spaces(depth)
     var out: [str] = []
     for (key, value) in entries {

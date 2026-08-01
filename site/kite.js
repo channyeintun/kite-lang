@@ -167,7 +167,7 @@ export function markdown(text) {
 
 /// Colour every `kite` code block on a page written in HTML.
 export function colourCodeBlocks() {
-  for (const block of document.querySelectorAll("pre > code.kite")) {
+  for (const block of document.querySelectorAll("pre > code.kite, pre > code.sketch")) {
     block.innerHTML = highlight(block.textContent);
   }
 }

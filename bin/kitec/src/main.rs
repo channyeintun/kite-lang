@@ -4,7 +4,7 @@
 //! the compiler's build time is a stated design target.
 
 use kite_driver::{compile, Emit};
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
@@ -373,11 +373,6 @@ fn explain(code: &str) -> ExitCode {
 }
 
 fn fail(message: &str) -> ExitCode {
-    let stderr = io::stderr();
-    if stderr.is_terminal() {
-        eprintln!("error: {}", message);
-    } else {
-        eprintln!("error: {}", message);
-    }
+    eprintln!("error: {}", message);
     ExitCode::FAILURE
 }

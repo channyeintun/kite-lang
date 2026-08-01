@@ -495,11 +495,13 @@ fn index_variants(file: &SourceFile, map: &mut ResolveMap) {
                 .entry(type_index as u32)
                 .or_default()
                 .insert(key.clone(), vi as u32);
-            if map.variant_index.contains_key(&key) {
-                ambiguous.push(key);
-            } else {
-                map.variant_index
-                    .insert(key, (type_index as u32, vi as u32));
+            // A name two enums share is ambiguous and must be written
+            // qualified, so the first one in does not win.
+            match map.variant_index.entry(key.clone()) {
+                std::collections::hash_map::Entry::Occupied(_) => ambiguous.push(key),
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert((type_index as u32, vi as u32));
+                }
             }
         }
     }

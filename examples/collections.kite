@@ -23,19 +23,19 @@ fn describe(n: int) -> (int, str) {
 
 fn main() {
     let items = [
-        Item{ name: "book", price: 30 },
-        Item{ name: "lamp", price: 120 },
+        Item { name: "book", price: 30 },
+        Item { name: "lamp", price: 120 },
     ]
     io.print(items.len())
     io.print(total(items))
 
     // A tuple, destructured by pattern.
     io.print(match describe(total(items)) {
-        (n, label) => label,
-    })
+            (n, label) => label,
+        })
 
     // A map. Reading a missing key gives nil, not zero.
-    var stock = {"book": 4, "lamp": 1}
+    var stock = { "book": 4, "lamp": 1 }
     stock["pen"] = 12
     io.print(stock.len())
 

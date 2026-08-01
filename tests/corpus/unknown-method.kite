@@ -10,5 +10,5 @@ impl Sq {
 
 fn main() {
     let s = Sq{ side: 2 }
-    io.print(s.perimeter())   //~ ERROR E0205
+    io.print(s.perimeter()) //~ ERROR E0205
 }
