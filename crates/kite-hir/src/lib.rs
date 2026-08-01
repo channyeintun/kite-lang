@@ -113,6 +113,8 @@ pub enum Stmt {
     /// `xs.push(v)`. Slices are copy-on-write values, so this mutates the
     /// binding, which must therefore be `var`.
     SlicePush { local: LocalId, value: Expr, span: Span },
+    /// `m[k] = v`. Maps are copy-on-write values too.
+    MapSet { local: LocalId, key: Expr, value: Expr, span: Span },
     /// `for x in xs`
     ForSlice {
         var: LocalId,
@@ -205,6 +207,13 @@ pub enum ExprKind {
     Unwrap { value: Box<Expr> },
     /// `(a, b)`. A positional record; the arena keeps its shape.
     TupleNew { elems: Vec<Expr> },
+    /// `{"a": 1}`. Entries are flattened key, value, key, value — insertion
+    /// order is part of the semantics, so the representation preserves it.
+    MapNew { entries: Vec<Expr> },
+    /// `m[k]`, which yields `Option<V>`: a missing key is a runtime condition,
+    /// never a zero value.
+    MapGet { base: Box<Expr>, key: Box<Expr> },
+    MapLen { base: Box<Expr> },
     /// `[1, 2, 3]`
     SliceNew { elems: Vec<Expr> },
     /// `xs[i]` — bounds-checked, and traps on failure because an out-of-range
@@ -415,6 +424,9 @@ impl Program {
             Stmt::SlicePush { local, value, .. } => {
                 writeln!(f, "_{}.push({})", local.0, self.expr(value))
             }
+            Stmt::MapSet { local, key, value, .. } => {
+                writeln!(f, "_{}[{}] = {}", local.0, self.expr(key), self.expr(value))
+            }
             Stmt::ForSlice { var, slice, body, .. } => {
                 writeln!(f, "for _{} in {} {{", var.0, self.expr(slice))?;
                 self.write_block(f, body, depth + 1)?;
@@ -515,6 +527,9 @@ impl Program {
                 format!("(match {} {} arms)", self.expr(scrutinee), arms.len())
             }
             ExprKind::Block(b) => format!("(block {} stmts)", b.stmts.len()),
+            ExprKind::MapNew { entries } => format!("{{{} entries}}", entries.len() / 2),
+            ExprKind::MapGet { base, key } => format!("{}[{}]", self.expr(base), self.expr(key)),
+            ExprKind::MapLen { base } => format!("{}.len()", self.expr(base)),
             ExprKind::TupleNew { elems } => {
                 let a: Vec<String> = elems.iter().map(|x| self.expr(x)).collect();
                 format!("({})", a.join(", "))

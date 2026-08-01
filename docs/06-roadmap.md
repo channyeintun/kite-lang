@@ -372,7 +372,7 @@ none.
 |---|---|
 | 0 — Specification review | ✅ done, and the spec was amended four times by what the code found |
 | 1 — Vertical slice | ✅ complete |
-| 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, slices, optionals, tuples. ❌ maps, closures, generics, `dyn` dispatch |
+| 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, slices, optionals, tuples, maps. ❌ closures, generics, `dyn` dispatch |
 | 3 — Error handling | ✅ complete |
 | 4 — WebAssembly backend | 🟡 everything the language currently has except maps and trait objects — all seven examples run. ❌ JS String Builtins |
 | 5 — Concurrency | ❌ not started |

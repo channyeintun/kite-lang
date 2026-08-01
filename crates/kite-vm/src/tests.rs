@@ -1330,3 +1330,61 @@ fn tuple_equality_is_structural() {
         vec!["true", "false"]
     );
 }
+
+// ---- maps -----------------------------------------------------------------
+
+#[test]
+fn a_map_is_built_read_and_written() {
+    assert_eq!(
+        run_main(
+            "  var m = {\"a\": 1, \"b\": 2}\n  io.print(m.len())\n\
+             \x20 let a = m[\"a\"]\n  io.print(if a == nil { -1 } else { a })\n\
+             \x20 m[\"c\"] = 3\n  io.print(m.len())"
+        ),
+        vec!["2", "1", "3"]
+    );
+}
+
+/// Map indexing yields an optional, never a zero value.
+#[test]
+fn a_missing_key_yields_nil() {
+    assert_eq!(
+        run_main("  let m = {\"a\": 1}\n  let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })"),
+        vec!["-1"]
+    );
+}
+
+#[test]
+fn assigning_an_existing_key_replaces_it() {
+    assert_eq!(
+        run_main(
+            "  var m = {\"a\": 1}\n  m[\"a\"] = 9\n  let a = m[\"a\"]\n\
+             \x20 io.print(if a == nil { -1 } else { a })\n  io.print(m.len())"
+        ),
+        vec!["9", "1"]
+    );
+}
+
+/// The specification guarantees insertion order, and the representation keeps
+/// it: re-assigning an existing key updates it in place rather than appending,
+/// so the length does not grow. Iteration over a map, which would observe the
+/// order directly, arrives with the `Iterate` trait.
+#[test]
+fn reassigning_a_key_does_not_append() {
+    assert_eq!(
+        run_main(
+            "  var m = {\"z\": 1, \"a\": 2}\n  m[\"z\"] = 9\n  io.print(m.len())\n\
+             \x20 let z = m[\"z\"]\n  io.print(if z == nil { -1 } else { z })"
+        ),
+        vec!["2", "9"]
+    );
+}
+
+#[test]
+fn maps_have_value_semantics() {
+    assert_eq!(
+        run_main("  var a = {\"k\": 1}\n  var b = a\n  b[\"k\"] = 9\n\
+                  \x20 let av = a[\"k\"]\n  io.print(if av == nil { -1 } else { av })"),
+        vec!["1"]
+    );
+}

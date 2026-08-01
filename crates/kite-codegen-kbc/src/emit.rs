@@ -32,6 +32,7 @@ fn compile_fn(func: &mir::Function) -> FnProto {
             | mir::Inst::Assign { value: mir::Rvalue::EnumNew { fields, .. }, .. } => fields.len(),
             mir::Inst::Assign { value: mir::Rvalue::SliceNew { elems }, .. }
             | mir::Inst::Assign { value: mir::Rvalue::TupleNew { elems }, .. } => elems.len(),
+            mir::Inst::Assign { value: mir::Rvalue::MapNew { entries }, .. } => entries.len(),
             _ => 0,
         })
         .max()
@@ -118,6 +119,12 @@ impl<'a> Emitter<'a> {
                 let idx = self.operand_reg(index, 1);
                 let src = self.operand_reg(value, 2);
                 self.code.push(Op::SetIndex { obj, index: idx, src });
+                return;
+            }
+            mir::Inst::MapSet { local, key, value } => {
+                let k = self.operand_reg(key, 0);
+                let v = self.operand_reg(value, 1);
+                self.code.push(Op::MapSet { obj: reg(*local), key: k, src: v });
                 return;
             }
             mir::Inst::SlicePush { local, value } => {
@@ -236,6 +243,23 @@ impl<'a> Emitter<'a> {
                 self.code.push(Op::IsNil { dst, obj });
             }
 
+            mir::Rvalue::MapNew { entries } => {
+                self.stage_args(entries);
+                self.code.push(Op::NewMap {
+                    dst,
+                    base: self.arg_base,
+                    count: entries.len() as u8,
+                });
+            }
+            mir::Rvalue::MapGet { base, key } => {
+                let obj = self.operand_reg(base, 0);
+                let k = self.operand_reg(key, 1);
+                self.code.push(Op::MapGet { dst, obj, key: k });
+            }
+            mir::Rvalue::MapLen { base } => {
+                let obj = self.operand_reg(base, 0);
+                self.code.push(Op::MapLen { dst, obj });
+            }
             mir::Rvalue::TupleNew { elems } => {
                 self.stage_args(elems);
                 self.code.push(Op::NewTuple {

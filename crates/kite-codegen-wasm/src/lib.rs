@@ -707,6 +707,12 @@ impl<'a> Emitter<'a> {
                     field_index: *index,
                 });
             }
+            // Maps are not lowered yet. The driver refuses these programs
+            // before codegen runs, so this is unreachable in practice.
+            mir::Inst::MapSet { .. } => {
+                func.instruction(&Instruction::Unreachable);
+            }
+
             // Slices are copy-on-write *values*, so a mutation copies the
             // array first and rebinds the local. The bytecode VM does the same
             // thing lazily through `Rc::make_mut`; here it is unconditional,
@@ -827,6 +833,14 @@ impl<'a> Emitter<'a> {
                     struct_type_index: record,
                     field_index: *index,
                 });
+                return true;
+            }
+
+            // Maps are not lowered yet; the driver refuses them first.
+            mir::Rvalue::MapNew { .. }
+            | mir::Rvalue::MapGet { .. }
+            | mir::Rvalue::MapLen { .. } => {
+                func.instruction(&Instruction::Unreachable);
                 return true;
             }
 

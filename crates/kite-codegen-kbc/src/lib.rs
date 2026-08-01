@@ -115,6 +115,12 @@ pub enum Op {
     TagOf { dst: Reg, obj: Reg },
     /// Elements occupy `base .. base + count`.
     NewTuple { dst: Reg, base: Reg, count: u8 },
+    /// Key/value pairs occupy `base .. base + count`, flattened.
+    NewMap { dst: Reg, base: Reg, count: u8 },
+    /// Yields an optional: a missing key is a runtime condition.
+    MapGet { dst: Reg, obj: Reg, key: Reg },
+    MapSet { obj: Reg, key: Reg, src: Reg },
+    MapLen { dst: Reg, obj: Reg },
     /// Elements occupy `base .. base + count`.
     NewSlice { dst: Reg, base: Reg, count: u8 },
     /// Traps when out of range: an index bug is a program bug.
@@ -318,6 +324,16 @@ impl fmt::Display for Op {
             NewTuple { dst, base, count } => {
                 write!(f, "{:<12} r{}, r{}, {}", "new.tuple", dst, base, count)
             }
+            NewMap { dst, base, count } => {
+                write!(f, "{:<12} r{}, r{}, {}", "new.map", dst, base, count)
+            }
+            MapGet { dst, obj, key } => {
+                write!(f, "{:<12} r{}, r{}, r{}", "map.get", dst, obj, key)
+            }
+            MapSet { obj, key, src } => {
+                write!(f, "{:<12} r{}, r{}, r{}", "map.set", obj, key, src)
+            }
+            MapLen { dst, obj } => write!(f, "{:<12} r{}, r{}", "map.len", dst, obj),
             NewSlice { dst, base, count } => {
                 write!(f, "{:<12} r{}, r{}, {}", "new.slice", dst, base, count)
             }

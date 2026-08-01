@@ -1323,9 +1323,63 @@ impl<'a> Checker<'a> {
 
             ast::Expr::Match(m) => self.match_expr(m, expected),
 
-            ast::Expr::Map { span, .. } => {
-                self.not_yet(*span, "map literals", "maps arrive later in Phase 2");
-                self.lit(ExprKind::Error, TyId::ERROR, *span)
+            ast::Expr::Map { entries, span } => {
+                let hint = expected.and_then(|e| match self.types.kind(e) {
+                    TyKind::Map(k, v) => Some((*k, *v)),
+                    _ => None,
+                });
+                if entries.is_empty() {
+                    let Some((k, v)) = hint else {
+                        self.diags.push(
+                            Diagnostic::error(codes::E0204, "cannot infer the map's types")
+                                .with_primary(*span, "an empty map has no entries to infer from")
+                                .with_note("write the type, as in `let m: {str: int} = {}`"),
+                        );
+                        return self.lit(ExprKind::Error, TyId::ERROR, *span);
+                    };
+                    let ty = self.types.map_of(k, v);
+                    return hir::Expr {
+                        kind: ExprKind::MapNew { entries: Vec::new() },
+                        ty,
+                        span: *span,
+                    };
+                }
+
+                let mut flat = Vec::with_capacity(entries.len() * 2);
+                let mut key_ty = hint.map(|(k, _)| k);
+                let mut val_ty = hint.map(|(_, v)| v);
+                for e in entries {
+                    let k = self.expr(&e.key, key_ty);
+                    match key_ty {
+                        None if !self.types.is_poisoned(k.ty) => key_ty = Some(k.ty),
+                        Some(want) => self.expect_ty(k.ty, want, k.span, None),
+                        None => {}
+                    }
+                    let v = self.expr(&e.value, val_ty);
+                    let v = self.coerce(v, val_ty);
+                    match val_ty {
+                        None if !self.types.is_poisoned(v.ty) => val_ty = Some(v.ty),
+                        Some(want) => self.expect_ty(v.ty, want, v.span, None),
+                        None => {}
+                    }
+                    flat.push(k);
+                    flat.push(v);
+                }
+
+                let k = key_ty.unwrap_or(TyId::ERROR);
+                let v = val_ty.unwrap_or(TyId::ERROR);
+                if !self.types.is_equatable(k) && !self.types.is_poisoned(k) {
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0200,
+                            format!("`{}` cannot be a map key", self.types.name(k)),
+                        )
+                        .with_primary(*span, "a key must be equatable")
+                        .with_note("lookup compares keys, so every field must itself compare"),
+                    );
+                }
+                let ty = self.types.map_of(k, v);
+                hir::Expr { kind: ExprKind::MapNew { entries: flat }, ty, span: *span }
             }
             ast::Expr::Index { base, index, span } => self.index_expr(base, index, *span),
             ast::Expr::Cast { span, .. } => {
@@ -1658,6 +1712,28 @@ impl<'a> Checker<'a> {
             return hir::Expr {
                 kind: ExprKind::ErrorMessage { base: Box::new(receiver) },
                 ty: TyId::STR,
+                span,
+            };
+        }
+
+        if let TyKind::Map(..) = *self.types.kind(receiver.ty) {
+            if name.name != "len" {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0205,
+                        format!("`{}` has no method `{}`", self.types.name(receiver.ty), name.name),
+                    )
+                    .with_primary(name.span, "no such method")
+                    .with_note("a map has: len; read with `m[key]`, which yields an optional"),
+                );
+                return self.lit(ExprKind::Error, TyId::ERROR, span);
+            }
+            if !args.is_empty() {
+                self.arity_error("len", args.len(), 0, span, None);
+            }
+            return hir::Expr {
+                kind: ExprKind::MapLen { base: Box::new(receiver) },
+                ty: TyId::INT,
                 span,
             };
         }
@@ -2171,6 +2247,18 @@ impl<'a> Checker<'a> {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
 
+        // Map indexing always yields an optional, never a zero value.
+        if let TyKind::Map(key_ty, value_ty) = *self.types.kind(seq.ty) {
+            let k = self.expr(index, Some(key_ty));
+            self.expect_ty(k.ty, key_ty, k.span, None);
+            let ty = self.types.optional_of(value_ty);
+            return hir::Expr {
+                kind: ExprKind::MapGet { base: Box::new(seq), key: Box::new(k) },
+                ty,
+                span,
+            };
+        }
+
         let Some(elem) = self.types.slice_elem(seq.ty) else {
             let found = self.types.with_article(seq.ty);
             self.diags.push(
@@ -2205,6 +2293,24 @@ impl<'a> Checker<'a> {
         if self.types.is_poisoned(seq.ty) {
             return None;
         }
+        if let TyKind::Map(key_ty, value_ty) = *self.types.kind(seq.ty) {
+            let local = self.require_mutable_slice_binding(base, "assigned into")?;
+            let k = self.expr(index, Some(key_ty));
+            self.expect_ty(k.ty, key_ty, k.span, None);
+            let v = self.expr(&a.value, Some(value_ty));
+            let v = self.coerce(v, Some(value_ty));
+            self.expect_ty(v.ty, value_ty, v.span, None);
+            return Some((
+                hir::Stmt::MapSet {
+                    local: hir::LocalId(local),
+                    key: k,
+                    value: v,
+                    span: a.span,
+                },
+                Flow::Falls,
+            ));
+        }
+
         let Some(elem) = self.types.slice_elem(seq.ty) else {
             let found = self.types.with_article(seq.ty);
             self.diags.push(

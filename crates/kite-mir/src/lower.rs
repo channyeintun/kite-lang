@@ -188,6 +188,11 @@ impl<'a> FnLowerer<'a> {
                 let v = self.operand(value);
                 self.emit(Inst::SetIndex { base: b, index: i, value: v });
             }
+            hir::Stmt::MapSet { local, key, value, .. } => {
+                let k = self.operand(key);
+                let v = self.operand(value);
+                self.emit(Inst::MapSet { local: Local(local.0), key: k, value: v });
+            }
             hir::Stmt::SlicePush { local, value, .. } => {
                 let v = self.operand(value);
                 self.emit(Inst::SlicePush { local: Local(local.0), value: v });
@@ -531,6 +536,19 @@ impl<'a> FnLowerer<'a> {
             hir::ExprKind::IsNil { value } => {
                 let v = self.operand(value);
                 Rvalue::IsNil { value: v }
+            }
+            hir::ExprKind::MapNew { entries } => {
+                let entries = entries.iter().map(|a| self.operand(a)).collect();
+                Rvalue::MapNew { entries }
+            }
+            hir::ExprKind::MapGet { base, key } => {
+                let b = self.operand(base);
+                let k = self.operand(key);
+                Rvalue::MapGet { base: b, key: k }
+            }
+            hir::ExprKind::MapLen { base } => {
+                let b = self.operand(base);
+                Rvalue::MapLen { base: b }
             }
             hir::ExprKind::TupleNew { elems } => {
                 let elems = elems.iter().map(|a| self.operand(a)).collect();

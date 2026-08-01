@@ -98,6 +98,7 @@ pub enum Inst {
     /// Appends in place. Slices are copy-on-write, so this targets a local
     /// rather than an arbitrary operand.
     SlicePush { local: Local, value: Operand },
+    MapSet { local: Local, key: Operand, value: Operand },
 }
 
 #[derive(Debug)]
@@ -117,6 +118,9 @@ pub enum Rvalue {
     /// only the pattern that matched knows which variant it is.
     VariantGet { base: Operand, enum_id: EnumId, variant: u32, index: u32 },
     TupleNew { elems: Vec<Operand> },
+    MapNew { entries: Vec<Operand> },
+    MapGet { base: Operand, key: Operand },
+    MapLen { base: Operand },
     SliceNew { elems: Vec<Operand> },
     IsNil { value: Operand },
     Wrap { value: Operand },
@@ -255,6 +259,9 @@ impl fmt::Display for Inst {
             }
             Inst::SetIndex { base, index, value } => write!(f, "{}[{}] = {}", base, index, value),
             Inst::SlicePush { local, value } => write!(f, "_{}.push({})", local.0, value),
+            Inst::MapSet { local, key, value } => {
+                write!(f, "_{}[{}] = {}", local.0, key, value)
+            }
         }
     }
 }
@@ -290,6 +297,9 @@ impl fmt::Display for Rvalue {
             Rvalue::VariantGet { base, variant, index, .. } => {
                 write!(f, "{}#{}.{}", base, variant, index)
             }
+            Rvalue::MapNew { entries } => write!(f, "{{{} entries}}", entries.len() / 2),
+            Rvalue::MapGet { base, key } => write!(f, "{}[{}]", base, key),
+            Rvalue::MapLen { base } => write!(f, "len {}", base),
             Rvalue::TupleNew { elems } => {
                 write!(f, "(")?;
                 write_operands(f, elems)?;

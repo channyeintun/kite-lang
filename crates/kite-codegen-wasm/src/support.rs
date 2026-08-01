@@ -50,7 +50,11 @@ pub fn unsupported(program: &mir::Program, types: &Types) -> Vec<Unsupported> {
         for block in &f.blocks {
             for stmt in &block.stmts {
                 match stmt {
+                    mir::Inst::MapSet { .. } => note("maps"),
                     mir::Inst::Assign { value, .. } => match value {
+                        mir::Rvalue::MapNew { .. }
+                        | mir::Rvalue::MapGet { .. }
+                        | mir::Rvalue::MapLen { .. } => note("maps"),
                         mir::Rvalue::Binary { op, .. } => {
                             if matches!(
                                 op,

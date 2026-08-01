@@ -30,6 +30,11 @@ pub enum Value {
     /// copies the handle; `RefCell` is what lets a `var` field be written
     /// through one. The checker has already proved only `var` fields are.
     Struct(Rc<StructValue>),
+    /// A map. Entries are kept in insertion order, which the specification
+    /// guarantees: Go randomises map iteration to stop people relying on it,
+    /// and Kite instead promises an order, which is cheaper to reason about and
+    /// removes a class of nondeterministic test failure.
+    Map(Rc<Vec<(Value, Value)>>),
     /// A tuple: a positional record, read by index like a struct's fields.
     Tuple(Rc<Vec<Value>>),
     /// An enum value: which variant, and its payload.
@@ -81,6 +86,7 @@ impl PartialEq for Value {
             }
             (Value::Slice(a), Value::Slice(b)) => a == b,
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
+            (Value::Map(a), Value::Map(b)) => a == b,
             (Value::Pair(a), Value::Pair(b)) => a == b,
             (Value::Err(a), Value::Err(b)) => a == b,
             (Value::Nil, Value::Nil) => true,
@@ -101,6 +107,7 @@ impl Value {
             Value::Enum(_) => "enum",
             Value::Slice(_) => "slice",
             Value::Tuple(_) => "tuple",
+            Value::Map(_) => "map",
             Value::Pair(_) => "(T, error)",
             Value::Err(_) => "error",
             Value::Nil => "nil",
@@ -169,6 +176,16 @@ impl fmt::Display for Value {
                     write!(f, "{}", v)?;
                 }
                 write!(f, ")")
+            }
+            Value::Map(entries) => {
+                write!(f, "{{")?;
+                for (i, (k, v)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", k, v)?;
+                }
+                write!(f, "}}")
             }
             Value::Nil => write!(f, "nil"),
         }
@@ -648,6 +665,60 @@ impl<'a> Vm<'a> {
                         items.push(self.regs[base + arg_base as usize + i].clone());
                     }
                     self.set(base, dst, Value::Tuple(Rc::new(items)));
+                }
+
+                Op::NewMap { dst, base: arg_base, count } => {
+                    let mut entries: Vec<(Value, Value)> = Vec::new();
+                    let mut i = 0;
+                    while i + 1 < count as usize {
+                        let k = self.regs[base + arg_base as usize + i].clone();
+                        let v = self.regs[base + arg_base as usize + i + 1].clone();
+                        // A repeated key keeps its original position, so
+                        // insertion order stays well defined.
+                        match entries.iter_mut().find(|(ek, _)| *ek == k) {
+                            Some(slot) => slot.1 = v,
+                            None => entries.push((k, v)),
+                        }
+                        i += 2;
+                    }
+                    self.set(base, dst, Value::Map(Rc::new(entries)));
+                }
+
+                Op::MapGet { dst, obj, key } => {
+                    let (m, k) = (self.get(base, obj), self.get(base, key));
+                    let Value::Map(entries) = m else {
+                        return Err(Trap::TypeConfusion { op: "map index", found: m.type_name() });
+                    };
+                    let v = entries
+                        .iter()
+                        .find(|(ek, _)| *ek == k)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or(Value::Nil);
+                    self.set(base, dst, v);
+                }
+
+                Op::MapSet { obj, key, src } => {
+                    let (k, v) = (self.get(base, key), self.get(base, src));
+                    let slot = base + obj as usize;
+                    let Value::Map(entries) = &mut self.regs[slot] else {
+                        return Err(Trap::TypeConfusion {
+                            op: "map assignment",
+                            found: self.regs[slot].type_name(),
+                        });
+                    };
+                    let entries = Rc::make_mut(entries);
+                    match entries.iter_mut().find(|(ek, _)| *ek == k) {
+                        Some(existing) => existing.1 = v,
+                        None => entries.push((k, v)),
+                    }
+                }
+
+                Op::MapLen { dst, obj } => {
+                    let m = self.get(base, obj);
+                    let Value::Map(entries) = m else {
+                        return Err(Trap::TypeConfusion { op: "len", found: m.type_name() });
+                    };
+                    self.set(base, dst, Value::Int(entries.len() as i64));
                 }
 
                 Op::NewSlice { dst, base: arg_base, count } => {
