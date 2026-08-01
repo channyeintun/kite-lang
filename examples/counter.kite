@@ -46,7 +46,7 @@ fn ui_of(model: Model) -> Node {
       text_of("title", style(), "Counter"),
       controls,
       text_of("status", style(), "last action: \(model.last)"),
-      text_of("hint", style(), "click a button; the model lives inside the module"),
+      text_of("hint", style(), "click, or press + - r; the model lives inside the module"),
     ],
   )
 }
@@ -61,7 +61,7 @@ fn palette(model: Model) -> [Paint] {
     filled_label("plus", "  +  ", 0x2a2f3a, 0xc9d1dc),
     filled_label("reset", " reset ", 0x3a2a2a, 0xdcc9c9),
     label("status", "last action: \(model.last)", 0x8b93a1),
-    label("hint", "click a button; the model lives inside the module", 0x5c6472),
+    label("hint", "click, or press + - r; the model lives inside the module", 0x5c6472),
   ]
 }
 
@@ -73,19 +73,41 @@ pub fn view(model: Model) {
   paint(frames_of(model), palette(model))
 }
 
-/// The only way the model changes. `event` is 0 for a click; more arrive as
-/// the host learns to send them.
-pub fn update(model: Model, event: int, x: float, y: float) -> Model {
-  if event != 0 {
-    return model
+/// The only way the model changes.
+///
+/// Every event comes through one door: a click fills `x` and `y`, a key press
+/// fills `key`. One signature rather than one per kind means a new kind of
+/// event is a new constant rather than a new export, and a program that
+/// ignores a kind never matches on it.
+pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
+  if event == 0 {
+    // A guard clause narrows for the rest of the block, so `target` reads as a
+    // `Frame` below without being unwrapped.
+    let target = hit(frames_of(model), x, y)
+    if target == nil {
+      return model
+    }
+    return act(model, target.name)
   }
-  // A guard clause narrows for the rest of the block, so `target` reads as a
-  // `Frame` below without being unwrapped.
-  let target = hit(frames_of(model), x, y)
-  if target == nil {
-    return model
+  if event == 1 {
+    return press(model, key)
   }
-  return act(model, target.name)
+  return model
+}
+
+/// The keyboard reaches the same actions the buttons do, which is what stops
+/// the two drifting apart.
+fn press(model: Model, key: str) -> Model {
+  if key == "+" || key == "=" || key == "ArrowUp" {
+    return act(model, "plus")
+  }
+  if key == "-" || key == "ArrowDown" {
+    return act(model, "minus")
+  }
+  if key == "r" || key == "R" {
+    return act(model, "reset")
+  }
+  return model
 }
 
 fn act(model: Model, name: str) -> Model {
@@ -106,6 +128,9 @@ fn act(model: Model, name: str) -> Model {
 fn main() {
   var model = init()
   view(model)
-  model = update(model, 0, 300.0, 60.0)
+  model = update(model, 0, 300.0, 60.0, "")
+  view(model)
+  model = update(model, 1, 0.0, 0.0, "+")
+  model = update(model, 1, 0.0, 0.0, "+")
   view(model)
 }

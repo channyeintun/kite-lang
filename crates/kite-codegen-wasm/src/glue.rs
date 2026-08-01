@@ -33,6 +33,22 @@ function intern(s) {{
   return STRINGS.push(s) - 1;
 }}
 
+/// A `str` for an exported function to take.
+///
+/// A `str` is an index into the table above, not a pointer and not a JavaScript
+/// string. Passing a JavaScript string to an export does not fail — the Wasm
+/// JS API runs `ToNumber` on it, which gives `NaN`, which becomes index 0 —
+/// so the program reads whichever string happens to be first. Anything calling
+/// an export with text has to come through here.
+export function str(s) {{
+  return intern(String(s));
+}}
+
+/// The text a `str` stands for, for a value an export returned.
+export function text(i) {{
+  return STRINGS[i];
+}}
+
 // An `int` is an i64, which reaches here as a BigInt.
 const showInt = (v) => String(v);
 
@@ -233,6 +249,15 @@ export async function run(source) {{
 // be any Kite type at all without needing a representation both sides agree
 // on, and it is why `update` returns a new model rather than mutating one:
 // Kite has no mutable global state to mutate.
+//
+// `update(model, event, x, y, key)` takes every event through one door. A
+// click fills `x` and `y` and leaves `key` empty; a key press fills `key` and
+// leaves the position at zero. One signature rather than one per event means a
+// new kind of event is a new constant rather than a new export, and a program
+// that ignores a kind simply never matches on it.
+export const EVENT_CLICK = 0n;
+export const EVENT_KEY = 1n;
+
 export function isApplication(exports) {{
   return ["init", "view", "update"].every((n) => typeof exports[n] === "function");
 }}
@@ -280,6 +305,7 @@ pub fn generate_page(title: &str) -> String {
 <script type="module">
   import {{ instantiate, setRenderer, setWriter, isApplication, setMeasure,
             setLineHeight, fontMeasure, fontLineHeight, FONT,
+            EVENT_CLICK, EVENT_KEY, str,
             domRenderer, canvasRenderer, textRenderer }} from "./app.js";
 
   // Measure in the font that will be drawn, before anything is laid out.
@@ -302,7 +328,6 @@ pub fn generate_page(title: &str) -> String {
   let model = interactive ? exports.init() : null;
   let mode = "dom";
 
-  const CLICK = 0n;
 
   function mount(which) {{
     stage.replaceChildren();
@@ -344,14 +369,29 @@ pub fn generate_page(title: &str) -> String {
     draw();
   }}
 
-  // A click becomes an event with a position, and the model it produces
-  // replaces the old one. Nothing else changes: the program has no way to
-  // reach the page, and the page has no way to reach inside the model.
-  stage.addEventListener("click", (e) => {{
+  // An event becomes a new model, and the new model replaces the old. Nothing
+  // else changes: the program has no way to reach the page, and the page has
+  // no way to reach inside the model.
+  function send(kind, x, y, key) {{
     if (!interactive) return;
-    const box = stage.getBoundingClientRect();
-    model = exports.update(model, CLICK, e.clientX - box.left, e.clientY - box.top);
+    // `key` is interned rather than passed as a JavaScript string: a `str` is
+    // an index into the module's table, and handing an export a string quietly
+    // becomes index 0.
+    model = exports.update(model, kind, x, y, str(key));
     draw();
+  }}
+
+  stage.addEventListener("click", (e) => {{
+    const box = stage.getBoundingClientRect();
+    send(EVENT_CLICK, e.clientX - box.left, e.clientY - box.top, "");
+  }});
+
+  // Keys go to the document rather than the stage: a div is not focusable, and
+  // making it so would put a focus ring around the whole application.
+  document.addEventListener("keydown", (e) => {{
+    if (!interactive || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.target !== document.body) return;
+    send(EVENT_KEY, 0, 0, e.key);
   }});
 
   for (const [name, button] of Object.entries(buttons)) {{

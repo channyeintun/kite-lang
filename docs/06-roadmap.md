@@ -319,9 +319,20 @@ Every `pub` free function is now exported. Method names are not unique across
 types and a module may not export one name twice, so methods are not — nor are
 generic specialisations, which would all want the same name.
 
-**Remaining:** real text measurement, wrapping, scrolling, keyboard and pointer
-events beyond a click, and incremental redraw — `view` currently repaints the
-whole tree.
+Events all come through one door: `update(model, event, x, y, key)`. A click
+fills the position and leaves the key empty; a key press fills the key and
+leaves the position at zero. One signature rather than one export per kind
+means a new kind of event is a new constant, and a program that ignores a kind
+simply never matches on it.
+
+A `str` crossing into an export has to be interned first. It is an index into
+the module's string table, not a pointer and not a JavaScript string — and
+handing an export a JavaScript string does not fail, it runs `ToNumber`, gets
+`NaN`, and reads index 0. The glue exports `str()` and `text()` so nothing has
+to know that.
+
+**Remaining:** scrolling, pointer events beyond a click, and incremental
+redraw — `view` repaints the whole tree.
 
 Four things came out differently from this plan:
 

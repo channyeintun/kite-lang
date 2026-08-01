@@ -136,6 +136,24 @@ fn main() {
          \x20 io.print(where_is(P{ x: 1, y: 5 }))\n}\n",
     ),
     (
+        "events",
+        "// Every event comes through one door: a click fills the position, a\n\
+         // key press fills the key.\n\
+         struct M {\n  n: int\n  from: str\n}\n\
+         fn step(m: M, event: int, x: float, y: float, key: str) -> M {\n\
+         \x20 if event == 0 {\n    return M{n: m.n + 1, from: \"click at \\(x),\\(y)\"}\n  }\n\
+         \x20 if event == 1 {\n\
+         \x20   if key == \"r\" {\n      return M{n: 0, from: \"reset\"}\n    }\n\
+         \x20   return M{n: m.n + 1, from: \"key \\(key)\"}\n  }\n\
+         \x20 return m\n}\n\
+         fn main() {\n  var m = M{n: 0, from: \"start\"}\n\
+         \x20 m = step(m, 0, 3.0, 4.0, \"\")\n  io.print(\"\\(m.n) \\(m.from)\")\n\
+         \x20 m = step(m, 1, 0.0, 0.0, \"+\")\n  io.print(\"\\(m.n) \\(m.from)\")\n\
+         \x20 m = step(m, 1, 0.0, 0.0, \"ArrowUp\")\n  io.print(\"\\(m.n) \\(m.from)\")\n\
+         \x20 m = step(m, 1, 0.0, 0.0, \"r\")\n  io.print(\"\\(m.n) \\(m.from)\")\n\
+         \x20 m = step(m, 9, 0.0, 0.0, \"\")\n  io.print(\"\\(m.n) \\(m.from)\")\n}\n",
+    ),
+    (
         "wrapping",
         "use std/ui\n\
          fn main() {\n\
@@ -210,6 +228,24 @@ fn main() {
         "fn main() {\n  let m = {\"a\": 1, \"b\": 2}\n  io.print(m.len())\n\
          \x20 let a = m[\"a\"]\n  io.print(if a == nil { -1 } else { a })\n\
          \x20 let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })\n}\n",
+    ),
+    (
+        "events",
+        "// Every event comes through one door: a click fills the position, a\n\
+         // key press fills the key.\n\
+         struct M {\n  n: int\n  from: str\n}\n\
+         fn step(m: M, event: int, x: float, y: float, key: str) -> M {\n\
+         \x20 if event == 0 {\n    return M{n: m.n + 1, from: \"click at \\(x),\\(y)\"}\n  }\n\
+         \x20 if event == 1 {\n\
+         \x20   if key == \"r\" {\n      return M{n: 0, from: \"reset\"}\n    }\n\
+         \x20   return M{n: m.n + 1, from: \"key \\(key)\"}\n  }\n\
+         \x20 return m\n}\n\
+         fn main() {\n  var m = M{n: 0, from: \"start\"}\n\
+         \x20 m = step(m, 0, 3.0, 4.0, \"\")\n  io.print(\"\\(m.n) \\(m.from)\")\n\
+         \x20 m = step(m, 1, 0.0, 0.0, \"+\")\n  io.print(\"\\(m.n) \\(m.from)\")\n\
+         \x20 m = step(m, 1, 0.0, 0.0, \"ArrowUp\")\n  io.print(\"\\(m.n) \\(m.from)\")\n\
+         \x20 m = step(m, 1, 0.0, 0.0, \"r\")\n  io.print(\"\\(m.n) \\(m.from)\")\n\
+         \x20 m = step(m, 9, 0.0, 0.0, \"\")\n  io.print(\"\\(m.n) \\(m.from)\")\n}\n",
     ),
     (
         "wrapping",
