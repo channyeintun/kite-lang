@@ -104,16 +104,22 @@ cargo run --bin kitec -- run examples/traits.kite   # traits and defaults
 cargo run --bin kitec -- run examples/structs.kite  # structs and methods
 ```
 
-Working today: `int`/`float`/`bool`/`str`, functions, `let`/`var`,
-`if`/`else` (also an expression), the three `for` forms with labelled `break`/`continue`, structs
-with methods and associated functions, enums with named and positional
-payloads, `match` with guards, alternation, ranges, and struct patterns,
-exhaustiveness checking that names the missing variants, and traits with
-default methods. 317 tests, plus an annotated compile-fail corpus.
+**Working today:** `int`/`float`/`bool`/`str`, functions, `let`/`var`,
+`if`/`else` (also an expression, with optional narrowing), the three `for`
+forms with labelled `break`/`continue`, structs with methods and associated
+functions, enums with named and positional payloads, `match` with guards,
+alternation, ranges and struct patterns, exhaustiveness checking that names
+the missing variants, traits with default methods, copy-on-write slices,
+`Option<T>`, and enforced error handling with `check`.
 
-Not yet: slices, maps, optionals, tuples, closures, generics, `dyn Trait`
-dispatch, and string interpolation — the rest of Phase 2. Error handling with
-`check` is Phase 3; the WasmGC backend is Phase 4.
+The WebAssembly backend lowers all of that except aggregates other than
+structs. Every program in the differential corpus is compiled to **both** the
+bytecode VM and Wasm, run on both, and the outputs compared.
+
+**Not yet:** maps, tuples, closures, generics, `dyn Trait` dispatch, string
+interpolation, and Wasm lowering for slices and enums.
+
+398 tests, plus an annotated compile-fail corpus.
 
 ```bash
 kitec run     file.kite      # compile and run
