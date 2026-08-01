@@ -342,8 +342,16 @@ impl<'a> Parser<'a> {
 
     fn parse_item(&mut self) -> Option<Item> {
         let start = self.span();
+        // `@host("net")` — the only attribute in the language, and the only
+        // one planned. It marks the declared boundary with the host, which the
+        // glue is generated from.
+        let host = if self.at(T::At) { Some(self.parse_host_attribute()?) } else { None };
         let is_pub = self.eat(T::Pub);
         let is_async = self.eat(T::Async);
+
+        if let Some(host) = host {
+            return self.parse_extern(is_pub, host, start).map(Item::Extern);
+        }
 
         match self.peek() {
             T::Fn => self.parse_fn(is_pub, is_async, start).map(Item::Fn),
@@ -663,6 +671,75 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+    }
+
+    /// `@host("net")` — the group a host declaration belongs to.
+    fn parse_host_attribute(&mut self) -> Option<String> {
+        self.bump(); // `@`
+        let name = self.ident()?;
+        if name.name != "host" {
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0100,
+                    format!("unknown attribute `@{}`", name.name),
+                )
+                .with_primary(name.span, "not an attribute")
+                .with_note("`@host(\"group\")` is the only attribute Kite has"),
+            );
+            return None;
+        }
+        self.expect(T::LParen)?;
+        let span = self.span();
+        if !self.at(T::Str) {
+            self.error_expected("a string naming the host group");
+            return None;
+        }
+        self.bump();
+        self.expect(T::RParen)?;
+        self.skip_newlines();
+        // The quotes are part of the span; the group is what is between them.
+        let text = self.text(span);
+        Some(text.trim_matches('"').to_string())
+    }
+
+    /// `@host("net") extern fn fetch(url: str) -> int`
+    fn parse_extern(&mut self, is_pub: bool, host: String, start: Span) -> Option<ExternDecl> {
+        if !self.at(T::Ident) || self.text(self.span()) != "extern" {
+            self.error_expected("`extern` after a `@host` attribute");
+            return None;
+        }
+        self.bump(); // `extern`
+        if !self.at(T::Fn) {
+            self.error_expected("`fn` after `extern`");
+            return None;
+        }
+        self.bump(); // `fn`
+        let name = self.ident()?;
+
+        self.expect(T::LParen)?;
+        let mut params = Vec::new();
+        self.skip_newlines();
+        while !self.at(T::RParen) && !self.at_end() {
+            let p_start = self.span();
+            let p_name = self.ident()?;
+            self.expect(T::Colon)?;
+            let ty = self.parse_type()?;
+            params.push(Param { is_var: false, name: p_name, ty, span: p_start.to(self.prev_span()) });
+            self.skip_newlines();
+            if !self.eat(T::Comma) {
+                break;
+            }
+            self.skip_newlines();
+        }
+        self.expect(T::RParen)?;
+
+        let ret = if self.eat(T::Arrow) {
+            Some(self.parse_return_type()?)
+        } else {
+            None
+        };
+        let span = start.to(self.prev_span());
+        Some(ExternDecl { is_pub, host, name, params, ret, span, sig_span: span })
     }
 
     fn parse_fn(&mut self, is_pub: bool, is_async: bool, start: Span) -> Option<FnDecl> {

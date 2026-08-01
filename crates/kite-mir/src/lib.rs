@@ -51,6 +51,10 @@ impl FnId {
 #[derive(Debug, Default)]
 pub struct Program {
     pub fns: Vec<Function>,
+    /// Host functions, carried through from HIR. The Wasm backend turns each
+    /// used one into an import and the glue declares it; the bytecode VM asks
+    /// its embedder.
+    pub externs: Vec<kite_hir::ExternDef>,
     pub entry: Option<FnId>,
     /// Interned string constants, referenced by [`Operand::Str`].
     pub strings: Vec<String>,
@@ -172,6 +176,8 @@ pub enum Rvalue {
     Await { task: Operand },
     /// `task.yield()` — suspend unconditionally. Also never reaches a backend.
     Yield,
+    /// A call across the declared host boundary.
+    CallExtern { index: u32, args: Vec<Operand> },
 }
 
 #[derive(Clone, Debug)]
@@ -388,6 +394,11 @@ impl fmt::Display for Rvalue {
             Rvalue::SliceGet { base, index } => write!(f, "{}.get({})", base, index),
             Rvalue::Await { task } => write!(f, "await {}", task),
             Rvalue::Yield => write!(f, "yield"),
+            Rvalue::CallExtern { index, args } => {
+                write!(f, "host#{}(", index)?;
+                write_operands(f, args)?;
+                write!(f, ")")
+            }
         }
     }
 }

@@ -173,6 +173,11 @@ pub fn check(
     // Signatures next, so calls can be checked in either direction.
     let mut lifted: Vec<hir::Function> = Vec::new();
     let mut sigs = Vec::new();
+    let mut externs: Vec<hir::ExternDef> = Vec::new();
+    // Which declaration each signature belongs to. Matching them up by name
+    // later would be matching a module-qualified name against a host-facing
+    // one, which is how a stub ends up calling the wrong import.
+    let mut extern_of_sig: Vec<Option<u32>> = Vec::new();
     for sig in &resolved.fns {
         let module = resolved.module_of_item(sig.decl_index);
         // A function's own type parameters are in scope for its signature.
@@ -194,6 +199,58 @@ pub fn check(
             .iter()
             .map(|g| (g.name.clone(), g.ty))
             .collect::<Vec<_>>();
+        if let ast::Item::Extern(e) = &file.items[sig.decl_index] {
+            let params: Vec<TyId> = e
+                .params
+                .iter()
+                .map(|p| resolve_named_ty(&p.ty, resolved, module, &type_ids, generics, &mut types, diags))
+                .collect();
+            let ret = match &e.ret {
+                None => TyId::UNIT,
+                Some(r) => resolve_named_ty(
+                    r.value_type(), resolved, module, &type_ids, generics, &mut types, diags,
+                ),
+            };
+            // Only numbers, booleans and strings cross the boundary. A struct
+            // would need a representation both sides agreed on, and inventing
+            // one silently is how an FFI becomes a source of corruption.
+            for (p, ty) in e.params.iter().zip(&params) {
+                check_host_type(*ty, p.ty.span(), &types, diags);
+            }
+            if let Some(r) = &e.ret {
+                check_host_type(ret, r.span(), &types, diags);
+            }
+            extern_of_sig.push(Some(externs.len() as u32));
+            externs.push(hir::ExternDef {
+                host: e.host.clone(),
+                // The host-facing name is the one written in the declaration.
+                // A module qualifies the Kite name — `http.fetch_start` — but
+                // the host knows nothing of Kite's modules, and an import
+                // whose field name changed when a library was reorganised
+                // would be a boundary that drifts for no reason.
+                name: e
+                    .name
+                    .name
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(&e.name.name)
+                    .to_string(),
+                params: params.clone(),
+                ret,
+                span: e.span,
+            });
+            sigs.push(Signature {
+                params,
+                ret,
+                is_async: false,
+                fallible: e.ret.as_ref().is_some_and(|r| r.is_fallible()),
+                name_span: e.name.span,
+                self_ty: None,
+                generics: Vec::new(),
+            });
+            continue;
+        }
+
         let (params, ret, fallible, name_span, self_ty) = match sig.owner {
             None => {
                 let ast::Item::Fn(f) = &file.items[sig.decl_index] else {
@@ -267,6 +324,7 @@ pub fn check(
                 _ => false,
             },
         };
+        extern_of_sig.push(None);
         sigs.push(Signature {
             params,
             ret,
@@ -303,6 +361,56 @@ pub fn check(
             narrowed: std::collections::HashMap::new(),
             loop_depth: 0,
         };
+        if let ast::Item::Extern(e) = &file.items[sig.decl_index] {
+            // A host function becomes an ordinary one whose whole body is the
+            // call across the boundary. Nothing after this point needs to know
+            // `extern` exists — and an unused one is pruned like any other.
+            let Some(index) = extern_of_sig.get(i).copied().flatten() else {
+                unreachable!("every extern declaration recorded its index")
+            };
+            let params: Vec<hir::Local> = e
+                .params
+                .iter()
+                .zip(&sigs[i].params)
+                .map(|(p, ty)| hir::Local {
+                    name: p.name.name.clone(),
+                    ty: *ty,
+                    mutable: false,
+                    span: p.span,
+                    synthetic: false,
+                })
+                .collect();
+            let args: Vec<hir::Expr> = params
+                .iter()
+                .enumerate()
+                .map(|(j, p)| hir::Expr {
+                    kind: ExprKind::Local(hir::LocalId(j as u32)),
+                    ty: p.ty,
+                    span: p.span,
+                })
+                .collect();
+            let call = hir::Expr {
+                kind: ExprKind::CallExtern { index, args },
+                ty: sigs[i].ret,
+                span: e.span,
+            };
+            fns.push(hir::Function {
+                name: e.name.name.clone(),
+                is_free: true,
+                generic_count: 0,
+                is_pub: e.is_pub,
+                is_async: false,
+                param_count: params.len(),
+                locals: params,
+                ret: sigs[i].ret,
+                body: hir::Block {
+                    stmts: vec![hir::Stmt::Return { value: Some(call), span: e.span }],
+                },
+                span: e.span,
+            });
+            continue;
+        }
+
         let func = match sig.owner {
             None => {
                 let ast::Item::Fn(f) = &file.items[sig.decl_index] else {
@@ -353,10 +461,38 @@ pub fn check(
 
     hir::Program {
         types,
+        externs,
         fns,
         entry: resolved.fn_by_name("main").map(hir::FnId),
         vtables,
     }
+}
+
+/// Whether a type may cross the host boundary.
+///
+/// Numbers, booleans and strings only. An aggregate would need a
+/// representation both sides agreed on, and inventing one silently is how an
+/// FFI becomes a source of corruption — a host that wants structure is handed
+/// a `str` of JSON, or an opaque handle it made itself.
+fn check_host_type(ty: TyId, span: Span, types: &Types, diags: &mut DiagBag) {
+    let ok = matches!(
+        types.kind(ty),
+        TyKind::Int | TyKind::Float | TyKind::Bool | TyKind::Str | TyKind::Unit | TyKind::Error
+    );
+    if ok {
+        return;
+    }
+    diags.push(
+        Diagnostic::error(
+            codes::E0204,
+            format!("`{}` cannot cross the host boundary", types.name(ty)),
+        )
+        .with_primary(span, "not a host type")
+        .with_note(
+            "a host declaration takes and returns `int`, `float`, `bool` or `str`; \
+             structure crosses as text, or as a handle the host made and understands",
+        ),
+    );
 }
 
 /// Collect, for every trait, the concrete types implementing it and the
@@ -1746,11 +1882,12 @@ impl<'a> Checker<'a> {
             ast::Expr::Field { base, name, span } => {
                 // A dotted static path in value position is not a field read.
                 match self.resolved.lookup_use(*span) {
-                    Some(Res::Builtin(_)) | Some(Res::Fn(_)) => {
+                    Some(Res::Fn(id)) => self.fn_value(id, *span),
+                    Some(Res::Builtin(_)) => {
                         self.not_yet(
                             *span,
-                            "using a function as a value",
-                            "closures arrive later in Phase 2",
+                            "using a builtin as a value",
+                            "wrap it in a closure, which names the types it works on",
                         );
                         self.lit(ExprKind::Error, TyId::ERROR, *span)
                     }
@@ -2235,12 +2372,15 @@ impl<'a> Checker<'a> {
                     None => read,
                 }
             }
-            Some(Res::Fn(_)) | Some(Res::Builtin(_)) => {
-                // Naming a function without calling it needs closures.
+            Some(Res::Fn(id)) => self.fn_value(id, p.span),
+            Some(Res::Builtin(_)) => {
+                // A builtin is not a function value: it has no body of its
+                // own, and several of them choose what to do from the type of
+                // their argument.
                 self.not_yet(
                     p.span,
-                    "using a function as a value",
-                    "closures arrive later in Phase 2",
+                    "using a builtin as a value",
+                    "wrap it in a closure, which names the types it works on",
                 );
                 self.lit(ExprKind::Error, TyId::ERROR, p.span)
             }
@@ -2260,6 +2400,41 @@ impl<'a> Checker<'a> {
             Some(Res::Variant(ti, vi)) => self.variant_value(ti, vi, &[], &[], p.span, p.span, None),
             // Resolution already reported this.
             None => self.lit(ExprKind::Error, TyId::ERROR, p.span),
+        }
+    }
+
+    /// A named function used as a value.
+    ///
+    /// It becomes a closure that captured nothing, which is what a function
+    /// reference *is* once the representation is settled: code plus an empty
+    /// environment. Nothing downstream needs a second form for it.
+    ///
+    /// A generic function has no single body to point at — which instantiation
+    /// would it be? — so it is refused with that as the reason.
+    fn fn_value(&mut self, id: u32, span: Span) -> hir::Expr {
+        let sig = &self.sigs[id as usize];
+        if !sig.generics.is_empty() {
+            let name = self.resolved.fns[id as usize].name.clone();
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0209,
+                    format!("`{}` is generic, so it has no single value", name),
+                )
+                .with_primary(span, "a generic function is a template, not a function")
+                .with_note("wrap the call in a closure, which fixes the type arguments"),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+        let (params, ret) = (sig.params.clone(), sig.ret);
+        let ty = self.types.fn_of(params, ret);
+        hir::Expr {
+            kind: ExprKind::ClosureNew {
+                func: hir::FnId(id),
+                captures: Vec::new(),
+                targs: Vec::new(),
+            },
+            ty,
+            span,
         }
     }
 
@@ -2582,12 +2757,17 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            BuiltinFn::TaskPark => {
+            BuiltinFn::TaskPark | BuiltinFn::TaskWaitHost => {
                 if !args.is_empty() {
-                    self.arity_error("task.park", args.len(), 0, span, None);
+                    self.arity_error(b.path(), args.len(), 0, span, None);
                 }
+                let builtin = if b == BuiltinFn::TaskPark {
+                    Builtin::TaskPark
+                } else {
+                    Builtin::TaskWaitHost
+                };
                 hir::Expr {
-                    kind: ExprKind::CallBuiltin { builtin: Builtin::TaskPark, args: Vec::new() },
+                    kind: ExprKind::CallBuiltin { builtin, args: Vec::new() },
                     ty: TyId::UNIT,
                     span,
                 }
@@ -2979,6 +3159,47 @@ impl<'a> Checker<'a> {
             );
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         };
+
+        // A field holding a function is callable through its name. Kite has no
+        // method/field distinction to preserve here — a field of function type
+        // *is* what a handler or a callback looks like, and `(r.handle)(x)`
+        // would be punctuation standing in for nothing.
+        if self.resolved.method_on(ti, &name.name).is_none() {
+            if let TyKind::Struct(sid) = *self.types.kind(receiver.ty) {
+                let field = self
+                    .types
+                    .struct_def(sid)
+                    .field(&name.name)
+                    .map(|(i, f)| (i as u32, f.ty));
+                if let Some((index, field_ty)) = field {
+                    if let TyKind::Fn { params, ret } = self.types.kind(field_ty).clone() {
+                        let callee = hir::Expr {
+                            kind: ExprKind::FieldGet { base: Box::new(receiver), index },
+                            ty: field_ty,
+                            span: name.span,
+                        };
+                        if args.len() != params.len() {
+                            self.arity_error(&name.name, args.len(), params.len(), span, None);
+                        }
+                        let mut hargs = Vec::with_capacity(args.len());
+                        for (i, a) in args.iter().enumerate() {
+                            let want = params.get(i).copied();
+                            let e = self.expr(a, want);
+                            let e = self.coerce(e, want);
+                            if let Some(w) = want {
+                                self.expect_ty(e.ty, w, e.span, None);
+                            }
+                            hargs.push(e);
+                        }
+                        return hir::Expr {
+                            kind: ExprKind::CallClosure { callee: Box::new(callee), args: hargs },
+                            ty: ret,
+                            span,
+                        };
+                    }
+                }
+            }
+        }
 
         let Some(fn_index) = self.resolved.method_on(ti, &name.name) else {
             let type_name = self.resolved.type_decl(ti).name.clone();
@@ -5550,6 +5771,21 @@ impl<'a> Checker<'a> {
             return hir::Expr { kind: ExprKind::Error, ty: TyId::ERROR, span };
         };
 
+        // A secret compared with `==` is a timing oracle. Provenance is read
+        // syntactically — a value that came *straight* from `crypto` — which
+        // catches the shape people actually write and claims nothing about the
+        // ones it cannot see.
+        if matches!(hop, H::EqStr | H::NeStr) && (self.from_crypto(&l) || self.from_crypto(&r)) {
+            self.diags.push(
+                Diagnostic::warning(codes::E0600, "comparing a secret with `==`")
+                    .with_primary(span, "this comparison stops at the first difference")
+                    .with_note(
+                        "write `crypto.equal(a, b)`, which takes the same time whichever \
+                         way it goes",
+                    ),
+            );
+        }
+
         // Float equality is a footgun the specification calls out.
         if matches!(hop, H::EqFloat | H::NeFloat) {
             self.diags.push(
@@ -5566,6 +5802,24 @@ impl<'a> Checker<'a> {
             kind: ExprKind::Binary { op: hop, lhs: Box::new(l), rhs: Box::new(r) },
             ty,
             span,
+        }
+    }
+
+    /// Whether a value came straight from `crypto`.
+    ///
+    /// Deliberately shallow: following a value through bindings and across
+    /// function boundaries would be a provenance analysis, and one that
+    /// stopped anywhere would give people confidence it has not earned. This
+    /// catches the shape people write — comparing a freshly computed digest or
+    /// token — says what to write instead, and claims nothing more.
+    fn from_crypto(&self, e: &hir::Expr) -> bool {
+        match &e.kind {
+            ExprKind::Call { callee, .. } => self
+                .resolved
+                .fns
+                .get(callee.0 as usize)
+                .is_some_and(|f| f.name.starts_with("crypto.")),
+            _ => false,
         }
     }
 

@@ -48,6 +48,9 @@ pub struct Program {
     /// The interned type arena. Owned here so every consumer of a `Program`
     /// can resolve a [`TyId`] without a second argument threaded alongside.
     pub types: Types,
+    /// Host functions the program declared. The glue is generated from these,
+    /// so the boundary is written once, in Kite, and cannot drift.
+    pub externs: Vec<ExternDef>,
     pub fns: Vec<Function>,
     /// The `main` function, if this program has one.
     pub entry: Option<FnId>,
@@ -100,6 +103,18 @@ impl Program {
     pub fn function(&self, id: FnId) -> &Function {
         &self.fns[id.index()]
     }
+}
+
+/// A declared host function.
+#[derive(Clone, Debug)]
+pub struct ExternDef {
+    /// The `@host("…")` group. The glue puts a group together, so a host
+    /// implements one object rather than a pile of loose functions.
+    pub host: String,
+    pub name: String,
+    pub params: Vec<TyId>,
+    pub ret: TyId,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -322,6 +337,9 @@ pub enum ExprKind {
     /// sweep. This is the primitive `sleep`, `race` and `timeout` are written
     /// on top of, which is why they are Kite rather than compiler code.
     Yield,
+    /// A call across the declared host boundary. `index` is into
+    /// [`Program::externs`].
+    CallExtern { index: u32, args: Vec<Expr> },
     /// A block in expression position — a `match` arm written with braces.
     /// Runs for its effects and produces unit.
     Block(Block),
@@ -410,6 +428,8 @@ pub enum Builtin {
     TaskWakeAt,
     /// `task.park()` — suspend until some other task finishes.
     TaskPark,
+    /// `task.wait_host()` — suspend until the host has had a turn.
+    TaskWaitHost,
     /// `time.now()` — milliseconds since the program started.
     TimeNow,
 }
@@ -427,6 +447,7 @@ impl Builtin {
             Builtin::TaskSpawn => "task.spawn",
             Builtin::TaskWakeAt => "task.wake_at",
             Builtin::TaskPark => "task.park",
+            Builtin::TaskWaitHost => "task.wait_host",
             Builtin::TimeNow => "time.now",
         }
     }
@@ -760,6 +781,11 @@ impl Program {
             }
             ExprKind::Await { value } => format!("(await {})", self.expr(value)),
             ExprKind::Yield => "(yield)".to_string(),
+            ExprKind::CallExtern { index, args } => {
+                let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();
+                let def = &self.externs[*index as usize];
+                format!("host {}.{}({})", def.host, def.name, a.join(", "))
+            }
             ExprKind::Error => "<error>".to_string(),
         }
     }

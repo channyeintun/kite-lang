@@ -80,6 +80,11 @@ pub enum BuiltinFn {
     /// finishes. What a combinator waiting on "whichever finishes first" needs,
     /// and the only way to wait without spinning.
     TaskPark,
+    /// `task.wait_host()` — ask not to be polled again until the host has had
+    /// a chance to do something. What a task waiting on a fetch needs: the
+    /// answer is not coming from another task, and spinning would keep the
+    /// event loop from ever delivering it.
+    TaskWaitHost,
     /// `task.finished(t)` / `task.get(t)` — inspect a task without suspending.
     /// A combinator that must not block on a particular task needs these; a
     /// program that simply wants the value writes `await`.
@@ -103,6 +108,7 @@ impl BuiltinFn {
             "task.yield" => Some(BuiltinFn::TaskYield),
             "task.wake_at" => Some(BuiltinFn::TaskWakeAt),
             "task.park" => Some(BuiltinFn::TaskPark),
+            "task.wait_host" => Some(BuiltinFn::TaskWaitHost),
             "task.finished" => Some(BuiltinFn::TaskFinished),
             "task.get" => Some(BuiltinFn::TaskGet),
             "time.now" => Some(BuiltinFn::TimeNow),
@@ -123,6 +129,7 @@ impl BuiltinFn {
             BuiltinFn::TaskYield => "task.yield",
             BuiltinFn::TaskWakeAt => "task.wake_at",
             BuiltinFn::TaskPark => "task.park",
+            BuiltinFn::TaskWaitHost => "task.wait_host",
             BuiltinFn::TaskFinished => "task.finished",
             BuiltinFn::TaskGet => "task.get",
             BuiltinFn::TimeNow => "time.now",
@@ -137,7 +144,10 @@ impl BuiltinFn {
             BuiltinFn::TextHeight => 0,
             BuiltinFn::DrawClip => 4,
             BuiltinFn::DrawUnclip => 0,
-            BuiltinFn::TaskYield | BuiltinFn::TimeNow | BuiltinFn::TaskPark => 0,
+            BuiltinFn::TaskYield
+            | BuiltinFn::TimeNow
+            | BuiltinFn::TaskPark
+            | BuiltinFn::TaskWaitHost => 0,
             BuiltinFn::TaskWakeAt | BuiltinFn::TaskFinished | BuiltinFn::TaskGet => 1,
         }
     }
@@ -224,6 +234,9 @@ pub struct FnSig {
     /// For a method, the type it is declared on and whether it takes `self`.
     pub owner: Option<MethodOwner>,
     pub is_pub: bool,
+    /// Declared `extern`: the body is the host's, and the compiler generates a
+    /// stub that forwards to it.
+    pub is_extern: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -525,6 +538,31 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                     span: f.name.span,
                     owner: None,
                     is_pub: f.is_pub,
+                    is_extern: false,
+                });
+            }
+
+            Item::Extern(e) => {
+                if let Some(&prev) = seen.get(e.name.name.as_str()) {
+                    diags.push(
+                        Diagnostic::error(
+                            codes::E0112,
+                            format!("`{}` is defined more than once", e.name.name),
+                        )
+                        .with_primary(e.name.span, "redefined here")
+                        .with_secondary(prev, "first defined here"),
+                    );
+                    continue;
+                }
+                seen.insert(&e.name.name, e.name.span);
+                map.fns.push(FnSig {
+                    name: e.name.name.clone(),
+                    param_count: e.params.len(),
+                    decl_index: i,
+                    span: e.name.span,
+                    owner: None,
+                    is_pub: e.is_pub,
+                    is_extern: true,
                 });
             }
 
@@ -586,6 +624,7 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                             is_default: false,
                         }),
                         is_pub: m.is_pub,
+                        is_extern: false,
                     });
                 }
 
@@ -618,6 +657,7 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                                     is_default: true,
                                 }),
                                 is_pub: m.is_pub,
+                                is_extern: false,
                             });
                         }
                     }
@@ -640,14 +680,21 @@ fn resolve_bodies(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) 
         // else. That is the whole of what a module scope is here.
         let module = map.modules.of(decl_index).to_string();
         let locals = match owner {
-            None => {
-                let Item::Fn(f) = &file.items[decl_index] else {
-                    unreachable!("a free function signature points at a function")
-                };
-                let mut r = FnResolver::new(map, diags, module);
-                r.resolve_fn(&f.params, Some(&f.body), false);
-                r.locals
-            }
+            None => match &file.items[decl_index] {
+                Item::Fn(f) => {
+                    let mut r = FnResolver::new(map, diags, module);
+                    r.resolve_fn(&f.params, Some(&f.body), false);
+                    r.locals
+                }
+                // A host function has no body here; its parameters still get
+                // slots, because the generated stub forwards them.
+                Item::Extern(e) => {
+                    let mut r = FnResolver::new(map, diags, module);
+                    r.resolve_fn(&e.params, None, false);
+                    r.locals
+                }
+                _ => unreachable!("a free function signature points at a function"),
+            },
             Some(o) => {
                 let methods = match &file.items[o.impl_index] {
                     Item::Impl(imp) => &imp.methods,

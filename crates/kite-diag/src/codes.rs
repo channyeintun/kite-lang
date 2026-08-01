@@ -224,4 +224,12 @@ codes! {
     E0521 = "E0521", "`await` outside an async function",
         "`await` suspends the enclosing function, so that function must be \
          declared `async`.";
+
+    // ---- cryptography -----------------------------------------------------
+    E0600 = "E0600", "comparing a secret with `==`",
+        "Structural equality short-circuits at the first difference, so how \
+         long a comparison takes says how much of a guess was right. That is a \
+         timing oracle, and it is how tokens and signatures are guessed one \
+         character at a time.\n\n\
+         `crypto.equal` compares in time that does not depend on the values.";
 }

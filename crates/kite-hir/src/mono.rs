@@ -29,7 +29,7 @@ pub fn monomorphise(program: &mut Program) {
     if program.fns.iter().all(|f| f.generic_count == 0) {
         return;
     }
-    let Program { types, fns, entry, vtables } = program;
+    let Program { types, fns, entry, vtables, externs: _ } = program;
 
     // Non-generic functions keep their bodies and are renumbered; templates are
     // dropped and replaced by their instantiations.
@@ -341,6 +341,7 @@ fn expr_children(k: &mut ExprKind) -> Vec<&mut Expr> {
         | ExprKind::TupleNew { elems: args }
         | ExprKind::MapNew { entries: args }
         | ExprKind::SliceNew { elems: args }
+        | ExprKind::CallExtern { args, .. }
         | ExprKind::StrOp { args, .. } => args.iter_mut().collect(),
         ExprKind::ClosureNew { captures, .. } => captures.iter_mut().collect(),
         ExprKind::CallClosure { callee, args } => {

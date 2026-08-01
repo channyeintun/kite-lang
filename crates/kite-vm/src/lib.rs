@@ -277,6 +277,10 @@ pub enum Trap {
     /// A register held a value of the wrong type. Only reachable through a
     /// codegen bug, since the type checker has already run.
     TypeConfusion { op: &'static str, found: &'static str },
+    /// A host function the program declared and the embedder did not supply.
+    /// The bytecode target has no host of its own — no DOM, no network — so
+    /// this is a statement about where the program is running, not a bug.
+    NoHostFunction { name: String },
     /// Every remaining task is waiting and none of them can ever run. A
     /// program that awaits a task nothing will complete has a bug the
     /// scheduler can see but the compiler cannot.
@@ -295,6 +299,11 @@ impl fmt::Display for Trap {
                 write!(f, "reached unreachable code in `{}` at pc {}", function, pc)
             }
             Trap::NoEntryPoint => write!(f, "no `main` function"),
+            Trap::NoHostFunction { name } => write!(
+                f,
+                "`{}` is a host function, and this runtime supplies no host",
+                name
+            ),
             Trap::Deadlock { waiting } => write!(
                 f,
                 "{} task{} can never make progress",
@@ -325,6 +334,15 @@ struct Frame {
 }
 
 pub fn run(chunk: &Chunk, out: &mut dyn Write) -> Result<(), Trap> {
+    run_with_host(chunk, out, None)
+}
+
+/// Run a program with a host supplying its `extern` declarations.
+pub fn run_with_host<'a>(
+    chunk: &'a Chunk,
+    out: &'a mut dyn Write,
+    host: Option<&'a mut dyn Host>,
+) -> Result<(), Trap> {
     let entry = chunk.entry.ok_or(Trap::NoEntryPoint)?;
     let mut vm = Vm {
         chunk,
@@ -335,8 +353,10 @@ pub fn run(chunk: &Chunk, out: &mut dyn Write) -> Result<(), Trap> {
         clock: 0,
         wake_request: None,
         park_request: false,
+        host_wait_request: false,
         floor: 0,
         result: Value::Unit,
+        host,
     };
     vm.execute(entry)?;
     // `main` returning is not the program ending: a task it started is still
@@ -376,8 +396,10 @@ pub fn run_function(chunk: &Chunk, name: &str, out: &mut dyn Write) -> Result<Va
         clock: 0,
         wake_request: None,
         park_request: false,
+        host_wait_request: false,
         floor: 0,
         result: Value::Unit,
+        host: None,
     };
     vm.execute(index)?;
     vm.drive()?;
@@ -404,11 +426,34 @@ struct Vm<'a> {
     /// Set by `task.park`: this task is waiting for some other one to finish,
     /// and there is no deadline that would make polling it worthwhile.
     park_request: bool,
+    /// Set by `task.wait_host`: this task is waiting on the host — a fetch, a
+    /// file, something outside the program entirely.
+    host_wait_request: bool,
     /// Frame depth at which the current nested run stops. Polling a task runs
     /// its closure to its own return, not to the bottom of the stack.
     floor: usize,
     /// The value the frame at the floor returned.
     result: Value,
+    /// What answers a call across the host boundary, if anything does.
+    host: Option<&'a mut dyn Host>,
+}
+
+/// What a program's `extern` declarations reach.
+///
+/// The bytecode VM is the embedding target, and this is what embedding means:
+/// a host supplies the functions a program declared. A name it does not know
+/// is a trap that says so rather than a silent zero.
+pub trait Host {
+    fn call(&mut self, name: &str, args: &[Value]) -> Result<Value, Trap>;
+
+    /// Give the host a turn when every task is waiting on it.
+    ///
+    /// Returns whether anything happened. A host with nothing outstanding
+    /// answers `false`, and the scheduler reports a deadlock rather than
+    /// spinning — which is the truth: nothing was ever going to arrive.
+    fn wait(&mut self) -> Result<bool, Trap> {
+        Ok(false)
+    }
 }
 
 /// One live task: how to resume it, and when it is worth trying again.
@@ -418,6 +463,8 @@ struct Scheduled {
     wake_at: Option<i64>,
     /// Waiting on another task rather than on the clock.
     parked: bool,
+    /// Waiting on the host rather than on anything in the program.
+    waiting_on_host: bool,
 }
 
 /// Read two register operands and apply `$f`, or trap on type confusion.
@@ -883,6 +930,18 @@ impl<'a> Vm<'a> {
                     self.set(base, dst, Value::Int(entries.len() as i64));
                 }
 
+                Op::CallExtern { dst, index, base: arg_base, argc } => {
+                    let name = self.chunk.externs[index as usize].clone();
+                    let args: Vec<Value> = (0..argc as usize)
+                        .map(|i| self.regs[base + arg_base as usize + i].clone())
+                        .collect();
+                    let value = match self.host.as_mut() {
+                        Some(h) => h.call(&name, &args)?,
+                        None => return Err(Trap::NoHostFunction { name }),
+                    };
+                    self.set(base, dst, value);
+                }
+
                 Op::MapKeys { dst, obj } | Op::MapValues { dst, obj } => {
                     let keys = matches!(proto.code[pc], Op::MapKeys { .. });
                     let m = self.get(base, obj);
@@ -1177,7 +1236,10 @@ impl<'a> Vm<'a> {
             let mut completed = false;
             let mut i = 0;
             while i < self.tasks.len() {
-                if self.tasks[i].parked || self.tasks[i].wake_at.is_some_and(|w| w > self.clock) {
+                if self.tasks[i].parked
+                    || self.tasks[i].waiting_on_host
+                    || self.tasks[i].wake_at.is_some_and(|w| w > self.clock)
+                {
                     i += 1;
                     continue;
                 }
@@ -1185,11 +1247,14 @@ impl<'a> Vm<'a> {
                 self.tasks[i].wake_at = None;
                 self.wake_request = None;
                 self.park_request = false;
+                self.host_wait_request = false;
                 let poll = self.tasks[i].poll.clone();
                 let done = self.poll_task(poll)?;
                 if i < self.tasks.len() {
                     self.tasks[i].wake_at = self.wake_request.take();
                     self.tasks[i].parked = std::mem::take(&mut self.park_request);
+                    self.tasks[i].waiting_on_host =
+                        std::mem::take(&mut self.host_wait_request);
                 }
                 if done {
                     self.tasks.remove(i);
@@ -1208,11 +1273,30 @@ impl<'a> Vm<'a> {
                 }
             }
             if !polled {
-                // Everything is waiting. If any of it is waiting on the clock,
-                // jump to the first deadline; if all of it is waiting on each
-                // other, nothing will ever happen.
+                // Everything is waiting. Give the host its turn first — a
+                // fetch or a file is something only it can finish — then the
+                // clock; and if nothing is waiting on either, nothing will
+                // ever happen.
+                let on_host = self.tasks.iter().any(|t| t.waiting_on_host);
+                if on_host {
+                    let progressed = match self.host.as_mut() {
+                        Some(h) => h.wait()?,
+                        None => false,
+                    };
+                    if progressed {
+                        for t in 0..self.tasks.len() {
+                            self.tasks[t].waiting_on_host = false;
+                        }
+                        continue;
+                    }
+                }
                 match self.tasks.iter().filter_map(|t| t.wake_at).min() {
-                    Some(next) if next > self.clock => self.clock = next,
+                    Some(next) if next > self.clock => {
+                        self.clock = next;
+                        for t in 0..self.tasks.len() {
+                            self.tasks[t].waiting_on_host = false;
+                        }
+                    }
                     _ => return Err(Trap::Deadlock { waiting: self.tasks.len() }),
                 }
             }
@@ -1301,7 +1385,12 @@ impl<'a> Vm<'a> {
             // compiler wrote. The scheduler owns it from here.
             Native::TaskSpawn => {
                 let poll = self.regs[base + arg_base as usize].clone();
-                self.tasks.push(Scheduled { poll, wake_at: None, parked: false });
+                self.tasks.push(Scheduled {
+                    poll,
+                    wake_at: None,
+                    parked: false,
+                    waiting_on_host: false,
+                });
                 Ok(Value::Unit)
             }
             Native::TaskWakeAt => {
@@ -1319,6 +1408,10 @@ impl<'a> Vm<'a> {
             }
             Native::TaskPark => {
                 self.park_request = true;
+                Ok(Value::Unit)
+            }
+            Native::TaskWaitHost => {
+                self.host_wait_request = true;
                 Ok(Value::Unit)
             }
             Native::TimeNow => Ok(Value::Int(self.clock)),

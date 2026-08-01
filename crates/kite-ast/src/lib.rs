@@ -43,6 +43,13 @@ pub struct Use {
 #[derive(Debug)]
 pub enum Item {
     Fn(FnDecl),
+    /// `@host("net") extern fn fetch(url: str) -> int`
+    ///
+    /// The declared boundary between a Kite program and its host. The glue is
+    /// *generated* from these, so the two cannot drift: a declaration added
+    /// here is an import the host must supply, and one removed is an import
+    /// that stops being asked for.
+    Extern(ExternDecl),
     Struct(StructDecl),
     Enum(EnumDecl),
     Trait(TraitDecl),
@@ -58,6 +65,7 @@ impl Item {
     pub fn declared_name(&self) -> Option<&str> {
         match self {
             Item::Fn(f) => Some(&f.name.name),
+            Item::Extern(e) => Some(&e.name.name),
             Item::Struct(s) => Some(&s.name.name),
             Item::Enum(e) => Some(&e.name.name),
             Item::Trait(t) => Some(&t.name.name),
@@ -69,6 +77,7 @@ impl Item {
     pub fn span(&self) -> Span {
         match self {
             Item::Fn(f) => f.span,
+            Item::Extern(e) => e.span,
             Item::Struct(s) => s.span,
             Item::Enum(e) => e.span,
             Item::Trait(t) => t.span,
@@ -82,6 +91,7 @@ impl Item {
     pub fn name(&self) -> Option<&Ident> {
         match self {
             Item::Fn(f) => Some(&f.name),
+            Item::Extern(e) => Some(&e.name),
             Item::Struct(s) => Some(&s.name),
             Item::Enum(e) => Some(&e.name),
             Item::Trait(t) => Some(&t.name),
@@ -94,6 +104,7 @@ impl Item {
     pub fn describe(&self) -> &'static str {
         match self {
             Item::Fn(_) => "function",
+            Item::Extern(_) => "host function",
             Item::Struct(_) => "struct",
             Item::Enum(_) => "enum",
             Item::Trait(_) => "trait",
@@ -241,6 +252,21 @@ pub struct FnDecl {
     pub span: Span,
     /// Span of just `fn name(...)`, so diagnostics about a signature do not
     /// underline the whole body.
+    pub sig_span: Span,
+}
+
+/// A host function, declared but not defined here.
+#[derive(Debug)]
+pub struct ExternDecl {
+    pub is_pub: bool,
+    /// The `@host("…")` group. The generated glue puts every declaration of a
+    /// group together, so a host implements one object rather than a pile of
+    /// loose functions.
+    pub host: String,
+    pub name: Ident,
+    pub params: Vec<Param>,
+    pub ret: Option<RetType>,
+    pub span: Span,
     pub sig_span: Span,
 }
 

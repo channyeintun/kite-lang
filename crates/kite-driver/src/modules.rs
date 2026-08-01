@@ -231,6 +231,7 @@ pub fn qualify_items(module: &str, items: &mut [Item]) {
     for item in items {
         let name = match item {
             Item::Fn(f) => Some(&mut f.name),
+            Item::Extern(e) => Some(&mut e.name),
             Item::Struct(s) => Some(&mut s.name),
             Item::Enum(e) => Some(&mut e.name),
             Item::Trait(t) => Some(&mut t.name),

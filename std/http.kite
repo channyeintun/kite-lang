@@ -1,1 +1,207 @@
-// std/http — see docs/06-roadmap.md
+// std/http — talking to a server, and answering one.
+//
+// The two halves are not symmetric. A client runs in a sandbox that already
+// has `fetch`, so the client half is a declared boundary of five host
+// functions and everything else is Kite. A server runs somewhere with sockets,
+// which no Kite target has yet — so the server half here is the part that
+// needs no sockets: the types, the router, and handlers that can be called
+// directly and tested without a network.
+//
+// A 404 is a `Response`, not an error: the request succeeded and the answer
+// was "no". Only a transport failure is an `error`.
+
+use std/task
+
+// ---- the declared boundary --------------------------------------------------
+//
+// Everything the client can do is these five functions. The glue is generated
+// from them, so what the host must supply and what the program may ask cannot
+// drift apart.
+
+@host("net")
+extern fn fetch_start(method: str, url: str, body: str, headers: str) -> int
+
+/// 0 while in flight, 1 when it arrived, 2 when the transport failed.
+@host("net")
+extern fn fetch_state(id: int) -> int
+
+@host("net")
+extern fn fetch_status(id: int) -> int
+
+@host("net")
+extern fn fetch_body(id: int) -> str
+
+@host("net")
+extern fn fetch_header(id: int, name: str) -> str
+
+@host("net")
+extern fn fetch_error(id: int) -> str
+
+// ---- requests and responses -------------------------------------------------
+
+pub struct Request {
+    pub method: str
+    pub path: str
+    pub body: str
+    /// `name: value` pairs, one per line — the shape that crosses the host
+    /// boundary, since only text does.
+    pub headers: str
+}
+
+pub struct Response {
+    pub status: int
+    pub body: str
+    /// The handle the response came from, for reading a header back.
+    id: int
+}
+
+pub fn ok(body: str) -> Response {
+    return Response{status: 200, body: body, id: -1}
+}
+
+pub fn not_found() -> Response {
+    return Response{status: 404, body: "not found", id: -1}
+}
+
+pub fn status(code: int, body: str) -> Response {
+    return Response{status: code, body: body, id: -1}
+}
+
+/// Whether the status is in the 2xx range.
+pub fn succeeded(r: Response) -> bool {
+    return r.status >= 200
+}
+
+/// A header of a response that came from the host. A response built in Kite
+/// carries no headers, and answers with an empty string.
+pub fn header(r: Response, name: str) -> str {
+    if r.id < 0 {
+        return ""
+    }
+    return fetch_header(r.id, name)
+}
+
+// ---- the client -------------------------------------------------------------
+
+pub async fn get(url: str) -> (Response, error) {
+    return await send("GET", url, "", "")
+}
+
+pub async fn post(url: str, body: str) -> (Response, error) {
+    return await send("POST", url, body, "content-type: application/json")
+}
+
+pub async fn put(url: str, body: str) -> (Response, error) {
+    return await send("PUT", url, body, "content-type: application/json")
+}
+
+pub async fn delete(url: str) -> (Response, error) {
+    return await send("DELETE", url, "", "")
+}
+
+/// Every request goes through here. Waiting is `task.wait_host()`: what is
+/// being waited for is not another task but the host itself, and saying so is
+/// what lets the runtime hand the event loop back rather than spin.
+pub async fn send(method: str, url: str, body: str, headers: str) -> (Response, error) {
+    let id = fetch_start(method, url, body, headers)
+    for fetch_state(id) == 0 {
+        task.wait_host()
+        task.yield()
+    }
+    if fetch_state(id) == 2 {
+        return _, errors.new("http \(method) \(url): \(fetch_error(id))")
+    }
+    return Response{status: fetch_status(id), body: fetch_body(id), id: id}, nil
+}
+
+// ---- the server -------------------------------------------------------------
+//
+// A handler is a function from a request to a response. Anything that wants to
+// wrap one is a function that takes a handler and returns a handler, which
+// needs no framework — so there is no middleware stack, no dependency
+// injection and no ORM here, deliberately.
+
+pub struct Route {
+    pub method: str
+    /// A path, with `:name` standing for one segment.
+    pub pattern: str
+    pub handle: fn(Request) -> Response
+}
+
+pub fn route(method: str, pattern: str, handle: fn(Request) -> Response) -> Route {
+    return Route{method: method, pattern: pattern, handle: handle}
+}
+
+/// The first route that matches, or a 404.
+pub fn serve(routes: [Route], request: Request) -> Response {
+    for r in routes {
+        if r.method == request.method {
+            if matches(r.pattern, request.path) {
+                return r.handle(request)
+            }
+        }
+    }
+    return not_found()
+}
+
+/// Whether a path matches a pattern, where `:name` stands for one segment.
+pub fn matches(pattern: str, path: str) -> bool {
+    let want = split(pattern, "/")
+    let found = split(path, "/")
+    if want.len() != found.len() {
+        return false
+    }
+    for i in 0..want.len() {
+        let w = want[i]
+        if !starts_with(w, ":") {
+            if w != found[i] {
+                return false
+            }
+        }
+    }
+    return true
+}
+
+/// The value a `:name` segment captured, or nil.
+pub fn parameter(pattern: str, path: str, name: str) -> Option<str> {
+    let want = split(pattern, "/")
+    let found = split(path, "/")
+    if want.len() != found.len() {
+        return nil
+    }
+    for i in 0..want.len() {
+        if want[i] == ":\(name)" {
+            return found[i]
+        }
+    }
+    return nil
+}
+
+/// A header's value out of the `name: value` lines a request carries.
+pub fn request_header(request: Request, name: str) -> Option<str> {
+    for line in split(request.headers, "\n") {
+        let at = line.index_of(":")
+        if at > 0 {
+            if lower(line.slice(0, at)) == lower(name) {
+                return line.slice(at + 1, line.len()).trim()
+            }
+        }
+    }
+    return nil
+}
+
+fn lower(s: str) -> str {
+    let upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    let down = "abcdefghijklmnopqrstuvwxyz"
+    var out = ""
+    for i in 0..s.len() {
+        let c = s.slice(i, i + 1)
+        let at = upper.index_of(c)
+        if at >= 0 {
+            out = out + down.slice(at, at + 1)
+        } else {
+            out = out + c
+        }
+    }
+    return out
+}

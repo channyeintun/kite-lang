@@ -126,7 +126,8 @@ fn main() -> ExitCode {
         if let Err(e) = std::fs::write(&wasm_path, &module.bytes) {
             return fail(&format!("cannot write `{}`: {}", wasm_path, e));
         }
-        let glue = kite_driver::generate_glue(&module.strings, "app.wasm");
+        let glue =
+            kite_driver::generate_glue_with_hosts(&module.strings, "app.wasm", &module.hosts);
         if let Err(e) = std::fs::write(&js_path, glue) {
             return fail(&format!("cannot write `{}`: {}", js_path, e));
         }

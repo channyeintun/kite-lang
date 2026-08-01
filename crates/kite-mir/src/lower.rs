@@ -17,6 +17,7 @@ pub fn lower(program: &hir::Program) -> Program {
         let lowered = FnLowerer::new(func, &program.types, &mut strings).run();
         out.fns.push(lowered);
     }
+    out.externs = program.externs.clone();
     out.strings = strings.list;
     out.vtables = program.vtables.clone();
     out
@@ -216,6 +217,7 @@ impl<'a> FnLowerer<'a> {
                     v,
                     Rvalue::Call { .. }
                         | Rvalue::CallBuiltin { .. }
+                        | Rvalue::CallExtern { .. }
                         | Rvalue::Await { .. }
                         | Rvalue::Yield
                 ) {
@@ -578,6 +580,10 @@ impl<'a> FnLowerer<'a> {
                 Rvalue::Await { task: t }
             }
             hir::ExprKind::Yield => Rvalue::Yield,
+            hir::ExprKind::CallExtern { index, args } => {
+                let args = args.iter().map(|a| self.operand(a)).collect();
+                Rvalue::CallExtern { index: *index, args }
+            }
             hir::ExprKind::Unwrap { value } => {
                 let v = self.operand(value);
                 Rvalue::Unwrap { value: v }

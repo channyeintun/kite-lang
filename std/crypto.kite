@@ -1,1 +1,151 @@
-// std/crypto — see docs/06-roadmap.md
+// std/crypto — bindings, not implementations.
+//
+// Every constant-time guarantee a cipher makes is a guarantee about generated
+// machine code, and Kite compiles through WasmGC to an engine free to reorder
+// anything. A pure-Kite AES would look correct and leak timing, which is worse
+// than none — so this module is a thin declared boundary over the host's own
+// primitives: WebCrypto in a browser or in Node, and whatever the runtime
+// supplies elsewhere.
+//
+// Three commitments, all of them about removing choices:
+//
+//   * **No ECB, no CBC, no MD5, no SHA-1, no raw RSA.** A primitive that is
+//     dangerous by default is not offered.
+//   * **Salts and nonces are generated, never passed.** The most common
+//     failure in applied cryptography is a reused nonce, and an API that
+//     accepts one invites it.
+//   * **Secrets are compared with `crypto.equal`, not `==`.** Structural
+//     equality short-circuits, which is a timing oracle. The compiler warns
+//     when a value that came from here is compared with `==`.
+
+use std/task
+
+// ---- the declared boundary --------------------------------------------------
+
+/// Cryptographically secure random bytes, as lowercase hex.
+@host("crypto")
+extern fn random_hex(bytes: int) -> str
+
+/// Digests and derivations are asynchronous in WebCrypto, so they start and
+/// are polled — the same shape `std/http` uses, for the same reason.
+@host("crypto")
+extern fn digest_start(algorithm: str, text: str) -> int
+
+@host("crypto")
+extern fn hmac_start(algorithm: str, key: str, text: str) -> int
+
+@host("crypto")
+extern fn derive_start(password: str, salt_hex: str, iterations: int) -> int
+
+/// 0 while working, 1 when the answer is ready, 2 when it failed.
+@host("crypto")
+extern fn work_state(id: int) -> int
+
+@host("crypto")
+extern fn work_result(id: int) -> str
+
+@host("crypto")
+extern fn work_error(id: int) -> str
+
+/// A comparison that takes the same time whichever way it goes.
+@host("crypto")
+extern fn constant_time_equal(a: str, b: str) -> bool
+
+// ---- what a program uses ----------------------------------------------------
+
+/// `count` random bytes, as lowercase hex.
+pub fn random(count: int) -> str {
+    return random_hex(count)
+}
+
+/// A random 128-bit identifier, as hex. Not a formatted UUID: the hyphens
+/// carry no information and invite parsing that does not need to exist.
+pub fn token() -> str {
+    return random_hex(16)
+}
+
+pub async fn sha256(text: str) -> (str, error) {
+    return await finish(digest_start("SHA-256", text), "sha256")
+}
+
+pub async fn sha384(text: str) -> (str, error) {
+    return await finish(digest_start("SHA-384", text), "sha384")
+}
+
+pub async fn sha512(text: str) -> (str, error) {
+    return await finish(digest_start("SHA-512", text), "sha512")
+}
+
+/// HMAC-SHA-256 of `text` under `key`.
+pub async fn hmac(key: str, text: str) -> (str, error) {
+    return await finish(hmac_start("SHA-256", key, text), "hmac")
+}
+
+/// Whether two secrets are the same, in time that does not depend on where
+/// they first differ.
+///
+/// `==` on two strings short-circuits at the first difference, which tells an
+/// attacker how much of a guess was right. This does not.
+pub fn equal(a: str, b: str) -> bool {
+    return constant_time_equal(a, b)
+}
+
+/// A password, hashed for storage.
+///
+/// The salt is generated here and carried in the result, because a caller who
+/// has to supply one is a caller who will eventually supply the same one
+/// twice. The result is `pbkdf2$iterations$salt$hash`, which is enough to
+/// verify against and to raise the iteration count later without invalidating
+/// what is already stored.
+pub async fn password_hash(password: str) -> (str, error) {
+    let salt = random_hex(16)
+    let iterations = 210000
+    let (digest, err) = await finish(derive_start(password, salt, iterations), "pbkdf2")
+    check err
+    return "pbkdf2$\(iterations)$\(salt)$\(digest)", nil
+}
+
+/// Whether a password matches something `password_hash` produced.
+pub async fn password_verify(password: str, stored: str) -> (bool, error) {
+    let parts = split(stored, "$")
+    if parts.len() != 4 {
+        return _, errors.new("crypto: not a stored password hash")
+    }
+    let iterations = to_int(parts[1])
+    if iterations <= 0 {
+        return _, errors.new("crypto: stored hash has no iteration count")
+    }
+    let (digest, err) = await finish(derive_start(password, parts[2], iterations), "pbkdf2")
+    check err
+    return equal(digest, parts[3]), nil
+}
+
+/// Wait for a host operation, and turn a failure into an error value.
+async fn finish(id: int, what: str) -> (str, error) {
+    for work_state(id) == 0 {
+        task.wait_host()
+        task.yield()
+    }
+    if work_state(id) == 2 {
+        return _, errors.new("crypto \(what): \(work_error(id))")
+    }
+    return work_result(id), nil
+}
+
+/// A whole number from text, or -1. Written here rather than in the prelude
+/// because parsing a number is a decision — what to do with the rest of the
+/// string — and a library that guesses will guess wrong somewhere.
+fn to_int(s: str) -> int {
+    if s.len() == 0 {
+        return -1
+    }
+    var out = 0
+    for i in 0..s.len() {
+        let d = "0123456789".index_of(s.slice(i, i + 1))
+        if d < 0 {
+            return -1
+        }
+        out = out * 10 + d
+    }
+    return out
+}

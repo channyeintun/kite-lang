@@ -16,6 +16,11 @@ pub fn compile(program: &mir::Program) -> Chunk {
     let traits: Vec<u32> = program.vtables.iter().map(|v| v.trait_id.0).collect();
     Chunk {
         functions: program.fns.iter().map(|f| compile_fn(f, &traits)).collect(),
+        externs: program
+            .externs
+            .iter()
+            .map(|e| format!("{}.{}", e.host, e.name))
+            .collect(),
         strings: program.strings.iter().map(|s| Rc::from(s.as_str())).collect(),
         entry: program.entry.map(|e| e.0),
         vtables: program
@@ -48,7 +53,8 @@ fn compile_fn(func: &mir::Function, traits: &[u32]) -> FnProto {
             | mir::Inst::Assign { value: mir::Rvalue::ClosureNew { captures: args, .. }, .. }
             | mir::Inst::Assign { value: mir::Rvalue::StrOp { args, .. }, .. }
             | mir::Inst::Assign { value: mir::Rvalue::CallVirtual { args, .. }, .. }
-            | mir::Inst::Assign { value: mir::Rvalue::CallBuiltin { args, .. }, .. } => args.len(),
+            | mir::Inst::Assign { value: mir::Rvalue::CallBuiltin { args, .. }, .. }
+            | mir::Inst::Assign { value: mir::Rvalue::CallExtern { args, .. }, .. } => args.len(),
             mir::Inst::Assign { value: mir::Rvalue::StructNew { fields, .. }, .. }
             | mir::Inst::Assign { value: mir::Rvalue::EnumNew { fields, .. }, .. } => fields.len(),
             mir::Inst::Assign { value: mir::Rvalue::SliceNew { elems }, .. }
@@ -350,6 +356,15 @@ impl<'a> Emitter<'a> {
             mir::Rvalue::MapLen { base } => {
                 let obj = self.operand_reg(base, 0);
                 self.code.push(Op::MapLen { dst, obj });
+            }
+            mir::Rvalue::CallExtern { index, args } => {
+                self.stage_args(args);
+                self.code.push(Op::CallExtern {
+                    dst,
+                    index: *index,
+                    base: self.arg_base,
+                    argc: args.len() as u8,
+                });
             }
             mir::Rvalue::MapKeys { base } => {
                 let obj = self.operand_reg(base, 0);

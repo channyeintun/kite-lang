@@ -30,6 +30,8 @@ pub enum Native {
     TaskWakeAt,
     /// Ask not to be polled again until some other task finishes.
     TaskPark,
+    /// Ask not to be polled again until the host has had a turn.
+    TaskWaitHost,
     /// Milliseconds since the program started.
     TimeNow,
     DrawRect,
@@ -53,6 +55,7 @@ impl Native {
             Builtin::TaskSpawn => Native::TaskSpawn,
             Builtin::TaskWakeAt => Native::TaskWakeAt,
             Builtin::TaskPark => Native::TaskPark,
+            Builtin::TaskWaitHost => Native::TaskWaitHost,
             Builtin::TimeNow => Native::TimeNow,
         }
     }
@@ -69,6 +72,7 @@ impl Native {
             Native::TaskSpawn => "task.spawn",
             Native::TaskWakeAt => "task.wake_at",
             Native::TaskPark => "task.park",
+            Native::TaskWaitHost => "task.wait_host",
             Native::TimeNow => "time.now",
         }
     }
@@ -192,6 +196,9 @@ pub enum Op {
     /// so the callee is entered exactly like a named function.
     CallClosure { dst: Reg, callee: Reg, base: Reg, argc: u8 },
     CallNative { dst: Reg, native: Native, base: Reg, argc: u8 },
+    /// A call across the declared host boundary. `index` is into
+    /// [`Chunk::externs`]; what answers it is the embedder's business.
+    CallExtern { dst: Reg, index: u32, base: Reg, argc: u8 },
     Return { src: Option<Reg> },
 
     /// A trap. Never catchable — Kite has no `recover`.
@@ -210,6 +217,10 @@ pub struct FnProto {
 #[derive(Debug, Default)]
 pub struct Chunk {
     pub functions: Vec<FnProto>,
+    /// Host functions this program declared, as `group.name`. The bytecode
+    /// target has no host of its own: an embedder supplies these, and one that
+    /// is asked for and not supplied is a trap naming it.
+    pub externs: Vec<String>,
     pub strings: Vec<Rc<str>>,
     pub entry: Option<u32>,
     /// Dispatch tables, one per trait used as an object.
@@ -335,6 +346,9 @@ impl fmt::Display for Op {
             IsNil { dst, obj } => write!(f, "{:<12} r{}, r{}", "is.nil", dst, obj),
             NewPair { dst, value, error } => {
                 write!(f, "{:<12} r{}, r{}, r{}", "new.pair", dst, value, error)
+            }
+            CallExtern { dst, index, base, argc } => {
+                write!(f, "{:<12} r{}, host{}, r{}, {}", "call.host", dst, index, base, argc)
             }
             MapKeys { dst, obj } => un(f, "map.keys", dst, obj),
             MapValues { dst, obj } => un(f, "map.values", dst, obj),

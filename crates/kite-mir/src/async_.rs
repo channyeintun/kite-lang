@@ -532,6 +532,9 @@ impl Builder<'_> {
                 Rvalue::CallBuiltin { builtin, args } => {
                     Rvalue::CallBuiltin { builtin, args: args.into_iter().map(shift).collect() }
                 }
+                Rvalue::CallExtern { index, args } => {
+                    Rvalue::CallExtern { index, args: args.into_iter().map(shift).collect() }
+                }
                 Rvalue::StructNew { struct_id, fields } => Rvalue::StructNew {
                     struct_id,
                     fields: fields.into_iter().map(shift).collect(),

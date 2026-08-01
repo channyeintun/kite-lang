@@ -47,7 +47,7 @@ use wasm_encoder::{
 mod eq;
 mod glue;
 mod support;
-pub use glue::{generate_glue, generate_page};
+pub use glue::{generate_glue, generate_glue_with_hosts, generate_page};
 pub use support::{unsupported, Unsupported};
 
 /// Host functions the module imports, as (name, params, results).
@@ -55,7 +55,7 @@ pub use support::{unsupported, Unsupported};
 /// Deliberately small: the standard library replaces them from Phase 6. String
 /// operations live here because a `str` is an index into a table the host
 /// holds — which is also why the module needs no linear memory.
-const IMPORTS: [(&str, &[ValType], &[ValType]); 23] = [
+const IMPORTS: [(&str, &[ValType], &[ValType]); 24] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
@@ -95,6 +95,7 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 23] = [
     ("task_spawn", &[ANY_REF], &[]),
     ("task_wake_at", &[ValType::I64], &[]),
     ("task_park", &[], &[]),
+    ("task_wait_host", &[], &[]),
     ("time_now", &[], &[ValType::I64]),
 ];
 
@@ -109,12 +110,15 @@ const IMPORT_COUNT: u32 = IMPORTS.len() as u32;
 pub struct Hosts {
     declared: Vec<bool>,
     index: Vec<u32>,
+    /// Declared host functions, in `program.externs` order, and where each
+    /// landed. A declaration nothing calls costs no import.
+    externs: Vec<Option<u32>>,
     /// Where the module's own functions start.
     pub base: u32,
 }
 
 impl Hosts {
-    fn new(declared: Vec<bool>) -> Hosts {
+    fn new(declared: Vec<bool>, used_externs: &[bool]) -> Hosts {
         let mut index = vec![0; declared.len()];
         let mut n = 0;
         for (i, d) in declared.iter().enumerate() {
@@ -123,7 +127,29 @@ impl Hosts {
                 n += 1;
             }
         }
-        Hosts { declared, index, base: n }
+        // Declared imports come first, then the program's own host functions:
+        // both occupy the bottom of the function index space, so the module's
+        // own functions start after all of them.
+        let mut externs = Vec::with_capacity(used_externs.len());
+        for used in used_externs {
+            if *used {
+                externs.push(Some(n));
+                n += 1;
+            } else {
+                externs.push(None);
+            }
+        }
+        Hosts { declared, index, externs, base: n }
+    }
+
+    /// The function index of a declared host call.
+    pub fn extern_at(&self, i: u32) -> Option<u32> {
+        self.externs.get(i as usize).copied().flatten()
+    }
+
+    /// Whether a declaration is reached at all.
+    pub fn extern_used(&self, i: usize) -> bool {
+        self.externs.get(i).is_some_and(|x| x.is_some())
     }
 
     fn declared(&self, i: u32) -> bool {
@@ -180,6 +206,7 @@ fn used_imports(program: &mir::Program, types: &Types, eq_fns: &[eq::EqFn]) -> H
                         Builtin::TaskSpawn => mark(host::TASK_SPAWN),
                         Builtin::TaskWakeAt => mark(host::TASK_WAKE_AT),
                         Builtin::TaskPark => mark(host::TASK_PARK),
+                        Builtin::TaskWaitHost => mark(host::TASK_WAIT_HOST),
                         Builtin::TimeNow => mark(host::TIME_NOW),
                     },
                     mir::Rvalue::StrOp { op, .. } => mark(match op {
@@ -203,7 +230,23 @@ fn used_imports(program: &mir::Program, types: &Types, eq_fns: &[eq::EqFn]) -> H
             }
         }
     }
-    Hosts::new(used)
+    // Host declarations the program actually calls. A declared boundary that
+    // nothing reaches costs nothing: no import, and nothing for a host to
+    // supply.
+    let mut used_externs = vec![false; program.externs.len()];
+    for f in &program.fns {
+        for b in &f.blocks {
+            for s in &b.stmts {
+                if let mir::Inst::Assign {
+                    value: mir::Rvalue::CallExtern { index, .. }, ..
+                } = s
+                {
+                    used_externs[*index as usize] = true;
+                }
+            }
+        }
+    }
+    Hosts::new(used, &used_externs)
 }
 
 /// The type a closure's captured environment is seen as from outside. Two
@@ -238,7 +281,8 @@ mod host {
     pub const TASK_SPAWN: u32 = 19;
     pub const TASK_WAKE_AT: u32 = 20;
     pub const TASK_PARK: u32 = 21;
-    pub const TIME_NOW: u32 = 22;
+    pub const TASK_WAIT_HOST: u32 = 22;
+    pub const TIME_NOW: u32 = 23;
 }
 
 pub struct WasmModule {
@@ -246,6 +290,19 @@ pub struct WasmModule {
     /// String constants, in index order. The glue turns these into real
     /// strings; the module only refers to them by index.
     pub strings: Vec<String>,
+    /// The host functions this module imports, as `(group, name, arity)`.
+    /// The glue is generated from these, so a declaration and the stub that
+    /// answers it cannot drift apart.
+    pub hosts: Vec<HostImport>,
+}
+
+#[derive(Clone, Debug)]
+pub struct HostImport {
+    pub group: String,
+    pub name: String,
+    pub params: usize,
+    /// Whether the host must return something.
+    pub returns: bool,
 }
 
 /// Where each kind of type lives in the type index space.
@@ -928,6 +985,24 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
             .ty()
             .function(vec![ANY_REF], vec![ValType::I32]);
     }
+    // Function types for the program's own host declarations, at the end of
+    // the section: an import may name any type index, and appending here
+    // shifts nothing that already exists.
+    let mut extern_types: Vec<Option<u32>> = vec![None; program.externs.len()];
+    for (i, def) in program.externs.iter().enumerate() {
+        if !hosts.extern_used(i) {
+            continue;
+        }
+        let params: Vec<ValType> = def
+            .params
+            .iter()
+            .map(|p| val_type_with(*p, types, &layout))
+            .collect();
+        let results: Vec<ValType> = wasm_result_with(def.ret, types, &layout).into_iter().collect();
+        extern_types[i] = Some(next_fn_type);
+        next_fn_type += 1;
+        type_section.ty().function(params, results);
+    }
     let _ = next_fn_type;
     module.section(&type_section);
 
@@ -940,6 +1015,14 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     for (i, (name, _, _)) in IMPORTS.iter().enumerate() {
         if hosts.declared(i as u32) {
             imports.import("kite", name, EntityType::Function(i as u32));
+        }
+    }
+    // Then the program's own declared boundary, one import per `extern` it
+    // reaches, in its `@host("group")`. The glue is generated from the same
+    // declarations, so the two cannot drift.
+    for (i, def) in program.externs.iter().enumerate() {
+        if let Some(ty) = extern_types[i] {
+            imports.import(&def.host, &def.name, EntityType::Function(ty));
         }
     }
     module.section(&imports);
@@ -1023,6 +1106,18 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     WasmModule {
         bytes: module.finish(),
         strings: program.strings.clone(),
+        hosts: program
+            .externs
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| hosts.extern_used(*i))
+            .map(|(_, def)| HostImport {
+                group: def.host.clone(),
+                name: def.name.clone(),
+                params: def.params.len(),
+                returns: def.ret != TyId::UNIT,
+            })
+            .collect(),
     }
 }
 
@@ -1820,6 +1915,22 @@ impl<'a> Emitter<'a> {
             // into a slice-shaped array — a copy rather than a share, because
             // the two array types are declared separately and a slice is a
             // value the caller may go on to modify.
+            // A call across the declared boundary. The import was declared
+            // from the same declaration this call came from, so the two cannot
+            // disagree about its shape.
+            mir::Rvalue::CallExtern { index, args } => {
+                for a in args {
+                    self.operand(func, a);
+                }
+                let Some(slot) = self.hosts.extern_at(*index) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                func.instruction(&Instruction::Call(slot));
+                let def = &self.program.externs[*index as usize];
+                return def.ret != TyId::UNIT;
+            }
+
             mir::Rvalue::MapKeys { base } | mir::Rvalue::MapValues { base } => {
                 let keys = matches!(value, mir::Rvalue::MapKeys { .. });
                 let Some(ml) = self.map_of(base) else {
@@ -2211,6 +2322,9 @@ impl<'a> Emitter<'a> {
             }
             Builtin::TaskPark => {
                 func.instruction(&Instruction::Call(self.hosts.at(host::TASK_PARK)));
+            }
+            Builtin::TaskWaitHost => {
+                func.instruction(&Instruction::Call(self.hosts.at(host::TASK_WAIT_HOST)));
             }
             Builtin::TimeNow => {
                 func.instruction(&Instruction::Call(self.hosts.at(host::TIME_NOW)));

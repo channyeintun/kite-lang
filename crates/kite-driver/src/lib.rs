@@ -10,7 +10,7 @@ use std::path::Path;
 
 pub mod modules;
 
-pub use kite_codegen_wasm::{generate_glue, generate_page};
+pub use kite_codegen_wasm::{generate_glue, generate_glue_with_hosts, generate_page};
 pub use kite_vm::Trap;
 
 /// How far to run the pipeline, and what to hand back.
