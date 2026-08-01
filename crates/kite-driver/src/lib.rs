@@ -4,7 +4,7 @@
 //! eventually the language server all drive the compiler identically.
 
 use kite_diag::{DiagBag, Diagnostic};
-use kite_span::{FileId, SourceMap};
+use kite_span::{FileId, SourceMap, Span};
 use std::io::Write;
 use std::path::Path;
 
@@ -143,26 +143,49 @@ fn run_passes(
     let library: Vec<FileId> =
         if wants_ui { vec![prelude, ui] } else { vec![prelude] };
 
-    let mut taken: std::collections::HashSet<String> = ast
+    // A program's own names take precedence, silently: that is what shadowing
+    // a prelude means. One library shadowing another is a different thing
+    // entirely — a bug in the standard library, where the shadowed declaration
+    // is still being called by its own file — so that is reported.
+    let own: std::collections::HashSet<String> = ast
         .items
         .iter()
         .filter_map(|i| i.declared_name())
         .map(|s| s.to_string())
         .collect();
+    let mut from_library: std::collections::HashMap<String, Span> =
+        std::collections::HashMap::new();
+
     for id in &library {
         let text = sources.text(*id);
         let tokens = kite_lexer::tokenize(*id, text, diags);
         let parsed = kite_parser::parse(*id, text, &tokens, diags);
         let mut keep = Vec::with_capacity(parsed.items.len());
         for item in parsed.items {
-            match item.declared_name() {
-                Some(n) if taken.contains(n) => continue,
-                Some(n) => {
-                    taken.insert(n.to_string());
-                    keep.push(item);
-                }
-                None => keep.push(item),
+            let Some(name) = item.declared_name().map(|s| s.to_string()) else {
+                keep.push(item);
+                continue;
+            };
+            if own.contains(&name) {
+                continue;
             }
+            if let Some(first) = from_library.get(&name) {
+                diags.push(
+                    kite_diag::Diagnostic::error(
+                        kite_diag::codes::E0112,
+                        format!("the standard library declares `{}` twice", name),
+                    )
+                    .with_primary(item.span(), "declared again here")
+                    .with_secondary(*first, "first declared here")
+                    .with_note(
+                        "one library file shadowing another would leave the first calling a \
+                         name that no longer means what it did — rename one of them",
+                    ),
+                );
+                continue;
+            }
+            from_library.insert(name, item.span());
+            keep.push(item);
         }
         ast.items.extend(keep);
     }

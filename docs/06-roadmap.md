@@ -219,9 +219,15 @@ list had grown to seventeen host functions, and a `hello world` was carrying
 string slicing and a font metric it never asks about. It is now 426 bytes —
 smaller than before any of them were added.
 
-**Remaining:** real modules, so a library's names can be qualified rather than
-shadowed; map methods; `Display`, which would let interpolation render user
-types.
+One library file shadowing another is now an **error** rather than a silent
+drop. A program shadowing a library name is fine and stays silent — that is
+what a prelude is for — but a library shadowing a library leaves the first file
+calling a name that no longer means what it did, which is a bug in the standard
+library and has bitten twice.
+
+**Remaining:** real modules, so a library's names can be *qualified* rather
+than shadowed at all; map methods; `Display`, which would let interpolation
+render user types.
 
 ---
 
