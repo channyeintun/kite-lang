@@ -198,6 +198,27 @@ impl<'a> Emitter<'a> {
                 self.code.push(Op::TagOf { dst, obj });
             }
 
+            mir::Rvalue::PairNew { value, error } => {
+                let v = self.operand_reg(value, 0);
+                let e = self.operand_reg(error, 1);
+                self.code.push(Op::NewPair { dst, value: v, error: e });
+            }
+            mir::Rvalue::PairValue { base } => {
+                let obj = self.operand_reg(base, 0);
+                self.code.push(Op::PairValue { dst, obj });
+            }
+            mir::Rvalue::PairError { base } => {
+                let obj = self.operand_reg(base, 0);
+                self.code.push(Op::PairError { dst, obj });
+            }
+            mir::Rvalue::ErrorNew { message } => {
+                let m = self.operand_reg(message, 0);
+                self.code.push(Op::NewError { dst, message: m });
+            }
+            mir::Rvalue::ErrorMessage { base } => {
+                let obj = self.operand_reg(base, 0);
+                self.code.push(Op::ErrorMessage { dst, obj });
+            }
             mir::Rvalue::IsNil { value } => {
                 let obj = self.operand_reg(value, 0);
                 self.code.push(Op::IsNil { dst, obj });

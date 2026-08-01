@@ -1073,10 +1073,16 @@ fn an_out_of_range_index_traps() {
     );
 }
 
+/// `.get()` yields an optional, unwrapped with an inline `if`. Kite has no
+/// `??` operator: an `if` expression does the same work in the open.
 #[test]
 fn get_yields_an_optional_instead_of_trapping() {
     assert_eq!(
-        run_main("  let xs = [10, 20]\n  io.print(xs.get(1) ?? -1)\n  io.print(xs.get(9) ?? -1)"),
+        run_main(
+            "  let xs = [10, 20]\n  let a = xs.get(1)\n  let b = xs.get(9)\n\
+             \x20 io.print(if a == nil { -1 } else { a })\n\
+             \x20 io.print(if b == nil { -1 } else { b })"
+        ),
         vec!["20", "-1"]
     );
 }
@@ -1164,7 +1170,7 @@ const FINDER: &str = "\
 struct User {
     name: str
 }
-fn find(id: int) -> ?User {
+fn find(id: int) -> Option<User> {
     if id == 1 {
         return User{ name: \"ada\" }
     }
@@ -1181,19 +1187,21 @@ fn an_optional_may_be_present_or_nil() {
     assert_eq!(lines(&src), vec!["ada", "missing"]);
 }
 
-/// `a?.b` yields nil when `a` is nil, and `a.b` otherwise.
+/// An inline `if` narrows the optional in the branch where it cannot be nil,
+/// which is what makes it a complete replacement for `?.` and `??`.
 #[test]
-fn optional_chaining_short_circuits_on_nil() {
+fn an_inline_if_narrows_the_optional() {
     let src = format!(
-        "{}\nfn main() {{\n  io.print(find(1)?.name ?? \"anonymous\")\n  io.print(find(2)?.name ?? \"anonymous\")\n}}\n",
+        "{}\nfn name_of(id: int) -> str {{\n  let u = find(id)\n  return if u == nil {{ \"anonymous\" }} else {{ u.name }}\n}}\nfn main() {{\n  io.print(name_of(1))\n  io.print(name_of(2))\n}}\n",
         FINDER
     );
     assert_eq!(lines(&src), vec!["ada", "anonymous"]);
 }
 
-/// `??` must not evaluate its right side when the left is present.
+/// An `if` expression evaluates only the branch it takes, so the fallback is
+/// not run when the value is present.
 #[test]
-fn coalesce_short_circuits() {
+fn an_inline_if_evaluates_only_one_branch() {
     let src = "\
 fn boom() -> int {
     let a = 1
@@ -1202,7 +1210,8 @@ fn boom() -> int {
 }
 fn main() {
     let xs = [7]
-    io.print(xs.get(0) ?? boom())
+    let first = xs.get(0)
+    io.print(if first == nil { boom() } else { first })
 }
 ";
     assert_eq!(lines(src), vec!["7"]);
@@ -1211,7 +1220,71 @@ fn main() {
 #[test]
 fn a_value_widens_into_an_optional_binding() {
     assert_eq!(
-        run_main("  let a: ?int = 5\n  let b: ?int = nil\n  io.print(a ?? 0)\n  io.print(b ?? 0)"),
+        run_main(
+            "  let a: Option<int> = 5\n  let b: Option<int> = nil\n\
+             \x20 io.print(if a == nil { 0 } else { a })\n\
+             \x20 io.print(if b == nil { 0 } else { b })"
+        ),
         vec!["5", "0"]
     );
+}
+
+// ---- error handling -------------------------------------------------------
+
+const DIVIDE: &str = "\
+fn divide(a: int, b: int) -> (int, error) {
+    if b == 0 {
+        return _, errors.new(\"division by zero\")
+    }
+    return a / b, nil
+}
+";
+
+#[test]
+fn a_fallible_call_returns_a_value_and_an_error() {
+    let src = format!(
+        "{}\nfn main() {{\n  let (q, err) = divide(10, 2)\n  if err != nil {{\n    io.print(\"failed\")\n  }} else {{\n    io.print(q)\n  }}\n}}\n",
+        DIVIDE
+    );
+    assert_eq!(lines(&src), vec!["5"]);
+}
+
+#[test]
+fn the_error_path_carries_a_message() {
+    let src = format!(
+        "{}\nfn main() {{\n  let (q, err) = divide(1, 0)\n  if err != nil {{\n    io.print(err.message())\n  }} else {{\n    io.print(q)\n  }}\n}}\n",
+        DIVIDE
+    );
+    assert_eq!(lines(&src), vec!["division by zero"]);
+}
+
+/// `check` is exactly `if err != nil { return _, err }`, so the error reaches
+/// the caller unchanged.
+#[test]
+fn check_propagates_to_the_caller() {
+    let src = format!(
+        "{}\nfn ratio(a: int, b: int) -> (int, error) {{\n  let (q, err) = divide(a, b)\n  check err\n  return q * 100, nil\n}}\nfn main() {{\n  let (r, err) = ratio(10, 2)\n  if err != nil {{\n    io.print(\"e: \" + err.message())\n  }} else {{\n    io.print(r)\n  }}\n  let (r2, err2) = ratio(10, 0)\n  if err2 != nil {{\n    io.print(\"e: \" + err2.message())\n  }} else {{\n    io.print(r2)\n  }}\n}}\n",
+        DIVIDE
+    );
+    assert_eq!(lines(&src), vec!["500", "e: division by zero"]);
+}
+
+/// After `check`, the value is readable in the same function without any
+/// further test — that is the whole point of the construct.
+#[test]
+fn check_makes_the_value_readable() {
+    let src = format!(
+        "{}\nfn twice(a: int, b: int) -> (int, error) {{\n  let (q, err) = divide(a, b)\n  check err\n  return q + q, nil\n}}\nfn main() {{\n  let (v, err) = twice(10, 5)\n  if err != nil {{\n    io.print(\"e\")\n  }} else {{\n    io.print(v)\n  }}\n}}\n",
+        DIVIDE
+    );
+    assert_eq!(lines(&src), vec!["4"]);
+}
+
+#[test]
+fn several_checks_chain_in_one_function() {
+    let src = format!(
+        "{}\nfn chain(a: int) -> (int, error) {{\n  let (x, err) = divide(a, 2)\n  check err\n  let (y, err) = divide(x, 2)\n  check err\n  return y, nil\n}}\nfn main() {{\n  let (v, err) = chain(20)\n  if err != nil {{\n    io.print(\"e\")\n  }} else {{\n    io.print(v)\n  }}\n}}\n",
+        DIVIDE
+    );
+    assert_eq!(lines(&src), vec!["5"]);
 }

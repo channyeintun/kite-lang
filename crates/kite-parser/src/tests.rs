@@ -61,12 +61,9 @@ fn sexp(e: &Expr, src: &str) -> String {
             let a: Vec<_> = args.iter().map(|x| sexp(x, src)).collect();
             format!("(call {} {})", sexp(callee, src), a.join(" "))
         }
-        Expr::Field { base, name, optional, .. } => format!(
-            "({} {} {})",
-            if *optional { "?." } else { "." },
-            sexp(base, src),
-            name.name
-        ),
+        Expr::Field { base, name, .. } => {
+            format!("(. {} {})", sexp(base, src), name.name)
+        }
         Expr::Index { base, index, .. } => {
             format!("(index {} {})", sexp(base, src), sexp(index, src))
         }
@@ -199,9 +196,12 @@ fn logical_precedence() {
     assert_eq!(expr_sexp("a && b || c"), "(|| (&& a b) c)");
 }
 
+/// `Option<T>` is spelled as a word. Kite has no `?` sigil anywhere.
 #[test]
-fn coalesce_is_right_associative() {
-    assert_eq!(expr_sexp("a ?? b ?? c"), "(?? a (?? b c))");
+fn optional_types_are_spelled_as_a_word() {
+    let p = ok("fn f(a: Option<int>) -> Option<str> {\n}\n");
+    let fns = p.fns();
+    assert!(matches!(fns[0].params[0].ty, Type::Optional { .. }));
 }
 
 #[test]
@@ -227,11 +227,6 @@ fn dotted_names_are_field_accesses() {
     assert_eq!(expr_sexp("io.print"), "(. io print)");
     assert_eq!(expr_sexp("io.print(x)"), "(call (. io print) x)");
     assert_eq!(expr_sexp("a.b.c"), "(. (. a b) c)");
-}
-
-#[test]
-fn optional_chaining_is_a_field_access() {
-    assert_eq!(expr_sexp("a?.b"), "(?. a b)");
 }
 
 #[test]

@@ -37,12 +37,16 @@ pub enum Res {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BuiltinFn {
     IoPrint,
+    /// `errors.new(message)` — builds an error value. Errors are ordinary
+    /// values in Kite, never exceptions.
+    ErrorsNew,
 }
 
 impl BuiltinFn {
     pub fn from_path(path: &str) -> Option<BuiltinFn> {
         match path {
             "io.print" => Some(BuiltinFn::IoPrint),
+            "errors.new" => Some(BuiltinFn::ErrorsNew),
             _ => None,
         }
     }
@@ -50,12 +54,13 @@ impl BuiltinFn {
     pub fn path(self) -> &'static str {
         match self {
             BuiltinFn::IoPrint => "io.print",
+            BuiltinFn::ErrorsNew => "errors.new",
         }
     }
 
     pub fn arity(self) -> usize {
         match self {
-            BuiltinFn::IoPrint => 1,
+            BuiltinFn::IoPrint | BuiltinFn::ErrorsNew => 1,
         }
     }
 }
@@ -476,7 +481,47 @@ impl<'a> FnResolver<'a> {
     }
 
     fn declare(&mut self, name: &Ident, mutable: bool, synthetic: bool) -> u32 {
+        self.declare_maybe_shadowing(name, mutable, synthetic, false)
+    }
+
+    /// `allow_shadow` is set only for the error slot of a tuple binding.
+    ///
+    /// The specification makes this the one exception to the same-scope
+    /// shadowing rule, because it is what lets a function chain several
+    /// fallible calls:
+    ///
+    /// ```kite
+    /// let (bytes, err) = fs.read(path)
+    /// check err
+    /// let (text, err) = str.from_utf8(bytes)
+    /// check err
+    /// ```
+    ///
+    /// It is safe because each `err` gets its own local slot, so the taint
+    /// analysis still reports the earlier one if it was never checked.
+    fn declare_maybe_shadowing(
+        &mut self,
+        name: &Ident,
+        mutable: bool,
+        synthetic: bool,
+        allow_shadow: bool,
+    ) -> u32 {
         if let Some(&prev_id) = self.scopes.last().unwrap().get(&name.name) {
+            if allow_shadow {
+                let id = self.locals.len() as u32;
+                self.locals.push(LocalInfo {
+                    name: name.name.clone(),
+                    mutable,
+                    span: name.span,
+                    synthetic,
+                });
+                self.scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(name.name.clone(), id);
+                self.map.bindings.insert(name.span, id);
+                return id;
+            }
             let prev = self.locals[prev_id as usize].span;
             self.diags.push(
                 Diagnostic::error(
@@ -569,9 +614,12 @@ impl<'a> FnResolver<'a> {
                 self.declare(n, mutable, false);
             }
             Binding::Tuple { elems, .. } => {
-                for e in elems {
+                for (i, e) in elems.iter().enumerate() {
                     if let BindElem::Name(n) = e {
-                        self.declare(n, mutable, false);
+                        // The error slot may shadow an earlier one in the same
+                        // scope; see `declare_maybe_shadowing`.
+                        let is_error_slot = elems.len() == 2 && i == 1;
+                        self.declare_maybe_shadowing(n, mutable, false, is_error_slot);
                     }
                 }
             }
@@ -790,12 +838,10 @@ impl<'a> FnResolver<'a> {
             // associated function (`Rect.square`) — but only when its head is
             // not a local. Locals win, so a field named `print` on a value
             // called `io` still works.
-            Expr::Field { base, name, optional, span } => {
-                if !*optional {
-                    if let Some(res) = self.try_dotted(base, name) {
-                        self.map.uses.insert(*span, res);
-                        return;
-                    }
+            Expr::Field { base, name, span } => {
+                if let Some(res) = self.try_dotted(base, name) {
+                    self.map.uses.insert(*span, res);
+                    return;
                 }
                 self.expr(base)
             }

@@ -139,23 +139,34 @@ Four things came out differently from this plan:
 
 ---
 
-## Phase 3 — Error handling (3–4 weeks)
+## Phase 3 — Error handling ✅ **complete**
 
-`(T, error)` returns, `check`, `??`, the `Error` trait, and the taint analysis in
-`kite-flow`.
+**Exit criterion met.** `(T, error)` returns, `check`, `return _, err`,
+`errors.new`, `err.message()`, and the flow-sensitive taint analysis producing
+E0301 and E0302. The annotated corpus in `tests/corpus/` covers both.
 
-Build the analysis with an annotated test corpus from the start:
+The analysis is the same two-element lattice as the definite-assignment pass
+built in Phase 1, merged at branch joins — that precedent made this the smaller
+job it was predicted to be.
 
-```kite
-fn broken() -> int {
-    let (v, err) = fallible()
-    return v            //~ ERROR E0301
-}
-```
+Two behaviours are worth recording:
 
-**Exit criterion:** every example in
-[spec §7](../SPECIFICATION.md#7-error-handling) compiles or fails exactly as
-documented, with the documented codes.
+- **Testing the error cleans the value on the right branch.** `if err != nil {
+  … } else { … }` proves the error is nil in the *else*, and `if err == nil` in
+  the *then*. An error branch that diverges cleans the value for everything
+  after the `if`. That is what makes a hand-written test do the same work as
+  `check`.
+- **Rebinding `err` in the same scope is permitted**, as the specification
+  requires — it is what lets a function chain several fallible calls. Each `err`
+  still gets its own local slot, so an earlier one that was never checked is
+  still reported.
+
+The specification's `??` defaulting operator was **removed** rather than
+implemented. It hid a branch behind a sigil, which is precisely what the
+language exists to avoid. An inline `if` does the same work in the open, and the
+compiler narrows the optional or cleans the taint on the branch where it is
+valid. `?.` and the `?T` type sigil went with it; the optional type is spelled
+`Option<T>`.
 
 ---
 

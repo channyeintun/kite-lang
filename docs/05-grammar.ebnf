@@ -71,7 +71,7 @@ PositionalFields
 
 TypeAlias    = "type" Ident [ Generics ] "=" Type ;
 
-Type         = "?" Type                              (* optional        *)
+Type         = "Option" "<" Type ">"                 (* optional        *)
              | "[" Type "]"                          (* slice           *)
              | "[" IntLit "]" Type                   (* array           *)
              | "{" Type ":" Type "}"                 (* map             *)
@@ -194,9 +194,8 @@ FieldPattern = Ident [ ":" Pattern ] ;
    Expressions — precedence climbing, loosest to tightest
    ------------------------------------------------------------------ *)
 
-Expr         = CoalesceExpr ;
+Expr         = OrExpr ;
 
-CoalesceExpr = OrExpr [ "??" CoalesceExpr ] ;          (* right assoc  *)
 OrExpr       = AndExpr { "||" AndExpr } ;
 AndExpr      = CmpExpr { "&&" CmpExpr } ;
 CmpExpr      = BitExpr [ CmpOp BitExpr ] ;             (* non-assoc    *)
@@ -210,7 +209,6 @@ UnaryExpr    = [ "-" | "!" | "await" ] PostfixExpr ;
 
 PostfixExpr  = PrimaryExpr { Postfix } ;
 Postfix      = "." Ident
-             | "?" "." Ident                          (* optional chain *)
              | "(" [ Args ] ")"                       (* call           *)
              | "[" Expr "]"                           (* index          *)
              | "[" [ Expr ] ".." [ Expr ] "]" ;       (* slice          *)
@@ -289,6 +287,10 @@ Comment      = LineComment | DocComment ;
 LineComment  = "//" { AnyCharButNewline } ;
 DocComment   = "///" { AnyCharButNewline } ;
 
+
+(* Note: `?` is not a token in Kite. There is no optional chaining, no
+   coalescing operator, and no ternary — an `if` expression, which narrows
+   optionals on the branch where they cannot be nil, does that work. *)
 
 (* ------------------------------------------------------------------
    Reserved words — 27

@@ -2,30 +2,28 @@ struct User {
     name: str
 }
 
-fn find(id: int) -> ?User {
+fn find(id: int) -> Option<User> {
     if id == 1 {
         return User{ name: "ada" }
     }
     return nil
 }
 
+fn name_of(id: int) -> str {
+    let u = find(id)
+    return if u == nil { "anonymous" } else { u.name }
+}
+
 fn main() {
-    let a = find(1)
-    let b = find(2)
-
-    io.print(a?.name ?? "anonymous")
-    io.print(b?.name ?? "anonymous")
-
-    io.print(match a {
-        nil => "missing",
-        u => "found",
-    })
-    io.print(match b {
-        nil => "missing",
-        u => "found",
-    })
+    io.print(name_of(1))
+    io.print(name_of(2))
 
     let xs = [10, 20, 30]
-    io.print(xs.get(1) ?? -1)
-    io.print(xs.get(9) ?? -1)
+    let first = xs.get(0)
+    io.print(if first == nil { -1 } else { first })
+
+    io.print(match find(1) {
+        nil => "none",
+        u => u.name,
+    })
 }

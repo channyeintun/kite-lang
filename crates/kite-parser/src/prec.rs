@@ -28,7 +28,6 @@ impl InfixOp {
             T::DotDot => InfixOp::Range { inclusive: false },
             T::DotDotEq => InfixOp::Range { inclusive: true },
             T::As => InfixOp::Cast,
-            T::QuestionQuestion => InfixOp::Binary(B::Coalesce),
             T::PipePipe => InfixOp::Binary(B::Or),
             T::AmpAmp => InfixOp::Binary(B::And),
             T::EqEq => InfixOp::Binary(B::Eq),
@@ -57,8 +56,6 @@ pub fn infix_binding_power(op: InfixOp) -> (u8, u8) {
     match op {
         // Loosest. `0..n + 1` is `0..(n + 1)`.
         InfixOp::Range { .. } => (2, 3),
-        // Right-associative: `a ?? b ?? c` is `a ?? (b ?? c)`.
-        InfixOp::Binary(B::Coalesce) => (5, 4),
         InfixOp::Binary(B::Or) => (6, 7),
         InfixOp::Binary(B::And) => (8, 9),
         // Non-associative; the parser reports chaining rather than encoding it
@@ -95,15 +92,9 @@ mod tests {
     }
 
     #[test]
-    fn coalesce_is_right_associative() {
-        let (l, r) = infix_binding_power(InfixOp::Binary(BinaryOp::Coalesce));
-        assert!(r < l, "?? must be right-associative");
-    }
-
-    #[test]
     fn range_is_loosest() {
         let (range_l, _) = infix_binding_power(InfixOp::Range { inclusive: false });
-        for op in [BinaryOp::Or, BinaryOp::Add, BinaryOp::Eq, BinaryOp::Coalesce] {
+        for op in [BinaryOp::Or, BinaryOp::Add, BinaryOp::Eq] {
             let (l, _) = infix_binding_power(InfixOp::Binary(op));
             assert!(range_l < l, "{:?} must bind tighter than `..`", op);
         }

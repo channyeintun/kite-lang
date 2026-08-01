@@ -114,6 +114,11 @@ pub enum Rvalue {
     TagOf { base: Operand },
     SliceNew { elems: Vec<Operand> },
     IsNil { value: Operand },
+    PairNew { value: Operand, error: Operand },
+    PairValue { base: Operand },
+    PairError { base: Operand },
+    ErrorNew { message: Operand },
+    ErrorMessage { base: Operand },
     /// Bounds-checked; traps on failure.
     IndexGet { base: Operand, index: Operand },
     SliceLen { base: Operand },
@@ -282,6 +287,11 @@ impl fmt::Display for Rvalue {
             }
             Rvalue::IndexGet { base, index } => write!(f, "{}[{}]", base, index),
             Rvalue::IsNil { value } => write!(f, "is-nil {}", value),
+            Rvalue::PairNew { value, error } => write!(f, "pair({}, {})", value, error),
+            Rvalue::PairValue { base } => write!(f, "{}.0", base),
+            Rvalue::PairError { base } => write!(f, "{}.1", base),
+            Rvalue::ErrorNew { message } => write!(f, "error({})", message),
+            Rvalue::ErrorMessage { base } => write!(f, "{}.message()", base),
             Rvalue::SliceLen { base } => write!(f, "len {}", base),
             Rvalue::SliceGet { base, index } => write!(f, "{}.get({})", base, index),
         }

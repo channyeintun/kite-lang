@@ -931,30 +931,31 @@ fn nil_needs_a_type_from_context() {
     assert!(c.has("E0204"), "{}", c.render());
 }
 
+/// An inline `if` narrows the optional in the branch where it cannot be nil.
+/// This is the whole replacement for `??` and `?.`.
 #[test]
-fn coalesce_needs_an_optional_on_the_left() {
-    let c = body("  let n = 1 ?? 2");
-    assert!(c.has("E0201"), "{}", c.render());
-    assert!(c.render().contains("can never be nil"), "{}", c.render());
+fn an_inline_if_narrows_the_optional() {
+    ok_body("  let xs = [1]\n  let a = xs.get(0)\n  let n: int = if a == nil { 0 } else { a }");
 }
 
+/// The narrowing is directional: `x != nil` narrows the *then* branch.
 #[test]
-fn coalesce_unwraps_the_optional() {
-    ok_body("  let xs = [1]\n  let n: int = xs.get(0) ?? 0");
+fn a_not_nil_test_narrows_the_then_branch() {
+    ok_body("  let xs = [1]\n  let a = xs.get(0)\n  let n: int = if a != nil { a } else { 0 }");
 }
 
+/// Outside the narrowed branch the value is still optional.
 #[test]
-fn optional_chaining_needs_an_optional() {
-    let c = run("struct P {\n  n: int\n}\nfn main() {\n  let p = P{ n: 1 }\n  io.print(p?.n ?? 0)\n}\n");
-    assert!(c.has("E0201"), "{}", c.render());
-    assert!(c.render().contains("write `.` instead"), "{}", c.render());
+fn the_other_branch_is_not_narrowed() {
+    let c = body("  let xs = [1]\n  let a = xs.get(0)\n  let n: int = if a == nil { a } else { 0 }");
+    assert!(c.has("E0200"), "{}", c.render());
 }
 
 /// The specification's example: once `nil` is matched, the binding is the
 /// unwrapped type.
 #[test]
 fn a_binding_narrows_once_nil_is_covered() {
-    let c = run("struct U {\n  name: str\n}\nfn find() -> ?U {\n  return nil\n}\nfn main() {\n  io.print(match find() {\n    nil => \"none\",\n    u => u.name,\n  })\n}\n");
+    let c = run("struct U {\n  name: str\n}\nfn find() -> Option<U> {\n  return nil\n}\nfn main() {\n  io.print(match find() {\n    nil => \"none\",\n    u => u.name,\n  })\n}\n");
     assert!(!c.diags.has_errors(), "{}", c.render());
 }
 
@@ -962,13 +963,13 @@ fn a_binding_narrows_once_nil_is_covered() {
 /// not narrowed.
 #[test]
 fn a_binding_is_not_narrowed_before_nil_is_covered() {
-    let c = run("struct U {\n  name: str\n}\nfn find() -> ?U {\n  return nil\n}\nfn main() {\n  io.print(match find() {\n    u => u.name,\n  })\n}\n");
+    let c = run("struct U {\n  name: str\n}\nfn find() -> Option<U> {\n  return nil\n}\nfn main() {\n  io.print(match find() {\n    u => u.name,\n  })\n}\n");
     assert!(c.has("E0200"), "{}", c.render());
 }
 
 #[test]
 fn an_optional_match_must_cover_nil_and_a_value() {
-    let c = run("fn main() {\n  let x: ?int = 1\n  let d = match x {\n    nil => 0,\n  }\n}\n");
+    let c = run("fn main() {\n  let x: Option<int> = 1\n  let d = match x {\n    nil => 0,\n  }\n}\n");
     assert!(c.has("E0210"), "{}", c.render());
     assert!(c.render().contains("a present value"), "{}", c.render());
 }
@@ -977,4 +978,119 @@ fn an_optional_match_must_cover_nil_and_a_value() {
 fn nil_cannot_match_a_non_optional() {
     let c = body("  let n = 1\n  let d = match n {\n    nil => 0,\n    _ => 1,\n  }");
     assert!(c.has("E0200"), "{}", c.render());
+}
+
+// ---- error handling -------------------------------------------------------
+
+const FALLIBLE: &str = "\
+fn load() -> (int, error) {
+    return 1, nil
+}
+";
+
+fn with_fallible(body: &str) -> Ctx {
+    run(&format!("{}\nfn main() {{\n{}\n}}\n", FALLIBLE, body))
+}
+
+#[test]
+fn checking_the_error_makes_the_value_readable() {
+    let c = with_fallible("  let (v, err) = load()\n  if err != nil {\n    io.print(0)\n  } else {\n    io.print(v)\n  }");
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+/// The flaw Kite fixes in Go: reading the value before the error is known.
+#[test]
+fn reading_the_value_before_checking_is_rejected() {
+    let c = with_fallible("  let (v, err) = load()\n  io.print(v)\n  if err != nil {\n    io.print(0)\n  }");
+    assert!(c.has("E0301"), "{}", c.render());
+    let out = c.render();
+    assert!(out.contains("only valid when the error is nil"), "{}", out);
+    assert!(out.contains("in Go the value on a failure path"), "{}", out);
+}
+
+#[test]
+fn an_unchecked_error_is_rejected() {
+    let c = with_fallible("  let (v, err) = load()\n  io.print(1)");
+    assert!(c.has("E0302"), "{}", c.render());
+    assert!(c.render().contains("goes out of scope uninspected"), "{}", c.render());
+}
+
+/// Discarding the *error* slot with `_` is exactly what Kite forbids.
+#[test]
+fn discarding_the_error_with_underscore_is_rejected() {
+    let c = with_fallible("  let (v, _) = load()\n  io.print(v)");
+    assert!(c.has("E0302"), "{}", c.render());
+}
+
+/// `if err != nil { return _, err }` — control continues only when the error
+/// was nil, so the value it guards becomes valid afterwards.
+#[test]
+fn an_early_return_cleans_the_value() {
+    let c = run("fn load() -> (int, error) {\n  return 1, nil\n}\nfn use_it() -> (int, error) {\n  let (v, err) = load()\n  if err != nil {\n    return _, err\n  }\n  return v, nil\n}\nfn main() {\n}\n");
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+/// The same shape, but the error branch does *not* diverge, so the value is
+/// still not proven valid on the path that falls through.
+#[test]
+fn a_non_diverging_error_branch_does_not_clean_the_value() {
+    let c = run("fn load() -> (int, error) {\n  return 1, nil\n}\nfn main() {\n  let (v, err) = load()\n  if err != nil {\n    io.print(\"oops\")\n  }\n  io.print(v)\n}\n");
+    assert!(c.has("E0301"), "{}", c.render());
+}
+
+#[test]
+fn check_outside_a_fallible_function_is_rejected() {
+    let c = run("fn load() -> (int, error) {\n  return 1, nil\n}\nfn main() {\n  let (v, err) = load()\n  check err\n}\n");
+    assert!(c.has("E0303"), "{}", c.render());
+}
+
+#[test]
+fn a_fallible_function_must_return_two_values() {
+    let c = run("fn f() -> (int, error) {\n  return 1\n}\n");
+    assert!(c.has("E0203"), "{}", c.render());
+    assert!(c.render().contains("return value, nil"), "{}", c.render());
+}
+
+#[test]
+fn destructuring_a_non_fallible_call_is_rejected() {
+    let c = run("fn plain() -> int {\n  return 1\n}\nfn main() {\n  let (v, err) = plain()\n}\n");
+    assert!(c.has("E0200"), "{}", c.render());
+}
+
+#[test]
+fn nil_is_the_no_error_value() {
+    let c = run("fn f() -> (int, error) {\n  return 1, nil\n}\nfn main() {\n}\n");
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+#[test]
+fn one_unchecked_error_yields_one_diagnostic() {
+    let c = with_fallible("  let (v, err) = load()\n  io.print(1)\n  io.print(2)\n  io.print(3)");
+    assert_eq!(c.diags.error_count(), 1, "{}", c.render());
+}
+
+/// The specification's one exception to same-scope shadowing: rebinding `err`
+/// is what lets a function chain several fallible calls.
+#[test]
+fn rebinding_err_in_the_same_scope_is_permitted() {
+    let c = run("fn load() -> (int, error) {\n  return 1, nil\n}\nfn chain() -> (int, error) {\n  let (a, err) = load()\n  check err\n  let (b, err) = load()\n  check err\n  return a + b, nil\n}\nfn main() {\n}\n");
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+/// Each `err` still gets its own slot, so an earlier one that was never checked
+/// is still reported.
+#[test]
+fn a_shadowed_but_unchecked_error_is_still_reported() {
+    let c = run("fn load() -> (int, error) {\n  return 1, nil\n}\nfn chain() -> (int, error) {\n  let (a, err) = load()\n  let (b, err) = load()\n  check err\n  return b, nil\n}\nfn main() {\n}\n");
+    assert!(c.has("E0302"), "{}", c.render());
+    // `a` is never read, so only the unchecked error is reported.
+    assert_eq!(c.diags.error_count(), 1, "{}", c.render());
+}
+
+/// Rebinding a *value* in the same scope is still rejected; only the error slot
+/// is exempt.
+#[test]
+fn rebinding_a_value_in_the_same_scope_is_still_rejected() {
+    let c = body("  let x = 1\n  let x = 2");
+    assert!(c.has("E0112"), "{}", c.render());
 }

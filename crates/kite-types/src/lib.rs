@@ -167,13 +167,9 @@ pub fn check(
                         resolve_named_ty(r.value_type(), resolved, &type_ids, &mut types, diags)
                     }
                 };
-                (
-                    params,
-                    ret,
-                    f.ret.as_ref().is_some_and(|r| r.is_fallible()),
-                    f.name.span,
-                    None,
-                )
+                let fallible = f.ret.as_ref().is_some_and(|r| r.is_fallible());
+                let ret = if fallible { types.fallible_of(ret) } else { ret };
+                (params, ret, fallible, f.name.span, None)
             }
             Some(owner) => {
                 // A default method's body lives in the trait declaration, not
@@ -200,13 +196,9 @@ pub fn check(
                 } else {
                     None
                 };
-                (
-                    params,
-                    ret,
-                    m.ret.as_ref().is_some_and(|r| r.is_fallible()),
-                    m.name.span,
-                    self_ty,
-                )
+                let fallible = m.ret.as_ref().is_some_and(|r| r.is_fallible());
+                let ret = if fallible { types.fallible_of(ret) } else { ret };
+                (params, ret, fallible, m.name.span, self_ty)
             }
         };
         sigs.push(Signature { params, ret, fallible, name_span, self_ty });
@@ -225,6 +217,8 @@ pub fn check(
             fn_index: i,
             locals: Vec::new(),
             init: Vec::new(),
+            taint: Vec::new(),
+            guards: std::collections::HashMap::new(),
             loop_depth: 0,
         };
         let func = match sig.owner {
@@ -304,6 +298,11 @@ struct Checker<'a> {
     locals: Vec<hir::Local>,
     /// Definite-assignment state, parallel to `locals`.
     init: Vec<Init>,
+    /// Error-taint state, parallel to `locals`. See [`Taint`].
+    taint: Vec<Taint>,
+    /// Which value local each error local guards, so checking the error cleans
+    /// the value.
+    guards: std::collections::HashMap<u32, u32>,
     loop_depth: u32,
 }
 
@@ -329,6 +328,43 @@ impl Init {
             Init::Assigned
         } else {
             Init::Unassigned
+        }
+    }
+}
+
+/// Error-taint state for one local.
+///
+/// A function returning `(T, error)` returns a **correlated pair**: the value
+/// is only meaningful when the error is nil. This two-element lattice is the
+/// proof, and it is what fixes Go's single biggest flaw — in Go the value on a
+/// failure path is the zero value and flows onward looking valid.
+///
+/// The lattice has height two and merges at branch joins, exactly like the
+/// definite-assignment analysis it sits beside.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Taint {
+    /// An ordinary local. Nothing to prove.
+    Clean,
+    /// A value bound from a fallible call whose error is not yet known to be
+    /// nil. Reading it is `E0301`.
+    Tainted,
+    /// An error binding that has not been inspected. Letting it fall out of
+    /// scope is `E0302`.
+    Unchecked,
+}
+
+impl Taint {
+    /// A value is clean after a join only when it is clean on *every* incoming
+    /// path. That merge rule is what makes the analysis sound.
+    fn merge(self, other: Taint) -> Taint {
+        if self == other {
+            self
+        } else if self == Taint::Tainted || other == Taint::Tainted {
+            Taint::Tainted
+        } else if self == Taint::Unchecked || other == Taint::Unchecked {
+            Taint::Unchecked
+        } else {
+            Taint::Clean
         }
     }
 }
@@ -403,11 +439,15 @@ impl<'a> Checker<'a> {
             })
             .collect();
 
+        self.taint = vec![Taint::Clean; self.locals.len()];
+
         let (hir_body, flow) = match body {
             Some(b) => self.block(b, sig),
             // A trait method with no default body. Nothing to check.
             None => (hir::Block::default(), Flow::Diverges),
         };
+
+        self.report_unchecked_errors();
 
         if body.is_some() && sig.ret != TyId::UNIT && flow == Flow::Falls {
             self.diags.push(
@@ -487,13 +527,9 @@ impl<'a> Checker<'a> {
                 Some((hir::Stmt::Expr(expr), flow))
             }
 
-            // Phase 3 introduces the taint analysis these depend on.
-            ast::Stmt::Check { span, .. } => {
-                self.not_yet(*span, "`check`", "error handling arrives in Phase 3");
-                None
-            }
+            ast::Stmt::Check { expr, span } => self.check_stmt(expr, *span, sig),
             ast::Stmt::Defer { span, .. } => {
-                self.not_yet(*span, "`defer`", "scope-exit release arrives in Phase 3");
+                self.not_yet(*span, "`defer`", "scope-exit release arrives in a later phase");
                 None
             }
             ast::Stmt::Error(_) => None,
@@ -501,13 +537,11 @@ impl<'a> Checker<'a> {
     }
 
     fn let_stmt(&mut self, l: &ast::LetStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
+        if let ast::Binding::Tuple { elems, span } = &l.binding {
+            return self.let_pair(l, elems, *span);
+        }
         let ast::Binding::Name(name) = &l.binding else {
-            self.not_yet(
-                l.binding.span(),
-                "tuple bindings",
-                "`let (v, err) = f()` arrives in Phase 3",
-            );
-            return None;
+            unreachable!("a binding is a name or a tuple")
         };
 
         let local_id = self.resolved.lookup_binding(name.span)?;
@@ -581,8 +615,8 @@ impl<'a> Checker<'a> {
     }
 
     fn assign_stmt(&mut self, a: &ast::AssignStmt, _sig: &Signature) -> Option<(hir::Stmt, Flow)> {
-        if let ast::Expr::Field { base, name, optional, span } = &a.target {
-            return self.assign_field(base, name, *optional, *span, a);
+        if let ast::Expr::Field { base, name, span } = &a.target {
+            return self.assign_field(base, name, *span, a);
         }
         if let ast::Expr::Index { base, index, span } = &a.target {
             return self.assign_index(base, index, *span, a);
@@ -674,6 +708,19 @@ impl<'a> Checker<'a> {
                 }
                 Some((hir::Stmt::Return { value: None, span: r.span }, Flow::Diverges))
             }
+            Some(ast::ReturnValue::Single(e)) if sig.fallible => {
+                let inner = self.types.fallible_value(sig.ret).unwrap_or(TyId::ERROR);
+                let value = self.expr(e, Some(inner));
+                self.expect_ty(value.ty, inner, value.span, Some(sig.name_span));
+                self.diags.push(
+                    Diagnostic::error(codes::E0203, "a fallible function returns two values")
+                        .with_primary(r.span, "only one value returned")
+                        .with_secondary(sig.name_span, "declared `(T, error)` here")
+                        .with_note("write `return value, nil` on the success path"),
+                );
+                None
+            }
+
             Some(ast::ReturnValue::Single(e)) => {
                 let value = self.expr(e, Some(sig.ret));
                 if sig.ret == TyId::UNIT {
@@ -690,7 +737,7 @@ impl<'a> Checker<'a> {
                     Flow::Diverges,
                 ))
             }
-            Some(ast::ReturnValue::Pair { span, .. }) | Some(ast::ReturnValue::Fail { span, .. }) => {
+            Some(ast::ReturnValue::Pair { value, error, span }) => {
                 if !sig.fallible {
                     self.diags.push(
                         Diagnostic::error(
@@ -700,29 +747,108 @@ impl<'a> Checker<'a> {
                         .with_primary(*span, "two values returned here")
                         .with_secondary(sig.name_span, "declare `-> (T, error)` to return a pair"),
                     );
-                } else {
-                    self.not_yet(*span, "fallible returns", "error handling arrives in Phase 3");
+                    return None;
                 }
-                None
+                let inner = self.types.fallible_value(sig.ret).unwrap_or(TyId::ERROR);
+                let v = self.expr(value, Some(inner));
+                self.expect_ty(v.ty, inner, v.span, Some(sig.name_span));
+                let e = self.expr(error, Some(TyId::ERR));
+                self.expect_ty(e.ty, TyId::ERR, e.span, None);
+                Some((
+                    hir::Stmt::Return {
+                        value: Some(hir::Expr {
+                            kind: ExprKind::PairNew {
+                                value: Box::new(v),
+                                error: Box::new(e),
+                            },
+                            ty: sig.ret,
+                            span: *span,
+                        }),
+                        span: r.span,
+                    },
+                    Flow::Diverges,
+                ))
+            }
+
+            // `return _, err` — the failure arm. There is deliberately no
+            // value on this path, which is what stops Go's zero-value leak.
+            Some(ast::ReturnValue::Fail { error, span }) => {
+                if !sig.fallible {
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0200,
+                            "`return _, err` needs a fallible function",
+                        )
+                        .with_primary(*span, "no error slot to return through")
+                        .with_secondary(sig.name_span, "declare `-> (T, error)` here"),
+                    );
+                    return None;
+                }
+                let e = self.expr(error, Some(TyId::ERR));
+                self.expect_ty(e.ty, TyId::ERR, e.span, None);
+                self.mark_checked(error);
+                Some((
+                    hir::Stmt::Return {
+                        value: Some(hir::Expr {
+                            kind: ExprKind::PairNew {
+                                value: Box::new(hir::Expr {
+                                    kind: ExprKind::Nil,
+                                    ty: TyId::ERROR,
+                                    span: *span,
+                                }),
+                                error: Box::new(e),
+                            },
+                            ty: sig.ret,
+                            span: *span,
+                        }),
+                        span: r.span,
+                    },
+                    Flow::Diverges,
+                ))
             }
         }
     }
 
     fn if_stmt(&mut self, i: &ast::IfStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
+        // `if err != nil { … }` is the explicit form of a check. Recognising it
+        // here is what lets a hand-written test clean the value it guards.
+        let tested = self.error_tested_by(&i.cond);
+        // `if x == nil { … } else { … }` narrows `x` in whichever branch it
+        // cannot be nil. Kite has no `?` sigil of any kind: an inline `if`
+        // does the same work, in the open.
+        let narrowing = self.nil_test(&i.cond);
         let cond = self.condition(&i.cond);
+        if let Some((id, _)) = tested {
+            if self.taint[id as usize] == Taint::Unchecked {
+                self.taint[id as usize] = Taint::Clean;
+            }
+        }
 
         // Each branch is checked from the same entry state, and the states are
         // merged at the join. A branch that diverges contributes nothing to the
         // join, because control never arrives from it.
         let entry_init = self.init.clone();
 
+        let entry_taint = self.taint.clone();
+        // Inside `if err != nil { … }` the value is still not valid.
+        let narrowed = self.apply_narrowing(narrowing, true);
+        let mut then_entry = self.taint.clone();
+        self.clean_guarded(&mut then_entry, tested, true);
+        self.taint = then_entry;
         let (then, then_flow) = self.block(&i.then, sig);
+        self.undo_narrowing(narrowed);
         let then_init = std::mem::replace(&mut self.init, entry_init.clone());
+        let then_taint = std::mem::replace(&mut self.taint, entry_taint.clone());
 
         let (else_, else_flow) = match i.else_.as_deref() {
             None => (None, Flow::Falls),
             Some(ast::ElseBranch::Block(b)) => {
+                let narrowed = self.apply_narrowing(narrowing, false);
+                let mut else_entry = entry_taint.clone();
+                self.clean_guarded(&mut else_entry, tested, false);
+                self.taint = else_entry;
                 let (blk, f) = self.block(b, sig);
+                self.undo_narrowing(narrowed);
                 (Some(blk), f)
             }
             Some(ast::ElseBranch::If(nested)) => {
@@ -731,6 +857,27 @@ impl<'a> Checker<'a> {
             }
         };
         let else_init = std::mem::take(&mut self.init);
+        let else_taint = std::mem::take(&mut self.taint);
+
+        // A guarded value becomes clean after `if err != nil { return … }`,
+        // because control only reaches here when the error was nil.
+        self.taint = match (then_flow, else_flow, i.else_.is_some()) {
+            // `if err != nil { return … }` — control continues only when the
+            // error was nil, so the value it guards is now valid.
+            (Flow::Diverges, _, false) => {
+                let mut merged = entry_taint.clone();
+                self.clean_guarded(&mut merged, tested, false);
+                merged
+            }
+            (Flow::Diverges, _, true) => else_taint.clone(),
+            (_, Flow::Diverges, true) => then_taint.clone(),
+            (_, _, false) => entry_taint.clone(),
+            _ => then_taint
+                .iter()
+                .zip(&else_taint)
+                .map(|(a, b)| a.merge(*b))
+                .collect(),
+        };
 
         self.init = match (then_flow, else_flow, i.else_.is_some()) {
             // No `else`: control can arrive having skipped the `then` entirely.
@@ -851,6 +998,97 @@ impl<'a> Checker<'a> {
         Some((result, Flow::Falls))
     }
 
+    /// A local compared against `nil`, and whether the comparison was `==`.
+    ///
+    /// Returns `None` unless the local's type is optional, so an `error` test
+    /// (handled separately by the taint analysis) does not narrow anything.
+    fn nil_test(&self, cond: &ast::Expr) -> Option<(u32, bool)> {
+        let ast::Expr::Binary { op, lhs, rhs, .. } = cond else {
+            return None;
+        };
+        let is_eq = match op {
+            ast::BinaryOp::Eq => true,
+            ast::BinaryOp::Ne => false,
+            _ => return None,
+        };
+        let path = match (lhs.as_ref(), rhs.as_ref()) {
+            (ast::Expr::Path(p), ast::Expr::Nil(_)) => p,
+            (ast::Expr::Nil(_), ast::Expr::Path(p)) => p,
+            _ => return None,
+        };
+        let Some(Res::Local(id)) = self.resolved.lookup_use(path.span) else {
+            return None;
+        };
+        matches!(self.types.kind(self.locals[id as usize].ty), TyKind::Optional(_))
+            .then_some((id, is_eq))
+    }
+
+    /// Narrow a local to its unwrapped type for the branch where it cannot be
+    /// nil. Returns what to restore afterwards.
+    fn apply_narrowing(
+        &mut self,
+        narrowing: Option<(u32, bool)>,
+        in_then: bool,
+    ) -> Option<(u32, TyId)> {
+        let (id, is_eq) = narrowing?;
+        // `x == nil` narrows in the *else*; `x != nil` narrows in the *then*.
+        if is_eq == in_then {
+            return None;
+        }
+        let TyKind::Optional(inner) = *self.types.kind(self.locals[id as usize].ty) else {
+            return None;
+        };
+        let previous = self.locals[id as usize].ty;
+        self.locals[id as usize].ty = inner;
+        Some((id, previous))
+    }
+
+    fn undo_narrowing(&mut self, saved: Option<(u32, TyId)>) {
+        if let Some((id, ty)) = saved {
+            self.locals[id as usize].ty = ty;
+        }
+    }
+
+    /// The error local a condition inspects, and whether the test was `==`.
+    ///
+    /// `if err != nil { … } else { … }` proves the error is nil in the *else*;
+    /// `if err == nil` proves it in the *then*. Cleaning the guarded value on
+    /// exactly that branch is what lets a hand-written test do the same work as
+    /// `check`.
+    fn error_tested_by(&self, cond: &ast::Expr) -> Option<(u32, bool)> {
+        let ast::Expr::Binary { op, lhs, rhs, .. } = cond else {
+            return None;
+        };
+        let is_eq = match op {
+            ast::BinaryOp::Eq => true,
+            ast::BinaryOp::Ne => false,
+            _ => return None,
+        };
+        let path = match (lhs.as_ref(), rhs.as_ref()) {
+            (ast::Expr::Path(p), ast::Expr::Nil(_)) => p,
+            (ast::Expr::Nil(_), ast::Expr::Path(p)) => p,
+            _ => return None,
+        };
+        match self.resolved.lookup_use(path.span) {
+            Some(Res::Local(id)) if self.locals[id as usize].ty == TyId::ERR => {
+                Some((id, is_eq))
+            }
+            _ => None,
+        }
+    }
+
+    /// Clean the value an error guards, on the branch where the error is nil.
+    fn clean_guarded(&self, taint: &mut [Taint], tested: Option<(u32, bool)>, in_then: bool) {
+        let Some((id, is_eq)) = tested else { return };
+        // `err == nil` proves it in the then-branch; `err != nil` in the else.
+        if is_eq != in_then {
+            return;
+        }
+        if let Some(&guarded) = self.guards.get(&id) {
+            taint[guarded as usize] = Taint::Clean;
+        }
+    }
+
     /// A condition must be exactly `bool`. Kite has no truthiness.
     fn condition(&mut self, e: &ast::Expr) -> hir::Expr {
         let c = self.expr(e, Some(TyId::BOOL));
@@ -913,10 +1151,6 @@ impl<'a> Checker<'a> {
                 self.unary(*op, val, *span)
             }
 
-            ast::Expr::Binary { op: ast::BinaryOp::Coalesce, lhs, rhs, span } => {
-                self.coalesce(lhs, rhs, expected, *span)
-            }
-
             ast::Expr::Binary { op, lhs, rhs, span } => {
                 if let Some(hop) = short_circuit(*op) {
                     let l = self.expr(lhs, Some(TyId::BOOL));
@@ -970,6 +1204,9 @@ impl<'a> Checker<'a> {
             // `nil` has no type of its own; it takes one from context. Kite
             // has no null, so the only place it fits is a `?T`.
             ast::Expr::Nil(span) => match expected {
+                // `nil` is the no-error value, which is why `return v, nil`
+                // reads the way it does.
+                Some(TyId::ERR) => hir::Expr { kind: ExprKind::Nil, ty: TyId::ERR, span: *span },
                 Some(want) if matches!(self.types.kind(want), TyKind::Optional(_)) => {
                     hir::Expr { kind: ExprKind::Nil, ty: want, span: *span }
                 }
@@ -982,7 +1219,7 @@ impl<'a> Checker<'a> {
                         )
                         .with_primary(*span, "`nil` is only a value of an optional type")
                         .with_note(format!(
-                            "Kite has no null: write `?{}` if this may be absent",
+                            "Kite has no null: write `Option<{}>` if this may be absent",
                             name
                         )),
                     );
@@ -1017,7 +1254,7 @@ impl<'a> Checker<'a> {
                     self.lit(ExprKind::Error, TyId::ERROR, *span)
                 }
             },
-            ast::Expr::Field { base, name, optional, span } => {
+            ast::Expr::Field { base, name, span } => {
                 // A dotted static path in value position is not a field read.
                 match self.resolved.lookup_use(*span) {
                     Some(Res::Builtin(_)) | Some(Res::Fn(_)) => {
@@ -1031,7 +1268,7 @@ impl<'a> Checker<'a> {
                     Some(Res::Variant(ti, vi)) => {
                         self.variant_value(ti, vi, &[], &[], *span, *span)
                     }
-                    _ => self.field_access(base, name, *optional, *span),
+                    _ => self.field_access(base, name, *span),
                 }
             }
 
@@ -1068,6 +1305,36 @@ impl<'a> Checker<'a> {
     fn path_expr(&mut self, p: &ast::Path) -> hir::Expr {
         match self.resolved.lookup_use(p.span) {
             Some(Res::Local(id)) => {
+                if self.taint[id as usize] == Taint::Tainted {
+                    let local = &self.locals[id as usize];
+                    let (name, decl) = (local.name.clone(), local.span);
+                    // The error this value is paired with, for the secondary
+                    // span that explains *why*.
+                    let err_name = self
+                        .guards
+                        .iter()
+                        .find(|(_, v)| **v == id)
+                        .map(|(e, _)| self.locals[*e as usize].name.clone());
+                    let mut d = Diagnostic::error(
+                        codes::E0301,
+                        format!("`{}` is used before its error is checked", name),
+                    )
+                    .with_secondary(decl, "this value is only valid when the error is nil")
+                    .with_primary(p.span, "used here while still tainted");
+                    if let Some(e) = err_name {
+                        d = d.with_note(format!(
+                            "check it first: write `check {}`, or test `{} != nil`",
+                            e, e
+                        ));
+                    }
+                    d = d.with_note(
+                        "in Go the value on a failure path is the zero value and flows onward \
+                         looking valid; in Kite there is no value on that path at all",
+                    );
+                    self.diags.push(d);
+                    // One mistake, one diagnostic.
+                    self.taint[id as usize] = Taint::Clean;
+                }
                 if self.init[id as usize] == Init::Unassigned {
                     let local = &self.locals[id as usize];
                     let (name, decl) = (local.name.clone(), local.span);
@@ -1154,8 +1421,8 @@ impl<'a> Checker<'a> {
         // `a.b(…)` is a method call unless the resolver already decided the
         // dotted name is static — a builtin, a variant, or an associated
         // function on a type.
-        if let ast::Expr::Field { base, name, optional, span: fspan } = callee {
-            if !*optional {
+        if let ast::Expr::Field { base, name, span: fspan } = callee {
+            {
                 return match self.resolved.lookup_use(*fspan) {
                     Some(Res::Builtin(b)) => self.builtin_call(b, args, span),
                     Some(Res::Type(ti)) => {
@@ -1231,6 +1498,20 @@ impl<'a> Checker<'a> {
 
     fn builtin_call(&mut self, b: BuiltinFn, args: &[ast::Expr], span: Span) -> hir::Expr {
         match b {
+            BuiltinFn::ErrorsNew => {
+                if args.len() != 1 {
+                    self.arity_error("errors.new", args.len(), 1, span, None);
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
+                }
+                let m = self.expr(&args[0], Some(TyId::STR));
+                self.expect_ty(m.ty, TyId::STR, m.span, None);
+                hir::Expr {
+                    kind: ExprKind::ErrorNew { message: Box::new(m) },
+                    ty: TyId::ERR,
+                    span,
+                }
+            }
+
             BuiltinFn::IoPrint => {
                 if args.len() != 1 {
                     self.arity_error("io.print", args.len(), 1, span, None);
@@ -1277,6 +1558,28 @@ impl<'a> Checker<'a> {
         let receiver = self.expr(base, None);
         if self.types.is_poisoned(receiver.ty) {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+
+        if receiver.ty == TyId::ERR {
+            if name.name != "message" {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0205,
+                        format!("`error` has no method `{}`", name.name),
+                    )
+                    .with_primary(name.span, "no such method")
+                    .with_note("`error` has: message"),
+                );
+                return self.lit(ExprKind::Error, TyId::ERROR, span);
+            }
+            if !args.is_empty() {
+                self.arity_error("message", args.len(), 0, span, None);
+            }
+            return hir::Expr {
+                kind: ExprKind::ErrorMessage { base: Box::new(receiver) },
+                ty: TyId::STR,
+                span,
+            };
         }
 
         if self.types.slice_elem(receiver.ty).is_some() {
@@ -1468,6 +1771,276 @@ impl<'a> Checker<'a> {
             .map(|i| i as u32)
     }
 
+    // ---- error handling ---------------------------------------------------
+
+    /// `let (v, err) = f()`. The value becomes Tainted and the error
+    /// Unchecked; neither is usable until the error is tested.
+    fn let_pair(
+        &mut self,
+        l: &ast::LetStmt,
+        elems: &[ast::BindElem],
+        span: Span,
+    ) -> Option<(hir::Stmt, Flow)> {
+        if elems.len() != 2 {
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0200,
+                    format!("expected 2 bindings, found {}", elems.len()),
+                )
+                .with_primary(span, "a fallible result has a value and an error")
+                .with_note("write `let (value, err) = f()`"),
+            );
+            return None;
+        }
+
+        // Dropping the *error* slot is exactly what Kite forbids.
+        if let ast::BindElem::Wildcard(w) = &elems[1] {
+            self.diags.push(
+                Diagnostic::error(codes::E0302, "an error may not be discarded with `_`")
+                    .with_primary(*w, "the error slot cannot be dropped")
+                    .with_note(
+                        "silently dropping errors is the single most common source of \
+                         production failures in languages that permit it; write `check` to \
+                         propagate, or test `err != nil` to handle it here",
+                    ),
+            );
+        }
+
+        let Some(init) = &l.init else {
+            self.diags.push(
+                Diagnostic::error(codes::E0204, "a tuple binding needs an initialiser")
+                    .with_primary(span, "nothing to destructure"),
+            );
+            return None;
+        };
+
+        let call = self.expr(init, None);
+        let Some(inner) = self.types.fallible_value(call.ty) else {
+            if !self.types.is_poisoned(call.ty) {
+                let found = self.types.with_article(call.ty);
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0200,
+                        "only a fallible call can be destructured this way",
+                    )
+                    .with_primary(call.span, format!("this is {}", found))
+                    .with_note("`let (v, err) = …` needs a function declared `-> (T, error)`"),
+                );
+            }
+            return None;
+        };
+
+        // The pair is evaluated once into a temporary; the two bindings read
+        // its slots.
+        let value_local = match &elems[0] {
+            ast::BindElem::Name(n) => self.resolved.lookup_binding(n.span),
+            ast::BindElem::Wildcard(_) => None,
+        };
+        let error_local = match &elems[1] {
+            ast::BindElem::Name(n) => self.resolved.lookup_binding(n.span),
+            ast::BindElem::Wildcard(_) => None,
+        };
+
+        let pair_local = self.synthetic_local("pair", call.ty, span);
+
+        let mut stmts = vec![hir::Stmt::Let {
+            local: hir::LocalId(pair_local),
+            init: Some(call),
+            span,
+        }];
+
+        if let Some(v) = value_local {
+            self.locals[v as usize].ty = inner;
+            self.init[v as usize] = Init::Assigned;
+            self.taint[v as usize] = Taint::Tainted;
+            stmts.push(hir::Stmt::Let {
+                local: hir::LocalId(v),
+                init: Some(hir::Expr {
+                    kind: ExprKind::PairValue {
+                        base: Box::new(hir::Expr {
+                            kind: ExprKind::Local(hir::LocalId(pair_local)),
+                            ty: self.types.fallible_of(inner),
+                            span,
+                        }),
+                    },
+                    ty: inner,
+                    span,
+                }),
+                span,
+            });
+        }
+        if let Some(e) = error_local {
+            self.locals[e as usize].ty = TyId::ERR;
+            self.init[e as usize] = Init::Assigned;
+            self.taint[e as usize] = Taint::Unchecked;
+            let pair_ty = self.types.fallible_of(inner);
+            stmts.push(hir::Stmt::Let {
+                local: hir::LocalId(e),
+                init: Some(hir::Expr {
+                    kind: ExprKind::PairError {
+                        base: Box::new(hir::Expr {
+                            kind: ExprKind::Local(hir::LocalId(pair_local)),
+                            ty: pair_ty,
+                            span,
+                        }),
+                    },
+                    ty: TyId::ERR,
+                    span,
+                }),
+                span,
+            });
+        }
+
+        // Record which value each error guards, so testing the error can clean
+        // the value.
+        if let (Some(v), Some(e)) = (value_local, error_local) {
+            self.guards.insert(e, v);
+        }
+
+        Some((
+            hir::Stmt::Block(hir::Block { stmts }),
+            Flow::Falls,
+        ))
+    }
+
+    /// `check err` — propagate if the error is not nil.
+    ///
+    /// Defined as exactly `if err != nil { return _, err }`. It occupies its own
+    /// line and is greppable, which preserves Go's central virtue: you can scan
+    /// the left margin of a function and see every place it can fail.
+    fn check_stmt(
+        &mut self,
+        expr: &ast::Expr,
+        span: Span,
+        sig: &Signature,
+    ) -> Option<(hir::Stmt, Flow)> {
+        if !sig.fallible {
+            self.diags.push(
+                Diagnostic::error(codes::E0303, "`check` outside a fallible function")
+                    .with_primary(span, "this would return an error")
+                    .with_secondary(sig.name_span, "declared here")
+                    .with_note(
+                        "`check` returns the error to the caller, so the enclosing function \
+                         must declare `-> (T, error)`",
+                    ),
+            );
+        }
+
+        let e = self.expr(expr, Some(TyId::ERR));
+        if !self.types.satisfies(e.ty, TyId::ERR) && !self.types.is_poisoned(e.ty) {
+            let found = self.types.with_article(e.ty);
+            self.diags.push(
+                Diagnostic::error(codes::E0200, "`check` needs an `error`")
+                    .with_primary(e.span, format!("this is {}", found)),
+            );
+        }
+
+        // After `check`, the error is known nil, so its value is readable.
+        self.mark_checked(expr);
+
+        let ret = if sig.fallible { sig.ret } else { TyId::ERROR };
+        Some((
+            hir::Stmt::If {
+                cond: hir::Expr {
+                    kind: ExprKind::Unary {
+                        op: hir::UnOp::Not,
+                        operand: Box::new(hir::Expr {
+                            kind: ExprKind::IsNil { value: Box::new(e) },
+                            ty: TyId::BOOL,
+                            span,
+                        }),
+                    },
+                    ty: TyId::BOOL,
+                    span,
+                },
+                then: hir::Block {
+                    stmts: vec![hir::Stmt::Return {
+                        value: Some(hir::Expr {
+                            kind: ExprKind::PairNew {
+                                value: Box::new(hir::Expr {
+                                    kind: ExprKind::Nil,
+                                    ty: TyId::ERROR,
+                                    span,
+                                }),
+                                error: Box::new(self.reread_error(expr, span)),
+                            },
+                            ty: ret,
+                            span,
+                        }),
+                        span,
+                    }],
+                },
+                else_: None,
+                span,
+            },
+            Flow::Falls,
+        ))
+    }
+
+    /// Re-read the error operand for the propagation branch.
+    fn reread_error(&mut self, expr: &ast::Expr, span: Span) -> hir::Expr {
+        let saved = self.taint.clone();
+        let e = self.expr(expr, Some(TyId::ERR));
+        self.taint = saved;
+        let _ = span;
+        e
+    }
+
+    /// Mark an error binding checked, and clean the value it guards.
+    fn mark_checked(&mut self, expr: &ast::Expr) {
+        let ast::Expr::Path(p) = expr else { return };
+        let Some(Res::Local(id)) = self.resolved.lookup_use(p.span) else {
+            return;
+        };
+        if self.taint[id as usize] == Taint::Unchecked {
+            self.taint[id as usize] = Taint::Clean;
+        }
+        if let Some(&guarded) = self.guards.get(&id) {
+            self.taint[guarded as usize] = Taint::Clean;
+        }
+    }
+
+    /// Report every error binding that was never inspected.
+    ///
+    /// Run once at the end of the body, where all paths have merged, so a
+    /// single error is reported once rather than per branch.
+    fn report_unchecked_errors(&mut self) {
+        let mut pending: Vec<(String, Span)> = Vec::new();
+        for (i, state) in self.taint.iter().enumerate() {
+            if *state == Taint::Unchecked && !self.locals[i].synthetic {
+                pending.push((self.locals[i].name.clone(), self.locals[i].span));
+            }
+        }
+        for (name, span) in pending {
+            self.diags.push(
+                Diagnostic::error(codes::E0302, format!("`{}` is never checked", name))
+                    .with_primary(span, "this error goes out of scope uninspected")
+                    .with_note(
+                        "silently dropping errors is the single most common source of \
+                         production failures in languages that permit it",
+                    )
+                    .with_note(
+                        "to propagate, write `check` on its own line; to handle it here, \
+                         test `err != nil`",
+                    ),
+            );
+        }
+    }
+
+    fn synthetic_local(&mut self, name: &str, ty: TyId, span: Span) -> u32 {
+        let id = self.locals.len() as u32;
+        self.locals.push(hir::Local {
+            name: format!("__{}", name),
+            ty,
+            mutable: false,
+            span,
+            synthetic: true,
+        });
+        self.init.push(Init::Assigned);
+        self.taint.push(Taint::Clean);
+        id
+    }
+
     // ---- slices -----------------------------------------------------------
 
     /// `[1, 2, 3]`. Every element must share one type; an empty literal needs
@@ -1512,51 +2085,6 @@ impl<'a> Checker<'a> {
 
     /// `xs[i]`. Traps on an out-of-range index, because that is a program bug.
     /// `.get()` is the form for when it genuinely is a runtime condition.
-    // ---- optionals --------------------------------------------------------
-
-    /// `a ?? b` — "or else this". The left side must be optional; the result is
-    /// the unwrapped type.
-    fn coalesce(
-        &mut self,
-        lhs: &ast::Expr,
-        rhs: &ast::Expr,
-        expected: Option<TyId>,
-        span: Span,
-    ) -> hir::Expr {
-        let hint = expected.map(|e| self.types.optional_of(e));
-        let value = self.expr(lhs, hint);
-        if self.types.is_poisoned(value.ty) {
-            let _ = self.expr(rhs, expected);
-            return self.lit(ExprKind::Error, TyId::ERROR, span);
-        }
-
-        let TyKind::Optional(inner) = *self.types.kind(value.ty) else {
-            let found = self.types.with_article(value.ty);
-            self.diags.push(
-                Diagnostic::error(
-                    codes::E0201,
-                    format!("`??` needs an optional on the left, not {}", found),
-                )
-                .with_primary(value.span, "this can never be nil")
-                .with_note("`??` supplies a value for the nil case, so there must be one"),
-            );
-            let _ = self.expr(rhs, Some(value.ty));
-            return self.lit(ExprKind::Error, TyId::ERROR, span);
-        };
-
-        let default = self.expr(rhs, Some(inner));
-        self.expect_ty(default.ty, inner, default.span, Some(value.span));
-
-        hir::Expr {
-            kind: ExprKind::Coalesce {
-                value: Box::new(value),
-                default: Box::new(default),
-            },
-            ty: inner,
-            span,
-        }
-    }
-
     fn index_expr(&mut self, base: &ast::Expr, index: &ast::Expr, span: Span) -> hir::Expr {
         let seq = self.expr(base, None);
         if self.types.is_poisoned(seq.ty) {
@@ -2511,85 +3039,8 @@ impl<'a> Checker<'a> {
     }
 
     /// `p.x`
-    fn field_access(
-        &mut self,
-        base: &ast::Expr,
-        name: &ast::Ident,
-        optional: bool,
-        span: Span,
-    ) -> hir::Expr {
+    fn field_access(&mut self, base: &ast::Expr, name: &ast::Ident, span: Span) -> hir::Expr {
         let obj = self.expr(base, None);
-
-        // `a?.b` yields `?B`: nil when `a` is nil, and `a.b` otherwise.
-        if optional {
-            if self.types.is_poisoned(obj.ty) {
-                return self.lit(ExprKind::Error, TyId::ERROR, span);
-            }
-            let TyKind::Optional(inner) = *self.types.kind(obj.ty) else {
-                let found = self.types.with_article(obj.ty);
-                self.diags.push(
-                    Diagnostic::error(
-                        codes::E0201,
-                        format!("`?.` needs an optional, not {}", found),
-                    )
-                    .with_primary(obj.span, "this can never be nil")
-                    .with_note("write `.` instead"),
-                );
-                return self.lit(ExprKind::Error, TyId::ERROR, span);
-            };
-
-            let TyKind::Struct(sid) = *self.types.kind(inner) else {
-                self.diags.push(
-                    Diagnostic::error(
-                        codes::E0200,
-                        format!("`{}` has no fields", self.types.name(inner)),
-                    )
-                    .with_primary(name.span, "field access needs a struct"),
-                );
-                return self.lit(ExprKind::Error, TyId::ERROR, span);
-            };
-            let Some((index, fty)) =
-                self.types.struct_def(sid).field(&name.name).map(|(i, f)| (i, f.ty))
-            else {
-                let sname = self.types.struct_def(sid).name.clone();
-                self.diags.push(
-                    Diagnostic::error(
-                        codes::E0200,
-                        format!("`{}` has no field `{}`", sname, name.name),
-                    )
-                    .with_primary(name.span, "no such field"),
-                );
-                return self.lit(ExprKind::Error, TyId::ERROR, span);
-            };
-
-            let result_ty = self.types.optional_of(fty);
-            let is_nil = hir::Expr {
-                kind: ExprKind::IsNil { value: Box::new(self.expr(base, None)) },
-                ty: TyId::BOOL,
-                span,
-            };
-            let read = hir::Expr {
-                kind: ExprKind::FieldGet {
-                    base: Box::new(self.expr(base, None)),
-                    index: index as u32,
-                },
-                ty: result_ty,
-                span,
-            };
-            return hir::Expr {
-                kind: ExprKind::If {
-                    cond: Box::new(is_nil),
-                    then: Box::new(hir::Expr {
-                        kind: ExprKind::Nil,
-                        ty: result_ty,
-                        span,
-                    }),
-                    else_: Box::new(read),
-                },
-                ty: result_ty,
-                span,
-            };
-        }
 
         if self.types.is_poisoned(obj.ty) {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
@@ -2646,14 +3097,9 @@ impl<'a> Checker<'a> {
         &mut self,
         base: &ast::Expr,
         name: &ast::Ident,
-        optional: bool,
         span: Span,
         a: &ast::AssignStmt,
     ) -> Option<(hir::Stmt, Flow)> {
-        if optional {
-            self.not_yet(span, "assignment through `?.`", "optionals arrive later");
-            return None;
-        }
 
         let obj = self.expr(base, None);
         if self.types.is_poisoned(obj.ty) {
@@ -2745,10 +3191,22 @@ impl<'a> Checker<'a> {
         else_: &ast::ElseBranch,
         span: Span,
     ) -> hir::Expr {
+        // An inline `if` narrows an optional exactly as the statement form
+        // does, which is why no `?.` or `??` operator is needed.
+        let narrowing = self.nil_test(cond);
         let c = self.condition(cond);
+
+        let narrowed = self.apply_narrowing(narrowing, true);
         let t = self.block_value(then);
+        self.undo_narrowing(narrowed);
+
         let e = match else_ {
-            ast::ElseBranch::Block(b) => self.block_value(b),
+            ast::ElseBranch::Block(b) => {
+                let narrowed = self.apply_narrowing(narrowing, false);
+                let v = self.block_value(b);
+                self.undo_narrowing(narrowed);
+                v
+            }
             ast::ElseBranch::If(nested) => {
                 let Some(inner_else) = nested.else_.as_deref() else {
                     return self.lit(ExprKind::Error, TyId::ERROR, span);

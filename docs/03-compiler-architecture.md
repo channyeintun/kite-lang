@@ -169,8 +169,6 @@ Post-typecheck, desugared, fully typed. Desugarings applied:
 | Surface | HIR |
 |---|---|
 | `check err` | `if err != nil { return ErrPath(err) }` |
-| `a ?? b` | `match a { nil => b, v => v }` |
-| `a?.b` | `match a { nil => nil, v => v.b }` |
 | `for x in xs {…}` | *(left intact — see note)* |
 | `0..10` | `Range.new(0, 10)` |
 | `"a \(b) c"` | `str.concat(["a ", Display.show(b), " c"])` |

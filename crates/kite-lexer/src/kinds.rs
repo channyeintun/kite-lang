@@ -56,9 +56,6 @@ pub enum TokenKind {
     FatArrow,
     At,
     Underscore,
-    Question,
-    QuestionDot,
-    QuestionQuestion,
     Slash,
     Plus,
     Minus,
@@ -109,8 +106,8 @@ impl TokenKind {
             | Amp | AmpAmp | Pipe | PipePipe | Caret | Shl | Shr
             | Eq | EqEq | Ne | Lt | Le | Gt | Ge
             | PlusEq | MinusEq | StarEq | SlashEq | PercentEq
-            | QuestionQuestion | Bang
-            | Dot | QuestionDot | DotDot | DotDotEq
+            | Bang
+            | Dot | DotDot | DotDotEq
             // a keyword that cannot end a statement
             | Return | As | In | Check | Await | Else
         )
@@ -198,9 +195,6 @@ impl TokenKind {
             FatArrow => "=>",
             At => "@",
             Underscore => "_",
-            Question => "?",
-            QuestionDot => "?.",
-            QuestionQuestion => "??",
             Slash => "/",
             Plus => "+",
             Minus => "-",
@@ -281,8 +275,6 @@ pub const PUNCT: &[(&str, TokenKind)] = &[
     ("..=", TokenKind::DotDotEq),
     ("<<", TokenKind::Shl),
     (">>", TokenKind::Shr),
-    ("?.", TokenKind::QuestionDot),
-    ("??", TokenKind::QuestionQuestion),
     ("->", TokenKind::Arrow),
     ("=>", TokenKind::FatArrow),
     ("==", TokenKind::EqEq),
@@ -307,7 +299,6 @@ pub const PUNCT: &[(&str, TokenKind)] = &[
     (":", TokenKind::Colon),
     (".", TokenKind::Dot),
     ("@", TokenKind::At),
-    ("?", TokenKind::Question),
     ("+", TokenKind::Plus),
     ("-", TokenKind::Minus),
     ("*", TokenKind::Star),

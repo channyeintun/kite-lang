@@ -1,0 +1,35 @@
+// Errors are ordinary values. The compiler will not let you read a result
+// before you have checked the error that came with it.
+
+fn divide(a: int, b: int) -> (int, error) {
+    if b == 0 {
+        return _, errors.new("division by zero")
+    }
+    return a / b, nil
+}
+
+// `check` is exactly `if err != nil { return _, err }`. It occupies its own
+// line, so you can scan the left margin and see every place this can fail.
+fn ratio(a: int, b: int) -> (int, error) {
+    let (q, err) = divide(a, b)
+    check err
+
+    let (scaled, err) = divide(q * 1000, 10)
+    check err
+
+    return scaled, nil
+}
+
+fn report(a: int, b: int) {
+    let (r, err) = ratio(a, b)
+    if err != nil {
+        io.print("failed: " + err.message())
+    } else {
+        io.print(r)
+    }
+}
+
+fn main() {
+    report(10, 2)
+    report(10, 0)
+}

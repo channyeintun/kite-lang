@@ -478,7 +478,7 @@ pub fn should_separate(prev: TokenKind, next: TokenKind) -> bool {
         return false;
     }
     // Leading-dot method chaining.
-    if matches!(next, TokenKind::Dot | TokenKind::QuestionDot) {
+    if next == TokenKind::Dot {
         return false;
     }
     // `}` newline `else` is one statement.

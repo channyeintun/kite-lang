@@ -276,7 +276,8 @@ impl RetType {
 pub enum Type {
     /// `int`, `Point`, `Cache<K, V>`, `mod.Type`
     Path(TypePath),
-    /// `?T`
+    /// `Option<T>`. Spelled as a word rather than a sigil: Kite has no `?`
+    /// operator of any kind, and a type that may be absent should say so.
     Optional { inner: Box<Type>, span: Span },
     /// `[T]`
     Slice { elem: Box<Type>, span: Span },
@@ -542,7 +543,7 @@ pub enum Expr {
         arg_names: Vec<Option<Ident>>,
         span: Span,
     },
-    Field { base: Box<Expr>, name: Ident, optional: bool, span: Span },
+    Field { base: Box<Expr>, name: Ident, span: Span },
     Index { base: Box<Expr>, index: Box<Expr>, span: Span },
     Range { start: Box<Expr>, end: Box<Expr>, inclusive: bool, span: Span },
     /// `if c { a } else { b }` used for its value.
@@ -728,7 +729,7 @@ impl Expr {
     pub fn is_place(&self) -> bool {
         match self {
             Expr::Path(p) => p.is_simple(),
-            Expr::Field { optional, .. } => !optional,
+            Expr::Field { .. } => true,
             Expr::Index { .. } => true,
             _ => false,
         }
@@ -829,8 +830,6 @@ pub enum BinaryOp {
     Ge,
     And,
     Or,
-    /// `??` — "or else this". Works on both `?T` and `(T, error)`.
-    Coalesce,
 }
 
 impl BinaryOp {
@@ -855,7 +854,6 @@ impl BinaryOp {
             Ge => ">=",
             And => "&&",
             Or => "||",
-            Coalesce => "??",
         }
     }
 

@@ -140,6 +140,9 @@ pub enum Stmt {
     Loop { body: Block, label: Option<String>, span: Span },
     Break { label: Option<String>, span: Span },
     Continue { label: Option<String>, span: Span },
+    /// A group of statements the checker emitted for one source statement, such
+    /// as the three bindings a `let (v, err) = f()` expands to.
+    Block(Block),
 }
 
 // ---------------------------------------------------------------------------
@@ -177,12 +180,22 @@ pub enum ExprKind {
     /// Exhaustive by construction: the checker has already proved every value
     /// is covered, so lowering needs no fallback arm.
     Match { scrutinee: Box<Expr>, arms: Vec<MatchArm> },
+    /// `(value, err)` — the result of a fallible function.
+    PairNew { value: Box<Expr>, error: Box<Expr> },
+    /// The value slot of a correlated pair. Only emitted where the taint
+    /// analysis has proved the error was checked and found nil.
+    PairValue { base: Box<Expr> },
+    /// The error slot of a correlated pair.
+    PairError { base: Box<Expr> },
+    /// `errors.new("...")`
+    ErrorNew { message: Box<Expr> },
+    /// `err.message()`
+    ErrorMessage { base: Box<Expr> },
     /// The absent optional. Only ever produced where the type is `?T`; Kite
     /// has no null anywhere else.
     Nil,
-    /// `a ?? b` — "or else this". Evaluates `b` only when `a` is nil.
-    Coalesce { value: Box<Expr>, default: Box<Expr> },
-    /// Tests for nil, used by `??`, `?.`, and `nil` patterns.
+    /// Tests for nil. Used by `check`, `nil` patterns, and the narrowing an
+    /// inline `if` performs.
     IsNil { value: Box<Expr> },
     /// `[1, 2, 3]`
     SliceNew { elems: Vec<Expr> },
@@ -430,6 +443,12 @@ impl Program {
                 indent(f, depth)?;
                 writeln!(f, "}}")
             }
+            Stmt::Block(b) => {
+                writeln!(f, "{{")?;
+                self.write_block(f, b, depth + 1)?;
+                indent(f, depth)?;
+                writeln!(f, "}}")
+            }
             Stmt::Break { .. } => writeln!(f, "break"),
             Stmt::Continue { .. } => writeln!(f, "continue"),
         }
@@ -487,9 +506,13 @@ impl Program {
                 format!("{}[{}]", self.expr(base), self.expr(index))
             }
             ExprKind::Nil => "nil".to_string(),
-            ExprKind::Coalesce { value, default } => {
-                format!("({} ?? {})", self.expr(value), self.expr(default))
+            ExprKind::PairNew { value, error } => {
+                format!("({}, {})", self.expr(value), self.expr(error))
             }
+            ExprKind::PairValue { base } => format!("{}.0", self.expr(base)),
+            ExprKind::PairError { base } => format!("{}.1", self.expr(base)),
+            ExprKind::ErrorNew { message } => format!("errors.new({})", self.expr(message)),
+            ExprKind::ErrorMessage { base } => format!("{}.message()", self.expr(base)),
             ExprKind::IsNil { value } => format!("(is-nil {})", self.expr(value)),
             ExprKind::SliceLen { base } => format!("{}.len()", self.expr(base)),
             ExprKind::SliceGet { base, index } => {

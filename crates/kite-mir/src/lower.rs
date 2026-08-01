@@ -165,6 +165,7 @@ impl<'a> FnLowerer<'a> {
                 let v = self.rvalue(value);
                 self.assign(Local(local.0), v);
             }
+            hir::Stmt::Block(b) => self.block(b),
             hir::Stmt::SetIndex { base, index, value, .. } => {
                 let b = self.operand(base);
                 let i = self.operand(index);
@@ -482,6 +483,27 @@ impl<'a> FnLowerer<'a> {
                 let args = args.iter().map(|a| self.operand(a)).collect();
                 Rvalue::CallBuiltin { builtin: *builtin, args }
             }
+            hir::ExprKind::PairNew { value, error } => {
+                let v = self.operand(value);
+                let e = self.operand(error);
+                Rvalue::PairNew { value: v, error: e }
+            }
+            hir::ExprKind::PairValue { base } => {
+                let b = self.operand(base);
+                Rvalue::PairValue { base: b }
+            }
+            hir::ExprKind::PairError { base } => {
+                let b = self.operand(base);
+                Rvalue::PairError { base: b }
+            }
+            hir::ExprKind::ErrorNew { message } => {
+                let m = self.operand(message);
+                Rvalue::ErrorNew { message: m }
+            }
+            hir::ExprKind::ErrorMessage { base } => {
+                let b = self.operand(base);
+                Rvalue::ErrorMessage { base: b }
+            }
             hir::ExprKind::IsNil { value } => {
                 let v = self.operand(value);
                 Rvalue::IsNil { value: v }
@@ -531,9 +553,6 @@ impl<'a> FnLowerer<'a> {
             hir::ExprKind::Local(l) => Operand::Local(Local(l.0)),
             hir::ExprKind::Error => Operand::Unit,
             hir::ExprKind::Nil => Operand::Nil,
-            hir::ExprKind::Coalesce { value, default } => {
-                Operand::Local(self.coalesce(value, default, e.ty))
-            }
 
             hir::ExprKind::If { cond, then, else_ } => {
                 Operand::Local(self.if_expr(cond, then, else_, e.ty))
@@ -851,32 +870,6 @@ impl<'a> FnLowerer<'a> {
         let slot = self.temp(Ty::ERROR);
         self.assign(slot, Rvalue::FieldGet { base: subject.clone(), index });
         self.bind_pattern(sub, &Operand::Local(slot));
-    }
-
-    /// `a ?? b` evaluates `b` only when `a` is nil, so it becomes a branch.
-    fn coalesce(&mut self, value: &hir::Expr, default: &hir::Expr, ty: Ty) -> Local {
-        let result = self.temp(ty);
-        let v = self.operand(value);
-        self.assign(result, Rvalue::Use(v.clone()));
-
-        let is_nil = self.temp(Ty::BOOL);
-        self.assign(is_nil, Rvalue::IsNil { value: v });
-
-        let fallback = self.new_block();
-        let join = self.new_block();
-        self.terminate(Terminator::Branch {
-            cond: Operand::Local(is_nil),
-            then: fallback,
-            else_: join,
-        });
-
-        self.switch_to(fallback);
-        let d = self.operand(default);
-        self.assign(result, Rvalue::Use(d));
-        self.terminate(Terminator::Goto(join));
-
-        self.switch_to(join);
-        result
     }
 
     /// `a && b` must not evaluate `b` when `a` is false, so it becomes a

@@ -144,13 +144,14 @@ codes! {
          This is the flaw Kite fixes in Go's error convention. In Go the value \
          on a failure path is the zero value, which flows onward looking \
          valid. In Kite there is no value on that path at all.\n\n\
-         Write `check err` to propagate, or test the error explicitly.";
+         Write `check err` to propagate, or test `err != nil` explicitly — in the          branch where the error is nil, the value becomes readable.";
 
     E0302 = "E0302", "error is never checked",
         "An `error` binding went out of scope without being inspected. Silently \
          dropping errors is the single most common source of production \
          failures in languages that permit it.\n\n\
-         To handle by defaulting, use `??`. To propagate, use `check`.";
+         To propagate, write `check`. To handle it where it happened, test \
+         `err != nil`.";
 
     E0303 = "E0303", "`check` outside a fallible function",
         "`check` returns the error to the caller, so the enclosing function \

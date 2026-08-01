@@ -49,6 +49,11 @@ pub enum Op {
     LoadUnit { dst: Reg },
     LoadNil { dst: Reg },
     IsNil { dst: Reg, obj: Reg },
+    NewPair { dst: Reg, value: Reg, error: Reg },
+    PairValue { dst: Reg, obj: Reg },
+    PairError { dst: Reg, obj: Reg },
+    NewError { dst: Reg, message: Reg },
+    ErrorMessage { dst: Reg, obj: Reg },
     Move { dst: Reg, src: Reg },
 
     // ---- arithmetic -------------------------------------------------------
@@ -246,6 +251,13 @@ impl fmt::Display for Op {
             LoadUnit { dst } => write!(f, "{:<12} r{}", "load.unit", dst),
             LoadNil { dst } => write!(f, "{:<12} r{}", "load.nil", dst),
             IsNil { dst, obj } => write!(f, "{:<12} r{}, r{}", "is.nil", dst, obj),
+            NewPair { dst, value, error } => {
+                write!(f, "{:<12} r{}, r{}, r{}", "new.pair", dst, value, error)
+            }
+            PairValue { dst, obj } => write!(f, "{:<12} r{}, r{}", "pair.value", dst, obj),
+            PairError { dst, obj } => write!(f, "{:<12} r{}, r{}", "pair.error", dst, obj),
+            NewError { dst, message } => write!(f, "{:<12} r{}, r{}", "new.error", dst, message),
+            ErrorMessage { dst, obj } => write!(f, "{:<12} r{}, r{}", "err.message", dst, obj),
             Move { dst, src } => write!(f, "{:<12} r{}, r{}", "move", dst, src),
 
             AddInt { dst, a, b } => bin(f, "add.int", dst, a, b),

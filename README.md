@@ -99,7 +99,7 @@ cargo run --bin kitec -- run examples/structs.kite  # structs and methods
 ```
 
 Working today: `int`/`float`/`bool`/`str`, functions, `let`/`var`,
-`if`/`else`, the three `for` forms with labelled `break`/`continue`, structs
+`if`/`else` (also an expression), the three `for` forms with labelled `break`/`continue`, structs
 with methods and associated functions, enums with named and positional
 payloads, `match` with guards, alternation, ranges, and struct patterns,
 exhaustiveness checking that names the missing variants, and traits with

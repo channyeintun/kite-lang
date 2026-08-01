@@ -200,11 +200,11 @@ GC-managed UTF-8 byte array. Kite programs cannot observe the difference:
 ### 3.2 Composite types
 
 ```kite
-[T]           // slice — growable, GC-managed sequence
+[T]           // slice — a copy-on-write sequence
 [N]T          // array — fixed length N, known at compile time
 {K: V}        // map — hash map with deterministic iteration order
 (A, B, C)     // tuple
-?T            // optional — either a T or nil
+Option<T>     // optional — either a T or nil
 fn(A, B) -> C // function type
 ```
 
@@ -214,25 +214,33 @@ about and removes an entire class of nondeterministic test failure.
 
 ### 3.3 Optionals
 
-`?T` is the only place `nil` may appear other than the `error` slot
+`Option<T>` is the only place `nil` may appear other than the `error` slot
 ([§7](#7-error-handling)). There is no null reference. A `Config` is always a
-`Config`; a `?Config` might be nil, and the compiler will not let you use it as a
-`Config` until you have handled that.
+`Config`; an `Option<Config>` might be nil, and the compiler will not let you use
+it as a `Config` until you have handled that.
+
+**There is no `?` in Kite.** No optional chaining, no coalescing operator, no
+ternary. Each of those is a sigil that hides a branch, and hidden control flow is
+the thing this language exists to remove. An `if` expression does the same work
+in the open:
 
 ```kite
-let maybe: ?User = users.find(id)
+let maybe: Option<User> = users.find(id)
 
-let name = maybe?.name              // ?str — optional chaining
-let display = maybe?.name ?? "anon" // str — default operator
+// The compiler narrows `maybe` to `User` in the branch where it cannot be nil.
+let name = if maybe == nil { "anon" } else { maybe.name }
 
 match maybe {
     nil  => io.print("not found"),
-    user => io.print(user.name),    // `user` is bound as User, not ?User
+    user => io.print(user.name),    // `user` is bound as User, not Option<User>
 }
 ```
 
-`??` also works on fallible results ([§7.5](#75-defaulting)), where it means the
-same thing: *"or else this."*
+**Narrowing** is what makes this ergonomic rather than tedious. Testing an
+optional against `nil` narrows it to the unwrapped type on the branch where it
+cannot be absent — in the `else` of `x == nil`, and in the `then` of `x != nil`.
+The same narrowing applies in a `match` arm once an earlier arm has covered
+`nil`.
 
 ### 3.4 Type declarations
 
@@ -371,7 +379,7 @@ Highest to lowest:
 
 | Level | Operators | Associativity |
 |---|---|---|
-| 1 | `a.b`  `a?.b`  `a(…)`  `a[…]` | left |
+| 1 | `a.b`  `a(…)`  `a[…]` | left |
 | 2 | `-a`  `!a` | prefix |
 | 3 | `as` | left |
 | 4 | `*`  `/`  `%` | left |
@@ -381,7 +389,7 @@ Highest to lowest:
 | 8 | `==` `!=` `<` `<=` `>` `>=` | non-associative |
 | 9 | `&&` | left |
 | 10 | `\|\|` | left |
-| 11 | `??` | right |
+
 
 Bitwise operators bind tighter than comparison, unlike C. `a & b == c` means
 `(a & b) == c`, which is what everyone intends and C gets wrong. Comparison is
@@ -545,11 +553,11 @@ the shape is worth keeping and the enforcement is worth adding.
 ```kite
 pub trait Error {
     fn message(self) -> str
-    fn cause(self) -> ?error { return nil }
+    fn cause(self) -> Option<error> { return nil }
 }
 ```
 
-`error` is a built-in alias for `?dyn Error`: either `nil`, or some value
+`error` is a built-in nil-able type — either nil, or a value describing a failure. Once trait objects land it becomes an alias for `Option<dyn Error>`: either `nil`, or some value
 implementing `Error`. Any type can implement `Error`.
 
 ```kite
@@ -681,17 +689,19 @@ Rebinding `err` in the same scope is permitted, and is the one exception to the
 same-scope shadowing rule in [§4.1](#41-bindings) — but only because the previous
 `err` is provably Checked at that point.
 
-### 7.5 Defaulting
+### 7.5 Handling a failure in place
 
-To handle a failure by substituting a value, discarding the error deliberately:
+To handle a failure rather than propagate it, test the error. In the branch where
+it is nil, the value becomes readable:
 
 ```kite
-let port = config.get_int("port") ?? 8080
+let (port, err) = config.get_int("port")
+let port = if err != nil { 8080 } else { port }
 ```
 
-`??` on a `(T, error)` evaluates the left side; if the error is nil it yields the
-value, otherwise it yields the right side. The error is discarded, and this is
-visible in the source.
+There is deliberately no defaulting operator. A `??` would hide the branch, and
+the whole point of the taint analysis is that every failure path is visible on
+the line where it happens.
 
 ### 7.6 Adding context
 
@@ -1301,6 +1311,7 @@ being re-litigated, and makes it clear when a decision should be revisited.
 
 | Omitted | Reasoning |
 |---|---|
+| `?` in any form | No optional chaining, no coalescing, no ternary. Every one hides a branch behind a sigil. An `if` expression, with narrowing, does the same work in the open. |
 | Exceptions | A second, invisible control-flow graph. Errors are values. |
 | `panic` / `recover` | Same reason. Unrecoverable failures trap. |
 | Inheritance | Composition plus traits covers the cases; inheritance adds a mutable, non-local type hierarchy. |
@@ -1321,7 +1332,7 @@ being re-litigated, and makes it clear when a decision should be revisited.
 | Postfix `?` for errors | Permits failure to hide mid-expression. `check` occupies its own line. |
 | Block comments | Nesting bugs, no benefit over line comments. |
 | `while` | `for cond {}` covers it. |
-| Ternary `?:` | `if` is an expression. |
+| Ternary `?:` | `if` is an expression, and it reads as English. |
 
 ---
 
@@ -1404,7 +1415,11 @@ pub async fn main() {
         io.print(task.show())
     }
 
-    let count = await sync(tasks, "https://api.example.com/tasks") ?? 0
+    let (count, err) = await sync(tasks, "https://api.example.com/tasks")
+    if err != nil {
+        io.error("sync failed: \(err.message())")
+        return
+    }
     io.print("synced \(count) tasks")
 }
 ```

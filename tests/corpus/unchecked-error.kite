@@ -1,0 +1,8 @@
+fn load() -> (int, error) {
+    return 1, nil
+}
+
+fn main() {
+    let (v, err) = load()   //~ ERROR E0302
+    io.print(1)
+}

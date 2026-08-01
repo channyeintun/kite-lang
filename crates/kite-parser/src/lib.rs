@@ -640,12 +640,6 @@ impl<'a> Parser<'a> {
     fn parse_type(&mut self) -> Option<Type> {
         let start = self.span();
         match self.peek() {
-            T::Question => {
-                self.bump();
-                let inner = self.parse_type()?;
-                let span = start.to(inner.span());
-                Some(Type::Optional { inner: Box::new(inner), span })
-            }
             T::LBracket => {
                 self.bump();
                 let elem = self.parse_type()?;
@@ -696,6 +690,15 @@ impl<'a> Parser<'a> {
                     None
                 };
                 Some(Type::Fn { params, ret, span: start.to(self.prev_span()) })
+            }
+            // `Option<T>` is the only built-in generic spelling for now, and
+            // the language has no `?` sigil at all.
+            T::Ident if self.text_at(self.pos) == "Option" && self.peek_at(1) == T::Lt => {
+                self.bump();
+                self.bump();
+                let inner = self.parse_type()?;
+                let end = self.expect(T::Gt)?;
+                Some(Type::Optional { inner: Box::new(inner), span: start.to(end) })
             }
             T::Ident if self.text_at(self.pos) == "dyn" => {
                 self.bump();
@@ -1366,8 +1369,7 @@ impl<'a> Parser<'a> {
     fn parse_postfix(&mut self, mut expr: Expr) -> Option<Expr> {
         loop {
             match self.peek() {
-                T::Dot | T::QuestionDot => {
-                    let optional = self.at(T::QuestionDot);
+                T::Dot => {
                     self.bump();
                     let name = self.ident()?;
                     let span = expr.span().to(name.span);
@@ -1375,12 +1377,7 @@ impl<'a> Parser<'a> {
                     // really a module path rather than a field of a local is a
                     // resolution question, not a syntactic one, so the resolver
                     // decides and records its answer against this span.
-                    expr = Expr::Field {
-                        base: Box::new(expr),
-                        name,
-                        optional,
-                        span,
-                    };
+                    expr = Expr::Field { base: Box::new(expr), name, span };
                 }
                 T::LParen => {
                     self.bump();

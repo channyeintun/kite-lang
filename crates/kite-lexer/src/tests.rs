@@ -231,10 +231,20 @@ fn file_without_trailing_newline_still_ends_cleanly() {
 
 // ---- punctuation ----------------------------------------------------------
 
+/// `?` is not a token in Kite at all — no optional chaining, no coalescing,
+/// no ternary. An inline `if` expression does that work in the open.
+#[test]
+fn question_mark_is_not_a_token() {
+    let (_, d) = lex("a ? b");
+    assert!(
+        d.iter().any(|x| x.code == Some(codes::E0002)),
+        "`?` should not lex"
+    );
+}
+
 #[test]
 fn maximal_munch_on_multi_character_operators() {
     assert_eq!(bare("..= .. ."), vec![T::DotDotEq, T::DotDot, T::Dot]);
-    assert_eq!(bare("?? ?. ?"), vec![T::QuestionQuestion, T::QuestionDot, T::Question]);
     assert_eq!(bare("== = =>"), vec![T::EqEq, T::Eq, T::FatArrow]);
     assert_eq!(bare("<= << <"), vec![T::Le, T::Shl, T::Lt]);
     assert_eq!(bare("-> - -="), vec![T::Arrow, T::Minus, T::MinusEq]);

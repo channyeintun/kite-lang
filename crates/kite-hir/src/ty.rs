@@ -41,8 +41,11 @@ impl TyId {
     pub const STR: TyId = TyId(4);
     pub const NEVER: TyId = TyId(5);
     pub const ERROR: TyId = TyId(6);
+    /// The `error` type. Distinct from [`TyId::ERROR`], which is compiler
+    /// poison: this one is a value a program can hold.
+    pub const ERR: TyId = TyId(7);
 
-    const PRIMITIVE_COUNT: usize = 7;
+    const PRIMITIVE_COUNT: usize = 8;
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -61,6 +64,13 @@ pub enum TyKind {
     /// Poison, produced where an error was already reported. Compatible with
     /// everything so one mistake yields one diagnostic.
     Error,
+    /// The `error` type: nil, or a value describing a failure. Kite's errors
+    /// are ordinary values, never exceptions.
+    Err,
+    /// The result of a fallible function, `(T, error)`. A **correlated pair**:
+    /// the value is only meaningful when the error is nil, which is what the
+    /// taint analysis enforces.
+    Fallible(TyId),
 
     Struct(StructId),
     Enum(EnumId),
@@ -196,6 +206,7 @@ impl Types {
             TyKind::Str,
             TyKind::Never,
             TyKind::Error,
+            TyKind::Err,
         ];
         debug_assert_eq!(kinds.len(), TyId::PRIMITIVE_COUNT);
         let index = kinds
@@ -231,7 +242,8 @@ impl Types {
     }
 
     pub fn optional_of(&mut self, inner: TyId) -> TyId {
-        // `??T` is just `?T`; flattening keeps the representation canonical.
+        // `Option<Option<T>>` is just `Option<T>`; flattening keeps the
+        // representation canonical.
         match self.kind(inner) {
             TyKind::Optional(_) => inner,
             _ => self.intern(TyKind::Optional(inner)),
@@ -256,6 +268,18 @@ impl Types {
 
     pub fn dyn_ty(&mut self, id: TraitId) -> TyId {
         self.intern(TyKind::Dyn(id))
+    }
+
+    pub fn fallible_of(&mut self, value: TyId) -> TyId {
+        self.intern(TyKind::Fallible(value))
+    }
+
+    /// The value type carried by a fallible result.
+    pub fn fallible_value(&self, id: TyId) -> Option<TyId> {
+        match self.kind(id) {
+            TyKind::Fallible(v) => Some(*v),
+            _ => None,
+        }
     }
 
     // ---- nominal declarations --------------------------------------------
@@ -351,7 +375,12 @@ impl Types {
         // a conversion: the value is unchanged and nothing is lost. Without it
         // every optional would need an explicit wrap at every site, which is
         // why every language with optionals has this rule.
-        matches!(self.kind(expected), TyKind::Optional(inner) if *inner == found)
+        if matches!(self.kind(expected), TyKind::Optional(inner) if *inner == found) {
+            return true;
+        }
+        // `error` is itself nil-able: nil *is* the no-error value. That is what
+        // makes `return value, nil` read the way it does.
+        expected == TyId::ERR && found == TyId::ERROR
     }
 
     pub fn is_poisoned(&self, id: TyId) -> bool {
@@ -366,7 +395,7 @@ impl Types {
     /// specification: two structs are equal when their fields are.
     pub fn is_equatable(&self, id: TyId) -> bool {
         match self.kind(id) {
-            TyKind::Int | TyKind::Float | TyKind::Bool | TyKind::Str => true,
+            TyKind::Int | TyKind::Float | TyKind::Bool | TyKind::Str | TyKind::Err => true,
             TyKind::Optional(inner) => self.is_equatable(*inner),
             TyKind::Slice(elem) => self.is_equatable(*elem),
             TyKind::Tuple(elems) => elems.iter().all(|e| self.is_equatable(*e)),
@@ -440,7 +469,8 @@ impl Types {
             | TyKind::Float
             | TyKind::Str
             | TyKind::Never
-            | TyKind::Error => true,
+            | TyKind::Error
+            | TyKind::Err => true,
             // Slices are copy-on-write *values*, not shared references, so a
             // slice is shareable exactly when its elements are. This is what
             // keeps ordinary data types `Share` without the author noticing.
@@ -462,6 +492,7 @@ impl Types {
             // A closure may capture a mutable binding, and a trait object's
             // concrete type is not known here.
             TyKind::Fn { .. } | TyKind::Dyn(_) => false,
+            TyKind::Fallible(v) => self.is_share_inner(*v, visiting),
             TyKind::Param { .. } => false,
         };
         visiting.pop();
@@ -480,11 +511,13 @@ impl Types {
             TyKind::Str => "str".into(),
             TyKind::Never => "!".into(),
             TyKind::Error => "<error>".into(),
+            TyKind::Err => "error".into(),
+            TyKind::Fallible(v) => format!("({}, error)", self.name(*v)),
             TyKind::Struct(s) => self.struct_def(*s).name.clone(),
             TyKind::Enum(e) => self.enum_def(*e).name.clone(),
             TyKind::Slice(t) => format!("[{}]", self.name(*t)),
             TyKind::Map(k, v) => format!("{{{}: {}}}", self.name(*k), self.name(*v)),
-            TyKind::Optional(t) => format!("?{}", self.name(*t)),
+            TyKind::Optional(t) => format!("Option<{}>", self.name(*t)),
             TyKind::Tuple(ts) => {
                 let inner: Vec<String> = ts.iter().map(|t| self.name(*t)).collect();
                 format!("({})", inner.join(", "))
@@ -533,11 +566,12 @@ impl Types {
             "int" => TyId::INT,
             "float" => TyId::FLOAT,
             "str" => TyId::STR,
+            "error" => TyId::ERR,
             _ => return None,
         })
     }
 
-    pub const PRIMITIVE_NAMES: [&'static str; 4] = ["bool", "int", "float", "str"];
+    pub const PRIMITIVE_NAMES: [&'static str; 5] = ["bool", "int", "float", "str", "error"];
 }
 
 #[cfg(test)]
@@ -571,7 +605,7 @@ mod tests {
         let mut t = Types::new();
         let a = t.optional_of(TyId::INT);
         let b = t.optional_of(a);
-        assert_eq!(a, b, "`??T` must canonicalise to `?T`");
+        assert_eq!(a, b, "`Option<Option<T>>` must canonicalise to `Option<T>`");
     }
 
     #[test]
@@ -611,7 +645,7 @@ mod tests {
         let m = t.map_of(TyId::STR, TyId::INT);
         assert_eq!(t.name(m), "{str: int}");
         let o = t.optional_of(TyId::STR);
-        assert_eq!(t.name(o), "?str");
+        assert_eq!(t.name(o), "Option<str>");
         let tup = t.tuple_of(vec![TyId::INT, TyId::BOOL]);
         assert_eq!(t.name(tup), "(int, bool)");
         let f = t.fn_of(vec![TyId::INT], TyId::STR);

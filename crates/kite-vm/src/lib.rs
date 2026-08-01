@@ -37,6 +37,12 @@ pub enum Value {
     /// value semantics without copying on every assignment, and what keeps it
     /// `Share` when `T` is.
     Slice(Rc<Vec<Value>>),
+    /// The result of a fallible function. The value slot holds `Nil` on the
+    /// error path — but the taint analysis has already proved no program can
+    /// read it there, so it is never observed.
+    Pair(Rc<(Value, Value)>),
+    /// An error value: a message. Kite errors are ordinary values.
+    Err(Rc<str>),
     /// `nil`, or a present optional. Only ever produced where the type is
     /// `?T`; Kite has no null anywhere else.
     Nil,
@@ -72,6 +78,8 @@ impl PartialEq for Value {
                 a.enum_id == b.enum_id && a.variant == b.variant && a.fields == b.fields
             }
             (Value::Slice(a), Value::Slice(b)) => a == b,
+            (Value::Pair(a), Value::Pair(b)) => a == b,
+            (Value::Err(a), Value::Err(b)) => a == b,
             (Value::Nil, Value::Nil) => true,
             _ => false,
         }
@@ -89,6 +97,8 @@ impl Value {
             Value::Struct(_) => "struct",
             Value::Enum(_) => "enum",
             Value::Slice(_) => "slice",
+            Value::Pair(_) => "(T, error)",
+            Value::Err(_) => "error",
             Value::Nil => "nil",
         }
     }
@@ -144,6 +154,8 @@ impl fmt::Display for Value {
                 }
                 write!(f, "]")
             }
+            Value::Pair(p) => write!(f, "({}, {})", p.0, p.1),
+            Value::Err(m) => write!(f, "{}", m),
             Value::Nil => write!(f, "nil"),
         }
     }
@@ -279,6 +291,57 @@ impl<'a> Vm<'a> {
                 Op::LoadBool { dst, value } => self.set(base, dst, Value::Bool(value)),
                 Op::LoadUnit { dst } => self.set(base, dst, Value::Unit),
                 Op::LoadNil { dst } => self.set(base, dst, Value::Nil),
+                Op::NewPair { dst, value, error } => {
+                    let v = self.get(base, value);
+                    let e = self.get(base, error);
+                    self.set(base, dst, Value::Pair(Rc::new((v, e))));
+                }
+                Op::PairValue { dst, obj } => match self.get(base, obj) {
+                    Value::Pair(p) => {
+                        let v = p.0.clone();
+                        self.set(base, dst, v);
+                    }
+                    other => {
+                        return Err(Trap::TypeConfusion {
+                            op: "value of a fallible result",
+                            found: other.type_name(),
+                        })
+                    }
+                },
+                Op::PairError { dst, obj } => match self.get(base, obj) {
+                    Value::Pair(p) => {
+                        let e = p.1.clone();
+                        self.set(base, dst, e);
+                    }
+                    other => {
+                        return Err(Trap::TypeConfusion {
+                            op: "error of a fallible result",
+                            found: other.type_name(),
+                        })
+                    }
+                },
+                Op::NewError { dst, message } => {
+                    let m = match self.get(base, message) {
+                        Value::Str(s) => s,
+                        other => {
+                            return Err(Trap::TypeConfusion {
+                                op: "errors.new",
+                                found: other.type_name(),
+                            })
+                        }
+                    };
+                    self.set(base, dst, Value::Err(m));
+                }
+                Op::ErrorMessage { dst, obj } => match self.get(base, obj) {
+                    Value::Err(m) => self.set(base, dst, Value::Str(m)),
+                    Value::Nil => self.set(base, dst, Value::Str(Rc::from(""))),
+                    other => {
+                        return Err(Trap::TypeConfusion {
+                            op: "message",
+                            found: other.type_name(),
+                        })
+                    }
+                },
                 Op::IsNil { dst, obj } => {
                     let v = matches!(self.get(base, obj), Value::Nil);
                     self.set(base, dst, Value::Bool(v));
