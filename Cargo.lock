@@ -184,6 +184,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kite-playground"
+version = "0.1.0"
+dependencies = [
+ "kite-doc",
+ "kite-driver",
+ "kite-fmt",
+]
+
+[[package]]
 name = "kite-resolve"
 version = "0.1.0"
 dependencies = [

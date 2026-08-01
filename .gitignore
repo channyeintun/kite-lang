@@ -2,3 +2,10 @@
 **/*.rs.bk
 Cargo.lock.bak
 .DS_Store
+
+# The site's generated files: built by site/build.sh from the sources above.
+site/kite_playground.wasm
+site/reference/
+site/docs/
+site/SPECIFICATION.md
+site/README.md

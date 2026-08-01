@@ -1,0 +1,16 @@
+[package]
+name = "kite-playground"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The Kite compiler, compiled to WebAssembly for the playground"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kite-driver.workspace = true
+kite-fmt.workspace = true
+kite-doc.workspace = true

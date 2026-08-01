@@ -17,6 +17,7 @@ members = [
     "crates/kite-vm",
     "crates/kite-driver",
     "crates/kite-lsp",
+    "crates/kite-playground",
     "bin/kitec",
 ]
 

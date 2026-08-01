@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kite</title>
+<link rel="stylesheet" href="kite.css">
+</head>
+<body>
+<header>
+  <span class="name">Kite</span>
+  <nav>
+    <a href="index.html">Home</a>
+    <a href="docs.html?doc=SPECIFICATION.md">Specification</a>
+    <a href="reference.html">Reference</a>
+    <a href="playground.html">Playground</a>
+  </nav>
+</header>
+
+<main id="content"><p class="muted">Loading…</p></main>
+
+<script type="module">
+import { markdown } from "./kite.js";
+
+const params = new URLSearchParams(location.search);
+// Only documents shipped with the site: a page that fetched any path a query
+// string named would be a page that reads whatever it is pointed at.
+const ALLOWED = [
+  "SPECIFICATION.md",
+  "docs/01-platform-research.md",
+  "docs/02-concurrency.md",
+  "docs/03-compiler-architecture.md",
+  "docs/04-stdlib-ui.md",
+  "docs/06-roadmap.md",
+  "README.md",
+];
+const doc = params.get("doc") ?? "SPECIFICATION.md";
+const content = document.getElementById("content");
+
+if (!ALLOWED.includes(doc) && !doc.startsWith("reference/")) {
+  content.innerHTML = "<p>No such document.</p>";
+} else {
+  fetch(doc)
+    .then((r) => (r.ok ? r.text() : Promise.reject(new Error(`${r.status}`))))
+    .then((text) => {
+      content.innerHTML = markdown(text);
+      document.title = (content.querySelector("h1")?.textContent ?? "Kite") + " — Kite";
+      if (location.hash) {
+        document.getElementById(location.hash.slice(1))?.scrollIntoView();
+      }
+    })
+    .catch((e) => {
+      content.innerHTML = `<p>Could not load <code>${doc}</code> (${e.message}).</p>`;
+    });
+}
+</script>
+</body>
+</html>

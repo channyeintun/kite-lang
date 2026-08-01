@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Playground — Kite</title>
+<link rel="stylesheet" href="kite.css">
+</head>
+<body>
+<header>
+  <span class="name">Kite</span>
+  <nav>
+    <a href="index.html">Home</a>
+    <a href="docs.html?doc=SPECIFICATION.md">Specification</a>
+    <a href="reference.html">Reference</a>
+    <a href="playground.html">Playground</a>
+  </nav>
+</header>
+
+<main class="wide">
+  <h1>Playground</h1>
+  <p class="lede">
+    This page compiles and runs Kite with no server. The module below
+    <em>is</em> the compiler, built for WebAssembly — the diagnostics are the
+    ones a terminal shows, because they come from the same code.
+  </p>
+
+  <div class="controls">
+    <button id="run" class="primary" disabled>Run</button>
+    <button id="check" disabled>Check</button>
+    <button id="format" disabled>Format</button>
+    <select id="stage">
+      <option value="">Show a stage…</option>
+      <option value="ast">AST</option>
+      <option value="hir">HIR</option>
+      <option value="mir">MIR</option>
+      <option value="kbc">Bytecode</option>
+    </select>
+    <span id="status" class="status">loading the compiler…</span>
+  </div>
+
+  <div class="pad">
+    <textarea id="source" spellcheck="false"></textarea>
+    <div id="out" class="out"></div>
+  </div>
+
+  <div class="samples" id="samples"></div>
+</main>
+
+<script type="module">
+import * as playground from "./playground.js";
+
+const SAMPLES = {
+  "Hello": `fn main() {
+    io.print("hello, world")
+}
+`,
+  "Errors are values": `fn divide(a: int, b: int) -> (int, error) {
+    if b == 0 {
+        return _, errors.new("division by zero")
+    }
+    return a / b, nil
+}
+
+fn main() {
+    let (n, err) = divide(10, 2)
+    check_it(err)
+    io.print(n)
+
+    // Reading \`m\` before checking \`e\` is a compile error: on the failure
+    // path there is no value at all, not a zero.
+    let (m, e) = divide(1, 0)
+    if e != nil {
+        io.print("failed: \\(e.message())")
+    }
+}
+
+fn check_it(err: error) {
+    if err != nil {
+        io.print("unexpected: \\(err.message())")
+    }
+}
+`,
+  "Enums and match": `enum Shape {
+    Circle(radius: float)
+    Rect(width: float, height: float)
+    Point
+}
+
+fn area(s: Shape) -> float {
+    return match s {
+        Circle(r) => 3.14159 * r * r,
+        Rect(w, h) => w * h,
+        Point => 0.0,
+    }
+}
+
+fn main() {
+    for s in [Shape.Circle(radius: 1.0), Shape.Rect(width: 2.0, height: 3.0), Shape.Point] {
+        io.print(area(s))
+    }
+}
+`,
+  "Concurrency": `use std/task
+
+async fn fetch(name: str, ms: int) -> str {
+    await task.sleep(ms)
+    io.print("finished \\(name) at \\(time.now())ms")
+    return name
+}
+
+async fn main() {
+    // Started here, all three at once: this takes 100ms, not 180.
+    let a = fetch("alpha", 100)
+    let b = fetch("beta", 50)
+    let c = fetch("gamma", 30)
+    let (first, second) = await task.both(a, b)
+    io.print("\\(first) \\(second) \\(await c) in \\(time.now())ms")
+}
+`,
+  "Traits": `trait Display2 {
+    fn show(self) -> str
+}
+
+struct Money {
+    pounds: int
+    pence: int
+}
+
+impl Display2 for Money {
+    fn show(self) -> str {
+        return "£\\(self.pounds).\\(self.pence)"
+    }
+}
+
+fn main() {
+    let m = Money{pounds: 4, pence: 50}
+    io.print(m.show())
+}
+`,
+  "Generics": `struct Stack<T> {
+    items: [T]
+}
+
+impl<T> Stack<T> {
+    pub fn push(self, item: T) -> Stack<T> {
+        return Stack{items: concat(self.items, [item])}
+    }
+
+    pub fn depth(self) -> int {
+        return self.items.len()
+    }
+}
+
+fn main() {
+    let s: Stack<int> = Stack{items: []}
+    io.print(s.push(1).push(2).depth())
+}
+`,
+};
+
+const source = document.getElementById("source");
+const out = document.getElementById("out");
+const status = document.getElementById("status");
+const samples = document.getElementById("samples");
+
+for (const [name, text] of Object.entries(SAMPLES)) {
+  const button = document.createElement("button");
+  button.textContent = name;
+  button.onclick = () => {
+    source.value = text;
+    out.textContent = "";
+  };
+  samples.appendChild(button);
+}
+source.value = SAMPLES["Hello"];
+
+const show = (text) => {
+  out.textContent = text === "" ? "(no output)" : text;
+};
+
+playground
+  .load()
+  .then(() => {
+    status.textContent = "ready — nothing here talks to a server";
+    for (const id of ["run", "check", "format"]) {
+      document.getElementById(id).disabled = false;
+    }
+  })
+  .catch((e) => {
+    status.textContent = `could not load the compiler: ${e.message}`;
+  });
+
+document.getElementById("run").onclick = () => show(playground.run(source.value));
+document.getElementById("check").onclick = () => {
+  const text = playground.check(source.value);
+  show(text === "" ? "ok" : text);
+};
+document.getElementById("format").onclick = () => {
+  source.value = playground.format(source.value);
+  show("formatted");
+};
+document.getElementById("stage").onchange = (e) => {
+  if (!e.target.value) return;
+  show(playground.emit(source.value, e.target.value));
+  e.target.value = "";
+};
+
+// Tab inserts four spaces rather than moving focus: this is an editor.
+source.addEventListener("keydown", (e) => {
+  if (e.key !== "Tab") return;
+  e.preventDefault();
+  const at = source.selectionStart;
+  source.value = source.value.slice(0, at) + "    " + source.value.slice(source.selectionEnd);
+  source.selectionStart = source.selectionEnd = at + 4;
+});
+</script>
+</body>
+</html>

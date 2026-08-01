@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kite — a small, explicit language for application software</title>
+<meta name="description" content="Kite is a programming language for building application software, with WebAssembly as its primary target. Errors are values the compiler enforces, concurrency is one concept, and nothing hides control flow.">
+<link rel="stylesheet" href="kite.css">
+</head>
+<body>
+<header>
+  <span class="name">Kite</span>
+  <nav>
+    <a href="index.html">Home</a>
+    <a href="docs.html?doc=SPECIFICATION.md">Specification</a>
+    <a href="reference.html">Reference</a>
+    <a href="playground.html">Playground</a>
+    <a href="docs.html?doc=docs/06-roadmap.md">Roadmap</a>
+  </nav>
+</header>
+
+<main>
+  <h1>A small, explicit language for application software</h1>
+  <p class="lede">
+    WebAssembly is the primary target, not an afterthought. Errors are values
+    and the compiler enforces it. There is one concurrency concept. Nothing
+    hides control flow.
+  </p>
+
+<pre><code class="kite">fn main() {
+    let (cfg, err) = config.load("app.toml")
+    check err
+
+    ui.run(App{ title: cfg.title })
+}
+</code></pre>
+
+  <p>
+    <a href="playground.html">Run Kite in your browser</a> — the playground is
+    the compiler itself, built for WebAssembly. Nothing there talks to a
+    server.
+  </p>
+
+  <h2>Why it exists</h2>
+  <p>
+    JavaScript and TypeScript grew into application development by accident.
+    Every serious web application today ships a compiler, a bundler, a type
+    checker bolted on from outside, a virtual DOM, and a runtime that
+    re-derives structure the compiler already knew and threw away.
+  </p>
+  <p>
+    WebAssembly 3.0 — ratified 13 June 2026 — removed the last technical
+    reason to accept that. It standardises garbage collection, native
+    exception handling, tail calls and typed function references, and all of
+    it is baseline across Chrome, Firefox and Safari. A language targeting
+    Wasm today does not need to ship a garbage collector inside its own
+    binary. That single fact is the difference between a 300 KB "hello world"
+    and a 5 KB one.
+  </p>
+
+  <h2>What is different</h2>
+
+  <h3>An error you have not checked makes the value unreadable</h3>
+  <p>
+    Go's <code>(T, error)</code> shape is right: failures are ordinary values
+    and every one is visible in the source. Its flaw is that nothing enforces
+    it — and the value on a failure path is a zero value that flows onward
+    looking valid.
+  </p>
+<pre><code class="kite">fn load_user(id: int) -> (User, error) {
+    let (raw, err) = db.query("SELECT ...", id)
+    // `raw` cannot be read yet: on the failure path there is no value at all.
+    check err
+    return parse_user(raw)
+}
+</code></pre>
+  <p>
+    Reading <code>raw</code> before the check is <code>E0301</code>. Letting
+    <code>err</code> go out of scope unexamined is <code>E0302</code>.
+  </p>
+
+  <h3>Concurrency is one concept</h3>
+  <p>
+    Some operations take time: mark them <code>async</code> and
+    <code>await</code> them. Calling an <code>async fn</code> starts it and
+    yields a <code>Task&lt;T&gt;</code>, which is how two things happen at
+    once. There are no channels, no goroutines and no <code>select</code>.
+  </p>
+<pre><code class="kite">let a = fetch("alpha", 100)
+let b = fetch("beta", 50)
+let (first, second) = await task.both(a, b)   // 100ms, not 150
+</code></pre>
+  <p>
+    The source never says how many threads exist. <code>Share</code> — a
+    marker the compiler infers structurally — is what will make the same
+    program parallel on the web the day shared-everything-threads ships.
+  </p>
+
+  <h3>Immutable by default</h3>
+  <p>
+    <code>let</code> bindings and struct fields are immutable unless marked
+    <code>var</code>. That maps directly onto WasmGC's per-field mutability
+    flag, removes the value-versus-pointer distinction, and makes most types
+    shareable across tasks without their author doing anything.
+  </p>
+
+  <h3>Diagnostics are the product</h3>
+<pre><code>error[E0114]: cannot assign to immutable binding `total`
+   ┌─ cart.kite:14:5
+   │
+ 9 │     let total = 0
+   │         ----- declared immutable here
+   ⋮
+14 │     total = total + item.price
+   │     ^^^^^ cannot assign
+   │
+help: make the binding mutable
+   │
+ 9 │     var total = 0
+   │     ~~~
+</code></pre>
+  <p>
+    Several decisions in the language — nominal traits, explicit
+    <code>dyn</code>, no implicit conversions, no overloading — were made
+    because they let the compiler name one cause and one fix.
+  </p>
+
+  <h2>Where it runs</h2>
+  <table>
+    <thead><tr><th>Target</th><th>How</th><th>State</th></tr></thead>
+    <tbody>
+      <tr><td><code>wasm32-gc</code></td><td>WasmGC, emitted directly</td><td>Every construct the language has</td></tr>
+      <tr><td><code>kbc</code></td><td>Register bytecode and a VM</td><td>The dev loop, the embedding target, and the differential oracle</td></tr>
+      <tr><td><code>native-*</code></td><td>Cranelift, ahead of time</td><td>Not yet — see the roadmap</td></tr>
+    </tbody>
+  </table>
+  <p>
+    Every program in the test corpus is compiled to <em>both</em> backends,
+    run on both, and the outputs compared. Two independent implementations
+    that must agree is what makes codegen bugs findable.
+  </p>
+
+  <h2>The tools</h2>
+<pre><code>kitec run     file.kite          compile and run
+kitec check   file.kite          check only
+kitec test    file.kite          run every `test_` function
+kitec fmt     file.kite          lay it out the one way
+kitec doc     file.kite          the reference, from the doc comments
+kitec fix     file.kite          apply every machine-applicable suggestion
+kitec build   file.kite --emit wasm --out dist
+kitec --explain E0301            why a rule exists
+</code></pre>
+
+  <h2>Reading order</h2>
+  <ul>
+    <li><a href="docs.html?doc=SPECIFICATION.md">The specification</a> — the language itself.</li>
+    <li><a href="reference.html">The standard library reference</a>, generated from its own source.</li>
+    <li><a href="docs.html?doc=docs/01-platform-research.md">Platform research</a> — what Wasm can and cannot do in 2026, with sources.</li>
+    <li><a href="docs.html?doc=docs/02-concurrency.md">Concurrency</a> — the async model and the <code>Share</code> marker.</li>
+    <li><a href="docs.html?doc=docs/03-compiler-architecture.md">Compiler architecture</a> — crates, IRs, and the WasmGC lowering.</li>
+    <li><a href="docs.html?doc=docs/04-stdlib-ui.md">The UI layer</a> — layout, and the dual DOM/canvas renderer.</li>
+    <li><a href="docs.html?doc=docs/06-roadmap.md">The roadmap</a> — what is done, and what is honestly not.</li>
+  </ul>
+</main>
+
+<script type="module">
+import { colourCodeBlocks } from "./kite.js";
+colourCodeBlocks();
+</script>
+</body>
+</html>
