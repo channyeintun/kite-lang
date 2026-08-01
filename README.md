@@ -38,7 +38,7 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 
 | Commitment | Consequence |
 |---|---|
-| **26 keywords** | Comparable to Go's 25. Every one maps to a concept a beginner must learn anyway. |
+| **27 keywords** | Comparable to Go's 25. Every one maps to a concept a beginner must learn anyway. |
 | **No hidden control flow** | No exceptions, no operator overloading, no implicit conversions, no destructors, no macros. |
 | **Errors are values, and the compiler enforces it** | Go's `(T, error)` shape, but a value returned alongside an unchecked error is *unreadable* until the error is checked. Go's single biggest flaw, removed, without changing how the code looks. |
 | **Immutable by default** | `let` and struct fields are immutable unless marked `var`. This maps directly onto WasmGC's per-field mutability flag, and makes most types automatically safe to share across threads. |

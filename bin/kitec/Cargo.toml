@@ -1,0 +1,17 @@
+[package]
+name = "kitec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The Kite compiler CLI"
+
+[[bin]]
+name = "kitec"
+path = "src/main.rs"
+
+[dependencies]
+kite-driver.workspace = true
+kite-diag.workspace = true
+kite-span.workspace = true

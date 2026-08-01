@@ -291,7 +291,7 @@ DocComment   = "///" { AnyCharButNewline } ;
 
 
 (* ------------------------------------------------------------------
-   Reserved words — 26
+   Reserved words — 27
    ------------------------------------------------------------------ *)
 
 Keyword = "async"  | "await"  | "as"     | "break"  | "check"
@@ -299,7 +299,7 @@ Keyword = "async"  | "await"  | "as"     | "break"  | "check"
         | "fn"     | "for"    | "if"     | "impl"   | "in"
         | "let"    | "match"  | "nil"    | "pub"    | "return"
         | "self"   | "struct" | "trait"  | "true"   | "type"
-        | "use" ;
+        | "use"    | "var" ;
 
 (* Contextual, not reserved — usable as identifiers:
      dyn, error, Self

@@ -101,14 +101,14 @@ identifiers are the same identifier.
 
 ### 2.2 Keywords
 
-Twenty-six, complete:
+Twenty-seven, complete:
 
 ```
 async    await    as       break    check    continue
 defer    else     enum     false    fn       for
 if       impl     in       let      match    nil
 pub      return   self     struct   trait    true
-type     use
+type     use      var
 ```
 
 Notably absent, and deliberately: `class`, `new`, `delete`, `null`, `void`,
@@ -1430,4 +1430,8 @@ pub async fn main() {
 | `self` | Receiver |
 | `use` | Import |
 
-**Total: 26.** Go has 25, C has 32, Rust has 39, Swift has over 90.
+**Total: 27.** Go has 25, C has 32, Rust has 39, Swift has over 90.
+
+The count is asserted by a test: `kinds::KEYWORDS.len() == TokenKind::KEYWORD_COUNT`
+in `crates/kite-lexer`. It cannot drift from the implementation without failing
+the build.

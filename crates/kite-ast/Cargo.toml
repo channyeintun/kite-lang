@@ -1,0 +1,11 @@
+[package]
+name = "kite-ast"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Concrete syntax tree for Kite"
+
+[dependencies]
+kite-span.workspace = true

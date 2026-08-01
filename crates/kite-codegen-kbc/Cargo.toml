@@ -1,0 +1,12 @@
+[package]
+name = "kite-codegen-kbc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Kite bytecode code generator"
+
+[dependencies]
+kite-mir.workspace = true
+kite-types.workspace = true

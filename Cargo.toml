@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kite-span",
+    "crates/kite-diag",
+    "crates/kite-lexer",
+    "crates/kite-ast",
+    "crates/kite-parser",
+    "crates/kite-resolve",
+    "crates/kite-types",
+    "crates/kite-hir",
+    "crates/kite-mir",
+    "crates/kite-codegen-kbc",
+    "crates/kite-vm",
+    "crates/kite-driver",
+    "bin/kitec",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/channyeintun/kite-lang"
+
+[workspace.dependencies]
+kite-span = { path = "crates/kite-span" }
+kite-diag = { path = "crates/kite-diag" }
+kite-lexer = { path = "crates/kite-lexer" }
+kite-ast = { path = "crates/kite-ast" }
+kite-parser = { path = "crates/kite-parser" }
+kite-resolve = { path = "crates/kite-resolve" }
+kite-types = { path = "crates/kite-types" }
+kite-hir = { path = "crates/kite-hir" }
+kite-mir = { path = "crates/kite-mir" }
+kite-codegen-kbc = { path = "crates/kite-codegen-kbc" }
+kite-vm = { path = "crates/kite-vm" }
+kite-driver = { path = "crates/kite-driver" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"

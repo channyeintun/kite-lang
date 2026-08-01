@@ -1,0 +1,14 @@
+[package]
+name = "kite-parser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Recursive-descent and Pratt parser for Kite"
+
+[dependencies]
+kite-span.workspace = true
+kite-diag.workspace = true
+kite-lexer.workspace = true
+kite-ast.workspace = true
