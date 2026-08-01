@@ -131,7 +131,7 @@ VM and Wasm, run on both, and the outputs compared. `--emit wasm` reports
 anything it cannot lower rather than producing a module that traps; today it
 refuses nothing the language can express.
 
-**Not yet:** type parameters on structs, enums and traits. Generic *functions* work, with bounds and inference, and so do closures.
+**Not yet:** methods on generic types — `impl<T> Box<T>` parses but its methods are not instantiated per specialisation. Generic functions, generic structs and enums, bounds, inference and closures all work.
 
 440 tests, plus an annotated compile-fail corpus.
 

@@ -199,6 +199,30 @@ fn main() {
          \x20 let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })\n}\n",
     ),
     (
+        "generic-types",
+        "struct Box<T> {\n  value: T\n}\n\
+         struct Pair<A, B> {\n  first: A\n  second: B\n}\n\
+         struct Tree<T> {\n  label: T\n  children: [Tree<T>]\n}\n\
+         enum Res<T, E> {\n  Ok(T)\n  Err(E)\n}\n\
+         fn size<T>(t: Tree<T>) -> int {\n  var n = 1\n\
+         \x20 for c in t.children {\n    n = n + size(c)\n  }\n  return n\n}\n\
+         fn or_else(r: Res<int, str>, fallback: int) -> int {\n\
+         \x20 return match r {\n    Ok(v) => v\n    Err(m) => fallback\n  }\n}\n\
+         fn main() {\n\
+         \x20 io.print(Box{value: 42}.value)\n  io.print(Box{value: \"text\"}.value)\n\
+         \x20 let deep: Box<Box<int>> = Box{value: Box{value: 7}}\n\
+         \x20 io.print(deep.value.value)\n\
+         \x20 let p = Pair{first: 1, second: \"one\"}\n\
+         \x20 io.print(\"\\(p.first) is \\(p.second)\")\n\
+         \x20 let leaf = Tree{label: 3, children: []}\n\
+         \x20 let root = Tree{label: 1, children: [leaf, Tree{label: 2, children: [leaf]}]}\n\
+         \x20 io.print(size(root))\n\
+         \x20 io.print(root.children[1].children[0].label)\n\
+         \x20 io.print(or_else(Res.Ok(5), -1))\n  io.print(or_else(Res.Err(\"no\"), -1))\n\
+         \x20 let a: Box<int> = Box{value: 1}\n  let b: Box<int> = Box{value: 1}\n\
+         \x20 io.print(a == b)\n  io.print(a == Box{value: 2})\n}\n",
+    ),
+    (
         "closures",
         "fn apply(f: fn(int) -> int, x: int) -> int {\n  return f(x)\n}\n\
          fn twice(f: fn(int) -> int, x: int) -> int {\n  return f(f(x))\n}\n\

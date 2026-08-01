@@ -146,7 +146,27 @@ thunk that casts the environment back to its own record and unpacks it. Calls
 go through `call_ref`, and the thunks are named in a declarative element
 segment because `ref.func` may only reference a function declared for it.
 
-**Remaining in Phase 2:** type parameters on structs, enums and traits.
+**Also done:** type parameters on structs and enums. A generic declaration is
+a template rather than a type — `Box` says nothing about what it holds — and
+each set of arguments gets a definition of its own with the parameters
+substituted away. Nothing past the type checker knows: a `Box<int>` is a struct
+like any other, with no boxing, no tag and no dispatch.
+
+Arguments are inferred from the values, as for functions, because `<` in
+expression position is a comparison and Kite has no turbofish. Where inference
+has nothing to work from — `Maybe.None` — the binding must be annotated, and
+E0209 says so.
+
+Three things fell out of the recursive case, `struct Tree<T> { children:
+[Tree<T>] }`. A specialisation may be asked for while its own template is still
+being filled in, so every one is recomputed once the declarations are complete.
+Substitution has to reach through a specialisation's own arguments, which needs
+a record of what each was made from. And `Box<Box<int>>` ends in a token the
+lexer read as a shift; the parser splits it rather than making the lexer care
+about types.
+
+**Remaining in Phase 2:** methods on generic types — `impl<T> Box<T> { ... }`
+parses but its methods are not instantiated per specialisation.
 
 Four things came out differently from this plan:
 
@@ -297,7 +317,7 @@ difference, and the functions call each other, so a struct holding a slice of
 structs compares correctly at any depth. They are emitted only for types a
 program actually compares.
 
-**All eleven examples compile to WebAssembly and agree with the bytecode VM,
+**All twelve examples compile to WebAssembly and agree with the bytecode VM,
 and every construct the language has now lowers.** `--emit wasm` refuses
 nothing the language can express. The scan that would report a gap is still
 wired in, because a backend that quietly emits a trapping module for something
@@ -430,9 +450,9 @@ none.
 |---|---|
 | 0 — Specification review | ✅ done, and the spec was amended four times by what the code found |
 | 1 — Vertical slice | ✅ complete |
-| 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, trait objects, slices, optionals, tuples, maps, interpolation, generic functions with bounds, closures. ❌ generic types |
+| 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, trait objects, slices, optionals, tuples, maps, interpolation, closures, generic functions and generic types. ❌ methods on generic types |
 | 3 — Error handling | ✅ complete |
-| 4 — WebAssembly backend | ✅ every construct the language has, all eleven examples, both backends agreeing. ❌ JS String Builtins (an optimisation, not a gap) |
+| 4 — WebAssembly backend | ✅ every construct the language has, all twelve examples, both backends agreeing. ❌ JS String Builtins (an optimisation, not a gap) |
 | 5 — Concurrency | ❌ not started |
 | 6 — Standard library | ❌ not started |
 | 7 — Layout engine and DOM renderer | ❌ not started |

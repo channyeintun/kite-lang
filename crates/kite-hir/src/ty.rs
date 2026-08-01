@@ -101,6 +101,10 @@ pub struct StructDef {
     pub is_pub: bool,
     pub fields: Vec<FieldDef>,
     pub span: Span,
+    /// Type parameters this declaration takes. Non-zero makes it a template:
+    /// `List` is not a type, `List<int>` is, and each set of arguments gets a
+    /// definition of its own with the parameters substituted away.
+    pub generic_count: usize,
 }
 
 impl StructDef {
@@ -109,7 +113,7 @@ impl StructDef {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FieldDef {
     pub name: String,
     pub ty: TyId,
@@ -126,6 +130,8 @@ pub struct EnumDef {
     pub is_pub: bool,
     pub variants: Vec<VariantDef>,
     pub span: Span,
+    /// Type parameters this declaration takes; see [`StructDef::generic_count`].
+    pub generic_count: usize,
 }
 
 impl EnumDef {
@@ -134,7 +140,7 @@ impl EnumDef {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct VariantDef {
     pub name: String,
     /// Empty for a unit variant such as `Point`.
@@ -191,6 +197,16 @@ pub struct Types {
     /// Parameter names, interned so a `TyKind` can hold a `&'static str` and
     /// stay `Hash` — which is what lets the arena deduplicate parameters.
     param_names: Vec<&'static str>,
+    /// Specialisations of generic declarations, so `List<int>` written twice is
+    /// one definition rather than two.
+    struct_instances: HashMap<(StructId, Vec<TyId>), StructId>,
+    enum_instances: HashMap<(EnumId, Vec<TyId>), EnumId>,
+    /// The reverse: what each specialisation was made from. Substitution needs
+    /// it, because `struct Tree<T> { children: [Tree<T>] }` specialised at
+    /// `int` has to turn the inner `Tree<T>` into `Tree<int>` rather than leave
+    /// it naming a parameter.
+    struct_origin: HashMap<StructId, (StructId, Vec<TyId>)>,
+    enum_origin: HashMap<EnumId, (EnumId, Vec<TyId>)>,
 }
 
 impl Default for Types {
@@ -224,6 +240,10 @@ impl Types {
             enums: Vec::new(),
             traits: Vec::new(),
             param_names: Vec::new(),
+            struct_instances: HashMap::new(),
+            enum_instances: HashMap::new(),
+            struct_origin: HashMap::new(),
+            enum_origin: HashMap::new(),
         }
     }
 
@@ -322,6 +342,7 @@ impl Types {
     pub fn declare_struct(&mut self, name: impl Into<String>, is_pub: bool, span: Span) -> StructId {
         let id = StructId(self.structs.len() as u32);
         self.structs.push(StructDef {
+            generic_count: 0,
             name: name.into(),
             is_pub,
             fields: Vec::new(),
@@ -334,6 +355,182 @@ impl Types {
         self.structs[id.index()].fields = fields;
     }
 
+    pub fn set_struct_generics(&mut self, id: StructId, count: usize) {
+        self.structs[id.index()].generic_count = count;
+    }
+
+    pub fn set_enum_generics(&mut self, id: EnumId, count: usize) {
+        self.enums[id.index()].generic_count = count;
+    }
+
+    /// The definition for a generic struct at one set of type arguments,
+    /// creating it the first time it is asked for.
+    ///
+    /// Specialising a nominal type rather than parameterising it keeps every
+    /// later phase unchanged: a `List<int>` is a struct like any other by the
+    /// time anything past the type checker sees it.
+    pub fn instantiate_struct(&mut self, template: StructId, args: &[TyId]) -> StructId {
+        let key = (template, args.to_vec());
+        if let Some(&existing) = self.struct_instances.get(&key) {
+            return existing;
+        }
+        let def = &self.structs[template.index()];
+        let name = format!("{}<{}>", def.name, self.arg_names(args));
+        let (is_pub, span) = (def.is_pub, def.span);
+        let fields = def.fields.clone();
+        let id = self.declare_struct(name, is_pub, span);
+        // Registered before the fields are substituted, so a struct holding
+        // itself — `struct Node<T> { next: Option<Node<T>> }` — terminates.
+        self.struct_instances.insert(key, id);
+        self.struct_origin.insert(id, (template, args.to_vec()));
+        let fields: Vec<FieldDef> = fields
+            .into_iter()
+            .map(|f| FieldDef { ty: self.substitute(f.ty, args), ..f })
+            .collect();
+        self.structs[id.index()].fields = fields;
+        id
+    }
+
+    /// The same for an enum: one definition per set of type arguments.
+    pub fn instantiate_enum(&mut self, template: EnumId, args: &[TyId]) -> EnumId {
+        let key = (template, args.to_vec());
+        if let Some(&existing) = self.enum_instances.get(&key) {
+            return existing;
+        }
+        let def = &self.enums[template.index()];
+        let name = format!("{}<{}>", def.name, self.arg_names(args));
+        let (is_pub, span) = (def.is_pub, def.span);
+        let variants = def.variants.clone();
+        let id = self.declare_enum(name, is_pub, span);
+        self.enum_instances.insert(key, id);
+        self.enum_origin.insert(id, (template, args.to_vec()));
+        let variants: Vec<VariantDef> = variants
+            .into_iter()
+            .map(|v| VariantDef {
+                fields: v
+                    .fields
+                    .into_iter()
+                    .map(|f| FieldDef { ty: self.substitute(f.ty, args), ..f })
+                    .collect(),
+                ..v
+            })
+            .collect();
+        self.enums[id.index()].variants = variants;
+        id
+    }
+
+    /// The generic declaration a specialisation came from.
+    pub fn struct_template_of(&self, id: StructId) -> Option<StructId> {
+        self.struct_origin.get(&id).map(|(t, _)| *t)
+    }
+
+    pub fn enum_template_of(&self, id: EnumId) -> Option<EnumId> {
+        self.enum_origin.get(&id).map(|(t, _)| *t)
+    }
+
+    fn arg_names(&self, args: &[TyId]) -> String {
+        args.iter().map(|a| self.name(*a)).collect::<Vec<_>>().join(", ")
+    }
+
+    /// Recompute every specialisation's fields from its template.
+    ///
+    /// A specialisation can be asked for while its own template is still being
+    /// filled in — `struct Tree<T> { children: [Tree<T>] }` names `Tree<T>`
+    /// before `Tree` has any fields — and would otherwise be left empty. This
+    /// runs once every declaration is complete.
+    pub fn refresh_instances(&mut self) {
+        let structs: Vec<(StructId, (StructId, Vec<TyId>))> =
+            self.struct_origin.iter().map(|(k, v)| (*k, v.clone())).collect();
+        for (id, (template, args)) in structs {
+            let fields = self.structs[template.index()].fields.clone();
+            let fields: Vec<FieldDef> = fields
+                .into_iter()
+                .map(|f| FieldDef { ty: self.substitute(f.ty, &args), ..f })
+                .collect();
+            self.structs[id.index()].fields = fields;
+        }
+        let enums: Vec<(EnumId, (EnumId, Vec<TyId>))> =
+            self.enum_origin.iter().map(|(k, v)| (*k, v.clone())).collect();
+        for (id, (template, args)) in enums {
+            let variants = self.enums[template.index()].variants.clone();
+            let variants: Vec<VariantDef> = variants
+                .into_iter()
+                .map(|v| VariantDef {
+                    fields: v
+                        .fields
+                        .into_iter()
+                        .map(|f| FieldDef { ty: self.substitute(f.ty, &args), ..f })
+                        .collect(),
+                    ..v
+                })
+                .collect();
+            self.enums[id.index()].variants = variants;
+        }
+    }
+
+    /// The template and arguments a specialised struct was made from.
+    pub fn struct_origin_of(&self, id: StructId) -> Option<(StructId, Vec<TyId>)> {
+        self.struct_origin.get(&id).cloned()
+    }
+
+    pub fn enum_origin_of(&self, id: EnumId) -> Option<(EnumId, Vec<TyId>)> {
+        self.enum_origin.get(&id).cloned()
+    }
+
+    /// Replace every parameter with the argument at its index, rebuilding
+    /// composite types around it.
+    pub fn substitute(&mut self, ty: TyId, args: &[TyId]) -> TyId {
+        match self.kind(ty).clone() {
+            TyKind::Param { index, .. } => args.get(index as usize).copied().unwrap_or(ty),
+            TyKind::Slice(e) => {
+                let e = self.substitute(e, args);
+                self.slice_of(e)
+            }
+            TyKind::Optional(i) => {
+                let i = self.substitute(i, args);
+                self.optional_of(i)
+            }
+            TyKind::Fallible(v) => {
+                let v = self.substitute(v, args);
+                self.fallible_of(v)
+            }
+            TyKind::Map(k, v) => {
+                let (k, v) = (self.substitute(k, args), self.substitute(v, args));
+                self.map_of(k, v)
+            }
+            TyKind::Tuple(es) => {
+                let es: Vec<TyId> = es.iter().map(|e| self.substitute(*e, args)).collect();
+                self.tuple_of(es)
+            }
+            TyKind::Fn { params, ret } => {
+                let ps: Vec<TyId> = params.iter().map(|p| self.substitute(*p, args)).collect();
+                let r = self.substitute(ret, args);
+                self.fn_of(ps, r)
+            }
+            // A specialisation whose own arguments mention a parameter: the
+            // recursive case, `Tree<T>` inside `Tree<T>`.
+            TyKind::Struct(s) => match self.struct_origin.get(&s).cloned() {
+                Some((template, own)) => {
+                    let own: Vec<TyId> =
+                        own.iter().map(|a| self.substitute(*a, args)).collect();
+                    let id = self.instantiate_struct(template, &own);
+                    self.struct_ty(id)
+                }
+                None => ty,
+            },
+            TyKind::Enum(e) => match self.enum_origin.get(&e).cloned() {
+                Some((template, own)) => {
+                    let own: Vec<TyId> =
+                        own.iter().map(|a| self.substitute(*a, args)).collect();
+                    let id = self.instantiate_enum(template, &own);
+                    self.enum_ty(id)
+                }
+                None => ty,
+            },
+            _ => ty,
+        }
+    }
+
     pub fn struct_def(&self, id: StructId) -> &StructDef {
         &self.structs[id.index()]
     }
@@ -341,6 +538,7 @@ impl Types {
     pub fn declare_enum(&mut self, name: impl Into<String>, is_pub: bool, span: Span) -> EnumId {
         let id = EnumId(self.enums.len() as u32);
         self.enums.push(EnumDef {
+            generic_count: 0,
             name: name.into(),
             is_pub,
             variants: Vec::new(),

@@ -1,0 +1,76 @@
+// Generic structs and enums.
+//
+// A generic declaration is a template, not a type: `Box` says nothing about
+// what it holds, and `Box<int>` does. Each set of type arguments gets a
+// definition of its own with the parameters substituted away — so by the time
+// anything past the type checker sees it, a `Box<int>` is a struct like any
+// other, and there is no boxing, no tag, and no dispatch.
+//
+// Type arguments are inferred from the values, as they are for functions.
+// There is no `Box<int>{...}` spelling because `<` in expression position is a
+// comparison; where inference has nothing to work from, annotate the binding.
+
+pub struct Box<T> {
+  pub value: T
+}
+
+pub struct Pair<A, B> {
+  pub first: A
+  pub second: B
+}
+
+// A generic type may hold itself.
+pub struct Tree<T> {
+  pub label: T
+  pub children: [Tree<T>]
+}
+
+pub enum Result<T, E> {
+  Ok(T)
+  Err(E)
+}
+
+pub fn size<T>(tree: Tree<T>) -> int {
+  var total = 1
+  for child in tree.children {
+    total = total + size(child)
+  }
+  return total
+}
+
+pub fn or_else(r: Result<int, str>, fallback: int) -> int {
+  return match r {
+    Ok(value) => value
+    Err(message) => fallback
+  }
+}
+
+fn main() {
+  // Inferred from the field values.
+  let n = Box{value: 42}
+  let s = Box{value: "text"}
+  io.print(n.value)
+  io.print(s.value)
+
+  // Nested. `>>` closes both argument lists.
+  let deep: Box<Box<int>> = Box{value: Box{value: 7}}
+  io.print(deep.value.value)
+
+  let p = Pair{first: 1, second: "one"}
+  io.print("\(p.first) is \(p.second)")
+
+  // Recursive, and the empty slice takes its type from the field it fills.
+  let leaf = Tree{label: 3, children: []}
+  let root = Tree{label: 1, children: [leaf, Tree{label: 2, children: [leaf]}]}
+  io.print(size(root))
+  io.print(root.children[1].children[0].label)
+
+  io.print(or_else(Result.Ok(5), -1))
+  io.print(or_else(Result.Err("no"), -1))
+
+  // The same instantiation written twice is one definition, so equality is
+  // structural in the ordinary way.
+  let a: Box<int> = Box{value: 1}
+  let b: Box<int> = Box{value: 1}
+  io.print(a == b)
+}

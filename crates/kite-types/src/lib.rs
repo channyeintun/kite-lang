@@ -56,6 +56,21 @@ pub fn check(
     // Now fill in fields and variants, resolving their types against the
     // arena, which already knows every name.
     for (i, decl) in resolved.types.iter().enumerate() {
+        // A declaration's own `<T, U>` is in scope for its fields.
+        let own_generics = match &file.items[decl.decl_index] {
+            ast::Item::Struct(s) => &s.generics,
+            ast::Item::Enum(e) => &e.generics,
+            ast::Item::Trait(tr) => &tr.generics,
+            _ => &[][..],
+        };
+        let defs = declare_generics(own_generics, resolved, &type_ids, &mut types, diags);
+        let generics: &[(String, TyId)] =
+            &defs.iter().map(|g| (g.name.clone(), g.ty)).collect::<Vec<_>>();
+        match type_ids[i] {
+            Some(TypeTarget::Struct(sid)) => types.set_struct_generics(sid, defs.len()),
+            Some(TypeTarget::Enum(eid)) => types.set_enum_generics(eid, defs.len()),
+            _ => {}
+        }
         match (type_ids[i], &file.items[decl.decl_index]) {
             (Some(TypeTarget::Enum(eid)), ast::Item::Enum(e)) => {
                 let variants = e
@@ -69,7 +84,7 @@ pub fn check(
                                     .map(|f| kite_hir::FieldDef {
                                         name: f.name.name.clone(),
                                         ty: resolve_named_ty(
-                                            &f.ty, resolved, &type_ids, NO_GENERICS, &mut types, diags,
+                                            &f.ty, resolved, &type_ids, generics, &mut types, diags,
                                         ),
                                         mutable: false,
                                         is_pub: true,
@@ -84,7 +99,7 @@ pub fn check(
                                     .map(|(i, ty)| kite_hir::FieldDef {
                                         name: i.to_string(),
                                         ty: resolve_named_ty(
-                                            ty, resolved, &type_ids, NO_GENERICS, &mut types, diags,
+                                            ty, resolved, &type_ids, generics, &mut types, diags,
                                         ),
                                         mutable: false,
                                         is_pub: true,
@@ -114,13 +129,13 @@ pub fn check(
                             .params
                             .iter()
                             .map(|p| {
-                                resolve_named_ty(&p.ty, resolved, &type_ids, NO_GENERICS, &mut types, diags)
+                                resolve_named_ty(&p.ty, resolved, &type_ids, generics, &mut types, diags)
                             })
                             .collect(),
                         ret: match &m.ret {
                             None => TyId::UNIT,
                             Some(r) => resolve_named_ty(
-                                r.value_type(), resolved, &type_ids, NO_GENERICS, &mut types, diags,
+                                r.value_type(), resolved, &type_ids, generics, &mut types, diags,
                             ),
                         },
                         takes_self: m.self_param.is_some(),
@@ -136,7 +151,7 @@ pub fn check(
                     .iter()
                     .map(|f| kite_hir::FieldDef {
                         name: f.name.name.clone(),
-                        ty: resolve_named_ty(&f.ty, resolved, &type_ids, NO_GENERICS, &mut types, diags),
+                        ty: resolve_named_ty(&f.ty, resolved, &type_ids, generics, &mut types, diags),
                         mutable: f.is_var,
                         is_pub: f.is_pub,
                         span: f.span,
@@ -147,6 +162,10 @@ pub fn check(
             _ => {}
         }
     }
+
+    // A specialisation may have been asked for while its template was still
+    // being filled in, so every one is recomputed now that they all are.
+    types.refresh_instances();
 
     // Signatures next, so calls can be checked in either direction.
     let mut lifted: Vec<hir::Function> = Vec::new();
@@ -381,9 +400,49 @@ struct GenericDef {
     span: Span,
 }
 
-/// Struct, enum and trait declarations cannot be generic yet, so their field
-/// and method types resolve with no parameters in scope.
-const NO_GENERICS: &[(String, TyId)] = &[];
+/// Whether the right number of type arguments were given.
+fn arity_ok(
+    p: &ast::TypePath,
+    want: usize,
+    got: usize,
+    decl: Span,
+    diags: &mut DiagBag,
+) -> bool {
+    if want == got {
+        return true;
+    }
+    let message = if want == 0 {
+        format!("`{}` takes no type arguments", p.name())
+    } else {
+        format!(
+            "`{}` takes {} type argument{}, but {} {} given",
+            p.name(),
+            want,
+            if want == 1 { "" } else { "s" },
+            got,
+            if got == 1 { "was" } else { "were" }
+        )
+    };
+    diags.push(
+        Diagnostic::error(codes::E0208, message)
+            .with_primary(p.span, "wrong number of type arguments")
+            .with_secondary(decl, "declared here"),
+    );
+    false
+}
+
+/// A generic declaration named with no arguments at all.
+fn missing_args(p: &ast::TypePath, want: usize, diags: &mut DiagBag) -> TyId {
+    diags.push(
+        Diagnostic::error(
+            codes::E0208,
+            format!("`{}` needs {} type argument{}", p.name(), want, if want == 1 { "" } else { "s" }),
+        )
+        .with_primary(p.span, "this names a generic declaration, not a type")
+        .with_note(format!("write `{}<...>` with the types it holds", p.name())),
+    );
+    TyId::ERROR
+}
 
 /// Turn a declaration's `<T: Bound, U>` list into parameter types.
 fn declare_generics(
@@ -1394,7 +1453,7 @@ impl<'a> Checker<'a> {
             }
 
             ast::Expr::Call { callee, args, arg_names, span } => {
-                self.call(callee, args, arg_names, *span)
+                self.call(callee, args, arg_names, *span, expected)
             }
 
             ast::Expr::If { cond, then, else_, span } => self.if_expr(cond, then, else_, *span),
@@ -1477,13 +1536,13 @@ impl<'a> Checker<'a> {
                         self.lit(ExprKind::Error, TyId::ERROR, *span)
                     }
                     Some(Res::Variant(ti, vi)) => {
-                        self.variant_value(ti, vi, &[], &[], *span, *span)
+                        self.variant_value(ti, vi, &[], &[], *span, *span, expected)
                     }
                     _ => self.field_access(base, name, *span),
                 }
             }
 
-            ast::Expr::StructLit(lit) => self.struct_literal(lit),
+            ast::Expr::StructLit(lit) => self.struct_literal_with(lit, expected),
 
             ast::Expr::Match(m) => self.match_expr(m, expected),
 
@@ -1930,7 +1989,7 @@ impl<'a> Checker<'a> {
                 self.lit(ExprKind::Error, TyId::ERROR, p.span)
             }
             // A unit variant used as a value: `Status.Active`.
-            Some(Res::Variant(ti, vi)) => self.variant_value(ti, vi, &[], &[], p.span, p.span),
+            Some(Res::Variant(ti, vi)) => self.variant_value(ti, vi, &[], &[], p.span, p.span, None),
             // Resolution already reported this.
             None => self.lit(ExprKind::Error, TyId::ERROR, p.span),
         }
@@ -1942,6 +2001,7 @@ impl<'a> Checker<'a> {
         args: &[ast::Expr],
         arg_names: &[Option<ast::Ident>],
         span: Span,
+        expected: Option<TyId>,
     ) -> hir::Expr {
         // Named arguments exist only for named-payload variant construction.
         // Everywhere else, a function needing many optional inputs takes a
@@ -1978,7 +2038,7 @@ impl<'a> Checker<'a> {
                         self.associated_call_named(ti, &name.name, *fspan, args, span)
                     }
                     Some(Res::Variant(ti, vi)) => {
-                        self.variant_value(ti, vi, args, arg_names, *fspan, span)
+                        self.variant_value(ti, vi, args, arg_names, *fspan, span, expected)
                     }
                     _ => self.method_call(base, name, args, span),
                 };
@@ -2086,7 +2146,7 @@ impl<'a> Checker<'a> {
             Some(Res::Type(ti)) => self.associated_call(ti, p, args, span),
 
             Some(Res::Variant(ti, vi)) => {
-                self.variant_value(ti, vi, args, arg_names, p.span, span)
+                self.variant_value(ti, vi, args, arg_names, p.span, span, expected)
             }
 
             None => self.lit(ExprKind::Error, TyId::ERROR, span),
@@ -2476,6 +2536,78 @@ impl<'a> Checker<'a> {
     }
 
     /// The `resolved.types` index for a nominal type, if it has one.
+    /// Work out a generic struct's type arguments and return the specialised
+    /// definition.
+    fn solve_struct_args(
+        &mut self,
+        template: kite_hir::StructId,
+        lit: &ast::StructLit,
+        expected: Option<TyId>,
+    ) -> Option<kite_hir::StructId> {
+        let count = self.types.struct_def(template).generic_count;
+
+        // An annotation settles it outright: `let p: Pair<int, str> = Pair{..}`.
+        if let Some(want) = expected {
+            if let TyKind::Struct(s) = *self.types.kind(want) {
+                if self.instance_of(s) == Some(template) {
+                    return Some(s);
+                }
+            }
+        }
+
+        let generics: Vec<GenericDef> = (0..count)
+            .map(|i| {
+                let ty = self.types.param_ty(i as u32, "");
+                GenericDef { name: format!("#{}", i), ty, bounds: Vec::new(), span: lit.span }
+            })
+            .collect();
+        let mut subst: Vec<Option<TyId>> = vec![None; count];
+        // This pass is a trial: a field like `children: []` cannot be checked
+        // until the parameter is known, and complaining about it here would
+        // report a problem that the real check — which runs against the
+        // specialisation — does not have. Its diagnostics are discarded.
+        let mut scratch = DiagBag::new();
+        std::mem::swap(self.diags, &mut scratch);
+        for init in &lit.fields {
+            let Some(declared) =
+                self.types.struct_def(template).field(&init.name.name).map(|(_, f)| f.ty)
+            else {
+                continue;
+            };
+            let v = self.expr(&init.value, None);
+            self.unify(declared, v.ty, &generics, &mut subst, v.span);
+        }
+        std::mem::swap(self.diags, &mut scratch);
+
+        let mut args = Vec::with_capacity(count);
+        for (i, s) in subst.iter().enumerate() {
+            match s {
+                Some(t) => args.push(*t),
+                None => {
+                    let name = self.types.struct_def(template).name.clone();
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0209,
+                            format!("cannot infer type argument {} of `{}`", i + 1, name),
+                        )
+                        .with_primary(lit.span, "no field pins this parameter down")
+                        .with_note(
+                            "annotate the binding — `let x: Name<int> = ...` — so the type \
+                             arguments are stated where they cannot be worked out",
+                        ),
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(self.types.instantiate_struct(template, &args))
+    }
+
+    /// The template a specialised struct came from, if it is one.
+    fn instance_of(&self, id: kite_hir::StructId) -> Option<kite_hir::StructId> {
+        self.types.struct_template_of(id)
+    }
+
     /// Resolve a surface type with the module's declarations in view, which is
     /// what lets an annotation name a struct, an enum, or a `dyn Trait`.
     fn resolve_type(&mut self, t: &ast::Type) -> TyId {
@@ -3070,6 +3202,75 @@ impl<'a> Checker<'a> {
     // ---- enums ------------------------------------------------------------
 
     /// `Circle(radius: 1.0)`, `Number(3.0)`, or a unit variant like `Point`.
+    /// Work out a generic enum's type arguments and return the specialisation.
+    fn solve_enum_args(
+        &mut self,
+        template: kite_hir::EnumId,
+        vi: u32,
+        args: &[ast::Expr],
+        expected: Option<TyId>,
+        span: Span,
+    ) -> Option<kite_hir::EnumId> {
+        let count = self.types.enum_def(template).generic_count;
+
+        if let Some(want) = expected {
+            if let TyKind::Enum(e) = *self.types.kind(want) {
+                if self.types.enum_template_of(e) == Some(template) {
+                    return Some(e);
+                }
+            }
+        }
+
+        let generics: Vec<GenericDef> = (0..count)
+            .map(|i| {
+                let ty = self.types.param_ty(i as u32, "");
+                GenericDef { name: format!("#{}", i), ty, bounds: Vec::new(), span }
+            })
+            .collect();
+        let mut subst: Vec<Option<TyId>> = vec![None; count];
+        let declared: Vec<TyId> = self.types.enum_def(template).variants[vi as usize]
+            .fields
+            .iter()
+            .map(|f| f.ty)
+            .collect();
+        // A trial pass, as for struct literals: its diagnostics belong to the
+        // real check against the specialisation, not to inference.
+        let mut scratch = DiagBag::new();
+        std::mem::swap(self.diags, &mut scratch);
+        for (i, a) in args.iter().enumerate() {
+            let Some(d) = declared.get(i).copied() else { continue };
+            let v = self.expr(a, None);
+            self.unify(d, v.ty, &generics, &mut subst, v.span);
+        }
+        std::mem::swap(self.diags, &mut scratch);
+
+        let mut solved = Vec::with_capacity(count);
+        for (i, s) in subst.iter().enumerate() {
+            match s {
+                Some(t) => solved.push(*t),
+                None => {
+                    // A unit variant of a generic enum says nothing about the
+                    // parameter — `Maybe.None` could be any `Maybe<T>` — so the
+                    // binding has to.
+                    let name = self.types.enum_def(template).name.clone();
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0209,
+                            format!("cannot infer type argument {} of `{}`", i + 1, name),
+                        )
+                        .with_primary(span, "nothing here pins this parameter down")
+                        .with_note(format!(
+                            "annotate the binding: `let x: {}<...> = ...`",
+                            name
+                        )),
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(self.types.instantiate_enum(template, &solved))
+    }
+
     fn variant_value(
         &mut self,
         ti: u32,
@@ -3078,9 +3279,21 @@ impl<'a> Checker<'a> {
         arg_names: &[Option<ast::Ident>],
         path_span: Span,
         span: Span,
+        expected: Option<TyId>,
     ) -> hir::Expr {
         let Some(TypeTarget::Enum(eid)) = self.type_ids[ti as usize] else {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
+        };
+        // A generic enum is specialised from the payload, or from the type the
+        // context is expecting — the same rule struct literals follow, and for
+        // the same reason: `<` in expression position is a comparison.
+        let eid = if self.types.enum_def(eid).generic_count > 0 {
+            match self.solve_enum_args(eid, vi, args, expected, span) {
+                Some(id) => id,
+                None => return self.lit(ExprKind::Error, TyId::ERROR, span),
+            }
+        } else {
+            eid
         };
         let enum_ty = self.types.enum_ty(eid);
 
@@ -3364,6 +3577,30 @@ impl<'a> Checker<'a> {
                 }
                 self.unify(dr, ar, generics, subst, span);
             }
+            // Two specialisations of one declaration: `Tree<T>` against
+            // `Tree<int>` solves `T`.
+            (TyKind::Struct(d), TyKind::Struct(a)) => {
+                if let (Some((dt, da)), Some((at, aa))) =
+                    (self.types.struct_origin_of(d), self.types.struct_origin_of(a))
+                {
+                    if dt == at && da.len() == aa.len() {
+                        for (x, y) in da.iter().zip(aa.iter()) {
+                            self.unify(*x, *y, generics, subst, span);
+                        }
+                    }
+                }
+            }
+            (TyKind::Enum(d), TyKind::Enum(a)) => {
+                if let (Some((dt, da)), Some((at, aa))) =
+                    (self.types.enum_origin_of(d), self.types.enum_origin_of(a))
+                {
+                    if dt == at && da.len() == aa.len() {
+                        for (x, y) in da.iter().zip(aa.iter()) {
+                            self.unify(*x, *y, generics, subst, span);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -3405,6 +3642,24 @@ impl<'a> Checker<'a> {
                 let v = self.apply_subst(v, subst);
                 self.types.fallible_of(v)
             }
+            TyKind::Struct(s) => match self.types.struct_origin_of(s) {
+                Some((template, args)) => {
+                    let args: Vec<TyId> =
+                        args.iter().map(|a| self.apply_subst(*a, subst)).collect();
+                    let id = self.types.instantiate_struct(template, &args);
+                    self.types.struct_ty(id)
+                }
+                None => ty,
+            },
+            TyKind::Enum(e) => match self.types.enum_origin_of(e) {
+                Some((template, args)) => {
+                    let args: Vec<TyId> =
+                        args.iter().map(|a| self.apply_subst(*a, subst)).collect();
+                    let id = self.types.instantiate_enum(template, &args);
+                    self.types.enum_ty(id)
+                }
+                None => ty,
+            },
             _ => ty,
         }
     }
@@ -3420,6 +3675,14 @@ impl<'a> Checker<'a> {
     fn mentions_param(&self, ty: TyId) -> bool {
         match self.types.kind(ty) {
             TyKind::Param { .. } => true,
+            TyKind::Struct(s) => self
+                .types
+                .struct_origin_of(*s)
+                .is_some_and(|(_, args)| args.iter().any(|a| self.mentions_param(*a))),
+            TyKind::Enum(e) => self
+                .types
+                .enum_origin_of(*e)
+                .is_some_and(|(_, args)| args.iter().any(|a| self.mentions_param(*a))),
             TyKind::Slice(e) | TyKind::Optional(e) | TyKind::Fallible(e) => self.mentions_param(*e),
             TyKind::Map(k, v) => self.mentions_param(*k) || self.mentions_param(*v),
             TyKind::Tuple(es) => es.iter().any(|e| self.mentions_param(*e)),
@@ -3615,6 +3878,16 @@ impl<'a> Checker<'a> {
                     );
                     return hir::Pattern::Wildcard;
                 };
+                // As for variants: the pattern names the declaration and the
+                // scrutinee says which specialisation.
+                let sid = match *self.types.kind(scrut) {
+                    TyKind::Struct(actual)
+                        if self.types.struct_template_of(actual) == Some(sid) =>
+                    {
+                        actual
+                    }
+                    _ => sid,
+                };
 
                 let struct_ty = self.types.struct_ty(sid);
                 if !self.types.satisfies(struct_ty, scrut) && !self.types.is_poisoned(scrut) {
@@ -3736,6 +4009,13 @@ impl<'a> Checker<'a> {
     ) -> hir::Pattern {
         let Some(TypeTarget::Enum(eid)) = self.type_ids[ti as usize] else {
             return hir::Pattern::Wildcard;
+        };
+        // A pattern names the declaration, not a specialisation: `Some(n)` is
+        // written the same whatever the enum holds. The scrutinee says which
+        // specialisation is meant.
+        let eid = match *self.types.kind(scrut) {
+            TyKind::Enum(actual) if self.types.enum_template_of(actual) == Some(eid) => actual,
+            _ => eid,
         };
         let enum_ty = self.types.enum_ty(eid);
 
@@ -3898,7 +4178,13 @@ impl<'a> Checker<'a> {
     /// Every field must be given unless `..base` supplies the rest. There are
     /// no zero values in Kite, which removes Go's most common production bug:
     /// a forgotten field silently becoming `0`, `""`, or `nil`.
-    fn struct_literal(&mut self, lit: &ast::StructLit) -> hir::Expr {
+    /// A struct literal. For a generic struct the type arguments are inferred
+    /// from the field values, or taken from the expected type.
+    ///
+    /// There is no `Pair<int, str>{...}` spelling because `<` in expression
+    /// position is a comparison — the same reason Kite has no turbofish for
+    /// functions. Inference is the consistent answer rather than a workaround.
+    fn struct_literal_with(&mut self, lit: &ast::StructLit, expected: Option<TyId>) -> hir::Expr {
         let Some(Res::Type(ti)) = self.resolved.lookup_use(lit.path.span) else {
             return self.lit(ExprKind::Error, TyId::ERROR, lit.span);
         };
@@ -3912,6 +4198,17 @@ impl<'a> Checker<'a> {
                 .with_primary(lit.path.span, format!("this is a {}", kind)),
             );
             return self.lit(ExprKind::Error, TyId::ERROR, lit.span);
+        };
+
+        // A generic struct is specialised here: the parameters are solved from
+        // the field values, and everything below works on the specialisation.
+        let sid = if self.types.struct_def(sid).generic_count > 0 {
+            match self.solve_struct_args(sid, lit, expected) {
+                Some(id) => id,
+                None => return self.lit(ExprKind::Error, TyId::ERROR, lit.span),
+            }
+        } else {
+            sid
         };
 
         let struct_ty = self.types.struct_ty(sid);
@@ -4876,6 +5173,43 @@ fn resolve_named_ty(
     diags: &mut DiagBag,
 ) -> TyId {
     match t {
+        ast::Type::Path(p) if !p.args.is_empty() => {
+            let args: Vec<TyId> = p
+                .args
+                .iter()
+                .map(|a| resolve_named_ty(a, resolved, type_ids, generics, types, diags))
+                .collect();
+            let target = resolved.type_by_name(p.name()).and_then(|i| type_ids[i as usize]);
+            match target {
+                Some(TypeTarget::Struct(s)) => {
+                    let want = types.struct_def(s).generic_count;
+                    if !arity_ok(p, want, args.len(), types.struct_def(s).span, diags) {
+                        return TyId::ERROR;
+                    }
+                    let id = types.instantiate_struct(s, &args);
+                    types.struct_ty(id)
+                }
+                Some(TypeTarget::Enum(e)) => {
+                    let want = types.enum_def(e).generic_count;
+                    if !arity_ok(p, want, args.len(), types.enum_def(e).span, diags) {
+                        return TyId::ERROR;
+                    }
+                    let id = types.instantiate_enum(e, &args);
+                    types.enum_ty(id)
+                }
+                _ => {
+                    diags.push(
+                        Diagnostic::error(
+                            codes::E0204,
+                            format!("`{}` does not take type arguments", p.name()),
+                        )
+                        .with_primary(p.span, "type arguments are not accepted here"),
+                    );
+                    TyId::ERROR
+                }
+            }
+        }
+
         ast::Type::Path(p) if p.is_simple() => {
             // A parameter shadows everything: inside `fn f<T>(...)`, `T` is the
             // parameter even if a type of that name is declared elsewhere.
@@ -4901,7 +5235,21 @@ fn resolve_named_ty(
                         );
                         TyId::ERROR
                     }
-                    other => named_ty(other, types),
+                    other => {
+                        // A generic declaration named without arguments is not
+                        // a type: `List` says nothing about what it holds.
+                        if let Some(TypeTarget::Struct(s)) = other {
+                            if types.struct_def(s).generic_count > 0 {
+                                return missing_args(p, types.struct_def(s).generic_count, diags);
+                            }
+                        }
+                        if let Some(TypeTarget::Enum(e)) = other {
+                            if types.enum_def(e).generic_count > 0 {
+                                return missing_args(p, types.enum_def(e).generic_count, diags);
+                            }
+                        }
+                        named_ty(other, types)
+                    }
                 },
                 None => resolve_ty(t, types, diags),
             }

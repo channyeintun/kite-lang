@@ -1,0 +1,14 @@
+// A unit variant of a generic enum says nothing about what the enum holds, so
+// there is nothing to infer the argument from and the binding must say.
+//
+// `let m: Maybe<int> = Maybe.None` is the fix.
+
+enum Maybe<T> {
+  None
+  Some(T)
+}
+
+fn main() {
+  let m = Maybe.None //~ ERROR E0209
+  io.print(1)
+}

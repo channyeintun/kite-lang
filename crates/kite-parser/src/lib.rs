@@ -52,6 +52,7 @@ pub fn parse(file: FileId, src: &str, tokens: &[Token], diags: &mut DiagBag) -> 
         panicking: false,
         no_struct_literal: 0,
         in_hole: false,
+        split_gt: false,
     };
     p.parse_source_file()
 }
@@ -74,12 +75,21 @@ struct Parser<'a> {
     /// Set for the sub-parser of a `\(...)` hole, where "end of input" means
     /// the closing paren.
     in_hole: bool,
+    /// Half of a `>>` has been consumed as the `>` closing a type argument
+    /// list; the other half is still to come.
+    split_gt: bool,
 }
 
 impl<'a> Parser<'a> {
     // ---- cursor -----------------------------------------------------------
 
     fn peek(&self) -> T {
+        // `Box<Box<int>>` ends in a token the lexer read as a shift. Rather
+        // than make the lexer care about types, the parser splits it: the
+        // first half is consumed as `>` and the second is left standing here.
+        if self.split_gt {
+            return T::Gt;
+        }
         self.tokens[self.pos].kind
     }
 
@@ -107,11 +117,28 @@ impl<'a> Parser<'a> {
     }
 
     fn bump(&mut self) -> Token {
+        if self.split_gt {
+            self.split_gt = false;
+            let t = self.tokens[self.pos];
+            self.pos += 1;
+            return Token { kind: T::Gt, span: Span::new(t.span.file, t.span.start + 1, t.span.end) };
+        }
         let t = self.tokens[self.pos];
         if t.kind != T::Eof {
             self.pos += 1;
         }
         t
+    }
+
+    /// Consume the `>` that closes a type argument list, splitting a `>>` if
+    /// that is what the lexer produced.
+    fn expect_closing_gt(&mut self) -> Option<Span> {
+        if self.tokens[self.pos].kind == T::Shr && !self.split_gt {
+            let t = self.tokens[self.pos];
+            self.split_gt = true;
+            return Some(Span::new(t.span.file, t.span.start, t.span.start + 1));
+        }
+        self.expect(T::Gt)
     }
 
     fn eat(&mut self, k: T) -> bool {
@@ -740,7 +767,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.bump();
                 let inner = self.parse_type()?;
-                let end = self.expect(T::Gt)?;
+                let end = self.expect_closing_gt()?;
                 Some(Type::Optional { inner: Box::new(inner), span: start.to(end) })
             }
             T::Ident if self.text_at(self.pos) == "dyn" => {
@@ -772,7 +799,7 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
-            self.expect(T::Gt)?;
+            self.expect_closing_gt()?;
         }
         Some(TypePath { segments, args, span: start.to(self.prev_span()) })
     }
@@ -1673,6 +1700,7 @@ impl<'a> Parser<'a> {
             panicking: false,
             no_struct_literal: 0,
             in_hole: true,
+            split_gt: false,
         };
         let span = Span::new(self.file, start as u32, end as u32);
         match sub.parse_expr() {

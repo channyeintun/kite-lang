@@ -14,8 +14,7 @@
 //! Substituting here is one pass over expression trees, rather than a
 //! substitution threaded through every step of lowering.
 
-use crate::{Block, Expr, ExprKind, FnId, Function, Local, Pattern, Program, Stmt, TyId, TyKind,
-            Types};
+use crate::{Block, Expr, ExprKind, FnId, Function, Local, Pattern, Program, Stmt, TyId, Types};
 use std::collections::HashMap;
 
 /// A generic function that instantiates itself with a larger type on each call
@@ -182,38 +181,13 @@ fn specialised_name(base: &str, targs: &[TyId], types: &Types) -> String {
     format!("{}<{}>", base, args.join(", "))
 }
 
-/// Replace every `Param` with the type argument at its index, rebuilding
-/// composite types around it.
+/// Replace every `Param` with the type argument at its index.
+///
+/// The arena owns this: a specialisation's own arguments may mention a
+/// parameter — `Tree<T>` inside `f<T>` — and rebuilding it needs the table
+/// recording what each specialisation was made from.
 pub fn subst(ty: TyId, targs: &[TyId], types: &mut Types) -> TyId {
-    match types.kind(ty).clone() {
-        TyKind::Param { index, .. } => targs.get(index as usize).copied().unwrap_or(ty),
-        TyKind::Slice(e) => {
-            let e = subst(e, targs, types);
-            types.slice_of(e)
-        }
-        TyKind::Optional(i) => {
-            let i = subst(i, targs, types);
-            types.optional_of(i)
-        }
-        TyKind::Fallible(v) => {
-            let v = subst(v, targs, types);
-            types.fallible_of(v)
-        }
-        TyKind::Map(k, v) => {
-            let (k, v) = (subst(k, targs, types), subst(v, targs, types));
-            types.map_of(k, v)
-        }
-        TyKind::Tuple(es) => {
-            let es: Vec<TyId> = es.iter().map(|e| subst(*e, targs, types)).collect();
-            types.tuple_of(es)
-        }
-        TyKind::Fn { params, ret } => {
-            let ps: Vec<TyId> = params.iter().map(|p| subst(*p, targs, types)).collect();
-            let r = subst(ret, targs, types);
-            types.fn_of(ps, r)
-        }
-        _ => ty,
-    }
+    types.substitute(ty, targs)
 }
 
 fn substitute_block(b: &mut Block, targs: &[TyId], types: &mut Types) {
@@ -387,7 +361,7 @@ fn expr_blocks(k: &mut ExprKind) -> Vec<&mut Block> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FnId, TyId};
+    use crate::{FnId, TyId, TyKind};
 
     fn template(name: &str, generic_count: usize, ret: TyId) -> Function {
         Function {

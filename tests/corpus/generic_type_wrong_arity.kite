@@ -1,0 +1,14 @@
+// The number of type arguments must match the declaration.
+
+struct Pair<A, B> {
+  first: A
+  second: B
+}
+
+fn take(p: Pair<int>) -> int { //~ ERROR E0208
+  return p.first
+}
+
+fn main() {
+  io.print(take(Pair{first: 1, second: 2}))
+}
