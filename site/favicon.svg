@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="32" height="32" role="img" aria-label="Kite">
+  <!--
+    The favicon: the tail-less form, because a favicon is drawn at 16 px and
+    the sheet drops the tail at 24 px and below.
+    Its colourway follows the ground it is drawn on — a tab strip is dark or
+    light and never says which, so the file decides for itself.
+  -->
+  <style>
+    .kite-mark { fill: #e9a63c; stroke: #e9a63c; }
+    @media (prefers-color-scheme: light) { .kite-mark { fill: #c9812a; stroke: #c9812a; } }
+  </style>
+  <polygon class="kite-mark" points="50,8 72,40 50,90 28,40" transform="rotate(-8 50 46)"
+           stroke-width="8" stroke-linejoin="round"/>
+</svg>

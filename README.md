@@ -1,3 +1,5 @@
+<img src="site/kite-mark.svg" alt="" width="64">
+
 # Kite
 
 A small, explicit programming language for building application software.
@@ -142,6 +144,7 @@ python3 -m http.server -d site 8000
 | [docs/04-stdlib-ui.md](docs/04-stdlib-ui.md) | The UI layer: layout engine, retained scene graph, and the dual DOM/canvas renderer. |
 | [docs/05-grammar.ebnf](docs/05-grammar.ebnf) | Complete formal grammar. |
 | [docs/06-roadmap.md](docs/06-roadmap.md) | Implementation phases, and exactly how far each one got. |
+| [site/brand.html](site/brand.html) | The mark: geometry, clear space, colourways, lockups. Open it in a browser. |
 
 ## What is not done
 
@@ -163,6 +166,8 @@ Recorded here rather than left to be discovered:
 - **Text on the canvas path is a subset.** Line breaking handles Latin and CJK
   and says so; shaping, bidi and a glyph atlas are not written.
 
-557 tests: unit tests per crate, an annotated compile-fail corpus, a
+564 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus across both backends, the standard library's own suite on
-both backends, the host boundary under Node, and every example on the site.
+both backends, the host boundary under Node, every example on the site, and the
+brand assets, which are checked for drift because the mark is drawn once and
+copied three times.

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 112 112" width="112" height="112" role="img" aria-label="Kite">
+  <!--
+    The editor extension tile, as the brand sheet draws it: 112 x 112, a 24-unit
+    corner radius, the mark at 72 on the dark ground.
+
+    The two shapes below are the mark's, copied from site/kite-mark.svg, which
+    is where the geometry is decided. They are copied rather than referenced
+    because an extension is packaged offline and an external reference would
+    not survive it — and crates/kite-driver/tests/brand_assets.rs fails if the
+    copy ever stops matching the original.
+
+    The Marketplace also wants a 128 px PNG. That is a rasterisation of this
+    file at packaging time, not a second drawing.
+  -->
+  <rect width="112" height="112" rx="24" fill="#1d1f2d"/>
+  <g transform="translate(20 20) scale(0.72)" fill="#e9a63c" stroke="#e9a63c">
+    <polygon points="44,7 64,34 44,76 24,34" transform="rotate(-12 44 40)"
+             stroke-width="6" stroke-linejoin="round"/>
+    <path d="M59 78 L63.5 83 L59 88 L54.5 83 Z M70 85 L73.6 89 L70 93 L66.4 89 Z"
+          stroke-width="4.5" stroke-linejoin="round"/>
+  </g>
+</svg>

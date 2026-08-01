@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100" role="img" aria-label="Kite">
+  <!--
+    The Kite mark, variant `b`, two tail diamonds.
+
+    Geometry taken verbatim from the KiteMark component in the brand sheet: a
+    kite quadrilateral 40 x 69 on a 100 grid, tilted -12 degrees about the
+    sail's centre, with a 3-unit round join (a 6-unit stroke, joined round).
+    The tail diamonds sit at 55% and 44% of the sail's width.
+
+    One file serves every colourway. The default is the approved pair — gold on
+    dark, the deeper gold on light — and a page that needs another (knockout,
+    mono) sets the kite-mark custom property below, or paints the file through
+    `mask-image`, rather than keeping a second copy of the geometry to be
+    wrong in.
+
+    Nothing in this comment may contain a double hyphen: an SVG loaded through
+    `<img>` is parsed as strict XML, and one would take the whole file out.
+  -->
+  <style>
+    .kite-mark { fill: var(--kite-mark, #e9a63c); stroke: var(--kite-mark, #e9a63c); }
+    @media (prefers-color-scheme: light) {
+      .kite-mark { fill: var(--kite-mark, #c9812a); stroke: var(--kite-mark, #c9812a); }
+    }
+  </style>
+  <polygon class="kite-mark" points="44,7 64,34 44,76 24,34" transform="rotate(-12 44 40)"
+           stroke-width="6" stroke-linejoin="round"/>
+  <path class="kite-mark" d="M59 78 L63.5 83 L59 88 L54.5 83 Z M70 85 L73.6 89 L70 93 L66.4 89 Z"
+        stroke-width="4.5" stroke-linejoin="round"/>
+</svg>

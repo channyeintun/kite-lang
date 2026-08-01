@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Brand — Kite</title>
+<meta name="description" content="The Kite mark: geometry, clear space, colourways, wordmark and lockups, and the three places it lives.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="kite.css">
+<style>
+/* This page's own furniture. Every panel below draws the mark from the same
+   kite-mark.svg the site header uses — recoloured through `mask-image`, never
+   redrawn — so there is one file for the geometry to be wrong in. */
+
+.panel {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--code-bg);
+  padding: 26px 28px;
+  margin: 1rem 0;
+}
+
+.panel > h2 {
+  margin: 0 0 18px;
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+/* The mark, at any size and in any colourway, from the one file. */
+.m {
+  display: inline-block;
+  flex: none;
+  background: var(--m, var(--kite-mark));
+  -webkit-mask: url(kite-mark.svg) center / contain no-repeat;
+  mask: url(kite-mark.svg) center / contain no-repeat;
+}
+.m.solo {
+  -webkit-mask-image: url(kite-mark-solo.svg);
+  mask-image: url(kite-mark-solo.svg);
+}
+
+.stage { display: flex; align-items: center; justify-content: center; padding: 40px; }
+.row { display: flex; align-items: center; gap: 28px; flex-wrap: wrap; }
+.row.bottom { align-items: flex-end; }
+
+.wordmark {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  color: var(--brand-ink);
+}
+
+.note { font-size: 13px; line-height: 1.6; color: var(--muted); font-family: ui-sans-serif, system-ui, sans-serif; }
+.note strong { color: var(--ink); font-weight: 500; }
+
+.spec {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 22px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--muted);
+  margin: 0;
+}
+.spec dt { color: var(--ink); }
+.spec dd { margin: 0; }
+
+.ways { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+@media (max-width: 44rem) { .ways { grid-template-columns: repeat(2, 1fr); } }
+.way > div:first-child {
+  border-radius: 8px;
+  padding: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.way .label {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 8px;
+}
+
+/* The four approved grounds. Fixed, not tokens: a colourway is a pairing of a
+   mark colour with a ground, and showing it in the reader's theme instead
+   would be showing something else. */
+.on-dark { background: #1d1f2d; border: 1px solid rgba(233, 233, 237, 0.10); }
+.on-light { background: #f4f1ec; border: 1px solid rgba(0, 0, 0, 0.08); }
+.on-gold { background: #e9a63c; }
+
+.clear {
+  border: 1px dashed var(--rule);
+  border-radius: 6px;
+  padding: 34px;   /* a quarter of the 136px mark, near enough to read */
+  flex: none;
+  display: flex;
+}
+
+.tile {
+  width: 112px;
+  height: 112px;
+  border-radius: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tabs { display: flex; align-items: stretch; gap: 2px; margin-top: 4px; }
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border-radius: 8px 8px 0 0;
+  padding: 9px 14px 11px;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.tab.here { background: #2b2d3b; color: #d5d6de; }
+.tab.other { background: #1d1f2d; color: #8b8d9e; opacity: 0.6; }
+.tab.other span.sq { width: 15px; height: 15px; border-radius: 3px; background: #3a3d4e; flex: none; }
+
+.preview { max-width: 100%; height: auto; border-radius: 6px; border: 1px solid var(--rule); }
+</style>
+</head>
+<body>
+<header>
+  <a class="brand" href="index.html">
+    <img class="mark" src="kite-mark.svg" alt="" width="28" height="28">
+    <span class="name">Kite</span>
+    <span class="chip">draft</span>
+  </a>
+  <nav>
+    <a href="docs.html?doc=SPECIFICATION.md">Specification</a>
+    <a href="reference.html">Reference</a>
+    <a href="playground.html">Playground</a>
+    <a href="docs.html?doc=docs/06-roadmap.md">Roadmap</a>
+    <a class="gh" href="https://github.com/channyeintun/kite-lang">GitHub</a>
+  </nav>
+</header>
+
+<main>
+  <h1>Kite — Flight</h1>
+  <p class="lede">
+    Geometry, clear space, colourways and the three places the mark lives.
+    Everything on this page is drawn from one file — <code>kite-mark.svg</code>
+    — at different sizes and colours.
+  </p>
+
+  <div class="panel">
+    <h2>The mark</h2>
+    <div class="stage"><span class="m" style="width:248px;height:248px"></span></div>
+  </div>
+
+  <div class="panel">
+    <h2>Clear space &amp; minimum size</h2>
+    <div class="row">
+      <div class="clear"><span class="m" style="width:136px;height:136px"></span></div>
+      <div class="note" style="display:flex;flex-direction:column;gap:14px;flex:1;min-width:14rem">
+        <div>Clear space on all sides = <strong>¼ of the mark's height</strong>.
+          Nothing crosses it — not the wordmark, not a border.</div>
+        <div>Minimum size <strong>32 px</strong> with the tail,
+          <strong>12 px</strong> without.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Geometry</h2>
+    <dl class="spec">
+      <dt>tilt</dt><dd>−12° about the sail's centre</dd>
+      <dt>sail</dt><dd>kite quadrilateral, 40 × 69 on a 100 grid</dd>
+      <dt>corners</dt><dd>3-unit round join, uniform</dd>
+      <dt>tail</dt><dd>2 diamonds at 55% and 44% of the sail's width</dd>
+    </dl>
+    <p class="note" style="margin:14px 0 0">
+      The sail measures 40 units across the widest point and 69 down the spine.
+      The brand sheet writes that width as 20, which is the half-width from the
+      spine to one shoulder; the number above is what the drawing measures.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h2>Colourways</h2>
+    <div class="ways">
+      <div class="way">
+        <div class="on-dark"><span class="m" style="--m:#e9a63c;width:86px;height:86px"></span></div>
+        <div class="label">#E9A63C on dark</div>
+      </div>
+      <div class="way">
+        <div class="on-light"><span class="m" style="--m:#c9812a;width:86px;height:86px"></span></div>
+        <div class="label">#C9812A on light</div>
+      </div>
+      <div class="way">
+        <div class="on-gold"><span class="m" style="--m:#2c1c05;width:86px;height:86px"></span></div>
+        <div class="label">#2C1C05 knockout</div>
+      </div>
+      <div class="way">
+        <div class="on-dark"><span class="m" style="--m:#e9e9ed;width:86px;height:86px"></span></div>
+        <div class="label">#E9E9ED mono</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Wordmark &amp; lockups — JetBrains Mono Medium, −2% tracking</h2>
+    <div class="wordmark" style="font-size:82px">Kite</div>
+    <div class="row" style="gap:64px;margin-top:26px">
+      <div class="row" style="gap:16px">
+        <span class="m" style="width:52px;height:52px"></span>
+        <span class="wordmark" style="font-size:38px">Kite</span>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:10px">
+        <span class="m" style="width:52px;height:52px"></span>
+        <span class="wordmark" style="font-size:24px">Kite</span>
+      </div>
+      <div class="row" style="gap:12px">
+        <span class="m" style="width:30px;height:30px"></span>
+        <span class="wordmark" style="font-size:21px">Kite</span>
+        <span style="width:1px;height:20px;background:var(--brand-rule)"></span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:14px;color:var(--muted)">v0.1.0-dev</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Favicon — the tail drops at 24 px and below</h2>
+    <div class="row bottom" style="gap:30px">
+      <span class="m" style="width:48px;height:48px"></span>
+      <span class="m" style="width:32px;height:32px"></span>
+      <span class="m solo" style="width:24px;height:24px"></span>
+      <span class="m solo" style="width:16px;height:16px"></span>
+      <span class="m solo" style="width:12px;height:12px"></span>
+    </div>
+    <div class="tabs">
+      <div class="tab here">
+        <span class="m solo" style="--m:#e9a63c;width:15px;height:15px"></span>
+        Kite — the language
+      </div>
+      <div class="tab other"><span class="sq"></span>SPECIFICATION.md</div>
+    </div>
+    <p class="note" style="margin:16px 0 0">
+      <code>favicon.svg</code> is the tailless mark, because a favicon is never
+      drawn above 32 px and the tail closes up below 24.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h2>Editor extension tile</h2>
+    <div class="row" style="gap:18px">
+      <div class="tile on-dark"><span class="m" style="--m:#e9a63c;width:72px;height:72px"></span></div>
+      <div class="tile on-gold"><span class="m" style="--m:#2c1c05;width:72px;height:72px"></span></div>
+      <div class="tile on-light"><span class="m" style="--m:#c9812a;width:72px;height:72px"></span></div>
+    </div>
+    <p class="note" style="margin:16px 0 0">
+      <code>editors/vscode/icon.svg</code> is the first of these. The Marketplace
+      wants a 128 px PNG, so it is rasterised at packaging time rather than
+      committed twice.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h2>Repository social preview — 1280 × 640, shown at half</h2>
+    <div class="row" style="align-items:flex-start;gap:36px">
+      <img class="preview" src="social-preview.svg" alt="Kite social preview card" width="640" height="320">
+      <div class="note" style="display:flex;flex-direction:column;gap:14px;flex:1;min-width:16rem">
+        <div>Export at <strong>1280 × 640</strong>. Some surfaces crop the card
+          slightly, so nothing load-bearing enters the outer 40 px.</div>
+        <div>The three commitments are set in JetBrains Mono and pulled straight
+          from the README — swap them per release rather than writing new copy.</div>
+        <div>On light grounds use <strong>#C9812A</strong> for the mark and keep
+          the wordmark at <strong>#23212A</strong>.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Documentation site header</h2>
+    <p class="note" style="margin:0">
+      It is the one at the top of this page: a 28 px mark, 12 px to the wordmark,
+      the version chip, 26 px between nav items, and the GitHub button in
+      <strong>#9184D9</strong>. A code block carries the mark's colour as a 2 px
+      left edge.
+    </p>
+  </div>
+</main>
+</body>
+</html>

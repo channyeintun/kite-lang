@@ -13,20 +13,45 @@
   --string: #2c6e49;
   --comment: #8a8f98;
   --number: #b45309;
+
+  /* ---- brand ------------------------------------------------------------
+     The brand sheet is the authority for this block: the mark's colourways,
+     the wordmark's face and tracking, and the header's metrics.
+
+     --kite-mark is a variable rather than `currentColor` because the mark is
+     loaded as an <img>, and colour does not cross that boundary. kite-mark.svg
+     reads this token itself, so one file serves every colourway. */
+  --kite-mark: #c9812a;             /* on light */
+  --brand-ground: #f4f1ec;          /* the sheet's light ground */
+  --brand-ink: #23212a;             /* the sheet names this for the wordmark */
+  --brand-dim: #6c6a74;
+  --brand-rule: rgba(35, 33, 42, 0.16);
+  --brand-violet: #5f51b0;
+  --brand-violet-ink: #4b3f96;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --ink: #e6e6e1;
-    --paper: #16181c;
+    --paper: #161826;
     --muted: #9aa0a8;
     --rule: #2c3037;
     --accent: #e8795c;
-    --code-bg: #1e2126;
+    --code-bg: #1d1f2d;
     --keyword: #e78ab5;
     --string: #7fbf9a;
     --comment: #767c86;
     --number: #dba55a;
+
+    --kite-mark: #e9a63c;
+    --brand-ground: #1d1f2d;
+    --brand-ink: #e9e9ed;
+    --brand-dim: #8b8d9e;
+    --brand-rule: rgba(233, 233, 237, 0.16);
+    /* The violet is the sheet's own #9184d9. Its light-ground counterpart
+       above is the same hue taken down far enough to read on paper. */
+    --brand-violet: #9184d9;
+    --brand-violet-ink: #c3bbee;
   }
 }
 
@@ -40,17 +65,75 @@ body {
   -webkit-text-size-adjust: 100%;
 }
 
+/* ---- the header, as the brand sheet draws it ----
+   Metrics are the sheet's: 26px of side padding, a 28px mark, 12px to the
+   wordmark, 26px between nav items. The mark's clear space is a quarter of its
+   height — 7px at this size — and every gap here is larger than that. */
+
 header {
-  border-bottom: 1px solid var(--rule);
-  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--brand-rule);
+  background: var(--brand-ground);
+  color: var(--brand-dim);
+  padding: 16px 26px;
   display: flex;
-  gap: 1.5rem;
-  align-items: baseline;
+  align-items: center;
+  justify-content: space-between;
+  gap: 32px;
   flex-wrap: wrap;
 }
 
-header .name { font-weight: 700; letter-spacing: -0.02em; font-size: 1.15rem; }
-header nav { display: flex; gap: 1.25rem; flex-wrap: wrap; }
+header .brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-decoration: none;
+  color: inherit;
+}
+
+header .mark { display: block; width: 28px; height: 28px; }
+
+/* JetBrains Mono Medium at −2% tracking. The sheet fetches the face from
+   Google Fonts; this site fetches nothing, so it asks for JetBrains Mono and
+   falls back to whatever monospace face is already installed. The weight and
+   the tracking are what carry the wordmark either way. */
+header .name {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-weight: 500;
+  font-size: 19px;
+  letter-spacing: -0.02em;
+  color: var(--brand-ink);
+}
+
+header .chip {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  color: var(--brand-dim);
+  border: 1px solid var(--brand-rule);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+header nav {
+  display: flex;
+  align-items: center;
+  gap: 26px;
+  flex-wrap: wrap;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 13.5px;
+}
+
+header nav a { color: var(--brand-dim); text-decoration: none; }
+header nav a:hover,
+header nav a[aria-current="page"] { color: var(--brand-ink); }
+
+header nav a.gh {
+  border: 1px solid var(--brand-violet);
+  border-radius: 8px;
+  padding: 6px 13px;
+  font-size: 12.5px;
+  color: var(--brand-violet-ink);
+}
+header nav a.gh:hover { color: var(--brand-violet-ink); background: color-mix(in srgb, var(--brand-violet) 12%, transparent); }
 
 a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
 
@@ -70,10 +153,13 @@ code, pre, textarea, .out {
 
 code { background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 3px; }
 
+/* The sheet gives a code block a 2px left edge in the mark's colour and
+   squares that corner off, so the accent reads as a margin rule. */
 pre {
   background: var(--code-bg);
   border: 1px solid var(--rule);
-  border-radius: 6px;
+  border-left: 2px solid var(--kite-mark);
+  border-radius: 0 6px 6px 0;
   padding: 0.9rem 1rem;
   overflow-x: auto;
   line-height: 1.5;

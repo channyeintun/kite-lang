@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100" role="img" aria-label="Kite">
+  <!--
+    The Kite mark, variant `bSolo`: no tail, a wider sail, a heavier stroke.
+
+    This is the small-size form. Below 24 px the tail stops being two diamonds
+    and starts being two smudges, so it goes — and the sail widens and thickens
+    to hold its shape at 12 px, which is the smallest size the sheet allows.
+  -->
+  <style>
+    .kite-mark { fill: var(--kite-mark, #e9a63c); stroke: var(--kite-mark, #e9a63c); }
+    @media (prefers-color-scheme: light) {
+      .kite-mark { fill: var(--kite-mark, #c9812a); stroke: var(--kite-mark, #c9812a); }
+    }
+  </style>
+  <polygon class="kite-mark" points="50,8 72,40 50,90 28,40" transform="rotate(-8 50 46)"
+           stroke-width="8" stroke-linejoin="round"/>
+</svg>

@@ -8,6 +8,20 @@ passes the compiler runs. That is the whole point of the arrangement: an
 extension that implements its own analysis is an analysis that only ever works
 in one editor, and one that eventually disagrees with the build.
 
+## The icon
+
+`icon.svg` is the brand sheet's extension tile: the mark at 72 on a 112 x 112
+rounded ground. The Marketplace only accepts a PNG, so packaging rasterises it
+rather than keeping a second drawing:
+
+```bash
+rsvg-convert -w 128 -h 128 icon.svg -o icon.png   # or any SVG rasteriser
+```
+
+`icon.png` is not committed, and `package.json` gains its `icon` field at that
+point. The shapes inside `icon.svg` are copied from `site/kite-mark.svg`, and
+`cargo test --test brand_assets` fails if the copy stops matching.
+
 ## Installing
 
 ```bash
