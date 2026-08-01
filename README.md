@@ -56,6 +56,7 @@ kitec fmt     file.kite          lay it out the one way
 kitec doc     file.kite          the reference, from the doc comments
 kitec fix     file.kite          apply every machine-applicable suggestion
 kitec bundle  file.kite          one executable that needs nothing installed
+kitec pkg     [directory]        resolve kite.toml, write kite.lock
 kitec build   file.kite --emit wasm --out dist
 kitec --explain E0301            why a rule exists
 ```
@@ -154,11 +155,13 @@ Recorded here rather than left to be discovered:
   a precise collector are the largest piece of work left.
 - **No `json.decode<T>`, `Eq`, `Hash` or `Debug` derivation.** All four want the
   same compile-time machinery, which is not built.
-- **No package manager.** There is no manifest, no lockfile and no dependency
-  resolution; modules are directories on disk.
+- **No version resolution.** `kitec pkg` reads a manifest, resolves path and
+  git dependencies and writes a lockfile of content hashes — but a dependency
+  is a path or a tag, and two packages wanting different versions of a third is
+  a conflict nothing detects.
 - **Text on the canvas path is a subset.** Line breaking handles Latin and CJK
   and says so; shaping, bidi and a glyph atlas are not written.
 
-543 tests: unit tests per crate, an annotated compile-fail corpus, a
+557 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus across both backends, the standard library's own suite on
 both backends, the host boundary under Node, and every example on the site.

@@ -185,3 +185,46 @@ fn an_unimported_module_contributes_nothing() {
     );
     assert!(with_ui.failed(), "`ui` must not be in scope without `use std/ui`");
 }
+
+// ---- packages -------------------------------------------------------------
+
+/// A dependency the manifest declares is reachable from anywhere in the
+/// package, not only from beside the file that imports it.
+#[test]
+fn a_manifest_dependency_is_on_the_module_path() {
+    let p = Project::new("manifest");
+    p.file(
+        "kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nshared = { path = \"shared\" }\n",
+    );
+    p.file(
+        "shared/greeting.kite",
+        "pub fn greet(name: str) -> str {\n  return \"hello, \\(name)\"\n}\n",
+    );
+    // The importer is in `src/`, and the dependency is not beside it.
+    let main = p.file(
+        "src/main.kite",
+        "use shared\n\nfn main() {\n  io.print(shared.greet(\"kite\"))\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "hello, kite\n");
+}
+
+/// What a package depends on is what it said, not what happens to be lying
+/// next to the file that imported it.
+#[test]
+fn a_declared_dependency_wins_over_a_sibling_of_the_same_name() {
+    let p = Project::new("shadowing");
+    p.file(
+        "kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nlib = { path = \"real\" }\n",
+    );
+    p.file("real/lib.kite", "pub fn which() -> str {\n  return \"declared\"\n}\n");
+    p.file("src/lib/other.kite", "pub fn which() -> str {\n  return \"sibling\"\n}\n");
+    let main = p.file(
+        "src/main.kite",
+        "use lib\n\nfn main() {\n  io.print(lib.which())\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "declared\n");
+}

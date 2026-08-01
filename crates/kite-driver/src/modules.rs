@@ -59,7 +59,42 @@ pub struct Loader {
     pub aliases: HashMap<String, String>,
     /// Where a user module's files live, for resolving its own imports.
     roots: HashMap<String, PathBuf>,
+    /// Dependencies from the package's `kite.toml`, by name. A `use` that
+    /// names one of these reaches the dependency rather than a sibling —
+    /// which is what makes a package's dependencies its own rather than
+    /// whatever happens to sit next to the entry file.
+    dependencies: HashMap<String, PathBuf>,
     seen: Vec<String>,
+}
+
+/// The dependencies a package declares, if the file being compiled is in one.
+///
+/// The manifest is looked for *upwards* from the entry file, because a program
+/// is usually `src/main.kite` and the manifest is beside `src/`. Nothing is
+/// fetched here — `kitec pkg` does that, once, on purpose.
+pub fn dependencies_near(dir: &Path) -> HashMap<String, PathBuf> {
+    let mut out = HashMap::new();
+    let mut here = Some(dir);
+    while let Some(directory) = here {
+        let manifest = directory.join("kite.toml");
+        if let Ok(text) = std::fs::read_to_string(&manifest) {
+            if let Ok(parsed) = crate::manifest::parse(&text) {
+                for dependency in &parsed.dependencies {
+                    let path = match &dependency.source {
+                        crate::manifest::Source::Path(p) => directory.join(p),
+                        // A git dependency lives where `kitec pkg` put it.
+                        crate::manifest::Source::Git { .. } => {
+                            directory.join(".kite/vendor").join(&dependency.name)
+                        }
+                    };
+                    out.insert(dependency.name.clone(), path);
+                }
+            }
+            break;
+        }
+        here = directory.parent();
+    }
+    out
 }
 
 impl Loader {
@@ -75,7 +110,10 @@ impl Loader {
         sources: &mut SourceMap,
         diags: &mut DiagBag,
     ) -> Loader {
-        let mut loader = Loader::default();
+        let mut loader = Loader {
+            dependencies: dir.map(dependencies_near).unwrap_or_default(),
+            ..Loader::default()
+        };
         let mut stack: Vec<String> = Vec::new();
         loader.visit_uses(entry, dir, &mut stack, sources, diags);
         loader
@@ -162,7 +200,13 @@ impl Loader {
             };
             // A directory is the canonical form; a single file is the same
             // thing with one file in it, and is what most modules start as.
-            let as_dir = base.join(name);
+            // A dependency the manifest declares wins over a sibling of the
+            // same name: what a package depends on is what it said, not what
+            // happens to be lying next to it.
+            let as_dir = match self.dependencies.get(name) {
+                Some(path) => path.clone(),
+                None => base.join(name),
+            };
             let as_file = base.join(format!("{}.kite", name));
             if as_dir.is_dir() {
                 let mut entries: Vec<PathBuf> = std::fs::read_dir(&as_dir)

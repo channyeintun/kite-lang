@@ -735,7 +735,7 @@ three.
 | `kitec doc` | ✅ the reference, from `///` comments, with signatures read from the parse |
 | `kitec bundle` | ✅ one executable that needs nothing installed |
 | `--explain` | ✅ |
-| `kite pkg` | ❌ not started — no manifest, no lockfile, no dependency resolution |
+| `kitec pkg` | ✅ manifest, path and git dependencies, and a lockfile of content hashes |
 
 The formatter works on **tokens**, not the tree: a tree has dropped the
 comments and the blank lines a formatter must keep. It decides indentation,
@@ -743,10 +743,17 @@ spacing and blank lines, and leaves where the lines end to the author — the
 same bargain `gofmt` makes. Running it over the tree found six bugs in it,
 which is the argument for running a formatter on real code before believing it.
 
-`kite pkg` is what remains, and with it the manifest in
-[spec §13.2](../SPECIFICATION.md#132-manifest): a lockfile with content hashes,
-no post-install scripts, and no way for a dependency to execute code at build
-time.
+`kitec pkg` reads `kite.toml`, resolves each dependency — a path, or a git URL
+and tag cloned into `.kite/vendor` — and writes `kite.lock` with a content hash
+over every `.kite` file of each. A build never reaches the network: `pkg` is
+the only thing that fetches, and only when asked. There is no post-install
+script and no build-time code execution because there is nowhere to put one,
+which is the npm supply-chain surface removed by construction rather than by
+policy.
+
+**Remaining:** version resolution. A dependency is a path or a tag, and two
+dependencies wanting different versions of a third is a conflict nothing
+detects yet.
 
 ---
 
@@ -1003,14 +1010,14 @@ none.
 | 7 — Layout and DOM renderer | 🟡 layout, events and the update loop; a frame that did not change is not repainted. ❌ retained scene graph, widget set, focus |
 | 8 — Canvas renderer | 🟡 draws, measures in the real font, hidden-overlay input, a parallel tree for a screen reader, UAX #14 subset. ❌ shaping, bidi, glyph atlas, per-rectangle damage, golden images |
 | 9 — Native backend | ❌ not written. `kitec bundle` produces one self-contained executable, which is packaging rather than code generation |
-| 10 — Tooling | 🟡 fmt, doc, fix, test, bundle, `--explain`, and the language server. ❌ `kite pkg` |
+| 10 — Tooling | 🟡 fmt, doc, fix, test, bundle, pkg, `--explain`, and the language server. ❌ version resolution across dependencies |
 | 11 — Networking | 🟡 the client, tested end to end under Node; the router and types for the server. ❌ anything that listens on a port |
 | 12 — Cryptography | 🟡 hashing, HMAC, PBKDF2, randomness, constant-time comparison, and E0600. ❌ AES-GCM, Ed25519, X25519 |
 | 13 — Documentation site | ✅ four pages, the reference generated from the library, and a playground that is the compiler |
 | 14 — Editor support | ✅ the language server and a VS Code extension over it. ❌ rename, references, inlay hints |
 | 15 — Distribution | 🟡 CI, cross-compiled release builds with checksums, an install script. ❌ nothing published yet |
 
-543 tests: unit tests per crate, an annotated compile-fail corpus, a
+557 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on both backends and compares, the
 standard library's own suite on both backends, the host boundary under Node,
 and every example on the site.

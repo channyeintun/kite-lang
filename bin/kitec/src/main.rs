@@ -4,6 +4,7 @@
 //! the compiler's build time is a stated design target.
 
 mod bundle;
+mod pkg;
 
 use kite_driver::{compile, Emit};
 use std::io::{self, Write};
@@ -21,9 +22,11 @@ USAGE:
     kitec doc   <file.kite>          the reference, from the doc comments
     kitec fix   <file.kite>          apply every machine-applicable suggestion
     kitec bundle <file.kite>         one executable that needs nothing installed
+    kitec pkg   [directory]          resolve `kite.toml` and write `kite.lock`
 
 OPTIONS:
     --release         build for release: `assert` is dropped, `require` is not
+    --offline         with `pkg`, refuse to fetch anything
     --check           with `fmt`, report rather than rewrite
     --all             with `doc`, include what is not `pub`
     --emit <stage>    check, ast, hir, mir, kbc, wasm
@@ -66,6 +69,7 @@ fn main() -> ExitCode {
     let mut check_only = false;
     let mut include_private = false;
     let mut release = false;
+    let mut offline = false;
     let mut i = 0;
 
     while i < args.len() {
@@ -107,7 +111,11 @@ fn main() -> ExitCode {
                 release = true;
                 i += 1;
             }
-            "run" | "check" | "build" | "test" | "fmt" | "doc" | "fix" | "bundle"
+            "--offline" => {
+                offline = true;
+                i += 1;
+            }
+            "run" | "check" | "build" | "test" | "fmt" | "doc" | "fix" | "bundle" | "pkg"
                 if command.is_none() =>
             {
                 command = Some(a.clone());
@@ -125,6 +133,13 @@ fn main() -> ExitCode {
     }
 
     let command = command.unwrap_or_else(|| "run".to_string());
+
+    // `pkg` takes a directory rather than a file, and defaults to this one.
+    if command == "pkg" {
+        let dir = path.unwrap_or_else(|| ".".to_string());
+        return pkg::run(std::path::Path::new(&dir), offline);
+    }
+
     let Some(path) = path else {
         return fail("expected a source file\n\nUSAGE:\n    kitec run <file.kite>");
     };

@@ -8,6 +8,7 @@ use kite_span::{FileId, SourceMap, Span};
 use std::io::Write;
 use std::path::Path;
 
+pub mod manifest;
 pub mod modules;
 
 pub use kite_codegen_wasm::{generate_glue, generate_glue_with_hosts, generate_page};

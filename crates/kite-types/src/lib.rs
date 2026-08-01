@@ -6096,12 +6096,13 @@ impl<'a> Checker<'a> {
 
     fn string_value(&mut self, span: Span) -> String {
         let raw = self.text(span);
-        let inner = if let Some(s) = raw.strip_prefix("\"\"\"") {
-            s.strip_suffix("\"\"\"").unwrap_or(s).trim_start_matches('\n')
-        } else {
-            let s = raw.strip_prefix('"').unwrap_or(raw);
-            s.strip_suffix('"').unwrap_or(s)
-        };
+        if let Some(s) = raw.strip_prefix("\"\"\"") {
+            let body = s.strip_suffix("\"\"\"").unwrap_or(s);
+            let dedented = dedent_block(body);
+            return self.decode_escapes(&dedented, span);
+        }
+        let s = raw.strip_prefix('"').unwrap_or(raw);
+        let inner = s.strip_suffix('"').unwrap_or(s);
         self.decode_escapes(inner, span)
     }
 
@@ -6747,6 +6748,33 @@ fn breaks_out(block: &ast::Block, label: Option<&str>) -> bool {
         }
     }
     in_block(block, label, false)
+}
+
+/// A block string's body, with the indentation the closing delimiter sets
+/// removed from every line.
+///
+/// The closing delimiter decides, rather than the shallowest line, because a
+/// block string is written *at* an indentation level and its author is looking
+/// at the closing quotes when they choose one. The line break after the
+/// opening delimiter and the one before the closing delimiter belong to the
+/// syntax rather than to the text, so both go.
+fn dedent_block(body: &str) -> String {
+    let body = body.strip_prefix("\r\n").or_else(|| body.strip_prefix('\n')).unwrap_or(body);
+    // Everything after the last line break is the closing delimiter's own
+    // indentation.
+    let (text, indent) = match body.rfind('\n') {
+        Some(at) => (&body[..at], &body[at + 1..]),
+        None => (body, ""),
+    };
+    if !indent.chars().all(|c| c == ' ' || c == '\t') {
+        // The closing delimiter is not on a line of its own, so there is no
+        // indentation to take off.
+        return body.to_string();
+    }
+    text.split('\n')
+        .map(|line| line.strip_prefix(indent).unwrap_or(line.trim_start_matches([' ', '\t'])))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// A dotted name's text, for diagnostics about a qualified call.
