@@ -19,7 +19,7 @@ fn checks() -> [error] {
     out.push(test.is_true(all([2, 4], |n: int| n % 2 == 0), "all"))
     let empty: [int] = []
     out.push(test.is_true(all(empty, |n: int| false), "all is vacuously true"))
-    out.push(test.equal_int(count([1, 2, 3], |n: int| n> 1), 2, "count"))
+    out.push(test.equal_int(count([1, 2, 3], |n: int| n > 1), 2, "count"))
     out.push(test.equal_ints(reversed([1, 2, 3]), [3, 2, 1], "reversed"))
     out.push(test.equal_ints(concat([1], [2, 3]), [1, 2, 3], "concat"))
     out.push(test.equal_ints(take([1, 2, 3], 2), [1, 2], "take"))
@@ -27,9 +27,9 @@ fn checks() -> [error] {
     out.push(test.equal_ints(drop([1, 2, 3], 2), [3], "drop"))
     out.push(test.equal_int(sum([1, 2, 3]), 6, "sum"))
 
-    let found = find([1, 2, 3], |n: int| n> 1)
+    let found = find([1, 2, 3], |n: int| n > 1)
     out.push(test.equal_int(if found == nil { -1 } else { found }, 2, "find"))
-    let missing = find([1], |n: int| n> 9)
+    let missing = find([1], |n: int| n > 9)
     out.push(test.is_true(missing == nil, "find yields nil"))
     let head = first([7, 8])
     out.push(test.equal_int(if head == nil { -1 } else { head }, 7, "first"))
@@ -38,24 +38,24 @@ fn checks() -> [error] {
     out.push(test.is_true(first(empty) == nil, "first of an empty slice"))
 
     // ---- ordering ----
-    out.push(test.equal_ints(sorted([3, 1, 2], |a: int, b: int| a<b), [1, 2, 3], "sorted"))
+    out.push(test.equal_ints(sorted([3, 1, 2], |a: int, b: int| a < b), [1, 2, 3], "sorted"))
     out.push(test.equal_strs(
-            sorted(["pear", "fig", "apple"], |a: str, b: str| a<b),
+            sorted(["pear", "fig", "apple"], |a: str, b: str| a < b),
             ["apple", "fig", "pear"],
             "sorted by code point",
         ))
-    out.push(test.equal_ints(sorted(empty, |a: int, b: int| a<b), empty, "sorting nothing"))
+    out.push(test.equal_ints(sorted(empty, |a: int, b: int| a < b), empty, "sorting nothing"))
     // Stability: two items the comparison does not separate keep their order.
     let pairs = [(2, "first"), (1, "x"), (2, "second")]
-    let by_number = sorted(pairs, |a: (int, str), b: (int, str)| a.0 <b.0)
+    let by_number = sorted(pairs, |a: (int, str), b: (int, str)| a.0 < b.0)
     out.push(test.equal_str(by_number[1].1, "first", "the sort is stable"))
     out.push(test.equal_str(by_number[2].1, "second", "the sort is stable"))
 
-    let smallest = min_by([3, 1, 2], |a: int, b: int| a<b)
+    let smallest = min_by([3, 1, 2], |a: int, b: int| a < b)
     out.push(test.equal_int(if smallest == nil { -1 } else { smallest }, 1, "min_by"))
-    let largest = max_by([3, 1, 2], |a: int, b: int| a<b)
+    let largest = max_by([3, 1, 2], |a: int, b: int| a < b)
     out.push(test.equal_int(if largest == nil { -1 } else { largest }, 3, "max_by"))
-    out.push(test.is_true(min_by(empty, |a: int, b: int| a<b) == nil, "min_by of nothing"))
+    out.push(test.is_true(min_by(empty, |a: int, b: int| a < b) == nil, "min_by of nothing"))
 
     out.push(test.equal_int(zip([1, 2, 3], [4, 5]).len(), 2, "zip stops at the shorter"))
     out.push(test.equal_int(zip([1, 2], [3, 4])[1].1, 4, "zip pairs up"))

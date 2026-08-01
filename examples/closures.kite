@@ -85,7 +85,7 @@ fn main() {
     io.print(shouted[0])
     io.print(shouted[1])
 
-    let big = keep([1, 8, 3, 9, 2], |n: int| n> 4)
+    let big = keep([1, 8, 3, 9, 2], |n: int| n > 4)
     io.print("\(big.len()) kept: \(big[0]) and \(big[1])")
 
     // A closure inside a closure, capturing from two levels out.

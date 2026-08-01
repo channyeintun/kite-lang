@@ -276,7 +276,17 @@ impl Formatter<'_> {
     /// while leaving `a < b` spaced.
     fn in_type_position(&self) -> bool {
         let line = self.current_line();
-        let value_from = line.rfind('=').map(|i| i + 1).unwrap_or(0);
+        // A value begins after an `=`, and after the `|` that closes a
+        // closure's parameter list — `|a: int, b: int| a < b` has a colon in
+        // it, and without this the comparison in the body was read as a type
+        // argument list and lost its spaces.
+        let value_from = line
+            .rfind('=')
+            .into_iter()
+            .chain(line.rfind('|'))
+            .max()
+            .map(|i| i + 1)
+            .unwrap_or(0);
         let tail = &line[value_from..];
         if tail.contains(':') || tail.contains("->") {
             return true;

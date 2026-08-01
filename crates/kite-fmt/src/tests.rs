@@ -118,6 +118,22 @@ fn a_blank_line_before_a_closing_brace_goes() {
     assert_eq!(out, "fn a() {\n    io.print(1)\n}\n");
 }
 
+/// A closure's parameters have colons in them, and the body after them is a
+/// value: `|a: int, b: int| a < b` is a comparison, not a type argument list.
+#[test]
+fn a_comparison_in_a_closure_body_keeps_its_spaces() {
+    let out = idempotent("fn f() {\n    let s = sorted(xs, |a: int, b: int| a < b)\n}\n");
+    assert!(out.contains("|a: int, b: int| a < b"), "{}", out);
+}
+
+/// A closure that declares a return type is still writing a type after its
+/// parameters.
+#[test]
+fn a_closures_return_type_stays_tight() {
+    let out = idempotent("fn f() {\n    let g = |n: int| -> Option<int> {\n        return n\n    }\n}\n");
+    assert!(out.contains("-> Option<int>"), "{}", out);
+}
+
 #[test]
 fn a_closure_keeps_its_pipes_tight() {
     let out = format("fn f() {\nlet double = map(xs, |x: int| x * 2)\n}\n");

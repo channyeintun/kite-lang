@@ -29,7 +29,7 @@ fn main() {
     io.print("worst kept: \(or_else(first(top), 0))")
 
     // `find` returns an optional, and testing it is what unwraps it.
-    let failing = find(scores, |n: int| n<50)
+    let failing = find(scores, |n: int| n < 50)
     if failing != nil {
         io.print("first failure: \(failing)")
     }

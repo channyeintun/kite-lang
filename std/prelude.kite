@@ -324,7 +324,7 @@ pub fn replace(s: str, from: str, to: str) -> str {
 
 /// The words of `s`, with runs of spaces collapsed.
 pub fn words(s: str) -> [str] {
-    return filter(split(s.trim(), " "), |w: str| w.len()> 0)
+    return filter(split(s.trim(), " "), |w: str| w.len() > 0)
 }
 
 // ---- optionals ------------------------------------------------------------
