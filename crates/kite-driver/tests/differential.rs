@@ -193,10 +193,18 @@ fn main() {
          }\n",
     ),
     (
-        "map-reads",
+        "maps",
         "fn main() {\n  let m = {\"a\": 1, \"b\": 2}\n  io.print(m.len())\n\
          \x20 let a = m[\"a\"]\n  io.print(if a == nil { -1 } else { a })\n\
          \x20 let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })\n}\n",
+    ),
+    (
+        "map-writes",
+        "fn main() {\n  var m = {\"a\": 1}\n  m[\"b\"] = 2\n  io.print(m.len())\n\
+         \x20 m[\"a\"] = 9\n  io.print(m.len())\n  let a = m[\"a\"]\n\
+         \x20 io.print(if a == nil { -1 } else { a })\n\
+         \x20 var c = m\n  c[\"a\"] = 100\n  let orig = m[\"a\"]\n\
+         \x20 io.print(if orig == nil { -1 } else { orig })\n}\n",
     ),
     (
         "evaluation-order",

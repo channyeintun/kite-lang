@@ -682,6 +682,38 @@ fn compile_fn(
         None => push_local(&mut locals, ValType::I32),
     }
 
+    // A dedicated index register. This used to alias `$pc`, which happened to
+    // work because a terminator always rewrites the program counter before
+    // branching — but a scan clobbering it is not something to rely on.
+    push_local(&mut locals, ValType::I32);
+    let index_scratch = scratch + 1;
+
+    // Two array registers per distinct map shape, so a map write can hold the
+    // arrays it is building while `array.copy` consumes its operands.
+    push_local(&mut locals, ValType::I32);
+    let mut map_scratch: std::collections::HashMap<TyId, (u32, u32)> =
+        std::collections::HashMap::new();
+    let mut next_local = index_scratch + 2;
+    let mut shapes: Vec<TyId> = Vec::new();
+    for l in &f.locals {
+        if matches!(types.kind(l.ty), TyKind::Map(..)) && !shapes.contains(&l.ty) {
+            shapes.push(l.ty);
+        }
+    }
+    for shape in &shapes {
+        let Some(ml) = layout.map_layout(*shape) else { continue };
+        push_local(
+            &mut locals,
+            ValType::Ref(RefType { nullable: true, heap_type: HeapType::Concrete(ml.keys) }),
+        );
+        push_local(
+            &mut locals,
+            ValType::Ref(RefType { nullable: true, heap_type: HeapType::Concrete(ml.values) }),
+        );
+        map_scratch.insert(*shape, (next_local, next_local + 1));
+        next_local += 2;
+    }
+
     let mut func = Function::new(locals);
     let n = f.blocks.len() as u32;
 
@@ -713,7 +745,8 @@ fn compile_fn(
             current_dst: None,
             pc,
             scratch,
-            index_scratch: pc,
+            index_scratch,
+            map_scratch: &map_scratch,
             block_index: i,
             total: n as usize,
         };
@@ -749,6 +782,8 @@ struct Emitter<'a> {
     scratch: u32,
     /// An i32 local for an index that has to be read twice.
     index_scratch: u32,
+    /// Per map shape, the two array registers a write builds into.
+    map_scratch: &'a std::collections::HashMap<TyId, (u32, u32)>,
     block_index: usize,
     total: usize,
 }
@@ -795,10 +830,16 @@ impl<'a> Emitter<'a> {
                     field_index: *index,
                 });
             }
-            // Maps are not lowered yet. The driver refuses these programs
-            // before codegen runs, so this is unreachable in practice.
-            mir::Inst::MapSet { .. } => {
-                func.instruction(&Instruction::Unreachable);
+            mir::Inst::MapSet { local, key, value } => {
+                let base = mir::Operand::Local(*local);
+                let map_ty = self.f.locals[local.index()].ty;
+                let (Some(ml), Some(&(kreg, vreg))) =
+                    (self.map_of(&base), self.map_scratch.get(&map_ty))
+                else {
+                    func.instruction(&Instruction::Unreachable);
+                    return;
+                };
+                self.map_write(func, ml, &base, key, value, local.0, kreg, vreg);
             }
 
             // Slices are copy-on-write *values*, so a mutation copies the
@@ -1333,6 +1374,113 @@ impl<'a> Emitter<'a> {
             })),
             _ => func.instruction(&Instruction::I32Const(0)),
         };
+    }
+
+    /// `m[k] = v`.
+    ///
+    /// Maps are copy-on-write values, so this builds new arrays and rebinds the
+    /// local rather than mutating in place. One code path covers both replacing
+    /// an existing key and appending a new one: the scan yields the key's index
+    /// or, when absent, the current length, and the new arrays are one longer
+    /// only in the second case.
+    #[allow(clippy::too_many_arguments)]
+    fn map_write(
+        &mut self,
+        func: &mut Function,
+        ml: MapLayout,
+        base: &mir::Operand,
+        key: &mir::Operand,
+        value: &mir::Operand,
+        dst: u32,
+        kreg: u32,
+        vreg: u32,
+    ) {
+        let pos = self.index_scratch;
+
+        // Scan for the key, leaving `pos` at its index or at the length.
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalSet(pos));
+        func.instruction(&Instruction::Block(BlockType::Empty));
+        func.instruction(&Instruction::Loop(BlockType::Empty));
+        func.instruction(&Instruction::LocalGet(pos));
+        self.map_field(func, ml, base, 0);
+        func.instruction(&Instruction::ArrayLen);
+        func.instruction(&Instruction::I32GeU);
+        func.instruction(&Instruction::BrIf(1));
+        self.map_field(func, ml, base, 0);
+        func.instruction(&Instruction::LocalGet(pos));
+        func.instruction(&Instruction::ArrayGet(ml.keys));
+        self.operand(func, key);
+        self.key_equality(func, ml.key_ty);
+        func.instruction(&Instruction::BrIf(1));
+        func.instruction(&Instruction::LocalGet(pos));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(pos));
+        func.instruction(&Instruction::Br(0));
+        func.instruction(&Instruction::End); // loop
+        func.instruction(&Instruction::End); // block
+
+        // The new length: one longer only when the key was absent.
+        self.map_field(func, ml, base, 0);
+        func.instruction(&Instruction::ArrayLen);
+        func.instruction(&Instruction::LocalGet(pos));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Add);
+        self.map_field(func, ml, base, 0);
+        func.instruction(&Instruction::ArrayLen);
+        func.instruction(&Instruction::LocalGet(pos));
+        func.instruction(&Instruction::I32GtU);
+        func.instruction(&Instruction::Select);
+        func.instruction(&Instruction::LocalSet(self.index_scratch2(func)));
+
+        // Keys.
+        func.instruction(&Instruction::LocalGet(self.index_scratch2(func)));
+        func.instruction(&Instruction::ArrayNewDefault(ml.keys));
+        func.instruction(&Instruction::LocalSet(kreg));
+        func.instruction(&Instruction::LocalGet(kreg));
+        func.instruction(&Instruction::I32Const(0));
+        self.map_field(func, ml, base, 0);
+        func.instruction(&Instruction::I32Const(0));
+        self.map_field(func, ml, base, 0);
+        func.instruction(&Instruction::ArrayLen);
+        func.instruction(&Instruction::ArrayCopy {
+            array_type_index_dst: ml.keys,
+            array_type_index_src: ml.keys,
+        });
+        func.instruction(&Instruction::LocalGet(kreg));
+        func.instruction(&Instruction::LocalGet(pos));
+        self.operand(func, key);
+        func.instruction(&Instruction::ArraySet(ml.keys));
+
+        // Values.
+        func.instruction(&Instruction::LocalGet(self.index_scratch2(func)));
+        func.instruction(&Instruction::ArrayNewDefault(ml.values));
+        func.instruction(&Instruction::LocalSet(vreg));
+        func.instruction(&Instruction::LocalGet(vreg));
+        func.instruction(&Instruction::I32Const(0));
+        self.map_field(func, ml, base, 1);
+        func.instruction(&Instruction::I32Const(0));
+        self.map_field(func, ml, base, 1);
+        func.instruction(&Instruction::ArrayLen);
+        func.instruction(&Instruction::ArrayCopy {
+            array_type_index_dst: ml.values,
+            array_type_index_src: ml.values,
+        });
+        func.instruction(&Instruction::LocalGet(vreg));
+        func.instruction(&Instruction::LocalGet(pos));
+        self.operand(func, value);
+        func.instruction(&Instruction::ArraySet(ml.values));
+
+        func.instruction(&Instruction::LocalGet(kreg));
+        func.instruction(&Instruction::LocalGet(vreg));
+        func.instruction(&Instruction::StructNew(ml.record));
+        func.instruction(&Instruction::LocalSet(dst));
+    }
+
+    /// A second i32 register, for the new length.
+    fn index_scratch2(&self, _func: &Function) -> u32 {
+        self.index_scratch + 1
     }
 
     /// Emit a linear scan for `key`, leaving `Option<V>` on the stack.

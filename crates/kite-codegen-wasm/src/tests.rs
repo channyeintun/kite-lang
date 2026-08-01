@@ -376,8 +376,8 @@ fn gaps(src: &str) -> Vec<String> {
 /// compiled into a module that traps at run time.
 #[test]
 fn unlowered_constructs_are_reported() {
-    assert!(gaps("fn main() {\n  var m = {\"a\": 1}\n  m[\"b\"] = 2\n}\n")
-        .contains(&"map assignment".to_string()));
+    assert!(gaps("trait T {\n  fn f(self) -> int\n}\nfn g(x: dyn T) {\n}\nfn main() {\n}\n")
+        .contains(&"trait objects".to_string()));
 
 
 
@@ -528,11 +528,13 @@ fn maps_with_integer_keys_validate() {
     valid("fn main() {\n  let m = {1: \"one\"}\n  let v = m[1]\n  io.print(if v == nil { \"?\" } else { v })\n}\n");
 }
 
-/// Reading a map lowers; writing to one does not yet, and is reported rather
-/// than emitted as a trap.
+/// A map write builds new arrays and rebinds, which is what gives maps value
+/// semantics. One code path covers replacing a key and appending one.
 #[test]
-fn map_assignment_is_still_reported() {
-    assert!(gaps("fn main() {\n  var m = {\"a\": 1}\n  m[\"b\"] = 2\n}\n")
-        .contains(&"map assignment".to_string()));
-    assert!(gaps("fn main() {\n  let m = {\"a\": 1}\n  io.print(m.len())\n}\n").is_empty());
+fn map_writes_validate() {
+    valid(
+        "fn main() {\n  var m = {\"a\": 1}\n  m[\"b\"] = 2\n  m[\"a\"] = 9\n\
+         \x20 io.print(m.len())\n}\n",
+    );
+    assert!(gaps("fn main() {\n  var m = {\"a\": 1}\n  m[\"b\"] = 2\n}\n").is_empty());
 }

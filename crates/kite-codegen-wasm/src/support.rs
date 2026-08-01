@@ -50,8 +50,6 @@ pub fn unsupported(program: &mir::Program, types: &Types) -> Vec<Unsupported> {
         for block in &f.blocks {
             for stmt in &block.stmts {
                 match stmt {
-                    // Reading a map lowers; writing to one does not yet.
-                    mir::Inst::MapSet { .. } => note("map assignment"),
                     mir::Inst::Assign { value, .. } => match value {
                         mir::Rvalue::Binary { op, .. } => {
                             if matches!(
@@ -65,7 +63,8 @@ pub fn unsupported(program: &mir::Program, types: &Types) -> Vec<Unsupported> {
                     },
                     mir::Inst::SetField { .. }
                     | mir::Inst::SetIndex { .. }
-                    | mir::Inst::SlicePush { .. } => {}
+                    | mir::Inst::SlicePush { .. }
+                    | mir::Inst::MapSet { .. } => {}
                 }
             }
         }
