@@ -2402,6 +2402,59 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A method on a `str`.
+    ///
+    /// The set is small on purpose. Each of these is a host call, and a host
+    /// call is a boundary two runtimes have to agree about — `split`,
+    /// `starts_with` and the rest are writable in Kite on top of them, and
+    /// belong in the standard library where they can be read.
+    fn str_method(
+        &mut self,
+        receiver: hir::Expr,
+        name: &ast::Ident,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> hir::Expr {
+        use kite_hir::StrKind;
+        // Operation, then the types of its arguments past the receiver, then
+        // what it returns.
+        let (op, params, ret): (StrKind, &[TyId], TyId) = match name.name.as_str() {
+            "len" => (StrKind::Len, &[], TyId::INT),
+            "trim" => (StrKind::Trim, &[], TyId::STR),
+            "index_of" => (StrKind::IndexOf, &[TyId::STR], TyId::INT),
+            "slice" => (StrKind::Slice, &[TyId::INT, TyId::INT], TyId::STR),
+            _ => {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0205,
+                        format!("`str` has no method `{}`", name.name),
+                    )
+                    .with_primary(name.span, "no such method")
+                    .with_note("`str` has: len, slice, index_of, trim")
+                    .with_note(
+                        "anything else is writable on top of those, and belongs in the \
+                         standard library rather than in the compiler",
+                    ),
+                );
+                return self.lit(ExprKind::Error, TyId::ERROR, span);
+            }
+        };
+
+        if args.len() != params.len() {
+            self.arity_error(&name.name, args.len(), params.len(), span, None);
+        }
+        let mut hargs = vec![receiver];
+        for (i, a) in args.iter().enumerate() {
+            let want = params.get(i).copied();
+            let e = self.expr(a, want);
+            if let Some(w) = want {
+                self.expect_ty(e.ty, w, e.span, None);
+            }
+            hargs.push(e);
+        }
+        hir::Expr { kind: ExprKind::StrOp { op, args: hargs }, ty: ret, span }
+    }
+
     /// `receiver.method(args)`.
     fn method_call(
         &mut self,
@@ -2438,25 +2491,7 @@ impl<'a> Checker<'a> {
         }
 
         if receiver.ty == TyId::STR {
-            if name.name != "len" {
-                self.diags.push(
-                    Diagnostic::error(
-                        codes::E0205,
-                        format!("`str` has no method `{}`", name.name),
-                    )
-                    .with_primary(name.span, "no such method")
-                    .with_note("`str` has: len; more arrive with the standard library"),
-                );
-                return self.lit(ExprKind::Error, TyId::ERROR, span);
-            }
-            if !args.is_empty() {
-                self.arity_error("len", args.len(), 0, span, None);
-            }
-            return hir::Expr {
-                kind: ExprKind::StrLen { base: Box::new(receiver) },
-                ty: TyId::INT,
-                span,
-            };
+            return self.str_method(receiver, name, args, span);
         }
 
         if let TyKind::Map(..) = *self.types.kind(receiver.ty) {

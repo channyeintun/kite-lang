@@ -77,7 +77,7 @@ set and agree on every line of output. See
 
 ```bash
 kitec build examples/hello.kite --emit wasm --out dist
-# wrote dist/app.wasm (489 bytes), dist/app.js and dist/index.html
+# wrote dist/app.wasm (426 bytes), dist/app.js and dist/index.html
 ```
 
 A program with a user interface writes its layout with `std/ui.kite` and draws
@@ -142,7 +142,7 @@ refuses nothing the language can express.
 
 **Phases 1–4 are complete.** Generic functions and types with bounds and methods, closures, trait objects, enforced error handling, and a WebAssembly backend that refuses nothing the language can express.
 
-444 tests, plus an annotated compile-fail corpus.
+446 tests, plus an annotated compile-fail corpus.
 
 ```bash
 kitec run     file.kite      # compile and run

@@ -184,6 +184,19 @@ function imports() {{
       draw_text: (x, y, i, colour) => renderer.text(x, y, STRINGS[i], Number(colour)),
       measure_text: (i) => measure(STRINGS[i]),
       line_height: () => lineHeight,
+      // Kite counts characters, JavaScript counts UTF-16 code units, so each
+      // of these goes through `[...s]` rather than indexing the string.
+      str_slice: (i, from, to) => {{
+        const cs = [...STRINGS[i]];
+        const a = Math.min(Math.max(Number(from), 0), cs.length);
+        const b = Math.min(Math.max(Number(to), a), cs.length);
+        return intern(cs.slice(a, b).join(''));
+      }},
+      str_index_of: (i, n) => {{
+        const at = STRINGS[i].indexOf(STRINGS[n]);
+        return at < 0 ? -1n : BigInt([...STRINGS[i].slice(0, at)].length);
+      }},
+      str_trim: (i) => intern(STRINGS[i].trim()),
       // Interpolation shares its formatting with printing, so a value cannot
       // look one way in `io.print(x)` and another in `"\(x)"`.
       str_of_int: (v) => intern(showInt(v)),

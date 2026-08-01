@@ -228,6 +228,78 @@ pub fn sumf(items: [float]) -> float {
   return total
 }
 
+// ---- strings --------------------------------------------------------------
+//
+// `str` has four methods, all of them host calls: `len`, `slice`, `index_of`
+// and `trim`. Everything below is written on top of them, which is where it
+// belongs — a host call is a boundary two runtimes have to agree about, and
+// every one added is a thing that can drift.
+
+/// Whether `needle` appears anywhere in `s`.
+pub fn contains(s: str, needle: str) -> bool {
+  return s.index_of(needle) >= 0
+}
+
+pub fn starts_with(s: str, prefix: str) -> bool {
+  if prefix.len() > s.len() {
+    return false
+  }
+  return s.slice(0, prefix.len()) == prefix
+}
+
+pub fn ends_with(s: str, suffix: str) -> bool {
+  if suffix.len() > s.len() {
+    return false
+  }
+  return s.slice(s.len() - suffix.len(), s.len()) == suffix
+}
+
+/// `s` cut at every occurrence of `sep`.
+///
+/// An empty separator would have no answer — every position is an occurrence —
+/// so it yields the whole string rather than looping.
+pub fn split(s: str, sep: str) -> [str] {
+  var out: [str] = []
+  if sep.len() == 0 {
+    out.push(s)
+    return out
+  }
+  var rest = s
+  for rest.len() > 0 {
+    let at = rest.index_of(sep)
+    if at < 0 {
+      out.push(rest)
+      return out
+    }
+    out.push(rest.slice(0, at))
+    rest = rest.slice(at + sep.len(), rest.len())
+  }
+  out.push("")
+  return out
+}
+
+/// The pieces joined with `sep` between them.
+pub fn join(pieces: [str], sep: str) -> str {
+  var out = ""
+  for i in 0..pieces.len() {
+    if i > 0 {
+      out = out + sep
+    }
+    out = out + pieces[i]
+  }
+  return out
+}
+
+/// `s` with every occurrence of `from` replaced by `to`.
+pub fn replace(s: str, from: str, to: str) -> str {
+  return join(split(s, from), to)
+}
+
+/// The words of `s`, with runs of spaces collapsed.
+pub fn words(s: str) -> [str] {
+  return filter(split(s.trim(), " "), |w: str| w.len() > 0)
+}
+
 // ---- optionals ------------------------------------------------------------
 
 /// The value, or `fallback` when there is none.

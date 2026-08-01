@@ -124,8 +124,8 @@ pub enum Rvalue {
     /// A value rendered as text. `from` is its type, which the Wasm backend
     /// needs because its host calls are typed and the VM's values are not.
     ToStr { operand: Operand, from: TyId },
-    /// `s.len()` — characters, not bytes.
-    StrLen { operand: Operand },
+    /// A string operation, all of which are host calls.
+    StrOp { op: kite_hir::StrKind, args: Vec<Operand> },
     /// A written numeric conversion. `from` and `to` are both needed: the VM
     /// reads the value's own tag, but Wasm needs both statically.
     Cast { operand: Operand, from: TyId, to: TyId },
@@ -310,7 +310,10 @@ impl fmt::Display for Rvalue {
                 write!(f, ")")
             }
             Rvalue::ToStr { operand, .. } => write!(f, "str {}", operand),
-            Rvalue::StrLen { operand } => write!(f, "str.len {}", operand),
+            Rvalue::StrOp { op, args } => {
+                write!(f, "{} ", op.name())?;
+                write_operands(f, args)
+            }
             Rvalue::Cast { operand, to, .. } => write!(f, "{} as ty{}", operand, to.0),
             Rvalue::CallVirtual { trait_id, method, args } => {
                 write!(f, "virtual trait{}#{}(", trait_id.0, method)?;

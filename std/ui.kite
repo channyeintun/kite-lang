@@ -363,14 +363,16 @@ fn arrange(node: Node, rect: Rect, depth: int) -> [Frame] {
 pub fn hit(frames: [Frame], x: float, y: float) -> Option<Frame> {
   var found: Option<Frame> = nil
   for frame in frames {
-    if contains(frame.rect, x, y) {
+    if rect_contains(frame.rect, x, y) {
       found = frame
     }
   }
   return found
 }
 
-pub fn contains(rect: Rect, x: float, y: float) -> bool {
+/// Whether a point falls inside a rectangle. Named for what it takes, because
+/// `contains` on its own belongs to strings.
+pub fn rect_contains(rect: Rect, x: float, y: float) -> bool {
   if x < rect.x || y < rect.y {
     return false
   }

@@ -46,6 +46,7 @@ fn compile_fn(func: &mir::Function, traits: &[u32]) -> FnProto {
             mir::Inst::Assign { value: mir::Rvalue::Call { args, .. }, .. }
             | mir::Inst::Assign { value: mir::Rvalue::CallClosure { args, .. }, .. }
             | mir::Inst::Assign { value: mir::Rvalue::ClosureNew { captures: args, .. }, .. }
+            | mir::Inst::Assign { value: mir::Rvalue::StrOp { args, .. }, .. }
             | mir::Inst::Assign { value: mir::Rvalue::CallVirtual { args, .. }, .. }
             | mir::Inst::Assign { value: mir::Rvalue::CallBuiltin { args, .. }, .. } => args.len(),
             mir::Inst::Assign { value: mir::Rvalue::StructNew { fields, .. }, .. }
@@ -222,9 +223,14 @@ impl<'a> Emitter<'a> {
                 });
             }
 
-            mir::Rvalue::StrLen { operand } => {
-                let a = self.operand_reg(operand, 0);
-                self.code.push(Op::StrLen { dst, src: a });
+            mir::Rvalue::StrOp { op, args } => {
+                self.stage_args(args);
+                self.code.push(Op::StrOp {
+                    dst,
+                    op: *op,
+                    base: self.arg_base,
+                    argc: args.len() as u8,
+                });
             }
 
             mir::Rvalue::ToStr { operand, .. } => {

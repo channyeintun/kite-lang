@@ -232,10 +232,10 @@ pub enum ExprKind {
     /// only when written: an `int` reaching a `float` context is an error, not
     /// a widening, because a silent one is how precision is lost unnoticed.
     Cast { value: Box<Expr>, to: TyId },
-    /// `s.len()` — the number of characters, not bytes. Text layout counts
-    /// what a reader would call a character, and a byte count would make
-    /// `"héllo"` five characters long in one encoding and six in another.
-    StrLen { base: Box<Expr> },
+    /// A string operation. Every one is a host call — a `str` is the host's
+    /// string, not bytes Kite owns — so they share a node rather than each
+    /// getting one.
+    StrOp { op: StrKind, args: Vec<Expr> },
     /// A closure value: the lifted function, plus the values it captured.
     /// Captures are by value and evaluated here, at the point the closure is
     /// made — not when it runs.
@@ -391,6 +391,47 @@ impl Builtin {
             Builtin::DrawText => "draw.text",
             Builtin::TextWidth => "text.width",
             Builtin::TextHeight => "text.height",
+        }
+    }
+}
+
+/// What a program can ask of a string.
+///
+/// Deliberately few. `split`, `starts_with`, `replace` and the rest are
+/// writable in Kite on top of these, and belong in the standard library where
+/// they can be read — a host call is a boundary, and every one added is a
+/// thing two runtimes have to agree about.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StrKind {
+    /// Characters, not bytes: `"héllo"` is five either way only by accident of
+    /// encoding, and text layout counts what a reader would call a character.
+    Len,
+    /// `s.slice(start, end)` — characters `start..end`, clamped to the string
+    /// rather than trapping. An out-of-range slice is a runtime condition in
+    /// text processing, not a program bug the way an out-of-range index is.
+    Slice,
+    /// `s.index_of(needle)` — the character index, or -1.
+    IndexOf,
+    /// `s.trim()` — leading and trailing whitespace removed.
+    Trim,
+}
+
+impl StrKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            StrKind::Len => "str.len",
+            StrKind::Slice => "str.slice",
+            StrKind::IndexOf => "str.index_of",
+            StrKind::Trim => "str.trim",
+        }
+    }
+
+    /// Including the receiver.
+    pub fn arity(self) -> usize {
+        match self {
+            StrKind::Len | StrKind::Trim => 1,
+            StrKind::IndexOf => 2,
+            StrKind::Slice => 3,
         }
     }
 }
@@ -598,7 +639,10 @@ impl Program {
                 )
             }
             ExprKind::ToStr { value } => format!("(str {})", self.expr(value)),
-            ExprKind::StrLen { base } => format!("(str.len {})", self.expr(base)),
+            ExprKind::StrOp { op, args } => {
+                let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();
+                format!("({} {})", op.name(), a.join(" "))
+            }
             ExprKind::Cast { value, to } => {
                 format!("({} as {})", self.expr(value), self.types.name(*to))
             }

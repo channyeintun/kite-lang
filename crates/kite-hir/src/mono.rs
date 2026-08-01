@@ -340,7 +340,8 @@ fn expr_children(k: &mut ExprKind) -> Vec<&mut Expr> {
         | ExprKind::EnumNew { fields: args, .. }
         | ExprKind::TupleNew { elems: args }
         | ExprKind::MapNew { entries: args }
-        | ExprKind::SliceNew { elems: args } => args.iter_mut().collect(),
+        | ExprKind::SliceNew { elems: args }
+        | ExprKind::StrOp { args, .. } => args.iter_mut().collect(),
         ExprKind::ClosureNew { captures, .. } => captures.iter_mut().collect(),
         ExprKind::CallClosure { callee, args } => {
             let mut v = vec![&mut **callee];
@@ -354,8 +355,7 @@ fn expr_children(k: &mut ExprKind) -> Vec<&mut Expr> {
         | ExprKind::IsNil { value }
         | ExprKind::Wrap { value }
         | ExprKind::Unwrap { value } => vec![value],
-        ExprKind::StrLen { base }
-        | ExprKind::FieldGet { base, .. }
+        ExprKind::FieldGet { base, .. }
         | ExprKind::PairValue { base }
         | ExprKind::PairError { base }
         | ExprKind::ErrorMessage { base }

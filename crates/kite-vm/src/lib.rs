@@ -131,6 +131,47 @@ impl Value {
 /// glue's default, so the two backends measure text the same way under test.
 const NOMINAL_ADVANCE: f64 = 8.0;
 
+/// Every string operation, on characters rather than bytes.
+///
+/// Rust indexes strings by byte and Kite by character, so each of these walks
+/// the `char` iterator. That is linear where a byte index would be constant,
+/// and it is the cost of a string being text rather than storage.
+fn string_op(
+    op: kite_hir::StrKind,
+    s: &str,
+    arg: impl Fn(u8) -> Value,
+) -> Result<Value, Trap> {
+    use kite_hir::StrKind;
+    let chars: Vec<char> = s.chars().collect();
+    Ok(match op {
+        StrKind::Len => Value::Int(chars.len() as i64),
+        StrKind::Trim => Value::Str(Rc::from(s.trim())),
+        StrKind::IndexOf => {
+            let Value::Str(needle) = arg(1) else {
+                return Err(Trap::TypeConfusion { op: "str.index_of", found: "not a str" });
+            };
+            // A byte offset from `find` means nothing to a caller counting
+            // characters, so it is converted rather than returned.
+            Value::Int(match s.find(needle.as_ref()) {
+                Some(byte) => s[..byte].chars().count() as i64,
+                None => -1,
+            })
+        }
+        StrKind::Slice => {
+            let (Value::Int(from), Value::Int(to)) = (arg(1), arg(2)) else {
+                return Err(Trap::TypeConfusion { op: "str.slice", found: "not an int" });
+            };
+            // Clamped rather than trapping: an out-of-range slice is an
+            // ordinary condition in text processing, unlike an out-of-range
+            // index into a slice, which is a bug.
+            let len = chars.len() as i64;
+            let from = from.clamp(0, len) as usize;
+            let to = to.clamp(from as i64, len) as usize;
+            Value::Str(Rc::from(chars[from..to].iter().collect::<String>().as_str()))
+        }
+    })
+}
+
 /// The line height with no font to ask. Matches the generated glue's default.
 const NOMINAL_LINE_HEIGHT: f64 = 16.0;
 
@@ -842,13 +883,18 @@ impl<'a> Vm<'a> {
                     self.call_with(c.func, base, arg_base, argc, dst, &c.captures)?;
                 }
 
-                Op::StrLen { dst, src } => {
-                    let v = self.get(base, src);
-                    let Value::Str(s) = &v else {
-                        return Err(Trap::TypeConfusion { op: "str.len", found: v.type_name() });
+                Op::StrOp { dst, op, base: arg_base, argc } => {
+                    let a = |i: u8| self.get(base, arg_base + i as Reg);
+                    let subject = a(0);
+                    let Value::Str(s) = &subject else {
+                        return Err(Trap::TypeConfusion {
+                            op: op.name(),
+                            found: subject.type_name(),
+                        });
                     };
-                    // Characters, matching what the host counts.
-                    self.set(base, dst, Value::Int(s.chars().count() as i64));
+                    let _ = argc;
+                    let out = string_op(op, s, |i| a(i))?;
+                    self.set(base, dst, out);
                 }
 
                 Op::IntToFloat { dst, src } => {

@@ -154,8 +154,9 @@ pub enum Op {
     /// value carries its own tag; the Wasm backend needs three host calls for
     /// the same job.
     ToStr { dst: Reg, src: Reg },
-    /// The character count of a string.
-    StrLen { dst: Reg, src: Reg },
+    /// A string operation. Arguments occupy `base .. base + argc`, the
+    /// receiver first.
+    StrOp { dst: Reg, op: kite_hir::StrKind, base: Reg, argc: u8 },
     IntToFloat { dst: Reg, src: Reg },
     FloatToInt { dst: Reg, src: Reg },
     /// Build a closure: a function index plus the captured values, which sit
@@ -404,7 +405,9 @@ impl fmt::Display for Op {
                 write!(f, "{:<12} r{}, fn{}, r{}, {}", "call", dst, fi, base, argc)
             }
             ToStr { dst, src } => write!(f, "{:<12} r{}, r{}", "str", dst, src),
-            StrLen { dst, src } => write!(f, "{:<12} r{}, r{}", "str.len", dst, src),
+            StrOp { dst, op, base, argc } => {
+                write!(f, "{:<12} r{}, r{}, {}", op.name(), dst, base, argc)
+            }
             IntToFloat { dst, src } => write!(f, "{:<12} r{}, r{}", "int.float", dst, src),
             FloatToInt { dst, src } => write!(f, "{:<12} r{}, r{}", "float.int", dst, src),
             Closure { dst, func: fi, base, count } => {

@@ -104,6 +104,9 @@ pub fn signature(ty: TyId, types: &Types, layout: &TypeLayout) -> (Vec<ValType>,
 pub struct EqBuilder<'a> {
     pub types: &'a Types,
     pub layout: &'a TypeLayout,
+    /// Where each host function ended up, since a string comparison reaches
+    /// for one and the import list is only as long as a module needs.
+    pub hosts: &'a Hosts,
     /// Where the generated comparisons start in the function index space.
     pub base: u32,
     pub fns: &'a [EqFn],
@@ -169,7 +172,7 @@ impl EqBuilder<'_> {
             // A `str` is an index into the host's table, and two different
             // indices may name the same text, so this is a host call rather
             // than an integer comparison.
-            TyKind::Str => f.instruction(&Instruction::Call(host::STR_EQ)),
+            TyKind::Str => f.instruction(&Instruction::Call(self.hosts.at(host::STR_EQ))),
             _ => match self.index_of(ty) {
                 Some(i) => f.instruction(&Instruction::Call(i)),
                 // Unreachable: `collect` closed over every component.
@@ -380,7 +383,7 @@ impl EqBuilder<'_> {
 
         struct_get(&mut f, 0, record, 0);
         struct_get(&mut f, 1, record, 0);
-        f.instruction(&Instruction::Call(host::STR_EQ));
+        f.instruction(&Instruction::Call(self.hosts.at(host::STR_EQ)));
         f.instruction(&Instruction::End);
         f
     }

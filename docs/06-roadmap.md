@@ -204,9 +204,24 @@ saturating rather than trapping on both backends, so a value out of range or a
 NaN gives a number rather than killing the program, and the two agree on every
 input.
 
+**Also done:** strings. `str` has four methods, all host calls: `len`, `slice`,
+`index_of` and `trim`. Everything else — `contains`, `starts_with`,
+`ends_with`, `split`, `join`, `replace`, `words` — is written in Kite on top of
+them, which is where it belongs. A host call is a boundary two runtimes have to
+agree about, and every one added is a thing that can drift.
+
+They count characters rather than bytes, on both sides: the VM walks a `char`
+iterator and the glue spreads with `[...s]`, so `"héllo日本"` is seven either
+way and `index_of` returns a position a caller can pass back to `slice`.
+
+**Also done:** the module declares only the imports it reaches for. The import
+list had grown to seventeen host functions, and a `hello world` was carrying
+string slicing and a font metric it never asks about. It is now 426 bytes —
+smaller than before any of them were added.
+
 **Remaining:** real modules, so a library's names can be qualified rather than
-shadowed; string and map methods; `Display`, which would let interpolation
-render user types.
+shadowed; map methods; `Display`, which would let interpolation render user
+types.
 
 ---
 
@@ -247,9 +262,9 @@ reports the first two, and the fall back to a nominal value matters —
 place everything at zero.
 
 This measures a *run*, not a paragraph: there is no wrapping yet, and a long
-label overflows its box rather than breaking. Wrapping needs string slicing,
-which `str` does not have — it has `len()` and nothing else. That is the next
-gap, and it is a standard-library one rather than a layout one.
+label overflows its box rather than breaking. The pieces wrapping needs now
+exist — `str.slice` and the prelude's `words` — so this is layout work rather
+than a missing primitive.
 
 ### Rendering
 

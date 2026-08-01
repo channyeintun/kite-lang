@@ -199,6 +199,29 @@ fn main() {
          \x20 let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })\n}\n",
     ),
     (
+        "strings",
+        "fn main() {\n  let s = \"  hello world  \"\n\
+         \x20 io.print(s.len())\n  io.print(s.trim())\n  io.print(s.trim().len())\n\
+         \x20 io.print(s.index_of(\"world\"))\n  io.print(s.index_of(\"nope\"))\n\
+         \x20 io.print(s.slice(2, 7))\n  io.print(s.slice(0, 100))\n\
+         \x20 io.print(s.slice(5, 2) == \"\")\n  io.print(s.slice(-3, 4))\n\
+         \x20 let u = \"héllo日本\"\n  io.print(u.len())\n  io.print(u.slice(1, 3))\n\
+         \x20 io.print(u.index_of(\"日\"))\n  io.print(u.index_of(\"é\"))\n}\n",
+    ),
+    (
+        "string-library",
+        "fn main() {\n\
+         \x20 io.print(contains(\"hello\", \"ell\"))\n  io.print(contains(\"hello\", \"z\"))\n\
+         \x20 io.print(starts_with(\"hello\", \"he\"))\n  io.print(starts_with(\"he\", \"hello\"))\n\
+         \x20 io.print(ends_with(\"hello\", \"lo\"))\n  io.print(ends_with(\"hello\", \"hello\"))\n\
+         \x20 let parts = split(\"a,b,,c\", \",\")\n  io.print(parts.len())\n\
+         \x20 io.print(parts[2] == \"\")\n  io.print(join(parts, \"-\"))\n\
+         \x20 io.print(replace(\"a.b.c\", \".\", \"/\"))\n\
+         \x20 io.print(words(\"  the   quick  brown \").len())\n\
+         \x20 io.print(join(words(\" one  two \"), \"+\"))\n\
+         \x20 io.print(split(\"nosep\", \",\").len())\n  io.print(split(\"x\", \"\").len())\n}\n",
+    ),
+    (
         "text-measurement",
         "// Measurement is a host call, so a runtime with no font answers with a\n\
          // nominal advance — the same one on both backends, which is what keeps\n\

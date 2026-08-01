@@ -55,7 +55,7 @@ pub use support::{unsupported, Unsupported};
 /// Deliberately small: the standard library replaces them from Phase 6. String
 /// operations live here because a `str` is an index into a table the host
 /// holds — which is also why the module needs no linear memory.
-const IMPORTS: [(&str, &[ValType], &[ValType]); 14] = [
+const IMPORTS: [(&str, &[ValType], &[ValType]); 17] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
@@ -79,9 +79,112 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 14] = [
     ("draw_text", &[ValType::F64, ValType::F64, ValType::I32, ValType::I64], &[]),
     ("measure_text", &[ValType::I32], &[ValType::F64]),
     ("line_height", &[], &[ValType::F64]),
+    ("str_slice", &[ValType::I32, ValType::I64, ValType::I64], &[ValType::I32]),
+    ("str_index_of", &[ValType::I32, ValType::I32], &[ValType::I64]),
+    ("str_trim", &[ValType::I32], &[ValType::I32]),
 ];
 
 const IMPORT_COUNT: u32 = IMPORTS.len() as u32;
+
+/// Which host functions a module declares, and where each ended up.
+///
+/// Imported functions occupy the bottom of the function index space, so
+/// dropping one shifts everything above it. That is the whole reason this is a
+/// map rather than a set.
+#[derive(Default)]
+pub struct Hosts {
+    declared: Vec<bool>,
+    index: Vec<u32>,
+    /// Where the module's own functions start.
+    pub base: u32,
+}
+
+impl Hosts {
+    fn new(declared: Vec<bool>) -> Hosts {
+        let mut index = vec![0; declared.len()];
+        let mut n = 0;
+        for (i, d) in declared.iter().enumerate() {
+            index[i] = n;
+            if *d {
+                n += 1;
+            }
+        }
+        Hosts { declared, index, base: n }
+    }
+
+    fn declared(&self, i: u32) -> bool {
+        self.declared[i as usize]
+    }
+
+    /// The function index of a host call. A call to an import that was not
+    /// declared is a compiler bug — the scan and the emitter disagreed — and
+    /// index 0 would call the wrong thing silently, so it is caught here.
+    pub fn at(&self, i: u32) -> u32 {
+        debug_assert!(
+            self.declared(i),
+            "emitting a call to `{}`, which the import scan did not mark used",
+            IMPORTS[i as usize].0
+        );
+        self.index[i as usize]
+    }
+}
+
+/// Which host functions a program reaches for.
+///
+/// Conservative where it has to be — `io.print` picks among four by the type
+/// of its argument, so printing anything marks all four — and exact elsewhere.
+/// Over-declaring costs bytes; under-declaring produces a module that will not
+/// instantiate, which is why the lookup asserts rather than defaulting.
+fn used_imports(program: &mir::Program, types: &Types, eq_fns: &[eq::EqFn]) -> Hosts {
+    let mut used = vec![false; IMPORTS.len()];
+    let mut mark = |i: u32| used[i as usize] = true;
+
+    // A generated comparison calls out for string equality, and reaches it
+    // through any aggregate holding a `str`.
+    if !eq_fns.is_empty() {
+        mark(host::STR_EQ);
+    }
+
+    for f in &program.fns {
+        for b in &f.blocks {
+            for s in &b.stmts {
+                let mir::Inst::Assign { value, .. } = s else { continue };
+                match value {
+                    mir::Rvalue::CallBuiltin { builtin, .. } => match builtin {
+                        Builtin::IoPrint => {
+                            mark(host::PRINT_INT);
+                            mark(host::PRINT_FLOAT);
+                            mark(host::PRINT_BOOL);
+                            mark(host::PRINT_STR);
+                        }
+                        Builtin::DrawRect => mark(host::DRAW_RECT),
+                        Builtin::DrawText => mark(host::DRAW_TEXT),
+                        Builtin::TextWidth => mark(host::MEASURE_TEXT),
+                        Builtin::TextHeight => mark(host::LINE_HEIGHT),
+                    },
+                    mir::Rvalue::StrOp { op, .. } => mark(match op {
+                        kite_hir::StrKind::Len => host::STR_LEN,
+                        kite_hir::StrKind::Slice => host::STR_SLICE,
+                        kite_hir::StrKind::IndexOf => host::STR_INDEX_OF,
+                        kite_hir::StrKind::Trim => host::STR_TRIM,
+                    }),
+                    mir::Rvalue::Binary { op, .. } => match op {
+                        BinOp::ConcatStr => mark(host::STR_CONCAT),
+                        BinOp::EqStr | BinOp::NeStr => mark(host::STR_EQ),
+                        _ => {}
+                    },
+                    mir::Rvalue::ToStr { from, .. } => match types.kind(*from) {
+                        TyKind::Int => mark(host::STR_OF_INT),
+                        TyKind::Float => mark(host::STR_OF_FLOAT),
+                        _ => mark(host::STR_OF_BOOL),
+                    },
+                    _ => {}
+                }
+            }
+        }
+    }
+    Hosts::new(used)
+}
 
 /// The type a closure's captured environment is seen as from outside. Two
 /// closures of one Kite type capture different things, so the environment is
@@ -107,6 +210,9 @@ mod host {
     pub const DRAW_TEXT: u32 = 11;
     pub const MEASURE_TEXT: u32 = 12;
     pub const LINE_HEIGHT: u32 = 13;
+    pub const STR_SLICE: u32 = 14;
+    pub const STR_INDEX_OF: u32 = 15;
+    pub const STR_TRIM: u32 = 16;
 }
 
 pub struct WasmModule {
@@ -728,12 +834,16 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
             });
         }
     }
-    let dispatch_base = IMPORT_COUNT + program.fns.len() as u32;
+    // Which host functions the module declares decides where its own functions
+    // start, so this has to be settled before any index is handed out.
+    let eq_fns = eq::collect(program, types);
+    let hosts = used_imports(program, types, &eq_fns);
+    let fn_base = hosts.base;
+    let dispatch_base = fn_base + program.fns.len() as u32;
 
     // Structural equality: one generated function per aggregate type a program
     // actually compares. They may call each other, so all are declared before
     // any is emitted.
-    let eq_fns = eq::collect(program, types);
     let eq_base = dispatch_base + dispatchers.len() as u32;
 
     // One thunk per lifted function: it takes the environment as an `anyref`,
@@ -776,9 +886,15 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     module.section(&type_section);
 
     // ---- imports -----------------------------------------------------------
+    // Only what the module reaches for. Every declared import costs bytes in
+    // the module and a function the host must supply, and the set has grown as
+    // the language has — a `hello world` should not carry string slicing or a
+    // font metric it never asks about.
     let mut imports = ImportSection::new();
     for (i, (name, _, _)) in IMPORTS.iter().enumerate() {
-        imports.import("kite", name, EntityType::Function(i as u32));
+        if hosts.declared(i as u32) {
+            imports.import("kite", name, EntityType::Function(i as u32));
+        }
     }
     module.section(&imports);
 
@@ -797,12 +913,12 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     let mut exports = ExportSection::new();
     let mut exported: std::collections::HashSet<&str> = std::collections::HashSet::new();
     if let Some(entry) = program.entry {
-        exports.export("main", ExportKind::Func, IMPORT_COUNT + entry.0);
+        exports.export("main", ExportKind::Func, fn_base + entry.0);
         exported.insert("main");
     }
     for (i, f) in program.fns.iter().enumerate() {
         if f.exportable && exported.insert(f.name.as_str()) {
-            exports.export(&f.name, ExportKind::Func, IMPORT_COUNT + i as u32);
+            exports.export(&f.name, ExportKind::Func, fn_base + i as u32);
         }
     }
     module.section(&exports);
@@ -823,7 +939,8 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     // whole table is needed before any body is emitted.
     let fn_returns: Vec<TyId> = program.fns.iter().map(|f| f.ret).collect();
     let mut code = CodeSection::new();
-    let eq_builder = eq::EqBuilder { types, layout: &layout, base: eq_base, fns: &eq_fns };
+    let eq_builder =
+        eq::EqBuilder { types, layout: &layout, base: eq_base, fns: &eq_fns, hosts: &hosts };
     for f in &program.fns {
         code.function(&compile_fn(
             f,
@@ -836,16 +953,18 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
             program,
             &thunk_fns,
             thunk_base,
+            fn_base,
+            &hosts,
         ));
     }
     for d in &dispatchers {
-        code.function(&compile_dispatcher(d, &layout));
+        code.function(&compile_dispatcher(d, &layout, fn_base));
     }
     for e in &eq_fns {
         code.function(&eq_builder.build(e.ty));
     }
     for (func, count) in &envs {
-        code.function(&compile_thunk(*func, *count, program, types, &layout));
+        code.function(&compile_thunk(*func, *count, program, types, &layout, fn_base));
     }
     module.section(&code);
 
@@ -1006,6 +1125,7 @@ fn compile_thunk(
     program: &mir::Program,
     types: &Types,
     layout: &TypeLayout,
+    fn_base: u32,
 ) -> Function {
     let mut f = Function::new(Vec::new());
     let lifted = &program.fns[func as usize];
@@ -1024,7 +1144,7 @@ fn compile_thunk(
     for i in 0..(lifted.param_count - count) {
         f.instruction(&Instruction::LocalGet(1 + i as u32));
     }
-    f.instruction(&Instruction::Call(IMPORT_COUNT + func));
+    f.instruction(&Instruction::Call(fn_base + func));
     f.instruction(&Instruction::End);
     let _ = types;
     f
@@ -1045,7 +1165,7 @@ struct Dispatcher {
 /// contiguous — they encode a struct or enum id — and a trait rarely has more
 /// than a handful of implementers, so the comparison chain is both smaller and
 /// easier to read in a disassembly.
-fn compile_dispatcher(d: &Dispatcher, layout: &TypeLayout) -> Function {
+fn compile_dispatcher(d: &Dispatcher, layout: &TypeLayout, fn_base: u32) -> Function {
     let mut func = Function::new(Vec::new());
     for (tag, callee) in &d.arms {
         func.instruction(&Instruction::LocalGet(0));
@@ -1066,7 +1186,7 @@ fn compile_dispatcher(d: &Dispatcher, layout: &TypeLayout) -> Function {
         for i in 1..d.params.len() {
             func.instruction(&Instruction::LocalGet(i as u32));
         }
-        func.instruction(&Instruction::Call(IMPORT_COUNT + callee.0));
+        func.instruction(&Instruction::Call(fn_base + callee.0));
         func.instruction(&Instruction::Return);
         func.instruction(&Instruction::End);
     }
@@ -1093,6 +1213,8 @@ fn compile_fn(
     program: &mir::Program,
     thunks: &[u32],
     thunk_base: u32,
+    fn_base: u32,
+    hosts: &Hosts,
 ) -> Function {
     // Locals beyond the parameters, plus one synthetic program counter.
     let mut locals: Vec<(u32, ValType)> = Vec::new();
@@ -1193,6 +1315,8 @@ fn compile_fn(
             program,
             thunks,
             thunk_base,
+            fn_base,
+            hosts,
             layout,
             current_dst: None,
             pc,
@@ -1234,6 +1358,9 @@ struct Emitter<'a> {
     /// Lifted functions with a thunk, in emission order.
     thunks: &'a [u32],
     thunk_base: u32,
+    /// Where the module's own functions start, past its imports.
+    fn_base: u32,
+    hosts: &'a Hosts,
     layout: &'a TypeLayout,
     /// The local a rvalue is being assigned into, when there is one. A slice
     /// construction takes its element type from there.
@@ -1366,13 +1493,13 @@ impl<'a> Emitter<'a> {
                 // rather than instructions.
                 match op {
                     BinOp::ConcatStr => {
-                        func.instruction(&Instruction::Call(host::STR_CONCAT));
+                        func.instruction(&Instruction::Call(self.hosts.at(host::STR_CONCAT)));
                     }
                     BinOp::EqStr => {
-                        func.instruction(&Instruction::Call(host::STR_EQ));
+                        func.instruction(&Instruction::Call(self.hosts.at(host::STR_EQ)));
                     }
                     BinOp::NeStr => {
-                        func.instruction(&Instruction::Call(host::STR_EQ));
+                        func.instruction(&Instruction::Call(self.hosts.at(host::STR_EQ)));
                         func.instruction(&Instruction::I32Eqz);
                     }
                     // Deep equality on an aggregate: a generated function per
@@ -1411,7 +1538,7 @@ impl<'a> Emitter<'a> {
                 for a in args {
                     self.operand(func, a);
                 }
-                func.instruction(&Instruction::Call(IMPORT_COUNT + callee.0));
+                func.instruction(&Instruction::Call(self.fn_base + callee.0));
                 return self.fn_returns[callee.index()] != TyId::UNIT;
             }
 
@@ -1507,9 +1634,16 @@ impl<'a> Emitter<'a> {
                 return true;
             }
 
-            mir::Rvalue::StrLen { operand } => {
-                self.operand(func, operand);
-                func.instruction(&Instruction::Call(host::STR_LEN));
+            mir::Rvalue::StrOp { op, args } => {
+                for a in args {
+                    self.operand(func, a);
+                }
+                func.instruction(&Instruction::Call(self.hosts.at(match op {
+                    kite_hir::StrKind::Len => host::STR_LEN,
+                    kite_hir::StrKind::Slice => host::STR_SLICE,
+                    kite_hir::StrKind::IndexOf => host::STR_INDEX_OF,
+                    kite_hir::StrKind::Trim => host::STR_TRIM,
+                })));
                 return true;
             }
 
@@ -1526,7 +1660,7 @@ impl<'a> Emitter<'a> {
                         return true;
                     }
                 };
-                func.instruction(&Instruction::Call(call));
+                func.instruction(&Instruction::Call(self.hosts.at(call)));
                 return true;
             }
 
@@ -1881,7 +2015,7 @@ impl<'a> Emitter<'a> {
                     }
                 };
                 self.operand(func, arg);
-                func.instruction(&Instruction::Call(import));
+                func.instruction(&Instruction::Call(self.hosts.at(import)));
             }
 
             // Both take their arguments in declaration order; the host reads
@@ -1890,22 +2024,22 @@ impl<'a> Emitter<'a> {
                 for a in args {
                     self.operand(func, a);
                 }
-                func.instruction(&Instruction::Call(host::DRAW_RECT));
+                func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_RECT)));
             }
             Builtin::DrawText => {
                 for a in args {
                     self.operand(func, a);
                 }
-                func.instruction(&Instruction::Call(host::DRAW_TEXT));
+                func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_TEXT)));
             }
             Builtin::TextWidth => {
                 for a in args {
                     self.operand(func, a);
                 }
-                func.instruction(&Instruction::Call(host::MEASURE_TEXT));
+                func.instruction(&Instruction::Call(self.hosts.at(host::MEASURE_TEXT)));
             }
             Builtin::TextHeight => {
-                func.instruction(&Instruction::Call(host::LINE_HEIGHT));
+                func.instruction(&Instruction::Call(self.hosts.at(host::LINE_HEIGHT)));
             }
         }
     }
