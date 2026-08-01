@@ -84,7 +84,13 @@ pub struct Node {
 /// One laid-out box, in absolute coordinates.
 pub struct Frame {
   pub name: str
+  /// The whole box, padding included. This is what a background fills and what
+  /// hit-testing tests against.
   pub rect: Rect
+  /// The box inside its padding, which is where content goes. A leaf has no
+  /// children to inset, so without this its padding would size the box and
+  /// then be ignored when its text was drawn.
+  pub inner: Rect
   /// How deep in the tree, which is the order to paint in.
   pub depth: int
 }
@@ -167,10 +173,49 @@ pub fn line_height() -> float {
 /// which is wrong for proportional text and consistent, so a layout stays
 /// comparable across backends.
 ///
-/// This measures a run, not a paragraph: there is no wrapping yet, and a long
-/// label overflows its box rather than breaking.
 pub fn text_size(body: str) -> Size {
   return Size{width: text.width(body), height: line_height()}
+}
+
+/// A run broken into lines that fit within `limit`.
+///
+/// Greedy and word-based: it breaks at spaces, taking as much as fits on each
+/// line. That is not UAX #14 — it will not break a long URL, and it knows
+/// nothing about the rules for CJK, where a line may break between almost any
+/// two characters. Both need the line-breaking property table, which is the
+/// canvas renderer's business.
+///
+/// A word longer than the limit gets a line of its own and overflows it, which
+/// is what every wrapper does short of breaking words apart.
+pub fn wrap(body: str, limit: float) -> [str] {
+  let pieces = words(body)
+  if pieces.len() == 0 {
+    return [""]
+  }
+
+  var lines: [str] = []
+  var current = pieces[0]
+  for i in 1..pieces.len() {
+    let candidate = current + " " + pieces[i]
+    if text.width(candidate) <= limit {
+      current = candidate
+    } else {
+      lines.push(current)
+      current = pieces[i]
+    }
+  }
+  lines.push(current)
+  return lines
+}
+
+/// How much space a run needs once wrapped to `limit`.
+pub fn wrapped_size(body: str, limit: float) -> Size {
+  let lines = wrap(body, limit)
+  var widest = 0.0
+  for line in lines {
+    widest = maxf(widest, text.width(line))
+  }
+  return Size{width: widest, height: intToFloat(lines.len()) * line_height()}
 }
 
 /// Kite performs no implicit numeric conversion, so this is written out.
@@ -225,6 +270,18 @@ fn measure_content(node: Node) -> Size {
     Text(s) => s
   }
   if body.len() > 0 {
+    // Text wraps when it has been given a width, and not otherwise. Which
+    // width to wrap to is only knowable once a parent has decided, and
+    // measurement runs before that — so a node that wants to wrap says how
+    // wide it is, and a node that does not is measured as one run.
+    //
+    // Flexbox answers this with a second measurement pass after the first
+    // layout. That is more capable and much harder to predict, and predicting
+    // it is most of what makes CSS difficult.
+    let fixed = node.style.width
+    if fixed != nil {
+      return wrapped_size(body, fixed - horizontal(node.style.padding))
+    }
     return text_size(body)
   }
   if node.children.len() == 0 {
@@ -300,17 +357,17 @@ fn cross_offset(a: Align, available: float, natural: float) -> float {
 }
 
 fn arrange(node: Node, rect: Rect, depth: int) -> [Frame] {
-  var frames = [Frame{name: node.name, rect: rect, depth: depth}]
-  if node.children.len() == 0 {
-    return frames
-  }
-
   let pad = node.style.padding
   let inner = Rect{
     x: rect.x + pad.left,
     y: rect.y + pad.top,
     width: maxf(0.0, rect.width - horizontal(pad)),
     height: maxf(0.0, rect.height - vertical(pad)),
+  }
+
+  var frames = [Frame{name: node.name, rect: rect, inner: inner, depth: depth}]
+  if node.children.len() == 0 {
+    return frames
   }
 
   let row_axis = is_row(node.style.axis)
@@ -438,7 +495,17 @@ fn draw_one(frame: Frame, p: Paint) {
     draw.rect(r.x, r.y, r.width, r.height, background)
   }
   let body = p.label
-  if body != nil {
-    draw.text(r.x, r.y, body, p.ink)
+  if body == nil {
+    return
+  }
+  // Content goes inside the padding, and wraps to the width measurement used
+  // — so what is painted is what was laid out, rather than an approximation
+  // that happens to look close.
+  let box = frame.inner
+  let lines = wrap(body, box.width)
+  var y = box.y
+  for line in lines {
+    draw.text(box.x, y, line, p.ink)
+    y = y + line_height()
   }
 }

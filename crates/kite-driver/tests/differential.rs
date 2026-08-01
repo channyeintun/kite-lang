@@ -136,6 +136,19 @@ fn main() {
          \x20 io.print(where_is(P{ x: 1, y: 5 }))\n}\n",
     ),
     (
+        "wrapping",
+        "use std/ui\n\
+         fn main() {\n\
+         \x20 let body = \"The quick brown fox jumps over the lazy dog\"\n\
+         \x20 for w in [100.0, 200.0, 400.0, 1000.0] {\n\
+         \x20   let lines = wrap(body, w)\n\
+         \x20   io.print(\"\\(w): \\(lines.len()) lines, \\(wrapped_size(body, w).width)\")\n\
+         \x20   for line in lines {\n      io.print(\"|\\(line)|\")\n    }\n  }\n\
+         \x20 io.print(wrap(\"\", 100.0).len())\n\
+         \x20 io.print(wrap(\"supercalifragilistic\", 20.0).len())\n\
+         \x20 io.print(wrap(\"  spaced   out  \", 1000.0)[0])\n}\n",
+    ),
+    (
         "strings",
         "fn greet(name: str) -> str {\n  return \"hello, \" + name\n}\n\
          fn main() {\n  io.print(greet(\"world\"))\n  io.print(\"a\" + \"b\" + \"c\")\n\
@@ -197,6 +210,19 @@ fn main() {
         "fn main() {\n  let m = {\"a\": 1, \"b\": 2}\n  io.print(m.len())\n\
          \x20 let a = m[\"a\"]\n  io.print(if a == nil { -1 } else { a })\n\
          \x20 let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })\n}\n",
+    ),
+    (
+        "wrapping",
+        "use std/ui\n\
+         fn main() {\n\
+         \x20 let body = \"The quick brown fox jumps over the lazy dog\"\n\
+         \x20 for w in [100.0, 200.0, 400.0, 1000.0] {\n\
+         \x20   let lines = wrap(body, w)\n\
+         \x20   io.print(\"\\(w): \\(lines.len()) lines, \\(wrapped_size(body, w).width)\")\n\
+         \x20   for line in lines {\n      io.print(\"|\\(line)|\")\n    }\n  }\n\
+         \x20 io.print(wrap(\"\", 100.0).len())\n\
+         \x20 io.print(wrap(\"supercalifragilistic\", 20.0).len())\n\
+         \x20 io.print(wrap(\"  spaced   out  \", 1000.0)[0])\n}\n",
     ),
     (
         "strings",

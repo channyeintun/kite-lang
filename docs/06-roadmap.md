@@ -261,10 +261,26 @@ reports the first two, and the fall back to a nominal value matters —
 `fontBoundingBox*` is not universal, and a layout that produced `NaN` would
 place everything at zero.
 
-This measures a *run*, not a paragraph: there is no wrapping yet, and a long
-label overflows its box rather than breaking. The pieces wrapping needs now
-exist — `str.slice` and the prelude's `words` — so this is layout work rather
-than a missing primitive.
+### Wrapping
+
+A text node wraps when it has been **given a width**, and not otherwise. Which
+width to wrap to is only knowable once a parent has decided, and measurement
+runs before that — so a node that wants to wrap says how wide it is, and one
+that does not is measured as a single run.
+
+Flexbox answers this with a second measurement pass after the first layout.
+That is more capable and much harder to predict, and predicting it is most of
+what makes CSS difficult.
+
+The wrapper is greedy and word-based. It is **not UAX #14**: it will not break
+a long URL, and it knows nothing about the rules for CJK, where a line may
+break between almost any two characters. Both need the line-breaking property
+table, which belongs with the canvas renderer.
+
+A `Frame` carries its outer rect and the rect inside its padding. Without the
+second, a leaf's padding would size its box and then be ignored when its text
+was drawn — visible as text flush against a box that was clearly wider than
+it.
 
 ### Rendering
 
