@@ -30,7 +30,8 @@ fn compile_fn(func: &mir::Function) -> FnProto {
             | mir::Inst::Assign { value: mir::Rvalue::CallBuiltin { args, .. }, .. } => args.len(),
             mir::Inst::Assign { value: mir::Rvalue::StructNew { fields, .. }, .. }
             | mir::Inst::Assign { value: mir::Rvalue::EnumNew { fields, .. }, .. } => fields.len(),
-            mir::Inst::Assign { value: mir::Rvalue::SliceNew { elems }, .. } => elems.len(),
+            mir::Inst::Assign { value: mir::Rvalue::SliceNew { elems }, .. }
+            | mir::Inst::Assign { value: mir::Rvalue::TupleNew { elems }, .. } => elems.len(),
             _ => 0,
         })
         .max()
@@ -233,6 +234,15 @@ impl<'a> Emitter<'a> {
             mir::Rvalue::IsNil { value } => {
                 let obj = self.operand_reg(value, 0);
                 self.code.push(Op::IsNil { dst, obj });
+            }
+
+            mir::Rvalue::TupleNew { elems } => {
+                self.stage_args(elems);
+                self.code.push(Op::NewTuple {
+                    dst,
+                    base: self.arg_base,
+                    count: elems.len() as u8,
+                });
             }
 
             mir::Rvalue::SliceNew { elems } => {

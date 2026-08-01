@@ -1288,3 +1288,45 @@ fn several_checks_chain_in_one_function() {
     );
     assert_eq!(lines(&src), vec!["5"]);
 }
+
+// ---- tuples ---------------------------------------------------------------
+
+#[test]
+fn a_tuple_is_built_and_destructured() {
+    let src = "\
+fn pair() -> (int, str) {
+    return (7, \"seven\")
+}
+fn main() {
+    io.print(match pair() {
+        (0, s) => \"zero\",
+        (n, s) => s,
+    })
+}
+";
+    assert_eq!(lines(src), vec!["seven"]);
+}
+
+#[test]
+fn tuple_elements_bind_by_position() {
+    assert_eq!(
+        run_main("  let q = (1, 2)\n  io.print(match q {\n    (a, b) => a + b,\n  })"),
+        vec!["3"]
+    );
+}
+
+#[test]
+fn nested_tuple_patterns_work() {
+    assert_eq!(
+        run_main("  let t = (1, (2, 3))\n  io.print(match t {\n    (a, (b, c)) => a + b + c,\n  })"),
+        vec!["6"]
+    );
+}
+
+#[test]
+fn tuple_equality_is_structural() {
+    assert_eq!(
+        run_main("  io.print((1, 2) == (1, 2))\n  io.print((1, 2) == (1, 3))"),
+        vec!["true", "false"]
+    );
+}

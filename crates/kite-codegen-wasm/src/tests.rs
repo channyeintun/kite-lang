@@ -376,7 +376,7 @@ fn gaps(src: &str) -> Vec<String> {
 /// compiled into a module that traps at run time.
 #[test]
 fn unlowered_constructs_are_reported() {
-    assert!(gaps("fn f(t: (int, str)) {\n}\nfn main() {\n}\n").contains(&"tuples".to_string()));
+    assert!(gaps("fn f(m: {str: int}) {\n}\nfn main() {\n}\n").contains(&"maps".to_string()));
 
 
 
@@ -389,6 +389,15 @@ fn unlowered_constructs_are_reported() {
 fn string_operations_lower() {
     valid("fn main() {\n  io.print(\"a\" + \"b\")\n  io.print(\"x\" == \"y\")\n  io.print(\"x\" != \"y\")\n}\n");
     assert!(gaps("fn main() {\n  io.print(\"a\" + \"b\")\n}\n").is_empty());
+}
+
+#[test]
+fn tuples_validate() {
+    valid(
+        "fn pair() -> (int, str) {\n  return (7, \"seven\")\n}\n\
+         fn main() {\n  io.print(match pair() {\n    (0, s) => \"zero\",\n    (n, s) => s,\n  })\n}\n",
+    );
+    assert!(gaps("fn f() -> (int, str) {\n  return (1, \"a\")\n}\nfn main() {\n}\n").is_empty());
 }
 
 #[test]

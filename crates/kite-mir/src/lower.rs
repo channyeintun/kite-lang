@@ -57,6 +57,8 @@ struct LoopCtx {
 enum FieldOwner {
     Variant(EnumId, u32),
     Struct(StructId),
+    /// A tuple's elements are positional; the tuple's own type names them.
+    Tuple(Ty),
 }
 
 struct FnLowerer<'a> {
@@ -530,6 +532,10 @@ impl<'a> FnLowerer<'a> {
                 let v = self.operand(value);
                 Rvalue::IsNil { value: v }
             }
+            hir::ExprKind::TupleNew { elems } => {
+                let elems = elems.iter().map(|a| self.operand(a)).collect();
+                Rvalue::TupleNew { elems }
+            }
             hir::ExprKind::SliceNew { elems } => {
                 let elems = elems.iter().map(|a| self.operand(a)).collect();
                 Rvalue::SliceNew { elems }
@@ -809,6 +815,19 @@ impl<'a> FnLowerer<'a> {
                 }
             }
 
+            hir::Pattern::Tuple { ty, elems } => {
+                let refutable: Vec<(usize, &hir::Pattern)> = elems
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| !p.is_irrefutable())
+                    .collect();
+                if refutable.is_empty() {
+                    self.terminate(Terminator::Goto(on_match));
+                    return;
+                }
+                self.test_fields(subject, &refutable, FieldOwner::Tuple(*ty), on_match, on_fail);
+            }
+
             hir::Pattern::Nil => {
                 let c = self.temp(Ty::BOOL);
                 self.assign(c, Rvalue::IsNil { value: subject.clone() });
@@ -891,6 +910,11 @@ impl<'a> FnLowerer<'a> {
                     self.bind_field(sub, subject, FieldOwner::Struct(*struct_id), *i);
                 }
             }
+            hir::Pattern::Tuple { ty, elems } => {
+                for (i, sub) in elems.iter().enumerate() {
+                    self.bind_field(sub, subject, FieldOwner::Tuple(*ty), i as u32);
+                }
+            }
             // Every alternative of an or-pattern must bind the same names, so
             // binding through the first is enough.
             hir::Pattern::Or(alts) => {
@@ -929,7 +953,9 @@ impl<'a> FnLowerer<'a> {
                 variant,
                 index,
             },
-            FieldOwner::Struct(_) => Rvalue::FieldGet { base: subject.clone(), index },
+            FieldOwner::Struct(_) | FieldOwner::Tuple(_) => {
+                Rvalue::FieldGet { base: subject.clone(), index }
+            }
         }
     }
 
@@ -937,6 +963,14 @@ impl<'a> FnLowerer<'a> {
         let fields = match owner {
             FieldOwner::Variant(e, v) => &self.types.enum_def(e).variants[v as usize].fields,
             FieldOwner::Struct(s) => &self.types.struct_def(s).fields,
+            FieldOwner::Tuple(ty) => {
+                return match self.types.kind(ty) {
+                    kite_hir::TyKind::Tuple(elems) => {
+                        elems.get(index as usize).copied().unwrap_or(Ty::ERROR)
+                    }
+                    _ => Ty::ERROR,
+                }
+            }
         };
         fields.get(index as usize).map(|f| f.ty).unwrap_or(Ty::ERROR)
     }

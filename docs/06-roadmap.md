@@ -240,7 +240,12 @@ default goes in a slot the taint analysis has already proved unreadable.
 **Every shipped example now compiles to WebAssembly and produces output
 identical to the bytecode VM**, and a test asserts it so the two cannot drift.
 
-Also still to lower: tuples, maps, and trait objects.
+Tuples lower as positional records, sharing the field machinery structs use.
+
+Also still to lower: maps, trait objects, and structural equality on
+aggregates. The rvalue match in the backend has **no catch-all**, so adding a
+form to MIR fails to compile rather than silently producing a module that
+traps.
 
 **`--emit wasm` refuses what it cannot lower**, rather than emitting a module
 that validates and then traps with no explanation:
@@ -367,9 +372,9 @@ none.
 |---|---|
 | 0 — Specification review | ✅ done, and the spec was amended four times by what the code found |
 | 1 — Vertical slice | ✅ complete |
-| 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, slices, optionals. ❌ maps, tuples, closures, generics, `dyn` dispatch |
+| 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, slices, optionals, tuples. ❌ maps, closures, generics, `dyn` dispatch |
 | 3 — Error handling | ✅ complete |
-| 4 — WebAssembly backend | 🟡 everything the language currently has except tuples, maps, and trait objects — all seven examples run. ❌ JS String Builtins |
+| 4 — WebAssembly backend | 🟡 everything the language currently has except maps and trait objects — all seven examples run. ❌ JS String Builtins |
 | 5 — Concurrency | ❌ not started |
 | 6 — Standard library | ❌ not started |
 | 7 — Layout engine and DOM renderer | ❌ not started |

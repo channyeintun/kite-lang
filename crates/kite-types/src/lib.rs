@@ -1336,9 +1336,32 @@ impl<'a> Checker<'a> {
                 self.not_yet(*span, "`await`", "concurrency arrives in Phase 5");
                 self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
-            ast::Expr::Tuple { span, .. } => {
-                self.not_yet(*span, "tuples", "arrives in Phase 2");
-                self.lit(ExprKind::Error, TyId::ERROR, *span)
+            ast::Expr::Tuple { elems, span } => {
+                if elems.is_empty() {
+                    return self.lit(ExprKind::Error, TyId::UNIT, *span);
+                }
+                // The expected type steers each element, which is what lets a
+                // tuple literal supply a `(int, str)` without annotation.
+                let hint: Option<Vec<TyId>> = expected.and_then(|e| {
+                    match self.types.kind(e) {
+                        TyKind::Tuple(ts) if ts.len() == elems.len() => Some(ts.clone()),
+                        _ => None,
+                    }
+                });
+                let mut out = Vec::with_capacity(elems.len());
+                let mut tys = Vec::with_capacity(elems.len());
+                for (i, e) in elems.iter().enumerate() {
+                    let want = hint.as_ref().map(|h| h[i]);
+                    let v = self.expr(e, want);
+                    let v = self.coerce(v, want);
+                    if let Some(w) = want {
+                        self.expect_ty(v.ty, w, v.span, None);
+                    }
+                    tys.push(v.ty);
+                    out.push(v);
+                }
+                let ty = self.types.tuple_of(tys);
+                hir::Expr { kind: ExprKind::TupleNew { elems: out }, ty, span: *span }
             }
             ast::Expr::Slice { elems, span } => self.slice_literal(elems, expected, *span),
             ast::Expr::Closure { span, .. } => {
@@ -2766,9 +2789,41 @@ impl<'a> Checker<'a> {
                 hir::Pattern::Or(alts.iter().map(|a| self.pattern(a, scrut)).collect())
             }
 
-            ast::Pattern::Tuple { span, .. } => {
-                self.not_yet(*span, "tuple patterns", "tuples arrive later in Phase 2");
-                hir::Pattern::Wildcard
+            ast::Pattern::Tuple { elems, span } => {
+                let TyKind::Tuple(element_tys) = self.types.kind(scrut).clone() else {
+                    if !self.types.is_poisoned(scrut) {
+                        let found = self.types.with_article(scrut);
+                        self.diags.push(
+                            Diagnostic::error(
+                                codes::E0200,
+                                format!("a tuple pattern cannot match {}", found),
+                            )
+                            .with_primary(*span, "not a tuple"),
+                        );
+                    }
+                    return hir::Pattern::Wildcard;
+                };
+                if elems.len() != element_tys.len() {
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0113,
+                            format!(
+                                "this tuple has {} element{}, but the pattern names {}",
+                                element_tys.len(),
+                                if element_tys.len() == 1 { "" } else { "s" },
+                                elems.len()
+                            ),
+                        )
+                        .with_primary(*span, "arity does not match"),
+                    );
+                    return hir::Pattern::Wildcard;
+                }
+                let subs = elems
+                    .iter()
+                    .zip(&element_tys)
+                    .map(|(p, ty)| self.pattern(p, *ty))
+                    .collect();
+                hir::Pattern::Tuple { ty: scrut, elems: subs }
             }
             ast::Pattern::Nil(span) => {
                 if !matches!(self.types.kind(scrut), TyKind::Optional(_))

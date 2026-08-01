@@ -203,6 +203,8 @@ pub enum ExprKind {
     /// `Option<T>` back to `T`, where narrowing has proved it is present.
     /// Never emitted on a path where the value could be nil.
     Unwrap { value: Box<Expr> },
+    /// `(a, b)`. A positional record; the arena keeps its shape.
+    TupleNew { elems: Vec<Expr> },
     /// `[1, 2, 3]`
     SliceNew { elems: Vec<Expr> },
     /// `xs[i]` — bounds-checked, and traps on failure because an out-of-range
@@ -251,6 +253,9 @@ pub enum Pattern {
     Variant { enum_id: EnumId, variant: u32, fields: Vec<Pattern> },
     /// `Point{ x: 0.0, y }`. Only the named fields are tested.
     Struct { struct_id: StructId, fields: Vec<(u32, Pattern)> },
+    /// `(a, b)` — one sub-pattern per element. Carries the tuple's own type so
+    /// lowering can name each element's type without a second lookup.
+    Tuple { ty: TyId, elems: Vec<Pattern> },
     /// `nil`
     Nil,
     /// `1 | 2 | 3`
@@ -262,6 +267,9 @@ impl Pattern {
     pub fn is_irrefutable(&self) -> bool {
         match self {
             Pattern::Wildcard | Pattern::Binding { .. } => true,
+            // A tuple has one constructor, so it matches everything exactly
+            // when each of its elements does.
+            Pattern::Tuple { elems, .. } => elems.iter().all(|e| e.is_irrefutable()),
             Pattern::Or(alts) => alts.iter().any(|a| a.is_irrefutable()),
             _ => false,
         }
@@ -507,6 +515,10 @@ impl Program {
                 format!("(match {} {} arms)", self.expr(scrutinee), arms.len())
             }
             ExprKind::Block(b) => format!("(block {} stmts)", b.stmts.len()),
+            ExprKind::TupleNew { elems } => {
+                let a: Vec<String> = elems.iter().map(|x| self.expr(x)).collect();
+                format!("({})", a.join(", "))
+            }
             ExprKind::SliceNew { elems } => {
                 let a: Vec<String> = elems.iter().map(|x| self.expr(x)).collect();
                 format!("[{}]", a.join(", "))

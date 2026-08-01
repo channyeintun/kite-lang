@@ -30,6 +30,8 @@ pub enum Value {
     /// copies the handle; `RefCell` is what lets a `var` field be written
     /// through one. The checker has already proved only `var` fields are.
     Struct(Rc<StructValue>),
+    /// A tuple: a positional record, read by index like a struct's fields.
+    Tuple(Rc<Vec<Value>>),
     /// An enum value: which variant, and its payload.
     Enum(Rc<EnumValue>),
     /// A slice. Copy-on-write: assignment shares the buffer, and a mutation
@@ -78,6 +80,7 @@ impl PartialEq for Value {
                 a.enum_id == b.enum_id && a.variant == b.variant && a.fields == b.fields
             }
             (Value::Slice(a), Value::Slice(b)) => a == b,
+            (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Pair(a), Value::Pair(b)) => a == b,
             (Value::Err(a), Value::Err(b)) => a == b,
             (Value::Nil, Value::Nil) => true,
@@ -97,6 +100,7 @@ impl Value {
             Value::Struct(_) => "struct",
             Value::Enum(_) => "enum",
             Value::Slice(_) => "slice",
+            Value::Tuple(_) => "tuple",
             Value::Pair(_) => "(T, error)",
             Value::Err(_) => "error",
             Value::Nil => "nil",
@@ -156,6 +160,16 @@ impl fmt::Display for Value {
             }
             Value::Pair(p) => write!(f, "({}, {})", p.0, p.1),
             Value::Err(m) => write!(f, "{}", m),
+            Value::Tuple(items) => {
+                write!(f, "(")?;
+                for (i, v) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, ")")
+            }
             Value::Nil => write!(f, "nil"),
         }
     }
@@ -573,10 +587,14 @@ impl<'a> Vm<'a> {
                         let v = s.fields.borrow()[index as usize].clone();
                         self.set(base, dst, v);
                     }
-                    // An enum payload is read the same way; the checker has
-                    // already proved the variant matches.
+                    // An enum payload and a tuple element are read the same
+                    // way; the checker has already proved the shape.
                     Value::Enum(e) => {
                         let v = e.fields[index as usize].clone();
+                        self.set(base, dst, v);
+                    }
+                    Value::Tuple(items) => {
+                        let v = items[index as usize].clone();
                         self.set(base, dst, v);
                     }
                     other => {
@@ -623,6 +641,14 @@ impl<'a> Vm<'a> {
                         })
                     }
                 },
+
+                Op::NewTuple { dst, base: arg_base, count } => {
+                    let mut items = Vec::with_capacity(count as usize);
+                    for i in 0..count as usize {
+                        items.push(self.regs[base + arg_base as usize + i].clone());
+                    }
+                    self.set(base, dst, Value::Tuple(Rc::new(items)));
+                }
 
                 Op::NewSlice { dst, base: arg_base, count } => {
                     let mut items = Vec::with_capacity(count as usize);

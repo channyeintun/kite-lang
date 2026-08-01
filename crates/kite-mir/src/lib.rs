@@ -116,6 +116,7 @@ pub enum Rvalue {
     /// because a backend using subtyped variant records has to cast first, and
     /// only the pattern that matched knows which variant it is.
     VariantGet { base: Operand, enum_id: EnumId, variant: u32, index: u32 },
+    TupleNew { elems: Vec<Operand> },
     SliceNew { elems: Vec<Operand> },
     IsNil { value: Operand },
     Wrap { value: Operand },
@@ -288,6 +289,11 @@ impl fmt::Display for Rvalue {
             Rvalue::TagOf { base } => write!(f, "tag {}", base),
             Rvalue::VariantGet { base, variant, index, .. } => {
                 write!(f, "{}#{}.{}", base, variant, index)
+            }
+            Rvalue::TupleNew { elems } => {
+                write!(f, "(")?;
+                write_operands(f, elems)?;
+                write!(f, ")")
             }
             Rvalue::SliceNew { elems } => {
                 write!(f, "[")?;

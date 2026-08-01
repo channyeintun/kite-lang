@@ -104,6 +104,8 @@ struct TypeLayout {
     /// One record per distinct fallible value type. The pair is a single GC
     /// object so a function can return both slots at once.
     pair_record: std::collections::HashMap<TyId, u32>,
+    /// One record per distinct tuple shape.
+    tuple_record: std::collections::HashMap<TyId, u32>,
 }
 
 impl TypeLayout {
@@ -134,12 +136,33 @@ impl TypeLayout {
     fn pair_type(&self, value: TyId) -> Option<u32> {
         self.pair_record.get(&value).copied()
     }
+
+    fn tuple_type(&self, ty: TyId) -> Option<u32> {
+        self.tuple_record.get(&ty).copied()
+    }
+}
+
+/// Every tuple shape a program mentions, in a stable order.
+fn tuple_shapes(program: &mir::Program, types: &Types) -> Vec<TyId> {
+    let mut seen = Vec::new();
+    let note = |ty: TyId, seen: &mut Vec<TyId>| {
+        if matches!(types.kind(ty), TyKind::Tuple(_)) && !seen.contains(&ty) {
+            seen.push(ty);
+        }
+    };
+    for f in &program.fns {
+        note(f.ret, &mut seen);
+        for l in &f.locals {
+            note(l.ty, &mut seen);
+        }
+    }
+    seen
 }
 
 /// Every fallible value type a program mentions, in a stable order.
 fn pair_values(program: &mir::Program, types: &Types) -> Vec<TyId> {
     let mut seen = Vec::new();
-    let mut note = |ty: TyId, seen: &mut Vec<TyId>| {
+    let note = |ty: TyId, seen: &mut Vec<TyId>| {
         if let TyKind::Fallible(v) = types.kind(ty) {
             if !seen.contains(v) {
                 seen.push(*v);
@@ -240,6 +263,7 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
         slice_array: std::collections::HashMap::new(),
         error_record: 0,
         pair_record: std::collections::HashMap::new(),
+        tuple_record: std::collections::HashMap::new(),
     };
     let payloads = option_payloads(program, types);
     for p in &payloads {
@@ -256,6 +280,11 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     let pairs = pair_values(program, types);
     for v in &pairs {
         layout.pair_record.insert(*v, next);
+        next += 1;
+    }
+    let tuples = tuple_shapes(program, types);
+    for s in &tuples {
+        layout.tuple_record.insert(*s, next);
         next += 1;
     }
     let aggregate_count = next - IMPORT_COUNT;
@@ -380,6 +409,23 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
             ));
         }
 
+        for s in &tuples {
+            let TyKind::Tuple(elems) = types.kind(*s).clone() else {
+                continue;
+            };
+            group.push(struct_subtype(
+                elems
+                    .iter()
+                    .map(|e| FieldType {
+                        element_type: StorageType::Val(val_type_with(*e, types, &layout)),
+                        mutable: false,
+                    })
+                    .collect(),
+                None,
+                true,
+            ));
+        }
+
         type_section.ty().rec(group);
     }
 
@@ -476,6 +522,13 @@ fn val_type_with(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
             nullable: true,
             heap_type: HeapType::Concrete(layout.enum_base_type(*e)),
         }),
+        TyKind::Tuple(_) => match layout.tuple_type(ty) {
+            Some(idx) => ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(idx),
+            }),
+            None => ValType::I32,
+        },
         TyKind::Err => ValType::Ref(RefType {
             nullable: true,
             heap_type: HeapType::Concrete(layout.error_record),
@@ -765,15 +818,30 @@ impl<'a> Emitter<'a> {
             }
 
             mir::Rvalue::FieldGet { base, index } => {
-                let Some(sid) = self.struct_of(base) else {
+                let Some(record) = self.record_of(base) else {
                     func.instruction(&Instruction::Unreachable);
                     return true;
                 };
                 self.operand(func, base);
                 func.instruction(&Instruction::StructGet {
-                    struct_type_index: self.layout.struct_type(sid),
+                    struct_type_index: record,
                     field_index: *index,
                 });
+                return true;
+            }
+
+            mir::Rvalue::TupleNew { elems } => {
+                let Some(idx) = self
+                    .current_dst
+                    .and_then(|d| self.layout.tuple_type(self.f.locals[d as usize].ty))
+                else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                for e in elems {
+                    self.operand(func, e);
+                }
+                func.instruction(&Instruction::StructNew(idx));
                 return true;
             }
 
@@ -990,13 +1058,9 @@ impl<'a> Emitter<'a> {
                 return true;
             }
 
-            // Enums, slices, and fallible pairs are not lowered yet.
-            // `unreachable` makes the stack polymorphic, so reporting a value
-            // keeps the surrounding code well-typed.
-            _ => {
-                func.instruction(&Instruction::Unreachable);
-                return true;
-            }
+            // Every MIR rvalue is handled: there is deliberately no catch-all
+            // here, so adding one to MIR fails to compile rather than silently
+            // producing a module that traps.
         }
         true
     }
@@ -1116,6 +1180,18 @@ impl<'a> Emitter<'a> {
             })),
             _ => func.instruction(&Instruction::I32Const(0)),
         };
+    }
+
+    /// The record type an operand holds, whether a struct or a tuple. Both are
+    /// positional records once lowered.
+    fn record_of(&self, o: &mir::Operand) -> Option<u32> {
+        let mir::Operand::Local(l) = o else { return None };
+        let ty = self.f.locals[l.index()].ty;
+        match self.types.kind(ty) {
+            TyKind::Struct(s) => Some(self.layout.struct_type(*s)),
+            TyKind::Tuple(_) => self.layout.tuple_type(ty),
+            _ => None,
+        }
     }
 
     /// The pair record an operand holds.

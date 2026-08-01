@@ -77,7 +77,6 @@ fn unsupported_type(ty: kite_hir::TyId, types: &Types) -> Option<&'static str> {
     use kite_hir::TyKind::*;
     match types.kind(ty) {
         Map(..) => Some("maps"),
-        Tuple(_) => Some("tuples"),
         Fn { .. } => Some("function values"),
         Dyn(_) => Some("trait objects"),
         _ => None,

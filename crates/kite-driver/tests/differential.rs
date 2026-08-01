@@ -186,6 +186,13 @@ fn main() {
          fn main() {\n  report(10, 2)\n  report(10, 0)\n}\n",
     ),
     (
+        "tuples",
+        "fn pair() -> (int, str) {\n  return (7, \"seven\")\n}\n\
+         fn main() {\n  io.print(match pair() {\n    (0, s) => \"zero\",\n    (n, s) => s,\n  })\n\
+         \x20 let t = (1, (2, 3))\n  io.print(match t {\n    (a, (b, c)) => a + b + c,\n  })\n\
+         }\n",
+    ),
+    (
         "evaluation-order",
         "fn step(n: int) -> int {\n  io.print(n)\n  return n\n}\nfn main() {\n  let x = step(1) + step(2)\n  io.print(x)\n}\n",
     ),

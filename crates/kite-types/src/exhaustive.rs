@@ -85,6 +85,18 @@ pub fn missing_patterns(scrutinee: TyId, patterns: &[&Pattern], types: &Types) -
             missing
         }
 
+        // A tuple has one constructor, so its elements decide. Reporting `_`
+        // is sound and never wrong, only less specific.
+        TyKind::Tuple(_) => {
+            if patterns.iter().any(|p| {
+                matches!(p, Pattern::Tuple { elems, .. } if elems.iter().all(|e| e.is_irrefutable()))
+            }) {
+                Vec::new()
+            } else {
+                vec![Missing("_".to_string())]
+            }
+        }
+
         // An optional has two cases: nil, and a present value.
         TyKind::Optional(_) => {
             let mut missing = Vec::new();

@@ -114,6 +114,8 @@ pub enum Op {
     /// The variant index of an enum value, as an int.
     TagOf { dst: Reg, obj: Reg },
     /// Elements occupy `base .. base + count`.
+    NewTuple { dst: Reg, base: Reg, count: u8 },
+    /// Elements occupy `base .. base + count`.
     NewSlice { dst: Reg, base: Reg, count: u8 },
     /// Traps when out of range: an index bug is a program bug.
     GetIndex { dst: Reg, obj: Reg, index: Reg },
@@ -313,6 +315,9 @@ impl fmt::Display for Op {
                 "new.enum", dst, enum_id, variant, base, count
             ),
             TagOf { dst, obj } => write!(f, "{:<12} r{}, r{}", "tag", dst, obj),
+            NewTuple { dst, base, count } => {
+                write!(f, "{:<12} r{}, r{}, {}", "new.tuple", dst, base, count)
+            }
             NewSlice { dst, base, count } => {
                 write!(f, "{:<12} r{}, r{}, {}", "new.slice", dst, base, count)
             }
