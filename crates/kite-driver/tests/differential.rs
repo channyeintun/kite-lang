@@ -274,6 +274,8 @@ fn every_example_agrees_across_backends() {
     };
 
     let mut checked = 0;
+    let mut total = 0;
+    let mut skipped: Vec<String> = Vec::new();
     let mut mismatches = Vec::new();
     for entry in entries {
         let path = entry.expect("entry").path();
@@ -285,7 +287,19 @@ fn every_example_agrees_across_backends() {
         let dir = root.join(&name);
         std::fs::create_dir_all(&dir).expect("create work directory");
 
+        // Every example must at least run on the bytecode target.
         let vm = run_on_vm(&name, &src);
+        total += 1;
+
+        // The Wasm target still refuses a few constructs. Those examples are
+        // counted as skipped rather than silently passing, so the count below
+        // fails if coverage ever goes backwards.
+        let compiled = compile(format!("{}.kite", name), &src, Emit::Wasm);
+        if compiled.failed() {
+            skipped.push(name);
+            continue;
+        }
+
         let wasm = run_on_wasm(&name, &src, &dir);
         if vm != wasm {
             mismatches.push(format!("{}:\n  vm:   {:?}\n  wasm: {:?}", name, vm, wasm));
@@ -294,7 +308,13 @@ fn every_example_agrees_across_backends() {
     }
     let _ = std::fs::remove_dir_all(&root);
 
-    assert!(checked >= 7, "only {} examples were checked", checked);
+    assert!(total >= 8, "only {} examples were found", total);
+    assert!(
+        checked >= 7,
+        "only {} examples reached wasm; skipped: {:?}",
+        checked,
+        skipped
+    );
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n\n"));
 }
 

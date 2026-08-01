@@ -1,0 +1,47 @@
+// Slices are copy-on-write values, maps keep insertion order, and indexing a
+// map yields an optional rather than a zero value.
+
+struct Item {
+    name: str
+    price: int
+}
+
+fn total(items: [Item]) -> int {
+    var sum = 0
+    for item in items {
+        sum = sum + item.price
+    }
+    return sum
+}
+
+fn describe(n: int) -> (int, str) {
+    if n > 100 {
+        return (n, "expensive")
+    }
+    return (n, "cheap")
+}
+
+fn main() {
+    let items = [
+        Item{ name: "book", price: 30 },
+        Item{ name: "lamp", price: 120 },
+    ]
+    io.print(items.len())
+    io.print(total(items))
+
+    // A tuple, destructured by pattern.
+    io.print(match describe(total(items)) {
+        (n, label) => label,
+    })
+
+    // A map. Reading a missing key gives nil, not zero.
+    var stock = {"book": 4, "lamp": 1}
+    stock["pen"] = 12
+    io.print(stock.len())
+
+    let books = stock["book"]
+    io.print(if books == nil { -1 } else { books })
+
+    let missing = stock["desk"]
+    io.print(if missing == nil { -1 } else { missing })
+}
