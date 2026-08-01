@@ -55,7 +55,7 @@ pub use support::{unsupported, Unsupported};
 /// Deliberately small: the standard library replaces them from Phase 6. String
 /// operations live here because a `str` is an index into a table the host
 /// holds — which is also why the module needs no linear memory.
-const IMPORTS: [(&str, &[ValType], &[ValType]); 17] = [
+const IMPORTS: [(&str, &[ValType], &[ValType]); 19] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
@@ -82,6 +82,12 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 17] = [
     ("str_slice", &[ValType::I32, ValType::I64, ValType::I64], &[ValType::I32]),
     ("str_index_of", &[ValType::I32, ValType::I32], &[ValType::I64]),
     ("str_trim", &[ValType::I32], &[ValType::I32]),
+    (
+        "draw_clip",
+        &[ValType::F64, ValType::F64, ValType::F64, ValType::F64],
+        &[],
+    ),
+    ("draw_unclip", &[], &[]),
 ];
 
 const IMPORT_COUNT: u32 = IMPORTS.len() as u32;
@@ -161,6 +167,8 @@ fn used_imports(program: &mir::Program, types: &Types, eq_fns: &[eq::EqFn]) -> H
                         Builtin::DrawText => mark(host::DRAW_TEXT),
                         Builtin::TextWidth => mark(host::MEASURE_TEXT),
                         Builtin::TextHeight => mark(host::LINE_HEIGHT),
+                        Builtin::DrawClip => mark(host::DRAW_CLIP),
+                        Builtin::DrawUnclip => mark(host::DRAW_UNCLIP),
                     },
                     mir::Rvalue::StrOp { op, .. } => mark(match op {
                         kite_hir::StrKind::Len => host::STR_LEN,
@@ -213,6 +221,8 @@ mod host {
     pub const STR_SLICE: u32 = 14;
     pub const STR_INDEX_OF: u32 = 15;
     pub const STR_TRIM: u32 = 16;
+    pub const DRAW_CLIP: u32 = 17;
+    pub const DRAW_UNCLIP: u32 = 18;
 }
 
 pub struct WasmModule {
@@ -2040,6 +2050,15 @@ impl<'a> Emitter<'a> {
             }
             Builtin::TextHeight => {
                 func.instruction(&Instruction::Call(self.hosts.at(host::LINE_HEIGHT)));
+            }
+            Builtin::DrawClip => {
+                for a in args {
+                    self.operand(func, a);
+                }
+                func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_CLIP)));
+            }
+            Builtin::DrawUnclip => {
+                func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_UNCLIP)));
             }
         }
     }

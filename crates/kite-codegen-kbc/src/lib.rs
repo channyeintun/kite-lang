@@ -27,6 +27,8 @@ pub enum Native {
     DrawText,
     TextWidth,
     TextHeight,
+    DrawClip,
+    DrawUnclip,
 }
 
 impl Native {
@@ -37,6 +39,8 @@ impl Native {
             Builtin::DrawText => Native::DrawText,
             Builtin::TextWidth => Native::TextWidth,
             Builtin::TextHeight => Native::TextHeight,
+            Builtin::DrawClip => Native::DrawClip,
+            Builtin::DrawUnclip => Native::DrawUnclip,
         }
     }
 
@@ -47,6 +51,8 @@ impl Native {
             Native::DrawText => "draw.text",
             Native::TextWidth => "text.width",
             Native::TextHeight => "text.height",
+            Native::DrawClip => "draw.clip",
+            Native::DrawUnclip => "draw.unclip",
         }
     }
 }

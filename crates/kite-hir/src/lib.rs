@@ -381,6 +381,10 @@ pub enum Builtin {
     TextWidth,
     /// `text.height()` — the host font's line height.
     TextHeight,
+    /// `draw.clip(x, y, w, h)` / `draw.unclip()`. Clipping is the one thing a
+    /// layout needs that is neither a rectangle nor a run of text.
+    DrawClip,
+    DrawUnclip,
 }
 
 impl Builtin {
@@ -391,6 +395,8 @@ impl Builtin {
             Builtin::DrawText => "draw.text",
             Builtin::TextWidth => "text.width",
             Builtin::TextHeight => "text.height",
+            Builtin::DrawClip => "draw.clip",
+            Builtin::DrawUnclip => "draw.unclip",
         }
     }
 }

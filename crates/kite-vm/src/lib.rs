@@ -1096,6 +1096,16 @@ impl<'a> Vm<'a> {
 
             Native::TextHeight => Ok(Value::Float(NOMINAL_LINE_HEIGHT)),
 
+            Native::DrawClip => {
+                let a = |i: usize| self.regs[base + arg_base as usize + i].clone();
+                let _ = writeln!(self.out, "clip {} {} {} {}", a(0), a(1), a(2), a(3));
+                Ok(Value::Unit)
+            }
+            Native::DrawUnclip => {
+                let _ = writeln!(self.out, "unclip");
+                Ok(Value::Unit)
+            }
+
             Native::IoPrint => {
                 let v = if argc == 0 {
                     Value::Unit

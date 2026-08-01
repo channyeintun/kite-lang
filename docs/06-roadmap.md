@@ -331,7 +331,25 @@ handing an export a JavaScript string does not fail, it runs `ToNumber`, gets
 `NaN`, and reads index 0. The glue exports `str()` and `text()` so nothing has
 to know that.
 
-**Remaining:** scrolling, pointer events beyond a click, and incremental
+### Scrolling
+
+Scrolling is not a layout concern. A tree is laid out at its natural size and a
+viewport decides which part is visible — so scrolling changes nothing about
+where anything *is*, only about what is drawn. Hit-testing works on the same
+frames: subtract the offset from the point rather than re-laying anything out,
+which is one subtraction instead of one per frame.
+
+Frames outside the viewport are skipped rather than drawn and thrown away.
+
+This is the one place the drawing boundary had to grow, from two calls to
+four. `draw.clip` and `draw.unclip` cannot be built out of fills: a half-visible
+row has to be cut by the renderer, and painting a rectangle over it would erase
+whatever it is scrolling past. The two renderers diverge most here — the DOM
+one nests an `overflow: hidden` element and shifts its children's origin, the
+canvas one pushes a path with `save`/`clip`/`restore` and moves nothing — and
+they still produce the same picture.
+
+**Remaining:** pointer events beyond a click and a wheel, and incremental
 redraw — `view` repaints the whole tree.
 
 Four things came out differently from this plan:

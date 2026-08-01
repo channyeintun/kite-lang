@@ -1,0 +1,132 @@
+// Scrolling.
+//
+// A tree is laid out at its natural size and a viewport decides which part is
+// visible, so scrolling changes nothing about where anything is — only about
+// what gets drawn. Hit-testing therefore works on the same frames: subtract
+// the offset from the point rather than re-laying anything out.
+//
+//     kitec build examples/scroll.kite --emit wasm --out dist
+
+use std/ui
+
+pub struct Model {
+  pub offset: float
+  pub selected: str
+}
+
+pub fn init() -> Model {
+  return Model{offset: 0.0, selected: "none"}
+}
+
+fn viewport() -> Rect {
+  return Rect{x: 16.0, y: 56.0, width: 380.0, height: 240.0}
+}
+
+fn row(i: int) -> Node {
+  return text_of(
+    "row-\(i)",
+    padded(Style{..row_style(), width: 380.0}, 6.0),
+    "\(i). " + label_for(i),
+  )
+}
+
+fn row_style() -> Style {
+  return style()
+}
+
+fn label_for(i: int) -> str {
+  if divides(i, 15) {
+    return "fizzbuzz — a row long enough to show that wrapping and scrolling are separate concerns"
+  }
+  if divides(i, 3) {
+    return "fizz"
+  }
+  if divides(i, 5) {
+    return "buzz"
+  }
+  return "an ordinary row"
+}
+
+fn content() -> Node {
+  var rows: [Node] = []
+  for i in 1..31 {
+    rows.push(row(i))
+  }
+  return box_of("list", spaced(Style{..column(), align: Align.Stretch}, 4.0), rows)
+}
+
+fn frames_of() -> [Frame] {
+  return layout(content(), Size{width: 380.0, height: 240.0})
+}
+
+fn palette(model: Model) -> [Paint] {
+  var out = [
+    fill("list", 0x14161a),
+  ]
+  for i in 1..31 {
+    let name = "row-\(i)"
+    let chosen = name == model.selected
+    let background = if chosen { 0x3b82f6 } else { 0x1a1e25 }
+    let ink = if chosen { 0xffffff } else { 0xc9d1dc }
+    out.push(filled_label(name, "\(i). " + label_for(i), background, ink))
+  }
+  return out
+}
+
+pub fn view(model: Model) {
+  let v = viewport()
+  draw.rect(0.0, 0.0, 640.0, 320.0, 0x0b0d10)
+  draw.text(16.0, 16.0, "Scroll with the wheel or arrow keys; click a row", 0x8b93a1)
+  draw.text(16.0, 32.0, "offset \(model.offset), selected \(model.selected)", 0x5c6472)
+  draw.rect(v.x, v.y, v.width, v.height, 0x14161a)
+  paint_scrolled(frames_of(), palette(model), v, model.offset)
+}
+
+pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
+  let frames = frames_of()
+  let box = Size{width: viewport().width, height: viewport().height}
+
+  if event == 0 {
+    let target = hit_scrolled(frames, viewport(), model.offset, x, y)
+    if target == nil {
+      return model
+    }
+    return Model{..model, selected: target.name}
+  }
+
+  if event == 1 {
+    return Model{..model, offset: clamp_scroll(model.offset + step(key), frames, box)}
+  }
+
+  // Event 2 is a wheel: `y` carries the distance.
+  if event == 2 {
+    return Model{..model, offset: clamp_scroll(model.offset + y, frames, box)}
+  }
+
+  return model
+}
+
+fn step(key: str) -> float {
+  if key == "ArrowDown" || key == "j" {
+    return 40.0
+  }
+  if key == "ArrowUp" || key == "k" {
+    return 0.0 - 40.0
+  }
+  if key == "PageDown" || key == " " {
+    return 200.0
+  }
+  if key == "PageUp" {
+    return 0.0 - 200.0
+  }
+  return 0.0
+}
+
+fn main() {
+  var model = init()
+  view(model)
+  model = update(model, 1, 0.0, 0.0, "PageDown")
+  io.print("after PageDown: offset \(model.offset)")
+  model = update(model, 0, 100.0, 100.0, "")
+  io.print("clicked: \(model.selected)")
+}

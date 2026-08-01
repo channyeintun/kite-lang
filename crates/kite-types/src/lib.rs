@@ -2270,6 +2270,37 @@ impl<'a> Checker<'a> {
             // compile rather than falling through to something else.
             BuiltinFn::DrawRect | BuiltinFn::DrawText => self.draw_call(b, args, span),
 
+            BuiltinFn::DrawClip => {
+                if args.len() != 4 {
+                    self.arity_error("draw.clip", args.len(), 4, span, None);
+                }
+                let mut hargs = Vec::with_capacity(4);
+                for a in args {
+                    let e = self.expr(a, Some(TyId::FLOAT));
+                    self.expect_ty(e.ty, TyId::FLOAT, e.span, None);
+                    hargs.push(e);
+                }
+                hir::Expr {
+                    kind: ExprKind::CallBuiltin { builtin: Builtin::DrawClip, args: hargs },
+                    ty: TyId::UNIT,
+                    span,
+                }
+            }
+
+            BuiltinFn::DrawUnclip => {
+                if !args.is_empty() {
+                    self.arity_error("draw.unclip", args.len(), 0, span, None);
+                }
+                hir::Expr {
+                    kind: ExprKind::CallBuiltin {
+                        builtin: Builtin::DrawUnclip,
+                        args: Vec::new(),
+                    },
+                    ty: TyId::UNIT,
+                    span,
+                }
+            }
+
             BuiltinFn::TextHeight => {
                 if !args.is_empty() {
                     self.arity_error("text.height", args.len(), 0, span, None);

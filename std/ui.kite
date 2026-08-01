@@ -509,3 +509,82 @@ fn draw_one(frame: Frame, p: Paint) {
     y = y + line_height()
   }
 }
+
+// ---- scrolling ------------------------------------------------------------
+//
+// Scrolling is not a layout concern here. A tree is laid out at its natural
+// size, and a viewport decides which part of it is visible — which means
+// scrolling changes nothing about where anything is, only about what is drawn.
+// That is why `hit` still works on the same frames: subtract the offset from
+// the point instead of re-laying anything out.
+
+/// How far a laid-out tree can scroll inside a viewport before its last frame
+/// is flush with the bottom. Never negative: content shorter than the viewport
+/// does not scroll.
+pub fn scroll_extent(frames: [Frame], viewport: Size) -> float {
+  var bottom = 0.0
+  for frame in frames {
+    bottom = maxf(bottom, frame.rect.y + frame.rect.height)
+  }
+  return maxf(0.0, bottom - viewport.height)
+}
+
+/// `offset` held within what there is to scroll.
+pub fn clamp_scroll(offset: float, frames: [Frame], viewport: Size) -> float {
+  return clampf(offset, 0.0, scroll_extent(frames, viewport))
+}
+
+fn shifted(r: Rect, dx: float, dy: float) -> Rect {
+  return Rect{x: r.x + dx, y: r.y + dy, width: r.width, height: r.height}
+}
+
+/// Draw a tree inside a viewport, scrolled down by `offset`.
+///
+/// Frames outside the viewport are skipped rather than drawn and clipped away.
+/// The clip is still needed for the ones that straddle an edge — a half-visible
+/// row has to be cut by the renderer, and painting over it would erase what it
+/// is scrolling past.
+pub fn paint_scrolled(
+  frames: [Frame],
+  paints: [Paint],
+  viewport: Rect,
+  offset: float,
+) {
+  draw.clip(viewport.x, viewport.y, viewport.width, viewport.height)
+  let dx = viewport.x
+  let dy = viewport.y - offset
+  for frame in frames {
+    let r = shifted(frame.rect, dx, dy)
+    if r.y + r.height >= viewport.y && r.y <= viewport.y + viewport.height {
+      let found = paint_for(paints, frame.name)
+      if found != nil {
+        draw_one(
+          Frame{
+            name: frame.name,
+            rect: r,
+            inner: shifted(frame.inner, dx, dy),
+            depth: frame.depth,
+          },
+          found,
+        )
+      }
+    }
+  }
+  draw.unclip()
+}
+
+/// The frame under a point in a scrolled viewport. The offset is subtracted
+/// from the point rather than added to every frame, which is the same answer
+/// and one subtraction instead of many.
+pub fn hit_scrolled(
+  frames: [Frame],
+  viewport: Rect,
+  offset: float,
+  x: float,
+  y: float,
+) -> Option<Frame> {
+  if !rect_contains(viewport, x, y) {
+    return nil
+  }
+  return hit(frames, x - viewport.x, y - viewport.y + offset)
+}

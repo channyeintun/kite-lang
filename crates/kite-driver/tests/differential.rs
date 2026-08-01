@@ -136,6 +136,32 @@ fn main() {
          \x20 io.print(where_is(P{ x: 1, y: 5 }))\n}\n",
     ),
     (
+        "clipping-and-scrolling",
+        "use std/ui\n\
+         fn rows() -> Node {\n  var out: [Node] = []\n\
+         \x20 for i in 0..8 {\n\
+         \x20   out.push(text_of(\"r\\(i)\", Style{..style(), width: 100.0}, \"row \\(i)\"))\n  }\n\
+         \x20 return box_of(\"list\", Style{..column(), align: Align.Stretch}, out)\n}\n\
+         fn main() {\n\
+         \x20 let v = Rect{x: 0.0, y: 0.0, width: 100.0, height: 50.0}\n\
+         \x20 let box = Size{width: 100.0, height: 50.0}\n\
+         \x20 let f = layout(rows(), box)\n\
+         \x20 io.print(\"extent \\(scroll_extent(f, box))\")\n\
+         \x20 io.print(clamp_scroll(-10.0, f, box))\n\
+         \x20 io.print(clamp_scroll(9999.0, f, box))\n\
+         \x20 var paints: [Paint] = []\n\
+         \x20 for i in 0..8 {\n\
+         \x20   paints.push(filled_label(\"r\\(i)\", \"row \\(i)\", 0x111111, 0xeeeeee))\n  }\n\
+         \x20 paint_scrolled(f, paints, v, 0.0)\n\
+         \x20 paint_scrolled(f, paints, v, 40.0)\n\
+         \x20 let a = hit_scrolled(f, v, 0.0, 10.0, 10.0)\n\
+         \x20 io.print(if a == nil { \"none\" } else { a.name })\n\
+         \x20 let b = hit_scrolled(f, v, 40.0, 10.0, 10.0)\n\
+         \x20 io.print(if b == nil { \"none\" } else { b.name })\n\
+         \x20 let c = hit_scrolled(f, v, 0.0, 500.0, 500.0)\n\
+         \x20 io.print(if c == nil { \"none\" } else { c.name })\n}\n",
+    ),
+    (
         "events",
         "// Every event comes through one door: a click fills the position, a\n\
          // key press fills the key.\n\
@@ -228,6 +254,32 @@ fn main() {
         "fn main() {\n  let m = {\"a\": 1, \"b\": 2}\n  io.print(m.len())\n\
          \x20 let a = m[\"a\"]\n  io.print(if a == nil { -1 } else { a })\n\
          \x20 let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })\n}\n",
+    ),
+    (
+        "clipping-and-scrolling",
+        "use std/ui\n\
+         fn rows() -> Node {\n  var out: [Node] = []\n\
+         \x20 for i in 0..8 {\n\
+         \x20   out.push(text_of(\"r\\(i)\", Style{..style(), width: 100.0}, \"row \\(i)\"))\n  }\n\
+         \x20 return box_of(\"list\", Style{..column(), align: Align.Stretch}, out)\n}\n\
+         fn main() {\n\
+         \x20 let v = Rect{x: 0.0, y: 0.0, width: 100.0, height: 50.0}\n\
+         \x20 let box = Size{width: 100.0, height: 50.0}\n\
+         \x20 let f = layout(rows(), box)\n\
+         \x20 io.print(\"extent \\(scroll_extent(f, box))\")\n\
+         \x20 io.print(clamp_scroll(-10.0, f, box))\n\
+         \x20 io.print(clamp_scroll(9999.0, f, box))\n\
+         \x20 var paints: [Paint] = []\n\
+         \x20 for i in 0..8 {\n\
+         \x20   paints.push(filled_label(\"r\\(i)\", \"row \\(i)\", 0x111111, 0xeeeeee))\n  }\n\
+         \x20 paint_scrolled(f, paints, v, 0.0)\n\
+         \x20 paint_scrolled(f, paints, v, 40.0)\n\
+         \x20 let a = hit_scrolled(f, v, 0.0, 10.0, 10.0)\n\
+         \x20 io.print(if a == nil { \"none\" } else { a.name })\n\
+         \x20 let b = hit_scrolled(f, v, 40.0, 10.0, 10.0)\n\
+         \x20 io.print(if b == nil { \"none\" } else { b.name })\n\
+         \x20 let c = hit_scrolled(f, v, 0.0, 500.0, 500.0)\n\
+         \x20 io.print(if c == nil { \"none\" } else { c.name })\n}\n",
     ),
     (
         "events",

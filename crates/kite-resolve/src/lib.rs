@@ -61,6 +61,15 @@ pub enum BuiltinFn {
     /// `text.height()` — the line height of the host's font: ascent plus
     /// descent plus leading, which is what a line of text actually occupies.
     TextHeight,
+    /// `draw.clip(x, y, w, h)` — confine drawing to a rectangle until
+    /// `draw.unclip()`.
+    ///
+    /// This is the one thing a layout produces that is neither a rectangle nor
+    /// a run of text. Clipping cannot be built out of fills: a half-visible
+    /// line of text has to be cut by the renderer, and painting a rectangle
+    /// over it would erase whatever it was scrolling past.
+    DrawClip,
+    DrawUnclip,
 }
 
 impl BuiltinFn {
@@ -72,6 +81,8 @@ impl BuiltinFn {
             "draw.text" => Some(BuiltinFn::DrawText),
             "text.width" => Some(BuiltinFn::TextWidth),
             "text.height" => Some(BuiltinFn::TextHeight),
+            "draw.clip" => Some(BuiltinFn::DrawClip),
+            "draw.unclip" => Some(BuiltinFn::DrawUnclip),
             _ => None,
         }
     }
@@ -84,6 +95,8 @@ impl BuiltinFn {
             BuiltinFn::DrawText => "draw.text",
             BuiltinFn::TextWidth => "text.width",
             BuiltinFn::TextHeight => "text.height",
+            BuiltinFn::DrawClip => "draw.clip",
+            BuiltinFn::DrawUnclip => "draw.unclip",
         }
     }
 
@@ -93,6 +106,8 @@ impl BuiltinFn {
             BuiltinFn::DrawRect | BuiltinFn::DrawText => 5,
             BuiltinFn::TextWidth => 1,
             BuiltinFn::TextHeight => 0,
+            BuiltinFn::DrawClip => 4,
+            BuiltinFn::DrawUnclip => 0,
         }
     }
 }

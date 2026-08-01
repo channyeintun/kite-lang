@@ -81,16 +81,33 @@ export const textRenderer = {{
     ),
   text: (x, y, body, colour) =>
     write('text ' + showFloat(x) + ' ' + showFloat(y) + ' ' + body + ' ' + colour),
+  clip: (x, y, w, h) =>
+    write(
+      'clip ' + showFloat(x) + ' ' + showFloat(y) + ' ' +
+      showFloat(w) + ' ' + showFloat(h),
+    ),
+  unclip: () => write('unclip'),
 }};
 
 // Absolutely-positioned elements under one container. The layout has already
 // decided every position, so the container needs no layout of its own.
 export function domRenderer(container) {{
   container.style.position = 'relative';
+
+  // A clip becomes a nested element with `overflow: hidden`, and everything
+  // drawn until the matching `unclip` goes inside it. Its children are
+  // positioned relative to it, so the origin has to be subtracted — which is
+  // the whole difference between this and the canvas renderer, where a clip is
+  // a path and coordinates never move.
+  let host = container;
+  let originX = 0;
+  let originY = 0;
+  const stack = [];
+
   const place = (el, x, y) => {{
     el.style.position = 'absolute';
-    el.style.left = x + 'px';
-    el.style.top = y + 'px';
+    el.style.left = x - originX + 'px';
+    el.style.top = y - originY + 'px';
     return el;
   }};
   return {{
@@ -99,7 +116,7 @@ export function domRenderer(container) {{
       el.style.width = w + 'px';
       el.style.height = h + 'px';
       el.style.background = hex(colour);
-      container.appendChild(el);
+      host.appendChild(el);
     }},
     text: (x, y, body, colour) => {{
       const el = place(document.createElement('div'), x, y);
@@ -107,7 +124,26 @@ export function domRenderer(container) {{
       el.style.font = FONT;
       el.style.whiteSpace = 'pre';
       el.textContent = body;
-      container.appendChild(el);
+      host.appendChild(el);
+    }},
+    clip: (x, y, w, h) => {{
+      const el = place(document.createElement('div'), x, y);
+      el.style.width = w + 'px';
+      el.style.height = h + 'px';
+      el.style.overflow = 'hidden';
+      host.appendChild(el);
+      stack.push([host, originX, originY]);
+      host = el;
+      originX = x;
+      originY = y;
+    }},
+    unclip: () => {{
+      const popped = stack.pop();
+      if (popped) {{
+        host = popped[0];
+        originX = popped[1];
+        originY = popped[2];
+      }}
     }},
   }};
 }}
@@ -115,6 +151,10 @@ export function domRenderer(container) {{
 // The same drawing onto a 2D context. Text is drawn from its top-left, which
 // is where the layout put it, so the baseline is set rather than assumed.
 export function canvasRenderer(ctx) {{
+  // A clip nests with `save`/`restore`, so an unbalanced `unclip` would
+  // restore state a caller never saved. The depth is tracked to refuse that
+  // rather than corrupt the context.
+  let depth = 0;
   return {{
     rect: (x, y, w, h, colour) => {{
       ctx.fillStyle = hex(colour);
@@ -125,6 +165,19 @@ export function canvasRenderer(ctx) {{
       ctx.font = FONT;
       ctx.textBaseline = 'top';
       ctx.fillText(body, x, y);
+    }},
+    clip: (x, y, w, h) => {{
+      ctx.save();
+      depth += 1;
+      ctx.beginPath();
+      ctx.rect(x, y, w, h);
+      ctx.clip();
+    }},
+    unclip: () => {{
+      if (depth > 0) {{
+        ctx.restore();
+        depth -= 1;
+      }}
     }},
   }};
 }}
@@ -198,6 +251,8 @@ function imports() {{
       str_eq: (a, b) => (STRINGS[a] === STRINGS[b] ? 1 : 0),
       draw_rect: (x, y, w, h, colour) => renderer.rect(x, y, w, h, Number(colour)),
       draw_text: (x, y, i, colour) => renderer.text(x, y, STRINGS[i], Number(colour)),
+      draw_clip: (x, y, w, h) => renderer.clip(x, y, w, h),
+      draw_unclip: () => renderer.unclip(),
       measure_text: (i) => measure(STRINGS[i]),
       line_height: () => lineHeight,
       // Kite counts characters, JavaScript counts UTF-16 code units, so each
@@ -257,6 +312,8 @@ export async function run(source) {{
 // that ignores a kind simply never matches on it.
 export const EVENT_CLICK = 0n;
 export const EVENT_KEY = 1n;
+/// A wheel: `y` carries the distance, `x` the horizontal one.
+export const EVENT_WHEEL = 2n;
 
 export function isApplication(exports) {{
   return ["init", "view", "update"].every((n) => typeof exports[n] === "function");
@@ -305,7 +362,7 @@ pub fn generate_page(title: &str) -> String {
 <script type="module">
   import {{ instantiate, setRenderer, setWriter, isApplication, setMeasure,
             setLineHeight, fontMeasure, fontLineHeight, FONT,
-            EVENT_CLICK, EVENT_KEY, str,
+            EVENT_CLICK, EVENT_KEY, EVENT_WHEEL, str,
             domRenderer, canvasRenderer, textRenderer }} from "./app.js";
 
   // Measure in the font that will be drawn, before anything is laid out.
@@ -391,8 +448,20 @@ pub fn generate_page(title: &str) -> String {
   document.addEventListener("keydown", (e) => {{
     if (!interactive || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.target !== document.body) return;
+    // A key the program acts on should not also scroll the page. Which keys
+    // those are is the program's business, so this asks by comparing the model
+    // it gives back — an application that ignores the key is left alone.
+    const before = model;
     send(EVENT_KEY, 0, 0, e.key);
+    if (model !== before) e.preventDefault();
   }});
+
+  stage.addEventListener("wheel", (e) => {{
+    if (!interactive) return;
+    const before = model;
+    send(EVENT_WHEEL, e.deltaX, e.deltaY, "");
+    if (model !== before) e.preventDefault();
+  }}, {{ passive: false }});
 
   for (const [name, button] of Object.entries(buttons)) {{
     button.addEventListener("click", () => show(name));
