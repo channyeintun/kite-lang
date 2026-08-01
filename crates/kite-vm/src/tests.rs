@@ -16,7 +16,7 @@ fn exec(src: &str) -> Result<String, Trap> {
     let tokens = kite_lexer::tokenize(f, src, &mut diags);
     let ast = kite_parser::parse(f, src, &tokens, &mut diags);
     let resolved = kite_resolve::resolve(&ast, &mut diags);
-    let mut hir = kite_types::check(&ast, &resolved, src, &mut diags);
+    let mut hir = kite_types::check(&ast, &resolved, &sources, &mut diags);
     assert!(
         !diags.has_errors(),
         "program does not compile:\n{}",

@@ -33,7 +33,7 @@ fn run(src: &str) -> Ctx {
         diags.render_all(&sources)
     );
     let resolved = kite_resolve::resolve(&ast, &mut diags);
-    let program = check(&ast, &resolved, src, &mut diags);
+    let program = check(&ast, &resolved, &sources, &mut diags);
     Ctx { program, diags, sources }
 }
 

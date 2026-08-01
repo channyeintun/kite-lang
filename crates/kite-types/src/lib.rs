@@ -20,14 +20,14 @@ use kite_diag::{codes, DiagBag, Diagnostic, Fix};
 use kite_hir as hir;
 use kite_hir::{Builtin, ExprKind, TyId, TyKind, Types};
 use kite_resolve::{BuiltinFn, Res, ResolveMap};
-use kite_span::Span;
+use kite_span::{SourceMap, Span};
 
 mod exhaustive;
 
 pub fn check(
     file: &ast::SourceFile,
     resolved: &ResolveMap,
-    src: &str,
+    sources: &SourceMap,
     diags: &mut DiagBag,
 ) -> hir::Program {
     let mut types = Types::new();
@@ -278,7 +278,7 @@ pub fn check(
             generics: sigs[i].generics.iter().map(|g| (g.name.clone(), g.ty)).collect(),
             type_ids: &type_ids,
             types: &mut types,
-            src,
+            sources,
             diags,
             fn_index: i,
             locals: Vec::new(),
@@ -529,7 +529,10 @@ struct Checker<'a> {
     type_ids: &'a [Option<TypeTarget>],
     /// The interned type arena, built up as declarations are checked.
     types: &'a mut Types,
-    src: &'a str,
+    /// Every file in the compilation. A span carries which one it came
+    /// from, so a program built from more than one source — the prelude and
+    /// the user's file — reads back correctly.
+    sources: &'a SourceMap,
     diags: &'a mut DiagBag,
     fn_index: usize,
     locals: Vec<hir::Local>,
@@ -4799,7 +4802,7 @@ impl<'a> Checker<'a> {
     }
 
     fn text(&self, span: Span) -> &'a str {
-        &self.src[span.start as usize..span.end as usize]
+        self.sources.span_text(span)
     }
 
     /// Decode a string literal's contents. Phase 1 handles escapes; string
@@ -5030,7 +5033,7 @@ impl<'a> Checker<'a> {
     /// The span of the `let` keyword preceding a binding, so E0114 can offer a
     /// `var` replacement.
     fn let_keyword_span(&self, name_span: Span) -> Option<Span> {
-        let before = &self.src[..name_span.start as usize];
+        let before = self.sources.text_before(name_span);
         let trimmed = before.trim_end();
         if trimmed.ends_with("let") {
             let end = trimmed.len() as u32;

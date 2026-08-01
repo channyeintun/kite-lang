@@ -463,6 +463,52 @@ mod tests {
         assert_eq!(p.entry, Some(FnId(1)));
     }
 
+    /// Only what a program can reach survives. The prelude is compiled into
+    /// every program, so this is what keeps a `hello world` small.
+    #[test]
+    fn unreachable_functions_are_dropped() {
+        let mut p = Program::default();
+        p.fns.push(template("used", 0, TyId::UNIT));
+        p.fns.push(template("unused", 0, TyId::UNIT));
+        let mut main = template("main", 0, TyId::UNIT);
+        main.body.stmts = vec![Stmt::Expr(call(0, Vec::new()))];
+        p.fns.push(main);
+        p.entry = Some(FnId(2));
+
+        prune(&mut p);
+
+        let names: Vec<&str> = p.fns.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["used", "main"]);
+        assert_eq!(p.entry, Some(FnId(1)));
+        // The surviving call was renumbered with everything else.
+        let Stmt::Expr(e) = &p.fns[1].body.stmts[0] else { panic!("expected a call") };
+        let ExprKind::Call { callee, .. } = &e.kind else { panic!("expected a call") };
+        assert_eq!(*callee, FnId(0));
+    }
+
+    /// A trait object can reach any method in its vtable, so those are roots
+    /// even when nothing calls them by name.
+    #[test]
+    fn vtable_methods_are_roots() {
+        use crate::{TypeTag, VTable, VTableEntry};
+        let mut p = Program::default();
+        p.fns.push(template("area", 0, TyId::INT));
+        p.fns.push(template("main", 0, TyId::UNIT));
+        p.entry = Some(FnId(1));
+        p.vtables.push(VTable {
+            trait_id: crate::TraitId(0),
+            entries: vec![VTableEntry {
+                tag: TypeTag::Struct(crate::StructId(0)),
+                methods: vec![FnId(0)],
+            }],
+        });
+
+        prune(&mut p);
+
+        assert_eq!(p.fns.len(), 2, "a vtable method is reachable");
+        assert_eq!(p.vtables[0].entries[0].methods[0], FnId(0));
+    }
+
     /// Substitution rebuilds composite types around the parameter rather than
     /// replacing only a bare `T`.
     #[test]
@@ -575,5 +621,146 @@ fn renumber_pattern(p: &mut Pattern, map: &HashMap<u32, u32>) {
         | Pattern::Bool(_)
         | Pattern::IntRange { .. }
         | Pattern::Nil => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reachability
+// ---------------------------------------------------------------------------
+
+/// Drop functions nothing can reach, and renumber what is left.
+///
+/// The prelude is compiled into every program, so without this a `hello world`
+/// would carry every list helper and every numeric helper it never mentions.
+/// Reachability is exact rather than heuristic: a call names its target by
+/// index, a closure names its lifted body, and a trait object can reach any
+/// method in its vtable. There is nothing else that can enter a function.
+pub fn prune(program: &mut Program) {
+    let Program { fns, entry, vtables, .. } = program;
+
+    let mut roots: Vec<u32> = Vec::new();
+    match entry {
+        Some(e) => roots.push(e.0),
+        // A program with no entry point is a library; everything public is a
+        // way in.
+        None => {
+            for (i, f) in fns.iter().enumerate() {
+                if f.is_pub {
+                    roots.push(i as u32);
+                }
+            }
+        }
+    }
+    // A value can become a trait object anywhere, and from there any of its
+    // trait's methods can run.
+    for v in vtables.iter() {
+        for row in &v.entries {
+            for m in &row.methods {
+                roots.push(m.0);
+            }
+        }
+    }
+
+    let mut reachable = vec![false; fns.len()];
+    let mut queue = roots;
+    while let Some(i) = queue.pop() {
+        let Some(seen) = reachable.get_mut(i as usize) else { continue };
+        if *seen {
+            continue;
+        }
+        *seen = true;
+        collect_callees(&fns[i as usize].body, &mut queue);
+    }
+
+    if reachable.iter().all(|r| *r) {
+        return;
+    }
+
+    let mut moved: HashMap<u32, u32> = HashMap::new();
+    let mut kept: Vec<Function> = Vec::new();
+    for (i, f) in fns.drain(..).enumerate() {
+        if reachable[i] {
+            moved.insert(i as u32, kept.len() as u32);
+            kept.push(f);
+        }
+    }
+    for f in &mut kept {
+        renumber_calls(&mut f.body, &moved);
+    }
+    if let Some(e) = entry {
+        if let Some(new) = moved.get(&e.0) {
+            *e = FnId(*new);
+        }
+    }
+    for v in vtables.iter_mut() {
+        for row in &mut v.entries {
+            for m in &mut row.methods {
+                if let Some(new) = moved.get(&m.0) {
+                    *m = FnId(*new);
+                }
+            }
+        }
+    }
+    *fns = kept;
+}
+
+fn collect_callees(b: &Block, out: &mut Vec<u32>) {
+    // The walks take `&mut`, and this only reads; cloning a body to reuse them
+    // would cost more than the second walk.
+    let mut b = b.clone();
+    for s in &mut b.stmts {
+        for e in stmt_exprs(s) {
+            collect_expr_callees(e, out);
+        }
+        for inner in stmt_blocks(s) {
+            collect_callees(inner, out);
+        }
+    }
+}
+
+fn collect_expr_callees(e: &mut Expr, out: &mut Vec<u32>) {
+    match &e.kind {
+        ExprKind::Call { callee, .. } => out.push(callee.0),
+        ExprKind::ClosureNew { func, .. } => out.push(func.0),
+        _ => {}
+    }
+    for c in expr_children(&mut e.kind) {
+        collect_expr_callees(c, out);
+    }
+    for b in expr_blocks(&mut e.kind) {
+        collect_callees(b, out);
+    }
+}
+
+fn renumber_calls(b: &mut Block, map: &HashMap<u32, u32>) {
+    for s in &mut b.stmts {
+        for e in stmt_exprs(s) {
+            renumber_call_expr(e, map);
+        }
+        for inner in stmt_blocks(s) {
+            renumber_calls(inner, map);
+        }
+    }
+}
+
+fn renumber_call_expr(e: &mut Expr, map: &HashMap<u32, u32>) {
+    match &mut e.kind {
+        ExprKind::Call { callee, .. } => {
+            if let Some(new) = map.get(&callee.0) {
+                *callee = FnId(*new);
+            }
+        }
+        ExprKind::ClosureNew { func, .. } => {
+            if let Some(new) = map.get(&func.0) {
+                *func = FnId(*new);
+            }
+        }
+        _ => {}
+    }
+    for c in expr_children(&mut e.kind) {
+        renumber_call_expr(c, map);
+    }
+    for b in expr_blocks(&mut e.kind) {
+        renumber_calls(b, map);
     }
 }

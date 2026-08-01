@@ -37,7 +37,7 @@ fn build(src: &str) -> Built {
     let tokens = kite_lexer::tokenize(f, src, &mut diags);
     let ast = kite_parser::parse(f, src, &tokens, &mut diags);
     let resolved = kite_resolve::resolve(&ast, &mut diags);
-    let mut hir = kite_types::check(&ast, &resolved, src, &mut diags);
+    let mut hir = kite_types::check(&ast, &resolved, &sources, &mut diags);
     assert!(
         !diags.has_errors(),
         "test source does not compile:\n{}",
@@ -364,7 +364,7 @@ fn gaps(src: &str) -> Vec<String> {
     let tokens = kite_lexer::tokenize(f, src, &mut diags);
     let ast = kite_parser::parse(f, src, &tokens, &mut diags);
     let resolved = kite_resolve::resolve(&ast, &mut diags);
-    let mut hir = kite_types::check(&ast, &resolved, src, &mut diags);
+    let mut hir = kite_types::check(&ast, &resolved, &sources, &mut diags);
     assert!(!diags.has_errors(), "{}", diags.render_all(&sources));
     kite_hir::mono::monomorphise(&mut hir);
     let mir = kite_mir::lower(&hir);

@@ -53,6 +53,19 @@ pub enum Item {
 }
 
 impl Item {
+    /// The name this item declares, if it declares one. An `impl` block
+    /// declares no name of its own — it adds to a type that has one.
+    pub fn declared_name(&self) -> Option<&str> {
+        match self {
+            Item::Fn(f) => Some(&f.name.name),
+            Item::Struct(s) => Some(&s.name.name),
+            Item::Enum(e) => Some(&e.name.name),
+            Item::Trait(t) => Some(&t.name.name),
+            Item::TypeAlias(a) => Some(&a.name.name),
+            Item::Impl(_) | Item::Error(_) => None,
+        }
+    }
+
     pub fn span(&self) -> Span {
         match self {
             Item::Fn(f) => f.span,

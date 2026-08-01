@@ -75,12 +75,22 @@ impl Compilation {
     }
 }
 
+/// The standard library, compiled into every program ahead of its own source.
+///
+/// It is written in Kite rather than in the compiler. Everything in it is
+/// expressible in the language, which is the point: a standard library needing
+/// compiler support would be evidence that the language was missing something.
+pub const PRELUDE: &str = include_str!("../../../std/prelude.kite");
+
 /// Compile one file's text.
 pub fn compile(path: impl AsRef<Path>, src: &str, emit: Emit) -> Compilation {
     let mut sources = SourceMap::new();
+    // The prelude is added first, so its spans and the user's never collide and
+    // a diagnostic inside it says which file it came from.
+    let prelude = sources.add("<prelude>", PRELUDE);
     let file = sources.add(path.as_ref(), src);
     let mut diags = DiagBag::new();
-    let (output, chunk, wasm) = run_passes(file, src, emit, &mut diags);
+    let (output, chunk, wasm) = run_passes(prelude, file, &sources, emit, &mut diags);
 
     let mut c = Compilation { sources, diags, output, chunk, wasm };
     c.diags.sort(&c.sources);
@@ -88,8 +98,9 @@ pub fn compile(path: impl AsRef<Path>, src: &str, emit: Emit) -> Compilation {
 }
 
 fn run_passes(
+    prelude: FileId,
     file: FileId,
-    src: &str,
+    sources: &SourceMap,
     emit: Emit,
     diags: &mut DiagBag,
 ) -> (
@@ -97,18 +108,44 @@ fn run_passes(
     Option<kite_codegen_kbc::Chunk>,
     Option<kite_codegen_wasm::WasmModule>,
 ) {
+    let src = sources.text(file);
     let tokens = kite_lexer::tokenize(file, src, diags);
-    let ast = kite_parser::parse(file, src, &tokens, diags);
+    let mut ast = kite_parser::parse(file, src, &tokens, diags);
 
     if emit == Emit::Ast {
         return (format!("{:#?}\n", ast), None, None);
     }
 
+    // The prelude's declarations join the program as ordinary ones, except
+    // where the program declares the same name. A prelude that could not be
+    // shadowed would make every name in it permanently unusable — and there is
+    // no module system yet to qualify one, so the program's own definition
+    // simply wins.
+    let prelude_src = sources.text(prelude);
+    let prelude_tokens = kite_lexer::tokenize(prelude, prelude_src, diags);
+    let prelude_ast = kite_parser::parse(prelude, prelude_src, &prelude_tokens, diags);
+    let taken: std::collections::HashSet<&str> =
+        ast.items.iter().filter_map(|i| i.declared_name()).collect();
+    let shadowed: Vec<&str> = prelude_ast
+        .items
+        .iter()
+        .filter_map(|i| i.declared_name())
+        .filter(|n| taken.contains(n))
+        .collect();
+    let shadowed: std::collections::HashSet<String> =
+        shadowed.into_iter().map(|s| s.to_string()).collect();
+    ast.items.extend(
+        prelude_ast
+            .items
+            .into_iter()
+            .filter(|i| !i.declared_name().is_some_and(|n| shadowed.contains(n))),
+    );
+
     // Resolution and checking still run after a syntax error — the parser
     // recovers, so later passes can report their own findings on the parts that
     // did parse. Code generation does not, because its input would be poisoned.
     let resolved = kite_resolve::resolve(&ast, diags);
-    let mut hir = kite_types::check(&ast, &resolved, src, diags);
+    let mut hir = kite_types::check(&ast, &resolved, sources, diags);
 
     if emit == Emit::Hir {
         return (hir.to_string(), None, None);
@@ -120,6 +157,9 @@ fn run_passes(
     // Specialise generic functions before lowering, so no backend ever sees a
     // type parameter. Nothing after this point knows generics exist.
     kite_hir::mono::monomorphise(&mut hir);
+    // The prelude is in every program; without this a `hello world` would
+    // carry every helper it never mentions.
+    kite_hir::mono::prune(&mut hir);
 
     let mir = kite_mir::lower(&hir);
     if emit == Emit::Mir {

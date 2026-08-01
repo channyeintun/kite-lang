@@ -173,6 +173,31 @@ result is used as: `let s: Stack<int> = Stack.empty()`.
 
 **Phase 2 is complete.**
 
+---
+
+## Phase 6 — Standard library (started)
+
+`std/prelude.kite` is compiled into every program, ahead of its own source. It
+is written in Kite rather than in the compiler, which is the test a standard
+library should have to pass: a prelude needing compiler support would be
+evidence the language was missing something. Nothing in it does.
+
+It holds slice combinators — `map`, `filter`, `fold`, `any`, `all`, `count`,
+`find`, `first`, `last`, `reversed`, `concat`, `take`, `drop` — numeric helpers,
+and `or_else` for optionals. It is deliberately small: each name is one every
+program must live with, and a name taken is hard to give back.
+
+Two things made it workable. A program's own definition **shadows** the
+prelude's, because there is no module system yet to qualify one and a prelude
+that could not be shadowed would make every name in it permanently unusable.
+And unreachable functions are **dropped** before code generation, so a program
+using none of it pays nothing: `hello.kite` is 469 bytes with the prelude in
+the compilation, against 6,562 for a program that uses most of it.
+
+**Remaining:** modules and `use`, so the prelude can be qualified rather than
+shadowed; string and map methods, which need host support; `Display`, which
+would let interpolation render user types.
+
 Four things came out differently from this plan:
 
 - **`a.b` is no longer folded into a path by the parser.** Whether `io.print`

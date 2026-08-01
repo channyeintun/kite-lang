@@ -447,7 +447,7 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
         layout.env_record.insert(*func, (next, *count));
         next += 1;
     }
-    let aggregate_count = next - object_record;
+    let aggregate_count = next - IMPORT_COUNT;
 
     // ---- types -------------------------------------------------------------
     let mut type_section = TypeSection::new();
@@ -457,23 +457,26 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
             .function(params.iter().copied(), results.iter().copied());
     }
 
-    // Closure signatures. These sit outside the aggregate group and before it,
-    // because a closure record holds a reference to one.
-    for ty in &fn_types {
-        let TyKind::Fn { params, ret } = types.kind(*ty) else {
-            unreachable!("only function types are collected here")
-        };
-        let mut ps = vec![ANY_REF];
-        ps.extend(params.iter().map(|p| val_type_with(*p, types, &layout)));
-        let results: Vec<ValType> = wasm_result_with(*ret, types, &layout).into_iter().collect();
-        type_section.ty().function(ps, results);
-    }
-
     // Every aggregate goes in one `rec` group: a field may name a type declared
     // later, and mutual recursion has to work — which it must, because every
     // Kite aggregate is a GC reference and recursion needs no annotation.
     if aggregate_count > 0 {
         let mut group: Vec<SubType> = Vec::with_capacity(aggregate_count as usize);
+
+        // Closure signatures come first. They belong in the group rather than
+        // ahead of it because a signature may mention an aggregate — a closure
+        // taking a struct — and a type may only name a later one from inside
+        // its own group.
+        for ty in &fn_types {
+            let TyKind::Fn { params, ret } = types.kind(*ty) else {
+                unreachable!("only function types are collected here")
+            };
+            let mut ps = vec![ANY_REF];
+            ps.extend(params.iter().map(|p| val_type_with(*p, types, &layout)));
+            let results: Vec<ValType> =
+                wasm_result_with(*ret, types, &layout).into_iter().collect();
+            group.push(func_subtype(ps, results));
+        }
 
         // The root every dispatchable aggregate extends. It is emitted whether
         // or not anything extends it; one unused type declaration is cheaper
@@ -683,7 +686,7 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     // would collide function types with every struct after the first.
     // Signature types come between the imports and the aggregate group, so a
     // function type index is past both.
-    let fn_type_base = object_record + aggregate_count;
+    let fn_type_base = IMPORT_COUNT + aggregate_count;
     // Dispatchers: one per trait method, taking the receiver as a reference to
     // the tagged root. They live above the user functions in the index space.
     let mut dispatchers: Vec<Dispatcher> = Vec::new();
@@ -825,6 +828,20 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     WasmModule {
         bytes: module.finish(),
         strings: program.strings.clone(),
+    }
+}
+
+/// A function type, for the shared signature closures are called through.
+fn func_subtype(params: Vec<ValType>, results: Vec<ValType>) -> SubType {
+    SubType {
+        is_final: true,
+        supertype_idx: None,
+        composite_type: CompositeType {
+            inner: CompositeInnerType::Func(wasm_encoder::FuncType::new(params, results)),
+            shared: false,
+            descriptor: None,
+            describes: None,
+        },
     }
 }
 
@@ -1063,17 +1080,11 @@ fn compile_fn(
 
     // One scratch local per distinct slice type in the function, so a
     // copy-on-write mutation has somewhere to hold the new array while
-    // `array.copy` consumes its operands.
-    let slice_local = f
-        .locals
-        .iter()
-        .map(|l| l.ty)
-        .find(|ty| matches!(types.kind(*ty), TyKind::Slice(_)));
+    // `array.copy` consumes its operands. One register per distinct slice
+    // shape: a function handling `[int]` and `[str]` needs one of each, and a
+    // single shared register was only ever right while a function used one.
     let scratch = pc + 1;
-    match slice_local {
-        Some(ty) => push_local(&mut locals, val_type_with(ty, types, layout)),
-        None => push_local(&mut locals, ValType::I32),
-    }
+    push_local(&mut locals, ValType::I32);
 
     // A dedicated index register. This used to alias `$pc`, which happened to
     // work because a terminator always rewrites the program counter before
@@ -1087,6 +1098,24 @@ fn compile_fn(
     let mut map_scratch: std::collections::HashMap<TyId, (u32, u32)> =
         std::collections::HashMap::new();
     let mut next_local = index_scratch + 2;
+
+    let mut slice_scratch: std::collections::HashMap<TyId, u32> =
+        std::collections::HashMap::new();
+    let mut slice_shapes: Vec<TyId> = Vec::new();
+    for l in &f.locals {
+        if matches!(types.kind(l.ty), TyKind::Slice(_)) && !slice_shapes.contains(&l.ty) {
+            slice_shapes.push(l.ty);
+        }
+    }
+    for shape in &slice_shapes {
+        push_local(&mut locals, val_type_with(*shape, types, layout));
+        let TyKind::Slice(elem) = *types.kind(*shape) else { continue };
+        if let Some(idx) = layout.slice_type(elem) {
+            slice_scratch.insert(TyId(idx), next_local);
+        }
+        next_local += 1;
+    }
+
     let mut shapes: Vec<TyId> = Vec::new();
     for l in &f.locals {
         if matches!(types.kind(l.ty), TyKind::Map(..)) && !shapes.contains(&l.ty) {
@@ -1146,6 +1175,7 @@ fn compile_fn(
             scratch,
             index_scratch,
             map_scratch: &map_scratch,
+            slice_scratch: &slice_scratch,
             block_index: i,
             total: n as usize,
         };
@@ -1192,6 +1222,10 @@ struct Emitter<'a> {
     index_scratch: u32,
     /// Per map shape, the two array registers a write builds into.
     map_scratch: &'a std::collections::HashMap<TyId, (u32, u32)>,
+    /// One register per distinct array type, keyed by that type's index in the
+    /// Wasm type space rather than by Kite type — two Kite slices with the same
+    /// element share an array type and may share the register.
+    slice_scratch: &'a std::collections::HashMap<TyId, u32>,
     block_index: usize,
     total: usize,
 }
@@ -1851,10 +1885,11 @@ impl<'a> Emitter<'a> {
         func.instruction(&Instruction::ArrayNewDefault(idx));
 
         // array.copy takes dest, dest_offset, src, src_offset, len — and the
-        // destination has to survive the call, so it is duplicated through a
-        // second push rather than a `tee`, which needs a local of array type.
-        func.instruction(&Instruction::LocalSet(self.scratch));
-        func.instruction(&Instruction::LocalGet(self.scratch));
+        // destination has to survive the call, so it is held in a register of
+        // its own array type rather than duplicated on the stack.
+        let hold = self.slice_scratch.get(&TyId(idx)).copied().unwrap_or(self.scratch);
+        func.instruction(&Instruction::LocalSet(hold));
+        func.instruction(&Instruction::LocalGet(hold));
         func.instruction(&Instruction::I32Const(0));
         self.operand(func, base);
         func.instruction(&Instruction::I32Const(0));
@@ -1864,7 +1899,7 @@ impl<'a> Emitter<'a> {
             array_type_index_dst: idx,
             array_type_index_src: idx,
         });
-        func.instruction(&Instruction::LocalGet(self.scratch));
+        func.instruction(&Instruction::LocalGet(hold));
     }
 
     fn local_of(&self, o: &mir::Operand) -> Option<u32> {

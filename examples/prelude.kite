@@ -1,0 +1,61 @@
+// The standard library.
+//
+// Everything used here comes from `std/prelude.kite`, which is compiled into
+// every program. It is written in Kite, not in the compiler: nothing in it
+// needs support the language does not already give a user, which is the test a
+// standard library should have to pass.
+//
+// Functions the program does not reach are dropped before code generation, so
+// a program that uses none of this pays nothing for it.
+
+struct Reading {
+  pub sensor: str
+  pub celsius: float
+  pub ok: bool
+}
+
+fn main() {
+  let scores = [72, 91, 45, 88, 60, 99, 12]
+
+  io.print("count: \(scores.len())")
+  io.print("sum: \(sum(scores))")
+  io.print("passing: \(count(scores, |n: int| n >= 60))")
+  io.print("any perfect: \(any(scores, |n: int| n == 100))")
+  io.print("all positive: \(all(scores, |n: int| n > 0))")
+
+  let top = filter(scores, |n: int| n >= 88)
+  io.print("top scores: \(top.len())")
+  io.print("best: \(or_else(last(top), 0))")
+  io.print("worst kept: \(or_else(first(top), 0))")
+
+  // `find` returns an optional, and testing it is what unwraps it.
+  let failing = find(scores, |n: int| n < 50)
+  if failing != nil {
+    io.print("first failure: \(failing)")
+  }
+
+  io.print("first three: \(take(scores, 3).len())")
+  io.print("after three: \(drop(scores, 3).len())")
+  io.print("reversed starts: \(or_else(first(reversed(scores)), 0))")
+  io.print("joined: \(concat(top, take(scores, 2)).len())")
+
+  // Numbers.
+  io.print("abs: \(abs(-17))")
+  io.print("clamped: \(clamp(150, 0, 100))")
+  io.print("between: \(min(max(50, 0), 100))")
+
+  // Floats are compared within a tolerance, never with `==`.
+  let sum_of_thirds = 0.1 + 0.2
+  io.print("close enough: \(approx_eq(sum_of_thirds, 0.3, 0.000001))")
+
+  let readings = [
+    Reading{sensor: "north", celsius: 21.5, ok: true},
+    Reading{sensor: "south", celsius: 48.0, ok: false},
+    Reading{sensor: "east", celsius: 19.0, ok: true},
+  ]
+  let working = filter(readings, |r: Reading| r.ok)
+  io.print("working sensors: \(working.len())")
+  io.print("hottest working: \(or_else(first(working), readings[0]).celsius)")
+  io.print("total: \(sumf(map(readings, |r: Reading| r.celsius)))")
+  io.print("names: \(fold(map(readings, |r: Reading| r.sensor), "", |acc: str, s: str| acc + s))")
+}

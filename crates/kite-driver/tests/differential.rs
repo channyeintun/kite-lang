@@ -199,6 +199,32 @@ fn main() {
          \x20 let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })\n}\n",
     ),
     (
+        "prelude",
+        "fn main() {\n  let xs = [5, 1, 9, 3, 7]\n\
+         \x20 io.print(sum(xs))\n  io.print(count(xs, |n: int| n > 4))\n\
+         \x20 io.print(filter(xs, |n: int| n > 4).len())\n\
+         \x20 io.print(any(xs, |n: int| n == 9))\n  io.print(all(xs, |n: int| n > 0))\n\
+         \x20 io.print(map(xs, |n: int| n * 2).len())\n\
+         \x20 io.print(fold(xs, 0, |a: int, n: int| a + n))\n\
+         \x20 io.print(fold(map(xs, |n: int| \"x\"), \"\", |a: str, s: str| a + s))\n\
+         \x20 io.print(abs(-12))\n  io.print(min(3, 8))\n  io.print(max(3, 8))\n\
+         \x20 io.print(clamp(99, 0, 10))\n\
+         \x20 io.print(approx_eq(0.1 + 0.2, 0.3, 0.0001))\n  io.print(divides(9, 3))\n\
+         \x20 io.print(or_else(first(xs), -1))\n\
+         \x20 let empty: [int] = []\n  io.print(or_else(first(empty), -1))\n\
+         \x20 io.print(or_else(last(xs), -1))\n\
+         \x20 io.print(reversed(xs)[0])\n  io.print(concat(xs, xs).len())\n\
+         \x20 io.print(take(xs, 2).len())\n  io.print(drop(xs, 2).len())\n\
+         \x20 io.print(or_else(find(xs, |n: int| n > 6), -1))\n\
+         \x20 io.print(is_some(find(xs, |n: int| n > 100)))\n}\n",
+    ),
+    (
+        "prelude-shadowing",
+        "// A program's own definition wins over the prelude's.\n\
+         fn sum(items: [int]) -> int {\n  return 999\n}\n\
+         fn main() {\n  io.print(sum([1, 2, 3]))\n  io.print(abs(-4))\n}\n",
+    ),
+    (
         "generic-methods",
         "struct Stack<T> {\n  items: [T]\n}\n\
          impl<T> Stack<T> {\n\

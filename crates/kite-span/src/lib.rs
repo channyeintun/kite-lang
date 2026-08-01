@@ -155,6 +155,18 @@ impl SourceMap {
         &self.file(span.file).text[span.start as usize..span.end as usize]
     }
 
+    /// The source text a span covers, from whichever file it belongs to.
+    pub fn span_text(&self, span: Span) -> &str {
+        let text = self.text(span.file);
+        &text[span.start as usize..span.end as usize]
+    }
+
+    /// The text of a file up to an offset. Used where a diagnostic needs to
+    /// look backwards from a span, such as for the `pub` before a name.
+    pub fn text_before(&self, span: Span) -> &str {
+        &self.text(span.file)[..span.start as usize]
+    }
+
     pub fn line_col(&self, span: Span) -> LineCol {
         self.file(span.file).line_col(span.start)
     }
