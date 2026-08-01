@@ -94,6 +94,10 @@ pub enum Inst {
     /// Write through a reference. Separate from `Assign` because the
     /// destination is a heap slot rather than a local.
     SetField { base: Operand, index: u32, value: Operand },
+    SetIndex { base: Operand, index: Operand, value: Operand },
+    /// Appends in place. Slices are copy-on-write, so this targets a local
+    /// rather than an arbitrary operand.
+    SlicePush { local: Local, value: Operand },
 }
 
 #[derive(Debug)]
@@ -108,6 +112,13 @@ pub enum Rvalue {
     EnumNew { enum_id: EnumId, variant: u32, fields: Vec<Operand> },
     /// The variant index of an enum value, for dispatching a `match`.
     TagOf { base: Operand },
+    SliceNew { elems: Vec<Operand> },
+    IsNil { value: Operand },
+    /// Bounds-checked; traps on failure.
+    IndexGet { base: Operand, index: Operand },
+    SliceLen { base: Operand },
+    /// Bounds-checked; yields an optional rather than trapping.
+    SliceGet { base: Operand, index: Operand },
 }
 
 #[derive(Clone, Debug)]
@@ -119,6 +130,7 @@ pub enum Operand {
     Str(StrId),
     /// The unit value. Never materialised by a backend.
     Unit,
+    Nil,
 }
 
 #[derive(Debug, Default)]
@@ -229,6 +241,8 @@ impl fmt::Display for Inst {
             Inst::SetField { base, index, value } => {
                 write!(f, "{}.{} = {}", base, index, value)
             }
+            Inst::SetIndex { base, index, value } => write!(f, "{}[{}] = {}", base, index, value),
+            Inst::SlicePush { local, value } => write!(f, "_{}.push({})", local.0, value),
         }
     }
 }
@@ -261,6 +275,15 @@ impl fmt::Display for Rvalue {
                 write!(f, ")")
             }
             Rvalue::TagOf { base } => write!(f, "tag {}", base),
+            Rvalue::SliceNew { elems } => {
+                write!(f, "[")?;
+                write_operands(f, elems)?;
+                write!(f, "]")
+            }
+            Rvalue::IndexGet { base, index } => write!(f, "{}[{}]", base, index),
+            Rvalue::IsNil { value } => write!(f, "is-nil {}", value),
+            Rvalue::SliceLen { base } => write!(f, "len {}", base),
+            Rvalue::SliceGet { base, index } => write!(f, "{}.get({})", base, index),
         }
     }
 }
@@ -284,6 +307,7 @@ impl fmt::Display for Operand {
             Operand::Bool(v) => write!(f, "{}", v),
             Operand::Str(s) => write!(f, "str{}", s.0),
             Operand::Unit => write!(f, "()"),
+            Operand::Nil => write!(f, "nil"),
         }
     }
 }

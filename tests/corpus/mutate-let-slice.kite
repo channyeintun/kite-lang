@@ -1,0 +1,4 @@
+fn main() {
+    let xs = [1, 2]
+    xs.push(3)      //~ ERROR E0114
+}

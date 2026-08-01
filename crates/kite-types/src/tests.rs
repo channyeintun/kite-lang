@@ -852,3 +852,129 @@ fn implementing_an_unknown_trait_is_reported() {
     let c = run("struct P {\n  n: int\n}\nimpl Nope for P {\n}\nfn main() {\n}\n");
     assert!(c.has("E0204"), "{}", c.render());
 }
+
+// ---- slices and optionals -------------------------------------------------
+
+#[test]
+fn an_empty_slice_literal_needs_a_type() {
+    let c = body("  let xs = []");
+    assert!(c.has("E0204"), "{}", c.render());
+    assert!(c.render().contains("[int]"), "{}", c.render());
+    ok_body("  let xs: [int] = []");
+}
+
+#[test]
+fn slice_elements_must_share_one_type() {
+    let c = body("  let xs = [1, \"two\"]");
+    assert!(c.has("E0200"), "{}", c.render());
+}
+
+#[test]
+fn indexing_a_non_slice_is_reported() {
+    let c = body("  let n = 1\n  io.print(n[0])");
+    assert!(c.has("E0200"), "{}", c.render());
+    assert!(c.render().contains("cannot be indexed"), "{}", c.render());
+}
+
+#[test]
+fn a_slice_index_must_be_an_int() {
+    let c = body("  let xs = [1]\n  io.print(xs[\"a\"])");
+    assert!(c.has("E0200"), "{}", c.render());
+}
+
+/// Slices are copy-on-write values, so mutating one changes the binding, which
+/// must therefore be `var`.
+#[test]
+fn mutating_a_let_slice_is_rejected_with_a_var_fix() {
+    let c = body("  let xs = [1]\n  xs.push(2)");
+    assert!(c.has("E0114"), "{}", c.render());
+    let out = c.render();
+    assert!(out.contains("copy-on-write"), "{}", out);
+    assert!(out.contains("var xs = [1]"), "{}", out);
+
+    let c = body("  let xs = [1]\n  xs[0] = 2");
+    assert!(c.has("E0114"), "{}", c.render());
+}
+
+#[test]
+fn a_var_slice_may_be_mutated() {
+    ok_body("  var xs = [1]\n  xs.push(2)\n  xs[0] = 3");
+}
+
+#[test]
+fn an_unknown_slice_method_lists_the_real_ones() {
+    let c = body("  let xs = [1]\n  io.print(xs.pop())");
+    assert!(c.has("E0205"), "{}", c.render());
+    assert!(c.render().contains("len, get, push"), "{}", c.render());
+}
+
+#[test]
+fn iterating_a_non_iterable_is_reported() {
+    let c = body("  let n = 1\n  for x in n {\n  }");
+    assert!(c.has("E0200"), "{}", c.render());
+    assert!(c.render().contains("not iterable"), "{}", c.render());
+}
+
+// ---- optionals ------------------------------------------------------------
+
+/// Kite has no null: `nil` only fits where the type is optional.
+#[test]
+fn nil_is_rejected_where_a_plain_type_is_wanted() {
+    let c = body("  let n: int = nil");
+    assert!(c.has("E0200"), "{}", c.render());
+    assert!(c.render().contains("no null"), "{}", c.render());
+}
+
+#[test]
+fn nil_needs_a_type_from_context() {
+    let c = body("  let n = nil");
+    assert!(c.has("E0204"), "{}", c.render());
+}
+
+#[test]
+fn coalesce_needs_an_optional_on_the_left() {
+    let c = body("  let n = 1 ?? 2");
+    assert!(c.has("E0201"), "{}", c.render());
+    assert!(c.render().contains("can never be nil"), "{}", c.render());
+}
+
+#[test]
+fn coalesce_unwraps_the_optional() {
+    ok_body("  let xs = [1]\n  let n: int = xs.get(0) ?? 0");
+}
+
+#[test]
+fn optional_chaining_needs_an_optional() {
+    let c = run("struct P {\n  n: int\n}\nfn main() {\n  let p = P{ n: 1 }\n  io.print(p?.n ?? 0)\n}\n");
+    assert!(c.has("E0201"), "{}", c.render());
+    assert!(c.render().contains("write `.` instead"), "{}", c.render());
+}
+
+/// The specification's example: once `nil` is matched, the binding is the
+/// unwrapped type.
+#[test]
+fn a_binding_narrows_once_nil_is_covered() {
+    let c = run("struct U {\n  name: str\n}\nfn find() -> ?U {\n  return nil\n}\nfn main() {\n  io.print(match find() {\n    nil => \"none\",\n    u => u.name,\n  })\n}\n");
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+/// Without an earlier `nil` arm the binding could still receive one, so it is
+/// not narrowed.
+#[test]
+fn a_binding_is_not_narrowed_before_nil_is_covered() {
+    let c = run("struct U {\n  name: str\n}\nfn find() -> ?U {\n  return nil\n}\nfn main() {\n  io.print(match find() {\n    u => u.name,\n  })\n}\n");
+    assert!(c.has("E0200"), "{}", c.render());
+}
+
+#[test]
+fn an_optional_match_must_cover_nil_and_a_value() {
+    let c = run("fn main() {\n  let x: ?int = 1\n  let d = match x {\n    nil => 0,\n  }\n}\n");
+    assert!(c.has("E0210"), "{}", c.render());
+    assert!(c.render().contains("a present value"), "{}", c.render());
+}
+
+#[test]
+fn nil_cannot_match_a_non_optional() {
+    let c = body("  let n = 1\n  let d = match n {\n    nil => 0,\n    _ => 1,\n  }");
+    assert!(c.has("E0200"), "{}", c.render());
+}

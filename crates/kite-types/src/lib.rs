@@ -584,6 +584,9 @@ impl<'a> Checker<'a> {
         if let ast::Expr::Field { base, name, optional, span } = &a.target {
             return self.assign_field(base, name, *optional, *span, a);
         }
+        if let ast::Expr::Index { base, index, span } = &a.target {
+            return self.assign_index(base, index, *span, a);
+        }
         let ast::Expr::Path(p) = &a.target else {
             self.not_yet(
                 a.target.span(),
@@ -768,13 +771,45 @@ impl<'a> Checker<'a> {
                     return None;
                 };
                 let ast::Expr::Range { start, end, inclusive, .. } = iter else {
-                    self.not_yet(
-                        iter.span(),
-                        "iterating anything but a range",
-                        "the Iterate trait arrives in Phase 2",
-                    );
+                    // Iterating a slice. The `Iterate` trait generalises this
+                    // later; slices are the case that matters now.
+                    let seq = self.expr(iter, None);
+                    let Some(elem) = self.types.slice_elem(seq.ty) else {
+                        if !self.types.is_poisoned(seq.ty) {
+                            let found = self.types.with_article(seq.ty);
+                            self.diags.push(
+                                Diagnostic::error(
+                                    codes::E0200,
+                                    format!("cannot iterate {}", found),
+                                )
+                                .with_primary(seq.span, "not iterable")
+                                .with_note(
+                                    "`for x in …` takes a range or a slice; the `Iterate` \
+                                     trait generalises this in a later phase",
+                                ),
+                            );
+                        }
+                        self.loop_depth -= 1;
+                        self.init = entry_init;
+                        return None;
+                    };
+                    let local_id = self.resolved.lookup_binding(name.span)?;
+                    self.locals[local_id as usize].ty = elem;
+                    self.init[local_id as usize] = Init::Assigned;
+
+                    let (body, _) = self.block(&f.body, sig);
                     self.loop_depth -= 1;
-                    return None;
+                    self.init = entry_init;
+                    return Some((
+                        hir::Stmt::ForSlice {
+                            var: hir::LocalId(local_id),
+                            slice: seq,
+                            body,
+                            label,
+                            span: f.span,
+                        },
+                        Flow::Falls,
+                    ));
                 };
 
                 let start_e = self.expr(start, Some(TyId::INT));
@@ -878,6 +913,10 @@ impl<'a> Checker<'a> {
                 self.unary(*op, val, *span)
             }
 
+            ast::Expr::Binary { op: ast::BinaryOp::Coalesce, lhs, rhs, span } => {
+                self.coalesce(lhs, rhs, expected, *span)
+            }
+
             ast::Expr::Binary { op, lhs, rhs, span } => {
                 if let Some(hop) = short_circuit(*op) {
                     let l = self.expr(lhs, Some(TyId::BOOL));
@@ -928,10 +967,36 @@ impl<'a> Checker<'a> {
                 self.not_yet(*span, "`char`", "arrives in Phase 2");
                 self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
-            ast::Expr::Nil(span) => {
-                self.not_yet(*span, "`nil`", "optionals arrive in Phase 2");
-                self.lit(ExprKind::Error, TyId::ERROR, *span)
-            }
+            // `nil` has no type of its own; it takes one from context. Kite
+            // has no null, so the only place it fits is a `?T`.
+            ast::Expr::Nil(span) => match expected {
+                Some(want) if matches!(self.types.kind(want), TyKind::Optional(_)) => {
+                    hir::Expr { kind: ExprKind::Nil, ty: want, span: *span }
+                }
+                Some(want) if !self.types.is_poisoned(want) => {
+                    let name = self.types.name(want);
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0200,
+                            format!("expected `{}`, found `nil`", name),
+                        )
+                        .with_primary(*span, "`nil` is only a value of an optional type")
+                        .with_note(format!(
+                            "Kite has no null: write `?{}` if this may be absent",
+                            name
+                        )),
+                    );
+                    self.lit(ExprKind::Error, TyId::ERROR, *span)
+                }
+                _ => {
+                    self.diags.push(
+                        Diagnostic::error(codes::E0204, "cannot infer a type for `nil`")
+                            .with_primary(*span, "no expected type here")
+                            .with_note("annotate the binding, as in `let x: ?int = nil`"),
+                    );
+                    self.lit(ExprKind::Error, TyId::ERROR, *span)
+                }
+            },
             // A method's receiver is local 0, which is what makes a method
             // call and a plain call the same thing after checking.
             ast::Expr::SelfExpr(span) => match self.sigs[self.fn_index].self_ty {
@@ -978,10 +1043,7 @@ impl<'a> Checker<'a> {
                 self.not_yet(*span, "map literals", "maps arrive later in Phase 2");
                 self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
-            ast::Expr::Index { span, .. } => {
-                self.not_yet(*span, "indexing", "slices and maps arrive in Phase 2");
-                self.lit(ExprKind::Error, TyId::ERROR, *span)
-            }
+            ast::Expr::Index { base, index, span } => self.index_expr(base, index, *span),
             ast::Expr::Cast { span, .. } => {
                 self.not_yet(*span, "`as` casts", "arrives in Phase 2");
                 self.lit(ExprKind::Error, TyId::ERROR, *span)
@@ -994,10 +1056,7 @@ impl<'a> Checker<'a> {
                 self.not_yet(*span, "tuples", "arrives in Phase 2");
                 self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
-            ast::Expr::Slice { span, .. } => {
-                self.not_yet(*span, "slice literals", "arrives in Phase 2");
-                self.lit(ExprKind::Error, TyId::ERROR, *span)
-            }
+            ast::Expr::Slice { elems, span } => self.slice_literal(elems, expected, *span),
             ast::Expr::Closure { span, .. } => {
                 self.not_yet(*span, "closures", "arrives in Phase 2");
                 self.lit(ExprKind::Error, TyId::ERROR, *span)
@@ -1220,6 +1279,16 @@ impl<'a> Checker<'a> {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
 
+        if self.types.slice_elem(receiver.ty).is_some() {
+            return self
+                .slice_method(base, receiver, name, args, span)
+                .unwrap_or_else(|| hir::Expr {
+                    kind: ExprKind::Error,
+                    ty: TyId::ERROR,
+                    span,
+                });
+        }
+
         let Some(ti) = self.type_index_of(receiver.ty) else {
             let found = self.types.with_article(receiver.ty);
             self.diags.push(
@@ -1399,6 +1468,303 @@ impl<'a> Checker<'a> {
             .map(|i| i as u32)
     }
 
+    // ---- slices -----------------------------------------------------------
+
+    /// `[1, 2, 3]`. Every element must share one type; an empty literal needs
+    /// its type from context.
+    fn slice_literal(
+        &mut self,
+        elems: &[ast::Expr],
+        expected: Option<TyId>,
+        span: Span,
+    ) -> hir::Expr {
+        let hint = expected.and_then(|e| self.types.slice_elem(e));
+
+        if elems.is_empty() {
+            let Some(elem) = hint else {
+                self.diags.push(
+                    Diagnostic::error(codes::E0204, "cannot infer the element type")
+                        .with_primary(span, "an empty slice has no elements to infer from")
+                        .with_note("write the type, as in `let xs: [int] = []`"),
+                );
+                return self.lit(ExprKind::Error, TyId::ERROR, span);
+            };
+            let ty = self.types.slice_of(elem);
+            return hir::Expr { kind: ExprKind::SliceNew { elems: Vec::new() }, ty, span };
+        }
+
+        let mut out = Vec::with_capacity(elems.len());
+        let mut elem_ty = hint;
+        for e in elems {
+            let v = self.expr(e, elem_ty);
+            match elem_ty {
+                None if !self.types.is_poisoned(v.ty) => elem_ty = Some(v.ty),
+                Some(want) => self.expect_ty(v.ty, want, v.span, None),
+                None => {}
+            }
+            out.push(v);
+        }
+
+        let elem = elem_ty.unwrap_or(TyId::ERROR);
+        let ty = self.types.slice_of(elem);
+        hir::Expr { kind: ExprKind::SliceNew { elems: out }, ty, span }
+    }
+
+    /// `xs[i]`. Traps on an out-of-range index, because that is a program bug.
+    /// `.get()` is the form for when it genuinely is a runtime condition.
+    // ---- optionals --------------------------------------------------------
+
+    /// `a ?? b` — "or else this". The left side must be optional; the result is
+    /// the unwrapped type.
+    fn coalesce(
+        &mut self,
+        lhs: &ast::Expr,
+        rhs: &ast::Expr,
+        expected: Option<TyId>,
+        span: Span,
+    ) -> hir::Expr {
+        let hint = expected.map(|e| self.types.optional_of(e));
+        let value = self.expr(lhs, hint);
+        if self.types.is_poisoned(value.ty) {
+            let _ = self.expr(rhs, expected);
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+
+        let TyKind::Optional(inner) = *self.types.kind(value.ty) else {
+            let found = self.types.with_article(value.ty);
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0201,
+                    format!("`??` needs an optional on the left, not {}", found),
+                )
+                .with_primary(value.span, "this can never be nil")
+                .with_note("`??` supplies a value for the nil case, so there must be one"),
+            );
+            let _ = self.expr(rhs, Some(value.ty));
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        };
+
+        let default = self.expr(rhs, Some(inner));
+        self.expect_ty(default.ty, inner, default.span, Some(value.span));
+
+        hir::Expr {
+            kind: ExprKind::Coalesce {
+                value: Box::new(value),
+                default: Box::new(default),
+            },
+            ty: inner,
+            span,
+        }
+    }
+
+    fn index_expr(&mut self, base: &ast::Expr, index: &ast::Expr, span: Span) -> hir::Expr {
+        let seq = self.expr(base, None);
+        if self.types.is_poisoned(seq.ty) {
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+
+        let Some(elem) = self.types.slice_elem(seq.ty) else {
+            let found = self.types.with_article(seq.ty);
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0200,
+                    format!("`{}` cannot be indexed", self.types.name(seq.ty)),
+                )
+                .with_primary(seq.span, format!("this is {}", found))
+                .with_note("indexing applies to slices and maps"),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        };
+
+        let i = self.expr(index, Some(TyId::INT));
+        self.expect_ty(i.ty, TyId::INT, i.span, None);
+
+        hir::Expr {
+            kind: ExprKind::Index { base: Box::new(seq), index: Box::new(i) },
+            ty: elem,
+            span,
+        }
+    }
+
+    fn assign_index(
+        &mut self,
+        base: &ast::Expr,
+        index: &ast::Expr,
+        span: Span,
+        a: &ast::AssignStmt,
+    ) -> Option<(hir::Stmt, Flow)> {
+        let seq = self.expr(base, None);
+        if self.types.is_poisoned(seq.ty) {
+            return None;
+        }
+        let Some(elem) = self.types.slice_elem(seq.ty) else {
+            let found = self.types.with_article(seq.ty);
+            self.diags.push(
+                Diagnostic::error(codes::E0200, "only a slice can be index-assigned")
+                    .with_primary(seq.span, format!("this is {}", found)),
+            );
+            return None;
+        };
+
+        // A slice is a copy-on-write value, so writing into it changes the
+        // binding, which must therefore be mutable.
+        self.require_mutable_slice_binding(base, "assigned into")?;
+
+        let i = self.expr(index, Some(TyId::INT));
+        self.expect_ty(i.ty, TyId::INT, i.span, None);
+
+        let value = self.expr(&a.value, Some(elem));
+        let value = match a.op.to_binary() {
+            None => {
+                self.expect_ty(value.ty, elem, value.span, None);
+                value
+            }
+            Some(binop) => {
+                let current = hir::Expr {
+                    kind: ExprKind::Index {
+                        base: Box::new(self.expr(base, None)),
+                        index: Box::new(self.expr(index, Some(TyId::INT))),
+                    },
+                    ty: elem,
+                    span,
+                };
+                self.binary(binop, current, value, a.span)
+            }
+        };
+
+        Some((
+            hir::Stmt::SetIndex { base: seq, index: i, value, span: a.span },
+            Flow::Falls,
+        ))
+    }
+
+    /// Mutating a slice changes the binding that holds it, because slices have
+    /// value semantics. Report when that binding is immutable.
+    fn require_mutable_slice_binding(&mut self, base: &ast::Expr, what: &str) -> Option<u32> {
+        let ast::Expr::Path(p) = base else {
+            self.not_yet(
+                base.span(),
+                "mutating a slice that is not a plain binding",
+                "assign it to a `var` first",
+            );
+            return None;
+        };
+        let Some(Res::Local(id)) = self.resolved.lookup_use(p.span) else {
+            return None;
+        };
+        if !self.locals[id as usize].mutable {
+            let name = self.locals[id as usize].name.clone();
+            let decl = self.locals[id as usize].span;
+            let mut d = Diagnostic::error(
+                codes::E0114,
+                format!("`{}` cannot be {}", name, what),
+            )
+            .with_primary(p.span, "this binding is immutable")
+            .with_secondary(decl, "declared with `let` here")
+            .with_note(
+                "a slice is a copy-on-write value, so changing its contents changes the \
+                 binding; declare it `var`",
+            );
+            if let Some(kw) = self.let_keyword_span(decl) {
+                d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
+            }
+            self.diags.push(d);
+            return None;
+        }
+        Some(id)
+    }
+
+    /// `xs.len()`, `xs.get(i)`, `xs.push(v)`.
+    fn slice_method(
+        &mut self,
+        base: &ast::Expr,
+        seq: hir::Expr,
+        name: &ast::Ident,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Option<hir::Expr> {
+        let elem = self.types.slice_elem(seq.ty)?;
+
+        match name.name.as_str() {
+            "len" => {
+                if !args.is_empty() {
+                    self.arity_error("len", args.len(), 0, span, None);
+                }
+                Some(hir::Expr {
+                    kind: ExprKind::SliceLen { base: Box::new(seq) },
+                    ty: TyId::INT,
+                    span,
+                })
+            }
+
+            "get" => {
+                if args.len() != 1 {
+                    self.arity_error("get", args.len(), 1, span, None);
+                    return Some(self.lit(ExprKind::Error, TyId::ERROR, span));
+                }
+                let i = self.expr(&args[0], Some(TyId::INT));
+                self.expect_ty(i.ty, TyId::INT, i.span, None);
+                let ty = self.types.optional_of(elem);
+                Some(hir::Expr {
+                    kind: ExprKind::SliceGet { base: Box::new(seq), index: Box::new(i) },
+                    ty,
+                    span,
+                })
+            }
+
+            "push" => {
+                if args.len() != 1 {
+                    self.arity_error("push", args.len(), 1, span, None);
+                    return Some(self.lit(ExprKind::Error, TyId::ERROR, span));
+                }
+                let id = self.require_mutable_slice_binding(base, "pushed to")?;
+                let v = self.expr(&args[0], Some(elem));
+                self.expect_ty(v.ty, elem, v.span, None);
+                // `push` is a statement, not an expression; the checker returns
+                // unit and MIR emits the mutation.
+                Some(hir::Expr {
+                    kind: ExprKind::Match {
+                        scrutinee: Box::new(hir::Expr {
+                            kind: ExprKind::Bool(true),
+                            ty: TyId::BOOL,
+                            span,
+                        }),
+                        arms: vec![hir::MatchArm {
+                            pattern: hir::Pattern::Wildcard,
+                            guard: None,
+                            body: hir::Expr {
+                                kind: ExprKind::Block(hir::Block {
+                                    stmts: vec![hir::Stmt::SlicePush {
+                                        local: hir::LocalId(id),
+                                        value: v,
+                                        span,
+                                    }],
+                                }),
+                                ty: TyId::UNIT,
+                                span,
+                            },
+                            span,
+                        }],
+                    },
+                    ty: TyId::UNIT,
+                    span,
+                })
+            }
+
+            _ => {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0205,
+                        format!("`{}` has no method `{}`", self.types.name(seq.ty), name.name),
+                    )
+                    .with_primary(name.span, "no such method")
+                    .with_note("a slice has: len, get, push"),
+                );
+                Some(self.lit(ExprKind::Error, TyId::ERROR, span))
+            }
+        }
+    }
+
     // ---- enums ------------------------------------------------------------
 
     /// `Circle(radius: 1.0)`, `Number(3.0)`, or a unit variant like `Point`.
@@ -1535,9 +1901,22 @@ impl<'a> Checker<'a> {
         let mut result_ty: Option<TyId> = None;
         let mut arm_spans: Vec<(Span, TyId)> = Vec::new();
 
+        // Arms are checked in order so a binding can be narrowed. Once an
+        // earlier arm has matched `nil`, a later binding pattern cannot receive
+        // one, so it binds the unwrapped type — which is what
+        // SPECIFICATION.md section 3.3 shows.
+        let mut nil_covered = false;
+
         for arm in &m.arms {
             self.init = entry_init.clone();
-            let pattern = self.pattern(&arm.pattern, scrut_ty);
+            let bind_ty = match *self.types.kind(scrut_ty) {
+                TyKind::Optional(inner) if nil_covered => inner,
+                _ => scrut_ty,
+            };
+            let pattern = self.pattern_with(&arm.pattern, scrut_ty, bind_ty);
+            if arm.guard.is_none() && covers_nil(&arm.pattern) {
+                nil_covered = true;
+            }
 
             let guard = arm.guard.as_ref().map(|g| {
                 let c = self.expr(g, Some(TyId::BOOL));
@@ -1635,12 +2014,19 @@ impl<'a> Checker<'a> {
 
     /// Check a pattern against the scrutinee's type and bind its names.
     fn pattern(&mut self, p: &ast::Pattern, scrut: TyId) -> hir::Pattern {
+        self.pattern_with(p, scrut, scrut)
+    }
+
+    /// As [`Self::pattern`], but a bare binding takes `bind_ty` rather than the
+    /// scrutinee's type. The two differ only when an optional has already had
+    /// its nil case matched by an earlier arm.
+    fn pattern_with(&mut self, p: &ast::Pattern, scrut: TyId, bind_ty: TyId) -> hir::Pattern {
         match p {
             ast::Pattern::Wildcard(_) => hir::Pattern::Wildcard,
 
             ast::Pattern::Binding(name) => match self.resolved.lookup_binding(name.span) {
                 Some(local) => {
-                    self.locals[local as usize].ty = scrut;
+                    self.locals[local as usize].ty = bind_ty;
                     self.init[local as usize] = Init::Assigned;
                     hir::Pattern::Binding(hir::LocalId(local))
                 }
@@ -1792,8 +2178,19 @@ impl<'a> Checker<'a> {
                 hir::Pattern::Wildcard
             }
             ast::Pattern::Nil(span) => {
-                self.not_yet(*span, "`nil` patterns", "optionals arrive later in Phase 2");
-                hir::Pattern::Wildcard
+                if !matches!(self.types.kind(scrut), TyKind::Optional(_))
+                    && !self.types.is_poisoned(scrut)
+                {
+                    let found = self.types.with_article(scrut);
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0200,
+                            format!("`nil` cannot match {}", found),
+                        )
+                        .with_primary(*span, "only an optional is ever nil"),
+                    );
+                }
+                hir::Pattern::Nil
             }
             ast::Pattern::Error(_) => hir::Pattern::Wildcard,
         }
@@ -2121,12 +2518,79 @@ impl<'a> Checker<'a> {
         optional: bool,
         span: Span,
     ) -> hir::Expr {
+        let obj = self.expr(base, None);
+
+        // `a?.b` yields `?B`: nil when `a` is nil, and `a.b` otherwise.
         if optional {
-            self.not_yet(span, "optional chaining", "optionals arrive later in Phase 2");
-            return self.lit(ExprKind::Error, TyId::ERROR, span);
+            if self.types.is_poisoned(obj.ty) {
+                return self.lit(ExprKind::Error, TyId::ERROR, span);
+            }
+            let TyKind::Optional(inner) = *self.types.kind(obj.ty) else {
+                let found = self.types.with_article(obj.ty);
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0201,
+                        format!("`?.` needs an optional, not {}", found),
+                    )
+                    .with_primary(obj.span, "this can never be nil")
+                    .with_note("write `.` instead"),
+                );
+                return self.lit(ExprKind::Error, TyId::ERROR, span);
+            };
+
+            let TyKind::Struct(sid) = *self.types.kind(inner) else {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0200,
+                        format!("`{}` has no fields", self.types.name(inner)),
+                    )
+                    .with_primary(name.span, "field access needs a struct"),
+                );
+                return self.lit(ExprKind::Error, TyId::ERROR, span);
+            };
+            let Some((index, fty)) =
+                self.types.struct_def(sid).field(&name.name).map(|(i, f)| (i, f.ty))
+            else {
+                let sname = self.types.struct_def(sid).name.clone();
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0200,
+                        format!("`{}` has no field `{}`", sname, name.name),
+                    )
+                    .with_primary(name.span, "no such field"),
+                );
+                return self.lit(ExprKind::Error, TyId::ERROR, span);
+            };
+
+            let result_ty = self.types.optional_of(fty);
+            let is_nil = hir::Expr {
+                kind: ExprKind::IsNil { value: Box::new(self.expr(base, None)) },
+                ty: TyId::BOOL,
+                span,
+            };
+            let read = hir::Expr {
+                kind: ExprKind::FieldGet {
+                    base: Box::new(self.expr(base, None)),
+                    index: index as u32,
+                },
+                ty: result_ty,
+                span,
+            };
+            return hir::Expr {
+                kind: ExprKind::If {
+                    cond: Box::new(is_nil),
+                    then: Box::new(hir::Expr {
+                        kind: ExprKind::Nil,
+                        ty: result_ty,
+                        span,
+                    }),
+                    else_: Box::new(read),
+                },
+                ty: result_ty,
+                span,
+            };
         }
 
-        let obj = self.expr(base, None);
         if self.types.is_poisoned(obj.ty) {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
@@ -2643,6 +3107,15 @@ impl<'a> Checker<'a> {
                 .with_primary(span, "not supported by this compiler version")
                 .with_note(when.to_string()),
         );
+    }
+}
+
+/// Whether a surface pattern matches `nil`.
+fn covers_nil(p: &ast::Pattern) -> bool {
+    match p {
+        ast::Pattern::Nil(_) | ast::Pattern::Wildcard(_) | ast::Pattern::Binding(_) => true,
+        ast::Pattern::Or { alts, .. } => alts.iter().any(covers_nil),
+        _ => false,
     }
 }
 

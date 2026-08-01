@@ -85,6 +85,18 @@ pub fn missing_patterns(scrutinee: TyId, patterns: &[&Pattern], types: &Types) -
             missing
         }
 
+        // An optional has two cases: nil, and a present value.
+        TyKind::Optional(_) => {
+            let mut missing = Vec::new();
+            if !patterns.iter().any(|p| covers_nil(p)) {
+                missing.push(Missing("nil".to_string()));
+            }
+            if !patterns.iter().any(|p| p.is_irrefutable()) {
+                missing.push(Missing("a present value".to_string()));
+            }
+            missing
+        }
+
         // A struct has one constructor, so it is exhaustive when every field
         // pattern is. Nested exhaustiveness over struct fields is deferred;
         // reporting `_` is sound and never wrong, just less specific.
@@ -115,6 +127,14 @@ fn flatten(p: &Pattern, types: &Types, out: &mut Vec<Row>) {
 
 fn is_any(r: &Row) -> bool {
     matches!(r, Row::Any)
+}
+
+fn covers_nil(p: &Pattern) -> bool {
+    match p {
+        Pattern::Wildcard | Pattern::Binding(_) | Pattern::Nil => true,
+        Pattern::Or(alts) => alts.iter().any(covers_nil),
+        _ => false,
+    }
 }
 
 fn covers_bool(p: &Pattern, want: bool) -> bool {
@@ -308,6 +328,28 @@ mod tests {
     }
 
     /// No finite set of literals covers an integer, so a catch-all is required.
+    /// An optional has exactly two cases, so both must be named.
+    #[test]
+    fn optionals_need_nil_and_a_present_value() {
+        let mut types = Types::new();
+        let opt = types.optional_of(TyId::INT);
+
+        let ps = [Pattern::Nil];
+        let refs: Vec<&Pattern> = ps.iter().collect();
+        assert_eq!(
+            names(&missing_patterns(opt, &refs, &types)),
+            vec!["a present value"]
+        );
+
+        let ps = [Pattern::Binding(LocalId(0))];
+        let refs: Vec<&Pattern> = ps.iter().collect();
+        assert_eq!(names(&missing_patterns(opt, &refs, &types)), Vec::<&str>::new());
+
+        let ps = [Pattern::Nil, Pattern::Binding(LocalId(0))];
+        let refs: Vec<&Pattern> = ps.iter().collect();
+        assert!(missing_patterns(opt, &refs, &types).is_empty());
+    }
+
     #[test]
     fn integers_always_need_a_catch_all() {
         let types = Types::new();

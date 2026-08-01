@@ -30,6 +30,7 @@ fn compile_fn(func: &mir::Function) -> FnProto {
             | mir::Inst::Assign { value: mir::Rvalue::CallBuiltin { args, .. }, .. } => args.len(),
             mir::Inst::Assign { value: mir::Rvalue::StructNew { fields, .. }, .. }
             | mir::Inst::Assign { value: mir::Rvalue::EnumNew { fields, .. }, .. } => fields.len(),
+            mir::Inst::Assign { value: mir::Rvalue::SliceNew { elems }, .. } => elems.len(),
             _ => 0,
         })
         .max()
@@ -111,6 +112,18 @@ impl<'a> Emitter<'a> {
                 self.code.push(Op::SetField { obj, index: *index as u16, src });
                 return;
             }
+            mir::Inst::SetIndex { base, index, value } => {
+                let obj = self.operand_reg(base, 0);
+                let idx = self.operand_reg(index, 1);
+                let src = self.operand_reg(value, 2);
+                self.code.push(Op::SetIndex { obj, index: idx, src });
+                return;
+            }
+            mir::Inst::SlicePush { local, value } => {
+                let src = self.operand_reg(value, 0);
+                self.code.push(Op::SlicePush { obj: reg(*local), src });
+                return;
+            }
         };
 
         match value {
@@ -184,6 +197,34 @@ impl<'a> Emitter<'a> {
                 let obj = self.operand_reg(base, 0);
                 self.code.push(Op::TagOf { dst, obj });
             }
+
+            mir::Rvalue::IsNil { value } => {
+                let obj = self.operand_reg(value, 0);
+                self.code.push(Op::IsNil { dst, obj });
+            }
+
+            mir::Rvalue::SliceNew { elems } => {
+                self.stage_args(elems);
+                self.code.push(Op::NewSlice {
+                    dst,
+                    base: self.arg_base,
+                    count: elems.len() as u8,
+                });
+            }
+            mir::Rvalue::IndexGet { base, index } => {
+                let obj = self.operand_reg(base, 0);
+                let idx = self.operand_reg(index, 1);
+                self.code.push(Op::GetIndex { dst, obj, index: idx });
+            }
+            mir::Rvalue::SliceLen { base } => {
+                let obj = self.operand_reg(base, 0);
+                self.code.push(Op::SliceLen { dst, obj });
+            }
+            mir::Rvalue::SliceGet { base, index } => {
+                let obj = self.operand_reg(base, 0);
+                let idx = self.operand_reg(index, 1);
+                self.code.push(Op::SliceGet { dst, obj, index: idx });
+            }
         }
     }
 
@@ -203,6 +244,7 @@ impl<'a> Emitter<'a> {
             mir::Operand::Bool(v) => Op::LoadBool { dst, value: *v },
             mir::Operand::Str(s) => Op::LoadStr { dst, idx: s.0 },
             mir::Operand::Unit => Op::LoadUnit { dst },
+            mir::Operand::Nil => Op::LoadNil { dst },
         };
         // `move rN, rN` is a no-op worth not emitting.
         if let Op::Move { dst: d, src } = &op {

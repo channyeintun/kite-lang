@@ -165,6 +165,19 @@ impl<'a> FnLowerer<'a> {
                 let v = self.rvalue(value);
                 self.assign(Local(local.0), v);
             }
+            hir::Stmt::SetIndex { base, index, value, .. } => {
+                let b = self.operand(base);
+                let i = self.operand(index);
+                let v = self.operand(value);
+                self.emit(Inst::SetIndex { base: b, index: i, value: v });
+            }
+            hir::Stmt::SlicePush { local, value, .. } => {
+                let v = self.operand(value);
+                self.emit(Inst::SlicePush { local: Local(local.0), value: v });
+            }
+            hir::Stmt::ForSlice { var, slice, body, label, .. } => {
+                self.for_slice(*var, slice, body, label.as_deref())
+            }
             hir::Stmt::SetField { base, index, value, .. } => {
                 let b = self.operand(base);
                 let v = self.operand(value);
@@ -319,6 +332,81 @@ impl<'a> FnLowerer<'a> {
         self.switch_to(exit);
     }
 
+    /// `for x in xs` becomes an index walk. The slice and its length are
+    /// evaluated once, before the loop, so neither is recomputed per iteration.
+    fn for_slice(
+        &mut self,
+        var: hir::LocalId,
+        slice: &hir::Expr,
+        body: &hir::Block,
+        label: Option<&str>,
+    ) {
+        let seq = self.temp(slice.ty);
+        let s = self.operand(slice);
+        self.assign(seq, Rvalue::Use(s));
+
+        let len = self.temp(Ty::INT);
+        self.assign(len, Rvalue::SliceLen { base: Operand::Local(seq) });
+
+        let idx = self.temp(Ty::INT);
+        self.assign(idx, Rvalue::Use(Operand::Int(0)));
+
+        let header = self.new_block();
+        let body_bb = self.new_block();
+        let step = self.new_block();
+        let exit = self.new_block();
+
+        self.terminate(Terminator::Goto(header));
+
+        self.switch_to(header);
+        let cond = self.temp(Ty::BOOL);
+        self.assign(
+            cond,
+            Rvalue::Binary {
+                op: BinOp::LtInt,
+                lhs: Operand::Local(idx),
+                rhs: Operand::Local(len),
+            },
+        );
+        self.terminate(Terminator::Branch {
+            cond: Operand::Local(cond),
+            then: body_bb,
+            else_: exit,
+        });
+
+        self.loops.push(LoopCtx {
+            label: label.map(str::to_string),
+            continue_to: step,
+            break_to: exit,
+        });
+
+        self.switch_to(body_bb);
+        self.assign(
+            Local(var.0),
+            Rvalue::IndexGet {
+                base: Operand::Local(seq),
+                index: Operand::Local(idx),
+            },
+        );
+        self.block(body);
+        self.terminate(Terminator::Goto(step));
+
+        self.loops.pop();
+
+        self.switch_to(step);
+        self.assign(
+            idx,
+            Rvalue::Binary {
+                op: BinOp::AddInt,
+                lhs: Operand::Local(idx),
+                rhs: Operand::Int(1),
+            },
+        );
+        self.terminate(Terminator::Goto(header));
+
+        self.switch_to(exit);
+    }
+
     fn while_loop(&mut self, cond: &hir::Expr, body: &hir::Block, label: Option<&str>) {
         let header = self.new_block();
         let body_bb = self.new_block();
@@ -394,6 +482,28 @@ impl<'a> FnLowerer<'a> {
                 let args = args.iter().map(|a| self.operand(a)).collect();
                 Rvalue::CallBuiltin { builtin: *builtin, args }
             }
+            hir::ExprKind::IsNil { value } => {
+                let v = self.operand(value);
+                Rvalue::IsNil { value: v }
+            }
+            hir::ExprKind::SliceNew { elems } => {
+                let elems = elems.iter().map(|a| self.operand(a)).collect();
+                Rvalue::SliceNew { elems }
+            }
+            hir::ExprKind::Index { base, index } => {
+                let b = self.operand(base);
+                let i = self.operand(index);
+                Rvalue::IndexGet { base: b, index: i }
+            }
+            hir::ExprKind::SliceLen { base } => {
+                let b = self.operand(base);
+                Rvalue::SliceLen { base: b }
+            }
+            hir::ExprKind::SliceGet { base, index } => {
+                let b = self.operand(base);
+                let i = self.operand(index);
+                Rvalue::SliceGet { base: b, index: i }
+            }
             hir::ExprKind::EnumNew { enum_id, variant, fields } => {
                 let fields = fields.iter().map(|a| self.operand(a)).collect();
                 Rvalue::EnumNew { enum_id: *enum_id, variant: *variant, fields }
@@ -420,6 +530,10 @@ impl<'a> FnLowerer<'a> {
             hir::ExprKind::Str(s) => Operand::Str(self.strings.intern(s)),
             hir::ExprKind::Local(l) => Operand::Local(Local(l.0)),
             hir::ExprKind::Error => Operand::Unit,
+            hir::ExprKind::Nil => Operand::Nil,
+            hir::ExprKind::Coalesce { value, default } => {
+                Operand::Local(self.coalesce(value, default, e.ty))
+            }
 
             hir::ExprKind::If { cond, then, else_ } => {
                 Operand::Local(self.if_expr(cond, then, else_, e.ty))
@@ -642,6 +756,16 @@ impl<'a> FnLowerer<'a> {
                 }
             }
 
+            hir::Pattern::Nil => {
+                let c = self.temp(Ty::BOOL);
+                self.assign(c, Rvalue::IsNil { value: subject.clone() });
+                self.terminate(Terminator::Branch {
+                    cond: Operand::Local(c),
+                    then: on_match,
+                    else_: on_fail,
+                });
+            }
+
             hir::Pattern::Wildcard | hir::Pattern::Binding(_) => {
                 self.terminate(Terminator::Goto(on_match));
             }
@@ -727,6 +851,32 @@ impl<'a> FnLowerer<'a> {
         let slot = self.temp(Ty::ERROR);
         self.assign(slot, Rvalue::FieldGet { base: subject.clone(), index });
         self.bind_pattern(sub, &Operand::Local(slot));
+    }
+
+    /// `a ?? b` evaluates `b` only when `a` is nil, so it becomes a branch.
+    fn coalesce(&mut self, value: &hir::Expr, default: &hir::Expr, ty: Ty) -> Local {
+        let result = self.temp(ty);
+        let v = self.operand(value);
+        self.assign(result, Rvalue::Use(v.clone()));
+
+        let is_nil = self.temp(Ty::BOOL);
+        self.assign(is_nil, Rvalue::IsNil { value: v });
+
+        let fallback = self.new_block();
+        let join = self.new_block();
+        self.terminate(Terminator::Branch {
+            cond: Operand::Local(is_nil),
+            then: fallback,
+            else_: join,
+        });
+
+        self.switch_to(fallback);
+        let d = self.operand(default);
+        self.assign(result, Rvalue::Use(d));
+        self.terminate(Terminator::Goto(join));
+
+        self.switch_to(join);
+        result
     }
 
     /// `a && b` must not evaluate `b` when `a` is false, so it becomes a

@@ -340,10 +340,18 @@ impl Types {
     /// escape hatches: `Never` satisfies anything because it never produces a
     /// value, and `Error` satisfies anything to stop cascades.
     pub fn satisfies(&self, found: TyId, expected: TyId) -> bool {
-        found == expected
+        if found == expected
             || found == TyId::NEVER
             || found == TyId::ERROR
             || expected == TyId::ERROR
+        {
+            return true;
+        }
+        // A `T` is acceptable where a `?T` is wanted. This is subsumption, not
+        // a conversion: the value is unchanged and nothing is lost. Without it
+        // every optional would need an explicit wrap at every site, which is
+        // why every language with optionals has this rule.
+        matches!(self.kind(expected), TyKind::Optional(inner) if *inner == found)
     }
 
     pub fn is_poisoned(&self, id: TyId) -> bool {
@@ -391,18 +399,21 @@ impl Types {
     }
 
     /// Whether a value of this type is a heap reference at run time. Drives
-    /// codegen and, later, the `Share` analysis.
+    /// codegen. Slices are excluded: they are heap-allocated but have value
+    /// semantics, so assignment does not alias.
     pub fn is_reference(&self, id: TyId) -> bool {
         matches!(
             self.kind(id),
-            TyKind::Struct(_)
-                | TyKind::Enum(_)
-                | TyKind::Slice(_)
-                | TyKind::Map(..)
-                | TyKind::Tuple(_)
-                | TyKind::Dyn(_)
-                | TyKind::Fn { .. }
+            TyKind::Struct(_) | TyKind::Enum(_) | TyKind::Map(..) | TyKind::Dyn(_) | TyKind::Fn { .. }
         )
+    }
+
+    /// The element type of a slice.
+    pub fn slice_elem(&self, id: TyId) -> Option<TyId> {
+        match self.kind(id) {
+            TyKind::Slice(e) => Some(*e),
+            _ => None,
+        }
     }
 
     /// Whether a type is deeply immutable, and so may cross a task boundary.
@@ -430,6 +441,9 @@ impl Types {
             | TyKind::Str
             | TyKind::Never
             | TyKind::Error => true,
+            // Slices are copy-on-write *values*, not shared references, so a
+            // slice is shareable exactly when its elements are. This is what
+            // keeps ordinary data types `Share` without the author noticing.
             TyKind::Slice(e) | TyKind::Optional(e) => self.is_share_inner(*e, visiting),
             TyKind::Map(k, v) => {
                 self.is_share_inner(*k, visiting) && self.is_share_inner(*v, visiting)
@@ -492,9 +506,10 @@ impl Types {
     /// "this is an `int`", not "this is a `int`".
     pub fn with_article(&self, id: TyId) -> String {
         let name = self.name(id);
+        // "an int", but "a User" — `u` almost always reads as a consonant at
+        // the start of an English word.
         let article = match name.chars().next() {
-            Some(c) if "aeiouAEIOU".contains(c) => "an",
-            Some('[') | Some('{') | Some('?') | Some('(') => "a",
+            Some(c) if "aeioAEIO".contains(c) => "an",
             _ => "a",
         };
         format!("{} `{}`", article, name)
@@ -575,6 +590,17 @@ mod tests {
         let t = Types::new();
         assert!(!t.satisfies(TyId::INT, TyId::FLOAT));
         assert!(!t.satisfies(TyId::FLOAT, TyId::INT));
+    }
+
+    /// A `T` is acceptable where a `?T` is wanted, but not the reverse.
+    #[test]
+    fn a_value_widens_to_its_optional() {
+        let mut t = Types::new();
+        let opt = t.optional_of(TyId::INT);
+        assert!(t.satisfies(TyId::INT, opt));
+        assert!(!t.satisfies(opt, TyId::INT), "an optional must be unwrapped");
+        let other = t.optional_of(TyId::STR);
+        assert!(!t.satisfies(TyId::INT, other));
     }
 
     #[test]
@@ -698,13 +724,15 @@ mod tests {
         assert!(!t.is_equatable(with_fn), "functions have no equality");
     }
 
+    /// Structs alias on assignment; slices do not, because they are
+    /// copy-on-write values.
     #[test]
-    fn aggregates_are_heap_references() {
+    fn structs_are_references_but_slices_are_values() {
         let mut t = Types::new();
         let s = struct_with(&mut t, "P", vec![("x", TyId::INT, false)]);
         assert!(t.is_reference(s));
         assert!(!t.is_reference(TyId::INT));
         let sl = t.slice_of(TyId::INT);
-        assert!(t.is_reference(sl));
+        assert!(!t.is_reference(sl), "a slice has value semantics");
     }
 }

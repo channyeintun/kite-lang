@@ -47,6 +47,8 @@ pub enum Op {
     LoadBool { dst: Reg, value: bool },
     LoadStr { dst: Reg, idx: u32 },
     LoadUnit { dst: Reg },
+    LoadNil { dst: Reg },
+    IsNil { dst: Reg, obj: Reg },
     Move { dst: Reg, src: Reg },
 
     // ---- arithmetic -------------------------------------------------------
@@ -106,6 +108,16 @@ pub enum Op {
     NewEnum { dst: Reg, enum_id: u32, variant: u32, base: Reg, count: u8 },
     /// The variant index of an enum value, as an int.
     TagOf { dst: Reg, obj: Reg },
+    /// Elements occupy `base .. base + count`.
+    NewSlice { dst: Reg, base: Reg, count: u8 },
+    /// Traps when out of range: an index bug is a program bug.
+    GetIndex { dst: Reg, obj: Reg, index: Reg },
+    SetIndex { obj: Reg, index: Reg, src: Reg },
+    SliceLen { dst: Reg, obj: Reg },
+    /// Yields an optional rather than trapping.
+    SliceGet { dst: Reg, obj: Reg, index: Reg },
+    /// Appends in place, copy-on-write.
+    SlicePush { obj: Reg, src: Reg },
     SetField { obj: Reg, index: u16, src: Reg },
 
     /// Arguments occupy `base .. base + argc`.
@@ -232,6 +244,8 @@ impl fmt::Display for Op {
             LoadBool { dst, value } => write!(f, "{:<12} r{}, {}", "load.bool", dst, value),
             LoadStr { dst, idx } => write!(f, "{:<12} r{}, str{}", "load.str", dst, idx),
             LoadUnit { dst } => write!(f, "{:<12} r{}", "load.unit", dst),
+            LoadNil { dst } => write!(f, "{:<12} r{}", "load.nil", dst),
+            IsNil { dst, obj } => write!(f, "{:<12} r{}, r{}", "is.nil", dst, obj),
             Move { dst, src } => write!(f, "{:<12} r{}, r{}", "move", dst, src),
 
             AddInt { dst, a, b } => bin(f, "add.int", dst, a, b),
@@ -287,6 +301,20 @@ impl fmt::Display for Op {
                 "new.enum", dst, enum_id, variant, base, count
             ),
             TagOf { dst, obj } => write!(f, "{:<12} r{}, r{}", "tag", dst, obj),
+            NewSlice { dst, base, count } => {
+                write!(f, "{:<12} r{}, r{}, {}", "new.slice", dst, base, count)
+            }
+            GetIndex { dst, obj, index } => {
+                write!(f, "{:<12} r{}, r{}, r{}", "get.index", dst, obj, index)
+            }
+            SetIndex { obj, index, src } => {
+                write!(f, "{:<12} r{}, r{}, r{}", "set.index", obj, index, src)
+            }
+            SliceLen { dst, obj } => write!(f, "{:<12} r{}, r{}", "len", dst, obj),
+            SliceGet { dst, obj, index } => {
+                write!(f, "{:<12} r{}, r{}, r{}", "slice.get", dst, obj, index)
+            }
+            SlicePush { obj, src } => write!(f, "{:<12} r{}, r{}", "push", obj, src),
             SetField { obj, index, src } => {
                 write!(f, "{:<12} r{}, {}, r{}", "set.field", obj, index, src)
             }

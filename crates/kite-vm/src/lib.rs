@@ -32,6 +32,14 @@ pub enum Value {
     Struct(Rc<StructValue>),
     /// An enum value: which variant, and its payload.
     Enum(Rc<EnumValue>),
+    /// A slice. Copy-on-write: assignment shares the buffer, and a mutation
+    /// clones it first if anyone else is holding it. That is what gives `[T]`
+    /// value semantics without copying on every assignment, and what keeps it
+    /// `Share` when `T` is.
+    Slice(Rc<Vec<Value>>),
+    /// `nil`, or a present optional. Only ever produced where the type is
+    /// `?T`; Kite has no null anywhere else.
+    Nil,
 }
 
 #[derive(Debug)]
@@ -63,6 +71,8 @@ impl PartialEq for Value {
             (Value::Enum(a), Value::Enum(b)) => {
                 a.enum_id == b.enum_id && a.variant == b.variant && a.fields == b.fields
             }
+            (Value::Slice(a), Value::Slice(b)) => a == b,
+            (Value::Nil, Value::Nil) => true,
             _ => false,
         }
     }
@@ -78,6 +88,8 @@ impl Value {
             Value::Str(_) => "str",
             Value::Struct(_) => "struct",
             Value::Enum(_) => "enum",
+            Value::Slice(_) => "slice",
+            Value::Nil => "nil",
         }
     }
 }
@@ -122,6 +134,17 @@ impl fmt::Display for Value {
                 }
                 write!(f, ")")
             }
+            Value::Slice(items) => {
+                write!(f, "[")?;
+                for (i, v) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]")
+            }
+            Value::Nil => write!(f, "nil"),
         }
     }
 }
@@ -135,6 +158,9 @@ pub enum Trap {
     /// bug, so it names where.
     Unreachable { function: String, pc: usize },
     NoEntryPoint,
+    /// An index outside a slice. A program bug, not a runtime condition, so it
+    /// traps — `.get()` is the form for the case where it genuinely is one.
+    IndexOutOfRange { index: i64, len: usize },
     /// A register held a value of the wrong type. Only reachable through a
     /// codegen bug, since the type checker has already run.
     TypeConfusion { op: &'static str, found: &'static str },
@@ -152,6 +178,11 @@ impl fmt::Display for Trap {
                 write!(f, "reached unreachable code in `{}` at pc {}", function, pc)
             }
             Trap::NoEntryPoint => write!(f, "no `main` function"),
+            Trap::IndexOutOfRange { index, len } => write!(
+                f,
+                "index {} is out of range for a slice of length {}",
+                index, len
+            ),
             Trap::TypeConfusion { op, found } => {
                 write!(f, "`{}` received a `{}`", op, found)
             }
@@ -247,6 +278,11 @@ impl<'a> Vm<'a> {
                 Op::LoadFloat { dst, value } => self.set(base, dst, Value::Float(value)),
                 Op::LoadBool { dst, value } => self.set(base, dst, Value::Bool(value)),
                 Op::LoadUnit { dst } => self.set(base, dst, Value::Unit),
+                Op::LoadNil { dst } => self.set(base, dst, Value::Nil),
+                Op::IsNil { dst, obj } => {
+                    let v = matches!(self.get(base, obj), Value::Nil);
+                    self.set(base, dst, Value::Bool(v));
+                }
                 Op::LoadStr { dst, idx } => {
                     let s = self.chunk.strings[idx as usize].clone();
                     self.set(base, dst, Value::Str(s));
@@ -525,6 +561,77 @@ impl<'a> Vm<'a> {
                     }
                 },
 
+                Op::NewSlice { dst, base: arg_base, count } => {
+                    let mut items = Vec::with_capacity(count as usize);
+                    for i in 0..count as usize {
+                        items.push(self.regs[base + arg_base as usize + i].clone());
+                    }
+                    self.set(base, dst, Value::Slice(Rc::new(items)));
+                }
+
+                Op::GetIndex { dst, obj, index } => {
+                    let (seq, i) = (self.get(base, obj), self.get(base, index));
+                    let items = Self::as_slice(&seq)?;
+                    let i = Self::as_index(&i)?;
+                    match usize::try_from(i).ok().and_then(|u| items.get(u)) {
+                        Some(v) => {
+                            let v = v.clone();
+                            self.set(base, dst, v);
+                        }
+                        None => {
+                            return Err(Trap::IndexOutOfRange { index: i, len: items.len() })
+                        }
+                    }
+                }
+
+                Op::SetIndex { obj, index, src } => {
+                    let value = self.get(base, src);
+                    let i = Self::as_index(&self.get(base, index))?;
+                    let slot = base + obj as usize;
+                    let Value::Slice(items) = &mut self.regs[slot] else {
+                        return Err(Trap::TypeConfusion {
+                            op: "index assignment",
+                            found: self.regs[slot].type_name(),
+                        });
+                    };
+                    let len = items.len();
+                    match usize::try_from(i).ok().filter(|u| *u < len) {
+                        // Copy-on-write: clone only if the buffer is shared.
+                        Some(u) => Rc::make_mut(items)[u] = value,
+                        None => return Err(Trap::IndexOutOfRange { index: i, len }),
+                    }
+                }
+
+                Op::SliceLen { dst, obj } => {
+                    let seq = self.get(base, obj);
+                    let len = Self::as_slice(&seq)?.len();
+                    self.set(base, dst, Value::Int(len as i64));
+                }
+
+                Op::SliceGet { dst, obj, index } => {
+                    let (seq, i) = (self.get(base, obj), self.get(base, index));
+                    let items = Self::as_slice(&seq)?;
+                    let i = Self::as_index(&i)?;
+                    let v = usize::try_from(i)
+                        .ok()
+                        .and_then(|u| items.get(u))
+                        .cloned()
+                        .unwrap_or(Value::Nil);
+                    self.set(base, dst, v);
+                }
+
+                Op::SlicePush { obj, src } => {
+                    let value = self.get(base, src);
+                    let slot = base + obj as usize;
+                    let Value::Slice(items) = &mut self.regs[slot] else {
+                        return Err(Trap::TypeConfusion {
+                            op: "push",
+                            found: self.regs[slot].type_name(),
+                        });
+                    };
+                    Rc::make_mut(items).push(value);
+                }
+
                 Op::Call { dst, func: callee, base: arg_base, argc } => {
                     self.call(callee, base, arg_base, argc, dst)?;
                 }
@@ -616,6 +723,26 @@ impl<'a> Vm<'a> {
                 let _ = writeln!(self.out, "{}", v);
                 Ok(Value::Unit)
             }
+        }
+    }
+
+    fn as_slice(v: &Value) -> Result<&Rc<Vec<Value>>, Trap> {
+        match v {
+            Value::Slice(items) => Ok(items),
+            other => Err(Trap::TypeConfusion {
+                op: "slice operation",
+                found: other.type_name(),
+            }),
+        }
+    }
+
+    fn as_index(v: &Value) -> Result<i64, Trap> {
+        match v {
+            Value::Int(i) => Ok(*i),
+            other => Err(Trap::TypeConfusion {
+                op: "index",
+                found: other.type_name(),
+            }),
         }
     }
 

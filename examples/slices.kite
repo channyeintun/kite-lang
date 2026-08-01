@@ -1,0 +1,35 @@
+fn sum(xs: [int]) -> int {
+    var total = 0
+    for x in xs {
+        total = total + x
+    }
+    return total
+}
+
+fn doubled(xs: [int]) -> [int] {
+    var out: [int] = []
+    for x in xs {
+        out.push(x * 2)
+    }
+    return out
+}
+
+fn main() {
+    let xs = [1, 2, 3, 4]
+    io.print(xs.len())
+    io.print(xs[0])
+    io.print(xs[3])
+    io.print(sum(xs))
+    io.print(doubled(xs).len())
+    io.print(doubled(xs)[3])
+
+    var ys = [1, 2, 3]
+    ys[0] = 99
+    io.print(ys[0])
+
+    // value semantics: pushing to a copy leaves the original alone
+    var zs = ys
+    zs.push(4)
+    io.print(ys.len())
+    io.print(zs.len())
+}

@@ -1052,3 +1052,166 @@ fn main() {
 ";
     assert_eq!(lines(src), vec!["2", "3"]);
 }
+
+// ---- slices ---------------------------------------------------------------
+
+#[test]
+fn slice_literals_index_and_length() {
+    assert_eq!(
+        run_main("  let xs = [10, 20, 30]\n  io.print(xs.len())\n  io.print(xs[0])\n  io.print(xs[2])"),
+        vec!["3", "10", "30"]
+    );
+}
+
+/// An out-of-range index is a program bug, so it traps. `.get()` is the form
+/// for when it genuinely is a runtime condition.
+#[test]
+fn an_out_of_range_index_traps() {
+    assert_eq!(
+        exec("fn main() {\n  let xs = [1, 2]\n  io.print(xs[5])\n}\n"),
+        Err(Trap::IndexOutOfRange { index: 5, len: 2 })
+    );
+}
+
+#[test]
+fn get_yields_an_optional_instead_of_trapping() {
+    assert_eq!(
+        run_main("  let xs = [10, 20]\n  io.print(xs.get(1) ?? -1)\n  io.print(xs.get(9) ?? -1)"),
+        vec!["20", "-1"]
+    );
+}
+
+#[test]
+fn iterating_a_slice_visits_every_element() {
+    assert_eq!(
+        run_main("  for x in [1, 2, 3] {\n    io.print(x)\n  }"),
+        vec!["1", "2", "3"]
+    );
+}
+
+#[test]
+fn an_empty_slice_iterates_zero_times() {
+    assert!(run_main("  let xs: [int] = []\n  for x in xs {\n    io.print(x)\n  }").is_empty());
+}
+
+#[test]
+fn push_and_index_assignment_mutate_the_binding() {
+    assert_eq!(
+        run_main("  var xs = [1, 2]\n  xs.push(3)\n  xs[0] = 99\n  io.print(xs.len())\n  io.print(xs[0])\n  io.print(xs[2])"),
+        vec!["3", "99", "3"]
+    );
+}
+
+/// Slices are copy-on-write *values*: assigning one and mutating the copy
+/// leaves the original alone. This is what keeps `[T]` `Share` when `T` is.
+#[test]
+fn slices_have_value_semantics() {
+    assert_eq!(
+        run_main(
+            "  var a = [1, 2]\n  var b = a\n  b.push(3)\n  b[0] = 9\n\
+             \x20 io.print(a.len())\n  io.print(a[0])\n  io.print(b.len())\n  io.print(b[0])"
+        ),
+        vec!["2", "1", "3", "9"]
+    );
+}
+
+#[test]
+fn a_slice_passed_to_a_function_is_not_aliased() {
+    let src = "\
+fn grow(xs: [int]) -> int {
+    var local = xs
+    local.push(99)
+    return local.len()
+}
+fn main() {
+    let xs = [1, 2]
+    io.print(grow(xs))
+    io.print(xs.len())
+}
+";
+    assert_eq!(lines(src), vec!["3", "2"]);
+}
+
+#[test]
+fn slices_of_structs_work() {
+    let src = "\
+struct P {
+    n: int
+}
+fn main() {
+    let ps = [P{ n: 1 }, P{ n: 2 }]
+    var total = 0
+    for p in ps {
+        total = total + p.n
+    }
+    io.print(total)
+}
+";
+    assert_eq!(lines(src), vec!["3"]);
+}
+
+#[test]
+fn slice_equality_is_structural() {
+    assert_eq!(
+        run_main("  io.print([1, 2] == [1, 2])\n  io.print([1, 2] == [1, 3])"),
+        vec!["true", "false"]
+    );
+}
+
+// ---- optionals ------------------------------------------------------------
+
+const FINDER: &str = "\
+struct User {
+    name: str
+}
+fn find(id: int) -> ?User {
+    if id == 1 {
+        return User{ name: \"ada\" }
+    }
+    return nil
+}
+";
+
+#[test]
+fn an_optional_may_be_present_or_nil() {
+    let src = format!(
+        "{}\nfn main() {{\n  io.print(match find(1) {{\n    nil => \"missing\",\n    u => u.name,\n  }})\n  io.print(match find(2) {{\n    nil => \"missing\",\n    u => u.name,\n  }})\n}}\n",
+        FINDER
+    );
+    assert_eq!(lines(&src), vec!["ada", "missing"]);
+}
+
+/// `a?.b` yields nil when `a` is nil, and `a.b` otherwise.
+#[test]
+fn optional_chaining_short_circuits_on_nil() {
+    let src = format!(
+        "{}\nfn main() {{\n  io.print(find(1)?.name ?? \"anonymous\")\n  io.print(find(2)?.name ?? \"anonymous\")\n}}\n",
+        FINDER
+    );
+    assert_eq!(lines(&src), vec!["ada", "anonymous"]);
+}
+
+/// `??` must not evaluate its right side when the left is present.
+#[test]
+fn coalesce_short_circuits() {
+    let src = "\
+fn boom() -> int {
+    let a = 1
+    let b = 0
+    return a / b
+}
+fn main() {
+    let xs = [7]
+    io.print(xs.get(0) ?? boom())
+}
+";
+    assert_eq!(lines(src), vec!["7"]);
+}
+
+#[test]
+fn a_value_widens_into_an_optional_binding() {
+    assert_eq!(
+        run_main("  let a: ?int = 5\n  let b: ?int = nil\n  io.print(a ?? 0)\n  io.print(b ?? 0)"),
+        vec!["5", "0"]
+    );
+}

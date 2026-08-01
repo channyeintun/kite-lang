@@ -1,0 +1,31 @@
+struct User {
+    name: str
+}
+
+fn find(id: int) -> ?User {
+    if id == 1 {
+        return User{ name: "ada" }
+    }
+    return nil
+}
+
+fn main() {
+    let a = find(1)
+    let b = find(2)
+
+    io.print(a?.name ?? "anonymous")
+    io.print(b?.name ?? "anonymous")
+
+    io.print(match a {
+        nil => "missing",
+        u => "found",
+    })
+    io.print(match b {
+        nil => "missing",
+        u => "found",
+    })
+
+    let xs = [10, 20, 30]
+    io.print(xs.get(1) ?? -1)
+    io.print(xs.get(9) ?? -1)
+}

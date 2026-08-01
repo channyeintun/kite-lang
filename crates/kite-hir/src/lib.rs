@@ -108,6 +108,19 @@ pub enum Stmt {
     Assign { local: LocalId, value: Expr, span: Span },
     /// `p.label = "x"` — only reachable for a field declared `var`.
     SetField { base: Expr, index: u32, value: Expr, span: Span },
+    /// `xs[i] = v`
+    SetIndex { base: Expr, index: Expr, value: Expr, span: Span },
+    /// `xs.push(v)`. Slices are copy-on-write values, so this mutates the
+    /// binding, which must therefore be `var`.
+    SlicePush { local: LocalId, value: Expr, span: Span },
+    /// `for x in xs`
+    ForSlice {
+        var: LocalId,
+        slice: Expr,
+        body: Block,
+        label: Option<String>,
+        span: Span,
+    },
     Expr(Expr),
     Return { value: Option<Expr>, span: Span },
     If { cond: Expr, then: Block, else_: Option<Block>, span: Span },
@@ -164,6 +177,23 @@ pub enum ExprKind {
     /// Exhaustive by construction: the checker has already proved every value
     /// is covered, so lowering needs no fallback arm.
     Match { scrutinee: Box<Expr>, arms: Vec<MatchArm> },
+    /// The absent optional. Only ever produced where the type is `?T`; Kite
+    /// has no null anywhere else.
+    Nil,
+    /// `a ?? b` — "or else this". Evaluates `b` only when `a` is nil.
+    Coalesce { value: Box<Expr>, default: Box<Expr> },
+    /// Tests for nil, used by `??`, `?.`, and `nil` patterns.
+    IsNil { value: Box<Expr> },
+    /// `[1, 2, 3]`
+    SliceNew { elems: Vec<Expr> },
+    /// `xs[i]` — bounds-checked, and traps on failure because an out-of-range
+    /// index is a program bug, not a runtime condition.
+    Index { base: Box<Expr>, index: Box<Expr> },
+    /// `xs.len()`
+    SliceLen { base: Box<Expr> },
+    /// `xs.get(i)` — yields `?T` for the case where the index genuinely is a
+    /// runtime condition.
+    SliceGet { base: Box<Expr>, index: Box<Expr> },
     /// A block in expression position — a `match` arm written with braces.
     /// Runs for its effects and produces unit.
     Block(Block),
@@ -199,6 +229,8 @@ pub enum Pattern {
     Variant { enum_id: EnumId, variant: u32, fields: Vec<Pattern> },
     /// `Point{ x: 0.0, y }`. Only the named fields are tested.
     Struct { struct_id: StructId, fields: Vec<(u32, Pattern)> },
+    /// `nil`
+    Nil,
     /// `1 | 2 | 3`
     Or(Vec<Pattern>),
 }
@@ -343,6 +375,22 @@ impl Program {
             Stmt::SetField { base, index, value, .. } => {
                 writeln!(f, "{}.{} = {}", self.expr(base), index, self.expr(value))
             }
+            Stmt::SetIndex { base, index, value, .. } => writeln!(
+                f,
+                "{}[{}] = {}",
+                self.expr(base),
+                self.expr(index),
+                self.expr(value)
+            ),
+            Stmt::SlicePush { local, value, .. } => {
+                writeln!(f, "_{}.push({})", local.0, self.expr(value))
+            }
+            Stmt::ForSlice { var, slice, body, .. } => {
+                writeln!(f, "for _{} in {} {{", var.0, self.expr(slice))?;
+                self.write_block(f, body, depth + 1)?;
+                indent(f, depth)?;
+                writeln!(f, "}}")
+            }
             Stmt::Expr(e) => writeln!(f, "{}", self.expr(e)),
             Stmt::Return { value: Some(e), .. } => writeln!(f, "return {}", self.expr(e)),
             Stmt::Return { value: None, .. } => writeln!(f, "return"),
@@ -431,6 +479,22 @@ impl Program {
                 format!("(match {} {} arms)", self.expr(scrutinee), arms.len())
             }
             ExprKind::Block(b) => format!("(block {} stmts)", b.stmts.len()),
+            ExprKind::SliceNew { elems } => {
+                let a: Vec<String> = elems.iter().map(|x| self.expr(x)).collect();
+                format!("[{}]", a.join(", "))
+            }
+            ExprKind::Index { base, index } => {
+                format!("{}[{}]", self.expr(base), self.expr(index))
+            }
+            ExprKind::Nil => "nil".to_string(),
+            ExprKind::Coalesce { value, default } => {
+                format!("({} ?? {})", self.expr(value), self.expr(default))
+            }
+            ExprKind::IsNil { value } => format!("(is-nil {})", self.expr(value)),
+            ExprKind::SliceLen { base } => format!("{}.len()", self.expr(base)),
+            ExprKind::SliceGet { base, index } => {
+                format!("{}.get({})", self.expr(base), self.expr(index))
+            }
             ExprKind::Error => "<error>".to_string(),
         }
     }
