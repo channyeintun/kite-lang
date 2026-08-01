@@ -44,7 +44,9 @@ use wasm_encoder::{
 };
 
 mod glue;
+mod support;
 pub use glue::generate_glue;
+pub use support::{unsupported, Unsupported};
 
 /// Host functions the module imports. Deliberately small: the standard library
 /// replaces them from Phase 6.

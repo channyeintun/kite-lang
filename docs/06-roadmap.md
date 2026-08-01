@@ -212,11 +212,27 @@ way.
 **Remaining steps:**
 
 2. ~~GC structs~~ ✅ — arrays (slices) still to do
-3. Enums via `br_on_cast` subtyping
+3. ~~Enums via subtyped variant records~~ ✅
 4. `str` as `externref` with JS String Builtins (today a constant index into a
    table the glue holds, which needs no linear memory at all)
 5. Trait objects with typed function-reference vtables
 6. `extern` declarations driving the glue, rather than a fixed import list
+
+Also still to lower: slices, optionals, tuples, maps, and the fallible-pair
+representation error handling uses.
+
+**`--emit wasm` refuses what it cannot lower**, rather than emitting a module
+that validates and then traps with no explanation:
+
+```
+error[E0204]: the wasm target cannot lower slices yet
+  ┌─ slices.kite:1:1
+  │
+1 │ fn sum(xs: [int]) -> int {
+  │ ^^^^^^^^^^^^^^^^^^^^^^^^^^ used in `sum`
+  │
+  = note: the bytecode target supports it: run without `--emit wasm`
+```
 
 **Exit criterion:** a Kite program runs in Chrome, Firefox, and Safari, and
 `hello world` is under 10 KB. The size half is met; browser verification waits

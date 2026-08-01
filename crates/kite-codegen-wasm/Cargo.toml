@@ -10,10 +10,10 @@ description = "WasmGC code generator for Kite"
 [dependencies]
 kite-mir.workspace = true
 kite-hir.workspace = true
+kite-span.workspace = true
 wasm-encoder = "0.255.0"
 
 [dev-dependencies]
-kite-span.workspace = true
 kite-diag.workspace = true
 kite-lexer.workspace = true
 kite-parser.workspace = true

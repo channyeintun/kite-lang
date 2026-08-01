@@ -3,7 +3,7 @@
 //! One place that knows the pass order, so `kitec`, the test harness, and
 //! eventually the language server all drive the compiler identically.
 
-use kite_diag::DiagBag;
+use kite_diag::{DiagBag, Diagnostic};
 use kite_span::{FileId, SourceMap};
 use std::io::Write;
 use std::path::Path;
@@ -123,6 +123,26 @@ fn run_passes(
     }
 
     if emit == Emit::Wasm {
+        // Report anything this target cannot lower, rather than emitting a
+        // module that validates and then traps at run time with no
+        // explanation.
+        let gaps = kite_codegen_wasm::unsupported(&mir, &hir.types);
+        if !gaps.is_empty() {
+            for gap in &gaps {
+                diags.push(
+                    Diagnostic::error(
+                        kite_diag::codes::E0204,
+                        format!("the wasm target cannot lower {} yet", gap.what),
+                    )
+                    .with_primary(gap.span, format!("used in `{}`", gap.function))
+                    .with_note(
+                        "the bytecode target supports it: run without `--emit wasm`. \
+                         See docs/06-roadmap.md for the remaining lowering steps",
+                    ),
+                );
+            }
+            return (String::new(), None, None);
+        }
         let module = kite_codegen_wasm::compile(&mir, &hir.types);
         return (String::new(), None, Some(module));
     }

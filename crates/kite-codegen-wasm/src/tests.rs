@@ -353,3 +353,55 @@ fn variants_are_subtypes_of_the_enum_base() {
     let printed = wasmprinter::print_bytes(&b.module.bytes).unwrap();
     assert!(printed.contains("(sub "), "variants are not subtypes:\n{}", printed);
 }
+
+// ---- honest about what is not lowered -------------------------------------
+
+fn gaps(src: &str) -> Vec<String> {
+    let mut sources = SourceMap::new();
+    let f = sources.add("t.kite", src);
+    let mut diags = kite_diag::DiagBag::new();
+    let tokens = kite_lexer::tokenize(f, src, &mut diags);
+    let ast = kite_parser::parse(f, src, &tokens, &mut diags);
+    let resolved = kite_resolve::resolve(&ast, &mut diags);
+    let hir = kite_types::check(&ast, &resolved, src, &mut diags);
+    assert!(!diags.has_errors(), "{}", diags.render_all(&sources));
+    let mir = kite_mir::lower(&hir);
+    unsupported(&mir, &hir.types)
+        .into_iter()
+        .map(|u| u.what.to_string())
+        .collect()
+}
+
+/// A construct the backend cannot lower must be *reported*, not silently
+/// compiled into a module that traps at run time.
+#[test]
+fn unlowered_constructs_are_reported() {
+    assert!(gaps("fn main() {\n  let xs = [1, 2]\n  io.print(xs.len())\n}\n")
+        .contains(&"slices".to_string()));
+
+    assert!(gaps("fn f() -> (int, error) {\n  return 1, nil\n}\nfn main() {\n}\n")
+        .contains(&"error handling".to_string()));
+
+    assert!(gaps("fn main() {\n  let a: Option<int> = nil\n}\n")
+        .contains(&"optionals".to_string()));
+
+    assert!(gaps("fn main() {\n  io.print(\"a\" + \"b\")\n}\n")
+        .contains(&"string comparison and concatenation".to_string()));
+}
+
+/// Everything the backend *does* lower must report no gaps, or the check would
+/// be refusing working programs.
+#[test]
+fn supported_programs_report_no_gaps() {
+    assert!(gaps(HELLO).is_empty());
+    assert!(gaps(&format!(
+        "{}\nfn main() {{\n  let r = Rect{{ width: 1, height: 2, scale: 3 }}\n  io.print(r.area())\n}}\n",
+        RECT
+    ))
+    .is_empty());
+    assert!(gaps(&format!(
+        "{}\nfn main() {{\n  io.print(match Point {{\n    Point => 1,\n    _ => 0,\n  }})\n}}\n",
+        SHAPE
+    ))
+    .is_empty());
+}
