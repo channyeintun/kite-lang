@@ -81,6 +81,25 @@ fn main() {
         "fn add(a: int, b: int) -> int {\n  return a + b\n}\nfn main() {\n  io.print(add(add(1, 2), add(3, 4)))\n}\n",
     ),
     (
+        "structs",
+        "struct Rect {\n  width: int\n  height: int\n  var label: str\n}\n\
+         impl Rect {\n  fn area(self) -> int {\n    return self.width * self.height\n  }\n\
+         \x20 fn wider(self, by: int) -> Rect {\n    return Rect{ ..self, width: self.width + by }\n  }\n}\n\
+         fn main() {\n  let r = Rect{ width: 3, height: 4, label: \"a\" }\n\
+         \x20 io.print(r.area())\n  io.print(r.wider(7).area())\n  io.print(r.area())\n}\n",
+    ),
+    (
+        "struct-mutation",
+        "struct C {\n  var n: int\n}\n\
+         impl C {\n  fn bump(var self) {\n    self.n = self.n + 1\n  }\n}\n\
+         fn main() {\n  let c = C{ n: 1 }\n  c.bump()\n  c.bump()\n  io.print(c.n)\n}\n",
+    ),
+    (
+        "nested-structs",
+        "struct Inner {\n  n: int\n}\nstruct Outer {\n  inner: Inner\n}\n\
+         fn main() {\n  let o = Outer{ inner: Inner{ n: 42 } }\n  io.print(o.inner.n)\n}\n",
+    ),
+    (
         "evaluation-order",
         "fn step(n: int) -> int {\n  io.print(n)\n  return n\n}\nfn main() {\n  let x = step(1) + step(2)\n  io.print(x)\n}\n",
     ),

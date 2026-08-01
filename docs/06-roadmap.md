@@ -174,7 +174,8 @@ valid. `?.` and the `?T` type sigil went with it; the optional type is spelled
 
 `kite-codegen-wasm` emits WebAssembly directly via `wasm-encoder` — no LLVM.
 
-**Done — step 1: functions, locals, arithmetic, control flow.**
+**Done — steps 1 and 2: functions, locals, arithmetic, control flow, and
+WasmGC structs.**
 
 ```bash
 kitec build examples/hello.kite --emit wasm --out dist
@@ -201,9 +202,16 @@ program counter. It handles an arbitrary CFG including irreducible ones. A
 relooper that recovers `if`/`loop` structure would produce tighter code and is
 the obvious later improvement.
 
+Structs lower to real WasmGC `struct` types in one `rec` group, so mutually
+recursive declarations work — which they must, since every Kite aggregate is a
+GC reference and recursion needs no annotation from the user. Kite's per-field
+`var` marker becomes WasmGC's per-field mutability flag directly; that
+correspondence is not a coincidence, it is why the language was designed this
+way.
+
 **Remaining steps:**
 
-2. GC structs and arrays
+2. ~~GC structs~~ ✅ — arrays (slices) still to do
 3. Enums via `br_on_cast` subtyping
 4. `str` as `externref` with JS String Builtins (today a constant index into a
    table the glue holds, which needs no linear memory at all)

@@ -207,3 +207,93 @@ fn string_constants_reach_the_glue() {
     let g = generate_glue(&b.module.strings, "app.wasm");
     assert!(g.contains(r#""big""#));
 }
+
+// ---- WasmGC structs -------------------------------------------------------
+
+const RECT: &str = "\
+struct Rect {
+    width: int
+    height: int
+    var scale: int
+}
+
+impl Rect {
+    fn area(self) -> int {
+        return self.width * self.height
+    }
+}
+";
+
+/// Kite ships no garbage collector: structs are WasmGC objects traced by the
+/// host engine, which is the whole reason a module stays this small.
+#[test]
+fn struct_construction_and_field_reads_validate() {
+    valid(&format!(
+        "{}\nfn main() {{\n  let r = Rect{{ width: 3, height: 4, scale: 1 }}\n  io.print(r.width)\n  io.print(r.area())\n}}\n",
+        RECT
+    ));
+}
+
+#[test]
+fn a_var_field_can_be_written() {
+    valid(&format!(
+        "{}\nfn main() {{\n  let r = Rect{{ width: 1, height: 1, scale: 1 }}\n  r.scale = 9\n  io.print(r.scale)\n}}\n",
+        RECT
+    ));
+}
+
+#[test]
+fn structs_pass_through_functions() {
+    valid(&format!(
+        "{}\nfn wider(r: Rect) -> Rect {{\n  return Rect{{ ..r, width: r.width + 1 }}\n}}\nfn main() {{\n  let r = wider(Rect{{ width: 1, height: 2, scale: 1 }})\n  io.print(r.width)\n}}\n",
+        RECT
+    ));
+}
+
+#[test]
+fn nested_structs_validate() {
+    valid(
+        "struct Inner {\n  n: int\n}\nstruct Outer {\n  inner: Inner\n}\n\
+         fn main() {\n  let o = Outer{ inner: Inner{ n: 42 } }\n  io.print(o.inner.n)\n}\n",
+    );
+}
+
+/// A struct that names itself needs no boxing annotation, because every Kite
+/// aggregate is already a GC reference. One `rec` group is what makes the
+/// emitted types accept it.
+#[test]
+fn a_recursive_struct_type_validates() {
+    valid(
+        "struct Node {\n  value: int\n  next: Node\n}\n\
+         fn value_of(n: Node) -> int {\n  return n.value\n}\n\
+         fn main() {\n  io.print(1)\n}\n",
+    );
+}
+
+#[test]
+fn mutually_recursive_structs_validate() {
+    valid(
+        "struct A {\n  b: B\n}\nstruct B {\n  a: A\n}\n\
+         fn f(x: A) -> B {\n  return x.b\n}\n\
+         fn main() {\n  io.print(1)\n}\n",
+    );
+}
+
+/// Kite's per-field `var` marker is exactly WasmGC's per-field mutability flag.
+#[test]
+fn field_mutability_reaches_the_emitted_type() {
+    let b = valid(&format!("{}\nfn main() {{\n  io.print(1)\n}}\n", RECT));
+    let printed = wasmprinter::print_bytes(&b.module.bytes).unwrap();
+    // `width` and `height` are immutable; `scale` is `var`.
+    assert!(printed.contains("(mut i64)"), "no mutable field emitted:\n{}", printed);
+    assert!(printed.contains("(struct"), "no struct type emitted:\n{}", printed);
+}
+
+#[test]
+fn a_program_with_structs_stays_small() {
+    let b = valid(&format!(
+        "{}\nfn main() {{\n  let r = Rect{{ width: 3, height: 4, scale: 1 }}\n  io.print(r.area())\n}}\n",
+        RECT
+    ));
+    assert!(b.size() < 10_000, "module is {} bytes", b.size());
+}

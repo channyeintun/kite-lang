@@ -38,8 +38,9 @@
 use kite_hir::{BinOp, Builtin, TyId, TyKind, Types, UnOp};
 use kite_mir as mir;
 use wasm_encoder::{
-    BlockType, CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection,
-    ImportSection, Instruction, Module, TypeSection, ValType,
+    BlockType, CodeSection, CompositeInnerType, CompositeType, EntityType, ExportKind,
+    ExportSection, FieldType, Function, FunctionSection, HeapType, ImportSection, Instruction,
+    Module, RefType, StorageType, SubType, TypeSection, ValType,
 };
 
 mod glue;
@@ -63,22 +64,78 @@ pub struct WasmModule {
     pub strings: Vec<String>,
 }
 
+/// Where each kind of type lives in the type index space.
+///
+/// Struct types come first after the imports so a function signature can refer
+/// to them, and they sit in one recursive group so mutually recursive
+/// declarations work — which they must, because every Kite aggregate is a GC
+/// reference and recursion needs no annotation from the user.
+struct TypeLayout {
+    struct_base: u32,
+}
+
+impl TypeLayout {
+    fn struct_type(&self, id: kite_hir::StructId) -> u32 {
+        self.struct_base + id.0
+    }
+}
+
 /// Compile a MIR program to a WebAssembly module.
 pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     let mut module = Module::new();
+    let layout = TypeLayout { struct_base: IMPORT_COUNT };
 
     // ---- types -------------------------------------------------------------
     let mut type_section = TypeSection::new();
     for (_, param) in IMPORTS.iter() {
         type_section.ty().function([*param], []);
     }
-    let mut fn_type_index = Vec::with_capacity(program.fns.len());
-    for f in &program.fns {
-        let params: Vec<ValType> = (0..f.param_count)
-            .map(|i| val_type(f.locals[i].ty, types))
+
+    // Every struct in one `rec` group: a field may name a struct declared
+    // later, and mutual recursion has to work.
+    if types.struct_count() > 0 {
+        let group: Vec<SubType> = (0..types.struct_count())
+            .map(|i| {
+                let def = types.struct_def(kite_hir::StructId(i as u32));
+                let fields: Vec<FieldType> = def
+                    .fields
+                    .iter()
+                    .map(|f| FieldType {
+                        element_type: StorageType::Val(val_type_with(f.ty, types, &layout)),
+                        // Kite's per-field `var` marker is exactly WasmGC's
+                        // per-field mutability flag. Immutable fields let the
+                        // engine hoist loads without alias analysis.
+                        mutable: f.mutable,
+                    })
+                    .collect();
+                SubType {
+                    is_final: true,
+                    supertype_idx: None,
+                    composite_type: CompositeType {
+                        inner: CompositeInnerType::Struct(wasm_encoder::StructType {
+                            fields: fields.into_boxed_slice(),
+                        }),
+                        shared: false,
+                        descriptor: None,
+                        describes: None,
+                    },
+                }
+            })
             .collect();
-        let results: Vec<ValType> = wasm_result(f.ret, types).into_iter().collect();
-        fn_type_index.push(type_section.len());
+        type_section.ty().rec(group);
+    }
+
+    // Indices are computed rather than read back: `TypeSection::len` counts a
+    // `rec` group as one entry, not as the types inside it, so trusting it here
+    // would collide function types with every struct after the first.
+    let fn_type_base = IMPORT_COUNT + types.struct_count() as u32;
+    let mut fn_type_index = Vec::with_capacity(program.fns.len());
+    for (i, f) in program.fns.iter().enumerate() {
+        let params: Vec<ValType> = (0..f.param_count)
+            .map(|j| val_type_with(f.locals[j].ty, types, &layout))
+            .collect();
+        let results: Vec<ValType> = wasm_result_with(f.ret, types, &layout).into_iter().collect();
+        fn_type_index.push(fn_type_base + i as u32);
         type_section.ty().function(params, results);
     }
     module.section(&type_section);
@@ -110,7 +167,7 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     let fn_returns: Vec<TyId> = program.fns.iter().map(|f| f.ret).collect();
     let mut code = CodeSection::new();
     for f in &program.fns {
-        code.function(&compile_fn(f, types, &fn_returns));
+        code.function(&compile_fn(f, types, &fn_returns, &layout));
     }
     module.section(&code);
 
@@ -121,10 +178,17 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
 }
 
 /// The Wasm value type for a Kite type.
-fn val_type(ty: TyId, types: &Types) -> ValType {
+fn val_type_with(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
     match types.kind(ty) {
         TyKind::Float => ValType::F64,
         TyKind::Int => ValType::I64,
+        // A struct is a GC reference, traced by the host engine. Kite ships no
+        // collector of its own, which is the whole reason a `hello world` is
+        // hundreds of bytes rather than hundreds of kilobytes.
+        TyKind::Struct(s) => ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Concrete(layout.struct_type(*s)),
+        }),
         // `str` is a constant index for now; with JS String Builtins this
         // becomes `externref` carrying the JS string with no copy.
         _ => ValType::I32,
@@ -132,15 +196,20 @@ fn val_type(ty: TyId, types: &Types) -> ValType {
 }
 
 /// The result type of a function, or `None` for unit.
-fn wasm_result(ty: TyId, types: &Types) -> Option<ValType> {
-    (ty != TyId::UNIT).then(|| val_type(ty, types))
+fn wasm_result_with(ty: TyId, types: &Types, layout: &TypeLayout) -> Option<ValType> {
+    (ty != TyId::UNIT).then(|| val_type_with(ty, types, layout))
 }
 
-fn compile_fn(f: &mir::Function, types: &Types, fn_returns: &[TyId]) -> Function {
+fn compile_fn(
+    f: &mir::Function,
+    types: &Types,
+    fn_returns: &[TyId],
+    layout: &TypeLayout,
+) -> Function {
     // Locals beyond the parameters, plus one synthetic program counter.
     let mut locals: Vec<(u32, ValType)> = Vec::new();
     for l in f.locals.iter().skip(f.param_count) {
-        push_local(&mut locals, val_type(l.ty, types));
+        push_local(&mut locals, val_type_with(l.ty, types, layout));
     }
     push_local(&mut locals, ValType::I32); // $pc
     let pc = f.locals.len() as u32;
@@ -172,6 +241,7 @@ fn compile_fn(f: &mir::Function, types: &Types, fn_returns: &[TyId]) -> Function
             f,
             types,
             fn_returns,
+            layout,
             pc,
             block_index: i,
             total: n as usize,
@@ -198,6 +268,7 @@ struct Emitter<'a> {
     types: &'a Types,
     /// Return type of every function, indexed by id.
     fn_returns: &'a [TyId],
+    layout: &'a TypeLayout,
     pc: u32,
     block_index: usize,
     total: usize,
@@ -231,9 +302,20 @@ impl<'a> Emitter<'a> {
             }
             // Aggregates are not lowered yet. The driver refuses these programs
             // before codegen runs, so this is defensive.
-            mir::Inst::SetField { .. }
-            | mir::Inst::SetIndex { .. }
-            | mir::Inst::SlicePush { .. } => {
+            mir::Inst::SetField { base, index, value } => {
+                let Some(sid) = self.struct_of(base) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return;
+                };
+                self.operand(func, base);
+                self.operand(func, value);
+                func.instruction(&Instruction::StructSet {
+                    struct_type_index: self.layout.struct_type(sid),
+                    field_index: *index,
+                });
+            }
+            // Slices are not lowered yet.
+            mir::Inst::SetIndex { .. } | mir::Inst::SlicePush { .. } => {
                 func.instruction(&Instruction::Unreachable);
             }
         }
@@ -284,8 +366,30 @@ impl<'a> Emitter<'a> {
                 return false;
             }
 
-            // Not lowered yet. `unreachable` makes the stack polymorphic, so
-            // reporting a value keeps the surrounding code well-typed.
+            mir::Rvalue::StructNew { struct_id, fields } => {
+                for f in fields {
+                    self.operand(func, f);
+                }
+                func.instruction(&Instruction::StructNew(self.layout.struct_type(*struct_id)));
+                return true;
+            }
+
+            mir::Rvalue::FieldGet { base, index } => {
+                let Some(sid) = self.struct_of(base) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                self.operand(func, base);
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: self.layout.struct_type(sid),
+                    field_index: *index,
+                });
+                return true;
+            }
+
+            // Enums, slices, and fallible pairs are not lowered yet.
+            // `unreachable` makes the stack polymorphic, so reporting a value
+            // keeps the surrounding code well-typed.
             _ => {
                 func.instruction(&Instruction::Unreachable);
                 return true;
@@ -342,9 +446,20 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// The struct an operand holds, if it holds one.
+    fn struct_of(&self, o: &mir::Operand) -> Option<kite_hir::StructId> {
+        let mir::Operand::Local(l) = o else { return None };
+        match self.types.kind(self.f.locals[l.index()].ty) {
+            TyKind::Struct(s) => Some(*s),
+            _ => None,
+        }
+    }
+
     fn operand_type(&self, o: &mir::Operand) -> ValType {
         match o {
-            mir::Operand::Local(l) => val_type(self.f.locals[l.index()].ty, self.types),
+            mir::Operand::Local(l) => {
+                val_type_with(self.f.locals[l.index()].ty, self.types, self.layout)
+            }
             mir::Operand::Int(_) => ValType::I64,
             mir::Operand::Float(_) => ValType::F64,
             _ => ValType::I32,
