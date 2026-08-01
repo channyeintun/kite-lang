@@ -98,6 +98,12 @@ struct TypeLayout {
     option_box: std::collections::HashMap<TyId, u32>,
     /// One array type per distinct slice element type.
     slice_array: std::collections::HashMap<TyId, u32>,
+    /// The error record: a message index. `nil` is a null reference, which is
+    /// what makes `return value, nil` read the way it does.
+    error_record: u32,
+    /// One record per distinct fallible value type. The pair is a single GC
+    /// object so a function can return both slots at once.
+    pair_record: std::collections::HashMap<TyId, u32>,
 }
 
 impl TypeLayout {
@@ -124,6 +130,29 @@ impl TypeLayout {
     fn slice_type(&self, elem: TyId) -> Option<u32> {
         self.slice_array.get(&elem).copied()
     }
+
+    fn pair_type(&self, value: TyId) -> Option<u32> {
+        self.pair_record.get(&value).copied()
+    }
+}
+
+/// Every fallible value type a program mentions, in a stable order.
+fn pair_values(program: &mir::Program, types: &Types) -> Vec<TyId> {
+    let mut seen = Vec::new();
+    let mut note = |ty: TyId, seen: &mut Vec<TyId>| {
+        if let TyKind::Fallible(v) = types.kind(ty) {
+            if !seen.contains(v) {
+                seen.push(*v);
+            }
+        }
+    };
+    for f in &program.fns {
+        note(f.ret, &mut seen);
+        for l in &f.locals {
+            note(l.ty, &mut seen);
+        }
+    }
+    seen
 }
 
 /// Every slice element type a program mentions, in a stable order.
@@ -209,6 +238,8 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
         enum_base,
         option_box: std::collections::HashMap::new(),
         slice_array: std::collections::HashMap::new(),
+        error_record: 0,
+        pair_record: std::collections::HashMap::new(),
     };
     let payloads = option_payloads(program, types);
     for p in &payloads {
@@ -218,6 +249,13 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     let elements = slice_elements(program, types);
     for e in &elements {
         layout.slice_array.insert(*e, next);
+        next += 1;
+    }
+    layout.error_record = next;
+    next += 1;
+    let pairs = pair_values(program, types);
+    for v in &pairs {
+        layout.pair_record.insert(*v, next);
         next += 1;
     }
     let aggregate_count = next - IMPORT_COUNT;
@@ -312,6 +350,36 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
             });
         }
 
+        // The error record holds a message index. `nil` is a null reference.
+        group.push(struct_subtype(
+            vec![FieldType {
+                element_type: StorageType::Val(ValType::I32),
+                mutable: false,
+            }],
+            None,
+            true,
+        ));
+
+        // A fallible result is one GC object holding both slots, so a function
+        // can return the pair without multi-value plumbing.
+        let err_ref = ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Concrete(layout.error_record),
+        });
+        for v in &pairs {
+            group.push(struct_subtype(
+                vec![
+                    FieldType {
+                        element_type: StorageType::Val(val_type_with(*v, types, &layout)),
+                        mutable: false,
+                    },
+                    FieldType { element_type: StorageType::Val(err_ref), mutable: false },
+                ],
+                None,
+                true,
+            ));
+        }
+
         type_section.ty().rec(group);
     }
 
@@ -345,9 +413,13 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     module.section(&functions);
 
     // ---- exports -----------------------------------------------------------
+    // Only the entry point is exported. Method names are not unique across
+    // types — two types may each have an `area` — and a Wasm module may not
+    // export one name twice. Which other functions a module offers is a
+    // module-system question, which arrives with Phase 6.
     let mut exports = ExportSection::new();
-    for (i, f) in program.fns.iter().enumerate() {
-        exports.export(&f.name, ExportKind::Func, IMPORT_COUNT + i as u32);
+    if let Some(entry) = program.entry {
+        exports.export("main", ExportKind::Func, IMPORT_COUNT + entry.0);
     }
     module.section(&exports);
 
@@ -404,6 +476,17 @@ fn val_type_with(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
             nullable: true,
             heap_type: HeapType::Concrete(layout.enum_base_type(*e)),
         }),
+        TyKind::Err => ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Concrete(layout.error_record),
+        }),
+        TyKind::Fallible(v) => match layout.pair_type(*v) {
+            Some(idx) => ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(idx),
+            }),
+            None => ValType::I32,
+        },
         TyKind::Slice(elem) => match layout.slice_type(*elem) {
             Some(idx) => ValType::Ref(RefType {
                 nullable: true,
@@ -542,6 +625,7 @@ impl<'a> Emitter<'a> {
         for stmt in &block.stmts {
             self.stmt(func, stmt);
         }
+        self.current_dst = None;
         self.terminator(func, &block.term);
     }
 
@@ -689,6 +773,68 @@ impl<'a> Emitter<'a> {
                 func.instruction(&Instruction::StructGet {
                     struct_type_index: self.layout.struct_type(sid),
                     field_index: *index,
+                });
+                return true;
+            }
+
+            mir::Rvalue::ErrorNew { message } => {
+                self.operand(func, message);
+                func.instruction(&Instruction::StructNew(self.layout.error_record));
+                return true;
+            }
+
+            mir::Rvalue::ErrorMessage { base } => {
+                self.operand(func, base);
+                func.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(
+                    self.layout.error_record,
+                )));
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: self.layout.error_record,
+                    field_index: 0,
+                });
+                return true;
+            }
+
+            mir::Rvalue::PairNew { value, error } => {
+                let (Some(idx), Some(vty)) = (self.pair_for_result(), self.pair_value_ty()) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                // `return _, err` carries no value — that is the whole point of
+                // the failure arm, and the taint analysis has already proved
+                // nothing can read it. The record still needs bits in that
+                // slot, so a default goes there and stays unobservable.
+                match value {
+                    mir::Operand::Nil | mir::Operand::Unit => self.default_of(func, vty),
+                    other => self.operand(func, other),
+                }
+                self.operand(func, error);
+                func.instruction(&Instruction::StructNew(idx));
+                return true;
+            }
+
+            mir::Rvalue::PairValue { base } => {
+                let Some(idx) = self.pair_of(base) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                self.operand(func, base);
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: idx,
+                    field_index: 0,
+                });
+                return true;
+            }
+
+            mir::Rvalue::PairError { base } => {
+                let Some(idx) = self.pair_of(base) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                self.operand(func, base);
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: idx,
+                    field_index: 1,
                 });
                 return true;
             }
@@ -945,6 +1091,53 @@ impl<'a> Emitter<'a> {
             mir::Operand::Local(l) => Some(l.0),
             _ => None,
         }
+    }
+
+    /// The value type of the pair currently being built.
+    fn pair_value_ty(&self) -> Option<TyId> {
+        let ty = match self.current_dst {
+            Some(dst) => self.f.locals[dst as usize].ty,
+            None => self.f.ret,
+        };
+        match *self.types.kind(ty) {
+            TyKind::Fallible(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// A value of `ty` that no program can observe.
+    fn default_of(&mut self, func: &mut Function, ty: TyId) {
+        match val_type_with(ty, self.types, self.layout) {
+            ValType::I64 => func.instruction(&Instruction::I64Const(0)),
+            ValType::F64 => func.instruction(&Instruction::F64Const(0.0.into())),
+            ValType::Ref(_) => func.instruction(&Instruction::RefNull(HeapType::Abstract {
+                shared: false,
+                ty: wasm_encoder::AbstractHeapType::None,
+            })),
+            _ => func.instruction(&Instruction::I32Const(0)),
+        };
+    }
+
+    /// The pair record an operand holds.
+    fn pair_of(&self, o: &mir::Operand) -> Option<u32> {
+        let mir::Operand::Local(l) = o else { return None };
+        let TyKind::Fallible(v) = *self.types.kind(self.f.locals[l.index()].ty) else {
+            return None;
+        };
+        self.layout.pair_type(v)
+    }
+
+    /// The pair record a `PairNew` is producing, taken from its destination.
+    fn pair_for_result(&self) -> Option<u32> {
+        let ty = match self.current_dst {
+            Some(dst) => self.f.locals[dst as usize].ty,
+            // A `return value, nil` builds the pair straight into the result.
+            None => self.f.ret,
+        };
+        let TyKind::Fallible(v) = *self.types.kind(ty) else {
+            return None;
+        };
+        self.layout.pair_type(v)
     }
 
     /// The array type and element type of an operand holding a slice.

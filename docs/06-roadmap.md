@@ -232,8 +232,15 @@ Mutation copies the array first, which is what gives `[T]` value semantics —
 the bytecode VM does the same lazily through `Rc::make_mut`, and here it is
 unconditional, correct but not yet cheap.
 
-Also still to lower: tuples, maps, and the fallible-pair representation error
-handling uses.
+A fallible result is one GC object holding both slots, so a function returns
+the pair without multi-value plumbing. `return _, err` carries no value — that
+is the point of the failure arm — but the record still needs bits there, so a
+default goes in a slot the taint analysis has already proved unreadable.
+
+**Every shipped example now compiles to WebAssembly and produces output
+identical to the bytecode VM**, and a test asserts it so the two cannot drift.
+
+Also still to lower: tuples, maps, and trait objects.
 
 **`--emit wasm` refuses what it cannot lower**, rather than emitting a module
 that validates and then traps with no explanation:
@@ -362,7 +369,7 @@ none.
 | 1 — Vertical slice | ✅ complete |
 | 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, slices, optionals. ❌ maps, tuples, closures, generics, `dyn` dispatch |
 | 3 — Error handling | ✅ complete |
-| 4 — WebAssembly backend | 🟡 numeric core, control flow, WasmGC structs, enums, slices, optionals, strings. ❌ tuples, maps, fallible pairs, trait objects, JS String Builtins |
+| 4 — WebAssembly backend | 🟡 everything the language currently has except tuples, maps, and trait objects — all seven examples run. ❌ JS String Builtins |
 | 5 — Concurrency | ❌ not started |
 | 6 — Standard library | ❌ not started |
 | 7 — Layout engine and DOM renderer | ❌ not started |

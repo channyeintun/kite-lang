@@ -378,9 +378,6 @@ fn gaps(src: &str) -> Vec<String> {
 fn unlowered_constructs_are_reported() {
     assert!(gaps("fn f(t: (int, str)) {\n}\nfn main() {\n}\n").contains(&"tuples".to_string()));
 
-    assert!(gaps("fn f() -> (int, error) {\n  return 1, nil\n}\nfn main() {\n}\n")
-        .contains(&"error handling".to_string()));
-
 
 
 }
@@ -480,4 +477,25 @@ fn slices_of_structs_validate() {
 #[test]
 fn slices_are_no_longer_an_unsupported_construct() {
     assert!(gaps("fn main() {\n  let xs = [1]\n  io.print(xs.len())\n}\n").is_empty());
+}
+
+// ---- error handling -------------------------------------------------------
+
+/// A fallible result is one GC object holding both slots, so a function can
+/// return the pair without multi-value plumbing.
+#[test]
+fn fallible_results_validate() {
+    valid(
+        "fn divide(a: int, b: int) -> (int, error) {\n  if b == 0 {\n\
+         \x20   return _, errors.new(\"division by zero\")\n  }\n  return a / b, nil\n}\n\
+         fn ratio(a: int, b: int) -> (int, error) {\n  let (q, err) = divide(a, b)\n\
+         \x20 check err\n  return q * 100, nil\n}\n\
+         fn main() {\n  let (r, err) = ratio(10, 2)\n  if err != nil {\n\
+         \x20   io.print(err.message())\n  } else {\n    io.print(r)\n  }\n}\n",
+    );
+}
+
+#[test]
+fn error_handling_is_no_longer_an_unsupported_construct() {
+    assert!(gaps("fn f() -> (int, error) {\n  return 1, nil\n}\nfn main() {\n}\n").is_empty());
 }

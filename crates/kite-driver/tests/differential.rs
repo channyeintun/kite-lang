@@ -176,6 +176,16 @@ fn main() {
          \x20 io.print(if b == nil { -1 } else { b })\n}\n",
     ),
     (
+        "error-handling",
+        "fn divide(a: int, b: int) -> (int, error) {\n  if b == 0 {\n\
+         \x20   return _, errors.new(\"division by zero\")\n  }\n  return a / b, nil\n}\n\
+         fn ratio(a: int, b: int) -> (int, error) {\n  let (q, err) = divide(a, b)\n\
+         \x20 check err\n  let (s, err) = divide(q * 1000, 10)\n  check err\n  return s, nil\n}\n\
+         fn report(a: int, b: int) {\n  let (r, err) = ratio(a, b)\n  if err != nil {\n\
+         \x20   io.print(\"failed: \" + err.message())\n  } else {\n    io.print(r)\n  }\n}\n\
+         fn main() {\n  report(10, 2)\n  report(10, 0)\n}\n",
+    ),
+    (
         "evaluation-order",
         "fn step(n: int) -> int {\n  io.print(n)\n  return n\n}\nfn main() {\n  let x = step(1) + step(2)\n  io.print(x)\n}\n",
     ),
@@ -240,6 +250,45 @@ fn run_on_wasm(name: &str, src: &str, dir: &std::path::Path) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).expect("output is valid UTF-8")
+}
+
+/// Every shipped example must also agree, which is what stops the examples and
+/// the backends drifting apart.
+#[test]
+fn every_example_agrees_across_backends() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("kite-ex-{}", std::process::id()));
+    let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let Ok(entries) = std::fs::read_dir(&examples) else {
+        panic!("no examples directory at {}", examples.display());
+    };
+
+    let mut checked = 0;
+    let mut mismatches = Vec::new();
+    for entry in entries {
+        let path = entry.expect("entry").path();
+        if path.extension().is_none_or(|e| e != "kite") {
+            continue;
+        }
+        let name = path.file_stem().unwrap().to_string_lossy().to_string();
+        let src = std::fs::read_to_string(&path).expect("read example");
+        let dir = root.join(&name);
+        std::fs::create_dir_all(&dir).expect("create work directory");
+
+        let vm = run_on_vm(&name, &src);
+        let wasm = run_on_wasm(&name, &src, &dir);
+        if vm != wasm {
+            mismatches.push(format!("{}:\n  vm:   {:?}\n  wasm: {:?}", name, vm, wasm));
+        }
+        checked += 1;
+    }
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(checked >= 7, "only {} examples were checked", checked);
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n\n"));
 }
 
 #[test]
