@@ -77,7 +77,15 @@ set and agree on every line of output. See
 
 ```bash
 kitec build examples/hello.kite --emit wasm --out dist
-# wrote dist/app.wasm (346 bytes) and dist/app.js
+# wrote dist/app.wasm (489 bytes), dist/app.js and dist/index.html
+```
+
+A program with a user interface writes its layout with `std/ui.kite` and draws
+through two host calls. The generated page runs the same module against a DOM
+renderer, a canvas renderer, and a text renderer, switched live:
+
+```bash
+kitec build examples/render.kite --emit wasm --out dist
 ```
 
 ```bash

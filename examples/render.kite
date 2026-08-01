@@ -1,0 +1,74 @@
+// Rendering.
+//
+// The same program draws to a DOM tree, to a canvas, or to text, and cannot
+// tell which: it calls `draw.rect` and `draw.text` and nothing else. That is
+// the whole host boundary for graphics, and it is two calls wide because
+// everything a layout produces is a rectangle or a run of text.
+//
+// Build it and open `dist/index.html`:
+//
+//     kitec build examples/render.kite --emit wasm --out dist
+
+use std/ui
+
+fn palette() -> [Paint] {
+  return [
+    fill("app", 0x14161a),
+    fill("header", 0x1f232b),
+    label("title", "Kite", 0xf5f7fa),
+    label("subtitle", "one layout, two renderers", 0x8b93a1),
+    fill("sidebar", 0x1a1e25),
+    label("nav-home", "Home", 0xc9d1dc),
+    label("nav-files", "Files", 0xc9d1dc),
+    label("nav-settings", "Settings", 0xc9d1dc),
+    label("heading", "Welcome back", 0xf5f7fa),
+    label("intro", "Everything here was placed by std/ui.kite.", 0x8b93a1),
+    filled_label("cancel", "Cancel", 0x2a2f3a, 0xc9d1dc),
+    filled_label("confirm", "Confirm", 0x3b82f6, 0xffffff),
+  ]
+}
+
+fn app() -> Node {
+  let header = box_of(
+    "header",
+    spaced(padded(Style{..row(), align: Align.Center, justify: Justify.SpaceBetween}, 12.0), 8.0),
+    [text_of("title", style(), "Kite"), text_of("subtitle", style(), "one layout, two renderers")],
+  )
+
+  let sidebar = box_of(
+    "sidebar",
+    spaced(padded(Style{..column(), width: 160.0}, 12.0), 8.0),
+    [
+      text_of("nav-home", style(), "Home"),
+      text_of("nav-files", style(), "Files"),
+      text_of("nav-settings", style(), "Settings"),
+    ],
+  )
+
+  let actions = box_of(
+    "actions",
+    spaced(Style{..row(), justify: Justify.End}, 8.0),
+    [
+      text_of("cancel", padded(style(), 6.0), "Cancel"),
+      text_of("confirm", padded(style(), 6.0), "Confirm"),
+    ],
+  )
+
+  let content = box_of(
+    "content",
+    spaced(grown(padded(Style{..column(), align: Align.Stretch}, 16.0), 1.0), 12.0),
+    [
+      text_of("heading", style(), "Welcome back"),
+      text_of("intro", grown(style(), 1.0), "Everything here was placed by std/ui.kite."),
+      actions,
+    ],
+  )
+
+  let body = box_of("main", Style{..row(), align: Align.Stretch, grow: 1.0}, [sidebar, content])
+  return box_of("app", Style{..column(), align: Align.Stretch}, [header, body])
+}
+
+fn main() {
+  let frames = layout(app(), Size{width: 640.0, height: 360.0})
+  paint(frames, palette())
+}

@@ -378,3 +378,67 @@ pub fn contains(rect: Rect, x: float, y: float) -> bool {
   }
   return x < rect.x + rect.width && y < rect.y + rect.height
 }
+
+// ---- painting -------------------------------------------------------------
+//
+// A `Frame` says where; a `Paint` says what it looks like. They are separate
+// because layout runs whether or not anything is drawn — a test asserts on
+// rectangles, and hit-testing reads them — and because keeping them apart is
+// what stops a renderer from being able to move anything.
+
+pub struct Paint {
+  /// The frame's `name`, which is how a paint finds its box.
+  pub name: str
+  /// `0xRRGGBB`, or nil to draw no background.
+  pub fill: Option<int>
+  /// Text drawn inside the box, at its top-left corner.
+  pub label: Option<str>
+  pub ink: int
+}
+
+pub fn fill(name: str, colour: int) -> Paint {
+  return Paint{name: name, fill: colour, label: nil, ink: 0x000000}
+}
+
+pub fn label(name: str, body: str, colour: int) -> Paint {
+  return Paint{name: name, fill: nil, label: body, ink: colour}
+}
+
+pub fn filled_label(name: str, body: str, background: int, colour: int) -> Paint {
+  return Paint{name: name, fill: background, label: body, ink: colour}
+}
+
+fn paint_for(paints: [Paint], name: str) -> Option<Paint> {
+  for p in paints {
+    if p.name == name {
+      return p
+    }
+  }
+  return nil
+}
+
+/// Draw a laid-out tree.
+///
+/// Frames come out in paint order, so this walks them forwards: a parent's
+/// background is drawn before its children sit on top. A frame with no paint
+/// is invisible but still laid out, which is how spacers work.
+pub fn paint(frames: [Frame], paints: [Paint]) {
+  for frame in frames {
+    let found = paint_for(paints, frame.name)
+    if found != nil {
+      draw_one(frame, found)
+    }
+  }
+}
+
+fn draw_one(frame: Frame, p: Paint) {
+  let r = frame.rect
+  let background = p.fill
+  if background != nil {
+    draw.rect(r.x, r.y, r.width, r.height, background)
+  }
+  let body = p.label
+  if body != nil {
+    draw.text(r.x, r.y, body, p.ink)
+  }
+}

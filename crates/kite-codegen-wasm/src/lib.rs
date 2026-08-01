@@ -47,7 +47,7 @@ use wasm_encoder::{
 mod eq;
 mod glue;
 mod support;
-pub use glue::generate_glue;
+pub use glue::{generate_glue, generate_page};
 pub use support::{unsupported, Unsupported};
 
 /// Host functions the module imports, as (name, params, results).
@@ -55,7 +55,7 @@ pub use support::{unsupported, Unsupported};
 /// Deliberately small: the standard library replaces them from Phase 6. String
 /// operations live here because a `str` is an index into a table the host
 /// holds — which is also why the module needs no linear memory.
-const IMPORTS: [(&str, &[ValType], &[ValType]); 10] = [
+const IMPORTS: [(&str, &[ValType], &[ValType]); 12] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
@@ -68,6 +68,15 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 10] = [
     ("str_of_float", &[ValType::F64], &[ValType::I32]),
     ("str_of_bool", &[ValType::I32], &[ValType::I32]),
     ("str_len", &[ValType::I32], &[ValType::I64]),
+    // The drawing boundary: a filled rectangle and a run of text. Everything a
+    // layout produces is one of the two, which is what lets a DOM renderer and
+    // a canvas renderer meet the same interface.
+    (
+        "draw_rect",
+        &[ValType::F64, ValType::F64, ValType::F64, ValType::F64, ValType::I64],
+        &[],
+    ),
+    ("draw_text", &[ValType::F64, ValType::F64, ValType::I32, ValType::I64], &[]),
 ];
 
 const IMPORT_COUNT: u32 = IMPORTS.len() as u32;
@@ -92,6 +101,8 @@ mod host {
     pub const STR_OF_FLOAT: u32 = 7;
     pub const STR_OF_BOOL: u32 = 8;
     pub const STR_LEN: u32 = 9;
+    pub const DRAW_RECT: u32 = 10;
+    pub const DRAW_TEXT: u32 = 11;
 }
 
 pub struct WasmModule {
@@ -1860,6 +1871,21 @@ impl<'a> Emitter<'a> {
                 };
                 self.operand(func, arg);
                 func.instruction(&Instruction::Call(import));
+            }
+
+            // Both take their arguments in declaration order; the host reads
+            // them positionally, which is why the checker fixes their types.
+            Builtin::DrawRect => {
+                for a in args {
+                    self.operand(func, a);
+                }
+                func.instruction(&Instruction::Call(host::DRAW_RECT));
+            }
+            Builtin::DrawText => {
+                for a in args {
+                    self.operand(func, a);
+                }
+                func.instruction(&Instruction::Call(host::DRAW_TEXT));
             }
         }
     }

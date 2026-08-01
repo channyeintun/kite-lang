@@ -2211,8 +2211,46 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `draw.rect(x, y, w, h, colour)` and `draw.text(x, y, body, colour)`.
+    ///
+    /// Coordinates are floats because a layout produces floats; a colour is an
+    /// `int` holding `0xRRGGBB`, because a struct crossing the host boundary
+    /// would need a representation both renderers agreed on and neither needs.
+    fn draw_call(
+        &mut self,
+        b: BuiltinFn,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> hir::Expr {
+        let text = b == BuiltinFn::DrawText;
+        let wanted: [TyId; 5] = if text {
+            [TyId::FLOAT, TyId::FLOAT, TyId::STR, TyId::INT, TyId::INT]
+        } else {
+            [TyId::FLOAT, TyId::FLOAT, TyId::FLOAT, TyId::FLOAT, TyId::INT]
+        };
+        let arity = if text { 4 } else { 5 };
+        if args.len() != arity {
+            self.arity_error(b.path(), args.len(), arity, span, None);
+        }
+        let mut hargs = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let want = wanted.get(i).copied();
+            let e = self.expr(a, want);
+            if let Some(w) = want {
+                self.expect_ty(e.ty, w, e.span, None);
+            }
+            hargs.push(e);
+        }
+        let builtin =
+            if text { Builtin::DrawText } else { Builtin::DrawRect };
+        hir::Expr { kind: ExprKind::CallBuiltin { builtin, args: hargs }, ty: TyId::UNIT, span }
+    }
+
     fn builtin_call(&mut self, b: BuiltinFn, args: &[ast::Expr], span: Span) -> hir::Expr {
         match b {
+            // Handled above, but named here so adding a builtin fails to
+            // compile rather than falling through to something else.
+            BuiltinFn::DrawRect | BuiltinFn::DrawText => self.draw_call(b, args, span),
             BuiltinFn::ErrorsNew => {
                 if args.len() != 1 {
                     self.arity_error("errors.new", args.len(), 1, span, None);

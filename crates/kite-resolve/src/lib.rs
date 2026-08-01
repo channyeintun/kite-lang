@@ -40,6 +40,16 @@ pub enum BuiltinFn {
     /// `errors.new(message)` — builds an error value. Errors are ordinary
     /// values in Kite, never exceptions.
     ErrorsNew,
+    /// `draw.rect(x, y, w, h, colour)` — a filled rectangle in device pixels.
+    ///
+    /// The drawing boundary is two calls wide on purpose. Everything a layout
+    /// produces is rectangles and runs of text, and a boundary that stayed
+    /// that narrow can be met by a DOM renderer and a canvas renderer alike —
+    /// which is the only way the two can be made to agree.
+    DrawRect,
+    /// `draw.text(x, y, body, colour)` — a run of text with its baseline-left
+    /// origin at `(x, y)`.
+    DrawText,
 }
 
 impl BuiltinFn {
@@ -47,6 +57,8 @@ impl BuiltinFn {
         match path {
             "io.print" => Some(BuiltinFn::IoPrint),
             "errors.new" => Some(BuiltinFn::ErrorsNew),
+            "draw.rect" => Some(BuiltinFn::DrawRect),
+            "draw.text" => Some(BuiltinFn::DrawText),
             _ => None,
         }
     }
@@ -55,12 +67,15 @@ impl BuiltinFn {
         match self {
             BuiltinFn::IoPrint => "io.print",
             BuiltinFn::ErrorsNew => "errors.new",
+            BuiltinFn::DrawRect => "draw.rect",
+            BuiltinFn::DrawText => "draw.text",
         }
     }
 
     pub fn arity(self) -> usize {
         match self {
             BuiltinFn::IoPrint | BuiltinFn::ErrorsNew => 1,
+            BuiltinFn::DrawRect | BuiltinFn::DrawText => 5,
         }
     }
 }

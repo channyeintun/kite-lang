@@ -42,6 +42,83 @@ const showFloat = (v) =>
 
 const showBool = (v) => (v ? "true" : "false");
 
+// ---- rendering ------------------------------------------------------------
+//
+// A Kite program draws by calling `draw.rect` and `draw.text`, and knows
+// nothing else about the host. Everything a layout produces is one of those
+// two, which is what lets a DOM renderer and a canvas renderer meet the same
+// interface — and what makes it impossible for them to disagree about where
+// something went, because neither decides.
+
+const hex = (colour) => '#' + (colour >>> 0).toString(16).padStart(6, '0');
+const FONT = '16px ui-monospace, monospace';
+
+// The default: describe each call. Useful under Node, and the same text the
+// bytecode VM writes, so the two backends can be compared without a browser.
+// Coordinates print the way Kite prints a float, so this and the bytecode VM
+// produce the same text and the differential suite can compare drawing.
+export const textRenderer = {{
+  rect: (x, y, w, h, colour) =>
+    write(
+      'rect ' + showFloat(x) + ' ' + showFloat(y) + ' ' +
+      showFloat(w) + ' ' + showFloat(h) + ' ' + colour,
+    ),
+  text: (x, y, body, colour) =>
+    write('text ' + showFloat(x) + ' ' + showFloat(y) + ' ' + body + ' ' + colour),
+}};
+
+// Absolutely-positioned elements under one container. The layout has already
+// decided every position, so the container needs no layout of its own.
+export function domRenderer(container) {{
+  container.style.position = 'relative';
+  const place = (el, x, y) => {{
+    el.style.position = 'absolute';
+    el.style.left = x + 'px';
+    el.style.top = y + 'px';
+    return el;
+  }};
+  return {{
+    rect: (x, y, w, h, colour) => {{
+      const el = place(document.createElement('div'), x, y);
+      el.style.width = w + 'px';
+      el.style.height = h + 'px';
+      el.style.background = hex(colour);
+      container.appendChild(el);
+    }},
+    text: (x, y, body, colour) => {{
+      const el = place(document.createElement('div'), x, y);
+      el.style.color = hex(colour);
+      el.style.font = FONT;
+      el.style.whiteSpace = 'pre';
+      el.textContent = body;
+      container.appendChild(el);
+    }},
+  }};
+}}
+
+// The same drawing onto a 2D context. Text is drawn from its top-left, which
+// is where the layout put it, so the baseline is set rather than assumed.
+export function canvasRenderer(ctx) {{
+  return {{
+    rect: (x, y, w, h, colour) => {{
+      ctx.fillStyle = hex(colour);
+      ctx.fillRect(x, y, w, h);
+    }},
+    text: (x, y, body, colour) => {{
+      ctx.fillStyle = hex(colour);
+      ctx.font = FONT;
+      ctx.textBaseline = 'top';
+      ctx.fillText(body, x, y);
+    }},
+  }};
+}}
+
+export let renderer = textRenderer;
+
+export function setRenderer(r) {{
+  renderer = r;
+}}
+
 /// Where output goes. Replace to capture it.
 export let write = (line) => console.log(line);
 
@@ -58,6 +135,8 @@ function imports() {{
       print_str: (i) => write(STRINGS[i]),
       str_concat: (a, b) => intern(STRINGS[a] + STRINGS[b]),
       str_eq: (a, b) => (STRINGS[a] === STRINGS[b] ? 1 : 0),
+      draw_rect: (x, y, w, h, colour) => renderer.rect(x, y, w, h, Number(colour)),
+      draw_text: (x, y, i, colour) => renderer.text(x, y, STRINGS[i], Number(colour)),
       // Interpolation shares its formatting with printing, so a value cannot
       // look one way in `io.print(x)` and another in `"\(x)"`.
       str_of_int: (v) => intern(showInt(v)),
@@ -89,6 +168,95 @@ export async function run(source) {{
 "#,
         table = table,
         wasm = json_string(wasm_path),
+    )
+}
+
+/// A page that runs the module, with a control for which renderer draws.
+///
+/// The same compiled module backs all three: the program calls `draw.rect` and
+/// `draw.text` and cannot tell where they went. Being able to switch between
+/// them in one page is the clearest evidence that neither renderer is deciding
+/// anything about layout.
+pub fn generate_page(title: &str) -> String {
+    format!(
+        r#"<!doctype html>
+<meta charset="utf-8">
+<title>{title}</title>
+<style>
+  body {{ margin: 0; background: #0b0d10; color: #c9d1dc;
+         font: 14px ui-monospace, SFMono-Regular, Menlo, monospace; }}
+  header {{ display: flex; gap: 12px; align-items: center; padding: 10px 14px;
+            border-bottom: 1px solid #1f232b; }}
+  button {{ font: inherit; color: inherit; background: #1a1e25; cursor: pointer;
+            border: 1px solid #2a2f3a; border-radius: 4px; padding: 4px 10px; }}
+  button[aria-pressed="true"] {{ background: #3b82f6; border-color: #3b82f6; color: #fff; }}
+  main {{ padding: 14px; }}
+  #stage {{ width: 640px; height: 360px; }}
+  pre {{ margin: 0; white-space: pre-wrap; }}
+</style>
+
+<header>
+  <strong>{title}</strong>
+  <button id="dom" aria-pressed="true">DOM</button>
+  <button id="canvas" aria-pressed="false">canvas</button>
+  <button id="text" aria-pressed="false">text</button>
+</header>
+
+<main>
+  <div id="stage"></div>
+</main>
+
+<script type="module">
+  import {{ instantiate, setRenderer, setWriter,
+            domRenderer, canvasRenderer, textRenderer }} from "./app.js";
+
+  const stage = document.getElementById("stage");
+  const buttons = {{
+    dom: document.getElementById("dom"),
+    canvas: document.getElementById("canvas"),
+    text: document.getElementById("text"),
+  }};
+
+  // The module is instantiated once per draw: `main` runs to completion and
+  // draws as it goes, so redrawing means running it again. A program that
+  // redrew on its own would need a frame loop, which arrives with events.
+  async function show(which) {{
+    for (const [name, button] of Object.entries(buttons)) {{
+      button.setAttribute("aria-pressed", String(name === which));
+    }}
+    stage.replaceChildren();
+
+    if (which === "canvas") {{
+      const canvas = document.createElement("canvas");
+      const scale = window.devicePixelRatio || 1;
+      canvas.width = 640 * scale;
+      canvas.height = 360 * scale;
+      canvas.style.width = "640px";
+      canvas.style.height = "360px";
+      stage.appendChild(canvas);
+      const ctx = canvas.getContext("2d");
+      ctx.scale(scale, scale);
+      setRenderer(canvasRenderer(ctx));
+    }} else if (which === "text") {{
+      const pre = document.createElement("pre");
+      stage.appendChild(pre);
+      setWriter((line) => {{ pre.textContent += line + "\n"; }});
+      setRenderer(textRenderer);
+    }} else {{
+      setRenderer(domRenderer(stage));
+    }}
+
+    const exports = await instantiate("./app.wasm");
+    exports.main();
+  }}
+
+  for (const [name, button] of Object.entries(buttons)) {{
+    button.addEventListener("click", () => show(name));
+  }}
+  show("dom");
+</script>
+"#,
+        title = title
     )
 }
 

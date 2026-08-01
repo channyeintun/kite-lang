@@ -129,11 +129,22 @@ fn main() -> ExitCode {
         if let Err(e) = std::fs::write(&js_path, glue) {
             return fail(&format!("cannot write `{}`: {}", js_path, e));
         }
+        // A page to open, so a compiled program is something to look at rather
+        // than three files and instructions.
+        let html_path = format!("{}/index.html", dir);
+        let name = std::path::Path::new(&path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("kite");
+        if let Err(e) = std::fs::write(&html_path, kite_driver::generate_page(name)) {
+            return fail(&format!("cannot write `{}`: {}", html_path, e));
+        }
         eprintln!(
-            "wrote {} ({} bytes) and {}",
+            "wrote {} ({} bytes), {} and {}",
             wasm_path,
             module.bytes.len(),
-            js_path
+            js_path,
+            html_path
         );
         return ExitCode::SUCCESS;
     }

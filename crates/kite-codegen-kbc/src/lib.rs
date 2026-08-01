@@ -23,18 +23,24 @@ pub type Reg = u16;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Native {
     IoPrint,
+    DrawRect,
+    DrawText,
 }
 
 impl Native {
     pub fn from_builtin(b: Builtin) -> Native {
         match b {
             Builtin::IoPrint => Native::IoPrint,
+            Builtin::DrawRect => Native::DrawRect,
+            Builtin::DrawText => Native::DrawText,
         }
     }
 
     pub fn name(self) -> &'static str {
         match self {
             Native::IoPrint => "io.print",
+            Native::DrawRect => "draw.rect",
+            Native::DrawText => "draw.text",
         }
     }
 }

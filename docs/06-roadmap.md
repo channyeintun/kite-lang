@@ -234,8 +234,29 @@ font, which arrives with the canvas renderer in Phase 8. Every width it
 produces is wrong for proportional text and right often enough to see the shape
 of a tree.
 
-**Remaining:** a DOM renderer and a canvas renderer that consume `[Frame]`,
-scrolling, wrapping, and real text measurement.
+### Rendering
+
+A program draws through exactly two host calls, `draw.rect` and `draw.text`.
+Everything a layout produces is a rectangle or a run of text, and a boundary
+that stays that narrow can be met by more than one renderer — which is the only
+way two renderers can be made to agree.
+
+`kitec build … --emit wasm` writes `app.wasm`, `app.js` and an `index.html`
+that runs the module against a **DOM renderer** (absolutely positioned
+elements), a **canvas renderer** (`fillRect` and `fillText`), or a **text
+renderer** that writes each call out. All three are in the same page, switched
+live, against the same compiled module: the program cannot tell which is
+running. The text renderer writes what the bytecode VM writes, so drawing is
+covered by the differential suite without a browser.
+
+Switching between DOM and canvas in that page shows the text-measurement
+placeholder for what it is: the canvas clips a label that the DOM lets
+overflow, because `nominal_advance` says 8 units per character and the real
+font disagrees. That is the honest state of it until Phase 8.
+
+**Remaining:** real text measurement, wrapping, scrolling, events, and
+incremental redraw — today the module is instantiated once per frame, which is
+fine for a static tree and not for an application.
 
 Four things came out differently from this plan:
 

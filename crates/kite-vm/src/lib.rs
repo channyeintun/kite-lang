@@ -1004,6 +1004,28 @@ impl<'a> Vm<'a> {
         argc: u8,
     ) -> Result<Value, Trap> {
         match native {
+            // The VM has no window. Writing each call out is what lets the
+            // differential suite compare drawing against WebAssembly at all,
+            // and what makes a layout testable without a browser.
+            Native::DrawRect => {
+                let a = |i: usize| self.regs[base + arg_base as usize + i].clone();
+                let _ = writeln!(
+                    self.out,
+                    "rect {} {} {} {} {}",
+                    a(0),
+                    a(1),
+                    a(2),
+                    a(3),
+                    a(4)
+                );
+                Ok(Value::Unit)
+            }
+            Native::DrawText => {
+                let a = |i: usize| self.regs[base + arg_base as usize + i].clone();
+                let _ = writeln!(self.out, "text {} {} {} {}", a(0), a(1), a(2), a(3));
+                Ok(Value::Unit)
+            }
+
             Native::IoPrint => {
                 let v = if argc == 0 {
                     Value::Unit

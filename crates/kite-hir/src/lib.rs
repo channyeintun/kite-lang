@@ -370,12 +370,18 @@ impl Pattern {
 pub enum Builtin {
     /// `io.print(v)` — writes `v` followed by a newline.
     IoPrint,
+    /// `draw.rect(x, y, w, h, colour)`
+    DrawRect,
+    /// `draw.text(x, y, body, colour)`
+    DrawText,
 }
 
 impl Builtin {
     pub fn path(self) -> &'static str {
         match self {
             Builtin::IoPrint => "io.print",
+            Builtin::DrawRect => "draw.rect",
+            Builtin::DrawText => "draw.text",
         }
     }
 }

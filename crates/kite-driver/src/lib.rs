@@ -8,7 +8,7 @@ use kite_span::{FileId, SourceMap};
 use std::io::Write;
 use std::path::Path;
 
-pub use kite_codegen_wasm::generate_glue;
+pub use kite_codegen_wasm::{generate_glue, generate_page};
 pub use kite_vm::Trap;
 
 /// How far to run the pipeline, and what to hand back.

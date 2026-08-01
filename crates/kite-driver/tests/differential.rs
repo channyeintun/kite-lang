@@ -199,6 +199,21 @@ fn main() {
          \x20 let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })\n}\n",
     ),
     (
+        "drawing",
+        "// The drawing boundary is two calls wide, and both backends describe\n\
+         // each call the same way — which is what lets a layout be compared\n\
+         // without a browser.\n\
+         fn main() {\n\
+         \x20 draw.rect(0.0, 0.0, 640.0, 360.0, 0x14161a)\n\
+         \x20 draw.text(12.0, 12.0, \"Kite\", 0xf5f7fa)\n\
+         \x20 var y = 40.0\n\
+         \x20 for i in 0..3 {\n\
+         \x20   draw.rect(0.0, y, 160.0, 24.0, 0x1a1e25)\n\
+         \x20   draw.text(8.0, y, \"row \\(i)\", 0xc9d1dc)\n\
+         \x20   y = y + 24.0\n  }\n\
+         \x20 draw.rect(-1.5, 0.25, 0.0, 1.0e2, 0xffffff)\n}\n",
+    ),
+    (
         "ambiguous-variant-names",
         "// Two enums with the same variant names. Which one an unqualified\n\
          // pattern means is decided by the scrutinee.\n\
