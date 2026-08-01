@@ -165,8 +165,13 @@ a record of what each was made from. And `Box<Box<int>>` ends in a token the
 lexer read as a shift; the parser splits it rather than making the lexer care
 about types.
 
-**Remaining in Phase 2:** methods on generic types — `impl<T> Box<T> { ... }`
-parses but its methods are not instantiated per specialisation.
+**Also done:** methods on generic types. `impl<T> Box<T>` is written once
+against the parameters and specialised per receiver — the type arguments come
+off the receiver's own type, so there is nothing at a call site to infer. An
+associated function has no receiver, so its arguments come from the type the
+result is used as: `let s: Stack<int> = Stack.empty()`.
+
+**Phase 2 is complete.**
 
 Four things came out differently from this plan:
 
@@ -450,7 +455,7 @@ none.
 |---|---|
 | 0 — Specification review | ✅ done, and the spec was amended four times by what the code found |
 | 1 — Vertical slice | ✅ complete |
-| 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, trait objects, slices, optionals, tuples, maps, interpolation, closures, generic functions and generic types. ❌ methods on generic types |
+| 2 — Type system | ✅ complete — structs, enums, match, exhaustiveness, traits, trait objects, slices, optionals, tuples, maps, interpolation, closures, generics on functions and types, with bounds and methods |
 | 3 — Error handling | ✅ complete |
 | 4 — WebAssembly backend | ✅ every construct the language has, all twelve examples, both backends agreeing. ❌ JS String Builtins (an optimisation, not a gap) |
 | 5 — Concurrency | ❌ not started |

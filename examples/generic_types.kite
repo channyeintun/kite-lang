@@ -30,6 +30,25 @@ pub enum Result<T, E> {
   Err(E)
 }
 
+// Methods on a generic type are written once, against the parameters, and
+// specialised per receiver — the type arguments come off the receiver's own
+// type, so there is nothing at a call site to infer.
+impl<T> Box<T> {
+  pub fn get(self) -> T {
+    return self.value
+  }
+
+  pub fn replaced(self, v: T) -> Box<T> {
+    return Box{value: v}
+  }
+
+  // An associated function has no receiver, so the arguments come from the
+  // type the result is used as.
+  pub fn of(v: T) -> Box<T> {
+    return Box{value: v}
+  }
+}
+
 pub fn size<T>(tree: Tree<T>) -> int {
   var total = 1
   for child in tree.children {
@@ -64,6 +83,12 @@ fn main() {
   let root = Tree{label: 1, children: [leaf, Tree{label: 2, children: [leaf]}]}
   io.print(size(root))
   io.print(root.children[1].children[0].label)
+
+  io.print(n.get())
+  io.print(n.replaced(9).get())
+  io.print(s.replaced("other").get())
+  let made: Box<bool> = Box.of(true)
+  io.print(made.get())
 
   io.print(or_else(Result.Ok(5), -1))
   io.print(or_else(Result.Err("no"), -1))

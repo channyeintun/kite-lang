@@ -230,7 +230,22 @@ pub fn check(
                     }
                 };
                 let self_ty = if owner.takes_self {
-                    Some(named_ty(type_ids[owner.type_index as usize], &mut types))
+                    // On a generic type, `self` is the declaration at its own
+                    // parameters — `Box<T>`, not `Box`. Without that, the copy
+                    // made for `Box<int>` would still take a `Box` and the
+                    // call would not type-check where types are checked.
+                    let own: Vec<TyId> = generic_defs.iter().map(|g| g.ty).collect();
+                    Some(match type_ids[owner.type_index as usize] {
+                        Some(TypeTarget::Struct(s)) if !own.is_empty() => {
+                            let id = types.instantiate_struct(s, &own);
+                            types.struct_ty(id)
+                        }
+                        Some(TypeTarget::Enum(e)) if !own.is_empty() => {
+                            let id = types.instantiate_enum(e, &own);
+                            types.enum_ty(id)
+                        }
+                        other => named_ty(other, &mut types),
+                    })
                 } else {
                     None
                 };
@@ -2035,7 +2050,7 @@ impl<'a> Checker<'a> {
                 return match self.resolved.lookup_use(*fspan) {
                     Some(Res::Builtin(b)) => self.builtin_call(b, args, span),
                     Some(Res::Type(ti)) => {
-                        self.associated_call_named(ti, &name.name, *fspan, args, span)
+                        self.associated_call_named(ti, &name.name, *fspan, args, span, expected)
                     }
                     Some(Res::Variant(ti, vi)) => {
                         self.variant_value(ti, vi, args, arg_names, *fspan, span, expected)
@@ -2143,7 +2158,7 @@ impl<'a> Checker<'a> {
                 self.lit(ExprKind::Error, TyId::ERROR, span)
             }
 
-            Some(Res::Type(ti)) => self.associated_call(ti, p, args, span),
+            Some(Res::Type(ti)) => self.associated_call(ti, p, args, span, expected),
 
             Some(Res::Variant(ti, vi)) => {
                 self.variant_value(ti, vi, args, arg_names, p.span, span, expected)
@@ -2432,8 +2447,16 @@ impl<'a> Checker<'a> {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
 
-        let sig_params = self.sigs[fn_index as usize].params.clone();
-        let ret = self.sigs[fn_index as usize].ret;
+        // A method on a generic type is written once against the parameters
+        // and specialised per receiver: the arguments come off the receiver's
+        // own type, so there is nothing at a call site to infer.
+        let targs = self.receiver_args(receiver.ty);
+        let subst: Vec<Option<TyId>> = targs.iter().map(|t| Some(*t)).collect();
+        let raw_params = self.sigs[fn_index as usize].params.clone();
+        let sig_params: Vec<TyId> =
+            raw_params.iter().map(|p| self.apply_subst(*p, &subst)).collect();
+        let raw_ret = self.sigs[fn_index as usize].ret;
+        let ret = self.apply_subst(raw_ret, &subst);
         let decl_span = self.sigs[fn_index as usize].name_span;
 
         if args.len() != sig_params.len() {
@@ -2446,6 +2469,7 @@ impl<'a> Checker<'a> {
         for (i, a) in args.iter().enumerate() {
             let want = sig_params.get(i).copied();
             let e = self.expr(a, want);
+            let e = self.coerce(e, want);
             if let Some(w) = want {
                 self.expect_ty(e.ty, w, e.span, Some(decl_span));
             }
@@ -2453,9 +2477,21 @@ impl<'a> Checker<'a> {
         }
 
         hir::Expr {
-            kind: ExprKind::Call { callee: hir::FnId(fn_index), args: hargs, targs: Vec::new() },
+            kind: ExprKind::Call { callee: hir::FnId(fn_index), args: hargs, targs },
             ty: ret,
             span,
+        }
+    }
+
+    /// The type arguments a receiver's own type was specialised with, or none
+    /// when it is an ordinary declaration.
+    fn receiver_args(&self, ty: TyId) -> Vec<TyId> {
+        match *self.types.kind(ty) {
+            TyKind::Struct(s) => {
+                self.types.struct_origin_of(s).map(|(_, a)| a).unwrap_or_default()
+            }
+            TyKind::Enum(e) => self.types.enum_origin_of(e).map(|(_, a)| a).unwrap_or_default(),
+            _ => Vec::new(),
         }
     }
 
@@ -2466,9 +2502,10 @@ impl<'a> Checker<'a> {
         p: &ast::Path,
         args: &[ast::Expr],
         span: Span,
+        expected: Option<TyId>,
     ) -> hir::Expr {
         let name = p.last().name.clone();
-        self.associated_call_named(ti, &name, p.span, args, span)
+        self.associated_call_named(ti, &name, p.span, args, span, expected)
     }
 
     fn associated_call_named(
@@ -2478,6 +2515,7 @@ impl<'a> Checker<'a> {
         path_span: Span,
         args: &[ast::Expr],
         span: Span,
+        expected: Option<TyId>,
     ) -> hir::Expr {
         let type_name = self.resolved.type_decl(ti).name.clone();
         let method_name = method_name.to_string();
@@ -2509,8 +2547,39 @@ impl<'a> Checker<'a> {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
 
-        let sig_params = self.sigs[fn_index as usize].params.clone();
-        let ret = self.sigs[fn_index as usize].ret;
+        // An associated function on a generic type has no receiver to take
+        // arguments from, so they come from the type the result is used as:
+        // `let s: Stack<int> = Stack.empty()`.
+        let generics = self.sigs[fn_index as usize].generics.clone();
+        let targs = if generics.is_empty() {
+            Vec::new()
+        } else {
+            match expected.map(|e| self.receiver_args(e)).filter(|a| a.len() == generics.len()) {
+                Some(a) => a,
+                None => {
+                    let names: Vec<&str> = generics.iter().map(|g| g.name.as_str()).collect();
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0209,
+                            format!("cannot infer {} for `{}`", names.join(", "), type_name),
+                        )
+                        .with_primary(span, "nothing here says what this returns")
+                        .with_note(format!(
+                            "annotate the binding: `let x: {}<...> = ...`",
+                            type_name
+                        )),
+                    );
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
+                }
+            }
+        };
+        let subst: Vec<Option<TyId>> = targs.iter().map(|t| Some(*t)).collect();
+
+        let raw_params = self.sigs[fn_index as usize].params.clone();
+        let sig_params: Vec<TyId> =
+            raw_params.iter().map(|p| self.apply_subst(*p, &subst)).collect();
+        let raw_ret = self.sigs[fn_index as usize].ret;
+        let ret = self.apply_subst(raw_ret, &subst);
         let decl_span = self.sigs[fn_index as usize].name_span;
 
         if args.len() != sig_params.len() {
@@ -2522,6 +2591,7 @@ impl<'a> Checker<'a> {
         for (i, a) in args.iter().enumerate() {
             let want = sig_params.get(i).copied();
             let e = self.expr(a, want);
+            let e = self.coerce(e, want);
             if let Some(w) = want {
                 self.expect_ty(e.ty, w, e.span, Some(decl_span));
             }
@@ -2529,7 +2599,7 @@ impl<'a> Checker<'a> {
         }
 
         hir::Expr {
-            kind: ExprKind::Call { callee: hir::FnId(fn_index), args: hargs, targs: Vec::new() },
+            kind: ExprKind::Call { callee: hir::FnId(fn_index), args: hargs, targs },
             ty: ret,
             span,
         }
@@ -2632,9 +2702,13 @@ impl<'a> Checker<'a> {
     }
 
     fn type_index_of(&self, ty: TyId) -> Option<u32> {
+        // A specialisation has no declaration of its own; its methods are
+        // declared on the template it was made from.
         let target = match *self.types.kind(ty) {
-            TyKind::Struct(s) => TypeTarget::Struct(s),
-            TyKind::Enum(e) => TypeTarget::Enum(e),
+            TyKind::Struct(s) => {
+                TypeTarget::Struct(self.types.struct_template_of(s).unwrap_or(s))
+            }
+            TyKind::Enum(e) => TypeTarget::Enum(self.types.enum_template_of(e).unwrap_or(e)),
             _ => return None,
         };
         self.type_ids

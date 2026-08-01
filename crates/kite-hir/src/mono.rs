@@ -14,7 +14,8 @@
 //! Substituting here is one pass over expression trees, rather than a
 //! substitution threaded through every step of lowering.
 
-use crate::{Block, Expr, ExprKind, FnId, Function, Local, Pattern, Program, Stmt, TyId, Types};
+use crate::{Block, EnumId, Expr, ExprKind, FnId, Function, Local, Pattern, Program, Stmt,
+            StructId, TyId, TyKind, Types};
 use std::collections::HashMap;
 
 /// A generic function that instantiates itself with a larger type on each call
@@ -203,6 +204,15 @@ fn substitute_block(b: &mut Block, targs: &[TyId], types: &mut Types) {
 
 fn substitute_expr(e: &mut Expr, targs: &[TyId], types: &mut Types) {
     e.ty = subst(e.ty, targs, types);
+    // A constructor names its definition directly, not only through the
+    // expression's type. `Box{value: v}` inside `Box<T>`'s own methods builds a
+    // `Box<T>`, and the copy made for `Box<int>` has to build a `Box<int>` — the
+    // substituted type is exactly which one.
+    match (&mut e.kind, types.kind(e.ty).clone()) {
+        (ExprKind::StructNew { struct_id, .. }, TyKind::Struct(s)) => *struct_id = s,
+        (ExprKind::EnumNew { enum_id, .. }, TyKind::Enum(x)) => *enum_id = x,
+        _ => {}
+    }
     match &mut e.kind {
         // A nested generic call's own type arguments may mention this
         // function's parameters — `f<T>` calling `g<[T]>` — so they substitute
@@ -227,7 +237,26 @@ fn substitute_expr(e: &mut Expr, targs: &[TyId], types: &mut Types) {
     }
 }
 
+/// The specialisation of a struct id under a substitution.
+fn subst_struct(id: StructId, targs: &[TyId], types: &mut Types) -> StructId {
+    let Some((template, args)) = types.struct_origin_of(id) else { return id };
+    let args: Vec<TyId> = args.iter().map(|a| subst(*a, targs, types)).collect();
+    types.instantiate_struct(template, &args)
+}
+
+fn subst_enum(id: EnumId, targs: &[TyId], types: &mut Types) -> EnumId {
+    let Some((template, args)) = types.enum_origin_of(id) else { return id };
+    let args: Vec<TyId> = args.iter().map(|a| subst(*a, targs, types)).collect();
+    types.instantiate_enum(template, &args)
+}
+
 fn substitute_pattern(p: &mut Pattern, targs: &[TyId], types: &mut Types) {
+    // A pattern names its definition too, and for the same reason.
+    match p {
+        Pattern::Struct { struct_id, .. } => *struct_id = subst_struct(*struct_id, targs, types),
+        Pattern::Variant { enum_id, .. } => *enum_id = subst_enum(*enum_id, targs, types),
+        _ => {}
+    }
     match p {
         Pattern::Tuple { ty, elems } => {
             *ty = subst(*ty, targs, types);

@@ -199,6 +199,30 @@ fn main() {
          \x20 let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })\n}\n",
     ),
     (
+        "generic-methods",
+        "struct Stack<T> {\n  items: [T]\n}\n\
+         impl<T> Stack<T> {\n\
+         \x20 fn of(v: T) -> Stack<T> {\n    return Stack{items: [v]}\n  }\n\
+         \x20 fn len(self) -> int {\n    return self.items.len()\n  }\n\
+         \x20 fn peek(self) -> Option<T> {\n    if self.items.len() == 0 {\n      return nil\n    }\n\
+         \x20   return self.items[self.items.len() - 1]\n  }\n\
+         \x20 fn pushed(self, v: T) -> Stack<T> {\n    var next = self.items\n\
+         \x20   next.push(v)\n    return Stack{items: next}\n  }\n}\n\
+         enum Slot<T> {\n  Empty\n  Full(T)\n}\n\
+         impl<T> Slot<T> {\n  fn or(self, fallback: T) -> T {\n\
+         \x20   return match self {\n      Empty => fallback\n      Full(v) => v\n    }\n  }\n}\n\
+         fn main() {\n\
+         \x20 let s = Stack{items: [1, 2, 3]}\n  io.print(s.len())\n\
+         \x20 let p = s.peek()\n  io.print(if p == nil { -1 } else { p })\n\
+         \x20 io.print(s.pushed(9).len())\n  io.print(s.len())\n\
+         \x20 let w = Stack{items: [\"a\"]}\n  io.print(w.pushed(\"b\").len())\n\
+         \x20 let q = w.pushed(\"b\").peek()\n  io.print(if q == nil { \"none\" } else { q })\n\
+         \x20 let one: Stack<bool> = Stack.of(true)\n  io.print(one.len())\n\
+         \x20 let full: Slot<int> = Slot.Full(5)\n  let empty: Slot<int> = Slot.Empty\n\
+         \x20 io.print(full.or(-1))\n  io.print(empty.or(-1))\n\
+         \x20 let text: Slot<str> = Slot.Full(\"yes\")\n  io.print(text.or(\"no\"))\n}\n",
+    ),
+    (
         "generic-types",
         "struct Box<T> {\n  value: T\n}\n\
          struct Pair<A, B> {\n  first: A\n  second: B\n}\n\

@@ -69,10 +69,11 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 ## Status
 
 **Phases 1–4 complete.** Structs, enums, `match` with exhaustiveness, traits
-and trait objects, slices, tuples, maps, optionals, enforced error handling —
-and every one of them compiles to WebAssembly. Both backends run the whole
-example set and agree. See [docs/06-roadmap.md](docs/06-roadmap.md) for what
-comes next.
+and trait objects, generics on both functions and types, closures, slices,
+tuples, maps, optionals, string interpolation, enforced error handling — and
+every one of them compiles to WebAssembly. Both backends run the whole example
+set and agree on every line of output. See
+[docs/06-roadmap.md](docs/06-roadmap.md) for what comes next.
 
 ```bash
 kitec build examples/hello.kite --emit wasm --out dist
@@ -131,7 +132,7 @@ VM and Wasm, run on both, and the outputs compared. `--emit wasm` reports
 anything it cannot lower rather than producing a module that traps; today it
 refuses nothing the language can express.
 
-**Not yet:** methods on generic types — `impl<T> Box<T>` parses but its methods are not instantiated per specialisation. Generic functions, generic structs and enums, bounds, inference and closures all work.
+**Phases 1–4 are complete.** Generic functions and types with bounds and methods, closures, trait objects, enforced error handling, and a WebAssembly backend that refuses nothing the language can express.
 
 440 tests, plus an annotated compile-fail corpus.
 
