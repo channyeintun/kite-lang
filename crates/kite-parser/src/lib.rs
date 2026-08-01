@@ -14,6 +14,34 @@ use kite_span::{FileId, Span};
 mod prec;
 use prec::{infix_binding_power, InfixOp};
 
+/// The index of the `)` closing the `(` at `open`, accounting for nesting and
+/// for parens inside nested string literals.
+fn matching_paren(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            b'"' => {
+                // A nested literal: its own parens are not ours.
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 pub fn parse(file: FileId, src: &str, tokens: &[Token], diags: &mut DiagBag) -> SourceFile {
     let mut p = Parser {
         file,
@@ -23,6 +51,7 @@ pub fn parse(file: FileId, src: &str, tokens: &[Token], diags: &mut DiagBag) -> 
         diags,
         panicking: false,
         no_struct_literal: 0,
+        in_hole: false,
     };
     p.parse_source_file()
 }
@@ -42,6 +71,9 @@ struct Parser<'a> {
     /// Non-zero while parsing an `if`/`for`/`match` scrutinee, where a `{`
     /// begins the body rather than a struct literal.
     no_struct_literal: u32,
+    /// Set for the sub-parser of a `\(...)` hole, where "end of input" means
+    /// the closing paren.
+    in_hole: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -131,9 +163,17 @@ impl<'a> Parser<'a> {
         } else {
             self.span()
         };
+        // Inside a `\(...)` the input ends at the closing paren, not at the
+        // end of the file, and saying otherwise sends the reader to the wrong
+        // place entirely.
+        let described = if self.in_hole && matches!(found, T::Eof | T::Newline) {
+            "the end of this interpolation"
+        } else {
+            found.describe()
+        };
         self.diags.push(
             Diagnostic::error(codes::E0100, format!("expected {}", what))
-                .with_primary(span, format!("found {}", found.describe())),
+                .with_primary(span, format!("found {}", described)),
         );
     }
 
@@ -1449,7 +1489,10 @@ impl<'a> Parser<'a> {
             }
             T::Str => {
                 self.bump();
-                Some(Expr::Str(span))
+                match self.split_interpolation(span) {
+                    Some(parts) => Some(Expr::Interpolated { parts, span }),
+                    None => Some(Expr::Str(span)),
+                }
             }
             T::Char => {
                 self.bump();
@@ -1540,6 +1583,98 @@ impl<'a> Parser<'a> {
                 self.error_expected("an expression");
                 None
             }
+        }
+    }
+
+    /// Split a string literal at its `\(expr)` holes, parsing each one as an
+    /// ordinary expression. Returns `None` when there are no holes, which is
+    /// the common case and keeps a plain literal a plain literal.
+    ///
+    /// The holes are parsed here rather than left as text for a later phase so
+    /// that a syntax error inside one is reported by the parser, with a span
+    /// pointing into the string — which is why the sub-lexer is given the whole
+    /// file and a range rather than a copied fragment.
+    fn split_interpolation(&mut self, span: Span) -> Option<Vec<StrPart>> {
+        let start = span.start as usize;
+        let raw = &self.src[start..span.end as usize];
+        // Skip the opening delimiter; the closing one ends the scan naturally,
+        // because a `\` cannot be the last byte of a well-formed literal.
+        let open = if raw.starts_with("\"\"\"") { 3 } else { 1 };
+
+        let bytes = raw.as_bytes();
+        let mut parts: Vec<StrPart> = Vec::new();
+        let mut run = open;
+        let mut i = open;
+        while i + 1 < bytes.len() {
+            if bytes[i] != b'\\' {
+                i += 1;
+                continue;
+            }
+            if bytes[i + 1] != b'(' {
+                // Some other escape. Step over both bytes so `\\\\(` is a
+                // literal backslash followed by a paren, not a hole.
+                i += 2;
+                continue;
+            }
+            if run < i {
+                parts.push(StrPart::Text(Span::new(
+                    self.file,
+                    (start + run) as u32,
+                    (start + i) as u32,
+                )));
+            }
+            let open_paren = i + 1;
+            let Some(close) = matching_paren(bytes, open_paren) else {
+                self.diags.push(
+                    kite_diag::Diagnostic::error(
+                        kite_diag::codes::E0100,
+                        "unterminated interpolation",
+                    )
+                    .with_primary(
+                        Span::new(self.file, (start + i) as u32, (start + open_paren + 1) as u32),
+                        "this `\\(` is never closed",
+                    ),
+                );
+                return Some(parts);
+            };
+            parts.push(StrPart::Hole(self.parse_hole(
+                start + open_paren + 1,
+                start + close,
+            )));
+            i = close + 1;
+            run = i;
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        let text_end = bytes.len().saturating_sub(open);
+        if run < text_end {
+            parts.push(StrPart::Text(Span::new(
+                self.file,
+                (start + run) as u32,
+                (start + text_end) as u32,
+            )));
+        }
+        Some(parts)
+    }
+
+    /// Parse one hole's expression, over a byte range of the file.
+    fn parse_hole(&mut self, start: usize, end: usize) -> Expr {
+        let tokens = kite_lexer::tokenize_range(self.file, self.src, start, end, self.diags);
+        let mut sub = Parser {
+            file: self.file,
+            src: self.src,
+            tokens: &tokens,
+            pos: 0,
+            diags: self.diags,
+            panicking: false,
+            no_struct_literal: 0,
+            in_hole: true,
+        };
+        let span = Span::new(self.file, start as u32, end as u32);
+        match sub.parse_expr() {
+            Some(e) => e,
+            None => Expr::Error(span),
         }
     }
 

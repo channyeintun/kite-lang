@@ -188,6 +188,11 @@ impl<'a> Emitter<'a> {
                 });
             }
 
+            mir::Rvalue::ToStr { operand, .. } => {
+                let a = self.operand_reg(operand, 0);
+                self.code.push(Op::ToStr { dst, src: a });
+            }
+
             mir::Rvalue::CallVirtual { trait_id, method, args } => {
                 self.stage_args(args);
                 self.code.push(Op::CallVirtual {

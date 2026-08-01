@@ -1,0 +1,13 @@
+// Interpolation renders the primitives. Anything else needs `Display`, which
+// says how a type should look to a human — deliberately not derived, because
+// that is a design decision rather than a mechanical one.
+
+struct Point {
+  x: int
+  y: int
+}
+
+fn main() {
+  let p = Point{x: 1, y: 2}
+  io.print("point is \(p)") //~ ERROR E0207
+}

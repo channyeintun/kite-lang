@@ -54,13 +54,18 @@ pub use support::{unsupported, Unsupported};
 /// Deliberately small: the standard library replaces them from Phase 6. String
 /// operations live here because a `str` is an index into a table the host
 /// holds — which is also why the module needs no linear memory.
-const IMPORTS: [(&str, &[ValType], &[ValType]); 6] = [
+const IMPORTS: [(&str, &[ValType], &[ValType]); 9] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
     ("print_str", &[ValType::I32], &[]),
     ("str_concat", &[ValType::I32, ValType::I32], &[ValType::I32]),
     ("str_eq", &[ValType::I32, ValType::I32], &[ValType::I32]),
+    // Rendering for `\(expr)`. These share their formatting with the `print_*`
+    // imports, so a value looks the same however it reaches the host.
+    ("str_of_int", &[ValType::I64], &[ValType::I32]),
+    ("str_of_float", &[ValType::F64], &[ValType::I32]),
+    ("str_of_bool", &[ValType::I32], &[ValType::I32]),
 ];
 
 const IMPORT_COUNT: u32 = IMPORTS.len() as u32;
@@ -73,6 +78,9 @@ mod host {
     pub const PRINT_STR: u32 = 3;
     pub const STR_CONCAT: u32 = 4;
     pub const STR_EQ: u32 = 5;
+    pub const STR_OF_INT: u32 = 6;
+    pub const STR_OF_FLOAT: u32 = 7;
+    pub const STR_OF_BOOL: u32 = 8;
 }
 
 pub struct WasmModule {
@@ -1146,6 +1154,23 @@ impl<'a> Emitter<'a> {
                         return false;
                     }
                 }
+            }
+
+            mir::Rvalue::ToStr { operand, from } => {
+                self.operand(func, operand);
+                let call = match self.types.kind(*from) {
+                    TyKind::Int => host::STR_OF_INT,
+                    TyKind::Float => host::STR_OF_FLOAT,
+                    TyKind::Bool => host::STR_OF_BOOL,
+                    // A `str` renders as itself; the checker emits no node for
+                    // that, so anything else here is a compiler bug.
+                    _ => {
+                        func.instruction(&Instruction::Unreachable);
+                        return true;
+                    }
+                };
+                func.instruction(&Instruction::Call(call));
+                return true;
             }
 
             // Every builtin returns unit today.

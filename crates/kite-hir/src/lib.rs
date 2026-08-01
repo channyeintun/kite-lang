@@ -215,6 +215,8 @@ pub enum ExprKind {
     /// A concrete value standing where a `dyn Trait` is wanted. Explicit so the
     /// representation change is visible in the IR.
     ToDyn { value: Box<Expr>, trait_id: TraitId },
+    /// A value rendered as text, from `\(expr)` in a string literal.
+    ToStr { value: Box<Expr> },
     CallBuiltin { builtin: Builtin, args: Vec<Expr> },
     Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
     Unary { op: UnOp, operand: Box<Expr> },
@@ -552,6 +554,7 @@ impl Program {
                     a.join(", ")
                 )
             }
+            ExprKind::ToStr { value } => format!("(str {})", self.expr(value)),
             ExprKind::ToDyn { value, trait_id } => {
                 format!("(as dyn {} {})", self.types.trait_def(*trait_id).name, self.expr(value))
             }

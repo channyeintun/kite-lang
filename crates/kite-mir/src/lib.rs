@@ -112,6 +112,9 @@ pub enum Rvalue {
     Call { callee: FnId, args: Vec<Operand> },
     /// Dispatched at run time from the receiver's concrete type.
     CallVirtual { trait_id: TraitId, method: u32, args: Vec<Operand> },
+    /// A value rendered as text. `from` is its type, which the Wasm backend
+    /// needs because its host calls are typed and the VM's values are not.
+    ToStr { operand: Operand, from: TyId },
     CallBuiltin { builtin: Builtin, args: Vec<Operand> },
     StructNew { struct_id: StructId, fields: Vec<Operand> },
     FieldGet { base: Operand, index: u32 },
@@ -282,6 +285,7 @@ impl fmt::Display for Rvalue {
                 write_operands(f, args)?;
                 write!(f, ")")
             }
+            Rvalue::ToStr { operand, .. } => write!(f, "str {}", operand),
             Rvalue::CallVirtual { trait_id, method, args } => {
                 write!(f, "virtual trait{}#{}(", trait_id.0, method)?;
                 write_operands(f, args)?;

@@ -158,6 +158,12 @@ io.print("hello, \(name), you are \(age) years old")
 Interpolation calls `Display.show` on the operand. It is not `printf`; there is
 no format-string language to learn and no format-string injection surface.
 
+`int`, `float`, `bool` and `str` render themselves. Every other type needs a
+`Display` implementation — deliberately not derived, because how a type presents
+itself to a human is a design decision rather than a mechanical one. A hole is
+an ordinary expression, so `"\(if n > 1 { "s" } else { "" })"` is a pluraliser
+and needs no special support.
+
 ### 2.5 Semicolon insertion
 
 Statements are newline-terminated. Semicolons are never written. A statement

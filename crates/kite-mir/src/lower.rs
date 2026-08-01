@@ -505,6 +505,10 @@ impl<'a> FnLowerer<'a> {
                 let args = args.iter().map(|a| self.operand(a)).collect();
                 Rvalue::CallVirtual { trait_id: *trait_id, method: *method, args }
             }
+            hir::ExprKind::ToStr { value } => {
+                Rvalue::ToStr { operand: self.operand(value), from: value.ty }
+            }
+
             // A trait object carries its value unchanged; the receiver's own
             // type tag is what dispatch reads.
             hir::ExprKind::ToDyn { value, .. } => Rvalue::Use(self.operand(value)),

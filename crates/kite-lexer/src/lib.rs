@@ -25,11 +25,28 @@ pub struct Token {
 /// diagnostics were produced — later passes can then still make progress and
 /// report their own findings rather than the run stopping at the first bad byte.
 pub fn tokenize(file: FileId, text: &str, diags: &mut DiagBag) -> Vec<Token> {
+    tokenize_range(file, text, 0, text.len(), diags)
+}
+
+/// Tokenize one byte range of a file.
+///
+/// The whole text is still passed, so every span is an absolute position in the
+/// file rather than an offset into a fragment. That is what lets an
+/// interpolated `\(expr)` be parsed as an ordinary expression and still point
+/// at the right place in a diagnostic.
+pub fn tokenize_range(
+    file: FileId,
+    text: &str,
+    start: usize,
+    end: usize,
+    diags: &mut DiagBag,
+) -> Vec<Token> {
     Lexer {
         file,
         src: text,
         bytes: text.as_bytes(),
-        pos: 0,
+        pos: start,
+        limit: end.min(text.len()),
         out: Vec::new(),
         delims: Vec::new(),
         pending_newline: false,
@@ -43,6 +60,9 @@ struct Lexer<'a> {
     src: &'a str,
     bytes: &'a [u8],
     pos: usize,
+    /// One past the last byte this lexer may read. Everything at or after it is
+    /// end-of-input as far as scanning is concerned.
+    limit: usize,
     out: Vec<Token>,
     /// Stack of open delimiters. Newlines inside `(` or `[` are never
     /// significant, so multi-line argument lists work without trailing commas.
@@ -56,7 +76,7 @@ impl<'a> Lexer<'a> {
         loop {
             self.skip_trivia();
 
-            if self.pos >= self.bytes.len() {
+            if self.pos >= self.limit {
                 if self.pending_newline && self.last_kind().is_some() {
                     // A trailing newline still terminates the final statement.
                     let p = self.pos as u32;
@@ -149,7 +169,7 @@ impl<'a> Lexer<'a> {
                     self.pos += 2;
                     // Consume to a plausible end so one stray `/*` does not
                     // cascade into dozens of downstream errors.
-                    while self.pos < self.bytes.len() {
+                    while self.pos < self.limit {
                         if self.peek() == Some(b'*') && self.peek_at(1) == Some(b'/') {
                             self.pos += 2;
                             break;
@@ -171,11 +191,12 @@ impl<'a> Lexer<'a> {
     // ---- scanning ---------------------------------------------------------
 
     fn peek(&self) -> Option<u8> {
-        self.bytes.get(self.pos).copied()
+        (self.pos < self.limit).then(|| self.bytes[self.pos])
     }
 
     fn peek_at(&self, n: usize) -> Option<u8> {
-        self.bytes.get(self.pos + n).copied()
+        let at = self.pos + n;
+        (at < self.limit).then(|| self.bytes[at])
     }
 
     fn bump(&mut self) -> Option<u8> {
@@ -187,7 +208,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn char_at(&self, byte: usize) -> Option<char> {
-        if byte >= self.bytes.len() {
+        if byte >= self.limit {
             return None;
         }
         self.src[byte..].chars().next()
@@ -318,7 +339,7 @@ impl<'a> Lexer<'a> {
         const SUFFIXES: [&str; 10] = [
             "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64",
         ];
-        let rest = &self.src[self.pos..];
+        let rest = &self.src[self.pos..self.limit];
         for s in SUFFIXES {
             if rest.starts_with(s) {
                 let after = self.pos + s.len();
@@ -334,14 +355,14 @@ impl<'a> Lexer<'a> {
     fn scan_string(&mut self) -> TokenKind {
         let start = self.pos;
 
-        if self.src[self.pos..].starts_with("\"\"\"") {
+        if self.src[self.pos..self.limit].starts_with("\"\"\"") {
             self.pos += 3;
             loop {
-                if self.pos >= self.bytes.len() {
+                if self.pos >= self.limit {
                     self.unterminated_string(start);
                     return TokenKind::Str;
                 }
-                if self.src[self.pos..].starts_with("\"\"\"") {
+                if self.src[self.pos..self.limit].starts_with("\"\"\"") {
                     self.pos += 3;
                     return TokenKind::Str;
                 }
@@ -400,7 +421,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn unterminated_string(&mut self, start: usize) {
-        let end = (start + 1).min(self.bytes.len());
+        let end = (start + 1).min(self.limit);
         let span = Span::new(self.file, start as u32, end as u32);
         self.diags.push(
             Diagnostic::error(codes::E0001, "unterminated string literal")

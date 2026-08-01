@@ -50,6 +50,16 @@ fn sexp(e: &Expr, src: &str) -> String {
     match e {
         Expr::Int(s) | Expr::Float(s) | Expr::Str(s) | Expr::Char(s) => text(*s),
         Expr::Bool { value, .. } => value.to_string(),
+        Expr::Interpolated { parts, .. } => {
+            let rendered: Vec<String> = parts
+                .iter()
+                .map(|p| match p {
+                    kite_ast::StrPart::Text(s) => format!("{:?}", text(*s)),
+                    kite_ast::StrPart::Hole(e) => sexp(e, src),
+                })
+                .collect();
+            format!("(str {})", rendered.join(" "))
+        }
         Expr::Nil(_) => "nil".into(),
         Expr::Path(p) => p.text(),
         Expr::SelfExpr(_) => "self".into(),
@@ -553,4 +563,26 @@ fn parses_match_as_an_expression() {
 #[test]
 fn parses_map_literals() {
     assert_eq!(expr_sexp("{\"a\": 1, \"b\": 2}"), "(map \"a\": 1 \"b\": 2)");
+}
+
+/// The parser splits an interpolated literal, so nothing downstream re-scans
+/// the text. A literal with no hole stays a plain literal.
+#[test]
+fn interpolation_is_split_at_parse_time() {
+    assert_eq!(expr_sexp(r#""a\(x)b""#), r#"(str "a" x "b")"#);
+    assert_eq!(expr_sexp(r#""\(x)""#), "(str x)");
+    assert_eq!(expr_sexp(r#""\(a + b) tail""#), r#"(str (+ a b) " tail")"#);
+    assert_eq!(expr_sexp(r#""\(f(1, 2))""#), "(str (call f 1 2))");
+    // Adjacent holes leave no text between them.
+    assert_eq!(expr_sexp(r#""\(a)\(b)""#), "(str a b)");
+    // A literal with no hole is untouched.
+    assert_eq!(expr_sexp(r#""plain""#), r#""plain""#);
+    // `\\(` is an escaped backslash, not the start of a hole.
+    assert_eq!(expr_sexp(r#""x\\\\(y)""#), r#""x\\\\(y)""#);
+}
+
+/// A nested string inside a hole may contain parens without ending the hole.
+#[test]
+fn a_hole_may_contain_a_string_with_parens() {
+    assert_eq!(expr_sexp(r#""\(f(")("))""#), r#"(str (call f ")("))"#);
 }

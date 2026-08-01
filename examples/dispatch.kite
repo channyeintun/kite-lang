@@ -18,7 +18,7 @@ pub trait Drawable {
   // A default body. A type may take it or replace it; dispatch finds whichever
   // one that type ended up with.
   fn describe(self) -> str {
-    return "a " + self.name()
+    return "a \(self.name())"
   }
 }
 
@@ -54,14 +54,13 @@ impl Drawable for Rect {
   // `Rect` inside a `dyn Drawable` gets this one and a `Circle` gets the
   // default — with no tag in the source saying so.
   fn describe(self) -> str {
-    return "a rect, " + self.name()
+    return "a \(self.width) by \(self.height) \(self.name())"
   }
 }
 
 // The parameter names behaviour, not a type. Any `Drawable` fits.
 fn report(shape: dyn Drawable) {
-  io.print(shape.describe())
-  io.print(shape.area())
+  io.print("\(shape.describe()) covering \(shape.area()) units")
 }
 
 fn total_area(shapes: [dyn Drawable]) -> float {
@@ -83,5 +82,5 @@ fn main() {
     Circle{radius: 2.0},
     Rect{width: 1.0, height: 5.0},
   ]
-  io.print(total_area(shapes))
+  io.print("\(shapes.len()) shapes, \(total_area(shapes)) units in total")
 }

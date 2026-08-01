@@ -1193,6 +1193,7 @@ impl<'a> Checker<'a> {
                 self.lit(ExprKind::Str(value), TyId::STR, *span)
             }
             ast::Expr::Bool { value, span } => self.lit(ExprKind::Bool(*value), TyId::BOOL, *span),
+            ast::Expr::Interpolated { parts, span } => self.interpolated(parts, *span),
 
             ast::Expr::Path(p) => self.path_expr(p),
             ast::Expr::Paren { inner, .. } => self.expr(inner, expected),
@@ -3781,6 +3782,70 @@ impl<'a> Checker<'a> {
 
     /// Decode a string literal's contents. Phase 1 handles escapes; string
     /// interpolation arrives with `Display` in Phase 2.
+    /// `"a \(x) b"` becomes concatenation. Each hole is rendered with `ToStr`,
+    /// and the pieces are folded left to right so the result reads in source
+    /// order even though `+` is what actually runs.
+    ///
+    /// There is no format-string language here and no way to get one, which is
+    /// the point: no width specifiers to learn and no injection surface.
+    fn interpolated(&mut self, parts: &[ast::StrPart], span: Span) -> hir::Expr {
+        let mut acc: Option<hir::Expr> = None;
+        for part in parts {
+            let piece = match part {
+                ast::StrPart::Text(s) => {
+                    let value = self.text_run_value(*s);
+                    self.lit(ExprKind::Str(value), TyId::STR, *s)
+                }
+                ast::StrPart::Hole(e) => {
+                    let v = self.expr(e, None);
+                    self.render(v)
+                }
+            };
+            acc = Some(match acc {
+                None => piece,
+                Some(lhs) => hir::Expr {
+                    span,
+                    kind: ExprKind::Binary {
+                        op: hir::BinOp::ConcatStr,
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(piece),
+                    },
+                    ty: TyId::STR,
+                },
+            });
+        }
+        acc.unwrap_or_else(|| self.lit(ExprKind::Str(String::new()), TyId::STR, span))
+    }
+
+    /// A hole's value as text. Primitives render themselves; anything else
+    /// needs `Display`, which the language cannot express until there is a
+    /// prelude to declare it in.
+    fn render(&mut self, v: hir::Expr) -> hir::Expr {
+        if self.types.is_poisoned(v.ty) {
+            return hir::Expr { span: v.span, kind: ExprKind::Error, ty: TyId::STR };
+        }
+        if v.ty == TyId::STR {
+            return v;
+        }
+        if matches!(*self.types.kind(v.ty), TyKind::Int | TyKind::Float | TyKind::Bool) {
+            let span = v.span;
+            return hir::Expr { span, kind: ExprKind::ToStr { value: Box::new(v) }, ty: TyId::STR };
+        }
+        self.diags.push(
+            Diagnostic::error(
+                codes::E0207,
+                format!("`{}` cannot be interpolated", self.types.name(v.ty)),
+            )
+            .with_primary(v.span, "this has no text form")
+            .with_note(
+                "interpolation renders `int`, `float`, `bool` and `str`. Anything else \
+                 needs a `Display` implementation, which arrives with the standard \
+                 library in Phase 6",
+            ),
+        );
+        hir::Expr { span: v.span, kind: ExprKind::Error, ty: TyId::STR }
+    }
+
     fn string_value(&mut self, span: Span) -> String {
         let raw = self.text(span);
         let inner = if let Some(s) = raw.strip_prefix("\"\"\"") {
@@ -3789,7 +3854,17 @@ impl<'a> Checker<'a> {
             let s = raw.strip_prefix('"').unwrap_or(raw);
             s.strip_suffix('"').unwrap_or(s)
         };
+        self.decode_escapes(inner, span)
+    }
 
+    /// The text of one literal run inside an interpolated string. The parser
+    /// has already excluded the quotes and the holes.
+    fn text_run_value(&mut self, span: Span) -> String {
+        let raw = self.text(span).to_string();
+        self.decode_escapes(&raw, span)
+    }
+
+    fn decode_escapes(&mut self, inner: &str, span: Span) -> String {
         let mut out = String::with_capacity(inner.len());
         let mut chars = inner.chars();
         while let Some(c) = chars.next() {
@@ -3823,16 +3898,11 @@ impl<'a> Checker<'a> {
                         ),
                     }
                 }
+                // The parser removes every `\(`, so one reaching here is a
+                // literal backslash before a paren, which is what it looks like.
                 Some('(') => {
-                    self.diags.push(
-                        Diagnostic::error(
-                            codes::E0200,
-                            "string interpolation is not available yet",
-                        )
-                        .with_primary(span, "`\\(...)` needs the `Display` trait")
-                        .with_note("traits arrive in Phase 2; see docs/06-roadmap.md"),
-                    );
-                    return out;
+                    out.push('\\');
+                    out.push('(');
                 }
                 Some(other) => {
                     self.diags.push(

@@ -520,12 +520,24 @@ pub enum ForHeader {
 // Expressions
 // ---------------------------------------------------------------------------
 
+/// One piece of an interpolated string literal.
+#[derive(Debug)]
+pub enum StrPart {
+    /// A run of literal text, spanning the source between holes. Escapes are
+    /// still encoded; they are decoded where a plain literal's are.
+    Text(Span),
+    Hole(Expr),
+}
+
 #[derive(Debug)]
 pub enum Expr {
     Int(Span),
     Float(Span),
-    /// Span covers the quotes. Interpolation parts are extracted later.
+    /// Span covers the quotes. A literal with no `\(...)` in it.
     Str(Span),
+    /// A string literal containing at least one `\(expr)`. The parser has
+    /// already split it, so nothing downstream re-scans the text.
+    Interpolated { parts: Vec<StrPart>, span: Span },
     Char(Span),
     Bool { value: bool, span: Span },
     Nil(Span),
@@ -705,6 +717,7 @@ impl Expr {
             | Expr::SelfExpr(s)
             | Expr::Error(s) => *s,
             Expr::Bool { span, .. }
+            | Expr::Interpolated { span, .. }
             | Expr::Unary { span, .. }
             | Expr::Binary { span, .. }
             | Expr::Call { span, .. }

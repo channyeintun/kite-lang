@@ -796,6 +796,14 @@ impl<'a> Vm<'a> {
                     self.call(callee, base, arg_base, argc, dst)?;
                 }
 
+                Op::ToStr { dst, src } => {
+                    // `Display` on a `Value` is the same code that `io.print`
+                    // uses, so `io.print(x)` and `io.print("\(x)")` cannot
+                    // disagree about how a value looks.
+                    let text = self.get(base, src).to_string();
+                    self.set(base, dst, Value::Str(Rc::from(text.as_str())));
+                }
+
                 Op::CallVirtual { dst, table, method, base: arg_base, argc } => {
                     // The receiver is the first argument. Its own tag chooses
                     // the body, which is the whole of dynamic dispatch: the

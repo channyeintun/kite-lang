@@ -131,9 +131,9 @@ VM and Wasm, run on both, and the outputs compared. `--emit wasm` reports
 anything it cannot lower rather than producing a module that traps; today it
 refuses nothing the language can express.
 
-**Not yet:** closures, generics, and string interpolation.
+**Not yet:** closures and generics.
 
-435 tests, plus an annotated compile-fail corpus.
+437 tests, plus an annotated compile-fail corpus.
 
 ```bash
 kitec run     file.kite      # compile and run

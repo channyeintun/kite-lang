@@ -33,6 +33,15 @@ function intern(s) {{
   return STRINGS.push(s) - 1;
 }}
 
+// An `int` is an i64, which reaches here as a BigInt.
+const showInt = (v) => String(v);
+
+// Floats print so they read back as Kite floats: `1.0`, not `1`.
+const showFloat = (v) =>
+  Number.isFinite(v) && Number.isInteger(v) ? v.toFixed(1) : String(v);
+
+const showBool = (v) => (v ? "true" : "false");
+
 /// Where output goes. Replace to capture it.
 export let write = (line) => console.log(line);
 
@@ -43,14 +52,17 @@ export function setWriter(fn) {{
 function imports() {{
   return {{
     kite: {{
-      print_int: (v) => write(String(v)),
-      // Floats print so they read back as Kite floats: `1.0`, not `1`.
-      print_float: (v) =>
-        write(Number.isFinite(v) && Number.isInteger(v) ? v.toFixed(1) : String(v)),
-      print_bool: (v) => write(v ? "true" : "false"),
+      print_int: (v) => write(showInt(v)),
+      print_float: (v) => write(showFloat(v)),
+      print_bool: (v) => write(showBool(v)),
       print_str: (i) => write(STRINGS[i]),
       str_concat: (a, b) => intern(STRINGS[a] + STRINGS[b]),
       str_eq: (a, b) => (STRINGS[a] === STRINGS[b] ? 1 : 0),
+      // Interpolation shares its formatting with printing, so a value cannot
+      // look one way in `io.print(x)` and another in `"\(x)"`.
+      str_of_int: (v) => intern(showInt(v)),
+      str_of_float: (v) => intern(showFloat(v)),
+      str_of_bool: (v) => intern(showBool(v)),
     }},
   }};
 }}

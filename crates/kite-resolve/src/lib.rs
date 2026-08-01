@@ -859,6 +859,15 @@ impl<'a> FnResolver<'a> {
             | Expr::SelfExpr(_)
             | Expr::Error(_) => {}
 
+            // Each hole is an ordinary expression and resolves like one.
+            Expr::Interpolated { parts, .. } => {
+                for part in parts {
+                    if let kite_ast::StrPart::Hole(e) = part {
+                        self.expr(e);
+                    }
+                }
+            }
+
             Expr::Path(p) => self.path(p),
 
             Expr::Unary { operand, .. } => self.expr(operand),

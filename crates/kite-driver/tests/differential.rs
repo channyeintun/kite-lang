@@ -199,6 +199,24 @@ fn main() {
          \x20 let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })\n}\n",
     ),
     (
+        "interpolation",
+        "fn main() {\n  let name = \"world\"\n  let n = 42\n  let pi = 2.5\n  let ok = true\n\
+         \x20 io.print(\"hello, \\(name)!\")\n\
+         \x20 io.print(\"n=\\(n) pi=\\(pi) ok=\\(ok)\")\n\
+         \x20 io.print(\"math: \\(n * 2 + 1)\")\n\
+         \x20 io.print(\"branch: \\(if n > 10 { \"big\" } else { \"small\" })\")\n\
+         \x20 io.print(\"adjacent: \\(name)\\(n)\")\n\
+         \x20 io.print(\"whole: \\(3.0)\")\n  io.print(\"none at all\")\n}\n",
+    ),
+    (
+        "interpolation-matches-print",
+        "fn main() {\n  var i = -3\n  for i < 3 {\n    io.print(i)\n\
+         \x20   io.print(\"\\(i)\")\n    i += 1\n  }\n\
+         \x20 io.print(1.5)\n  io.print(\"\\(1.5)\")\n\
+         \x20 io.print(4.0)\n  io.print(\"\\(4.0)\")\n\
+         \x20 io.print(true)\n  io.print(\"\\(true)\")\n}\n",
+    ),
+    (
         "structural-equality",
         "struct Point {\n  x: int\n  y: int\n}\n\
          struct Line {\n  a: Point\n  b: Point\n  label: str\n}\n\

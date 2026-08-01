@@ -138,6 +138,10 @@ pub enum Op {
     /// A call dispatched from the concrete type of the receiver, which sits at
     /// `base`. `table` indexes [`Chunk::vtables`].
     CallVirtual { dst: Reg, table: u32, method: u32, base: Reg, argc: u8 },
+    /// Render a value as text. One instruction covers every type because a VM
+    /// value carries its own tag; the Wasm backend needs three host calls for
+    /// the same job.
+    ToStr { dst: Reg, src: Reg },
     CallNative { dst: Reg, native: Native, base: Reg, argc: u8 },
     Return { src: Option<Reg> },
 
@@ -377,6 +381,7 @@ impl fmt::Display for Op {
             Call { dst, func: fi, base, argc } => {
                 write!(f, "{:<12} r{}, fn{}, r{}, {}", "call", dst, fi, base, argc)
             }
+            ToStr { dst, src } => write!(f, "{:<12} r{}, r{}", "str", dst, src),
             CallVirtual { dst, table, method, base, argc } => write!(
                 f,
                 "{:<12} r{}, vt{}#{}, r{}, {}",

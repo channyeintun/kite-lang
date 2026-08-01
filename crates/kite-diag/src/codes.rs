@@ -138,6 +138,13 @@ codes! {
          Either give the method a `self` parameter, or accept the concrete \
          type instead of the trait object.";
 
+    E0207 = "E0207", "value cannot be interpolated",
+        "String interpolation renders `int`, `float`, `bool` and `str`. Any \
+         other type needs a `Display` implementation, which says how it should \
+         appear to a human.\n\n\
+         That is deliberately not derived: how a type presents itself is a \
+         design decision, not a mechanical one.";
+
     E0210 = "E0210", "non-exhaustive match",
         "A `match` must cover every possible value. Exhaustiveness is what \
          makes adding an enum variant safe: the compiler shows you every place \

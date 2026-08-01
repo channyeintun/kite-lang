@@ -118,8 +118,12 @@ default methods, and nominal `impl` validation.
 **Also done since:** `[T]`, `{K: V}`, `Option<T>`, tuples, and `dyn Trait`
 dispatch on both backends.
 
-**Remaining:** closures, generics with monomorphisation, and string
-interpolation. Each is additive; none changes what already works.
+**Also done:** string interpolation. A hole is parsed as an ordinary
+expression by a sub-parser given the file and a byte range, so a syntax error
+inside one points into the string rather than at the whole literal.
+
+**Remaining:** closures and generics with monomorphisation. Both are additive;
+neither changes what already works.
 
 Four things came out differently from this plan:
 
@@ -402,7 +406,7 @@ none.
 |---|---|
 | 0 — Specification review | ✅ done, and the spec was amended four times by what the code found |
 | 1 — Vertical slice | ✅ complete |
-| 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, trait objects, slices, optionals, tuples, maps. ❌ closures, generics |
+| 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, trait objects, slices, optionals, tuples, maps, string interpolation. ❌ closures, generics |
 | 3 — Error handling | ✅ complete |
 | 4 — WebAssembly backend | ✅ every construct the language has, all nine examples, both backends agreeing. ❌ JS String Builtins (an optimisation, not a gap) |
 | 5 — Concurrency | ❌ not started |

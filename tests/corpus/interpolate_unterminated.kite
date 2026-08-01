@@ -1,0 +1,7 @@
+// A syntax error inside a hole is reported by the parser, with a span pointing
+// into the string rather than at the whole literal. That is the reason the
+// sub-lexer is given the file and a byte range instead of a copied fragment.
+
+fn main() {
+  io.print("value is \(1 + )") //~ ERROR E0100
+}
