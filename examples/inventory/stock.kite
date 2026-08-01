@@ -1,0 +1,14 @@
+// The other half of the `inventory` module.
+
+pub fn total(items: [Item]) -> int {
+    var sum = 0
+    for it in items {
+        // `line_total` is private to the module, and this file is in it.
+        sum = sum + line_total(it)
+    }
+    return sum
+}
+
+pub fn restock(items: [Item], threshold: int) -> [Item] {
+    return filter(items, |it: Item| it.count < threshold)
+}

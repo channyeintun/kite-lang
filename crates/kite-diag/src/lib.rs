@@ -192,6 +192,20 @@ impl DiagBag {
         std::mem::take(&mut self.diagnostics)
     }
 
+    /// Drop warnings pointing into files the user did not write.
+    ///
+    /// A warning is advice about a choice someone made. The standard library's
+    /// choices are the standard library's business, and a user who cannot edit
+    /// the file cannot act on the advice — so `std/math`'s deliberate
+    /// truncating cast is not a note in every program that rounds a number.
+    /// Errors are never dropped: an error in a library is a broken build.
+    pub fn silence_warnings_in(&mut self, is_library: impl Fn(kite_span::FileId) -> bool) {
+        self.diagnostics.retain(|d| {
+            d.severity == Severity::Error
+                || !d.primary_span().is_some_and(|s| is_library(s.file))
+        });
+    }
+
     /// Order by source position so output is deterministic regardless of the
     /// order passes happened to discover problems.
     pub fn sort(&mut self, _sources: &SourceMap) {

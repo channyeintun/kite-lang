@@ -42,6 +42,28 @@ fn matching_paren(bytes: &[u8], open: usize) -> Option<usize> {
     None
 }
 
+/// The type path a struct literal's head spells, if it spells one.
+///
+/// `Point` arrives as a path and `ui.Style` as a field access, because whether
+/// `a.b` names a module or reads a field is a resolution question. Both are
+/// runs of plain names, and nothing else can precede a `{`.
+fn type_path_of(expr: &Expr) -> Option<TypePath> {
+    match expr {
+        Expr::Path(p) => Some(TypePath {
+            segments: p.segments.clone(),
+            args: Vec::new(),
+            span: p.span,
+        }),
+        Expr::Field { base, name, span } => {
+            let mut path = type_path_of(base)?;
+            path.segments.push(name.clone());
+            path.span = *span;
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
 pub fn parse(file: FileId, src: &str, tokens: &[Token], diags: &mut DiagBag) -> SourceFile {
     let mut p = Parser {
         file,
@@ -1491,13 +1513,13 @@ impl<'a> Parser<'a> {
                 // scrutinee, where `{` opens the body; the specification tells
                 // the user to parenthesise in that position.
                 T::LBrace if self.no_struct_literal == 0 => {
-                    let Expr::Path(p) = &expr else {
+                    // `ui.Style{ … }` reaches here as a field access, because
+                    // `a.b` is a resolution question rather than a syntactic
+                    // one. Only a chain of plain names can be a type, so
+                    // anything else stays a field access and the `{` is left
+                    // for whatever follows.
+                    let Some(path) = type_path_of(&expr) else {
                         return Some(expr);
-                    };
-                    let path = TypePath {
-                        segments: p.segments.clone(),
-                        args: Vec::new(),
-                        span: p.span,
                     };
                     expr = Expr::StructLit(self.parse_struct_literal(path)?);
                 }

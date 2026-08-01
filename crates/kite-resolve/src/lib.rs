@@ -139,6 +139,47 @@ pub struct TypeDecl {
     /// Index into `SourceFile::items`.
     pub decl_index: usize,
     pub span: Span,
+    pub is_pub: bool,
+}
+
+/// Which module each merged item came from, and how the use sites spell them.
+///
+/// A module is a directory ([spec §13.1]). Every file in it contributes to one
+/// namespace, and an importer always writes the module name: `config.load`
+/// says where `load` came from, which is why there is no wildcard import.
+///
+/// Modules are merged into one item list before resolution, with each declared
+/// name rewritten to its qualified form — `load` in module `config` is
+/// declared as `config.load`. A dot cannot appear in an identifier, so the
+/// qualified name is unforgeable *and* is exactly what a user writes. Lookups
+/// inside a module try its own prefix first, which is what lets sibling files
+/// call each other unqualified.
+#[derive(Debug, Default)]
+pub struct Modules {
+    /// Module name per item index. Empty for the root module, which is the
+    /// program's own file plus the prelude.
+    pub of_item: Vec<String>,
+    /// `use std/json as j` — the spelling at the use site, and the module it
+    /// names.
+    pub aliases: HashMap<String, String>,
+}
+
+impl Modules {
+    pub fn of(&self, item: usize) -> &str {
+        self.of_item.get(item).map(|s| s.as_str()).unwrap_or("")
+    }
+
+    /// Rewrite an alias at the head of a dotted name: `j.decode` becomes
+    /// `json.decode` when the file wrote `use std/json as j`.
+    pub fn canonical(&self, name: &str) -> String {
+        let Some((head, rest)) = name.split_once('.') else {
+            return name.to_string();
+        };
+        match self.aliases.get(head) {
+            Some(module) => format!("{}.{}", module, rest),
+            None => name.to_string(),
+        }
+    }
 }
 
 /// A function's identity, known before any body is resolved so calls may go in
@@ -151,6 +192,7 @@ pub struct FnSig {
     pub span: Span,
     /// For a method, the type it is declared on and whether it takes `self`.
     pub owner: Option<MethodOwner>,
+    pub is_pub: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -183,6 +225,8 @@ pub struct LocalInfo {
 pub struct ResolveMap {
     pub fns: Vec<FnSig>,
     pub types: Vec<TypeDecl>,
+    /// Which module each item came from.
+    pub modules: Modules,
     /// Per function, in the same order as `fns`.
     pub locals: Vec<Vec<LocalInfo>>,
     /// Every resolved name, keyed by the span of its use. Spans are unique per
@@ -218,14 +262,50 @@ impl ResolveMap {
     }
 
     pub fn fn_by_name(&self, name: &str) -> Option<u32> {
+        self.fn_by_name_in("", name)
+    }
+
+    pub fn type_by_name(&self, name: &str) -> Option<u32> {
+        self.type_by_name_in("", name)
+    }
+
+    /// A function visible from inside `module`.
+    ///
+    /// The module's own declarations win, so a file in `math` calling `abs`
+    /// gets `math.abs` rather than a name of that spelling elsewhere. Failing
+    /// that the name is looked up as written, which is how the prelude and a
+    /// qualified `task.all` both resolve.
+    pub fn fn_by_name_in(&self, module: &str, name: &str) -> Option<u32> {
+        let name = self.modules.canonical(name);
+        self.find_fn(&qualify(module, &name))
+            .or_else(|| self.find_fn(&name))
+    }
+
+    fn find_fn(&self, name: &str) -> Option<u32> {
         self.fns
             .iter()
             .position(|f| f.owner.is_none() && f.name == name)
             .map(|i| i as u32)
     }
 
-    pub fn type_by_name(&self, name: &str) -> Option<u32> {
+    pub fn type_by_name_in(&self, module: &str, name: &str) -> Option<u32> {
+        let name = self.modules.canonical(name);
+        self.find_type(&qualify(module, &name))
+            .or_else(|| self.find_type(&name))
+    }
+
+    fn find_type(&self, name: &str) -> Option<u32> {
         self.types.iter().position(|t| t.name == name).map(|i| i as u32)
+    }
+
+    /// The module an item was declared in.
+    pub fn module_of_item(&self, decl_index: usize) -> &str {
+        self.modules.of(decl_index)
+    }
+
+    /// The module a function was declared in.
+    pub fn module_of_fn(&self, index: u32) -> &str {
+        self.modules.of(self.fns[index as usize].decl_index)
     }
 
     pub fn type_decl(&self, index: u32) -> &TypeDecl {
@@ -291,8 +371,24 @@ impl ResolveMap {
     }
 }
 
+/// The qualified form of a name declared in `module`.
+fn qualify(module: &str, name: &str) -> String {
+    if module.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}.{}", module, name)
+    }
+}
+
 pub fn resolve(file: &SourceFile, diags: &mut DiagBag) -> ResolveMap {
-    let mut map = ResolveMap::default();
+    resolve_modules(file, Modules::default(), diags)
+}
+
+/// Resolve a merged item list whose declarations are already qualified by
+/// module. The driver does the merging, because which modules a program needs
+/// is a question about `use` declarations and the file system, not about names.
+pub fn resolve_modules(file: &SourceFile, modules: Modules, diags: &mut DiagBag) -> ResolveMap {
+    let mut map = ResolveMap { modules, ..ResolveMap::default() };
 
     collect_types(file, &mut map, diags);
     index_variants(file, &mut map);
@@ -308,11 +404,11 @@ fn collect_types(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) {
     let mut seen: HashMap<&str, Span> = HashMap::new();
 
     for (i, item) in file.items.iter().enumerate() {
-        let (name, kind) = match item {
-            Item::Struct(s) => (&s.name, TypeKind::Struct),
-            Item::Enum(e) => (&e.name, TypeKind::Enum),
-            Item::Trait(t) => (&t.name, TypeKind::Trait),
-            Item::TypeAlias(a) => (&a.name, TypeKind::Alias),
+        let (name, kind, is_pub) = match item {
+            Item::Struct(s) => (&s.name, TypeKind::Struct, s.is_pub),
+            Item::Enum(e) => (&e.name, TypeKind::Enum, e.is_pub),
+            Item::Trait(t) => (&t.name, TypeKind::Trait, t.is_pub),
+            Item::TypeAlias(a) => (&a.name, TypeKind::Alias, a.is_pub),
             _ => continue,
         };
 
@@ -333,6 +429,7 @@ fn collect_types(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) {
             kind,
             decl_index: i,
             span: name.span,
+            is_pub,
         });
     }
 }
@@ -396,13 +493,15 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                     decl_index: i,
                     span: f.name.span,
                     owner: None,
+                    is_pub: f.is_pub,
                 });
             }
 
             Item::Impl(imp) => {
-                let target = imp.self_ty.name();
+                let module = map.modules.of(i).to_string();
+                let target = imp.self_ty.text();
                 let _ = &seen;
-                let Some(type_index) = map.type_by_name(target) else {
+                let Some(type_index) = map.type_by_name_in(&module, &target) else {
                     diags.push(
                         Diagnostic::error(codes::E0204, format!("unknown type `{}`", target))
                             .with_primary(imp.self_ty.span, "no such type in this module")
@@ -413,7 +512,7 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
 
                 let trait_index = match &imp.trait_path {
                     None => None,
-                    Some(tp) => match map.type_by_name(tp.name()) {
+                    Some(tp) => match map.type_by_name_in(&module, &tp.text()) {
                         Some(ti) if map.types[ti as usize].kind == TypeKind::Trait => Some(ti),
                         Some(ti) => {
                             diags.push(
@@ -455,6 +554,7 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                             trait_index,
                             is_default: false,
                         }),
+                        is_pub: m.is_pub,
                     });
                 }
 
@@ -486,6 +586,7 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                                     trait_index: Some(ti),
                                     is_default: true,
                                 }),
+                                is_pub: m.is_pub,
                             });
                         }
                     }
@@ -503,12 +604,16 @@ fn resolve_bodies(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) 
         let decl_index = map.fns[sig_index].decl_index;
         let owner = map.fns[sig_index].owner;
 
+        // A body is resolved in the module that declares it, so a file in
+        // `math` reaching for `abs` finds its own module's before anything
+        // else. That is the whole of what a module scope is here.
+        let module = map.modules.of(decl_index).to_string();
         let locals = match owner {
             None => {
                 let Item::Fn(f) = &file.items[decl_index] else {
                     unreachable!("a free function signature points at a function")
                 };
-                let mut r = FnResolver::new(map, diags);
+                let mut r = FnResolver::new(map, diags, module);
                 r.resolve_fn(&f.params, Some(&f.body), false);
                 r.locals
             }
@@ -519,7 +624,7 @@ fn resolve_bodies(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) 
                     _ => unreachable!("a method signature points at an impl or trait"),
                 };
                 let m = &methods[o.method_index];
-                let mut r = FnResolver::new(map, diags);
+                let mut r = FnResolver::new(map, diags, module);
                 r.resolve_fn(&m.params, m.body.as_ref(), o.takes_self);
                 r.locals
             }
@@ -535,10 +640,13 @@ struct FnResolver<'a> {
     scopes: Vec<HashMap<String, u32>>,
     loop_depth: u32,
     labels: Vec<String>,
+    /// The module this body was declared in. Its own names win over everything
+    /// but locals.
+    module: String,
 }
 
 impl<'a> FnResolver<'a> {
-    fn new(map: &'a mut ResolveMap, diags: &'a mut DiagBag) -> Self {
+    fn new(map: &'a mut ResolveMap, diags: &'a mut DiagBag, module: String) -> Self {
         FnResolver {
             map,
             diags,
@@ -546,7 +654,51 @@ impl<'a> FnResolver<'a> {
             scopes: vec![HashMap::new()],
             loop_depth: 0,
             labels: Vec::new(),
+            module,
         }
+    }
+
+    /// A type visible from the module being resolved.
+    fn find_type(&self, name: &str) -> Option<u32> {
+        self.map.type_by_name_in(&self.module, name)
+    }
+
+    /// A free function visible from the module being resolved.
+    fn find_fn(&self, name: &str) -> Option<u32> {
+        self.map.fn_by_name_in(&self.module, name)
+    }
+
+    /// Reject reaching into another module for something it did not mark
+    /// `pub`. Two levels of visibility, exactly as the specification says.
+    fn check_visible(&mut self, res: Res, span: Span, name: &str) {
+        let (module, is_pub, decl, what) = match res {
+            Res::Fn(i) => {
+                let f = &self.map.fns[i as usize];
+                (self.map.modules.of(f.decl_index), f.is_pub, f.span, "function")
+            }
+            Res::Type(i) | Res::Variant(i, _) => {
+                let t = &self.map.types[i as usize];
+                (self.map.modules.of(t.decl_index), t.is_pub, t.span, t.kind.describe())
+            }
+            _ => return,
+        };
+        // The root module holds the program and the prelude, which are in
+        // scope everywhere by construction.
+        if module.is_empty() || module == self.module || is_pub {
+            return;
+        }
+        let module = module.to_string();
+        self.diags.push(
+            Diagnostic::error(
+                codes::E0401,
+                format!("`{}` is private to module `{}`", name, module),
+            )
+            .with_primary(span, "not visible here")
+            .with_secondary(decl, format!("this {} is not marked `pub`", what))
+            .with_note(
+                "unmarked declarations are visible only within their own module;                  write `pub` to export one",
+            ),
+        );
     }
 
     fn resolve_fn(&mut self, params: &[Param], body: Option<&Block>, takes_self: bool) {
@@ -879,9 +1031,11 @@ impl<'a> FnResolver<'a> {
         let name = path.name();
 
         if path.segments.len() >= 2 {
-            // `Shape.Circle`
-            let owner = &path.segments[path.segments.len() - 2].name;
-            if let Some(ti) = self.map.type_by_name(owner) {
+            // `Shape.Circle`, or `ui.Align.Start` — everything but the last
+            // segment names the type, which may itself be module-qualified.
+            let owner = segments_text(&path.segments[..path.segments.len() - 1]);
+            if let Some(ti) = self.find_type(&owner) {
+                self.check_visible(Res::Type(ti), path.span, &owner);
                 self.map.uses.insert(path.span, Res::Type(ti));
                 return;
             }
@@ -891,7 +1045,8 @@ impl<'a> FnResolver<'a> {
             self.map.uses.insert(path.span, Res::Variant(ty, vi));
             return;
         }
-        if let Some(ti) = self.map.type_by_name(name) {
+        if let Some(ti) = self.find_type(&path.text()) {
+            self.check_visible(Res::Type(ti), path.span, name);
             self.map.uses.insert(path.span, Res::Type(ti));
             return;
         }
@@ -1008,25 +1163,35 @@ impl<'a> FnResolver<'a> {
     }
 
     /// Try to read `base.name` as a static path rather than a field access.
-    /// Returns `None` when the head names a local, which always wins.
+    ///
+    /// Returns `None` when the head names a local, which always wins — a field
+    /// called `print` on a value called `io` still works.
     fn try_dotted(&mut self, base: &Expr, name: &Ident) -> Option<Res> {
-        let Expr::Path(head) = base else {
-            return None;
-        };
-        if !head.is_simple() {
-            return None;
-        }
-        let head_name = &head.last().name;
-        if self.lookup(head_name).is_some() {
+        // The base may itself be dotted: `ui.Justify.SpaceBetween` is a module,
+        // a type and a variant, and arrives as nested field accesses because
+        // the parser does not decide what `a.b` means.
+        let head = dotted_text(base)?;
+        if self.lookup(head.split('.').next().unwrap_or(&head)).is_some() {
             return None;
         }
 
-        let dotted = format!("{}.{}", head_name, name.name);
+        let dotted = format!("{}.{}", head, name.name);
         if let Some(b) = BuiltinFn::from_path(&dotted) {
             return Some(Res::Builtin(b));
         }
+        // `task.all` — a function in an imported module. Declared names are
+        // qualified when a module is merged, so this is an ordinary lookup.
+        if let Some(fi) = self.find_fn(&dotted) {
+            self.check_visible(Res::Fn(fi), name.span, &dotted);
+            return Some(Res::Fn(fi));
+        }
+        if let Some(ti) = self.find_type(&dotted) {
+            self.check_visible(Res::Type(ti), name.span, &dotted);
+            return Some(Res::Type(ti));
+        }
 
-        let ti = self.map.type_by_name(head_name)?;
+        let ti = self.find_type(&head)?;
+        self.check_visible(Res::Type(ti), name.span, &head);
         // `Shape.Circle` — looked up on `Shape`, not in the unqualified index,
         // which has dropped every name two enums share.
         if let Some(vi) = self.map.variant_of(ti, &name.name) {
@@ -1038,8 +1203,9 @@ impl<'a> FnResolver<'a> {
     }
 
     fn resolve_type_name(&mut self, path: &TypePath) {
-        match self.map.type_by_name(path.name()) {
+        match self.find_type(&path.text()) {
             Some(ti) => {
+                self.check_visible(Res::Type(ti), path.span, &path.text());
                 self.map.uses.insert(path.span, Res::Type(ti));
             }
             None => {
@@ -1063,15 +1229,20 @@ impl<'a> FnResolver<'a> {
                 self.map.uses.insert(p.span, Res::Builtin(b));
                 return;
             }
+            // `task.all` — a function reached through its module.
+            if let Some(fi) = self.find_fn(&text) {
+                self.check_visible(Res::Fn(fi), p.span, &text);
+                self.map.uses.insert(p.span, Res::Fn(fi));
+                return;
+            }
             // `Shape.Circle` — a qualified variant.
-            let owner = &p.segments[p.segments.len() - 2].name;
+            let owner = segments_text(&p.segments[..p.segments.len() - 1]);
             let leaf = &p.last().name;
-            if let Some(ti) = self.map.type_by_name(owner) {
-                if let Some(&(vt, vi)) = self.map.variant_index.get(leaf) {
-                    if vt == ti {
-                        self.map.uses.insert(p.span, Res::Variant(vt, vi));
-                        return;
-                    }
+            if let Some(ti) = self.find_type(&owner) {
+                self.check_visible(Res::Type(ti), p.span, &owner);
+                if let Some(vi) = self.map.variant_of(ti, leaf) {
+                    self.map.uses.insert(p.span, Res::Variant(ti, vi));
+                    return;
                 }
                 // Otherwise it is an associated function such as `Rect.square`,
                 // which the checker resolves against the type's method table.
@@ -1091,7 +1262,7 @@ impl<'a> FnResolver<'a> {
             self.map.uses.insert(p.span, Res::Local(id));
             return;
         }
-        if let Some(id) = self.map.fn_by_name(name) {
+        if let Some(id) = self.find_fn(name) {
             self.map.uses.insert(p.span, Res::Fn(id));
             return;
         }
@@ -1099,7 +1270,7 @@ impl<'a> FnResolver<'a> {
             self.map.uses.insert(p.span, Res::Variant(ty, vi));
             return;
         }
-        if let Some(ti) = self.map.type_by_name(name) {
+        if let Some(ti) = self.find_type(name) {
             self.map.uses.insert(p.span, Res::Type(ti));
             return;
         }
@@ -1129,6 +1300,25 @@ impl<'a> FnResolver<'a> {
         let candidates: Vec<&str> = self.map.types.iter().map(|t| t.name.as_str()).collect();
         nearest(name, &candidates)
     }
+}
+
+/// A run of plain names, dotted. `None` for anything else, which is then an
+/// ordinary field access.
+fn dotted_text(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Path(p) => Some(p.text()),
+        Expr::Field { base, name, .. } => Some(format!("{}.{}", dotted_text(base)?, name.name)),
+        _ => None,
+    }
+}
+
+/// The dotted text of a run of path segments.
+fn segments_text(segments: &[Ident]) -> String {
+    segments
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 fn nearest(name: &str, candidates: &[&str]) -> Option<String> {

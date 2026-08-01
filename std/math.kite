@@ -1,0 +1,62 @@
+// std/math — numbers.
+//
+// Written in Kite, like the rest of the standard library. Nothing here needs
+// compiler support, which is the test a standard library should have to pass.
+
+pub fn abs(x: float) -> float {
+    if x < 0.0 {
+        return 0.0 - x
+    }
+    return x
+}
+
+pub fn min(a: float, b: float) -> float {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+pub fn max(a: float, b: float) -> float {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+pub fn clamp(x: float, low: float, high: float) -> float {
+    return min(max(x, low), high)
+}
+
+/// Truncation towards zero, which is what an `as int` cast does. Casts are
+/// saturating on every backend, so a value out of range gives a number rather
+/// than killing the program.
+pub fn trunc(x: float) -> float {
+    return (x as int) as float
+}
+
+/// Comparisons rather than `t != x`, which would be exact float equality and
+/// warn — rightly, since it is rarely what someone means.
+pub fn floor(x: float) -> float {
+    let t = trunc(x)
+    if t > x {
+        return t - 1.0
+    }
+    return t
+}
+
+pub fn ceil(x: float) -> float {
+    let t = trunc(x)
+    if t < x {
+        return t + 1.0
+    }
+    return t
+}
+
+/// Half away from zero, which is what most people mean by rounding.
+pub fn round(x: float) -> float {
+    if x < 0.0 {
+        return 0.0 - floor(0.0 - x + 0.5)
+    }
+    return floor(x + 0.5)
+}

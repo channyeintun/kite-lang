@@ -8,6 +8,8 @@ use kite_span::{FileId, SourceMap, Span};
 use std::io::Write;
 use std::path::Path;
 
+pub mod modules;
+
 pub use kite_codegen_wasm::{generate_glue, generate_page};
 pub use kite_vm::Trap;
 
@@ -80,11 +82,11 @@ impl Compilation {
 /// It is written in Kite rather than in the compiler. Everything in it is
 /// expressible in the language, which is the point: a standard library needing
 /// compiler support would be evidence that the language was missing something.
+///
+/// The prelude is the one library file whose names arrive **unqualified**:
+/// `map`, `filter`, `Display`. Everything else is a module, reached through
+/// `use` and written qualified at every use site.
 pub const PRELUDE: &str = include_str!("../../../std/prelude.kite");
-
-/// The layout engine. Also written in Kite, and also pruned away entirely by
-/// any program that does not use it.
-pub const UI: &str = include_str!("../../../std/ui.kite");
 
 /// Compile one file's text.
 pub fn compile(path: impl AsRef<Path>, src: &str, emit: Emit) -> Compilation {
@@ -92,22 +94,30 @@ pub fn compile(path: impl AsRef<Path>, src: &str, emit: Emit) -> Compilation {
     // The prelude is added first, so its spans and the user's never collide and
     // a diagnostic inside it says which file it came from.
     let prelude = sources.add("<prelude>", PRELUDE);
-    let ui = sources.add("<ui>", UI);
-    let file = sources.add(path.as_ref(), src);
+    let path = path.as_ref().to_path_buf();
+    let file = sources.add(&path, src);
     let mut diags = DiagBag::new();
     let (output, chunk, wasm) =
-        run_passes(prelude, ui, file, &sources, emit, &mut diags);
+        run_passes(prelude, file, &path, &mut sources, emit, &mut diags);
 
     let mut c = Compilation { sources, diags, output, chunk, wasm };
+    // The standard library's own advice is not the user's to act on.
+    let library: Vec<FileId> = c
+        .sources
+        .iter()
+        .filter(|(_, name)| name.starts_with('<') && name.ends_with('>'))
+        .map(|(id, _)| id)
+        .collect();
+    c.diags.silence_warnings_in(|f| library.contains(&f));
     c.diags.sort(&c.sources);
     c
 }
 
 fn run_passes(
     prelude: FileId,
-    ui: FileId,
     file: FileId,
-    sources: &SourceMap,
+    path: &Path,
+    sources: &mut SourceMap,
     emit: Emit,
     diags: &mut DiagBag,
 ) -> (
@@ -115,38 +125,29 @@ fn run_passes(
     Option<kite_codegen_kbc::Chunk>,
     Option<kite_codegen_wasm::WasmModule>,
 ) {
-    let src = sources.text(file);
-    let tokens = kite_lexer::tokenize(file, src, diags);
-    let mut ast = kite_parser::parse(file, src, &tokens, diags);
+    let src = sources.text(file).to_string();
+    let tokens = kite_lexer::tokenize(file, &src, diags);
+    let mut ast = kite_parser::parse(file, &src, &tokens, diags);
 
     if emit == Emit::Ast {
         return (format!("{:#?}\n", ast), None, None);
     }
 
+    // Modules the program reaches, transitively. Nothing is compiled that
+    // nothing asked for, which is what keeps a `hello world` from carrying the
+    // standard library.
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+    let loader = modules::Loader::load(&ast, dir, sources, diags);
+
+    // Every item's module, aligned with the merged item list. The program's own
+    // items and the prelude's are the root module.
+    let mut item_modules: Vec<String> = vec![String::new(); ast.items.len()];
+
     // The prelude's declarations join the program as ordinary ones, except
     // where the program declares the same name. A prelude that could not be
-    // shadowed would make every name in it permanently unusable — and there is
-    // no module system yet to qualify one, so the program's own definition
-    // simply wins.
-    // The prelude is always in scope. The layout engine is not: it declares
-    // types with ordinary names — `Size`, `Rect`, `Node` — and a program that
-    // never mentions layout should not have to avoid them. `use std/ui` is
-    // what asks for it.
-    //
-    // This is file-level opt-in, not a module system: the names it brings are
-    // unqualified, and a program cannot ask for some of them and not others.
-    // Real modules are the next piece of Phase 6.
-    let wants_ui = ast
-        .uses
-        .iter()
-        .any(|u| u.path.len() == 2 && u.path[0].name == "std" && u.path[1].name == "ui");
-    let library: Vec<FileId> =
-        if wants_ui { vec![prelude, ui] } else { vec![prelude] };
-
-    // A program's own names take precedence, silently: that is what shadowing
-    // a prelude means. One library shadowing another is a different thing
-    // entirely — a bug in the standard library, where the shadowed declaration
-    // is still being called by its own file — so that is reported.
+    // shadowed would make every name in it permanently unusable, so the
+    // program's own definition simply wins — silently, because that is what a
+    // prelude is for.
     let own: std::collections::HashSet<String> = ast
         .items
         .iter()
@@ -156,10 +157,10 @@ fn run_passes(
     let mut from_library: std::collections::HashMap<String, Span> =
         std::collections::HashMap::new();
 
-    for id in &library {
-        let text = sources.text(*id);
-        let tokens = kite_lexer::tokenize(*id, text, diags);
-        let parsed = kite_parser::parse(*id, text, &tokens, diags);
+    {
+        let text = sources.text(prelude).to_string();
+        let tokens = kite_lexer::tokenize(prelude, &text, diags);
+        let parsed = kite_parser::parse(prelude, &text, &tokens, diags);
         let mut keep = Vec::with_capacity(parsed.items.len());
         for item in parsed.items {
             let Some(name) = item.declared_name().map(|s| s.to_string()) else {
@@ -169,6 +170,9 @@ fn run_passes(
             if own.contains(&name) {
                 continue;
             }
+            // One prelude declaration shadowing another is a bug in the
+            // standard library: the first file is left calling a name that no
+            // longer means what it did.
             if let Some(first) = from_library.get(&name) {
                 diags.push(
                     kite_diag::Diagnostic::error(
@@ -187,13 +191,32 @@ fn run_passes(
             from_library.insert(name, item.span());
             keep.push(item);
         }
+        item_modules.extend(std::iter::repeat_n(String::new(), keep.len()));
         ast.items.extend(keep);
+    }
+
+    // Each module's declarations are merged qualified, so `load` in module
+    // `config` is declared as `config.load` — unforgeable as an identifier,
+    // and exactly what an importer writes.
+    for module in &loader.loaded {
+        for id in &module.files {
+            let text = sources.text(*id).to_string();
+            let tokens = kite_lexer::tokenize(*id, &text, diags);
+            let mut parsed = kite_parser::parse(*id, &text, &tokens, diags);
+            modules::qualify_items(&module.name, &mut parsed.items);
+            item_modules.extend(std::iter::repeat_n(module.name.clone(), parsed.items.len()));
+            ast.items.extend(parsed.items);
+        }
     }
 
     // Resolution and checking still run after a syntax error — the parser
     // recovers, so later passes can report their own findings on the parts that
     // did parse. Code generation does not, because its input would be poisoned.
-    let resolved = kite_resolve::resolve(&ast, diags);
+    let module_map = kite_resolve::Modules {
+        of_item: item_modules,
+        aliases: loader.aliases.clone(),
+    };
+    let resolved = kite_resolve::resolve_modules(&ast, module_map, diags);
     let mut hir = kite_types::check(&ast, &resolved, sources, diags);
 
     if emit == Emit::Hir {

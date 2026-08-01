@@ -1,0 +1,33 @@
+// Modules.
+//
+// A module is a directory: `inventory/` holds two files that share one
+// namespace. An importer always writes the module name, so `inventory.total`
+// says where `total` came from — there is no wildcard import and no way to
+// bring a bare name into scope.
+
+use inventory
+use std/math as m
+
+fn main() {
+    let items = [
+        inventory.item("bolt", 3, 100),
+        inventory.item("nut", 1, 4),
+        inventory.item("washer", 1, 2),
+    ]
+
+    io.print("stock value: \(inventory.total(items))")
+
+    // A module's own name may be spelled differently at the use site, but it
+    // must still be spelled.
+    io.print("rounded average: \(m.round(inventory.total(items) as float / 3.0))")
+
+    let low = inventory.restock(items, 10)
+    for it in low {
+        io.print("reorder \(it.name) (\(it.count) left)")
+    }
+
+    // A type from a module is qualified too, and may share a name with one of
+    // the program's own.
+    let one: inventory.Item = inventory.item("spare", 5, 1)
+    io.print("\(one.name) costs \(one.price)")
+}

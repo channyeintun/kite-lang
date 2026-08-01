@@ -56,6 +56,9 @@ pub fn check(
     // Now fill in fields and variants, resolving their types against the
     // arena, which already knows every name.
     for (i, decl) in resolved.types.iter().enumerate() {
+        // Types named inside a module mean that module's, so its own name is
+        // tried first everywhere a type is written.
+        let module = resolved.module_of_item(decl.decl_index);
         // A declaration's own `<T, U>` is in scope for its fields.
         let own_generics = match &file.items[decl.decl_index] {
             ast::Item::Struct(s) => &s.generics,
@@ -63,7 +66,7 @@ pub fn check(
             ast::Item::Trait(tr) => &tr.generics,
             _ => &[][..],
         };
-        let defs = declare_generics(own_generics, resolved, &type_ids, &mut types, diags);
+        let defs = declare_generics(own_generics, resolved, module, &type_ids, &mut types, diags);
         let generics: &[(String, TyId)] =
             &defs.iter().map(|g| (g.name.clone(), g.ty)).collect::<Vec<_>>();
         match type_ids[i] {
@@ -84,7 +87,7 @@ pub fn check(
                                     .map(|f| kite_hir::FieldDef {
                                         name: f.name.name.clone(),
                                         ty: resolve_named_ty(
-                                            &f.ty, resolved, &type_ids, generics, &mut types, diags,
+                                            &f.ty, resolved, module, &type_ids, generics, &mut types, diags,
                                         ),
                                         mutable: false,
                                         is_pub: true,
@@ -99,7 +102,7 @@ pub fn check(
                                     .map(|(i, ty)| kite_hir::FieldDef {
                                         name: i.to_string(),
                                         ty: resolve_named_ty(
-                                            ty, resolved, &type_ids, generics, &mut types, diags,
+                                            ty, resolved, module, &type_ids, generics, &mut types, diags,
                                         ),
                                         mutable: false,
                                         is_pub: true,
@@ -129,13 +132,13 @@ pub fn check(
                             .params
                             .iter()
                             .map(|p| {
-                                resolve_named_ty(&p.ty, resolved, &type_ids, generics, &mut types, diags)
+                                resolve_named_ty(&p.ty, resolved, module, &type_ids, generics, &mut types, diags)
                             })
                             .collect(),
                         ret: match &m.ret {
                             None => TyId::UNIT,
                             Some(r) => resolve_named_ty(
-                                r.value_type(), resolved, &type_ids, generics, &mut types, diags,
+                                r.value_type(), resolved, module, &type_ids, generics, &mut types, diags,
                             ),
                         },
                         takes_self: m.self_param.is_some(),
@@ -151,7 +154,7 @@ pub fn check(
                     .iter()
                     .map(|f| kite_hir::FieldDef {
                         name: f.name.name.clone(),
-                        ty: resolve_named_ty(&f.ty, resolved, &type_ids, generics, &mut types, diags),
+                        ty: resolve_named_ty(&f.ty, resolved, module, &type_ids, generics, &mut types, diags),
                         mutable: f.is_var,
                         is_pub: f.is_pub,
                         span: f.span,
@@ -171,6 +174,7 @@ pub fn check(
     let mut lifted: Vec<hir::Function> = Vec::new();
     let mut sigs = Vec::new();
     for sig in &resolved.fns {
+        let module = resolved.module_of_item(sig.decl_index);
         // A function's own type parameters are in scope for its signature.
         let ast_generics: &[ast::GenericParam] = match sig.owner {
             None => match &file.items[sig.decl_index] {
@@ -184,7 +188,8 @@ pub fn check(
                 _ => &[],
             },
         };
-        let generic_defs = declare_generics(ast_generics, resolved, &type_ids, &mut types, diags);
+        let generic_defs =
+            declare_generics(ast_generics, resolved, module, &type_ids, &mut types, diags);
         let generics: &[(String, TyId)] = &generic_defs
             .iter()
             .map(|g| (g.name.clone(), g.ty))
@@ -197,12 +202,12 @@ pub fn check(
                 let params = f
                     .params
                     .iter()
-                    .map(|p| resolve_named_ty(&p.ty, resolved, &type_ids, generics, &mut types, diags))
+                    .map(|p| resolve_named_ty(&p.ty, resolved, module, &type_ids, generics, &mut types, diags))
                     .collect();
                 let ret = match &f.ret {
                     None => TyId::UNIT,
                     Some(r) => {
-                        resolve_named_ty(r.value_type(), resolved, &type_ids, generics, &mut types, diags)
+                        resolve_named_ty(r.value_type(), resolved, module, &type_ids, generics, &mut types, diags)
                     }
                 };
                 let fallible = f.ret.as_ref().is_some_and(|r| r.is_fallible());
@@ -221,12 +226,12 @@ pub fn check(
                 let params = m
                     .params
                     .iter()
-                    .map(|p| resolve_named_ty(&p.ty, resolved, &type_ids, generics, &mut types, diags))
+                    .map(|p| resolve_named_ty(&p.ty, resolved, module, &type_ids, generics, &mut types, diags))
                     .collect();
                 let ret = match &m.ret {
                     None => TyId::UNIT,
                     Some(r) => {
-                        resolve_named_ty(r.value_type(), resolved, &type_ids, generics, &mut types, diags)
+                        resolve_named_ty(r.value_type(), resolved, module, &type_ids, generics, &mut types, diags)
                     }
                 };
                 let self_ty = if owner.takes_self {
@@ -269,6 +274,7 @@ pub fn check(
     for (i, sig) in resolved.fns.iter().enumerate() {
         let mut checker = Checker {
             resolved,
+            module: resolved.module_of_item(sig.decl_index).to_string(),
             sigs: &sigs,
             lifted: Vec::new(),
             lifted_base: lifted.len(),
@@ -463,6 +469,7 @@ fn missing_args(p: &ast::TypePath, want: usize, diags: &mut DiagBag) -> TyId {
 fn declare_generics(
     params: &[ast::GenericParam],
     resolved: &ResolveMap,
+    module: &str,
     type_ids: &[Option<TypeTarget>],
     types: &mut Types,
     diags: &mut DiagBag,
@@ -483,7 +490,10 @@ fn declare_generics(
         let ty = types.param_ty(i as u32, &p.name.name);
         let mut bounds = Vec::new();
         for b in &p.bounds {
-            match resolved.type_by_name(b.name()).and_then(|i| type_ids[i as usize]) {
+            match resolved
+                .type_by_name_in(module, &b.text())
+                .and_then(|i| type_ids[i as usize])
+            {
                 Some(TypeTarget::Trait(tr)) => bounds.push(tr),
                 _ => diags.push(
                     Diagnostic::error(
@@ -502,6 +512,9 @@ fn declare_generics(
 
 struct Checker<'a> {
     resolved: &'a ResolveMap,
+    /// The module whose body is being checked. Names written unqualified mean
+    /// this module's first.
+    module: String,
     sigs: &'a [Signature],
     /// Functions lifted out of this function's closure literals.
     lifted: Vec<hir::Function>,
@@ -2071,6 +2084,56 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A call to a named function, reached unqualified or through its module.
+    fn fn_call(
+        &mut self,
+        id: u32,
+        text: &str,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> hir::Expr {
+        let sig_params = self.sigs[id as usize].params.clone();
+        let ret = self.sigs[id as usize].ret;
+        let decl_span = self.sigs[id as usize].name_span;
+        let generics = self.sigs[id as usize].generics.clone();
+
+        if args.len() != sig_params.len() {
+            self.arity_error(text, args.len(), sig_params.len(), span, Some(decl_span));
+        }
+
+        // A generic call works its type arguments out from the arguments
+        // themselves. There is no turbofish, so a parameter that appears in no
+        // parameter type cannot be supplied at all — which is reported rather
+        // than silently defaulted.
+        let mut subst: Vec<Option<TyId>> = vec![None; generics.len()];
+        let mut hargs = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let declared = sig_params.get(i).copied();
+            // An argument is checked against the parameter type only once that
+            // type is fully known; until then it is checked on its own and used
+            // to fill parameters in.
+            let want = declared.and_then(|d| self.apply_subst_opt(d, &subst));
+            let e = self.expr(a, want);
+            let e = self.coerce(e, want);
+            if let Some(d) = declared {
+                self.unify(d, e.ty, &generics, &mut subst, e.span);
+                let expected = self.apply_subst(d, &subst);
+                self.expect_ty(e.ty, expected, e.span, Some(decl_span));
+            }
+            hargs.push(e);
+        }
+
+        let targs = self.finish_subst(&generics, &subst, span);
+        self.check_bounds(&generics, &targs, span);
+        let ret = self.apply_subst(ret, &subst);
+
+        hir::Expr {
+            kind: ExprKind::Call { callee: hir::FnId(id), args: hargs, targs },
+            ty: ret,
+            span,
+        }
+    }
+
     fn call(
         &mut self,
         callee: &ast::Expr,
@@ -2110,6 +2173,10 @@ impl<'a> Checker<'a> {
             {
                 return match self.resolved.lookup_use(*fspan) {
                     Some(Res::Builtin(b)) => self.builtin_call(b, args, span),
+                    // `task.all(…)` — a function reached through its module.
+                    Some(Res::Fn(id)) => {
+                        self.fn_call(id, &format!("{}.{}", expr_text(base), name.name), args, span)
+                    }
                     Some(Res::Type(ti)) => {
                         self.associated_call_named(ti, &name.name, *fspan, args, span, expected)
                     }
@@ -2127,54 +2194,7 @@ impl<'a> Checker<'a> {
         };
 
         match self.resolved.lookup_use(p.span) {
-            Some(Res::Fn(id)) => {
-                let sig_params = self.sigs[id as usize].params.clone();
-                let ret = self.sigs[id as usize].ret;
-                let decl_span = self.sigs[id as usize].name_span;
-                let generics = self.sigs[id as usize].generics.clone();
-
-                if args.len() != sig_params.len() {
-                    self.arity_error(
-                        &p.text(),
-                        args.len(),
-                        sig_params.len(),
-                        span,
-                        Some(decl_span),
-                    );
-                }
-
-                // A generic call works its type arguments out from the
-                // arguments themselves. There is no turbofish, so a parameter
-                // that appears in no parameter type cannot be supplied at all —
-                // which is reported rather than silently defaulted.
-                let mut subst: Vec<Option<TyId>> = vec![None; generics.len()];
-                let mut hargs = Vec::with_capacity(args.len());
-                for (i, a) in args.iter().enumerate() {
-                    let declared = sig_params.get(i).copied();
-                    // An argument is checked against the parameter type only
-                    // once that type is fully known; until then it is checked
-                    // on its own and used to fill parameters in.
-                    let want = declared.and_then(|d| self.apply_subst_opt(d, &subst));
-                    let e = self.expr(a, want);
-                    let e = self.coerce(e, want);
-                    if let Some(d) = declared {
-                        self.unify(d, e.ty, &generics, &mut subst, e.span);
-                        let expected = self.apply_subst(d, &subst);
-                        self.expect_ty(e.ty, expected, e.span, Some(decl_span));
-                    }
-                    hargs.push(e);
-                }
-
-                let targs = self.finish_subst(&generics, &subst, span);
-                self.check_bounds(&generics, &targs, span);
-                let ret = self.apply_subst(ret, &subst);
-
-                hir::Expr {
-                    kind: ExprKind::Call { callee: hir::FnId(id), args: hargs, targs },
-                    ty: ret,
-                    span,
-                }
-            }
+            Some(Res::Fn(id)) => self.fn_call(id, &p.text(), args, span),
 
             Some(Res::Builtin(b)) => self.builtin_call(b, args, span),
 
@@ -2910,7 +2930,7 @@ impl<'a> Checker<'a> {
     /// Resolve a surface type with the module's declarations in view, which is
     /// what lets an annotation name a struct, an enum, or a `dyn Trait`.
     fn resolve_type(&mut self, t: &ast::Type) -> TyId {
-        resolve_named_ty(t, self.resolved, self.type_ids, &self.generics, self.types, self.diags)
+        resolve_named_ty(t, self.resolved, &self.module, self.type_ids, &self.generics, self.types, self.diags)
     }
 
     /// The declared-type index for a `dyn Trait`, used to consult impls.
@@ -5542,6 +5562,9 @@ fn named_ty(target: Option<TypeTarget>, types: &mut Types) -> TyId {
 fn resolve_named_ty(
     t: &ast::Type,
     resolved: &ResolveMap,
+    // The module the reference was written in. Its own declarations win, so
+    // `Node` inside `std/ui.kite` is `ui.Node` without the file saying so.
+    module: &str,
     type_ids: &[Option<TypeTarget>],
     generics: &[(String, TyId)],
     types: &mut Types,
@@ -5552,9 +5575,11 @@ fn resolve_named_ty(
             let args: Vec<TyId> = p
                 .args
                 .iter()
-                .map(|a| resolve_named_ty(a, resolved, type_ids, generics, types, diags))
+                .map(|a| resolve_named_ty(a, resolved, module, type_ids, generics, types, diags))
                 .collect();
-            let target = resolved.type_by_name(p.name()).and_then(|i| type_ids[i as usize]);
+            let target = resolved
+                .type_by_name_in(module, &p.text())
+                .and_then(|i| type_ids[i as usize]);
             match target {
                 Some(TypeTarget::Struct(s)) => {
                     let want = types.struct_def(s).generic_count;
@@ -5585,16 +5610,19 @@ fn resolve_named_ty(
             }
         }
 
-        ast::Type::Path(p) if p.is_simple() => {
+        // A path with no type arguments: a name, possibly module-qualified.
+        ast::Type::Path(p) => {
             // A parameter shadows everything: inside `fn f<T>(...)`, `T` is the
             // parameter even if a type of that name is declared elsewhere.
-            if let Some((_, id)) = generics.iter().find(|(n, _)| n == p.name()) {
-                return *id;
+            if p.is_simple() {
+                if let Some((_, id)) = generics.iter().find(|(n, _)| n == p.name()) {
+                    return *id;
+                }
+                if let Some(prim) = Types::primitive_from_name(p.name()) {
+                    return prim;
+                }
             }
-            if let Some(prim) = Types::primitive_from_name(p.name()) {
-                return prim;
-            }
-            match resolved.type_by_name(p.name()) {
+            match resolved.type_by_name_in(module, &p.text()) {
                 Some(i) => match type_ids[i as usize] {
                     Some(TypeTarget::Trait(_)) => {
                         diags.push(
@@ -5630,22 +5658,22 @@ fn resolve_named_ty(
             }
         }
         ast::Type::Slice { elem, .. } => {
-            let e = resolve_named_ty(elem, resolved, type_ids, generics, types, diags);
+            let e = resolve_named_ty(elem, resolved, module, type_ids, generics, types, diags);
             types.slice_of(e)
         }
         ast::Type::Map { key, value, .. } => {
-            let k = resolve_named_ty(key, resolved, type_ids, generics, types, diags);
-            let v = resolve_named_ty(value, resolved, type_ids, generics, types, diags);
+            let k = resolve_named_ty(key, resolved, module, type_ids, generics, types, diags);
+            let v = resolve_named_ty(value, resolved, module, type_ids, generics, types, diags);
             types.map_of(k, v)
         }
         ast::Type::Optional { inner, .. } => {
-            let i = resolve_named_ty(inner, resolved, type_ids, generics, types, diags);
+            let i = resolve_named_ty(inner, resolved, module, type_ids, generics, types, diags);
             types.optional_of(i)
         }
         ast::Type::Tuple { elems, .. } => {
             let es: Vec<TyId> = elems
                 .iter()
-                .map(|e| resolve_named_ty(e, resolved, type_ids, generics, types, diags))
+                .map(|e| resolve_named_ty(e, resolved, module, type_ids, generics, types, diags))
                 .collect();
             if es.is_empty() {
                 TyId::UNIT
@@ -5656,15 +5684,15 @@ fn resolve_named_ty(
         ast::Type::Fn { params, ret, .. } => {
             let ps: Vec<TyId> = params
                 .iter()
-                .map(|p| resolve_named_ty(p, resolved, type_ids, generics, types, diags))
+                .map(|p| resolve_named_ty(p, resolved, module, type_ids, generics, types, diags))
                 .collect();
             let r = match ret {
-                Some(r) => resolve_named_ty(r, resolved, type_ids, generics, types, diags),
+                Some(r) => resolve_named_ty(r, resolved, module, type_ids, generics, types, diags),
                 None => TyId::UNIT,
             };
             types.fn_of(ps, r)
         }
-        ast::Type::Dyn { path, span } => match resolved.type_by_name(path.name()) {
+        ast::Type::Dyn { path, span } => match resolved.type_by_name_in(module, &path.text()) {
             Some(i) => match type_ids[i as usize] {
                 Some(TypeTarget::Trait(tr)) => {
                     check_object_safe(tr, *span, types, diags);
@@ -5762,6 +5790,15 @@ fn resolve_ty(t: &ast::Type, types: &mut Types, diags: &mut DiagBag) -> TyId {
             TyId::ERROR
         }
         ast::Type::Error(_) => TyId::ERROR,
+    }
+}
+
+/// A dotted name's text, for diagnostics about a qualified call.
+fn expr_text(e: &ast::Expr) -> String {
+    match e {
+        ast::Expr::Path(p) => p.text(),
+        ast::Expr::Field { base, name, .. } => format!("{}.{}", expr_text(base), name.name),
+        _ => "…".to_string(),
     }
 }
 

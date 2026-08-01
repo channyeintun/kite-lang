@@ -146,6 +146,15 @@ impl SourceMap {
         &self.files[id.0 as usize]
     }
 
+    /// Every file, with its display name. The driver uses this to tell the
+    /// program's own source from the standard library's.
+    pub fn iter(&self) -> impl Iterator<Item = (FileId, String)> + '_ {
+        self.files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (FileId(i as u32), f.name.display().to_string()))
+    }
+
     pub fn text(&self, id: FileId) -> &str {
         &self.file(id).text
     }

@@ -154,27 +154,27 @@ fn main() {
     (
         "clipping-and-scrolling",
         "use std/ui\n\
-         fn rows() -> Node {\n  var out: [Node] = []\n\
+         fn rows() -> ui.Node {\n  var out: [ui.Node] = []\n\
          \x20 for i in 0..8 {\n\
-         \x20   out.push(text_of(\"r\\(i)\", Style{..style(), width: 100.0}, \"row \\(i)\"))\n  }\n\
-         \x20 return box_of(\"list\", Style{..column(), align: Align.Stretch}, out)\n}\n\
+         \x20   out.push(ui.text_of(\"r\\(i)\", ui.Style{..ui.style(), width: 100.0}, \"row \\(i)\"))\n  }\n\
+         \x20 return ui.box_of(\"list\", ui.Style{..ui.column(), align: ui.Align.Stretch}, out)\n}\n\
          fn main() {\n\
-         \x20 let v = Rect{x: 0.0, y: 0.0, width: 100.0, height: 50.0}\n\
-         \x20 let box = Size{width: 100.0, height: 50.0}\n\
-         \x20 let f = layout(rows(), box)\n\
-         \x20 io.print(\"extent \\(scroll_extent(f, box))\")\n\
-         \x20 io.print(clamp_scroll(-10.0, f, box))\n\
-         \x20 io.print(clamp_scroll(9999.0, f, box))\n\
-         \x20 var paints: [Paint] = []\n\
+         \x20 let v = ui.Rect{x: 0.0, y: 0.0, width: 100.0, height: 50.0}\n\
+         \x20 let box = ui.Size{width: 100.0, height: 50.0}\n\
+         \x20 let f = ui.layout(rows(), box)\n\
+         \x20 io.print(\"extent \\(ui.scroll_extent(f, box))\")\n\
+         \x20 io.print(ui.clamp_scroll(-10.0, f, box))\n\
+         \x20 io.print(ui.clamp_scroll(9999.0, f, box))\n\
+         \x20 var paints: [ui.Paint] = []\n\
          \x20 for i in 0..8 {\n\
-         \x20   paints.push(filled_label(\"r\\(i)\", \"row \\(i)\", 0x111111, 0xeeeeee))\n  }\n\
-         \x20 paint_scrolled(f, paints, v, 0.0)\n\
-         \x20 paint_scrolled(f, paints, v, 40.0)\n\
-         \x20 let a = hit_scrolled(f, v, 0.0, 10.0, 10.0)\n\
+         \x20   paints.push(ui.filled_label(\"r\\(i)\", \"row \\(i)\", 0x111111, 0xeeeeee))\n  }\n\
+         \x20 ui.paint_scrolled(f, paints, v, 0.0)\n\
+         \x20 ui.paint_scrolled(f, paints, v, 40.0)\n\
+         \x20 let a = ui.hit_scrolled(f, v, 0.0, 10.0, 10.0)\n\
          \x20 io.print(if a == nil { \"none\" } else { a.name })\n\
-         \x20 let b = hit_scrolled(f, v, 40.0, 10.0, 10.0)\n\
+         \x20 let b = ui.hit_scrolled(f, v, 40.0, 10.0, 10.0)\n\
          \x20 io.print(if b == nil { \"none\" } else { b.name })\n\
-         \x20 let c = hit_scrolled(f, v, 0.0, 500.0, 500.0)\n\
+         \x20 let c = ui.hit_scrolled(f, v, 0.0, 500.0, 500.0)\n\
          \x20 io.print(if c == nil { \"none\" } else { c.name })\n}\n",
     ),
     (
@@ -201,12 +201,12 @@ fn main() {
          fn main() {\n\
          \x20 let body = \"The quick brown fox jumps over the lazy dog\"\n\
          \x20 for w in [100.0, 200.0, 400.0, 1000.0] {\n\
-         \x20   let lines = wrap(body, w)\n\
-         \x20   io.print(\"\\(w): \\(lines.len()) lines, \\(wrapped_size(body, w).width)\")\n\
+         \x20   let lines = ui.wrap(body, w)\n\
+         \x20   io.print(\"\\(w): \\(lines.len()) lines, \\(ui.wrapped_size(body, w).width)\")\n\
          \x20   for line in lines {\n      io.print(\"|\\(line)|\")\n    }\n  }\n\
-         \x20 io.print(wrap(\"\", 100.0).len())\n\
-         \x20 io.print(wrap(\"supercalifragilistic\", 20.0).len())\n\
-         \x20 io.print(wrap(\"  spaced   out  \", 1000.0)[0])\n}\n",
+         \x20 io.print(ui.wrap(\"\", 100.0).len())\n\
+         \x20 io.print(ui.wrap(\"supercalifragilistic\", 20.0).len())\n\
+         \x20 io.print(ui.wrap(\"  ui.spaced   out  \", 1000.0)[0])\n}\n",
     ),
     (
         "strings",
@@ -290,27 +290,27 @@ fn main() {
     (
         "clipping-and-scrolling",
         "use std/ui\n\
-         fn rows() -> Node {\n  var out: [Node] = []\n\
+         fn rows() -> ui.Node {\n  var out: [ui.Node] = []\n\
          \x20 for i in 0..8 {\n\
-         \x20   out.push(text_of(\"r\\(i)\", Style{..style(), width: 100.0}, \"row \\(i)\"))\n  }\n\
-         \x20 return box_of(\"list\", Style{..column(), align: Align.Stretch}, out)\n}\n\
+         \x20   out.push(ui.text_of(\"r\\(i)\", ui.Style{..ui.style(), width: 100.0}, \"row \\(i)\"))\n  }\n\
+         \x20 return ui.box_of(\"list\", ui.Style{..ui.column(), align: ui.Align.Stretch}, out)\n}\n\
          fn main() {\n\
-         \x20 let v = Rect{x: 0.0, y: 0.0, width: 100.0, height: 50.0}\n\
-         \x20 let box = Size{width: 100.0, height: 50.0}\n\
-         \x20 let f = layout(rows(), box)\n\
-         \x20 io.print(\"extent \\(scroll_extent(f, box))\")\n\
-         \x20 io.print(clamp_scroll(-10.0, f, box))\n\
-         \x20 io.print(clamp_scroll(9999.0, f, box))\n\
-         \x20 var paints: [Paint] = []\n\
+         \x20 let v = ui.Rect{x: 0.0, y: 0.0, width: 100.0, height: 50.0}\n\
+         \x20 let box = ui.Size{width: 100.0, height: 50.0}\n\
+         \x20 let f = ui.layout(rows(), box)\n\
+         \x20 io.print(\"extent \\(ui.scroll_extent(f, box))\")\n\
+         \x20 io.print(ui.clamp_scroll(-10.0, f, box))\n\
+         \x20 io.print(ui.clamp_scroll(9999.0, f, box))\n\
+         \x20 var paints: [ui.Paint] = []\n\
          \x20 for i in 0..8 {\n\
-         \x20   paints.push(filled_label(\"r\\(i)\", \"row \\(i)\", 0x111111, 0xeeeeee))\n  }\n\
-         \x20 paint_scrolled(f, paints, v, 0.0)\n\
-         \x20 paint_scrolled(f, paints, v, 40.0)\n\
-         \x20 let a = hit_scrolled(f, v, 0.0, 10.0, 10.0)\n\
+         \x20   paints.push(ui.filled_label(\"r\\(i)\", \"row \\(i)\", 0x111111, 0xeeeeee))\n  }\n\
+         \x20 ui.paint_scrolled(f, paints, v, 0.0)\n\
+         \x20 ui.paint_scrolled(f, paints, v, 40.0)\n\
+         \x20 let a = ui.hit_scrolled(f, v, 0.0, 10.0, 10.0)\n\
          \x20 io.print(if a == nil { \"none\" } else { a.name })\n\
-         \x20 let b = hit_scrolled(f, v, 40.0, 10.0, 10.0)\n\
+         \x20 let b = ui.hit_scrolled(f, v, 40.0, 10.0, 10.0)\n\
          \x20 io.print(if b == nil { \"none\" } else { b.name })\n\
-         \x20 let c = hit_scrolled(f, v, 0.0, 500.0, 500.0)\n\
+         \x20 let c = ui.hit_scrolled(f, v, 0.0, 500.0, 500.0)\n\
          \x20 io.print(if c == nil { \"none\" } else { c.name })\n}\n",
     ),
     (
@@ -337,12 +337,12 @@ fn main() {
          fn main() {\n\
          \x20 let body = \"The quick brown fox jumps over the lazy dog\"\n\
          \x20 for w in [100.0, 200.0, 400.0, 1000.0] {\n\
-         \x20   let lines = wrap(body, w)\n\
-         \x20   io.print(\"\\(w): \\(lines.len()) lines, \\(wrapped_size(body, w).width)\")\n\
+         \x20   let lines = ui.wrap(body, w)\n\
+         \x20   io.print(\"\\(w): \\(lines.len()) lines, \\(ui.wrapped_size(body, w).width)\")\n\
          \x20   for line in lines {\n      io.print(\"|\\(line)|\")\n    }\n  }\n\
-         \x20 io.print(wrap(\"\", 100.0).len())\n\
-         \x20 io.print(wrap(\"supercalifragilistic\", 20.0).len())\n\
-         \x20 io.print(wrap(\"  spaced   out  \", 1000.0)[0])\n}\n",
+         \x20 io.print(ui.wrap(\"\", 100.0).len())\n\
+         \x20 io.print(ui.wrap(\"supercalifragilistic\", 20.0).len())\n\
+         \x20 io.print(ui.wrap(\"  ui.spaced   out  \", 1000.0)[0])\n}\n",
     ),
     (
         "strings",
@@ -677,7 +677,13 @@ fn main() {
 ];
 
 fn run_on_vm(name: &str, src: &str) -> String {
-    let c = compile(format!("{}.kite", name), src, Emit::Check);
+    run_on_vm_at(&format!("{}.kite", name), name, src)
+}
+
+/// Compile from a real path, so a program's own modules — which are sibling
+/// files and directories — can be found.
+fn run_on_vm_at(path: &str, name: &str, src: &str) -> String {
+    let c = compile(path, src, Emit::Check);
     assert!(
         !c.failed(),
         "{} does not compile:\n{}",
@@ -698,7 +704,11 @@ fn node_available() -> bool {
 }
 
 fn run_on_wasm(name: &str, src: &str, dir: &std::path::Path) -> String {
-    let c = compile(format!("{}.kite", name), src, Emit::Wasm);
+    run_on_wasm_at(&format!("{}.kite", name), name, src, dir)
+}
+
+fn run_on_wasm_at(path: &str, name: &str, src: &str, dir: &std::path::Path) -> String {
+    let c = compile(path, src, Emit::Wasm);
     assert!(
         !c.failed(),
         "{} does not compile to wasm:\n{}",
@@ -766,19 +776,20 @@ fn every_example_agrees_across_backends() {
         std::fs::create_dir_all(&dir).expect("create work directory");
 
         // Every example must at least run on the bytecode target.
-        let vm = run_on_vm(&name, &src);
+        let full = path.to_string_lossy().to_string();
+        let vm = run_on_vm_at(&full, &name, &src);
         total += 1;
 
         // The Wasm target still refuses a few constructs. Those examples are
         // counted as skipped rather than silently passing, so the count below
         // fails if coverage ever goes backwards.
-        let compiled = compile(format!("{}.kite", name), &src, Emit::Wasm);
+        let compiled = compile(&full, &src, Emit::Wasm);
         if compiled.failed() {
             skipped.push(name);
             continue;
         }
 
-        let wasm = run_on_wasm(&name, &src, &dir);
+        let wasm = run_on_wasm_at(&full, &name, &src, &dir);
         if vm != wasm {
             mismatches.push(format!("{}:\n  vm:   {:?}\n  wasm: {:?}", name, vm, wasm));
         }

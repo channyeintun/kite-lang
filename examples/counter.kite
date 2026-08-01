@@ -23,14 +23,14 @@ pub fn init() -> Model {
   return Model{count: 0, last: "nothing yet"}
 }
 
-fn tile(name: str, caption: str, width: float) -> Node {
-  return text_of(name, padded(sized(style(), width, 32.0), 8.0), caption)
+fn tile(name: str, caption: str, width: float) -> ui.Node {
+  return ui.text_of(name, ui.padded(ui.sized(ui.style(), width, 32.0), 8.0), caption)
 }
 
-fn ui_of(model: Model) -> Node {
-  let controls = box_of(
+fn ui_of(model: Model) -> ui.Node {
+  let controls = ui.box_of(
     "controls",
-    spaced(Style{..row(), align: Align.Center}, 8.0),
+    ui.spaced(ui.Style{..ui.row(), align: ui.Align.Center}, 8.0),
     [
       tile("minus", "  -  ", 48.0),
       tile("count", "\(model.count)", 96.0),
@@ -39,38 +39,38 @@ fn ui_of(model: Model) -> Node {
     ],
   )
 
-  return box_of(
+  return ui.box_of(
     "app",
-    spaced(padded(Style{..column(), align: Align.Start}, 16.0), 12.0),
+    ui.spaced(ui.padded(ui.Style{..ui.column(), align: ui.Align.Start}, 16.0), 12.0),
     [
-      text_of("title", style(), "Counter"),
+      ui.text_of("title", ui.style(), "Counter"),
       controls,
-      text_of("status", style(), "last action: \(model.last)"),
-      text_of("hint", style(), "click, or press + - r; the model lives inside the module"),
+      ui.text_of("status", ui.style(), "last action: \(model.last)"),
+      ui.text_of("hint", ui.style(), "click, or press + - r; the model lives inside the module"),
     ],
   )
 }
 
-fn palette(model: Model) -> [Paint] {
+fn palette(model: Model) -> [ui.Paint] {
   let accent = if model.count > 0 { 0x3b82f6 } else { 0x2a2f3a }
   return [
-    fill("app", 0x14161a),
-    label("title", "Counter", 0xf5f7fa),
-    filled_label("minus", "  -  ", 0x2a2f3a, 0xc9d1dc),
-    filled_label("count", "\(model.count)", accent, 0xffffff),
-    filled_label("plus", "  +  ", 0x2a2f3a, 0xc9d1dc),
-    filled_label("reset", " reset ", 0x3a2a2a, 0xdcc9c9),
-    label("status", "last action: \(model.last)", 0x8b93a1),
-    label("hint", "click, or press + - r; the model lives inside the module", 0x5c6472),
+    ui.fill("app", 0x14161a),
+    ui.label("title", "Counter", 0xf5f7fa),
+    ui.filled_label("minus", "  -  ", 0x2a2f3a, 0xc9d1dc),
+    ui.filled_label("count", "\(model.count)", accent, 0xffffff),
+    ui.filled_label("plus", "  +  ", 0x2a2f3a, 0xc9d1dc),
+    ui.filled_label("reset", " reset ", 0x3a2a2a, 0xdcc9c9),
+    ui.label("status", "last action: \(model.last)", 0x8b93a1),
+    ui.label("hint", "click, or press + - r; the model lives inside the module", 0x5c6472),
   ]
 }
 
-fn frames_of(model: Model) -> [Frame] {
-  return layout(ui_of(model), Size{width: 640.0, height: 240.0})
+fn frames_of(model: Model) -> [ui.Frame] {
+  return ui.layout(ui_of(model), ui.Size{width: 640.0, height: 240.0})
 }
 
 pub fn view(model: Model) {
-  paint(frames_of(model), palette(model))
+  ui.paint(frames_of(model), palette(model))
 }
 
 /// The only way the model changes.
@@ -83,7 +83,7 @@ pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
   if event == 0 {
     // A guard clause narrows for the rest of the block, so `target` reads as a
     // `Frame` below without being unwrapped.
-    let target = hit(frames_of(model), x, y)
+    let target = ui.hit(frames_of(model), x, y)
     if target == nil {
       return model
     }

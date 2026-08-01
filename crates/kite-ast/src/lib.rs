@@ -334,6 +334,16 @@ impl TypePath {
         &self.segments.last().expect("type path is never empty").name
     }
 
+    /// Dotted rendering, which is also how a module-qualified declaration is
+    /// named once modules are merged: `ui.Node` is literally the declared name.
+    pub fn text(&self) -> String {
+        self.segments
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
     pub fn is_simple(&self) -> bool {
         self.segments.len() == 1 && self.args.is_empty()
     }

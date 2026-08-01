@@ -1,0 +1,21 @@
+// One file of the `inventory` module.
+//
+// Every `.kite` file in a directory contributes to the same namespace, so this
+// file and `stock.kite` see each other's names unqualified and neither imports
+// the other. There is no header/implementation split and no per-file import.
+
+pub struct Item {
+    pub name: str
+    pub price: int
+    pub count: int
+}
+
+pub fn item(name: str, price: int, count: int) -> Item {
+    return Item{name: name, price: price, count: count}
+}
+
+// Unmarked, so it is private to this module: a program that imports
+// `inventory` cannot call it, and E0401 says why.
+fn line_total(it: Item) -> int {
+    return it.price * it.count
+}
