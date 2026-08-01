@@ -199,6 +199,49 @@ fn main() {
          \x20 let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })\n}\n",
     ),
     (
+        "generics",
+        "fn first<T>(xs: [T]) -> Option<T> {\n  if xs.len() == 0 {\n    return nil\n  }\n\
+         \x20 return xs[0]\n}\n\
+         fn pair<A, B>(a: A, b: B) -> (A, B) {\n  return (a, b)\n}\n\
+         fn count<T>(xs: [T]) -> int {\n  var n = 0\n  for x in xs {\n    n += 1\n  }\n\
+         \x20 return n\n}\n\
+         fn main() {\n\
+         \x20 let a = first([10, 20, 30])\n  io.print(if a == nil { -1 } else { a })\n\
+         \x20 let b = first([\"x\", \"y\"])\n  io.print(if b == nil { \"none\" } else { b })\n\
+         \x20 let e: [int] = []\n  let c = first(e)\n\
+         \x20 io.print(if c == nil { -1 } else { c })\n\
+         \x20 match pair(1, \"one\") {\n    (x, y) => io.print(\"\\(x) is \\(y)\")\n  }\n\
+         \x20 match pair(true, 2.5) {\n    (x, y) => io.print(\"\\(x) and \\(y)\")\n  }\n\
+         \x20 io.print(count([1, 2, 3]))\n  io.print(count([\"a\", \"b\"]))\n\
+         \x20 io.print(count([[1], [2], [3], [4]]))\n}\n",
+    ),
+    (
+        "generic-bounds",
+        "trait Shape {\n  fn area(self) -> int\n}\n\
+         struct Sq {\n  s: int\n}\nstruct Tri {\n  b: int\n  h: int\n}\n\
+         impl Shape for Sq {\n  fn area(self) -> int {\n    return self.s * self.s\n  }\n}\n\
+         impl Shape for Tri {\n  fn area(self) -> int {\n    return self.b * self.h / 2\n  }\n}\n\
+         fn total<T: Shape>(xs: [T]) -> int {\n  var sum = 0\n\
+         \x20 for x in xs {\n    sum = sum + x.area()\n  }\n  return sum\n}\n\
+         fn biggest<T: Shape>(a: T, b: T) -> int {\n\
+         \x20 return if a.area() > b.area() { a.area() } else { b.area() }\n}\n\
+         fn main() {\n\
+         \x20 io.print(total([Sq{s: 2}, Sq{s: 3}]))\n\
+         \x20 io.print(total([Tri{b: 4, h: 6}, Tri{b: 2, h: 2}]))\n\
+         \x20 io.print(biggest(Sq{s: 5}, Sq{s: 4}))\n\
+         \x20 io.print(biggest(Tri{b: 1, h: 2}, Tri{b: 10, h: 10}))\n}\n",
+    ),
+    (
+        "generics-nested",
+        "fn ident<T>(x: T) -> T {\n  return x\n}\n\
+         fn twice<T>(x: T) -> [T] {\n  return [ident(x), ident(x)]\n}\n\
+         fn depth<T>(xs: [T]) -> int {\n  return xs.len()\n}\n\
+         fn main() {\n\
+         \x20 io.print(ident(7))\n  io.print(ident(\"s\"))\n  io.print(ident(true))\n\
+         \x20 io.print(depth(twice(1)))\n  io.print(depth(twice(\"a\")))\n\
+         \x20 io.print(depth(twice(twice(1))))\n}\n",
+    ),
+    (
         "interpolation",
         "fn main() {\n  let name = \"world\"\n  let n = 42\n  let pi = 2.5\n  let ok = true\n\
          \x20 io.print(\"hello, \\(name)!\")\n\

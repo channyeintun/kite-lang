@@ -1,0 +1,470 @@
+//! Monomorphisation: a generic function becomes one copy per set of type
+//! arguments actually used.
+//!
+//! Kite specialises rather than boxing because the whole point of a type
+//! parameter here is that the concrete type *is* known at the call site — code
+//! that wanted runtime polymorphism would have written `dyn Trait`, which is
+//! already a different and cheaper thing.
+//!
+//! Specialising also means neither backend ever sees a `Param`. MIR lowering,
+//! the bytecode VM and the WebAssembly backend all work on concrete types only,
+//! and none of them needs to know that generics exist.
+//!
+//! This runs on HIR because HIR still has the shape the checker produced.
+//! Substituting here is one pass over expression trees, rather than a
+//! substitution threaded through every step of lowering.
+
+use crate::{Block, Expr, ExprKind, FnId, Function, Local, Pattern, Program, Stmt, TyId, TyKind,
+            Types};
+use std::collections::HashMap;
+
+/// A generic function that instantiates itself with a larger type on each call
+/// never terminates. The cap is far above any real program and low enough that
+/// a runaway stops in well under a second.
+const MAX_INSTANTIATIONS: usize = 4096;
+
+/// Specialise every generic function for the argument sets its callers use, and
+/// drop the templates.
+pub fn monomorphise(program: &mut Program) {
+    if program.fns.iter().all(|f| f.generic_count == 0) {
+        return;
+    }
+    let Program { types, fns, entry, vtables } = program;
+
+    // Non-generic functions keep their bodies and are renumbered; templates are
+    // dropped and replaced by their instantiations.
+    let mut moved: HashMap<u32, u32> = HashMap::new();
+    let mut out: Vec<Function> = Vec::new();
+    for (i, f) in fns.iter().enumerate() {
+        if f.generic_count == 0 {
+            moved.insert(i as u32, out.len() as u32);
+            out.push(f.clone());
+        }
+    }
+
+    let mut made: HashMap<(u32, Vec<TyId>), u32> = HashMap::new();
+    let mut pending: Vec<usize> = (0..out.len()).collect();
+    let mut budget = MAX_INSTANTIATIONS;
+
+    while let Some(index) = pending.pop() {
+        if budget == 0 {
+            break;
+        }
+        budget -= 1;
+        // Take the body so the walk does not borrow `out` while `out` grows.
+        let mut body = std::mem::take(&mut out[index].body);
+        {
+            let mut m = Mono {
+                fns,
+                types,
+                moved: &moved,
+                made: &mut made,
+                out: &mut out,
+                pending: &mut pending,
+            };
+            m.block(&mut body);
+        }
+        out[index].body = body;
+    }
+
+    if let Some(e) = entry {
+        if let Some(new) = moved.get(&e.0) {
+            *e = FnId(*new);
+        }
+    }
+    // A trait method is never generic today, so every vtable entry is a moved
+    // original rather than an instantiation.
+    for v in vtables.iter_mut() {
+        for row in &mut v.entries {
+            for m in &mut row.methods {
+                if let Some(new) = moved.get(&m.0) {
+                    *m = FnId(*new);
+                }
+            }
+        }
+    }
+
+    *fns = out;
+}
+
+struct Mono<'a> {
+    /// The original functions, templates included.
+    fns: &'a [Function],
+    types: &'a mut Types,
+    moved: &'a HashMap<u32, u32>,
+    made: &'a mut HashMap<(u32, Vec<TyId>), u32>,
+    out: &'a mut Vec<Function>,
+    pending: &'a mut Vec<usize>,
+}
+
+impl Mono<'_> {
+    /// The specialisation for a template and its type arguments, creating it if
+    /// this is the first call site to ask.
+    fn instantiate(&mut self, template: u32, targs: &[TyId]) -> u32 {
+        let key = (template, targs.to_vec());
+        if let Some(&existing) = self.made.get(&key) {
+            return existing;
+        }
+        let index = self.out.len() as u32;
+        // Claim the slot before the body is built, so a recursive call to the
+        // same instantiation finds it instead of making a second one.
+        self.made.insert(key, index);
+
+        let source = &self.fns[template as usize];
+        let mut copy = Function {
+            name: specialised_name(&source.name, targs, self.types),
+            is_pub: source.is_pub,
+            is_async: source.is_async,
+            param_count: source.param_count,
+            locals: source
+                .locals
+                .iter()
+                .map(|l| Local { ty: subst(l.ty, targs, self.types), ..l.clone() })
+                .collect(),
+            ret: subst(source.ret, targs, self.types),
+            body: source.body.clone(),
+            span: source.span,
+            // The copy is concrete; there is nothing left to specialise.
+            generic_count: 0,
+        };
+        substitute_block(&mut copy.body, targs, self.types);
+        self.out.push(copy);
+        self.pending.push(index as usize);
+        index
+    }
+
+    fn block(&mut self, b: &mut Block) {
+        for s in &mut b.stmts {
+            self.stmt(s);
+        }
+    }
+
+    fn stmt(&mut self, s: &mut Stmt) {
+        for e in stmt_exprs(s) {
+            self.expr(e);
+        }
+        for b in stmt_blocks(s) {
+            self.block(b);
+        }
+    }
+
+    fn expr(&mut self, e: &mut Expr) {
+        if let ExprKind::Call { callee, targs, .. } = &mut e.kind {
+            if targs.is_empty() {
+                // Not generic: only the renumbering applies.
+                if let Some(new) = self.moved.get(&callee.0) {
+                    *callee = FnId(*new);
+                }
+            } else {
+                let args = std::mem::take(targs);
+                *callee = FnId(self.instantiate(callee.0, &args));
+            }
+        }
+        for c in expr_children(&mut e.kind) {
+            self.expr(c);
+        }
+        for b in expr_blocks(&mut e.kind) {
+            self.block(b);
+        }
+    }
+}
+
+/// A readable name for a specialisation, so a MIR or bytecode dump says which
+/// one it is looking at.
+fn specialised_name(base: &str, targs: &[TyId], types: &Types) -> String {
+    let args: Vec<String> = targs.iter().map(|t| types.name(*t)).collect();
+    format!("{}<{}>", base, args.join(", "))
+}
+
+/// Replace every `Param` with the type argument at its index, rebuilding
+/// composite types around it.
+pub fn subst(ty: TyId, targs: &[TyId], types: &mut Types) -> TyId {
+    match types.kind(ty).clone() {
+        TyKind::Param { index, .. } => targs.get(index as usize).copied().unwrap_or(ty),
+        TyKind::Slice(e) => {
+            let e = subst(e, targs, types);
+            types.slice_of(e)
+        }
+        TyKind::Optional(i) => {
+            let i = subst(i, targs, types);
+            types.optional_of(i)
+        }
+        TyKind::Fallible(v) => {
+            let v = subst(v, targs, types);
+            types.fallible_of(v)
+        }
+        TyKind::Map(k, v) => {
+            let (k, v) = (subst(k, targs, types), subst(v, targs, types));
+            types.map_of(k, v)
+        }
+        TyKind::Tuple(es) => {
+            let es: Vec<TyId> = es.iter().map(|e| subst(*e, targs, types)).collect();
+            types.tuple_of(es)
+        }
+        TyKind::Fn { params, ret } => {
+            let ps: Vec<TyId> = params.iter().map(|p| subst(*p, targs, types)).collect();
+            let r = subst(ret, targs, types);
+            types.fn_of(ps, r)
+        }
+        _ => ty,
+    }
+}
+
+fn substitute_block(b: &mut Block, targs: &[TyId], types: &mut Types) {
+    for s in &mut b.stmts {
+        for e in stmt_exprs(s) {
+            substitute_expr(e, targs, types);
+        }
+        for inner in stmt_blocks(s) {
+            substitute_block(inner, targs, types);
+        }
+    }
+}
+
+fn substitute_expr(e: &mut Expr, targs: &[TyId], types: &mut Types) {
+    e.ty = subst(e.ty, targs, types);
+    match &mut e.kind {
+        // A nested generic call's own type arguments may mention this
+        // function's parameters — `f<T>` calling `g<[T]>` — so they substitute
+        // too, before the call is instantiated.
+        ExprKind::Call { targs: inner, .. } => {
+            for t in inner.iter_mut() {
+                *t = subst(*t, targs, types);
+            }
+        }
+        ExprKind::Match { arms, .. } => {
+            for arm in arms.iter_mut() {
+                substitute_pattern(&mut arm.pattern, targs, types);
+            }
+        }
+        _ => {}
+    }
+    for c in expr_children(&mut e.kind) {
+        substitute_expr(c, targs, types);
+    }
+    for b in expr_blocks(&mut e.kind) {
+        substitute_block(b, targs, types);
+    }
+}
+
+fn substitute_pattern(p: &mut Pattern, targs: &[TyId], types: &mut Types) {
+    match p {
+        Pattern::Tuple { ty, elems } => {
+            *ty = subst(*ty, targs, types);
+            for e in elems {
+                substitute_pattern(e, targs, types);
+            }
+        }
+        Pattern::Variant { fields, .. } | Pattern::Or(fields) => {
+            for f in fields {
+                substitute_pattern(f, targs, types);
+            }
+        }
+        Pattern::Struct { fields, .. } => {
+            for (_, f) in fields {
+                substitute_pattern(f, targs, types);
+            }
+        }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Structural walks
+//
+// Written out rather than derived, and with no catch-all: adding a node to the
+// HIR fails to compile here, which is the only reliable way to keep a walk in
+// step with the tree it walks.
+// ---------------------------------------------------------------------------
+
+fn stmt_exprs(s: &mut Stmt) -> Vec<&mut Expr> {
+    match s {
+        Stmt::Let { init, .. } => init.iter_mut().collect(),
+        Stmt::Assign { value, .. } | Stmt::SlicePush { value, .. } => vec![value],
+        Stmt::SetField { base, value, .. } => vec![base, value],
+        Stmt::SetIndex { base, index, value, .. } => vec![base, index, value],
+        Stmt::MapSet { key, value, .. } => vec![key, value],
+        Stmt::ForSlice { slice, .. } => vec![slice],
+        Stmt::Expr(e) => vec![e],
+        Stmt::Return { value, .. } => value.iter_mut().collect(),
+        Stmt::If { cond, .. } | Stmt::While { cond, .. } => vec![cond],
+        Stmt::ForRange { start, end, .. } => vec![start, end],
+        Stmt::Loop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Block(_) => vec![],
+    }
+}
+
+fn stmt_blocks(s: &mut Stmt) -> Vec<&mut Block> {
+    match s {
+        Stmt::If { then, else_, .. } => {
+            let mut v = vec![then];
+            v.extend(else_.iter_mut());
+            v
+        }
+        Stmt::ForSlice { body, .. }
+        | Stmt::ForRange { body, .. }
+        | Stmt::While { body, .. }
+        | Stmt::Loop { body, .. }
+        | Stmt::Block(body) => vec![body],
+        Stmt::Let { .. }
+        | Stmt::Assign { .. }
+        | Stmt::SetField { .. }
+        | Stmt::SetIndex { .. }
+        | Stmt::SlicePush { .. }
+        | Stmt::MapSet { .. }
+        | Stmt::Expr(_)
+        | Stmt::Return { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. } => vec![],
+    }
+}
+
+fn expr_children(k: &mut ExprKind) -> Vec<&mut Expr> {
+    match k {
+        ExprKind::Call { args, .. }
+        | ExprKind::CallVirtual { args, .. }
+        | ExprKind::CallBuiltin { args, .. }
+        | ExprKind::StructNew { fields: args, .. }
+        | ExprKind::EnumNew { fields: args, .. }
+        | ExprKind::TupleNew { elems: args }
+        | ExprKind::MapNew { entries: args }
+        | ExprKind::SliceNew { elems: args } => args.iter_mut().collect(),
+        ExprKind::ToDyn { value, .. }
+        | ExprKind::ToStr { value }
+        | ExprKind::Unary { operand: value, .. }
+        | ExprKind::IsNil { value }
+        | ExprKind::Wrap { value }
+        | ExprKind::Unwrap { value } => vec![value],
+        ExprKind::FieldGet { base, .. }
+        | ExprKind::PairValue { base }
+        | ExprKind::PairError { base }
+        | ExprKind::ErrorMessage { base }
+        | ExprKind::MapLen { base }
+        | ExprKind::SliceLen { base } => vec![base],
+        ExprKind::ErrorNew { message } => vec![message],
+        ExprKind::Binary { lhs, rhs, .. } => vec![lhs, rhs],
+        ExprKind::PairNew { value, error } => vec![value, error],
+        ExprKind::MapGet { base, key } => vec![base, key],
+        ExprKind::Index { base, index } | ExprKind::SliceGet { base, index } => vec![base, index],
+        ExprKind::If { cond, then, else_ } => vec![cond, then, else_],
+        ExprKind::Match { scrutinee, arms } => {
+            let mut v = vec![&mut **scrutinee];
+            for a in arms.iter_mut() {
+                v.extend(a.guard.iter_mut());
+                v.push(&mut a.body);
+            }
+            v
+        }
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Local(_)
+        | ExprKind::Nil
+        | ExprKind::Block(_)
+        | ExprKind::Error => vec![],
+    }
+}
+
+fn expr_blocks(k: &mut ExprKind) -> Vec<&mut Block> {
+    match k {
+        ExprKind::Block(b) => vec![b],
+        _ => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{FnId, TyId};
+
+    fn template(name: &str, generic_count: usize, ret: TyId) -> Function {
+        Function {
+            name: name.into(),
+            generic_count,
+            is_pub: false,
+            is_async: false,
+            param_count: 0,
+            locals: Vec::new(),
+            ret,
+            body: Block::default(),
+            span: kite_span::Span::new(kite_span::FileId(0), 0, 0),
+        }
+    }
+
+    fn call(callee: u32, targs: Vec<TyId>) -> Expr {
+        Expr {
+            kind: ExprKind::Call { callee: FnId(callee), args: Vec::new(), targs },
+            ty: TyId::UNIT,
+            span: kite_span::Span::new(kite_span::FileId(0), 0, 0),
+        }
+    }
+
+    /// Two call sites with different type arguments produce two functions; a
+    /// third repeating one of them reuses it.
+    #[test]
+    fn one_copy_per_distinct_argument_set() {
+        let mut p = Program::default();
+        let param = p.types.param_ty(0, "T");
+        p.fns.push(template("id", 1, param));
+        let mut main = template("main", 0, TyId::UNIT);
+        main.body.stmts = vec![
+            Stmt::Expr(call(0, vec![TyId::INT])),
+            Stmt::Expr(call(0, vec![TyId::STR])),
+            Stmt::Expr(call(0, vec![TyId::INT])),
+        ];
+        p.fns.push(main);
+        p.entry = Some(FnId(1));
+
+        monomorphise(&mut p);
+
+        // `main` plus two specialisations; the template itself is gone.
+        assert_eq!(p.fns.len(), 3);
+        assert_eq!(p.fns[0].name, "main");
+        assert_eq!(p.entry, Some(FnId(0)));
+        let names: Vec<&str> = p.fns[1..].iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"id<int>"), "got {:?}", names);
+        assert!(names.contains(&"id<str>"), "got {:?}", names);
+
+        // Each copy's return type is its own argument, not the parameter.
+        for f in &p.fns[1..] {
+            assert!(!matches!(p.types.kind(f.ret), TyKind::Param { .. }));
+            assert_eq!(f.generic_count, 0);
+        }
+    }
+
+    /// A program with no generic function is left exactly as it was — including
+    /// its function numbering, which nothing else should have to think about.
+    #[test]
+    fn a_program_without_generics_is_untouched() {
+        let mut p = Program::default();
+        p.fns.push(template("a", 0, TyId::UNIT));
+        p.fns.push(template("b", 0, TyId::INT));
+        p.entry = Some(FnId(1));
+
+        monomorphise(&mut p);
+
+        assert_eq!(p.fns.len(), 2);
+        assert_eq!(p.fns[0].name, "a");
+        assert_eq!(p.entry, Some(FnId(1)));
+    }
+
+    /// Substitution rebuilds composite types around the parameter rather than
+    /// replacing only a bare `T`.
+    #[test]
+    fn substitution_reaches_inside_composites() {
+        let mut types = Types::new();
+        let t = types.param_ty(0, "T");
+        let slice_of_t = types.slice_of(t);
+        let opt = types.optional_of(slice_of_t);
+
+        let concrete = subst(opt, &[TyId::STR], &mut types);
+
+        let TyKind::Optional(inner) = *types.kind(concrete) else {
+            panic!("expected an optional, got {}", types.name(concrete))
+        };
+        let TyKind::Slice(elem) = *types.kind(inner) else {
+            panic!("expected a slice, got {}", types.name(inner))
+        };
+        assert_eq!(elem, TyId::STR);
+    }
+}

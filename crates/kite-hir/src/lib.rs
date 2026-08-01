@@ -11,6 +11,7 @@
 use kite_span::Span;
 use std::fmt;
 
+pub mod mono;
 pub mod ty;
 pub use ty::{
     EnumDef, EnumId, FieldDef, StructDef, StructId, TraitDef, TraitId, TraitMethodDef, TyId,
@@ -101,9 +102,13 @@ impl Program {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Function {
     pub name: String,
+    /// How many type parameters this function declares. Non-zero means it is a
+    /// template: monomorphisation replaces it with one copy per instantiation,
+    /// and no backend ever sees it.
+    pub generic_count: usize,
     pub is_pub: bool,
     pub is_async: bool,
     /// Parameters occupy locals `0..param_count`.
@@ -124,7 +129,7 @@ impl Function {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Local {
     pub name: String,
     pub ty: TyId,
@@ -139,12 +144,12 @@ pub struct Local {
 // Statements
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Stmt {
     /// `let` / `var`. `init` is absent for deferred initialisation.
     Let { local: LocalId, init: Option<Expr>, span: Span },
@@ -194,21 +199,24 @@ pub enum Stmt {
 // Expressions
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Expr {
     pub kind: ExprKind,
     pub ty: TyId,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ExprKind {
     Int(i64),
     Float(f64),
     Str(String),
     Bool(bool),
     Local(LocalId),
-    Call { callee: FnId, args: Vec<Expr> },
+    /// `targs` are the solved type arguments, in declaration order. Empty for
+    /// a call to a function with no type parameters, which is nearly all of
+    /// them — monomorphisation keys on this.
+    Call { callee: FnId, args: Vec<Expr>, targs: Vec<TyId> },
     /// A call through a trait object. `args[0]` is the receiver; which function
     /// runs is decided at run time from its concrete type.
     CallVirtual { trait_id: TraitId, method: u32, args: Vec<Expr> },
@@ -283,7 +291,7 @@ pub enum ExprKind {
     Error,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct MatchArm {
     pub pattern: Pattern,
     /// Locals the pattern binds, in the order the pattern introduces them.
@@ -294,7 +302,7 @@ pub struct MatchArm {
 
 /// A resolved pattern. Names are already bound to local slots, and variants to
 /// positions, so lowering is a mechanical walk.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Pattern {
     /// `_`, and any binding — both match everything. A binding also writes the
     /// scrutinee into its local.
@@ -541,7 +549,7 @@ impl Program {
             ExprKind::Str(s) => format!("{:?}", s),
             ExprKind::Bool(b) => b.to_string(),
             ExprKind::Local(l) => format!("_{}", l.0),
-            ExprKind::Call { callee, args } => {
+            ExprKind::Call { callee, args, .. } => {
                 let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();
                 format!("fn{}({})", callee.0, a.join(", "))
             }

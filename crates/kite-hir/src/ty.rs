@@ -188,6 +188,9 @@ pub struct Types {
     structs: Vec<StructDef>,
     enums: Vec<EnumDef>,
     traits: Vec<TraitDef>,
+    /// Parameter names, interned so a `TyKind` can hold a `&'static str` and
+    /// stay `Hash` — which is what lets the arena deduplicate parameters.
+    param_names: Vec<&'static str>,
 }
 
 impl Default for Types {
@@ -214,7 +217,14 @@ impl Types {
             .enumerate()
             .map(|(i, k)| (k.clone(), TyId(i as u32)))
             .collect();
-        Types { kinds, index, structs: Vec::new(), enums: Vec::new(), traits: Vec::new() }
+        Types {
+            kinds,
+            index,
+            structs: Vec::new(),
+            enums: Vec::new(),
+            traits: Vec::new(),
+            param_names: Vec::new(),
+        }
     }
 
     pub fn intern(&mut self, kind: TyKind) -> TyId {
@@ -268,6 +278,20 @@ impl Types {
 
     pub fn dyn_ty(&mut self, id: TraitId) -> TyId {
         self.intern(TyKind::Dyn(id))
+    }
+
+    /// A generic parameter. Interned by index and name, so the same parameter
+    /// of the same declaration is always the same `TyId`.
+    pub fn param_ty(&mut self, index: u32, name: &str) -> TyId {
+        let name: &'static str = match self.param_names.iter().find(|n| **n == name) {
+            Some(n) => n,
+            None => {
+                let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+                self.param_names.push(leaked);
+                leaked
+            }
+        };
+        self.intern(TyKind::Param { index, name })
     }
 
     pub fn fallible_of(&mut self, value: TyId) -> TyId {

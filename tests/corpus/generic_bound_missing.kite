@@ -1,0 +1,22 @@
+// A bound is what makes a method call on a type parameter legal. Without one,
+// nothing is known about the type.
+
+trait Shape {
+  fn area(self) -> int
+}
+
+struct Blob {
+  n: int
+}
+
+fn total<T>(xs: [T]) -> int {
+  var sum = 0
+  for x in xs {
+    sum = sum + x.area() //~ ERROR E0205
+  }
+  return sum
+}
+
+fn main() {
+  io.print(total([Blob{n: 1}]))
+}

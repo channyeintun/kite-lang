@@ -122,8 +122,19 @@ dispatch on both backends.
 expression by a sub-parser given the file and a byte range, so a syntax error
 inside one points into the string rather than at the whole literal.
 
-**Remaining:** closures and generics with monomorphisation. Both are additive;
-neither changes what already works.
+**Also done:** generics on functions, with monomorphisation. Type arguments
+are inferred from the arguments passed — there is no turbofish — and bounds say
+what a parameter can do. Specialisation happens on HIR, before lowering, so
+neither backend ever sees a `Param`: MIR, the bytecode VM and the Wasm backend
+all work on concrete types and none of them knows generics exist.
+
+One shortcut is worth naming. A method called on a bounded parameter lowers to
+a *virtual* call rather than a direct one. It is correct — after specialisation
+the receiver is concrete and the vtable finds the right body — but the tag
+comparison is avoidable, and devirtualising after monomorphisation is a
+worthwhile follow-up.
+
+**Remaining:** closures, and type parameters on structs, enums and traits.
 
 Four things came out differently from this plan:
 
@@ -406,7 +417,7 @@ none.
 |---|---|
 | 0 — Specification review | ✅ done, and the spec was amended four times by what the code found |
 | 1 — Vertical slice | ✅ complete |
-| 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, trait objects, slices, optionals, tuples, maps, string interpolation. ❌ closures, generics |
+| 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, trait objects, slices, optionals, tuples, maps, interpolation, generic functions with bounds. ❌ closures, generic types |
 | 3 — Error handling | ✅ complete |
 | 4 — WebAssembly backend | ✅ every construct the language has, all nine examples, both backends agreeing. ❌ JS String Builtins (an optimisation, not a gap) |
 | 5 — Concurrency | ❌ not started |

@@ -221,6 +221,7 @@ pub struct FnDecl {
     pub is_pub: bool,
     pub is_async: bool,
     pub name: Ident,
+    pub generics: Vec<GenericParam>,
     pub params: Vec<Param>,
     pub ret: Option<RetType>,
     pub body: Block,

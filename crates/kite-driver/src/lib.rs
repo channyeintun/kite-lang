@@ -108,7 +108,7 @@ fn run_passes(
     // recovers, so later passes can report their own findings on the parts that
     // did parse. Code generation does not, because its input would be poisoned.
     let resolved = kite_resolve::resolve(&ast, diags);
-    let hir = kite_types::check(&ast, &resolved, src, diags);
+    let mut hir = kite_types::check(&ast, &resolved, src, diags);
 
     if emit == Emit::Hir {
         return (hir.to_string(), None, None);
@@ -116,6 +116,10 @@ fn run_passes(
     if diags.has_errors() {
         return (String::new(), None, None);
     }
+
+    // Specialise generic functions before lowering, so no backend ever sees a
+    // type parameter. Nothing after this point knows generics exist.
+    kite_hir::mono::monomorphise(&mut hir);
 
     let mir = kite_mir::lower(&hir);
     if emit == Emit::Mir {

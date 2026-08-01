@@ -1,0 +1,118 @@
+// Generics.
+//
+// A type parameter stands for a type the caller chooses. Kite specialises: the
+// compiler emits one copy of a generic function per set of type arguments
+// actually used, so nothing about a call to `first([int])` is decided at run
+// time and neither backend ever sees a type parameter.
+//
+// Type arguments are worked out from the arguments passed. There is no
+// turbofish — if a parameter cannot be inferred, the signature is asking for
+// something the call site cannot say.
+
+// `T` appears in the parameter type, so a call pins it down.
+pub fn first<T>(items: [T]) -> Option<T> {
+  if items.len() == 0 {
+    return nil
+  }
+  return items[0]
+}
+
+pub fn last<T>(items: [T]) -> Option<T> {
+  if items.len() == 0 {
+    return nil
+  }
+  return items[items.len() - 1]
+}
+
+// Two independent parameters. Each is solved by its own argument.
+pub fn pair<A, B>(a: A, b: B) -> (A, B) {
+  return (a, b)
+}
+
+pub fn repeat<T>(value: T, times: int) -> [T] {
+  var out: [T] = []
+  for i in 0..times {
+    out.push(value)
+  }
+  return out
+}
+
+// A bound says what the parameter can do. Without one, nothing is known about
+// the type and nothing can be called on it — which is the point: the body is
+// checked once, against the bound, not once per instantiation.
+pub trait Drawable {
+  fn area(self) -> int
+  fn name(self) -> str
+}
+
+pub struct Square {
+  pub side: int
+}
+
+pub struct Triangle {
+  pub base: int
+  pub height: int
+}
+
+impl Drawable for Square {
+  fn area(self) -> int {
+    return self.side * self.side
+  }
+  fn name(self) -> str {
+    return "square"
+  }
+}
+
+impl Drawable for Triangle {
+  fn area(self) -> int {
+    return self.base * self.height / 2
+  }
+  fn name(self) -> str {
+    return "triangle"
+  }
+}
+
+pub fn total_area<T: Drawable>(shapes: [T]) -> int {
+  var sum = 0
+  for s in shapes {
+    sum = sum + s.area()
+  }
+  return sum
+}
+
+pub fn largest<T: Drawable>(a: T, b: T) -> T {
+  if a.area() >= b.area() {
+    return a
+  }
+  return b
+}
+
+fn main() {
+  // One function, four specialisations — `int`, `str`, `bool`, and `[int]`.
+  let n = first([3, 1, 4])
+  io.print(if n == nil { -1 } else { n })
+
+  let s = last(["alpha", "beta", "gamma"])
+  io.print(if s == nil { "none" } else { s })
+
+  let empty: [bool] = []
+  let b = first(empty)
+  io.print(if b == nil { "empty" } else { "\(b)" })
+
+  let nested = first([[1, 2], [3]])
+  io.print(if nested == nil { 0 } else { nested.len() })
+
+  match pair("count", 3) {
+    (label, value) => io.print("\(label): \(value)")
+  }
+
+  io.print(repeat("ha", 3).len())
+  io.print(repeat(0, 5).len())
+
+  // A bound holds for every type the call sites choose.
+  io.print(total_area([Square{side: 2}, Square{side: 3}]))
+  io.print(total_area([Triangle{base: 4, height: 6}]))
+
+  let winner = largest(Square{side: 3}, Square{side: 5})
+  io.print("\(winner.name()) of \(winner.area())")
+}

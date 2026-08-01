@@ -510,6 +510,8 @@ impl<'a> Parser<'a> {
         let is_async = self.eat(T::Async);
         self.expect(T::Fn)?;
         let name = self.ident()?;
+        // A method's own `<T>` list is parsed and discarded: type parameters
+        // live on the declaration a method belongs to, not on the method.
         let _generics = self.parse_generics()?;
 
         self.expect(T::LParen)?;
@@ -617,6 +619,7 @@ impl<'a> Parser<'a> {
     fn parse_fn(&mut self, is_pub: bool, is_async: bool, start: Span) -> Option<FnDecl> {
         self.bump(); // `fn`
         let name = self.ident()?;
+        let generics = self.parse_generics()?;
 
         self.expect(T::LParen)?;
         let mut params = Vec::new();
@@ -651,7 +654,7 @@ impl<'a> Parser<'a> {
         let body = self.parse_block()?;
         let span = start.to(body.span);
 
-        Some(FnDecl { is_pub, is_async, name, params, ret, body, span, sig_span })
+        Some(FnDecl { is_pub, is_async, name, generics, params, ret, body, span, sig_span })
     }
 
     /// `-> T` or `-> (T, error)`.

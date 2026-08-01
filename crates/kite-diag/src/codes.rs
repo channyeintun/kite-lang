@@ -145,6 +145,20 @@ codes! {
          That is deliberately not derived: how a type presents itself is a \
          design decision, not a mechanical one.";
 
+    E0208 = "E0208", "invalid type parameter",
+        "A type parameter stands for a type the caller chooses. Each must be \
+         named once, and each bound must name a trait.\n\n\
+         A bound is what makes anything possible with the parameter: without \
+         one, nothing is known about the type, so nothing can be done to a \
+         value of it beyond moving it around.";
+
+    E0209 = "E0209", "type argument cannot be inferred",
+        "A generic function's type arguments are worked out from the types of \
+         the arguments passed to it. A parameter that appears nowhere in the \
+         parameter list has nothing to infer from.\n\n\
+         Kite has no turbofish. If a parameter cannot be inferred, take a \
+         value of that type, or return a concrete type instead.";
+
     E0210 = "E0210", "non-exhaustive match",
         "A `match` must cover every possible value. Exhaustiveness is what \
          makes adding an enum variant safe: the compiler shows you every place \

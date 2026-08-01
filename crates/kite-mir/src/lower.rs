@@ -497,7 +497,9 @@ impl<'a> FnLowerer<'a> {
                 let o = self.operand(operand);
                 Rvalue::Unary { op: *op, operand: o }
             }
-            hir::ExprKind::Call { callee, args } => {
+            // Monomorphisation has already run, so every call is concrete and
+            // `targs` is empty.
+            hir::ExprKind::Call { callee, args, .. } => {
                 let args = args.iter().map(|a| self.operand(a)).collect();
                 Rvalue::Call { callee: FnId(callee.0), args }
             }

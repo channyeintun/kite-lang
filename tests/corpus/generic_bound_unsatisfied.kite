@@ -1,0 +1,32 @@
+// The bound must hold for the type the call site chooses.
+
+trait Shape {
+  fn area(self) -> int
+}
+
+struct Sq {
+  s: int
+}
+
+struct Blob {
+  n: int
+}
+
+impl Shape for Sq {
+  fn area(self) -> int {
+    return self.s * self.s
+  }
+}
+
+fn total<T: Shape>(xs: [T]) -> int {
+  var sum = 0
+  for x in xs {
+    sum = sum + x.area()
+  }
+  return sum
+}
+
+fn main() {
+  io.print(total([Sq{s: 2}]))
+  io.print(total([Blob{n: 1}])) //~ ERROR E0208
+}

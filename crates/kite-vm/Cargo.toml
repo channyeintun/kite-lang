@@ -18,3 +18,4 @@ kite-parser.workspace = true
 kite-resolve.workspace = true
 kite-types.workspace = true
 kite-mir.workspace = true
+kite-hir.workspace = true
