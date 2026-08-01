@@ -158,6 +158,24 @@ fn main() {
          \x20 let b = maybe(-1)\n  io.print(if b == nil { 0 } else { b })\n}\n",
     ),
     (
+        "slices",
+        "fn sum(xs: [int]) -> int {\n  var total = 0\n  for x in xs {\n    total = total + x\n  }\n\
+         \x20 return total\n}\n\
+         fn main() {\n  let xs = [1, 2, 3, 4]\n  io.print(xs.len())\n  io.print(xs[0])\n\
+         \x20 io.print(xs[3])\n  io.print(sum(xs))\n}\n",
+    ),
+    (
+        "slice-value-semantics",
+        "fn main() {\n  var a = [1, 2]\n  var b = a\n  b.push(3)\n  b[0] = 9\n\
+         \x20 io.print(a.len())\n  io.print(a[0])\n  io.print(b.len())\n  io.print(b[0])\n}\n",
+    ),
+    (
+        "slice-get",
+        "fn main() {\n  let xs = [10, 20]\n  let a = xs.get(1)\n  let b = xs.get(9)\n\
+         \x20 io.print(if a == nil { -1 } else { a })\n\
+         \x20 io.print(if b == nil { -1 } else { b })\n}\n",
+    ),
+    (
         "evaluation-order",
         "fn step(n: int) -> int {\n  io.print(n)\n  return n\n}\nfn main() {\n  let x = step(1) + step(2)\n  io.print(x)\n}\n",
     ),

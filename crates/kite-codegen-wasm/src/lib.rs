@@ -96,6 +96,8 @@ struct TypeLayout {
     /// nullable reference to a one-field record, so `nil` is a null reference
     /// and the payload keeps its own type rather than being erased.
     option_box: std::collections::HashMap<TyId, u32>,
+    /// One array type per distinct slice element type.
+    slice_array: std::collections::HashMap<TyId, u32>,
 }
 
 impl TypeLayout {
@@ -118,6 +120,41 @@ impl TypeLayout {
     fn option_type(&self, payload: TyId) -> Option<u32> {
         self.option_box.get(&payload).copied()
     }
+
+    fn slice_type(&self, elem: TyId) -> Option<u32> {
+        self.slice_array.get(&elem).copied()
+    }
+}
+
+/// Every slice element type a program mentions, in a stable order.
+fn slice_elements(program: &mir::Program, types: &Types) -> Vec<TyId> {
+    let mut seen = Vec::new();
+    let mut note = |ty: TyId, seen: &mut Vec<TyId>| {
+        if let TyKind::Slice(elem) = types.kind(ty) {
+            if !seen.contains(elem) {
+                seen.push(*elem);
+            }
+        }
+    };
+    for f in &program.fns {
+        note(f.ret, &mut seen);
+        for l in &f.locals {
+            note(l.ty, &mut seen);
+        }
+    }
+    for i in 0..types.struct_count() {
+        for f in &types.struct_def(kite_hir::StructId(i as u32)).fields {
+            note(f.ty, &mut seen);
+        }
+    }
+    for i in 0..types.enum_count() {
+        for v in &types.enum_def(kite_hir::EnumId(i as u32)).variants {
+            for f in &v.fields {
+                note(f.ty, &mut seen);
+            }
+        }
+    }
+    seen
 }
 
 /// Every optional payload type a program mentions, in a stable order.
@@ -171,10 +208,16 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
         struct_base,
         enum_base,
         option_box: std::collections::HashMap::new(),
+        slice_array: std::collections::HashMap::new(),
     };
     let payloads = option_payloads(program, types);
     for p in &payloads {
         layout.option_box.insert(*p, next);
+        next += 1;
+    }
+    let elements = slice_elements(program, types);
+    for e in &elements {
+        layout.slice_array.insert(*e, next);
         next += 1;
     }
     let aggregate_count = next - IMPORT_COUNT;
@@ -249,6 +292,24 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
                 None,
                 true,
             ));
+        }
+
+        // One array per distinct element type. Kite slices are copy-on-write
+        // values, so the array is mutable and a mutation copies first.
+        for e in &elements {
+            group.push(SubType {
+                is_final: true,
+                supertype_idx: None,
+                composite_type: CompositeType {
+                    inner: CompositeInnerType::Array(wasm_encoder::ArrayType(FieldType {
+                        element_type: StorageType::Val(val_type_with(*e, types, &layout)),
+                        mutable: true,
+                    })),
+                    shared: false,
+                    descriptor: None,
+                    describes: None,
+                },
+            });
         }
 
         type_section.ty().rec(group);
@@ -343,6 +404,13 @@ fn val_type_with(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
             nullable: true,
             heap_type: HeapType::Concrete(layout.enum_base_type(*e)),
         }),
+        TyKind::Slice(elem) => match layout.slice_type(*elem) {
+            Some(idx) => ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(idx),
+            }),
+            None => ValType::I32,
+        },
         TyKind::Optional(inner) => match layout.option_type(*inner) {
             Some(idx) => ValType::Ref(RefType {
                 nullable: true,
@@ -376,6 +444,20 @@ fn compile_fn(
     push_local(&mut locals, ValType::I32); // $pc
     let pc = f.locals.len() as u32;
 
+    // One scratch local per distinct slice type in the function, so a
+    // copy-on-write mutation has somewhere to hold the new array while
+    // `array.copy` consumes its operands.
+    let slice_local = f
+        .locals
+        .iter()
+        .map(|l| l.ty)
+        .find(|ty| matches!(types.kind(*ty), TyKind::Slice(_)));
+    let scratch = pc + 1;
+    match slice_local {
+        Some(ty) => push_local(&mut locals, val_type_with(ty, types, layout)),
+        None => push_local(&mut locals, ValType::I32),
+    }
+
     let mut func = Function::new(locals);
     let n = f.blocks.len() as u32;
 
@@ -404,7 +486,10 @@ fn compile_fn(
             types,
             fn_returns,
             layout,
+            current_dst: None,
             pc,
+            scratch,
+            index_scratch: pc,
             block_index: i,
             total: n as usize,
         };
@@ -431,7 +516,15 @@ struct Emitter<'a> {
     /// Return type of every function, indexed by id.
     fn_returns: &'a [TyId],
     layout: &'a TypeLayout,
+    /// The local a rvalue is being assigned into, when there is one. A slice
+    /// construction takes its element type from there.
+    current_dst: Option<u32>,
     pc: u32,
+    /// A local of array type, used to hold a copy while `array.copy` consumes
+    /// its operands.
+    scratch: u32,
+    /// An i32 local for an index that has to be read twice.
+    index_scratch: u32,
     block_index: usize,
     total: usize,
 }
@@ -455,6 +548,7 @@ impl<'a> Emitter<'a> {
     fn stmt(&mut self, func: &mut Function, stmt: &mir::Inst) {
         match stmt {
             mir::Inst::Assign { dst, value } => {
+                self.current_dst = Some(dst.0);
                 // MIR wraps a statement-position call in an assignment so the
                 // call still happens. A unit-returning call leaves nothing on
                 // the stack, so there is nothing to store.
@@ -476,9 +570,45 @@ impl<'a> Emitter<'a> {
                     field_index: *index,
                 });
             }
-            // Slices are not lowered yet.
-            mir::Inst::SetIndex { .. } | mir::Inst::SlicePush { .. } => {
-                func.instruction(&Instruction::Unreachable);
+            // Slices are copy-on-write *values*, so a mutation copies the
+            // array first and rebinds the local. The bytecode VM does the same
+            // thing lazily through `Rc::make_mut`; here it is unconditional,
+            // which is correct but not yet cheap.
+            mir::Inst::SetIndex { base, index, value } => {
+                let Some((idx, _)) = self.slice_of(base) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return;
+                };
+                let Some(local) = self.local_of(base) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return;
+                };
+                self.copy_array(func, idx, base, 0);
+                func.instruction(&Instruction::LocalSet(local));
+
+                func.instruction(&Instruction::LocalGet(local));
+                self.index_operand(func, index);
+                self.operand(func, value);
+                func.instruction(&Instruction::ArraySet(idx));
+            }
+
+            mir::Inst::SlicePush { local, value } => {
+                let base = mir::Operand::Local(*local);
+                let Some((idx, _)) = self.slice_of(&base) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return;
+                };
+                // One longer, contents copied, new element last.
+                self.copy_array(func, idx, &base, 1);
+                func.instruction(&Instruction::LocalSet(local.0));
+
+                func.instruction(&Instruction::LocalGet(local.0));
+                func.instruction(&Instruction::LocalGet(local.0));
+                func.instruction(&Instruction::ArrayLen);
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::I32Sub);
+                self.operand(func, value);
+                func.instruction(&Instruction::ArraySet(idx));
             }
         }
     }
@@ -560,6 +690,84 @@ impl<'a> Emitter<'a> {
                     struct_type_index: self.layout.struct_type(sid),
                     field_index: *index,
                 });
+                return true;
+            }
+
+            mir::Rvalue::SliceNew { elems } => {
+                let Some(idx) = self.slice_array_for_result() else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                for e in elems {
+                    self.operand(func, e);
+                }
+                func.instruction(&Instruction::ArrayNewFixed {
+                    array_type_index: idx,
+                    array_size: elems.len() as u32,
+                });
+                return true;
+            }
+
+            // `array.get` traps when out of range, which is exactly Kite's
+            // rule: an out-of-range index is a program bug, not a runtime
+            // condition. `.get()` is the form for when it genuinely is one.
+            mir::Rvalue::IndexGet { base, index } => {
+                let Some((idx, _)) = self.slice_of(base) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                self.operand(func, base);
+                self.index_operand(func, index);
+                func.instruction(&Instruction::ArrayGet(idx));
+                return true;
+            }
+
+            // `.get()` is the form for when an out-of-range index genuinely is
+            // a runtime condition, so it bounds-checks and yields an optional
+            // rather than trapping.
+            mir::Rvalue::SliceGet { base, index } => {
+                let (Some((idx, elem)), Some(box_idx)) = (
+                    self.slice_of(base),
+                    self.slice_of(base)
+                        .and_then(|(_, e)| self.layout.option_type(e)),
+                ) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                let _ = elem;
+
+                self.index_operand(func, index);
+                func.instruction(&Instruction::LocalTee(self.index_scratch));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32GeS);
+                func.instruction(&Instruction::LocalGet(self.index_scratch));
+                self.operand(func, base);
+                func.instruction(&Instruction::ArrayLen);
+                func.instruction(&Instruction::I32LtU);
+                func.instruction(&Instruction::I32And);
+
+                let result = ValType::Ref(RefType {
+                    nullable: true,
+                    heap_type: HeapType::Concrete(box_idx),
+                });
+                func.instruction(&Instruction::If(BlockType::Result(result)));
+                self.operand(func, base);
+                func.instruction(&Instruction::LocalGet(self.index_scratch));
+                func.instruction(&Instruction::ArrayGet(idx));
+                func.instruction(&Instruction::StructNew(box_idx));
+                func.instruction(&Instruction::Else);
+                func.instruction(&Instruction::RefNull(HeapType::Abstract {
+                    shared: false,
+                    ty: wasm_encoder::AbstractHeapType::None,
+                }));
+                func.instruction(&Instruction::End);
+                return true;
+            }
+
+            mir::Rvalue::SliceLen { base } => {
+                self.operand(func, base);
+                func.instruction(&Instruction::ArrayLen);
+                func.instruction(&Instruction::I64ExtendI32U);
                 return true;
             }
 
@@ -701,6 +909,70 @@ impl<'a> Emitter<'a> {
                 }));
             }
         }
+    }
+
+    /// Leave a fresh array on the stack holding `base`'s contents, `extra`
+    /// elements longer.
+    fn copy_array(&mut self, func: &mut Function, idx: u32, base: &mir::Operand, extra: u32) {
+        // The destination, sized len + extra.
+        self.operand(func, base);
+        func.instruction(&Instruction::ArrayLen);
+        if extra > 0 {
+            func.instruction(&Instruction::I32Const(extra as i32));
+            func.instruction(&Instruction::I32Add);
+        }
+        func.instruction(&Instruction::ArrayNewDefault(idx));
+
+        // array.copy takes dest, dest_offset, src, src_offset, len — and the
+        // destination has to survive the call, so it is duplicated through a
+        // second push rather than a `tee`, which needs a local of array type.
+        func.instruction(&Instruction::LocalSet(self.scratch));
+        func.instruction(&Instruction::LocalGet(self.scratch));
+        func.instruction(&Instruction::I32Const(0));
+        self.operand(func, base);
+        func.instruction(&Instruction::I32Const(0));
+        self.operand(func, base);
+        func.instruction(&Instruction::ArrayLen);
+        func.instruction(&Instruction::ArrayCopy {
+            array_type_index_dst: idx,
+            array_type_index_src: idx,
+        });
+        func.instruction(&Instruction::LocalGet(self.scratch));
+    }
+
+    fn local_of(&self, o: &mir::Operand) -> Option<u32> {
+        match o {
+            mir::Operand::Local(l) => Some(l.0),
+            _ => None,
+        }
+    }
+
+    /// The array type and element type of an operand holding a slice.
+    fn slice_of(&self, o: &mir::Operand) -> Option<(u32, TyId)> {
+        let mir::Operand::Local(l) = o else { return None };
+        let TyKind::Slice(elem) = *self.types.kind(self.f.locals[l.index()].ty) else {
+            return None;
+        };
+        self.layout.slice_type(elem).map(|idx| (idx, elem))
+    }
+
+    /// The array type for the slice a `SliceNew` is producing.
+    ///
+    /// The destination local carries the slice type, and the emitter knows it
+    /// because MIR always assigns a construction into one.
+    fn slice_array_for_result(&self) -> Option<u32> {
+        self.current_dst.and_then(|d| {
+            let TyKind::Slice(elem) = *self.types.kind(self.f.locals[d as usize].ty) else {
+                return None;
+            };
+            self.layout.slice_type(elem)
+        })
+    }
+
+    /// An index, narrowed from Kite's 64-bit `int` to the i32 Wasm arrays use.
+    fn index_operand(&mut self, func: &mut Function, o: &mir::Operand) {
+        self.operand(func, o);
+        func.instruction(&Instruction::I32WrapI64);
     }
 
     /// The box type for an operand about to be wrapped. The operand carries

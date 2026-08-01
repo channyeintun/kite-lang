@@ -211,7 +211,7 @@ way.
 
 **Remaining steps:**
 
-2. ~~GC structs~~ ✅ — arrays (slices) still to do
+2. ~~GC structs and arrays~~ ✅
 3. ~~Enums via subtyped variant records~~ ✅
 4. `str` as `externref` with JS String Builtins (today a constant index into a
    table the glue holds, which needs no linear memory at all)
@@ -226,8 +226,14 @@ reference and the payload keeps its own type. Narrowing became an explicit
 `Unwrap` node in HIR: previously the checker rewrote a local'''s type in a
 branch, which the untyped VM tolerated and typed Wasm locals would not.
 
-Also still to lower: slices, tuples, maps, and the fallible-pair representation
-error handling uses.
+Slices are WasmGC arrays. `array.get` traps when out of range, which is exactly
+Kite's rule for `xs[i]`; `.get()` bounds-checks and yields an optional instead.
+Mutation copies the array first, which is what gives `[T]` value semantics —
+the bytecode VM does the same lazily through `Rc::make_mut`, and here it is
+unconditional, correct but not yet cheap.
+
+Also still to lower: tuples, maps, and the fallible-pair representation error
+handling uses.
 
 **`--emit wasm` refuses what it cannot lower**, rather than emitting a module
 that validates and then traps with no explanation:
@@ -356,7 +362,7 @@ none.
 | 1 — Vertical slice | ✅ complete |
 | 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, slices, optionals. ❌ maps, tuples, closures, generics, `dyn` dispatch |
 | 3 — Error handling | ✅ complete |
-| 4 — WebAssembly backend | 🟡 numeric core, control flow, WasmGC structs, enums, strings. ❌ slices, optionals, tuples, pairs, trait objects, JS String Builtins |
+| 4 — WebAssembly backend | 🟡 numeric core, control flow, WasmGC structs, enums, slices, optionals, strings. ❌ tuples, maps, fallible pairs, trait objects, JS String Builtins |
 | 5 — Concurrency | ❌ not started |
 | 6 — Standard library | ❌ not started |
 | 7 — Layout engine and DOM renderer | ❌ not started |

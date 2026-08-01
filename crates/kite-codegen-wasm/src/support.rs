@@ -50,14 +50,7 @@ pub fn unsupported(program: &mir::Program, types: &Types) -> Vec<Unsupported> {
         for block in &f.blocks {
             for stmt in &block.stmts {
                 match stmt {
-                    mir::Inst::SetIndex { .. } | mir::Inst::SlicePush { .. } => {
-                        note("slices")
-                    }
                     mir::Inst::Assign { value, .. } => match value {
-                        mir::Rvalue::SliceNew { .. }
-                        | mir::Rvalue::IndexGet { .. }
-                        | mir::Rvalue::SliceLen { .. }
-                        | mir::Rvalue::SliceGet { .. } => note("slices"),
                         mir::Rvalue::PairNew { .. }
                         | mir::Rvalue::PairValue { .. }
                         | mir::Rvalue::PairError { .. }
@@ -73,7 +66,9 @@ pub fn unsupported(program: &mir::Program, types: &Types) -> Vec<Unsupported> {
                         }
                         _ => {}
                     },
-                    mir::Inst::SetField { .. } => {}
+                    mir::Inst::SetField { .. }
+                    | mir::Inst::SetIndex { .. }
+                    | mir::Inst::SlicePush { .. } => {}
                 }
             }
         }
@@ -86,7 +81,6 @@ pub fn unsupported(program: &mir::Program, types: &Types) -> Vec<Unsupported> {
 fn unsupported_type(ty: kite_hir::TyId, types: &Types) -> Option<&'static str> {
     use kite_hir::TyKind::*;
     match types.kind(ty) {
-        Slice(_) => Some("slices"),
         Map(..) => Some("maps"),
         Tuple(_) => Some("tuples"),
         Fallible(_) | Err => Some("error handling"),

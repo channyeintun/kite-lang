@@ -113,7 +113,8 @@ the missing variants, traits with default methods, copy-on-write slices,
 `Option<T>`, and enforced error handling with `check`.
 
 The WebAssembly backend lowers the numeric and control-flow core, WasmGC
-structs, and enums as subtyped variant records. Every program in the
+structs and arrays, enums as subtyped variant records, optionals as nullable
+boxed references, and strings. Every program in the
 differential corpus is compiled to **both** the bytecode VM and Wasm, run on
 both, and the outputs compared. `--emit wasm` reports anything it cannot lower
 rather than producing a module that traps.

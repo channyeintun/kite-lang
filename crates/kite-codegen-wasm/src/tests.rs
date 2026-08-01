@@ -376,14 +376,13 @@ fn gaps(src: &str) -> Vec<String> {
 /// compiled into a module that traps at run time.
 #[test]
 fn unlowered_constructs_are_reported() {
-    assert!(gaps("fn main() {\n  let xs = [1, 2]\n  io.print(xs.len())\n}\n")
-        .contains(&"slices".to_string()));
+    assert!(gaps("fn f(t: (int, str)) {\n}\nfn main() {\n}\n").contains(&"tuples".to_string()));
 
     assert!(gaps("fn f() -> (int, error) {\n  return 1, nil\n}\nfn main() {\n}\n")
         .contains(&"error handling".to_string()));
 
 
-    assert!(gaps("fn main() {\n  let xs: [str] = []\n}\n").contains(&"slices".to_string()));
+
 }
 
 /// Everything the backend *does* lower must report no gaps, or the check would
@@ -446,4 +445,39 @@ fn a_nil_pattern_validates() {
 #[test]
 fn optionals_are_no_longer_an_unsupported_construct() {
     assert!(gaps("fn f() -> Option<int> {\n  return nil\n}\nfn main() {\n}\n").is_empty());
+}
+
+// ---- slices ---------------------------------------------------------------
+
+/// A slice is a WasmGC `array`. `array.get` traps when out of range, which is
+/// exactly Kite's rule for `xs[i]`.
+#[test]
+fn slice_literals_and_reads_validate() {
+    valid("fn main() {\n  let xs = [10, 20, 30]\n  io.print(xs.len())\n  io.print(xs[0])\n}\n");
+}
+
+#[test]
+fn iterating_a_slice_validates() {
+    valid("fn main() {\n  var total = 0\n  for x in [1, 2, 3] {\n    total = total + x\n  }\n  io.print(total)\n}\n");
+}
+
+/// Mutation copies first, which is what gives `[T]` value semantics.
+#[test]
+fn slice_mutation_validates() {
+    valid("fn main() {\n  var xs = [1, 2]\n  xs.push(3)\n  xs[0] = 9\n  io.print(xs.len())\n  io.print(xs[0])\n}\n");
+}
+
+#[test]
+fn get_yielding_an_optional_validates() {
+    valid("fn main() {\n  let xs = [1, 2]\n  let a = xs.get(5)\n  io.print(if a == nil { -1 } else { a })\n}\n");
+}
+
+#[test]
+fn slices_of_structs_validate() {
+    valid("struct P {\n  n: int\n}\nfn main() {\n  let ps = [P{ n: 1 }, P{ n: 2 }]\n  io.print(ps[1].n)\n}\n");
+}
+
+#[test]
+fn slices_are_no_longer_an_unsupported_construct() {
+    assert!(gaps("fn main() {\n  let xs = [1]\n  io.print(xs.len())\n}\n").is_empty());
 }
