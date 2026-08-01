@@ -153,13 +153,10 @@ pub fn text_of(name: str, base: Style, body: str) -> Node {
 
 // ---- measurement ----------------------------------------------------------
 
-/// The height of one line, in the same units as everything else.
-///
-/// Still a constant: a host that could report its font's ascent and descent
-/// would give a better one, and asking for that is the next thing measurement
-/// should learn.
-pub fn nominal_line_height() -> float {
-  return 16.0
+/// The height of one line, from the host's font: ascent plus descent plus
+/// leading, which is what a line of text actually occupies.
+pub fn line_height() -> float {
+  return text.height()
 }
 
 /// How much space a run of text needs.
@@ -173,7 +170,7 @@ pub fn nominal_line_height() -> float {
 /// This measures a run, not a paragraph: there is no wrapping yet, and a long
 /// label overflows its box rather than breaking.
 pub fn text_size(body: str) -> Size {
-  return Size{width: text.width(body), height: nominal_line_height()}
+  return Size{width: text.width(body), height: line_height()}
 }
 
 /// Kite performs no implicit numeric conversion, so this is written out.

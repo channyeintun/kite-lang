@@ -2270,6 +2270,20 @@ impl<'a> Checker<'a> {
             // compile rather than falling through to something else.
             BuiltinFn::DrawRect | BuiltinFn::DrawText => self.draw_call(b, args, span),
 
+            BuiltinFn::TextHeight => {
+                if !args.is_empty() {
+                    self.arity_error("text.height", args.len(), 0, span, None);
+                }
+                hir::Expr {
+                    kind: ExprKind::CallBuiltin {
+                        builtin: Builtin::TextHeight,
+                        args: Vec::new(),
+                    },
+                    ty: TyId::FLOAT,
+                    span,
+                }
+            }
+
             BuiltinFn::TextWidth => {
                 if args.len() != 1 {
                     self.arity_error("text.width", args.len(), 1, span, None);

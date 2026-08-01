@@ -240,9 +240,16 @@ with, so the layout matches what is painted. A runtime with no font answers
 with a nominal advance per character; the bytecode VM and the generated glue
 use the same one, so a layout stays comparable across backends under test.
 
+`text.height()` is the same arrangement for the other axis: the font's ascent
+plus descent plus leading, which is what a line actually occupies. A canvas
+reports the first two, and the fall back to a nominal value matters —
+`fontBoundingBox*` is not universal, and a layout that produced `NaN` would
+place everything at zero.
+
 This measures a *run*, not a paragraph: there is no wrapping yet, and a long
-label overflows its box rather than breaking. Line height is still a constant,
-which a host reporting its font's ascent and descent would improve.
+label overflows its box rather than breaking. Wrapping needs string slicing,
+which `str` does not have — it has `len()` and nothing else. That is the next
+gap, and it is a standard-library one rather than a layout one.
 
 ### Rendering
 

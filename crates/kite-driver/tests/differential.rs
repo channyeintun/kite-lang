@@ -207,7 +207,8 @@ fn main() {
          \x20 io.print(text.width(\"\"))\n  io.print(text.width(\"abc\"))\n\
          \x20 io.print(text.width(\"héllo\"))\n  io.print(text.width(\"日本語\"))\n\
          \x20 let s = \"ab\" + \"cd\"\n  io.print(text.width(s))\n\
-         \x20 io.print(text.width(s) > text.width(\"a\"))\n}\n",
+         \x20 io.print(text.width(s) > text.width(\"a\"))\n\
+         \x20 io.print(text.height())\n  io.print(text.height() > 0.0)\n}\n",
     ),
     (
         "guard-clause-narrowing",

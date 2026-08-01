@@ -26,6 +26,7 @@ pub enum Native {
     DrawRect,
     DrawText,
     TextWidth,
+    TextHeight,
 }
 
 impl Native {
@@ -35,6 +36,7 @@ impl Native {
             Builtin::DrawRect => Native::DrawRect,
             Builtin::DrawText => Native::DrawText,
             Builtin::TextWidth => Native::TextWidth,
+            Builtin::TextHeight => Native::TextHeight,
         }
     }
 
@@ -44,6 +46,7 @@ impl Native {
             Native::DrawRect => "draw.rect",
             Native::DrawText => "draw.text",
             Native::TextWidth => "text.width",
+            Native::TextHeight => "text.height",
         }
     }
 }

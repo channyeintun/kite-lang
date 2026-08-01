@@ -379,6 +379,8 @@ pub enum Builtin {
     DrawText,
     /// `text.width(body)` — a host call, because only the host has the font.
     TextWidth,
+    /// `text.height()` — the host font's line height.
+    TextHeight,
 }
 
 impl Builtin {
@@ -388,6 +390,7 @@ impl Builtin {
             Builtin::DrawRect => "draw.rect",
             Builtin::DrawText => "draw.text",
             Builtin::TextWidth => "text.width",
+            Builtin::TextHeight => "text.height",
         }
     }
 }

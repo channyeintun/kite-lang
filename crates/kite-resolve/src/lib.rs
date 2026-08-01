@@ -58,6 +58,9 @@ pub enum BuiltinFn {
     /// so a layout is a function of where it runs, and pretending otherwise is
     /// how text ends up clipped.
     TextWidth,
+    /// `text.height()` — the line height of the host's font: ascent plus
+    /// descent plus leading, which is what a line of text actually occupies.
+    TextHeight,
 }
 
 impl BuiltinFn {
@@ -68,6 +71,7 @@ impl BuiltinFn {
             "draw.rect" => Some(BuiltinFn::DrawRect),
             "draw.text" => Some(BuiltinFn::DrawText),
             "text.width" => Some(BuiltinFn::TextWidth),
+            "text.height" => Some(BuiltinFn::TextHeight),
             _ => None,
         }
     }
@@ -79,6 +83,7 @@ impl BuiltinFn {
             BuiltinFn::DrawRect => "draw.rect",
             BuiltinFn::DrawText => "draw.text",
             BuiltinFn::TextWidth => "text.width",
+            BuiltinFn::TextHeight => "text.height",
         }
     }
 
@@ -87,6 +92,7 @@ impl BuiltinFn {
             BuiltinFn::IoPrint | BuiltinFn::ErrorsNew => 1,
             BuiltinFn::DrawRect | BuiltinFn::DrawText => 5,
             BuiltinFn::TextWidth => 1,
+            BuiltinFn::TextHeight => 0,
         }
     }
 }

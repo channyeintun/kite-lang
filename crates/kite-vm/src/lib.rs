@@ -131,6 +131,9 @@ impl Value {
 /// glue's default, so the two backends measure text the same way under test.
 const NOMINAL_ADVANCE: f64 = 8.0;
 
+/// The line height with no font to ask. Matches the generated glue's default.
+const NOMINAL_LINE_HEIGHT: f64 = 16.0;
+
 /// `f64` to `i64` the way Wasm's `i64.trunc_sat_f64_s` does: towards zero,
 /// clamped at the ends, and zero for NaN. Rust's `as` already has exactly this
 /// behaviour, which is why this is a named function rather than a comment.
@@ -1044,6 +1047,8 @@ impl<'a> Vm<'a> {
                 };
                 Ok(Value::Float(s.chars().count() as f64 * NOMINAL_ADVANCE))
             }
+
+            Native::TextHeight => Ok(Value::Float(NOMINAL_LINE_HEIGHT)),
 
             Native::IoPrint => {
                 let v = if argc == 0 {

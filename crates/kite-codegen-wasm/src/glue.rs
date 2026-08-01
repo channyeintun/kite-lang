@@ -127,6 +127,15 @@ export function setMeasure(fn) {{
   measure = fn;
 }}
 
+// What one line of text occupies: ascent plus descent plus leading. A canvas
+// reports the first two, and the third is what the difference between them and
+// the em box amounts to.
+export let lineHeight = 16;
+
+export function setLineHeight(v) {{
+  lineHeight = v;
+}}
+
 /// Measure with a canvas, in the font the renderers draw with. A canvas is
 /// used even for the DOM renderer: `measureText` is the same shaping the
 /// browser applies to a text node, and it costs no layout.
@@ -134,6 +143,19 @@ export function fontMeasure(font) {{
   const ctx = document.createElement('canvas').getContext('2d');
   ctx.font = font;
   return (body) => ctx.measureText(body).width;
+}}
+
+/// The font's own line height, from the metrics a canvas reports. Falling back
+/// to the nominal value matters: `fontBoundingBox*` is not universal, and a
+/// layout that produced `NaN` would place everything at zero.
+export function fontLineHeight(font) {{
+  const ctx = document.createElement('canvas').getContext('2d');
+  ctx.font = font;
+  const m = ctx.measureText('Mg');
+  const ascent = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent;
+  const descent = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent;
+  const height = (ascent ?? 0) + (descent ?? 0);
+  return Number.isFinite(height) && height > 0 ? height : 16;
 }}
 
 export let renderer = textRenderer;
@@ -161,6 +183,7 @@ function imports() {{
       draw_rect: (x, y, w, h, colour) => renderer.rect(x, y, w, h, Number(colour)),
       draw_text: (x, y, i, colour) => renderer.text(x, y, STRINGS[i], Number(colour)),
       measure_text: (i) => measure(STRINGS[i]),
+      line_height: () => lineHeight,
       // Interpolation shares its formatting with printing, so a value cannot
       // look one way in `io.print(x)` and another in `"\(x)"`.
       str_of_int: (v) => intern(showInt(v)),
@@ -243,10 +266,12 @@ pub fn generate_page(title: &str) -> String {
 
 <script type="module">
   import {{ instantiate, setRenderer, setWriter, isApplication, setMeasure,
-            fontMeasure, FONT, domRenderer, canvasRenderer, textRenderer }} from "./app.js";
+            setLineHeight, fontMeasure, fontLineHeight, FONT,
+            domRenderer, canvasRenderer, textRenderer }} from "./app.js";
 
   // Measure in the font that will be drawn, before anything is laid out.
   setMeasure(fontMeasure(FONT));
+  setLineHeight(fontLineHeight(FONT));
 
   const stage = document.getElementById("stage");
   const buttons = {{
