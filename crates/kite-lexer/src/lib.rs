@@ -21,11 +21,45 @@ pub struct Token {
     pub span: Span,
 }
 
+/// A comment, kept out of the token stream but not thrown away.
+///
+/// The parser never sees one — a comment cannot change what a program means —
+/// but `kitec fmt` has to put them back and `kitec doc` is made of them, and
+/// recovering them by re-scanning the text later is how a formatter starts
+/// moving them to the wrong line.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Comment {
+    pub span: Span,
+    /// `///` — attaches to the declaration that follows.
+    pub doc: bool,
+}
+
 /// Tokenise `text`. Always returns a stream ending in `Eof`, even when
 /// diagnostics were produced — later passes can then still make progress and
 /// report their own findings rather than the run stopping at the first bad byte.
 pub fn tokenize(file: FileId, text: &str, diags: &mut DiagBag) -> Vec<Token> {
-    tokenize_range(file, text, 0, text.len(), diags)
+    tokenize_with_comments(file, text, diags).0
+}
+
+/// Tokenise, keeping the comments.
+pub fn tokenize_with_comments(
+    file: FileId,
+    text: &str,
+    diags: &mut DiagBag,
+) -> (Vec<Token>, Vec<Comment>) {
+    Lexer {
+        file,
+        src: text,
+        bytes: text.as_bytes(),
+        pos: 0,
+        limit: text.len(),
+        out: Vec::new(),
+        comments: Vec::new(),
+        delims: Vec::new(),
+        pending_newline: false,
+        diags,
+    }
+    .run_with_comments()
 }
 
 /// Tokenize one byte range of a file.
@@ -48,6 +82,7 @@ pub fn tokenize_range(
         pos: start,
         limit: end.min(text.len()),
         out: Vec::new(),
+        comments: Vec::new(),
         delims: Vec::new(),
         pending_newline: false,
         diags,
@@ -64,6 +99,7 @@ struct Lexer<'a> {
     /// end-of-input as far as scanning is concerned.
     limit: usize,
     out: Vec<Token>,
+    comments: Vec<Comment>,
     /// Stack of open delimiters. Newlines inside `(` or `[` are never
     /// significant, so multi-line argument lists work without trailing commas.
     delims: Vec<TokenKind>,
@@ -72,7 +108,11 @@ struct Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
-    fn run(mut self) -> Vec<Token> {
+    fn run(self) -> Vec<Token> {
+        self.run_with_comments().0
+    }
+
+    fn run_with_comments(mut self) -> (Vec<Token>, Vec<Comment>) {
         loop {
             self.skip_trivia();
 
@@ -90,7 +130,7 @@ impl<'a> Lexer<'a> {
                     kind: TokenKind::Eof,
                     span: Span::empty_at(self.file, p),
                 });
-                return self.out;
+                return (self.out, self.comments);
             }
 
             let start = self.pos;
@@ -157,12 +197,18 @@ impl<'a> Lexer<'a> {
                     self.pending_newline = true;
                 }
                 Some(b'/') if self.peek_at(1) == Some(b'/') => {
+                    let start = self.pos;
+                    let doc = self.peek_at(2) == Some(b'/');
                     while let Some(c) = self.peek() {
                         if c == b'\n' {
                             break;
                         }
                         self.pos += 1;
                     }
+                    self.comments.push(Comment {
+                        span: Span::new(self.file, start as u32, self.pos as u32),
+                        doc,
+                    });
                 }
                 Some(b'/') if self.peek_at(1) == Some(b'*') => {
                     let start = self.pos;

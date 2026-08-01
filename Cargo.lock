@@ -95,6 +95,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kite-doc"
+version = "0.1.0"
+dependencies = [
+ "kite-ast",
+ "kite-diag",
+ "kite-lexer",
+ "kite-parser",
+ "kite-span",
+]
+
+[[package]]
 name = "kite-driver"
 version = "0.1.0"
 dependencies = [
@@ -110,6 +121,15 @@ dependencies = [
  "kite-span",
  "kite-types",
  "kite-vm",
+]
+
+[[package]]
+name = "kite-fmt"
+version = "0.1.0"
+dependencies = [
+ "kite-diag",
+ "kite-lexer",
+ "kite-span",
 ]
 
 [[package]]
@@ -199,7 +219,9 @@ name = "kitec"
 version = "0.1.0"
 dependencies = [
  "kite-diag",
+ "kite-doc",
  "kite-driver",
+ "kite-fmt",
  "kite-span",
 ]
 

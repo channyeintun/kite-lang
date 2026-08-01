@@ -15,8 +15,13 @@ USAGE:
     kitec check <file.kite>          check without running
     kitec build <file.kite>          compile and report what was produced
     kitec test  <file.kite>          run every `test_` function in the file
+    kitec fmt   <file.kite>          lay the file out the one way
+    kitec doc   <file.kite>          the reference, from the doc comments
+    kitec fix   <file.kite>          apply every machine-applicable suggestion
 
 OPTIONS:
+    --check           with `fmt`, report rather than rewrite
+    --all             with `doc`, include what is not `pub`
     --emit <stage>    check, ast, hir, mir, kbc, wasm
     --out <dir>       where `--emit wasm` writes app.wasm and app.js
     --explain <CODE>  explain a diagnostic code, e.g. --explain E0301
@@ -47,6 +52,8 @@ fn main() -> ExitCode {
     let mut path = None;
     let mut emit = None;
     let mut out_dir = None;
+    let mut check_only = false;
+    let mut include_private = false;
     let mut i = 0;
 
     while i < args.len() {
@@ -76,7 +83,15 @@ fn main() -> ExitCode {
                 out_dir = Some(v.clone());
                 i += 2;
             }
-            "run" | "check" | "build" | "test" if command.is_none() => {
+            "--check" => {
+                check_only = true;
+                i += 1;
+            }
+            "--all" => {
+                include_private = true;
+                i += 1;
+            }
+            "run" | "check" | "build" | "test" | "fmt" | "doc" | "fix" if command.is_none() => {
                 command = Some(a.clone());
                 i += 1;
             }
@@ -100,6 +115,29 @@ fn main() -> ExitCode {
         Ok(s) => s,
         Err(e) => return fail(&format!("cannot read `{}`: {}", path, e)),
     };
+
+    // Formatting reads tokens, not a compiled program: a file that does not
+    // parse still formats, which is exactly when someone reaches for it.
+    if command == "fmt" {
+        return format_file(&path, &src, check_only);
+    }
+
+    // Documentation is extracted from the source, not from a compiled
+    // program: a file that does not compile still has doc comments, and its
+    // reference is often what someone is reading to find out why.
+    if command == "doc" {
+        let name = std::path::Path::new(&path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("module");
+        let docs = kite_doc::extract(name, &src);
+        print!("{}", kite_doc::markdown(&docs, !include_private));
+        return ExitCode::SUCCESS;
+    }
+
+    if command == "fix" {
+        return fix_file(&path, &src);
+    }
 
     let emit = emit.unwrap_or(Emit::Check);
     let result = compile(&path, &src, emit);
@@ -244,6 +282,76 @@ fn run_tests(result: &kite_driver::Compilation, path: &str) -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// `kitec fix` — apply what the compiler already knows how to do.
+///
+/// Every fix a diagnostic carries is a replacement of one span, and applying
+/// them back to front means no earlier edit moves a later one. Only fixes
+/// pointing into the file being compiled are applied: a suggestion about the
+/// standard library is not the user's to take.
+fn fix_file(path: &str, src: &str) -> ExitCode {
+    let result = compile(path, src, kite_driver::Emit::Check);
+    let mut edits: Vec<(u32, u32, String)> = Vec::new();
+    let file = result
+        .sources
+        .iter()
+        .find(|(_, name)| name == path)
+        .map(|(id, _)| id);
+    for d in result.diags.iter() {
+        for edit in d.fixes.iter().flat_map(|f| f.edits.iter()) {
+            if Some(edit.span.file) != file {
+                continue;
+            }
+            edits.push((edit.span.start, edit.span.end, edit.replacement.clone()));
+        }
+    }
+    if edits.is_empty() {
+        eprintln!("nothing to fix in {}", path);
+        eprint!("{}", result.render_diagnostics());
+        return ExitCode::SUCCESS;
+    }
+    // Back to front: an edit near the end cannot move one before it.
+    edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
+    let mut out = src.to_string();
+    let applied = edits.len();
+    for (start, end, replacement) in edits {
+        out.replace_range(start as usize..end as usize, &replacement);
+    }
+    match std::fs::write(path, &out) {
+        Ok(()) => {
+            eprintln!(
+                "applied {} fix{} to {}",
+                applied,
+                if applied == 1 { "" } else { "es" },
+                path
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(&format!("cannot write `{}`: {}", path, e)),
+    }
+}
+
+/// `kitec fmt` — rewrite a file, or say whether it would change.
+fn format_file(path: &str, src: &str, check_only: bool) -> ExitCode {
+    let formatted = kite_fmt::format(src);
+    if formatted == src {
+        if !check_only {
+            eprintln!("{} is already formatted", path);
+        }
+        return ExitCode::SUCCESS;
+    }
+    if check_only {
+        eprintln!("{} is not formatted", path);
+        return ExitCode::FAILURE;
+    }
+    match std::fs::write(path, &formatted) {
+        Ok(()) => {
+            eprintln!("formatted {}", path);
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(&format!("cannot write `{}`: {}", path, e)),
     }
 }
 

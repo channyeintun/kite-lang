@@ -4,6 +4,8 @@ members = [
     "crates/kite-span",
     "crates/kite-diag",
     "crates/kite-lexer",
+    "crates/kite-fmt",
+    "crates/kite-doc",
     "crates/kite-ast",
     "crates/kite-parser",
     "crates/kite-resolve",
@@ -28,6 +30,8 @@ repository = "https://github.com/channyeintun/kite-lang"
 kite-span = { path = "crates/kite-span" }
 kite-diag = { path = "crates/kite-diag" }
 kite-lexer = { path = "crates/kite-lexer" }
+kite-fmt = { path = "crates/kite-fmt" }
+kite-doc = { path = "crates/kite-doc" }
 kite-ast = { path = "crates/kite-ast" }
 kite-parser = { path = "crates/kite-parser" }
 kite-resolve = { path = "crates/kite-resolve" }

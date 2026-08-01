@@ -13,5 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 kite-driver.workspace = true
+kite-fmt.workspace = true
+kite-doc.workspace = true
 kite-diag.workspace = true
 kite-span.workspace = true
