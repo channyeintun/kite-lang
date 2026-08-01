@@ -73,6 +73,31 @@ fn checks() -> [error] {
     out.push(test.is_true("Z" < "a", "upper case sorts before lower"))
     out.push(test.is_false("b" <= "a", "and the other way"))
 
+    // ---- reading numbers ----
+    let n = parse_int("42")
+    out.push(test.equal_int(if n == nil { -1 } else { n }, 42, "parse_int"))
+    let negative = parse_int("-7")
+    out.push(test.equal_int(if negative == nil { 0 } else { negative }, -7, "a negative number"))
+    out.push(test.is_true(parse_int("12a") == nil, "trailing rubbish is not a number"))
+    out.push(test.is_true(parse_int("") == nil, "nothing is not a number"))
+    out.push(test.is_true(parse_int("-") == nil, "a sign alone is not a number"))
+    out.push(test.is_true(parse_int(" 1") == nil, "parsing does not trim"))
+    let f = parse_float("2.5")
+    out.push(test.equal_float(if f == nil { 0.0 } else { f }, 2.5, 0.0001, "parse_float"))
+    let nf = parse_float("-0.25")
+    out.push(test.equal_float(if nf == nil { 0.0 } else { nf }, -0.25, 0.0001, "a negative float"))
+    let whole = parse_float("3")
+    out.push(test.equal_float(if whole == nil { 0.0 } else { whole }, 3.0, 0.0001, "a whole float"))
+    out.push(test.is_true(parse_float("2.") == nil, "a point with nothing after it"))
+
+    // ---- letters ----
+    out.push(test.equal_str(lower("MiXeD"), "mixed", "lower"))
+    out.push(test.equal_str(upper("MiXeD"), "MIXED", "upper"))
+    out.push(test.equal_str(lower("héllo"), "héllo", "only ASCII case changes"))
+    out.push(test.is_true(equal_ignoring_case("Content-Type", "content-type"), "header names"))
+    out.push(test.equal_str(pad_start("7", 3, "0"), "007", "pad_start"))
+    out.push(test.equal_str(pad_start("1234", 3, "0"), "1234", "pad_start leaves longer text"))
+
     // ---- numbers ----
     out.push(test.equal_int(abs(-3), 3, "abs"))
     out.push(test.equal_int(min(2, 5), 2, "min"))

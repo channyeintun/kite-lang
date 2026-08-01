@@ -344,6 +344,127 @@ pub fn is_some<T>(value: Option<T>) -> bool {
     return value != nil
 }
 
+// ---- reading numbers --------------------------------------------------------
+//
+// Parsing yields an optional rather than trapping or returning a zero: text
+// that is not a number is an ordinary runtime condition — it came from a file
+// or a person — and a zero would be indistinguishable from the text "0".
+
+/// A whole number, or nil. Accepts a leading `-` and digits, and nothing else:
+/// no spaces, no separators, no trailing units. A caller who wants those
+/// trims first, which is a decision this cannot make for them.
+pub fn parse_int(text: str) -> Option<int> {
+    if text.len() == 0 {
+        return nil
+    }
+    var negative = false
+    var start = 0
+    if text.slice(0, 1) == "-" {
+        negative = true
+        start = 1
+    }
+    if start >= text.len() {
+        return nil
+    }
+    var value = 0
+    for i in start..text.len() {
+        let d = "0123456789".index_of(text.slice(i, i + 1))
+        if d < 0 {
+            return nil
+        }
+        value = value * 10 + d
+    }
+    if negative {
+        return 0 - value
+    }
+    return value
+}
+
+/// A number with an optional fractional part, or nil. No exponent: a program
+/// that needs one is reading a format that has other rules too, and `std/json`
+/// is where those live.
+pub fn parse_float(text: str) -> Option<float> {
+    let point = text.index_of(".")
+    if point < 0 {
+        let whole = parse_int(text)
+        if whole == nil {
+            return nil
+        }
+        return whole as float
+    }
+    let left = text.slice(0, point)
+    let right = text.slice(point + 1, text.len())
+    if right.len() == 0 {
+        return nil
+    }
+    let whole = parse_int(if left.len() == 0 { "0" } else { left })
+    let fraction = parse_int(right)
+    if whole == nil {
+        return nil
+    }
+    if fraction == nil {
+        return nil
+    }
+    var scale = 1.0
+    for i in 0..right.len() {
+        scale = scale * 10.0
+    }
+    let magnitude = absf(whole as float) + (fraction as float) / scale
+    if starts_with(text, "-") {
+        return 0.0 - magnitude
+    }
+    return magnitude
+}
+
+// ---- letters ----------------------------------------------------------------
+//
+// ASCII only, and it says so. Case is a property of a language rather than of a
+// character — Turkish dotless i and German ß both make "lowercase then compare"
+// wrong — and a library that pretended otherwise would be wrong quietly. What
+// this is for is protocol text: header names, flags, identifiers.
+
+pub fn lower(text: str) -> str {
+    return mapped(text, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+}
+
+pub fn upper(text: str) -> str {
+    return mapped(text, "abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+}
+
+/// Whether two runs of text are the same ignoring ASCII case, which is what a
+/// header name or a flag is compared with.
+pub fn equal_ignoring_case(left: str, right: str) -> bool {
+    return lower(left) == lower(right)
+}
+
+fn mapped(text: str, from: str, to: str) -> str {
+    var out = ""
+    for i in 0..text.len() {
+        let c = text.slice(i, i + 1)
+        let at = from.index_of(c)
+        if at >= 0 {
+            out = out + to.slice(at, at + 1)
+        } else {
+            out = out + c
+        }
+    }
+    return out
+}
+
+/// `text` at least `width` long, padded on the left with `with`. Numbers in a
+/// column need this often enough to belong here rather than in `std/fmt`,
+/// which is about laying out a whole line.
+pub fn pad_start(text: str, width: int, with: str) -> str {
+    if with.len() == 0 {
+        return text
+    }
+    var out = text
+    for out.len() < width {
+        out = with + out
+    }
+    return out
+}
+
 // ---- ordering ---------------------------------------------------------------
 //
 // Sorting takes a comparison rather than requiring an `Ord` implementation.

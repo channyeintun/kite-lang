@@ -182,26 +182,10 @@ pub fn request_header(request: Request, name: str) -> Option<str> {
     for line in split(request.headers, "\n") {
         let at = line.index_of(":")
         if at > 0 {
-            if lower(line.slice(0, at)) == lower(name) {
+            if equal_ignoring_case(line.slice(0, at), name) {
                 return line.slice(at + 1, line.len()).trim()
             }
         }
     }
     return nil
-}
-
-fn lower(s: str) -> str {
-    let upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    let down = "abcdefghijklmnopqrstuvwxyz"
-    var out = ""
-    for i in 0..s.len() {
-        let c = s.slice(i, i + 1)
-        let at = upper.index_of(c)
-        if at >= 0 {
-            out = out + down.slice(at, at + 1)
-        } else {
-            out = out + c
-        }
-    }
-    return out
 }

@@ -111,7 +111,10 @@ pub async fn password_verify(password: str, stored: str) -> (bool, error) {
     if parts.len() != 4 {
         return _, errors.new("crypto: not a stored password hash")
     }
-    let iterations = to_int(parts[1])
+    let iterations = parse_int(parts[1])
+    if iterations == nil {
+        return _, errors.new("crypto: stored hash has no iteration count")
+    }
     if iterations <= 0 {
         return _, errors.new("crypto: stored hash has no iteration count")
     }
@@ -130,22 +133,4 @@ async fn finish(id: int, what: str) -> (str, error) {
         return _, errors.new("crypto \(what): \(work_error(id))")
     }
     return work_result(id), nil
-}
-
-/// A whole number from text, or -1. Written here rather than in the prelude
-/// because parsing a number is a decision — what to do with the rest of the
-/// string — and a library that guesses will guess wrong somewhere.
-fn to_int(s: str) -> int {
-    if s.len() == 0 {
-        return -1
-    }
-    var out = 0
-    for i in 0..s.len() {
-        let d = "0123456789".index_of(s.slice(i, i + 1))
-        if d < 0 {
-            return -1
-        }
-        out = out * 10 + d
-    }
-    return out
 }
