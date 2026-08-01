@@ -1,0 +1,221 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Kite",
+  "scopeName": "source.kite",
+  "fileTypes": ["kite"],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string" },
+    { "include": "#char" },
+    { "include": "#number" },
+    { "include": "#declaration" },
+    { "include": "#keyword" },
+    { "include": "#type" },
+    { "include": "#call" },
+    { "include": "#operator" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comment": {
+      "patterns": [
+        {
+          "name": "comment.line.documentation.kite",
+          "match": "///.*$"
+        },
+        {
+          "name": "comment.line.double-slash.kite",
+          "match": "//.*$"
+        }
+      ]
+    },
+
+    "string": {
+      "patterns": [
+        {
+          "name": "string.quoted.triple.kite",
+          "begin": "\"\"\"",
+          "end": "\"\"\"",
+          "patterns": [{ "include": "#interpolation" }, { "include": "#escape" }]
+        },
+        {
+          "name": "string.quoted.double.kite",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [{ "include": "#interpolation" }, { "include": "#escape" }]
+        }
+      ]
+    },
+
+    "interpolation": {
+      "name": "meta.embedded.line.kite",
+      "begin": "\\\\\\(",
+      "end": "\\)",
+      "beginCaptures": { "0": { "name": "punctuation.section.embedded.begin.kite" } },
+      "endCaptures": { "0": { "name": "punctuation.section.embedded.end.kite" } },
+      "patterns": [{ "include": "$self" }]
+    },
+
+    "escape": {
+      "name": "constant.character.escape.kite",
+      "match": "\\\\(n|t|r|0|\\\\|\"|'|u\\{[0-9A-Fa-f]+\\})"
+    },
+
+    "char": {
+      "name": "string.quoted.single.kite",
+      "match": "'(\\\\(n|t|r|0|\\\\|\"|'|u\\{[0-9A-Fa-f]+\\})|[^'\\\\])'"
+    },
+
+    "number": {
+      "patterns": [
+        {
+          "comment": "A float needs a digit either side of the point: `1.` and `.5` are not floats in Kite.",
+          "name": "constant.numeric.float.kite",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][-+]?[0-9_]+)?\\b"
+        },
+        {
+          "name": "constant.numeric.hex.kite",
+          "match": "\\b0[xX][0-9A-Fa-f_]+\\b"
+        },
+        {
+          "name": "constant.numeric.binary.kite",
+          "match": "\\b0[bB][01_]+\\b"
+        },
+        {
+          "name": "constant.numeric.octal.kite",
+          "match": "\\b0[oO][0-7_]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.kite",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+
+    "declaration": {
+      "comment": "A name in a declaring position, so `fn area` colours `area` as a definition rather than as an ordinary identifier.",
+      "patterns": [
+        {
+          "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.function.kite" },
+            "2": { "name": "entity.name.function.kite" }
+          }
+        },
+        {
+          "match": "\\b(struct|enum|trait|type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.type.kite" },
+            "2": { "name": "entity.name.type.kite" }
+          }
+        },
+        {
+          "match": "\\b(impl)\\b",
+          "captures": { "1": { "name": "keyword.declaration.impl.kite" } }
+        }
+      ]
+    },
+
+    "keyword": {
+      "comment": "All 27, grouped by what they do. Asserted against the lexer's own list by a test, so a keyword added to the language fails the build until it is coloured.",
+      "patterns": [
+        {
+          "name": "keyword.control.kite",
+          "match": "\\b(if|else|for|in|match|return|break|continue|defer|check|await)\\b"
+        },
+        {
+          "name": "keyword.declaration.kite",
+          "match": "\\b(fn|struct|enum|trait|impl|type|let|var|use|pub|async)\\b"
+        },
+        {
+          "name": "keyword.operator.word.kite",
+          "match": "\\b(as)\\b"
+        },
+        {
+          "name": "constant.language.kite",
+          "match": "\\b(true|false|nil)\\b"
+        },
+        {
+          "name": "variable.language.self.kite",
+          "match": "\\bself\\b"
+        }
+      ]
+    },
+
+    "type": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.kite",
+          "match": "\\b(int|float|bool|str|char|error)\\b"
+        },
+        {
+          "comment": "`dyn Trait` — the trait is a type, and the `dyn` before it is what says the dispatch is dynamic.",
+          "match": "\\b(dyn)\\s+([A-Z][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.modifier.dyn.kite" },
+            "2": { "name": "entity.name.type.kite" }
+          }
+        },
+        {
+          "comment": "Capitalised names are types by convention, which the compiler does not enforce and a highlighter can still use.",
+          "name": "entity.name.type.kite",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+
+    "call": {
+      "patterns": [
+        {
+          "comment": "A dotted path such as `io.print` or `draw.rect`.",
+          "match": "\\b([a-z_][A-Za-z0-9_]*)\\.([a-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+          "captures": {
+            "1": { "name": "support.module.kite" },
+            "2": { "name": "entity.name.function.call.kite" }
+          }
+        },
+        {
+          "name": "entity.name.function.call.kite",
+          "match": "\\b[a-z_][A-Za-z0-9_]*\\s*(?=\\()"
+        }
+      ]
+    },
+
+    "operator": {
+      "patterns": [
+        {
+          "name": "keyword.operator.assignment.kite",
+          "match": "(\\+=|-=|\\*=|/=|%=|=)"
+        },
+        {
+          "name": "keyword.operator.comparison.kite",
+          "match": "(==|!=|<=|>=|<|>)"
+        },
+        {
+          "name": "keyword.operator.logical.kite",
+          "match": "(&&|\\|\\||!)"
+        },
+        {
+          "name": "keyword.operator.arithmetic.kite",
+          "match": "(\\+|-|\\*|/|%|&|\\||\\^|<<|>>)"
+        },
+        {
+          "name": "keyword.operator.arrow.kite",
+          "match": "(->|=>)"
+        },
+        {
+          "name": "keyword.operator.range.kite",
+          "match": "(\\.\\.=|\\.\\.)"
+        }
+      ]
+    },
+
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.separator.kite", "match": "[,:]" },
+        { "name": "punctuation.section.brackets.kite", "match": "[\\[\\]]" },
+        { "name": "punctuation.section.braces.kite", "match": "[{}]" },
+        { "name": "punctuation.section.parens.kite", "match": "[()]" }
+      ]
+    }
+  }
+}

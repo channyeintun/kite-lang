@@ -142,7 +142,7 @@ refuses nothing the language can express.
 
 **Phases 1–4 are complete.** Generic functions and types with bounds and methods, closures, trait objects, enforced error handling, and a WebAssembly backend that refuses nothing the language can express.
 
-442 tests, plus an annotated compile-fail corpus.
+444 tests, plus an annotated compile-fail corpus.
 
 ```bash
 kitec run     file.kite      # compile and run

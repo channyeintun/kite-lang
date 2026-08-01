@@ -649,9 +649,19 @@ editor, and the same queries the compiler runs are the ones an editor needs.
 The extension itself should be a few hundred lines: launch the server, ship a
 grammar, register the file type. Anything more belongs in the server.
 
-**Syntax highlighting** needs a TextMate grammar (`kite.tmLanguage.json`)
-regardless — VS Code uses it for the fast path before the server answers, and
-GitHub needs it too.
+**Syntax highlighting** ✅ — `editors/vscode/` has the grammar, a language
+configuration, and a manifest. It colours all 27 keywords, the primitives,
+string interpolation (`\(expr)` as embedded code rather than as string),
+numeric literals in every base, `dyn Trait`, declaring positions, and dotted
+calls.
+
+A test in `kite-lexer` asserts that every keyword the lexer knows appears in
+the grammar, so adding one to the language fails the build until it is
+coloured. Highlighting drifting out of step with the language is the normal
+failure here, and it is worth a test rather than a habit.
+
+The same file is what a Linguist submission needs, so this is not work done
+twice.
 
 ### Highlighting on GitHub
 

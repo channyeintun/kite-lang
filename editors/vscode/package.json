@@ -1,0 +1,27 @@
+{
+  "name": "kite-lang",
+  "displayName": "Kite",
+  "description": "Syntax highlighting for the Kite programming language.",
+  "version": "0.1.0",
+  "publisher": "kite-lang",
+  "license": "MIT",
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "kite",
+        "aliases": ["Kite", "kite"],
+        "extensions": [".kite"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "kite",
+        "scopeName": "source.kite",
+        "path": "./syntaxes/kite.tmLanguage.json"
+      }
+    ]
+  }
+}
