@@ -42,9 +42,29 @@ expensive later:
 
 ---
 
-## Phase 1 — Vertical slice (4–6 weeks)
+## Phase 1 — Vertical slice ✅ **complete**
 
 **Goal:** `kite run hello.kite` prints output, executed by the bytecode VM.
+
+**Exit criterion met.** The program below runs, and a syntax error produces one
+well-rendered diagnostic. 212 tests pass, plus an annotated compile-fail corpus
+in `tests/corpus/` that asserts each expected code lands on its expected line
+*and* that no unannotated line produces a diagnostic — which is how the "one
+diagnostic per cause" requirement stays true as the compiler grows.
+
+Two things came out differently from this plan, both recorded where they
+happened:
+
+- **Definite-assignment analysis landed in Phase 1, not later.** The
+  specification permits `let z: int` followed by branch assignment, and there is
+  no way to accept that without the analysis. It is a two-element lattice
+  merged at branch joins — the same shape as the Phase 3 taint analysis, so
+  Phase 3 now has a worked precedent to copy.
+- **Loop forms survive HIR into MIR.** The desugaring table below originally put
+  `for` expansion in HIR. That is wrong: flattening the loop there puts the
+  increment after the body, and `continue` then skips it, so `for i in 0..5 {
+  if i == 2 { continue } }` would never terminate. MIR builds the CFG with the
+  increment in its own block, which `continue` targets.
 
 Language subset:
 

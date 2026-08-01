@@ -40,6 +40,16 @@ impl Ty {
         }
     }
 
+    /// The type's name with its indefinite article, for prose in diagnostics:
+    /// "this is an `int`", not "this is a `int`".
+    pub fn with_article(self) -> String {
+        let article = match self {
+            Ty::Int | Ty::Error => "an",
+            _ => "a",
+        };
+        format!("{} `{}`", article, self.name())
+    }
+
     /// Whether a value of type `self` is acceptable where `expected` is
     /// required.
     ///

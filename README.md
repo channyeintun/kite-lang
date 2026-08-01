@@ -68,5 +68,43 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 
 ## Status
 
-Specification draft. No implementation yet. The specification is the artifact to
-critique before a single line of the compiler is written.
+**Phase 1 complete** — the vertical slice runs end to end. See
+[docs/06-roadmap.md](docs/06-roadmap.md) for what comes next.
+
+```bash
+cargo run --bin kitec -- run examples/hello.kite
+```
+
+```kite
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+fn main() {
+    let x = add(2, 3)
+    if x > 4 {
+        io.print("big")
+    }
+    for i in 0..x {
+        io.print(i)
+    }
+}
+```
+
+Working today: the full lexer (all 27 keywords, newline termination, Unicode
+identifiers), parser with error recovery, name resolution, bidirectional type
+checking, definite-assignment analysis, MIR with explicit basic blocks,
+register-based bytecode, and a VM. 212 tests, plus an annotated compile-fail
+corpus.
+
+The language subset is `int`/`float`/`bool`/`str`, functions, `let`/`var`,
+`if`/`else`, the three `for` forms with labelled `break`/`continue`, and
+`io.print`. Structs, enums, traits, and generics are Phase 2; error handling
+with `check` is Phase 3; the WasmGC backend is Phase 4.
+
+```bash
+kitec run     file.kite      # compile and run
+kitec check   file.kite      # check only
+kitec build   file.kite --emit mir    # ast | hir | mir | kbc
+kitec --explain E0301        # why a rule exists
+```

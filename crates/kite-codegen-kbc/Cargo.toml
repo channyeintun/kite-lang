@@ -9,4 +9,12 @@ description = "Kite bytecode code generator"
 
 [dependencies]
 kite-mir.workspace = true
+kite-hir.workspace = true
+
+[dev-dependencies]
+kite-span.workspace = true
+kite-diag.workspace = true
+kite-lexer.workspace = true
+kite-parser.workspace = true
+kite-resolve.workspace = true
 kite-types.workspace = true

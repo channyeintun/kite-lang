@@ -1,0 +1,8 @@
+fn takes_int(n: int) {
+    io.print(n)
+}
+
+fn main() {
+    takes_int(1.5)   //~ ERROR E0200
+    let mixed = 1 + 1.5   //~ ERROR E0201
+}

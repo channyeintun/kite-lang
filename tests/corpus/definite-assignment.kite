@@ -1,0 +1,7 @@
+fn main() {
+    let z: int
+    if true {
+        z = 1
+    }
+    io.print(z)      //~ ERROR E0110
+}

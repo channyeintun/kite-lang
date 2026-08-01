@@ -13,7 +13,13 @@ dependencies = [
 name = "kite-codegen-kbc"
 version = "0.1.0"
 dependencies = [
+ "kite-diag",
+ "kite-hir",
+ "kite-lexer",
  "kite-mir",
+ "kite-parser",
+ "kite-resolve",
+ "kite-span",
  "kite-types",
 ]
 
@@ -61,8 +67,13 @@ dependencies = [
 name = "kite-mir"
 version = "0.1.0"
 dependencies = [
+ "kite-diag",
  "kite-hir",
+ "kite-lexer",
+ "kite-parser",
+ "kite-resolve",
  "kite-span",
+ "kite-types",
 ]
 
 [[package]]
@@ -108,6 +119,13 @@ name = "kite-vm"
 version = "0.1.0"
 dependencies = [
  "kite-codegen-kbc",
+ "kite-diag",
+ "kite-lexer",
+ "kite-mir",
+ "kite-parser",
+ "kite-resolve",
+ "kite-span",
+ "kite-types",
 ]
 
 [[package]]

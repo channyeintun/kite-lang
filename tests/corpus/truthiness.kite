@@ -1,0 +1,5 @@
+fn main() {
+    if 1 {           //~ ERROR E0202
+        io.print("yes")
+    }
+}

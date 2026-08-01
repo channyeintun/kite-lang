@@ -64,6 +64,7 @@ pub fn check(
             diags,
             fn_index: i,
             locals: Vec::new(),
+            init: Vec::new(),
             loop_depth: 0,
         };
         let func = checker.check_fn(f, &sigs[i]);
@@ -88,7 +89,35 @@ struct Checker<'a> {
     diags: &'a mut DiagBag,
     fn_index: usize,
     locals: Vec<hir::Local>,
+    /// Definite-assignment state, parallel to `locals`.
+    init: Vec<Init>,
     loop_depth: u32,
+}
+
+/// Whether a local certainly holds a value at this point.
+///
+/// The specification permits `let x: int` followed by assignment in branches,
+/// "provided the compiler can prove exactly one assignment occurs on every path
+/// before first use". This is that proof: a two-element lattice, merged at
+/// every branch join, which is the same machinery as the error-taint analysis
+/// arriving in Phase 3.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Init {
+    /// Declared without a value and not yet assigned on this path.
+    Unassigned,
+    Assigned,
+}
+
+impl Init {
+    /// A local is assigned after a join only when it is assigned on *every*
+    /// incoming path.
+    fn merge(self, other: Init) -> Init {
+        if self == Init::Assigned && other == Init::Assigned {
+            Init::Assigned
+        } else {
+            Init::Unassigned
+        }
+    }
 }
 
 /// Whether a block always leaves via `return`, `break`, or `continue`.
@@ -125,6 +154,18 @@ impl<'a> Checker<'a> {
                 mutable: info.mutable,
                 span: info.span,
                 synthetic: info.synthetic,
+            })
+            .collect();
+
+        // Parameters always hold a value; everything else starts unassigned
+        // and is marked as its `let` or `var` is checked.
+        self.init = (0..self.locals.len())
+            .map(|i| {
+                if i < f.params.len() {
+                    Init::Assigned
+                } else {
+                    Init::Unassigned
+                }
             })
             .collect();
 
@@ -262,6 +303,11 @@ impl<'a> Checker<'a> {
         };
 
         self.locals[local_id as usize].ty = ty;
+        // A `let` with an initialiser holds a value from here on; one without
+        // stays unassigned until a branch writes it.
+        if init.is_some() {
+            self.init[local_id as usize] = Init::Assigned;
+        }
         let _ = sig;
         Some((
             hir::Stmt::Let { local: hir::LocalId(local_id), init, span: l.span },
@@ -283,6 +329,7 @@ impl<'a> Checker<'a> {
             None => init.ty,
         };
         self.locals[local_id as usize].ty = ty;
+        self.init[local_id as usize] = Init::Assigned;
 
         Some((
             hir::Stmt::Let { local: hir::LocalId(local_id), init: Some(init), span: v.span },
@@ -303,12 +350,17 @@ impl<'a> Checker<'a> {
             return None;
         };
 
-        let local_ty = self.locals[local_id as usize].ty;
-        let mutable = self.locals[local_id as usize].mutable;
-        let decl_span = self.locals[local_id as usize].span;
-        let name = self.locals[local_id as usize].name.clone();
+        let slot = local_id as usize;
+        let local_ty = self.locals[slot].ty;
+        let mutable = self.locals[slot].mutable;
+        let decl_span = self.locals[slot].span;
+        let name = self.locals[slot].name.clone();
+        let already_assigned = self.init[slot] == Init::Assigned;
 
-        if !mutable {
+        // An immutable binding may be written exactly once, and only if it was
+        // declared without an initialiser. That is what makes
+        // `let z: int` followed by branch assignment legal.
+        if !mutable && already_assigned {
             let mut d = Diagnostic::error(
                 codes::E0114,
                 format!("cannot assign to immutable binding `{}`", name),
@@ -316,13 +368,25 @@ impl<'a> Checker<'a> {
             .with_secondary(decl_span, "declared immutable here")
             .with_primary(p.span, "cannot assign");
 
-            // The `let` keyword sits immediately before the name; offer to
-            // replace it with `var`.
             if let Some(kw) = self.let_keyword_span(decl_span) {
                 d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
             }
             self.diags.push(d);
+        } else if !mutable && self.loop_depth > 0 {
+            // Inside a loop the assignment could run more than once, which
+            // would be a second write to an immutable binding.
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0114,
+                    format!("cannot assign to immutable binding `{}` inside a loop", name),
+                )
+                .with_primary(p.span, "this assignment may run more than once")
+                .with_secondary(decl_span, "declared immutable here")
+                .with_note("declare it `var` if it is meant to change"),
+            );
         }
+
+        self.init[slot] = Init::Assigned;
 
         let value = self.expr(&a.value, Some(local_ty));
 
@@ -366,7 +430,7 @@ impl<'a> Checker<'a> {
                 if sig.ret == Ty::Unit {
                     self.diags.push(
                         Diagnostic::error(codes::E0200, "returning a value from a `()` function")
-                            .with_primary(value.span, format!("this is a `{}`", value.ty))
+                            .with_primary(value.span, format!("this is {}", value.ty.with_article()))
                             .with_secondary(sig.name_span, "no return type declared here"),
                     );
                 } else {
@@ -397,7 +461,14 @@ impl<'a> Checker<'a> {
 
     fn if_stmt(&mut self, i: &ast::IfStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
         let cond = self.condition(&i.cond);
+
+        // Each branch is checked from the same entry state, and the states are
+        // merged at the join. A branch that diverges contributes nothing to the
+        // join, because control never arrives from it.
+        let entry_init = self.init.clone();
+
         let (then, then_flow) = self.block(&i.then, sig);
+        let then_init = std::mem::replace(&mut self.init, entry_init.clone());
 
         let (else_, else_flow) = match i.else_.as_deref() {
             None => (None, Flow::Falls),
@@ -409,6 +480,20 @@ impl<'a> Checker<'a> {
                 let (stmt, f) = self.if_stmt(nested, sig)?;
                 (Some(hir::Block { stmts: vec![stmt] }), f)
             }
+        };
+        let else_init = std::mem::take(&mut self.init);
+
+        self.init = match (then_flow, else_flow, i.else_.is_some()) {
+            // No `else`: control can arrive having skipped the `then` entirely.
+            (_, _, false) => entry_init,
+            (Flow::Diverges, Flow::Diverges, _) => else_init,
+            (Flow::Diverges, Flow::Falls, _) => else_init,
+            (Flow::Falls, Flow::Diverges, _) => then_init,
+            (Flow::Falls, Flow::Falls, _) => then_init
+                .iter()
+                .zip(&else_init)
+                .map(|(a, b)| a.merge(*b))
+                .collect(),
         };
 
         // Without an `else`, control can always fall through.
@@ -424,6 +509,10 @@ impl<'a> Checker<'a> {
     fn for_stmt(&mut self, f: &ast::ForStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
         let label = f.label.as_ref().map(|l| l.name.clone());
         self.loop_depth += 1;
+
+        // A loop body may run zero times, so nothing it assigns can be assumed
+        // assigned afterwards. The entry state is restored at the end.
+        let entry_init = self.init.clone();
 
         let result = match &f.header {
             ast::ForHeader::In { binding, iter } => {
@@ -449,6 +538,8 @@ impl<'a> Checker<'a> {
 
                 let local_id = self.resolved.lookup_binding(name.span)?;
                 self.locals[local_id as usize].ty = Ty::Int;
+                // The loop itself supplies the counter's value.
+                self.init[local_id as usize] = Init::Assigned;
 
                 let (body, _) = self.block(&f.body, sig);
                 hir::Stmt::ForRange {
@@ -473,6 +564,7 @@ impl<'a> Checker<'a> {
         };
 
         self.loop_depth -= 1;
+        self.init = entry_init;
         // A loop is treated as falling through even when it has no exit; proving
         // otherwise needs reachability analysis that arrives with MIR.
         Some((result, Flow::Falls))
@@ -483,7 +575,7 @@ impl<'a> Checker<'a> {
         let c = self.expr(e, Some(Ty::Bool));
         if !c.ty.satisfies(Ty::Bool) && !c.ty.is_poisoned() {
             let mut d = Diagnostic::error(codes::E0202, "condition must be `bool`")
-                .with_primary(c.span, format!("this is a `{}`", c.ty))
+                .with_primary(c.span, format!("this is {}", c.ty.with_article()))
                 .with_note("Kite has no truthiness: compare explicitly");
             if c.ty == Ty::Int {
                 d = d.with_note("for example, write `n != 0`");
@@ -551,7 +643,7 @@ impl<'a> Checker<'a> {
                                     codes::E0201,
                                     format!("`{}` needs `bool` operands", op.text()),
                                 )
-                                .with_primary(side.span, format!("this is a `{}`", side.ty))
+                                .with_primary(side.span, format!("this is {}", side.ty.with_article()))
                                 .with_note("Kite has no truthiness"),
                             );
                         }
@@ -630,11 +722,31 @@ impl<'a> Checker<'a> {
 
     fn path_expr(&mut self, p: &ast::Path) -> hir::Expr {
         match self.resolved.lookup_use(p.span) {
-            Some(Res::Local(id)) => hir::Expr {
-                kind: ExprKind::Local(hir::LocalId(id)),
-                ty: self.locals[id as usize].ty,
-                span: p.span,
-            },
+            Some(Res::Local(id)) => {
+                if self.init[id as usize] == Init::Unassigned {
+                    let local = &self.locals[id as usize];
+                    let (name, decl) = (local.name.clone(), local.span);
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0110,
+                            format!("`{}` may not have a value here", name),
+                        )
+                        .with_primary(p.span, "used before being assigned")
+                        .with_secondary(decl, "declared without a value here")
+                        .with_note(
+                            "a `let` without an initialiser must be assigned on every path \
+                             before it is read",
+                        ),
+                    );
+                    // Mark it assigned so one omission yields one diagnostic.
+                    self.init[id as usize] = Init::Assigned;
+                }
+                hir::Expr {
+                    kind: ExprKind::Local(hir::LocalId(id)),
+                    ty: self.locals[id as usize].ty,
+                    span: p.span,
+                }
+            }
             Some(Res::Fn(_)) | Some(Res::Builtin(_)) => {
                 // Naming a function without calling it needs function types.
                 self.not_yet(
@@ -701,7 +813,7 @@ impl<'a> Checker<'a> {
                                 codes::E0200,
                                 format!("`io.print` cannot print a `{}`", e.ty),
                             )
-                            .with_primary(e.span, format!("this is a `{}`", e.ty))
+                            .with_primary(e.span, format!("this is {}", e.ty.with_article()))
                             .with_note("`io.print` accepts int, float, bool, and str"),
                         );
                     }
@@ -718,7 +830,7 @@ impl<'a> Checker<'a> {
                 let ty = self.locals[id as usize].ty;
                 self.diags.push(
                     Diagnostic::error(codes::E0205, format!("`{}` is not a function", p.text()))
-                        .with_primary(p.span, format!("this is a `{}`", ty))
+                        .with_primary(p.span, format!("this is {}", ty.with_article()))
                         .with_secondary(self.locals[id as usize].span, "declared here"),
                 );
                 self.lit(ExprKind::Error, Ty::Error, span)
@@ -755,8 +867,8 @@ impl<'a> Checker<'a> {
             if !e.ty.satisfies(t.ty) && !t.ty.is_poisoned() && !e.ty.is_poisoned() {
                 self.diags.push(
                     Diagnostic::error(codes::E0200, "`if` branches have different types")
-                        .with_primary(e.span, format!("this branch is a `{}`", e.ty))
-                        .with_secondary(t.span, format!("this branch is a `{}`", t.ty))
+                        .with_primary(e.span, format!("this branch is {}", e.ty.with_article()))
+                        .with_secondary(t.span, format!("this branch is {}", t.ty.with_article()))
                         .with_note("every branch of a value `if` must produce the same type"),
                 );
             }
@@ -802,7 +914,7 @@ impl<'a> Checker<'a> {
                         codes::E0201,
                         format!("`{}` cannot be applied to `{}`", op.text(), val.ty),
                     )
-                    .with_primary(val.span, format!("this is a `{}`", val.ty))
+                    .with_primary(val.span, format!("this is {}", val.ty.with_article()))
                     .with_note(match op {
                         ast::UnaryOp::Neg => "`-` applies to `int` and `float`",
                         ast::UnaryOp::Not => "`!` applies to `bool`",
@@ -1024,7 +1136,7 @@ impl<'a> Checker<'a> {
             codes::E0200,
             format!("expected `{}`, found `{}`", expected, found),
         )
-        .with_primary(span, format!("this is a `{}`", found));
+        .with_primary(span, format!("this is {}", found.with_article()));
 
         if let Some(b) = because {
             d = d.with_secondary(b, format!("`{}` required here", expected));

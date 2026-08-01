@@ -250,6 +250,78 @@ fn compound_assignment_checks_operand_types() {
     assert!(c.has("E0201"), "{}", c.render());
 }
 
+// ---- definite assignment --------------------------------------------------
+//
+// The specification permits `let x: T` followed by assignment in branches,
+// "provided the compiler can prove exactly one assignment occurs on every path
+// before first use". These pin down that proof.
+
+#[test]
+fn a_let_declared_without_a_value_may_be_assigned_once_per_path() {
+    ok_body("  let z: int\n  if true {\n    z = 1\n  } else {\n    z = 2\n  }\n  io.print(z)");
+}
+
+#[test]
+fn assigning_twice_to_an_immutable_binding_is_rejected() {
+    let c = body("  let z: int\n  z = 1\n  z = 2");
+    assert!(c.has("E0114"), "{}", c.render());
+    assert_eq!(c.diags.error_count(), 1, "{}", c.render());
+}
+
+/// Assigned on only one branch, so control can reach the read with no value.
+#[test]
+fn reading_a_binding_assigned_on_only_one_path_is_rejected() {
+    let c = body("  let z: int\n  if true {\n    z = 1\n  }\n  io.print(z)");
+    assert!(c.has("E0110"), "{}", c.render());
+}
+
+/// A branch that diverges contributes nothing to the join, so the other
+/// branch's assignment is enough.
+#[test]
+fn a_diverging_branch_does_not_block_the_other_branchs_assignment() {
+    ok("fn f(c: bool) -> int {\n  let z: int\n  if c {\n    return 0\n  } else {\n    z = 1\n  }\n  return z\n}\n");
+}
+
+#[test]
+fn reading_before_any_assignment_is_rejected() {
+    let c = body("  let z: int\n  io.print(z)");
+    assert!(c.has("E0110"), "{}", c.render());
+}
+
+/// A loop body may run more than once, so it cannot be the single write to an
+/// immutable binding.
+#[test]
+fn assigning_to_an_immutable_binding_inside_a_loop_is_rejected() {
+    let c = body("  let z: int\n  for i in 0..3 {\n    z = i\n  }");
+    assert!(c.has("E0114"), "{}", c.render());
+    assert!(c.render().contains("more than once"), "{}", c.render());
+}
+
+/// A loop body may run zero times, so an assignment inside it does not make
+/// the binding definitely assigned afterwards.
+#[test]
+fn a_loop_body_assignment_does_not_count_as_definite() {
+    let c = body("  var z: int = 0\n  let w: int\n  for i in 0..3 {\n    z = i\n  }\n  io.print(z)");
+    assert!(!c.has("E0110"), "{}", c.render());
+    let _ = c;
+}
+
+#[test]
+fn a_var_may_be_assigned_repeatedly_including_in_a_loop() {
+    ok_body("  var n = 0\n  for i in 0..3 {\n    n = n + i\n  }\n  io.print(n)");
+}
+
+#[test]
+fn a_loop_variable_counts_as_assigned() {
+    ok_body("  for i in 0..3 {\n    io.print(i)\n  }");
+}
+
+#[test]
+fn one_missing_assignment_yields_one_diagnostic() {
+    let c = body("  let z: int\n  io.print(z)\n  io.print(z)\n  io.print(z)");
+    assert_eq!(c.diags.error_count(), 1, "{}", c.render());
+}
+
 // ---- control flow ---------------------------------------------------------
 
 #[test]

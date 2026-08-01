@@ -9,3 +9,12 @@ description = "Kite bytecode virtual machine"
 
 [dependencies]
 kite-codegen-kbc.workspace = true
+
+[dev-dependencies]
+kite-span.workspace = true
+kite-diag.workspace = true
+kite-lexer.workspace = true
+kite-parser.workspace = true
+kite-resolve.workspace = true
+kite-types.workspace = true
+kite-mir.workspace = true

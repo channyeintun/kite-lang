@@ -1,0 +1,7 @@
+fn f() -> int {
+    let x = 1
+}                    //~ ERROR E0203
+
+fn main() {
+    io.print(f())
+}

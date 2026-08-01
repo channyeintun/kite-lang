@@ -65,13 +65,19 @@ kite/
 | `wasm-encoder` | Wasm binary emission | Bytecode Alliance, tracks the spec, GC types supported |
 | `wasmparser` | Validation of own output | Catch codegen bugs in CI, not in a browser |
 | `cranelift-codegen`, `cranelift-module`, `cranelift-object` | Native backend | Rust-native, fast, designed for language backends |
-| `annotate-snippets` | Diagnostic rendering | rustc's own renderer |
+| *(none — hand-written)* | Diagnostic rendering | The renderer is ~200 lines and pins the output format exactly to the specification, under snapshot test. Revisit if it grows. |
 | `rustc-hash` | FxHashMap | Measurably faster than SipHash for compiler workloads |
 | `indexmap` | Insertion-ordered maps | Kite maps guarantee insertion order |
 | `la-arena` / `id-arena` | Arena allocation | Index-based IR nodes, no lifetime plumbing |
 
+Also required: `unicode-ident`, for UAX #31 `XID_Start` / `XID_Continue`. This
+is not optional polish — `XID_Continue` includes combining marks, and without
+them Burmese, Devanagari, Thai, and Hebrew cannot spell ordinary words. An
+`is_alphanumeric` approximation rejects `နာမည်` at its final character.
+
 Deliberately avoided: parser generators (hand-written recursive descent gives far
-better error recovery), LLVM, and any C or C++ dependency.
+better error recovery), LLVM, and any C or C++ dependency. As of Phase 1 the
+compiler has exactly one external dependency.
 
 ---
 
@@ -165,7 +171,7 @@ Post-typecheck, desugared, fully typed. Desugarings applied:
 | `check err` | `if err != nil { return ErrPath(err) }` |
 | `a ?? b` | `match a { nil => b, v => v }` |
 | `a?.b` | `match a { nil => nil, v => v.b }` |
-| `for x in xs {…}` | `Iterate` protocol loop |
+| `for x in xs {…}` | *(left intact — see note)* |
 | `0..10` | `Range.new(0, 10)` |
 | `"a \(b) c"` | `str.concat(["a ", Display.show(b), " c"])` |
 | `Point{ ..p, y: 5.0 }` | explicit per-field construction |
@@ -174,6 +180,13 @@ Post-typecheck, desugared, fully typed. Desugarings applied:
 `match` remains in HIR — it is lowered to a decision tree in MIR, after the
 exhaustiveness check has run against the source-level shape so diagnostics can
 name the user's own arms.
+
+**Loop forms also remain in HIR**, which is a correctness requirement rather
+than a convenience. Expanding `for i in a..b` here would place the increment at
+the end of the body, and `continue` would then jump past it — the loop would
+never advance. MIR builds the control-flow graph with the increment in a block
+of its own, and `continue` targets that block. This is why `kite-hir` carries
+`ForRange`, `While`, and `Loop` rather than a single desugared `Loop`.
 
 ---
 
