@@ -1,0 +1,19 @@
+# Highlighting for `.kite` files.
+#
+# GitHub highlights through Linguist, which only knows languages that have been
+# submitted to it — and Linguist asks for evidence of wide use before accepting
+# one, which is a consequence of adoption rather than a task. Until then this
+# maps Kite onto Go, whose keyword set and brace style overlap enough that the
+# colours land in sensible places.
+#
+# It is a deliberate approximation, not a claim: `match`, `check`, `trait` and
+# `dyn` will not be coloured, and Go's `chan`, `go` and `defer` would be if
+# anyone wrote them. The alternative is no highlighting at all.
+#
+# `linguist-detectable` makes `.kite` files count in the repository's language
+# statistics. See docs/06-roadmap.md, Phase 14.
+*.kite linguist-language=Go
+*.kite linguist-detectable
+
+# Generated glue and pages are output, not source.
+dist/* linguist-generated
