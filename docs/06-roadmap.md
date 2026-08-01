@@ -419,7 +419,7 @@ valid. `?.` and the `?T` type sigil went with it; the optional type is spelled
 
 ---
 
-## Phase 4 — WebAssembly backend 🟡 **step 1 of 6 complete**
+## Phase 4 — WebAssembly backend ✅ **complete, less JS String Builtins**
 
 `kite-codegen-wasm` emits WebAssembly directly via `wasm-encoder` — no LLVM.
 
@@ -462,10 +462,17 @@ way.
 
 2. ~~GC structs and arrays~~ ✅
 3. ~~Enums via subtyped variant records~~ ✅
-4. `str` as `externref` with JS String Builtins (today a constant index into a
-   table the glue holds, which needs no linear memory at all)
-5. Trait objects with typed function-reference vtables
-6. `extern` declarations driving the glue, rather than a fixed import list
+4. `str` as `externref` with JS String Builtins — **not done**. A `str` is a
+   constant index into a table the glue holds, which needs no linear memory at
+   all and costs one call per operation. Builtins would make a string a real JS
+   string and the boundary free; it is an optimisation, not a gap.
+5. ~~Trait objects with typed function-reference vtables~~ ✅ — a tag and a
+   dispatcher per method, because WasmGC compares types structurally and
+   `ref.test` cannot separate two structs of the same shape.
+6. ~~`extern` declarations driving the glue~~ ✅ — `@host("net") extern fn`
+   becomes an import, the generated glue declares the group, and a page
+   supplies it. The compiler's own builtins are still a fixed list, which is
+   the honest shape of it: those are the language's, not the program's.
 
 String concatenation and comparison lower as host calls, since a `str` is an
 index into a table the glue holds and the glue grows it.
@@ -544,104 +551,222 @@ on the remaining lowering steps.
 
 ---
 
-## Phase 5 — Concurrency (4–6 weeks)
+## Phase 5 — Concurrency ✅ **complete, except real parallelism**
 
-`async`/`await`, the state machine transformation, `Task<T>`, the combinators,
-`task.scope` and cancellation, `Share` inference, and the schedulers.
+`async fn` compiles to two ordinary functions: a **starter** that allocates the
+frame, hands the scheduler a resume closure and returns the task, and a
+**resume function** that is the original body with an entry dispatching on where
+the last suspension left off. It is one MIR pass, so both backends see ordinary
+functions, ordinary structs and an ordinary closure, and neither knows
+concurrency exists.
 
-Native and bytecode targets get the real work-stealing pool here. Web gets the
-cooperative loop plus the isolate pool for `task.parallel`.
+MIR being a CFG already is what made this small: the hard part of the usual
+transform — recovering the resume points — is free when a suspension is a block
+boundary. Locals are spilled and reloaded around a suspension rather than
+rewritten into frame fields everywhere; a live-range analysis would spill fewer
+and getting it wrong would be a miscompile, so that is a later optimisation
+with a correct starting point.
 
-**Exit criterion:** a program that fetches three URLs concurrently works on web;
-the same source uses all cores on native; and moving a type with a `var` field
-into `task.parallel` produces `E0520` with the documented message.
+`Task<T>` is a struct the compiler declares, generic like any other, so
+substitution and monomorphisation carry it for free and `both<A, B>` works. Its
+fields are named `$done` and `$value`, which no program can spell.
 
----
+Four primitives — `task.yield`, `task.park`, `task.wake_at` and `time.now`,
+plus `task.wait_host` for a fetch — and every combinator in `std/task` is Kite
+written on top of them: `both`, `all`, `race`, `sleep`, `timeout`, `parallel`,
+`scope`.
 
-## Phase 6 — Standard library core (4–6 weeks)
+Two things the scheduler had to get right:
 
-`core`, `errors`, `fmt`, `math`, `time`, `io`, `json`, `task`, `buffer`, `test`.
+- **An `await` that finds its task unfinished parks.** An awaiting task is
+  otherwise runnable on every sweep, and a scheduler cannot tell that from
+  progress — so one sleeping task would spin the program forever.
+- **A completion wakes everything**, because that is what a parked task was
+  waiting for. Without it a `timeout` would sleep through the result it was
+  waiting for.
 
-Written in Kite. This is the first substantial body of Kite code, and it will
-find ergonomic problems that no amount of specification review would have. Budget
-time to act on what it reveals.
+The clock is **virtual** on both backends: when every task is waiting on a
+deadline it jumps to the earliest. A program that sleeps costs no real time
+under test, and the two backends produce the same interleaving — a scheduler
+racing real timers could not be differentially tested.
 
-`json.decode<T>` requires compile-time derivation — build that machinery here,
-since `Eq`, `Hash`, and `Debug` derivation need the same infrastructure.
-
-**Exit criterion:** the standard library's own test suite passes on all three
-backends.
-
----
-
-## Phase 7 — Layout engine and DOM renderer (6–8 weeks)
-
-The flexbox subset over flat buffers, the retained scene graph and its diff, the
-widget set, the Elm-style update loop, and `DomRenderer`.
-
-DOM first, deliberately: it is simpler, it is the accessible path, and it
-establishes the correct rendering output that the canvas renderer must later
-match.
-
-Validate layout against Taffy's test suite — it is an independent flexbox
-implementation with extensive fixtures, and agreeing with it is strong evidence
-of correctness.
-
-**Exit criterion:** the task-list application from
-[docs/04 §6](04-stdlib-ui.md#6-events-and-state) runs in a browser, is keyboard
-navigable, and is usable with VoiceOver.
-
----
-
-## Phase 8 — Canvas renderer (8–10 weeks)
-
-`CanvasRenderer` over Canvas2D, then WebGPU. HarfBuzz for shaping, UAX #14 line
-breaking, UAX #9 bidi, the glyph atlas, damage tracking, hidden-overlay text
-input, and the parallel ARIA tree.
-
-The hardest phase, and the one most likely to overrun. Text is the reason.
-
-Golden-image tests against the DOM renderer are the acceptance mechanism: the two
-must produce identical layout for every fixture, across Latin, Cyrillic, Arabic,
-Hebrew, Devanagari, Thai, CJK, and Burmese.
-
-**Exit criterion:** the same task-list source runs under both renderers with
-identical layout, and both are usable with a screen reader.
+**Exit criterion, honestly:** three URLs fetched concurrently on web works and
+is tested under Node; `E0520` names the mutable field responsible, not just the
+type. **What does not work is real parallelism, on any target.** A WasmGC
+reference cannot cross a thread boundary until shared-everything-threads ships,
+and the bytecode VM's values are `Rc`-based rather than `Send`. `task.parallel`
+therefore interleaves rather than parallelises today. The *rule* is real and
+enforced now, which is the forward-compatibility decision that mattered: the
+day either restriction lifts, the same source starts using cores.
 
 ---
 
-## Phase 9 — Native backend (6–8 weeks)
+## Phase 6 — Standard library core ✅ **complete, less `decode<T>`**
 
-`kite-codegen-clif` via Cranelift, plus the precise generational collector in
-`kite-rt`.
+`std/math`, `std/time`, `std/errors`, `std/fmt`, `std/json`, `std/test`,
+`std/buffer`, `std/task`, `std/http`, `std/crypto` and `std/ui` — all written
+in Kite, all reached through `use`, all documented by `kitec doc` from their
+own source.
 
-The GC is the real work. Stack maps at safepoints, precise root scanning, a
-nursery with a bump allocator, and a write barrier for the old generation.
+**Modules landed first**, because the library needed them. A module is a
+directory, and its declarations are merged *qualified*: `load` in module
+`config` is declared as `config.load`. A dot cannot appear in an identifier, so
+the qualified name is unforgeable and is exactly what an importer writes — which
+is why diagnostics need no demangling and the rest of the compiler needs no
+notion of a module beyond "which one am I in". `pub` finally means something:
+reaching for an unmarked declaration across a module boundary is E0401.
 
-**Exit criterion:** the differential test corpus produces identical output on all
-three backends, and a native binary starts in under 10ms.
+Writing `std/json` — a parser, a writer, a pretty-printer and accessors — found
+four things the language now does, which is exactly what this phase was for:
+
+- **Returning a fallible call's result directly**, `return parse_user(raw)`,
+  which the specification's own example does and the checker refused.
+- **Match arms coerce into an expected optional**, so `Text(s) => s` and
+  `other => nil` are arms of one `Option<str>`.
+- **Reading an error counts as checking it.** E0302 exists to catch the error
+  nobody looked at, not the one handed to `errors.wrap`.
+- **Every accessor takes an optional and yields one**, which is what makes them
+  chain without a `?.` operator: `field(field(doc, "a"), "b")` reads left to
+  right and the branch is taken once, at the end.
+
+Maps grew `keys()` and `values()` and, with them, `for (k, v) in m` — lowered
+to a loop over the keys with the value looked up per key, which is what a
+reader would write by hand and keeps insertion order.
+
+`kitec test` runs every `test_` function in a file. Assertions return errors
+rather than trapping, so one failure does not stop the rest.
+
+**Exit criterion, honestly:** the library's own tests are ordinary Kite
+programs in `tests/std/`, and they run on the bytecode VM *and* on WebAssembly
+under Node with the outputs compared. The third backend does not exist, so
+"all three" is two.
+
+**Remaining:** `json.decode<T>` — a document straight into a user's struct —
+needs compile-time derivation, and so do `Eq`, `Hash` and `Debug`. None of that
+machinery is built. Until it is, a document is taken apart with accessors that
+each yield an optional, which is more typing and no less safe.
 
 ---
 
-## Phase 10 — Tooling (ongoing, start at Phase 2)
+## Phase 7 — Layout engine and DOM renderer 🟡 **the loop works; the diff does not**
 
-| Tool | Start after |
+Done: the flexbox subset in `std/ui.kite`, the Elm-shaped update loop, the DOM
+renderer, and events — click, key, wheel, pointer move, down, up, and resize,
+all through one door.
+
+A frame is **recorded before it is painted**, and an identical one is not
+painted at all: a pointer moving over nothing costs one comparison rather than
+a rebuilt tree. That is the half of damage tracking a model that did not change
+needs. Finding *which* rectangle changed needs a retained scene graph that
+survives between frames, and that is not written.
+
+**Remaining:** the retained scene graph and its diff; a widget set (there are
+boxes and text, and everything else is a program's own); keyboard navigation
+and focus; validation against Taffy's fixtures. Layout is over ordinary slices
+rather than flat buffers, which is the shape `buffer.F64` exists to change and
+has not yet.
+
+---
+
+## Phase 8 — Canvas renderer 🟡 **it draws; text is where it stops**
+
+Done: `canvasRenderer` over Canvas2D, drawing the same four calls the DOM
+renderer takes and switchable live in the same page against the same module.
+Text is measured through `measureText` in the font that will be drawn, so
+layout matches what is painted.
+
+**Hidden-overlay text input** is done: typing on the canvas path goes to a real
+input positioned where the pointer was, which is the trick every canvas editor
+uses and what brings up the on-screen keyboard on a phone.
+
+**A parallel tree** is done, and is deliberately not called an accessibility
+tree: the same runs of text, in the same order, in hidden DOM beside the
+canvas, so a screen reader is not left with a picture. There are no roles, no
+focus and no live regions.
+
+**Line breaking is a named subset of UAX #14**: Latin breaks between words, CJK
+between characters, and which characters are wide is *measured* rather than
+tabulated — the host owns the font. It will not break a long URL, knows nothing
+of non-breaking spaces, and will leave a closing bracket at the start of a
+line.
+
+**Remaining, and it is most of the phase:** HarfBuzz-quality shaping, UAX #9
+bidi, a glyph atlas, per-rectangle damage tracking, WebGPU, and the
+golden-image tests against the DOM renderer across Latin, Cyrillic, Arabic,
+Hebrew, Devanagari, Thai, CJK and Burmese. Text is the reason this was called
+the hardest phase, and it still is.
+
+---
+
+## Phase 9 — Native backend ❌ **not written. `kitec bundle` is packaging, not codegen**
+
+What exists is a **bundle**: `kitec bundle app.kite` writes one executable that
+is this compiler with the program appended to it. Running it finds the program,
+compiles it and runs it — under a millisecond, with no linker, no runtime to
+unpack and nothing to install. That solves distribution, which is what most
+people mean when they ask for a native binary, and the roadmap's start-up
+criterion is met by a wide margin.
+
+It is **not** a third backend, and calling it one would be the kind of
+overstatement this document exists to avoid. The program still runs on the
+bytecode VM. There is no machine code, no Cranelift, and no collector.
+
+What the real backend needs, unchanged from the original plan:
+`kite-codegen-clif` over Cranelift, and a precise generational collector in
+`kite-rt` — stack maps at safepoints, precise root scanning, a nursery with a
+bump allocator, and a write barrier for the old generation. The GC is the real
+work, which is why this is the phase the plan says to cut first: the bytecode
+VM already covers native execution adequately, and Cranelift is a performance
+upgrade rather than a capability.
+
+**Exit criterion, unmet:** the differential corpus runs on two backends, not
+three.
+
+---
+
+## Phase 10 — Tooling 🟡 **all but the package manager**
+
+| Tool | State |
 |---|---|
-| `kite fmt` | Phase 1 — the CST is lossless, so this is cheap and prevents style debate |
-| `kite-lsp` | Phase 2 — same salsa queries as the compiler |
-| `kite test` | Phase 2 |
-| `kite fix` | Phase 3 |
-| `kite pkg` | Phase 6 |
-| `kite doc` | Phase 6 |
-| `--explain` | Phase 3 |
+| `kitec fmt` | ✅ token-based, comment-preserving, and the whole tree passes `--check` |
+| `kite-lsp` | ✅ diagnostics, hover, definition, completion, symbols, formatting |
+| `kitec test` | ✅ every `test_` function, with failures as values so one does not stop the rest |
+| `kitec fix` | ✅ applies the machine-applicable suggestions diagnostics carry |
+| `kitec doc` | ✅ the reference, from `///` comments, with signatures read from the parse |
+| `kitec bundle` | ✅ one executable that needs nothing installed |
+| `--explain` | ✅ |
+| `kite pkg` | ❌ not started — no manifest, no lockfile, no dependency resolution |
 
-Start `kite fmt` early. A formatter from day one means no formatting discussion
-ever happens, and the lossless CST that makes it easy is already required for the
-LSP.
+The formatter works on **tokens**, not the tree: a tree has dropped the
+comments and the blank lines a formatter must keep. It decides indentation,
+spacing and blank lines, and leaves where the lines end to the author — the
+same bargain `gofmt` makes. Running it over the tree found six bugs in it,
+which is the argument for running a formatter on real code before believing it.
+
+`kite pkg` is what remains, and with it the manifest in
+[spec §13.2](../SPECIFICATION.md#132-manifest): a lockfile with content hashes,
+no post-install scripts, and no way for a dependency to execute code at build
+time.
 
 ---
 
-## Phase 11 — Networking (4–6 weeks)
+## Phase 11 — Networking 🟡 **the client works; the server has no sockets**
+
+`std/http` is five host declarations and the rest Kite. Three requests started
+together take as long as the slowest, which the tests demonstrate under Node
+against `data:` URLs. A 404 is a `Response`, not an error — the request
+succeeded and the answer was "no" — and only a transport failure is an `error`.
+
+Waiting is `task.wait_host()`, which is its own thing: an awaiting task parks
+for another task, and a fetching one must let the event loop run. Saying which
+is what stops the scheduler spinning through a promise that cannot resolve
+while it holds the thread.
+
+The **server half is the part that needs no sockets**: `Request`, `Response`, a
+router with `:name` captures, and handlers that are functions and can be tested
+by calling them. What is missing is the boundary underneath — WASI's
+`wasi:http/incoming-handler`, or a Node adapter — so nothing listens on a port
+yet.
 
 A web language with no way to talk to a server is a toy, and the two halves are
 not symmetric: the client runs in a sandbox that already has `fetch`, and the
@@ -670,7 +795,19 @@ has them, and reaching for them is the whole reason the boundary is declared.
 
 ---
 
-## Phase 12 — Cryptography (3–4 weeks)
+## Phase 12 — Cryptography 🟡 **hashing, HMAC, PBKDF2 and randomness**
+
+`std/crypto` binds SHA-256/384/512, HMAC-SHA-256, PBKDF2 password hashing with
+a generated salt, cryptographically secure random bytes, and a constant-time
+comparison. Comparing a secret with `==` is a warning (E0600) that says to use
+`crypto.equal`.
+
+**Remaining:** AES-GCM, Ed25519 and X25519 — each is another few declarations
+over WebCrypto, and each needs key handling that has not been designed. Argon2
+is not in WebCrypto at all, so it waits on a runtime that has it.
+
+The rules the module was built to enforce are in place: no ECB, no CBC, no MD5,
+no SHA-1, no raw RSA; salts generated rather than passed.
 
 **Bindings, not implementations.** Every constant-time guarantee a cipher makes
 is a guarantee about generated machine code, and Kite compiles through WasmGC to
@@ -696,7 +833,27 @@ Three design commitments, all of them about removing choices:
 
 ---
 
-## Phase 13 — Documentation and specification site (3–4 weeks)
+## Phase 13 — Documentation and site ✅ **including the playground**
+
+`site/` is four pages and two scripts, built by `site/build.sh`: the pitch, the
+specification and the other documents rendered from their Markdown, the
+standard library reference generated by `kitec doc`, and the playground.
+
+**The playground is the compiler.** `kitec` is Rust and already targets
+WebAssembly, so the page compiles and runs Kite in the same tab with no server
+at all, and the diagnostics it shows are the ones a terminal shows because they
+come from the same code. It runs, checks, formats, and shows any of the
+intermediate forms.
+
+The Markdown renderer and the syntax highlighter are written here rather than
+fetched: a language's documentation should load on a bad connection, and a
+dependency in the site is a dependency in the project. The highlighter is a
+lexer rather than a pile of regular expressions — a keyword inside a string is
+not a keyword.
+
+**Every example on the site is compiled in CI**, and the playground's samples
+are also *run*, so one that stopped working would fail the build rather than
+sit there wrong.
 
 The specification already exists and is the source of truth. What is missing is
 somewhere to read it that is not a Markdown file on a git host.
@@ -715,7 +872,22 @@ somewhere to read it that is not a Markdown file on a git host.
 
 ---
 
-## Phase 14 — Editor support (4–6 weeks)
+## Phase 14 — Editor support ✅ **the server, and an extension over it**
+
+`kite-lsp` answers over stdio: diagnostics as you type, hover, go to
+definition, completion, document symbols and formatting. Every answer comes
+from the same passes `kitec` runs — a language server that re-derives its own
+is a second compiler, and the disagreement always surfaces as "the editor says
+this is fine and the build says it is not".
+
+The protocol is `Content-Length`-framed JSON, and both halves are written by
+hand: the framing is six lines and the JSON two hundred, which keeps the
+dependency list at nothing a build has to fetch. The VS Code extension has no
+npm dependency either, not even the LSP client library.
+
+**Remaining:** rename, find references, and inlay hints for solved generic
+arguments — the last is worth more here than in a language with a turbofish,
+because there is nowhere else to see what a call inferred.
 
 **`kite-lsp`, then a thin VS Code extension over it.** The order matters: an
 extension that implements its own analysis is one that only ever works in one
@@ -781,7 +953,20 @@ the grammar written for VS Code is the same one the submission needs.
 
 ---
 
-## Phase 15 — Distribution (2–3 weeks)
+## Phase 15 — Distribution 🟡 **the pipeline exists; nothing is published**
+
+`.github/workflows/release.yml` cross-compiles `kitec` and `kite-lsp` for macOS
+(arm64, x86-64), Linux (x86-64 and arm64, static musl) and Windows on a tag,
+with a checksum file. The builds are reproducible — the path prefix is remapped
+and debug info dropped — because a compiler is exactly the artefact where
+"trusting trust" is not hypothetical. `install.sh` downloads one archive,
+verifies it against the release's own checksums, and refuses rather than warns
+when they differ.
+
+**Remaining:** nothing has been released, so none of it has run in anger. There
+is no Homebrew formula, no Scoop manifest and no AUR package, and releases are
+not signed beyond their checksums. `kitec` as a Wasm module exists — the
+playground is it — but is not published as an artefact.
 
 A compiler nobody can install is a compiler nobody uses.
 
@@ -808,25 +993,42 @@ none.
 
 | Phase | State |
 |---|---|
-| 0 — Specification review | ✅ done, and the spec was amended four times by what the code found |
+| 0 — Specification review | ✅ done, and the spec was amended by what the code found |
 | 1 — Vertical slice | ✅ complete |
-| 2 — Type system | ✅ complete — structs, enums, match, exhaustiveness, traits, trait objects, slices, optionals, tuples, maps, interpolation, closures, generics on functions and types, with bounds and methods |
+| 2 — Type system | ✅ complete — structs, enums, match, exhaustiveness, traits, trait objects, slices, optionals, tuples, maps, interpolation, closures, generics on functions and types |
 | 3 — Error handling | ✅ complete |
-| 4 — WebAssembly backend | ✅ every construct the language has, all twelve examples, both backends agreeing. ❌ JS String Builtins (an optimisation, not a gap) |
-| 5 — Concurrency | ❌ not started |
-| 6 — Standard library | ❌ not started |
-| 7 — Layout engine and DOM renderer | ❌ not started |
-| 8 — Canvas renderer | ❌ not started |
-| 9 — Native backend | ❌ not started |
-| 10 — Tooling | 🟡 `kitec` with run/check/build/--emit/--explain. ❌ fmt, LSP, test runner, package manager |
-| 11 — Networking | ❌ not started; blocked on Phase 5, since every call is `async` |
-| 12 — Cryptography | ❌ not started; bindings to the host, never implementations |
-| 13 — Documentation site | ❌ not started; the specification exists, somewhere to read it does not |
-| 14 — Editor support | ❌ not started; a TextMate grammar is the first piece and GitHub needs it too |
-| 15 — Distribution | ❌ not started; `.gitattributes` maps `.kite` onto Rust's highlighting today |
+| 4 — WebAssembly backend | ✅ every construct the language has, on both backends, compared. ❌ JS String Builtins (an optimisation, not a gap) |
+| 5 — Concurrency | ✅ `async`/`await`, the state machine, `Task<T>`, the combinators, `Share`. ❌ real parallelism on any target — the platform forbids it today |
+| 6 — Standard library | ✅ modules, and ten of them written in Kite, tested on both backends. ❌ `json.decode<T>` and the derivation machinery it needs |
+| 7 — Layout and DOM renderer | 🟡 layout, events and the update loop; a frame that did not change is not repainted. ❌ retained scene graph, widget set, focus |
+| 8 — Canvas renderer | 🟡 draws, measures in the real font, hidden-overlay input, a parallel tree for a screen reader, UAX #14 subset. ❌ shaping, bidi, glyph atlas, per-rectangle damage, golden images |
+| 9 — Native backend | ❌ not written. `kitec bundle` produces one self-contained executable, which is packaging rather than code generation |
+| 10 — Tooling | 🟡 fmt, doc, fix, test, bundle, `--explain`, and the language server. ❌ `kite pkg` |
+| 11 — Networking | 🟡 the client, tested end to end under Node; the router and types for the server. ❌ anything that listens on a port |
+| 12 — Cryptography | 🟡 hashing, HMAC, PBKDF2, randomness, constant-time comparison, and E0600. ❌ AES-GCM, Ed25519, X25519 |
+| 13 — Documentation site | ✅ four pages, the reference generated from the library, and a playground that is the compiler |
+| 14 — Editor support | ✅ the language server and a VS Code extension over it. ❌ rename, references, inlay hints |
+| 15 — Distribution | 🟡 CI, cross-compiled release builds with checksums, an install script. ❌ nothing published yet |
 
-406 tests, an annotated compile-fail corpus, and a differential corpus that runs
-every program on both backends and compares.
+543 tests: unit tests per crate, an annotated compile-fail corpus, a
+differential corpus that runs every program on both backends and compares, the
+standard library's own suite on both backends, the host boundary under Node,
+and every example on the site.
+
+### What is deliberately not done
+
+Three things are absent on purpose rather than pending, and each is recorded
+where the decision was made:
+
+- **Real parallelism.** WasmGC references cannot cross a thread boundary, and
+  the VM's values are `Rc`-based. `Share` is enforced *now* so the day either
+  changes, no source does.
+- **A third backend.** Cranelift plus a precise collector is the largest single
+  piece of work left, and the plan says to cut it first for a reason: the
+  bytecode VM covers native execution, and `kitec bundle` covers distribution.
+- **`json.decode<T>`, `Eq`, `Hash`, `Debug`.** All four want the same
+  derivation machinery, and building it for one of them alone would be building
+  it twice.
 
 ## Realistic timeline
 

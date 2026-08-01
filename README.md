@@ -39,20 +39,95 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 | Commitment | Consequence |
 |---|---|
 | **27 keywords** | Comparable to Go's 25. Every one maps to a concept a beginner must learn anyway. |
-| **No hidden control flow** | No exceptions, no operator overloading, no implicit conversions, no destructors, no macros. |
+| **No hidden control flow** | No exceptions, no operator overloading, no implicit conversions, no macros. `defer` releases; it cannot change a return value. |
 | **Errors are values, and the compiler enforces it** | Go's `(T, error)` shape, but a value returned alongside an unchecked error is *unreadable* until the error is checked. Go's single biggest flaw, removed, without changing how the code looks. |
-| **Immutable by default** | `let` and struct fields are immutable unless marked `var`. This maps directly onto WasmGC's per-field mutability flag, and makes most types automatically safe to share across threads. |
+| **Immutable by default** | `let` and struct fields are immutable unless marked `var`. This maps directly onto WasmGC's per-field mutability flag, and makes most types automatically safe to share across tasks. |
 | **No pointers, no references, no lifetimes** | Structs are GC-managed reference types. There is no `*T`, no `&T`, and no value/pointer receiver distinction. |
-| **One concurrency concept, not two** | `async`/`await`. No goroutines, no channels, no mutex-by-default. The scheduler is multi-threaded where the platform permits — the source never says which. |
-| **Wasm is the reference target** | The semantics are chosen so that lowering to WasmGC is direct. Native and bytecode targets follow the Wasm semantics, not the other way round. |
+| **One concurrency concept, not two** | `async`/`await`. No goroutines, no channels, no mutex-by-default. Calling an `async fn` starts it; `await` is how the value comes out. |
+| **Wasm is the reference target** | The semantics are chosen so that lowering to WasmGC is direct. |
+
+## What runs today
+
+```bash
+kitec run     file.kite          compile and run
+kitec check   file.kite          check only
+kitec test    file.kite          run every `test_` function
+kitec fmt     file.kite          lay it out the one way
+kitec doc     file.kite          the reference, from the doc comments
+kitec fix     file.kite          apply every machine-applicable suggestion
+kitec bundle  file.kite          one executable that needs nothing installed
+kitec build   file.kite --emit wasm --out dist
+kitec --explain E0301            why a rule exists
+```
+
+**The language.** `int`/`float`/`bool`/`str`, functions, `let`/`var`, `if`/`else`
+as statement and expression, three `for` forms with labelled `break`/`continue`,
+structs with methods, enums with named and positional payloads, `match` with
+guards and exhaustiveness that names the missing variants, traits with default
+methods and trait objects, generics on functions and types with bounds,
+closures, slices, tuples, maps with `keys()`/`values()` and `for (k, v) in m`,
+`Option<T>`, string interpolation, `defer`, `require`/`assert`, modules with
+`pub`, and enforced error handling with `check`.
+
+**Concurrency.** `async fn` compiles to a state machine in MIR — a starter and
+a resume function — so both backends see ordinary code and neither knows
+concurrency exists. `std/task` supplies `both`, `all`, `race`, `sleep`,
+`timeout`, `scope` and `parallel`, all written in Kite over four compiler
+primitives.
+
+```kite
+let a = fetch("alpha", 100)
+let b = fetch("beta", 50)
+let (first, second) = await task.both(a, b)   // 100ms, not 150
+```
+
+**A standard library, in Kite.** `math`, `time`, `errors`, `fmt`, `json`,
+`test`, `buffer`, `task`, `http`, `crypto`, `ui`. Its own tests are ordinary
+Kite programs that run on *both* backends and must agree.
+
+**A declared host boundary.** `@host("net") extern fn` becomes a Wasm import
+and a group in the generated glue, so the boundary is written once, in Kite,
+and the glue cannot drift from it.
+
+**Tools.** A formatter that preserves comments, a documentation generator, a
+fixer, a test runner, and a language server with diagnostics, hover, go to
+definition, completion and symbols — all over the same passes the compiler
+runs.
 
 ## Targets
 
-| Target | Backend | Status |
+| Target | Backend | State |
 |---|---|---|
-| `wasm32-gc` | WasmGC via `wasm-encoder` | Primary. Numbers, control flow, and calls lower today; aggregates in progress |
-| `kbc` | Register-based bytecode + interpreter | Dev loop, embedding, REPL |
-| `native-*` | Cranelift AOT (aarch64, x86-64) | Desktop and CLI applications |
+| `wasm32-gc` | WasmGC via `wasm-encoder` | Every construct the language has. `--emit wasm` refuses nothing it can express |
+| `kbc` | Register bytecode and a VM | The dev loop, the embedding target, and the differential oracle |
+| bundle | This compiler with the program appended | One file, nothing installed, starts in about a millisecond |
+| `native-*` | Cranelift AOT | **Not written.** See the roadmap, which says so plainly |
+
+Every program in the differential corpus is compiled to **both** real backends,
+run on both, and the outputs compared. Two independent implementations that
+must agree is what makes codegen bugs findable, and it is why the bytecode VM
+was built before the Wasm backend even though Wasm is the point of the project.
+
+```bash
+kitec build examples/hello.kite --emit wasm --out dist
+# wrote dist/app.wasm (426 bytes), dist/app.js and dist/index.html
+```
+
+A program with a user interface writes its layout with `std/ui.kite` and draws
+through four host calls. The generated page runs the same module against a DOM
+renderer, a canvas renderer, and a text renderer, switched live — the program
+cannot tell which is running.
+
+## The playground is the compiler
+
+`kitec` is Rust and already targets WebAssembly, so the site compiles and runs
+Kite in the same tab with no server at all. The diagnostics it shows are the
+ones a terminal shows, because they come from the same code.
+
+```bash
+./site/build.sh
+python3 -m http.server -d site 8000
+```
 
 ## Reading order
 
@@ -64,89 +139,26 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 | [docs/03-compiler-architecture.md](docs/03-compiler-architecture.md) | Crate layout, IR pipeline, WasmGC lowering, diagnostics. |
 | [docs/04-stdlib-ui.md](docs/04-stdlib-ui.md) | The UI layer: layout engine, retained scene graph, and the dual DOM/canvas renderer. |
 | [docs/05-grammar.ebnf](docs/05-grammar.ebnf) | Complete formal grammar. |
-| [docs/06-roadmap.md](docs/06-roadmap.md) | Implementation phases, with a defensible order. |
+| [docs/06-roadmap.md](docs/06-roadmap.md) | Implementation phases, and exactly how far each one got. |
 
-## Status
+## What is not done
 
-**Phases 1–4 complete.** Structs, enums, `match` with exhaustiveness, traits
-and trait objects, generics on both functions and types, closures, slices,
-tuples, maps, optionals, string interpolation, enforced error handling — and
-every one of them compiles to WebAssembly. Both backends run the whole example
-set and agree on every line of output. See
-[docs/06-roadmap.md](docs/06-roadmap.md) for what comes next.
+Recorded here rather than left to be discovered:
 
-```bash
-kitec build examples/hello.kite --emit wasm --out dist
-# wrote dist/app.wasm (426 bytes), dist/app.js and dist/index.html
-```
+- **No real parallelism, on any target.** A WasmGC reference cannot cross a
+  thread boundary until shared-everything-threads ships, and the VM's values
+  are `Rc`-based. `Share` is enforced now so that the day either changes, no
+  source has to.
+- **No native code generation.** `kitec bundle` produces a self-contained
+  executable, but the program inside it runs on the bytecode VM. Cranelift and
+  a precise collector are the largest piece of work left.
+- **No `json.decode<T>`, `Eq`, `Hash` or `Debug` derivation.** All four want the
+  same compile-time machinery, which is not built.
+- **No package manager.** There is no manifest, no lockfile and no dependency
+  resolution; modules are directories on disk.
+- **Text on the canvas path is a subset.** Line breaking handles Latin and CJK
+  and says so; shaping, bidi and a glyph atlas are not written.
 
-A program with a user interface writes its layout with `std/ui.kite` and draws
-through two host calls. The generated page runs the same module against a DOM
-renderer, a canvas renderer, and a text renderer, switched live:
-
-```bash
-kitec build examples/render.kite --emit wasm --out dist
-```
-
-```bash
-cargo run --bin kitec -- run examples/hello.kite
-```
-
-```kite
-fn add(a: int, b: int) -> int {
-    return a + b
-}
-
-fn main() {
-    let x = add(2, 3)
-    if x > 4 {
-        io.print("big")
-    }
-    for i in 0..x {
-        io.print(i)
-    }
-}
-```
-
-```bash
-cargo run --bin kitec -- run examples/shapes.kite   # enums and match
-cargo run --bin kitec -- run examples/traits.kite   # traits and defaults
-cargo run --bin kitec -- run examples/structs.kite  # structs and methods
-```
-
-**Working today:** `int`/`float`/`bool`/`str`, functions, `let`/`var`,
-`if`/`else` (also an expression, with optional narrowing), the three `for`
-forms with labelled `break`/`continue`, structs with methods and associated
-functions, enums with named and positional payloads, `match` with guards,
-alternation, ranges and struct patterns, exhaustiveness checking that names
-the missing variants, traits with default methods, copy-on-write slices,
-`Option<T>`, and enforced error handling with `check`.
-
-**Every example above compiles to WebAssembly and produces identical output**
-— structs and slices as WasmGC objects and arrays, enums as subtyped variant
-records, optionals as nullable boxed references, and fallible results as a
-two-slot record. A trait object is a reference to a record carrying a type
-tag, and each trait method gets a dispatcher that compares that tag — WasmGC
-types are structurally equal, so `struct Circle { r: float }` and
-`struct Square { s: float }` are literally the same Wasm type and `ref.test`
-cannot separate them. Only types reachable through a `dyn` carry the tag, so a
-program that never forms a trait object pays nothing for the mechanism.
-
-Deep equality is a generated function per aggregate type — Wasm has no
-instruction for it — emitted only for types a program actually compares.
-
-Every program in the differential corpus is compiled to **both** the bytecode
-VM and Wasm, run on both, and the outputs compared. `--emit wasm` reports
-anything it cannot lower rather than producing a module that traps; today it
-refuses nothing the language can express.
-
-**Phases 1–4 are complete.** Generic functions and types with bounds and methods, closures, trait objects, enforced error handling, and a WebAssembly backend that refuses nothing the language can express.
-
-444 tests, plus an annotated compile-fail corpus.
-
-```bash
-kitec run     file.kite      # compile and run
-kitec check   file.kite      # check only
-kitec build   file.kite --emit mir    # ast | hir | mir | kbc
-kitec --explain E0301        # why a rule exists
-```
+543 tests: unit tests per crate, an annotated compile-fail corpus, a
+differential corpus across both backends, the standard library's own suite on
+both backends, the host boundary under Node, and every example on the site.

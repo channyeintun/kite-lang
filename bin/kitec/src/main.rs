@@ -3,6 +3,8 @@
 //! Argument parsing is hand-written. It is thirty lines, has no dependency, and
 //! the compiler's build time is a stated design target.
 
+mod bundle;
+
 use kite_driver::{compile, Emit};
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -18,6 +20,7 @@ USAGE:
     kitec fmt   <file.kite>          lay the file out the one way
     kitec doc   <file.kite>          the reference, from the doc comments
     kitec fix   <file.kite>          apply every machine-applicable suggestion
+    kitec bundle <file.kite>         one executable that needs nothing installed
 
 OPTIONS:
     --release         build for release: `assert` is dropped, `require` is not
@@ -31,6 +34,13 @@ OPTIONS:
 ";
 
 fn main() -> ExitCode {
+    // This binary may *be* a Kite program: `kitec bundle` copies the compiler
+    // and appends the source to it. Running that copy runs the program, and
+    // everything below is unreachable there.
+    if let Some(program) = bundle::embedded() {
+        return bundle::run(&program);
+    }
+
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
@@ -97,7 +107,9 @@ fn main() -> ExitCode {
                 release = true;
                 i += 1;
             }
-            "run" | "check" | "build" | "test" | "fmt" | "doc" | "fix" if command.is_none() => {
+            "run" | "check" | "build" | "test" | "fmt" | "doc" | "fix" | "bundle"
+                if command.is_none() =>
+            {
                 command = Some(a.clone());
                 i += 1;
             }
@@ -143,6 +155,10 @@ fn main() -> ExitCode {
 
     if command == "fix" {
         return fix_file(&path, &src);
+    }
+
+    if command == "bundle" {
+        return bundle::write(&path, &src, out_dir.as_deref(), release);
     }
 
     let emit = emit.unwrap_or(Emit::Check);
