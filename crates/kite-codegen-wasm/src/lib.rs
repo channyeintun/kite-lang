@@ -106,6 +106,20 @@ struct TypeLayout {
     pair_record: std::collections::HashMap<TyId, u32>,
     /// One record per distinct tuple shape.
     tuple_record: std::collections::HashMap<TyId, u32>,
+    /// One record per distinct map shape, holding parallel key and value
+    /// arrays. Two arrays rather than an array of pairs keeps lookup a scan
+    /// over one contiguous run, and reuses the array machinery slices need.
+    map_record: std::collections::HashMap<TyId, MapLayout>,
+}
+
+#[derive(Clone, Copy)]
+pub struct MapLayout {
+    /// The record holding both arrays.
+    pub record: u32,
+    pub keys: u32,
+    pub values: u32,
+    pub key_ty: TyId,
+    pub value_ty: TyId,
 }
 
 impl TypeLayout {
@@ -140,6 +154,27 @@ impl TypeLayout {
     fn tuple_type(&self, ty: TyId) -> Option<u32> {
         self.tuple_record.get(&ty).copied()
     }
+
+    fn map_layout(&self, ty: TyId) -> Option<MapLayout> {
+        self.map_record.get(&ty).copied()
+    }
+}
+
+/// Every map shape a program mentions, in a stable order.
+fn map_shapes(program: &mir::Program, types: &Types) -> Vec<TyId> {
+    let mut seen = Vec::new();
+    let note = |ty: TyId, seen: &mut Vec<TyId>| {
+        if matches!(types.kind(ty), TyKind::Map(..)) && !seen.contains(&ty) {
+            seen.push(ty);
+        }
+    };
+    for f in &program.fns {
+        note(f.ret, &mut seen);
+        for l in &f.locals {
+            note(l.ty, &mut seen);
+        }
+    }
+    seen
 }
 
 /// Every tuple shape a program mentions, in a stable order.
@@ -264,6 +299,7 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
         error_record: 0,
         pair_record: std::collections::HashMap::new(),
         tuple_record: std::collections::HashMap::new(),
+        map_record: std::collections::HashMap::new(),
     };
     let payloads = option_payloads(program, types);
     for p in &payloads {
@@ -286,6 +322,16 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     for s in &tuples {
         layout.tuple_record.insert(*s, next);
         next += 1;
+    }
+    // A map needs three types: the record, and one array for each side.
+    let maps = map_shapes(program, types);
+    for m in &maps {
+        let TyKind::Map(k, v) = *types.kind(*m) else { continue };
+        layout.map_record.insert(
+            *m,
+            MapLayout { record: next, keys: next + 1, values: next + 2, key_ty: k, value_ty: v },
+        );
+        next += 3;
     }
     let aggregate_count = next - IMPORT_COUNT;
 
@@ -426,6 +472,41 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
             ));
         }
 
+        for m in &maps {
+            let Some(ml) = layout.map_layout(*m) else { continue };
+            let karr = ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(ml.keys),
+            });
+            let varr = ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(ml.values),
+            });
+            group.push(struct_subtype(
+                vec![
+                    FieldType { element_type: StorageType::Val(karr), mutable: false },
+                    FieldType { element_type: StorageType::Val(varr), mutable: false },
+                ],
+                None,
+                true,
+            ));
+            for elem in [ml.key_ty, ml.value_ty] {
+                group.push(SubType {
+                    is_final: true,
+                    supertype_idx: None,
+                    composite_type: CompositeType {
+                        inner: CompositeInnerType::Array(wasm_encoder::ArrayType(FieldType {
+                            element_type: StorageType::Val(val_type_with(elem, types, &layout)),
+                            mutable: true,
+                        })),
+                        shared: false,
+                        descriptor: None,
+                        describes: None,
+                    },
+                });
+            }
+        }
+
         type_section.ty().rec(group);
     }
 
@@ -522,6 +603,13 @@ fn val_type_with(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
             nullable: true,
             heap_type: HeapType::Concrete(layout.enum_base_type(*e)),
         }),
+        TyKind::Map(..) => match layout.map_layout(ty) {
+            Some(ml) => ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(ml.record),
+            }),
+            None => ValType::I32,
+        },
         TyKind::Tuple(_) => match layout.tuple_type(ty) {
             Some(idx) => ValType::Ref(RefType {
                 nullable: true,
@@ -836,11 +924,62 @@ impl<'a> Emitter<'a> {
                 return true;
             }
 
-            // Maps are not lowered yet; the driver refuses them first.
-            mir::Rvalue::MapNew { .. }
-            | mir::Rvalue::MapGet { .. }
-            | mir::Rvalue::MapLen { .. } => {
-                func.instruction(&Instruction::Unreachable);
+            mir::Rvalue::MapNew { entries } => {
+                let Some(ml) = self
+                    .current_dst
+                    .and_then(|d| self.layout.map_layout(self.f.locals[d as usize].ty))
+                else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                // Entries arrive flattened as key, value, key, value.
+                let pairs = entries.len() / 2;
+                for e in entries.iter().step_by(2) {
+                    self.operand(func, e);
+                }
+                func.instruction(&Instruction::ArrayNewFixed {
+                    array_type_index: ml.keys,
+                    array_size: pairs as u32,
+                });
+                for e in entries.iter().skip(1).step_by(2) {
+                    self.operand(func, e);
+                }
+                func.instruction(&Instruction::ArrayNewFixed {
+                    array_type_index: ml.values,
+                    array_size: pairs as u32,
+                });
+                func.instruction(&Instruction::StructNew(ml.record));
+                return true;
+            }
+
+            mir::Rvalue::MapLen { base } => {
+                let Some(ml) = self.map_of(base) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                self.operand(func, base);
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: ml.record,
+                    field_index: 0,
+                });
+                func.instruction(&Instruction::ArrayLen);
+                func.instruction(&Instruction::I64ExtendI32U);
+                return true;
+            }
+
+            // Lookup is a linear scan over the key array. A hash index is an
+            // optimisation for later; a scan is what makes the semantics —
+            // insertion order, and first match wins — obviously right.
+            mir::Rvalue::MapGet { base, key } => {
+                let (Some(ml), Some(box_idx)) = (
+                    self.map_of(base),
+                    self.map_of(base)
+                        .and_then(|m| self.layout.option_type(m.value_ty)),
+                ) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                self.map_scan(func, ml, base, key, box_idx);
                 return true;
             }
 
@@ -1194,6 +1333,103 @@ impl<'a> Emitter<'a> {
             })),
             _ => func.instruction(&Instruction::I32Const(0)),
         };
+    }
+
+    /// Emit a linear scan for `key`, leaving `Option<V>` on the stack.
+    ///
+    /// ```text
+    /// block $end (result optref)
+    ///   block $miss
+    ///     loop $scan
+    ///       i >= len  -> br $miss
+    ///       keys[i] == key -> box(values[i]) ; br $end
+    ///       i += 1 ; br $scan
+    ///     end
+    ///   end
+    ///   ref.null none
+    /// end
+    /// ```
+    fn map_scan(
+        &mut self,
+        func: &mut Function,
+        ml: MapLayout,
+        base: &mir::Operand,
+        key: &mir::Operand,
+        box_idx: u32,
+    ) {
+        let i = self.index_scratch;
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalSet(i));
+
+        let result = ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Concrete(box_idx),
+        });
+        func.instruction(&Instruction::Block(BlockType::Result(result)));
+        func.instruction(&Instruction::Block(BlockType::Empty));
+        func.instruction(&Instruction::Loop(BlockType::Empty));
+
+        // Past the end?
+        func.instruction(&Instruction::LocalGet(i));
+        self.map_field(func, ml, base, 0);
+        func.instruction(&Instruction::ArrayLen);
+        func.instruction(&Instruction::I32GeU);
+        func.instruction(&Instruction::BrIf(1));
+
+        // Key match?
+        self.map_field(func, ml, base, 0);
+        func.instruction(&Instruction::LocalGet(i));
+        func.instruction(&Instruction::ArrayGet(ml.keys));
+        self.operand(func, key);
+        self.key_equality(func, ml.key_ty);
+
+        func.instruction(&Instruction::If(BlockType::Empty));
+        self.map_field(func, ml, base, 1);
+        func.instruction(&Instruction::LocalGet(i));
+        func.instruction(&Instruction::ArrayGet(ml.values));
+        func.instruction(&Instruction::StructNew(box_idx));
+        // 0 = if, 1 = loop, 2 = the miss block, 3 = the result block.
+        func.instruction(&Instruction::Br(3));
+        func.instruction(&Instruction::End);
+
+        func.instruction(&Instruction::LocalGet(i));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(i));
+        func.instruction(&Instruction::Br(0));
+
+        func.instruction(&Instruction::End); // loop
+        func.instruction(&Instruction::End); // miss block
+
+        func.instruction(&Instruction::RefNull(HeapType::Abstract {
+            shared: false,
+            ty: wasm_encoder::AbstractHeapType::None,
+        }));
+        func.instruction(&Instruction::End); // result block
+    }
+
+    fn map_field(&mut self, func: &mut Function, ml: MapLayout, base: &mir::Operand, field: u32) {
+        self.operand(func, base);
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: ml.record,
+            field_index: field,
+        });
+    }
+
+    /// Compare two keys. A `str` is a table index the glue interns, so equal
+    /// strings share an index and an integer compare is exact.
+    fn key_equality(&mut self, func: &mut Function, key_ty: TyId) {
+        let inst = match val_type_with(key_ty, self.types, self.layout) {
+            ValType::I64 => Instruction::I64Eq,
+            ValType::F64 => Instruction::F64Eq,
+            _ => Instruction::I32Eq,
+        };
+        func.instruction(&inst);
+    }
+
+    fn map_of(&self, o: &mir::Operand) -> Option<MapLayout> {
+        let mir::Operand::Local(l) = o else { return None };
+        self.layout.map_layout(self.f.locals[l.index()].ty)
     }
 
     /// The record type an operand holds, whether a struct or a tuple. Both are

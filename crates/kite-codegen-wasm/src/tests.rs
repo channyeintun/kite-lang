@@ -376,7 +376,8 @@ fn gaps(src: &str) -> Vec<String> {
 /// compiled into a module that traps at run time.
 #[test]
 fn unlowered_constructs_are_reported() {
-    assert!(gaps("fn f(m: {str: int}) {\n}\nfn main() {\n}\n").contains(&"maps".to_string()));
+    assert!(gaps("fn main() {\n  var m = {\"a\": 1}\n  m[\"b\"] = 2\n}\n")
+        .contains(&"map assignment".to_string()));
 
 
 
@@ -507,4 +508,31 @@ fn fallible_results_validate() {
 #[test]
 fn error_handling_is_no_longer_an_unsupported_construct() {
     assert!(gaps("fn f() -> (int, error) {\n  return 1, nil\n}\nfn main() {\n}\n").is_empty());
+}
+
+// ---- maps -----------------------------------------------------------------
+
+/// A map is a record holding parallel key and value arrays. Lookup is a linear
+/// scan, which is what makes insertion order and first-match-wins obviously
+/// right; a hash index is an optimisation for later.
+#[test]
+fn map_reads_validate() {
+    valid(
+        "fn main() {\n  let m = {\"a\": 1, \"b\": 2}\n  io.print(m.len())\n\
+         \x20 let a = m[\"a\"]\n  io.print(if a == nil { -1 } else { a })\n}\n",
+    );
+}
+
+#[test]
+fn maps_with_integer_keys_validate() {
+    valid("fn main() {\n  let m = {1: \"one\"}\n  let v = m[1]\n  io.print(if v == nil { \"?\" } else { v })\n}\n");
+}
+
+/// Reading a map lowers; writing to one does not yet, and is reported rather
+/// than emitted as a trap.
+#[test]
+fn map_assignment_is_still_reported() {
+    assert!(gaps("fn main() {\n  var m = {\"a\": 1}\n  m[\"b\"] = 2\n}\n")
+        .contains(&"map assignment".to_string()));
+    assert!(gaps("fn main() {\n  let m = {\"a\": 1}\n  io.print(m.len())\n}\n").is_empty());
 }

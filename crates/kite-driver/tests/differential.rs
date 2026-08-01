@@ -193,6 +193,12 @@ fn main() {
          }\n",
     ),
     (
+        "map-reads",
+        "fn main() {\n  let m = {\"a\": 1, \"b\": 2}\n  io.print(m.len())\n\
+         \x20 let a = m[\"a\"]\n  io.print(if a == nil { -1 } else { a })\n\
+         \x20 let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })\n}\n",
+    ),
+    (
         "evaluation-order",
         "fn step(n: int) -> int {\n  io.print(n)\n  return n\n}\nfn main() {\n  let x = step(1) + step(2)\n  io.print(x)\n}\n",
     ),

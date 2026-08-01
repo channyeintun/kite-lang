@@ -242,7 +242,12 @@ identical to the bytecode VM**, and a test asserts it so the two cannot drift.
 
 Tuples lower as positional records, sharing the field machinery structs use.
 
-Also still to lower: maps, trait objects, and structural equality on
+Maps lower as a record holding parallel key and value arrays, and lookup is a
+linear scan — which is what makes insertion order and first-match-wins
+obviously right. A hash index is an optimisation for later. Writing to a map is
+not lowered yet; reading is.
+
+Also still to lower: map assignment, trait objects, and structural equality on
 aggregates. The rvalue match in the backend has **no catch-all**, so adding a
 form to MIR fails to compile rather than silently producing a module that
 traps.
@@ -374,7 +379,7 @@ none.
 | 1 — Vertical slice | ✅ complete |
 | 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, slices, optionals, tuples, maps. ❌ closures, generics, `dyn` dispatch |
 | 3 — Error handling | ✅ complete |
-| 4 — WebAssembly backend | 🟡 everything the language currently has except maps and trait objects — all seven examples run. ❌ JS String Builtins |
+| 4 — WebAssembly backend | 🟡 everything except map *assignment* and trait objects. ❌ JS String Builtins |
 | 5 — Concurrency | ❌ not started |
 | 6 — Standard library | ❌ not started |
 | 7 — Layout engine and DOM renderer | ❌ not started |

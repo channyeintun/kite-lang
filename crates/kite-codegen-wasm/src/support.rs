@@ -50,11 +50,9 @@ pub fn unsupported(program: &mir::Program, types: &Types) -> Vec<Unsupported> {
         for block in &f.blocks {
             for stmt in &block.stmts {
                 match stmt {
-                    mir::Inst::MapSet { .. } => note("maps"),
+                    // Reading a map lowers; writing to one does not yet.
+                    mir::Inst::MapSet { .. } => note("map assignment"),
                     mir::Inst::Assign { value, .. } => match value {
-                        mir::Rvalue::MapNew { .. }
-                        | mir::Rvalue::MapGet { .. }
-                        | mir::Rvalue::MapLen { .. } => note("maps"),
                         mir::Rvalue::Binary { op, .. } => {
                             if matches!(
                                 op,
@@ -80,7 +78,6 @@ pub fn unsupported(program: &mir::Program, types: &Types) -> Vec<Unsupported> {
 fn unsupported_type(ty: kite_hir::TyId, types: &Types) -> Option<&'static str> {
     use kite_hir::TyKind::*;
     match types.kind(ty) {
-        Map(..) => Some("maps"),
         Fn { .. } => Some("function values"),
         Dyn(_) => Some("trait objects"),
         _ => None,
