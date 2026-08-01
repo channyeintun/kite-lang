@@ -60,10 +60,10 @@ fn ok_body(stmts: &str) -> Ctx {
 fn infers_literal_types() {
     let c = ok_body("  let a = 1\n  let b = 1.5\n  let s = \"x\"\n  let t = true");
     let locals = &c.program.fns[0].locals;
-    assert_eq!(locals[0].ty, Ty::Int);
-    assert_eq!(locals[1].ty, Ty::Float);
-    assert_eq!(locals[2].ty, Ty::Str);
-    assert_eq!(locals[3].ty, Ty::Bool);
+    assert_eq!(locals[0].ty, TyId::INT);
+    assert_eq!(locals[1].ty, TyId::FLOAT);
+    assert_eq!(locals[2].ty, TyId::STR);
+    assert_eq!(locals[3].ty, TyId::BOOL);
 }
 
 #[test]
@@ -328,7 +328,7 @@ fn one_missing_assignment_yields_one_diagnostic() {
 fn for_range_binds_an_int_loop_variable() {
     let c = ok_body("  for i in 0..10 {\n    io.print(i)\n  }");
     let locals = &c.program.fns[0].locals;
-    assert!(locals.iter().any(|l| l.name == "i" && l.ty == Ty::Int));
+    assert!(locals.iter().any(|l| l.name == "i" && l.ty == TyId::INT));
 }
 
 #[test]
@@ -411,7 +411,7 @@ fn an_invalid_escape_is_reported() {
 
 // ---- cascade suppression --------------------------------------------------
 
-/// One mistake must yield one diagnostic. `Ty::Error` satisfies every
+/// One mistake must yield one diagnostic. `TyId::ERROR` satisfies every
 /// expectation precisely so that downstream uses stay quiet.
 #[test]
 fn one_type_error_does_not_cascade() {
@@ -456,6 +456,6 @@ fn main() {
 ");
     assert_eq!(c.program.fns.len(), 2);
     assert_eq!(c.program.entry, Some(hir::FnId(1)));
-    assert_eq!(c.program.fns[0].ret, Ty::Int);
+    assert_eq!(c.program.fns[0].ret, TyId::INT);
     assert_eq!(c.program.fns[0].param_count, 2);
 }

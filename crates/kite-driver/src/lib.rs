@@ -109,7 +109,7 @@ fn run_passes(
 
     let mir = kite_mir::lower(&hir);
     if emit == Emit::Mir {
-        return (mir.to_string(), None);
+        return (mir.render(&hir.types).to_string(), None);
     }
 
     let chunk = kite_codegen_kbc::compile(&mir);

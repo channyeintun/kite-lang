@@ -9,7 +9,7 @@
 //! optimisation passes want; the bytecode backend maps locals to registers
 //! directly and does not need it.
 
-use kite_hir::{BinOp, Builtin, Ty, UnOp};
+use kite_hir::{BinOp, Builtin, TyId, Types, UnOp};
 use kite_span::Span;
 use std::fmt;
 
@@ -60,7 +60,7 @@ pub struct Function {
     /// Parameters occupy locals `0..param_count`.
     pub param_count: usize,
     pub locals: Vec<LocalDecl>,
-    pub ret: Ty,
+    pub ret: TyId,
     pub blocks: Vec<BasicBlock>,
     pub span: Span,
 }
@@ -77,7 +77,7 @@ impl Function {
 
 #[derive(Debug)]
 pub struct LocalDecl {
-    pub ty: Ty,
+    pub ty: TyId,
     /// Source name, or `None` for a compiler temporary.
     pub name: Option<String>,
 }
@@ -154,40 +154,56 @@ pub fn reachable_blocks(func: &Function) -> Vec<bool> {
 // Display, for `kitec --emit mir`
 // ---------------------------------------------------------------------------
 
-impl fmt::Display for Program {
+/// Pairs a program with the arena its `TyId`s belong to, so it can be printed.
+pub struct Display_<'a> {
+    pub program: &'a Program,
+    pub types: &'a Types,
+}
+
+impl Program {
+    /// Render for `kitec --emit mir`. A `TyId` is meaningless without the
+    /// arena, so it must be supplied.
+    pub fn render<'a>(&'a self, types: &'a Types) -> Display_<'a> {
+        Display_ { program: self, types }
+    }
+}
+
+impl fmt::Display for Display_<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, s) in self.strings.iter().enumerate() {
+        for (i, s) in self.program.strings.iter().enumerate() {
             writeln!(f, "str{} = {:?}", i, s)?;
         }
-        if !self.strings.is_empty() {
+        if !self.program.strings.is_empty() {
             writeln!(f)?;
         }
-        for func in &self.fns {
-            writeln!(f, "{}", func)?;
+        for func in &self.program.fns {
+            self.write_fn(f, func)?;
+            writeln!(f)?;
         }
         Ok(())
     }
 }
 
-impl fmt::Display for Function {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "fn {}(", self.name)?;
-        for i in 0..self.param_count {
+impl Display_<'_> {
+    fn write_fn(&self, f: &mut fmt::Formatter<'_>, func: &Function) -> fmt::Result {
+        write!(f, "fn {}(", func.name)?;
+        for i in 0..func.param_count {
             if i > 0 {
                 write!(f, ", ")?;
             }
-            write!(f, "_{}: {}", i, self.locals[i].ty)?;
+            write!(f, "_{}: {}", i, self.types.name(func.locals[i].ty))?;
         }
-        writeln!(f, ") -> {} {{", self.ret)?;
+        writeln!(f, ") -> {} {{", self.types.name(func.ret))?;
 
-        for (i, l) in self.locals.iter().enumerate().skip(self.param_count) {
+        for (i, l) in func.locals.iter().enumerate().skip(func.param_count) {
+            let ty = self.types.name(l.ty);
             match &l.name {
-                Some(n) => writeln!(f, "  let _{}: {}   // {}", i, l.ty, n)?,
-                None => writeln!(f, "  let _{}: {}", i, l.ty)?,
+                Some(n) => writeln!(f, "  let _{}: {}   // {}", i, ty, n)?,
+                None => writeln!(f, "  let _{}: {}", i, ty)?,
             }
         }
 
-        for (i, b) in self.blocks.iter().enumerate() {
+        for (i, b) in func.blocks.iter().enumerate() {
             writeln!(f, "  bb{}:", i)?;
             for s in &b.stmts {
                 writeln!(f, "    {}", s)?;

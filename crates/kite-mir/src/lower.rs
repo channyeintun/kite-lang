@@ -1,6 +1,7 @@
 //! HIR to MIR: control flow becomes a graph.
 
 use crate::*;
+use kite_hir::TyId;
 use kite_hir as hir;
 use std::collections::HashMap;
 
@@ -86,7 +87,7 @@ impl<'a> FnLowerer<'a> {
         // A function that falls off its end returns unit. The checker has
         // already rejected this for functions that declare a return type.
         if !self.sealed {
-            self.terminate(Terminator::Return(if self.hir_fn.ret == Ty::Unit {
+            self.terminate(Terminator::Return(if self.hir_fn.ret == TyId::UNIT {
                 None
             } else {
                 Some(Operand::Unit)
@@ -134,7 +135,7 @@ impl<'a> FnLowerer<'a> {
         self.sealed = true;
     }
 
-    fn temp(&mut self, ty: Ty) -> Local {
+    fn temp(&mut self, ty: TyId) -> Local {
         let id = Local(self.locals.len() as u32);
         self.locals.push(LocalDecl { ty, name: None });
         id
@@ -260,7 +261,7 @@ impl<'a> FnLowerer<'a> {
 
         // The bound is evaluated once, before the loop, so a call in the bound
         // position runs exactly one time.
-        let bound = self.temp(Ty::Int);
+        let bound = self.temp(TyId::INT);
         let end_op = self.operand(end);
         self.assign(bound, Rvalue::Use(end_op));
 
@@ -272,7 +273,7 @@ impl<'a> FnLowerer<'a> {
         self.terminate(Terminator::Goto(header));
 
         self.switch_to(header);
-        let cond = self.temp(Ty::Bool);
+        let cond = self.temp(TyId::BOOL);
         self.assign(
             cond,
             Rvalue::Binary {
@@ -421,7 +422,7 @@ impl<'a> FnLowerer<'a> {
     /// `a && b` must not evaluate `b` when `a` is false, so it becomes a
     /// branch rather than an instruction.
     fn short_circuit(&mut self, op: BinOp, lhs: &hir::Expr, rhs: &hir::Expr) -> Local {
-        let result = self.temp(Ty::Bool);
+        let result = self.temp(TyId::BOOL);
         let l = self.operand(lhs);
         self.assign(result, Rvalue::Use(l.clone()));
 
@@ -450,7 +451,7 @@ impl<'a> FnLowerer<'a> {
         cond: &hir::Expr,
         then: &hir::Expr,
         else_: &hir::Expr,
-        ty: Ty,
+        ty: TyId,
     ) -> Local {
         let result = self.temp(ty);
         let c = self.operand(cond);

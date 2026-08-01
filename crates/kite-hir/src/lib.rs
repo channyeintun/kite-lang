@@ -12,7 +12,10 @@ use kite_span::Span;
 use std::fmt;
 
 pub mod ty;
-pub use ty::Ty;
+pub use ty::{
+    EnumDef, EnumId, FieldDef, StructDef, StructId, TraitDef, TraitId, TraitMethodDef, TyId,
+    TyKind, Types, VariantDef,
+};
 
 // ---------------------------------------------------------------------------
 // Indices
@@ -41,6 +44,9 @@ index!(LocalId, "Index into [`Function::locals`]. Parameters come first.");
 
 #[derive(Debug, Default)]
 pub struct Program {
+    /// The interned type arena. Owned here so every consumer of a `Program`
+    /// can resolve a [`TyId`] without a second argument threaded alongside.
+    pub types: Types,
     pub fns: Vec<Function>,
     /// The `main` function, if this program has one.
     pub entry: Option<FnId>,
@@ -60,7 +66,7 @@ pub struct Function {
     /// Parameters occupy locals `0..param_count`.
     pub param_count: usize,
     pub locals: Vec<Local>,
-    pub ret: Ty,
+    pub ret: TyId,
     pub body: Block,
     pub span: Span,
 }
@@ -78,7 +84,7 @@ impl Function {
 #[derive(Debug)]
 pub struct Local {
     pub name: String,
-    pub ty: Ty,
+    pub ty: TyId,
     pub mutable: bool,
     pub span: Span,
     /// Locals the compiler introduced, such as loop bounds. Excluded from
@@ -128,7 +134,7 @@ pub enum Stmt {
 #[derive(Debug)]
 pub struct Expr {
     pub kind: ExprKind,
-    pub ty: Ty,
+    pub ty: TyId,
     pub span: Span,
 }
 
@@ -221,31 +227,127 @@ pub enum UnOp {
 // ---------------------------------------------------------------------------
 // Display, for `kitec --emit hir`
 // ---------------------------------------------------------------------------
+//
+// A `TyId` is only meaningful against the arena, so rendering hangs off
+// `Program`, which owns it, rather than off the individual nodes.
 
 impl fmt::Display for Program {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for func in &self.fns {
-            writeln!(f, "{}", func)?;
+            self.write_fn(f, func)?;
+            writeln!(f)?;
         }
         Ok(())
     }
 }
 
-impl fmt::Display for Function {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "fn {}(", self.name)?;
-        for (i, p) in self.params().iter().enumerate() {
+impl Program {
+    fn ty(&self, id: TyId) -> String {
+        self.types.name(id)
+    }
+
+    fn write_fn(&self, f: &mut fmt::Formatter<'_>, func: &Function) -> fmt::Result {
+        write!(f, "fn {}(", func.name)?;
+        for (i, p) in func.params().iter().enumerate() {
             if i > 0 {
                 write!(f, ", ")?;
             }
-            write!(f, "_{}: {}", i, p.ty)?;
+            write!(f, "_{}: {}", i, self.ty(p.ty))?;
         }
-        writeln!(f, ") -> {} {{", self.ret)?;
-        for (i, l) in self.locals.iter().enumerate().skip(self.param_count) {
-            writeln!(f, "  // _{} {}: {}", i, l.name, l.ty)?;
+        writeln!(f, ") -> {} {{", self.ty(func.ret))?;
+        for (i, l) in func.locals.iter().enumerate().skip(func.param_count) {
+            writeln!(f, "  // _{} {}: {}", i, l.name, self.ty(l.ty))?;
         }
-        write_block(f, &self.body, 1)?;
+        self.write_block(f, &func.body, 1)?;
         writeln!(f, "}}")
+    }
+
+    fn write_block(&self, f: &mut fmt::Formatter<'_>, b: &Block, depth: usize) -> fmt::Result {
+        for s in &b.stmts {
+            self.write_stmt(f, s, depth)?;
+        }
+        Ok(())
+    }
+
+    fn write_stmt(&self, f: &mut fmt::Formatter<'_>, s: &Stmt, depth: usize) -> fmt::Result {
+        indent(f, depth)?;
+        match s {
+            Stmt::Let { local, init, .. } => match init {
+                Some(e) => writeln!(f, "let _{} = {}", local.0, self.expr(e)),
+                None => writeln!(f, "let _{}", local.0),
+            },
+            Stmt::Assign { local, value, .. } => writeln!(f, "_{} = {}", local.0, self.expr(value)),
+            Stmt::Expr(e) => writeln!(f, "{}", self.expr(e)),
+            Stmt::Return { value: Some(e), .. } => writeln!(f, "return {}", self.expr(e)),
+            Stmt::Return { value: None, .. } => writeln!(f, "return"),
+            Stmt::If { cond, then, else_, .. } => {
+                writeln!(f, "if {} {{", self.expr(cond))?;
+                self.write_block(f, then, depth + 1)?;
+                if let Some(e) = else_ {
+                    indent(f, depth)?;
+                    writeln!(f, "}} else {{")?;
+                    self.write_block(f, e, depth + 1)?;
+                }
+                indent(f, depth)?;
+                writeln!(f, "}}")
+            }
+            Stmt::ForRange { var, start, end, inclusive, body, .. } => {
+                writeln!(
+                    f,
+                    "for _{} in {}{}{} {{",
+                    var.0,
+                    self.expr(start),
+                    if *inclusive { "..=" } else { ".." },
+                    self.expr(end)
+                )?;
+                self.write_block(f, body, depth + 1)?;
+                indent(f, depth)?;
+                writeln!(f, "}}")
+            }
+            Stmt::While { cond, body, .. } => {
+                writeln!(f, "while {} {{", self.expr(cond))?;
+                self.write_block(f, body, depth + 1)?;
+                indent(f, depth)?;
+                writeln!(f, "}}")
+            }
+            Stmt::Loop { body, .. } => {
+                writeln!(f, "loop {{")?;
+                self.write_block(f, body, depth + 1)?;
+                indent(f, depth)?;
+                writeln!(f, "}}")
+            }
+            Stmt::Break { .. } => writeln!(f, "break"),
+            Stmt::Continue { .. } => writeln!(f, "continue"),
+        }
+    }
+
+    fn expr(&self, e: &Expr) -> String {
+        match &e.kind {
+            ExprKind::Int(v) => v.to_string(),
+            ExprKind::Float(v) => format!("{:?}", v),
+            ExprKind::Str(s) => format!("{:?}", s),
+            ExprKind::Bool(b) => b.to_string(),
+            ExprKind::Local(l) => format!("_{}", l.0),
+            ExprKind::Call { callee, args } => {
+                let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();
+                format!("fn{}({})", callee.0, a.join(", "))
+            }
+            ExprKind::CallBuiltin { builtin, args } => {
+                let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();
+                format!("{}({})", builtin.path(), a.join(", "))
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                format!("({:?} {} {})", op, self.expr(lhs), self.expr(rhs))
+            }
+            ExprKind::Unary { op, operand } => format!("({:?} {})", op, self.expr(operand)),
+            ExprKind::If { cond, then, else_ } => format!(
+                "(if {} {} {})",
+                self.expr(cond),
+                self.expr(then),
+                self.expr(else_)
+            ),
+            ExprKind::Error => "<error>".to_string(),
+        }
     }
 }
 
@@ -254,99 +356,4 @@ fn indent(f: &mut fmt::Formatter<'_>, n: usize) -> fmt::Result {
         write!(f, "  ")?;
     }
     Ok(())
-}
-
-fn write_block(f: &mut fmt::Formatter<'_>, b: &Block, depth: usize) -> fmt::Result {
-    for s in &b.stmts {
-        write_stmt(f, s, depth)?;
-    }
-    Ok(())
-}
-
-fn write_stmt(f: &mut fmt::Formatter<'_>, s: &Stmt, depth: usize) -> fmt::Result {
-    indent(f, depth)?;
-    match s {
-        Stmt::Let { local, init, .. } => match init {
-            Some(e) => writeln!(f, "let _{} = {}", local.0, e),
-            None => writeln!(f, "let _{}", local.0),
-        },
-        Stmt::Assign { local, value, .. } => writeln!(f, "_{} = {}", local.0, value),
-        Stmt::Expr(e) => writeln!(f, "{}", e),
-        Stmt::Return { value: Some(e), .. } => writeln!(f, "return {}", e),
-        Stmt::Return { value: None, .. } => writeln!(f, "return"),
-        Stmt::If { cond, then, else_, .. } => {
-            writeln!(f, "if {} {{", cond)?;
-            write_block(f, then, depth + 1)?;
-            if let Some(e) = else_ {
-                indent(f, depth)?;
-                writeln!(f, "}} else {{")?;
-                write_block(f, e, depth + 1)?;
-            }
-            indent(f, depth)?;
-            writeln!(f, "}}")
-        }
-        Stmt::ForRange { var, start, end, inclusive, body, .. } => {
-            writeln!(
-                f,
-                "for _{} in {}{}{} {{",
-                var.0,
-                start,
-                if *inclusive { "..=" } else { ".." },
-                end
-            )?;
-            write_block(f, body, depth + 1)?;
-            indent(f, depth)?;
-            writeln!(f, "}}")
-        }
-        Stmt::While { cond, body, .. } => {
-            writeln!(f, "while {} {{", cond)?;
-            write_block(f, body, depth + 1)?;
-            indent(f, depth)?;
-            writeln!(f, "}}")
-        }
-        Stmt::Loop { body, .. } => {
-            writeln!(f, "loop {{")?;
-            write_block(f, body, depth + 1)?;
-            indent(f, depth)?;
-            writeln!(f, "}}")
-        }
-        Stmt::Break { .. } => writeln!(f, "break"),
-        Stmt::Continue { .. } => writeln!(f, "continue"),
-    }
-}
-
-impl fmt::Display for Expr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.kind {
-            ExprKind::Int(v) => write!(f, "{}", v),
-            ExprKind::Float(v) => write!(f, "{:?}", v),
-            ExprKind::Str(s) => write!(f, "{:?}", s),
-            ExprKind::Bool(b) => write!(f, "{}", b),
-            ExprKind::Local(l) => write!(f, "_{}", l.0),
-            ExprKind::Call { callee, args } => {
-                write!(f, "fn{}(", callee.0)?;
-                for (i, a) in args.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", a)?;
-                }
-                write!(f, ")")
-            }
-            ExprKind::CallBuiltin { builtin, args } => {
-                write!(f, "{}(", builtin.path())?;
-                for (i, a) in args.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", a)?;
-                }
-                write!(f, ")")
-            }
-            ExprKind::Binary { op, lhs, rhs } => write!(f, "({:?} {} {})", op, lhs, rhs),
-            ExprKind::Unary { op, operand } => write!(f, "({:?} {})", op, operand),
-            ExprKind::If { cond, then, else_ } => write!(f, "(if {} {} {})", cond, then, else_),
-            ExprKind::Error => write!(f, "<error>"),
-        }
-    }
 }

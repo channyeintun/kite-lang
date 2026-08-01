@@ -11,14 +11,14 @@
 //! * **No implicit numeric conversion.** `int` and `float` never coerce.
 //! * **No truthiness.** A condition must be exactly `bool`.
 //!
-//! Once an error is reported the offending expression becomes [`Ty::Error`],
+//! Once an error is reported the offending expression becomes [`TyId::ERROR`],
 //! which satisfies every expectation. One mistake therefore yields one
 //! diagnostic instead of a cascade.
 
 use kite_ast as ast;
 use kite_diag::{codes, DiagBag, Diagnostic, Fix};
 use kite_hir as hir;
-use kite_hir::{Builtin, ExprKind, Ty};
+use kite_hir::{Builtin, ExprKind, TyId, Types};
 use kite_resolve::{BuiltinFn, Res, ResolveMap};
 use kite_span::Span;
 
@@ -28,7 +28,8 @@ pub fn check(
     src: &str,
     diags: &mut DiagBag,
 ) -> hir::Program {
-    let mut program = hir::Program::default();
+    let mut types = Types::new();
+    let mut fns = Vec::new();
 
     // Signatures first, so calls can be checked in either direction.
     let mut sigs = Vec::new();
@@ -36,14 +37,14 @@ pub fn check(
         let ast::Item::Fn(f) = &file.items[sig.decl_index] else {
             unreachable!("signature index points at a function")
         };
-        let params: Vec<Ty> = f
+        let params: Vec<TyId> = f
             .params
             .iter()
-            .map(|p| resolve_ty(&p.ty, diags))
+            .map(|p| resolve_ty(&p.ty, &mut types, diags))
             .collect();
         let ret = match &f.ret {
-            None => Ty::Unit,
-            Some(r) => resolve_ty(r.value_type(), diags),
+            None => TyId::UNIT,
+            Some(r) => resolve_ty(r.value_type(), &mut types, diags),
         };
         sigs.push(Signature {
             params,
@@ -60,6 +61,7 @@ pub fn check(
         let mut checker = Checker {
             resolved,
             sigs: &sigs,
+            types: &mut types,
             src,
             diags,
             fn_index: i,
@@ -68,16 +70,19 @@ pub fn check(
             loop_depth: 0,
         };
         let func = checker.check_fn(f, &sigs[i]);
-        program.fns.push(func);
+        fns.push(func);
     }
 
-    program.entry = resolved.fn_by_name("main").map(hir::FnId);
-    program
+    hir::Program {
+        types,
+        fns,
+        entry: resolved.fn_by_name("main").map(hir::FnId),
+    }
 }
 
 struct Signature {
-    params: Vec<Ty>,
-    ret: Ty,
+    params: Vec<TyId>,
+    ret: TyId,
     fallible: bool,
     name_span: Span,
 }
@@ -85,6 +90,8 @@ struct Signature {
 struct Checker<'a> {
     resolved: &'a ResolveMap,
     sigs: &'a [Signature],
+    /// The interned type arena, built up as declarations are checked.
+    types: &'a mut Types,
     src: &'a str,
     diags: &'a mut DiagBag,
     fn_index: usize,
@@ -150,7 +157,7 @@ impl<'a> Checker<'a> {
             .enumerate()
             .map(|(i, info)| hir::Local {
                 name: info.name.clone(),
-                ty: sig.params.get(i).copied().unwrap_or(Ty::Error),
+                ty: sig.params.get(i).copied().unwrap_or(TyId::ERROR),
                 mutable: info.mutable,
                 span: info.span,
                 synthetic: info.synthetic,
@@ -171,7 +178,7 @@ impl<'a> Checker<'a> {
 
         let (body, flow) = self.block(&f.body, sig);
 
-        if sig.ret != Ty::Unit && flow == Flow::Falls {
+        if sig.ret != TyId::UNIT && flow == Flow::Falls {
             self.diags.push(
                 Diagnostic::error(codes::E0203, "not every path returns a value")
                     .with_primary(
@@ -180,7 +187,7 @@ impl<'a> Checker<'a> {
                     )
                     .with_secondary(
                         f.ret.as_ref().map(|r| r.span()).unwrap_or(sig.name_span),
-                        format!("`{}` declared here", sig.ret),
+                        format!("`{}` declared here", self.types.name(sig.ret)),
                     ),
             );
         }
@@ -240,7 +247,7 @@ impl<'a> Checker<'a> {
 
             ast::Stmt::Expr(e) => {
                 let expr = self.expr(e, None);
-                let flow = if expr.ty == Ty::Never { Flow::Diverges } else { Flow::Falls };
+                let flow = if expr.ty == TyId::NEVER { Flow::Diverges } else { Flow::Falls };
                 Some((hir::Stmt::Expr(expr), flow))
             }
 
@@ -268,7 +275,7 @@ impl<'a> Checker<'a> {
         };
 
         let local_id = self.resolved.lookup_binding(name.span)?;
-        let annotated = l.ty.as_ref().map(|t| resolve_ty(t, self.diags));
+        let annotated = l.ty.as_ref().map(|t| resolve_ty(t, self.types, self.diags));
 
         let init = l.init.as_ref().map(|e| self.expr(e, annotated));
 
@@ -279,15 +286,15 @@ impl<'a> Checker<'a> {
             }
             (Some(a), None) => a,
             (None, Some(i)) => {
-                if i.ty == Ty::Unit {
+                if i.ty == TyId::UNIT {
                     self.diags.push(
                         Diagnostic::error(codes::E0200, "cannot bind a value of type `()`")
                             .with_primary(i.span, "this expression produces no value")
                             .with_note("a function without a declared return type returns `()`"),
                     );
-                    Ty::Error
-                } else if i.ty == Ty::Never {
-                    Ty::Error
+                    TyId::ERROR
+                } else if i.ty == TyId::NEVER {
+                    TyId::ERROR
                 } else {
                     i.ty
                 }
@@ -298,7 +305,7 @@ impl<'a> Checker<'a> {
                         .with_primary(name.span, "no type annotation and no initialiser")
                         .with_note("write `let x: int` or give it a value"),
                 );
-                Ty::Error
+                TyId::ERROR
             }
         };
 
@@ -317,7 +324,7 @@ impl<'a> Checker<'a> {
 
     fn var_stmt(&mut self, v: &ast::VarStmt, _sig: &Signature) -> Option<(hir::Stmt, Flow)> {
         let local_id = self.resolved.lookup_binding(v.name.span)?;
-        let annotated = v.ty.as_ref().map(|t| resolve_ty(t, self.diags));
+        let annotated = v.ty.as_ref().map(|t| resolve_ty(t, self.types, self.diags));
         let init = self.expr(&v.init, annotated);
 
         let ty = match annotated {
@@ -325,7 +332,7 @@ impl<'a> Checker<'a> {
                 self.expect_ty(init.ty, a, init.span, v.ty.as_ref().map(|t| t.span()));
                 a
             }
-            None if init.ty == Ty::Unit || init.ty == Ty::Never => Ty::Error,
+            None if init.ty == TyId::UNIT || init.ty == TyId::NEVER => TyId::ERROR,
             None => init.ty,
         };
         self.locals[local_id as usize].ty = ty;
@@ -416,10 +423,10 @@ impl<'a> Checker<'a> {
     fn return_stmt(&mut self, r: &ast::ReturnStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
         match &r.value {
             None => {
-                if sig.ret != Ty::Unit {
+                if sig.ret != TyId::UNIT {
                     self.diags.push(
                         Diagnostic::error(codes::E0203, "missing return value")
-                            .with_primary(r.span, format!("expected a `{}`", sig.ret))
+                            .with_primary(r.span, format!("expected a `{}`", self.types.name(sig.ret)))
                             .with_secondary(sig.name_span, "declared here"),
                     );
                 }
@@ -427,10 +434,10 @@ impl<'a> Checker<'a> {
             }
             Some(ast::ReturnValue::Single(e)) => {
                 let value = self.expr(e, Some(sig.ret));
-                if sig.ret == Ty::Unit {
+                if sig.ret == TyId::UNIT {
                     self.diags.push(
                         Diagnostic::error(codes::E0200, "returning a value from a `()` function")
-                            .with_primary(value.span, format!("this is {}", value.ty.with_article()))
+                            .with_primary(value.span, format!("this is {}", self.types.with_article(value.ty)))
                             .with_secondary(sig.name_span, "no return type declared here"),
                     );
                 } else {
@@ -531,13 +538,13 @@ impl<'a> Checker<'a> {
                     return None;
                 };
 
-                let start_e = self.expr(start, Some(Ty::Int));
-                let end_e = self.expr(end, Some(Ty::Int));
-                self.expect_ty(start_e.ty, Ty::Int, start_e.span, None);
-                self.expect_ty(end_e.ty, Ty::Int, end_e.span, None);
+                let start_e = self.expr(start, Some(TyId::INT));
+                let end_e = self.expr(end, Some(TyId::INT));
+                self.expect_ty(start_e.ty, TyId::INT, start_e.span, None);
+                self.expect_ty(end_e.ty, TyId::INT, end_e.span, None);
 
                 let local_id = self.resolved.lookup_binding(name.span)?;
-                self.locals[local_id as usize].ty = Ty::Int;
+                self.locals[local_id as usize].ty = TyId::INT;
                 // The loop itself supplies the counter's value.
                 self.init[local_id as usize] = Init::Assigned;
 
@@ -572,12 +579,12 @@ impl<'a> Checker<'a> {
 
     /// A condition must be exactly `bool`. Kite has no truthiness.
     fn condition(&mut self, e: &ast::Expr) -> hir::Expr {
-        let c = self.expr(e, Some(Ty::Bool));
-        if !c.ty.satisfies(Ty::Bool) && !c.ty.is_poisoned() {
+        let c = self.expr(e, Some(TyId::BOOL));
+        if !self.types.satisfies(c.ty, TyId::BOOL) && !self.types.is_poisoned(c.ty) {
             let mut d = Diagnostic::error(codes::E0202, "condition must be `bool`")
-                .with_primary(c.span, format!("this is {}", c.ty.with_article()))
+                .with_primary(c.span, format!("this is {}", self.types.with_article(c.ty)))
                 .with_note("Kite has no truthiness: compare explicitly");
-            if c.ty == Ty::Int {
+            if c.ty == TyId::INT {
                 d = d.with_note("for example, write `n != 0`");
             }
             self.diags.push(d);
@@ -589,40 +596,40 @@ impl<'a> Checker<'a> {
 
     /// `expected` is a hint, not a constraint — it steers literal typing and
     /// improves messages. The caller still checks the result.
-    fn expr(&mut self, e: &ast::Expr, expected: Option<Ty>) -> hir::Expr {
+    fn expr(&mut self, e: &ast::Expr, expected: Option<TyId>) -> hir::Expr {
         match e {
             ast::Expr::Int(span) => {
                 let text = self.text(*span);
                 match parse_int(text) {
-                    Some(v) => self.lit(ExprKind::Int(v), Ty::Int, *span),
+                    Some(v) => self.lit(ExprKind::Int(v), TyId::INT, *span),
                     None => {
                         self.diags.push(
                             Diagnostic::error(codes::E0004, "integer literal is out of range")
                                 .with_primary(*span, "does not fit in `int`")
                                 .with_note("`int` is 64-bit signed"),
                         );
-                        self.lit(ExprKind::Error, Ty::Error, *span)
+                        self.lit(ExprKind::Error, TyId::ERROR, *span)
                     }
                 }
             }
             ast::Expr::Float(span) => {
                 let text = self.text(*span);
                 match parse_float(text) {
-                    Some(v) => self.lit(ExprKind::Float(v), Ty::Float, *span),
+                    Some(v) => self.lit(ExprKind::Float(v), TyId::FLOAT, *span),
                     None => {
                         self.diags.push(
                             Diagnostic::error(codes::E0004, "invalid float literal")
                                 .with_primary(*span, "cannot be parsed"),
                         );
-                        self.lit(ExprKind::Error, Ty::Error, *span)
+                        self.lit(ExprKind::Error, TyId::ERROR, *span)
                     }
                 }
             }
             ast::Expr::Str(span) => {
                 let value = self.string_value(*span);
-                self.lit(ExprKind::Str(value), Ty::Str, *span)
+                self.lit(ExprKind::Str(value), TyId::STR, *span)
             }
-            ast::Expr::Bool { value, span } => self.lit(ExprKind::Bool(*value), Ty::Bool, *span),
+            ast::Expr::Bool { value, span } => self.lit(ExprKind::Bool(*value), TyId::BOOL, *span),
 
             ast::Expr::Path(p) => self.path_expr(p),
             ast::Expr::Paren { inner, .. } => self.expr(inner, expected),
@@ -634,23 +641,23 @@ impl<'a> Checker<'a> {
 
             ast::Expr::Binary { op, lhs, rhs, span } => {
                 if let Some(hop) = short_circuit(*op) {
-                    let l = self.expr(lhs, Some(Ty::Bool));
-                    let r = self.expr(rhs, Some(Ty::Bool));
+                    let l = self.expr(lhs, Some(TyId::BOOL));
+                    let r = self.expr(rhs, Some(TyId::BOOL));
                     for side in [&l, &r] {
-                        if !side.ty.satisfies(Ty::Bool) && !side.ty.is_poisoned() {
+                        if !self.types.satisfies(side.ty, TyId::BOOL) && !self.types.is_poisoned(side.ty) {
                             self.diags.push(
                                 Diagnostic::error(
                                     codes::E0201,
                                     format!("`{}` needs `bool` operands", op.text()),
                                 )
-                                .with_primary(side.span, format!("this is {}", side.ty.with_article()))
+                                .with_primary(side.span, format!("this is {}", self.types.with_article(side.ty)))
                                 .with_note("Kite has no truthiness"),
                             );
                         }
                     }
                     return hir::Expr {
                         kind: ExprKind::Binary { op: hop, lhs: Box::new(l), rhs: Box::new(r) },
-                        ty: Ty::Bool,
+                        ty: TyId::BOOL,
                         span: *span,
                     };
                 }
@@ -658,7 +665,7 @@ impl<'a> Checker<'a> {
                 // Steer literal typing on one side by the other, so
                 // `x + 1` works when `x` is a float.
                 let l = self.expr(lhs, None);
-                let hint = if l.ty.is_poisoned() { expected } else { Some(l.ty) };
+                let hint = if self.types.is_poisoned(l.ty) { expected } else { Some(l.ty) };
                 let r = self.expr(rhs, hint);
                 self.binary(*op, l, r, *span)
             }
@@ -673,50 +680,50 @@ impl<'a> Checker<'a> {
                     "ranges outside a `for` header",
                     "range values arrive with the Iterate trait in Phase 2",
                 );
-                self.lit(ExprKind::Error, Ty::Error, *span)
+                self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
 
             ast::Expr::Char(span) => {
                 self.not_yet(*span, "`char`", "arrives in Phase 2");
-                self.lit(ExprKind::Error, Ty::Error, *span)
+                self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
             ast::Expr::Nil(span) => {
                 self.not_yet(*span, "`nil`", "optionals arrive in Phase 2");
-                self.lit(ExprKind::Error, Ty::Error, *span)
+                self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
             ast::Expr::SelfExpr(span) => {
                 self.not_yet(*span, "`self`", "methods arrive in Phase 2");
-                self.lit(ExprKind::Error, Ty::Error, *span)
+                self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
             ast::Expr::Field { span, .. } => {
                 self.not_yet(*span, "field access", "structs arrive in Phase 2");
-                self.lit(ExprKind::Error, Ty::Error, *span)
+                self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
             ast::Expr::Index { span, .. } => {
                 self.not_yet(*span, "indexing", "slices and maps arrive in Phase 2");
-                self.lit(ExprKind::Error, Ty::Error, *span)
+                self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
             ast::Expr::Cast { span, .. } => {
                 self.not_yet(*span, "`as` casts", "arrives in Phase 2");
-                self.lit(ExprKind::Error, Ty::Error, *span)
+                self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
             ast::Expr::Await { span, .. } => {
                 self.not_yet(*span, "`await`", "concurrency arrives in Phase 5");
-                self.lit(ExprKind::Error, Ty::Error, *span)
+                self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
             ast::Expr::Tuple { span, .. } => {
                 self.not_yet(*span, "tuples", "arrives in Phase 2");
-                self.lit(ExprKind::Error, Ty::Error, *span)
+                self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
             ast::Expr::Slice { span, .. } => {
                 self.not_yet(*span, "slice literals", "arrives in Phase 2");
-                self.lit(ExprKind::Error, Ty::Error, *span)
+                self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
             ast::Expr::Closure { span, .. } => {
                 self.not_yet(*span, "closures", "arrives in Phase 2");
-                self.lit(ExprKind::Error, Ty::Error, *span)
+                self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
-            ast::Expr::Error(span) => self.lit(ExprKind::Error, Ty::Error, *span),
+            ast::Expr::Error(span) => self.lit(ExprKind::Error, TyId::ERROR, *span),
         }
     }
 
@@ -754,17 +761,17 @@ impl<'a> Checker<'a> {
                     "using a function as a value",
                     "function types arrive in Phase 2",
                 );
-                self.lit(ExprKind::Error, Ty::Error, p.span)
+                self.lit(ExprKind::Error, TyId::ERROR, p.span)
             }
             // Resolution already reported this.
-            None => self.lit(ExprKind::Error, Ty::Error, p.span),
+            None => self.lit(ExprKind::Error, TyId::ERROR, p.span),
         }
     }
 
     fn call(&mut self, callee: &ast::Expr, args: &[ast::Expr], span: Span) -> hir::Expr {
         let ast::Expr::Path(p) = callee else {
             self.not_yet(callee.span(), "calling an arbitrary expression", "Phase 2");
-            return self.lit(ExprKind::Error, Ty::Error, span);
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
         };
 
         match self.resolved.lookup_use(p.span) {
@@ -807,13 +814,13 @@ impl<'a> Checker<'a> {
                 let mut hargs = Vec::new();
                 for a in args {
                     let e = self.expr(a, None);
-                    if !e.ty.is_printable() && !e.ty.is_poisoned() {
+                    if !self.types.is_printable(e.ty) && !self.types.is_poisoned(e.ty) {
                         self.diags.push(
                             Diagnostic::error(
                                 codes::E0200,
-                                format!("`io.print` cannot print a `{}`", e.ty),
+                                format!("`io.print` cannot print a `{}`", self.types.name(e.ty)),
                             )
-                            .with_primary(e.span, format!("this is {}", e.ty.with_article()))
+                            .with_primary(e.span, format!("this is {}", self.types.with_article(e.ty)))
                             .with_note("`io.print` accepts int, float, bool, and str"),
                         );
                     }
@@ -821,7 +828,7 @@ impl<'a> Checker<'a> {
                 }
                 hir::Expr {
                     kind: ExprKind::CallBuiltin { builtin: Builtin::IoPrint, args: hargs },
-                    ty: Ty::Unit,
+                    ty: TyId::UNIT,
                     span,
                 }
             }
@@ -830,13 +837,13 @@ impl<'a> Checker<'a> {
                 let ty = self.locals[id as usize].ty;
                 self.diags.push(
                     Diagnostic::error(codes::E0205, format!("`{}` is not a function", p.text()))
-                        .with_primary(p.span, format!("this is {}", ty.with_article()))
+                        .with_primary(p.span, format!("this is {}", self.types.with_article(ty)))
                         .with_secondary(self.locals[id as usize].span, "declared here"),
                 );
-                self.lit(ExprKind::Error, Ty::Error, span)
+                self.lit(ExprKind::Error, TyId::ERROR, span)
             }
 
-            None => self.lit(ExprKind::Error, Ty::Error, span),
+            None => self.lit(ExprKind::Error, TyId::ERROR, span),
         }
     }
 
@@ -853,22 +860,22 @@ impl<'a> Checker<'a> {
             ast::ElseBranch::Block(b) => self.block_value(b),
             ast::ElseBranch::If(nested) => {
                 let Some(inner_else) = nested.else_.as_deref() else {
-                    return self.lit(ExprKind::Error, Ty::Error, span);
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
                 };
                 self.if_expr(&nested.cond, &nested.then, inner_else, nested.span)
             }
         };
 
-        let ty = if t.ty == Ty::Never {
+        let ty = if t.ty == TyId::NEVER {
             e.ty
-        } else if e.ty == Ty::Never {
+        } else if e.ty == TyId::NEVER {
             t.ty
         } else {
-            if !e.ty.satisfies(t.ty) && !t.ty.is_poisoned() && !e.ty.is_poisoned() {
+            if !self.types.satisfies(e.ty, t.ty) && !self.types.is_poisoned(t.ty) && !self.types.is_poisoned(e.ty) {
                 self.diags.push(
                     Diagnostic::error(codes::E0200, "`if` branches have different types")
-                        .with_primary(e.span, format!("this branch is {}", e.ty.with_article()))
-                        .with_secondary(t.span, format!("this branch is {}", t.ty.with_article()))
+                        .with_primary(e.span, format!("this branch is {}", self.types.with_article(e.ty)))
+                        .with_secondary(t.span, format!("this branch is {}", self.types.with_article(t.ty)))
                         .with_note("every branch of a value `if` must produce the same type"),
                 );
             }
@@ -893,7 +900,7 @@ impl<'a> Checker<'a> {
                         .with_primary(b.span, "expected a single expression")
                         .with_note("an `if` used as a value takes one expression per branch"),
                 );
-                self.lit(ExprKind::Error, Ty::Error, b.span)
+                self.lit(ExprKind::Error, TyId::ERROR, b.span)
             }
         }
     }
@@ -901,26 +908,26 @@ impl<'a> Checker<'a> {
     // ---- operators --------------------------------------------------------
 
     fn unary(&mut self, op: ast::UnaryOp, val: hir::Expr, span: Span) -> hir::Expr {
-        if val.ty.is_poisoned() {
-            return hir::Expr { kind: ExprKind::Error, ty: Ty::Error, span };
+        if self.types.is_poisoned(val.ty) {
+            return hir::Expr { kind: ExprKind::Error, ty: TyId::ERROR, span };
         }
         let (hop, ty) = match (op, val.ty) {
-            (ast::UnaryOp::Neg, Ty::Int) => (hir::UnOp::NegInt, Ty::Int),
-            (ast::UnaryOp::Neg, Ty::Float) => (hir::UnOp::NegFloat, Ty::Float),
-            (ast::UnaryOp::Not, Ty::Bool) => (hir::UnOp::Not, Ty::Bool),
+            (ast::UnaryOp::Neg, TyId::INT) => (hir::UnOp::NegInt, TyId::INT),
+            (ast::UnaryOp::Neg, TyId::FLOAT) => (hir::UnOp::NegFloat, TyId::FLOAT),
+            (ast::UnaryOp::Not, TyId::BOOL) => (hir::UnOp::Not, TyId::BOOL),
             _ => {
                 self.diags.push(
                     Diagnostic::error(
                         codes::E0201,
-                        format!("`{}` cannot be applied to `{}`", op.text(), val.ty),
+                        format!("`{}` cannot be applied to `{}`", op.text(), self.types.name(val.ty)),
                     )
-                    .with_primary(val.span, format!("this is {}", val.ty.with_article()))
+                    .with_primary(val.span, format!("this is {}", self.types.with_article(val.ty)))
                     .with_note(match op {
                         ast::UnaryOp::Neg => "`-` applies to `int` and `float`",
                         ast::UnaryOp::Not => "`!` applies to `bool`",
                     }),
                 );
-                return hir::Expr { kind: ExprKind::Error, ty: Ty::Error, span };
+                return hir::Expr { kind: ExprKind::Error, ty: TyId::ERROR, span };
             }
         };
         hir::Expr {
@@ -940,54 +947,54 @@ impl<'a> Checker<'a> {
         use ast::BinaryOp as B;
         use hir::BinOp as H;
 
-        if l.ty.is_poisoned() || r.ty.is_poisoned() {
-            return hir::Expr { kind: ExprKind::Error, ty: Ty::Error, span };
+        if self.types.is_poisoned(l.ty) || self.types.is_poisoned(r.ty) {
+            return hir::Expr { kind: ExprKind::Error, ty: TyId::ERROR, span };
         }
 
         if l.ty != r.ty {
             self.mismatched_operands(op, &l, &r, span);
-            return hir::Expr { kind: ExprKind::Error, ty: Ty::Error, span };
+            return hir::Expr { kind: ExprKind::Error, ty: TyId::ERROR, span };
         }
 
         let t = l.ty;
         let resolved = match (op, t) {
-            (B::Add, Ty::Int) => Some((H::AddInt, Ty::Int)),
-            (B::Sub, Ty::Int) => Some((H::SubInt, Ty::Int)),
-            (B::Mul, Ty::Int) => Some((H::MulInt, Ty::Int)),
-            (B::Div, Ty::Int) => Some((H::DivInt, Ty::Int)),
-            (B::Rem, Ty::Int) => Some((H::RemInt, Ty::Int)),
+            (B::Add, TyId::INT) => Some((H::AddInt, TyId::INT)),
+            (B::Sub, TyId::INT) => Some((H::SubInt, TyId::INT)),
+            (B::Mul, TyId::INT) => Some((H::MulInt, TyId::INT)),
+            (B::Div, TyId::INT) => Some((H::DivInt, TyId::INT)),
+            (B::Rem, TyId::INT) => Some((H::RemInt, TyId::INT)),
 
-            (B::Add, Ty::Float) => Some((H::AddFloat, Ty::Float)),
-            (B::Sub, Ty::Float) => Some((H::SubFloat, Ty::Float)),
-            (B::Mul, Ty::Float) => Some((H::MulFloat, Ty::Float)),
-            (B::Div, Ty::Float) => Some((H::DivFloat, Ty::Float)),
+            (B::Add, TyId::FLOAT) => Some((H::AddFloat, TyId::FLOAT)),
+            (B::Sub, TyId::FLOAT) => Some((H::SubFloat, TyId::FLOAT)),
+            (B::Mul, TyId::FLOAT) => Some((H::MulFloat, TyId::FLOAT)),
+            (B::Div, TyId::FLOAT) => Some((H::DivFloat, TyId::FLOAT)),
 
-            (B::Add, Ty::Str) => Some((H::ConcatStr, Ty::Str)),
+            (B::Add, TyId::STR) => Some((H::ConcatStr, TyId::STR)),
 
-            (B::BitAnd, Ty::Int) => Some((H::BitAnd, Ty::Int)),
-            (B::BitOr, Ty::Int) => Some((H::BitOr, Ty::Int)),
-            (B::BitXor, Ty::Int) => Some((H::BitXor, Ty::Int)),
-            (B::Shl, Ty::Int) => Some((H::Shl, Ty::Int)),
-            (B::Shr, Ty::Int) => Some((H::Shr, Ty::Int)),
+            (B::BitAnd, TyId::INT) => Some((H::BitAnd, TyId::INT)),
+            (B::BitOr, TyId::INT) => Some((H::BitOr, TyId::INT)),
+            (B::BitXor, TyId::INT) => Some((H::BitXor, TyId::INT)),
+            (B::Shl, TyId::INT) => Some((H::Shl, TyId::INT)),
+            (B::Shr, TyId::INT) => Some((H::Shr, TyId::INT)),
 
-            (B::Eq, Ty::Int) => Some((H::EqInt, Ty::Bool)),
-            (B::Ne, Ty::Int) => Some((H::NeInt, Ty::Bool)),
-            (B::Lt, Ty::Int) => Some((H::LtInt, Ty::Bool)),
-            (B::Le, Ty::Int) => Some((H::LeInt, Ty::Bool)),
-            (B::Gt, Ty::Int) => Some((H::GtInt, Ty::Bool)),
-            (B::Ge, Ty::Int) => Some((H::GeInt, Ty::Bool)),
+            (B::Eq, TyId::INT) => Some((H::EqInt, TyId::BOOL)),
+            (B::Ne, TyId::INT) => Some((H::NeInt, TyId::BOOL)),
+            (B::Lt, TyId::INT) => Some((H::LtInt, TyId::BOOL)),
+            (B::Le, TyId::INT) => Some((H::LeInt, TyId::BOOL)),
+            (B::Gt, TyId::INT) => Some((H::GtInt, TyId::BOOL)),
+            (B::Ge, TyId::INT) => Some((H::GeInt, TyId::BOOL)),
 
-            (B::Eq, Ty::Float) => Some((H::EqFloat, Ty::Bool)),
-            (B::Ne, Ty::Float) => Some((H::NeFloat, Ty::Bool)),
-            (B::Lt, Ty::Float) => Some((H::LtFloat, Ty::Bool)),
-            (B::Le, Ty::Float) => Some((H::LeFloat, Ty::Bool)),
-            (B::Gt, Ty::Float) => Some((H::GtFloat, Ty::Bool)),
-            (B::Ge, Ty::Float) => Some((H::GeFloat, Ty::Bool)),
+            (B::Eq, TyId::FLOAT) => Some((H::EqFloat, TyId::BOOL)),
+            (B::Ne, TyId::FLOAT) => Some((H::NeFloat, TyId::BOOL)),
+            (B::Lt, TyId::FLOAT) => Some((H::LtFloat, TyId::BOOL)),
+            (B::Le, TyId::FLOAT) => Some((H::LeFloat, TyId::BOOL)),
+            (B::Gt, TyId::FLOAT) => Some((H::GtFloat, TyId::BOOL)),
+            (B::Ge, TyId::FLOAT) => Some((H::GeFloat, TyId::BOOL)),
 
-            (B::Eq, Ty::Bool) => Some((H::EqBool, Ty::Bool)),
-            (B::Ne, Ty::Bool) => Some((H::NeBool, Ty::Bool)),
-            (B::Eq, Ty::Str) => Some((H::EqStr, Ty::Bool)),
-            (B::Ne, Ty::Str) => Some((H::NeStr, Ty::Bool)),
+            (B::Eq, TyId::BOOL) => Some((H::EqBool, TyId::BOOL)),
+            (B::Ne, TyId::BOOL) => Some((H::NeBool, TyId::BOOL)),
+            (B::Eq, TyId::STR) => Some((H::EqStr, TyId::BOOL)),
+            (B::Ne, TyId::STR) => Some((H::NeStr, TyId::BOOL)),
 
             _ => None,
         };
@@ -995,20 +1002,20 @@ impl<'a> Checker<'a> {
         let Some((hop, ty)) = resolved else {
             let mut d = Diagnostic::error(
                 codes::E0201,
-                format!("`{}` cannot be applied to two `{}` values", op.text(), t),
+                format!("`{}` cannot be applied to two `{}` values", op.text(), self.types.name(t)),
             )
             .with_primary(span, "no such operation");
-            if op.is_arithmetic() && t == Ty::Str {
+            if op.is_arithmetic() && t == TyId::STR {
                 d = d.with_note("`+` concatenates strings; the other arithmetic operators do not");
             }
-            if op == B::Rem && t == Ty::Float {
+            if op == B::Rem && t == TyId::FLOAT {
                 d = d.with_note("use `math.rem` for floating-point remainder");
             }
-            if op.is_comparison() && !t.is_ordered() {
-                d = d.with_note(format!("`{}` is not ordered", t));
+            if op.is_comparison() && !self.types.is_ordered(t) {
+                d = d.with_note(format!("`{}` is not ordered", self.types.name(t)));
             }
             self.diags.push(d);
-            return hir::Expr { kind: ExprKind::Error, ty: Ty::Error, span };
+            return hir::Expr { kind: ExprKind::Error, ty: TyId::ERROR, span };
         };
 
         // Float equality is a footgun the specification calls out.
@@ -1036,13 +1043,13 @@ impl<'a> Checker<'a> {
     ) {
         let mut d = Diagnostic::error(
             codes::E0201,
-            format!("`{}` cannot be applied to `{}` and `{}`", op.text(), l.ty, r.ty),
+            format!("`{}` cannot be applied to `{}` and `{}`", op.text(), self.types.name(l.ty), self.types.name(r.ty)),
         )
         .with_primary(span, "operand types differ")
-        .with_secondary(l.span, format!("`{}`", l.ty))
-        .with_secondary(r.span, format!("`{}`", r.ty));
+        .with_secondary(l.span, format!("`{}`", self.types.name(l.ty)))
+        .with_secondary(r.span, format!("`{}`", self.types.name(r.ty)));
 
-        if l.ty.is_numeric() && r.ty.is_numeric() {
+        if self.types.is_numeric(l.ty) && self.types.is_numeric(r.ty) {
             d = d.with_note(
                 "Kite performs no implicit numeric conversion; write an explicit `as` cast",
             );
@@ -1052,7 +1059,7 @@ impl<'a> Checker<'a> {
 
     // ---- helpers ----------------------------------------------------------
 
-    fn lit(&self, kind: ExprKind, ty: Ty, span: Span) -> hir::Expr {
+    fn lit(&self, kind: ExprKind, ty: TyId, span: Span) -> hir::Expr {
         hir::Expr { kind, ty, span }
     }
 
@@ -1128,23 +1135,23 @@ impl<'a> Checker<'a> {
         out
     }
 
-    fn expect_ty(&mut self, found: Ty, expected: Ty, span: Span, because: Option<Span>) {
-        if found.satisfies(expected) {
+    fn expect_ty(&mut self, found: TyId, expected: TyId, span: Span, because: Option<Span>) {
+        if self.types.satisfies(found, expected) {
             return;
         }
         let mut d = Diagnostic::error(
             codes::E0200,
-            format!("expected `{}`, found `{}`", expected, found),
+            format!("expected `{}`, found `{}`", self.types.name(expected), self.types.name(found)),
         )
-        .with_primary(span, format!("this is {}", found.with_article()));
+        .with_primary(span, format!("this is {}", self.types.with_article(found)));
 
         if let Some(b) = because {
-            d = d.with_secondary(b, format!("`{}` required here", expected));
+            d = d.with_secondary(b, format!("`{}` required here", self.types.name(expected)));
         }
-        if found.is_numeric() && expected.is_numeric() {
+        if self.types.is_numeric(found) && self.types.is_numeric(expected) {
             d = d.with_note(format!(
                 "Kite performs no implicit numeric conversion; write `... as {}`",
-                expected
+                self.types.name(expected)
             ));
         }
         self.diags.push(d);
@@ -1210,36 +1217,112 @@ fn short_circuit(op: ast::BinaryOp) -> Option<hir::BinOp> {
     }
 }
 
-/// Resolve a surface type to a [`Ty`].
-fn resolve_ty(t: &ast::Type, diags: &mut DiagBag) -> Ty {
+/// Resolve a surface type to a [`TyId`], interning composite types as it goes.
+fn resolve_ty(t: &ast::Type, types: &mut Types, diags: &mut DiagBag) -> TyId {
     match t {
-        ast::Type::Path(p) if p.is_simple() => match Ty::from_name(p.name()) {
+        ast::Type::Path(p) if p.is_simple() => match Types::primitive_from_name(p.name()) {
             Some(ty) => ty,
             None => {
-                diags.push(
+                let mut d =
                     Diagnostic::error(codes::E0204, format!("unknown type `{}`", p.name()))
-                        .with_primary(p.span, "not a known type")
-                        .with_note(format!(
-                            "this compiler version knows: {}",
-                            Ty::PRIMITIVE_NAMES.join(", ")
-                        )),
-                );
-                Ty::Error
+                        .with_primary(p.span, "not a known type");
+                if let Some(near) = nearest_type_name(p.name(), types) {
+                    d = d.with_note(format!("a similar type is in scope: `{}`", near));
+                } else {
+                    d = d.with_note(format!(
+                        "known types: {}",
+                        types.known_type_names().join(", ")
+                    ));
+                }
+                diags.push(d);
+                TyId::ERROR
             }
         },
-        ast::Type::Error(_) => Ty::Error,
-        other => {
+
+        ast::Type::Slice { elem, .. } => {
+            let e = resolve_ty(elem, types, diags);
+            types.slice_of(e)
+        }
+        ast::Type::Map { key, value, .. } => {
+            let k = resolve_ty(key, types, diags);
+            let v = resolve_ty(value, types, diags);
+            types.map_of(k, v)
+        }
+        ast::Type::Optional { inner, .. } => {
+            let i = resolve_ty(inner, types, diags);
+            types.optional_of(i)
+        }
+        ast::Type::Tuple { elems, .. } => {
+            let es: Vec<TyId> = elems.iter().map(|e| resolve_ty(e, types, diags)).collect();
+            if es.is_empty() {
+                TyId::UNIT
+            } else {
+                types.tuple_of(es)
+            }
+        }
+        ast::Type::Fn { params, ret, .. } => {
+            let ps: Vec<TyId> = params.iter().map(|p| resolve_ty(p, types, diags)).collect();
+            let r = match ret {
+                Some(r) => resolve_ty(r, types, diags),
+                None => TyId::UNIT,
+            };
+            types.fn_of(ps, r)
+        }
+
+        ast::Type::Path(p) => {
             diags.push(
-                Diagnostic::error(codes::E0204, "this type is not supported yet")
-                    .with_primary(other.span(), "not available in this compiler version")
-                    .with_note(
-                        "structs, enums, slices, maps, and optionals arrive in Phase 2; see \
-                         docs/06-roadmap.md",
-                    ),
+                Diagnostic::error(codes::E0204, "generic types are not available yet")
+                    .with_primary(p.span, "type arguments need generics")
+                    .with_note("generics arrive later in Phase 2; see docs/06-roadmap.md"),
             );
-            Ty::Error
+            TyId::ERROR
+        }
+        ast::Type::Dyn { span, .. } => {
+            diags.push(
+                Diagnostic::error(codes::E0204, "`dyn` is not available yet")
+                    .with_primary(*span, "trait objects need traits")
+                    .with_note("traits arrive later in Phase 2; see docs/06-roadmap.md"),
+            );
+            TyId::ERROR
+        }
+        ast::Type::Error(_) => TyId::ERROR,
+    }
+}
+
+/// Nearest known type name by edit distance, when close enough to be a typo.
+fn nearest_type_name(name: &str, types: &Types) -> Option<String> {
+    let mut best: Option<(usize, String)> = None;
+    for cand in types.known_type_names() {
+        let d = edit_distance(name, &cand);
+        if best.as_ref().is_none_or(|(bd, _)| d < *bd) {
+            best = Some((d, cand));
         }
     }
+    let (dist, cand) = best?;
+    (dist <= (name.len() / 3).max(1)).then_some(cand)
+}
+
+/// Levenshtein distance, two-row variant.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
 }
 
 fn parse_int(text: &str) -> Option<i64> {
