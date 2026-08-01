@@ -72,18 +72,44 @@ pub struct WasmModule {
 /// reference and recursion needs no annotation from the user.
 struct TypeLayout {
     struct_base: u32,
+    /// Each enum contributes one base record plus one per variant, so its
+    /// types are found through this offset table rather than by arithmetic.
+    enum_base: Vec<u32>,
 }
 
 impl TypeLayout {
     fn struct_type(&self, id: kite_hir::StructId) -> u32 {
         self.struct_base + id.0
     }
+
+    /// The common supertype for an enum. Every variant record extends it, so
+    /// one nullable reference to this type describes any value of the enum.
+    fn enum_base_type(&self, id: kite_hir::EnumId) -> u32 {
+        self.enum_base[id.index()]
+    }
+
+    /// The record for one variant, which carries the tag plus that variant's
+    /// payload.
+    fn variant_type(&self, id: kite_hir::EnumId, variant: u32) -> u32 {
+        self.enum_base[id.index()] + 1 + variant
+    }
 }
 
 /// Compile a MIR program to a WebAssembly module.
 pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     let mut module = Module::new();
-    let layout = TypeLayout { struct_base: IMPORT_COUNT };
+
+    // Type index space: import signatures, then structs, then each enum's base
+    // record followed by its variants, then function signatures.
+    let struct_base = IMPORT_COUNT;
+    let mut next = struct_base + types.struct_count() as u32;
+    let mut enum_base = Vec::with_capacity(types.enum_count());
+    for i in 0..types.enum_count() {
+        enum_base.push(next);
+        next += 1 + types.enum_def(kite_hir::EnumId(i as u32)).variants.len() as u32;
+    }
+    let aggregate_count = next - IMPORT_COUNT;
+    let layout = TypeLayout { struct_base, enum_base };
 
     // ---- types -------------------------------------------------------------
     let mut type_section = TypeSection::new();
@@ -91,44 +117,64 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
         type_section.ty().function([*param], []);
     }
 
-    // Every struct in one `rec` group: a field may name a struct declared
-    // later, and mutual recursion has to work.
-    if types.struct_count() > 0 {
-        let group: Vec<SubType> = (0..types.struct_count())
-            .map(|i| {
-                let def = types.struct_def(kite_hir::StructId(i as u32));
-                let fields: Vec<FieldType> = def
-                    .fields
-                    .iter()
-                    .map(|f| FieldType {
+    // Every aggregate goes in one `rec` group: a field may name a type declared
+    // later, and mutual recursion has to work — which it must, because every
+    // Kite aggregate is a GC reference and recursion needs no annotation.
+    if aggregate_count > 0 {
+        let mut group: Vec<SubType> = Vec::with_capacity(aggregate_count as usize);
+
+        for i in 0..types.struct_count() {
+            let def = types.struct_def(kite_hir::StructId(i as u32));
+            let fields: Vec<FieldType> = def
+                .fields
+                .iter()
+                .map(|f| FieldType {
+                    element_type: StorageType::Val(val_type_with(f.ty, types, &layout)),
+                    // Kite's per-field `var` marker is exactly WasmGC's
+                    // per-field mutability flag. Immutable fields let the
+                    // engine hoist loads without alias analysis.
+                    mutable: f.mutable,
+                })
+                .collect();
+            group.push(struct_subtype(fields, None, true));
+        }
+
+        // An enum becomes a base record holding just the tag, plus one subtype
+        // per variant carrying its payload. A `match` reads the tag, and a
+        // payload read casts to the variant it has already established.
+        for i in 0..types.enum_count() {
+            let eid = kite_hir::EnumId(i as u32);
+            let base = layout.enum_base_type(eid);
+            group.push(struct_subtype(
+                vec![FieldType {
+                    element_type: StorageType::Val(ValType::I32),
+                    mutable: false,
+                }],
+                None,
+                false,
+            ));
+            for variant in &types.enum_def(eid).variants {
+                let mut fields = vec![FieldType {
+                    element_type: StorageType::Val(ValType::I32),
+                    mutable: false,
+                }];
+                for f in &variant.fields {
+                    fields.push(FieldType {
                         element_type: StorageType::Val(val_type_with(f.ty, types, &layout)),
-                        // Kite's per-field `var` marker is exactly WasmGC's
-                        // per-field mutability flag. Immutable fields let the
-                        // engine hoist loads without alias analysis.
-                        mutable: f.mutable,
-                    })
-                    .collect();
-                SubType {
-                    is_final: true,
-                    supertype_idx: None,
-                    composite_type: CompositeType {
-                        inner: CompositeInnerType::Struct(wasm_encoder::StructType {
-                            fields: fields.into_boxed_slice(),
-                        }),
-                        shared: false,
-                        descriptor: None,
-                        describes: None,
-                    },
+                        mutable: false,
+                    });
                 }
-            })
-            .collect();
+                group.push(struct_subtype(fields, Some(base), true));
+            }
+        }
+
         type_section.ty().rec(group);
     }
 
     // Indices are computed rather than read back: `TypeSection::len` counts a
     // `rec` group as one entry, not as the types inside it, so trusting it here
     // would collide function types with every struct after the first.
-    let fn_type_base = IMPORT_COUNT + types.struct_count() as u32;
+    let fn_type_base = IMPORT_COUNT + aggregate_count;
     let mut fn_type_index = Vec::with_capacity(program.fns.len());
     for (i, f) in program.fns.iter().enumerate() {
         let params: Vec<ValType> = (0..f.param_count)
@@ -177,6 +223,25 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     }
 }
 
+fn struct_subtype(
+    fields: Vec<FieldType>,
+    supertype: Option<u32>,
+    is_final: bool,
+) -> SubType {
+    SubType {
+        is_final,
+        supertype_idx: supertype,
+        composite_type: CompositeType {
+            inner: CompositeInnerType::Struct(wasm_encoder::StructType {
+                fields: fields.into_boxed_slice(),
+            }),
+            shared: false,
+            descriptor: None,
+            describes: None,
+        },
+    }
+}
+
 /// The Wasm value type for a Kite type.
 fn val_type_with(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
     match types.kind(ty) {
@@ -188,6 +253,12 @@ fn val_type_with(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
         TyKind::Struct(s) => ValType::Ref(RefType {
             nullable: true,
             heap_type: HeapType::Concrete(layout.struct_type(*s)),
+        }),
+        // Any variant is a subtype of the base record, so one reference to it
+        // describes every value of the enum.
+        TyKind::Enum(e) => ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Concrete(layout.enum_base_type(*e)),
         }),
         // `str` is a constant index for now; with JS String Builtins this
         // becomes `externref` carrying the JS string with no copy.
@@ -387,6 +458,47 @@ impl<'a> Emitter<'a> {
                 return true;
             }
 
+            mir::Rvalue::EnumNew { enum_id, variant, fields } => {
+                // Field 0 is the tag; the payload follows.
+                func.instruction(&Instruction::I32Const(*variant as i32));
+                for f in fields {
+                    self.operand(func, f);
+                }
+                func.instruction(&Instruction::StructNew(
+                    self.layout.variant_type(*enum_id, *variant),
+                ));
+                return true;
+            }
+
+            mir::Rvalue::TagOf { base } => {
+                let Some(eid) = self.enum_of(base) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                self.operand(func, base);
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: self.layout.enum_base_type(eid),
+                    field_index: 0,
+                });
+                // The tag is an i32 in the record but an int in Kite.
+                func.instruction(&Instruction::I64ExtendI32S);
+                return true;
+            }
+
+            // The tag has already been tested, so the cast cannot fail.
+            mir::Rvalue::VariantGet { base, enum_id, variant, index } => {
+                self.operand(func, base);
+                func.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(
+                    self.layout.variant_type(*enum_id, *variant),
+                )));
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: self.layout.variant_type(*enum_id, *variant),
+                    // Field 0 is the tag, so the payload starts at 1.
+                    field_index: index + 1,
+                });
+                return true;
+            }
+
             // Enums, slices, and fallible pairs are not lowered yet.
             // `unreachable` makes the stack polymorphic, so reporting a value
             // keeps the surrounding code well-typed.
@@ -443,6 +555,15 @@ impl<'a> Emitter<'a> {
             mir::Operand::Unit | mir::Operand::Nil => {
                 func.instruction(&Instruction::I32Const(0));
             }
+        }
+    }
+
+    /// The enum an operand holds, if it holds one.
+    fn enum_of(&self, o: &mir::Operand) -> Option<kite_hir::EnumId> {
+        let mir::Operand::Local(l) = o else { return None };
+        match self.types.kind(self.f.locals[l.index()].ty) {
+            TyKind::Enum(e) => Some(*e),
+            _ => None,
         }
     }
 

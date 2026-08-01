@@ -2,6 +2,7 @@
 
 use crate::*;
 use kite_hir::TyId as Ty;
+use kite_hir::{EnumId, StructId, Types};
 use kite_hir as hir;
 use std::collections::HashMap;
 
@@ -13,7 +14,7 @@ pub fn lower(program: &hir::Program) -> Program {
     let mut strings = StringPool::default();
 
     for func in &program.fns {
-        let lowered = FnLowerer::new(func, &mut strings).run();
+        let lowered = FnLowerer::new(func, &program.types, &mut strings).run();
         out.fns.push(lowered);
     }
     out.strings = strings.list;
@@ -47,8 +48,20 @@ struct LoopCtx {
     break_to: BlockId,
 }
 
+/// Which aggregate a pattern's field belongs to.
+///
+/// A binding introduced by a pattern needs the field's *real* type, not a
+/// placeholder: the bytecode VM has untyped registers and would not notice,
+/// but Wasm locals are typed and a wrong one is a validation failure.
+#[derive(Clone, Copy)]
+enum FieldOwner {
+    Variant(EnumId, u32),
+    Struct(StructId),
+}
+
 struct FnLowerer<'a> {
     hir_fn: &'a hir::Function,
+    types: &'a Types,
     strings: &'a mut StringPool,
     locals: Vec<LocalDecl>,
     blocks: Vec<BasicBlock>,
@@ -60,7 +73,7 @@ struct FnLowerer<'a> {
 }
 
 impl<'a> FnLowerer<'a> {
-    fn new(hir_fn: &'a hir::Function, strings: &'a mut StringPool) -> Self {
+    fn new(hir_fn: &'a hir::Function, types: &'a Types, strings: &'a mut StringPool) -> Self {
         let locals = hir_fn
             .locals
             .iter()
@@ -72,6 +85,7 @@ impl<'a> FnLowerer<'a> {
 
         FnLowerer {
             hir_fn,
+            types,
             strings,
             locals,
             blocks: vec![BasicBlock::default()],
@@ -707,7 +721,7 @@ impl<'a> FnLowerer<'a> {
                 });
             }
 
-            hir::Pattern::Variant { variant, fields, .. } => {
+            hir::Pattern::Variant { enum_id, variant, fields } => {
                 let tag = self.temp(Ty::INT);
                 self.assign(tag, Rvalue::TagOf { base: subject.clone() });
                 let hit = self.temp(Ty::BOOL);
@@ -744,10 +758,16 @@ impl<'a> FnLowerer<'a> {
                     else_: on_fail,
                 });
                 self.switch_to(payload_bb);
-                self.test_fields(subject, &refutable, on_match, on_fail);
+                self.test_fields(
+                    subject,
+                    &refutable,
+                    FieldOwner::Variant(*enum_id, *variant),
+                    on_match,
+                    on_fail,
+                );
             }
 
-            hir::Pattern::Struct { fields, .. } => {
+            hir::Pattern::Struct { struct_id, fields } => {
                 let refutable: Vec<(usize, &hir::Pattern)> = fields
                     .iter()
                     .filter(|(_, p)| !p.is_irrefutable())
@@ -757,7 +777,13 @@ impl<'a> FnLowerer<'a> {
                     self.terminate(Terminator::Goto(on_match));
                     return;
                 }
-                self.test_fields(subject, &refutable, on_match, on_fail);
+                self.test_fields(
+                    subject,
+                    &refutable,
+                    FieldOwner::Struct(*struct_id),
+                    on_match,
+                    on_fail,
+                );
             }
 
             // Any alternative matching is enough.
@@ -795,15 +821,15 @@ impl<'a> FnLowerer<'a> {
         &mut self,
         subject: &Operand,
         fields: &[(usize, &hir::Pattern)],
+        owner: FieldOwner,
         on_match: BlockId,
         on_fail: BlockId,
     ) {
         for (n, (index, sub)) in fields.iter().enumerate() {
-            let slot = self.temp(Ty::ERROR);
-            self.assign(
-                slot,
-                Rvalue::FieldGet { base: subject.clone(), index: *index as u32 },
-            );
+            let ty = self.field_type(owner, *index as u32);
+            let slot = self.temp(ty);
+            let read = self.read_field(subject, owner, *index as u32);
+            self.assign(slot, read);
             let target = if n + 1 < fields.len() {
                 self.new_block()
             } else {
@@ -842,14 +868,14 @@ impl<'a> FnLowerer<'a> {
             hir::Pattern::Binding(local) => {
                 self.assign(Local(local.0), Rvalue::Use(subject.clone()));
             }
-            hir::Pattern::Variant { fields, .. } => {
+            hir::Pattern::Variant { enum_id, variant, fields } => {
                 for (i, sub) in fields.iter().enumerate() {
-                    self.bind_field(sub, subject, i as u32);
+                    self.bind_field(sub, subject, FieldOwner::Variant(*enum_id, *variant), i as u32);
                 }
             }
-            hir::Pattern::Struct { fields, .. } => {
+            hir::Pattern::Struct { struct_id, fields } => {
                 for (i, sub) in fields {
-                    self.bind_field(sub, subject, *i);
+                    self.bind_field(sub, subject, FieldOwner::Struct(*struct_id), *i);
                 }
             }
             // Every alternative of an or-pattern must bind the same names, so
@@ -863,13 +889,43 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
-    fn bind_field(&mut self, sub: &hir::Pattern, subject: &Operand, index: u32) {
+    fn bind_field(
+        &mut self,
+        sub: &hir::Pattern,
+        subject: &Operand,
+        owner: FieldOwner,
+        index: u32,
+    ) {
         if matches!(sub, hir::Pattern::Wildcard) {
             return;
         }
-        let slot = self.temp(Ty::ERROR);
-        self.assign(slot, Rvalue::FieldGet { base: subject.clone(), index });
+        let ty = self.field_type(owner, index);
+        let slot = self.temp(ty);
+        let read = self.read_field(subject, owner, index);
+        self.assign(slot, read);
         self.bind_pattern(sub, &Operand::Local(slot));
+    }
+
+    /// Read a field, naming the variant when the subject is an enum so a
+    /// backend that subtypes its variants knows what to cast to.
+    fn read_field(&self, subject: &Operand, owner: FieldOwner, index: u32) -> Rvalue {
+        match owner {
+            FieldOwner::Variant(enum_id, variant) => Rvalue::VariantGet {
+                base: subject.clone(),
+                enum_id,
+                variant,
+                index,
+            },
+            FieldOwner::Struct(_) => Rvalue::FieldGet { base: subject.clone(), index },
+        }
+    }
+
+    fn field_type(&self, owner: FieldOwner, index: u32) -> Ty {
+        let fields = match owner {
+            FieldOwner::Variant(e, v) => &self.types.enum_def(e).variants[v as usize].fields,
+            FieldOwner::Struct(s) => &self.types.struct_def(s).fields,
+        };
+        fields.get(index as usize).map(|f| f.ty).unwrap_or(Ty::ERROR)
     }
 
     /// `a && b` must not evaluate `b` when `a` is false, so it becomes a

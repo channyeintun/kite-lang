@@ -100,6 +100,42 @@ fn main() {
          fn main() {\n  let o = Outer{ inner: Inner{ n: 42 } }\n  io.print(o.inner.n)\n}\n",
     ),
     (
+        "enums",
+        "enum Shape {\n  Circle(radius: int)\n  Rect(width: int, height: int)\n  Point\n}\n\
+         fn describe(s: Shape) -> str {\n  return match s {\n    Circle(r) => \"circle\",\n\
+         \x20   Rect(w, h) if w == h => \"square\",\n    Rect(w, h) => \"rect\",\n\
+         \x20   Point => \"point\",\n  }\n}\n\
+         fn area(s: Shape) -> int {\n  return match s {\n    Circle(r) => 3 * r * r,\n\
+         \x20   Rect(w, h) => w * h,\n    Point => 0,\n  }\n}\n\
+         fn main() {\n  io.print(describe(Circle(radius: 2)))\n  io.print(area(Circle(radius: 2)))\n\
+         \x20 io.print(describe(Rect(width: 3, height: 3)))\n\
+         \x20 io.print(describe(Rect(width: 3, height: 4)))\n\
+         \x20 io.print(area(Rect(width: 3, height: 4)))\n  io.print(describe(Point))\n}\n",
+    ),
+    (
+        "recursive-enum",
+        "enum Tree {\n  Leaf(int)\n  Node(left: Tree, right: Tree)\n}\n\
+         fn total(t: Tree) -> int {\n  return match t {\n    Leaf(n) => n,\n\
+         \x20   Node(l, r) => total(l) + total(r),\n  }\n}\n\
+         fn main() {\n  let t = Node(left: Node(left: Leaf(1), right: Leaf(2)), right: Leaf(3))\n\
+         \x20 io.print(total(t))\n}\n",
+    ),
+    (
+        "literal-patterns",
+        "fn classify(n: int) -> str {\n  return match n {\n    0 => \"zero\",\n\
+         \x20   1 | 2 | 3 => \"small\",\n    4..=9 => \"medium\",\n    _ => \"large\",\n  }\n}\n\
+         fn main() {\n  io.print(classify(0))\n  io.print(classify(2))\n\
+         \x20 io.print(classify(9))\n  io.print(classify(10))\n}\n",
+    ),
+    (
+        "struct-patterns",
+        "struct P {\n  x: int\n  y: int\n}\n\
+         fn where_is(p: P) -> str {\n  return match p {\n    P{ x: 0, y: 0 } => \"origin\",\n\
+         \x20   P{ x: 0, y } => \"on y\",\n    P{ x, y } => \"elsewhere\",\n  }\n}\n\
+         fn main() {\n  io.print(where_is(P{ x: 0, y: 0 }))\n  io.print(where_is(P{ x: 0, y: 5 }))\n\
+         \x20 io.print(where_is(P{ x: 1, y: 5 }))\n}\n",
+    ),
+    (
         "evaluation-order",
         "fn step(n: int) -> int {\n  io.print(n)\n  return n\n}\nfn main() {\n  let x = step(1) + step(2)\n  io.print(x)\n}\n",
     ),

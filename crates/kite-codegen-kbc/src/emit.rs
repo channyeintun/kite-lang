@@ -177,7 +177,11 @@ impl<'a> Emitter<'a> {
                 });
             }
 
-            mir::Rvalue::FieldGet { base, index } => {
+            // The VM stores an enum's payload in the same slot layout as a
+            // struct's fields, so both read the same way. Only the Wasm
+            // backend, which subtypes its variants, needs the distinction.
+            mir::Rvalue::FieldGet { base, index }
+            | mir::Rvalue::VariantGet { base, index, .. } => {
                 let obj = self.operand_reg(base, 0);
                 self.code.push(Op::GetField { dst, obj, index: *index as u16 });
             }

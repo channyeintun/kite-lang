@@ -297,3 +297,59 @@ fn a_program_with_structs_stays_small() {
     ));
     assert!(b.size() < 10_000, "module is {} bytes", b.size());
 }
+
+// ---- WasmGC enums ---------------------------------------------------------
+
+const SHAPE: &str = "\
+enum Shape {
+    Circle(radius: int)
+    Rect(width: int, height: int)
+    Point
+}
+";
+
+/// An enum becomes a base record holding the tag plus one subtype per variant.
+/// A `match` reads the tag; a payload read casts to the variant it has already
+/// established.
+#[test]
+fn enum_construction_and_matching_validate() {
+    valid(&format!(
+        "{}\nfn area(s: Shape) -> int {{\n  return match s {{\n    Circle(r) => 3 * r * r,\n    Rect(w, h) => w * h,\n    Point => 0,\n  }}\n}}\nfn main() {{\n  io.print(area(Circle(radius: 2)))\n  io.print(area(Rect(width: 3, height: 4)))\n  io.print(area(Point))\n}}\n",
+        SHAPE
+    ));
+}
+
+#[test]
+fn a_unit_variant_validates() {
+    valid(&format!(
+        "{}\nfn main() {{\n  let p = Point\n  io.print(match p {{\n    Point => 1,\n    _ => 0,\n  }})\n}}\n",
+        SHAPE
+    ));
+}
+
+#[test]
+fn guards_and_literal_patterns_validate() {
+    valid(&format!(
+        "{}\nfn main() {{\n  io.print(match Rect(width: 2, height: 2) {{\n    Rect(w, h) if w == h => 1,\n    Rect(w, h) => 2,\n    _ => 0,\n  }})\n  io.print(match 7 {{\n    0 => \"zero\",\n    1 | 2 => \"small\",\n    3..=9 => \"medium\",\n    _ => \"large\",\n  }})\n}}\n",
+        SHAPE
+    ));
+}
+
+/// A recursive enum needs no boxing annotation: every Kite aggregate is already
+/// a GC reference, and one `rec` group is what lets the emitted types say so.
+#[test]
+fn a_recursive_enum_validates() {
+    valid(
+        "enum Tree {\n  Leaf(int)\n  Node(left: Tree, right: Tree)\n}\n\
+         fn total(t: Tree) -> int {\n  return match t {\n    Leaf(n) => n,\n\
+         \x20   Node(l, r) => total(l) + total(r),\n  }\n}\n\
+         fn main() {\n  io.print(total(Node(left: Leaf(1), right: Leaf(2))))\n}\n",
+    );
+}
+
+#[test]
+fn variants_are_subtypes_of_the_enum_base() {
+    let b = valid(&format!("{}\nfn main() {{\n  io.print(1)\n}}\n", SHAPE));
+    let printed = wasmprinter::print_bytes(&b.module.bytes).unwrap();
+    assert!(printed.contains("(sub "), "variants are not subtypes:\n{}", printed);
+}

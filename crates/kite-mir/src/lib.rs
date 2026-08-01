@@ -112,6 +112,10 @@ pub enum Rvalue {
     EnumNew { enum_id: EnumId, variant: u32, fields: Vec<Operand> },
     /// The variant index of an enum value, for dispatching a `match`.
     TagOf { base: Operand },
+    /// A payload field of a known enum variant. Separate from `FieldGet`
+    /// because a backend using subtyped variant records has to cast first, and
+    /// only the pattern that matched knows which variant it is.
+    VariantGet { base: Operand, enum_id: EnumId, variant: u32, index: u32 },
     SliceNew { elems: Vec<Operand> },
     IsNil { value: Operand },
     PairNew { value: Operand, error: Operand },
@@ -280,6 +284,9 @@ impl fmt::Display for Rvalue {
                 write!(f, ")")
             }
             Rvalue::TagOf { base } => write!(f, "tag {}", base),
+            Rvalue::VariantGet { base, variant, index, .. } => {
+                write!(f, "{}#{}.{}", base, variant, index)
+            }
             Rvalue::SliceNew { elems } => {
                 write!(f, "[")?;
                 write_operands(f, elems)?;
