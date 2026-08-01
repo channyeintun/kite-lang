@@ -1,12 +1,14 @@
 {
   "name": "kite-lang",
   "displayName": "Kite",
-  "description": "Syntax highlighting for the Kite programming language.",
-  "version": "0.1.0",
+  "description": "Language support for Kite: highlighting, diagnostics, hover, go to definition, and formatting.",
+  "version": "0.2.0",
   "publisher": "kite-lang",
   "license": "MIT",
   "engines": { "vscode": "^1.75.0" },
   "categories": ["Programming Languages"],
+  "main": "./extension.js",
+  "activationEvents": ["onLanguage:kite"],
   "contributes": {
     "languages": [
       {
@@ -22,6 +24,16 @@
         "scopeName": "source.kite",
         "path": "./syntaxes/kite.tmLanguage.json"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Kite",
+      "properties": {
+        "kite.server.path": {
+          "type": "string",
+          "default": "kite-lsp",
+          "description": "The language server binary. Build it with `cargo build --release -p kite-lsp`."
+        }
+      }
+    }
   }
 }

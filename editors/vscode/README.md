@@ -1,43 +1,40 @@
-# Kite for VS Code
+# Kite for Visual Studio Code
 
-Syntax highlighting for [Kite](../../README.md).
+Highlighting, diagnostics as you type, hover, go to definition, completion,
+document symbols, and format on save.
 
-Deliberately only that, for now. Everything an editor needs beyond colouring —
-diagnostics, go-to-definition, hover types, rename, completion — has to come
-from a language server running the same queries the compiler runs. An extension
-that reimplements any of it is one that works in exactly one editor and drifts
-from the compiler on its own schedule. `kite-lsp` is Phase 14 in
-[the roadmap](../../docs/06-roadmap.md); this is the piece that has to exist
-either way, because VS Code uses a TextMate grammar for the fast path before a
-server answers, and GitHub's Linguist needs the same file.
+Everything but the highlighting comes from **`kite-lsp`**, which runs the same
+passes the compiler runs. That is the whole point of the arrangement: an
+extension that implements its own analysis is an analysis that only ever works
+in one editor, and one that eventually disagrees with the build.
 
-## Installing it
+## Installing
 
 ```bash
-ln -s "$PWD/editors/vscode" ~/.vscode/extensions/kite-lang
+cargo build --release -p kite-lsp
 ```
 
-Then reload the window. On the web or in a remote workspace, package it first:
+Put the binary on `PATH`, or set `kite.server.path` to where it is. Then copy
+this directory into `~/.vscode/extensions/kite-lang` and reload the window.
 
-```bash
-npx @vscode/vsce package
-```
+## What the server answers
 
-## What it colours
+| Request | Answer |
+|---|---|
+| `textDocument/didOpen`, `didChange`, `didSave` | diagnostics for that file |
+| `textDocument/hover` | the declaration a name resolves to |
+| `textDocument/definition` | where it was declared |
+| `textDocument/completion` | keywords, and every name in scope |
+| `textDocument/documentSymbol` | the file's declarations |
+| `textDocument/formatting` | the file, laid out by `kitec fmt` |
 
-All 27 keywords, primitives, string interpolation (`\(expr)` is highlighted as
-embedded code, not as string), numeric literals in every base, `dyn Trait`,
-declaring positions — `fn area` colours `area` as a definition — and dotted
-calls such as `io.print`.
+Diagnostics pointing into the standard library are not published: they belong
+to a file the user does not have open, and showing them against a line they do
+have open would be a lie about where the problem is.
 
-A test in the compiler asserts that every keyword the lexer knows appears in
-the grammar, so adding one to the language fails the build until it is
-coloured. Highlighting drifting out of step with the language is the normal
-failure here, and it is worth a test rather than a habit.
+## Highlighting without the server
 
-## What it does not colour
-
-Type inference. A capitalised name is treated as a type because that is the
-convention, and Kite does not enforce it — a lowercase type name will look like
-a variable. Only a language server can do better, and that is the point of
-having one.
+The grammar works on its own — the extension activates on a `.kite` file, and
+a missing server binary is reported once and then stays out of the way. The
+same grammar is what a [Linguist](https://github.com/github-linguist/linguist)
+submission needs, so it is not work done twice.

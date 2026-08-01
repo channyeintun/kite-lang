@@ -51,6 +51,36 @@ pub struct Compilation {
     chunk: Option<kite_codegen_kbc::Chunk>,
     /// The compiled WebAssembly module, when `--emit wasm` was requested.
     pub wasm: Option<kite_codegen_wasm::WasmModule>,
+    /// What an editor needs: where every name was used and where it was
+    /// declared. Built from the same resolution the checker ran on, because a
+    /// language server that re-derives its own answers is a second compiler
+    /// that disagrees with the first one.
+    pub index: Index,
+}
+
+/// Where names are, for an editor.
+#[derive(Default)]
+pub struct Index {
+    /// Every resolved use: where it was written, where it was declared, and
+    /// what to say about it.
+    pub uses: Vec<Use>,
+    /// Every top-level declaration, for a symbol list and for completion.
+    pub symbols: Vec<Symbol>,
+}
+
+pub struct Use {
+    pub at: Span,
+    pub declared_at: Span,
+    /// A one-line description: the signature, or the type of a binding.
+    pub label: String,
+    pub kind: &'static str,
+}
+
+pub struct Symbol {
+    pub name: String,
+    pub at: Span,
+    pub kind: &'static str,
+    pub label: String,
 }
 
 impl Compilation {
@@ -123,10 +153,10 @@ pub fn compile(path: impl AsRef<Path>, src: &str, emit: Emit) -> Compilation {
     let path = path.as_ref().to_path_buf();
     let file = sources.add(&path, src);
     let mut diags = DiagBag::new();
-    let (output, chunk, wasm) =
+    let (output, chunk, wasm, index) =
         run_passes(prelude, file, &path, &mut sources, emit, &mut diags);
 
-    let mut c = Compilation { sources, diags, output, chunk, wasm };
+    let mut c = Compilation { sources, diags, output, chunk, wasm, index };
     // The standard library's own advice is not the user's to act on.
     let library: Vec<FileId> = c
         .sources
@@ -150,13 +180,14 @@ fn run_passes(
     String,
     Option<kite_codegen_kbc::Chunk>,
     Option<kite_codegen_wasm::WasmModule>,
+    Index,
 ) {
     let src = sources.text(file).to_string();
     let tokens = kite_lexer::tokenize(file, &src, diags);
     let mut ast = kite_parser::parse(file, &src, &tokens, diags);
 
     if emit == Emit::Ast {
-        return (format!("{:#?}\n", ast), None, None);
+        return (format!("{:#?}\n", ast), None, None, Index::default());
     }
 
     // Modules the program reaches, transitively. Nothing is compiled that
@@ -244,12 +275,16 @@ fn run_passes(
     };
     let resolved = kite_resolve::resolve_modules(&ast, module_map, diags);
     let mut hir = kite_types::check(&ast, &resolved, sources, diags);
+    // Built before the early returns below: an editor asks about a file most
+    // often when it does *not* compile, and an index that vanished on the
+    // first error would be an index nobody could use.
+    let index = build_index(&resolved, sources);
 
     if emit == Emit::Hir {
-        return (hir.to_string(), None, None);
+        return (hir.to_string(), None, None, index);
     }
     if diags.has_errors() {
-        return (String::new(), None, None);
+        return (String::new(), None, None, index);
     }
 
     // Specialise generic functions before lowering, so no backend ever sees a
@@ -264,7 +299,7 @@ fn run_passes(
     // backends see ordinary functions and neither knows concurrency exists.
     kite_mir::asyncify(&mut mir, &mut hir.types);
     if emit == Emit::Mir {
-        return (mir.render(&hir.types).to_string(), None, None);
+        return (mir.render(&hir.types).to_string(), None, None, index);
     }
 
     if emit == Emit::Wasm {
@@ -286,18 +321,93 @@ fn run_passes(
                     ),
                 );
             }
-            return (String::new(), None, None);
+            return (String::new(), None, None, index);
         }
         let module = kite_codegen_wasm::compile(&mir, &hir.types);
-        return (String::new(), None, Some(module));
+        return (String::new(), None, Some(module), index);
     }
 
     let chunk = kite_codegen_kbc::compile(&mir);
     if emit == Emit::Kbc {
-        return (chunk.to_string(), Some(chunk), None);
+        return (chunk.to_string(), Some(chunk), None, index);
     }
 
-    (String::new(), Some(chunk), None)
+    (String::new(), Some(chunk), None, index)
+}
+
+/// What an editor needs, from the resolution the checker already ran.
+fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Index {
+    use kite_resolve::Res;
+    let mut index = Index::default();
+
+    for (i, f) in resolved.fns.iter().enumerate() {
+        if f.owner.is_some() {
+            continue;
+        }
+        let label = signature_text(sources, f.span, f.param_count);
+        index.symbols.push(Symbol {
+            name: f.name.clone(),
+            at: f.span,
+            kind: if f.is_extern { "host function" } else { "function" },
+            label,
+        });
+        let _ = i;
+    }
+    for t in &resolved.types {
+        index.symbols.push(Symbol {
+            name: t.name.clone(),
+            at: t.span,
+            kind: t.kind.describe(),
+            label: format!("{} {}", t.kind.describe(), t.name),
+        });
+    }
+
+    for (at, res) in &resolved.uses {
+        let (declared_at, label, kind) = match res {
+            Res::Fn(i) => {
+                let f = &resolved.fns[*i as usize];
+                (f.span, signature_text(sources, f.span, f.param_count), "function")
+            }
+            Res::Type(i) => {
+                let t = &resolved.types[*i as usize];
+                (t.span, format!("{} {}", t.kind.describe(), t.name), t.kind.describe())
+            }
+            Res::Variant(i, v) => {
+                let t = &resolved.types[*i as usize];
+                (t.span, format!("variant #{} of {}", v, t.name), "variant")
+            }
+            Res::Builtin(b) => (*at, format!("{} — a compiler builtin", b.path()), "builtin"),
+            // A local's declaration is in the function's own table, which the
+            // index does not carry: the editor gets the name and where it was
+            // used, which is what hovering one asks for.
+            Res::Local(_) => continue,
+        };
+        index.uses.push(Use { at: *at, declared_at, label, kind });
+    }
+    index.uses.sort_by_key(|u| (u.at.file.0, u.at.start));
+    index.symbols.sort_by_key(|s| (s.at.file.0, s.at.start));
+    index
+}
+
+/// The first line of a declaration, which is its signature.
+fn signature_text(sources: &SourceMap, at: Span, param_count: usize) -> String {
+    let text = sources.text(at.file);
+    // Back up to the start of the line, then take it up to the body.
+    let line_start = text[..at.start as usize]
+        .rfind('\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let line_end = text[at.start as usize..]
+        .find('\n')
+        .map(|i| at.start as usize + i)
+        .unwrap_or(text.len());
+    let line = text[line_start..line_end].trim();
+    let line = line.strip_suffix('{').unwrap_or(line).trim();
+    if line.is_empty() {
+        format!("takes {} argument(s)", param_count)
+    } else {
+        line.to_string()
+    }
 }
 
 #[cfg(test)]

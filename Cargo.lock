@@ -149,6 +149,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kite-lsp"
+version = "0.1.0"
+dependencies = [
+ "kite-diag",
+ "kite-doc",
+ "kite-driver",
+ "kite-fmt",
+ "kite-lexer",
+ "kite-span",
+]
+
+[[package]]
 name = "kite-mir"
 version = "0.1.0"
 dependencies = [

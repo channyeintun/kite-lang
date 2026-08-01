@@ -1,0 +1,20 @@
+[package]
+name = "kite-lsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The Kite language server"
+
+[[bin]]
+name = "kite-lsp"
+path = "src/main.rs"
+
+[dependencies]
+kite-driver.workspace = true
+kite-diag.workspace = true
+kite-span.workspace = true
+kite-fmt.workspace = true
+kite-doc.workspace = true
+kite-lexer.workspace = true

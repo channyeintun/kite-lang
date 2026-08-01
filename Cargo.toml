@@ -16,6 +16,7 @@ members = [
     "crates/kite-codegen-wasm",
     "crates/kite-vm",
     "crates/kite-driver",
+    "crates/kite-lsp",
     "bin/kitec",
 ]
 
