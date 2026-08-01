@@ -165,6 +165,17 @@ export async function run(source) {{
   }}
   return exports.main();
 }}
+
+// An application exports `init`, `view` and `update` instead of `main`.
+//
+// The model never crosses the boundary as data — it is a Wasm reference the
+// host holds and hands back, opaque to JavaScript. That is what lets a model
+// be any Kite type at all without needing a representation both sides agree
+// on, and it is why `update` returns a new model rather than mutating one:
+// Kite has no mutable global state to mutate.
+export function isApplication(exports) {{
+  return ["init", "view", "update"].every((n) => typeof exports[n] === "function");
+}}
 "#,
         table = table,
         wasm = json_string(wasm_path),
@@ -207,7 +218,7 @@ pub fn generate_page(title: &str) -> String {
 </main>
 
 <script type="module">
-  import {{ instantiate, setRenderer, setWriter,
+  import {{ instantiate, setRenderer, setWriter, isApplication,
             domRenderer, canvasRenderer, textRenderer }} from "./app.js";
 
   const stage = document.getElementById("stage");
@@ -217,15 +228,19 @@ pub fn generate_page(title: &str) -> String {
     text: document.getElementById("text"),
   }};
 
-  // The module is instantiated once per draw: `main` runs to completion and
-  // draws as it goes, so redrawing means running it again. A program that
-  // redrew on its own would need a frame loop, which arrives with events.
-  async function show(which) {{
-    for (const [name, button] of Object.entries(buttons)) {{
-      button.setAttribute("aria-pressed", String(name === which));
-    }}
-    stage.replaceChildren();
+  // One instance for the life of the page. A program that exports `init`,
+  // `view` and `update` keeps its model inside the module — the host holds a
+  // reference and hands it back, opaque to JavaScript — so instantiating again
+  // would throw the model away.
+  const exports = await instantiate("./app.wasm");
+  const interactive = isApplication(exports);
+  let model = interactive ? exports.init() : null;
+  let mode = "dom";
 
+  const CLICK = 0n;
+
+  function mount(which) {{
+    stage.replaceChildren();
     if (which === "canvas") {{
       const canvas = document.createElement("canvas");
       const scale = window.devicePixelRatio || 1;
@@ -245,10 +260,34 @@ pub fn generate_page(title: &str) -> String {
     }} else {{
       setRenderer(domRenderer(stage));
     }}
-
-    const exports = await instantiate("./app.wasm");
-    exports.main();
   }}
+
+  function draw() {{
+    mount(mode);
+    if (interactive) {{
+      exports.view(model);
+    }} else {{
+      exports.main();
+    }}
+  }}
+
+  function show(which) {{
+    mode = which;
+    for (const [name, button] of Object.entries(buttons)) {{
+      button.setAttribute("aria-pressed", String(name === which));
+    }}
+    draw();
+  }}
+
+  // A click becomes an event with a position, and the model it produces
+  // replaces the old one. Nothing else changes: the program has no way to
+  // reach the page, and the page has no way to reach inside the model.
+  stage.addEventListener("click", (e) => {{
+    if (!interactive) return;
+    const box = stage.getBoundingClientRect();
+    model = exports.update(model, CLICK, e.clientX - box.left, e.clientY - box.top);
+    draw();
+  }});
 
   for (const [name, button] of Object.entries(buttons)) {{
     button.addEventListener("click", () => show(name));

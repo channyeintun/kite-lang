@@ -786,13 +786,20 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     module.section(&functions);
 
     // ---- exports -----------------------------------------------------------
-    // Only the entry point is exported. Method names are not unique across
-    // types — two types may each have an `area` — and a Wasm module may not
-    // export one name twice. Which other functions a module offers is a
-    // module-system question, which arrives with Phase 6.
+    // `main`, plus every `pub` free function — those are what a host can call,
+    // and their names are unique because Kite has no overloading. Methods are
+    // not exported: two types may each have an `area`, and a module may not
+    // export one name twice.
     let mut exports = ExportSection::new();
+    let mut exported: std::collections::HashSet<&str> = std::collections::HashSet::new();
     if let Some(entry) = program.entry {
         exports.export("main", ExportKind::Func, IMPORT_COUNT + entry.0);
+        exported.insert("main");
+    }
+    for (i, f) in program.fns.iter().enumerate() {
+        if f.exportable && exported.insert(f.name.as_str()) {
+            exports.export(&f.name, ExportKind::Func, IMPORT_COUNT + i as u32);
+        }
     }
     module.section(&exports);
 

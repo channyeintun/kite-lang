@@ -199,6 +199,27 @@ fn main() {
          \x20 let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })\n}\n",
     ),
     (
+        "guard-clause-narrowing",
+        "// `if x == nil { return }` leaves only the path where `x` is there,\n\
+         // so it reads as a `T` for the rest of the block.\n\
+         fn unwrap_or(v: Option<int>, fallback: int) -> int {\n\
+         \x20 if v == nil {\n    return fallback\n  }\n  return v + 1\n}\n\
+         fn describe(s: Option<str>) -> str {\n\
+         \x20 if s == nil {\n    return \"none\"\n  }\n  return s + \"!\"\n}\n\
+         fn nested(a: Option<int>, b: Option<int>) -> int {\n\
+         \x20 if a == nil {\n    return -1\n  }\n\
+         \x20 if b == nil {\n    return a\n  }\n  return a + b\n}\n\
+         fn scoped(v: Option<int>) -> int {\n\
+         \x20 // The narrowing ends with the block that guarded it.\n\
+         \x20 for i in 0..1 {\n    if v == nil {\n      return -1\n    }\n\
+         \x20   io.print(v)\n  }\n  return 0\n}\n\
+         fn main() {\n\
+         \x20 io.print(unwrap_or(41, 0))\n  io.print(unwrap_or(nil, 7))\n\
+         \x20 io.print(describe(\"hi\"))\n  io.print(describe(nil))\n\
+         \x20 io.print(nested(1, 2))\n  io.print(nested(1, nil))\n  io.print(nested(nil, 2))\n\
+         \x20 io.print(scoped(5))\n  io.print(scoped(nil))\n}\n",
+    ),
+    (
         "drawing",
         "// The drawing boundary is two calls wide, and both backends describe\n\
          // each call the same way — which is what lets a layout be compared\n\

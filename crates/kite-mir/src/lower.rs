@@ -113,6 +113,7 @@ impl<'a> FnLowerer<'a> {
 
         Function {
             name: self.hir_fn.name.clone(),
+            exportable: self.hir_fn.is_pub && self.hir_fn.is_free,
             param_count: self.hir_fn.param_count,
             locals: self.locals,
             ret: self.hir_fn.ret,

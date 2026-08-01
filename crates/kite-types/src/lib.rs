@@ -712,6 +712,7 @@ impl<'a> Checker<'a> {
         hir::Function {
             generic_count: sig.generics.len(),
             name: name.to_string(),
+            is_free: self.resolved.fns[self.fn_index].owner.is_none(),
             is_pub,
             is_async,
             param_count,
@@ -727,6 +728,9 @@ impl<'a> Checker<'a> {
     fn block(&mut self, b: &ast::Block, sig: &Signature) -> (hir::Block, Flow) {
         let mut out = hir::Block::default();
         let mut flow = Flow::Falls;
+        // A guard clause narrows for the rest of *this* block and no further,
+        // so the set is restored on the way out.
+        let entry_narrowed = self.narrowed.clone();
 
         for s in &b.stmts {
             if flow == Flow::Diverges {
@@ -742,6 +746,7 @@ impl<'a> Checker<'a> {
                 flow = f;
             }
         }
+        self.narrowed = entry_narrowed;
         (out, flow)
     }
 
@@ -1153,6 +1158,16 @@ impl<'a> Checker<'a> {
         } else {
             then_flow.merge(else_flow)
         };
+
+        // A guard clause: `if x == nil { return }` leaves only the path where
+        // `x` is present, so the narrowing holds for the rest of the block.
+        //
+        // This is the shape people actually write — test the bad case, leave,
+        // and get on with it — and without it the narrowing had to be spelled
+        // as a positive `if` wrapping everything that followed.
+        if then_flow == Flow::Diverges && i.else_.is_none() {
+            self.apply_narrowing(narrowing, false);
+        }
 
         Some((hir::Stmt::If { cond, then, else_, span: i.span }, flow))
     }
@@ -1850,6 +1865,9 @@ impl<'a> Checker<'a> {
 
         let index = self.lifted.len();
         self.lifted.push(hir::Function {
+            // A lifted body has a generated name and no caller outside the
+            // closure that made it.
+            is_free: false,
             // Named per enclosing function, so two closures in different
             // functions do not both come out as `closure#0` in a dump.
             name: format!("{}#closure{}", self.resolved.fns[self.fn_index].name, index),

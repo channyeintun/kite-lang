@@ -219,6 +219,7 @@ pub fn measure(node: Node) -> Size {
     h = fixed_h
   }
   return Size{width: w, height: h}
+
 }
 
 fn measure_content(node: Node) -> Size {

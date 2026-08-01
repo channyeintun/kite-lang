@@ -113,6 +113,10 @@ impl Mono<'_> {
         let source = &self.fns[template as usize];
         let mut copy = Function {
             name: specialised_name(&source.name, targs, self.types),
+            // A specialisation is not exportable: `first<int>` and `first<str>`
+            // would both want the name `first`, and a module may not export
+            // one name twice.
+            is_free: false,
             is_pub: source.is_pub,
             is_async: source.is_async,
             param_count: source.param_count,
@@ -398,6 +402,7 @@ mod tests {
         Function {
             name: name.into(),
             generic_count,
+            is_free: true,
             is_pub: false,
             is_async: false,
             param_count: 0,

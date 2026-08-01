@@ -105,6 +105,9 @@ impl Program {
 #[derive(Clone, Debug)]
 pub struct Function {
     pub name: String,
+    /// A free function, as opposed to a method or a lifted closure body. Only
+    /// these have names unique enough to export.
+    pub is_free: bool,
     /// How many type parameters this function declares. Non-zero means it is a
     /// template: monomorphisation replaces it with one copy per instantiation,
     /// and no backend ever sees it.

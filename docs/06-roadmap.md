@@ -194,6 +194,11 @@ And unreachable functions are **dropped** before code generation, so a program
 using none of it pays nothing: `hello.kite` is 469 bytes with the prelude in
 the compilation, against 6,562 for a program that uses most of it.
 
+**Also done:** guard-clause narrowing. `if x == nil { return }` leaves only
+the path where `x` is present, so it reads as a `T` for the rest of the block —
+the shape people actually write, and one the standard library needed twice
+before it existed. The narrowing ends with the block that guarded it.
+
 **Also done:** `str.len()` and `as` casts between `int` and `float`. Casts are
 saturating rather than trapping on both backends, so a value out of range or a
 NaN gives a number rather than killing the program, and the two agree on every
@@ -254,9 +259,26 @@ placeholder for what it is: the canvas clips a label that the DOM lets
 overflow, because `nominal_advance` says 8 units per character and the real
 font disagrees. That is the honest state of it until Phase 8.
 
-**Remaining:** real text measurement, wrapping, scrolling, events, and
-incremental redraw — today the module is instantiated once per frame, which is
-fine for a static tree and not for an application.
+### Applications
+
+A program that exports `init`, `view` and `update` instead of `main` is an
+application, and the generated page drives it: a click becomes an event with a
+position, `update` returns a new model, and `view` draws it.
+
+The model never crosses the boundary as data. It is a Wasm reference the host
+holds and hands back, opaque to JavaScript — which is what lets a model be any
+Kite type at all without a representation both sides have to agree on, and why
+`update` returns a new model rather than changing one. Kite has no mutable
+global state, so this is the only shape an application could have taken; it is
+also the shape every state-management library eventually converges on.
+
+Every `pub` free function is now exported. Method names are not unique across
+types and a module may not export one name twice, so methods are not — nor are
+generic specialisations, which would all want the same name.
+
+**Remaining:** real text measurement, wrapping, scrolling, keyboard and pointer
+events beyond a click, and incremental redraw — `view` currently repaints the
+whole tree.
 
 Four things came out differently from this plan:
 

@@ -60,6 +60,10 @@ pub struct Program {
 #[derive(Debug)]
 pub struct Function {
     pub name: String,
+    /// Whether the host may call this. Only a `pub` free function is
+    /// exportable: method names are not unique across types — two types may
+    /// each have an `area` — and a Wasm module may not export one name twice.
+    pub exportable: bool,
     /// Parameters occupy locals `0..param_count`.
     pub param_count: usize,
     pub locals: Vec<LocalDecl>,
