@@ -20,6 +20,7 @@ USAGE:
     kitec fix   <file.kite>          apply every machine-applicable suggestion
 
 OPTIONS:
+    --release         build for release: `assert` is dropped, `require` is not
     --check           with `fmt`, report rather than rewrite
     --all             with `doc`, include what is not `pub`
     --emit <stage>    check, ast, hir, mir, kbc, wasm
@@ -54,6 +55,7 @@ fn main() -> ExitCode {
     let mut out_dir = None;
     let mut check_only = false;
     let mut include_private = false;
+    let mut release = false;
     let mut i = 0;
 
     while i < args.len() {
@@ -89,6 +91,10 @@ fn main() -> ExitCode {
             }
             "--all" => {
                 include_private = true;
+                i += 1;
+            }
+            "--release" => {
+                release = true;
                 i += 1;
             }
             "run" | "check" | "build" | "test" | "fmt" | "doc" | "fix" if command.is_none() => {
@@ -140,7 +146,7 @@ fn main() -> ExitCode {
     }
 
     let emit = emit.unwrap_or(Emit::Check);
-    let result = compile(&path, &src, emit);
+    let result = kite_driver::compile_with(&path, &src, emit, release);
 
     if !result.diags.is_empty() {
         eprint!("{}", result.render_diagnostics());

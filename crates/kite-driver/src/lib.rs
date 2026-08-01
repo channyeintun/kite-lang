@@ -144,8 +144,21 @@ impl Compilation {
 /// `use` and written qualified at every use site.
 pub const PRELUDE: &str = include_str!("../../../std/prelude.kite");
 
-/// Compile one file's text.
+/// Compile one file's text, for a debug build.
 pub fn compile(path: impl AsRef<Path>, src: &str, emit: Emit) -> Compilation {
+    compile_with(path, src, emit, false)
+}
+
+/// Compile, in a named build mode.
+///
+/// The only thing `release` changes is that `assert` is dropped: a build mode
+/// that changed anything else would make testing the debug build meaningless.
+pub fn compile_with(
+    path: impl AsRef<Path>,
+    src: &str,
+    emit: Emit,
+    release: bool,
+) -> Compilation {
     let mut sources = SourceMap::new();
     // The prelude is added first, so its spans and the user's never collide and
     // a diagnostic inside it says which file it came from.
@@ -154,7 +167,7 @@ pub fn compile(path: impl AsRef<Path>, src: &str, emit: Emit) -> Compilation {
     let file = sources.add(&path, src);
     let mut diags = DiagBag::new();
     let (output, chunk, wasm, index) =
-        run_passes(prelude, file, &path, &mut sources, emit, &mut diags);
+        run_passes(prelude, file, &path, &mut sources, emit, release, &mut diags);
 
     let mut c = Compilation { sources, diags, output, chunk, wasm, index };
     // The standard library's own advice is not the user's to act on.
@@ -175,6 +188,7 @@ fn run_passes(
     path: &Path,
     sources: &mut SourceMap,
     emit: Emit,
+    release: bool,
     diags: &mut DiagBag,
 ) -> (
     String,
@@ -274,7 +288,7 @@ fn run_passes(
         aliases: loader.aliases.clone(),
     };
     let resolved = kite_resolve::resolve_modules(&ast, module_map, diags);
-    let mut hir = kite_types::check(&ast, &resolved, sources, diags);
+    let mut hir = kite_types::check_with(&ast, &resolved, sources, diags, release);
     // Built before the early returns below: an editor asks about a file most
     // often when it does *not* compile, and an index that vanished on the
     // first error would be an index nobody could use.

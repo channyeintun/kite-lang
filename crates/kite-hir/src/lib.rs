@@ -432,6 +432,10 @@ pub enum Builtin {
     TaskWaitHost,
     /// `time.now()` — milliseconds since the program started.
     TimeNow,
+    /// `require(cond, message)` — trap when the claim is false. `assert`
+    /// lowers to this too, in a debug build; in a release build it lowers to
+    /// nothing at all.
+    Require,
 }
 
 impl Builtin {
@@ -449,6 +453,7 @@ impl Builtin {
             Builtin::TaskPark => "task.park",
             Builtin::TaskWaitHost => "task.wait_host",
             Builtin::TimeNow => "time.now",
+            Builtin::Require => "require",
         }
     }
 }

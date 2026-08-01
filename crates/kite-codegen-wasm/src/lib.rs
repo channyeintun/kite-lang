@@ -208,6 +208,8 @@ fn used_imports(program: &mir::Program, types: &Types, eq_fns: &[eq::EqFn]) -> H
                         Builtin::TaskPark => mark(host::TASK_PARK),
                         Builtin::TaskWaitHost => mark(host::TASK_WAIT_HOST),
                         Builtin::TimeNow => mark(host::TIME_NOW),
+                        // A failed claim prints what was claimed and traps.
+                        Builtin::Require => mark(host::PRINT_STR),
                     },
                     mir::Rvalue::StrOp { op, .. } => mark(match op {
                         kite_hir::StrKind::Len => host::STR_LEN,
@@ -2331,6 +2333,23 @@ impl<'a> Emitter<'a> {
             }
             Builtin::TimeNow => {
                 func.instruction(&Instruction::Call(self.hosts.at(host::TIME_NOW)));
+            }
+            // `require(cond, message)`: when the claim is false, say what it
+            // was and trap. `unreachable` is what a trap *is* on this target.
+            Builtin::Require => {
+                let Some(cond) = args.first() else {
+                    func.instruction(&Instruction::Unreachable);
+                    return;
+                };
+                self.operand(func, cond);
+                func.instruction(&Instruction::I32Eqz);
+                func.instruction(&Instruction::If(BlockType::Empty));
+                if let Some(message) = args.get(1) {
+                    self.operand(func, message);
+                    func.instruction(&Instruction::Call(self.hosts.at(host::PRINT_STR)));
+                }
+                func.instruction(&Instruction::Unreachable);
+                func.instruction(&Instruction::End);
             }
             Builtin::DrawUnclip => {
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_UNCLIP)));

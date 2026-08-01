@@ -719,6 +719,40 @@ fn main() {
          \x20 let (a, _) = pair()\n  io.print(a)\n}\n",
     ),
     (
+        "defer",
+        "fn close(what: str) {\n  io.print(\"closed \\(what)\")\n}\n\
+         fn work(fail: bool) -> (int, error) {\n  io.print(\"open a\")\n\
+         \x20 defer close(\"a\")\n\
+         \x20 if fail {\n    return _, errors.new(\"no\")\n  }\n\
+         \x20 io.print(\"open b\")\n  defer close(\"b\")\n  return 1, nil\n}\n\
+         fn main() {\n  let (n, err) = work(false)\n  if err != nil {\n    io.print(\"?\")\n    return\n  }\n\
+         \x20 io.print(n)\n  let (m, e) = work(true)\n\
+         \x20 io.print(if e == nil { \"?\" } else { e.message() })\n}\n",
+    ),
+    (
+        "require",
+        "fn half(n: int) -> int {\n  require(n % 2 == 0, \"needs an even number\")\n\
+         \x20 return n / 2\n}\n\
+         fn main() {\n  io.print(half(10))\n  assert(half(4) == 2, \"four halves to two\")\n\
+         \x20 io.print(\"claims held\")\n}\n",
+    ),
+    (
+        "map-iteration",
+        "fn main() {\n  var m = {\"a\": 1, \"b\": 2}\n  m[\"c\"] = 3\n\
+         \x20 for (k, v) in m {\n    io.print(\"\\(k) -> \\(v)\")\n  }\n\
+         \x20 io.print(join(m.keys(), \",\"))\n  io.print(sum(m.values()))\n\
+         \x20 var total = 0\n  for (_, v) in m {\n    total = total + v\n  }\n\
+         \x20 io.print(total)\n}\n",
+    ),
+    (
+        "functions-as-values",
+        "fn double(n: int) -> int {\n  return n * 2\n}\n\
+         struct Op {\n  name: str\n  apply: fn(int) -> int\n}\n\
+         fn main() {\n  let op = Op{name: \"double\", apply: double}\n\
+         \x20 io.print(\"\\(op.name) \\(op.apply(21))\")\n\
+         \x20 io.print(map([1, 2, 3], double) == [2, 4, 6])\n}\n",
+    ),
+    (
         "evaluation-order",
         "fn step(n: int) -> int {\n  io.print(n)\n  return n\n}\nfn main() {\n  let x = step(1) + step(2)\n  io.print(x)\n}\n",
     ),

@@ -30,6 +30,17 @@ pub fn check(
     sources: &SourceMap,
     diags: &mut DiagBag,
 ) -> hir::Program {
+    check_with(file, resolved, sources, diags, false)
+}
+
+/// Check, in a named build mode. `release` drops `assert`.
+pub fn check_with(
+    file: &ast::SourceFile,
+    resolved: &ResolveMap,
+    sources: &SourceMap,
+    diags: &mut DiagBag,
+    release: bool,
+) -> hir::Program {
     let mut types = Types::new();
     let mut fns = Vec::new();
 
@@ -360,6 +371,8 @@ pub fn check(
             guards: std::collections::HashMap::new(),
             narrowed: std::collections::HashMap::new(),
             loop_depth: 0,
+            deferred: Vec::new(),
+            release,
         };
         if let ast::Item::Extern(e) = &file.items[sig.decl_index] {
             // A host function becomes an ordinary one whose whole body is the
@@ -558,6 +571,15 @@ struct Signature {
     generics: Vec<GenericDef>,
 }
 
+/// A registered `defer`: what to run, and the flag that says whether it was
+/// ever reached.
+#[derive(Clone)]
+struct Deferred {
+    flag: u32,
+    call: hir::Expr,
+    span: Span,
+}
+
 /// One declared type parameter.
 #[derive(Clone, Debug)]
 struct GenericDef {
@@ -664,6 +686,14 @@ struct Checker<'a> {
     /// The module whose body is being checked. Names written unqualified mean
     /// this module's first.
     module: String,
+    /// `defer`red calls, in registration order, each with the flag that says
+    /// whether control ever reached it. A `defer` inside an `if` that did not
+    /// run must not run at exit, and a flag is the only thing that knows.
+    deferred: Vec<Deferred>,
+    /// Built for release. The only thing it changes is that `assert` is
+    /// dropped; everything else about the program is the same, because a
+    /// build mode that changed semantics would make testing meaningless.
+    release: bool,
     sigs: &'a [Signature],
     /// Functions lifted out of this function's closure literals.
     lifted: Vec<hir::Function>,
@@ -849,11 +879,18 @@ impl<'a> Checker<'a> {
 
         self.taint = vec![Taint::Clean; self.locals.len()];
 
-        let (hir_body, flow) = match body {
+        let (mut hir_body, flow) = match body {
             Some(b) => self.block(b, sig),
             // A trait method with no default body. Nothing to check.
             None => (hir::Block::default(), Flow::Diverges),
         };
+        // Falling off the end is an exit like any other. A function that
+        // always returns explicitly has already run them, and the flags stop
+        // any of them running twice.
+        if flow == Flow::Falls {
+            hir_body.stmts.extend(self.run_deferred());
+        }
+        self.deferred.clear();
 
         self.report_unchecked_errors();
 
@@ -942,10 +979,7 @@ impl<'a> Checker<'a> {
             }
 
             ast::Stmt::Check { expr, span } => self.check_stmt(expr, *span, sig),
-            ast::Stmt::Defer { span, .. } => {
-                self.not_yet(*span, "`defer`", "scope-exit release arrives in a later phase");
-                None
-            }
+            ast::Stmt::Defer { expr, span } => self.defer_stmt(expr, *span),
             ast::Stmt::Error(_) => None,
         }
     }
@@ -1117,6 +1151,89 @@ impl<'a> Checker<'a> {
         ))
     }
 
+    /// `defer file.close()` — run this when the function returns, by any path.
+    ///
+    /// The call is checked here, where its arguments still mean what they did:
+    /// deferring evaluates the receiver and arguments now and the call later,
+    /// which is what makes `defer file.close()` close *that* file.
+    ///
+    /// Unlike Go's, a deferred call cannot modify the return value. It is for
+    /// releasing what was taken, which is the only use that survives scrutiny.
+    fn defer_stmt(&mut self, expr: &ast::Expr, span: Span) -> Option<(hir::Stmt, Flow)> {
+        if !matches!(expr, ast::Expr::Call { .. }) {
+            self.diags.push(
+                Diagnostic::error(codes::E0200, "`defer` takes a call")
+                    .with_primary(expr.span(), "this is not a call")
+                    .with_note(
+                        "`defer` runs something when the function returns; an expression \
+                         that is not a call has nothing to run",
+                    ),
+            );
+            return None;
+        }
+        let call = self.expr(expr, None);
+        // The flag starts false and is set here. At every exit the calls run
+        // in reverse, each guarded by its own flag — so one inside an `if`
+        // that never ran never runs.
+        let flag = self.synthetic_local("deferred", TyId::BOOL, span);
+        self.deferred.push(Deferred { flag, call, span });
+        Some((
+            hir::Stmt::Block(hir::Block {
+                stmts: vec![
+                    hir::Stmt::Let {
+                        local: hir::LocalId(flag),
+                        init: Some(hir::Expr {
+                            kind: ExprKind::Bool(false),
+                            ty: TyId::BOOL,
+                            span,
+                        }),
+                        span,
+                    },
+                    hir::Stmt::Assign {
+                        local: hir::LocalId(flag),
+                        value: hir::Expr { kind: ExprKind::Bool(true), ty: TyId::BOOL, span },
+                        span,
+                    },
+                ],
+            }),
+            Flow::Falls,
+        ))
+    }
+
+    /// A `return`, with whatever was deferred running first.
+    ///
+    /// The value is evaluated before the deferred calls — it was written
+    /// before them — and a deferred call cannot change it, because it is
+    /// already in the statement being returned.
+    fn returning(&self, ret: hir::Stmt, span: Span) -> hir::Stmt {
+        if self.deferred.is_empty() {
+            return ret;
+        }
+        let mut stmts = self.run_deferred();
+        stmts.push(ret);
+        let _ = span;
+        hir::Stmt::Block(hir::Block { stmts })
+    }
+
+    /// The deferred calls, in reverse registration order, each guarded by its
+    /// flag. Emitted before every `return` and at the end of the body.
+    fn run_deferred(&self) -> Vec<hir::Stmt> {
+        self.deferred
+            .iter()
+            .rev()
+            .map(|d| hir::Stmt::If {
+                cond: hir::Expr {
+                    kind: ExprKind::Local(hir::LocalId(d.flag)),
+                    ty: TyId::BOOL,
+                    span: d.span,
+                },
+                then: hir::Block { stmts: vec![hir::Stmt::Expr(d.call.clone())] },
+                else_: None,
+                span: d.span,
+            })
+            .collect()
+    }
+
     fn return_stmt(&mut self, r: &ast::ReturnStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
         match &r.value {
             None => {
@@ -1127,7 +1244,7 @@ impl<'a> Checker<'a> {
                             .with_secondary(sig.name_span, "declared here"),
                     );
                 }
-                Some((hir::Stmt::Return { value: None, span: r.span }, Flow::Diverges))
+                Some((self.returning(hir::Stmt::Return { value: None, span: r.span }, r.span), Flow::Diverges))
             }
             Some(ast::ReturnValue::Single(e)) if sig.fallible => {
                 let inner = self.types.fallible_value(sig.ret).unwrap_or(TyId::ERROR);
@@ -1138,10 +1255,8 @@ impl<'a> Checker<'a> {
                 // analysis is what enforces that, so nothing is lost by not
                 // taking it apart here.
                 if self.types.fallible_value(value.ty) == Some(inner) {
-                    return Some((
-                        hir::Stmt::Return { value: Some(value), span: r.span },
-                        Flow::Diverges,
-                    ));
+                    let ret = hir::Stmt::Return { value: Some(value), span: r.span };
+                    return Some((self.returning(ret, r.span), Flow::Diverges));
                 }
                 self.expect_ty(value.ty, inner, value.span, Some(sig.name_span));
                 self.diags.push(
@@ -1168,10 +1283,8 @@ impl<'a> Checker<'a> {
                 } else {
                     self.expect_ty(value.ty, sig.ret, value.span, Some(sig.name_span));
                 }
-                Some((
-                    hir::Stmt::Return { value: Some(value), span: r.span },
-                    Flow::Diverges,
-                ))
+                let ret = hir::Stmt::Return { value: Some(value), span: r.span };
+                Some((self.returning(ret, r.span), Flow::Diverges))
             }
             Some(ast::ReturnValue::Pair { value, error, span }) => {
                 if !sig.fallible {
@@ -1190,20 +1303,15 @@ impl<'a> Checker<'a> {
                 self.expect_ty(v.ty, inner, v.span, Some(sig.name_span));
                 let e = self.expr(error, Some(TyId::ERR));
                 self.expect_ty(e.ty, TyId::ERR, e.span, None);
-                Some((
-                    hir::Stmt::Return {
-                        value: Some(hir::Expr {
-                            kind: ExprKind::PairNew {
-                                value: Box::new(v),
-                                error: Box::new(e),
-                            },
-                            ty: sig.ret,
-                            span: *span,
-                        }),
-                        span: r.span,
-                    },
-                    Flow::Diverges,
-                ))
+                let ret = hir::Stmt::Return {
+                    value: Some(hir::Expr {
+                        kind: ExprKind::PairNew { value: Box::new(v), error: Box::new(e) },
+                        ty: sig.ret,
+                        span: *span,
+                    }),
+                    span: r.span,
+                };
+                Some((self.returning(ret, r.span), Flow::Diverges))
             }
 
             // `return _, err` — the failure arm. There is deliberately no
@@ -1223,24 +1331,22 @@ impl<'a> Checker<'a> {
                 let e = self.expr(error, Some(TyId::ERR));
                 self.expect_ty(e.ty, TyId::ERR, e.span, None);
                 self.mark_checked(error);
-                Some((
-                    hir::Stmt::Return {
-                        value: Some(hir::Expr {
-                            kind: ExprKind::PairNew {
-                                value: Box::new(hir::Expr {
-                                    kind: ExprKind::Nil,
-                                    ty: TyId::ERROR,
-                                    span: *span,
-                                }),
-                                error: Box::new(e),
-                            },
-                            ty: sig.ret,
-                            span: *span,
-                        }),
-                        span: r.span,
-                    },
-                    Flow::Diverges,
-                ))
+                let ret = hir::Stmt::Return {
+                    value: Some(hir::Expr {
+                        kind: ExprKind::PairNew {
+                            value: Box::new(hir::Expr {
+                                kind: ExprKind::Nil,
+                                ty: TyId::ERROR,
+                                span: *span,
+                            }),
+                            error: Box::new(e),
+                        },
+                        ty: sig.ret,
+                        span: *span,
+                    }),
+                    span: r.span,
+                };
+                Some((self.returning(ret, r.span), Flow::Diverges))
             }
         }
     }
@@ -2752,6 +2858,44 @@ impl<'a> Checker<'a> {
                 }
                 hir::Expr {
                     kind: ExprKind::CallBuiltin { builtin: Builtin::TaskWakeAt, args: hargs },
+                    ty: TyId::UNIT,
+                    span,
+                }
+            }
+
+            // `assert(cond, "…")` and `require(cond, "…")`.
+            //
+            // Both take the message eagerly rather than lazily: a message is a
+            // string, building one is cheap, and a closure that might run
+            // would be a second kind of control flow to explain.
+            BuiltinFn::Assert | BuiltinFn::Require => {
+                let name = b.path();
+                if args.len() != 2 {
+                    self.arity_error(name, args.len(), 2, span, None);
+                    return self.lit(ExprKind::Error, TyId::UNIT, span);
+                }
+                let cond = self.expr(&args[0], Some(TyId::BOOL));
+                if !self.types.satisfies(cond.ty, TyId::BOOL) && !self.types.is_poisoned(cond.ty) {
+                    let found = self.types.with_article(cond.ty);
+                    self.diags.push(
+                        Diagnostic::error(codes::E0202, format!("`{}` takes a `bool`", name))
+                            .with_primary(cond.span, format!("this is {}", found))
+                            .with_note("Kite has no truthiness; compare explicitly"),
+                    );
+                }
+                let message = self.expr(&args[1], Some(TyId::STR));
+                self.expect_ty(message.ty, TyId::STR, message.span, None);
+                // An assertion is a claim about the program, not about its
+                // input, so a release build drops it. A `require` is a claim
+                // about what a caller passed, and stays.
+                if b == BuiltinFn::Assert && self.release {
+                    return self.lit(ExprKind::Error, TyId::UNIT, span);
+                }
+                hir::Expr {
+                    kind: ExprKind::CallBuiltin {
+                        builtin: Builtin::Require,
+                        args: vec![cond, message],
+                    },
                     ty: TyId::UNIT,
                     span,
                 }

@@ -92,6 +92,13 @@ pub enum BuiltinFn {
     TaskGet,
     /// `time.now()` — milliseconds since the program started.
     TimeNow,
+    /// `assert(cond, message)` — trap when `cond` is false. Compiled out in a
+    /// release build, because an assertion is a claim about the program rather
+    /// than about its input.
+    Assert,
+    /// `require(cond, message)` — the same, always on. What a library uses to
+    /// state a precondition it will not check twice.
+    Require,
 }
 
 impl BuiltinFn {
@@ -112,6 +119,8 @@ impl BuiltinFn {
             "task.finished" => Some(BuiltinFn::TaskFinished),
             "task.get" => Some(BuiltinFn::TaskGet),
             "time.now" => Some(BuiltinFn::TimeNow),
+            "assert" => Some(BuiltinFn::Assert),
+            "require" => Some(BuiltinFn::Require),
             _ => None,
         }
     }
@@ -133,6 +142,8 @@ impl BuiltinFn {
             BuiltinFn::TaskFinished => "task.finished",
             BuiltinFn::TaskGet => "task.get",
             BuiltinFn::TimeNow => "time.now",
+            BuiltinFn::Assert => "assert",
+            BuiltinFn::Require => "require",
         }
     }
 
@@ -149,6 +160,7 @@ impl BuiltinFn {
             | BuiltinFn::TaskPark
             | BuiltinFn::TaskWaitHost => 0,
             BuiltinFn::TaskWakeAt | BuiltinFn::TaskFinished | BuiltinFn::TaskGet => 1,
+            BuiltinFn::Assert | BuiltinFn::Require => 2,
         }
     }
 }
@@ -1344,6 +1356,13 @@ impl<'a> FnResolver<'a> {
         }
         if let Some(id) = self.find_fn(name) {
             self.map.uses.insert(p.span, Res::Fn(id));
+            return;
+        }
+        // `assert` and `require` are the two builtins that are not dotted: a
+        // claim about the program belongs in the language rather than behind a
+        // module name. A program declaring its own wins, as with everything.
+        if let Some(b) = BuiltinFn::from_path(name) {
+            self.map.uses.insert(p.span, Res::Builtin(b));
             return;
         }
         if let Some(&(ty, vi)) = self.map.variant_index.get(name) {

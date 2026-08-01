@@ -1209,3 +1209,45 @@ fn a_tuple_binding_of_the_wrong_width_is_reported() {
     let c = body("  let (a, b, c) = (1, 2)");
     assert!(c.has("E0200"), "{}", c.render());
 }
+
+// ---- defer ----------------------------------------------------------------
+
+#[test]
+fn defer_runs_at_every_exit() {
+    let c = run(
+        "fn close(what: str) {\n}\n\
+         fn work(fail: bool) -> (int, error) {\n\
+         \x20 defer close(\"a\")\n\
+         \x20 if fail {\n    return _, errors.new(\"no\")\n  }\n\
+         \x20 return 1, nil\n}\n\
+         fn main() {\n}\n",
+    );
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+/// `defer` takes a call. An expression that is not one has nothing to run.
+#[test]
+fn defer_needs_a_call() {
+    let c = body("  defer 1 + 2");
+    assert!(c.has("E0200"), "{}", c.render());
+}
+
+// ---- assert and require ---------------------------------------------------
+
+#[test]
+fn require_takes_a_condition_and_a_message() {
+    let c = body("  require(1 == 1, \"always\")");
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+#[test]
+fn a_claim_must_be_a_bool() {
+    let c = body("  require(1, \"not a bool\")");
+    assert!(c.has("E0202"), "{}", c.render());
+}
+
+#[test]
+fn a_claim_needs_a_message() {
+    let c = body("  require(true)");
+    assert!(c.has("E0113"), "{}", c.render());
+}

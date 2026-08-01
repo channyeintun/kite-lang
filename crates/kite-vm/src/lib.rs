@@ -277,6 +277,8 @@ pub enum Trap {
     /// A register held a value of the wrong type. Only reachable through a
     /// codegen bug, since the type checker has already run.
     TypeConfusion { op: &'static str, found: &'static str },
+    /// `assert` or `require` found its claim false.
+    Failed { message: String },
     /// A host function the program declared and the embedder did not supply.
     /// The bytecode target has no host of its own — no DOM, no network — so
     /// this is a statement about where the program is running, not a bug.
@@ -299,6 +301,7 @@ impl fmt::Display for Trap {
                 write!(f, "reached unreachable code in `{}` at pc {}", function, pc)
             }
             Trap::NoEntryPoint => write!(f, "no `main` function"),
+            Trap::Failed { message } => write!(f, "{}", message),
             Trap::NoHostFunction { name } => write!(
                 f,
                 "`{}` is a host function, and this runtime supplies no host",
@@ -1415,6 +1418,20 @@ impl<'a> Vm<'a> {
                 Ok(Value::Unit)
             }
             Native::TimeNow => Ok(Value::Int(self.clock)),
+
+            // A failed claim is a trap: not catchable, and it says what was
+            // claimed. Kite has no `recover`, so this ends the program.
+            Native::Require => {
+                let cond = self.regs[base + arg_base as usize].clone();
+                if matches!(cond, Value::Bool(true)) {
+                    return Ok(Value::Unit);
+                }
+                let message = match self.regs.get(base + arg_base as usize + 1) {
+                    Some(Value::Str(s)) => s.to_string(),
+                    _ => "a claim about this program does not hold".to_string(),
+                };
+                Err(Trap::Failed { message })
+            }
 
             Native::IoPrint => {
                 let v = if argc == 0 {
