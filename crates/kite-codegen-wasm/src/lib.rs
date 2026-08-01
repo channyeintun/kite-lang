@@ -129,7 +129,7 @@ impl TypeLayout {
 /// Every slice element type a program mentions, in a stable order.
 fn slice_elements(program: &mir::Program, types: &Types) -> Vec<TyId> {
     let mut seen = Vec::new();
-    let mut note = |ty: TyId, seen: &mut Vec<TyId>| {
+    let note = |ty: TyId, seen: &mut Vec<TyId>| {
         if let TyKind::Slice(elem) = types.kind(ty) {
             if !seen.contains(elem) {
                 seen.push(*elem);
@@ -160,7 +160,7 @@ fn slice_elements(program: &mir::Program, types: &Types) -> Vec<TyId> {
 /// Every optional payload type a program mentions, in a stable order.
 fn option_payloads(program: &mir::Program, types: &Types) -> Vec<TyId> {
     let mut seen = Vec::new();
-    let mut note = |ty: TyId, seen: &mut Vec<TyId>| {
+    let note = |ty: TyId, seen: &mut Vec<TyId>| {
         if let TyKind::Optional(inner) = types.kind(ty) {
             if !seen.contains(inner) {
                 seen.push(*inner);
