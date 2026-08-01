@@ -18,6 +18,7 @@ pub fn lower(program: &hir::Program) -> Program {
         out.fns.push(lowered);
     }
     out.strings = strings.list;
+    out.vtables = program.vtables.clone();
     out
 }
 
@@ -500,6 +501,13 @@ impl<'a> FnLowerer<'a> {
                 let args = args.iter().map(|a| self.operand(a)).collect();
                 Rvalue::Call { callee: FnId(callee.0), args }
             }
+            hir::ExprKind::CallVirtual { trait_id, method, args } => {
+                let args = args.iter().map(|a| self.operand(a)).collect();
+                Rvalue::CallVirtual { trait_id: *trait_id, method: *method, args }
+            }
+            // A trait object carries its value unchanged; the receiver's own
+            // type tag is what dispatch reads.
+            hir::ExprKind::ToDyn { value, .. } => Rvalue::Use(self.operand(value)),
             hir::ExprKind::CallBuiltin { builtin, args } => {
                 let args = args.iter().map(|a| self.operand(a)).collect();
                 Rvalue::CallBuiltin { builtin: *builtin, args }

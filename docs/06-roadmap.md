@@ -115,9 +115,11 @@ functions, `enum` with named and positional payloads, `match` with guards,
 alternation, ranges and struct patterns, exhaustiveness checking, `trait` with
 default methods, and nominal `impl` validation.
 
-**Remaining:** `[T]`, `{K: V}`, `?T`, tuples, closures, generics with
-monomorphisation, `dyn Trait` dispatch, and string interpolation. Each is
-additive; none changes what already works.
+**Also done since:** `[T]`, `{K: V}`, `Option<T>`, tuples, and `dyn Trait`
+dispatch on both backends.
+
+**Remaining:** closures, generics with monomorphisation, and string
+interpolation. Each is additive; none changes what already works.
 
 Four things came out differently from this plan:
 
@@ -249,10 +251,20 @@ arrays and rebinds, so maps keep value semantics; one code path covers both
 replacing a key and appending one, because the scan yields either the key'''s
 index or the current length.
 
-**All eight examples now compile to WebAssembly and agree with the bytecode
-VM.**
+A trait object is a reference to a one-field root record holding the concrete
+type's identity, and each trait method gets a dispatcher that compares that
+tag and calls the matching implementation.
 
-Still to lower: trait objects, and structural equality on aggregates. The rvalue match in the backend has **no catch-all**, so adding a
+The tag is not redundant with `ref.test`. WasmGC compares types
+*structurally*, so `struct Circle { r: float }` and `struct Square { s: float }`
+are **the same** Wasm type — a nominal distinction in Kite is no distinction at
+all down here, and a cast-based dispatch would silently pick the wrong body.
+Only types that appear in some vtable carry the tag, so a program without `dyn`
+is byte-for-byte what it was before trait objects existed.
+
+**All nine examples now compile to WebAssembly and agree with the bytecode VM.**
+
+Still to lower: structural equality on aggregates. The rvalue match in the backend has **no catch-all**, so adding a
 form to MIR fails to compile rather than silently producing a module that
 traps.
 
@@ -381,9 +393,9 @@ none.
 |---|---|
 | 0 — Specification review | ✅ done, and the spec was amended four times by what the code found |
 | 1 — Vertical slice | ✅ complete |
-| 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, slices, optionals, tuples, maps. ❌ closures, generics, `dyn` dispatch |
+| 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, trait objects, slices, optionals, tuples, maps. ❌ closures, generics |
 | 3 — Error handling | ✅ complete |
-| 4 — WebAssembly backend | 🟡 everything the language has except trait objects — all eight examples run. ❌ JS String Builtins |
+| 4 — WebAssembly backend | ✅ everything the language has, including trait objects — all nine examples run on both backends. ❌ JS String Builtins |
 | 5 — Concurrency | ❌ not started |
 | 6 — Standard library | ❌ not started |
 | 7 — Layout engine and DOM renderer | ❌ not started |

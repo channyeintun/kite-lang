@@ -9,7 +9,7 @@
 //! optimisation passes want; the bytecode backend maps locals to registers
 //! directly and does not need it.
 
-use kite_hir::{BinOp, Builtin, EnumId, StructId, TyId, Types, UnOp};
+use kite_hir::{BinOp, Builtin, EnumId, StructId, TraitId, TyId, Types, UnOp};
 use kite_span::Span;
 use std::fmt;
 
@@ -52,6 +52,9 @@ pub struct Program {
     pub entry: Option<FnId>,
     /// Interned string constants, referenced by [`Operand::Str`].
     pub strings: Vec<String>,
+    /// Dispatch tables, carried through unchanged from HIR. Lowering does not
+    /// need them; the backends do.
+    pub vtables: Vec<kite_hir::VTable>,
 }
 
 #[derive(Debug)]
@@ -107,6 +110,8 @@ pub enum Rvalue {
     Binary { op: BinOp, lhs: Operand, rhs: Operand },
     Unary { op: UnOp, operand: Operand },
     Call { callee: FnId, args: Vec<Operand> },
+    /// Dispatched at run time from the receiver's concrete type.
+    CallVirtual { trait_id: TraitId, method: u32, args: Vec<Operand> },
     CallBuiltin { builtin: Builtin, args: Vec<Operand> },
     StructNew { struct_id: StructId, fields: Vec<Operand> },
     FieldGet { base: Operand, index: u32 },
@@ -274,6 +279,11 @@ impl fmt::Display for Rvalue {
             Rvalue::Unary { op, operand } => write!(f, "{:?}({})", op, operand),
             Rvalue::Call { callee, args } => {
                 write!(f, "call fn{}(", callee.0)?;
+                write_operands(f, args)?;
+                write!(f, ")")
+            }
+            Rvalue::CallVirtual { trait_id, method, args } => {
+                write!(f, "virtual trait{}#{}(", trait_id.0, method)?;
                 write_operands(f, args)?;
                 write!(f, ")")
             }

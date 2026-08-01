@@ -185,6 +185,45 @@ impl ResolveMap {
             .collect()
     }
 
+    /// Whether a type has an `impl` block for a trait. This is what makes a
+    /// value usable as a `dyn Trait`.
+    pub fn implements(&self, type_index: u32, trait_index: u32) -> bool {
+        self.fns.iter().any(|f| {
+            f.owner
+                .is_some_and(|o| o.type_index == type_index && o.trait_index == Some(trait_index))
+        })
+    }
+
+    /// Every type implementing a trait, in declaration order. This is the set a
+    /// virtual call dispatches over, so its order is the vtable's order.
+    pub fn impls_of(&self, trait_index: u32) -> Vec<u32> {
+        let mut seen = Vec::new();
+        for f in &self.fns {
+            if let Some(o) = f.owner {
+                if o.trait_index == Some(trait_index) && !seen.contains(&o.type_index) {
+                    seen.push(o.type_index);
+                }
+            }
+        }
+        seen.sort_unstable();
+        seen
+    }
+
+    /// The function that runs when a trait's method is called on a concrete
+    /// type. A default method resolves to the trait's own body, which is why
+    /// `is_default` methods are recorded per implementing type.
+    pub fn trait_method(&self, type_index: u32, trait_index: u32, name: &str) -> Option<u32> {
+        self.fns
+            .iter()
+            .position(|f| {
+                f.name == name
+                    && f.owner.is_some_and(|o| {
+                        o.type_index == type_index && o.trait_index == Some(trait_index)
+                    })
+            })
+            .map(|i| i as u32)
+    }
+
     pub fn method_on(&self, type_index: u32, name: &str) -> Option<u32> {
         self.fns
             .iter()

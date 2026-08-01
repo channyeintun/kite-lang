@@ -11,14 +11,31 @@ use crate::*;
 use kite_mir as mir;
 
 pub fn compile(program: &mir::Program) -> Chunk {
+    // A virtual call names its trait; the emitter needs a table index. Both
+    // sides walk `program.vtables` in the same order, so position is the index.
+    let traits: Vec<u32> = program.vtables.iter().map(|v| v.trait_id.0).collect();
     Chunk {
-        functions: program.fns.iter().map(compile_fn).collect(),
+        functions: program.fns.iter().map(|f| compile_fn(f, &traits)).collect(),
         strings: program.strings.iter().map(|s| Rc::from(s.as_str())).collect(),
         entry: program.entry.map(|e| e.0),
+        vtables: program
+            .vtables
+            .iter()
+            .map(|v| {
+                let mut rows: Vec<(u32, Vec<u32>)> = v
+                    .entries
+                    .iter()
+                    .map(|e| (e.tag.encode(), e.methods.iter().map(|m| m.0).collect()))
+                    .collect();
+                // `lookup` binary-searches, so the rows must be sorted by tag.
+                rows.sort_by_key(|(t, _)| *t);
+                VTable { rows }
+            })
+            .collect(),
     }
 }
 
-fn compile_fn(func: &mir::Function) -> FnProto {
+fn compile_fn(func: &mir::Function, traits: &[u32]) -> FnProto {
     // Registers: one per MIR local, then a window wide enough for the largest
     // call in the body.
     let max_args = func
@@ -27,6 +44,7 @@ fn compile_fn(func: &mir::Function) -> FnProto {
         .flat_map(|b| &b.stmts)
         .map(|s| match s {
             mir::Inst::Assign { value: mir::Rvalue::Call { args, .. }, .. }
+            | mir::Inst::Assign { value: mir::Rvalue::CallVirtual { args, .. }, .. }
             | mir::Inst::Assign { value: mir::Rvalue::CallBuiltin { args, .. }, .. } => args.len(),
             mir::Inst::Assign { value: mir::Rvalue::StructNew { fields, .. }, .. }
             | mir::Inst::Assign { value: mir::Rvalue::EnumNew { fields, .. }, .. } => fields.len(),
@@ -40,6 +58,7 @@ fn compile_fn(func: &mir::Function) -> FnProto {
 
     let mut e = Emitter {
         func,
+        traits,
         code: Vec::new(),
         block_starts: vec![u32::MAX; func.blocks.len()],
         patches: Vec::new(),
@@ -66,6 +85,8 @@ struct Patch {
 
 struct Emitter<'a> {
     func: &'a mir::Function,
+    /// Trait ids in table order, for turning a `TraitId` into a table index.
+    traits: &'a [u32],
     code: Vec<Op>,
     block_starts: Vec<u32>,
     patches: Vec<Patch>,
@@ -77,6 +98,10 @@ struct Emitter<'a> {
 }
 
 impl<'a> Emitter<'a> {
+    fn vtable_index(&self, trait_id: kite_hir::TraitId) -> u32 {
+        self.traits.iter().position(|t| *t == trait_id.0).unwrap_or(0) as u32
+    }
+
     fn run(&mut self) {
         let reachable = mir::reachable_blocks(self.func);
 
@@ -158,6 +183,17 @@ impl<'a> Emitter<'a> {
                 self.code.push(Op::Call {
                     dst,
                     func: callee.0,
+                    base: self.arg_base,
+                    argc: args.len() as u8,
+                });
+            }
+
+            mir::Rvalue::CallVirtual { trait_id, method, args } => {
+                self.stage_args(args);
+                self.code.push(Op::CallVirtual {
+                    dst,
+                    table: self.vtable_index(*trait_id),
+                    method: *method,
                     base: self.arg_base,
                     argc: args.len() as u8,
                 });

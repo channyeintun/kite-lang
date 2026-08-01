@@ -110,6 +110,17 @@ struct TypeLayout {
     /// arrays. Two arrays rather than an array of pairs keeps lookup a scan
     /// over one contiguous run, and reuses the array machinery slices need.
     map_record: std::collections::HashMap<TyId, MapLayout>,
+    /// The root record every dispatchable aggregate extends: one immutable i32
+    /// holding the concrete type's identity.
+    ///
+    /// WasmGC types are compared structurally, so `struct Circle { r: float }`
+    /// and `struct Square { s: float }` are *the same* Wasm type and `ref.test`
+    /// cannot tell them apart. A stored tag is what makes dispatch sound. Only
+    /// types that appear in a vtable carry one, so a program without `dyn` pays
+    /// nothing for it.
+    object_record: u32,
+    /// Types carrying a tag, by [`kite_hir::TypeTag::encode`].
+    tagged: std::collections::HashSet<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -123,6 +134,20 @@ pub struct MapLayout {
 }
 
 impl TypeLayout {
+    /// How far a type's own fields are pushed down by the identity tag: one
+    /// field for a dispatchable type, none otherwise.
+    fn shift(&self, tag: kite_hir::TypeTag) -> u32 {
+        u32::from(self.tagged.contains(&tag.encode()))
+    }
+
+    fn struct_shift(&self, id: kite_hir::StructId) -> u32 {
+        self.shift(kite_hir::TypeTag::Struct(id))
+    }
+
+    fn enum_shift(&self, id: kite_hir::EnumId) -> u32 {
+        self.shift(kite_hir::TypeTag::Enum(id))
+    }
+
     fn struct_type(&self, id: kite_hir::StructId) -> u32 {
         self.struct_base + id.0
     }
@@ -282,7 +307,15 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
 
     // Type index space: import signatures, then structs, then each enum's base
     // record followed by its variants, then function signatures.
-    let struct_base = IMPORT_COUNT;
+    // Only types reachable through a trait object need an identity tag.
+    let tagged: std::collections::HashSet<u32> = program
+        .vtables
+        .iter()
+        .flat_map(|v| v.entries.iter())
+        .map(|e| e.tag.encode())
+        .collect();
+    let object_record = IMPORT_COUNT;
+    let struct_base = object_record + 1;
     let mut next = struct_base + types.struct_count() as u32;
     let mut enum_base = Vec::with_capacity(types.enum_count());
     for i in 0..types.enum_count() {
@@ -292,6 +325,8 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     // Optional boxes need the layout to describe their payload, so build a
     // provisional one first and fill the table in.
     let mut layout = TypeLayout {
+        object_record,
+        tagged,
         struct_base,
         enum_base,
         option_box: std::collections::HashMap::new(),
@@ -349,20 +384,28 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     if aggregate_count > 0 {
         let mut group: Vec<SubType> = Vec::with_capacity(aggregate_count as usize);
 
+        // The root every dispatchable aggregate extends. It is emitted whether
+        // or not anything extends it; one unused type declaration is cheaper
+        // than a conditional index space.
+        group.push(struct_subtype(vec![tag_field()], None, false));
+
         for i in 0..types.struct_count() {
-            let def = types.struct_def(kite_hir::StructId(i as u32));
-            let fields: Vec<FieldType> = def
-                .fields
-                .iter()
-                .map(|f| FieldType {
-                    element_type: StorageType::Val(val_type_with(f.ty, types, &layout)),
-                    // Kite's per-field `var` marker is exactly WasmGC's
-                    // per-field mutability flag. Immutable fields let the
-                    // engine hoist loads without alias analysis.
-                    mutable: f.mutable,
-                })
-                .collect();
-            group.push(struct_subtype(fields, None, true));
+            let sid = kite_hir::StructId(i as u32);
+            let def = types.struct_def(sid);
+            let mut fields: Vec<FieldType> = Vec::with_capacity(def.fields.len() + 1);
+            let tagged = layout.struct_shift(sid) == 1;
+            if tagged {
+                fields.push(tag_field());
+            }
+            fields.extend(def.fields.iter().map(|f| FieldType {
+                element_type: StorageType::Val(val_type_with(f.ty, types, &layout)),
+                // Kite's per-field `var` marker is exactly WasmGC's per-field
+                // mutability flag. Immutable fields let the engine hoist loads
+                // without alias analysis.
+                mutable: f.mutable,
+            }));
+            let super_ty = tagged.then_some(object_record);
+            group.push(struct_subtype(fields, super_ty, !tagged));
         }
 
         // An enum becomes a base record holding just the tag, plus one subtype
@@ -371,19 +414,19 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
         for i in 0..types.enum_count() {
             let eid = kite_hir::EnumId(i as u32);
             let base = layout.enum_base_type(eid);
+            let tagged = layout.enum_shift(eid) == 1;
+            let prefix: Vec<FieldType> = if tagged {
+                vec![tag_field(), tag_field()]
+            } else {
+                vec![tag_field()]
+            };
             group.push(struct_subtype(
-                vec![FieldType {
-                    element_type: StorageType::Val(ValType::I32),
-                    mutable: false,
-                }],
-                None,
+                prefix.clone(),
+                tagged.then_some(object_record),
                 false,
             ));
             for variant in &types.enum_def(eid).variants {
-                let mut fields = vec![FieldType {
-                    element_type: StorageType::Val(ValType::I32),
-                    mutable: false,
-                }];
+                let mut fields = prefix.clone();
                 for f in &variant.fields {
                     fields.push(FieldType {
                         element_type: StorageType::Val(val_type_with(f.ty, types, &layout)),
@@ -514,6 +557,32 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     // `rec` group as one entry, not as the types inside it, so trusting it here
     // would collide function types with every struct after the first.
     let fn_type_base = IMPORT_COUNT + aggregate_count;
+    // Dispatchers: one per trait method, taking the receiver as a reference to
+    // the tagged root. They live above the user functions in the index space.
+    let mut dispatchers: Vec<Dispatcher> = Vec::new();
+    for v in &program.vtables {
+        let def = types.trait_def(v.trait_id);
+        for (m, method) in def.methods.iter().enumerate() {
+            let mut params = vec![ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(object_record),
+            })];
+            params.extend(method.params.iter().map(|p| val_type_with(*p, types, &layout)));
+            dispatchers.push(Dispatcher {
+                trait_id: v.trait_id,
+                method: m as u32,
+                params,
+                ret: method.ret,
+                arms: v
+                    .entries
+                    .iter()
+                    .map(|e| (e.tag, e.methods[m]))
+                    .collect(),
+            });
+        }
+    }
+    let dispatch_base = IMPORT_COUNT + program.fns.len() as u32;
+
     let mut fn_type_index = Vec::with_capacity(program.fns.len());
     for (i, f) in program.fns.iter().enumerate() {
         let params: Vec<ValType> = (0..f.param_count)
@@ -522,6 +591,12 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
         let results: Vec<ValType> = wasm_result_with(f.ret, types, &layout).into_iter().collect();
         fn_type_index.push(fn_type_base + i as u32);
         type_section.ty().function(params, results);
+    }
+    let mut dispatch_type_index = Vec::with_capacity(dispatchers.len());
+    for (i, d) in dispatchers.iter().enumerate() {
+        dispatch_type_index.push(fn_type_base + program.fns.len() as u32 + i as u32);
+        let results: Vec<ValType> = wasm_result_with(d.ret, types, &layout).into_iter().collect();
+        type_section.ty().function(d.params.iter().copied(), results);
     }
     module.section(&type_section);
 
@@ -534,7 +609,7 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
 
     // ---- functions ---------------------------------------------------------
     let mut functions = FunctionSection::new();
-    for idx in &fn_type_index {
+    for idx in fn_type_index.iter().chain(&dispatch_type_index) {
         functions.function(*idx);
     }
     module.section(&functions);
@@ -556,13 +631,24 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     let fn_returns: Vec<TyId> = program.fns.iter().map(|f| f.ret).collect();
     let mut code = CodeSection::new();
     for f in &program.fns {
-        code.function(&compile_fn(f, types, &fn_returns, &layout));
+        code.function(&compile_fn(f, types, &fn_returns, &layout, dispatch_base, &dispatchers));
+    }
+    for d in &dispatchers {
+        code.function(&compile_dispatcher(d, &layout));
     }
     module.section(&code);
 
     WasmModule {
         bytes: module.finish(),
         strings: program.strings.clone(),
+    }
+}
+
+/// An immutable `i32` field: a variant tag or a type identity.
+fn tag_field() -> FieldType {
+    FieldType {
+        element_type: StorageType::Val(ValType::I32),
+        mutable: false,
     }
 }
 
@@ -621,6 +707,13 @@ fn val_type_with(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
             nullable: true,
             heap_type: HeapType::Concrete(layout.error_record),
         }),
+        // A trait object is a reference to the tagged root. The value is
+        // unchanged from its concrete form; only the static type widens, and
+        // WasmGC subtyping makes that free.
+        TyKind::Dyn(_) => ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Concrete(layout.object_record),
+        }),
         TyKind::Fallible(v) => match layout.pair_type(*v) {
             Some(idx) => ValType::Ref(RefType {
                 nullable: true,
@@ -649,6 +742,53 @@ fn val_type_with(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
     }
 }
 
+/// A trait method's dispatcher: the receiver's stored tag chooses which
+/// implementation runs.
+struct Dispatcher {
+    trait_id: kite_hir::TraitId,
+    method: u32,
+    params: Vec<ValType>,
+    ret: TyId,
+    /// `(concrete type tag, the function implementing this method for it)`.
+    arms: Vec<(kite_hir::TypeTag, kite_hir::FnId)>,
+}
+
+/// A chain of tag comparisons. A `br_table` would be denser, but tags are not
+/// contiguous — they encode a struct or enum id — and a trait rarely has more
+/// than a handful of implementers, so the comparison chain is both smaller and
+/// easier to read in a disassembly.
+fn compile_dispatcher(d: &Dispatcher, layout: &TypeLayout) -> Function {
+    let mut func = Function::new(Vec::new());
+    for (tag, callee) in &d.arms {
+        func.instruction(&Instruction::LocalGet(0));
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: layout.object_record,
+            field_index: 0,
+        });
+        func.instruction(&Instruction::I32Const(tag.encode() as i32));
+        func.instruction(&Instruction::I32Eq);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        // The tag has just been checked, so the cast cannot fail.
+        func.instruction(&Instruction::LocalGet(0));
+        let concrete = match tag {
+            kite_hir::TypeTag::Struct(s) => layout.struct_type(*s),
+            kite_hir::TypeTag::Enum(e) => layout.enum_base_type(*e),
+        };
+        func.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(concrete)));
+        for i in 1..d.params.len() {
+            func.instruction(&Instruction::LocalGet(i as u32));
+        }
+        func.instruction(&Instruction::Call(IMPORT_COUNT + callee.0));
+        func.instruction(&Instruction::Return);
+        func.instruction(&Instruction::End);
+    }
+    // No arm matched: the checker proved the receiver implements the trait, so
+    // reaching here is a compiler bug rather than a program one.
+    func.instruction(&Instruction::Unreachable);
+    func.instruction(&Instruction::End);
+    func
+}
+
 /// The result type of a function, or `None` for unit.
 fn wasm_result_with(ty: TyId, types: &Types, layout: &TypeLayout) -> Option<ValType> {
     (ty != TyId::UNIT).then(|| val_type_with(ty, types, layout))
@@ -659,6 +799,8 @@ fn compile_fn(
     types: &Types,
     fn_returns: &[TyId],
     layout: &TypeLayout,
+    dispatch_base: u32,
+    dispatchers: &[Dispatcher],
 ) -> Function {
     // Locals beyond the parameters, plus one synthetic program counter.
     let mut locals: Vec<(u32, ValType)> = Vec::new();
@@ -741,6 +883,8 @@ fn compile_fn(
             f,
             types,
             fn_returns,
+            dispatch_base,
+            dispatchers,
             layout,
             current_dst: None,
             pc,
@@ -772,6 +916,9 @@ struct Emitter<'a> {
     types: &'a Types,
     /// Return type of every function, indexed by id.
     fn_returns: &'a [TyId],
+    /// Where the dispatchers start in the function index space.
+    dispatch_base: u32,
+    dispatchers: &'a [Dispatcher],
     layout: &'a TypeLayout,
     /// The local a rvalue is being assigned into, when there is one. A slice
     /// construction takes its element type from there.
@@ -827,7 +974,7 @@ impl<'a> Emitter<'a> {
                 self.operand(func, value);
                 func.instruction(&Instruction::StructSet {
                     struct_type_index: self.layout.struct_type(sid),
-                    field_index: *index,
+                    field_index: *index + self.layout.struct_shift(sid),
                 });
             }
             mir::Inst::MapSet { local, key, value } => {
@@ -938,6 +1085,28 @@ impl<'a> Emitter<'a> {
                 return self.fn_returns[callee.index()] != TyId::UNIT;
             }
 
+            mir::Rvalue::CallVirtual { trait_id, method, args } => {
+                for a in args {
+                    self.operand(func, a);
+                }
+                let i = self
+                    .dispatchers
+                    .iter()
+                    .position(|d| d.trait_id == *trait_id && d.method == *method);
+                match i {
+                    Some(i) => {
+                        func.instruction(&Instruction::Call(self.dispatch_base + i as u32));
+                        return self.dispatchers[i].ret != TyId::UNIT;
+                    }
+                    // A trait with no implementers has no dispatcher; the
+                    // checker has already reported the call site.
+                    None => {
+                        func.instruction(&Instruction::Unreachable);
+                        return false;
+                    }
+                }
+            }
+
             // Every builtin returns unit today.
             mir::Rvalue::CallBuiltin { builtin, args } => {
                 self.builtin(func, *builtin, args);
@@ -945,6 +1114,12 @@ impl<'a> Emitter<'a> {
             }
 
             mir::Rvalue::StructNew { struct_id, fields } => {
+                // A dispatchable type stores its identity in field 0, because
+                // WasmGC's structural typing cannot recover it from the value.
+                let tag = kite_hir::TypeTag::Struct(*struct_id);
+                if self.layout.shift(tag) == 1 {
+                    func.instruction(&Instruction::I32Const(tag.encode() as i32));
+                }
                 for f in fields {
                     self.operand(func, f);
                 }
@@ -953,14 +1128,14 @@ impl<'a> Emitter<'a> {
             }
 
             mir::Rvalue::FieldGet { base, index } => {
-                let Some(record) = self.record_of(base) else {
+                let Some((record, shift)) = self.record_of(base) else {
                     func.instruction(&Instruction::Unreachable);
                     return true;
                 };
                 self.operand(func, base);
                 func.instruction(&Instruction::StructGet {
                     struct_type_index: record,
-                    field_index: *index,
+                    field_index: *index + shift,
                 });
                 return true;
             }
@@ -1212,7 +1387,12 @@ impl<'a> Emitter<'a> {
             }
 
             mir::Rvalue::EnumNew { enum_id, variant, fields } => {
-                // Field 0 is the tag; the payload follows.
+                // The variant tag, then the payload — behind the identity tag
+                // when this enum is reachable through a trait object.
+                let tag = kite_hir::TypeTag::Enum(*enum_id);
+                if self.layout.shift(tag) == 1 {
+                    func.instruction(&Instruction::I32Const(tag.encode() as i32));
+                }
                 func.instruction(&Instruction::I32Const(*variant as i32));
                 for f in fields {
                     self.operand(func, f);
@@ -1231,7 +1411,7 @@ impl<'a> Emitter<'a> {
                 self.operand(func, base);
                 func.instruction(&Instruction::StructGet {
                     struct_type_index: self.layout.enum_base_type(eid),
-                    field_index: 0,
+                    field_index: self.layout.enum_shift(eid),
                 });
                 // The tag is an i32 in the record but an int in Kite.
                 func.instruction(&Instruction::I64ExtendI32S);
@@ -1246,8 +1426,8 @@ impl<'a> Emitter<'a> {
                 )));
                 func.instruction(&Instruction::StructGet {
                     struct_type_index: self.layout.variant_type(*enum_id, *variant),
-                    // Field 0 is the tag, so the payload starts at 1.
-                    field_index: index + 1,
+                    // The variant tag precedes the payload.
+                    field_index: index + 1 + self.layout.enum_shift(*enum_id),
                 });
                 return true;
             }
@@ -1582,12 +1762,14 @@ impl<'a> Emitter<'a> {
 
     /// The record type an operand holds, whether a struct or a tuple. Both are
     /// positional records once lowered.
-    fn record_of(&self, o: &mir::Operand) -> Option<u32> {
+    /// The record an operand holds, and how far its fields are shifted by an
+    /// identity tag. Tuples never dispatch, so they are never shifted.
+    fn record_of(&self, o: &mir::Operand) -> Option<(u32, u32)> {
         let mir::Operand::Local(l) = o else { return None };
         let ty = self.f.locals[l.index()].ty;
         match self.types.kind(ty) {
-            TyKind::Struct(s) => Some(self.layout.struct_type(*s)),
-            TyKind::Tuple(_) => self.layout.tuple_type(ty),
+            TyKind::Struct(s) => Some((self.layout.struct_type(*s), self.layout.struct_shift(*s))),
+            TyKind::Tuple(_) => self.layout.tuple_type(ty).map(|i| (i, 0)),
             _ => None,
         }
     }

@@ -263,11 +263,55 @@ pub fn check(
         fns.push(func);
     }
 
+    let vtables = build_vtables(resolved, &type_ids, &types);
+
     hir::Program {
         types,
         fns,
         entry: resolved.fn_by_name("main").map(hir::FnId),
+        vtables,
     }
+}
+
+/// Collect, for every trait, the concrete types implementing it and the
+/// function each supplies for each method. Doing this once here is what keeps
+/// the bytecode VM and the Wasm backend dispatching over the same set.
+fn build_vtables(
+    resolved: &ResolveMap,
+    type_ids: &[Option<TypeTarget>],
+    types: &Types,
+) -> Vec<hir::VTable> {
+    let mut out = Vec::new();
+    for (i, target) in type_ids.iter().enumerate() {
+        let Some(TypeTarget::Trait(trait_id)) = target else { continue };
+        let def = types.trait_def(*trait_id);
+        let mut entries = Vec::new();
+        for ti in resolved.impls_of(i as u32) {
+            let tag = match type_ids.get(ti as usize).and_then(|t| *t) {
+                Some(TypeTarget::Struct(s)) => hir::TypeTag::Struct(s),
+                Some(TypeTarget::Enum(e)) => hir::TypeTag::Enum(e),
+                // A trait implementing a trait is already rejected; skip rather
+                // than emit a row nothing can dispatch to.
+                _ => continue,
+            };
+            let methods: Vec<hir::FnId> = def
+                .methods
+                .iter()
+                .map(|m| {
+                    resolved
+                        .trait_method(ti, i as u32, &m.name)
+                        .map(hir::FnId)
+                        // A missing method is already an error; point the row at
+                        // itself rather than panic, so checking continues.
+                        .unwrap_or(hir::FnId(0))
+                })
+                .collect();
+            entries.push(hir::VTableEntry { tag, methods });
+        }
+        entries.sort_by_key(|e| e.tag);
+        out.push(hir::VTable { trait_id: *trait_id, entries });
+    }
+    out
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -552,7 +596,7 @@ impl<'a> Checker<'a> {
         };
 
         let local_id = self.resolved.lookup_binding(name.span)?;
-        let annotated = l.ty.as_ref().map(|t| resolve_ty(t, self.types, self.diags));
+        let annotated = l.ty.as_ref().map(|t| self.resolve_type(t));
 
         let init = l.init.as_ref().map(|e| {
             let v = self.expr(e, annotated);
@@ -604,7 +648,7 @@ impl<'a> Checker<'a> {
 
     fn var_stmt(&mut self, v: &ast::VarStmt, _sig: &Signature) -> Option<(hir::Stmt, Flow)> {
         let local_id = self.resolved.lookup_binding(v.name.span)?;
-        let annotated = v.ty.as_ref().map(|t| resolve_ty(t, self.types, self.diags));
+        let annotated = v.ty.as_ref().map(|t| self.resolve_type(t));
         let init = self.expr(&v.init, annotated);
         let init = self.coerce(init, annotated);
 
@@ -1681,6 +1725,59 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A method called on a trait object. Which body runs is decided at run
+    /// time from the receiver's concrete type; the signature comes from the
+    /// trait, so checking is entirely static.
+    fn virtual_call(
+        &mut self,
+        receiver: hir::Expr,
+        tr: hir::TraitId,
+        name: &ast::Ident,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> hir::Expr {
+        let def = self.types.trait_def(tr);
+        let Some((index, method)) = def.method(&name.name) else {
+            let trait_name = def.name.clone();
+            let available: Vec<String> = def.methods.iter().map(|m| m.name.clone()).collect();
+            let mut d = Diagnostic::error(
+                codes::E0205,
+                format!("`dyn {}` has no method `{}`", trait_name, name.name),
+            )
+            .with_primary(name.span, "no such method")
+            .with_note(
+                "a trait object exposes only its trait's methods; the concrete type is \
+                 not known here",
+            );
+            if !available.is_empty() {
+                d = d.with_note(format!("`{}` has: {}", trait_name, available.join(", ")));
+            }
+            self.diags.push(d);
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        };
+        let (params, ret) = (method.params.clone(), method.ret);
+        let method = index as u32;
+
+        if args.len() != params.len() {
+            self.arity_error(&name.name, args.len(), params.len(), span, None);
+        }
+        let mut lowered = vec![receiver];
+        for (i, a) in args.iter().enumerate() {
+            let want = params.get(i).copied();
+            let e = self.expr(a, want);
+            if let Some(w) = want {
+                self.expect_ty(e.ty, w, e.span, None);
+            }
+            let e = self.coerce(e, want);
+            lowered.push(e);
+        }
+        hir::Expr {
+            kind: ExprKind::CallVirtual { trait_id: tr, method, args: lowered },
+            ty: ret,
+            span,
+        }
+    }
+
     /// `receiver.method(args)`.
     fn method_call(
         &mut self,
@@ -1746,6 +1843,10 @@ impl<'a> Checker<'a> {
                     ty: TyId::ERROR,
                     span,
                 });
+        }
+
+        if let TyKind::Dyn(tr) = *self.types.kind(receiver.ty) {
+            return self.virtual_call(receiver, tr, name, args, span);
         }
 
         let Some(ti) = self.type_index_of(receiver.ty) else {
@@ -1911,6 +2012,29 @@ impl<'a> Checker<'a> {
     }
 
     /// The `resolved.types` index for a nominal type, if it has one.
+    /// Resolve a surface type with the module's declarations in view, which is
+    /// what lets an annotation name a struct, an enum, or a `dyn Trait`.
+    fn resolve_type(&mut self, t: &ast::Type) -> TyId {
+        resolve_named_ty(t, self.resolved, self.type_ids, self.types, self.diags)
+    }
+
+    /// The declared-type index for a `dyn Trait`, used to consult impls.
+    fn trait_index_of(&self, tr: hir::TraitId) -> Option<u32> {
+        self.type_ids
+            .iter()
+            .position(|t| matches!(t, Some(TypeTarget::Trait(a)) if *a == tr))
+            .map(|i| i as u32)
+    }
+
+    /// Whether a concrete value may stand where a trait object is wanted.
+    fn coerces_to_dyn(&self, found: TyId, expected: TyId) -> bool {
+        let TyKind::Dyn(tr) = *self.types.kind(expected) else { return false };
+        let (Some(ti), Some(tri)) = (self.type_index_of(found), self.trait_index_of(tr)) else {
+            return false;
+        };
+        self.resolved.implements(ti, tri)
+    }
+
     fn type_index_of(&self, ty: TyId) -> Option<u32> {
         let target = match *self.types.kind(ty) {
             TyKind::Struct(s) => TypeTarget::Struct(s),
@@ -3608,7 +3732,10 @@ impl<'a> Checker<'a> {
             self.diags.push(
                 Diagnostic::warning(codes::E0201, "comparing floats for exact equality")
                     .with_primary(span, "floating-point equality is rarely what you want")
-                    .with_note("use `math.approx_eq` to compare with a tolerance"),
+                    .with_note(
+                        "compare within a tolerance instead: `abs(a - b) < epsilon`. \
+                         `math.approx_eq` arrives with the standard library in Phase 6",
+                    ),
             );
         }
 
@@ -3735,12 +3862,19 @@ impl<'a> Checker<'a> {
                 kind: ExprKind::Wrap { value: Box::new(e) },
                 ty: want,
             },
+            // A concrete value becoming a trait object. Nothing about the value
+            // changes; the node records that dispatch is now dynamic.
+            TyKind::Dyn(tr) if self.coerces_to_dyn(e.ty, want) => hir::Expr {
+                span: e.span,
+                kind: ExprKind::ToDyn { value: Box::new(e), trait_id: tr },
+                ty: want,
+            },
             _ => e,
         }
     }
 
     fn expect_ty(&mut self, found: TyId, expected: TyId, span: Span, because: Option<Span>) {
-        if self.types.satisfies(found, expected) {
+        if self.types.satisfies(found, expected) || self.coerces_to_dyn(found, expected) {
             return;
         }
         let mut d = Diagnostic::error(
@@ -3751,6 +3885,16 @@ impl<'a> Checker<'a> {
 
         if let Some(b) = because {
             d = d.with_secondary(b, format!("`{}` required here", self.types.name(expected)));
+        }
+        if let TyKind::Dyn(tr) = *self.types.kind(expected) {
+            if self.type_index_of(found).is_some() {
+                let (tn, fname) =
+                    (self.types.trait_def(tr).name.clone(), self.types.name(found));
+                d = d.with_note(format!(
+                    "`{}` does not implement `{}`; write `impl {} for {}` to use it here",
+                    fname, tn, tn, fname
+                ));
+            }
         }
         if self.types.is_numeric(found) && self.types.is_numeric(expected) {
             d = d.with_note(format!(
@@ -3964,6 +4108,33 @@ fn check_impls(
 }
 
 /// The arena type for a declared name.
+/// A trait is usable as an object only when every method dispatches on a
+/// receiver. A method without `self` has no value to dispatch from, so a trait
+/// object could never supply one — the rule belongs at every place a `dyn` is
+/// written, which is why it lives beside type resolution rather than in one
+/// caller.
+fn check_object_safe(tr: kite_hir::TraitId, span: Span, types: &Types, diags: &mut DiagBag) {
+    let def = types.trait_def(tr);
+    let offenders: Vec<&str> = def
+        .methods
+        .iter()
+        .filter(|m| !m.takes_self)
+        .map(|m| m.name.as_str())
+        .collect();
+    if offenders.is_empty() {
+        return;
+    }
+    diags.push(
+        Diagnostic::error(
+            codes::E0206,
+            format!("`{}` cannot be a trait object", def.name),
+        )
+        .with_primary(span, "this trait has a method that does not take `self`")
+        .with_note(format!("`{}` has no receiver to dispatch on", offenders.join("`, `")))
+        .with_note("give every method a `self` parameter, or take the concrete type"),
+    );
+}
+
 fn named_ty(target: Option<TypeTarget>, types: &mut Types) -> TyId {
     match target {
         Some(TypeTarget::Struct(s)) => types.struct_ty(s),
@@ -4045,7 +4216,10 @@ fn resolve_named_ty(
         }
         ast::Type::Dyn { path, span } => match resolved.type_by_name(path.name()) {
             Some(i) => match type_ids[i as usize] {
-                Some(TypeTarget::Trait(tr)) => types.dyn_ty(tr),
+                Some(TypeTarget::Trait(tr)) => {
+                    check_object_safe(tr, *span, types, diags);
+                    types.dyn_ty(tr)
+                }
                 _ => {
                     diags.push(
                         Diagnostic::error(

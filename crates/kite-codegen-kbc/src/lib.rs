@@ -135,6 +135,9 @@ pub enum Op {
 
     /// Arguments occupy `base .. base + argc`.
     Call { dst: Reg, func: u32, base: Reg, argc: u8 },
+    /// A call dispatched from the concrete type of the receiver, which sits at
+    /// `base`. `table` indexes [`Chunk::vtables`].
+    CallVirtual { dst: Reg, table: u32, method: u32, base: Reg, argc: u8 },
     CallNative { dst: Reg, native: Native, base: Reg, argc: u8 },
     Return { src: Option<Reg> },
 
@@ -156,6 +159,24 @@ pub struct Chunk {
     pub functions: Vec<FnProto>,
     pub strings: Vec<Rc<str>>,
     pub entry: Option<u32>,
+    /// Dispatch tables, one per trait used as an object.
+    pub vtables: Vec<VTable>,
+}
+
+/// A trait's dispatch table: rows keyed by the receiver's runtime type tag.
+/// A linear scan is right here — a program has few implementers per trait, and
+/// a sorted-array probe beats a hash map at these sizes.
+#[derive(Debug, Default)]
+pub struct VTable {
+    /// `(type tag, one function per trait method)`, sorted by tag.
+    pub rows: Vec<(u32, Vec<u32>)>,
+}
+
+impl VTable {
+    pub fn lookup(&self, tag: u32, method: u32) -> Option<u32> {
+        let row = self.rows.binary_search_by_key(&tag, |(t, _)| *t).ok()?;
+        self.rows[row].1.get(method as usize).copied()
+    }
 }
 
 impl Chunk {
@@ -356,6 +377,11 @@ impl fmt::Display for Op {
             Call { dst, func: fi, base, argc } => {
                 write!(f, "{:<12} r{}, fn{}, r{}, {}", "call", dst, fi, base, argc)
             }
+            CallVirtual { dst, table, method, base, argc } => write!(
+                f,
+                "{:<12} r{}, vt{}#{}, r{}, {}",
+                "call.virtual", dst, table, method, base, argc
+            ),
             CallNative { dst, native, base, argc } => write!(
                 f,
                 "{:<12} r{}, {}, r{}, {}",

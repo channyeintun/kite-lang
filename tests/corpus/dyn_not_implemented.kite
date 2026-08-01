@@ -1,0 +1,36 @@
+// A concrete type may only stand where a trait object is wanted when it has an
+// `impl` block for that trait. There is no structural matching: implementing
+// the right methods by accident is not implementing the trait.
+
+trait Shape {
+  fn area(self) -> int
+}
+
+struct Circle {
+  r: int
+}
+
+// Has `area`, but never says it is a `Shape`.
+struct Blob {
+  n: int
+}
+
+impl Shape for Circle {
+  fn area(self) -> int {
+    return self.r * self.r
+  }
+}
+
+impl Blob {
+  fn area(self) -> int {
+    return self.n
+  }
+}
+
+fn describe(s: dyn Shape) {
+  io.print(s.area())
+}
+
+fn main() {
+  describe(Blob{n: 3}) //~ ERROR E0200
+}

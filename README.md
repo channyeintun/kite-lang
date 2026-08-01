@@ -68,10 +68,11 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 
 ## Status
 
-**Phases 1–3 complete. Phase 4 started.** Structs, enums, `match` with
-exhaustiveness, traits, slices, optionals, enforced error handling, and a
-WebAssembly backend for the numeric and control-flow core. See
-[docs/06-roadmap.md](docs/06-roadmap.md) for what comes next.
+**Phases 1–4 complete.** Structs, enums, `match` with exhaustiveness, traits
+and trait objects, slices, tuples, maps, optionals, enforced error handling —
+and every one of them compiles to WebAssembly. Both backends run the whole
+example set and agree. See [docs/06-roadmap.md](docs/06-roadmap.md) for what
+comes next.
 
 ```bash
 kitec build examples/hello.kite --emit wasm --out dist
@@ -115,16 +116,20 @@ the missing variants, traits with default methods, copy-on-write slices,
 **Every example above compiles to WebAssembly and produces identical output**
 — structs and slices as WasmGC objects and arrays, enums as subtyped variant
 records, optionals as nullable boxed references, and fallible results as a
-two-slot record. Tuples, maps, and trait objects are the remaining gaps, and
-`--emit wasm` reports them rather than emitting a module that traps. Every program in the
-differential corpus is compiled to **both** the bytecode VM and Wasm, run on
-both, and the outputs compared. `--emit wasm` reports anything it cannot lower
-rather than producing a module that traps.
+two-slot record. A trait object is a reference to a record carrying a type
+tag, and each trait method gets a dispatcher that compares that tag — WasmGC
+types are structurally equal, so `struct Circle { r: float }` and
+`struct Square { s: float }` are literally the same Wasm type and `ref.test`
+cannot separate them. Only types reachable through a `dyn` carry the tag, so a
+program that never forms a trait object pays nothing for the mechanism.
 
-**Not yet:** maps, tuples, closures, generics, `dyn Trait` dispatch, string
-interpolation, and Wasm lowering for slices and enums.
+Every program in the differential corpus is compiled to **both** the bytecode
+VM and Wasm, run on both, and the outputs compared. `--emit wasm` reports
+anything it cannot lower rather than producing a module that traps.
 
-398 tests, plus an annotated compile-fail corpus.
+**Not yet:** closures, generics, and string interpolation.
+
+434 tests, plus an annotated compile-fail corpus.
 
 ```bash
 kitec run     file.kite      # compile and run

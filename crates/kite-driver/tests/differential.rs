@@ -199,6 +199,40 @@ fn main() {
          \x20 let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })\n}\n",
     ),
     (
+        "trait-objects",
+        "trait Shape {\n  fn area(self) -> int\n  fn sides(self) -> int\n}\n\
+         struct Circle {\n  r: int\n}\nstruct Square {\n  s: int\n}\n\
+         impl Shape for Circle {\n  fn area(self) -> int {\n    return self.r * self.r * 3\n  }\n\
+         \x20 fn sides(self) -> int {\n    return 0\n  }\n}\n\
+         impl Shape for Square {\n  fn area(self) -> int {\n    return self.s * self.s\n  }\n\
+         \x20 fn sides(self) -> int {\n    return 4\n  }\n}\n\
+         fn describe(v: dyn Shape) {\n  io.print(v.area())\n  io.print(v.sides())\n}\n\
+         fn main() {\n  describe(Circle{r: 2})\n  describe(Square{s: 3})\n\
+         \x20 let xs: [dyn Shape] = [Circle{r: 1}, Square{s: 2}, Circle{r: 3}]\n\
+         \x20 var sum = 0\n  for x in xs {\n    sum = sum + x.area()\n  }\n  io.print(sum)\n}\n",
+    ),
+    (
+        "trait-objects-with-enums",
+        "trait Named {\n  fn tag(self) -> int\n}\n\
+         enum Colour {\n  Red\n  Green(int)\n}\nstruct Point {\n  x: int\n}\n\
+         impl Named for Colour {\n  fn tag(self) -> int {\n    return match self {\n\
+         \x20     Red => 1\n      Green(n) => n\n    }\n  }\n}\n\
+         impl Named for Point {\n  fn tag(self) -> int {\n    return self.x\n  }\n}\n\
+         fn main() {\n  let xs: [dyn Named] = [Colour.Red, Colour.Green(7), Point{x: 100}]\n\
+         \x20 for x in xs {\n    io.print(x.tag())\n  }\n}\n",
+    ),
+    (
+        "trait-default-methods-dispatch",
+        "trait Greet {\n  fn name(self) -> str\n\
+         \x20 fn hello(self) -> str {\n    return \"hi \" + self.name()\n  }\n}\n\
+         struct A {\n  n: int\n}\nstruct B {\n  n: int\n}\n\
+         impl Greet for A {\n  fn name(self) -> str {\n    return \"a\"\n  }\n}\n\
+         impl Greet for B {\n  fn name(self) -> str {\n    return \"b\"\n  }\n\
+         \x20 fn hello(self) -> str {\n    return \"yo b\"\n  }\n}\n\
+         fn main() {\n  let xs: [dyn Greet] = [A{n: 1}, B{n: 2}]\n\
+         \x20 for x in xs {\n    io.print(x.hello())\n  }\n}\n",
+    ),
+    (
         "map-writes",
         "fn main() {\n  var m = {\"a\": 1}\n  m[\"b\"] = 2\n  io.print(m.len())\n\
          \x20 m[\"a\"] = 9\n  io.print(m.len())\n  let a = m[\"a\"]\n\

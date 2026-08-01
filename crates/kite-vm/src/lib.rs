@@ -796,6 +796,31 @@ impl<'a> Vm<'a> {
                     self.call(callee, base, arg_base, argc, dst)?;
                 }
 
+                Op::CallVirtual { dst, table, method, base: arg_base, argc } => {
+                    // The receiver is the first argument. Its own tag chooses
+                    // the body, which is the whole of dynamic dispatch: the
+                    // value carries its type, so nothing extra is stored.
+                    let receiver = self.get(base, arg_base);
+                    let tag = match &receiver {
+                        Value::Struct(s) => s.struct_id,
+                        Value::Enum(e) => 0x8000_0000 | e.enum_id,
+                        other => {
+                            return Err(Trap::TypeConfusion {
+                                op: "call.virtual",
+                                found: other.type_name(),
+                            })
+                        }
+                    };
+                    let Some(callee) = self.chunk.vtables[table as usize].lookup(tag, method)
+                    else {
+                        return Err(Trap::TypeConfusion {
+                            op: "call.virtual",
+                            found: receiver.type_name(),
+                        });
+                    };
+                    self.call(callee, base, arg_base, argc, dst)?;
+                }
+
                 Op::CallNative { dst, native, base: arg_base, argc } => {
                     let result = self.call_native(native, base, arg_base, argc)?;
                     self.set(base, dst, result);

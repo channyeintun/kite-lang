@@ -373,14 +373,75 @@ fn gaps(src: &str) -> Vec<String> {
 }
 
 /// A construct the backend cannot lower must be *reported*, not silently
-/// compiled into a module that traps at run time.
+/// compiled into a module that traps at run time. Closures are the one left.
 #[test]
 fn unlowered_constructs_are_reported() {
-    assert!(gaps("trait T {\n  fn f(self) -> int\n}\nfn g(x: dyn T) {\n}\nfn main() {\n}\n")
-        .contains(&"trait objects".to_string()));
+    assert!(gaps("fn apply(f: fn(int) -> int) {\n}\nfn main() {\n}\n")
+        .contains(&"function values".to_string()));
+}
 
+const SHAPES: &str = "\
+trait Shape {
+  fn area(self) -> int
+}
+struct Circle {
+  r: int
+}
+struct Square {
+  s: int
+}
+impl Shape for Circle {
+  fn area(self) -> int {
+    return self.r * self.r * 3
+  }
+}
+impl Shape for Square {
+  fn area(self) -> int {
+    return self.s * self.s
+  }
+}
+fn total(shapes: [dyn Shape]) -> int {
+  var sum = 0
+  for s in shapes {
+    sum = sum + s.area()
+  }
+  return sum
+}
+fn main() {
+  let xs: [dyn Shape] = [Circle{r: 2}, Square{s: 3}]
+  io.print(total(xs))
+}
+";
 
+/// Trait objects lower to a tag comparison in a per-method dispatcher.
+#[test]
+fn trait_objects_validate() {
+    valid(SHAPES);
+    assert!(gaps(SHAPES).is_empty());
+}
 
+/// `Circle { r: int }` and `Square { s: int }` are *the same* WasmGC type —
+/// types there are compared structurally, so a nominal difference in Kite is
+/// no difference at all here. Dispatch therefore cannot use `ref.test` and
+/// reads a stored identity tag instead. That the two dispatch apart is checked
+/// by executing them, in the differential suite; this test pins the reason.
+#[test]
+fn dispatchable_types_carry_an_identity_tag() {
+    let tagged = "trait T {\n  fn f(self) -> int\n}\nstruct P {\n  x: int\n}\n\
+                  impl T for P {\n  fn f(self) -> int {\n    return self.x\n  }\n}\n\
+                  fn g(v: dyn T) -> int {\n  return v.f()\n}\n\
+                  fn main() {\n  io.print(g(P{x: 1}))\n}\n";
+    valid(tagged);
+
+    // A program that never forms a trait object pays nothing: no tag field, no
+    // dispatcher, no root record extension.
+    let plain = "struct P {\n  x: int\n}\n\
+                 fn g(v: P) -> int {\n  return v.x\n}\n\
+                 fn main() {\n  io.print(g(P{x: 1}))\n}\n";
+    assert!(
+        valid(plain).size() < valid(tagged).size(),
+        "a program without `dyn` should be smaller than the same program with it"
+    );
 }
 
 /// Everything the backend *does* lower must report no gaps, or the check would

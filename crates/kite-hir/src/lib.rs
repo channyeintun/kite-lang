@@ -50,9 +50,52 @@ pub struct Program {
     pub fns: Vec<Function>,
     /// The `main` function, if this program has one.
     pub entry: Option<FnId>,
+    /// One per trait that is used as an object. Built here rather than in a
+    /// backend so both backends dispatch over the same set in the same order.
+    pub vtables: Vec<VTable>,
+}
+
+/// Everything a virtual call needs: which concrete types implement a trait, and
+/// which function each one supplies for each of its methods.
+#[derive(Clone, Debug)]
+pub struct VTable {
+    pub trait_id: TraitId,
+    /// In `TypeTag` order, which is stable across compilations.
+    pub entries: Vec<VTableEntry>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VTableEntry {
+    pub tag: TypeTag,
+    /// One function per trait method, in the trait's declaration order. A
+    /// default method resolves to the trait's own body.
+    pub methods: Vec<FnId>,
+}
+
+/// A concrete type as identified at run time. This is what a virtual call reads
+/// off the receiver to pick a row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TypeTag {
+    Struct(StructId),
+    Enum(EnumId),
+}
+
+impl TypeTag {
+    /// A single integer identifying the type at run time. Enums are shifted
+    /// clear of structs so the two id spaces cannot collide.
+    pub fn encode(self) -> u32 {
+        match self {
+            TypeTag::Struct(s) => s.0,
+            TypeTag::Enum(e) => 0x8000_0000 | e.0,
+        }
+    }
 }
 
 impl Program {
+    pub fn vtable(&self, trait_id: TraitId) -> Option<&VTable> {
+        self.vtables.iter().find(|v| v.trait_id == trait_id)
+    }
+
     pub fn function(&self, id: FnId) -> &Function {
         &self.fns[id.index()]
     }
@@ -166,6 +209,12 @@ pub enum ExprKind {
     Bool(bool),
     Local(LocalId),
     Call { callee: FnId, args: Vec<Expr> },
+    /// A call through a trait object. `args[0]` is the receiver; which function
+    /// runs is decided at run time from its concrete type.
+    CallVirtual { trait_id: TraitId, method: u32, args: Vec<Expr> },
+    /// A concrete value standing where a `dyn Trait` is wanted. Explicit so the
+    /// representation change is visible in the IR.
+    ToDyn { value: Box<Expr>, trait_id: TraitId },
     CallBuiltin { builtin: Builtin, args: Vec<Expr> },
     Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
     Unary { op: UnOp, operand: Box<Expr> },
@@ -493,6 +542,18 @@ impl Program {
             ExprKind::Call { callee, args } => {
                 let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();
                 format!("fn{}({})", callee.0, a.join(", "))
+            }
+            ExprKind::CallVirtual { trait_id, method, args } => {
+                let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();
+                format!(
+                    "virtual {}#{}({})",
+                    self.types.trait_def(*trait_id).name,
+                    method,
+                    a.join(", ")
+                )
+            }
+            ExprKind::ToDyn { value, trait_id } => {
+                format!("(as dyn {} {})", self.types.trait_def(*trait_id).name, self.expr(value))
             }
             ExprKind::CallBuiltin { builtin, args } => {
                 let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();

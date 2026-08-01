@@ -131,6 +131,13 @@ codes! {
     E0205 = "E0205", "not callable",
         "This expression is not a function.";
 
+    E0206 = "E0206", "trait cannot be a trait object",
+        "A `dyn Trait` dispatches by looking at the value it holds, so every \
+         method must take `self`. A method without a receiver has nothing to \
+         dispatch on.\n\n\
+         Either give the method a `self` parameter, or accept the concrete \
+         type instead of the trait object.";
+
     E0210 = "E0210", "non-exhaustive match",
         "A `match` must cover every possible value. Exhaustiveness is what \
          makes adding an enum variant safe: the compiler shows you every place \

@@ -1,0 +1,28 @@
+// A trait object dispatches by looking at the value it holds. A method with no
+// `self` has no value to dispatch from, so the trait cannot become an object.
+
+trait Factory {
+  fn make() -> int
+  fn count(self) -> int
+}
+
+struct Widget {
+  n: int
+}
+
+impl Factory for Widget {
+  fn make() -> int {
+    return 0
+  }
+  fn count(self) -> int {
+    return self.n
+  }
+}
+
+fn use_it(f: dyn Factory) { //~ ERROR E0206
+  io.print(f.count())
+}
+
+fn main() {
+  use_it(Widget{n: 1})
+}
