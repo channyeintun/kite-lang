@@ -1,0 +1,77 @@
+// The prelude's own tests.
+//
+// Each file here is an ordinary program: it runs its checks and prints what
+// failed. That is what lets the same file run on the bytecode VM *and* on
+// WebAssembly and be compared — a library test that only ran on one backend
+// would not be testing the thing most likely to be wrong.
+
+use std/test
+
+fn checks() -> [error] {
+    var out: [error] = []
+
+    // ---- slices ----
+    out.push(test.equal_ints(map([1, 2, 3], |n: int| n * 2), [2, 4, 6], "map"))
+    out.push(test.equal_ints(filter([1, 2, 3, 4], |n: int| n % 2 == 0), [2, 4], "filter"))
+    out.push(test.equal_int(fold([1, 2, 3], 0, |a: int, b: int| a + b), 6, "fold"))
+    out.push(test.is_true(any([1, 2], |n: int| n == 2), "any"))
+    out.push(test.is_false(any([1, 2], |n: int| n == 9), "any misses"))
+    out.push(test.is_true(all([2, 4], |n: int| n % 2 == 0), "all"))
+    let empty: [int] = []
+    out.push(test.is_true(all(empty, |n: int| false), "all is vacuously true"))
+    out.push(test.equal_int(count([1, 2, 3], |n: int| n > 1), 2, "count"))
+    out.push(test.equal_ints(reversed([1, 2, 3]), [3, 2, 1], "reversed"))
+    out.push(test.equal_ints(concat([1], [2, 3]), [1, 2, 3], "concat"))
+    out.push(test.equal_ints(take([1, 2, 3], 2), [1, 2], "take"))
+    out.push(test.equal_ints(take([1, 2, 3], -1), empty, "take of a negative amount"))
+    out.push(test.equal_ints(drop([1, 2, 3], 2), [3], "drop"))
+    out.push(test.equal_int(sum([1, 2, 3]), 6, "sum"))
+
+    let found = find([1, 2, 3], |n: int| n > 1)
+    out.push(test.equal_int(if found == nil { -1 } else { found }, 2, "find"))
+    let missing = find([1], |n: int| n > 9)
+    out.push(test.is_true(missing == nil, "find yields nil"))
+    let head = first([7, 8])
+    out.push(test.equal_int(if head == nil { -1 } else { head }, 7, "first"))
+    let tail = last([7, 8])
+    out.push(test.equal_int(if tail == nil { -1 } else { tail }, 8, "last"))
+    out.push(test.is_true(first(empty) == nil, "first of an empty slice"))
+
+    // ---- numbers ----
+    out.push(test.equal_int(abs(-3), 3, "abs"))
+    out.push(test.equal_int(min(2, 5), 2, "min"))
+    out.push(test.equal_int(max(2, 5), 5, "max"))
+    out.push(test.equal_int(clamp(11, 0, 10), 10, "clamp"))
+    out.push(test.equal_float(absf(-2.5), 2.5, 0.0001, "absf"))
+    out.push(test.is_true(approx_eq(0.1 + 0.2, 0.3, 0.0001), "approx_eq"))
+    out.push(test.is_true(divides(9, 3), "divides"))
+
+    // ---- strings ----
+    out.push(test.is_true(contains("hello", "ell"), "contains"))
+    out.push(test.is_true(starts_with("hello", "he"), "starts_with"))
+    out.push(test.is_true(ends_with("hello", "lo"), "ends_with"))
+    out.push(test.is_false(starts_with("he", "hello"), "starts_with a longer prefix"))
+    out.push(test.equal_strs(split("a,b,c", ","), ["a", "b", "c"], "split"))
+    out.push(test.equal_str(join(["a", "b"], "-"), "a-b", "join"))
+    out.push(test.equal_str(replace("banana", "na", "NA"), "baNANA", "replace"))
+    out.push(test.equal_strs(words("  two  words  "), ["two", "words"], "words"))
+    out.push(test.equal_int("héllo日本".len(), 7, "len counts characters"))
+    out.push(test.equal_str("  x  ".trim(), "x", "trim"))
+    out.push(test.equal_int("hello".index_of("ll"), 2, "index_of"))
+    out.push(test.equal_int("hello".index_of("z"), -1, "index_of misses"))
+    out.push(test.equal_str("hello".slice(1, 3), "el", "slice"))
+    out.push(test.equal_str("hello".slice(3, 99), "lo", "slice clamps"))
+
+    return out
+}
+
+fn main() {
+    var failed = 0
+    for e in checks() {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("prelude: \(checks().len() - failed) passed, \(failed) failed")
+}

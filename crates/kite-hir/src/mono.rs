@@ -361,6 +361,8 @@ fn expr_children(k: &mut ExprKind) -> Vec<&mut Expr> {
         | ExprKind::PairError { base }
         | ExprKind::ErrorMessage { base }
         | ExprKind::MapLen { base }
+        | ExprKind::MapKeys { base }
+        | ExprKind::MapValues { base }
         | ExprKind::SliceLen { base } => vec![base],
         ExprKind::ErrorNew { message } => vec![message],
         ExprKind::Binary { lhs, rhs, .. } => vec![lhs, rhs],

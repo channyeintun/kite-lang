@@ -1,0 +1,81 @@
+// std/buffer — flat numeric buffers.
+//
+// A `[Point]` is an array of *references* to `Point` objects rather than a
+// flat run of coordinates: WasmGC has no unboxed aggregates inside arrays,
+// which the specification records as a known consequence. For numeric work
+// where the layout matters, a buffer is a flat sequence of numbers with the
+// shape written down separately — which is what a layout engine or a
+// renderer wants anyway.
+//
+// This is the version over slices. A `buffer.F64` over linear memory would let
+// the host read it without copying, and is what the canvas renderer will want;
+// nothing in the language stops it, but the Wasm backend has no linear memory
+// today and adding one for this alone would cost every program the bytes.
+
+/// A flat run of floats, read and written in fixed-size records.
+pub struct F64 {
+    pub var values: [float]
+    /// How many numbers make up one record: 2 for a point, 4 for a rectangle.
+    pub stride: int
+}
+
+pub fn f64(stride: int) -> F64 {
+    return F64{values: [], stride: max(stride, 1)}
+}
+
+/// How many records the buffer holds.
+pub fn count(b: F64) -> int {
+    return b.values.len() / b.stride
+}
+
+/// One number of one record.
+pub fn get(b: F64, record: int, field: int) -> float {
+    return b.values[record * b.stride + field]
+}
+
+/// A whole record, as a slice of `stride` numbers.
+pub fn record(b: F64, index: int) -> [float] {
+    var out: [float] = []
+    for i in 0..b.stride {
+        out.push(b.values[index * b.stride + i])
+    }
+    return out
+}
+
+/// A buffer with one record appended. Buffers are values, like slices: this
+/// produces a new one rather than editing the one it was given.
+pub fn push(b: F64, values: [float]) -> F64 {
+    return F64{values: concat(b.values, values), stride: b.stride}
+}
+
+/// A buffer with one number replaced.
+pub fn set(b: F64, record: int, field: int, value: float) -> F64 {
+    var out = b.values
+    out[record * b.stride + field] = value
+    return F64{values: out, stride: b.stride}
+}
+
+/// Every value of one field, across every record — the column form, which is
+/// what a bounds check or a sum wants.
+pub fn column(b: F64, field: int) -> [float] {
+    var out: [float] = []
+    for i in 0..count(b) {
+        out.push(get(b, i, field))
+    }
+    return out
+}
+
+/// The smallest and largest value in a field.
+pub fn extent(b: F64, field: int) -> (float, float) {
+    let values = column(b, field)
+    if values.len() == 0 {
+        return (0.0, 0.0)
+    }
+    var low = values[0]
+    var high = values[0]
+    for v in values {
+        low = minf(low, v)
+        high = maxf(high, v)
+    }
+    return (low, high)
+}

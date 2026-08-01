@@ -1,0 +1,47 @@
+// std/errors — building and adding to error values.
+//
+// An error in Kite is an ordinary value: nil, or something describing a
+// failure. `errors.new` is a compiler builtin because constructing one is the
+// only thing that needs to be; everything else is written here.
+
+/// `err` with context in front of it, or nil when `err` is nil.
+///
+/// Returning nil for nil is what lets this compose with `check` directly:
+///
+/// ```kite
+/// let (bytes, err) = fs.read(path)
+/// check errors.wrap(err, "loading config from \(path)")
+/// ```
+pub fn wrap(err: error, context: str) -> error {
+    if err == nil {
+        return nil
+    }
+    return errors.new("\(context): \(err.message())")
+}
+
+/// An error whose message is built from parts, for a caller that would
+/// otherwise interpolate into `errors.new` at every site.
+pub fn of(subject: str, problem: str) -> error {
+    return errors.new("\(subject): \(problem)")
+}
+
+/// Whether an error's message mentions `needle`.
+///
+/// A stand-in for `errors.is<T>`, which needs concrete error types carrying
+/// their own data — the trait-object half of the error design. Matching on
+/// text is weaker and says so: it is here because "did this fail because the
+/// file was missing" is a real question, not because it is the right answer.
+pub fn mentions(err: error, needle: str) -> bool {
+    if err == nil {
+        return false
+    }
+    return contains(err.message(), needle)
+}
+
+/// The message, or a stand-in for nil, so a caller can print without testing.
+pub fn message_or(err: error, absent: str) -> str {
+    if err == nil {
+        return absent
+    }
+    return err.message()
+}

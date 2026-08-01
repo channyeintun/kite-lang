@@ -995,13 +995,27 @@ impl<'a> Checker<'a> {
             }
             Some(ast::ReturnValue::Single(e)) if sig.fallible => {
                 let inner = self.types.fallible_value(sig.ret).unwrap_or(TyId::ERROR);
-                let value = self.expr(e, Some(inner));
+                let value = self.expr(e, Some(sig.ret));
+                // `return parse_user(raw)` — passing a fallible call's result
+                // straight out. The pair travels as a pair: its value is still
+                // only valid when its error is nil, and the caller's taint
+                // analysis is what enforces that, so nothing is lost by not
+                // taking it apart here.
+                if self.types.fallible_value(value.ty) == Some(inner) {
+                    return Some((
+                        hir::Stmt::Return { value: Some(value), span: r.span },
+                        Flow::Diverges,
+                    ));
+                }
                 self.expect_ty(value.ty, inner, value.span, Some(sig.name_span));
                 self.diags.push(
                     Diagnostic::error(codes::E0203, "a fallible function returns two values")
                         .with_primary(r.span, "only one value returned")
                         .with_secondary(sig.name_span, "declared `(T, error)` here")
-                        .with_note("write `return value, nil` on the success path"),
+                        .with_note(
+                            "write `return value, nil` on the success path, or return a call \
+                             that is itself fallible",
+                        ),
                 );
                 None
             }
@@ -1147,7 +1161,7 @@ impl<'a> Checker<'a> {
 
         // A guarded value becomes clean after `if err != nil { return … }`,
         // because control only reaches here when the error was nil.
-        self.taint = match (then_flow, else_flow, i.else_.is_some()) {
+        let merged_taint = match (then_flow, else_flow, i.else_.is_some()) {
             // `if err != nil { return … }` — control continues only when the
             // error was nil, so the value it guards is now valid.
             (Flow::Diverges, _, false) => {
@@ -1165,7 +1179,8 @@ impl<'a> Checker<'a> {
                 .collect(),
         };
 
-        self.init = match (then_flow, else_flow, i.else_.is_some()) {
+        self.restore_taint(merged_taint);
+        let merged_init = match (then_flow, else_flow, i.else_.is_some()) {
             // No `else`: control can arrive having skipped the `then` entirely.
             (_, _, false) => entry_init,
             (Flow::Diverges, Flow::Diverges, _) => else_init,
@@ -1177,6 +1192,7 @@ impl<'a> Checker<'a> {
                 .map(|(a, b)| a.merge(*b))
                 .collect(),
         };
+        self.restore_init(merged_init);
 
         // Without an `else`, control can always fall through.
         let flow = if i.else_.is_none() {
@@ -1209,9 +1225,12 @@ impl<'a> Checker<'a> {
         let result = match &f.header {
             ast::ForHeader::In { binding, iter } => {
                 let ast::Binding::Name(name) = binding else {
-                    self.not_yet(binding.span(), "tuple loop bindings", "arrives in Phase 2");
+                    // `for (k, v) in m` — the only tuple binding a loop takes,
+                    // because a map is the only thing that yields pairs.
+                    let result = self.for_map(f, binding, iter, sig);
                     self.loop_depth -= 1;
-                    return None;
+                    self.restore_init(entry_init);
+                    return result;
                 };
                 let ast::Expr::Range { start, end, inclusive, .. } = iter else {
                     // Iterating a slice. The `Iterate` trait generalises this
@@ -1233,7 +1252,7 @@ impl<'a> Checker<'a> {
                             );
                         }
                         self.loop_depth -= 1;
-                        self.init = entry_init;
+                        self.restore_init(entry_init);
                         return None;
                     };
                     let local_id = self.resolved.lookup_binding(name.span)?;
@@ -1242,7 +1261,7 @@ impl<'a> Checker<'a> {
 
                     let (body, _) = self.block(&f.body, sig);
                     self.loop_depth -= 1;
-                    self.init = entry_init;
+                    self.restore_init(entry_init);
                     return Some((
                         hir::Stmt::ForSlice {
                             var: hir::LocalId(local_id),
@@ -1288,7 +1307,7 @@ impl<'a> Checker<'a> {
         };
 
         self.loop_depth -= 1;
-        self.init = entry_init;
+        self.restore_init(entry_init);
         // `for { … }` with nothing that breaks out of it never falls through.
         // That is worth knowing here rather than leaving to MIR, because a
         // function whose every exit is a `return` inside such a loop is
@@ -1298,6 +1317,138 @@ impl<'a> Checker<'a> {
         let diverges = matches!(f.header, ast::ForHeader::Loop)
             && !breaks_out(&f.body, f.label.as_ref().map(|l| l.name.as_str()));
         Some((result, if diverges { Flow::Diverges } else { Flow::Falls }))
+    }
+
+    /// `for (key, value) in m`.
+    ///
+    /// Lowered to a loop over `m.keys()` with the value looked up per key,
+    /// which is exactly what a reader would write by hand — and it keeps
+    /// insertion order, which the specification guarantees. The lookup yields
+    /// an optional and is unwrapped, because the key came out of the map one
+    /// line earlier and cannot be missing.
+    fn for_map(
+        &mut self,
+        f: &ast::ForStmt,
+        binding: &ast::Binding,
+        iter: &ast::Expr,
+        sig: &Signature,
+    ) -> Option<(hir::Stmt, Flow)> {
+        let ast::Binding::Tuple { elems, span } = binding else {
+            return None;
+        };
+        let map = self.expr(iter, None);
+        let TyKind::Map(key_ty, value_ty) = *self.types.kind(map.ty) else {
+            if !self.types.is_poisoned(map.ty) {
+                let found = self.types.with_article(map.ty);
+                self.diags.push(
+                    Diagnostic::error(codes::E0200, format!("cannot iterate {} in pairs", found))
+                        .with_primary(map.span, "not a map")
+                        .with_note("`for (k, v) in …` iterates a map; a slice yields one value"),
+                );
+            }
+            return None;
+        };
+        if elems.len() != 2 {
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0200,
+                    format!("expected 2 bindings, found {}", elems.len()),
+                )
+                .with_primary(*span, "a map yields a key and a value")
+                .with_note("write `for (key, value) in m`"),
+            );
+            return None;
+        }
+
+        // The map is bound once: iterating re-reads it per key, and an
+        // expression with side effects must not run per iteration.
+        let holder = self.synthetic_local("map", map.ty, *span);
+        let keys_ty = self.types.slice_of(key_ty);
+        let key_local = match &elems[0] {
+            ast::BindElem::Name(n) => self.resolved.lookup_binding(n.span)?,
+            ast::BindElem::Wildcard(w) => self.synthetic_local("key", key_ty, *w),
+        };
+        self.locals[key_local as usize].ty = key_ty;
+        self.init[key_local as usize] = Init::Assigned;
+
+        let map_expr = |this: &Self| hir::Expr {
+            kind: ExprKind::Local(hir::LocalId(holder)),
+            ty: this.locals[holder as usize].ty,
+            span: *span,
+        };
+        let lookup = hir::Expr {
+            kind: ExprKind::Unwrap {
+                value: Box::new(hir::Expr {
+                    kind: ExprKind::MapGet {
+                        base: Box::new(map_expr(self)),
+                        key: Box::new(hir::Expr {
+                            kind: ExprKind::Local(hir::LocalId(key_local)),
+                            ty: key_ty,
+                            span: *span,
+                        }),
+                    },
+                    ty: self.types.optional_of(value_ty),
+                    span: *span,
+                }),
+            },
+            ty: value_ty,
+            span: *span,
+        };
+
+        let mut body_stmts = Vec::new();
+        if let ast::BindElem::Name(n) = &elems[1] {
+            let value_local = self.resolved.lookup_binding(n.span)?;
+            self.locals[value_local as usize].ty = value_ty;
+            self.init[value_local as usize] = Init::Assigned;
+            body_stmts.push(hir::Stmt::Let {
+                local: hir::LocalId(value_local),
+                init: Some(lookup),
+                span: n.span,
+            });
+        }
+        let (body, _) = self.block(&f.body, sig);
+        body_stmts.extend(body.stmts);
+
+        let keys = hir::Expr {
+            kind: ExprKind::MapKeys { base: Box::new(map_expr(self)) },
+            ty: keys_ty,
+            span: *span,
+        };
+        let loop_stmt = hir::Stmt::ForSlice {
+            var: hir::LocalId(key_local),
+            slice: keys,
+            body: hir::Block { stmts: body_stmts },
+            label: f.label.as_ref().map(|l| l.name.clone()),
+            span: f.span,
+        };
+        Some((
+            hir::Stmt::Block(hir::Block {
+                stmts: vec![
+                    hir::Stmt::Let { local: hir::LocalId(holder), init: Some(map), span: *span },
+                    loop_stmt,
+                ],
+            }),
+            Flow::Falls,
+        ))
+    }
+
+    /// Put back a saved definite-assignment state.
+    ///
+    /// A snapshot is taken before a branch or a loop body and put back after,
+    /// because neither is guaranteed to run. Locals created *while* checking
+    /// the body — the temporaries a desugaring needs — are not in the snapshot
+    /// and must not vanish with it, so the state is padded back out to the
+    /// table it indexes.
+    fn restore_init(&mut self, saved: Vec<Init>) {
+        self.init = saved;
+        self.init.resize(self.locals.len(), Init::Assigned);
+    }
+
+    /// The same for taint. A temporary the checker made holds no correlated
+    /// result, so it is clean.
+    fn restore_taint(&mut self, saved: Vec<Taint>) {
+        self.taint = saved;
+        self.taint.resize(self.locals.len(), Taint::Clean);
     }
 
     /// A local compared against `nil`, and whether the comparison was `==`.
@@ -2043,6 +2194,14 @@ impl<'a> Checker<'a> {
                     // One mistake, one diagnostic.
                     self.taint[id as usize] = Taint::Clean;
                 }
+                // Reading an error *is* inspecting it. Handing it to
+                // something that will deal with it — `errors.wrap(err, …)`,
+                // `log(err)`, `test.failed(err, …)` — is a way of handling a
+                // failure, and E0302 exists to catch the error nobody looked
+                // at, not the error somebody passed on.
+                if self.taint[id as usize] == Taint::Unchecked {
+                    self.taint[id as usize] = Taint::Clean;
+                }
                 if self.init[id as usize] == Init::Unassigned {
                     let local = &self.locals[id as usize];
                     let (name, decl) = (local.name.clone(), local.span);
@@ -2712,26 +2871,41 @@ impl<'a> Checker<'a> {
             return self.str_method(receiver, name, args, span);
         }
 
-        if let TyKind::Map(..) = *self.types.kind(receiver.ty) {
-            if name.name != "len" {
-                self.diags.push(
-                    Diagnostic::error(
-                        codes::E0205,
-                        format!("`{}` has no method `{}`", self.types.name(receiver.ty), name.name),
-                    )
-                    .with_primary(name.span, "no such method")
-                    .with_note("a map has: len; read with `m[key]`, which yields an optional"),
-                );
-                return self.lit(ExprKind::Error, TyId::ERROR, span);
-            }
-            if !args.is_empty() {
-                self.arity_error("len", args.len(), 0, span, None);
-            }
-            return hir::Expr {
-                kind: ExprKind::MapLen { base: Box::new(receiver) },
-                ty: TyId::INT,
-                span,
+        if let TyKind::Map(k, v) = *self.types.kind(receiver.ty) {
+            let (kind, ty) = match name.name.as_str() {
+                "len" => (ExprKind::MapLen { base: Box::new(receiver) }, TyId::INT),
+                // Insertion order, which the specification guarantees — so
+                // `keys` and `values` line up element for element.
+                "keys" => {
+                    let ty = self.types.slice_of(k);
+                    (ExprKind::MapKeys { base: Box::new(receiver) }, ty)
+                }
+                "values" => {
+                    let ty = self.types.slice_of(v);
+                    (ExprKind::MapValues { base: Box::new(receiver) }, ty)
+                }
+                _ => {
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0205,
+                            format!(
+                                "`{}` has no method `{}`",
+                                self.types.name(receiver.ty),
+                                name.name
+                            ),
+                        )
+                        .with_primary(name.span, "no such method")
+                        .with_note(
+                            "a map has: len, keys, values; read with `m[key]`, which yields                              an optional, and write with `m[key] = value`",
+                        ),
+                    );
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
+                }
             };
+            if !args.is_empty() {
+                self.arity_error(&name.name, args.len(), 0, span, None);
+            }
+            return hir::Expr { kind, ty, span };
         }
 
         if self.types.slice_elem(receiver.ty).is_some() {
@@ -3984,7 +4158,7 @@ impl<'a> Checker<'a> {
         let mut nil_covered = false;
 
         for arm in &m.arms {
-            self.init = entry_init.clone();
+            self.restore_init(entry_init.clone());
             let bind_ty = match *self.types.kind(scrut_ty) {
                 TyKind::Optional(inner) if nil_covered => inner,
                 _ => scrut_ty,
@@ -4006,10 +4180,16 @@ impl<'a> Checker<'a> {
                 c
             });
 
+            let want = expected.or(result_ty);
             let body = match &arm.body {
-                ast::MatchBody::Expr(e) => self.expr(e, expected.or(result_ty)),
-                ast::MatchBody::Block(b) => self.match_block(b, expected.or(result_ty)),
+                ast::MatchBody::Expr(e) => self.expr(e, want),
+                ast::MatchBody::Block(b) => self.match_block(b, want),
             };
+            // An arm producing a `T` where a `?T` is wanted is subsumption,
+            // exactly as it is for a `let` or an argument — so `Text(s) => s`
+            // and `other => nil` are arms of one `Option<str>` match rather
+            // than a type error about two arms disagreeing.
+            let body = self.coerce(body, want);
 
             if body.ty != TyId::NEVER && !self.types.is_poisoned(body.ty) {
                 match result_ty {
@@ -4042,7 +4222,7 @@ impl<'a> Checker<'a> {
 
         // A binding introduced by one arm's pattern is not in scope after the
         // match, so the entry state is what survives.
-        self.init = entry_init;
+        self.restore_init(entry_init);
 
         self.check_exhaustive(m, &arms, scrut_ty);
 

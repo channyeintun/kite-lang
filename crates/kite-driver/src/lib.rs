@@ -75,6 +75,32 @@ impl Compilation {
             Some(c) => kite_vm::run(c, out).map(|_| true),
         }
     }
+
+    /// The tests this program declares, in source order.
+    ///
+    /// A test is a function whose name starts with `test_`. There is no
+    /// attribute syntax in Kite and there is not going to be one: a naming
+    /// convention needs no machinery, and `grep test_` finds every test.
+    pub fn tests(&self) -> Vec<String> {
+        let Some(chunk) = &self.chunk else { return Vec::new() };
+        chunk
+            .functions
+            .iter()
+            .filter(|f| f.name.starts_with("test_"))
+            .map(|f| f.name.clone())
+            .collect()
+    }
+
+    /// Run one test, and report what it said went wrong.
+    ///
+    /// A test returns `(int, error)`, so a failure arrives as an error value
+    /// with a message rather than as a trap — which is what lets the rest of
+    /// the tests run.
+    pub fn run_test(&self, name: &str, out: &mut dyn Write) -> Result<Option<String>, Trap> {
+        let Some(chunk) = &self.chunk else { return Ok(None) };
+        let value = kite_vm::run_function(chunk, name, out)?;
+        Ok(kite_vm::failure_message(&value))
+    }
 }
 
 /// The standard library, compiled into every program ahead of its own source.

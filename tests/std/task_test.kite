@@ -1,0 +1,88 @@
+// std/task, and the state machine underneath it.
+//
+// The clock is virtual on both backends, so a program that sleeps costs no
+// real time here and the two agree on the order things happened in — which is
+// what makes these comparable at all.
+
+use std/test
+use std/task
+
+async fn work(name: str, ms: int) -> str {
+    await task.sleep(ms)
+    return name
+}
+
+async fn counter(n: int) -> int {
+    var total = 0
+    for i in 0..n {
+        total = total + i
+        task.yield()
+    }
+    return total
+}
+
+async fn checks() -> [error] {
+    var out: [error] = []
+
+    // Awaiting a task that has already finished never suspends.
+    out.push(test.equal_str(await work("one", 0), "one", "await"))
+
+    // Three started together finish in the slowest one's time, not the sum.
+    let start = time.now()
+    let a = work("a", 100)
+    let b = work("b", 50)
+    let c = work("c", 30)
+    let (first, second) = await task.both(a, b)
+    let third = await c
+    out.push(test.equal_str(first, "a", "both, first"))
+    out.push(test.equal_str(second, "b", "both, second"))
+    out.push(test.equal_str(third, "c", "the third"))
+    out.push(test.equal_int(time.now() - start, 100, "concurrent, not sequential"))
+
+    out.push(test.equal_strs(
+        await task.all([work("x", 20), work("y", 10)]),
+        ["x", "y"],
+        "all keeps the order it was given",
+    ))
+
+    out.push(test.equal_str(
+        await task.race([work("fast", 5), work("slow", 500)]),
+        "fast",
+        "race",
+    ))
+
+    let late = await task.timeout(work("late", 900), 50)
+    out.push(test.is_true(late == nil, "timeout gives up"))
+    let quick = await task.timeout(work("quick", 5), 50)
+    out.push(test.equal_str(if quick == nil { "?" } else { quick }, "quick", "timeout succeeds"))
+
+    // A suspension inside a loop resumes where it left off.
+    out.push(test.equal_int(await counter(5), 10, "yield inside a loop"))
+
+    // Awaiting the same task twice gives the same answer.
+    let once = work("once", 1)
+    let value = await once
+    out.push(test.equal_str(await once, value, "awaiting twice"))
+
+    // A task is only started by calling it, and only finishes when polled.
+    let unstarted = work("later", 200)
+    out.push(test.is_false(task.finished(unstarted), "a task starts unfinished"))
+    out.push(test.equal_str(await unstarted, "later", "and finishes when awaited"))
+
+    let parallel = await task.parallel([1, 2, 3], |n: int| n * 2)
+    out.push(test.equal_ints(parallel, [2, 4, 6], "parallel maps"))
+
+    return out
+}
+
+async fn main() {
+    let results = await checks()
+    var failed = 0
+    for e in results {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("task: \(results.len() - failed) passed, \(failed) failed")
+}

@@ -60,3 +60,71 @@ pub fn round(x: float) -> float {
     }
     return floor(x + 0.5)
 }
+
+/// The square root, by Newton's method.
+///
+/// Written in Kite rather than reached for from the host: a host call is a
+/// boundary two runtimes have to agree about, and this one converges to the
+/// same answer everywhere. Twenty iterations is far more than a `float`
+/// needs — the loop stops as soon as it stops moving.
+pub fn sqrt(x: float) -> float {
+    if x <= 0.0 {
+        return 0.0
+    }
+    var guess = x
+    for i in 0..20 {
+        let next = (guess + x / guess) / 2.0
+        if abs(next - guess) < 0.0000000001 {
+            return next
+        }
+        guess = next
+    }
+    return guess
+}
+
+/// `base` raised to a whole power. Negative powers give the reciprocal.
+pub fn pow(base: float, exponent: int) -> float {
+    if exponent < 0 {
+        let positive = pow(base, 0 - exponent)
+        if positive == 0.0 {
+            return 0.0
+        }
+        return 1.0 / positive
+    }
+    var out = 1.0
+    for i in 0..exponent {
+        out = out * base
+    }
+    return out
+}
+
+/// The length of the hypotenuse — the distance from the origin to (x, y).
+pub fn hypot(x: float, y: float) -> float {
+    return sqrt(x * x + y * y)
+}
+
+/// A point `t` of the way from `a` to `b`.
+pub fn lerp(a: float, b: float, t: float) -> float {
+    return a + (b - a) * t
+}
+
+/// -1, 0 or 1.
+pub fn sign(x: float) -> int {
+    if x > 0.0 {
+        return 1
+    }
+    if x < 0.0 {
+        return -1
+    }
+    return 0
+}
+
+/// The ratio of a circle's circumference to its diameter, to the precision a
+/// `float` holds.
+pub fn pi() -> float {
+    return 3.141592653589793
+}
+
+pub fn e() -> float {
+    return 2.718281828459045
+}

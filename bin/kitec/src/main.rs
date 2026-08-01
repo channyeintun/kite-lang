@@ -14,6 +14,7 @@ USAGE:
     kitec run   <file.kite>          compile and run
     kitec check <file.kite>          check without running
     kitec build <file.kite>          compile and report what was produced
+    kitec test  <file.kite>          run every `test_` function in the file
 
 OPTIONS:
     --emit <stage>    check, ast, hir, mir, kbc, wasm
@@ -75,7 +76,7 @@ fn main() -> ExitCode {
                 out_dir = Some(v.clone());
                 i += 2;
             }
-            "run" | "check" | "build" if command.is_none() => {
+            "run" | "check" | "build" | "test" if command.is_none() => {
                 command = Some(a.clone());
                 i += 1;
             }
@@ -160,6 +161,8 @@ fn main() -> ExitCode {
             eprintln!("compiled `{}` to bytecode", path);
             ExitCode::SUCCESS
         }
+        "test" => run_tests(&result, &path),
+
         "run" => {
             if !result.is_runnable() {
                 return fail(&format!(
@@ -184,6 +187,62 @@ fn main() -> ExitCode {
             }
         }
         _ => unreachable!("command was validated above"),
+    }
+}
+
+/// Run every `test_` function, reporting each and summarising.
+///
+/// A failure is an error *value* with a message, not a trap, so one failing
+/// test does not stop the rest — which is the whole reason `std/test`'s
+/// assertions return errors rather than asserting.
+fn run_tests(result: &kite_driver::Compilation, path: &str) -> ExitCode {
+    let tests = result.tests();
+    if tests.is_empty() {
+        eprintln!(
+            "no tests in `{}`\n\nnote: a test is a `pub fn test_…() -> (int, error)`",
+            path
+        );
+        return ExitCode::SUCCESS;
+    }
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let mut failed = 0;
+    for name in &tests {
+        // A test's own output belongs under its name, so `io.print` inside one
+        // is a debugging aid rather than a jumble.
+        let mut captured = Vec::new();
+        let outcome = result.run_test(name, &mut captured);
+        let printed = String::from_utf8_lossy(&captured).to_string();
+        match outcome {
+            Ok(None) => {
+                let _ = writeln!(out, "ok       {}", name);
+            }
+            Ok(Some(message)) => {
+                failed += 1;
+                let _ = writeln!(out, "FAILED   {}\n         {}", name, message);
+            }
+            Err(trap) => {
+                failed += 1;
+                let _ = writeln!(out, "TRAPPED  {}\n         {}", name, trap);
+            }
+        }
+        for line in printed.lines() {
+            let _ = writeln!(out, "         | {}", line);
+        }
+    }
+
+    let _ = writeln!(
+        out,
+        "\n{} passed, {} failed",
+        tests.len() - failed,
+        failed
+    );
+    let _ = out.flush();
+    if failed > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
 

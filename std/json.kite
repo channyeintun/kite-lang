@@ -1,1 +1,513 @@
-// std/json — see docs/06-roadmap.md
+// std/json — reading and writing JSON.
+//
+// Written in Kite, on top of the four string primitives the language has. It
+// is the first substantial body of Kite code in the standard library, and a
+// parse returns `(Json, error)` like anything else that can fail: a malformed
+// document is a value to handle, not something thrown.
+
+/// A JSON value.
+///
+/// Recursive with no boxing annotation, because every Kite aggregate is
+/// already a GC reference.
+pub enum Json {
+    Null
+    Bool(bool)
+    Number(float)
+    Text(str)
+    Array([Json])
+    Object({str: Json})
+}
+
+/// How far a parse got, and what it produced.
+///
+/// Parsing is written as functions from a position to a value and a new
+/// position, rather than around a cursor with a `var` field: the two read
+/// about the same, and this one cannot be left half-advanced by an early
+/// return.
+struct Step {
+    value: Json
+    next: int
+}
+
+/// A parsed string, and where it ended.
+struct Text {
+    text: str
+    next: int
+}
+
+// ---- parsing ---------------------------------------------------------------
+
+/// The value a document holds, or an error saying where it went wrong.
+pub fn parse(input: str) -> (Json, error) {
+    let (step, err) = parse_value(input, skip_space(input, 0))
+    check err
+    let end = skip_space(input, step.next)
+    if end < input.len() {
+        return _, errors.new("json: unexpected text at \(end)")
+    }
+    return step.value, nil
+}
+
+fn parse_value(input: str, at: int) -> (Step, error) {
+    if at >= input.len() {
+        return _, errors.new("json: unexpected end of input")
+    }
+    let c = input.slice(at, at + 1)
+    if c == "{" {
+        return parse_object(input, at)
+    }
+    if c == "[" {
+        return parse_array(input, at)
+    }
+    if c == "\"" {
+        let (text, err) = parse_string(input, at)
+        check err
+        return Step{value: Json.Text(text.text), next: text.next}, nil
+    }
+    if c == "t" {
+        return keyword(input, at, "true", Json.Bool(true))
+    }
+    if c == "f" {
+        return keyword(input, at, "false", Json.Bool(false))
+    }
+    if c == "n" {
+        return keyword(input, at, "null", Json.Null)
+    }
+    return parse_number(input, at)
+}
+
+fn keyword(input: str, at: int, word: str, value: Json) -> (Step, error) {
+    let end = at + word.len()
+    if end > input.len() {
+        return _, errors.new("json: unexpected end of input")
+    }
+    if input.slice(at, end) != word {
+        return _, errors.new("json: expected `\(word)` at \(at)")
+    }
+    return Step{value: value, next: end}, nil
+}
+
+fn parse_object(input: str, at: int) -> (Step, error) {
+    var entries: {str: Json} = {}
+    var i = skip_space(input, at + 1)
+    if peek(input, i) == "}" {
+        return Step{value: Json.Object(entries), next: i + 1}, nil
+    }
+    for {
+        let (key, err) = parse_string(input, i)
+        check err
+        i = skip_space(input, key.next)
+        if peek(input, i) != ":" {
+            return _, errors.new("json: expected `:` at \(i)")
+        }
+        let (value, verr) = parse_value(input, skip_space(input, i + 1))
+        check verr
+        entries[key.text] = value.value
+        i = skip_space(input, value.next)
+        let c = peek(input, i)
+        if c == "," {
+            i = skip_space(input, i + 1)
+        } else {
+            if c == "}" {
+                return Step{value: Json.Object(entries), next: i + 1}, nil
+            }
+            return _, errors.new("json: expected `,` or `}` at \(i)")
+        }
+    }
+}
+
+fn parse_array(input: str, at: int) -> (Step, error) {
+    var items: [Json] = []
+    var i = skip_space(input, at + 1)
+    if peek(input, i) == "]" {
+        return Step{value: Json.Array(items), next: i + 1}, nil
+    }
+    for {
+        let (step, err) = parse_value(input, i)
+        check err
+        items.push(step.value)
+        i = skip_space(input, step.next)
+        let c = peek(input, i)
+        if c == "," {
+            i = skip_space(input, i + 1)
+        } else {
+            if c == "]" {
+                return Step{value: Json.Array(items), next: i + 1}, nil
+            }
+            return _, errors.new("json: expected `,` or `]` at \(i)")
+        }
+    }
+}
+
+fn parse_string(input: str, at: int) -> (Text, error) {
+    if peek(input, at) != "\"" {
+        return _, errors.new("json: expected a string at \(at)")
+    }
+    var out = ""
+    var i = at + 1
+    for i < input.len() {
+        let c = input.slice(i, i + 1)
+        if c == "\"" {
+            return Text{text: out, next: i + 1}, nil
+        }
+        if c == "\\" {
+            let e = peek(input, i + 1)
+            if e == "n" {
+                out = out + "\n"
+            } else {
+                if e == "t" {
+                    out = out + "\t"
+                } else {
+                    if e == "r" {
+                        out = out + "\r"
+                    } else {
+                        // `\"`, `\\`, `\/` — and, deliberately, `\uXXXX`,
+                        // whose digits arrive as themselves. Decoding it needs
+                        // a way to build a character from a code point, and
+                        // `str` has no such operation yet.
+                        out = out + e
+                    }
+                }
+            }
+            i = i + 2
+        } else {
+            out = out + c
+            i = i + 1
+        }
+    }
+    return _, errors.new("json: unterminated string from \(at)")
+}
+
+fn parse_number(input: str, at: int) -> (Step, error) {
+    var i = at
+    var negative = false
+    if peek(input, i) == "-" {
+        negative = true
+        i = i + 1
+    }
+    let start = i
+    var value = 0.0
+    for i < input.len() {
+        let d = digit(peek(input, i))
+        if d < 0 {
+            break
+        }
+        value = value * 10.0 + (d as float)
+        i = i + 1
+    }
+    if i == start {
+        return _, errors.new("json: expected a number at \(at)")
+    }
+    if peek(input, i) == "." {
+        i = i + 1
+        var scale = 1.0
+        for i < input.len() {
+            let d = digit(peek(input, i))
+            if d < 0 {
+                break
+            }
+            scale = scale / 10.0
+            value = value + (d as float) * scale
+            i = i + 1
+        }
+    }
+    let marker = peek(input, i)
+    if marker == "e" {
+        let (scale, next) = exponent(input, i + 1)
+        value = value * scale
+        i = next
+    }
+    if marker == "E" {
+        let (scale, next) = exponent(input, i + 1)
+        value = value * scale
+        i = next
+    }
+    if negative {
+        value = 0.0 - value
+    }
+    return Step{value: Json.Number(value), next: i}, nil
+}
+
+/// The multiplier an exponent stands for, and where it ended.
+fn exponent(input: str, at: int) -> (float, int) {
+    var i = at
+    var negative = false
+    let sign = peek(input, i)
+    if sign == "-" {
+        negative = true
+        i = i + 1
+    }
+    if sign == "+" {
+        i = i + 1
+    }
+    var power = 0
+    for i < input.len() {
+        let d = digit(peek(input, i))
+        if d < 0 {
+            break
+        }
+        power = power * 10 + d
+        i = i + 1
+    }
+    var scale = 1.0
+    for n in 0..power {
+        if negative {
+            scale = scale / 10.0
+        } else {
+            scale = scale * 10.0
+        }
+    }
+    return (scale, i)
+}
+
+fn skip_space(input: str, at: int) -> int {
+    var i = at
+    for i < input.len() {
+        let c = input.slice(i, i + 1)
+        if c != " " {
+            if c != "\n" {
+                if c != "\t" {
+                    if c != "\r" {
+                        return i
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return i
+}
+
+fn peek(input: str, at: int) -> str {
+    if at < 0 {
+        return ""
+    }
+    if at >= input.len() {
+        return ""
+    }
+    return input.slice(at, at + 1)
+}
+
+/// The value of a decimal digit, or -1.
+fn digit(c: str) -> int {
+    if c.len() != 1 {
+        return -1
+    }
+    return "0123456789".index_of(c)
+}
+
+// ---- writing ---------------------------------------------------------------
+
+/// A value as compact JSON.
+pub fn stringify(value: Json) -> str {
+    return match value {
+        Null => "null",
+        Bool(b) => if b { "true" } else { "false" },
+        Number(n) => number(n),
+        Text(s) => quote(s),
+        Array(list) => "[" + join(map(list, |item: Json| stringify(item)), ",") + "]",
+        Object(entries) => "{" + join(pairs(entries), ",") + "}",
+    }
+}
+
+fn pairs(entries: {str: Json}) -> [str] {
+    var out: [str] = []
+    // Insertion order, which the specification guarantees for a map — so a
+    // document read and written again keeps its field order.
+    for (key, value) in entries {
+        out.push(quote(key) + ":" + stringify(value))
+    }
+    return out
+}
+
+/// A number without a trailing `.0`: JSON has one numeric type, and `1.0` and
+/// `1` mean the same thing to everything that reads it.
+fn number(n: float) -> str {
+    let whole = n as int
+    if (whole as float) == n {
+        return "\(whole)"
+    }
+    return "\(n)"
+}
+
+fn quote(s: str) -> str {
+    var out = "\""
+    for i in 0..s.len() {
+        let c = s.slice(i, i + 1)
+        if c == "\"" {
+            out = out + "\\\""
+        } else {
+            if c == "\\" {
+                out = out + "\\\\"
+            } else {
+                if c == "\n" {
+                    out = out + "\\n"
+                } else {
+                    if c == "\t" {
+                        out = out + "\\t"
+                    } else {
+                        out = out + c
+                    }
+                }
+            }
+        }
+    }
+    return out + "\""
+}
+
+/// A value as indented JSON, for something a person will read.
+pub fn pretty(value: Json) -> str {
+    return indent_value(value, 0)
+}
+
+fn indent_value(value: Json, depth: int) -> str {
+    let pad = spaces(depth + 1)
+    let close = spaces(depth)
+    return match value {
+        Array(list) => if list.len() == 0 {
+            "[]"
+        } else {
+            "[\n" + join(map(list, |item: Json| pad + indent_value(item, depth + 1)), ",\n") + "\n" + close + "]"
+        },
+        Object(entries) => if entries.len() == 0 {
+            "{}"
+        } else {
+            "{\n" + join(indented_pairs(entries, depth + 1), ",\n") + "\n" + close + "}"
+        },
+        other => stringify(other),
+    }
+}
+
+fn indented_pairs(entries: {str: Json}, depth: int) -> [str] {
+    let pad = spaces(depth)
+    var out: [str] = []
+    for (key, value) in entries {
+        out.push(pad + quote(key) + ": " + indent_value(value, depth))
+    }
+    return out
+}
+
+fn spaces(depth: int) -> str {
+    var out = ""
+    for i in 0..depth {
+        out = out + "  "
+    }
+    return out
+}
+
+// ---- taking a value apart ---------------------------------------------------
+//
+// `json.decode<T>` — a document straight into a user's own struct — needs
+// compile-time derivation, which is the same machinery `Eq`, `Hash` and
+// `Debug` derivation want, and none of it exists yet. Until it does a program
+// takes a document apart with these, which is more typing and no less safe:
+// each yields an optional, so a missing or mistyped field is a value to handle
+// rather than a surprise.
+
+/// A field of an object.
+///
+/// Every accessor takes an **optional** value and yields one, which is what
+/// makes them chain: `json.field(json.field(doc, "a"), "b")` reads left to
+/// right and yields nil the moment anything is missing. A plain `Json` is
+/// accepted wherever an `Option<Json>` is wanted, so the first call in a chain
+/// needs nothing special.
+///
+/// Kite has no `?.`, and this is why it does not need one: an operation that
+/// might find nothing says so in its result type, and the branch is taken once
+/// at the end rather than hidden at every step.
+pub fn field(value: Option<Json>, key: str) -> Option<Json> {
+    if value == nil {
+        return nil
+    }
+    return match value {
+        Object(entries) => entries[key],
+        other => nil,
+    }
+}
+
+pub fn at(value: Option<Json>, index: int) -> Option<Json> {
+    if value == nil {
+        return nil
+    }
+    return match value {
+        Array(list) => list.get(index),
+        other => nil,
+    }
+}
+
+pub fn text(value: Option<Json>) -> Option<str> {
+    if value == nil {
+        return nil
+    }
+    return match value {
+        Text(s) => s,
+        other => nil,
+    }
+}
+
+pub fn number_of(value: Option<Json>) -> Option<float> {
+    if value == nil {
+        return nil
+    }
+    return match value {
+        Number(n) => n,
+        other => nil,
+    }
+}
+
+pub fn int_of(value: Option<Json>) -> Option<int> {
+    if value == nil {
+        return nil
+    }
+    return match value {
+        Number(n) => n as int,
+        other => nil,
+    }
+}
+
+pub fn bool_of(value: Option<Json>) -> Option<bool> {
+    if value == nil {
+        return nil
+    }
+    return match value {
+        Bool(b) => b,
+        other => nil,
+    }
+}
+
+/// The elements of an array, or nothing at all — a caller iterating them
+/// wants a slice rather than a branch.
+pub fn items(value: Option<Json>) -> [Json] {
+    if value == nil {
+        return []
+    }
+    return match value {
+        Array(list) => list,
+        other => [],
+    }
+}
+
+/// A field's text, or a fallback — the shape most configuration reading takes.
+pub fn text_or(value: Option<Json>, key: str, fallback: str) -> str {
+    let s = text(field(value, key))
+    if s == nil {
+        return fallback
+    }
+    return s
+}
+
+pub fn int_or(value: Option<Json>, key: str, fallback: int) -> int {
+    let n = int_of(field(value, key))
+    if n == nil {
+        return fallback
+    }
+    return n
+}
+
+pub fn bool_or(value: Option<Json>, key: str, fallback: bool) -> bool {
+    let b = bool_of(field(value, key))
+    if b == nil {
+        return fallback
+    }
+    return b
+}

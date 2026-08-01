@@ -156,6 +156,9 @@ pub enum Op {
     MapGet { dst: Reg, obj: Reg, key: Reg },
     MapSet { obj: Reg, key: Reg, src: Reg },
     MapLen { dst: Reg, obj: Reg },
+    /// A map's keys or values as a slice, in insertion order.
+    MapKeys { dst: Reg, obj: Reg },
+    MapValues { dst: Reg, obj: Reg },
     /// Elements occupy `base .. base + count`.
     NewSlice { dst: Reg, base: Reg, count: u8 },
     /// Traps when out of range: an index bug is a program bug.
@@ -333,6 +336,8 @@ impl fmt::Display for Op {
             NewPair { dst, value, error } => {
                 write!(f, "{:<12} r{}, r{}, r{}", "new.pair", dst, value, error)
             }
+            MapKeys { dst, obj } => un(f, "map.keys", dst, obj),
+            MapValues { dst, obj } => un(f, "map.values", dst, obj),
             PairValue { dst, obj } => write!(f, "{:<12} r{}, r{}", "pair.value", dst, obj),
             PairError { dst, obj } => write!(f, "{:<12} r{}, r{}", "pair.error", dst, obj),
             NewError { dst, message } => write!(f, "{:<12} r{}, r{}", "new.error", dst, message),

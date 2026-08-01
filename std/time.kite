@@ -1,0 +1,59 @@
+// std/time — the clock, and what to say about it.
+//
+// `time.now()` is a compiler builtin: it reads the runtime's clock in
+// milliseconds. The clock is **virtual** on the bytecode VM and in the
+// generated glue — when every task is waiting on a deadline it jumps to the
+// earliest — so a program that sleeps costs no real time under test and both
+// backends agree on the order things happened in.
+
+/// Milliseconds in one second.
+pub fn seconds(n: int) -> int {
+    return n * 1000
+}
+
+pub fn minutes(n: int) -> int {
+    return n * 60000
+}
+
+pub fn hours(n: int) -> int {
+    return n * 3600000
+}
+
+pub fn millis(n: int) -> int {
+    return n
+}
+
+/// How long since a reading taken earlier.
+pub fn since(start: int) -> int {
+    return time.now() - start
+}
+
+/// A duration in the largest unit that keeps it readable.
+pub fn show(ms: int) -> str {
+    if ms < 1000 {
+        return "\(ms)ms"
+    }
+    if ms < 60000 {
+        return "\(ms / 1000).\((ms % 1000) / 100)s"
+    }
+    if ms < 3600000 {
+        return "\(ms / 60000)m \((ms % 60000) / 1000)s"
+    }
+    return "\(ms / 3600000)h \((ms % 3600000) / 60000)m"
+}
+
+/// `hh:mm:ss` from a duration, for a stopwatch or a progress line.
+pub fn clock(ms: int) -> str {
+    let total = ms / 1000
+    let h = total / 3600
+    let m = (total % 3600) / 60
+    let s = total % 60
+    return "\(pad2(h)):\(pad2(m)):\(pad2(s))"
+}
+
+fn pad2(n: int) -> str {
+    if n < 10 {
+        return "0\(n)"
+    }
+    return "\(n)"
+}

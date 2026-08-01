@@ -345,6 +345,45 @@ pub fn run(chunk: &Chunk, out: &mut dyn Write) -> Result<(), Trap> {
     vm.drive()
 }
 
+/// The message a test's result carries, or `None` when it passed.
+///
+/// A test returns `(int, error)`; the error slot is what says whether it
+/// passed. A bare `error` is accepted too, for a test written that way.
+pub fn failure_message(value: &Value) -> Option<String> {
+    match value {
+        Value::Pair(p) => failure_message(&p.1),
+        Value::Err(message) => Some(message.to_string()),
+        _ => None,
+    }
+}
+
+/// Run one function by name and hand back what it returned.
+///
+/// This is what `kitec test` drives: a test is an ordinary function, found by
+/// its name, and its result is an `error` the runner reports.
+pub fn run_function(chunk: &Chunk, name: &str, out: &mut dyn Write) -> Result<Value, Trap> {
+    let index = chunk
+        .functions
+        .iter()
+        .position(|f| f.name == name)
+        .ok_or(Trap::NoEntryPoint)? as u32;
+    let mut vm = Vm {
+        chunk,
+        out,
+        regs: Vec::new(),
+        frames: Vec::new(),
+        tasks: Vec::new(),
+        clock: 0,
+        wake_request: None,
+        park_request: false,
+        floor: 0,
+        result: Value::Unit,
+    };
+    vm.execute(index)?;
+    vm.drive()?;
+    Ok(std::mem::replace(&mut vm.result, Value::Unit))
+}
+
 struct Vm<'a> {
     chunk: &'a Chunk,
     out: &'a mut dyn Write,
@@ -842,6 +881,24 @@ impl<'a> Vm<'a> {
                         return Err(Trap::TypeConfusion { op: "len", found: m.type_name() });
                     };
                     self.set(base, dst, Value::Int(entries.len() as i64));
+                }
+
+                Op::MapKeys { dst, obj } | Op::MapValues { dst, obj } => {
+                    let keys = matches!(proto.code[pc], Op::MapKeys { .. });
+                    let m = self.get(base, obj);
+                    let Value::Map(entries) = m else {
+                        return Err(Trap::TypeConfusion {
+                            op: "keys",
+                            found: m.type_name(),
+                        });
+                    };
+                    // Insertion order, which the specification guarantees, so
+                    // `keys` and `values` line up element for element.
+                    let items: Vec<Value> = entries
+                        .iter()
+                        .map(|(k, v)| if keys { k.clone() } else { v.clone() })
+                        .collect();
+                    self.set(base, dst, Value::Slice(Rc::new(items)));
                 }
 
                 Op::NewSlice { dst, base: arg_base, count } => {

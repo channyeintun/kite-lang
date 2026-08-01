@@ -595,6 +595,14 @@ impl<'a> FnLowerer<'a> {
                 let k = self.operand(key);
                 Rvalue::MapGet { base: b, key: k }
             }
+            hir::ExprKind::MapKeys { base } => {
+                let b = self.operand(base);
+                Rvalue::MapKeys { base: b }
+            }
+            hir::ExprKind::MapValues { base } => {
+                let b = self.operand(base);
+                Rvalue::MapValues { base: b }
+            }
             hir::ExprKind::MapLen { base } => {
                 let b = self.operand(base);
                 Rvalue::MapLen { base: b }

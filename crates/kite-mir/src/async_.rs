@@ -561,6 +561,8 @@ impl Builder<'_> {
                     Rvalue::MapGet { base: shift(base), key: shift(key) }
                 }
                 Rvalue::MapLen { base } => Rvalue::MapLen { base: shift(base) },
+                Rvalue::MapKeys { base } => Rvalue::MapKeys { base: shift(base) },
+                Rvalue::MapValues { base } => Rvalue::MapValues { base: shift(base) },
                 Rvalue::SliceNew { elems } => {
                     Rvalue::SliceNew { elems: elems.into_iter().map(shift).collect() }
                 }

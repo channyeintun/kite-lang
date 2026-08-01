@@ -1815,6 +1815,60 @@ impl<'a> Emitter<'a> {
                 return true;
             }
 
+            // A map's keys or values as a slice, in insertion order. The map
+            // holds parallel arrays already, so this is a copy of one of them
+            // into a slice-shaped array — a copy rather than a share, because
+            // the two array types are declared separately and a slice is a
+            // value the caller may go on to modify.
+            mir::Rvalue::MapKeys { base } | mir::Rvalue::MapValues { base } => {
+                let keys = matches!(value, mir::Rvalue::MapKeys { .. });
+                let Some(ml) = self.map_of(base) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                let elem = if keys { ml.key_ty } else { ml.value_ty };
+                let (src, field) = if keys { (ml.keys, 0) } else { (ml.values, 1) };
+                let Some(dst_ty) = self.layout.slice_type(elem) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                // Length, then a fresh array of the slice's own type.
+                self.operand(func, base);
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: ml.record,
+                    field_index: field,
+                });
+                func.instruction(&Instruction::ArrayLen);
+                func.instruction(&Instruction::ArrayNewDefault(dst_ty));
+                let hold = self
+                    .slice_scratch
+                    .get(&TyId(dst_ty))
+                    .copied()
+                    .unwrap_or(self.scratch);
+                func.instruction(&Instruction::LocalSet(hold));
+                // array.copy takes dest, dest_offset, src, src_offset, len.
+                func.instruction(&Instruction::LocalGet(hold));
+                func.instruction(&Instruction::I32Const(0));
+                self.operand(func, base);
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: ml.record,
+                    field_index: field,
+                });
+                func.instruction(&Instruction::I32Const(0));
+                self.operand(func, base);
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: ml.record,
+                    field_index: field,
+                });
+                func.instruction(&Instruction::ArrayLen);
+                func.instruction(&Instruction::ArrayCopy {
+                    array_type_index_dst: dst_ty,
+                    array_type_index_src: src,
+                });
+                func.instruction(&Instruction::LocalGet(hold));
+                return true;
+            }
+
             mir::Rvalue::MapLen { base } => {
                 let Some(ml) = self.map_of(base) else {
                     func.instruction(&Instruction::Unreachable);

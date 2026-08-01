@@ -296,6 +296,11 @@ pub enum ExprKind {
     /// never a zero value.
     MapGet { base: Box<Expr>, key: Box<Expr> },
     MapLen { base: Box<Expr> },
+    /// `m.keys()` and `m.values()`, in insertion order — which the
+    /// specification guarantees, so both are ordinary slices and iterating one
+    /// alongside the other lines up.
+    MapKeys { base: Box<Expr> },
+    MapValues { base: Box<Expr> },
     /// `[1, 2, 3]`
     SliceNew { elems: Vec<Expr> },
     /// `xs[i]` — bounds-checked, and traps on failure because an out-of-range
@@ -725,6 +730,8 @@ impl Program {
             ExprKind::MapNew { entries } => format!("{{{} entries}}", entries.len() / 2),
             ExprKind::MapGet { base, key } => format!("{}[{}]", self.expr(base), self.expr(key)),
             ExprKind::MapLen { base } => format!("{}.len()", self.expr(base)),
+            ExprKind::MapKeys { base } => format!("{}.keys()", self.expr(base)),
+            ExprKind::MapValues { base } => format!("{}.values()", self.expr(base)),
             ExprKind::TupleNew { elems } => {
                 let a: Vec<String> = elems.iter().map(|x| self.expr(x)).collect();
                 format!("({})", a.join(", "))

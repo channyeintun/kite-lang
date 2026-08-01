@@ -149,6 +149,9 @@ pub enum Rvalue {
     MapNew { entries: Vec<Operand> },
     MapGet { base: Operand, key: Operand },
     MapLen { base: Operand },
+    /// A map's keys and values as slices, in insertion order.
+    MapKeys { base: Operand },
+    MapValues { base: Operand },
     SliceNew { elems: Vec<Operand> },
     IsNil { value: Operand },
     Wrap { value: Operand },
@@ -360,6 +363,8 @@ impl fmt::Display for Rvalue {
             Rvalue::MapNew { entries } => write!(f, "{{{} entries}}", entries.len() / 2),
             Rvalue::MapGet { base, key } => write!(f, "{}[{}]", base, key),
             Rvalue::MapLen { base } => write!(f, "len {}", base),
+            Rvalue::MapKeys { base } => write!(f, "keys {}", base),
+            Rvalue::MapValues { base } => write!(f, "values {}", base),
             Rvalue::TupleNew { elems } => {
                 write!(f, "(")?;
                 write_operands(f, elems)?;

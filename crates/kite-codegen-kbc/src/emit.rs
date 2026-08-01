@@ -351,6 +351,14 @@ impl<'a> Emitter<'a> {
                 let obj = self.operand_reg(base, 0);
                 self.code.push(Op::MapLen { dst, obj });
             }
+            mir::Rvalue::MapKeys { base } => {
+                let obj = self.operand_reg(base, 0);
+                self.code.push(Op::MapKeys { dst, obj });
+            }
+            mir::Rvalue::MapValues { base } => {
+                let obj = self.operand_reg(base, 0);
+                self.code.push(Op::MapValues { dst, obj });
+            }
             mir::Rvalue::TupleNew { elems } => {
                 self.stage_args(elems);
                 self.code.push(Op::NewTuple {

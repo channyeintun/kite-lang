@@ -1,0 +1,114 @@
+// std/fmt — laying text out in columns.
+//
+// There is no format-string language in Kite, and there is not going to be
+// one: `\(x)` interpolation calls `Display.show` and has no injection surface
+// and nothing to learn. What interpolation cannot do is *align* things, which
+// is what this module is for.
+
+/// `s` at least `width` characters wide, padded on the right.
+pub fn pad(s: str, width: int) -> str {
+    var out = s
+    for out.len() < width {
+        out = out + " "
+    }
+    return out
+}
+
+/// `s` at least `width` characters wide, padded on the left.
+pub fn pad_left(s: str, width: int) -> str {
+    var out = s
+    for out.len() < width {
+        out = " " + out
+    }
+    return out
+}
+
+/// `s` centred in `width`, with any odd space going to the right.
+pub fn centre(s: str, width: int) -> str {
+    let spare = width - s.len()
+    if spare <= 0 {
+        return s
+    }
+    return pad(pad_left(s, s.len() + spare / 2), width)
+}
+
+/// `s` cut to `width`, with an ellipsis when something was cut.
+pub fn ellipsis(s: str, width: int) -> str {
+    if s.len() <= width {
+        return s
+    }
+    if width <= 1 {
+        return "…"
+    }
+    return s.slice(0, width - 1) + "…"
+}
+
+/// A float with exactly `places` digits after the point.
+///
+/// Rounds half away from zero, which is what most people mean, and does the
+/// work in integers so the result does not depend on how the host prints a
+/// float.
+pub fn fixed(x: float, places: int) -> str {
+    var scale = 1
+    for i in 0..places {
+        scale = scale * 10
+    }
+    let negative = x < 0.0
+    let magnitude = absf(x) * (scale as float) + 0.5
+    let units = magnitude as int
+    let whole = units / scale
+    let frac = units % scale
+    let sign = if negative { "-" } else { "" }
+    if places <= 0 {
+        return "\(sign)\(whole)"
+    }
+    return "\(sign)\(whole).\(pad_zeros(frac, places))"
+}
+
+/// A percentage, to one decimal place.
+pub fn percent(part: float, whole: float) -> str {
+    if whole == 0.0 {
+        return "—"
+    }
+    return fixed(part / whole * 100.0, 1) + "%"
+}
+
+/// An integer with thousands separators.
+pub fn grouped(n: int) -> str {
+    let digits = "\(abs(n))"
+    var out = ""
+    var seen = 0
+    var i = digits.len() - 1
+    for i >= 0 {
+        out = digits.slice(i, i + 1) + out
+        seen = seen + 1
+        if seen % 3 == 0 {
+            if i > 0 {
+                out = "," + out
+            }
+        }
+        i -= 1
+    }
+    if n < 0 {
+        return "-" + out
+    }
+    return out
+}
+
+/// A row of columns, each padded to its width.
+pub fn row(cells: [str], widths: [int]) -> str {
+    var out = ""
+    for i in 0..cells.len() {
+        let width = if i < widths.len() { widths[i] } else { 0 }
+        out = out + pad(cells[i], width)
+    }
+    return out
+}
+
+fn pad_zeros(n: int, places: int) -> str {
+    var out = "\(n)"
+    for out.len() < places {
+        out = "0" + out
+    }
+    return out
+}

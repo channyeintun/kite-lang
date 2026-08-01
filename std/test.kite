@@ -1,1 +1,104 @@
-// std/test — see docs/06-roadmap.md
+// std/test — writing tests, and what a failure says.
+//
+// A test is a `pub` function whose name starts with `test_` and which returns
+// `(int, error)`. `kitec test file.kite` finds them, runs each, and reports.
+//
+// Assertions return an `error`, so `check` propagates the first failure and a
+// test reads as a list of claims:
+//
+// ```kite
+// pub fn test_adding() -> (int, error) {
+//     check test.equal_int(add(2, 2), 4, "two and two")
+//     check test.is_true(add(1, 1) == 2, "one and one")
+//     return 0, nil
+// }
+// ```
+//
+// There is no assertion that *traps*: a failed test should report and let the
+// rest run, and a trap is not catchable in Kite by design.
+
+/// Passes when `cond` holds.
+pub fn is_true(cond: bool, what: str) -> error {
+    if cond {
+        return nil
+    }
+    return errors.new("\(what): expected true")
+}
+
+pub fn is_false(cond: bool, what: str) -> error {
+    if cond {
+        return errors.new("\(what): expected false")
+    }
+    return nil
+}
+
+pub fn equal_int(found: int, want: int, what: str) -> error {
+    if found == want {
+        return nil
+    }
+    return errors.new("\(what): expected \(want), found \(found)")
+}
+
+pub fn equal_str(found: str, want: str, what: str) -> error {
+    if found == want {
+        return nil
+    }
+    return errors.new("\(what): expected \"\(want)\", found \"\(found)\"")
+}
+
+pub fn equal_bool(found: bool, want: bool, what: str) -> error {
+    if found == want {
+        return nil
+    }
+    return errors.new("\(what): expected \(want), found \(found)")
+}
+
+/// Floats compare within a tolerance, because comparing them exactly is
+/// almost never what is meant — the compiler warns about `==` on floats for
+/// the same reason.
+pub fn equal_float(found: float, want: float, tolerance: float, what: str) -> error {
+    if absf(found - want) <= tolerance {
+        return nil
+    }
+    return errors.new("\(what): expected \(want) ± \(tolerance), found \(found)")
+}
+
+pub fn equal_ints(found: [int], want: [int], what: str) -> error {
+    if found == want {
+        return nil
+    }
+    return errors.new("\(what): expected [\(join_ints(want))], found [\(join_ints(found))]")
+}
+
+pub fn equal_strs(found: [str], want: [str], what: str) -> error {
+    if found == want {
+        return nil
+    }
+    return errors.new("\(what): expected [\(join(want, ", "))], found [\(join(found, ", "))]")
+}
+
+/// Passes when an error happened, which is what a test of a failure path
+/// wants: a function that should have refused and did not is a bug.
+pub fn failed(err: error, what: str) -> error {
+    if err == nil {
+        return errors.new("\(what): expected a failure, found none")
+    }
+    return nil
+}
+
+/// Passes when nothing went wrong, carrying the message onwards when it did.
+pub fn ok(err: error, what: str) -> error {
+    if err == nil {
+        return nil
+    }
+    return errors.new("\(what): \(err.message())")
+}
+
+/// Fails outright, for a branch that should not have been reached.
+pub fn fail(what: str) -> error {
+    return errors.new(what)
+}
+
+fn join_ints(items: [int]) -> str {
+    return join(map(items, |n: int| "\(n)"), ", ")
+}

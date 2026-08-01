@@ -1,0 +1,75 @@
+// std/json's own tests.
+
+use std/test
+use std/json
+
+fn parsed(doc: str) -> json.Json {
+    let (value, err) = json.parse(doc)
+    if err != nil {
+        return json.Json.Text("parse failed: \(err.message())")
+    }
+    return value
+}
+
+fn roundtrip(doc: str) -> str {
+    return json.stringify(parsed(doc))
+}
+
+fn checks() -> [error] {
+    var out: [error] = []
+
+    out.push(test.equal_str(roundtrip("null"), "null", "null"))
+    out.push(test.equal_str(roundtrip("true"), "true", "true"))
+    out.push(test.equal_str(roundtrip("  42 "), "42", "a number with space around it"))
+    out.push(test.equal_str(roundtrip("-1.5"), "-1.5", "a negative float"))
+    out.push(test.equal_str(roundtrip("1e3"), "1000", "an exponent"))
+    out.push(test.equal_str(roundtrip("1.5e-2"), "0.015", "a negative exponent"))
+    out.push(test.equal_str(roundtrip("\"hi\""), "\"hi\"", "a string"))
+    out.push(test.equal_str(roundtrip("[]"), "[]", "an empty array"))
+    out.push(test.equal_str(roundtrip("{}"), "{}", "an empty object"))
+    out.push(test.equal_str(roundtrip("[1,[2,[3]]]"), "[1,[2,[3]]]", "nesting"))
+    out.push(test.equal_str(
+        roundtrip("{\"b\": 1, \"a\": 2}"),
+        "{\"b\":1,\"a\":2}",
+        "objects keep insertion order",
+    ))
+    out.push(test.equal_str(roundtrip("\"a\\nb\""), "\"a\\nb\"", "an escape survives a round trip"))
+
+    let doc = parsed("{\"name\": \"kite\", \"n\": 3, \"tags\": [\"a\", \"b\"], \"deep\": {\"x\": true}}")
+    out.push(test.equal_str(json.text_or(doc, "name", "?"), "kite", "text_or"))
+    out.push(test.equal_int(json.int_or(doc, "n", 0), 3, "int_or"))
+    out.push(test.equal_int(json.int_or(doc, "missing", -1), -1, "int_or falls back"))
+    out.push(test.equal_int(json.items(json.field(doc, "tags")).len(), 2, "items"))
+
+    let deep = json.field(doc, "deep")
+    let flag = json.bool_of(json.field(deep, "x"))
+    out.push(test.is_true(if flag == nil { false } else { flag }, "a nested field"))
+
+    let first = json.at(json.field(doc, "tags"), 0)
+    out.push(test.equal_str(json.text_or(doc, "name", "?"), "kite", "text_or again"))
+    let text = json.text(first)
+    out.push(test.equal_str(if text == nil { "?" } else { text }, "a", "at"))
+
+    // Failures are values, with the position in the message.
+    let (bad, err) = json.parse("{\"a\": }")
+    out.push(test.failed(err, "a malformed document"))
+    let (trailing, terr) = json.parse("1 2")
+    out.push(test.failed(terr, "trailing text"))
+    let (unterminated, uerr) = json.parse("\"abc")
+    out.push(test.failed(uerr, "an unterminated string"))
+
+    out.push(test.equal_str(json.pretty(parsed("{\"a\":[1]}")), "{\n  \"a\": [\n    1\n  ]\n}", "pretty"))
+
+    return out
+}
+
+fn main() {
+    var failed = 0
+    for e in checks() {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("json: \(checks().len() - failed) passed, \(failed) failed")
+}

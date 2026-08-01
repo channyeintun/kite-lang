@@ -1,0 +1,88 @@
+// std/math, std/fmt, std/time, std/errors and std/buffer.
+
+use std/test
+use std/math
+use std/fmt
+use std/time
+use std/errors
+use std/buffer
+
+fn fails() -> (int, error) {
+    return _, errors.new("no such file")
+}
+
+fn checks() -> [error] {
+    var out: [error] = []
+
+    // ---- math ----
+    out.push(test.equal_float(math.abs(-2.5), 2.5, 0.0001, "abs"))
+    out.push(test.equal_float(math.floor(-1.5), -2.0, 0.0001, "floor"))
+    out.push(test.equal_float(math.ceil(1.2), 2.0, 0.0001, "ceil"))
+    out.push(test.equal_float(math.round(2.5), 3.0, 0.0001, "round"))
+    out.push(test.equal_float(math.round(-2.5), -3.0, 0.0001, "round is half away from zero"))
+    out.push(test.equal_float(math.trunc(-1.9), -1.0, 0.0001, "trunc"))
+    out.push(test.equal_float(math.clamp(11.0, 0.0, 10.0), 10.0, 0.0001, "clamp"))
+    out.push(test.equal_float(math.sqrt(9.0), 3.0, 0.0001, "sqrt"))
+    out.push(test.equal_float(math.sqrt(2.0), 1.41421356, 0.0001, "sqrt of two"))
+    out.push(test.equal_float(math.pow(2.0, 10), 1024.0, 0.0001, "pow"))
+    out.push(test.equal_float(math.hypot(3.0, 4.0), 5.0, 0.0001, "hypot"))
+    out.push(test.equal_float(math.lerp(0.0, 10.0, 0.25), 2.5, 0.0001, "lerp"))
+    out.push(test.equal_int(math.sign(-3.0), -1, "sign"))
+
+    // ---- fmt ----
+    out.push(test.equal_str(fmt.pad("ab", 4), "ab  ", "pad"))
+    out.push(test.equal_str(fmt.pad_left("ab", 4), "  ab", "pad_left"))
+    out.push(test.equal_str(fmt.centre("ab", 6), "  ab  ", "centre"))
+    out.push(test.equal_str(fmt.ellipsis("abcdef", 4), "abc…", "ellipsis"))
+    out.push(test.equal_str(fmt.ellipsis("abc", 4), "abc", "ellipsis leaves short text alone"))
+    out.push(test.equal_str(fmt.fixed(3.14159, 2), "3.14", "fixed"))
+    out.push(test.equal_str(fmt.fixed(2.005, 2), "2.01", "fixed rounds"))
+    out.push(test.equal_str(fmt.fixed(-1.25, 1), "-1.3", "fixed keeps the sign"))
+    out.push(test.equal_str(fmt.grouped(1234567), "1,234,567", "grouped"))
+    out.push(test.equal_str(fmt.grouped(-12), "-12", "grouped keeps the sign"))
+    out.push(test.equal_str(fmt.percent(1.0, 4.0), "25.0%", "percent"))
+
+    // ---- time ----
+    out.push(test.equal_int(time.seconds(2), 2000, "seconds"))
+    out.push(test.equal_str(time.show(999), "999ms", "show milliseconds"))
+    out.push(test.equal_str(time.show(65000), "1m 5s", "show minutes"))
+    out.push(test.equal_str(time.clock(3725000), "01:02:05", "clock"))
+
+    // ---- errors ----
+    let (v, err) = fails()
+    out.push(test.failed(err, "a failing call"))
+    let wrapped = errors.wrap(err, "starting up")
+    out.push(test.equal_str(
+        errors.message_or(wrapped, "?"),
+        "starting up: no such file",
+        "wrap adds context",
+    ))
+    out.push(test.is_true(errors.wrap(nil, "context") == nil, "wrap passes nil through"))
+    out.push(test.is_true(errors.mentions(wrapped, "no such file"), "mentions"))
+
+    // ---- buffer ----
+    var b = buffer.f64(2)
+    b = buffer.push(b, [1.0, 2.0])
+    b = buffer.push(b, [3.0, 4.0])
+    out.push(test.equal_int(buffer.count(b), 2, "count"))
+    out.push(test.equal_float(buffer.get(b, 1, 0), 3.0, 0.0001, "get"))
+    let (low, high) = buffer.extent(b, 1)
+    out.push(test.equal_float(low, 2.0, 0.0001, "extent low"))
+    out.push(test.equal_float(high, 4.0, 0.0001, "extent high"))
+    let edited = buffer.set(b, 0, 0, 9.0)
+    out.push(test.equal_float(buffer.get(edited, 0, 0), 9.0, 0.0001, "set"))
+    out.push(test.equal_float(buffer.get(b, 0, 0), 1.0, 0.0001, "a buffer is a value"))
+
+    return out
+}
+
+fn main() {
+    var failed = 0
+    for e in checks() {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("library: \(checks().len() - failed) passed, \(failed) failed")
+}

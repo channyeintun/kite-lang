@@ -31,8 +31,12 @@ pub const STD_MODULES: &[(&str, &str)] = &[
     ("ui", include_str!("../../../std/ui.kite")),
     ("task", include_str!("../../../std/task.kite")),
     ("math", include_str!("../../../std/math.kite")),
+    ("time", include_str!("../../../std/time.kite")),
+    ("errors", include_str!("../../../std/errors.kite")),
+    ("fmt", include_str!("../../../std/fmt.kite")),
     ("json", include_str!("../../../std/json.kite")),
     ("test", include_str!("../../../std/test.kite")),
+    ("buffer", include_str!("../../../std/buffer.kite")),
     ("http", include_str!("../../../std/http.kite")),
     ("crypto", include_str!("../../../std/crypto.kite")),
 ];
