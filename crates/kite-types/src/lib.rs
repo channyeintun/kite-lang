@@ -2352,6 +2352,13 @@ impl<'a> Checker<'a> {
                 let mut hargs = Vec::new();
                 for a in args {
                     let e = self.expr(a, None);
+                    // A type with `Display` prints through it, so `io.print(p)`
+                    // and `"\(p)"` agree by construction rather than by
+                    // everyone remembering to keep them the same.
+                    if !self.types.is_printable(e.ty) && self.display_method(e.ty).is_some() {
+                        hargs.push(self.render(e));
+                        continue;
+                    }
                     if !self.types.is_printable(e.ty) && !self.types.is_poisoned(e.ty) {
                         let article = self.types.with_article(e.ty);
                         self.diags.push(
@@ -2364,9 +2371,13 @@ impl<'a> Checker<'a> {
                             )
                             .with_primary(e.span, format!("this is {}", article))
                             .with_note(
-                                "`io.print` accepts int, float, bool, and str; the `Display` \
-                                 trait replaces this in Phase 6",
-                            ),
+                                "`io.print` takes `int`, `float`, `bool` and `str` directly, \
+                                 and anything that implements `Display`",
+                            )
+                            .with_note(format!(
+                                "write `impl Display for {} {{ fn show(self) -> str {{ … }} }}`",
+                                self.types.name(e.ty)
+                            )),
                         );
                     }
                     hargs.push(e);
@@ -5102,9 +5113,23 @@ impl<'a> Checker<'a> {
         acc.unwrap_or_else(|| self.lit(ExprKind::Str(String::new()), TyId::STR, span))
     }
 
-    /// A hole's value as text. Primitives render themselves; anything else
-    /// needs `Display`, which the language cannot express until there is a
-    /// prelude to declare it in.
+    /// The `show` method a type gets from implementing `Display`, if it does.
+    ///
+    /// The trait is found by name, because it is declared in the prelude rather
+    /// than in the compiler — which is what lets a program define its own if it
+    /// wants to, and what stops the compiler from having an opinion about how
+    /// anything reads.
+    fn display_method(&self, ty: TyId) -> Option<u32> {
+        let trait_index = self.resolved.type_by_name("Display")?;
+        if !matches!(self.type_ids.get(trait_index as usize)?, Some(TypeTarget::Trait(_))) {
+            return None;
+        }
+        let type_index = self.type_index_of(ty)?;
+        self.resolved.trait_method(type_index, trait_index, "show")
+    }
+
+    /// A value as text. Primitives render themselves; anything else needs
+    /// `Display`.
     fn render(&mut self, v: hir::Expr) -> hir::Expr {
         if self.types.is_poisoned(v.ty) {
             return hir::Expr { span: v.span, kind: ExprKind::Error, ty: TyId::STR };
@@ -5116,17 +5141,30 @@ impl<'a> Checker<'a> {
             let span = v.span;
             return hir::Expr { span, kind: ExprKind::ToStr { value: Box::new(v) }, ty: TyId::STR };
         }
+        if let Some(show) = self.display_method(v.ty) {
+            let span = v.span;
+            let targs = self.receiver_args(v.ty);
+            return hir::Expr {
+                kind: ExprKind::Call { callee: hir::FnId(show), args: vec![v], targs },
+                ty: TyId::STR,
+                span,
+            };
+        }
+        let name = self.types.name(v.ty);
         self.diags.push(
             Diagnostic::error(
                 codes::E0207,
-                format!("`{}` cannot be interpolated", self.types.name(v.ty)),
+                format!("`{}` has no text form", name),
             )
-            .with_primary(v.span, "this has no text form")
+            .with_primary(v.span, "this cannot be rendered")
             .with_note(
-                "interpolation renders `int`, `float`, `bool` and `str`. Anything else \
-                 needs a `Display` implementation, which arrives with the standard \
-                 library in Phase 6",
-            ),
+                "`int`, `float`, `bool` and `str` render themselves. Anything else needs \
+                 `Display`",
+            )
+            .with_note(format!(
+                "write `impl Display for {} {{ fn show(self) -> str {{ … }} }}`",
+                name
+            )),
         );
         hir::Expr { span: v.span, kind: ExprKind::Error, ty: TyId::STR }
     }

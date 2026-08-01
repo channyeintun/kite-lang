@@ -225,9 +225,19 @@ what a prelude is for — but a library shadowing a library leaves the first fil
 calling a name that no longer means what it did, which is a bug in the standard
 library and has bitten twice.
 
+**Also done:** `Display`. `io.print` and `\(x)` interpolation both look for
+it, so implementing it once makes a type printable everywhere — and the two
+cannot disagree, because printing goes through interpolation.
+
+The trait is declared in the prelude, not in the compiler. The checker finds it
+by name, which is what lets a program define its own and what stops the
+compiler from having an opinion about how anything reads. It is deliberately
+**not** derived: a mechanical answer would be wrong more often than right, and
+a `Password` whose derived form printed its field is exactly the case where
+being wrong matters.
+
 **Remaining:** real modules, so a library's names can be *qualified* rather
-than shadowed at all; map methods; `Display`, which would let interpolation
-render user types.
+than shadowed at all; map methods.
 
 ---
 

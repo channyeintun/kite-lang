@@ -1,0 +1,85 @@
+// Display.
+//
+// `io.print` and `\(x)` interpolation both look for this trait, so
+// implementing it once makes a type printable everywhere — and the two cannot
+// disagree, because interpolation is what printing goes through.
+//
+// It is deliberately not derived. How a type reads to a human is a design
+// decision, and a mechanical answer would be wrong more often than right: a
+// `Password` whose derived form printed its field is the obvious case, and it
+// is exactly the case where being wrong matters.
+
+pub struct Point {
+  pub x: int
+  pub y: int
+}
+
+impl Display for Point {
+  fn show(self) -> str {
+    return "(\(self.x), \(self.y))"
+  }
+}
+
+pub struct Money {
+  pub pence: int
+}
+
+impl Display for Money {
+  // A type is free to present itself as something other than its fields.
+  fn show(self) -> str {
+    let pounds = self.pence / 100
+    let rest = abs(self.pence % 100)
+    let pad = if rest < 10 { "0" } else { "" }
+    return "£\(pounds).\(pad)\(rest)"
+  }
+}
+
+pub struct Password {
+  pub secret: str
+}
+
+impl Display for Password {
+  // The reason `Display` is not derived, in one method.
+  fn show(self) -> str {
+    return "********"
+  }
+}
+
+pub enum Shape {
+  Dot
+  Circle(int)
+  Rect(int, int)
+}
+
+impl Display for Shape {
+  fn show(self) -> str {
+    return match self {
+      Dot => "a dot"
+      Circle(r) => "a circle of radius \(r)"
+      Rect(w, h) => "a \(w)×\(h) rectangle"
+    }
+  }
+}
+
+fn main() {
+  let p = Point{x: 3, y: 4}
+
+  // Directly, and inside a string. The same method runs for both.
+  io.print(p)
+  io.print("the point is \(p)")
+
+  io.print(Money{pence: 1999})
+  io.print(Money{pence: 5})
+  io.print("that costs \(Money{pence: 250})")
+
+  io.print(Password{secret: "hunter2"})
+
+  io.print(Shape.Dot)
+  io.print(Shape.Circle(5))
+  io.print("drawing \(Shape.Rect(3, 4))")
+
+  // Anything with `Display` composes with the rest of the library, because
+  // `show` is an ordinary method.
+  let shapes = [Shape.Dot, Shape.Circle(1), Shape.Rect(2, 2)]
+  io.print(join(map(shapes, |s: Shape| s.show()), "; "))
+}

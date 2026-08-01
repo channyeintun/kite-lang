@@ -8,6 +8,19 @@
 // It is deliberately small. Each addition is a name every program must live
 // with, and a name taken is hard to give back.
 
+// ---- display --------------------------------------------------------------
+
+/// How a type presents itself to a human.
+///
+/// `io.print` and `\(x)` interpolation both look for this, so implementing it
+/// once makes a type printable everywhere. It is deliberately **not** derived:
+/// how something reads is a design decision, and a mechanical one would be
+/// wrong more often than it was right — a `Password` that printed its field is
+/// the obvious case.
+pub trait Display {
+  fn show(self) -> str
+}
+
 // ---- slices ---------------------------------------------------------------
 
 /// A new slice with `f` applied to every item. The result need not have the

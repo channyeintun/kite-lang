@@ -136,6 +136,22 @@ fn main() {
          \x20 io.print(where_is(P{ x: 1, y: 5 }))\n}\n",
     ),
     (
+        "display",
+        "struct P {\n  x: int\n  y: int\n}\n\
+         impl Display for P {\n  fn show(self) -> str {\n\
+         \x20   return \"(\\(self.x), \\(self.y))\"\n  }\n}\n\
+         enum S {\n  Dot\n  Circle(int)\n}\n\
+         impl Display for S {\n  fn show(self) -> str {\n\
+         \x20   return match self {\n      Dot => \"dot\"\n\
+         \x20     Circle(r) => \"circle \\(r)\"\n    }\n  }\n}\n\
+         fn main() {\n  let p = P{x: 3, y: 4}\n\
+         \x20 io.print(p)\n  io.print(\"at \\(p)\")\n\
+         \x20 io.print(S.Dot)\n  io.print(S.Circle(9))\n\
+         \x20 io.print(\"\\(S.Dot) and \\(P{x: 0, y: 0})\")\n\
+         \x20 io.print(join(map([p, P{x: 1, y: 1}], |q: P| q.show()), \" \"))\n\
+         \x20 io.print(p.show() == \"(3, 4)\")\n}\n",
+    ),
+    (
         "clipping-and-scrolling",
         "use std/ui\n\
          fn rows() -> Node {\n  var out: [Node] = []\n\
@@ -254,6 +270,22 @@ fn main() {
         "fn main() {\n  let m = {\"a\": 1, \"b\": 2}\n  io.print(m.len())\n\
          \x20 let a = m[\"a\"]\n  io.print(if a == nil { -1 } else { a })\n\
          \x20 let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })\n}\n",
+    ),
+    (
+        "display",
+        "struct P {\n  x: int\n  y: int\n}\n\
+         impl Display for P {\n  fn show(self) -> str {\n\
+         \x20   return \"(\\(self.x), \\(self.y))\"\n  }\n}\n\
+         enum S {\n  Dot\n  Circle(int)\n}\n\
+         impl Display for S {\n  fn show(self) -> str {\n\
+         \x20   return match self {\n      Dot => \"dot\"\n\
+         \x20     Circle(r) => \"circle \\(r)\"\n    }\n  }\n}\n\
+         fn main() {\n  let p = P{x: 3, y: 4}\n\
+         \x20 io.print(p)\n  io.print(\"at \\(p)\")\n\
+         \x20 io.print(S.Dot)\n  io.print(S.Circle(9))\n\
+         \x20 io.print(\"\\(S.Dot) and \\(P{x: 0, y: 0})\")\n\
+         \x20 io.print(join(map([p, P{x: 1, y: 1}], |q: P| q.show()), \" \"))\n\
+         \x20 io.print(p.show() == \"(3, 4)\")\n}\n",
     ),
     (
         "clipping-and-scrolling",
