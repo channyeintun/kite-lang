@@ -197,6 +197,12 @@ pub enum ExprKind {
     /// Tests for nil. Used by `check`, `nil` patterns, and the narrowing an
     /// inline `if` performs.
     IsNil { value: Box<Expr> },
+    /// `T` into `Option<T>`. Emitted at every subsumption site, so the
+    /// representation change is explicit in the IR rather than implied.
+    Wrap { value: Box<Expr> },
+    /// `Option<T>` back to `T`, where narrowing has proved it is present.
+    /// Never emitted on a path where the value could be nil.
+    Unwrap { value: Box<Expr> },
     /// `[1, 2, 3]`
     SliceNew { elems: Vec<Expr> },
     /// `xs[i]` — bounds-checked, and traps on failure because an out-of-range
@@ -231,7 +237,10 @@ pub enum Pattern {
     /// `_`, and any binding — both match everything. A binding also writes the
     /// scrutinee into its local.
     Wildcard,
-    Binding(LocalId),
+    /// Binds the scrutinee. `unwrap` is set where narrowing has proved an
+    /// optional is present, so the local holds the payload rather than the
+    /// optional — the same explicitness an inline `if` gets.
+    Binding { local: LocalId, unwrap: bool },
     Int(i64),
     Float(f64),
     Str(String),
@@ -252,7 +261,7 @@ impl Pattern {
     /// Whether this pattern matches every value, so no test is needed.
     pub fn is_irrefutable(&self) -> bool {
         match self {
-            Pattern::Wildcard | Pattern::Binding(_) => true,
+            Pattern::Wildcard | Pattern::Binding { .. } => true,
             Pattern::Or(alts) => alts.iter().any(|a| a.is_irrefutable()),
             _ => false,
         }
@@ -514,6 +523,8 @@ impl Program {
             ExprKind::ErrorNew { message } => format!("errors.new({})", self.expr(message)),
             ExprKind::ErrorMessage { base } => format!("{}.message()", self.expr(base)),
             ExprKind::IsNil { value } => format!("(is-nil {})", self.expr(value)),
+            ExprKind::Wrap { value } => format!("(wrap {})", self.expr(value)),
+            ExprKind::Unwrap { value } => format!("(unwrap {})", self.expr(value)),
             ExprKind::SliceLen { base } => format!("{}.len()", self.expr(base)),
             ExprKind::SliceGet { base, index } => {
                 format!("{}.get({})", self.expr(base), self.expr(index))

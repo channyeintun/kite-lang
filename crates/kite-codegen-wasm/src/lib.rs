@@ -92,6 +92,10 @@ struct TypeLayout {
     /// Each enum contributes one base record plus one per variant, so its
     /// types are found through this offset table rather than by arithmetic.
     enum_base: Vec<u32>,
+    /// One box record per distinct optional payload type. `Option<T>` is a
+    /// nullable reference to a one-field record, so `nil` is a null reference
+    /// and the payload keeps its own type rather than being erased.
+    option_box: std::collections::HashMap<TyId, u32>,
 }
 
 impl TypeLayout {
@@ -110,6 +114,42 @@ impl TypeLayout {
     fn variant_type(&self, id: kite_hir::EnumId, variant: u32) -> u32 {
         self.enum_base[id.index()] + 1 + variant
     }
+
+    fn option_type(&self, payload: TyId) -> Option<u32> {
+        self.option_box.get(&payload).copied()
+    }
+}
+
+/// Every optional payload type a program mentions, in a stable order.
+fn option_payloads(program: &mir::Program, types: &Types) -> Vec<TyId> {
+    let mut seen = Vec::new();
+    let mut note = |ty: TyId, seen: &mut Vec<TyId>| {
+        if let TyKind::Optional(inner) = types.kind(ty) {
+            if !seen.contains(inner) {
+                seen.push(*inner);
+            }
+        }
+    };
+    for f in &program.fns {
+        note(f.ret, &mut seen);
+        for l in &f.locals {
+            note(l.ty, &mut seen);
+        }
+    }
+    // A struct or variant field may be optional even when no local is.
+    for i in 0..types.struct_count() {
+        for f in &types.struct_def(kite_hir::StructId(i as u32)).fields {
+            note(f.ty, &mut seen);
+        }
+    }
+    for i in 0..types.enum_count() {
+        for v in &types.enum_def(kite_hir::EnumId(i as u32)).variants {
+            for f in &v.fields {
+                note(f.ty, &mut seen);
+            }
+        }
+    }
+    seen
 }
 
 /// Compile a MIR program to a WebAssembly module.
@@ -125,8 +165,19 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
         enum_base.push(next);
         next += 1 + types.enum_def(kite_hir::EnumId(i as u32)).variants.len() as u32;
     }
+    // Optional boxes need the layout to describe their payload, so build a
+    // provisional one first and fill the table in.
+    let mut layout = TypeLayout {
+        struct_base,
+        enum_base,
+        option_box: std::collections::HashMap::new(),
+    };
+    let payloads = option_payloads(program, types);
+    for p in &payloads {
+        layout.option_box.insert(*p, next);
+        next += 1;
+    }
     let aggregate_count = next - IMPORT_COUNT;
-    let layout = TypeLayout { struct_base, enum_base };
 
     // ---- types -------------------------------------------------------------
     let mut type_section = TypeSection::new();
@@ -185,6 +236,19 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
                 }
                 group.push(struct_subtype(fields, Some(base), true));
             }
+        }
+
+        // One box per distinct optional payload. A `nil` is a null reference,
+        // so no tag is needed and the payload keeps its own type.
+        for p in &payloads {
+            group.push(struct_subtype(
+                vec![FieldType {
+                    element_type: StorageType::Val(val_type_with(*p, types, &layout)),
+                    mutable: false,
+                }],
+                None,
+                true,
+            ));
         }
 
         type_section.ty().rec(group);
@@ -279,6 +343,14 @@ fn val_type_with(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
             nullable: true,
             heap_type: HeapType::Concrete(layout.enum_base_type(*e)),
         }),
+        TyKind::Optional(inner) => match layout.option_type(*inner) {
+            Some(idx) => ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(idx),
+            }),
+            // Only reachable while the layout is still being built.
+            None => ValType::I32,
+        },
         // `str` is a constant index for now; with JS String Builtins this
         // becomes `externref` carrying the JS string with no copy.
         _ => ValType::I32,
@@ -491,6 +563,38 @@ impl<'a> Emitter<'a> {
                 return true;
             }
 
+            mir::Rvalue::Wrap { value } => {
+                let Some(idx) = self.option_box_for(value) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                self.operand(func, value);
+                func.instruction(&Instruction::StructNew(idx));
+                return true;
+            }
+
+            // Narrowing has already proved the value is present, so the cast
+            // is a formality the validator needs and the engine elides.
+            mir::Rvalue::Unwrap { value } => {
+                let Some((idx, _)) = self.optional_of(value) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                self.operand(func, value);
+                func.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(idx)));
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: idx,
+                    field_index: 0,
+                });
+                return true;
+            }
+
+            mir::Rvalue::IsNil { value } => {
+                self.operand(func, value);
+                func.instruction(&Instruction::RefIsNull);
+                return true;
+            }
+
             mir::Rvalue::EnumNew { enum_id, variant, fields } => {
                 // Field 0 is the tag; the payload follows.
                 func.instruction(&Instruction::I32Const(*variant as i32));
@@ -585,10 +689,41 @@ impl<'a> Emitter<'a> {
             mir::Operand::Str(s) => {
                 func.instruction(&Instruction::I32Const(s.0 as i32));
             }
-            mir::Operand::Unit | mir::Operand::Nil => {
+            mir::Operand::Unit => {
                 func.instruction(&Instruction::I32Const(0));
             }
+            // `ref.null none` is a subtype of every nullable internal
+            // reference, so one instruction serves every optional type.
+            mir::Operand::Nil => {
+                func.instruction(&Instruction::RefNull(HeapType::Abstract {
+                    shared: false,
+                    ty: wasm_encoder::AbstractHeapType::None,
+                }));
+            }
         }
+    }
+
+    /// The box type for an operand about to be wrapped. The operand carries
+    /// the *payload*, so the box is found by its own type.
+    fn option_box_for(&self, o: &mir::Operand) -> Option<u32> {
+        let payload = match o {
+            mir::Operand::Local(l) => self.f.locals[l.index()].ty,
+            mir::Operand::Int(_) => TyId::INT,
+            mir::Operand::Float(_) => TyId::FLOAT,
+            mir::Operand::Bool(_) => TyId::BOOL,
+            mir::Operand::Str(_) => TyId::STR,
+            _ => return None,
+        };
+        self.layout.option_type(payload)
+    }
+
+    /// The box type and payload type of an operand holding an optional.
+    fn optional_of(&self, o: &mir::Operand) -> Option<(u32, TyId)> {
+        let mir::Operand::Local(l) = o else { return None };
+        let TyKind::Optional(inner) = *self.types.kind(self.f.locals[l.index()].ty) else {
+            return None;
+        };
+        self.layout.option_type(inner).map(|idx| (idx, inner))
     }
 
     /// The enum an operand holds, if it holds one.
@@ -690,14 +825,9 @@ impl<'a> Emitter<'a> {
                     // end. The checker has already proved every path returns a
                     // value, so this path is dead — but it still has to be
                     // well-typed, and `unreachable` is what makes it so.
-                    let usable = matches!(
-                        v,
-                        Some(mir::Operand::Local(_))
-                            | Some(mir::Operand::Int(_))
-                            | Some(mir::Operand::Float(_))
-                            | Some(mir::Operand::Bool(_))
-                            | Some(mir::Operand::Str(_))
-                    );
+                    // `Operand::Unit` is the placeholder MIR emits for a
+                    // function that falls off its end; `Nil` is a real value.
+                    let usable = !matches!(v, None | Some(mir::Operand::Unit));
                     match v {
                         Some(o) if usable => self.operand(func, o),
                         _ => {

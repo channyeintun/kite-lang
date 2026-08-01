@@ -221,8 +221,13 @@ way.
 String concatenation and comparison lower as host calls, since a `str` is an
 index into a table the glue holds and the glue grows it.
 
-Also still to lower: slices, optionals, tuples, maps, and the fallible-pair
-representation error handling uses.
+Optionals lower as a nullable reference to a one-field box, so `nil` is a null
+reference and the payload keeps its own type. Narrowing became an explicit
+`Unwrap` node in HIR: previously the checker rewrote a local'''s type in a
+branch, which the untyped VM tolerated and typed Wasm locals would not.
+
+Also still to lower: slices, tuples, maps, and the fallible-pair representation
+error handling uses.
 
 **`--emit wasm` refuses what it cannot lower**, rather than emitting a module
 that validates and then traps with no explanation:

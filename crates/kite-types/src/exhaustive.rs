@@ -26,7 +26,7 @@ enum Row {
 
 fn lower(p: &Pattern, types: &Types) -> Row {
     match p {
-        Pattern::Wildcard | Pattern::Binding(_) => Row::Any,
+        Pattern::Wildcard | Pattern::Binding { .. } => Row::Any,
         Pattern::Variant { variant, fields, .. } => {
             Row::Variant(*variant, fields.iter().map(|f| lower(f, types)).collect())
         }
@@ -131,7 +131,7 @@ fn is_any(r: &Row) -> bool {
 
 fn covers_nil(p: &Pattern) -> bool {
     match p {
-        Pattern::Wildcard | Pattern::Binding(_) | Pattern::Nil => true,
+        Pattern::Wildcard | Pattern::Binding { .. } | Pattern::Nil => true,
         Pattern::Or(alts) => alts.iter().any(covers_nil),
         _ => false,
     }
@@ -139,7 +139,7 @@ fn covers_nil(p: &Pattern) -> bool {
 
 fn covers_bool(p: &Pattern, want: bool) -> bool {
     match p {
-        Pattern::Wildcard | Pattern::Binding(_) => true,
+        Pattern::Wildcard | Pattern::Binding { .. } => true,
         Pattern::Bool(b) => *b == want,
         Pattern::Or(alts) => alts.iter().any(|a| covers_bool(a, want)),
         _ => false,
@@ -298,7 +298,7 @@ mod tests {
     fn a_binding_covers_everything() {
         let mut types = Types::new();
         let (_, ty) = shape(&mut types);
-        let ps = [Pattern::Binding(LocalId(0))];
+        let ps = [Pattern::Binding { local: LocalId(0), unwrap: false }];
         let refs: Vec<&Pattern> = ps.iter().collect();
         assert!(missing_patterns(ty, &refs, &types).is_empty());
     }
@@ -341,11 +341,11 @@ mod tests {
             vec!["a present value"]
         );
 
-        let ps = [Pattern::Binding(LocalId(0))];
+        let ps = [Pattern::Binding { local: LocalId(0), unwrap: false }];
         let refs: Vec<&Pattern> = ps.iter().collect();
         assert_eq!(names(&missing_patterns(opt, &refs, &types)), Vec::<&str>::new());
 
-        let ps = [Pattern::Nil, Pattern::Binding(LocalId(0))];
+        let ps = [Pattern::Nil, Pattern::Binding { local: LocalId(0), unwrap: false }];
         let refs: Vec<&Pattern> = ps.iter().collect();
         assert!(missing_patterns(opt, &refs, &types).is_empty());
     }

@@ -118,6 +118,8 @@ pub enum Rvalue {
     VariantGet { base: Operand, enum_id: EnumId, variant: u32, index: u32 },
     SliceNew { elems: Vec<Operand> },
     IsNil { value: Operand },
+    Wrap { value: Operand },
+    Unwrap { value: Operand },
     PairNew { value: Operand, error: Operand },
     PairValue { base: Operand },
     PairError { base: Operand },
@@ -294,6 +296,8 @@ impl fmt::Display for Rvalue {
             }
             Rvalue::IndexGet { base, index } => write!(f, "{}[{}]", base, index),
             Rvalue::IsNil { value } => write!(f, "is-nil {}", value),
+            Rvalue::Wrap { value } => write!(f, "wrap {}", value),
+            Rvalue::Unwrap { value } => write!(f, "unwrap {}", value),
             Rvalue::PairNew { value, error } => write!(f, "pair({}, {})", value, error),
             Rvalue::PairValue { base } => write!(f, "{}.0", base),
             Rvalue::PairError { base } => write!(f, "{}.1", base),

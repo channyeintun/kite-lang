@@ -63,7 +63,6 @@ pub fn unsupported(program: &mir::Program, types: &Types) -> Vec<Unsupported> {
                         | mir::Rvalue::PairError { .. }
                         | mir::Rvalue::ErrorNew { .. }
                         | mir::Rvalue::ErrorMessage { .. } => note("error handling"),
-                        mir::Rvalue::IsNil { .. } => note("optionals"),
                         mir::Rvalue::Binary { op, .. } => {
                             if matches!(
                                 op,
@@ -89,7 +88,6 @@ fn unsupported_type(ty: kite_hir::TyId, types: &Types) -> Option<&'static str> {
     match types.kind(ty) {
         Slice(_) => Some("slices"),
         Map(..) => Some("maps"),
-        Optional(_) => Some("optionals"),
         Tuple(_) => Some("tuples"),
         Fallible(_) | Err => Some("error handling"),
         Fn { .. } => Some("function values"),

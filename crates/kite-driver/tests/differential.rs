@@ -142,6 +142,22 @@ fn main() {
          \x20 io.print(\"x\" == \"x\")\n  io.print(\"x\" == \"y\")\n  io.print(\"x\" != \"y\")\n}\n",
     ),
     (
+        "optionals",
+        "struct U {\n  name: str\n}\n\
+         fn find(id: int) -> Option<U> {\n  if id == 1 {\n    return U{ name: \"ada\" }\n  }\n\
+         \x20 return nil\n}\n\
+         fn name_of(id: int) -> str {\n  let u = find(id)\n\
+         \x20 return if u == nil { \"anon\" } else { u.name }\n}\n\
+         fn main() {\n  io.print(name_of(1))\n  io.print(name_of(2))\n\
+         \x20 io.print(match find(1) {\n    nil => \"none\",\n    u => u.name,\n  })\n}\n",
+    ),
+    (
+        "optional-primitives",
+        "fn maybe(n: int) -> Option<int> {\n  if n > 0 {\n    return n\n  }\n  return nil\n}\n\
+         fn main() {\n  let a = maybe(5)\n  io.print(if a == nil { 0 } else { a })\n\
+         \x20 let b = maybe(-1)\n  io.print(if b == nil { 0 } else { b })\n}\n",
+    ),
+    (
         "evaluation-order",
         "fn step(n: int) -> int {\n  io.print(n)\n  return n\n}\nfn main() {\n  let x = step(1) + step(2)\n  io.print(x)\n}\n",
     ),

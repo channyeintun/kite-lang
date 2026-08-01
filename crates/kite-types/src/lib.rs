@@ -219,6 +219,7 @@ pub fn check(
             init: Vec::new(),
             taint: Vec::new(),
             guards: std::collections::HashMap::new(),
+            narrowed: std::collections::HashMap::new(),
             loop_depth: 0,
         };
         let func = match sig.owner {
@@ -303,6 +304,12 @@ struct Checker<'a> {
     /// Which value local each error local guards, so checking the error cleans
     /// the value.
     guards: std::collections::HashMap<u32, u32>,
+    /// Locals currently narrowed out of their optional, and to what.
+    ///
+    /// A local keeps one declared type for its whole life — rewriting it would
+    /// leave the IR describing a local as `T` that the backend allocated as
+    /// `Option<T>`. The narrowed *use* carries an explicit `Unwrap` instead.
+    narrowed: std::collections::HashMap<u32, TyId>,
     loop_depth: u32,
 }
 
@@ -547,7 +554,10 @@ impl<'a> Checker<'a> {
         let local_id = self.resolved.lookup_binding(name.span)?;
         let annotated = l.ty.as_ref().map(|t| resolve_ty(t, self.types, self.diags));
 
-        let init = l.init.as_ref().map(|e| self.expr(e, annotated));
+        let init = l.init.as_ref().map(|e| {
+            let v = self.expr(e, annotated);
+            self.coerce(v, annotated)
+        });
 
         let ty = match (annotated, &init) {
             (Some(a), Some(i)) => {
@@ -596,6 +606,7 @@ impl<'a> Checker<'a> {
         let local_id = self.resolved.lookup_binding(v.name.span)?;
         let annotated = v.ty.as_ref().map(|t| resolve_ty(t, self.types, self.diags));
         let init = self.expr(&v.init, annotated);
+        let init = self.coerce(init, annotated);
 
         let ty = match annotated {
             Some(a) => {
@@ -723,6 +734,7 @@ impl<'a> Checker<'a> {
 
             Some(ast::ReturnValue::Single(e)) => {
                 let value = self.expr(e, Some(sig.ret));
+                let value = self.coerce(value, Some(sig.ret));
                 if sig.ret == TyId::UNIT {
                     self.diags.push(
                         Diagnostic::error(codes::E0200, "returning a value from a `()` function")
@@ -1023,13 +1035,9 @@ impl<'a> Checker<'a> {
             .then_some((id, is_eq))
     }
 
-    /// Narrow a local to its unwrapped type for the branch where it cannot be
-    /// nil. Returns what to restore afterwards.
-    fn apply_narrowing(
-        &mut self,
-        narrowing: Option<(u32, bool)>,
-        in_then: bool,
-    ) -> Option<(u32, TyId)> {
+    /// Narrow a local out of its optional for the branch where it cannot be
+    /// nil. Returns the id to un-narrow afterwards.
+    fn apply_narrowing(&mut self, narrowing: Option<(u32, bool)>, in_then: bool) -> Option<u32> {
         let (id, is_eq) = narrowing?;
         // `x == nil` narrows in the *else*; `x != nil` narrows in the *then*.
         if is_eq == in_then {
@@ -1038,14 +1046,13 @@ impl<'a> Checker<'a> {
         let TyKind::Optional(inner) = *self.types.kind(self.locals[id as usize].ty) else {
             return None;
         };
-        let previous = self.locals[id as usize].ty;
-        self.locals[id as usize].ty = inner;
-        Some((id, previous))
+        self.narrowed.insert(id, inner);
+        Some(id)
     }
 
-    fn undo_narrowing(&mut self, saved: Option<(u32, TyId)>) {
-        if let Some((id, ty)) = saved {
-            self.locals[id as usize].ty = ty;
+    fn undo_narrowing(&mut self, saved: Option<u32>) {
+        if let Some(id) = saved {
+            self.narrowed.remove(&id);
         }
     }
 
@@ -1149,6 +1156,46 @@ impl<'a> Checker<'a> {
             ast::Expr::Unary { op, operand, span } => {
                 let val = self.expr(operand, expected);
                 self.unary(*op, val, *span)
+            }
+
+            // `x == nil` is a nil test, not a structural comparison. Saying so
+            // here keeps it one instruction and keeps `nil` out of the
+            // equality rules entirely.
+            ast::Expr::Binary { op, lhs, rhs, span }
+                if matches!(op, ast::BinaryOp::Eq | ast::BinaryOp::Ne)
+                    && (matches!(lhs.as_ref(), ast::Expr::Nil(_))
+                        || matches!(rhs.as_ref(), ast::Expr::Nil(_))) =>
+            {
+                let subject = if matches!(lhs.as_ref(), ast::Expr::Nil(_)) { rhs } else { lhs };
+                let value = self.expr(subject, None);
+                if !matches!(self.types.kind(value.ty), TyKind::Optional(_))
+                    && value.ty != TyId::ERR
+                    && !self.types.is_poisoned(value.ty)
+                {
+                    let found = self.types.with_article(value.ty);
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0201,
+                            format!("{} can never be nil", found),
+                        )
+                        .with_primary(value.span, "this comparison is always the same")
+                        .with_note("only an optional or an `error` is ever nil"),
+                    );
+                }
+                let test = hir::Expr {
+                    kind: ExprKind::IsNil { value: Box::new(value) },
+                    ty: TyId::BOOL,
+                    span: *span,
+                };
+                if *op == ast::BinaryOp::Eq {
+                    test
+                } else {
+                    hir::Expr {
+                        kind: ExprKind::Unary { op: hir::UnOp::Not, operand: Box::new(test) },
+                        ty: TyId::BOOL,
+                        span: *span,
+                    }
+                }
             }
 
             ast::Expr::Binary { op, lhs, rhs, span } => {
@@ -1353,10 +1400,19 @@ impl<'a> Checker<'a> {
                     // Mark it assigned so one omission yields one diagnostic.
                     self.init[id as usize] = Init::Assigned;
                 }
-                hir::Expr {
+                let declared = self.locals[id as usize].ty;
+                let read = hir::Expr {
                     kind: ExprKind::Local(hir::LocalId(id)),
-                    ty: self.locals[id as usize].ty,
+                    ty: declared,
                     span: p.span,
+                };
+                match self.narrowed.get(&id).copied() {
+                    Some(inner) => hir::Expr {
+                        kind: ExprKind::Unwrap { value: Box::new(read) },
+                        ty: inner,
+                        span: p.span,
+                    },
+                    None => read,
                 }
             }
             Some(Res::Fn(_)) | Some(Res::Builtin(_)) => {
@@ -1461,6 +1517,7 @@ impl<'a> Checker<'a> {
                 for (i, a) in args.iter().enumerate() {
                     let want = sig_params.get(i).copied();
                     let e = self.expr(a, want);
+                    let e = self.coerce(e, want);
                     if let Some(w) = want {
                         self.expect_ty(e.ty, w, e.span, Some(decl_span));
                     }
@@ -2556,7 +2613,12 @@ impl<'a> Checker<'a> {
                 Some(local) => {
                     self.locals[local as usize].ty = bind_ty;
                     self.init[local as usize] = Init::Assigned;
-                    hir::Pattern::Binding(hir::LocalId(local))
+                    hir::Pattern::Binding {
+                        local: hir::LocalId(local),
+                        // The local holds `bind_ty`; the scrutinee is `scrut`.
+                        // They differ exactly when narrowing applied.
+                        unwrap: bind_ty != scrut,
+                    }
                 }
                 // Resolution decided this names a unit variant.
                 None => match self.resolved.lookup_use(name.span) {
@@ -2687,7 +2749,10 @@ impl<'a> Checker<'a> {
                             Some(local) => {
                                 self.locals[local as usize].ty = fty;
                                 self.init[local as usize] = Init::Assigned;
-                                hir::Pattern::Binding(hir::LocalId(local))
+                                hir::Pattern::Binding {
+                                    local: hir::LocalId(local),
+                                    unwrap: false,
+                                }
                             }
                             None => hir::Pattern::Wildcard,
                         },
@@ -3492,6 +3557,25 @@ impl<'a> Checker<'a> {
             }
         }
         out
+    }
+
+    /// Insert the wrap a `T` needs to stand where an `Option<T>` is wanted.
+    ///
+    /// Doing it here, at every site, keeps the representation change visible in
+    /// the IR rather than left for a backend to infer.
+    fn coerce(&mut self, e: hir::Expr, expected: Option<TyId>) -> hir::Expr {
+        let Some(want) = expected else { return e };
+        if e.ty == want || self.types.is_poisoned(e.ty) {
+            return e;
+        }
+        match *self.types.kind(want) {
+            TyKind::Optional(inner) if inner == e.ty => hir::Expr {
+                span: e.span,
+                kind: ExprKind::Wrap { value: Box::new(e) },
+                ty: want,
+            },
+            _ => e,
+        }
     }
 
     fn expect_ty(&mut self, found: TyId, expected: TyId, span: Span, because: Option<Span>) {

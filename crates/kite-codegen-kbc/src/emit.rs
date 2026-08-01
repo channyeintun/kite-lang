@@ -223,6 +223,13 @@ impl<'a> Emitter<'a> {
                 let obj = self.operand_reg(base, 0);
                 self.code.push(Op::ErrorMessage { dst, obj });
             }
+            // The VM's values carry their own type, so an optional needs no
+            // box: wrapping and unwrapping are moves. Only Wasm, whose locals
+            // are typed, needs a representation change here.
+            mir::Rvalue::Wrap { value } | mir::Rvalue::Unwrap { value } => {
+                self.load_into(dst, value);
+            }
+
             mir::Rvalue::IsNil { value } => {
                 let obj = self.operand_reg(value, 0);
                 self.code.push(Op::IsNil { dst, obj });

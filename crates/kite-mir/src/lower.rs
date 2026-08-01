@@ -518,6 +518,14 @@ impl<'a> FnLowerer<'a> {
                 let b = self.operand(base);
                 Rvalue::ErrorMessage { base: b }
             }
+            hir::ExprKind::Wrap { value } => {
+                let v = self.operand(value);
+                Rvalue::Wrap { value: v }
+            }
+            hir::ExprKind::Unwrap { value } => {
+                let v = self.operand(value);
+                Rvalue::Unwrap { value: v }
+            }
             hir::ExprKind::IsNil { value } => {
                 let v = self.operand(value);
                 Rvalue::IsNil { value: v }
@@ -811,7 +819,7 @@ impl<'a> FnLowerer<'a> {
                 });
             }
 
-            hir::Pattern::Wildcard | hir::Pattern::Binding(_) => {
+            hir::Pattern::Wildcard | hir::Pattern::Binding { .. } => {
                 self.terminate(Terminator::Goto(on_match));
             }
         }
@@ -865,8 +873,13 @@ impl<'a> FnLowerer<'a> {
     /// Write the pattern's bindings, once it is known to have matched.
     fn bind_pattern(&mut self, pattern: &hir::Pattern, subject: &Operand) {
         match pattern {
-            hir::Pattern::Binding(local) => {
-                self.assign(Local(local.0), Rvalue::Use(subject.clone()));
+            hir::Pattern::Binding { local, unwrap } => {
+                let value = if *unwrap {
+                    Rvalue::Unwrap { value: subject.clone() }
+                } else {
+                    Rvalue::Use(subject.clone())
+                };
+                self.assign(Local(local.0), value);
             }
             hir::Pattern::Variant { enum_id, variant, fields } => {
                 for (i, sub) in fields.iter().enumerate() {

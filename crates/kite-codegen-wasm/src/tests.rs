@@ -382,8 +382,6 @@ fn unlowered_constructs_are_reported() {
     assert!(gaps("fn f() -> (int, error) {\n  return 1, nil\n}\nfn main() {\n}\n")
         .contains(&"error handling".to_string()));
 
-    assert!(gaps("fn main() {\n  let a: Option<int> = nil\n}\n")
-        .contains(&"optionals".to_string()));
 
     assert!(gaps("fn main() {\n  let xs: [str] = []\n}\n").contains(&"slices".to_string()));
 }
@@ -410,4 +408,42 @@ fn supported_programs_report_no_gaps() {
         SHAPE
     ))
     .is_empty());
+}
+
+// ---- optionals ------------------------------------------------------------
+
+/// `Option<T>` is a nullable reference to a one-field box, so `nil` is a null
+/// reference and the payload keeps its own type rather than being erased.
+#[test]
+fn optionals_validate() {
+    valid(
+        "struct U {\n  name: str\n}\n\
+         fn find(id: int) -> Option<U> {\n  if id == 1 {\n    return U{ name: \"ada\" }\n  }\n\
+         \x20 return nil\n}\n\
+         fn name_of(id: int) -> str {\n  let u = find(id)\n\
+         \x20 return if u == nil { \"anon\" } else { u.name }\n}\n\
+         fn main() {\n  io.print(name_of(1))\n  io.print(name_of(2))\n}\n",
+    );
+}
+
+#[test]
+fn optionals_of_primitives_validate() {
+    valid(
+        "fn maybe(n: int) -> Option<int> {\n  if n > 0 {\n    return n\n  }\n  return nil\n}\n\
+         fn main() {\n  let a = maybe(5)\n  io.print(if a == nil { 0 } else { a })\n\
+         \x20 let b = maybe(-1)\n  io.print(if b == nil { 0 } else { b })\n}\n",
+    );
+}
+
+#[test]
+fn a_nil_pattern_validates() {
+    valid(
+        "fn maybe(n: int) -> Option<int> {\n  return nil\n}\n\
+         fn main() {\n  io.print(match maybe(1) {\n    nil => \"none\",\n    v => \"some\",\n  })\n}\n",
+    );
+}
+
+#[test]
+fn optionals_are_no_longer_an_unsupported_construct() {
+    assert!(gaps("fn f() -> Option<int> {\n  return nil\n}\nfn main() {\n}\n").is_empty());
 }
