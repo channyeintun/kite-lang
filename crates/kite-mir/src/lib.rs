@@ -1,1 +1,1 @@
-// Phase 2+ — see docs/06-roadmap.md
+// Phase 1 — see docs/06-roadmap.md

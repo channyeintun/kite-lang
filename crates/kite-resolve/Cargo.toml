@@ -11,3 +11,7 @@ description = "Name resolution and scoping for Kite"
 kite-span.workspace = true
 kite-diag.workspace = true
 kite-ast.workspace = true
+
+[dev-dependencies]
+kite-lexer.workspace = true
+kite-parser.workspace = true

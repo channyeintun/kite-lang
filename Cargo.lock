@@ -45,9 +45,7 @@ dependencies = [
 name = "kite-hir"
 version = "0.1.0"
 dependencies = [
- "kite-resolve",
  "kite-span",
- "kite-types",
 ]
 
 [[package]]
@@ -65,7 +63,6 @@ version = "0.1.0"
 dependencies = [
  "kite-hir",
  "kite-span",
- "kite-types",
 ]
 
 [[package]]
@@ -84,6 +81,8 @@ version = "0.1.0"
 dependencies = [
  "kite-ast",
  "kite-diag",
+ "kite-lexer",
+ "kite-parser",
  "kite-span",
 ]
 
@@ -97,6 +96,9 @@ version = "0.1.0"
 dependencies = [
  "kite-ast",
  "kite-diag",
+ "kite-hir",
+ "kite-lexer",
+ "kite-parser",
  "kite-resolve",
  "kite-span",
 ]

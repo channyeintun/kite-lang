@@ -5,9 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Typed high-level IR for Kite"
+description = "Typed high-level IR and type representation for Kite"
 
 [dependencies]
 kite-span.workspace = true
-kite-types.workspace = true
-kite-resolve.workspace = true

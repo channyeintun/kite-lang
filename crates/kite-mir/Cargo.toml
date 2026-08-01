@@ -10,4 +10,3 @@ description = "SSA mid-level IR for Kite"
 [dependencies]
 kite-span.workspace = true
 kite-hir.workspace = true
-kite-types.workspace = true

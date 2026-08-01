@@ -5,10 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Type checker for Kite"
+description = "Type checker for Kite; lowers the AST to typed HIR"
 
 [dependencies]
 kite-span.workspace = true
 kite-diag.workspace = true
 kite-ast.workspace = true
 kite-resolve.workspace = true
+kite-hir.workspace = true
+
+[dev-dependencies]
+kite-lexer.workspace = true
+kite-parser.workspace = true
