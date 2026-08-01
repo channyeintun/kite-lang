@@ -1,0 +1,380 @@
+// Layout.
+//
+// A subset of flexbox, written in Kite. It computes where things go; it draws
+// nothing. That separation is the whole point of the design: the same layout
+// feeds a DOM renderer and a canvas renderer, and neither can disagree with
+// the other about where a box ended up, because neither decides.
+//
+// The model is deliberately one layout algorithm rather than several. CSS has
+// block, inline, float, table, flex and grid, and most of the difficulty of
+// writing CSS is knowing which one is in force. Kite has boxes in a row or a
+// column, and that is all — which is enough for application UI, and is what
+// every UI toolkit that started after the web converged on.
+
+pub struct Size {
+  pub width: float
+  pub height: float
+}
+
+pub struct Rect {
+  pub x: float
+  pub y: float
+  pub width: float
+  pub height: float
+}
+
+pub struct Insets {
+  pub top: float
+  pub right: float
+  pub bottom: float
+  pub left: float
+}
+
+/// Which way children are laid out.
+pub enum Axis {
+  Row
+  Column
+}
+
+/// How spare space along the main axis is distributed.
+pub enum Justify {
+  Start
+  Center
+  End
+  SpaceBetween
+}
+
+/// Where a child sits on the cross axis.
+pub enum Align {
+  Start
+  Center
+  End
+  Stretch
+}
+
+pub struct Style {
+  pub axis: Axis
+  pub justify: Justify
+  pub align: Align
+  /// A fixed size, or nil to size from the content.
+  pub width: Option<float>
+  pub height: Option<float>
+  /// Share of the leftover main-axis space. Zero means take none.
+  pub grow: float
+  pub padding: Insets
+  /// Space between children, not before the first or after the last.
+  pub gap: float
+}
+
+/// What a leaf holds. A box with children holds `Empty`; the two are exclusive
+/// because a node that was both would need a rule for which wins, and every
+/// such rule is a rule someone has to remember.
+pub enum Content {
+  Empty
+  Text(str)
+}
+
+pub struct Node {
+  pub name: str
+  pub style: Style
+  pub content: Content
+  pub children: [Node]
+}
+
+/// One laid-out box, in absolute coordinates.
+pub struct Frame {
+  pub name: str
+  pub rect: Rect
+  /// How deep in the tree, which is the order to paint in.
+  pub depth: int
+}
+
+// ---- construction ---------------------------------------------------------
+
+pub fn insets(all: float) -> Insets {
+  return Insets{top: all, right: all, bottom: all, left: all}
+}
+
+pub fn insets_none() -> Insets {
+  return insets(0.0)
+}
+
+pub fn insets_xy(x: float, y: float) -> Insets {
+  return Insets{top: y, right: x, bottom: y, left: x}
+}
+
+/// A style with everything at its default. Kite has no zero values, so a
+/// default is a function rather than an omission — which means there is one
+/// place to read to know what a default is.
+pub fn style() -> Style {
+  return Style{
+    axis: Axis.Row,
+    justify: Justify.Start,
+    align: Align.Start,
+    width: nil,
+    height: nil,
+    grow: 0.0,
+    padding: insets_none(),
+    gap: 0.0,
+  }
+}
+
+pub fn row() -> Style {
+  return style()
+}
+
+pub fn column() -> Style {
+  return Style{..style(), axis: Axis.Column}
+}
+
+pub fn sized(base: Style, width: float, height: float) -> Style {
+  return Style{..base, width: width, height: height}
+}
+
+pub fn grown(base: Style, amount: float) -> Style {
+  return Style{..base, grow: amount}
+}
+
+pub fn padded(base: Style, amount: float) -> Style {
+  return Style{..base, padding: insets(amount)}
+}
+
+pub fn spaced(base: Style, amount: float) -> Style {
+  return Style{..base, gap: amount}
+}
+
+pub fn box_of(name: str, base: Style, children: [Node]) -> Node {
+  return Node{name: name, style: base, content: Content.Empty, children: children}
+}
+
+pub fn text_of(name: str, base: Style, body: str) -> Node {
+  return Node{name: name, style: base, content: Content.Text(body), children: []}
+}
+
+// ---- measurement ----------------------------------------------------------
+
+/// The advance width of one character, in the same units as everything else.
+///
+/// Real text needs shaping — ligatures, kerning, script-specific joining — and
+/// none of that can happen here, because the compiler has no font. This is a
+/// placeholder with a name that says so, and every number it produces is wrong
+/// for proportional text. It is right often enough to lay a tree out and see
+/// the shape, which is what it is for until Phase 8 brings a shaper.
+pub fn nominal_advance() -> float {
+  return 8.0
+}
+
+pub fn nominal_line_height() -> float {
+  return 16.0
+}
+
+pub fn text_size(body: str) -> Size {
+  let chars = body.len()
+  return Size{
+    width: intToFloat(chars) * nominal_advance(),
+    height: nominal_line_height(),
+  }
+}
+
+/// Kite performs no implicit numeric conversion, so this is written out.
+pub fn intToFloat(n: int) -> float {
+  return n as float
+}
+
+fn horizontal(pad: Insets) -> float {
+  return pad.left + pad.right
+}
+
+fn vertical(pad: Insets) -> float {
+  return pad.top + pad.bottom
+}
+
+fn is_row(a: Axis) -> bool {
+  return match a {
+    Row => true
+    Column => false
+  }
+}
+
+/// The size a node wants, ignoring what it is given.
+///
+/// A fixed width or height wins outright. Otherwise a leaf measures its
+/// content and a box measures its children: summed along the main axis with
+/// the gaps, and the largest along the cross axis.
+pub fn measure(node: Node) -> Size {
+  let pad = node.style.padding
+  let inner = measure_content(node)
+
+  var w = inner.width + horizontal(pad)
+  var h = inner.height + vertical(pad)
+  // Narrowing works on a local, not on a path through fields — the compiler
+  // cannot know a field has not changed between the test and the use — so the
+  // optional is bound before it is tested.
+  let fixed_w = node.style.width
+  if fixed_w != nil {
+    w = fixed_w
+  }
+  let fixed_h = node.style.height
+  if fixed_h != nil {
+    h = fixed_h
+  }
+  return Size{width: w, height: h}
+}
+
+fn measure_content(node: Node) -> Size {
+  let body = match node.content {
+    Empty => ""
+    Text(s) => s
+  }
+  if body.len() > 0 {
+    return text_size(body)
+  }
+  if node.children.len() == 0 {
+    return Size{width: 0.0, height: 0.0}
+  }
+
+  let gaps = node.style.gap * intToFloat(node.children.len() - 1)
+  var main = 0.0
+  var cross = 0.0
+  for child in node.children {
+    let size = measure(child)
+    let along = if is_row(node.style.axis) { size.width } else { size.height }
+    let across = if is_row(node.style.axis) { size.height } else { size.width }
+    main = main + along
+    cross = maxf(cross, across)
+  }
+  main = main + gaps
+
+  if is_row(node.style.axis) {
+    return Size{width: main, height: cross}
+  }
+  return Size{width: cross, height: main}
+}
+
+// ---- arrangement ----------------------------------------------------------
+
+/// Lay a tree out inside a viewport, producing one frame per node in paint
+/// order — parents before their children, which is the order a painter needs
+/// and the reverse of the order hit-testing needs.
+pub fn layout(root: Node, viewport: Size) -> [Frame] {
+  let fixed_w = root.style.width
+  let fixed_h = root.style.height
+  let w = if fixed_w != nil { fixed_w } else { viewport.width }
+  let h = if fixed_h != nil { fixed_h } else { viewport.height }
+  return arrange(root, Rect{x: 0.0, y: 0.0, width: w, height: h}, 0)
+}
+
+/// How far in the first child sits.
+fn leading_space(j: Justify, spare: float) -> float {
+  return match j {
+    Start => 0.0
+    Center => spare / 2.0
+    End => spare
+    SpaceBetween => 0.0
+  }
+}
+
+/// The distance between one child and the next. `SpaceBetween` spreads the
+/// spare space into the gaps rather than pushing everything to one side; with
+/// fewer than two children there are no gaps to spread it into.
+fn between_space(j: Justify, gap: float, spare: float, count: int) -> float {
+  return match j {
+    SpaceBetween => if count > 1 { gap + spare / intToFloat(count - 1) } else { gap }
+    Start | Center | End => gap
+  }
+}
+
+/// A child's size across the axis: its own, unless it is being stretched.
+fn cross_size(a: Align, available: float, natural: float) -> float {
+  return match a {
+    Stretch => available
+    Start | Center | End => natural
+  }
+}
+
+fn cross_offset(a: Align, available: float, natural: float) -> float {
+  return match a {
+    Start => 0.0
+    Stretch => 0.0
+    Center => maxf(0.0, (available - natural) / 2.0)
+    End => maxf(0.0, available - natural)
+  }
+}
+
+fn arrange(node: Node, rect: Rect, depth: int) -> [Frame] {
+  var frames = [Frame{name: node.name, rect: rect, depth: depth}]
+  if node.children.len() == 0 {
+    return frames
+  }
+
+  let pad = node.style.padding
+  let inner = Rect{
+    x: rect.x + pad.left,
+    y: rect.y + pad.top,
+    width: maxf(0.0, rect.width - horizontal(pad)),
+    height: maxf(0.0, rect.height - vertical(pad)),
+  }
+
+  let row_axis = is_row(node.style.axis)
+  let available = if row_axis { inner.width } else { inner.height }
+  let gaps = node.style.gap * intToFloat(node.children.len() - 1)
+
+  // Fixed sizes first, then the leftover is shared out by `grow`.
+  var used = 0.0
+  var total_grow = 0.0
+  for child in node.children {
+    let size = measure(child)
+    used = used + (if row_axis { size.width } else { size.height })
+    total_grow = total_grow + child.style.grow
+  }
+  let leftover = maxf(0.0, available - used - gaps)
+
+  // Where the first child starts, and how much sits between children. Only
+  // children that do not grow can be pushed around: if anything grows, there
+  // is no spare space left to distribute.
+  let spare = if total_grow > 0.0 { 0.0 } else { leftover }
+  var cursor = leading_space(node.style.justify, spare)
+  let between = between_space(node.style.justify, node.style.gap, spare, node.children.len())
+
+  for child in node.children {
+    let size = measure(child)
+    var along = if row_axis { size.width } else { size.height }
+    if total_grow > 0.0 {
+      along = along + leftover * (child.style.grow / total_grow)
+    }
+
+    let across_available = if row_axis { inner.height } else { inner.width }
+    let natural = if row_axis { size.height } else { size.width }
+    let across = cross_size(node.style.align, across_available, natural)
+    let offset = cross_offset(node.style.align, across_available, natural)
+
+    let child_rect = if row_axis {
+      Rect{x: inner.x + cursor, y: inner.y + offset, width: along, height: across}
+    } else {
+      Rect{x: inner.x + offset, y: inner.y + cursor, width: across, height: along}
+    }
+    frames = concat(frames, arrange(child, child_rect, depth + 1))
+    cursor = cursor + along + between
+  }
+
+  return frames
+}
+
+/// The topmost frame containing a point, or nil. Frames come out in paint
+/// order, so the last match is the one drawn last and therefore on top.
+pub fn hit(frames: [Frame], x: float, y: float) -> Option<Frame> {
+  var found: Option<Frame> = nil
+  for frame in frames {
+    if contains(frame.rect, x, y) {
+      found = frame
+    }
+  }
+  return found
+}
+
+pub fn contains(rect: Rect, x: float, y: float) -> bool {
+  if x < rect.x || y < rect.y {
+    return false
+  }
+  return x < rect.x + rect.width && y < rect.y + rect.height
+}

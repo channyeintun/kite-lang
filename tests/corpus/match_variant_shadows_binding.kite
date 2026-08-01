@@ -1,0 +1,27 @@
+// Two enums may each declare a `Start`. Which one an unqualified pattern means
+// depends on what is being matched — so the scrutinee decides, and a name that
+// matches one of its variants is that variant rather than a new binding.
+//
+// The arm below is therefore `Mode.Slow`, not a catch-all, and the `Fast` arm
+// after it is reachable. This file is in the compile-fail corpus for the
+// second half: `Fast` is never covered by `Slow`, so omitting it is caught.
+
+enum Mode {
+  Slow
+  Fast
+}
+
+enum Speed {
+  Slow
+  Quick
+}
+
+fn describe(m: Mode) -> int {
+  return match m { //~ ERROR E0210
+    Slow => 1
+  }
+}
+
+fn main() {
+  io.print(describe(Mode.Fast))
+}

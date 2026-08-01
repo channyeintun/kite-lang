@@ -127,6 +127,13 @@ impl Value {
     }
 }
 
+/// `f64` to `i64` the way Wasm's `i64.trunc_sat_f64_s` does: towards zero,
+/// clamped at the ends, and zero for NaN. Rust's `as` already has exactly this
+/// behaviour, which is why this is a named function rather than a comment.
+fn saturating_trunc(f: f64) -> i64 {
+    f as i64
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -826,6 +833,49 @@ impl<'a> Vm<'a> {
                         });
                     };
                     self.call_with(c.func, base, arg_base, argc, dst, &c.captures)?;
+                }
+
+                Op::StrLen { dst, src } => {
+                    let v = self.get(base, src);
+                    let Value::Str(s) = &v else {
+                        return Err(Trap::TypeConfusion { op: "str.len", found: v.type_name() });
+                    };
+                    // Characters, matching what the host counts.
+                    self.set(base, dst, Value::Int(s.chars().count() as i64));
+                }
+
+                Op::IntToFloat { dst, src } => {
+                    let v = self.get(base, src);
+                    let out = match v {
+                        Value::Int(i) => Value::Float(i as f64),
+                        // Already a float: writing the cast anyway is allowed.
+                        Value::Float(f) => Value::Float(f),
+                        other => {
+                            return Err(Trap::TypeConfusion {
+                                op: "as float",
+                                found: other.type_name(),
+                            })
+                        }
+                    };
+                    self.set(base, dst, out);
+                }
+
+                Op::FloatToInt { dst, src } => {
+                    let v = self.get(base, src);
+                    let out = match v {
+                        // Truncation towards zero, and saturating rather than
+                        // trapping — the same rule Wasm's `trunc_sat` follows,
+                        // so both backends agree on every input including NaN.
+                        Value::Float(f) => Value::Int(saturating_trunc(f)),
+                        Value::Int(i) => Value::Int(i),
+                        other => {
+                            return Err(Trap::TypeConfusion {
+                                op: "as int",
+                                found: other.type_name(),
+                            })
+                        }
+                    };
+                    self.set(base, dst, out);
                 }
 
                 Op::ToStr { dst, src } => {

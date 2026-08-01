@@ -194,9 +194,48 @@ And unreachable functions are **dropped** before code generation, so a program
 using none of it pays nothing: `hello.kite` is 469 bytes with the prelude in
 the compilation, against 6,562 for a program that uses most of it.
 
-**Remaining:** modules and `use`, so the prelude can be qualified rather than
-shadowed; string and map methods, which need host support; `Display`, which
-would let interpolation render user types.
+**Also done:** `str.len()` and `as` casts between `int` and `float`. Casts are
+saturating rather than trapping on both backends, so a value out of range or a
+NaN gives a number rather than killing the program, and the two agree on every
+input.
+
+**Remaining:** real modules, so a library's names can be qualified rather than
+shadowed; string and map methods; `Display`, which would let interpolation
+render user types.
+
+---
+
+## Phase 7 — Layout (started)
+
+`std/ui.kite` is a subset of flexbox, written in Kite. It computes where things
+go and draws nothing — the same layout can feed a DOM renderer and a canvas
+renderer, and neither can disagree with the other about where a box ended up
+because neither decides.
+
+The model is deliberately *one* algorithm. CSS has block, inline, float, table,
+flex and grid, and most of the difficulty of writing CSS is knowing which is in
+force. Kite has boxes in a row or a column: fixed or content sizing, `grow` for
+the leftover, `justify` along the main axis, `align` across it, padding and
+gaps. That is what every UI toolkit designed after the web converged on, and it
+is enough for application UI.
+
+`layout(root, viewport)` returns one `Frame` per node in paint order, in
+absolute coordinates, and `hit(frames, x, y)` reads the same list backwards.
+
+It is opt-in through `use std/ui`, because it declares types with ordinary
+names — `Size`, `Rect`, `Node` — and a program that never mentions layout
+should not have to avoid them. That is file-level opt-in rather than a module
+system: the names arrive unqualified and a program cannot ask for some and not
+others.
+
+**Text measurement is a placeholder**, and named so: `nominal_advance` returns
+a fixed 8 units per character. Real text needs shaping, and shaping needs a
+font, which arrives with the canvas renderer in Phase 8. Every width it
+produces is wrong for proportional text and right often enough to see the shape
+of a tree.
+
+**Remaining:** a DOM renderer and a canvas renderer that consume `[Frame]`,
+scrolling, wrapping, and real text measurement.
 
 Four things came out differently from this plan:
 

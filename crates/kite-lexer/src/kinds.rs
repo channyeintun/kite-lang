@@ -93,6 +93,12 @@ impl TokenKind {
     ///
     /// This is the specification's rule: operators, open delimiters, and
     /// commas continue a statement.
+    ///
+    /// `>` and `>>` are the exceptions. They read as operators but far more
+    /// often close a type argument list — `pub width: Option<float>` ends a
+    /// field — and a line genuinely ending in a comparison is a line whose
+    /// right-hand side is missing. Treating them as continuations made every
+    /// generic field swallow the line after it.
     pub fn continues_line(self) -> bool {
         use TokenKind::*;
         matches!(
@@ -103,8 +109,8 @@ impl TokenKind {
             | Comma | Colon | Arrow | FatArrow
             // binary and assignment operators
             | Plus | Minus | Star | Slash | Percent
-            | Amp | AmpAmp | Pipe | PipePipe | Caret | Shl | Shr
-            | Eq | EqEq | Ne | Lt | Le | Gt | Ge
+            | Amp | AmpAmp | Pipe | PipePipe | Caret | Shl
+            | Eq | EqEq | Ne | Lt | Le | Ge
             | PlusEq | MinusEq | StarEq | SlashEq | PercentEq
             | Bang
             | Dot | DotDot | DotDotEq

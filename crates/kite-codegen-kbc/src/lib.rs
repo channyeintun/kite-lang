@@ -142,6 +142,10 @@ pub enum Op {
     /// value carries its own tag; the Wasm backend needs three host calls for
     /// the same job.
     ToStr { dst: Reg, src: Reg },
+    /// The character count of a string.
+    StrLen { dst: Reg, src: Reg },
+    IntToFloat { dst: Reg, src: Reg },
+    FloatToInt { dst: Reg, src: Reg },
     /// Build a closure: a function index plus the captured values, which sit
     /// at `base .. base + count`.
     Closure { dst: Reg, func: u32, base: Reg, count: u8 },
@@ -388,6 +392,9 @@ impl fmt::Display for Op {
                 write!(f, "{:<12} r{}, fn{}, r{}, {}", "call", dst, fi, base, argc)
             }
             ToStr { dst, src } => write!(f, "{:<12} r{}, r{}", "str", dst, src),
+            StrLen { dst, src } => write!(f, "{:<12} r{}, r{}", "str.len", dst, src),
+            IntToFloat { dst, src } => write!(f, "{:<12} r{}, r{}", "int.float", dst, src),
+            FloatToInt { dst, src } => write!(f, "{:<12} r{}, r{}", "float.int", dst, src),
             Closure { dst, func: fi, base, count } => {
                 write!(f, "{:<12} r{}, fn{}, r{}, {}", "closure", dst, fi, base, count)
             }

@@ -63,6 +63,9 @@ function imports() {{
       str_of_int: (v) => intern(showInt(v)),
       str_of_float: (v) => intern(showFloat(v)),
       str_of_bool: (v) => intern(showBool(v)),
+      // Characters, not UTF-16 code units: `[...s]` iterates code points, so
+      // an emoji counts once rather than twice.
+      str_len: (i) => BigInt([...STRINGS[i]].length),
     }},
   }};
 }}

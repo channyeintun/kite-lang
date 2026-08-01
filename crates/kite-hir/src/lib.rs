@@ -225,6 +225,14 @@ pub enum ExprKind {
     ToDyn { value: Box<Expr>, trait_id: TraitId },
     /// A value rendered as text, from `\(expr)` in a string literal.
     ToStr { value: Box<Expr> },
+    /// `x as float` / `x as int`. The only conversions Kite performs, and
+    /// only when written: an `int` reaching a `float` context is an error, not
+    /// a widening, because a silent one is how precision is lost unnoticed.
+    Cast { value: Box<Expr>, to: TyId },
+    /// `s.len()` — the number of characters, not bytes. Text layout counts
+    /// what a reader would call a character, and a byte count would make
+    /// `"héllo"` five characters long in one encoding and six in another.
+    StrLen { base: Box<Expr> },
     /// A closure value: the lifted function, plus the values it captured.
     /// Captures are by value and evaluated here, at the point the closure is
     /// made — not when it runs.
@@ -575,6 +583,10 @@ impl Program {
                 )
             }
             ExprKind::ToStr { value } => format!("(str {})", self.expr(value)),
+            ExprKind::StrLen { base } => format!("(str.len {})", self.expr(base)),
+            ExprKind::Cast { value, to } => {
+                format!("({} as {})", self.expr(value), self.types.name(*to))
+            }
             ExprKind::ClosureNew { func, captures, .. } => {
                 let c: Vec<String> = captures.iter().map(|x| self.expr(x)).collect();
                 format!("closure fn{}[{}]", func.0, c.join(", "))

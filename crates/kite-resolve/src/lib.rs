@@ -148,10 +148,20 @@ pub struct ResolveMap {
     /// without writing `Shape.Circle`. Ambiguous names are removed and must be
     /// qualified.
     variant_index: HashMap<String, (u32, u32)>,
+    /// Variant names per enum, so a qualified `Shape.Circle` resolves against
+    /// that enum rather than against the unqualified index — which drops any
+    /// name two enums share, and would otherwise make the qualified form fail
+    /// exactly where it is most needed.
+    variants_of: HashMap<u32, HashMap<String, u32>>,
     ambiguous_variants: Vec<String>,
 }
 
 impl ResolveMap {
+    /// The index of a variant on one enum.
+    pub fn variant_of(&self, type_index: u32, name: &str) -> Option<u32> {
+        self.variants_of.get(&type_index)?.get(name).copied()
+    }
+
     pub fn lookup_use(&self, span: Span) -> Option<Res> {
         self.uses.get(&span).copied()
     }
@@ -293,6 +303,10 @@ fn index_variants(file: &SourceFile, map: &mut ResolveMap) {
         };
         for (vi, v) in e.variants.iter().enumerate() {
             let key = v.name.name.clone();
+            map.variants_of
+                .entry(type_index as u32)
+                .or_default()
+                .insert(key.clone(), vi as u32);
             if map.variant_index.contains_key(&key) {
                 ambiguous.push(key);
             } else {
@@ -966,11 +980,10 @@ impl<'a> FnResolver<'a> {
         }
 
         let ti = self.map.type_by_name(head_name)?;
-        // `Shape.Circle`
-        if let Some(&(vt, vi)) = self.map.variant_index.get(&name.name) {
-            if vt == ti {
-                return Some(Res::Variant(vt, vi));
-            }
+        // `Shape.Circle` — looked up on `Shape`, not in the unqualified index,
+        // which has dropped every name two enums share.
+        if let Some(vi) = self.map.variant_of(ti, &name.name) {
+            return Some(Res::Variant(ti, vi));
         }
         // `Rect.square` — an associated function, resolved against the type's
         // method table by the checker.

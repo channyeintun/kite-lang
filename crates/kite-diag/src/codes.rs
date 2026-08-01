@@ -167,6 +167,13 @@ codes! {
          reading it as if they were is a bug waiting to happen. Copy it into a \
          `let`, or pass it as a parameter.";
 
+    E0212 = "E0212", "invalid cast",
+        "`as` converts between `int` and `float`. There is no conversion \
+         between any other pair of types.\n\n\
+         Kite performs no implicit numeric conversion, so a conversion is \
+         always written — which means every place precision can be lost is a \
+         place someone chose.";
+
     E0210 = "E0210", "non-exhaustive match",
         "A `match` must cover every possible value. Exhaustiveness is what \
          makes adding an enum variant safe: the compiler shows you every place \

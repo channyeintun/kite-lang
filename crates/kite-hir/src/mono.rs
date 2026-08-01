@@ -344,12 +344,14 @@ fn expr_children(k: &mut ExprKind) -> Vec<&mut Expr> {
             v
         }
         ExprKind::ToDyn { value, .. }
+        | ExprKind::Cast { value, .. }
         | ExprKind::ToStr { value }
         | ExprKind::Unary { operand: value, .. }
         | ExprKind::IsNil { value }
         | ExprKind::Wrap { value }
         | ExprKind::Unwrap { value } => vec![value],
-        ExprKind::FieldGet { base, .. }
+        ExprKind::StrLen { base }
+        | ExprKind::FieldGet { base, .. }
         | ExprKind::PairValue { base }
         | ExprKind::PairError { base }
         | ExprKind::ErrorMessage { base }

@@ -926,6 +926,9 @@ impl<'a> Checker<'a> {
 
         let value = match a.op.to_binary() {
             None => {
+                // Subsumption applies to an assignment as to an initialiser:
+                // `found = frame` where `found` is an `Option<Frame>` wraps.
+                let value = self.coerce(value, Some(local_ty));
                 self.expect_ty(value.ty, local_ty, value.span, Some(decl_span));
                 value
             }
@@ -1623,10 +1626,7 @@ impl<'a> Checker<'a> {
                 hir::Expr { kind: ExprKind::MapNew { entries: flat }, ty, span: *span }
             }
             ast::Expr::Index { base, index, span } => self.index_expr(base, index, *span),
-            ast::Expr::Cast { span, .. } => {
-                self.not_yet(*span, "`as` casts", "arrives in Phase 2");
-                self.lit(ExprKind::Error, TyId::ERROR, *span)
-            }
+            ast::Expr::Cast { expr, ty, span } => self.cast(expr, ty, *span),
             ast::Expr::Await { span, .. } => {
                 self.not_yet(*span, "`await`", "concurrency arrives in Phase 5");
                 self.lit(ExprKind::Error, TyId::ERROR, *span)
@@ -1916,6 +1916,46 @@ impl<'a> Checker<'a> {
             return;
         }
         self.captures.push(id);
+    }
+
+    /// `x as float`.
+    ///
+    /// Only between `int` and `float`, and only when written. Kite performs no
+    /// implicit numeric conversion — an `int` reaching a `float` context is an
+    /// error rather than a widening — because a silent conversion is how
+    /// precision goes missing without anyone having decided it should.
+    fn cast(&mut self, expr: &ast::Expr, ty: &ast::Type, span: Span) -> hir::Expr {
+        let value = self.expr(expr, None);
+        let to = self.resolve_type(ty);
+        if self.types.is_poisoned(value.ty) || self.types.is_poisoned(to) {
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+        if !self.types.is_numeric(value.ty) || !self.types.is_numeric(to) {
+            let (a, b) = (self.types.name(value.ty), self.types.name(to));
+            self.diags.push(
+                Diagnostic::error(codes::E0212, format!("cannot cast `{}` to `{}`", a, b))
+                    .with_primary(
+                        span,
+                        "`as` converts between `int` and `float`, and nothing else",
+                    )
+                    .with_note(
+                        "there is no conversion between other types: a `str` is not a \
+                         number and a number is not a `str`",
+                    ),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+        if value.ty == TyId::FLOAT && to == TyId::INT {
+            self.diags.push(
+                Diagnostic::warning(codes::E0212, "this cast discards the fractional part")
+                    .with_primary(span, "truncated towards zero")
+                    .with_note(
+                        "a value too large for an `int` saturates rather than trapping, and \
+                         a NaN becomes zero",
+                    ),
+            );
+        }
+        hir::Expr { kind: ExprKind::Cast { value: Box::new(value), to }, ty: to, span }
     }
 
     fn path_expr(&mut self, p: &ast::Path) -> hir::Expr {
@@ -2306,6 +2346,28 @@ impl<'a> Checker<'a> {
             return hir::Expr {
                 kind: ExprKind::ErrorMessage { base: Box::new(receiver) },
                 ty: TyId::STR,
+                span,
+            };
+        }
+
+        if receiver.ty == TyId::STR {
+            if name.name != "len" {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0205,
+                        format!("`str` has no method `{}`", name.name),
+                    )
+                    .with_primary(name.span, "no such method")
+                    .with_note("`str` has: len; more arrive with the standard library"),
+                );
+                return self.lit(ExprKind::Error, TyId::ERROR, span);
+            }
+            if !args.is_empty() {
+                self.arity_error("len", args.len(), 0, span, None);
+            }
+            return hir::Expr {
+                kind: ExprKind::StrLen { base: Box::new(receiver) },
+                ty: TyId::INT,
                 span,
             };
         }
@@ -3854,6 +3916,25 @@ impl<'a> Checker<'a> {
         match p {
             ast::Pattern::Wildcard(_) => hir::Pattern::Wildcard,
 
+            // A name matching a unit variant of the scrutinee's own enum is
+            // that variant, not a binding — even where the resolver already
+            // declared a local for it, because the resolver declares one for
+            // any name it cannot place.
+            //
+            // The resolver genuinely cannot place this one: two enums may each
+            // declare a `Start`, and which is meant depends on what is being
+            // matched. That is a type, and types are this pass's business.
+            //
+            // Before this, an ambiguous name became a catch-all binding: every
+            // arm after it was dead, exhaustiveness was satisfied, and the
+            // match silently returned the wrong answer. A variant name and a
+            // binding name colliding is a much smaller surprise than that, and
+            // it is one the reader can see.
+            ast::Pattern::Binding(name) if self.unit_variant_of(scrut, &name.name).is_some() => {
+                let (ti, vi) = self.unit_variant_of(scrut, &name.name).expect("just checked");
+                self.variant_pattern(ti, vi, None, scrut, name.span)
+            }
+
             ast::Pattern::Binding(name) => match self.resolved.lookup_binding(name.span) {
                 Some(local) => {
                     self.locals[local as usize].ty = bind_ty;
@@ -4074,6 +4155,26 @@ impl<'a> Checker<'a> {
             }
             ast::Pattern::Error(_) => hir::Pattern::Wildcard,
         }
+    }
+
+    /// The declaration index and variant index of a unit variant with this
+    /// name on the scrutinee's enum, if there is one.
+    fn unit_variant_of(&self, scrut: TyId, name: &str) -> Option<(u32, u32)> {
+        let TyKind::Enum(eid) = *self.types.kind(scrut) else { return None };
+        let vi = self
+            .types
+            .enum_def(eid)
+            .variants
+            .iter()
+            .position(|v| v.name == name && v.fields.is_empty())?;
+        // Patterns name the declaration, so a specialisation resolves back to
+        // the template it came from.
+        let template = self.types.enum_template_of(eid).unwrap_or(eid);
+        let ti = self
+            .type_ids
+            .iter()
+            .position(|t| matches!(t, Some(TypeTarget::Enum(e)) if *e == template))?;
+        Some((ti as u32, vi as u32))
     }
 
     fn variant_pattern(
@@ -4346,6 +4447,11 @@ impl<'a> Checker<'a> {
                 );
             }
             let value = self.expr(&init.value, Some(ty));
+            // Subsumption applies here as everywhere else: a `T` written for
+            // an `Option<T>` field is wrapped, and a concrete value for a
+            // `dyn Trait` field widens. Without this the VM tolerated the
+            // mismatch — its registers are untyped — and Wasm rejected it.
+            let value = self.coerce(value, Some(ty));
             self.expect_ty(value.ty, ty, value.span, Some(decl_span));
             given[index] = Some(value);
         }
@@ -4533,6 +4639,7 @@ impl<'a> Checker<'a> {
         let value = self.expr(&a.value, Some(ty));
         let value = match a.op.to_binary() {
             None => {
+                let value = self.coerce(value, Some(ty));
                 self.expect_ty(value.ty, ty, value.span, Some(decl_span));
                 value
             }

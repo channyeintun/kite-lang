@@ -517,6 +517,14 @@ impl<'a> FnLowerer<'a> {
                 args: args.iter().map(|a| self.operand(a)).collect(),
             },
 
+            hir::ExprKind::StrLen { base } => Rvalue::StrLen { operand: self.operand(base) },
+
+            hir::ExprKind::Cast { value, to } => Rvalue::Cast {
+                operand: self.operand(value),
+                from: value.ty,
+                to: *to,
+            },
+
             hir::ExprKind::ToStr { value } => {
                 Rvalue::ToStr { operand: self.operand(value), from: value.ty }
             }

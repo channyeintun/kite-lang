@@ -199,6 +199,29 @@ fn main() {
          \x20 let z = m[\"zz\"]\n  io.print(if z == nil { -1 } else { z })\n}\n",
     ),
     (
+        "ambiguous-variant-names",
+        "// Two enums with the same variant names. Which one an unqualified\n\
+         // pattern means is decided by the scrutinee.\n\
+         enum Mode {\n  Slow\n  Fast\n}\n\
+         enum Speed {\n  Slow\n  Quick\n}\n\
+         fn mode(m: Mode) -> int {\n  return match m {\n    Slow => 1\n    Fast => 2\n  }\n}\n\
+         fn speed(s: Speed) -> int {\n  return match s {\n    Slow => 10\n    Quick => 20\n  }\n}\n\
+         fn main() {\n  io.print(mode(Mode.Slow))\n  io.print(mode(Mode.Fast))\n\
+         \x20 io.print(speed(Speed.Slow))\n  io.print(speed(Speed.Quick))\n}\n",
+    ),
+    (
+        "subsumption-everywhere",
+        "struct Holder {\n  var slot: Option<int>\n  tag: Option<str>\n}\n\
+         fn main() {\n\
+         \x20 // A `T` written where an `Option<T>` is wanted wraps, in a field,\n\
+         \x20 // in an assignment, and in a field assignment alike.\n\
+         \x20 var h = Holder{slot: 1, tag: \"x\"}\n\
+         \x20 io.print(or_else(h.slot, -1))\n  io.print(or_else(h.tag, \"none\"))\n\
+         \x20 h.slot = 9\n  io.print(or_else(h.slot, -1))\n\
+         \x20 var v: Option<int> = nil\n  io.print(or_else(v, -1))\n\
+         \x20 v = 7\n  io.print(or_else(v, -1))\n}\n",
+    ),
+    (
         "prelude",
         "fn main() {\n  let xs = [5, 1, 9, 3, 7]\n\
          \x20 io.print(sum(xs))\n  io.print(count(xs, |n: int| n > 4))\n\

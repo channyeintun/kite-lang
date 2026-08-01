@@ -82,15 +82,21 @@ impl Compilation {
 /// compiler support would be evidence that the language was missing something.
 pub const PRELUDE: &str = include_str!("../../../std/prelude.kite");
 
+/// The layout engine. Also written in Kite, and also pruned away entirely by
+/// any program that does not use it.
+pub const UI: &str = include_str!("../../../std/ui.kite");
+
 /// Compile one file's text.
 pub fn compile(path: impl AsRef<Path>, src: &str, emit: Emit) -> Compilation {
     let mut sources = SourceMap::new();
     // The prelude is added first, so its spans and the user's never collide and
     // a diagnostic inside it says which file it came from.
     let prelude = sources.add("<prelude>", PRELUDE);
+    let ui = sources.add("<ui>", UI);
     let file = sources.add(path.as_ref(), src);
     let mut diags = DiagBag::new();
-    let (output, chunk, wasm) = run_passes(prelude, file, &sources, emit, &mut diags);
+    let (output, chunk, wasm) =
+        run_passes(prelude, ui, file, &sources, emit, &mut diags);
 
     let mut c = Compilation { sources, diags, output, chunk, wasm };
     c.diags.sort(&c.sources);
@@ -99,6 +105,7 @@ pub fn compile(path: impl AsRef<Path>, src: &str, emit: Emit) -> Compilation {
 
 fn run_passes(
     prelude: FileId,
+    ui: FileId,
     file: FileId,
     sources: &SourceMap,
     emit: Emit,
@@ -121,25 +128,44 @@ fn run_passes(
     // shadowed would make every name in it permanently unusable — and there is
     // no module system yet to qualify one, so the program's own definition
     // simply wins.
-    let prelude_src = sources.text(prelude);
-    let prelude_tokens = kite_lexer::tokenize(prelude, prelude_src, diags);
-    let prelude_ast = kite_parser::parse(prelude, prelude_src, &prelude_tokens, diags);
-    let taken: std::collections::HashSet<&str> =
-        ast.items.iter().filter_map(|i| i.declared_name()).collect();
-    let shadowed: Vec<&str> = prelude_ast
+    // The prelude is always in scope. The layout engine is not: it declares
+    // types with ordinary names — `Size`, `Rect`, `Node` — and a program that
+    // never mentions layout should not have to avoid them. `use std/ui` is
+    // what asks for it.
+    //
+    // This is file-level opt-in, not a module system: the names it brings are
+    // unqualified, and a program cannot ask for some of them and not others.
+    // Real modules are the next piece of Phase 6.
+    let wants_ui = ast
+        .uses
+        .iter()
+        .any(|u| u.path.len() == 2 && u.path[0].name == "std" && u.path[1].name == "ui");
+    let library: Vec<FileId> =
+        if wants_ui { vec![prelude, ui] } else { vec![prelude] };
+
+    let mut taken: std::collections::HashSet<String> = ast
         .items
         .iter()
         .filter_map(|i| i.declared_name())
-        .filter(|n| taken.contains(n))
+        .map(|s| s.to_string())
         .collect();
-    let shadowed: std::collections::HashSet<String> =
-        shadowed.into_iter().map(|s| s.to_string()).collect();
-    ast.items.extend(
-        prelude_ast
-            .items
-            .into_iter()
-            .filter(|i| !i.declared_name().is_some_and(|n| shadowed.contains(n))),
-    );
+    for id in &library {
+        let text = sources.text(*id);
+        let tokens = kite_lexer::tokenize(*id, text, diags);
+        let parsed = kite_parser::parse(*id, text, &tokens, diags);
+        let mut keep = Vec::with_capacity(parsed.items.len());
+        for item in parsed.items {
+            match item.declared_name() {
+                Some(n) if taken.contains(n) => continue,
+                Some(n) => {
+                    taken.insert(n.to_string());
+                    keep.push(item);
+                }
+                None => keep.push(item),
+            }
+        }
+        ast.items.extend(keep);
+    }
 
     // Resolution and checking still run after a syntax error — the parser
     // recovers, so later passes can report their own findings on the parts that

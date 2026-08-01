@@ -55,7 +55,7 @@ pub use support::{unsupported, Unsupported};
 /// Deliberately small: the standard library replaces them from Phase 6. String
 /// operations live here because a `str` is an index into a table the host
 /// holds — which is also why the module needs no linear memory.
-const IMPORTS: [(&str, &[ValType], &[ValType]); 9] = [
+const IMPORTS: [(&str, &[ValType], &[ValType]); 10] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
@@ -67,6 +67,7 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 9] = [
     ("str_of_int", &[ValType::I64], &[ValType::I32]),
     ("str_of_float", &[ValType::F64], &[ValType::I32]),
     ("str_of_bool", &[ValType::I32], &[ValType::I32]),
+    ("str_len", &[ValType::I32], &[ValType::I64]),
 ];
 
 const IMPORT_COUNT: u32 = IMPORTS.len() as u32;
@@ -90,6 +91,7 @@ mod host {
     pub const STR_OF_INT: u32 = 6;
     pub const STR_OF_FLOAT: u32 = 7;
     pub const STR_OF_BOOL: u32 = 8;
+    pub const STR_LEN: u32 = 9;
 }
 
 pub struct WasmModule {
@@ -1465,6 +1467,28 @@ impl<'a> Emitter<'a> {
                     return true;
                 };
                 return *ret != TyId::UNIT;
+            }
+
+            mir::Rvalue::Cast { operand, from, to } => {
+                self.operand(func, operand);
+                if from == to {
+                    return true;
+                }
+                // Saturating rather than trapping, so a value out of range or
+                // a NaN gives a number rather than killing the program — the
+                // bytecode VM does the same, and they have to agree.
+                func.instruction(&if *to == TyId::FLOAT {
+                    Instruction::F64ConvertI64S
+                } else {
+                    Instruction::I64TruncSatF64S
+                });
+                return true;
+            }
+
+            mir::Rvalue::StrLen { operand } => {
+                self.operand(func, operand);
+                func.instruction(&Instruction::Call(host::STR_LEN));
+                return true;
             }
 
             mir::Rvalue::ToStr { operand, from } => {

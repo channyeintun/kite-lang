@@ -211,6 +211,22 @@ impl<'a> Emitter<'a> {
                 });
             }
 
+            mir::Rvalue::Cast { operand, to, .. } => {
+                let a = self.operand_reg(operand, 0);
+                // A cast to the type a value already has is a no-op, which the
+                // checker allows so that generic code can write one anyway.
+                self.code.push(if *to == kite_hir::TyId::FLOAT {
+                    Op::IntToFloat { dst, src: a }
+                } else {
+                    Op::FloatToInt { dst, src: a }
+                });
+            }
+
+            mir::Rvalue::StrLen { operand } => {
+                let a = self.operand_reg(operand, 0);
+                self.code.push(Op::StrLen { dst, src: a });
+            }
+
             mir::Rvalue::ToStr { operand, .. } => {
                 let a = self.operand_reg(operand, 0);
                 self.code.push(Op::ToStr { dst, src: a });
