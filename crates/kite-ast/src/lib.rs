@@ -347,6 +347,12 @@ impl TypePath {
     pub fn is_simple(&self) -> bool {
         self.segments.len() == 1 && self.args.is_empty()
     }
+
+    /// Whether this names one of the compiler's own generic types, written
+    /// unqualified: `Task<int>`, never `mod.Task<int>`.
+    pub fn is_generic_name(&self, name: &str) -> bool {
+        self.segments.len() == 1 && self.name() == name
+    }
 }
 
 // ---------------------------------------------------------------------------

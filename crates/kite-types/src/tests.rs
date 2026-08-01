@@ -1094,3 +1094,118 @@ fn rebinding_a_value_in_the_same_scope_is_still_rejected() {
     let c = body("  let x = 1\n  let x = 2");
     assert!(c.has("E0112"), "{}", c.render());
 }
+
+// ---- concurrency ----------------------------------------------------------
+
+/// Calling an `async fn` starts it and yields the task. That is the whole of
+/// how concurrency is expressed, so it is the first thing to pin down.
+#[test]
+fn calling_an_async_function_yields_a_task() {
+    let c = run("async fn work() -> int {\n  return 1\n}\nfn main() {\n  let t = work()\n  let n: int = t\n}\n");
+    assert!(c.has("E0200"), "{}", c.render());
+    assert!(c.render().contains("Task<int>"), "{}", c.render());
+}
+
+#[test]
+fn await_outside_an_async_function_is_rejected() {
+    let c = run("async fn work() -> int {\n  return 1\n}\nfn main() {\n  let n = await work()\n}\n");
+    assert!(c.has("E0521"), "{}", c.render());
+}
+
+#[test]
+fn awaiting_something_that_is_not_a_task_is_rejected() {
+    let c = run("async fn main() {\n  let n = await 3\n}\n");
+    assert!(c.has("E0200"), "{}", c.render());
+}
+
+#[test]
+fn awaiting_a_task_gives_the_value_it_produces() {
+    let c = run("async fn work() -> int {\n  return 1\n}\nasync fn main() {\n  let n: int = await work()\n}\n");
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+/// `task.yield` suspends, so it is subject to the same rule as `await`.
+#[test]
+fn yielding_outside_an_async_function_is_rejected() {
+    let c = body("  task.yield()");
+    assert!(c.has("E0521"), "{}", c.render());
+}
+
+/// The `Share` bound is structural: nobody implements it, and most types
+/// satisfy it without their author knowing it exists.
+#[test]
+fn an_immutable_type_satisfies_the_share_bound() {
+    let c = run(
+        "trait Share {\n}\n\
+         struct Order {\n  id: int\n  name: str\n}\n\
+         fn send<T: Share>(value: T) {\n}\n\
+         fn main() {\n  send(Order{id: 1, name: \"a\"})\n}\n",
+    );
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+#[test]
+fn a_mutable_field_is_reported_where_share_is_required() {
+    let c = run(
+        "trait Share {\n}\n\
+         struct Counter {\n  var count: int\n}\n\
+         fn send<T: Share>(value: T) {\n}\n\
+         fn main() {\n  send(Counter{count: 0})\n}\n",
+    );
+    assert!(c.has("E0520"), "{}", c.render());
+    // The message has to name the field, not just the type: "not Share" is
+    // not something a reader can act on.
+    assert!(
+        c.render().contains("because this field is mutable"),
+        "{}",
+        c.render()
+    );
+}
+
+#[test]
+fn share_is_transitive_through_a_field() {
+    let c = run(
+        "trait Share {\n}\n\
+         struct Counter {\n  var count: int\n}\n\
+         struct Holder {\n  c: Counter\n}\n\
+         fn send<T: Share>(value: T) {\n}\n\
+         fn main() {\n  send(Holder{c: Counter{count: 0}})\n}\n",
+    );
+    assert!(c.has("E0520"), "{}", c.render());
+}
+
+/// A `for { }` with no way out never falls through, so a function whose every
+/// exit is a `return` inside one needs no unreachable return after it.
+#[test]
+fn an_unbroken_loop_diverges() {
+    let c = run("fn spin() -> int {\n  for {\n    return 1\n  }\n}\nfn main() {\n}\n");
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+#[test]
+fn a_loop_that_breaks_still_needs_a_return_after_it() {
+    let c = run("fn spin() -> int {\n  for {\n    break\n  }\n}\nfn main() {\n}\n");
+    assert!(c.has("E0203"), "{}", c.render());
+}
+
+/// An unlabelled `break` belongs to the innermost loop, so it does not stop
+/// the outer one from diverging.
+#[test]
+fn a_break_in_a_nested_loop_does_not_escape_the_outer_one() {
+    let c = run("fn spin() -> int {\n  for {\n    for i in 0..3 {\n      break\n    }\n    return 1\n  }\n}\nfn main() {\n}\n");
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+// ---- tuple bindings -------------------------------------------------------
+
+#[test]
+fn a_tuple_binding_takes_a_tuple_apart() {
+    let c = body("  let (a, b) = (1, \"two\")\n  io.print(a)\n  io.print(b)");
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+#[test]
+fn a_tuple_binding_of_the_wrong_width_is_reported() {
+    let c = body("  let (a, b, c) = (1, 2)");
+    assert!(c.has("E0200"), "{}", c.render());
+}

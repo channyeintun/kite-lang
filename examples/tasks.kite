@@ -1,0 +1,58 @@
+// Concurrency.
+//
+// One concept: some operations take time, so mark them `async` and `await`
+// them. Calling an `async fn` starts it and yields a `Task<T>` — which is why
+// three calls followed by three awaits take as long as the slowest, not as
+// long as the three together.
+//
+// Nothing here says how many threads exist. That is the runtime's business,
+// and the same source becomes parallel the day the platform allows it.
+
+use std/task
+
+async fn fetch(name: str, ms: int) -> str {
+    io.print("start \(name)")
+    await task.sleep(ms)
+    io.print("finished \(name) at \(time.now())ms")
+    return "body of \(name)"
+}
+
+async fn count_to(n: int) -> int {
+    var total = 0
+    for i in 0..n {
+        total = total + i
+        // Yielding is how a long computation stays polite. It is a suspension
+        // like any other: the state machine records where it got to.
+        task.yield()
+    }
+    return total
+}
+
+async fn main() {
+    // Started here, all three at once.
+    let a = fetch("alpha", 100)
+    let b = fetch("beta", 50)
+    let c = fetch("gamma", 30)
+
+    // Awaiting in order still costs only the slowest, because none of them
+    // was waiting for this line to be reached.
+    let (first, second) = await task.both(a, b)
+    io.print(first)
+    io.print(second)
+    io.print(await c)
+    io.print("all three in \(time.now())ms, not 180ms")
+
+    // A task that takes too long, and one that does not.
+    let slow = fetch("slow", 500)
+    let answer = await task.timeout(slow, 120)
+    io.print(if answer == nil { "slow timed out" } else { answer })
+
+    // `race` gives whichever finishes first. The losers keep running: a task
+    // the program started is the program's work, and stopping it silently
+    // would be exactly the hidden control flow the language exists to remove.
+    let winner = await task.race([fetch("hare", 10), fetch("tortoise", 90)])
+    io.print("winner: \(winner)")
+
+    // Ordinary computation, interleaved with everything above.
+    io.print("counted \(await count_to(5))")
+}

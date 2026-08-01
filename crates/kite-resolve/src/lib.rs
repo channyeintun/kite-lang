@@ -70,6 +70,23 @@ pub enum BuiltinFn {
     /// over it would erase whatever it was scrolling past.
     DrawClip,
     DrawUnclip,
+    /// `task.yield()` — give the scheduler the chance to run something else.
+    /// The one suspension primitive: `sleep`, `race` and `timeout` are Kite
+    /// written on top of it.
+    TaskYield,
+    /// `task.wake_at(ms)` — ask not to be polled again before a deadline.
+    TaskWakeAt,
+    /// `task.park()` — ask not to be polled again until some other task
+    /// finishes. What a combinator waiting on "whichever finishes first" needs,
+    /// and the only way to wait without spinning.
+    TaskPark,
+    /// `task.finished(t)` / `task.get(t)` — inspect a task without suspending.
+    /// A combinator that must not block on a particular task needs these; a
+    /// program that simply wants the value writes `await`.
+    TaskFinished,
+    TaskGet,
+    /// `time.now()` — milliseconds since the program started.
+    TimeNow,
 }
 
 impl BuiltinFn {
@@ -83,6 +100,12 @@ impl BuiltinFn {
             "text.height" => Some(BuiltinFn::TextHeight),
             "draw.clip" => Some(BuiltinFn::DrawClip),
             "draw.unclip" => Some(BuiltinFn::DrawUnclip),
+            "task.yield" => Some(BuiltinFn::TaskYield),
+            "task.wake_at" => Some(BuiltinFn::TaskWakeAt),
+            "task.park" => Some(BuiltinFn::TaskPark),
+            "task.finished" => Some(BuiltinFn::TaskFinished),
+            "task.get" => Some(BuiltinFn::TaskGet),
+            "time.now" => Some(BuiltinFn::TimeNow),
             _ => None,
         }
     }
@@ -97,6 +120,12 @@ impl BuiltinFn {
             BuiltinFn::TextHeight => "text.height",
             BuiltinFn::DrawClip => "draw.clip",
             BuiltinFn::DrawUnclip => "draw.unclip",
+            BuiltinFn::TaskYield => "task.yield",
+            BuiltinFn::TaskWakeAt => "task.wake_at",
+            BuiltinFn::TaskPark => "task.park",
+            BuiltinFn::TaskFinished => "task.finished",
+            BuiltinFn::TaskGet => "task.get",
+            BuiltinFn::TimeNow => "time.now",
         }
     }
 
@@ -108,6 +137,8 @@ impl BuiltinFn {
             BuiltinFn::TextHeight => 0,
             BuiltinFn::DrawClip => 4,
             BuiltinFn::DrawUnclip => 0,
+            BuiltinFn::TaskYield | BuiltinFn::TimeNow | BuiltinFn::TaskPark => 0,
+            BuiltinFn::TaskWakeAt | BuiltinFn::TaskFinished | BuiltinFn::TaskGet => 1,
         }
     }
 }

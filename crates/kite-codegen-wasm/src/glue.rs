@@ -276,8 +276,88 @@ function imports() {{
       // Characters, not UTF-16 code units: `[...s]` iterates code points, so
       // an emoji counts once rather than twice.
       str_len: (i) => BigInt([...STRINGS[i]].length),
+      // ---- the scheduler ---------------------------------------------------
+      //
+      // A queue of live tasks is mutable state, and Kite has none, so the
+      // scheduler lives here. What crosses the boundary is a resume closure
+      // the host cannot look inside: it is handed back through the module's
+      // own `kite_poll` export, which is the only thing that can enter it.
+      task_spawn: (poll) => {{
+        TASKS.push({{ poll, wakeAt: null, parked: false }});
+      }},
+      task_wake_at: (ms) => {{
+        wakeRequest = Number(ms);
+      }},
+      task_park: () => {{
+        parkRequest = true;
+      }},
+      time_now: () => BigInt(clock),
     }},
   }};
+}}
+
+// ---- the scheduler --------------------------------------------------------
+//
+// Round-robin, in spawn order — the same order the bytecode VM polls in, which
+// is what lets the two backends be compared at all.
+//
+// The clock is **virtual**. When every task is waiting on a deadline it jumps
+// to the earliest one rather than waiting for it, so a program that sleeps
+// costs no real time and two backends running the same program produce the
+// same interleaving. A scheduler that raced real timers could not be
+// differentially tested, and a UI event loop does not need one: events arrive
+// from the host, not from the clock.
+const TASKS = [];
+let clock = 0;
+let wakeRequest = null;
+let parkRequest = false;
+
+export function drive(exports) {{
+  while (TASKS.length > 0) {{
+    let polled = false;
+    let completed = false;
+    for (let i = 0; i < TASKS.length; ) {{
+      const task = TASKS[i];
+      if (task.parked || (task.wakeAt !== null && task.wakeAt > clock)) {{
+        i += 1;
+        continue;
+      }}
+      polled = true;
+      task.wakeAt = null;
+      wakeRequest = null;
+      parkRequest = false;
+      const done = exports.kite_poll(task.poll) !== 0;
+      if (TASKS[i] === task) {{
+        task.wakeAt = wakeRequest;
+        task.parked = parkRequest;
+      }}
+      if (done) {{
+        TASKS.splice(i, 1);
+        completed = true;
+      }} else {{
+        i += 1;
+      }}
+    }}
+    // A task finishing is what a parked task is waiting for, and may be what a
+    // sleeping one wanted too — so a completion wakes everything and lets each
+    // decide for itself.
+    if (completed) {{
+      for (const t of TASKS) {{
+        t.parked = false;
+        t.wakeAt = null;
+      }}
+    }}
+    if (!polled) {{
+      const next = TASKS.reduce(
+        (best, t) => (t.wakeAt !== null && (best === null || t.wakeAt < best) ? t.wakeAt : best),
+        null,
+      );
+      if (next === null || next <= clock) {{
+        throw new Error(TASKS.length + ' task(s) can never make progress');
+      }}
+      clock = next;
+    }}
+  }}
 }}
 
 export async function instantiate(source = {wasm}) {{
@@ -294,7 +374,13 @@ export async function run(source) {{
   if (typeof exports.main !== "function") {{
     throw new Error("this module has no `main`");
   }}
-  return exports.main();
+  const result = exports.main();
+  // `main` returning is not the program ending: a task it started is still
+  // the program's work, and dropping it would make `async` silently lossy.
+  if (typeof exports.kite_poll === "function") {{
+    drive(exports);
+  }}
+  return result;
 }}
 
 // An application exports `init`, `view` and `update` instead of `main`.

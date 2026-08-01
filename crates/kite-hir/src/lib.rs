@@ -306,6 +306,17 @@ pub enum ExprKind {
     /// `xs.get(i)` — yields `?T` for the case where the index genuinely is a
     /// runtime condition.
     SliceGet { base: Box<Expr>, index: Box<Expr> },
+    /// `await t` — the value of a task, once it has one.
+    ///
+    /// This never reaches a backend. The state-machine transform in MIR
+    /// replaces it with a test of the task and, where it is not finished, a
+    /// suspension: the enclosing function stores where it got to and returns
+    /// to the scheduler.
+    Await { value: Box<Expr> },
+    /// `task.yield()` — suspend unconditionally and come back on the next
+    /// sweep. This is the primitive `sleep`, `race` and `timeout` are written
+    /// on top of, which is why they are Kite rather than compiler code.
+    Yield,
     /// A block in expression position — a `match` arm written with braces.
     /// Runs for its effects and produces unit.
     Block(Block),
@@ -385,6 +396,17 @@ pub enum Builtin {
     /// layout needs that is neither a rectangle nor a run of text.
     DrawClip,
     DrawUnclip,
+    /// `task.spawn(poll)` — hand a task's resume closure to the scheduler.
+    /// Emitted by the state-machine transform; no program writes it.
+    TaskSpawn,
+    /// `task.wake_at(ms)` — tell the scheduler not to poll the running task
+    /// again before a deadline. A hint, not a guarantee: a scheduler is free
+    /// to poll early, and the code that asked must re-check the clock.
+    TaskWakeAt,
+    /// `task.park()` — suspend until some other task finishes.
+    TaskPark,
+    /// `time.now()` — milliseconds since the program started.
+    TimeNow,
 }
 
 impl Builtin {
@@ -397,6 +419,10 @@ impl Builtin {
             Builtin::TextHeight => "text.height",
             Builtin::DrawClip => "draw.clip",
             Builtin::DrawUnclip => "draw.unclip",
+            Builtin::TaskSpawn => "task.spawn",
+            Builtin::TaskWakeAt => "task.wake_at",
+            Builtin::TaskPark => "task.park",
+            Builtin::TimeNow => "time.now",
         }
     }
 }
@@ -725,6 +751,8 @@ impl Program {
             ExprKind::SliceGet { base, index } => {
                 format!("{}.get({})", self.expr(base), self.expr(index))
             }
+            ExprKind::Await { value } => format!("(await {})", self.expr(value)),
+            ExprKind::Yield => "(yield)".to_string(),
             ExprKind::Error => "<error>".to_string(),
         }
     }

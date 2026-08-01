@@ -163,6 +163,11 @@ impl<'a> Emitter<'a> {
         };
 
         match value {
+            // Both are replaced by the state-machine transform before any
+            // backend sees them.
+            mir::Rvalue::Await { .. } | mir::Rvalue::Yield => {
+                unreachable!("`await` survived the state-machine transform")
+            }
             mir::Rvalue::Use(o) => self.load_into(dst, o),
 
             mir::Rvalue::Binary { op, lhs, rhs } => {
@@ -396,7 +401,10 @@ impl<'a> Emitter<'a> {
             mir::Operand::Bool(v) => Op::LoadBool { dst, value: *v },
             mir::Operand::Str(s) => Op::LoadStr { dst, idx: s.0 },
             mir::Operand::Unit => Op::LoadUnit { dst },
-            mir::Operand::Nil => Op::LoadNil { dst },
+            // The VM's registers carry their own tags, so one nil serves for
+            // every unreadable slot. Wasm, whose slots are typed, needs the
+            // type this operand carries.
+            mir::Operand::Nil | mir::Operand::Default(_) => Op::LoadNil { dst },
         };
         // `move rN, rN` is a no-op worth not emitting.
         if let Op::Move { dst: d, src } = &op {

@@ -23,6 +23,15 @@ pub type Reg = u16;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Native {
     IoPrint,
+    /// Hand the scheduler a task's resume closure. The state-machine
+    /// transform emits this; no program writes it.
+    TaskSpawn,
+    /// Ask the scheduler not to poll the running task before a deadline.
+    TaskWakeAt,
+    /// Ask not to be polled again until some other task finishes.
+    TaskPark,
+    /// Milliseconds since the program started.
+    TimeNow,
     DrawRect,
     DrawText,
     TextWidth,
@@ -41,6 +50,10 @@ impl Native {
             Builtin::TextHeight => Native::TextHeight,
             Builtin::DrawClip => Native::DrawClip,
             Builtin::DrawUnclip => Native::DrawUnclip,
+            Builtin::TaskSpawn => Native::TaskSpawn,
+            Builtin::TaskWakeAt => Native::TaskWakeAt,
+            Builtin::TaskPark => Native::TaskPark,
+            Builtin::TimeNow => Native::TimeNow,
         }
     }
 
@@ -53,6 +66,10 @@ impl Native {
             Native::TextHeight => "text.height",
             Native::DrawClip => "draw.clip",
             Native::DrawUnclip => "draw.unclip",
+            Native::TaskSpawn => "task.spawn",
+            Native::TaskWakeAt => "task.wake_at",
+            Native::TaskPark => "task.park",
+            Native::TimeNow => "time.now",
         }
     }
 }

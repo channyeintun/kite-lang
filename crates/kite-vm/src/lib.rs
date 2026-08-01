@@ -277,6 +277,10 @@ pub enum Trap {
     /// A register held a value of the wrong type. Only reachable through a
     /// codegen bug, since the type checker has already run.
     TypeConfusion { op: &'static str, found: &'static str },
+    /// Every remaining task is waiting and none of them can ever run. A
+    /// program that awaits a task nothing will complete has a bug the
+    /// scheduler can see but the compiler cannot.
+    Deadlock { waiting: usize },
 }
 
 impl fmt::Display for Trap {
@@ -291,6 +295,12 @@ impl fmt::Display for Trap {
                 write!(f, "reached unreachable code in `{}` at pc {}", function, pc)
             }
             Trap::NoEntryPoint => write!(f, "no `main` function"),
+            Trap::Deadlock { waiting } => write!(
+                f,
+                "{} task{} can never make progress",
+                waiting,
+                if *waiting == 1 { "" } else { "s" }
+            ),
             Trap::IndexOutOfRange { index, len } => write!(
                 f,
                 "index {} is out of range for a slice of length {}",
@@ -316,13 +326,23 @@ struct Frame {
 
 pub fn run(chunk: &Chunk, out: &mut dyn Write) -> Result<(), Trap> {
     let entry = chunk.entry.ok_or(Trap::NoEntryPoint)?;
-    Vm {
+    let mut vm = Vm {
         chunk,
         out,
         regs: Vec::new(),
         frames: Vec::new(),
-    }
-    .execute(entry)
+        tasks: Vec::new(),
+        clock: 0,
+        wake_request: None,
+        park_request: false,
+        floor: 0,
+        result: Value::Unit,
+    };
+    vm.execute(entry)?;
+    // `main` returning is not the program ending: a task it started is still
+    // the program's work, and dropping it on the floor would make `async`
+    // silently lossy. The scheduler runs until nothing is left.
+    vm.drive()
 }
 
 struct Vm<'a> {
@@ -330,6 +350,35 @@ struct Vm<'a> {
     out: &'a mut dyn Write,
     regs: Vec<Value>,
     frames: Vec<Frame>,
+    /// Tasks that have been started and not yet finished, in the order they
+    /// were spawned. A task is a closure the scheduler polls; the state
+    /// machine behind it is ordinary compiled code.
+    tasks: Vec<Scheduled>,
+    /// A **virtual** clock, in milliseconds. Nothing here waits on wall time:
+    /// when every task is blocked on a deadline, the clock jumps to the
+    /// earliest one. That makes `sleep` free in tests and, more importantly,
+    /// makes the bytecode and Wasm backends produce the same ordering — a
+    /// scheduler that raced real timers could not be differentially tested.
+    clock: i64,
+    /// Set by `task.wake_at` during a poll, and read once it returns.
+    wake_request: Option<i64>,
+    /// Set by `task.park`: this task is waiting for some other one to finish,
+    /// and there is no deadline that would make polling it worthwhile.
+    park_request: bool,
+    /// Frame depth at which the current nested run stops. Polling a task runs
+    /// its closure to its own return, not to the bottom of the stack.
+    floor: usize,
+    /// The value the frame at the floor returned.
+    result: Value,
+}
+
+/// One live task: how to resume it, and when it is worth trying again.
+struct Scheduled {
+    poll: Value,
+    /// The earliest clock reading at which polling could achieve anything.
+    wake_at: Option<i64>,
+    /// Waiting on another task rather than on the clock.
+    parked: bool,
 }
 
 /// Read two register operands and apply `$f`, or trap on type confusion.
@@ -365,7 +414,11 @@ impl<'a> Vm<'a> {
             // because the frame is torn down immediately after.
             ret_slot: 0,
         });
+        self.execute_frames()
+    }
 
+    /// The dispatch loop, running until the frame this run started at returns.
+    fn execute_frames(&mut self) -> Result<(), Trap> {
         loop {
             let (func, pc, base) = {
                 let f = self.frames.last().expect("at least one frame");
@@ -1038,15 +1091,96 @@ impl<'a> Vm<'a> {
         Ok(())
     }
 
-    /// Returns true when the last frame was popped and execution is complete.
+    /// Returns true when the frame that just returned was the one this run
+    /// started at — the bottom of the stack for a program, or the poll of a
+    /// task for the scheduler.
     fn pop_frame(&mut self, value: Value) -> bool {
         let frame = self.frames.pop().expect("a frame to pop");
         self.regs.truncate(frame.base);
-        if self.frames.is_empty() {
+        if self.frames.len() <= self.floor {
+            self.result = value;
             return true;
         }
         self.regs[frame.ret_slot] = value;
         false
+    }
+
+    // ---- the scheduler ----------------------------------------------------
+
+    /// Poll every live task until none is left.
+    ///
+    /// Round-robin, in spawn order, which is what makes the interleaving
+    /// deterministic and comparable against the other backend. A task that
+    /// cannot run yet is skipped; when *nothing* can run, the clock jumps to
+    /// the earliest deadline rather than waiting for it, so a program that
+    /// sleeps costs no real time under test.
+    fn drive(&mut self) -> Result<(), Trap> {
+        while !self.tasks.is_empty() {
+            let mut polled = false;
+            let mut completed = false;
+            let mut i = 0;
+            while i < self.tasks.len() {
+                if self.tasks[i].parked || self.tasks[i].wake_at.is_some_and(|w| w > self.clock) {
+                    i += 1;
+                    continue;
+                }
+                polled = true;
+                self.tasks[i].wake_at = None;
+                self.wake_request = None;
+                self.park_request = false;
+                let poll = self.tasks[i].poll.clone();
+                let done = self.poll_task(poll)?;
+                if i < self.tasks.len() {
+                    self.tasks[i].wake_at = self.wake_request.take();
+                    self.tasks[i].parked = std::mem::take(&mut self.park_request);
+                }
+                if done {
+                    self.tasks.remove(i);
+                    completed = true;
+                } else {
+                    i += 1;
+                }
+            }
+            // A task finishing is what a parked task is waiting for, and may
+            // be what a sleeping one wanted too — so a completion wakes
+            // everything and lets each decide for itself.
+            if completed {
+                for t in 0..self.tasks.len() {
+                    self.tasks[t].parked = false;
+                    self.tasks[t].wake_at = None;
+                }
+            }
+            if !polled {
+                // Everything is waiting. If any of it is waiting on the clock,
+                // jump to the first deadline; if all of it is waiting on each
+                // other, nothing will ever happen.
+                match self.tasks.iter().filter_map(|t| t.wake_at).min() {
+                    Some(next) if next > self.clock => self.clock = next,
+                    _ => return Err(Trap::Deadlock { waiting: self.tasks.len() }),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Run one task's resume closure to its own return.
+    fn poll_task(&mut self, poll: Value) -> Result<bool, Trap> {
+        let Value::Closure(c) = &poll else {
+            return Err(Trap::TypeConfusion { op: "task.poll", found: poll.type_name() });
+        };
+        let (func, captures) = (c.func, c.captures.clone());
+        let saved_floor = self.floor;
+        self.floor = self.frames.len();
+        // The closure's captures are its leading parameters, exactly as at any
+        // other call site; a resume function takes one, its frame.
+        let base = self.regs.len();
+        self.call_with(func, base, 0, 0, 0, &captures)?;
+        self.execute_frames()?;
+        self.floor = saved_floor;
+        match std::mem::replace(&mut self.result, Value::Unit) {
+            Value::Bool(b) => Ok(b),
+            other => Err(Trap::TypeConfusion { op: "task.poll", found: other.type_name() }),
+        }
     }
 
     fn call_native(
@@ -1105,6 +1239,32 @@ impl<'a> Vm<'a> {
                 let _ = writeln!(self.out, "unclip");
                 Ok(Value::Unit)
             }
+
+            // A task's resume closure, handed over by the state machine the
+            // compiler wrote. The scheduler owns it from here.
+            Native::TaskSpawn => {
+                let poll = self.regs[base + arg_base as usize].clone();
+                self.tasks.push(Scheduled { poll, wake_at: None, parked: false });
+                Ok(Value::Unit)
+            }
+            Native::TaskWakeAt => {
+                let Value::Int(ms) = self.regs[base + arg_base as usize] else {
+                    return Err(Trap::TypeConfusion {
+                        op: "task.wake_at",
+                        found: "not an int",
+                    });
+                };
+                // A hint, not a promise. The code that asked re-checks the
+                // clock, so an early poll is harmless and a late one only
+                // costs time.
+                self.wake_request = Some(ms);
+                Ok(Value::Unit)
+            }
+            Native::TaskPark => {
+                self.park_request = true;
+                Ok(Value::Unit)
+            }
+            Native::TimeNow => Ok(Value::Int(self.clock)),
 
             Native::IoPrint => {
                 let v = if argc == 0 {

@@ -233,7 +233,10 @@ fn run_passes(
     // carry every helper it never mentions.
     kite_hir::mono::prune(&mut hir);
 
-    let mir = kite_mir::lower(&hir);
+    let mut mir = kite_mir::lower(&hir);
+    // `async fn` becomes a starter and a resume function here, once, so both
+    // backends see ordinary functions and neither knows concurrency exists.
+    kite_mir::asyncify(&mut mir, &mut hir.types);
     if emit == Emit::Mir {
         return (mir.render(&hir.types).to_string(), None, None);
     }

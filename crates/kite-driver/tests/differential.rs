@@ -671,6 +671,54 @@ fn main() {
          \x20 io.print(if orig == nil { -1 } else { orig })\n}\n",
     ),
     (
+        "tasks-interleave",
+        "async fn work(n: int) -> int {\n  io.print(\"start \\(n)\")\n  task.yield()\n\
+         \x20 io.print(\"middle \\(n)\")\n  task.yield()\n  io.print(\"end \\(n)\")\n\
+         \x20 return n * 10\n}\n\
+         async fn main() {\n  let a = work(1)\n  let b = work(2)\n\
+         \x20 io.print(\"results \\(await a) \\(await b)\")\n}\n",
+    ),
+    (
+        "tasks-sleep",
+        "use std/task\n\
+         async fn fetch(name: str, ms: int) -> str {\n\
+         \x20 await task.sleep(ms)\n\
+         \x20 io.print(\"\\(name) at \\(time.now())\")\n  return name\n}\n\
+         async fn main() {\n\
+         \x20 let a = fetch(\"a\", 100)\n  let b = fetch(\"b\", 50)\n  let c = fetch(\"c\", 30)\n\
+         \x20 let (x, y) = await task.both(a, b)\n\
+         \x20 io.print(\"\\(x) \\(y) \\(await c)\")\n\
+         \x20 io.print(\"elapsed \\(time.now())\")\n}\n",
+    ),
+    (
+        "tasks-combinators",
+        "use std/task\n\
+         async fn slow(name: str, ms: int) -> str {\n  await task.sleep(ms)\n  return name\n}\n\
+         async fn main() {\n\
+         \x20 let all = await task.all([slow(\"a\", 20), slow(\"b\", 10)])\n\
+         \x20 io.print(join(all, \",\"))\n\
+         \x20 let first = await task.race([slow(\"fast\", 5), slow(\"slow\", 500)])\n\
+         \x20 io.print(first)\n\
+         \x20 let late = await task.timeout(slow(\"late\", 900), 50)\n\
+         \x20 io.print(if late == nil { \"timed out\" } else { late })\n\
+         \x20 let inTime = await task.timeout(slow(\"quick\", 5), 50)\n\
+         \x20 io.print(if inTime == nil { \"timed out\" } else { inTime })\n}\n",
+    ),
+    (
+        "tasks-in-a-loop",
+        "async fn add(a: int, b: int) -> int {\n  task.yield()\n  return a + b\n}\n\
+         async fn main() {\n  var total = 0\n  var pending: [Task<int>] = []\n\
+         \x20 for i in 0..5 {\n    pending.push(add(i, i))\n  }\n\
+         \x20 for t in pending {\n    total = total + await t\n  }\n\
+         \x20 io.print(total)\n}\n",
+    ),
+    (
+        "tuple-bindings",
+        "fn pair() -> (int, str) {\n  return (7, \"seven\")\n}\n\
+         fn main() {\n  let (n, name) = pair()\n  io.print(n)\n  io.print(name)\n\
+         \x20 let (a, _) = pair()\n  io.print(a)\n}\n",
+    ),
+    (
         "evaluation-order",
         "fn step(n: int) -> int {\n  io.print(n)\n  return n\n}\nfn main() {\n  let x = step(1) + step(2)\n  io.print(x)\n}\n",
     ),

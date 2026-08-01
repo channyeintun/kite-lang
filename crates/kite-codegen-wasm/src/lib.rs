@@ -55,7 +55,7 @@ pub use support::{unsupported, Unsupported};
 /// Deliberately small: the standard library replaces them from Phase 6. String
 /// operations live here because a `str` is an index into a table the host
 /// holds — which is also why the module needs no linear memory.
-const IMPORTS: [(&str, &[ValType], &[ValType]); 19] = [
+const IMPORTS: [(&str, &[ValType], &[ValType]); 23] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
@@ -88,6 +88,14 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 19] = [
         &[],
     ),
     ("draw_unclip", &[], &[]),
+    // The scheduler lives in the host, because a queue of live tasks is
+    // mutable state and Kite has none. What crosses is a closure the host
+    // cannot look inside: it hands the reference back through `kite_poll`,
+    // which is the module's own trampoline.
+    ("task_spawn", &[ANY_REF], &[]),
+    ("task_wake_at", &[ValType::I64], &[]),
+    ("task_park", &[], &[]),
+    ("time_now", &[], &[ValType::I64]),
 ];
 
 const IMPORT_COUNT: u32 = IMPORTS.len() as u32;
@@ -169,6 +177,10 @@ fn used_imports(program: &mir::Program, types: &Types, eq_fns: &[eq::EqFn]) -> H
                         Builtin::TextHeight => mark(host::LINE_HEIGHT),
                         Builtin::DrawClip => mark(host::DRAW_CLIP),
                         Builtin::DrawUnclip => mark(host::DRAW_UNCLIP),
+                        Builtin::TaskSpawn => mark(host::TASK_SPAWN),
+                        Builtin::TaskWakeAt => mark(host::TASK_WAKE_AT),
+                        Builtin::TaskPark => mark(host::TASK_PARK),
+                        Builtin::TimeNow => mark(host::TIME_NOW),
                     },
                     mir::Rvalue::StrOp { op, .. } => mark(match op {
                         kite_hir::StrKind::Len => host::STR_LEN,
@@ -223,6 +235,10 @@ mod host {
     pub const STR_TRIM: u32 = 16;
     pub const DRAW_CLIP: u32 = 17;
     pub const DRAW_UNCLIP: u32 = 18;
+    pub const TASK_SPAWN: u32 = 19;
+    pub const TASK_WAKE_AT: u32 = 20;
+    pub const TASK_PARK: u32 = 21;
+    pub const TIME_NOW: u32 = 22;
 }
 
 pub struct WasmModule {
@@ -893,6 +909,26 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
         let ty = closure_ty_of(*func, program, types);
         extra_type_index.push(layout.closure_sig[&ty]);
     }
+
+    // The poll trampoline, for a module with tasks in it. The host holds a
+    // task's resume closure as an opaque reference and cannot call it — a
+    // closure is a GC struct, and JavaScript has no way to enter one — so the
+    // module exports the one function that can: cast it back and `call_ref`.
+    let poll_ty = types.find_fn(&[], TyId::BOOL);
+    let poll_trampoline = hosts.declared(host::TASK_SPAWN);
+    let trampoline_index = fn_base
+        + program.fns.len() as u32
+        + dispatchers.len() as u32
+        + eq_fns.len() as u32
+        + envs.len() as u32;
+    if poll_trampoline {
+        extra_type_index.push(next_fn_type);
+        next_fn_type += 1;
+        type_section
+            .ty()
+            .function(vec![ANY_REF], vec![ValType::I32]);
+    }
+    let _ = next_fn_type;
     module.section(&type_section);
 
     // ---- imports -----------------------------------------------------------
@@ -930,6 +966,9 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
         if f.exportable && exported.insert(f.name.as_str()) {
             exports.export(&f.name, ExportKind::Func, fn_base + i as u32);
         }
+    }
+    if poll_trampoline {
+        exports.export("kite_poll", ExportKind::Func, trampoline_index);
     }
     module.section(&exports);
 
@@ -975,6 +1014,9 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     }
     for (func, count) in &envs {
         code.function(&compile_thunk(*func, *count, program, types, &layout, fn_base));
+    }
+    if poll_trampoline {
+        code.function(&compile_poll_trampoline(poll_ty, &layout));
     }
     module.section(&code);
 
@@ -1157,6 +1199,40 @@ fn compile_thunk(
     f.instruction(&Instruction::Call(fn_base + func));
     f.instruction(&Instruction::End);
     let _ = types;
+    f
+}
+
+/// `kite_poll(task) -> i32`: run one step of a task and say whether it is done.
+///
+/// The host's scheduler holds resume closures it cannot enter. This casts one
+/// back to the record a `fn() -> bool` closure is, takes the environment and
+/// the code out of it, and calls through — which is exactly what a
+/// `CallClosure` compiles to, written once for the host to reach.
+fn compile_poll_trampoline(poll_ty: Option<TyId>, layout: &TypeLayout) -> Function {
+    let Some((record, sig)) = poll_ty.and_then(|ty| {
+        Some((layout.closure_type(ty)?, layout.closure_sig.get(&ty).copied()?))
+    }) else {
+        // No `fn() -> bool` closure exists, so nothing could have been
+        // spawned. A trap here is unreachable rather than a fallback.
+        let mut f = Function::new(Vec::new());
+        f.instruction(&Instruction::Unreachable);
+        f.instruction(&Instruction::End);
+        return f;
+    };
+    let mut f = Function::new(vec![(
+        1,
+        ValType::Ref(RefType { nullable: true, heap_type: HeapType::Concrete(record) }),
+    )]);
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(record)));
+    f.instruction(&Instruction::LocalSet(1));
+    // Environment, then the code to run: the order `call_ref` reads them in.
+    f.instruction(&Instruction::LocalGet(1));
+    f.instruction(&Instruction::StructGet { struct_type_index: record, field_index: 1 });
+    f.instruction(&Instruction::LocalGet(1));
+    f.instruction(&Instruction::StructGet { struct_type_index: record, field_index: 0 });
+    f.instruction(&Instruction::CallRef(sig));
+    f.instruction(&Instruction::End);
     f
 }
 
@@ -1676,8 +1752,12 @@ impl<'a> Emitter<'a> {
 
             mir::Rvalue::CallBuiltin { builtin, args } => {
                 self.builtin(func, *builtin, args);
-                // Drawing returns nothing; measuring returns a width.
-                return matches!(builtin, Builtin::TextWidth | Builtin::TextHeight);
+                // Drawing returns nothing; measuring returns a width, and the
+                // clock returns a reading.
+                return matches!(
+                    builtin,
+                    Builtin::TextWidth | Builtin::TextHeight | Builtin::TimeNow
+                );
             }
 
             mir::Rvalue::StructNew { struct_id, fields } => {
@@ -1999,6 +2079,12 @@ impl<'a> Emitter<'a> {
                 return true;
             }
 
+            // The state-machine transform replaced both of these before any
+            // backend saw the program.
+            mir::Rvalue::Await { .. } | mir::Rvalue::Yield => {
+                unreachable!("`await` survived the state-machine transform")
+            }
+
             // Every MIR rvalue is handled: there is deliberately no catch-all
             // here, so adding one to MIR fails to compile rather than silently
             // producing a module that traps.
@@ -2057,6 +2143,24 @@ impl<'a> Emitter<'a> {
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_CLIP)));
             }
+            Builtin::TaskSpawn => {
+                for a in args {
+                    self.operand(func, a);
+                }
+                func.instruction(&Instruction::Call(self.hosts.at(host::TASK_SPAWN)));
+            }
+            Builtin::TaskWakeAt => {
+                for a in args {
+                    self.operand(func, a);
+                }
+                func.instruction(&Instruction::Call(self.hosts.at(host::TASK_WAKE_AT)));
+            }
+            Builtin::TaskPark => {
+                func.instruction(&Instruction::Call(self.hosts.at(host::TASK_PARK)));
+            }
+            Builtin::TimeNow => {
+                func.instruction(&Instruction::Call(self.hosts.at(host::TIME_NOW)));
+            }
             Builtin::DrawUnclip => {
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_UNCLIP)));
             }
@@ -2092,6 +2196,10 @@ impl<'a> Emitter<'a> {
                     ty: wasm_encoder::AbstractHeapType::None,
                 }));
             }
+            // A slot nothing may read still needs bits of the slot's own type.
+            // The bytecode VM's registers carry their own tags and can use one
+            // nil for all of them; here every type needs its own zero.
+            mir::Operand::Default(ty) => self.default_of(func, *ty),
         }
     }
 

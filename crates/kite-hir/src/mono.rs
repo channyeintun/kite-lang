@@ -354,6 +354,7 @@ fn expr_children(k: &mut ExprKind) -> Vec<&mut Expr> {
         | ExprKind::Unary { operand: value, .. }
         | ExprKind::IsNil { value }
         | ExprKind::Wrap { value }
+        | ExprKind::Await { value }
         | ExprKind::Unwrap { value } => vec![value],
         ExprKind::FieldGet { base, .. }
         | ExprKind::PairValue { base }
@@ -381,6 +382,7 @@ fn expr_children(k: &mut ExprKind) -> Vec<&mut Expr> {
         | ExprKind::Bool(_)
         | ExprKind::Local(_)
         | ExprKind::Nil
+        | ExprKind::Yield
         | ExprKind::Block(_)
         | ExprKind::Error => vec![],
     }

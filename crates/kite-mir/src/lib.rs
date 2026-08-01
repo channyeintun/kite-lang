@@ -13,7 +13,9 @@ use kite_hir::{BinOp, Builtin, EnumId, StructId, TraitId, TyId, Types, UnOp};
 use kite_span::Span;
 use std::fmt;
 
+mod async_;
 mod lower;
+pub use async_::transform as asyncify;
 pub use lower::lower;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -60,6 +62,10 @@ pub struct Program {
 #[derive(Debug)]
 pub struct Function {
     pub name: String,
+    /// Declared `async`. The state-machine transform rewrites these into a
+    /// starter that hands the scheduler a resume closure, and a resume
+    /// function that picks up where the last suspension left off.
+    pub is_async: bool,
     /// Whether the host may call this. Only a `pub` free function is
     /// exportable: method names are not unique across types — two types may
     /// each have an `area` — and a Wasm module may not export one name twice.
@@ -89,13 +95,13 @@ pub struct LocalDecl {
     pub name: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct BasicBlock {
     pub stmts: Vec<Inst>,
     pub term: Terminator,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Inst {
     Assign { dst: Local, value: Rvalue },
     /// Write through a reference. Separate from `Assign` because the
@@ -108,7 +114,7 @@ pub enum Inst {
     MapSet { local: Local, key: Operand, value: Operand },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Rvalue {
     Use(Operand),
     Binary { op: BinOp, lhs: Operand, rhs: Operand },
@@ -157,6 +163,12 @@ pub enum Rvalue {
     SliceLen { base: Operand },
     /// Bounds-checked; yields an optional rather than trapping.
     SliceGet { base: Operand, index: Operand },
+    /// `await t`. Never reaches a backend: the state-machine transform splits
+    /// the block here into "the task is finished, take its value" and "it is
+    /// not, save where we are and return to the scheduler".
+    Await { task: Operand },
+    /// `task.yield()` — suspend unconditionally. Also never reaches a backend.
+    Yield,
 }
 
 #[derive(Clone, Debug)]
@@ -169,9 +181,14 @@ pub enum Operand {
     /// The unit value. Never materialised by a backend.
     Unit,
     Nil,
+    /// Bits for a slot nothing may read: a task's value before it has one, a
+    /// frame's local before it is written, the value half of a failed result.
+    /// The type is carried because a typed slot needs a value of its own type,
+    /// and `nil` is not one for an `int`.
+    Default(TyId),
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub enum Terminator {
     Goto(BlockId),
     Branch { cond: Operand, then: BlockId, else_: BlockId },
@@ -364,6 +381,8 @@ impl fmt::Display for Rvalue {
             Rvalue::ErrorMessage { base } => write!(f, "{}.message()", base),
             Rvalue::SliceLen { base } => write!(f, "len {}", base),
             Rvalue::SliceGet { base, index } => write!(f, "{}.get({})", base, index),
+            Rvalue::Await { task } => write!(f, "await {}", task),
+            Rvalue::Yield => write!(f, "yield"),
         }
     }
 }
@@ -388,6 +407,7 @@ impl fmt::Display for Operand {
             Operand::Str(s) => write!(f, "str{}", s.0),
             Operand::Unit => write!(f, "()"),
             Operand::Nil => write!(f, "nil"),
+            Operand::Default(_) => write!(f, "<default>"),
         }
     }
 }

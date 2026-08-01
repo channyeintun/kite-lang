@@ -21,6 +21,20 @@ pub trait Display {
   fn show(self) -> str
 }
 
+/// A value of this type may be moved to another task or isolate.
+///
+/// The one trait nobody implements: the compiler decides, structurally, and a
+/// type qualifies when it is deeply immutable. Because struct fields are
+/// immutable unless marked `var`, most types satisfy it without their author
+/// doing anything or knowing the trait exists — it only becomes visible when
+/// it is violated, as E0520.
+///
+/// It is declared here rather than in the compiler so that `Share` is an
+/// ordinary name a bound can mention, and so the rule it stands for is
+/// readable in the language it constrains.
+pub trait Share {
+}
+
 // ---- slices ---------------------------------------------------------------
 
 /// A new slice with `f` applied to every item. The result need not have the

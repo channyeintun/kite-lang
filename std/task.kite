@@ -1,1 +1,107 @@
-// std/task — see docs/06-roadmap.md
+// std/task — the concurrency library.
+//
+// Kite has one concurrency concept: some operations take time, so mark them
+// `async` and `await` them. Calling an `async fn` *starts* it and yields a
+// `Task<T>`; awaiting is how the value comes out. Two calls and then two
+// awaits is how two things happen at once, and there is no second keyword for
+// spawning.
+//
+// Everything here is written in Kite. The compiler supplies four primitives —
+// `task.yield`, `task.park`, `task.wake_at` and `time.now` — and every
+// combinator below is built from them, which is the test a standard library
+// should have to pass.
+
+/// Both results, once both tasks have produced one.
+///
+/// The tasks were already running before this was called: awaiting one and
+/// then the other waits for the later of the two, not for the sum.
+pub async fn both<A, B>(a: Task<A>, b: Task<B>) -> (A, B) {
+    let first = await a
+    let second = await b
+    return (first, second)
+}
+
+/// Every result, in the order the tasks were given.
+pub async fn all<T>(tasks: [Task<T>]) -> [T] {
+    var out: [T] = []
+    for t in tasks {
+        out.push(await t)
+    }
+    return out
+}
+
+/// The result of whichever task finishes first.
+///
+/// The losers are not cancelled: a task the program started is the program's
+/// work, and stopping it silently is the kind of hidden control flow the
+/// language exists to remove.
+pub async fn race<T>(tasks: [Task<T>]) -> T {
+    for {
+        for t in tasks {
+            if task.finished(t) {
+                return task.get(t)
+            }
+        }
+        // Nothing to wait for but somebody else finishing, which is exactly
+        // what parking says. Without it this would spin, and a scheduler
+        // cannot tell a spin from progress.
+        task.park()
+        task.yield()
+    }
+}
+
+/// Suspend for at least `ms` milliseconds.
+///
+/// The clock is the runtime's, and it is virtual under the bytecode VM and the
+/// generated glue alike: when every task is waiting on a deadline it jumps to
+/// the earliest one. A program that sleeps therefore costs no real time under
+/// test, and the two backends agree on the order things happened in.
+pub async fn sleep(ms: int) {
+    let deadline = time.now() + ms
+    for time.now() < deadline {
+        task.wake_at(deadline)
+        task.yield()
+    }
+}
+
+/// The task's result, or nil if it takes longer than `ms`.
+pub async fn timeout<T>(work: Task<T>, ms: int) -> Option<T> {
+    let deadline = time.now() + ms
+    for {
+        if task.finished(work) {
+            return task.get(work)
+        }
+        if time.now() >= deadline {
+            return nil
+        }
+        task.wake_at(deadline)
+        task.yield()
+    }
+}
+
+/// Run `f` over every item, giving other tasks the chance to run between
+/// items, and collect the results.
+///
+/// **This is not parallelism today, on any target**, and the reason is a
+/// platform one rather than a design one: a WasmGC reference cannot cross a
+/// thread boundary at all until the shared-everything-threads proposal ships,
+/// and the bytecode VM's values are not `Send` either. What is real now is the
+/// *rule*: `T` and `U` must be `Share`, so the day either restriction lifts,
+/// this function starts using cores and no source changes.
+pub async fn parallel<T: Share, U: Share>(items: [T], f: fn(T) -> U) -> [U] {
+    var out: [U] = []
+    for item in items {
+        out.push(f(item))
+        task.yield()
+    }
+    return out
+}
+
+/// Wait for every task in a group before continuing.
+///
+/// This is structured concurrency in the small: a scope cannot be left with
+/// its work still running, so a task cannot outlive the code that started it
+/// by accident.
+pub async fn scope<T>(tasks: [Task<T>]) -> [T] {
+    return await all(tasks)
+}

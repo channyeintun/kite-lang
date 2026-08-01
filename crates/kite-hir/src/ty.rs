@@ -207,6 +207,8 @@ pub struct Types {
     /// it naming a parameter.
     struct_origin: HashMap<StructId, (StructId, Vec<TyId>)>,
     enum_origin: HashMap<EnumId, (EnumId, Vec<TyId>)>,
+    /// The `Task<T>` template, declared the first time a task is needed.
+    task_template: Option<StructId>,
 }
 
 impl Default for Types {
@@ -244,6 +246,7 @@ impl Types {
             enum_instances: HashMap::new(),
             struct_origin: HashMap::new(),
             enum_origin: HashMap::new(),
+            task_template: None,
         }
     }
 
@@ -325,6 +328,69 @@ impl Types {
 
     pub fn fallible_of(&mut self, value: TyId) -> TyId {
         self.intern(TyKind::Fallible(value))
+    }
+
+    /// `Task<T>` — the result of calling an `async fn`.
+    ///
+    /// A task is an ordinary struct the compiler declares: whether it has
+    /// finished, and the value if it has. Making it a struct rather than a
+    /// type of its own means the backends need no new representation, the
+    /// state-machine transform writes to it with the field machinery that
+    /// already exists, and `Task<int>` and `Task<str>` are as distinct as any
+    /// two structs.
+    ///
+    /// It is declared as a *generic* struct and instantiated per payload, so
+    /// substitution, monomorphisation and specialisation all treat it like any
+    /// other `Box<T>` — which is what makes `async fn both<A, B>` work.
+    ///
+    /// The fields are named so no program can reach them: an identifier cannot
+    /// contain `$`. `task.finished` and `task.get` are the door.
+    pub fn task_of(&mut self, value: TyId, span: Span) -> StructId {
+        let template = match self.task_template {
+            Some(t) => t,
+            None => {
+                let id = self.declare_struct("Task", true, span);
+                self.task_template = Some(id);
+                self.set_struct_generics(id, 1);
+                let param = self.param_ty(0, "T");
+                self.set_struct_fields(
+                    id,
+                    vec![
+                        FieldDef {
+                            name: "$done".into(),
+                            ty: TyId::BOOL,
+                            mutable: true,
+                            is_pub: false,
+                            span,
+                        },
+                        FieldDef {
+                            name: "$value".into(),
+                            ty: param,
+                            mutable: true,
+                            is_pub: false,
+                            span,
+                        },
+                    ],
+                );
+                id
+            }
+        };
+        self.instantiate_struct(template, &[value])
+    }
+
+    /// The `T` of a `Task<T>`, for a struct the compiler made.
+    pub fn task_value(&self, id: StructId) -> Option<TyId> {
+        let template = self.task_template?;
+        let (origin, args) = self.struct_origin.get(&id)?;
+        (*origin == template).then(|| args[0])
+    }
+
+    /// Whether a type is a task, and of what.
+    pub fn task_payload(&self, ty: TyId) -> Option<TyId> {
+        match self.kind(ty) {
+            TyKind::Struct(s) => self.task_value(*s),
+            _ => None,
+        }
     }
 
     /// The value type carried by a fallible result.

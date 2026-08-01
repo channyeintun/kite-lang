@@ -259,9 +259,18 @@ pub fn check(
                 (params, ret, fallible, m.name.span, self_ty)
             }
         };
+        let is_async = match sig.owner {
+            None => matches!(&file.items[sig.decl_index], ast::Item::Fn(f) if f.is_async),
+            Some(owner) => match &file.items[owner.impl_index] {
+                ast::Item::Impl(imp) => imp.methods[owner.method_index].is_async,
+                ast::Item::Trait(tr) => tr.methods[owner.method_index].is_async,
+                _ => false,
+            },
+        };
         sigs.push(Signature {
             params,
             ret,
+            is_async,
             fallible,
             name_span,
             self_ty,
@@ -400,7 +409,11 @@ enum TypeTarget {
 
 struct Signature {
     params: Vec<TyId>,
+    /// What the body returns. A call to an `async fn` yields `Task<ret>`; the
+    /// body still returns the value itself, because the state machine is what
+    /// puts it into the task.
     ret: TyId,
+    is_async: bool,
     fallible: bool,
     name_span: Span,
     /// For a method, the type its `self` has.
@@ -1276,9 +1289,15 @@ impl<'a> Checker<'a> {
 
         self.loop_depth -= 1;
         self.init = entry_init;
-        // A loop is treated as falling through even when it has no exit; proving
-        // otherwise needs reachability analysis that arrives with MIR.
-        Some((result, Flow::Falls))
+        // `for { … }` with nothing that breaks out of it never falls through.
+        // That is worth knowing here rather than leaving to MIR, because a
+        // function whose every exit is a `return` inside such a loop is
+        // otherwise reported as missing a return — and writing an unreachable
+        // one to satisfy the compiler is exactly the sort of dead code a
+        // reader has to puzzle over.
+        let diverges = matches!(f.header, ast::ForHeader::Loop)
+            && !breaks_out(&f.body, f.label.as_ref().map(|l| l.name.as_str()));
+        Some((result, if diverges { Flow::Diverges } else { Flow::Falls }))
     }
 
     /// A local compared against `nil`, and whether the comparison was `==`.
@@ -1655,10 +1674,7 @@ impl<'a> Checker<'a> {
             }
             ast::Expr::Index { base, index, span } => self.index_expr(base, index, *span),
             ast::Expr::Cast { expr, ty, span } => self.cast(expr, ty, *span),
-            ast::Expr::Await { span, .. } => {
-                self.not_yet(*span, "`await`", "concurrency arrives in Phase 5");
-                self.lit(ExprKind::Error, TyId::ERROR, *span)
-            }
+            ast::Expr::Await { expr, span } => self.await_expr(expr, *span),
             ast::Expr::Tuple { elems, span } => {
                 if elems.is_empty() {
                     return self.lit(ExprKind::Error, TyId::UNIT, *span);
@@ -1788,6 +1804,10 @@ impl<'a> Checker<'a> {
                 let sig = Signature {
                     params: Vec::new(),
                     ret,
+                    // A closure cannot be `async`: it has no signature of its
+                    // own to declare it on, and a suspension point inside one
+                    // would suspend a function that never said it could.
+                    is_async: false,
                     fallible: false,
                     name_span: span,
                     self_ty: None,
@@ -2084,6 +2104,44 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `await t` — the value of a task, once it has one.
+    ///
+    /// Only inside an `async fn`, because awaiting is suspending and a
+    /// function that can suspend has to say so in its signature. That is the
+    /// whole of the "function colouring" rule, and it is what keeps the
+    /// scheduler out of the middle of an ordinary call.
+    fn await_expr(&mut self, inner: &ast::Expr, span: Span) -> hir::Expr {
+        let value = self.expr(inner, None);
+        if !self.sigs[self.fn_index].is_async {
+            self.diags.push(
+                Diagnostic::error(codes::E0521, "`await` outside an async function")
+                    .with_primary(span, "this suspends the enclosing function")
+                    .with_secondary(self.sigs[self.fn_index].name_span, "declared here")
+                    .with_note("write `async fn` to allow it to suspend"),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+        let Some(payload) = self.types.task_payload(value.ty) else {
+            if !self.types.is_poisoned(value.ty) {
+                let found = self.types.with_article(value.ty);
+                self.diags.push(
+                    Diagnostic::error(codes::E0200, "only a task can be awaited")
+                        .with_primary(value.span, format!("this is {}", found))
+                        .with_note(
+                            "calling an `async fn` without `await` yields its `Task<T>`; \
+                             `await` is how the value comes out",
+                        ),
+                );
+            }
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        };
+        hir::Expr {
+            kind: ExprKind::Await { value: Box::new(value) },
+            ty: payload,
+            span,
+        }
+    }
+
     /// A call to a named function, reached unqualified or through its module.
     fn fn_call(
         &mut self,
@@ -2126,6 +2184,15 @@ impl<'a> Checker<'a> {
         let targs = self.finish_subst(&generics, &subst, span);
         self.check_bounds(&generics, &targs, span);
         let ret = self.apply_subst(ret, &subst);
+        // Calling an `async fn` starts it and yields the task. That is how
+        // concurrency is expressed: two calls then one `await` of each runs
+        // both at once, and there is no second keyword for it.
+        let ret = if self.sigs[id as usize].is_async {
+            let task = self.types.task_of(ret, span);
+            self.types.struct_ty(task)
+        } else {
+            ret
+        };
 
         hir::Expr {
             kind: ExprKind::Call { callee: hir::FnId(id), args: hargs, targs },
@@ -2317,6 +2384,95 @@ impl<'a> Checker<'a> {
                         args: Vec::new(),
                     },
                     ty: TyId::UNIT,
+                    span,
+                }
+            }
+
+            // `task.yield()` — the suspension primitive. It is a statement,
+            // not a value: what comes back is the same nothing that went in.
+            BuiltinFn::TaskYield => {
+                if !args.is_empty() {
+                    self.arity_error("task.yield", args.len(), 0, span, None);
+                }
+                if !self.sigs[self.fn_index].is_async {
+                    self.diags.push(
+                        Diagnostic::error(codes::E0521, "`task.yield` outside an async function")
+                            .with_primary(span, "this suspends the enclosing function")
+                            .with_secondary(self.sigs[self.fn_index].name_span, "declared here")
+                            .with_note("write `async fn` to allow it to suspend"),
+                    );
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
+                }
+                hir::Expr { kind: ExprKind::Yield, ty: TyId::UNIT, span }
+            }
+
+            BuiltinFn::TaskWakeAt => {
+                if args.len() != 1 {
+                    self.arity_error("task.wake_at", args.len(), 1, span, None);
+                }
+                let mut hargs = Vec::with_capacity(1);
+                for a in args {
+                    let e = self.expr(a, Some(TyId::INT));
+                    self.expect_ty(e.ty, TyId::INT, e.span, None);
+                    hargs.push(e);
+                }
+                hir::Expr {
+                    kind: ExprKind::CallBuiltin { builtin: Builtin::TaskWakeAt, args: hargs },
+                    ty: TyId::UNIT,
+                    span,
+                }
+            }
+
+            BuiltinFn::TaskPark => {
+                if !args.is_empty() {
+                    self.arity_error("task.park", args.len(), 0, span, None);
+                }
+                hir::Expr {
+                    kind: ExprKind::CallBuiltin { builtin: Builtin::TaskPark, args: Vec::new() },
+                    ty: TyId::UNIT,
+                    span,
+                }
+            }
+
+            BuiltinFn::TimeNow => {
+                if !args.is_empty() {
+                    self.arity_error("time.now", args.len(), 0, span, None);
+                }
+                hir::Expr {
+                    kind: ExprKind::CallBuiltin { builtin: Builtin::TimeNow, args: Vec::new() },
+                    ty: TyId::INT,
+                    span,
+                }
+            }
+
+            // Reading a task without suspending. `finished` is a field read
+            // and `get` is another; a combinator that must not block on one
+            // particular task is what they exist for.
+            BuiltinFn::TaskFinished | BuiltinFn::TaskGet => {
+                let name = b.path();
+                if args.len() != 1 {
+                    self.arity_error(name, args.len(), 1, span, None);
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
+                }
+                let task = self.expr(&args[0], None);
+                let Some(payload) = self.types.task_payload(task.ty) else {
+                    if !self.types.is_poisoned(task.ty) {
+                        let found = self.types.with_article(task.ty);
+                        self.diags.push(
+                            Diagnostic::error(
+                                codes::E0200,
+                                format!("`{}` needs a task", name),
+                            )
+                            .with_primary(task.span, format!("this is {}", found)),
+                        );
+                    }
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
+                };
+                let index = u32::from(b == BuiltinFn::TaskGet);
+                let ty = if index == 0 { TyId::BOOL } else { payload };
+                hir::Expr {
+                    kind: ExprKind::FieldGet { base: Box::new(task), index },
+                    ty,
                     span,
                 }
             }
@@ -2974,12 +3130,94 @@ impl<'a> Checker<'a> {
 
     /// `let (v, err) = f()`. The value becomes Tainted and the error
     /// Unchecked; neither is usable until the error is tested.
+    /// `let (a, b) = pair` for an ordinary tuple.
+    ///
+    /// Returns `None` when the initialiser is not a tuple, which is how the
+    /// fallible-result path — the other meaning of the same syntax — gets its
+    /// turn. The initialiser is checked here either way; the fallible path
+    /// checks it again, which is one wasted walk on a path that is about to
+    /// build different statements from it anyway.
+    fn let_tuple(
+        &mut self,
+        l: &ast::LetStmt,
+        elems: &[ast::BindElem],
+        init: &ast::Expr,
+        span: Span,
+    ) -> Option<(hir::Stmt, Flow)> {
+        let annotated = l.ty.as_ref().map(|t| self.resolve_type(t));
+        // A peek: the expression is checked once, here, and reused whichever
+        // path takes it.
+        let value = self.expr(init, annotated);
+        let TyKind::Tuple(parts) = self.types.kind(value.ty).clone() else {
+            return None;
+        };
+        if parts.len() != elems.len() {
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0200,
+                    format!(
+                        "expected {} binding{}, found {}",
+                        parts.len(),
+                        if parts.len() == 1 { "" } else { "s" },
+                        elems.len()
+                    ),
+                )
+                .with_primary(span, format!("this is {}", self.types.with_article(value.ty)))
+                .with_note("a tuple binding names every element, or `_` for one to drop"),
+            );
+            return None;
+        }
+
+        // The tuple is held in a local of its own, so an initialiser with side
+        // effects runs once however many elements are taken from it.
+        let holder = hir::LocalId(self.synthetic_local("tuple", value.ty, span));
+        let mut stmts = vec![hir::Stmt::Let {
+            local: holder,
+            init: Some(value),
+            span,
+        }];
+        for (i, e) in elems.iter().enumerate() {
+            let ast::BindElem::Name(name) = e else { continue };
+            let Some(local) = self.resolved.lookup_binding(name.span) else { continue };
+            self.locals[local as usize].ty = parts[i];
+            self.init[local as usize] = Init::Assigned;
+            self.taint[local as usize] = Taint::Clean;
+            stmts.push(hir::Stmt::Let {
+                local: hir::LocalId(local),
+                init: Some(hir::Expr {
+                    kind: ExprKind::FieldGet {
+                        base: Box::new(hir::Expr {
+                            kind: ExprKind::Local(holder),
+                            ty: self.locals[holder.index()].ty,
+                            span,
+                        }),
+                        index: i as u32,
+                    },
+                    ty: parts[i],
+                    span: name.span,
+                }),
+                span: name.span,
+            });
+        }
+        Some((hir::Stmt::Block(hir::Block { stmts }), Flow::Falls))
+    }
+
     fn let_pair(
         &mut self,
         l: &ast::LetStmt,
         elems: &[ast::BindElem],
         span: Span,
     ) -> Option<(hir::Stmt, Flow)> {
+        // A tuple binding is either a fallible result being split into its
+        // value and its error, or an ordinary tuple being taken apart. Which
+        // one it is comes from the initialiser's type, so that is checked
+        // first and the two paths diverge after.
+        if let Some(init) = &l.init {
+            if let Some(stmt) = self.let_tuple(l, elems, init, span) {
+                return Some(stmt);
+            }
+        }
+
         if elems.len() != 2 {
             self.diags.push(
                 Diagnostic::error(
@@ -4051,6 +4289,17 @@ impl<'a> Checker<'a> {
                 continue;
             }
             for bound in &g.bounds {
+                // `Share` is the one bound nobody implements: the compiler
+                // decides, structurally, and the answer is "deeply immutable".
+                // Most types satisfy it without their author knowing it
+                // exists, which is what makes data races impossible here
+                // without an annotation burden.
+                if self.types.trait_def(*bound).name == "Share" {
+                    if !self.types.is_share(*t) {
+                        self.report_not_share(*t, &g.name, span, g.span);
+                    }
+                    continue;
+                }
                 let ok = match (self.type_index_of(*t), self.trait_index_of(*bound)) {
                     (Some(ti), Some(tri)) => self.resolved.implements(ti, tri),
                     _ => false,
@@ -4072,6 +4321,82 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A type that cannot cross a task boundary, and the field responsible.
+    ///
+    /// Naming the field is the whole value of the message: "not Share" says
+    /// nothing a reader can act on, and "because this field is mutable" says
+    /// exactly what to change.
+    fn report_not_share(&mut self, ty: TyId, param: &str, span: Span, bound: Span) {
+        let name = self.types.name(ty);
+        let mut d = Diagnostic::error(
+            codes::E0520,
+            format!("`{}` cannot be moved to another task", name),
+        )
+        .with_primary(span, format!("`{}` is not Share", name))
+        .with_secondary(bound, format!("`{}` is required to be Share here", param));
+        if let Some((field, owner)) = self.first_mutable_field(ty) {
+            d = d.with_secondary(
+                field,
+                format!("because this field is mutable, `{}` may not be shared", owner),
+            );
+        }
+        self.diags.push(d.with_note(
+            "two tasks holding one mutable value is a data race. Either make the field \
+             immutable and return a new value, or keep the type on one task",
+        ));
+    }
+
+    /// The first `var` field reachable from a type, and the type declaring it.
+    fn first_mutable_field(&self, ty: TyId) -> Option<(Span, String)> {
+        let mut seen = Vec::new();
+        self.mutable_field_inner(ty, &mut seen)
+    }
+
+    fn mutable_field_inner(&self, ty: TyId, seen: &mut Vec<TyId>) -> Option<(Span, String)> {
+        if seen.contains(&ty) {
+            return None;
+        }
+        seen.push(ty);
+        match self.types.kind(ty).clone() {
+            TyKind::Struct(s) => {
+                let def = self.types.struct_def(s);
+                let name = def.name.clone();
+                for f in &def.fields {
+                    if f.mutable {
+                        return Some((f.span, name));
+                    }
+                }
+                let inner: Vec<TyId> = def.fields.iter().map(|f| f.ty).collect();
+                inner.into_iter().find_map(|t| self.mutable_field_inner(t, seen))
+            }
+            TyKind::Enum(e) => {
+                let def = self.types.enum_def(e);
+                let name = def.name.clone();
+                for v in &def.variants {
+                    for f in &v.fields {
+                        if f.mutable {
+                            return Some((f.span, name.clone()));
+                        }
+                    }
+                }
+                let inner: Vec<TyId> = def
+                    .variants
+                    .iter()
+                    .flat_map(|v| v.fields.iter().map(|f| f.ty))
+                    .collect();
+                inner.into_iter().find_map(|t| self.mutable_field_inner(t, seen))
+            }
+            TyKind::Slice(e) | TyKind::Optional(e) | TyKind::Fallible(e) => {
+                self.mutable_field_inner(e, seen)
+            }
+            TyKind::Map(k, v) => self
+                .mutable_field_inner(k, seen)
+                .or_else(|| self.mutable_field_inner(v, seen)),
+            TyKind::Tuple(es) => es.into_iter().find_map(|t| self.mutable_field_inner(t, seen)),
+            _ => None,
+        }
+    }
+
     /// The enclosing function's signature, so a nested block still checks
     /// `return` against the right type.
     fn current_signature(&self) -> Signature {
@@ -4079,6 +4404,7 @@ impl<'a> Checker<'a> {
         Signature {
             params: s.params.clone(),
             ret: s.ret,
+            is_async: s.is_async,
             fallible: s.fallible,
             name_span: s.name_span,
             self_ty: s.self_ty,
@@ -5577,6 +5903,20 @@ fn resolve_named_ty(
                 .iter()
                 .map(|a| resolve_named_ty(a, resolved, module, type_ids, generics, types, diags))
                 .collect();
+            // `Task<T>` is the compiler's, like `Option<T>`: a program may
+            // name one but cannot declare one, and there is nothing useful a
+            // hand-written `Task` could be.
+            if p.is_generic_name("Task") {
+                if args.len() != 1 {
+                    diags.push(
+                        Diagnostic::error(codes::E0208, "`Task` takes one type argument")
+                            .with_primary(p.span, "the type the task produces"),
+                    );
+                    return TyId::ERROR;
+                }
+                let id = types.task_of(args[0], p.span);
+                return types.struct_ty(id);
+            }
             let target = resolved
                 .type_by_name_in(module, &p.text())
                 .and_then(|i| type_ids[i as usize]);
@@ -5791,6 +6131,43 @@ fn resolve_ty(t: &ast::Type, types: &mut Types, diags: &mut DiagBag) -> TyId {
         }
         ast::Type::Error(_) => TyId::ERROR,
     }
+}
+
+/// Whether a `break` inside this body leaves *this* loop.
+///
+/// An unlabelled `break` in a nested loop belongs to that loop, and a labelled
+/// one belongs to whichever loop carries the label — so only the two cases
+/// that name this loop count.
+fn breaks_out(block: &ast::Block, label: Option<&str>) -> bool {
+    fn in_block(b: &ast::Block, label: Option<&str>, nested: bool) -> bool {
+        b.stmts.iter().any(|s| in_stmt(s, label, nested))
+    }
+    fn in_if(i: &ast::IfStmt, label: Option<&str>, nested: bool) -> bool {
+        in_block(&i.then, label, nested)
+            || match i.else_.as_deref() {
+                Some(ast::ElseBranch::Block(b)) => in_block(b, label, nested),
+                Some(ast::ElseBranch::If(next)) => in_if(next, label, nested),
+                None => false,
+            }
+    }
+    fn in_stmt(s: &ast::Stmt, label: Option<&str>, nested: bool) -> bool {
+        match s {
+            ast::Stmt::Break { label: written, .. } => match written {
+                None => !nested,
+                Some(l) => Some(l.name.as_str()) == label,
+            },
+            ast::Stmt::If(i) => in_if(i, label, nested),
+            // An inner loop captures an unlabelled `break`, so from here on
+            // only a labelled one can leave this one.
+            ast::Stmt::For(f) => in_block(&f.body, label, true),
+            ast::Stmt::Match(m) => m.arms.iter().any(|a| match &a.body {
+                ast::MatchBody::Block(b) => in_block(b, label, nested),
+                ast::MatchBody::Expr(_) => false,
+            }),
+            _ => false,
+        }
+    }
+    in_block(block, label, false)
 }
 
 /// A dotted name's text, for diagnostics about a qualified call.

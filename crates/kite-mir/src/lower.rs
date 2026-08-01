@@ -113,6 +113,7 @@ impl<'a> FnLowerer<'a> {
 
         Function {
             name: self.hir_fn.name.clone(),
+            is_async: self.hir_fn.is_async,
             exportable: self.hir_fn.is_pub && self.hir_fn.is_free,
             param_count: self.hir_fn.param_count,
             locals: self.locals,
@@ -208,9 +209,16 @@ impl<'a> FnLowerer<'a> {
                 self.emit(Inst::SetField { base: b, index: *index, value: v });
             }
             hir::Stmt::Expr(e) => {
-                // Evaluated for its effects. A call still has to happen.
+                // Evaluated for its effects. A call still has to happen — and
+                // so does a suspension, which is the effect it *is*.
                 let v = self.rvalue(e);
-                if matches!(v, Rvalue::Call { .. } | Rvalue::CallBuiltin { .. }) {
+                if matches!(
+                    v,
+                    Rvalue::Call { .. }
+                        | Rvalue::CallBuiltin { .. }
+                        | Rvalue::Await { .. }
+                        | Rvalue::Yield
+                ) {
                     let t = self.temp(e.ty);
                     self.assign(t, v);
                 }
@@ -565,6 +573,11 @@ impl<'a> FnLowerer<'a> {
                 let v = self.operand(value);
                 Rvalue::Wrap { value: v }
             }
+            hir::ExprKind::Await { value } => {
+                let t = self.operand(value);
+                Rvalue::Await { task: t }
+            }
+            hir::ExprKind::Yield => Rvalue::Yield,
             hir::ExprKind::Unwrap { value } => {
                 let v = self.operand(value);
                 Rvalue::Unwrap { value: v }
