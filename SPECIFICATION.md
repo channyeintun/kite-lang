@@ -475,7 +475,8 @@ let label = if x > 10 { "big" } else { "small" }
 `for` is the only loop keyword. It has three forms.
 
 ```kite
-// 1. Iterate anything implementing Iterate
+// 1. Iterate a slice, a range, or a map. (The `Iterate` trait that would
+//    generalise this to a user type needs associated types; see §10.4.)
 for item in items {
     io.print(item)
 }
@@ -950,11 +951,24 @@ language's structural operations:
 | `Hash` | Usable as a map key | Yes, when all fields are `Hash` |
 | `Display` | String interpolation, `io.print` | No — must be written |
 | `Debug` | `\(x:?)` and diagnostics | Yes, structurally |
-| `Iterate` | `for x in …` | No |
+| `Iterate` | `for x in …` | No — see below |
 | `Share` | Safe to move across tasks | Yes, inferred — see [§12.4](#124-the-share-marker) |
 
 `Display` is deliberately not derived. How a type presents itself to a human is a
 design decision, not a mechanical one.
+
+**`Iterate` cannot be written in this language yet, and the implementation says
+so rather than pretending.** A trait that yields values needs to name the type
+it yields, which is an associated type — and [§11](#11-generics) excludes
+associated types from version 1.0 on the grounds that they cost error-message
+quality. The two decisions are in tension, and the tension is resolved for now
+in favour of the simpler type system: `for x in …` works over ranges, slices
+and maps, all three of which the compiler knows the element type of directly. A
+user type becomes iterable by exposing a slice.
+
+Whichever way this is settled later, it is a real change: adding associated
+types is a type-system change, and special-casing `Iterate` in the compiler is
+a language with one magic trait in it.
 
 ---
 

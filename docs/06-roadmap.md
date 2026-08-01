@@ -1019,7 +1019,7 @@ none.
 | 3 — Error handling | ✅ complete |
 | 4 — WebAssembly backend | ✅ every construct the language has, on both backends, compared. ❌ JS String Builtins (an optimisation, not a gap) |
 | 5 — Concurrency | ✅ `async`/`await`, the state machine, `Task<T>`, the combinators, `Share`. ❌ real parallelism on any target — the platform forbids it today |
-| 6 — Standard library | ✅ modules, and ten of them written in Kite, tested on both backends. ❌ `json.decode<T>` and the derivation machinery it needs |
+| 6 — Standard library | ✅ modules, eleven of them written in Kite, tested on both backends. ❌ `json.decode<T>` and the derivation machinery it needs |
 | 7 — Layout and DOM renderer | 🟡 layout, events, the update loop, a widget set with focus, and a keyboard-driven task list; a frame that did not change is not repainted. ❌ retained scene graph and its diff, screen-reader verification |
 | 8 — Canvas renderer | 🟡 draws, measures in the real font, hidden-overlay input, a parallel tree for a screen reader, UAX #14 subset. ❌ shaping, bidi, glyph atlas, per-rectangle damage, golden images |
 | 9 — Native backend | ❌ not written. `kitec bundle` produces one self-contained executable, which is packaging rather than code generation |
