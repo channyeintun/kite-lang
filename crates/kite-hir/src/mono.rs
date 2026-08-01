@@ -328,6 +328,12 @@ fn expr_children(k: &mut ExprKind) -> Vec<&mut Expr> {
         | ExprKind::TupleNew { elems: args }
         | ExprKind::MapNew { entries: args }
         | ExprKind::SliceNew { elems: args } => args.iter_mut().collect(),
+        ExprKind::ClosureNew { captures: args, .. } => args.iter_mut().collect(),
+        ExprKind::CallClosure { callee, args } => {
+            let mut v = vec![&mut **callee];
+            v.extend(args.iter_mut());
+            v
+        }
         ExprKind::ToDyn { value, .. }
         | ExprKind::ToStr { value }
         | ExprKind::Unary { operand: value, .. }
@@ -466,5 +472,99 @@ mod tests {
             panic!("expected a slice, got {}", types.name(inner))
         };
         assert_eq!(elem, TyId::STR);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Local renumbering
+//
+// Lambda lifting moves a closure body into a function of its own, where the
+// locals it uses are numbered differently. The walks above already know the
+// shape of the tree, so the renumber reuses them rather than repeating it.
+// ---------------------------------------------------------------------------
+
+/// Rewrite every local reference in a block through `map`.
+///
+/// A local the map does not mention is left alone. That never happens for a
+/// lifted body — every local it can reach is either a capture, a parameter, or
+/// one of its own — but leaving it alone is the behaviour that fails visibly
+/// rather than silently pointing at the wrong slot.
+pub fn renumber_locals(b: &mut Block, map: &HashMap<u32, u32>) {
+    for s in &mut b.stmts {
+        renumber_stmt(s, map);
+    }
+}
+
+fn remap(id: &mut crate::LocalId, map: &HashMap<u32, u32>) {
+    if let Some(&new) = map.get(&id.0) {
+        *id = crate::LocalId(new);
+    }
+}
+
+fn renumber_stmt(s: &mut Stmt, map: &HashMap<u32, u32>) {
+    match s {
+        Stmt::Let { local, .. }
+        | Stmt::Assign { local, .. }
+        | Stmt::SlicePush { local, .. }
+        | Stmt::MapSet { local, .. }
+        | Stmt::ForSlice { var: local, .. }
+        | Stmt::ForRange { var: local, .. } => remap(local, map),
+        Stmt::SetField { .. }
+        | Stmt::SetIndex { .. }
+        | Stmt::Expr(_)
+        | Stmt::Return { .. }
+        | Stmt::If { .. }
+        | Stmt::While { .. }
+        | Stmt::Loop { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::Block(_) => {}
+    }
+    for e in stmt_exprs(s) {
+        renumber_expr(e, map);
+    }
+    for b in stmt_blocks(s) {
+        renumber_locals(b, map);
+    }
+}
+
+fn renumber_expr(e: &mut Expr, map: &HashMap<u32, u32>) {
+    match &mut e.kind {
+        ExprKind::Local(id) => remap(id, map),
+        ExprKind::Match { arms, .. } => {
+            for arm in arms.iter_mut() {
+                renumber_pattern(&mut arm.pattern, map);
+            }
+        }
+        _ => {}
+    }
+    for c in expr_children(&mut e.kind) {
+        renumber_expr(c, map);
+    }
+    for b in expr_blocks(&mut e.kind) {
+        renumber_locals(b, map);
+    }
+}
+
+fn renumber_pattern(p: &mut Pattern, map: &HashMap<u32, u32>) {
+    match p {
+        Pattern::Binding { local, .. } => remap(local, map),
+        Pattern::Variant { fields, .. } | Pattern::Or(fields) | Pattern::Tuple { elems: fields, .. } => {
+            for f in fields {
+                renumber_pattern(f, map);
+            }
+        }
+        Pattern::Struct { fields, .. } => {
+            for (_, f) in fields {
+                renumber_pattern(f, map);
+            }
+        }
+        Pattern::Wildcard
+        | Pattern::Int(_)
+        | Pattern::Float(_)
+        | Pattern::Str(_)
+        | Pattern::Bool(_)
+        | Pattern::IntRange { .. }
+        | Pattern::Nil => {}
     }
 }

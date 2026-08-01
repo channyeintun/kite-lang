@@ -44,6 +44,8 @@ fn compile_fn(func: &mir::Function, traits: &[u32]) -> FnProto {
         .flat_map(|b| &b.stmts)
         .map(|s| match s {
             mir::Inst::Assign { value: mir::Rvalue::Call { args, .. }, .. }
+            | mir::Inst::Assign { value: mir::Rvalue::CallClosure { args, .. }, .. }
+            | mir::Inst::Assign { value: mir::Rvalue::ClosureNew { captures: args, .. }, .. }
             | mir::Inst::Assign { value: mir::Rvalue::CallVirtual { args, .. }, .. }
             | mir::Inst::Assign { value: mir::Rvalue::CallBuiltin { args, .. }, .. } => args.len(),
             mir::Inst::Assign { value: mir::Rvalue::StructNew { fields, .. }, .. }
@@ -183,6 +185,27 @@ impl<'a> Emitter<'a> {
                 self.code.push(Op::Call {
                     dst,
                     func: callee.0,
+                    base: self.arg_base,
+                    argc: args.len() as u8,
+                });
+            }
+
+            mir::Rvalue::ClosureNew { func, captures } => {
+                self.stage_args(captures);
+                self.code.push(Op::Closure {
+                    dst,
+                    func: func.0,
+                    base: self.arg_base,
+                    count: captures.len() as u8,
+                });
+            }
+
+            mir::Rvalue::CallClosure { callee, args } => {
+                let c = self.operand_reg(callee, 0);
+                self.stage_args(args);
+                self.code.push(Op::CallClosure {
+                    dst,
+                    callee: c,
                     base: self.arg_base,
                     argc: args.len() as u8,
                 });

@@ -1156,6 +1156,14 @@ impl<'a> Emitter<'a> {
                 }
             }
 
+            // Closures are not lowered yet. The driver refuses any program
+            // with a function-typed value before codegen runs, so these are
+            // defensive rather than reachable.
+            mir::Rvalue::ClosureNew { .. } | mir::Rvalue::CallClosure { .. } => {
+                func.instruction(&Instruction::Unreachable);
+                return true;
+            }
+
             mir::Rvalue::ToStr { operand, from } => {
                 self.operand(func, operand);
                 let call = match self.types.kind(*from) {

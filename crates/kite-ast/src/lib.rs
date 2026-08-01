@@ -571,7 +571,14 @@ pub enum Expr {
     /// `Point{ x: 1.0, y: 2.0 }`, optionally with `..base`.
     StructLit(StructLit),
     Match(MatchExpr),
-    Closure { params: Vec<ClosureParam>, body: Box<ClosureBody>, span: Span },
+    Closure {
+        params: Vec<ClosureParam>,
+        /// `|x| -> T { … }`. Needed for a block body used where no expected
+        /// type says what it returns.
+        ret: Option<Box<Type>>,
+        body: Box<ClosureBody>,
+        span: Span,
+    },
     Error(Span),
 }
 

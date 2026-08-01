@@ -39,6 +39,11 @@ pub enum Value {
     Tuple(Rc<Vec<Value>>),
     /// An enum value: which variant, and its payload.
     Enum(Rc<EnumValue>),
+    /// A closure: the lifted function, and the values it captured. Captures
+    /// are taken when the closure is made, so this holds values rather than a
+    /// reference to the frame it came from — which is why a closure outliving
+    /// its enclosing call is not a problem.
+    Closure(Rc<ClosureValue>),
     /// A slice. Copy-on-write: assignment shares the buffer, and a mutation
     /// clones it first if anyone else is holding it. That is what gives `[T]`
     /// value semantics without copying on every assignment, and what keeps it
@@ -53,6 +58,12 @@ pub enum Value {
     /// `nil`, or a present optional. Only ever produced where the type is
     /// `?T`; Kite has no null anywhere else.
     Nil,
+}
+
+#[derive(Debug)]
+pub struct ClosureValue {
+    pub func: u32,
+    pub captures: Vec<Value>,
 }
 
 #[derive(Debug)]
@@ -110,6 +121,7 @@ impl Value {
             Value::Map(_) => "map",
             Value::Pair(_) => "(T, error)",
             Value::Err(_) => "error",
+            Value::Closure(_) => "closure",
             Value::Nil => "nil",
         }
     }
@@ -130,6 +142,9 @@ impl fmt::Display for Value {
             }
             Value::Bool(v) => write!(f, "{}", v),
             Value::Str(s) => write!(f, "{}", s),
+            // A closure has no text form; `io.print` rejects one long before
+            // this, so this only ever appears in a debug dump.
+            Value::Closure(c) => write!(f, "closure#{}", c.func),
             Value::Struct(s) => {
                 // Debug-shaped output until the `Display` trait lands.
                 write!(f, "{{")?;
@@ -796,6 +811,23 @@ impl<'a> Vm<'a> {
                     self.call(callee, base, arg_base, argc, dst)?;
                 }
 
+                Op::Closure { dst, func, base: arg_base, count } => {
+                    let captures = (0..count as usize)
+                        .map(|i| self.get(base, arg_base + i as Reg))
+                        .collect();
+                    self.set(base, dst, Value::Closure(Rc::new(ClosureValue { func, captures })));
+                }
+
+                Op::CallClosure { dst, callee, base: arg_base, argc } => {
+                    let Value::Closure(c) = self.get(base, callee) else {
+                        return Err(Trap::TypeConfusion {
+                            op: "call.closure",
+                            found: self.get(base, callee).type_name(),
+                        });
+                    };
+                    self.call_with(c.func, base, arg_base, argc, dst, &c.captures)?;
+                }
+
                 Op::ToStr { dst, src } => {
                     // `Display` on a `Value` is the same code that `io.print`
                     // uses, so `io.print(x)` and `io.print("\(x)")` cannot
@@ -861,6 +893,21 @@ impl<'a> Vm<'a> {
         argc: u8,
         dst: Reg,
     ) -> Result<(), Trap> {
+        self.call_with(callee, base, arg_base, argc, dst, &[])
+    }
+
+    /// `leading` occupies the callee's first registers, ahead of the arguments.
+    /// That is how a closure's captures arrive: a lifted function takes them as
+    /// its leading parameters, so it is entered exactly like any other.
+    fn call_with(
+        &mut self,
+        callee: u32,
+        base: usize,
+        arg_base: Reg,
+        argc: u8,
+        dst: Reg,
+        leading: &[Value],
+    ) -> Result<(), Trap> {
         if self.frames.len() >= MAX_FRAMES {
             return Err(Trap::CallDepthExceeded);
         }
@@ -870,11 +917,13 @@ impl<'a> Vm<'a> {
         self.regs
             .resize(new_base + proto.frame_size, Value::Unit);
 
-        // Copy arguments from the caller's window into the callee's parameter
-        // registers, which are always locals 0..argc.
+        for (i, v) in leading.iter().enumerate() {
+            self.regs[new_base + i] = v.clone();
+        }
+        // Arguments follow, in the callee's parameter registers.
         for i in 0..argc as usize {
             let v = self.regs[base + arg_base as usize + i].clone();
-            self.regs[new_base + i] = v;
+            self.regs[new_base + leading.len() + i] = v;
         }
 
         self.frames.push(Frame {

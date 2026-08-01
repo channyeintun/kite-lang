@@ -112,6 +112,11 @@ pub enum Rvalue {
     Call { callee: FnId, args: Vec<Operand> },
     /// Dispatched at run time from the receiver's concrete type.
     CallVirtual { trait_id: TraitId, method: u32, args: Vec<Operand> },
+    /// A closure value: the lifted function, plus what it captured.
+    ClosureNew { func: FnId, captures: Vec<Operand> },
+    /// Calling a function value. The captures it carries are prepended to the
+    /// arguments, so the lifted function is called like any other.
+    CallClosure { callee: Operand, args: Vec<Operand> },
     /// A value rendered as text. `from` is its type, which the Wasm backend
     /// needs because its host calls are typed and the VM's values are not.
     ToStr { operand: Operand, from: TyId },
@@ -282,6 +287,16 @@ impl fmt::Display for Rvalue {
             Rvalue::Unary { op, operand } => write!(f, "{:?}({})", op, operand),
             Rvalue::Call { callee, args } => {
                 write!(f, "call fn{}(", callee.0)?;
+                write_operands(f, args)?;
+                write!(f, ")")
+            }
+            Rvalue::ClosureNew { func, captures } => {
+                write!(f, "closure fn{}[", func.0)?;
+                write_operands(f, captures)?;
+                write!(f, "]")
+            }
+            Rvalue::CallClosure { callee, args } => {
+                write!(f, "{}(", callee)?;
                 write_operands(f, args)?;
                 write!(f, ")")
             }

@@ -225,6 +225,14 @@ pub enum ExprKind {
     ToDyn { value: Box<Expr>, trait_id: TraitId },
     /// A value rendered as text, from `\(expr)` in a string literal.
     ToStr { value: Box<Expr> },
+    /// A closure value: the lifted function, plus the values it captured.
+    /// Captures are by value and evaluated here, at the point the closure is
+    /// made — not when it runs.
+    ClosureNew { func: FnId, captures: Vec<Expr> },
+    /// Calling a function value. The callee's captures are passed ahead of the
+    /// arguments, which is why a lifted function takes them as leading
+    /// parameters rather than as a separate environment record.
+    CallClosure { callee: Box<Expr>, args: Vec<Expr> },
     CallBuiltin { builtin: Builtin, args: Vec<Expr> },
     Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
     Unary { op: UnOp, operand: Box<Expr> },
@@ -563,6 +571,14 @@ impl Program {
                 )
             }
             ExprKind::ToStr { value } => format!("(str {})", self.expr(value)),
+            ExprKind::ClosureNew { func, captures } => {
+                let c: Vec<String> = captures.iter().map(|x| self.expr(x)).collect();
+                format!("closure fn{}[{}]", func.0, c.join(", "))
+            }
+            ExprKind::CallClosure { callee, args } => {
+                let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();
+                format!("{}({})", self.expr(callee), a.join(", "))
+            }
             ExprKind::ToDyn { value, trait_id } => {
                 format!("(as dyn {} {})", self.types.trait_def(*trait_id).name, self.expr(value))
             }

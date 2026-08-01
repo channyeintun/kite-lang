@@ -149,6 +149,7 @@ pub fn check(
     }
 
     // Signatures next, so calls can be checked in either direction.
+    let mut lifted: Vec<hir::Function> = Vec::new();
     let mut sigs = Vec::new();
     for sig in &resolved.fns {
         // A function's own type parameters are in scope for its signature.
@@ -235,6 +236,9 @@ pub fn check(
         let mut checker = Checker {
             resolved,
             sigs: &sigs,
+            lifted: Vec::new(),
+            closure_span: None,
+            captures: Vec::new(),
             generic_defs: sigs[i].generics.clone(),
             generics: sigs[i].generics.iter().map(|g| (g.name.clone(), g.ty)).collect(),
             type_ids: &type_ids,
@@ -288,7 +292,12 @@ pub fn check(
             }
         };
         fns.push(func);
+        // Functions lifted out of this one's closure literals. Their ids were
+        // handed out assuming they land after every declared function, so they
+        // are collected here and appended once all declarations are checked.
+        lifted.append(&mut checker.lifted);
     }
+    fns.append(&mut lifted);
 
     let vtables = build_vtables(resolved, &type_ids, &types);
 
@@ -419,6 +428,19 @@ fn declare_generics(
 struct Checker<'a> {
     resolved: &'a ResolveMap,
     sigs: &'a [Signature],
+    /// Functions lifted out of closure literals, appended after every declared
+    /// function.
+    lifted: Vec<hir::Function>,
+    /// The source region of the closure being checked. A local declared
+    /// outside it is a capture.
+    ///
+    /// This is a span test rather than an id threshold because the checker
+    /// pre-populates every local a function has, closure parameters included —
+    /// so "declared later" says nothing about "declared inside".
+    closure_span: Option<Span>,
+    /// Captures of the closure currently being checked, in the order they are
+    /// first read — which is the order the lifted function takes them.
+    captures: Vec<u32>,
     /// The enclosing function's type parameters. Empty for most functions,
     /// which is why every lookup here is a linear scan.
     generic_defs: Vec<GenericDef>,
@@ -1555,21 +1577,260 @@ impl<'a> Checker<'a> {
                 hir::Expr { kind: ExprKind::TupleNew { elems: out }, ty, span: *span }
             }
             ast::Expr::Slice { elems, span } => self.slice_literal(elems, expected, *span),
-            ast::Expr::Closure { span, .. } => {
-                self.not_yet(
-                    *span,
-                    "a closure",
-                    "closures are the last part of Phase 2; see docs/06-roadmap.md",
-                );
-                self.lit(ExprKind::Error, TyId::ERROR, *span)
+            ast::Expr::Closure { params, ret, body, span } => {
+                self.closure(params, ret.as_deref(), body, expected, *span)
             }
             ast::Expr::Error(span) => self.lit(ExprKind::Error, TyId::ERROR, *span),
         }
     }
 
+    /// A closure literal.
+    ///
+    /// The body is lifted into a function of its own, whose leading parameters
+    /// are the values it captured. Lifting here rather than in a later pass
+    /// means MIR, both backends and monomorphisation see only ordinary
+    /// functions: nothing downstream has to know closures exist.
+    ///
+    /// Captures are by value, taken when the closure is made. A closure that
+    /// could see later writes to a `var` would be action at a distance, which
+    /// is exactly what the rest of the language refuses — so capturing a `var`
+    /// is rejected rather than quietly given one meaning or the other.
+    fn closure(
+        &mut self,
+        params: &[ast::ClosureParam],
+        ret_ty: Option<&ast::Type>,
+        body: &ast::ClosureBody,
+        expected: Option<TyId>,
+        span: Span,
+    ) -> hir::Expr {
+        // What the context wants, when it wants anything. An unannotated
+        // parameter is only knowable from here.
+        let wanted: Option<(Vec<TyId>, TyId)> = expected.and_then(|e| {
+            match self.types.kind(e) {
+                TyKind::Fn { params, ret } => Some((params.clone(), *ret)),
+                _ => None,
+            }
+        });
+
+        let mut param_ids = Vec::with_capacity(params.len());
+        for (i, p) in params.iter().enumerate() {
+            let annotated = p.ty.as_ref().map(|t| self.resolve_type(t));
+            let from_context = wanted.as_ref().and_then(|(ps, _)| ps.get(i).copied());
+            let ty = match (annotated, from_context) {
+                (Some(a), Some(c)) => {
+                    self.expect_ty(a, c, p.name.span, None);
+                    a
+                }
+                (Some(a), None) => a,
+                (None, Some(c)) => c,
+                (None, None) => {
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0211,
+                            format!("cannot infer the type of `{}`", p.name.name),
+                        )
+                        .with_primary(p.name.span, "this parameter has no type")
+                        .with_note(
+                            "a closure's parameter types come from the place it is used. \
+                             Where that is not known, annotate them: `|x: int| ...`",
+                        ),
+                    );
+                    TyId::ERROR
+                }
+            };
+            let Some(id) = self.resolved.lookup_binding(p.name.span) else {
+                return self.lit(ExprKind::Error, TyId::ERROR, span);
+            };
+            self.set_local_ty(id, ty);
+            param_ids.push(id);
+        }
+
+        // Check the body. Captures accumulate as outer locals are read.
+        // A closure inside a closure sees the inner boundary, so its own
+        // captures are the ones it reads from anywhere further out.
+        let outer_captures = std::mem::take(&mut self.captures);
+        let outer_region = self.closure_span.replace(span);
+        // An annotation wins over the context, and is checked against it.
+        let annotated_ret = ret_ty.map(|t| self.resolve_type(t));
+        let expected_ret = match (annotated_ret, wanted.as_ref().map(|(_, r)| *r)) {
+            (Some(a), Some(c)) => {
+                self.expect_ty(a, c, ret_ty.map(|t| t.span()).unwrap_or(span), None);
+                Some(a)
+            }
+            (Some(a), None) => Some(a),
+            (None, c) => c,
+        };
+        let (hir_body, ret) = match body {
+            ast::ClosureBody::Expr(e) => {
+                let v = self.expr(e, expected_ret);
+                let v = self.coerce(v, expected_ret);
+                let ty = v.ty;
+                let block = hir::Block {
+                    stmts: vec![hir::Stmt::Return { value: Some(v), span }],
+                };
+                (block, ty)
+            }
+            ast::ClosureBody::Block(b) => {
+                // A block body's `return` statements are checked against the
+                // signature the context asked for; with no context there is
+                // nothing to check them against, so the closure returns unit.
+                let ret = expected_ret.unwrap_or(TyId::UNIT);
+                let sig = Signature {
+                    params: Vec::new(),
+                    ret,
+                    fallible: false,
+                    name_span: span,
+                    self_ty: None,
+                    generics: Vec::new(),
+                };
+                let (block, flow) = self.block(b, &sig);
+                // Falling off the end of a closure that promised a value is
+                // the same mistake as in a named function.
+                if ret != TyId::UNIT && flow != Flow::Diverges {
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0211,
+                            "this closure can finish without returning a value",
+                        )
+                        .with_primary(span, format!("it must return `{}`", self.types.name(ret)))
+                        .with_note("every path out of the body needs a `return`"),
+                    );
+                }
+                (block, ret)
+            }
+        };
+        let captures = std::mem::replace(&mut self.captures, outer_captures);
+        self.closure_span = outer_region;
+        // A capture of a capture: what an inner closure took from outside the
+        // enclosing one is something the enclosing one must take too, so that
+        // it has a value to hand on.
+        if let Some(outer) = outer_region {
+            for id in &captures {
+                if !self.declared_inside(*id, outer) && !self.captures.contains(id) {
+                    self.captures.push(*id);
+                }
+            }
+        }
+
+        let ty = self.types.fn_of(
+            param_ids.iter().map(|id| self.locals[*id as usize].ty).collect(),
+            ret,
+        );
+        let func = self.lift(&captures, &param_ids, hir_body, ret, span);
+        let capture_exprs = captures
+            .iter()
+            .map(|id| hir::Expr {
+                kind: ExprKind::Local(hir::LocalId(*id)),
+                ty: self.locals[*id as usize].ty,
+                span,
+            })
+            .collect();
+        hir::Expr { kind: ExprKind::ClosureNew { func, captures: capture_exprs }, ty, span }
+    }
+
+    /// Move a closure body into a function of its own.
+    ///
+    /// The new function's locals are the captures, then the parameters, then
+    /// everything the body declared — so a lifted body's local numbering is
+    /// remapped exactly once, here.
+    fn lift(
+        &mut self,
+        captures: &[u32],
+        params: &[u32],
+        mut body: hir::Block,
+        ret: TyId,
+        span: Span,
+    ) -> hir::FnId {
+        let mut map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        let mut locals: Vec<hir::Local> = Vec::new();
+        for id in captures.iter().chain(params.iter()) {
+            map.insert(*id, locals.len() as u32);
+            locals.push(self.locals[*id as usize].clone());
+        }
+        // Everything the body itself introduced, which is every local whose
+        // declaration lies inside the closure. A nested closure's locals are
+        // in there too; they are dead here, having moved with its body, and
+        // cost an unused slot rather than a wrong one.
+        for id in 0..self.locals.len() as u32 {
+            if map.contains_key(&id) || !self.declared_inside(id, span) {
+                continue;
+            }
+            map.insert(id, locals.len() as u32);
+            locals.push(self.locals[id as usize].clone());
+        }
+        kite_hir::mono::renumber_locals(&mut body, &map);
+
+        let index = self.lifted.len();
+        self.lifted.push(hir::Function {
+            // Named per enclosing function, so two closures in different
+            // functions do not both come out as `closure#0` in a dump.
+            name: format!("{}#closure{}", self.resolved.fns[self.fn_index].name, index),
+            generic_count: 0,
+            is_pub: false,
+            is_async: false,
+            param_count: captures.len() + params.len(),
+            locals,
+            ret,
+            body,
+            span,
+        });
+        // Lifted functions are appended after every declared one, so their ids
+        // start where the declared ones end.
+        hir::FnId(self.resolved.fns.len() as u32 + index as u32)
+    }
+
+    fn set_local_ty(&mut self, id: u32, ty: TyId) {
+        if let Some(l) = self.locals.get_mut(id as usize) {
+            l.ty = ty;
+        }
+        while self.init.len() <= id as usize {
+            self.init.push(Init::Assigned);
+        }
+        while self.taint.len() <= id as usize {
+            self.taint.push(Taint::Clean);
+        }
+        self.init[id as usize] = Init::Assigned;
+        self.taint[id as usize] = Taint::Clean;
+    }
+
+    /// Whether a local's declaration lies inside a source region.
+    fn declared_inside(&self, id: u32, region: Span) -> bool {
+        let s = self.locals[id as usize].span;
+        s.start >= region.start && s.end <= region.end
+    }
+
+    /// Record a read of an enclosing function's local as a capture.
+    fn note_capture(&mut self, id: u32, span: Span) {
+        let Some(region) = self.closure_span else { return };
+        if self.declared_inside(id, region) || self.captures.contains(&id) {
+            return;
+        }
+        if self.locals[id as usize].mutable {
+            let name = self.locals[id as usize].name.clone();
+            let decl = self.locals[id as usize].span;
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0211,
+                    format!("a closure cannot capture `{}`, which is a `var`", name),
+                )
+                .with_primary(span, "captured here")
+                .with_secondary(decl, "declared with `var`")
+                .with_note(
+                    "captures are by value, taken when the closure is made — so later \
+                     writes would not be seen, and reading one as if they were is a bug \
+                     waiting to happen",
+                )
+                .with_note("copy it into a `let` first, or pass it as a parameter"),
+            );
+            return;
+        }
+        self.captures.push(id);
+    }
+
     fn path_expr(&mut self, p: &ast::Path) -> hir::Expr {
         match self.resolved.lookup_use(p.span) {
             Some(Res::Local(id)) => {
+                self.note_capture(id, p.span);
                 if self.taint[id as usize] == Taint::Tainted {
                     let local = &self.locals[id as usize];
                     let (name, decl) = (local.name.clone(), local.span);
@@ -1774,23 +2035,37 @@ impl<'a> Checker<'a> {
                 // from one that is not: the call is well-formed and it is the
                 // compiler that cannot do it yet. Saying "not a function" of a
                 // `fn(int) -> int` reads as a contradiction, because it is one.
-                let d = if matches!(self.types.kind(ty), TyKind::Fn { .. }) {
-                    Diagnostic::error(
-                        codes::E0200,
-                        "calling a function value is not implemented yet".to_string(),
-                    )
-                    .with_primary(p.span, format!("`{}` holds {}", p.text(), self.types.with_article(ty)))
-                    .with_secondary(decl, "declared here")
-                    .with_note(
-                        "calling a value rather than a named function arrives with closures; \
-                         see docs/06-roadmap.md",
-                    )
-                } else {
+                if let TyKind::Fn { params: sig_params, ret } = self.types.kind(ty).clone() {
+                    self.note_capture(id, p.span);
+                    let callee = hir::Expr {
+                        kind: ExprKind::Local(hir::LocalId(id)),
+                        ty,
+                        span: p.span,
+                    };
+                    if args.len() != sig_params.len() {
+                        self.arity_error(&p.text(), args.len(), sig_params.len(), span, Some(decl));
+                    }
+                    let mut hargs = Vec::with_capacity(args.len());
+                    for (i, a) in args.iter().enumerate() {
+                        let want = sig_params.get(i).copied();
+                        let e = self.expr(a, want);
+                        let e = self.coerce(e, want);
+                        if let Some(w) = want {
+                            self.expect_ty(e.ty, w, e.span, Some(decl));
+                        }
+                        hargs.push(e);
+                    }
+                    return hir::Expr {
+                        kind: ExprKind::CallClosure { callee: Box::new(callee), args: hargs },
+                        ty: ret,
+                        span,
+                    };
+                }
+                self.diags.push(
                     Diagnostic::error(codes::E0205, format!("`{}` is not a function", p.text()))
                         .with_primary(p.span, format!("this is {}", self.types.with_article(ty)))
-                        .with_secondary(decl, "declared here")
-                };
-                self.diags.push(d);
+                        .with_secondary(decl, "declared here"),
+                );
                 self.lit(ExprKind::Error, TyId::ERROR, span)
             }
 

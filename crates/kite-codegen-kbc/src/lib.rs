@@ -142,6 +142,12 @@ pub enum Op {
     /// value carries its own tag; the Wasm backend needs three host calls for
     /// the same job.
     ToStr { dst: Reg, src: Reg },
+    /// Build a closure: a function index plus the captured values, which sit
+    /// at `base .. base + count`.
+    Closure { dst: Reg, func: u32, base: Reg, count: u8 },
+    /// Call a closure. Its captures are prepended to the arguments at `base`,
+    /// so the callee is entered exactly like a named function.
+    CallClosure { dst: Reg, callee: Reg, base: Reg, argc: u8 },
     CallNative { dst: Reg, native: Native, base: Reg, argc: u8 },
     Return { src: Option<Reg> },
 
@@ -382,6 +388,12 @@ impl fmt::Display for Op {
                 write!(f, "{:<12} r{}, fn{}, r{}, {}", "call", dst, fi, base, argc)
             }
             ToStr { dst, src } => write!(f, "{:<12} r{}, r{}", "str", dst, src),
+            Closure { dst, func: fi, base, count } => {
+                write!(f, "{:<12} r{}, fn{}, r{}, {}", "closure", dst, fi, base, count)
+            }
+            CallClosure { dst, callee, base, argc } => {
+                write!(f, "{:<12} r{}, r{}, r{}, {}", "call.closure", dst, callee, base, argc)
+            }
             CallVirtual { dst, table, method, base, argc } => write!(
                 f,
                 "{:<12} r{}, vt{}#{}, r{}, {}",

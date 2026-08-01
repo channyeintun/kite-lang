@@ -1764,13 +1764,22 @@ impl<'a> Parser<'a> {
             self.expect(T::Pipe)?;
         }
 
+        // A block body has nothing to infer a return type from unless the
+        // context supplies one, so `-> T` is available for the cases it does
+        // not — `let f = |x: int| -> str { … }`.
+        let ret = if self.eat(T::Arrow) {
+            Some(Box::new(self.parse_type()?))
+        } else {
+            None
+        };
+
         let body = if self.at(T::LBrace) {
             ClosureBody::Block(self.parse_block()?)
         } else {
             ClosureBody::Expr(self.parse_expr()?)
         };
         let span = start.to(self.prev_span());
-        Some(Expr::Closure { params, body: Box::new(body), span })
+        Some(Expr::Closure { params, ret, body: Box::new(body), span })
     }
 }
 

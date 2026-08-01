@@ -159,6 +159,14 @@ codes! {
          Kite has no turbofish. If a parameter cannot be inferred, take a \
          value of that type, or return a concrete type instead.";
 
+    E0211 = "E0211", "invalid closure",
+        "A closure's parameter types come from where it is used. Where that is \
+         not known, they must be annotated.\n\n\
+         Captures are by value and taken when the closure is made, so a `var` \
+         cannot be captured: later writes to it would not be seen, and code \
+         reading it as if they were is a bug waiting to happen. Copy it into a \
+         `let`, or pass it as a parameter.";
+
     E0210 = "E0210", "non-exhaustive match",
         "A `match` must cover every possible value. Exhaustiveness is what \
          makes adding an enum variant safe: the compiler shows you every place \
