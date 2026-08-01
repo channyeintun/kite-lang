@@ -13,7 +13,7 @@ use kite_diag::{codes, DiagBag, Diagnostic};
 use kite_span::{FileId, Span};
 
 mod kinds;
-pub use kinds::TokenKind;
+pub use kinds::{keyword, TokenKind, KEYWORDS};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Token {
