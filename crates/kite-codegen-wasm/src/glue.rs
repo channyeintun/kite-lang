@@ -184,6 +184,10 @@ export function domRenderer(container) {{
   return {{
     rect: (x, y, w, h, colour) => {{
       const el = place(document.createElement('div'), x, y);
+      // A filled rectangle is decoration until something says otherwise, and
+      // a screen reader announcing "group" for every box is worse than
+      // silence.
+      el.setAttribute('aria-hidden', 'true');
       el.style.width = w + 'px';
       el.style.height = h + 'px';
       el.style.background = hex(colour);
@@ -221,6 +225,29 @@ export function domRenderer(container) {{
 
 // The same drawing onto a 2D context. Text is drawn from its top-left, which
 // is where the layout put it, so the baseline is set rather than assumed.
+/// Where a canvas renderer's text is announced.
+///
+/// A canvas is a picture: everything a program draws into one is invisible to
+/// a screen reader, which is the accessibility cost of the canvas path and the
+/// reason the DOM renderer is the one to ship first. What closes the gap is a
+/// **parallel tree**: the same runs of text, in the same order, in hidden DOM
+/// next to the canvas. It is not a full accessibility tree — there are no
+/// roles, no focus and no live regions yet — and calling it one would be a
+/// claim this does not earn.
+let announcer = null;
+
+export function setAnnouncer(element) {{
+  announcer = element;
+  if (element) element.replaceChildren();
+}}
+
+function announce(body) {{
+  if (!announcer || body === '') return;
+  const line = document.createElement('div');
+  line.textContent = body;
+  announcer.appendChild(line);
+}}
+
 export function canvasRenderer(ctx) {{
   // A clip nests with `save`/`restore`, so an unbalanced `unclip` would
   // restore state a caller never saved. The depth is tracked to refuse that
@@ -232,6 +259,7 @@ export function canvasRenderer(ctx) {{
       ctx.fillRect(x, y, w, h);
     }},
     text: (x, y, body, colour) => {{
+      announce(body);
       ctx.fillStyle = hex(colour);
       ctx.font = FONT;
       ctx.textBaseline = 'top';
@@ -370,6 +398,47 @@ function imports() {{
   }};
 }}
 
+/// A renderer that records what it was asked to draw, so a frame identical to
+/// the last one can be skipped.
+///
+/// This is the cheap half of damage tracking: it does not find *which*
+/// rectangle changed, only whether anything did. That is the half that matters
+/// for an application whose model did not change — a key press it ignored, a
+/// pointer moving over nothing — and the expensive half needs a scene graph
+/// that survives between frames, which is Phase 8's work.
+export function recordingRenderer() {{
+  const calls = [];
+  return {{
+    calls,
+    rect: (x, y, w, h, colour) => calls.push(['r', x, y, w, h, colour]),
+    text: (x, y, body, colour) => calls.push(['t', x, y, body, colour]),
+    clip: (x, y, w, h) => calls.push(['c', x, y, w, h]),
+    unclip: () => calls.push(['u']),
+  }};
+}}
+
+/// Replay recorded calls into a real renderer.
+export function replay(calls, renderer) {{
+  for (const call of calls) {{
+    if (call[0] === 'r') renderer.rect(call[1], call[2], call[3], call[4], call[5]);
+    else if (call[0] === 't') renderer.text(call[1], call[2], call[3], call[4]);
+    else if (call[0] === 'c') renderer.clip(call[1], call[2], call[3], call[4]);
+    else renderer.unclip();
+  }}
+}}
+
+/// Whether two recordings are the same picture.
+export function sameFrame(a, b) {{
+  if (a === null || b === null || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {{
+    if (a[i].length !== b[i].length) return false;
+    for (let j = 0; j < a[i].length; j += 1) {{
+      if (a[i][j] !== b[i][j]) return false;
+    }}
+  }}
+  return true;
+}}
+
 // ---- the scheduler --------------------------------------------------------
 //
 // Round-robin, in spawn order — the same order the bytecode VM polls in, which
@@ -485,6 +554,14 @@ export const EVENT_CLICK = 0n;
 export const EVENT_KEY = 1n;
 /// A wheel: `y` carries the distance, `x` the horizontal one.
 export const EVENT_WHEEL = 2n;
+/// The pointer moved, went down, or came up. One door, as with the rest: a
+/// new kind of event is a new constant, and a program that ignores a kind
+/// simply never matches on it.
+export const EVENT_MOVE = 3n;
+export const EVENT_DOWN = 4n;
+export const EVENT_UP = 5n;
+/// The window was resized: `x` and `y` carry the new size.
+export const EVENT_RESIZE = 6n;
 
 export function isApplication(exports) {{
   return ["init", "view", "update"].every((n) => typeof exports[n] === "function");
@@ -665,8 +742,16 @@ pub fn generate_page(title: &str) -> String {
             border: 1px solid #2a2f3a; border-radius: 4px; padding: 4px 10px; }}
   button[aria-pressed="true"] {{ background: #3b82f6; border-color: #3b82f6; color: #fff; }}
   main {{ padding: 14px; }}
-  #stage {{ width: 640px; height: 360px; }}
+  #stage {{ width: 640px; height: 360px; position: relative; }}
   pre {{ margin: 0; white-space: pre-wrap; }}
+  /* The parallel tree for the canvas renderer: read by a screen reader,
+     invisible to everyone else. `display: none` would hide it from both. */
+  #announcer {{ position: absolute; width: 1px; height: 1px; overflow: hidden;
+                clip-path: inset(50%); white-space: nowrap; }}
+  /* Where typing goes when the canvas is drawing. A canvas cannot hold a
+     caret, so the text lands in a real input positioned under the pointer and
+     kept invisible — the same trick every canvas editor uses. */
+  #typing {{ position: absolute; opacity: 0; pointer-events: none; width: 1px; }}
 </style>
 
 <header>
@@ -678,12 +763,15 @@ pub fn generate_page(title: &str) -> String {
 
 <main>
   <div id="stage"></div>
+  <div id="announcer" role="region" aria-live="polite" aria-label="drawing"></div>
+  <input id="typing" aria-hidden="true" tabindex="-1">
 </main>
 
 <script type="module">
   import {{ instantiate, setRenderer, setWriter, isApplication, setMeasure,
-            setLineHeight, fontMeasure, fontLineHeight, FONT,
-            EVENT_CLICK, EVENT_KEY, EVENT_WHEEL, str,
+            setLineHeight, fontMeasure, fontLineHeight, FONT, setAnnouncer,
+            EVENT_CLICK, EVENT_KEY, EVENT_WHEEL, EVENT_MOVE, EVENT_DOWN,
+            EVENT_UP, EVENT_RESIZE, str, recordingRenderer, replay, sameFrame,
             domRenderer, canvasRenderer, textRenderer }} from "./app.js";
 
   // Measure in the font that will be drawn, before anything is laid out.
@@ -691,6 +779,9 @@ pub fn generate_page(title: &str) -> String {
   setLineHeight(fontLineHeight(FONT));
 
   const stage = document.getElementById("stage");
+  const announcer = document.getElementById("announcer");
+  const typing = document.getElementById("typing");
+  let currentRenderer = textRenderer;
   const buttons = {{
     dom: document.getElementById("dom"),
     canvas: document.getElementById("canvas"),
@@ -709,6 +800,11 @@ pub fn generate_page(title: &str) -> String {
 
   function mount(which) {{
     stage.replaceChildren();
+    setAnnouncer(which === "canvas" ? announcer : null);
+    if (which === "text") {{
+      // The text renderer writes rather than draws, so it needs somewhere to
+      // write to before the frame is replayed.
+    }}
     if (which === "canvas") {{
       const canvas = document.createElement("canvas");
       const scale = window.devicePixelRatio || 1;
@@ -719,24 +815,35 @@ pub fn generate_page(title: &str) -> String {
       stage.appendChild(canvas);
       const ctx = canvas.getContext("2d");
       ctx.scale(scale, scale);
-      setRenderer(canvasRenderer(ctx));
+      currentRenderer = canvasRenderer(ctx);
     }} else if (which === "text") {{
       const pre = document.createElement("pre");
       stage.appendChild(pre);
       setWriter((line) => {{ pre.textContent += line + "\n"; }});
-      setRenderer(textRenderer);
+      currentRenderer = textRenderer;
     }} else {{
-      setRenderer(domRenderer(stage));
+      currentRenderer = domRenderer(stage);
     }}
   }}
 
-  function draw() {{
-    mount(mode);
+  // A frame is recorded before it is painted, and an identical one is not
+  // painted at all. That is the half of damage tracking a model that did not
+  // change needs — a key press the program ignored, a pointer moving over
+  // nothing — and it costs one comparison.
+  let lastFrame = null;
+
+  function draw(force) {{
+    const recorder = recordingRenderer();
+    setRenderer(recorder);
     if (interactive) {{
       exports.view(model);
     }} else {{
       exports.main();
     }}
+    if (!force && sameFrame(lastFrame, recorder.calls)) return;
+    lastFrame = recorder.calls;
+    mount(mode);
+    replay(recorder.calls, currentRenderer);
   }}
 
   function show(which) {{
@@ -744,7 +851,7 @@ pub fn generate_page(title: &str) -> String {
     for (const [name, button] of Object.entries(buttons)) {{
       button.setAttribute("aria-pressed", String(name === which));
     }}
-    draw();
+    draw(true);
   }}
 
   // An event becomes a new model, and the new model replaces the old. Nothing
@@ -756,12 +863,54 @@ pub fn generate_page(title: &str) -> String {
     // an index into the module's table, and handing an export a string quietly
     // becomes index 0.
     model = exports.update(model, kind, x, y, str(key));
-    draw();
+    draw(false);
   }}
 
-  stage.addEventListener("click", (e) => {{
+  const at = (e) => {{
     const box = stage.getBoundingClientRect();
-    send(EVENT_CLICK, e.clientX - box.left, e.clientY - box.top, "");
+    return [e.clientX - box.left, e.clientY - box.top];
+  }};
+
+  stage.addEventListener("click", (e) => {{
+    const [x, y] = at(e);
+    send(EVENT_CLICK, x, y, "");
+    // Typing goes to a real input placed where the pointer is: a canvas
+    // cannot hold a caret, and an invisible input is how every canvas editor
+    // handles this. It also brings the on-screen keyboard up on a phone.
+    if (mode === "canvas") {{
+      typing.style.left = x + "px";
+      typing.style.top = y + "px";
+      typing.focus({{ preventScroll: true }});
+    }}
+  }});
+
+  // Pointer events, all through the same door as everything else.
+  stage.addEventListener("pointermove", (e) => {{
+    const [x, y] = at(e);
+    send(EVENT_MOVE, x, y, "");
+  }});
+  stage.addEventListener("pointerdown", (e) => {{
+    const [x, y] = at(e);
+    send(EVENT_DOWN, x, y, "");
+  }});
+  stage.addEventListener("pointerup", (e) => {{
+    const [x, y] = at(e);
+    send(EVENT_UP, x, y, "");
+  }});
+
+  // Text typed into the hidden input arrives one character at a time, which
+  // is the same shape a key press has. An IME's composition arrives here too,
+  // once it is committed.
+  typing.addEventListener("input", () => {{
+    for (const character of typing.value) {{
+      send(EVENT_KEY, 0, 0, character);
+    }}
+    typing.value = "";
+  }});
+
+  window.addEventListener("resize", () => {{
+    const box = stage.getBoundingClientRect();
+    send(EVENT_RESIZE, box.width, box.height, "");
   }});
 
   // Keys go to the document rather than the stage: a div is not focusable, and

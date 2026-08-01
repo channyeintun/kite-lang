@@ -76,6 +76,18 @@ fn a_comparison_keeps_its_spaces() {
     assert!(out.contains("if a < b {"), "{}", out);
 }
 
+/// `<=` ends a comparison and `=` ends an assignment, and only one of them
+/// means a struct literal follows.
+#[test]
+fn a_comparison_before_a_block_is_not_a_struct_literal() {
+    for op in ["<=", ">=", "==", "!="] {
+        let out = format(&format!("fn f() {{\nif a {} b {{\nio.print(1)\n}}\n}}\n", op));
+        assert!(out.contains(&format!("if a {} b {{", op)), "{}", out);
+    }
+    let literal = format("fn f() {\nlet p = Point{ x: 1 }\n}\n");
+    assert!(literal.contains("Point{ x: 1 }"), "{}", literal);
+}
+
 #[test]
 fn a_comment_on_its_own_line_stays_there() {
     let out = idempotent("// a note\nfn main() {\n    io.print(1)\n}\n");

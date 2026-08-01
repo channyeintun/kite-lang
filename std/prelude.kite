@@ -154,7 +154,7 @@ pub fn concat<T>(items: [T], other: [T]) -> [T] {
 pub fn take<T>(items: [T], n: int) -> [T] {
     var out: [T] = []
     for i in 0..items.len() {
-        if i >= n{
+        if i >= n {
             return out
         }
         out.push(items[i])
@@ -166,7 +166,7 @@ pub fn take<T>(items: [T], n: int) -> [T] {
 pub fn drop<T>(items: [T], n: int) -> [T] {
     var out: [T] = []
     for i in 0..items.len() {
-        if i >= n{
+        if i >= n {
             out.push(items[i])
         }
     }

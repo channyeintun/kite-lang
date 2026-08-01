@@ -135,7 +135,7 @@ pub fn route(method: str, pattern: str, handle: fn(Request) -> Response) -> Rout
 /// The first route that matches, or a 404.
 pub fn serve(routes: [Route], request: Request) -> Response {
     for r in routes {
-        if r.method == request.method{
+        if r.method == request.method {
             if matches(r.pattern, request.path) {
                 return r.handle(request)
             }

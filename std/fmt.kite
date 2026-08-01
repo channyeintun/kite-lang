@@ -34,7 +34,7 @@ pub fn centre(s: str, width: int) -> str {
 
 /// `s` cut to `width`, with an ellipsis when something was cut.
 pub fn ellipsis(s: str, width: int) -> str {
-    if s.len() <= width{
+    if s.len() <= width {
         return s
     }
     if width <= 1 {

@@ -257,8 +257,14 @@ impl Formatter<'_> {
         if head.is_empty() {
             return false;
         }
-        ["=", "(", "[", ",", ":", "=>", "+", "-", "*", "/", "&&", "||", "==", "!=", "return",
-         "check", "await", "push"]
+        // `=` ends an assignment, but `<=`, `>=`, `==` and `!=` end a
+        // comparison — and `if a <= b {` opens a block. A struct literal in a
+        // comparison has to be parenthesised anyway, which the specification
+        // already tells people for an `if` condition.
+        if ["<=", ">=", "==", "!="].iter().any(|op| head.ends_with(op)) {
+            return false;
+        }
+        ["=", "(", "[", ",", ":", "=>", "+", "-", "*", "/", "return", "check", "await"]
             .iter()
             .any(|token| head.ends_with(token))
     }

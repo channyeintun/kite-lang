@@ -188,7 +188,7 @@ pub fn text_size(body: str) -> Size {
 /// A word longer than the limit gets a line of its own and overflows it, which
 /// is what every wrapper does short of breaking words apart.
 pub fn wrap(body: str, limit: float) -> [str] {
-    let pieces = words(body)
+    let pieces = pieces_of(body)
     if pieces.len() == 0 {
         return [""]
     }
@@ -196,16 +196,84 @@ pub fn wrap(body: str, limit: float) -> [str] {
     var lines: [str] = []
     var current = pieces[0]
     for i in 1..pieces.len() {
-        let candidate = current + " " + pieces[i]
-        if text.width(candidate) <= limit{
+        let piece = pieces[i]
+        // A piece that begins a word carries the space that joined it to the
+        // one before; a CJK piece does not, because there was none.
+        let candidate = if joins(piece) { current + piece } else { current + " " + piece }
+        if text.width(candidate) <= limit {
             current = candidate
         } else {
             lines.push(current)
-            current = pieces[i]
+            current = piece
         }
     }
     lines.push(current)
     return lines
+}
+
+/// The pieces a line may be broken between.
+///
+/// This is a **subset of UAX #14**, and the subset is named rather than
+/// implied: a run of Latin text breaks between words, and CJK breaks between
+/// characters — which is most of what the rules say for most text, and is the
+/// difference between a Japanese paragraph laid out and one drawn as a single
+/// enormous word.
+///
+/// What it does not do: it will not break a long URL, it does not know
+/// non-breaking spaces, and it will happily leave a closing bracket at the
+/// start of a line. Each of those needs the line-breaking property table,
+/// which belongs with the canvas renderer.
+fn pieces_of(body: str) -> [str] {
+    var out: [str] = []
+    var current = ""
+    for i in 0..body.len() {
+        let c = body.slice(i, i + 1)
+        if c == " " {
+            if current.len() > 0 {
+                out.push(current)
+                current = ""
+            }
+        } else {
+            if wide(c) {
+                // A wide character is its own piece, and so is whatever
+                // preceded it.
+                if current.len() > 0 {
+                    out.push(current)
+                    current = ""
+                }
+                out.push(c)
+            } else {
+                current = current + c
+            }
+        }
+    }
+    if current.len() > 0 {
+        out.push(current)
+    }
+    return out
+}
+
+/// Whether a piece joins the line before it with no space.
+///
+/// A piece that came from a wide character had no space before it, so putting
+/// one back would open a gap that was never in the text.
+fn joins(piece: str) -> bool {
+    if piece.len() != 1 {
+        return false
+    }
+    return wide(piece)
+}
+
+/// Whether a character is one a line may break either side of.
+///
+/// Measured rather than tabulated: a character wider than a Latin one under
+/// the host's own font is a CJK or full-width character, and the host is the
+/// only thing that knows its font. A runtime with no font answers with a
+/// nominal advance per character, where every character is the same width and
+/// nothing is wide — which is the right answer there, because nothing is being
+/// drawn.
+fn wide(c: str) -> bool {
+    return text.width(c) > text.width("W") * 1.2
 }
 
 /// How much space a run needs once wrapped to `limit`.
@@ -466,7 +534,7 @@ pub fn filled_label(name: str, body: str, background: int, colour: int) -> Paint
 
 fn paint_for(paints: [Paint], name: str) -> Option<Paint> {
     for p in paints {
-        if p.name == name{
+        if p.name == name {
             return p
         }
     }

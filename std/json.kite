@@ -81,7 +81,7 @@ fn keyword(input: str, at: int, word: str, value: Json) -> (Step, error) {
     if end > input.len() {
         return _, errors.new("json: unexpected end of input")
     }
-    if input.slice(at, end) != word{
+    if input.slice(at, end) != word {
         return _, errors.new("json: expected `\(word)` at \(at)")
     }
     return Step{ value: value, next: end }, nil
@@ -195,7 +195,7 @@ fn parse_number(input: str, at: int) -> (Step, error) {
         value = value * 10.0 + (d as float)
         i = i + 1
     }
-    if i == start{
+    if i == start {
         return _, errors.new("json: expected a number at \(at)")
     }
     if peek(input, i) == "." {
@@ -324,7 +324,7 @@ fn pairs(entries: { str: Json }) -> [str] {
 /// `1` mean the same thing to everything that reads it.
 fn number(n: float) -> str {
     let whole = n as int
-    if (whole as float) == n{
+    if (whole as float) == n {
         return "\(whole)"
     }
     return "\(n)"
