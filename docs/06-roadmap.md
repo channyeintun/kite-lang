@@ -340,6 +340,28 @@ LSP.
 
 ---
 
+## Where the implementation actually stands
+
+Recorded honestly, because a roadmap that overstates progress is worse than
+none.
+
+| Phase | State |
+|---|---|
+| 0 — Specification review | ✅ done, and the spec was amended four times by what the code found |
+| 1 — Vertical slice | ✅ complete |
+| 2 — Type system | ✅ structs, enums, match, exhaustiveness, traits, slices, optionals. ❌ maps, tuples, closures, generics, `dyn` dispatch |
+| 3 — Error handling | ✅ complete |
+| 4 — WebAssembly backend | 🟡 numeric core, control flow, WasmGC structs, enums, strings. ❌ slices, optionals, tuples, pairs, trait objects, JS String Builtins |
+| 5 — Concurrency | ❌ not started |
+| 6 — Standard library | ❌ not started |
+| 7 — Layout engine and DOM renderer | ❌ not started |
+| 8 — Canvas renderer | ❌ not started |
+| 9 — Native backend | ❌ not started |
+| 10 — Tooling | 🟡 `kitec` with run/check/build/--emit/--explain. ❌ fmt, LSP, test runner, package manager |
+
+406 tests, an annotated compile-fail corpus, and a differential corpus that runs
+every program on both backends and compares.
+
 ## Realistic timeline
 
 | Milestone | Cumulative |
