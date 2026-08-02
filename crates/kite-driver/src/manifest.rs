@@ -100,7 +100,11 @@ pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
 
         match table.as_str() {
             "package" => match key {
-                "name" => manifest.name = unquote(value, line_number)?,
+                "name" => {
+                    let name = unquote(value, line_number)?;
+                    check_name("package", &name, line_number)?;
+                    manifest.name = name;
+                }
                 "version" => manifest.version = unquote(value, line_number)?,
                 other => {
                     return Err(ManifestError {
@@ -123,6 +127,7 @@ pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
                 );
             }
             "dependencies" => {
+                check_name("dependency", key, line_number)?;
                 let (source, version) = if value.starts_with('"') {
                     (Source::Path(unquote(value, line_number)?), None)
                 } else {
@@ -192,6 +197,43 @@ pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
         });
     }
     Ok(manifest)
+}
+
+/// A package name, checked before anything is built out of it.
+///
+/// A name is not only a label: `kitec pkg` joins it onto a path under
+/// `.kite/vendor`, and the module loader joins it again at build time. A name
+/// containing `/` or `..`, or an absolute one, therefore escapes that
+/// directory — and since a *dependency's own* manifest introduces names
+/// transitively, the name that escapes need never appear in the manifest
+/// anybody wrote.
+///
+/// So it is checked here, once, at the only place a name enters the program.
+/// The rule is deliberately narrow — ASCII letters, digits, `-` and `_` —
+/// because a package name is written by hand, typed into a `use`, and turned
+/// into a directory, and anything wider buys nothing for all three.
+///
+/// This is the guarantee `kitec pkg` is built on: the module's own header
+/// claims the npm supply-chain surface is removed *by construction*, and a
+/// name that can reach outside its directory would have put it back.
+fn check_name(what: &str, name: &str, line: usize) -> Result<(), ManifestError> {
+    let ok = !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('-')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if ok {
+        return Ok(());
+    }
+    Err(ManifestError {
+        line,
+        message: format!(
+            "`{}` is not a {} name\n  a name is ASCII letters, digits, `-` and `_`, at most 64 \
+             of them, because it becomes a directory under `.kite/vendor` and a name in a `use`",
+            name, what
+        ),
+    })
 }
 
 fn strip_comment(line: &str) -> &str {

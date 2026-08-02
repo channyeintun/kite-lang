@@ -62,11 +62,33 @@ const headerLines = (headers) =>
     .map(([name, value]) => name + ": " + (Array.isArray(value) ? value.join(", ") : value))
     .join("\n");
 
+// A header is `name: value`, one per line — the shape everything crosses this
+// boundary in, because only text does.
+//
+// The splitting is what makes it dangerous, and the danger is worth stating.
+// Node refuses a header *value* containing a newline (`ERR_INVALID_CHAR`);
+// splitting on newlines first turns what it would have refused into two
+// well-formed headers, so this encoding hands a program's mistake straight to
+// the wire and defeats a check the runtime already had. A program that
+// interpolates anything a request said into a header string is one newline
+// away from setting a cookie somebody else chose.
+//
+// So a name is held to the RFC 7230 token set and a value to "no CR, LF or
+// NUL", and anything else is dropped rather than sent. Dropped, not escaped:
+// there is no escaping that keeps the meaning, and a header nobody can read is
+// better than a header somebody else wrote.
+const TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const parseHeaders = (lines) => {{
   const out = {{}};
-  for (const line of String(lines).split("\n")) {{
+  // `\r?\n`, so a CR cannot ride along on the end of a value.
+  for (const line of String(lines).split(/\r?\n/)) {{
     const at = line.indexOf(":");
-    if (at > 0) out[line.slice(0, at).trim()] = line.slice(at + 1).trim();
+    if (at <= 0) continue;
+    const name = line.slice(0, at).trim();
+    const value = line.slice(at + 1).trim();
+    if (!TOKEN.test(name)) continue;
+    if (/[\r\n\0]/.test(value)) continue;
+    out[name] = value;
   }}
   return out;
 }};
@@ -140,7 +162,16 @@ provide("net", {{
     if (fields["content-type"] === undefined && fields["Content-Type"] === undefined) {{
       fields["content-type"] = "text/plain; charset=utf-8";
     }}
-    request.res.writeHead(Number(status), fields);
+    // A header Node still refuses is a bug in the program, not a reason to end
+    // the process: `writeHead` throws, and an uncaught throw here unwinds
+    // through the Wasm frame and takes the server with it.
+    try {{
+      request.res.writeHead(Number(status), fields);
+    }} catch (e) {{
+      request.res.writeHead(500, {{ "content-type": "text/plain; charset=utf-8" }});
+      request.res.end("the handler produced a header this host will not send\n");
+      return 0n;
+    }}
     request.res.end(text(body));
     return 1n;
   }},

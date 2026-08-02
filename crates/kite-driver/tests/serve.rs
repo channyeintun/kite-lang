@@ -194,3 +194,93 @@ fn a_program_that_only_fetches_gets_no_adapter() {
         "a fetching program should not be given a server adapter"
     );
 }
+
+/// A newline in a header value does not become a second header.
+///
+/// This is the one place the boundary's `name: value` encoding is dangerous:
+/// splitting on newlines turns what Node itself refuses (`ERR_INVALID_CHAR`)
+/// into two well-formed headers, so a handler that interpolates anything a
+/// request said into a header string would be one newline away from setting a
+/// cookie somebody else chose. The adapter drops the malformed line instead.
+#[test]
+fn a_newline_in_a_header_does_not_smuggle_a_second_one() {
+    if !node_available() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let src = "use std/http\n\
+         fn nowhere(request: http.Request) -> http.Response {\n\
+         \x20   return http.not_found()\n\
+         }\n\
+         async fn main() {\n\
+         \x20   let (server, err) = await http.open(0)\n\
+         \x20   if err != nil {\n        io.print(err.message())\n        return\n    }\n\
+         \x20   io.print(\"listening \\(http.port_of(server))\")\n\
+         \x20   let (incoming, aerr) = await http.accept(server)\n\
+         \x20   if aerr != nil {\n        return\n    }\n\
+         \x20   // Exactly the mistake an application makes: request text, straight\n\
+         \x20   // into a header.\n\
+         \x20   let smuggled = http.respond(incoming, http.ok(\"body\"),\n\
+         \x20       [http.Header{ name: \"location\", value: \"/view/\\(incoming.request.body)\" }])\n\
+         \x20   if smuggled != nil {\n\
+         \x20       io.print(smuggled.message())\n\
+         \x20       // Refused, so nothing was sent — answer without it, or the\n\
+         \x20       // socket simply hangs.\n\
+         \x20       let none: [http.Header] = []\n\
+         \x20       let plain = http.respond(incoming, http.ok(\"refused\"), none)\n\
+         \x20       if plain != nil {\n            io.print(plain.message())\n        }\n\
+         \x20   }\n\
+         }\n";
+    let client = r#"import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const server = spawn(process.execPath, [fileURLToPath(new URL("./serve.mjs", import.meta.url))], {
+  stdio: ["ignore", "pipe", "inherit"],
+});
+const stop = () => { try { server.kill("SIGKILL"); } catch {} };
+process.on("exit", stop);
+
+try {
+  let buffered = "";
+  const port = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("never listened:\n" + buffered)), 15000);
+    server.stdout.on("data", (chunk) => {
+      buffered += chunk;
+      const match = buffered.match(/listening (\d+)/);
+      if (match) { clearTimeout(timer); resolve(Number(match[1])); }
+    });
+    server.on("exit", (code) => reject(new Error("exited with " + code + ":\n" + buffered)));
+  });
+
+  const response = await fetch(`http://127.0.0.1:${port}/x`, {
+    method: "POST",
+    body: "x\nSet-Cookie: session=attacker; Path=/",
+  });
+  console.log("status " + response.status);
+  console.log("body " + (await response.text()));
+  console.log("set-cookie " + JSON.stringify(response.headers.get("set-cookie")));
+  console.log("location " + JSON.stringify(response.headers.get("location")));
+} finally {
+  stop();
+}
+"#;
+    let out = serve_under_node("header-injection", src, client);
+    // The whole malformed line is dropped: no smuggled cookie, and no
+    // half-written `location` either.
+    assert!(
+        out.contains("set-cookie null"),
+        "a newline in a header value smuggled a second header:\n{}",
+        out
+    );
+    // The whole response is refused rather than half-sent: `respond` answers
+    // with an error, so no `location` goes out either.
+    assert!(out.contains("location null"), "{}", out);
+    // And the handler was told why, rather than left to wonder: it took the
+    // error path and answered with the fallback body. (The message itself goes
+    // to the server child's own output, which this client never reads.)
+    assert!(
+        out.contains("body refused"),
+        "the handler should have been told the header was refused:\n{}",
+        out
+    );
+}

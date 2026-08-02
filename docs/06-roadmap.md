@@ -998,6 +998,34 @@ are cloned into `.kite/vendor/<name>@<version>`, and the chosen one is
 materialised where a build reads it. `--offline` resolves only from what is
 already vendored and says so when it cannot.
 
+**A security review of this found two real holes, and both were the same
+mistake: a string a dependency's dependency wrote, trusted.** The module header
+above claims the npm supply-chain surface is removed *by construction*, and
+that claim is exactly what fetching a transitive graph put back.
+
+- **A dependency's name became a path.** It is a TOML key, it was stored
+  unvalidated, and `.kite/vendor/<name>` is deleted recursively and written
+  into — so a name of `../../.git/hooks` replaced the project's git hooks with
+  executable files, and an absolute name went anywhere at all. Names arrive
+  transitively, so it need never have appeared in a manifest anybody here
+  wrote. A name is now ASCII letters, digits, `-` and `_`, checked once in the
+  parser where names enter, and checked again at the join because that is
+  where the damage would be.
+- **A URL beginning with `-` was an option, not a URL.** `git ls-remote --tags
+  --upload-pack=…`, left with no repository, falls back to the current
+  directory's own remote and honours it. There is now a scheme allow-list, a
+  `--` before every positional argument, and `GIT_PROTOCOL_FROM_USER=0` with
+  every protocol denied but the four that are asked for.
+
+One claim in that review did **not** survive checking, and it is worth
+recording because the correction is the useful part: `ext::`, which hands the
+rest of a URL to a shell, was reported as exploitable on the theory that its
+default policy is `user` and an unset `GIT_PROTOCOL_FROM_USER` permits it. Git
+defaults *known-dangerous* protocols to `never`, so it is denied
+unconditionally and has been since 2.12. The allow-list stays anyway: the URL
+is attacker-controlled through a manifest nobody here wrote, and defending
+that on the far end's default configuration is not defending it.
+
 ---
 
 ## Phase 11 — Networking 🟡 **both halves work; WASI does not**
@@ -1055,6 +1083,20 @@ Two things came out differently from the plan:
   carries both. Putting the handle in the `Request` would have made a
   `Request` something only the runtime could produce — and a handler is only
   testable by calling it if a request is something anyone can write out.
+
+**A security review found two things in the fetching half**, both of which had
+put back the surface this design claims to remove by construction, and both are
+recorded in Phase 10 where the package manager is. The server half contributed
+one design change: **response headers cross as pairs, not as text.** Everything
+else on this boundary is `name: value` lines, and for a response that encoding
+is unsafe — the host splits on the newline, so a newline inside a value stops
+being data and becomes a separator, and a handler putting a path or an
+identifier from a request into a header would be one newline away from letting
+the caller add a `Set-Cookie` of their own. Joining the lines inside
+`http.respond`, from parts it was handed separately, is what makes "the program
+meant two headers" and "somebody else added one" distinguishable at all; from
+the joined string it is not. A value carrying a line break is refused rather
+than stripped, because there is no escaping that keeps the meaning.
 
 **Remaining: WASI.** `wasi:http/incoming-handler` is the other implementation
 this boundary was shaped for, and it is not written — it is a component-model

@@ -519,12 +519,55 @@ pub async fn accept(server: Server) -> (Incoming, error) {
     return Incoming{ request: request, id: id }, nil
 }
 
-/// Answer a request. `headers` is `name: value` lines, as everywhere else.
-pub fn respond(incoming: Incoming, response: Response, headers: str) -> error {
-    if serve_respond(incoming.id, response.status, response.body, headers) == 1 {
+/// One response header, as a name and a value that are still two things.
+///
+/// Written as a literal — `http.Header{ name: "location", value: "/x" }` —
+/// rather than through a constructor, because `header` already means "read a
+/// header off a response" in this module and one name cannot mean two things.
+pub struct Header {
+    pub name: str
+    pub value: str
+}
+
+/// Answer a request.
+///
+/// Headers are given as **pairs, not as text**, and that is the whole of the
+/// design. Everything else crossing this boundary is `name: value` lines, and
+/// for a *response* that encoding is unsafe: the host splits on the newline, so
+/// a newline inside a value stops being data and becomes a separator. A
+/// handler that put anything a request said into a header — a path, an
+/// identifier, a filename — would be one newline away from letting the caller
+/// add a `Set-Cookie` of their own.
+///
+/// Joining the lines here, from parts the library was given separately, is what
+/// makes the difference between "the program meant two headers" and "somebody
+/// else added one" decidable. It cannot be decided from the joined string, and
+/// the host is handed nothing else.
+///
+/// A name or value carrying a carriage return or a newline is refused rather
+/// than stripped: there is no escaping that keeps the meaning, and a header
+/// nobody can read is better than one somebody else wrote.
+pub fn respond(incoming: Incoming, response: Response, headers: [Header]) -> error {
+    var lines: [str] = []
+    for h in headers {
+        if breaks_a_line(h.name) {
+            return errors.new("http.respond: header name `\(h.name)` contains a line break")
+        }
+        if breaks_a_line(h.value) {
+            return errors.new("http.respond: the value of `\(h.name)` contains a line break")
+        }
+        lines.push("\(h.name): \(h.value)")
+    }
+    if serve_respond(incoming.id, response.status, response.body, join(lines, "\n")) == 1 {
         return nil
     }
     return errors.new("http.respond: that request was already answered")
+}
+
+/// Whether text carries a line break, in any of the three spellings a header
+/// parser might act on.
+fn breaks_a_line(text: str) -> bool {
+    return text.index_of("\n") >= 0 || text.index_of("\r") >= 0
 }
 
 /// Accept requests and answer them from a routing table, until the server is
@@ -539,7 +582,8 @@ pub async fn run(server: Server, routes: [Route]) -> (int, error) {
     for {
         let (incoming, err) = await accept(server)
         check err
-        let failed = respond(incoming, serve(routes, incoming.request), "")
+        let none: [Header] = []
+        let failed = respond(incoming, serve(routes, incoming.request), none)
         if failed != nil {
             return _, failed
         }
