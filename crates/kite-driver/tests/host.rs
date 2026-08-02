@@ -90,6 +90,7 @@ fn server_runner(port: u16) -> String {
         r#"import {{ readFile }} from "node:fs/promises";
 import {{ createServer }} from "node:http";
 import {{ createHash }} from "node:crypto";
+import {{ writeSync }} from "node:fs";
 import {{ run, setWriter }} from "./app.js";
 
 const out = [];
@@ -139,7 +140,14 @@ server.on("upgrade", (req, socket) => {{
 
 await new Promise((r) => server.listen({port}, "127.0.0.1", r));
 await run(new Uint8Array(await readFile(new URL("./app.wasm", import.meta.url))));
-process.stdout.write(out.map((l) => l + "\n").join(""));
+// Written synchronously: `process.stdout` is a pipe here, and a pipe's writes
+// are asynchronous on Windows — so the exit below could outrun the output.
+writeSync(1, out.map((l) => l + "\n").join(""));
+// The event-stream and socket tests leave keep-alive connections open on
+// purpose, and exiting while those are mid-close trips an assertion inside
+// libuv on Windows. Destroying them first is what makes the shutdown
+// deterministic rather than a race the platform sometimes loses.
+server.closeAllConnections();
 server.close();
 // A stream the program left open would keep the loop alive, and the program
 // is over.
