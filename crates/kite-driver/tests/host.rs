@@ -17,8 +17,25 @@ fn node_available() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// The default runner: instantiate, run, print what the program wrote.
+const PLAIN_RUNNER: &str = "import { readFile } from \"node:fs/promises\";\n\
+     import { run, setWriter } from \"./app.js\";\n\
+     const out = [];\n\
+     setWriter((l) => out.push(l));\n\
+     await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+     process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+
 /// Compile a program to Wasm and run it under Node, returning its output.
 fn run_under_node(name: &str, src: &str) -> String {
+    run_runner_under_node(name, src, PLAIN_RUNNER, &[])
+}
+
+/// The same, with the runner written out and the node arguments given.
+///
+/// Streams need something to stream from, so the tests that use them bring a
+/// server along in the runner rather than reaching for a network that may or
+/// may not be there.
+fn run_runner_under_node(name: &str, src: &str, runner: &str, args: &[&str]) -> String {
     let dir = std::env::temp_dir().join(format!("kite-host-{}-{}", name, std::process::id()));
     std::fs::create_dir_all(&dir).expect("work directory");
     let c = compile(format!("{}.kite", name), src, Emit::Wasm);
@@ -35,18 +52,10 @@ fn run_under_node(name: &str, src: &str) -> String {
         kite_driver::generate_glue_with_hosts(&module.strings, "app.wasm", &module.hosts),
     )
     .expect("write glue");
-    std::fs::write(
-        dir.join("run.mjs"),
-        "import { readFile } from \"node:fs/promises\";\n\
-         import { run, setWriter } from \"./app.js\";\n\
-         const out = [];\n\
-         setWriter((l) => out.push(l));\n\
-         await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
-         process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n",
-    )
-    .expect("write runner");
+    std::fs::write(dir.join("run.mjs"), runner).expect("write runner");
 
     let output = Command::new("node")
+        .args(args)
         .arg(dir.join("run.mjs"))
         .output()
         .expect("node runs");
@@ -58,6 +67,86 @@ fn run_under_node(name: &str, src: &str) -> String {
     );
     let _ = std::fs::remove_dir_all(&dir);
     String::from_utf8(output.stdout).expect("utf-8")
+}
+
+/// A port nothing is listening on, for a test that needs to be reached.
+fn free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let port = listener.local_addr().expect("an address").port();
+    drop(listener);
+    port
+}
+
+/// A server for the tests below: it echoes the method and body of any request,
+/// streams three events at `/events`, and echoes text frames over a socket at
+/// `/ws`.
+///
+/// The socket half is written out by hand because Node has the WebSocket
+/// *client* and no server, and a dependency taken on for one test would be a
+/// dependency in the build. It reads one small masked frame at a time, which
+/// is all these tests send.
+fn server_runner(port: u16) -> String {
+    format!(
+        r#"import {{ readFile }} from "node:fs/promises";
+import {{ createServer }} from "node:http";
+import {{ createHash }} from "node:crypto";
+import {{ run, setWriter }} from "./app.js";
+
+const out = [];
+setWriter((l) => out.push(l));
+
+const server = createServer((req, res) => {{
+  if (req.url === "/events") {{
+    res.writeHead(200, {{
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    }});
+    res.write("id: 1\ndata: first\n\n");
+    res.write("event: tick\nid: 2\ndata: second\n\n");
+    res.write("data: line one\ndata: line two\n\n");
+    return;
+  }}
+  let body = "";
+  req.on("data", (c) => {{ body += c; }});
+  req.on("end", () => {{
+    res.writeHead(200, {{ "content-type": "text/plain" }});
+    res.end(req.method + "|" + body);
+  }});
+}});
+
+server.on("upgrade", (req, socket) => {{
+  const key = req.headers["sec-websocket-key"];
+  const accept = createHash("sha1")
+    .update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+    .digest("base64");
+  socket.write(
+    "HTTP/1.1 101 Switching Protocols\r\n" +
+      "Upgrade: websocket\r\nConnection: Upgrade\r\n" +
+      "Sec-WebSocket-Accept: " + accept + "\r\n\r\n",
+  );
+  socket.on("data", (buf) => {{
+    if ((buf[0] & 0x0f) !== 1) return;
+    const len = buf[1] & 0x7f;
+    const mask = buf.subarray(2, 6);
+    const data = buf.subarray(6, 6 + len);
+    let text = "";
+    for (let i = 0; i < len; i++) text += String.fromCharCode(data[i] ^ mask[i % 4]);
+    const reply = Buffer.from("echo:" + text);
+    socket.write(Buffer.concat([Buffer.from([0x81, reply.length]), reply]));
+  }});
+}});
+
+await new Promise((r) => server.listen({port}, "127.0.0.1", r));
+await run(new Uint8Array(await readFile(new URL("./app.wasm", import.meta.url))));
+process.stdout.write(out.map((l) => l + "\n").join(""));
+server.close();
+// A stream the program left open would keep the loop alive, and the program
+// is over.
+process.exit(0);
+"#,
+        port = port
+    )
 }
 
 /// Three requests started together take as long as the slowest, and a 404 is a
@@ -86,6 +175,178 @@ fn http_fetches_concurrently() {
          \x20 io.print(\"\\(rc.status) \\(rc.body)\")\n}\n",
     );
     assert_eq!(out, "200 first\n200 second\n200 third\n", "{}", out);
+}
+
+/// Every method reaches the server as itself, QUERY included.
+///
+/// QUERY is the reason this test exists: it is a draft method with a body, and
+/// what makes it work is that `fetch` forbids only CONNECT, TRACE and TRACK
+/// and passes any other token through. A server echoing the method back is the
+/// only way to know that actually happened rather than being normalised into
+/// something else on the way out.
+#[test]
+fn every_method_reaches_the_server_including_query() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let port = free_port();
+    let src = format!(
+        "use std/http\n\
+         async fn main() {{\n\
+         \x20 let at = \"http://127.0.0.1:{port}/\"\n\
+         \x20 let (q, qe) = await http.query(at, \"{{}}\")\n\
+         \x20 let (p, pe) = await http.patch(at, \"{{}}\")\n\
+         \x20 let (o, oe) = await http.options(at)\n\
+         \x20 let (h, he) = await http.head(at)\n\
+         \x20 if qe != nil {{ return }}\n\
+         \x20 if pe != nil {{ return }}\n\
+         \x20 if oe != nil {{ return }}\n\
+         \x20 if he != nil {{ return }}\n\
+         \x20 io.print(q.body)\n\
+         \x20 io.print(p.body)\n\
+         \x20 io.print(o.body)\n\
+         \x20 io.print(\"HEAD \\(h.status) \\(http.succeeded(h))\")\n}}\n",
+        port = port
+    );
+    let out = run_runner_under_node("methods", &src, &server_runner(port), &[]);
+    assert_eq!(out, "QUERY|{}\nPATCH|{}\nOPTIONS|\nHEAD 200 true\n", "{}", out);
+}
+
+/// A 404 is not a success, which is the whole point of `succeeded` being a
+/// range and not a floor.
+#[test]
+fn a_404_is_a_response_and_not_a_success() {
+    let src = "use std/http\n\
+        fn main() {\n\
+        \x20 io.print(http.succeeded(http.ok(\"fine\")))\n\
+        \x20 io.print(http.succeeded(http.not_found()))\n\
+        \x20 io.print(http.succeeded(http.status(500, \"no\")))\n\
+        \x20 io.print(http.succeeded(http.status(204, \"\")))\n}\n";
+    let c = compile("status.kite", src, Emit::Check);
+    assert!(!c.failed(), "{}", c.render_diagnostics());
+    let mut out = Vec::new();
+    c.run(&mut out).expect("runs");
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "true\nfalse\nfalse\ntrue\n"
+    );
+}
+
+/// Server-sent events arrive in order, named events included, and the data of
+/// a multi-line event arrives whole.
+#[test]
+fn server_sent_events_arrive_in_order() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let port = free_port();
+    let src = format!(
+        "use std/http\n\
+         async fn main() {{\n\
+         \x20 let (s, err) = await http.events_named(\"http://127.0.0.1:{port}/events\", \"tick\")\n\
+         \x20 if err != nil {{\n    io.print(\"failed: \\(err.message())\")\n    return\n  }}\n\
+         \x20 for i in 0..3 {{\n\
+         \x20   let (e, re) = await http.receive(s)\n\
+         \x20   if re != nil {{\n      io.print(\"error\")\n      return\n    }}\n\
+         \x20   io.print(\"\\(e.name) \\(e.id) \\(e.data)\")\n  }}\n\
+         \x20 http.close(s)\n}}\n",
+        port = port
+    );
+    let out = run_runner_under_node(
+        "sse",
+        &src,
+        &server_runner(port),
+        &["--experimental-eventsource"],
+    );
+    assert_eq!(
+        out,
+        "message 1 first\ntick 2 second\nmessage 2 line one\nline two\n",
+        "{}",
+        out
+    );
+}
+
+/// Closing drains rather than discards, and then says it was closed — not
+/// that it failed.
+///
+/// Two things are being pinned. Events that already arrived are still the
+/// program's to read, because throwing away data the host already delivered
+/// would lose it silently. And once they are read the stream reports being
+/// closed, which is a different bug from a stream whose network went away and
+/// sends a reader looking somewhere else.
+#[test]
+fn a_closed_event_stream_drains_then_says_it_is_closed() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let port = free_port();
+    let src = format!(
+        "use std/http\n\
+         async fn main() {{\n\
+         \x20 let (s, err) = await http.events(\"http://127.0.0.1:{port}/events\")\n\
+         \x20 if err != nil {{\n    io.print(\"failed to open\")\n    return\n  }}\n\
+         \x20 http.close(s)\n\
+         \x20 var read = 0\n\
+         \x20 for {{\n\
+         \x20   let (e, re) = await http.receive(s)\n\
+         \x20   if re != nil {{\n      io.print(\"\\(read > 0) \\(re.message())\")\n      return\n    }}\n\
+         \x20   read = read + e.data.len()\n  }}\n}}\n",
+        port = port
+    );
+    let out = run_runner_under_node(
+        "sse-closed",
+        &src,
+        &server_runner(port),
+        &["--experimental-eventsource"],
+    );
+    assert_eq!(out, "true sse: the stream is closed\n", "{}", out);
+}
+
+/// A socket connects, carries a message each way, and closes.
+#[test]
+fn a_socket_carries_messages_both_ways() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let port = free_port();
+    let src = format!(
+        "use std/socket\n\
+         async fn main() {{\n\
+         \x20 let (s, err) = await socket.connect(\"ws://127.0.0.1:{port}/ws\")\n\
+         \x20 if err != nil {{\n    io.print(\"failed: \\(err.message())\")\n    return\n  }}\n\
+         \x20 io.print(\"open \\(socket.open(s))\")\n\
+         \x20 let sent = socket.send(s, \"ping\")\n\
+         \x20 if sent != nil {{\n    io.print(\"send failed\")\n    return\n  }}\n\
+         \x20 let (message, re) = await socket.receive(s)\n\
+         \x20 if re != nil {{\n    io.print(\"receive failed\")\n    return\n  }}\n\
+         \x20 io.print(message)\n\
+         \x20 socket.close(s)\n\
+         \x20 io.print(\"open \\(socket.open(s))\")\n}}\n",
+        port = port
+    );
+    let out = run_runner_under_node("socket", &src, &server_runner(port), &[]);
+    assert_eq!(out, "open true\necho:ping\nopen false\n", "{}", out);
+}
+
+/// Sending on a socket that never opened is an error, not a silent drop.
+#[test]
+fn a_socket_that_cannot_connect_says_so() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let out = run_under_node(
+        "socket-refused",
+        "use std/socket\n\
+         async fn main() {\n\
+         \x20 let (s, err) = await socket.connect(\"ws://127.0.0.1:9/nothing\")\n\
+         \x20 io.print(if err == nil { \"unexpectedly open\" } else { \"refused\" })\n}\n",
+    );
+    assert_eq!(out, "refused\n", "{}", out);
 }
 
 /// A transport failure is an `error`. A status is not.

@@ -1,22 +1,26 @@
 // std/http — talking to a server, and answering one.
 //
 // The two halves are not symmetric. A client runs in a sandbox that already
-// has `fetch`, so the client half is a declared boundary of five host
-// functions and everything else is Kite. A server runs somewhere with sockets,
-// which no Kite target has yet — so the server half here is the part that
-// needs no sockets: the types, the router, and handlers that can be called
-// directly and tested without a network.
+// has `fetch` and `EventSource`, so the client half is a declared boundary
+// over those and everything else is Kite. A server runs somewhere with
+// sockets, which no Kite target has yet — so the server half here is the part
+// that needs no sockets: the types, the router, and handlers that can be
+// called directly and tested without a network.
 //
 // A 404 is a `Response`, not an error: the request succeeded and the answer
 // was "no". Only a transport failure is an `error`.
+//
+// Any method the host will send, this will send — `fetch` forbids only
+// CONNECT, TRACE and TRACK — so QUERY works here the day a server answers it,
+// with no change to this module.
 
 use std/task
 
 // ---- the declared boundary --------------------------------------------------
 //
-// Everything the client can do is these five functions. The glue is generated
-// from them, so what the host must supply and what the program may ask cannot
-// drift apart.
+// Requesting and answering is these six functions. The glue is generated from
+// them, so what the host must supply and what the program may ask cannot drift
+// apart.
 
 @host("net")
 extern fn fetch_start(method: str, url: str, body: str, headers: str) -> int
@@ -36,6 +40,66 @@ extern fn fetch_header(id: int, name: str) -> str
 
 @host("net")
 extern fn fetch_error(id: int) -> str
+
+// ---- the event stream boundary ----------------------------------------------
+//
+// Server-sent events are `EventSource`, which every browser has. It is not the
+// general streaming reader `fetch` would give: `EventSource` issues a GET and
+// carries no headers of its own, so a stream behind an `Authorization` header
+// is out of reach and a cookie or a token in the URL is what is left. What it
+// supplies in exchange is reconnection — a dropped stream comes back on its
+// own, with `Last-Event-ID`, and nothing here has to know it happened.
+//
+// An event is taken off a queue rather than pushed at a callback, because a
+// callback would be a second way for control to enter a program.
+
+/// `names` is the event names to deliver besides the default `message`, one
+/// per line — the same shape headers cross in, since only text crosses.
+///
+/// They are given at open rather than added afterwards because a listener
+/// registered after the stream is running misses whatever already arrived, and
+/// a race in a standard library is a bug every program inherits.
+@host("net")
+extern fn sse_open(url: str, names: str) -> int
+
+/// 0 while connecting, 1 once open, 2 once the stream failed for good, 3 once
+/// the program closed it.
+///
+/// A stream that drops and reconnects stays 1: reconnection is the host's job
+/// and not an event in the program. Closing is distinct from failing because a
+/// program that closed a stream and then asked it for an event has a bug of a
+/// different kind than one whose network went away.
+@host("net")
+extern fn sse_state(id: int) -> int
+
+/// How many events have arrived and not yet been taken.
+@host("net")
+extern fn sse_pending(id: int) -> int
+
+/// Take the oldest event and answer its `data`.
+///
+/// The name and the id of that same event are read back with the two
+/// functions below, the way a response's headers are read back from its
+/// handle. Data crosses on its own because data is the part that can contain
+/// anything, newlines included, and a `name: value` encoding would mangle it.
+@host("net")
+extern fn sse_next(id: int) -> str
+
+@host("net")
+extern fn sse_event_name(id: int) -> str
+
+@host("net")
+extern fn sse_event_id(id: int) -> str
+
+/// Also deliver events whose `event:` field is `name`.
+///
+/// `EventSource` has no wildcard — a named event arrives only for a listener
+/// registered under that name — so a program that wants one says so.
+@host("net")
+extern fn sse_listen(id: int, name: str) -> int
+
+@host("net")
+extern fn sse_close(id: int) -> int
 
 // ---- requests and responses -------------------------------------------------
 
@@ -69,7 +133,7 @@ pub fn status(code: int, body: str) -> Response {
 
 /// Whether the status is in the 2xx range.
 pub fn succeeded(r: Response) -> bool {
-    return r.status >= 200
+    return r.status >= 200 && r.status < 300
 }
 
 /// A header of a response that came from the host. A response built in Kite
@@ -99,6 +163,41 @@ pub async fn delete(url: str) -> (Response, error) {
     return await send("DELETE", url, "", "")
 }
 
+pub async fn patch(url: str, body: str) -> (Response, error) {
+    return await send("PATCH", url, body, "content-type: application/json")
+}
+
+/// A HEAD request. The status and the headers arrive; the body is empty by
+/// definition, not by accident.
+pub async fn head(url: str) -> (Response, error) {
+    return await send("HEAD", url, "", "")
+}
+
+pub async fn options(url: str) -> (Response, error) {
+    return await send("OPTIONS", url, "", "")
+}
+
+/// A QUERY request: a read that carries a body.
+///
+/// QUERY is what GET would be if a request could ask a long question — safe,
+/// idempotent and cacheable, with the question in the body instead of squeezed
+/// into a URL and its length limits. It is still a draft
+/// (`draft-ietf-httpbis-safe-method-w-body`) rather than a finished RFC.
+///
+/// It works today because `fetch` forbids exactly three methods — CONNECT,
+/// TRACE and TRACK — and passes every other token through untouched. Two
+/// things follow, and both are the server's business rather than this
+/// module's: QUERY is not CORS-safelisted, so a cross-origin call is preceded
+/// by a preflight `OPTIONS`; and a server that does not know the method
+/// answers 405 rather than failing, which is a `Response` here and not an
+/// `error`.
+///
+/// The body is sent as JSON. A different query language — SQL, GraphQL,
+/// anything — goes through `send` with the content type it wants.
+pub async fn query(url: str, body: str) -> (Response, error) {
+    return await send("QUERY", url, body, "content-type: application/json")
+}
+
 /// Every request goes through here. Waiting is `task.wait_host()`: what is
 /// being waited for is not another task but the host itself, and saying so is
 /// what lets the runtime hand the event loop back rather than spin.
@@ -112,6 +211,104 @@ pub async fn send(method: str, url: str, body: str, headers: str) -> (Response, 
         return _, errors.new("http \(method) \(url): \(fetch_error(id))")
     }
     return Response{ status: fetch_status(id), body: fetch_body(id), id: id }, nil
+}
+
+// ---- server-sent events -----------------------------------------------------
+//
+// A stream is a handle and events are taken off it. Nothing is pushed at the
+// program: an event arrives when a task asks for one, which is the same shape
+// as awaiting a request and needs no second notion of control flow.
+
+pub struct Events {
+    id: int
+}
+
+pub struct Event {
+    /// The `event:` field, or "message" when the event had none.
+    pub name: str
+    /// The `id:` field, or "" when the event had none. The host replays it as
+    /// `Last-Event-ID` after a reconnection, so a program rarely needs it.
+    pub id: str
+    pub data: str
+}
+
+/// Open a stream of server-sent events, waiting until it is open.
+///
+/// GET only, and no headers: that is `EventSource`, not a choice made here.
+/// A stream that needs an `Authorization` header cannot be opened this way —
+/// a cookie the browser already sends, or a token in the URL, is what is left.
+pub async fn events(url: str) -> (Events, error) {
+    return await events_named(url, "")
+}
+
+/// The same, also delivering events whose `event:` field is one of `names`,
+/// given one per line.
+///
+/// `EventSource` hands a named event to a listener registered for that name
+/// and offers no way to ask for all of them, so a program that wants
+/// `event: tick` says `tick` here. Naming them at open is what keeps the first
+/// one from arriving before anything is listening.
+pub async fn events_named(url: str, names: str) -> (Events, error) {
+    let id = sse_open(url, names)
+    for sse_state(id) == 0 {
+        task.wait_host()
+        task.yield()
+    }
+    if sse_state(id) == 2 {
+        return _, errors.new("sse \(url): the stream would not open")
+    }
+    return Events{ id: id }, nil
+}
+
+/// Deliver events named `name` from now on.
+///
+/// For a name discovered while the stream is running. Anything known before it
+/// opened belongs in `events_named`, which cannot miss an event this may.
+pub fn listen(stream: Events, name: str) {
+    sse_listen(stream.id, name)
+}
+
+/// The next event, waiting for one to arrive.
+///
+/// Waiting is `task.wait_host()` for the reason a request waits that way: what
+/// the task waits for is the host's event loop, and a scheduler told so hands
+/// the loop back rather than spinning. A stream that is merely quiet is not a
+/// stalled program, and this is what tells the two apart.
+pub async fn receive(stream: Events) -> (Event, error) {
+    for sse_pending(stream.id) == 0 {
+        if sse_state(stream.id) == 2 {
+            return _, errors.new("sse: the stream failed")
+        }
+        if sse_state(stream.id) == 3 {
+            return _, errors.new("sse: the stream is closed")
+        }
+        task.wait_host()
+        task.yield()
+    }
+    // `sse_next` takes the event; the name and id are that event's, so they
+    // have to be read after it and before anything takes another.
+    let data = sse_next(stream.id)
+    return Event{
+        name: sse_event_name(stream.id),
+        id: sse_event_id(stream.id),
+        data: data,
+    }, nil
+}
+
+/// How many events are waiting. A program with something else to do asks this
+/// rather than `receive`.
+pub fn pending(stream: Events) -> int {
+    return sse_pending(stream.id)
+}
+
+/// Stop the stream, and stop it reconnecting.
+///
+/// Events that already arrived stay readable: `receive` drains what is
+/// waiting and only then reports the stream closed. Discarding them would
+/// throw away data the host had already delivered, which is a loss a program
+/// has no way to notice.
+pub fn close(stream: Events) {
+    sse_close(stream.id)
 }
 
 // ---- the server -------------------------------------------------------------

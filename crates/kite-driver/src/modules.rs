@@ -38,6 +38,7 @@ pub const STD_MODULES: &[(&str, &str)] = &[
     ("test", include_str!("../../../std/test.kite")),
     ("buffer", include_str!("../../../std/buffer.kite")),
     ("http", include_str!("../../../std/http.kite")),
+    ("socket", include_str!("../../../std/socket.kite")),
     ("crypto", include_str!("../../../std/crypto.kite")),
 ];
 

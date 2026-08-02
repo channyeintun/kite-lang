@@ -580,7 +580,7 @@ export function isApplication(exports) {{
     )
 }
 
-/// The `net` group, which `std/http` declares.
+/// The `net` group, which `std/http` and `std/socket` declare.
 ///
 /// Supplied here rather than left to the page because every environment Kite
 /// runs in has `fetch`, and a standard library whose one boundary had to be
@@ -589,10 +589,14 @@ export function isApplication(exports) {{
 ///
 /// A request is a handle rather than a promise: `str` and `int` are what cross
 /// the boundary, so the module starts a request, is told to wait for the host,
-/// and asks again.
+/// and asks again. Streams — server-sent events and sockets — are the same
+/// handle with a queue behind it, which is why they share one table: what
+/// changes between them is which browser object fills the queue, not how a
+/// program reads it.
 const NET_HOST: &str = r#"
 if (HOSTS.net) {
   const REQUESTS = [];
+  const STREAMS = [];
   const parseHeaders = (text) => {
     const out = {};
     for (const line of String(text).split("\n")) {
@@ -628,6 +632,113 @@ if (HOSTS.net) {
       return intern(headers ? headers.get(STRINGS[name]) ?? "" : "");
     },
     fetch_error: (id) => intern(REQUESTS[Number(id)].error),
+
+    // ---- server-sent events, which are EventSource ----
+    //
+    // `onerror` fires on every dropped connection, and EventSource reconnects
+    // by itself — so only a source it has given up on (readyState 2) is a
+    // failure the program is told about.
+    sse_open: (url, names) => {
+      const s = { state: 0, queue: [], taken: { name: "", id: "" }, source: null };
+      const id = STREAMS.push(s) - 1;
+      if (typeof EventSource === "undefined") {
+        s.state = 2;
+        return BigInt(id);
+      }
+      const source = new EventSource(STRINGS[url]);
+      s.source = source;
+      s.take = (e) => {
+        s.queue.push({ name: e.type || "message", id: e.lastEventId || "", data: e.data ?? "" });
+      };
+      source.onopen = () => { s.state = 1; };
+      source.onmessage = s.take;
+      // Registered before anything can arrive, which is the whole reason the
+      // names are given at open.
+      for (const name of STRINGS[names].split("\n")) {
+        if (name !== "") source.addEventListener(name, s.take);
+      }
+      source.onerror = () => { if (source.readyState === 2) s.state = 2; };
+      return BigInt(id);
+    },
+    sse_state: (id) => BigInt(STREAMS[Number(id)].state),
+    sse_pending: (id) => BigInt(STREAMS[Number(id)].queue.length),
+    sse_next: (id) => {
+      const s = STREAMS[Number(id)];
+      const e = s.queue.shift();
+      if (e === undefined) {
+        s.taken = { name: "", id: "" };
+        return intern("");
+      }
+      s.taken = { name: e.name, id: e.id };
+      return intern(e.data);
+    },
+    sse_event_name: (id) => intern(STREAMS[Number(id)].taken.name),
+    sse_event_id: (id) => intern(STREAMS[Number(id)].taken.id),
+    sse_listen: (id, name) => {
+      const s = STREAMS[Number(id)];
+      if (s.source) s.source.addEventListener(STRINGS[name], s.take);
+      return 1n;
+    },
+    sse_close: (id) => {
+      const s = STREAMS[Number(id)];
+      if (s.source) s.source.close();
+      s.state = 3;
+      return 1n;
+    },
+
+    // ---- sockets, which are WebSocket ----
+    //
+    // Text frames only: a `str` is what crosses this boundary, and handing a
+    // program an empty string where a binary frame arrived would be inventing
+    // a message that was never sent.
+    socket_open: (url) => {
+      const s = { state: 0, queue: [], error: "", socket: null };
+      const id = STREAMS.push(s) - 1;
+      if (typeof WebSocket === "undefined") {
+        s.state = 2;
+        s.error = "this host has no WebSocket";
+        return BigInt(id);
+      }
+      let socket;
+      try {
+        socket = new WebSocket(STRINGS[url]);
+      } catch (e) {
+        s.state = 2;
+        s.error = String(e && e.message ? e.message : e);
+        return BigInt(id);
+      }
+      s.socket = socket;
+      socket.onopen = () => { s.state = 1; };
+      socket.onmessage = (e) => { if (typeof e.data === "string") s.queue.push(e.data); };
+      socket.onerror = () => {
+        if (s.state !== 3) {
+          s.state = 2;
+          if (s.error === "") s.error = "the connection failed";
+        }
+      };
+      socket.onclose = () => { if (s.state !== 2) s.state = 3; };
+      return BigInt(id);
+    },
+    socket_state: (id) => BigInt(STREAMS[Number(id)].state),
+    socket_pending: (id) => BigInt(STREAMS[Number(id)].queue.length),
+    socket_next: (id) => {
+      const s = STREAMS[Number(id)];
+      const message = s.queue.shift();
+      return intern(message === undefined ? "" : message);
+    },
+    socket_send: (id, message) => {
+      const s = STREAMS[Number(id)];
+      if (s.state !== 1 || !s.socket) return 0n;
+      s.socket.send(STRINGS[message]);
+      return 1n;
+    },
+    socket_error: (id) => intern(STREAMS[Number(id)].error),
+    socket_close: (id) => {
+      const s = STREAMS[Number(id)];
+      if (s.socket) s.socket.close();
+      s.state = 3;
+      return 1n;
+    },
   };
 }
 "#;

@@ -1,0 +1,111 @@
+// std/socket — WebSocket, from the client side.
+//
+// The browser is the target, so this is the client half and there is no other:
+// a page connects, it does not listen. What crosses the boundary is text, so
+// this carries text frames. A binary frame is not delivered rather than
+// delivered as something it is not — a program that needs bytes encodes them
+// and says how.
+//
+// A message is taken off a queue, not handed to a callback. `std/http` opens
+// its event streams the same way and for the same reason: a callback would be
+// a second way for control to enter a program, and the language has one.
+
+use std/task
+
+// ---- the declared boundary --------------------------------------------------
+
+@host("net")
+extern fn socket_open(url: str) -> int
+
+/// 0 while connecting, 1 once open, 2 once it failed, 3 once it closed
+/// cleanly. Unlike an event stream, a socket does not reconnect itself: a
+/// closed socket is closed, and reopening one is a decision the program makes.
+@host("net")
+extern fn socket_state(id: int) -> int
+
+/// How many messages have arrived and not yet been taken.
+@host("net")
+extern fn socket_pending(id: int) -> int
+
+/// Take the oldest message.
+@host("net")
+extern fn socket_next(id: int) -> str
+
+/// 1 when the message was handed to the host, 0 when the socket was not open.
+@host("net")
+extern fn socket_send(id: int, message: str) -> int
+
+@host("net")
+extern fn socket_error(id: int) -> str
+
+@host("net")
+extern fn socket_close(id: int) -> int
+
+// ---- what a program uses ------------------------------------------------------
+
+pub struct Socket {
+    id: int
+}
+
+/// Connect, waiting until the socket is open.
+///
+/// The URL is `ws://` or `wss://`. A page served over https can only reach
+/// `wss://`, which is the browser's rule and not this module's.
+pub async fn connect(url: str) -> (Socket, error) {
+    let id = socket_open(url)
+    for socket_state(id) == 0 {
+        task.wait_host()
+        task.yield()
+    }
+    if socket_state(id) != 1 {
+        return _, errors.new("socket \(url): \(socket_error(id))")
+    }
+    return Socket{ id: id }, nil
+}
+
+/// Send a text frame.
+///
+/// Sending on a socket that is not open is an error rather than a silent drop:
+/// the message did not go, and a program that is told so can decide what that
+/// means.
+pub fn send(s: Socket, message: str) -> error {
+    if socket_send(s.id, message) == 1 {
+        return nil
+    }
+    return errors.new("socket: not open")
+}
+
+/// The next message, waiting for one to arrive.
+///
+/// Answers an error once the socket closes — a closed socket will never
+/// produce another message, so waiting for one is the deadlock this reports
+/// instead of entering.
+pub async fn receive(s: Socket) -> (str, error) {
+    for socket_pending(s.id) == 0 {
+        if socket_state(s.id) == 2 {
+            return _, errors.new("socket: \(socket_error(s.id))")
+        }
+        if socket_state(s.id) == 3 {
+            return _, errors.new("socket: closed")
+        }
+        task.wait_host()
+        task.yield()
+    }
+    return socket_next(s.id), nil
+}
+
+/// How many messages are waiting. A program with something else to do asks
+/// this rather than `receive`.
+pub fn pending(s: Socket) -> int {
+    return socket_pending(s.id)
+}
+
+/// Whether the socket is open. A socket that has closed answers false, and
+/// stays that way.
+pub fn open(s: Socket) -> bool {
+    return socket_state(s.id) == 1
+}
+
+pub fn close(s: Socket) {
+    socket_close(s.id)
+}
