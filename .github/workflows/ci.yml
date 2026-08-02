@@ -22,7 +22,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          # Node 24 where it can be had: `--js-strings` builds a module against
+          # the JS String Builtins, and an engine without them cannot
+          # instantiate it — testing that path on an engine that skips it would
+          # be testing nothing.
+          - { os: ubuntu-latest, node: 24 }
+          - { os: macos-latest, node: 24 }
+          # Windows stays on 22. Node 24 there aborts inside libuv —
+          # `!(handle->flags & UV_HANDLE_CLOSING)` in `uv_async_send` — while a
+          # test's HTTP server shuts down, and it does so after the server's
+          # connections have been destroyed explicitly, which is as far as this
+          # side of the boundary can reach. It is Node's own shutdown path, not
+          # the program's, and the builtins are covered on the other two.
+          - { os: windows-latest, node: 22 }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -30,12 +43,9 @@ jobs:
       # The Wasm half of the differential suite runs the compiled module.
       # Without Node it is skipped, and skipping it is exactly what must not
       # happen on CI.
-      # Node 24, not 22: `--js-strings` compiles a module against the JS String
-      # Builtins, and an engine without them cannot instantiate it. Testing
-      # that path on an engine that skips it would be testing nothing.
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: ${{ matrix.node }}
       - run: cargo test --workspace --all-targets
 
   # No `cargo fmt --check`: the Rust here is laid out by hand, and the promise
