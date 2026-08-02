@@ -18,3 +18,8 @@
 
 # Generated glue and pages are output, not source.
 dist/* linguist-generated
+
+# The golden transcripts are compared byte for byte, so their line endings are
+# not the checkout's to decide. Without this git hands Windows CRLF and every
+# one of them "fails" for a reason that has nothing to do with text layout.
+crates/kite-driver/tests/golden/*.txt text eol=lf

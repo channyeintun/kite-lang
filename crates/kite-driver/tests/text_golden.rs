@@ -93,8 +93,14 @@ fn the_transcripts_match_their_goldens() {
     let mut mismatches = Vec::new();
     for (name, body) in &found {
         let path = golden_dir().join(format!("{}.txt", name));
+        // Line endings are settled before comparing: git hands Windows a
+        // checkout with CRLF, and a golden that differed only in that would be
+        // a failure about the checkout rather than about the text. What these
+        // files record is the order and the advances of runs, and neither is
+        // an `\r`.
         let golden = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("no golden at {}: {}", path.display(), e));
+            .unwrap_or_else(|e| panic!("no golden at {}: {}", path.display(), e))
+            .replace("\r\n", "\n");
         if &golden != body {
             mismatches.push(format!(
                 "{}:\n  expected:\n{}\n  found:\n{}",
