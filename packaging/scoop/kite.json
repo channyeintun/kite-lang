@@ -15,7 +15,7 @@
     "version": "0.0.0",
     "description": "A small, explicit programming language for application software, with WebAssembly as its primary target",
     "homepage": "https://github.com/channyeintun/kite-lang",
-    "license": "MIT|Apache-2.0",
+    "license": "MIT",
     "architecture": {
         "64bit": {
             "url": "https://github.com/channyeintun/kite-lang/releases/download/v0.0.0/kite-v0.0.0-x86_64-pc-windows-msvc.zip",

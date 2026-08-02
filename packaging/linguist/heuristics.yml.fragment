@@ -1,0 +1,26 @@
+# The entry for `lib/linguist/heuristics.yml`.
+#
+# `.kite` is not ours alone. At the time of writing GitHub indexes files with
+# that extension for at least two other projects that call themselves Kite, and
+# Linguist has no entry for any of them — so whoever submits first decides how
+# the rest are told apart, and it should be done in a way that does not simply
+# claim the extension.
+#
+# The pattern keys on constructs this language has and the others do not, in
+# rough order of how often they appear in real code:
+#
+#   check err              propagation, the highest-traffic construct there is
+#   -> (T, error)          the correlated-result return shape
+#   @host("group")         a declared host boundary
+#   @derive(Debug)         a body the compiler writes
+#   pub fn / async fn      Kite's declaration forms, together
+#
+# It answers `Kite` only when it sees one of those. A file with nothing
+# distinctive in it is left to the Bayesian classifier trained on the samples,
+# because a heuristic that guesses is worse than no heuristic: it is confidently
+# wrong, and it is wrong about somebody else's language.
+disambiguations:
+  - extensions: ['.kite']
+    rules:
+      - language: Kite
+        pattern: '(^\s*check\s+\w+\s*$|->\s*\(\s*\w+\s*,\s*error\s*\)|^\s*@host\("|^\s*@derive\(|^\s*(pub\s+)?(async\s+)?fn\s+\w+\s*\()'

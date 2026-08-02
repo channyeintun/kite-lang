@@ -12,7 +12,7 @@ class Kite < Formula
   desc "Small, explicit programming language for application software, with WebAssembly as its primary target"
   homepage "https://github.com/channyeintun/kite-lang"
   version "0.0.0"
-  license any_of: ["MIT", "Apache-2.0"]
+  license "MIT"
 
   on_macos do
     on_arm do
@@ -40,6 +40,7 @@ class Kite < Formula
     bin.install "kitec"
     bin.install "kite-lsp"
     doc.install "README.md", "SPECIFICATION.md"
+    prefix.install "LICENSE"
   end
 
   # A test that compiles and runs a program, rather than one that prints a

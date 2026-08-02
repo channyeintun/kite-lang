@@ -1275,11 +1275,31 @@ deliberately does not.
 `linguist-detectable` makes `.kite` files count towards the repository's
 language statistics.
 
-**Properly, later:** adding Kite to Linguist needs a submitted TextMate grammar
-with a permissive licence, a unique extension, and — the real gate — evidence of
-use: Linguist asks for hundreds of repositories with the language in them before
-accepting a new one. That is not a task, it is a consequence of adoption, and
-the grammar written for VS Code is the same one the submission needs.
+**Properly, later:** the submission is written and waiting in
+[`packaging/linguist/`](../packaging/linguist/) — the `languages.yml` entry, the
+heuristics, and a script that copies the samples out of the library at
+submission time rather than keeping a second copy to rot. The grammar written
+for VS Code is the one it vendors, and the repository now carries an MIT
+`LICENSE`, which is on Linguist's permitted list and was the one piece actually
+missing.
+
+**The gate is a number, and it is further off than "hundreds of
+repositories" suggested.** Linguist asks for *at least 2000 files per
+extension indexed in the last year, excluding forks*. GitHub currently indexes
+about 480 `.kite` files, and most are not this language: `kite-lang/kite` and
+`kitecorp/kite-language` are other projects with the same extension and the
+same name, and Linguist has no entry for any of them.
+
+That collision is worth knowing about in advance rather than discovering in a
+review. Whoever submits first decides how the rest are told apart, so the
+heuristic offered keys on things this language has and the others do not —
+`check`, `-> (T, error)`, `@host(`, `@derive(` — and answers nothing when it
+sees none of them. A heuristic that guesses is worse than none: it is
+confidently wrong about somebody else's language.
+
+None of that is a task. It is a consequence of adoption, and the right thing
+to do with it is leave the submission ready and go and build something worth
+using.
 
 ---
 

@@ -199,3 +199,110 @@ fn the_release_attaches_the_compiler_as_webassembly() {
         "the module is built and then not attached"
     );
 }
+
+/// The licence is stated in five places, and they have to agree.
+///
+/// A project whose manifests declare a licence it does not carry is one a
+/// packager has to guess about, and Linguist will not vendor a grammar whose
+/// repository does not state one at all.
+#[test]
+fn every_manifest_declares_the_licence_the_repository_carries() {
+    let licence = read("LICENSE");
+    assert!(
+        licence.starts_with("MIT License"),
+        "the repository's own LICENSE is not MIT"
+    );
+    assert!(
+        read("Cargo.toml").contains("license = \"MIT\""),
+        "the workspace declares a different licence from the one in LICENSE"
+    );
+    assert!(
+        read("packaging/homebrew/kite.rb").contains("license \"MIT\""),
+        "the formula declares a different licence"
+    );
+    assert!(
+        read("packaging/scoop/kite.json").contains("\"license\": \"MIT\""),
+        "the Scoop manifest declares a different licence"
+    );
+    assert!(
+        read("packaging/aur/PKGBUILD").contains("license=('MIT')"),
+        "the PKGBUILD declares a different licence"
+    );
+    // And it has to reach the people who download a build, not just the people
+    // who read the repository.
+    assert!(
+        read(".github/workflows/release.yml").contains("SPECIFICATION.md LICENSE"),
+        "the release archives do not carry the licence"
+    );
+}
+
+/// The Linguist submission names real files.
+///
+/// `assemble.sh` copies samples out of the library and the examples at
+/// submission time rather than keeping a second copy, which is the right call
+/// — and it means a renamed example turns the submission into a broken script
+/// at exactly the wrong moment.
+#[test]
+fn the_linguist_samples_all_exist() {
+    let script = read("packaging/linguist/assemble.sh");
+    let mut found = 0;
+    for line in script.lines() {
+        let Some(rest) = line.trim().strip_prefix('"') else { continue };
+        let Some((path, _)) = rest.split_once('"') else { continue };
+        if !path.ends_with(".kite") {
+            continue;
+        }
+        assert!(
+            repo().join(path).exists(),
+            "assemble.sh offers `{}` as a Linguist sample and it does not exist",
+            path
+        );
+        found += 1;
+    }
+    assert!(found >= 5, "only {} samples are named", found);
+    // Linguist says outright that tutorial examples will not be accepted. The
+    // check reads the sample list rather than the file, because the file
+    // *explains* why `hello.kite` is absent and would otherwise fail for
+    // saying so.
+    let listed: Vec<&str> = script
+        .lines()
+        .skip_while(|l| !l.contains("samples=("))
+        .take_while(|l| !l.trim().starts_with(')'))
+        .filter_map(|l| l.trim().strip_prefix('"'))
+        .filter_map(|l| l.split_once('"').map(|(p, _)| p))
+        .collect();
+    assert!(
+        !listed.iter().any(|p| p.ends_with("hello.kite")),
+        "`hello.kite` is a tutorial example; Linguist rejects those"
+    );
+}
+
+/// The grammar Linguist would vendor is the one the editor ships, and the
+/// `languages.yml` entry has to name its scope or highlighting silently does
+/// nothing.
+#[test]
+fn the_languages_entry_matches_the_grammar() {
+    let grammar = read("editors/vscode/syntaxes/kite.tmLanguage.json");
+    let entry = read("packaging/linguist/languages.yml.fragment");
+    assert!(
+        grammar.contains("\"scopeName\": \"source.kite\""),
+        "the grammar's scope name changed"
+    );
+    assert!(
+        entry.contains("tm_scope: source.kite"),
+        "the Linguist entry names a scope the grammar does not define"
+    );
+    assert!(
+        entry.contains("- \".kite\""),
+        "the Linguist entry does not claim the extension"
+    );
+    // Read as data, not as text: the fragment's own comment explains why
+    // `language_id` is absent, and a check on the raw file would fail for the
+    // explanation.
+    assert!(
+        !entry
+            .lines()
+            .any(|l| l.trim_start().starts_with("language_id")),
+        "`language_id` is Linguist's to allocate with `script/update-ids`"
+    );
+}

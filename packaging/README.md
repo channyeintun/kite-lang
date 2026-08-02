@@ -50,6 +50,14 @@ sha256sum -c SHA256SUMS --ignore-missing
 installed. It does not install `cosign` to check a signature — a verifier
 fetched by the thing it is verifying proves nothing.
 
+## Syntax highlighting on GitHub
+
+[`linguist/`](linguist/) holds a submission that is ready except for the one
+thing that cannot be written: Linguist wants 2000 indexed files with the
+extension before it will take a new language, and that is adoption rather than
+work. The entry, the heuristics and a sample-assembling script are there; the
+README beside them says what the current count is and how to check it.
+
 ## The compiler as WebAssembly
 
 `kite_playground.wasm` is `kitec` compiled to `wasm32-unknown-unknown`. The

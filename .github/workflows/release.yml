@@ -65,7 +65,7 @@ jobs:
               cp "target/${{ matrix.target }}/release/$binary" "dist/$name/"
             fi
           done
-          cp README.md SPECIFICATION.md "dist/$name/"
+          cp README.md SPECIFICATION.md LICENSE "dist/$name/"
           cd dist
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             7z a "$name.zip" "$name" > /dev/null

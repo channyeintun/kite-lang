@@ -1,0 +1,23 @@
+# The entry for `lib/linguist/languages.yml`, which is kept alphabetical —
+# Kite goes between `Kit` and `Kotlin`.
+#
+# `language_id` is deliberately absent: Linguist allocates it with
+# `script/update-ids`, and an invented one collides.
+#
+# The colour is the mark's gold, from site/brand.html. Linguist shows it beside
+# the language in a repository's bar, so it should be the one the project uses
+# everywhere else rather than a fresh choice.
+#
+# `ace_mode: rust` is not a claim that Kite is Rust. Ace has no Kite mode, the
+# field must name one that exists, and Rust is the closest of them — the same
+# reasoning `.gitattributes` uses today, for the same reason. `codemirror_mode`
+# follows it.
+Kite:
+  type: programming
+  color: "#e9a63c"
+  extensions:
+    - ".kite"
+  tm_scope: source.kite
+  ace_mode: rust
+  codemirror_mode: rust
+  codemirror_mime_type: text/x-rustsrc
