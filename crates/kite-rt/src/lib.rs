@@ -280,6 +280,17 @@ const DEFAULT_THRESHOLD: usize = 8 << 20;
 /// JIT run in one process start clean.
 #[no_mangle]
 pub extern "C" fn kite_rt_startup() {
+    // The highest stack address the Kite program owns. The compiled entry
+    // calls this, so its own frame — and every frame the program makes below
+    // it — is at an address at or under this local, the stack growing down.
+    // The root walk stops here, which is what keeps it out of the frames of
+    // whatever called the program: a test harness, `main`, a threading
+    // runtime. None of those can hold a Kite reference, and walking into them
+    // is how a garbage word gets read as an object header.
+    let floor = 0usize;
+    unsafe {
+        STACK_TOP = (&floor as *const usize as usize) + STACK_TOP_MARGIN;
+    }
     unsafe {
         if !RT.is_null() {
             let old = Box::from_raw(RT);
@@ -699,6 +710,17 @@ unsafe fn for_each_ref_slot(p: *mut u8, f: &mut dyn FnMut(*mut u64)) {
     }
 }
 
+/// The highest stack address the root walk may reach, set by
+/// `kite_rt_startup`. Zero before a program has started, which makes the walk
+/// find nothing rather than guess.
+static mut STACK_TOP: usize = 0;
+
+/// How far above `kite_rt_startup`'s own frame the program's entry frame may
+/// sit. The compiled wrapper called into here, so its frame is immediately
+/// above; a page is far more room than that needs and still stops well short
+/// of a harness's frames.
+const STACK_TOP_MARGIN: usize = 4096;
+
 /// The current frame pointer, for starting a stack walk.
 #[inline(always)]
 fn current_fp() -> usize {
@@ -720,21 +742,53 @@ fn current_fp() -> usize {
 /// into the caller; on both x86-64 and AArch64 the caller's stack pointer at
 /// the moment of the call is the record's address plus 16, which is exactly
 /// what the stack-map offsets are relative to. Frames whose return address is
-/// not a registered safepoint — every Rust frame, and every compiled frame
-/// with nothing live — are skipped rather than scanned.
+/// not a registered safepoint — this crate's own frames, and every compiled
+/// frame with nothing live — are skipped rather than scanned.
+///
+/// **This requires every frame between here and the program's entry to keep a
+/// frame pointer**, and that is not a default: Cranelift is told to
+/// (`preserve_frame_pointers`), and the workspace's `.cargo/config.toml`
+/// passes `-C force-frame-pointers=yes` so this crate's own frames do too. On
+/// Apple targets the ABI demands it anyway, which is exactly why the first
+/// version of this walk passed on macOS and corrupted the heap on x86-64
+/// Linux and Windows: `rbp` there was an ordinary callee-saved register
+/// holding whatever the optimiser put in it, and the walk read it as a frame.
+///
+/// The walk is bounded at both ends rather than trusted. It stops at
+/// `STACK_TOP` — the program's own entry — because nothing above that can
+/// hold a Kite reference; it requires the chain to climb, so a repeated or
+/// descending pointer ends it; and it ignores a frame whose recorded slots
+/// would fall outside the stack between here and there. A bad frame therefore
+/// costs a missed root at worst, and a missed root is a use-after-free, so it
+/// is *also* checked: a walk that reaches `STACK_TOP` without seeing the
+/// entry's own frame would mean the chain broke, and the debug assertion
+/// below says so on the build where anyone is looking.
 fn stack_root_slots() -> Vec<*mut u64> {
+    let top = unsafe { STACK_TOP };
     let maps = &rt().stack_maps;
     let mut slots = Vec::new();
     let mut fp = current_fp();
+    let floor = fp;
     let mut hops = 0;
-    while fp != 0 && fp & 7 == 0 && hops < 1_000_000 {
+    // Nothing has started, so nothing is rooted. Better to say that than to
+    // walk an unbounded chain.
+    if top == 0 {
+        return slots;
+    }
+    while fp != 0 && fp & 7 == 0 && fp < top && hops < 1_000_000 {
         hops += 1;
         let ret = unsafe { *((fp + 8) as *const usize) };
         let caller_fp = unsafe { *(fp as *const usize) };
         if let Ok(i) = maps.binary_search_by_key(&ret, |(pc, _)| *pc) {
             let sp = fp + 16;
             for off in &maps[i].1 {
-                slots.push((sp + *off as usize) as *mut u64);
+                let slot = sp + *off as usize;
+                // A slot outside the live stack is not a slot. This cannot
+                // happen with a well-formed chain, and silently skipping it
+                // is what keeps a malformed one from being fatal.
+                if slot >= floor && slot < top {
+                    slots.push(slot as *mut u64);
+                }
             }
         }
         // The chain must climb; a repeated or descending pointer means the

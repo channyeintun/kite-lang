@@ -1,0 +1,25 @@
+# Frame pointers, everywhere, because the collector needs them.
+#
+# `kite-rt` finds GC roots by walking the frame-pointer chain from inside the
+# runtime up to the compiled program's entry. Cranelift is told to keep frame
+# pointers in the code it emits, but the frames *between* — this crate's own,
+# on the way from the allocator to the Kite frame that called it — are Rust,
+# and Rust omits frame pointers by default on x86-64 Linux and Windows. There
+# `rbp` is an ordinary callee-saved register, and a walk that reads it as a
+# frame record reads whatever the optimiser happened to leave there.
+#
+# That is not a performance knob with a correctness footnote; it is the other
+# way round. A precise collector that moves objects has to find every
+# reference, and a chain it cannot follow is a reference it will not update.
+# Apple targets require frame pointers by ABI, which is why the first version
+# of the walk passed on macOS and corrupted the heap on the other two.
+#
+# The cost is one register on x86-64 and nothing on AArch64. For a compiler
+# that is not a trade worth thinking about twice.
+#
+# Anyone building `kite-rt` into their own binary needs the same flag. The
+# walk is bounded and validated so a broken chain loses a root rather than
+# scribbling on the heap — but a lost root is a use-after-free, so this is a
+# requirement rather than an optimisation.
+[build]
+rustflags = ["-C", "force-frame-pointers=yes"]
