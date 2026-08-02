@@ -54,6 +54,14 @@ fn a_bundle_runs_the_program_it_carries() {
     let program = dir.join(if cfg!(windows) { "greet.exe" } else { "greet" });
     assert!(program.exists(), "no bundle at {}", program.display());
 
+    // The very first run of a freshly written executable pays a one-time
+    // platform cost — on macOS, Gatekeeper assesses an unsigned binary for
+    // seconds before letting it start. That is the operating system's price,
+    // not the bundle's, so the timing below measures the second run: the one
+    // whose whole cost is compiling at startup, which is the claim under test.
+    let warm = Command::new(&program).output().expect("the bundle runs");
+    assert!(warm.status.success(), "{}", String::from_utf8_lossy(&warm.stderr));
+
     let started = Instant::now();
     let out = Command::new(&program).output().expect("the bundle runs");
     let elapsed = started.elapsed();

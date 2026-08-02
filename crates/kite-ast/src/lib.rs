@@ -125,6 +125,10 @@ pub struct StructDecl {
     pub name: Ident,
     pub generics: Vec<GenericParam>,
     pub fields: Vec<FieldDecl>,
+    /// What `@derive(…)` asked for, in the order it was written. The bodies
+    /// are generated as ordinary Kite before resolution, so nothing past that
+    /// point can tell a derived method from a hand-written one.
+    pub derives: Vec<Ident>,
     pub span: Span,
 }
 
@@ -145,6 +149,8 @@ pub struct EnumDecl {
     pub name: Ident,
     pub generics: Vec<GenericParam>,
     pub variants: Vec<VariantDecl>,
+    /// See [`StructDecl::derives`].
+    pub derives: Vec<Ident>,
     pub span: Span,
 }
 

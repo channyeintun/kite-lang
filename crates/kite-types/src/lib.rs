@@ -33,6 +33,25 @@ pub fn check(
     check_with(file, resolved, sources, diags, false)
 }
 
+/// What the checker solved but the programmer never wrote.
+///
+/// A `let` with no annotation gets its type recorded here, and a call to a
+/// generic function gets the type arguments the call worked out. This is what
+/// an editor shows inline: Kite has no turbofish, so a call site is the one
+/// place these facts have no written form at all.
+///
+/// Everything is rendered to text at the moment it is solved, because a
+/// [`TyId`] is only meaningful next to the arena that interned it — and the
+/// arena leaves with the checker.
+#[derive(Default)]
+pub struct Solved {
+    /// The span of a bare `let`/`var` name, and the type it received.
+    pub bindings: Vec<(Span, String)>,
+    /// The span of a generic callee as written, and the arguments the call
+    /// solved, comma-joined: `int, str`.
+    pub calls: Vec<(Span, String)>,
+}
+
 /// Check, in a named build mode. `release` drops `assert`.
 pub fn check_with(
     file: &ast::SourceFile,
@@ -40,6 +59,24 @@ pub fn check_with(
     sources: &SourceMap,
     diags: &mut DiagBag,
     release: bool,
+) -> hir::Program {
+    // Solved-but-unwritten types are a language-server concern; a build has
+    // nowhere to put them, so they are worked out and dropped.
+    check_recording(file, resolved, sources, diags, release, &mut Solved::default())
+}
+
+/// Check, and keep what inference decided along the way.
+///
+/// The extra parameter is an out-parameter rather than a return value so that
+/// [`check_with`] keeps its shape: everything that only wants a program calls
+/// it exactly as before.
+pub fn check_recording(
+    file: &ast::SourceFile,
+    resolved: &ResolveMap,
+    sources: &SourceMap,
+    diags: &mut DiagBag,
+    release: bool,
+    solved: &mut Solved,
 ) -> hir::Program {
     let mut types = Types::new();
     let mut fns = Vec::new();
@@ -373,6 +410,7 @@ pub fn check_with(
             loop_depth: 0,
             deferred: Vec::new(),
             release,
+            solved: &mut *solved,
         };
         if let ast::Item::Extern(e) = &file.items[sig.decl_index] {
             // A host function becomes an ordinary one whose whole body is the
@@ -694,6 +732,10 @@ struct Checker<'a> {
     /// dropped; everything else about the program is the same, because a
     /// build mode that changed semantics would make testing meaningless.
     release: bool,
+    /// Where inference writes down what it decided, for an editor. Recorded
+    /// here rather than re-derived later, because a second derivation is a
+    /// second checker waiting to disagree with this one.
+    solved: &'a mut Solved,
     sigs: &'a [Signature],
     /// Functions lifted out of this function's closure literals.
     lifted: Vec<hir::Function>,
@@ -1031,6 +1073,11 @@ impl<'a> Checker<'a> {
         };
 
         self.locals[local_id as usize].ty = ty;
+        // The binding's type was worked out rather than written, which is
+        // exactly what an inlay hint exists to show.
+        if l.ty.is_none() && init.is_some() && !self.types.is_poisoned(ty) {
+            self.solved.bindings.push((name.span, self.types.name(ty)));
+        }
         // A `let` with an initialiser holds a value from here on; one without
         // stays unassigned until a branch writes it.
         if init.is_some() {
@@ -1059,6 +1106,9 @@ impl<'a> Checker<'a> {
         };
         self.locals[local_id as usize].ty = ty;
         self.init[local_id as usize] = Init::Assigned;
+        if v.ty.is_none() && !self.types.is_poisoned(ty) {
+            self.solved.bindings.push((v.name.span, self.types.name(ty)));
+        }
 
         Some((
             hir::Stmt::Let { local: hir::LocalId(local_id), init: Some(init), span: v.span },
@@ -2583,10 +2633,15 @@ impl<'a> Checker<'a> {
     }
 
     /// A call to a named function, reached unqualified or through its module.
+    ///
+    /// `callee_span` is the callee exactly as written, which is where an inlay
+    /// hint for the solved type arguments belongs — after the name, where a
+    /// language with a turbofish would have let them be spelled.
     fn fn_call(
         &mut self,
         id: u32,
         text: &str,
+        callee_span: Span,
         args: &[ast::Expr],
         span: Span,
     ) -> hir::Expr {
@@ -2623,6 +2678,12 @@ impl<'a> Checker<'a> {
 
         let targs = self.finish_subst(&generics, &subst, span);
         self.check_bounds(&generics, &targs, span);
+        // What the call inferred, once it inferred all of it. A partial answer
+        // would be a hint that lies, so an unsolved parameter records nothing.
+        if !targs.is_empty() && !targs.iter().any(|t| self.types.is_poisoned(*t)) {
+            let names: Vec<String> = targs.iter().map(|t| self.types.name(*t)).collect();
+            self.solved.calls.push((callee_span, names.join(", ")));
+        }
         let ret = self.apply_subst(ret, &subst);
         // Calling an `async fn` starts it and yields the task. That is how
         // concurrency is expressed: two calls then one `await` of each runs
@@ -2681,9 +2742,13 @@ impl<'a> Checker<'a> {
                 return match self.resolved.lookup_use(*fspan) {
                     Some(Res::Builtin(b)) => self.builtin_call(b, args, span),
                     // `task.all(…)` — a function reached through its module.
-                    Some(Res::Fn(id)) => {
-                        self.fn_call(id, &format!("{}.{}", expr_text(base), name.name), args, span)
-                    }
+                    Some(Res::Fn(id)) => self.fn_call(
+                        id,
+                        &format!("{}.{}", expr_text(base), name.name),
+                        *fspan,
+                        args,
+                        span,
+                    ),
                     Some(Res::Type(ti)) => {
                         self.associated_call_named(ti, &name.name, *fspan, args, span, expected)
                     }
@@ -2701,7 +2766,7 @@ impl<'a> Checker<'a> {
         };
 
         match self.resolved.lookup_use(p.span) {
-            Some(Res::Fn(id)) => self.fn_call(id, &p.text(), args, span),
+            Some(Res::Fn(id)) => self.fn_call(id, &p.text(), p.span, args, span),
 
             Some(Res::Builtin(b)) => self.builtin_call(b, args, span),
 
@@ -3124,6 +3189,7 @@ impl<'a> Checker<'a> {
             "trim" => (StrKind::Trim, &[], TyId::STR),
             "index_of" => (StrKind::IndexOf, &[TyId::STR], TyId::INT),
             "slice" => (StrKind::Slice, &[TyId::INT, TyId::INT], TyId::STR),
+            "code_at" => (StrKind::CodeAt, &[TyId::INT], TyId::INT),
             _ => {
                 self.diags.push(
                     Diagnostic::error(
@@ -3131,7 +3197,7 @@ impl<'a> Checker<'a> {
                         format!("`str` has no method `{}`", name.name),
                     )
                     .with_primary(name.span, "no such method")
-                    .with_note("`str` has: len, slice, index_of, trim")
+                    .with_note("`str` has: len, slice, index_of, trim, code_at")
                     .with_note(
                         "anything else is writable on top of those, and belongs in the \
                          standard library rather than in the compiler",

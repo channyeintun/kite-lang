@@ -14,6 +14,19 @@ use kite_span::{FileId, Span};
 mod prec;
 use prec::{infix_binding_power, InfixOp};
 
+/// What an `@name(…)` in front of a declaration asked for.
+///
+/// Kite has two attributes and intends to have no more, so this is an enum of
+/// two rather than a general annotation facility. An attribute that could be
+/// invented by a program would be a macro system arriving one keyword at a
+/// time.
+enum Attribute {
+    /// `@host("net")` — the group a declared boundary belongs to.
+    Host(String),
+    /// `@derive(Debug, Hash)` — bodies the compiler writes from the fields.
+    Derive(Vec<Ident>),
+}
+
 /// The index of the `)` closing the `(` at `open`, accounting for nesting and
 /// for parens inside nested string literals.
 fn matching_paren(bytes: &[u8], open: usize) -> Option<usize> {
@@ -342,21 +355,39 @@ impl<'a> Parser<'a> {
 
     fn parse_item(&mut self) -> Option<Item> {
         let start = self.span();
-        // `@host("net")` — the only attribute in the language, and the only
-        // one planned. It marks the declared boundary with the host, which the
-        // glue is generated from.
-        let host = if self.at(T::At) { Some(self.parse_host_attribute()?) } else { None };
+        // Kite has two attributes and intends to have no more. `@host("net")`
+        // marks the declared boundary with the host, which the glue is
+        // generated from; `@derive(Debug)` asks for a body the compiler can
+        // write mechanically. Both name something the compiler must do that no
+        // amount of Kite could say instead — which is the bar an attribute has
+        // to clear.
+        let attribute = if self.at(T::At) { Some(self.parse_attribute()?) } else { None };
         let is_pub = self.eat(T::Pub);
         let is_async = self.eat(T::Async);
 
-        if let Some(host) = host {
-            return self.parse_extern(is_pub, host, start).map(Item::Extern);
+        let derives = match attribute {
+            Some(Attribute::Host(host)) => {
+                return self.parse_extern(is_pub, host, start).map(Item::Extern)
+            }
+            Some(Attribute::Derive(names)) => names,
+            None => Vec::new(),
+        };
+        if !derives.is_empty() && !matches!(self.peek(), T::Struct | T::Enum) {
+            self.diags.push(
+                Diagnostic::error(codes::E0700, "`@derive` is only for a struct or an enum")
+                    .with_primary(self.span(), "not a type declaration")
+                    .with_note(
+                        "a derived body is written from a type's fields, so there has to be a \
+                         type",
+                    ),
+            );
+            return None;
         }
 
         match self.peek() {
             T::Fn => self.parse_fn(is_pub, is_async, start).map(Item::Fn),
-            T::Struct if !is_async => self.parse_struct(is_pub, start).map(Item::Struct),
-            T::Enum if !is_async => self.parse_enum(is_pub, start).map(Item::Enum),
+            T::Struct if !is_async => self.parse_struct(is_pub, derives, start).map(Item::Struct),
+            T::Enum if !is_async => self.parse_enum(is_pub, derives, start).map(Item::Enum),
             T::Trait if !is_async => self.parse_trait(is_pub, start).map(Item::Trait),
             T::Impl if !is_async => self.parse_impl(start).map(Item::Impl),
             T::Type if !is_async => self.parse_type_alias(is_pub, start).map(Item::TypeAlias),
@@ -397,7 +428,12 @@ impl<'a> Parser<'a> {
         Some(params)
     }
 
-    fn parse_struct(&mut self, is_pub: bool, start: Span) -> Option<StructDecl> {
+    fn parse_struct(
+        &mut self,
+        is_pub: bool,
+        derives: Vec<Ident>,
+        start: Span,
+    ) -> Option<StructDecl> {
         self.bump(); // `struct`
         let name = self.ident()?;
         let generics = self.parse_generics()?;
@@ -419,7 +455,7 @@ impl<'a> Parser<'a> {
             }
         }
         let end = self.expect(T::RBrace)?;
-        Some(StructDecl { is_pub, name, generics, fields, span: start.to(end) })
+        Some(StructDecl { is_pub, name, generics, fields, derives, span: start.to(end) })
     }
 
     fn parse_field_decl(&mut self) -> Option<FieldDecl> {
@@ -434,7 +470,7 @@ impl<'a> Parser<'a> {
         Some(FieldDecl { is_pub, is_var, name, ty, span })
     }
 
-    fn parse_enum(&mut self, is_pub: bool, start: Span) -> Option<EnumDecl> {
+    fn parse_enum(&mut self, is_pub: bool, derives: Vec<Ident>, start: Span) -> Option<EnumDecl> {
         self.bump(); // `enum`
         let name = self.ident()?;
         let generics = self.parse_generics()?;
@@ -456,7 +492,7 @@ impl<'a> Parser<'a> {
             }
         }
         let end = self.expect(T::RBrace)?;
-        Some(EnumDecl { is_pub, name, generics, variants, span: start.to(end) })
+        Some(EnumDecl { is_pub, name, generics, variants, derives, span: start.to(end) })
     }
 
     fn parse_variant(&mut self) -> Option<VariantDecl> {
@@ -673,21 +709,29 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `@host("net")` — the group a host declaration belongs to.
-    fn parse_host_attribute(&mut self) -> Option<String> {
+    /// `@host("net")`, or `@derive(Debug, Hash)`.
+    fn parse_attribute(&mut self) -> Option<Attribute> {
         self.bump(); // `@`
         let name = self.ident()?;
-        if name.name != "host" {
-            self.diags.push(
-                Diagnostic::error(
-                    codes::E0100,
-                    format!("unknown attribute `@{}`", name.name),
-                )
-                .with_primary(name.span, "not an attribute")
-                .with_note("`@host(\"group\")` is the only attribute Kite has"),
-            );
-            return None;
+        match name.name.as_str() {
+            "host" => self.parse_host_attribute().map(Attribute::Host),
+            "derive" => self.parse_derive_attribute().map(Attribute::Derive),
+            _ => {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0100,
+                        format!("unknown attribute `@{}`", name.name),
+                    )
+                    .with_primary(name.span, "not an attribute")
+                    .with_note("`@host(\"group\")` and `@derive(…)` are the attributes Kite has"),
+                );
+                None
+            }
         }
+    }
+
+    /// `("net")` — the group a host declaration belongs to.
+    fn parse_host_attribute(&mut self) -> Option<String> {
         self.expect(T::LParen)?;
         let span = self.span();
         if !self.at(T::Str) {
@@ -700,6 +744,35 @@ impl<'a> Parser<'a> {
         // The quotes are part of the span; the group is what is between them.
         let text = self.text(span);
         Some(text.trim_matches('"').to_string())
+    }
+
+    /// `(Debug, Hash)` — what the compiler is asked to write out.
+    ///
+    /// The names are taken as written and checked later, where the whole
+    /// program is known: whether `Encode` means the one in `std/json` is a
+    /// resolution question, and the parser answers none of those.
+    fn parse_derive_attribute(&mut self) -> Option<Vec<Ident>> {
+        self.expect(T::LParen)?;
+        let mut names = Vec::new();
+        while !self.at(T::RParen) && !self.at_end() {
+            self.skip_newlines();
+            names.push(self.ident()?);
+            self.skip_newlines();
+            if !self.eat(T::Comma) {
+                break;
+            }
+        }
+        self.expect(T::RParen)?;
+        self.skip_newlines();
+        if names.is_empty() {
+            self.diags.push(
+                Diagnostic::error(codes::E0700, "`@derive()` asks for nothing")
+                    .with_primary(self.prev_span(), "no traits named")
+                    .with_note("write the traits to derive, such as `@derive(Debug)`"),
+            );
+            return None;
+        }
+        Some(names)
     }
 
     /// `@host("net") extern fn fetch(url: str) -> int`

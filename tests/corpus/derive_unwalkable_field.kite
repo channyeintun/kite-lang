@@ -1,0 +1,28 @@
+// A derived body is a walk over a type's fields, and the walk has to know how
+// to handle each one. Where it does not, it says which field stopped it and
+// what would fix it — a derive is a convenience, and refusing one leaves the
+// hand-written implementation available.
+//
+// Two failures here, and they are different failures: a field whose type
+// exists but does not derive the same trait, and a trait nothing derives at
+// all.
+
+struct Plain {
+    x: int
+}
+
+@derive(Debug)
+struct Outer {
+    // `Plain` is a real type; it just has no `debug`.
+    inner: Plain //~ ERROR E0702
+}
+
+@derive(Ord) //~ ERROR E0701
+struct Ranked {
+    n: int
+}
+
+fn main() {
+    io.print(Outer{ inner: Plain{ x: 1 } }.inner.x)
+    io.print(Ranked{ n: 2 }.n)
+}

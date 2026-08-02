@@ -1,0 +1,44 @@
+# Maintainer: Chan Nyein Tun <chanyeintun@gmail.com>
+#
+# The binary package. Arch convention offers three names for one project —
+# `kite`, `kite-bin`, `kite-git` — and this is the middle one: it installs the
+# release's own binaries rather than rebuilding them, so what an Arch user runs
+# is byte-for-byte what everyone else runs. That matters more here than a build
+# from source would: the release builds are reproducible, and a rebuild that
+# produced a different binary would be the interesting event, not the normal
+# one.
+#
+# The checksums are placeholders until a release fills them in.
+# `packaging/render.sh <version>` writes the real ones from that release's own
+# SHA256SUMS.
+
+pkgname=kite-bin
+_pkgname=kite
+pkgver=0.0.0
+pkgrel=1
+pkgdesc="A small, explicit programming language for application software, with WebAssembly as its primary target"
+arch=('x86_64' 'aarch64')
+url="https://github.com/channyeintun/kite-lang"
+license=('MIT' 'Apache-2.0')
+provides=('kitec' 'kite-lsp')
+conflicts=('kite' 'kite-git')
+options=('!strip')
+
+source_x86_64=("$pkgname-$pkgver-x86_64.tar.gz::$url/releases/download/v$pkgver/kite-v$pkgver-x86_64-unknown-linux-musl.tar.gz")
+source_aarch64=("$pkgname-$pkgver-aarch64.tar.gz::$url/releases/download/v$pkgver/kite-v$pkgver-aarch64-unknown-linux-musl.tar.gz")
+sha256sums_x86_64=('0000000000000000000000000000000000000000000000000000000000000000')
+sha256sums_aarch64=('0000000000000000000000000000000000000000000000000000000000000000')
+
+package() {
+  local target
+  case "$CARCH" in
+    x86_64) target="x86_64-unknown-linux-musl" ;;
+    aarch64) target="aarch64-unknown-linux-musl" ;;
+  esac
+  local dir="$srcdir/kite-v$pkgver-$target"
+
+  install -Dm755 "$dir/kitec" "$pkgdir/usr/bin/kitec"
+  install -Dm755 "$dir/kite-lsp" "$pkgdir/usr/bin/kite-lsp"
+  install -Dm644 "$dir/README.md" "$pkgdir/usr/share/doc/$_pkgname/README.md"
+  install -Dm644 "$dir/SPECIFICATION.md" "$pkgdir/usr/share/doc/$_pkgname/SPECIFICATION.md"
+}

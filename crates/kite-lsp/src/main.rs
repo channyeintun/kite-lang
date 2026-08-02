@@ -31,15 +31,36 @@ fn main() {
 
         // A request has an id and expects an answer; a notification has
         // neither, and answering one is a protocol error.
-        if let (Some(id), Some(result)) = (id, reply.result) {
-            write_message(
-                &mut output,
-                &Json::object(vec![
-                    ("jsonrpc", Json::str("2.0")),
-                    ("id", id),
-                    ("result", result),
-                ]),
-            );
+        if let Some(id) = id {
+            if let Some(message) = reply.error {
+                // A refusal with its reason. -32803 is the protocol's
+                // RequestFailed: the request was understood, and the answer
+                // is no — which the editor shows, where an empty result
+                // would just look like nothing happening.
+                write_message(
+                    &mut output,
+                    &Json::object(vec![
+                        ("jsonrpc", Json::str("2.0")),
+                        ("id", id),
+                        (
+                            "error",
+                            Json::object(vec![
+                                ("code", Json::number(-32803)),
+                                ("message", Json::str(message)),
+                            ]),
+                        ),
+                    ]),
+                );
+            } else if let Some(result) = reply.result {
+                write_message(
+                    &mut output,
+                    &Json::object(vec![
+                        ("jsonrpc", Json::str("2.0")),
+                        ("id", id),
+                        ("result", result),
+                    ]),
+                );
+            }
         }
         for (method, params) in reply.notifications {
             write_message(

@@ -1,0 +1,69 @@
+// A server: routes, handlers, and a socket underneath them.
+//
+//     kitec build examples/server.kite --emit wasm --out dist
+//     node dist/serve.mjs
+//
+// A handler is a function from a `Request` to a `Response`, and it was one
+// before anything could listen — which is why every route below can be tested
+// by calling it, with no port and no network. `http.run` is the thin part: it
+// takes requests off the host and answers them from the table.
+//
+// Nothing is pushed at the program. A request is *taken*, when a task asks for
+// one, because a callback would be a second way for control to enter a program
+// and Kite has one.
+
+use std/http
+use std/json
+
+fn index(request: http.Request) -> http.Response {
+    return http.ok("kite")
+}
+
+fn greet(request: http.Request) -> http.Response {
+    let who = http.parameter("/hello/:name", request.path, "name")
+    if who == nil {
+        return http.status(400, "no name in the path")
+    }
+    return http.ok("hello \(who)")
+}
+
+/// A 404 is a `Response`, not an error: the request succeeded and the answer
+/// was "no". Only a transport failure is an `error`, and that rule holds on
+/// both sides of the same socket.
+fn missing(request: http.Request) -> http.Response {
+    return http.not_found()
+}
+
+fn echo(request: http.Request) -> http.Response {
+    var fields: { str: json.Json } = { }
+    fields["method"] = json.Json.Text(request.method)
+    fields["path"] = json.Json.Text(request.path)
+    fields["body"] = json.Json.Text(request.body)
+    return http.ok(json.stringify(json.Json.Object(fields)))
+}
+
+fn routes() -> [http.Route] {
+    return [
+        http.route("GET", "/", index),
+        http.route("GET", "/hello/:name", greet),
+        http.route("POST", "/echo", echo),
+    ]
+}
+
+async fn main() {
+    // Port 0 asks the host for one; asking which it chose is how a test avoids
+    // colliding with another test.
+    let (server, err) = await http.open(8080)
+    if err != nil {
+        io.print("cannot listen: \(err.message())")
+        return
+    }
+    io.print("listening \(http.port_of(server))")
+
+    let (answered, rerr) = await http.run(server, routes())
+    if rerr != nil {
+        io.print("stopped: \(rerr.message())")
+        return
+    }
+    io.print("answered \(answered)")
+}

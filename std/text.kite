@@ -1,0 +1,1764 @@
+// Text.
+//
+// The algorithms that decide what order text is drawn in and which glyph a
+// letter becomes — the parts of text that are decisions rather than pixels.
+// They live here, beside the layout engine and away from the renderers,
+// because a renderer that made these decisions could disagree with the one
+// next to it, and the point of computing everything in Kite is that neither
+// renderer decides anything.
+//
+// Everything in this module is a **named subset** of a Unicode algorithm, in
+// the same spirit as the line breaker in `std/ui`: what is implemented is
+// stated, what is not is stated, and nothing is implied.
+//
+// - `bidi_runs` is UAX #9, the bidirectional algorithm: rules P2–P3, X1–X10,
+//   W1–W7, N0–N2 (bracket pairs included), I1–I2 and L1–L2. What it does not
+//   do: L3 (combining marks at a direction boundary keep their place) and L4
+//   (mirroring) are left to the renderer, which mirrors inside a
+//   single-direction run on its own; explicit overrides survive resolution
+//   but a renderer that re-derives a run's direction from its first strong
+//   character — which is what both of ours do — will not honour an override
+//   that contradicts the letters. Higher-level protocols (HL1–HL6) are not
+//   implemented at all.
+// - `join_arabic` is the joining half of Arabic shaping: Joining_Type over
+//   the Arabic block's own letters, mapped to Arabic Presentation Forms-B,
+//   with the mandatory lam-alef ligature. It is **not HarfBuzz-quality
+//   shaping**, which is OpenType GSUB/GPOS — a font's own substitution and
+//   positioning programs — and cannot be written against a boundary that
+//   only measures. A real shaping engine would additionally reorder Indic
+//   clusters for Devanagari, position Thai marks above and below their base,
+//   and reorder Burmese medial consonants; none of that happens here, and a
+//   program drawing those scripts is relying on the host's font stack to do
+//   it, which the browser-backed renderers can and a glyph-at-a-time
+//   renderer cannot.
+
+// ---- the Bidi_Class table --------------------------------------------------
+
+/// A code point's part in the bidirectional algorithm, from UAX #9 table 4.
+pub enum BidiClass {
+    L
+    R
+    AL
+    EN
+    ES
+    ET
+    AN
+    CS
+    NSM
+    BN
+    B
+    S
+    WS
+    ON
+    LRE
+    RLE
+    LRO
+    RLO
+    PDF
+    LRI
+    RLI
+    FSI
+    PDI
+}
+
+fn within(code: int, low: int, high: int) -> bool {
+    return code >= low && code <= high
+}
+
+/// The Bidi_Class of a code point, from a compact range table.
+///
+/// The table is a subset of the Unicode character database, and the subset is
+/// listed rather than implied. It covers: the C0 and C1 controls; ASCII and
+/// Latin-1; Latin Extended-A and -B (0100–024F); the combining diacritics
+/// (0300–036F); Greek (0370–03FF); Cyrillic with its combining marks
+/// (0400–04FF); Hebrew (0590–05FF) and its presentation forms (FB1D–FB4F);
+/// the Arabic block (0600–06FF) with its digits, points and signs, the Arabic
+/// Supplement (0750–077F), Arabic Extended-B (0870–089F), Arabic Extended-A
+/// (08A0–08FF), and both Arabic presentation-forms blocks (FB50–FDFF,
+/// FE70–FEFF); the combining marks of Devanagari, Thai and Myanmar (whose
+/// letters are already L); general punctuation (2000–206F) including every
+/// explicit bidi formatting character; currency signs (20A0–20CF); the
+/// arrow, mathematical and symbol blocks (2190–2BFF) and supplemental
+/// punctuation (2E00–2E7F) as ON; CJK punctuation and brackets (3000–303F);
+/// the variation selectors and combining half marks (FE00–FE2F); the small
+/// form variants (FE50–FE6F) as ON; and the fullwidth forms (FF01–FF65).
+///
+/// **Anything outside these ranges is treated as L.** For CJK, Hangul, kana,
+/// and the letters of Devanagari, Thai and Myanmar that is the correct
+/// answer; for Syriac, Thaana and N'Ko it is wrong and unclaimed; for emoji —
+/// which are ON, and which sit outside the Basic Multilingual Plane — it
+/// makes a symbol behave like a letter, which matters only when one sits
+/// between two runs of opposite direction. Within the covered Arabic and
+/// Greek blocks a handful of signs are coarser than the character database:
+/// they are named below where they are folded.
+pub fn bidi_class(code: int) -> BidiClass {
+    // Past the end of a string, `code_at` answers -1.
+    if code < 0 {
+        return BidiClass.L
+    }
+    // C0 controls: tab and the separators mean something to layout, the rest
+    // are boundary-neutral.
+    if code == 0x0009 || code == 0x000B || code == 0x001F {
+        return BidiClass.S
+    }
+    if code == 0x000A || code == 0x000D || within(code, 0x001C, 0x001E) {
+        return BidiClass.B
+    }
+    if code == 0x000C {
+        return BidiClass.WS
+    }
+    if code < 0x0020 {
+        return BidiClass.BN
+    }
+    if code == 0x0020 {
+        return BidiClass.WS
+    }
+    if within(code, 0x0023, 0x0025) {
+        return BidiClass.ET
+    }
+    if code == 0x002B || code == 0x002D {
+        return BidiClass.ES
+    }
+    if code == 0x002C || code == 0x002E || code == 0x002F || code == 0x003A {
+        return BidiClass.CS
+    }
+    if within(code, 0x0030, 0x0039) {
+        return BidiClass.EN
+    }
+    if within(code, 0x0041, 0x005A) || within(code, 0x0061, 0x007A) {
+        return BidiClass.L
+    }
+    if code == 0x007F {
+        return BidiClass.BN
+    }
+    // The rest of ASCII is punctuation.
+    if code < 0x0080 {
+        return BidiClass.ON
+    }
+    if code == 0x0085 {
+        return BidiClass.B
+    }
+    // C1 controls.
+    if code < 0x00A0 {
+        return BidiClass.BN
+    }
+    // A no-break space separates numbers without separating them.
+    if code == 0x00A0 {
+        return BidiClass.CS
+    }
+    if within(code, 0x00A2, 0x00A5) || code == 0x00B0 || code == 0x00B1 {
+        return BidiClass.ET
+    }
+    if code == 0x00D7 || code == 0x00F7 {
+        return BidiClass.ON
+    }
+    if code == 0x00AA || code == 0x00B5 || code == 0x00BA || within(code, 0x00C0, 0x00FF) {
+        return BidiClass.L
+    }
+    // The rest of Latin-1 is signs and punctuation.
+    if code < 0x00C0 {
+        return BidiClass.ON
+    }
+    // Latin Extended-A and -B.
+    if within(code, 0x0100, 0x024F) {
+        return BidiClass.L
+    }
+    // Combining diacritical marks.
+    if within(code, 0x0300, 0x036F) {
+        return BidiClass.NSM
+    }
+    // Greek — a few of its signs are properly ON, folded to L here.
+    if within(code, 0x0370, 0x03FF) {
+        return BidiClass.L
+    }
+    // Cyrillic, with its combining marks.
+    if within(code, 0x0483, 0x0489) {
+        return BidiClass.NSM
+    }
+    if within(code, 0x0400, 0x04FF) {
+        return BidiClass.L
+    }
+    // Hebrew: the accents and points are marks, everything else in the block
+    // is R — including the unassigned gaps, which Unicode also defaults to R.
+    if within(code, 0x0591, 0x05BD) || code == 0x05BF || code == 0x05C1 || code == 0x05C2 ||
+    code == 0x05C4 || code == 0x05C5 || code == 0x05C7 {
+        return BidiClass.NSM
+    }
+    if within(code, 0x0590, 0x05FF) {
+        return BidiClass.R
+    }
+    // The Arabic block. The number signs wrap around digits, so they count as
+    // numbers; the points and Koranic marks are marks; the two poetic signs
+    // and the sajdah sign are ON; everything else — letters, the letter mark
+    // at 061C, the punctuation that behaves like a letter — is AL.
+    if within(code, 0x0600, 0x0605) || code == 0x06DD {
+        return BidiClass.AN
+    }
+    if code == 0x0609 || code == 0x060A || code == 0x066A {
+        return BidiClass.ET
+    }
+    if code == 0x060C {
+        return BidiClass.CS
+    }
+    if code == 0x0606 || code == 0x0607 || code == 0x060E || code == 0x060F ||
+    code == 0x06DE || code == 0x06E9 {
+        return BidiClass.ON
+    }
+    if within(code, 0x0610, 0x061A) || within(code, 0x064B, 0x065F) || code == 0x0670 ||
+    within(code, 0x06D6, 0x06DC) || within(code, 0x06DF, 0x06E4) || code == 0x06E7 ||
+    code == 0x06E8 || within(code, 0x06EA, 0x06ED) {
+        return BidiClass.NSM
+    }
+    if within(code, 0x0660, 0x0669) || code == 0x066B || code == 0x066C {
+        return BidiClass.AN
+    }
+    if within(code, 0x06F0, 0x06F9) {
+        return BidiClass.EN
+    }
+    if within(code, 0x0600, 0x06FF) {
+        return BidiClass.AL
+    }
+    // Arabic Supplement, Extended-B and Extended-A.
+    if within(code, 0x0750, 0x077F) || within(code, 0x0870, 0x089F) {
+        return BidiClass.AL
+    }
+    if within(code, 0x08CA, 0x08E1) || within(code, 0x08E3, 0x08FF) {
+        return BidiClass.NSM
+    }
+    if code == 0x08E2 {
+        return BidiClass.AN
+    }
+    if within(code, 0x08A0, 0x08FF) {
+        return BidiClass.AL
+    }
+    // Devanagari combining marks; the letters fall through to L.
+    if within(code, 0x0900, 0x0902) || code == 0x093A || code == 0x093C ||
+    within(code, 0x0941, 0x0948) || code == 0x094D || within(code, 0x0951, 0x0957) ||
+    code == 0x0962 || code == 0x0963 {
+        return BidiClass.NSM
+    }
+    // Thai combining marks and the baht sign; the letters fall through to L.
+    if code == 0x0E31 || within(code, 0x0E34, 0x0E3A) || within(code, 0x0E47, 0x0E4E) {
+        return BidiClass.NSM
+    }
+    if code == 0x0E3F {
+        return BidiClass.ET
+    }
+    // Myanmar combining marks; the letters fall through to L.
+    if within(code, 0x102D, 0x1030) || within(code, 0x1032, 0x1037) || code == 0x1039 ||
+    code == 0x103A || code == 0x103D || code == 0x103E || code == 0x1058 ||
+    code == 0x1059 || within(code, 0x105E, 0x1060) || within(code, 0x1071, 0x1074) ||
+    code == 0x1082 || code == 0x1085 || code == 0x1086 || code == 0x108D ||
+    code == 0x109D {
+        return BidiClass.NSM
+    }
+    // General punctuation, including every explicit formatting character.
+    if within(code, 0x2000, 0x200A) {
+        return BidiClass.WS
+    }
+    if within(code, 0x200B, 0x200D) {
+        return BidiClass.BN
+    }
+    if code == 0x200E {
+        return BidiClass.L
+    }
+    if code == 0x200F {
+        return BidiClass.R
+    }
+    if code == 0x2028 {
+        return BidiClass.WS
+    }
+    if code == 0x2029 {
+        return BidiClass.B
+    }
+    if code == 0x202A {
+        return BidiClass.LRE
+    }
+    if code == 0x202B {
+        return BidiClass.RLE
+    }
+    if code == 0x202C {
+        return BidiClass.PDF
+    }
+    if code == 0x202D {
+        return BidiClass.LRO
+    }
+    if code == 0x202E {
+        return BidiClass.RLO
+    }
+    if code == 0x202F {
+        return BidiClass.CS
+    }
+    if within(code, 0x2030, 0x2034) {
+        return BidiClass.ET
+    }
+    if code == 0x2044 {
+        return BidiClass.CS
+    }
+    if code == 0x205F {
+        return BidiClass.WS
+    }
+    if within(code, 0x2060, 0x2064) {
+        return BidiClass.BN
+    }
+    if code == 0x2066 {
+        return BidiClass.LRI
+    }
+    if code == 0x2067 {
+        return BidiClass.RLI
+    }
+    if code == 0x2068 {
+        return BidiClass.FSI
+    }
+    if code == 0x2069 {
+        return BidiClass.PDI
+    }
+    if within(code, 0x206A, 0x206F) {
+        return BidiClass.BN
+    }
+    if within(code, 0x2010, 0x205E) {
+        return BidiClass.ON
+    }
+    // Currency signs.
+    if within(code, 0x20A0, 0x20CF) {
+        return BidiClass.ET
+    }
+    // Arrows, mathematics, technical symbols, and supplemental punctuation.
+    if within(code, 0x2190, 0x2BFF) || within(code, 0x2E00, 0x2E7F) {
+        return BidiClass.ON
+    }
+    // CJK punctuation, including its brackets. The ideographic space is
+    // whitespace; the ideographs after the block are L by the default below.
+    if code == 0x3000 {
+        return BidiClass.WS
+    }
+    if within(code, 0x3001, 0x303F) {
+        return BidiClass.ON
+    }
+    // Hebrew presentation forms.
+    if code == 0xFB1E {
+        return BidiClass.NSM
+    }
+    if within(code, 0xFB1D, 0xFB4F) {
+        return BidiClass.R
+    }
+    // Arabic presentation forms. The two ornate parentheses are brackets, not
+    // letters.
+    if code == 0xFD3E || code == 0xFD3F {
+        return BidiClass.ON
+    }
+    if within(code, 0xFB50, 0xFDFF) {
+        return BidiClass.AL
+    }
+    // Variation selectors and combining half marks.
+    if within(code, 0xFE00, 0xFE0F) || within(code, 0xFE20, 0xFE2F) {
+        return BidiClass.NSM
+    }
+    // Small form variants — a few are properly CS, folded to ON here.
+    if within(code, 0xFE50, 0xFE6F) {
+        return BidiClass.ON
+    }
+    // The zero-width no-break space, which is the byte-order mark.
+    if code == 0xFEFF {
+        return BidiClass.BN
+    }
+    if within(code, 0xFE70, 0xFEFF) {
+        return BidiClass.AL
+    }
+    // Fullwidth forms: digits are numbers, letters are letters, the rest is
+    // punctuation — the same answers as their ASCII counterparts.
+    if within(code, 0xFF10, 0xFF19) {
+        return BidiClass.EN
+    }
+    if within(code, 0xFF21, 0xFF3A) || within(code, 0xFF41, 0xFF5A) {
+        return BidiClass.L
+    }
+    if within(code, 0xFF01, 0xFF65) {
+        return BidiClass.ON
+    }
+    // Everything else — CJK ideographs and kana, Hangul, the letters of
+    // Devanagari, Thai and Myanmar, and every script this table does not
+    // cover — is L.
+    return BidiClass.L
+}
+
+/// Whether a code point is a nonspacing mark — `Mn`, the class the bidi table
+/// calls NSM. A mark advances nothing: it draws over the letter before it, so
+/// it is transparent to joining and takes its direction from its base.
+pub fn is_combining(code: int) -> bool {
+    return bidi_class(code) == BidiClass.NSM
+}
+
+// ---- paragraph direction ---------------------------------------------------
+
+/// The paragraph embedding level — rules P2 and P3.
+///
+/// The first strong character decides: L means 0, R or AL means 1, and a
+/// paragraph with no strong character at all reads left to right. Characters
+/// inside an isolate are skipped, because an isolate is exactly a promise
+/// that its content does not influence its surroundings.
+///
+/// This is asked once per paragraph and applied to every line wrapped out of
+/// it — a line does not re-decide its direction, or the second line of a
+/// Hebrew paragraph beginning with a number would come out backwards.
+pub fn paragraph_level(body: str) -> int {
+    var depth = 0
+    for i in 0..body.len() {
+        let c = bidi_class(body.code_at(i))
+        if c == BidiClass.LRI || c == BidiClass.RLI || c == BidiClass.FSI {
+            depth += 1
+        } else if c == BidiClass.PDI {
+            if depth > 0 {
+                depth -= 1
+            }
+        } else if depth == 0 {
+            if c == BidiClass.L {
+                return 0
+            }
+            if c == BidiClass.R || c == BidiClass.AL {
+                return 1
+            }
+        }
+    }
+    return 0
+}
+
+// ---- the resolved order ----------------------------------------------------
+
+/// One single-direction stretch of a reordered line, in the order it is
+/// painted, left to right.
+///
+/// `body` is in **logical order** — the order the text was written in — and a
+/// renderer displays a single-direction run correctly on its own: a browser
+/// re-derives the run's direction from its first strong character, which is
+/// rule P2 again, and mirrors brackets inside it, which is rule L4. A run of
+/// neutrals alone at an odd level has no strong character to re-derive from,
+/// so it arrives already reversed and mirrored, with `rtl` false.
+pub struct Run {
+    pub body: str
+    pub rtl: bool
+}
+
+/// A line reordered for display — the whole of UAX #9 this module implements,
+/// applied: P2–P3 for the base direction, X1–X10 for the explicit formatting
+/// characters, W1–W7 for the weak types, N0–N2 for the neutrals and bracket
+/// pairs, I1–I2 for the levels, and L1–L2 for the final order.
+///
+/// The runs come out in visual order and are drawn left to right; explicit
+/// formatting characters are dropped from the bodies, because they were
+/// instructions and have been obeyed. An RTL paragraph is **not**
+/// right-aligned by this — alignment belongs to the box, and the box speaks
+/// `Justify`, so a right-aligned Hebrew paragraph is a `Justify.End` box.
+pub fn bidi_runs(line: str) -> [Run] {
+    return bidi_runs_with(line, paragraph_level(line))
+}
+
+/// `bidi_runs` with the paragraph level supplied, for a line wrapped out of a
+/// longer paragraph — the paragraph decides once, the lines inherit.
+pub fn bidi_runs_with(line: str, base: int) -> [Run] {
+    // Most lines are plain left-to-right text, and a plain line is one run:
+    // the full resolution would say the same thing at greater cost.
+    if base == 0 && plain_left_to_right(line) {
+        return [Run{ body: line, rtl: false }]
+    }
+    let codes = codes_of(line)
+    let a = analyse(codes, base)
+    return runs_from(line, codes, a)
+}
+
+/// The resolved embedding level of every character, after L1. Exposed for
+/// tests: a level is the algorithm's whole intermediate state in one number.
+pub fn bidi_levels(line: str) -> [int] {
+    let codes = codes_of(line)
+    let a = analyse(codes, paragraph_level(line))
+    return a.levels
+}
+
+/// The character indices of a line in visual order, leftmost first — rule L2
+/// applied at character granularity. Characters that are not drawn — the
+/// explicit formatting characters — are absent.
+pub fn bidi_visual(line: str) -> [int] {
+    let codes = codes_of(line)
+    let a = analyse(codes, paragraph_level(line))
+    return visual_positions(a.levels, shown_flags(codes, a.removed))
+}
+
+/// Whether a line needs no reordering: no strong right-to-left characters,
+/// no Arabic numbers, no explicit formatting characters, and no separators.
+fn plain_left_to_right(line: str) -> bool {
+    for i in 0..line.len() {
+        let code = line.code_at(i)
+        if invisible(code) {
+            return false
+        }
+        if class_needs_bidi(bidi_class(code)) {
+            return false
+        }
+    }
+    return true
+}
+
+fn class_needs_bidi(c: BidiClass) -> bool {
+    return match c {
+        R | AL | AN | B | S => true
+        LRE | RLE | LRO | RLO | PDF | LRI | RLI | FSI | PDI => true
+        L | EN | ES | ET | CS | NSM | BN | WS | ON => false
+    }
+}
+
+/// Formatting characters that resolve direction but draw nothing: the two
+/// implicit marks, the Arabic letter mark, and the four isolate characters.
+/// The embeddings and overrides are removed by X9 before this is asked.
+fn invisible(code: int) -> bool {
+    return code == 0x200E || code == 0x200F || code == 0x061C ||
+    within(code, 0x2066, 0x2069)
+}
+
+fn codes_of(body: str) -> [int] {
+    var out: [int] = []
+    for i in 0..body.len() {
+        out.push(body.code_at(i))
+    }
+    return out
+}
+
+fn classes_of(codes: [int]) -> [BidiClass] {
+    var out: [BidiClass] = []
+    for code in codes {
+        out.push(bidi_class(code))
+    }
+    return out
+}
+
+// ---- the algorithm ---------------------------------------------------------
+
+/// What resolution leaves behind: a level per character, which characters
+/// X9 removed, and the classes the text started with — L1 and the bracket
+/// rule both need the original class, not the resolved one.
+struct Analysis {
+    levels: [int]
+    removed: [bool]
+    original: [BidiClass]
+}
+
+/// Which isolate initiator matches which PDI — BD9. The matching is purely
+/// lexical: a counter, not the directional stack.
+struct Isolates {
+    pdi_for: [int]
+    initiator_for: [int]
+}
+
+fn is_isolate_initiator(c: BidiClass) -> bool {
+    return match c {
+        LRI | RLI | FSI => true
+        _ => false
+    }
+}
+
+fn match_isolates(original: [BidiClass]) -> Isolates {
+    var pdi_for: [int] = []
+    var initiator_for: [int] = []
+    for i in 0..original.len() {
+        pdi_for.push(-1)
+        initiator_for.push(-1)
+    }
+    var stack: [int] = []
+    var top = 0
+    for i in 0..original.len() {
+        if is_isolate_initiator(original[i]) {
+            if top < stack.len() {
+                stack[top] = i
+            } else {
+                stack.push(i)
+            }
+            top += 1
+        } else if original[i] == BidiClass.PDI {
+            if top > 0 {
+                top -= 1
+                pdi_for[stack[top]] = i
+                initiator_for[i] = stack[top]
+            }
+        }
+    }
+    return Isolates{ pdi_for: pdi_for, initiator_for: initiator_for }
+}
+
+/// What the explicit rules leave behind: a level and a possibly overridden
+/// class per character, and which characters X9 removes from the rest of the
+/// resolution.
+struct Explicit {
+    levels: [int]
+    cls: [BidiClass]
+    removed: [bool]
+}
+
+fn next_odd(level: int) -> int {
+    return if level % 2 == 1 { level + 2 } else { level + 1 }
+}
+
+fn next_even(level: int) -> int {
+    return if level % 2 == 0 { level + 2 } else { level + 1 }
+}
+
+/// The direction an FSI takes — P2 again, over the isolate's own content.
+fn fsi_rtl(original: [BidiClass], from: int) -> bool {
+    var depth = 0
+    let start = from + 1
+    for i in start..original.len() {
+        let c = original[i]
+        if is_isolate_initiator(c) {
+            depth += 1
+        } else if c == BidiClass.PDI {
+            if depth == 0 {
+                return false
+            }
+            depth -= 1
+        } else if depth == 0 {
+            if c == BidiClass.L {
+                return false
+            }
+            if c == BidiClass.R || c == BidiClass.AL {
+                return true
+            }
+        }
+    }
+    return false
+}
+
+/// Rules X1–X9: the directional status stack.
+///
+/// Embeddings and overrides push and pop levels; isolates do the same but
+/// keep their place in the text; an override rewrites the class of everything
+/// under it. The depth limit is the specification's own 125, and material
+/// past it overflows harmlessly rather than trapping. X9 removes the
+/// embedding and override characters and the boundary-neutrals; the isolate
+/// characters stay, because the rules after this one treat them as neutrals.
+fn explicit_pass(original: [BidiClass], base: int) -> Explicit {
+    let n = original.len()
+    var levels: [int] = []
+    var cls: [BidiClass] = []
+    var removed: [bool] = []
+    for i in 0..n {
+        levels.push(base)
+        cls.push(original[i])
+        removed.push(false)
+    }
+
+    // The stack, as three parallel arrays with a logical top: an entry is a
+    // level, an override (0 none, 1 left, 2 right) and whether an isolate
+    // made it.
+    var stack_level: [int] = [base]
+    var stack_override: [int] = [0]
+    var stack_isolate: [bool] = [false]
+    var top = 1
+    var overflow_isolates = 0
+    var overflow_embeds = 0
+    var valid_isolates = 0
+
+    for i in 0..n {
+        let c = original[i]
+        if c == BidiClass.RLE || c == BidiClass.LRE || c == BidiClass.RLO || c == BidiClass.LRO {
+            removed[i] = true
+            levels[i] = stack_level[top - 1]
+            let rtl = c == BidiClass.RLE || c == BidiClass.RLO
+            let level = if rtl { next_odd(stack_level[top - 1]) } else { next_even(stack_level[top - 1]) }
+            var override = 0
+            if c == BidiClass.LRO {
+                override = 1
+            }
+            if c == BidiClass.RLO {
+                override = 2
+            }
+            if level <= 125 && overflow_isolates == 0 && overflow_embeds == 0 {
+                if top < stack_level.len() {
+                    stack_level[top] = level
+                    stack_override[top] = override
+                    stack_isolate[top] = false
+                } else {
+                    stack_level.push(level)
+                    stack_override.push(override)
+                    stack_isolate.push(false)
+                }
+                top += 1
+            } else if overflow_isolates == 0 {
+                overflow_embeds += 1
+            }
+        } else if c == BidiClass.PDF {
+            removed[i] = true
+            levels[i] = stack_level[top - 1]
+            if overflow_isolates > 0 {
+                // Inside an overflowed isolate nothing pops.
+            } else if overflow_embeds > 0 {
+                overflow_embeds -= 1
+            } else if top >= 2 && !stack_isolate[top - 1] {
+                top -= 1
+            }
+        } else if is_isolate_initiator(c) {
+            // The initiator itself sits outside the isolate: current level,
+            // current override.
+            levels[i] = stack_level[top - 1]
+            if stack_override[top - 1] == 1 {
+                cls[i] = BidiClass.L
+            }
+            if stack_override[top - 1] == 2 {
+                cls[i] = BidiClass.R
+            }
+            let rtl = c == BidiClass.RLI || (c == BidiClass.FSI && fsi_rtl(original, i))
+            let level = if rtl { next_odd(stack_level[top - 1]) } else { next_even(stack_level[top - 1]) }
+            if level <= 125 && overflow_isolates == 0 && overflow_embeds == 0 {
+                valid_isolates += 1
+                if top < stack_level.len() {
+                    stack_level[top] = level
+                    stack_override[top] = 0
+                    stack_isolate[top] = true
+                } else {
+                    stack_level.push(level)
+                    stack_override.push(0)
+                    stack_isolate.push(true)
+                }
+                top += 1
+            } else {
+                overflow_isolates += 1
+            }
+        } else if c == BidiClass.PDI {
+            if overflow_isolates > 0 {
+                overflow_isolates -= 1
+            } else if valid_isolates > 0 {
+                overflow_embeds = 0
+                for !stack_isolate[top - 1] {
+                    top -= 1
+                }
+                top -= 1
+                valid_isolates -= 1
+            }
+            levels[i] = stack_level[top - 1]
+            if stack_override[top - 1] == 1 {
+                cls[i] = BidiClass.L
+            }
+            if stack_override[top - 1] == 2 {
+                cls[i] = BidiClass.R
+            }
+        } else if c == BidiClass.B {
+            // A paragraph separator inside a line is unusual; it takes the
+            // paragraph level, which is rule X8.
+            levels[i] = base
+        } else if c == BidiClass.BN {
+            removed[i] = true
+            levels[i] = stack_level[top - 1]
+        } else {
+            levels[i] = stack_level[top - 1]
+            if stack_override[top - 1] == 1 {
+                cls[i] = BidiClass.L
+            }
+            if stack_override[top - 1] == 2 {
+                cls[i] = BidiClass.R
+            }
+        }
+    }
+    return Explicit{ levels: levels, cls: cls, removed: removed }
+}
+
+/// Rule X10: the isolating run sequences.
+///
+/// A level run that ends with an isolate initiator continues at its matching
+/// PDI, so the text inside the isolate cannot affect the text around it. Each
+/// sequence is the unit the W, N and I rules run over.
+fn sequences_of(
+    levels: [int],
+    removed: [bool],
+    original: [BidiClass],
+    iso: Isolates,
+) -> [[int]] {
+    // The surviving characters, in logical order.
+    var order: [int] = []
+    for i in 0..levels.len() {
+        if !removed[i] {
+            order.push(i)
+        }
+    }
+
+    // Maximal level runs over the surviving characters.
+    var run_first: [int] = []
+    var run_last: [int] = []
+    var k = 0
+    for k < order.len() {
+        let start = k
+        k += 1
+        for k < order.len() && levels[order[k]] == levels[order[start]] {
+            k += 1
+        }
+        run_first.push(order[start])
+        run_last.push(order[k - 1])
+    }
+
+    var sequences: [[int]] = []
+    for r in 0..run_first.len() {
+        // A run whose first character is a matched PDI continues an earlier
+        // sequence rather than starting one.
+        let first = run_first[r]
+        if original[first] == BidiClass.PDI && iso.initiator_for[first] != -1 {
+            continue
+        }
+        var seq: [int] = []
+        var current = r
+        for {
+            // Append the run's surviving characters.
+            var j = run_first[current]
+            for j <= run_last[current] {
+                if !removed[j] {
+                    seq.push(j)
+                }
+                j += 1
+            }
+            let last = run_last[current]
+            if !is_isolate_initiator(original[last]) || iso.pdi_for[last] == -1 {
+                break
+            }
+            // Continue at the run that starts with the matching PDI.
+            let target = iso.pdi_for[last]
+            var found = -1
+            for r2 in 0..run_first.len() {
+                if run_first[r2] == target {
+                    found = r2
+                }
+            }
+            if found == -1 {
+                break
+            }
+            current = found
+        }
+        sequences.push(seq)
+    }
+    return sequences
+}
+
+/// Whether the boundary before a sequence reads right-to-left: the higher of
+/// the sequence's level and its neighbour's, odd meaning R — the sos and eos
+/// of X10.
+fn boundary_before(seq: [int], levels: [int], removed: [bool], base: int) -> bool {
+    var before = base
+    var j = seq[0] - 1
+    for j >= 0 {
+        if !removed[j] {
+            before = levels[j]
+            break
+        }
+        j -= 1
+    }
+    return max(levels[seq[0]], before) % 2 == 1
+}
+
+fn boundary_after(
+    seq: [int],
+    levels: [int],
+    removed: [bool],
+    original: [BidiClass],
+    base: int,
+    iso: Isolates,
+) -> bool {
+    let last = seq[seq.len() - 1]
+    var after = base
+    if is_isolate_initiator(original[last]) && iso.pdi_for[last] == -1 {
+        // An isolate that never closes runs to the end of the paragraph.
+        after = base
+    } else {
+        var j = last + 1
+        for j < levels.len() {
+            if !removed[j] {
+                after = levels[j]
+                break
+            }
+            j += 1
+        }
+    }
+    return max(levels[seq[seq.len() - 1]], after) % 2 == 1
+}
+
+/// Rules W1–W7: the weak types.
+///
+/// Marks take their base's class; European numbers become Arabic after
+/// Arabic letters; Arabic letters then count as R; separators between
+/// digits join the digits; terminators beside them do the same; whatever
+/// separator is left is a neutral; and a European number in left-to-right
+/// company is just text.
+fn resolve_weak(classes: [BidiClass], original: [BidiClass], seq: [int], sos_r: bool) -> [BidiClass] {
+    var cls = classes
+    let n = seq.len()
+    // From here on an isolate initiator or PDI takes part as a neutral.
+    for k in 0..n {
+        if is_isolate_initiator(original[seq[k]]) || original[seq[k]] == BidiClass.PDI {
+            cls[seq[k]] = BidiClass.ON
+        }
+    }
+    // W1: a mark becomes its base — or a neutral, when what precedes it is an
+    // isolate boundary, which no mark can attach across.
+    for k in 0..n {
+        if cls[seq[k]] == BidiClass.NSM {
+            if k == 0 {
+                cls[seq[k]] = if sos_r { BidiClass.R } else { BidiClass.L }
+            } else if is_isolate_initiator(original[seq[k - 1]]) ||
+            original[seq[k - 1]] == BidiClass.PDI {
+                cls[seq[k]] = BidiClass.ON
+            } else {
+                cls[seq[k]] = cls[seq[k - 1]]
+            }
+        }
+    }
+    // W2: a European number after an Arabic letter is an Arabic number.
+    var strong = if sos_r { BidiClass.R } else { BidiClass.L }
+    for k in 0..n {
+        let c = cls[seq[k]]
+        if c == BidiClass.L || c == BidiClass.R || c == BidiClass.AL {
+            strong = c
+        }
+        if c == BidiClass.EN && strong == BidiClass.AL {
+            cls[seq[k]] = BidiClass.AN
+        }
+    }
+    // W3: Arabic letters count as R from here on.
+    for k in 0..n {
+        if cls[seq[k]] == BidiClass.AL {
+            cls[seq[k]] = BidiClass.R
+        }
+    }
+    // W4: a single separator between two numbers of the right kind joins them.
+    for k in 0..n {
+        if k > 0 && k < n - 1 {
+            let prev = cls[seq[k - 1]]
+            let next = cls[seq[k + 1]]
+            if cls[seq[k]] == BidiClass.ES && prev == BidiClass.EN && next == BidiClass.EN {
+                cls[seq[k]] = BidiClass.EN
+            }
+            if cls[seq[k]] == BidiClass.CS && prev == BidiClass.EN && next == BidiClass.EN {
+                cls[seq[k]] = BidiClass.EN
+            }
+            if cls[seq[k]] == BidiClass.CS && prev == BidiClass.AN && next == BidiClass.AN {
+                cls[seq[k]] = BidiClass.AN
+            }
+        }
+    }
+    // W5: terminators adjacent to a European number join it, on either side.
+    for k in 0..n {
+        if cls[seq[k]] == BidiClass.ET && k > 0 && cls[seq[k - 1]] == BidiClass.EN {
+            cls[seq[k]] = BidiClass.EN
+        }
+    }
+    var k = n - 1
+    for k >= 0 {
+        if cls[seq[k]] == BidiClass.ET && k < n - 1 && cls[seq[k + 1]] == BidiClass.EN {
+            cls[seq[k]] = BidiClass.EN
+        }
+        k -= 1
+    }
+    // W6: whatever separator or terminator is left is a neutral.
+    for k2 in 0..n {
+        let c = cls[seq[k2]]
+        if c == BidiClass.ES || c == BidiClass.ET || c == BidiClass.CS {
+            cls[seq[k2]] = BidiClass.ON
+        }
+    }
+    // W7: a European number in left-to-right company is just text.
+    var left = !sos_r
+    for k3 in 0..n {
+        let c = cls[seq[k3]]
+        if c == BidiClass.L {
+            left = true
+        }
+        if c == BidiClass.R {
+            left = false
+        }
+        if c == BidiClass.EN && left {
+            cls[seq[k3]] = BidiClass.L
+        }
+    }
+    return cls
+}
+
+// ---- bracket pairs ---------------------------------------------------------
+//
+// The pair table is a subset of BidiBrackets.txt, and the subset is listed:
+// the three ASCII pairs, the floor and ceiling corners, the deprecated angle
+// brackets (canonically equal to the CJK ones, which BD16 requires honouring),
+// the mathematical white and angle brackets at 27E6–27EF, the CJK pairs at
+// 3008–301B, and the fullwidth pairs. Everything else — the Tibetan marks,
+// the ornate Arabic parentheses, the superscripted pairs — is not a bracket
+// here, and falls to N1 and N2 like any other neutral.
+
+/// The closing bracket an opening one pairs with, or 0 for everything else.
+fn bracket_close(code: int) -> int {
+    if code == 0x0028 {
+        return 0x0029
+    }
+    if code == 0x005B {
+        return 0x005D
+    }
+    if code == 0x007B {
+        return 0x007D
+    }
+    if code == 0x2308 {
+        return 0x2309
+    }
+    if code == 0x230A {
+        return 0x230B
+    }
+    if code == 0x2329 {
+        return 0x232A
+    }
+    if within(code, 0x27E6, 0x27EE) && code % 2 == 0 {
+        return code + 1
+    }
+    if within(code, 0x3008, 0x3010) && code % 2 == 0 {
+        return code + 1
+    }
+    if within(code, 0x3014, 0x301A) && code % 2 == 0 {
+        return code + 1
+    }
+    if code == 0xFF08 {
+        return 0xFF09
+    }
+    if code == 0xFF3B {
+        return 0xFF3D
+    }
+    if code == 0xFF5B {
+        return 0xFF5D
+    }
+    if code == 0xFF5F {
+        return 0xFF60
+    }
+    if code == 0xFF62 {
+        return 0xFF63
+    }
+    return 0
+}
+
+/// The deprecated angle brackets are canonically the CJK ones, and BD16 says
+/// canonical equivalence decides a match.
+fn bracket_canon(code: int) -> int {
+    if code == 0x2329 {
+        return 0x3008
+    }
+    if code == 0x232A {
+        return 0x3009
+    }
+    return code
+}
+
+/// Whether a code point closes any bracket in the table.
+fn is_bracket_close(code: int) -> bool {
+    let canon = bracket_canon(code)
+    if canon == 0x0029 || canon == 0x005D || canon == 0x007D {
+        return true
+    }
+    if canon == 0x2309 || canon == 0x230B {
+        return true
+    }
+    if within(canon, 0x27E7, 0x27EF) && canon % 2 == 1 {
+        return true
+    }
+    if within(canon, 0x3009, 0x3011) && canon % 2 == 1 {
+        return true
+    }
+    if within(canon, 0x3015, 0x301B) && canon % 2 == 1 {
+        return true
+    }
+    if canon == 0xFF09 || canon == 0xFF3D || canon == 0xFF5D || canon == 0xFF60 ||
+    canon == 0xFF63 {
+        return true
+    }
+    return false
+}
+
+/// L for a strong left-to-right, R for a strong right-to-left — with numbers
+/// counting as R, which is what N0 and N1 both say — or neither.
+fn n_strong(c: BidiClass) -> int {
+    return match c {
+        L => 0
+        R | EN | AN => 1
+        _ => -1
+    }
+}
+
+/// Rule N0: paired brackets take the direction of what they contain.
+///
+/// Pairs are found with BD16's stack — nesting respected, a stray bracket
+/// ignored, and at the sixty-fourth open bracket the search stops with what
+/// it has, which is the specification's own limit. A pair containing a strong
+/// character in the embedding direction takes that direction; one containing
+/// only the opposite direction takes its context; one containing no strong
+/// character at all is left for N1 and N2.
+fn resolve_brackets(
+    codes: [int],
+    classes: [BidiClass],
+    original: [BidiClass],
+    seq: [int],
+    level: int,
+    sos_r: bool,
+) -> [BidiClass] {
+    var cls = classes
+    let n = seq.len()
+    let e_dir = level % 2
+    // Find the pairs.
+    var stack_code: [int] = []
+    var stack_at: [int] = []
+    var top = 0
+    var open_at: [int] = []
+    var close_at: [int] = []
+    for k in 0..n {
+        if cls[seq[k]] != BidiClass.ON {
+            continue
+        }
+        let code = codes[seq[k]]
+        if bracket_close(code) != 0 {
+            if top == 63 {
+                break
+            }
+            if top < stack_code.len() {
+                stack_code[top] = code
+                stack_at[top] = k
+            } else {
+                stack_code.push(code)
+                stack_at.push(k)
+            }
+            top += 1
+        } else if is_bracket_close(code) {
+            var j = top - 1
+            for j >= 0 {
+                if bracket_canon(bracket_close(stack_code[j])) == bracket_canon(code) {
+                    open_at.push(stack_at[j])
+                    close_at.push(k)
+                    top = j
+                    break
+                }
+                j -= 1
+            }
+        }
+    }
+    // Process pairs in the order their openings appear.
+    let opens = open_at
+    var order: [int] = []
+    for p in 0..open_at.len() {
+        order.push(p)
+    }
+    order = sorted(order, |a: int, b: int| opens[a] < opens[b])
+    for p in order {
+        let o = open_at[p]
+        let c = close_at[p]
+        var found_e = false
+        var found_o = false
+        var k = o + 1
+        for k < c {
+            let s = n_strong(cls[seq[k]])
+            if s == e_dir {
+                found_e = true
+            }
+            if s == 1 - e_dir{
+                found_o = true
+            }
+            k += 1
+        }
+        if !found_e && !found_o {
+            continue
+        }
+        var direction = e_dir
+        if !found_e {
+            // Only the opposite direction inside: the context before the
+            // opening bracket decides, sos standing in at the start.
+            var ctx = if sos_r { 1 } else { 0 }
+            var j = o - 1
+            for j >= 0 {
+                let s = n_strong(cls[seq[j]])
+                if s != -1 {
+                    ctx = s
+                    break
+                }
+                j -= 1
+            }
+            if ctx == 1 - e_dir{
+                direction = 1 - e_dir
+            }
+        }
+        let assigned = if direction == 1 { BidiClass.R } else { BidiClass.L }
+        cls[seq[o]] = assigned
+        cls[seq[c]] = assigned
+        // A mark that followed a bracket follows it into its new class.
+        var m = o + 1
+        for m < n && original[seq[m]] == BidiClass.NSM {
+            cls[seq[m]] = assigned
+            m += 1
+        }
+        m = c + 1
+        for m < n && original[seq[m]] == BidiClass.NSM {
+            cls[seq[m]] = assigned
+            m += 1
+        }
+    }
+    return cls
+}
+
+fn is_neutral(c: BidiClass) -> bool {
+    return match c {
+        ON | WS | B | S => true
+        _ => false
+    }
+}
+
+/// Rules N1 and N2: a stretch of neutrals between two strongs of the same
+/// direction takes it; anything still unresolved takes the embedding
+/// direction. Numbers push like R on their neighbours, and the sequence
+/// boundaries stand in for text beyond them.
+fn resolve_neutrals(
+    classes: [BidiClass],
+    seq: [int],
+    level: int,
+    sos_r: bool,
+    eos_r: bool,
+) -> [BidiClass] {
+    var cls = classes
+    let n = seq.len()
+    let e = if level % 2 == 1 { BidiClass.R } else { BidiClass.L }
+    var k = 0
+    for k < n {
+        if !is_neutral(cls[seq[k]]) {
+            k += 1
+            continue
+        }
+        let start = k
+        for k < n && is_neutral(cls[seq[k]]) {
+            k += 1
+        }
+        var before = 0
+        if start == 0 {
+            before = if sos_r { 1 } else { 0 }
+        } else {
+            before = n_strong(cls[seq[start - 1]])
+        }
+        var after = 0
+        if k == n {
+            after = if eos_r { 1 } else { 0 }
+        } else {
+            after = n_strong(cls[seq[k]])
+        }
+        var assigned = e
+        if before == after && before != -1 {
+            assigned = if before == 1 { BidiClass.R } else { BidiClass.L }
+        }
+        var j = start
+        for j < k {
+            cls[seq[j]] = assigned
+            j += 1
+        }
+    }
+    return cls
+}
+
+/// Rules I1 and I2: numbers and opposite-direction text rise above their
+/// embedding level, which is what makes digits read left to right inside
+/// Hebrew and Hebrew read right to left inside English.
+fn raise_levels(given: [int], cls: [BidiClass], seq: [int]) -> [int] {
+    var levels = given
+    for k in 0..seq.len() {
+        let p = seq[k]
+        let c = cls[p]
+        if levels[p] % 2 == 0 {
+            if c == BidiClass.R {
+                levels[p] = levels[p] + 1
+            }
+            if c == BidiClass.AN || c == BidiClass.EN {
+                levels[p] = levels[p] + 2
+            }
+        } else {
+            if c == BidiClass.L || c == BidiClass.EN || c == BidiClass.AN {
+                levels[p] = levels[p] + 1
+            }
+        }
+    }
+    return levels
+}
+
+/// Rule L1: separators, and the whitespace trailing a line or leading up to a
+/// separator, return to the paragraph level — which is why the space at the
+/// end of a right-to-left line sits at its left edge rather than inside the
+/// text.
+fn reset_separators(
+    given: [int],
+    original: [BidiClass],
+    removed: [bool],
+    base: int,
+) -> [int] {
+    var levels = given
+    let n = original.len()
+    for i in 0..n {
+        if original[i] == BidiClass.B || original[i] == BidiClass.S {
+            levels[i] = base
+            var j = i - 1
+            for j >= 0 && resettable(original[j], removed[j]) {
+                levels[j] = base
+                j -= 1
+            }
+        }
+    }
+    var j = n - 1
+    for j >= 0 && resettable(original[j], removed[j]) {
+        levels[j] = base
+        j -= 1
+    }
+    return levels
+}
+
+/// What L1 walks back over: whitespace, the isolate characters, and the
+/// characters X9 removed — which draw nothing and should not hold a level
+/// hostage.
+fn resettable(c: BidiClass, was_removed: bool) -> bool {
+    if was_removed {
+        return true
+    }
+    return match c {
+        WS | LRI | RLI | FSI | PDI => true
+        _ => false
+    }
+}
+
+/// The whole resolution, P2 aside: explicit levels, isolating run sequences,
+/// weak types, brackets, neutrals, implicit levels, and the separator reset.
+fn analyse(codes: [int], base: int) -> Analysis {
+    let original = classes_of(codes)
+    let iso = match_isolates(original)
+    let x = explicit_pass(original, base)
+    var cls = x.cls
+    var levels = x.levels
+    let seqs = sequences_of(levels, x.removed, original, iso)
+    for seq in seqs {
+        if seq.len() == 0 {
+            continue
+        }
+        let level = levels[seq[0]]
+        let sos_r = boundary_before(seq, levels, x.removed, base)
+        let eos_r = boundary_after(seq, levels, x.removed, original, base, iso)
+        cls = resolve_weak(cls, original, seq, sos_r)
+        cls = resolve_brackets(codes, cls, original, seq, level, sos_r)
+        cls = resolve_neutrals(cls, seq, level, sos_r, eos_r)
+        levels = raise_levels(levels, cls, seq)
+    }
+    levels = reset_separators(levels, original, x.removed, base)
+    return Analysis{ levels: levels, removed: x.removed, original: original }
+}
+
+/// Which characters are drawn at all: not removed by X9, and not one of the
+/// invisible direction marks.
+fn shown_flags(codes: [int], removed: [bool]) -> [bool] {
+    var out: [bool] = []
+    for i in 0..codes.len() {
+        out.push(!removed[i] && !invisible(codes[i]))
+    }
+    return out
+}
+
+/// Rule L2 at character granularity: from the highest level present down to
+/// level one, reverse every maximal stretch at or above it. A left-to-right
+/// number inside right-to-left text is reversed twice, which is why it comes
+/// out forwards.
+fn visual_positions(levels: [int], keep: [bool]) -> [int] {
+    var pos: [int] = []
+    for i in 0..levels.len() {
+        if keep[i] {
+            pos.push(i)
+        }
+    }
+    if pos.len() == 0 {
+        return pos
+    }
+    var highest = 0
+    for p in pos {
+        highest = max(highest, levels[p])
+    }
+    var l = highest
+    for l >= 1 {
+        var k = 0
+        for k < pos.len() {
+            if levels[pos[k]] < l {
+                k += 1
+                continue
+            }
+            let start = k
+            for k < pos.len() && levels[pos[k]] >= l {
+                k += 1
+            }
+            var lo = start
+            var hi = k - 1
+            for lo < hi {
+                let tmp = pos[lo]
+                pos[lo] = pos[hi]
+                pos[hi] = tmp
+                lo += 1
+                hi -= 1
+            }
+        }
+        l -= 1
+    }
+    return pos
+}
+
+/// The mirrored counterpart of a bracket, or the character itself. This is
+/// rule L4 for the pair table above and nothing more — the full mirroring
+/// table also swaps guillemets, comparison signs and a few hundred
+/// mathematical symbols, and a renderer that draws whole runs gets those from
+/// the host. Only a reversed neutral run needs this copy.
+fn mirror_char(c: str) -> str {
+    let opens = "([{\u{2308}\u{230a}\u{2329}\u{27e6}\u{27e8}\u{27ea}\u{27ec}\u{27ee}\u{3008}\u{300a}\u{300c}\u{300e}\u{3010}\u{3014}\u{3016}\u{3018}\u{301a}\u{ff08}\u{ff3b}\u{ff5b}\u{ff5f}\u{ff62}"
+    let closes = ")]}\u{2309}\u{230b}\u{232a}\u{27e7}\u{27e9}\u{27eb}\u{27ed}\u{27ef}\u{3009}\u{300b}\u{300d}\u{300f}\u{3011}\u{3015}\u{3017}\u{3019}\u{301b}\u{ff09}\u{ff3d}\u{ff5d}\u{ff60}\u{ff63}"
+    let o = opens.index_of(c)
+    if o >= 0 {
+        return closes.slice(o, o + 1)
+    }
+    let cl = closes.index_of(c)
+    if cl >= 0 {
+        return opens.slice(cl, cl + 1)
+    }
+    return c
+}
+
+/// Group the visual order into runs a renderer can draw whole.
+///
+/// A stretch of the visual order whose logical positions step forwards is a
+/// left-to-right run; one that steps backwards is right-to-left, and its body
+/// is kept in logical order for the renderer to reverse — a renderer shapes
+/// and mirrors inside a run it knows the direction of, and it re-derives that
+/// direction from the run's first strong character. A right-to-left run with
+/// no strong character gives it nothing to re-derive from, so that one case
+/// arrives pre-reversed, brackets mirrored, and says `rtl: false`.
+fn runs_from(line: str, codes: [int], a: Analysis) -> [Run] {
+    let keep = shown_flags(codes, a.removed)
+    let pos = visual_positions(a.levels, keep)
+    if pos.len() == 0 {
+        return [Run{ body: "", rtl: false }]
+    }
+
+    // The next and previous drawn character, for stepping over dropped ones.
+    let n = codes.len()
+    var next_shown: [int] = []
+    var prev_shown: [int] = []
+    for i in 0..n {
+        next_shown.push(-1)
+        prev_shown.push(-1)
+    }
+    var last = -1
+    for i in 0..n {
+        if keep[i] {
+            prev_shown[i] = last
+            if last >= 0 {
+                next_shown[last] = i
+            }
+            last = i
+        }
+    }
+
+    var out: [Run] = []
+    var k = 0
+    for k < pos.len() {
+        let start = k
+        let parity = a.levels[pos[start]] % 2
+        k += 1
+        // 0 while undecided, then +1 stepping forwards or -1 backwards.
+        var direction = 0
+        for k < pos.len() {
+            if a.levels[pos[k]] % 2 != parity {
+                break
+            }
+            let forwards = next_shown[pos[k - 1]] == pos[k]
+            let backwards = prev_shown[pos[k - 1]] == pos[k]
+            if direction >= 0 && forwards {
+                direction = 1
+            } else if direction <= 0 && backwards {
+                direction = -1
+            } else {
+                break
+            }
+            k += 1
+        }
+        out.push(run_of(line, a, keep, pos, start, k, parity))
+    }
+    return out
+}
+
+/// One grouped run, from a slice of the visual order.
+fn run_of(
+    line: str,
+    a: Analysis,
+    keep: [bool],
+    pos: [int],
+    from: int,
+    to: int,
+    parity: int,
+) -> Run {
+    // The run's logical extent, and whether anything in it is strong enough
+    // for a renderer to re-derive its direction from.
+    var lo = pos[from]
+    var hi = pos[from]
+    var strong = false
+    for k in from..to {
+        let p = pos[k]
+        lo = min(lo, p)
+        hi = max(hi, p)
+        if a.original[p] == BidiClass.R || a.original[p] == BidiClass.AL {
+            strong = true
+        }
+    }
+    if parity == 1 && !strong {
+        // A reversed neutral run: already in visual order, brackets mirrored,
+        // nothing left for the renderer to decide.
+        var body = ""
+        for k in from..to {
+            body = body + mirror_char(line.slice(pos[k], pos[k] + 1))
+        }
+        return Run{ body: body, rtl: false }
+    }
+    var body = ""
+    var i = lo
+    for i <= hi {
+        if keep[i] {
+            body = body + line.slice(i, i + 1)
+        }
+        i += 1
+    }
+    return Run{ body: body, rtl: parity == 1 }
+}
+
+// ---- Arabic joining --------------------------------------------------------
+
+/// A letter's presentation forms, as a string in the fixed Forms-B order:
+/// isolated, final, initial, medial. A right-joining letter has only the
+/// first two; hamza stands alone and has one. The empty string means the
+/// letter is not in the table.
+///
+/// The table is the Arabic block's own alphabet — the twenty-eight letters,
+/// the hamza carriers, teh marbuta and alef maksura — which is exactly what
+/// Arabic Presentation Forms-B covers. Persian, Urdu, Pashto and the other
+/// extensions have no forms in that block and pass through unshaped.
+fn arabic_forms(code: int) -> str {
+    if code == 0x0621 {
+        return "\u{fe80}"
+    }
+    if code == 0x0622 {
+        return "\u{fe81}\u{fe82}"
+    }
+    if code == 0x0623 {
+        return "\u{fe83}\u{fe84}"
+    }
+    if code == 0x0624 {
+        return "\u{fe85}\u{fe86}"
+    }
+    if code == 0x0625 {
+        return "\u{fe87}\u{fe88}"
+    }
+    if code == 0x0626 {
+        return "\u{fe89}\u{fe8a}\u{fe8b}\u{fe8c}"
+    }
+    if code == 0x0627 {
+        return "\u{fe8d}\u{fe8e}"
+    }
+    if code == 0x0628 {
+        return "\u{fe8f}\u{fe90}\u{fe91}\u{fe92}"
+    }
+    if code == 0x0629 {
+        return "\u{fe93}\u{fe94}"
+    }
+    if code == 0x062A {
+        return "\u{fe95}\u{fe96}\u{fe97}\u{fe98}"
+    }
+    if code == 0x062B {
+        return "\u{fe99}\u{fe9a}\u{fe9b}\u{fe9c}"
+    }
+    if code == 0x062C {
+        return "\u{fe9d}\u{fe9e}\u{fe9f}\u{fea0}"
+    }
+    if code == 0x062D {
+        return "\u{fea1}\u{fea2}\u{fea3}\u{fea4}"
+    }
+    if code == 0x062E {
+        return "\u{fea5}\u{fea6}\u{fea7}\u{fea8}"
+    }
+    if code == 0x062F {
+        return "\u{fea9}\u{feaa}"
+    }
+    if code == 0x0630 {
+        return "\u{feab}\u{feac}"
+    }
+    if code == 0x0631 {
+        return "\u{fead}\u{feae}"
+    }
+    if code == 0x0632 {
+        return "\u{feaf}\u{feb0}"
+    }
+    if code == 0x0633 {
+        return "\u{feb1}\u{feb2}\u{feb3}\u{feb4}"
+    }
+    if code == 0x0634 {
+        return "\u{feb5}\u{feb6}\u{feb7}\u{feb8}"
+    }
+    if code == 0x0635 {
+        return "\u{feb9}\u{feba}\u{febb}\u{febc}"
+    }
+    if code == 0x0636 {
+        return "\u{febd}\u{febe}\u{febf}\u{fec0}"
+    }
+    if code == 0x0637 {
+        return "\u{fec1}\u{fec2}\u{fec3}\u{fec4}"
+    }
+    if code == 0x0638 {
+        return "\u{fec5}\u{fec6}\u{fec7}\u{fec8}"
+    }
+    if code == 0x0639 {
+        return "\u{fec9}\u{feca}\u{fecb}\u{fecc}"
+    }
+    if code == 0x063A {
+        return "\u{fecd}\u{fece}\u{fecf}\u{fed0}"
+    }
+    if code == 0x0641 {
+        return "\u{fed1}\u{fed2}\u{fed3}\u{fed4}"
+    }
+    if code == 0x0642 {
+        return "\u{fed5}\u{fed6}\u{fed7}\u{fed8}"
+    }
+    if code == 0x0643 {
+        return "\u{fed9}\u{feda}\u{fedb}\u{fedc}"
+    }
+    if code == 0x0644 {
+        return "\u{fedd}\u{fede}\u{fedf}\u{fee0}"
+    }
+    if code == 0x0645 {
+        return "\u{fee1}\u{fee2}\u{fee3}\u{fee4}"
+    }
+    if code == 0x0646 {
+        return "\u{fee5}\u{fee6}\u{fee7}\u{fee8}"
+    }
+    if code == 0x0647 {
+        return "\u{fee9}\u{feea}\u{feeb}\u{feec}"
+    }
+    if code == 0x0648 {
+        return "\u{feed}\u{feee}"
+    }
+    if code == 0x0649 {
+        return "\u{feef}\u{fef0}"
+    }
+    if code == 0x064A {
+        return "\u{fef1}\u{fef2}\u{fef3}\u{fef4}"
+    }
+    return ""
+}
+
+/// Whether a letter connects forwards, to the letter written after it: the
+/// dual-joining letters do, the tatweel exists to, and everything else does
+/// not.
+fn connects_forwards(code: int) -> bool {
+    if code == 0x0640 {
+        return true
+    }
+    return arabic_forms(code).len() == 4
+}
+
+/// Whether a letter connects backwards, to the letter written before it:
+/// anything with a final form, and the tatweel.
+fn connects_backwards(code: int) -> bool {
+    if code == 0x0640 {
+        return true
+    }
+    return arabic_forms(code).len() >= 2
+}
+
+/// The nearest non-transparent character before `at`, or -1. Marks are
+/// transparent to joining — a shadda between two letters does not break the
+/// stroke that connects them.
+fn prev_base(codes: [int], at: int) -> int {
+    var j = at - 1
+    for j >= 0 {
+        if !is_combining(codes[j]) {
+            return j
+        }
+        j -= 1
+    }
+    return -1
+}
+
+fn next_base(codes: [int], at: int) -> int {
+    var j = at + 1
+    for j < codes.len() {
+        if !is_combining(codes[j]) {
+            return j
+        }
+        j += 1
+    }
+    return -1
+}
+
+/// The lam-alef ligature — the one ligature Arabic requires rather than
+/// prefers. `joined` selects the final form, for a lam that connects to the
+/// letter before it.
+fn lam_alef(alef: int, joined: bool) -> str {
+    let forms = if alef == 0x0622 {
+        "\u{fef5}\u{fef6}"
+    } else if alef == 0x0623 {
+        "\u{fef7}\u{fef8}"
+    } else if alef == 0x0625 {
+        "\u{fef9}\u{fefa}"
+    } else {
+        "\u{fefb}\u{fefc}"
+    }
+    return if joined { forms.slice(1, 2) } else { forms.slice(0, 1) }
+}
+
+fn is_lam_alef(code: int) -> bool {
+    return code == 0x0622 || code == 0x0623 || code == 0x0625 || code == 0x0627
+}
+
+/// Arabic contextual joining: each letter of the Arabic block becomes the
+/// presentation form its neighbours demand — isolated, final, initial or
+/// medial — and lam followed by alef becomes the mandatory ligature.
+///
+/// This is the Joining_Type algorithm over the table above, and it is **not
+/// shaping**: a font's own GSUB rules choose better glyphs than the
+/// presentation-forms block offers, kern them, and position their marks. The
+/// browser-backed renderers get all of that from `fillText` and never need
+/// this function; what needs it is anything that draws one glyph at a time —
+/// a glyph atlas cannot cache a letter whose shape depends on its
+/// neighbours, and can cache a presentation form, whose shape is the point
+/// of it.
+///
+/// Marks are transparent: a fatha or shadda between two letters neither
+/// breaks their joining nor is itself changed. Letters outside the table —
+/// Persian, Urdu, anything beyond the block's own alphabet — pass through
+/// unshaped and do not join, which is stated rather than guessed at.
+pub fn join_arabic(run: str) -> str {
+    let codes = codes_of(run)
+    let n = codes.len()
+    var out = ""
+    var i = 0
+    for i < n {
+        let code = codes[i]
+        let forms = arabic_forms(code)
+        if forms.len() == 0 {
+            out = out + run.slice(i, i + 1)
+            i += 1
+            continue
+        }
+        let before = prev_base(codes, i)
+        let joined_before = before >= 0 && connects_forwards(codes[before])
+        if code == 0x0644 && i + 1 < n && is_lam_alef(codes[i + 1]) {
+            out = out + lam_alef(codes[i + 1], joined_before)
+            i += 2
+            continue
+        }
+        let after = next_base(codes, i)
+        let joined_after = forms.len() == 4 && after >= 0 && connects_backwards(codes[after])
+        var index = 0
+        if joined_before && joined_after {
+            index = 3
+        } else if joined_before {
+            index = 1
+        } else if joined_after {
+            index = 2
+        }
+        out = out + forms.slice(index, index + 1)
+        i += 1
+    }
+    return out
+}

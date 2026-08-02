@@ -52,14 +52,16 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 
 ```bash
 kitec run     file.kite          compile and run
+kitec run     file.kite --native run as machine code, under the JIT
 kitec check   file.kite          check only
 kitec test    file.kite          run every `test_` function
 kitec fmt     file.kite          lay it out the one way
 kitec doc     file.kite          the reference, from the doc comments
 kitec fix     file.kite          apply every machine-applicable suggestion
 kitec bundle  file.kite          one executable that needs nothing installed
-kitec pkg     [directory]        resolve kite.toml, write kite.lock
-kitec build   file.kite --emit wasm --out dist
+kitec pkg     [directory]        resolve versions, write kite.lock
+kitec build   file.kite --emit wasm   --out dist
+kitec build   file.kite --emit native --out dist
 kitec --explain E0301            why a rule exists
 ```
 
@@ -70,7 +72,8 @@ guards and exhaustiveness that names the missing variants, traits with default
 methods and trait objects, generics on functions and types with bounds,
 closures, slices, tuples, maps with `keys()`/`values()` and `for (k, v) in m`,
 `Option<T>`, string interpolation, `defer`, `require`/`assert`, modules with
-`pub`, and enforced error handling with `check`.
+`pub`, `@derive` for the bodies a compiler can write, and enforced error
+handling with `check`.
 
 **Concurrency.** `async fn` compiles to a state machine in MIR — a starter and
 a resume function — so both backends see ordinary code and neither knows
@@ -85,17 +88,33 @@ let (first, second) = await task.both(a, b)   // 100ms, not 150
 ```
 
 **A standard library, in Kite.** `math`, `time`, `errors`, `fmt`, `json`,
-`test`, `buffer`, `task`, `http`, `crypto`, `ui`. Its own tests are ordinary
-Kite programs that run on *both* backends and must agree.
+`test`, `buffer`, `task`, `http`, `socket`, `crypto`, `ui`. Its own tests are
+ordinary Kite programs that run on *both* backends and must agree.
+
+**Bodies the compiler writes.** `@derive(Debug, Hash, Encode, Decode)` in front
+of a struct or an enum writes them from the fields — as ordinary Kite, expanded
+before resolution, so both backends handle it without knowing derivation
+exists. `Display` is deliberately not derivable, and `Eq` is not derivable
+because `==` is already structural on every value.
+
+```kite
+@derive(Encode, Decode)
+struct User { name: str, age: int }
+
+let (doc, err) = json.parse(text)
+check err
+let (user, uerr) = User.decode(doc)
+```
 
 **A declared host boundary.** `@host("net") extern fn` becomes a Wasm import
 and a group in the generated glue, so the boundary is written once, in Kite,
 and the glue cannot drift from it.
 
 **Tools.** A formatter that preserves comments, a documentation generator, a
-fixer, a test runner, and a language server with diagnostics, hover, go to
-definition, completion and symbols — all over the same passes the compiler
-runs.
+fixer, a test runner, a package manager that resolves versions across the whole
+dependency graph, and a language server with diagnostics, hover, go to
+definition, find references, rename, completion, symbols and inlay hints for
+what a call inferred — all over the same passes the compiler runs.
 
 ## Targets
 
@@ -104,16 +123,17 @@ runs.
 | `wasm32-gc` | WasmGC via `wasm-encoder` | Every construct the language has. `--emit wasm` refuses nothing it can express |
 | `kbc` | Register bytecode and a VM | The dev loop, the embedding target, and the differential oracle |
 | bundle | This compiler with the program appended | One file, nothing installed, starts in about a millisecond |
-| `native-*` | Cranelift AOT | **Not written.** See the roadmap, which says so plainly |
+| `native-*` | Cranelift, AOT and JIT | Machine code, with a precise collector in `kite-rt`. `--emit native` writes an object file; `run --native` needs no linker |
 
-Every program in the differential corpus is compiled to **both** real backends,
-run on both, and the outputs compared. Two independent implementations that
-must agree is what makes codegen bugs findable, and it is why the bytecode VM
-was built before the Wasm backend even though Wasm is the point of the project.
+Every program in the differential corpus is compiled to **all three** real
+backends, run on all three, and the outputs compared. Three independent
+implementations that must agree is what makes codegen bugs findable, and it is
+why the bytecode VM was built before the Wasm backend even though Wasm is the
+point of the project.
 
 ```bash
 kitec build examples/hello.kite --emit wasm --out dist
-# wrote dist/app.wasm (426 bytes), dist/app.js and dist/index.html
+# wrote dist/app.wasm (500 bytes), dist/app.js and dist/index.html
 ```
 
 `examples/todo.kite` is a task list with a text field, buttons and checkboxes,
@@ -154,20 +174,24 @@ Recorded here rather than left to be discovered:
   thread boundary until shared-everything-threads ships, and the VM's values
   are `Rc`-based. `Share` is enforced now so that the day either changes, no
   source has to.
-- **No native code generation.** `kitec bundle` produces a self-contained
-  executable, but the program inside it runs on the bytecode VM. Cranelift and
-  a precise collector are the largest piece of work left.
-- **No `json.decode<T>`, `Eq`, `Hash` or `Debug` derivation.** All four want the
-  same compile-time machinery, which is not built.
-- **No version resolution.** `kitec pkg` reads a manifest, resolves path and
-  git dependencies and writes a lockfile of content hashes — but a dependency
-  is a path or a tag, and two packages wanting different versions of a third is
-  a conflict nothing detects.
-- **Text on the canvas path is a subset.** Line breaking handles Latin and CJK
-  and says so; shaping, bidi and a glyph atlas are not written.
+- **No shaping beyond joining.** Arabic joins and combining marks stay put;
+  HarfBuzz-quality shaping is OpenType GSUB/GPOS and cannot be written against
+  a boundary that only measures. Indic reordering, Thai mark placement and
+  Burmese clusters come from the host's font stack or not at all.
+- **Golden transcripts, not golden images.** The eight scripts are compared by
+  the drawing calls they produce, on both backends. A rasterisation difference
+  needs a browser and pixels, and would need a dependency this does not have.
+- **No `wasi:http/incoming-handler`.** A Kite program listens on a port through
+  a generated Node adapter. WASI's version is a component-model export, and
+  `kitec` emits a core module.
+- **Nothing published.** The release pipeline is signed, packaged for Homebrew,
+  Scoop and the AUR, and has never run: no tag has been pushed.
+- **No Argon2.** It is not in WebCrypto, so it waits on a runtime that has it.
 
-564 tests: unit tests per crate, an annotated compile-fail corpus, a
-differential corpus across both backends, the standard library's own suite on
-both backends, the host boundary under Node, every example on the site, and the
-brand assets, which are checked for drift because the mark is drawn once and
-copied three times.
+683 tests: unit tests per crate, an annotated compile-fail corpus, a
+differential corpus that runs every program on **three** backends and compares,
+the standard library's own suite on two of them, the host boundary and a real
+socket under Node, golden text transcripts across eight scripts, both string
+representations compared against each other and against the VM, every example
+on the site, and the brand assets, which are checked for drift because the mark
+is drawn once and copied three times.

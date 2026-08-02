@@ -386,3 +386,184 @@ pub fn request_header(request: Request, name: str) -> Option<str> {
     }
     return nil
 }
+
+// ---- listening ---------------------------------------------------------------
+//
+// The half that needs sockets, and the half a Kite target does not have of its
+// own. The boundary below is the same shape as every other one in this module:
+// numbers and text cross it, a handle stands for what the host holds, and
+// nothing is pushed at the program — a request is *taken*, when a task asks
+// for one.
+//
+// That last part is what makes a server here look like the rest of the
+// language. A callback-driven server is a second way for control to enter a
+// program, and Kite has one.
+//
+// **What supplies these.** `kitec build --emit wasm` writes a `serve.mjs`
+// beside the module when a program declares them: a Node, Deno or Bun adapter
+// that listens, queues what arrives, and hands each answer back. WASI's
+// `wasi:http/incoming-handler` is the other implementation this boundary was
+// shaped for, and it is *not* written — it is a component-model export, and
+// `kitec` emits a core module. That is a real gap and it is recorded rather
+// than implied.
+
+/// Listen on a port. A handle, or -1 when the host cannot listen — which is
+/// the ordinary case in a browser, and is why this answers rather than traps.
+@host("net")
+extern fn serve_open(port: int) -> int
+
+/// The port actually bound. Asking for 0 gets one the host chose, and a test
+/// that must not collide with another test needs to know which.
+@host("net")
+extern fn serve_port(id: int) -> int
+
+/// How many requests have arrived and not yet been taken.
+@host("net")
+extern fn serve_pending(id: int) -> int
+
+/// Take the oldest request, yielding its own handle, or -1 when none waits.
+@host("net")
+extern fn serve_next(id: int) -> int
+
+@host("net")
+extern fn serve_method(request: int) -> str
+
+@host("net")
+extern fn serve_path(request: int) -> str
+
+@host("net")
+extern fn serve_body(request: int) -> str
+
+@host("net")
+extern fn serve_headers(request: int) -> str
+
+/// Answer one request. 1 when the host took it, 0 when that request was
+/// already answered or never existed.
+@host("net")
+extern fn serve_respond(request: int, status: int, body: str, headers: str) -> int
+
+@host("net")
+extern fn serve_error(id: int) -> str
+
+@host("net")
+extern fn serve_close(id: int) -> int
+
+/// Something listening on a port.
+pub struct Server {
+    id: int
+}
+
+/// A request that arrived, and the handle to answer it with.
+///
+/// The handle is kept beside the `Request` rather than inside it, so a
+/// `Request` stays a value a test can write out by hand. A handler is a
+/// function from a request to a response, and that is only true if a request
+/// is something anyone can make.
+pub struct Incoming {
+    pub request: Request
+    id: int
+}
+
+/// Start listening. Port 0 asks the host to choose one; `port_of` says which.
+///
+/// It is `async` because binding a socket is not instant, and a server that
+/// answered "which port?" before the host had one would answer wrongly rather
+/// than late. Waiting is `task.wait_host()` for the reason everything in this
+/// module waits that way: what is being waited for is the host.
+pub async fn open(port: int) -> (Server, error) {
+    let id = serve_open(port)
+    if id < 0 {
+        return _, errors.new("http.open: cannot listen on \(port)")
+    }
+    for serve_port(id) < 0 {
+        let failure = serve_error(id)
+        if failure != "" {
+            return _, errors.new("http.open: \(failure)")
+        }
+        task.wait_host()
+        task.yield()
+    }
+    return Server{ id: id }, nil
+}
+
+/// The port a server is actually listening on.
+pub fn port_of(server: Server) -> int {
+    return serve_port(server.id)
+}
+
+/// Wait for the next request.
+///
+/// Waiting is `task.wait_host()` for the reason a fetch waits that way: what
+/// is being waited for is the host rather than another task, and saying so is
+/// what lets the runtime hand the event loop back instead of spinning through
+/// a queue that cannot fill while it holds the thread.
+pub async fn accept(server: Server) -> (Incoming, error) {
+    for serve_pending(server.id) == 0 {
+        let failure = serve_error(server.id)
+        if failure != "" {
+            return _, errors.new("http.accept: \(failure)")
+        }
+        task.wait_host()
+        task.yield()
+    }
+    let id = serve_next(server.id)
+    if id < 0 {
+        return _, errors.new("http.accept: the request went away before it was taken")
+    }
+    let request = Request{
+        method: serve_method(id),
+        path: serve_path(id),
+        body: serve_body(id),
+        headers: serve_headers(id),
+    }
+    return Incoming{ request: request, id: id }, nil
+}
+
+/// Answer a request. `headers` is `name: value` lines, as everywhere else.
+pub fn respond(incoming: Incoming, response: Response, headers: str) -> error {
+    if serve_respond(incoming.id, response.status, response.body, headers) == 1 {
+        return nil
+    }
+    return errors.new("http.respond: that request was already answered")
+}
+
+/// Accept requests and answer them from a routing table, until the server is
+/// closed or the host fails.
+///
+/// This is the whole of a server: `serve` already turns a table and a request
+/// into a response, and it did so before anything could listen — which is why
+/// a handler was testable by calling it long before this existed, and stays
+/// that way.
+pub async fn run(server: Server, routes: [Route]) -> (int, error) {
+    var answered = 0
+    for {
+        let (incoming, err) = await accept(server)
+        check err
+        let failed = respond(incoming, serve(routes, incoming.request), "")
+        if failed != nil {
+            return _, failed
+        }
+        answered = answered + 1
+        if serve_pending(server.id) == 0 {
+            if serve_closed(server) {
+                return answered, nil
+            }
+        }
+    }
+}
+
+/// Whether a server has stopped listening.
+pub fn serve_closed(server: Server) -> bool {
+    return serve_port(server.id) < 0
+}
+
+/// Stop listening. Requests already taken can still be answered; nothing new
+/// arrives.
+///
+/// Named `shut` rather than `close` because `close` already means "stop
+/// listening to this event stream" in this module, and Kite has no
+/// overloading: one name, one signature. Two things that are not the same
+/// thing do not get the same name.
+pub fn shut(server: Server) {
+    let ignored = serve_close(server.id)
+}

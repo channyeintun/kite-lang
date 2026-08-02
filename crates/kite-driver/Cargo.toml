@@ -20,3 +20,8 @@ kite-mir.workspace = true
 kite-codegen-kbc.workspace = true
 kite-codegen-wasm.workspace = true
 kite-vm.workspace = true
+
+# The native backend can only exist where native code can run: the playground
+# compiles this crate to wasm32, where Cranelift has nothing to emit for.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+kite-codegen-clif.workspace = true

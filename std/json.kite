@@ -487,6 +487,51 @@ pub fn items(value: Option<Json>) -> [Json] {
     }
 }
 
+/// An object's entries, in the order the document wrote them.
+///
+/// The counterpart to `items` for the other container. Anything that is not an
+/// object yields nothing rather than an error, which is what makes the
+/// accessors chain: a caller that needs to tell "not an object" from "an empty
+/// object" matches on the `Json` itself, which is still there.
+pub fn entries(value: Option<Json>) -> { str: Json } {
+    let none: { str: Json } = { }
+    if value == nil {
+        return none
+    }
+    return match value {
+        Object(fields) => fields,
+        other => none,
+    }
+}
+
+/// Whether a document says nothing here.
+///
+/// A field that is absent and a field written `null` both answer true, and
+/// that is the point: the two mean the same thing to every producer of JSON,
+/// and a reader that told them apart would be reading a distinction the format
+/// does not reliably carry. `@derive(Decode)` uses this for an `Option<T>`
+/// field.
+pub fn is_null(value: Option<Json>) -> bool {
+    if value == nil {
+        return true
+    }
+    return match value {
+        Null => true,
+        other => false,
+    }
+}
+
+/// A value that can become JSON.
+///
+/// Declared here rather than in the prelude because it mentions `Json`, and a
+/// trait cannot be declared somewhere that has never heard of the type it
+/// returns. `@derive(Encode)` writes the body; the decoding direction is an
+/// associated function on the type — `User.decode(doc)` — because a trait
+/// method cannot say it returns the implementing type.
+pub trait Encode {
+    fn encode(self) -> Json
+}
+
 /// A field's text, or a fallback — the shape most configuration reading takes.
 pub fn text_or(value: Option<Json>, key: str, fallback: str) -> str {
     let s = text(field(value, key))

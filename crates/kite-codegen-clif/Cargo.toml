@@ -1,0 +1,29 @@
+[package]
+name = "kite-codegen-clif"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native code generator for Kite, over Cranelift"
+
+[dependencies]
+kite-mir.workspace = true
+kite-hir.workspace = true
+kite-span.workspace = true
+kite-rt.workspace = true
+cranelift-codegen.workspace = true
+cranelift-frontend.workspace = true
+cranelift-module.workspace = true
+cranelift-jit.workspace = true
+cranelift-object.workspace = true
+cranelift-native.workspace = true
+
+[dev-dependencies]
+kite-diag.workspace = true
+kite-lexer.workspace = true
+kite-parser.workspace = true
+kite-resolve.workspace = true
+kite-types.workspace = true
+kite-codegen-kbc.workspace = true
+kite-vm.workspace = true

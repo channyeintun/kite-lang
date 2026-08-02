@@ -1,0 +1,16 @@
+[package]
+name = "kite-rt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native runtime for Kite: the collector, the host functions, and the scheduler"
+
+[lib]
+# `rlib` is what the JIT path links against through Cargo; `staticlib` is the
+# archive `kitec --emit native` hands to the system linker alongside the
+# object file Cranelift wrote.
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]

@@ -57,6 +57,25 @@ trap 'rm -rf "$work"' EXIT
 # first.
 say "reading the release's checksums…"
 fetch "$base/SHA256SUMS" "$work/SHA256SUMS" || die "cannot reach $base"
+
+# The checksum file is signed with Sigstore, and the signature is checked when
+# `cosign` is already installed. It is deliberately *not* installed here: a
+# verifier fetched by the thing it is meant to verify proves nothing, so this
+# says what to install and carries on rather than pretending to have checked.
+if command -v cosign >/dev/null 2>&1; then
+  say "checking the release's signature…"
+  fetch "$base/SHA256SUMS.sigstore.json" "$work/SHA256SUMS.sigstore.json" ||
+    die "this release has no signature; if you expected one, do not install it"
+  cosign verify-blob "$work/SHA256SUMS" \
+    --bundle "$work/SHA256SUMS.sigstore.json" \
+    --certificate-identity-regexp "https://github\.com/$REPO/" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    >/dev/null 2>&1 || die "the signature over SHA256SUMS did not verify — refusing to install"
+  say "  signed by the release workflow of $REPO"
+else
+  say "  (install \`cosign\` to check the release's signature as well)"
+fi
+
 archive="$(awk -v t="$target" '$2 ~ t { print $2 }' "$work/SHA256SUMS" | head -n 1)"
 [ -n "$archive" ] || die "this release has no binary for $target"
 

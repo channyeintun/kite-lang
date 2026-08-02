@@ -7,6 +7,8 @@
 //!
 //! The generated module is deliberately tiny and has no dependencies.
 
+use crate::Strings;
+
 /// The JavaScript module that instantiates a compiled Kite program.
 pub fn generate_glue(strings: &[String], wasm_path: &str) -> String {
     generate_glue_with_hosts(strings, wasm_path, &[])
@@ -24,11 +26,118 @@ pub fn generate_glue_with_hosts(
     wasm_path: &str,
     hosts: &[crate::HostImport],
 ) -> String {
+    generate_glue_for(strings, wasm_path, hosts, Strings::Table)
+}
+
+/// The glue for a module compiled with a chosen string representation.
+///
+/// The two differ in one place and nowhere else: what a `str` value *is*.
+/// Every read of one goes through `S`, and every JavaScript string that
+/// becomes one goes through `intern` — so the thirty-odd host functions below
+/// are written once and do not know which module they are answering.
+pub fn generate_glue_for(
+    strings: &[String],
+    wasm_path: &str,
+    hosts: &[crate::HostImport],
+    mode: Strings,
+) -> String {
     let table = strings
         .iter()
         .map(|s| format!("  {},", json_string(s)))
         .collect::<Vec<_>>()
         .join("\n");
+    let strings_section = match mode {
+        Strings::Table => format!(
+            r#"// String constants. A `str` is an index into this table, which is why the
+// module needs no linear memory. Concatenation appends, so the table grows.
+const STRINGS = [
+{table}
+];
+
+function intern(s) {{
+  const existing = STRINGS.indexOf(s);
+  if (existing !== -1) return existing;
+  return STRINGS.push(s) - 1;
+}}
+
+// The string a `str` value stands for.
+const S = (i) => STRINGS[i];
+
+/// A `str` for an exported function to take.
+///
+/// A `str` is an index into the table above, not a pointer and not a JavaScript
+/// string. Passing a JavaScript string to an export does not fail — the Wasm
+/// JS API runs `ToNumber` on it, which gives `NaN`, which becomes index 0 —
+/// so the program reads whichever string happens to be first. Anything calling
+/// an export with text has to come through here.
+export function str(s) {{
+  return intern(String(s));
+}}
+
+/// The text a `str` stands for, for a value an export returned.
+export function text(i) {{
+  return S(i);
+}}
+"#
+        ),
+        Strings::Builtins => String::from(
+            r#"// A `str` *is* a JavaScript string here.
+//
+// The module holds an `externref`; its constants are imported globals the
+// engine synthesised from the literals themselves; `+` and `==` on strings are
+// the JS String Builtins, compiled to intrinsics rather than to calls into
+// this file. There is no table, nothing to intern, and nothing to look up when
+// a string crosses to a DOM API — the value already is the string.
+//
+// What is *not* a builtin is deliberate. `length`, `charCodeAt` and
+// `substring` index by UTF-16 code unit and Kite counts characters, so using
+// them would make this backend disagree with the bytecode VM the moment a
+// program held an astral character. Those stay host calls below, where they
+// can count code points.
+const intern = (s) => s;
+const S = (s) => s;
+
+/// A `str` for an exported function to take. Here that is the string itself,
+/// and this exists so a caller need not know which representation it got.
+export function str(s) {
+  return String(s);
+}
+
+/// The text a `str` stands for, for a value an export returned.
+export function text(s) {
+  return s;
+}
+"#,
+        ),
+    };
+    // The builtins are a *compile* option, not an instantiate one, so the two
+    // steps have to be taken separately here. An engine that does not know the
+    // option ignores it and then fails to find `wasm:js-string`, which is a
+    // link error nobody could place — so it is checked for and named.
+    let compile_step = match mode {
+        Strings::Table => String::from(
+            "  const { instance } = await WebAssembly.instantiate(bytes, imports());",
+        ),
+        Strings::Builtins => String::from(
+            "  // An engine without the builtins ignores the options and then cannot\n\
+            \x20 // find `wasm:js-string`, which is a link error nobody could place. The\n\
+            \x20 // failure is caught and named rather than left as one.\n\
+            \x20 let module;\n\
+            \x20 try {\n\
+            \x20   module = await WebAssembly.compile(bytes, {\n\
+            \x20     builtins: ['js-string'],\n\
+            \x20     importedStringConstants: 'kite:strings',\n\
+            \x20   });\n\
+            \x20 } catch (e) {\n\
+            \x20   throw new Error(\n\
+            \x20     'this module was built with --js-strings and needs the JS String ' +\n\
+            \x20       'Builtins, which this engine does not have: ' + e.message + '. ' +\n\
+            \x20       'Use a current browser or Node 23+, or build without the flag.',\n\
+            \x20   );\n\
+            \x20 }\n\
+            \x20 const instance = await WebAssembly.instantiate(module, imports());",
+        ),
+    };
     let mut groups: Vec<&str> = Vec::new();
     for h in hosts {
         if !groups.contains(&h.group.as_str()) {
@@ -92,33 +201,7 @@ pub fn generate_glue_with_hosts(
 // ambient runtime, so everything the module can do is visible in this file.
 
 {hosts}
-// String constants. A `str` is an index into this table, which is why the
-// module needs no linear memory. Concatenation appends, so the table grows.
-const STRINGS = [
-{table}
-];
-
-function intern(s) {{
-  const existing = STRINGS.indexOf(s);
-  if (existing !== -1) return existing;
-  return STRINGS.push(s) - 1;
-}}
-
-/// A `str` for an exported function to take.
-///
-/// A `str` is an index into the table above, not a pointer and not a JavaScript
-/// string. Passing a JavaScript string to an export does not fail — the Wasm
-/// JS API runs `ToNumber` on it, which gives `NaN`, which becomes index 0 —
-/// so the program reads whichever string happens to be first. Anything calling
-/// an export with text has to come through here.
-export function str(s) {{
-  return intern(String(s));
-}}
-
-/// The text a `str` stands for, for a value an export returned.
-export function text(i) {{
-  return STRINGS[i];
-}}
+{strings_section}
 
 // An `int` is an i64, which reaches here as a BigInt.
 const showInt = (v) => String(v);
@@ -158,12 +241,23 @@ export const textRenderer = {{
       showFloat(w) + ' ' + showFloat(h),
     ),
   unclip: () => write('unclip'),
+  // Writing out a frame is the whole point of this renderer, so it has no
+  // damage path: a partial transcript would not be a transcript. It says so
+  // by declaring only `rebuild`, which is what the frame loop falls back to.
+  rebuild: (calls) => replay(calls, textRenderer),
 }};
 
 // Absolutely-positioned elements under one container. The layout has already
 // decided every position, so the container needs no layout of its own.
+//
+// The elements are **retained**: one per drawing call, in call order, kept
+// between frames. A frame that differs from the last in one label therefore
+// costs one `textContent` write rather than a rebuilt subtree — and the
+// program that produced it still wrote an ordinary `view` that describes the
+// whole picture.
 export function domRenderer(container) {{
   container.style.position = 'relative';
+  container.replaceChildren();
 
   // A clip becomes a nested element with `overflow: hidden`, and everything
   // drawn until the matching `unclip` goes inside it. Its children are
@@ -173,7 +267,10 @@ export function domRenderer(container) {{
   let host = container;
   let originX = 0;
   let originY = 0;
-  const stack = [];
+  let stack = [];
+  // One node per call, in call order. This is the retained scene graph.
+  let nodes = [];
+  let index = 0;
 
   const place = (el, x, y) => {{
     el.style.position = 'absolute';
@@ -181,9 +278,16 @@ export function domRenderer(container) {{
     el.style.top = y - originY + 'px';
     return el;
   }};
-  return {{
+  const take = () => {{
+    const el = document.createElement('div');
+    nodes[index] = el;
+    index += 1;
+    host.appendChild(el);
+    return el;
+  }};
+  const renderer = {{
     rect: (x, y, w, h, colour) => {{
-      const el = place(document.createElement('div'), x, y);
+      const el = place(take(), x, y);
       // A filled rectangle is decoration until something says otherwise, and
       // a screen reader announcing "group" for every box is worse than
       // silence.
@@ -191,28 +295,35 @@ export function domRenderer(container) {{
       el.style.width = w + 'px';
       el.style.height = h + 'px';
       el.style.background = hex(colour);
-      host.appendChild(el);
     }},
     text: (x, y, body, colour) => {{
-      const el = place(document.createElement('div'), x, y);
+      const el = place(take(), x, y);
       el.style.color = hex(colour);
       el.style.font = FONT;
       el.style.whiteSpace = 'pre';
+      // A drawing call carries no direction, so a single-direction run
+      // re-derives its own from its first strong character — rule P2 again.
+      // Without this the browser resolves the run against a left-to-right
+      // base and hangs its leading and trailing neutrals on the wrong side.
+      el.style.direction = firstStrongRtl(body) ? 'rtl' : 'ltr';
       el.textContent = body;
-      host.appendChild(el);
     }},
     clip: (x, y, w, h) => {{
-      const el = place(document.createElement('div'), x, y);
+      const el = place(take(), x, y);
       el.style.width = w + 'px';
       el.style.height = h + 'px';
       el.style.overflow = 'hidden';
-      host.appendChild(el);
       stack.push([host, originX, originY]);
       host = el;
       originX = x;
       originY = y;
     }},
     unclip: () => {{
+      // An `unclip` paints nothing, but it still takes a slot: the scene graph
+      // is indexed by call, and a call that consumed no node would put every
+      // node after it one place out.
+      nodes[index] = null;
+      index += 1;
       const popped = stack.pop();
       if (popped) {{
         host = popped[0];
@@ -220,7 +331,53 @@ export function domRenderer(container) {{
         originY = popped[2];
       }}
     }},
+
+    /// Draw a frame from nothing, discarding whatever was there.
+    rebuild: (calls) => {{
+      container.replaceChildren();
+      host = container;
+      originX = 0;
+      originY = 0;
+      stack = [];
+      nodes = [];
+      index = 0;
+      replay(calls, renderer);
+    }},
+
+    /// Update the nodes whose calls changed, and leave the rest alone.
+    ///
+    /// Only reached when the diff says the two frames have the same shape, so
+    /// node `i` and call `i` still describe the same thing. Anything else goes
+    /// through `rebuild`, because a renderer that guessed at how nodes moved
+    /// would be a second layout engine.
+    patch: (previous, next, diff) => {{
+      for (let i = diff.from; i < diff.newEnd; i += 1) {{
+        const el = nodes[i];
+        const call = next[i];
+        const was = previous[i];
+        if (!el) continue;
+        // The origin a clip established is not re-derived here: it did not
+        // change, or the frame would not have been patchable.
+        const ox = Number(el.style.left.replace('px', '')) - was[1];
+        const oy = Number(el.style.top.replace('px', '')) - was[2];
+        el.style.left = call[1] + ox + 'px';
+        el.style.top = call[2] + oy + 'px';
+        if (call[0] === 'r') {{
+          el.style.width = call[3] + 'px';
+          el.style.height = call[4] + 'px';
+          el.style.background = hex(call[5]);
+        }} else if (call[0] === 't') {{
+          el.style.color = hex(call[4]);
+          el.style.direction = firstStrongRtl(call[3]) ? 'rtl' : 'ltr';
+          if (el.textContent !== call[3]) el.textContent = call[3];
+        }} else if (call[0] === 'c') {{
+          el.style.width = call[3] + 'px';
+          el.style.height = call[4] + 'px';
+        }}
+      }}
+    }},
   }};
+  return renderer;
 }}
 
 // The same drawing onto a 2D context. Text is drawn from its top-left, which
@@ -241,8 +398,13 @@ export function setAnnouncer(element) {{
   if (element) element.replaceChildren();
 }}
 
+// Off while a damaged region is repainted: the parallel tree is rebuilt from
+// the whole frame once, and a run of text that happens to sit in two damage
+// rectangles must not be read twice.
+let announcing = true;
+
 function announce(body) {{
-  if (!announcer || body === '') return;
+  if (!announcer || !announcing || body === '') return;
   const line = document.createElement('div');
   line.textContent = body;
   announcer.appendChild(line);
@@ -253,16 +415,24 @@ export function canvasRenderer(ctx) {{
   // restore state a caller never saved. The depth is tracked to refuse that
   // rather than corrupt the context.
   let depth = 0;
-  return {{
+  // Glyphs the atlas can prove safe are blitted from cached tiles; anything
+  // it cannot prove falls back to `fillText`, which is always correct.
+  const atlas = glyphAtlas(ctx);
+  const renderer = {{
     rect: (x, y, w, h, colour) => {{
       ctx.fillStyle = hex(colour);
       ctx.fillRect(x, y, w, h);
     }},
     text: (x, y, body, colour) => {{
       announce(body);
+      if (atlas && atlas.text(x, y, body, colour)) return;
       ctx.fillStyle = hex(colour);
       ctx.font = FONT;
       ctx.textBaseline = 'top';
+      // The anchor stays the left edge whichever way the run reads — the
+      // layout computed an x, not an alignment.
+      ctx.textAlign = 'left';
+      ctx.direction = firstStrongRtl(body) ? 'rtl' : 'ltr';
       ctx.fillText(body, x, y);
     }},
     clip: (x, y, w, h) => {{
@@ -277,6 +447,267 @@ export function canvasRenderer(ctx) {{
         ctx.restore();
         depth -= 1;
       }}
+    }},
+
+    rebuild: (calls) => {{
+      ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+      setAnnouncer(announcer);
+      replay(calls, renderer);
+    }},
+
+    /// Repaint only the rectangles that changed.
+    ///
+    /// A canvas has no nodes to patch — it is one surface — so what a retained
+    /// scene graph buys here is different from what it buys the DOM: the frame
+    /// is replayed in full, but clipped to the damage, so the pixels outside it
+    /// are never touched and the calls outside it are rejected by the clip
+    /// rather than drawn. The text announced to a screen reader is rebuilt
+    /// whole either way, because a partial reading is worse than a repeated
+    /// one.
+    damage: (calls, rects) => {{
+      setAnnouncer(announcer);
+      for (const call of calls) {{
+        if (call[0] === 't') announce(call[3]);
+      }}
+      announcing = false;
+      for (const rect of rects) {{
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(rect[0], rect[1], rect[2], rect[3]);
+        ctx.clip();
+        ctx.clearRect(rect[0], rect[1], rect[2], rect[3]);
+        for (const call of calls) {{
+          const bounds = callBounds(call);
+          if (bounds === null || rectsOverlap(bounds, rect)) {{
+            replay([call], renderer);
+          }}
+        }}
+        ctx.restore();
+      }}
+      announcing = true;
+    }},
+  }};
+  return renderer;
+}}
+
+// ---- the glyph atlas -------------------------------------------------------
+//
+// `fillText` rasterises every glyph of every run on every repaint. An atlas
+// rasterises a glyph once — into an offscreen tile keyed by (code point,
+// font, colour) — and blits the tile everywhere that glyph appears again,
+// which is the difference between text costing a rasteriser and text costing
+// a copy.
+//
+// The honesty is in the plan, not the cache: a run is served from the atlas
+// only when drawing it one glyph at a time is provably the picture `fillText`
+// would draw. That means every glyph is one code point with its own advance,
+// the advances sum to the measured width of the whole run — a font that
+// kerned or ligated the run fails that sum and falls back — and nothing in
+// the run asks for shaping the atlas cannot do: unjoined Arabic is refused
+// because a letter's shape there depends on its neighbours (presentation
+// forms, already joined, are served; `std/text.join_arabic` produces them),
+// and emoji, joiner sequences and everything outside the Basic Multilingual
+// Plane are refused rather than guessed at. A combining mark is the one
+// shaping the atlas does honour: it advances nothing and rides the glyph
+// before it.
+//
+// What no plan can prove here is pixel identity — antialiasing a glyph alone
+// and antialiasing it mid-run can differ, and tile blits are snapped to the
+// device pixel grid, which `fillText` does not do. That is the stated cost of
+// the cache, and the fallback path exists for everything the plan refuses.
+//
+// WebGPU is deliberately absent. The roadmap's own cut list defers it, and
+// the atlas is the part of a GPU text pipeline that pays for itself on
+// Canvas2D today — a WebGPU renderer would keep the same tiles and change
+// where they are composited, so nothing built here is thrown away when it
+// earns its place.
+
+/// Whether the first strong character reads right-to-left — rule P2, over the
+/// blocks this stack covers: Hebrew and Arabic with their presentation forms
+/// answer right-to-left; Latin, Greek and Cyrillic answer left-to-right;
+/// digits, marks and punctuation keep scanning. A run with no strong
+/// character reads left-to-right, which is why `std/text` pre-reverses the
+/// one run shape that would get this wrong.
+export function firstStrongRtl(body) {{
+  for (const ch of body) {{
+    const cp = ch.codePointAt(0);
+    if (
+      (cp >= 0x0590 && cp <= 0x08ff) ||
+      (cp >= 0xfb1d && cp <= 0xfdff) ||
+      (cp >= 0xfe70 && cp <= 0xfeff)
+    ) {{
+      return true;
+    }}
+    if ((cp >= 0x41 && cp <= 0x5a) || (cp >= 0x61 && cp <= 0x7a) || (cp >= 0xc0 && cp < 0x0590)) {{
+      return false;
+    }}
+  }}
+  return false;
+}}
+
+/// How to draw a run one glyph at a time, or null when that cannot be proven
+/// to match `fillText`. Pure — it needs a measurer and nothing else — so the
+/// rules are testable under Node, where no canvas exists.
+///
+/// Each entry is a glyph and its x offset from the run's origin. A combining
+/// mark — any character the font measures at zero advance — shares the pen
+/// with whatever follows it: it advances nothing, exactly as `Mn` should. A
+/// right-to-left run comes out in reverse cluster order, marks staying with
+/// their bases, which is rule L2 applied to a run the resolver already made
+/// single-direction; a run mixing strong directions is refused, because
+/// ordering it is the resolver's job, not the painter's.
+export function atlasPlan(body, measureOne) {{
+  const measurer = measureOne ?? measure;
+  const clusters = [];
+  let sawRtl = false;
+  let sawLtr = false;
+  for (const ch of body) {{
+    const cp = ch.codePointAt(0);
+    // The supplementary planes hold the emoji, and an emoji is not one glyph.
+    if (cp > 0xffff) return null;
+    // Joiners and variation selectors change the glyphs around them.
+    if (cp === 0x200d || (cp >= 0xfe00 && cp <= 0xfe0f)) return null;
+    // Formatting characters draw nothing and should never reach a painter.
+    if (
+      (cp >= 0x200b && cp <= 0x200f) ||
+      (cp >= 0x202a && cp <= 0x202e) ||
+      (cp >= 0x2060 && cp <= 0x206f) ||
+      cp === 0x061c ||
+      cp === 0xfeff
+    ) {{
+      return null;
+    }}
+    // Unjoined Arabic: the shape of every letter depends on its neighbours,
+    // which is the one thing a cache keyed by code point cannot express.
+    if (
+      (cp >= 0x0600 && cp <= 0x06ff) ||
+      (cp >= 0x0750 && cp <= 0x077f) ||
+      (cp >= 0x0870 && cp <= 0x08ff)
+    ) {{
+      return null;
+    }}
+    const advance = measurer(ch);
+    if (!(advance >= 0)) return null;
+    if (advance === 0 && clusters.length > 0) {{
+      clusters[clusters.length - 1].marks.push(ch);
+      continue;
+    }}
+    const rtlChar =
+      (cp >= 0x0590 && cp <= 0x05ff) || (cp >= 0xfb1d && cp <= 0xfdff) ||
+      (cp >= 0xfe70 && cp <= 0xfefe);
+    if (rtlChar) sawRtl = true;
+    else if (cp !== 0x20) sawLtr = true;
+    clusters.push({{ ch, advance, marks: [] }});
+  }}
+  if (sawRtl && sawLtr) return null;
+  const ordered = sawRtl ? [...clusters].reverse() : clusters;
+  let pen = 0;
+  const entries = [];
+  for (const cluster of ordered) {{
+    entries.push({{ ch: cluster.ch, x: pen }});
+    for (const mark of cluster.marks) {{
+      entries.push({{ ch: mark, x: pen + cluster.advance }});
+    }}
+    pen += cluster.advance;
+  }}
+  // The proof: glyph advances must sum to what the font says the whole run
+  // measures. A kerned pair or a ligature makes these differ, and a run the
+  // font would draw differently is a run the atlas must not touch.
+  if (Math.abs(pen - measurer(body)) > 0.5) return null;
+  return entries;
+}}
+
+/// A tile per (code point, font, colour), rasterised once. `makeTile` is
+/// injectable so the cache logic runs under Node; the default rasterises with
+/// a real canvas and reports null where there is none, which turns the whole
+/// atlas off rather than half on.
+function defaultTileMaker(font, scale) {{
+  if (typeof document === 'undefined') return null;
+  const measurer = document.createElement('canvas').getContext('2d');
+  measurer.font = font;
+  measurer.textBaseline = 'top';
+  return (ch, colour) => {{
+    const m = measurer.measureText(ch);
+    // Without the ink bounds a tile cannot be sized: a mark's ink sits left
+    // of its origin, an italic overhangs its advance. No bounds, no atlas.
+    if (m.actualBoundingBoxLeft === undefined || m.actualBoundingBoxRight === undefined) {{
+      return null;
+    }}
+    const left = Math.ceil(Math.max(0, m.actualBoundingBoxLeft)) + 1;
+    const top = Math.ceil(Math.max(0, m.actualBoundingBoxAscent ?? 0)) + 1;
+    const w = left + Math.ceil(Math.max(m.actualBoundingBoxRight, m.width)) + 2;
+    const h = top + Math.ceil(Math.max(0, m.actualBoundingBoxDescent ?? lineHeight)) + 2;
+    const tile = document.createElement('canvas');
+    tile.width = Math.max(1, Math.ceil(w * scale));
+    tile.height = Math.max(1, Math.ceil(h * scale));
+    const tctx = tile.getContext('2d');
+    tctx.scale(scale, scale);
+    tctx.font = font;
+    tctx.textBaseline = 'top';
+    tctx.fillStyle = colour;
+    tctx.fillText(ch, left, top);
+    return {{ canvas: tile, left, top, w, h }};
+  }};
+}}
+
+/// The atlas over a context: plan, cache, blit — and `false` for any run the
+/// plan refuses or any glyph the tile maker cannot serve, so the caller's
+/// `fillText` path stays the answer of last resort. `stats()` reports how
+/// many tiles were rasterised against how many were reused, which is the
+/// measurable half of "prove it helps".
+export function glyphAtlas(ctx, font = FONT, makeTile = null) {{
+  const scale = (ctx.getTransform ? ctx.getTransform().a : 1) || 1;
+  const rasterise = makeTile ?? defaultTileMaker(font, scale);
+  if (!rasterise) return null;
+  const tiles = new Map();
+  let rasterised = 0;
+  let reused = 0;
+  let fallbacks = 0;
+  const tileFor = (ch, colour) => {{
+    const key = ch + '\0' + font + '\0' + colour;
+    let tile = tiles.get(key);
+    if (tile === undefined) {{
+      // The cap is crude on purpose: past it, everything is dropped and the
+      // atlas warms again. An eviction policy would be state to get wrong,
+      // and 4096 tiles outlasts any plausible working set of glyphs.
+      if (tiles.size >= 4096) tiles.clear();
+      tile = rasterise(ch, hex(colour));
+      tiles.set(key, tile);
+      if (tile) rasterised += 1;
+    }} else if (tile) {{
+      reused += 1;
+    }}
+    return tile;
+  }};
+  return {{
+    stats: () => ({{ tiles: tiles.size, rasterised, reused, fallbacks }}),
+    text: (x, y, body, colour) => {{
+      const plan = atlasPlan(body, measure);
+      if (plan === null) {{
+        fallbacks += 1;
+        return false;
+      }}
+      // Every tile is fetched before anything is painted: a run is drawn
+      // whole from the atlas or not at all, never half and half.
+      const placed = [];
+      for (const glyph of plan) {{
+        const tile = tileFor(glyph.ch, colour);
+        if (!tile) {{
+          fallbacks += 1;
+          return false;
+        }}
+        placed.push([tile, glyph.x]);
+      }}
+      for (const [tile, gx] of placed) {{
+        // Snapped to the device pixel grid: a tile blitted at a fractional
+        // position is resampled into blur. The snap is at most half a device
+        // pixel, and it is the one place the atlas admits to differing from
+        // `fillText`.
+        const px = Math.round((x + gx - tile.left) * scale) / scale;
+        const py = Math.round((y - tile.top) * scale) / scale;
+        ctx.drawImage(tile.canvas, px, py, tile.w, tile.h);
+      }}
+      return true;
     }},
   }};
 }}
@@ -345,34 +776,41 @@ function imports() {{
       print_int: (v) => write(showInt(v)),
       print_float: (v) => write(showFloat(v)),
       print_bool: (v) => write(showBool(v)),
-      print_str: (i) => write(STRINGS[i]),
-      str_concat: (a, b) => intern(STRINGS[a] + STRINGS[b]),
-      str_eq: (a, b) => (STRINGS[a] === STRINGS[b] ? 1 : 0),
+      print_str: (i) => write(S(i)),
+      str_concat: (a, b) => intern(S(a) + S(b)),
+      str_eq: (a, b) => (S(a) === S(b) ? 1 : 0),
       // By code point, which is what `<` on JavaScript strings compares and
       // what Rust's `str` ordering compares — so the two backends sort the
       // same way. It is *not* alphabetical order in every language; collation
       // is a table and a locale, and neither belongs in an operator.
       str_compare: (a, b) =>
-        STRINGS[a] < STRINGS[b] ? -1n : STRINGS[a] > STRINGS[b] ? 1n : 0n,
+        S(a) < S(b) ? -1n : S(a) > S(b) ? 1n : 0n,
       draw_rect: (x, y, w, h, colour) => renderer.rect(x, y, w, h, Number(colour)),
-      draw_text: (x, y, i, colour) => renderer.text(x, y, STRINGS[i], Number(colour)),
+      draw_text: (x, y, i, colour) => renderer.text(x, y, S(i), Number(colour)),
       draw_clip: (x, y, w, h) => renderer.clip(x, y, w, h),
       draw_unclip: () => renderer.unclip(),
-      measure_text: (i) => measure(STRINGS[i]),
+      measure_text: (i) => measure(S(i)),
       line_height: () => lineHeight,
       // Kite counts characters, JavaScript counts UTF-16 code units, so each
       // of these goes through `[...s]` rather than indexing the string.
       str_slice: (i, from, to) => {{
-        const cs = [...STRINGS[i]];
+        const cs = [...S(i)];
         const a = Math.min(Math.max(Number(from), 0), cs.length);
         const b = Math.min(Math.max(Number(to), a), cs.length);
         return intern(cs.slice(a, b).join(''));
       }},
       str_index_of: (i, n) => {{
-        const at = STRINGS[i].indexOf(STRINGS[n]);
-        return at < 0 ? -1n : BigInt([...STRINGS[i].slice(0, at)].length);
+        const at = S(i).indexOf(S(n));
+        return at < 0 ? -1n : BigInt([...S(i).slice(0, at)].length);
       }},
-      str_trim: (i) => intern(STRINGS[i].trim()),
+      str_trim: (i) => intern(S(i).trim()),
+      // A code point, not a UTF-16 code unit — `codePointAt` on a surrogate
+      // pair would answer with half of one, and the bytecode VM answers with
+      // the whole character.
+      str_code_at: (i, at) => {{
+        const c = [...S(i)][Number(at)];
+        return c === undefined ? -1n : BigInt(c.codePointAt(0));
+      }},
       // Interpolation shares its formatting with printing, so a value cannot
       // look one way in `io.print(x)` and another in `"\(x)"`.
       str_of_int: (v) => intern(showInt(v)),
@@ -380,7 +818,7 @@ function imports() {{
       str_of_bool: (v) => intern(showBool(v)),
       // Characters, not UTF-16 code units: `[...s]` iterates code points, so
       // an emoji counts once rather than twice.
-      str_len: (i) => BigInt([...STRINGS[i]].length),
+      str_len: (i) => BigInt([...S(i)].length),
       // ---- the scheduler ---------------------------------------------------
       //
       // A queue of live tasks is mutable state, and Kite has none, so the
@@ -404,14 +842,13 @@ function imports() {{
   }};
 }}
 
-/// A renderer that records what it was asked to draw, so a frame identical to
-/// the last one can be skipped.
+/// A renderer that records what it was asked to draw.
 ///
-/// This is the cheap half of damage tracking: it does not find *which*
-/// rectangle changed, only whether anything did. That is the half that matters
-/// for an application whose model did not change — a key press it ignored, a
-/// pointer moving over nothing — and the expensive half needs a scene graph
-/// that survives between frames, which is Phase 8's work.
+/// `view` is written as though it painted the whole tree every frame, because
+/// that is the only shape a function from a model to a picture can have. What
+/// makes that affordable is that the picture is *recorded* rather than
+/// painted, and the recording is compared with the last one — so the tree the
+/// program describes and the work the host does are two different things.
 export function recordingRenderer() {{
   const calls = [];
   return {{
@@ -433,16 +870,154 @@ export function replay(calls, renderer) {{
   }}
 }}
 
+/// Whether two calls are the same call.
+export function sameCall(a, b) {{
+  if (a === undefined || b === undefined || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {{
+    if (a[i] !== b[i]) return false;
+  }}
+  return true;
+}}
+
 /// Whether two recordings are the same picture.
 export function sameFrame(a, b) {{
   if (a === null || b === null || a.length !== b.length) return false;
   for (let i = 0; i < a.length; i += 1) {{
-    if (a[i].length !== b[i].length) return false;
-    for (let j = 0; j < a[i].length; j += 1) {{
-      if (a[i][j] !== b[i][j]) return false;
-    }}
+    if (!sameCall(a[i], b[i])) return false;
   }}
   return true;
+}}
+
+// ---- the retained scene graph ---------------------------------------------
+//
+// The recording *is* the scene graph. It survives between frames, and a new
+// frame is compared with it rather than replacing it — which is what turns
+// "repaint everything" into "repaint what moved".
+//
+// The diff is a common prefix and a common suffix, not a general edit script.
+// That is a deliberate limit and it is the right one for this shape of data: a
+// `view` is a walk over a tree in a fixed order, so a change to a model
+// changes a contiguous run of calls, and an inserted row shifts a suffix that
+// the suffix scan finds unmoved. A general LCS would find fewer differences on
+// pathological input, and cost more on every frame that is not pathological.
+
+/// The rectangle a call covers, or null for one that paints nothing.
+///
+/// Text is measured with the same measurer the layout used, so the damage
+/// rectangle for a run of text is the rectangle the run was laid out into and
+/// not a guess about it.
+export function callBounds(call) {{
+  if (call[0] === 'r') return [call[1], call[2], call[3], call[4]];
+  if (call[0] === 't') return [call[1], call[2], measure(call[3]), lineHeight];
+  return null;
+}}
+
+/// What changed between two frames.
+///
+/// `from` is the first index that differs; `oldEnd` and `newEnd` are one past
+/// the last index that differs in each frame. When nothing differs, `from`
+/// equals both and `same` is true.
+export function diffFrames(previous, next) {{
+  const old = previous ?? [];
+  let from = 0;
+  while (from < old.length && from < next.length && sameCall(old[from], next[from])) {{
+    from += 1;
+  }}
+  let oldEnd = old.length;
+  let newEnd = next.length;
+  while (oldEnd > from && newEnd > from && sameCall(old[oldEnd - 1], next[newEnd - 1])) {{
+    oldEnd -= 1;
+    newEnd -= 1;
+  }}
+  return {{
+    same: previous !== null && from === oldEnd && from === newEnd,
+    from,
+    oldEnd,
+    newEnd,
+    // Whether the two frames have the same *shape*: same length, and every
+    // call of the same kind. A renderer that holds one node per call can patch
+    // those in place; anything else it has to rebuild, because the nodes and
+    // the calls would no longer line up.
+    patchable:
+      previous !== null &&
+      old.length === next.length &&
+      old.every((call, i) => call[0] === next[i][0]),
+  }};
+}}
+
+/// The rectangles a frame has to repaint, given what changed.
+///
+/// Both frames contribute: a rectangle that *left* has to be painted over just
+/// as much as one that arrived. Overlapping rectangles are merged until none
+/// overlap, and past a limit the whole lot collapses to one bounding box —
+/// clearing a slightly larger area is always correct, and a damage list that
+/// grew without bound would cost more to walk than the painting it saved.
+export function damageOf(previous, next, diff, limit) {{
+  const cap = limit ?? 16;
+  const old = previous ?? [];
+  let rects = [];
+  for (let i = diff.from; i < diff.oldEnd; i += 1) {{
+    const r = callBounds(old[i]);
+    if (r) rects.push(r);
+  }}
+  for (let i = diff.from; i < diff.newEnd; i += 1) {{
+    const r = callBounds(next[i]);
+    if (r) rects.push(r);
+  }}
+  // A clip or an unclip among the changes moves everything drawn inside it, and
+  // this diff does not track which calls those were. Repainting everything is
+  // the honest answer rather than a wrong one.
+  const structural = (call) => call[0] === 'c' || call[0] === 'u';
+  for (let i = diff.from; i < diff.oldEnd; i += 1) {{
+    if (structural(old[i])) return null;
+  }}
+  for (let i = diff.from; i < diff.newEnd; i += 1) {{
+    if (structural(next[i])) return null;
+  }}
+  if (rects.length === 0) return [];
+  rects = mergeRects(rects);
+  if (rects.length > cap) return [boundingBox(rects)];
+  return rects;
+}}
+
+export function rectsOverlap(a, b) {{
+  return (
+    a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
+  );
+}}
+
+function boundingBox(rects) {{
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const r of rects) {{
+    x0 = Math.min(x0, r[0]);
+    y0 = Math.min(y0, r[1]);
+    x1 = Math.max(x1, r[0] + r[2]);
+    y1 = Math.max(y1, r[1] + r[3]);
+  }}
+  return [x0, y0, x1 - x0, y1 - y0];
+}}
+
+function mergeRects(rects) {{
+  const out = [];
+  for (const rect of rects) {{
+    let merged = rect;
+    let again = true;
+    while (again) {{
+      again = false;
+      for (let i = out.length - 1; i >= 0; i -= 1) {{
+        if (rectsOverlap(out[i], merged)) {{
+          merged = boundingBox([out[i], merged]);
+          out.splice(i, 1);
+          again = true;
+        }}
+      }}
+    }}
+    out.push(merged);
+  }}
+  return out;
 }}
 
 // ---- the scheduler --------------------------------------------------------
@@ -525,7 +1100,7 @@ export async function instantiate(source = {wasm}) {{
     source instanceof Uint8Array
       ? source
       : new Uint8Array(await (await fetch(source)).arrayBuffer());
-  const {{ instance }} = await WebAssembly.instantiate(bytes, imports());
+{compile_step}
   return instance.exports;
 }}
 
@@ -573,7 +1148,8 @@ export function isApplication(exports) {{
   return ["init", "view", "update"].every((n) => typeof exports[n] === "function");
 }}
 "#,
-        table = table,
+        strings_section = strings_section,
+        compile_step = compile_step,
         hosts = host_section,
         host_spread = if hosts.is_empty() { "" } else { "    ...HOSTS,\n" },
         wasm = json_string(wasm_path),
@@ -609,9 +1185,9 @@ if (HOSTS.net) {
     fetch_start: (method, url, body, headers) => {
       const request = { state: 0, status: 0, body: "", error: "", headers: null };
       const id = REQUESTS.push(request) - 1;
-      const init = { method: STRINGS[method], headers: parseHeaders(STRINGS[headers]) };
-      if (STRINGS[body] !== "") init.body = STRINGS[body];
-      fetch(STRINGS[url], init)
+      const init = { method: S(method), headers: parseHeaders(S(headers)) };
+      if (S(body) !== "") init.body = S(body);
+      fetch(S(url), init)
         .then(async (response) => {
           request.status = response.status;
           request.headers = response.headers;
@@ -629,7 +1205,7 @@ if (HOSTS.net) {
     fetch_body: (id) => intern(REQUESTS[Number(id)].body),
     fetch_header: (id, name) => {
       const headers = REQUESTS[Number(id)].headers;
-      return intern(headers ? headers.get(STRINGS[name]) ?? "" : "");
+      return intern(headers ? headers.get(S(name)) ?? "" : "");
     },
     fetch_error: (id) => intern(REQUESTS[Number(id)].error),
 
@@ -645,7 +1221,7 @@ if (HOSTS.net) {
         s.state = 2;
         return BigInt(id);
       }
-      const source = new EventSource(STRINGS[url]);
+      const source = new EventSource(S(url));
       s.source = source;
       s.take = (e) => {
         s.queue.push({ name: e.type || "message", id: e.lastEventId || "", data: e.data ?? "" });
@@ -654,7 +1230,7 @@ if (HOSTS.net) {
       source.onmessage = s.take;
       // Registered before anything can arrive, which is the whole reason the
       // names are given at open.
-      for (const name of STRINGS[names].split("\n")) {
+      for (const name of S(names).split("\n")) {
         if (name !== "") source.addEventListener(name, s.take);
       }
       source.onerror = () => { if (source.readyState === 2) s.state = 2; };
@@ -676,7 +1252,7 @@ if (HOSTS.net) {
     sse_event_id: (id) => intern(STREAMS[Number(id)].taken.id),
     sse_listen: (id, name) => {
       const s = STREAMS[Number(id)];
-      if (s.source) s.source.addEventListener(STRINGS[name], s.take);
+      if (s.source) s.source.addEventListener(S(name), s.take);
       return 1n;
     },
     sse_close: (id) => {
@@ -701,7 +1277,7 @@ if (HOSTS.net) {
       }
       let socket;
       try {
-        socket = new WebSocket(STRINGS[url]);
+        socket = new WebSocket(S(url));
       } catch (e) {
         s.state = 2;
         s.error = String(e && e.message ? e.message : e);
@@ -729,7 +1305,7 @@ if (HOSTS.net) {
     socket_send: (id, message) => {
       const s = STREAMS[Number(id)];
       if (s.state !== 1 || !s.socket) return 0n;
-      s.socket.send(STRINGS[message]);
+      s.socket.send(S(message));
       return 1n;
     },
     socket_error: (id) => intern(STREAMS[Number(id)].error),
@@ -752,6 +1328,11 @@ if (HOSTS.net) {
 const CRYPTO_HOST: &str = r#"
 if (HOSTS.crypto) {
   const WORK = [];
+  // Keys live here, on this side of the boundary. What the program holds is
+  // an index into this array; the material itself never crosses. A key pair
+  // is stored whole, and the private half is created non-extractable, so even
+  // this file could not export it.
+  const KEYS = [];
   const subtle = globalThis.crypto && globalThis.crypto.subtle;
   const hex = (buffer) =>
     [...new Uint8Array(buffer)].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -772,6 +1353,16 @@ if (HOSTS.crypto) {
     return BigInt(id);
   };
   const bytes = (text) => new TextEncoder().encode(text);
+  const keep = (key) => String(KEYS.push(key) - 1);
+  // WebCrypto reports a missing algorithm as NotSupportedError, whose message
+  // says nothing. Saying which algorithm, and where it does exist, beats
+  // that — and nothing weaker is substituted.
+  const unsupported = (name) => (e) => {
+    if (e && e.name === "NotSupportedError") {
+      throw new Error(`this host's WebCrypto has no ${name} — Node 24 and current browsers do`);
+    }
+    throw e;
+  };
   HOSTS.crypto = {
     random_hex: (count) => {
       const out = new Uint8Array(Number(count));
@@ -779,25 +1370,25 @@ if (HOSTS.crypto) {
       return intern(hex(out.buffer));
     },
     digest_start: (algorithm, text) =>
-      start(subtle.digest(STRINGS[algorithm], bytes(STRINGS[text])).then(hex)),
+      start(subtle.digest(S(algorithm), bytes(S(text))).then(hex)),
     hmac_start: (algorithm, key, text) =>
       start(
         subtle
-          .importKey("raw", bytes(STRINGS[key]), { name: "HMAC", hash: STRINGS[algorithm] }, false, [
+          .importKey("raw", bytes(S(key)), { name: "HMAC", hash: S(algorithm) }, false, [
             "sign",
           ])
-          .then((k) => subtle.sign("HMAC", k, bytes(STRINGS[text])))
+          .then((k) => subtle.sign("HMAC", k, bytes(S(text))))
           .then(hex),
       ),
     derive_start: (password, salt, iterations) =>
       start(
         subtle
-          .importKey("raw", bytes(STRINGS[password]), "PBKDF2", false, ["deriveBits"])
+          .importKey("raw", bytes(S(password)), "PBKDF2", false, ["deriveBits"])
           .then((k) =>
             subtle.deriveBits(
               {
                 name: "PBKDF2",
-                salt: unhex(STRINGS[salt]),
+                salt: unhex(S(salt)),
                 iterations: Number(iterations),
                 hash: "SHA-256",
               },
@@ -807,14 +1398,98 @@ if (HOSTS.crypto) {
           )
           .then(hex),
       ),
+    key_generate_start: (kind) => {
+      const name = S(kind);
+      if (name === "AES-GCM") {
+        return start(
+          subtle.generateKey({ name, length: 256 }, false, ["encrypt", "decrypt"]).then(keep),
+        );
+      }
+      const usages = name === "Ed25519" ? ["sign", "verify"] : ["deriveBits"];
+      return start(subtle.generateKey(name, false, usages).catch(unsupported(name)).then(keep));
+    },
+    key_import_start: (material) => {
+      const text = S(material);
+      if (!/^[0-9a-f]{64}$/i.test(text)) {
+        return start(Promise.reject(new Error("a key is 32 bytes — 64 hex characters")));
+      }
+      return start(
+        subtle.importKey("raw", unhex(text), "AES-GCM", false, ["encrypt", "decrypt"]).then(keep),
+      );
+    },
+    key_public_start: (key) =>
+      start(
+        Promise.resolve(KEYS[Number(key)])
+          .then((pair) => subtle.exportKey("raw", pair.publicKey))
+          .then(hex),
+      ),
+    seal_start: (key, nonce, plaintext) =>
+      start(
+        subtle
+          .encrypt(
+            { name: "AES-GCM", iv: unhex(S(nonce)) },
+            KEYS[Number(key)],
+            bytes(S(plaintext)),
+          )
+          .then(hex),
+      ),
+    open_start: (key, nonce, cipher) =>
+      start(
+        subtle
+          .decrypt(
+            { name: "AES-GCM", iv: unhex(S(nonce)) },
+            KEYS[Number(key)],
+            unhex(S(cipher)),
+          )
+          .then((clear) => new TextDecoder().decode(clear))
+          .catch(() => {
+            // GCM authenticates before it decrypts, and reports nothing more
+            // specific — which is right: an oracle that said *what* failed
+            // would be worth attacking.
+            throw new Error("the sealed text was altered, or sealed under a different key");
+          }),
+      ),
+    sign_start: (key, text) =>
+      start(subtle.sign("Ed25519", KEYS[Number(key)].privateKey, bytes(S(text))).then(hex)),
+    verify_start: (pub, text, signature) =>
+      start(
+        subtle
+          .importKey("raw", unhex(S(pub)), "Ed25519", false, ["verify"])
+          .catch(unsupported("Ed25519"))
+          .then((k) => subtle.verify("Ed25519", k, unhex(S(signature)), bytes(S(text))))
+          .then((ok) => (ok ? "true" : "false")),
+      ),
+    // Agreement and derivation in one step, so the raw X25519 output exists
+    // only inside this chain: it has structure an attacker can use, and HKDF
+    // is what turns it into a key that does not.
+    agree_start: (key, pub) =>
+      start(
+        subtle
+          .importKey("raw", unhex(S(pub)), "X25519", false, [])
+          .catch(unsupported("X25519"))
+          .then((theirs) =>
+            subtle.deriveBits({ name: "X25519", public: theirs }, KEYS[Number(key)].privateKey, 256),
+          )
+          .then((shared) => subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]))
+          .then((k) =>
+            subtle.deriveKey(
+              { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: bytes("kite crypto.agree v1") },
+              k,
+              { name: "AES-GCM", length: 256 },
+              false,
+              ["encrypt", "decrypt"],
+            ),
+          )
+          .then(keep),
+      ),
     work_state: (id) => BigInt(WORK[Number(id)].state),
     work_result: (id) => intern(WORK[Number(id)].result),
     work_error: (id) => intern(WORK[Number(id)].error),
     // Same time whichever way it goes: every byte is compared, and the length
     // is folded in rather than returned early on.
     constant_time_equal: (a, b) => {
-      const x = STRINGS[a];
-      const y = STRINGS[b];
+      const x = S(a);
+      const y = S(b);
       let diff = x.length ^ y.length;
       for (let i = 0; i < Math.max(x.length, y.length); i += 1) {
         diff |= (x.charCodeAt(i % x.length) || 0) ^ (y.charCodeAt(i % y.length) || 0);
@@ -888,8 +1563,8 @@ pub fn generate_page(title: &str) -> String {
   import {{ instantiate, setRenderer, setWriter, isApplication, setMeasure,
             setLineHeight, fontMeasure, fontLineHeight, FONT, setAnnouncer,
             EVENT_CLICK, EVENT_KEY, EVENT_WHEEL, EVENT_MOVE, EVENT_DOWN,
-            EVENT_UP, EVENT_RESIZE, str, recordingRenderer, replay, sameFrame,
-            domRenderer, canvasRenderer, textRenderer }} from "./app.js";
+            EVENT_UP, EVENT_RESIZE, str, recordingRenderer, replay, diffFrames,
+            damageOf, domRenderer, canvasRenderer, textRenderer }} from "./app.js";
 
   // Measure in the font that will be drawn, before anything is laid out.
   setMeasure(fontMeasure(FONT));
@@ -937,16 +1612,25 @@ pub fn generate_page(title: &str) -> String {
       const pre = document.createElement("pre");
       stage.appendChild(pre);
       setWriter((line) => {{ pre.textContent += line + "\n"; }});
-      currentRenderer = textRenderer;
+      // Writing out a frame is this renderer's whole job, so it has no damage
+      // path — and its `rebuild` clears first, because a transcript that
+      // appended every frame would stop being a picture of one.
+      currentRenderer = {{
+        ...textRenderer,
+        rebuild: (calls) => {{
+          pre.textContent = "";
+          replay(calls, textRenderer);
+        }},
+      }};
     }} else {{
       currentRenderer = domRenderer(stage);
     }}
   }}
 
-  // A frame is recorded before it is painted, and an identical one is not
-  // painted at all. That is the half of damage tracking a model that did not
-  // change needs — a key press the program ignored, a pointer moving over
-  // nothing — and it costs one comparison.
+  // The last frame, kept between frames. It is the retained scene graph: a new
+  // frame is compared with it rather than replacing it, so an identical frame
+  // costs one comparison and a frame that changed in one label costs one
+  // element's worth of work rather than a rebuilt tree.
   let lastFrame = null;
 
   function draw(force) {{
@@ -957,10 +1641,25 @@ pub fn generate_page(title: &str) -> String {
     }} else {{
       exports.main();
     }}
-    if (!force && sameFrame(lastFrame, recorder.calls)) return;
-    lastFrame = recorder.calls;
-    mount(mode);
-    replay(recorder.calls, currentRenderer);
+    const next = recorder.calls;
+    const diff = diffFrames(force ? null : lastFrame, next);
+    if (diff.same) return;
+
+    if (!force && diff.patchable && currentRenderer.patch) {{
+      currentRenderer.patch(lastFrame, next, diff);
+    }} else if (!force && lastFrame !== null && currentRenderer.damage) {{
+      const rects = damageOf(lastFrame, next, diff);
+      if (rects === null) {{
+        currentRenderer.rebuild(next);
+      }} else {{
+        currentRenderer.damage(next, rects);
+      }}
+    }} else {{
+      // A renderer that was just switched to, or one with no damage path, gets
+      // the whole picture.
+      currentRenderer.rebuild(next);
+    }}
+    lastFrame = next;
   }}
 
   function show(which) {{
@@ -968,6 +1667,9 @@ pub fn generate_page(title: &str) -> String {
     for (const [name, button] of Object.entries(buttons)) {{
       button.setAttribute("aria-pressed", String(name === which));
     }}
+    // A new renderer has nothing retained, so the frame it gets is a whole one
+    // however little the model changed.
+    mount(which);
     draw(true);
   }}
 

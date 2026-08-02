@@ -18,6 +18,7 @@
 //! manifest that needs more than that is a manifest that has grown a
 //! programming language, which is what this is avoiding.
 
+use crate::semver::Requirement;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -42,6 +43,12 @@ pub struct Target {
 pub struct Dependency {
     pub name: String,
     pub source: Source,
+    /// `version = "^1.2"` — what this package asks of the dependency's
+    /// version, resolved by `kitec pkg` against every other requirement on
+    /// the same name. Absent means any: a pinned source — a path, or a git
+    /// tag — already offers exactly one version, and an unpinned one takes
+    /// the highest that everyone naming it can live with.
+    pub version: Option<Requirement>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -116,14 +123,34 @@ pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
                 );
             }
             "dependencies" => {
-                let source = if value.starts_with('"') {
-                    Source::Path(unquote(value, line_number)?)
+                let (source, version) = if value.starts_with('"') {
+                    (Source::Path(unquote(value, line_number)?), None)
                 } else {
                     let fields = inline_table(value, line_number)?;
-                    match (fields.get("path"), fields.get("git")) {
+                    let version = match fields.get("version") {
+                        None => None,
+                        Some(text) => {
+                            Some(Requirement::parse(text).map_err(|message| ManifestError {
+                                line: line_number,
+                                message: format!("dependency `{}`: {}", key, message),
+                            })?)
+                        }
+                    };
+                    let source = match (fields.get("path"), fields.get("git")) {
                         (Some(path), None) => Source::Path(path.clone()),
                         (None, Some(url)) => {
-                            Source::Git { url: url.clone(), tag: fields.get("tag").cloned() }
+                            let tag = fields.get("tag").cloned();
+                            if tag.is_some() && version.is_some() {
+                                return Err(ManifestError {
+                                    line: line_number,
+                                    message: format!(
+                                        "dependency `{}` has both a `tag` and a `version`; \
+                                         pick one — a tag pins, a version resolves",
+                                        key
+                                    ),
+                                });
+                            }
+                            Source::Git { url: url.clone(), tag }
                         }
                         _ => {
                             return Err(ManifestError {
@@ -134,9 +161,14 @@ pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
                                 ),
                             })
                         }
-                    }
+                    };
+                    (source, version)
                 };
-                manifest.dependencies.push(Dependency { name: key.to_string(), source });
+                manifest.dependencies.push(Dependency {
+                    name: key.to_string(),
+                    source,
+                    version,
+                });
             }
             "" => {
                 return Err(ManifestError {
@@ -244,6 +276,10 @@ fn split_fields(inner: &str) -> Vec<String> {
 #[derive(Debug, PartialEq)]
 pub struct Locked {
     pub name: String,
+    /// The version resolution settled on — the one that satisfied every
+    /// `version = "…"` requirement on the name, or the one a pinned source
+    /// has.
+    pub version: String,
     pub source: String,
     /// A hash over every `.kite` file in the dependency, in sorted order.
     pub hash: String,
@@ -261,8 +297,8 @@ pub fn lockfile(entries: &[Locked]) -> String {
     );
     for entry in entries {
         out.push_str(&format!(
-            "[[locked]]\nname = \"{}\"\nsource = \"{}\"\nhash = \"{}\"\n\n",
-            entry.name, entry.source, entry.hash
+            "[[locked]]\nname = \"{}\"\nversion = \"{}\"\nsource = \"{}\"\nhash = \"{}\"\n\n",
+            entry.name, entry.version, entry.source, entry.hash
         ));
     }
     out

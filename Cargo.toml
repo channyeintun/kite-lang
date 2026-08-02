@@ -14,6 +14,8 @@ members = [
     "crates/kite-mir",
     "crates/kite-codegen-kbc",
     "crates/kite-codegen-wasm",
+    "crates/kite-codegen-clif",
+    "crates/kite-rt",
     "crates/kite-vm",
     "crates/kite-driver",
     "crates/kite-lsp",
@@ -42,8 +44,18 @@ kite-hir = { path = "crates/kite-hir" }
 kite-mir = { path = "crates/kite-mir" }
 kite-codegen-kbc = { path = "crates/kite-codegen-kbc" }
 kite-codegen-wasm = { path = "crates/kite-codegen-wasm" }
+kite-codegen-clif = { path = "crates/kite-codegen-clif" }
+kite-rt = { path = "crates/kite-rt" }
 kite-vm = { path = "crates/kite-vm" }
 kite-driver = { path = "crates/kite-driver" }
+# The native backend's code generator. One version pinned across all five so
+# the IR a frontend builds is the IR the module and JIT crates expect.
+cranelift-codegen = "0.134"
+cranelift-frontend = "0.134"
+cranelift-module = "0.134"
+cranelift-jit = "0.134"
+cranelift-object = "0.134"
+cranelift-native = "0.134"
 
 [profile.release]
 opt-level = 3

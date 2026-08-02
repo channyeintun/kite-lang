@@ -1,0 +1,229 @@
+// std/text — the bidirectional algorithm and Arabic joining.
+//
+// The bidi cases are hand-derived from UAX #9's own rules, not copied from a
+// reference implementation: each one names the rule it exercises, so a
+// failure says which rule broke rather than which fixture drifted. Levels
+// and visual order are asserted as plain integers because a level is the
+// algorithm's whole intermediate state in one number.
+
+use std/test
+use std/text
+
+fn levels(line: str) -> [int] {
+    return text.bidi_levels(line)
+}
+
+fn visual(line: str) -> [int] {
+    return text.bidi_visual(line)
+}
+
+fn bodies(line: str) -> [str] {
+    return map(text.bidi_runs(line), |r: text.Run| r.body)
+}
+
+fn checks() -> [error] {
+    var out: [error] = []
+
+    // ---- the class table ----
+    out.push(test.is_true(text.bidi_class(0x0041) == text.BidiClass.L, "A is L"))
+    out.push(test.is_true(text.bidi_class(0x05D0) == text.BidiClass.R, "alef is R"))
+    out.push(test.is_true(text.bidi_class(0x0628) == text.BidiClass.AL, "beh is AL"))
+    out.push(test.is_true(text.bidi_class(0x0035) == text.BidiClass.EN, "5 is EN"))
+    out.push(test.is_true(text.bidi_class(0x0665) == text.BidiClass.AN, "arabic five is AN"))
+    out.push(test.is_true(text.bidi_class(0x0020) == text.BidiClass.WS, "space is WS"))
+    out.push(test.is_true(text.bidi_class(0x002B) == text.BidiClass.ES, "plus is ES"))
+    out.push(test.is_true(text.bidi_class(0x0024) == text.BidiClass.ET, "dollar is ET"))
+    out.push(test.is_true(text.bidi_class(0x002C) == text.BidiClass.CS, "comma is CS"))
+    out.push(test.is_true(text.bidi_class(0x0301) == text.BidiClass.NSM, "acute is NSM"))
+    out.push(test.is_true(text.bidi_class(0x05B0) == text.BidiClass.NSM, "sheva is NSM"))
+    out.push(test.is_true(text.bidi_class(0x064E) == text.BidiClass.NSM, "fatha is NSM"))
+    out.push(test.is_true(text.bidi_class(0x200D) == text.BidiClass.BN, "zwj is BN"))
+    out.push(test.is_true(text.bidi_class(0x2066) == text.BidiClass.LRI, "lri is LRI"))
+    out.push(test.is_true(text.bidi_class(0x2069) == text.BidiClass.PDI, "pdi is PDI"))
+    out.push(test.is_true(text.bidi_class(0x4E2D) == text.BidiClass.L, "an ideograph is L"))
+    out.push(test.is_true(text.bidi_class(0x0E01) == text.BidiClass.L, "thai ko kai is L"))
+    out.push(test.is_true(text.bidi_class(0x0E31) == text.BidiClass.NSM, "thai mai han-akat is NSM"))
+    out.push(test.is_true(text.bidi_class(0x102D) == text.BidiClass.NSM, "myanmar i is NSM"))
+    out.push(test.is_true(text.bidi_class(0xFE91) == text.BidiClass.AL, "a presentation form is AL"))
+    out.push(test.is_true(text.is_combining(0x0301), "a mark is combining"))
+    out.push(test.is_false(text.is_combining(0x0628), "a letter is not"))
+
+    // ---- P2 and P3 ----
+    out.push(test.equal_int(text.paragraph_level("abc"), 0, "latin paragraph"))
+    out.push(test.equal_int(text.paragraph_level("\u{5d0}\u{5d1}"), 1, "hebrew paragraph"))
+    out.push(test.equal_int(text.paragraph_level("123 \u{5d0}"), 1, "digits are not strong"))
+    out.push(test.equal_int(text.paragraph_level(""), 0, "an empty paragraph reads left to right"))
+    out.push(test.equal_int(
+            text.paragraph_level("\u{2066}\u{5d0}\u{2069}x"),
+            0,
+            "P2 skips over an isolate",
+        ))
+
+    // ---- levels: the W, N and I rules ----
+    out.push(test.equal_ints(levels("abc"), [0, 0, 0], "plain latin stays at zero"))
+    out.push(test.equal_ints(levels("\u{5d0}\u{5d1}\u{5d2}"), [1, 1, 1], "plain hebrew is level one"))
+    out.push(test.equal_ints(
+            levels("abc \u{5d0}\u{5d1}\u{5d2}"),
+            [0, 0, 0, 0, 1, 1, 1],
+            "N2: the space between directions takes the base",
+        ))
+    out.push(test.equal_ints(
+            levels("\u{5d0}\u{5d1}\u{5d2} abc"),
+            [1, 1, 1, 1, 2, 2, 2],
+            "I2: latin inside hebrew rises to two",
+        ))
+    out.push(test.equal_ints(
+            levels("\u{5d0}\u{5d1}\u{5d2} 123"),
+            [1, 1, 1, 1, 2, 2, 2],
+            "I2: european numbers inside hebrew rise to two",
+        ))
+    out.push(test.equal_ints(
+            levels("abc \u{5d0}\u{5d1}\u{5d2} "),
+            [0, 0, 0, 0, 1, 1, 1, 0],
+            "L1: trailing whitespace returns to the base",
+        ))
+    out.push(test.equal_ints(
+            levels("\u{628}\u{62c}\u{62f} 123"),
+            [1, 1, 1, 1, 2, 2, 2],
+            "W2 then I2: digits after arabic are arabic numbers",
+        ))
+    out.push(test.equal_ints(
+            levels("\u{5d0}1.2\u{5d1}"),
+            [1, 2, 2, 2, 1],
+            "W4: a comma-class separator between digits joins them",
+        ))
+    out.push(test.equal_ints(
+            levels("abc 123"),
+            [0, 0, 0, 0, 0, 0, 0],
+            "W7: a number in left-to-right company is just text",
+        ))
+    out.push(test.equal_ints(
+            levels("\u{5d0}$123\u{5d1}"),
+            [1, 2, 2, 2, 2, 1],
+            "W5: a terminator beside a european number joins it",
+        ))
+
+    // ---- N0: bracket pairs ----
+    out.push(test.equal_ints(
+            levels("\u{5d0}(\u{5d1})\u{5d2}"),
+            [1, 1, 1, 1, 1],
+            "N0: brackets around hebrew inside hebrew stay hebrew",
+        ))
+    out.push(test.equal_ints(
+            levels("\u{5d0}(b)\u{5d2}"),
+            [1, 1, 2, 1, 1],
+            "N0: brackets keep the embedding direction their context has",
+        ))
+    out.push(test.equal_ints(
+            levels("a(\u{5d0}\u{5d1}\u{5d2})b"),
+            [0, 0, 1, 1, 1, 0, 0],
+            "N0: brackets containing only the opposite direction follow their context",
+        ))
+
+    // ---- X: isolates and overrides ----
+    out.push(test.equal_ints(
+            levels("\u{5d0} \u{2066}abc\u{2069} \u{5d1}"),
+            [1, 1, 1, 2, 2, 2, 1, 1, 1],
+            "X5–X6a: an isolate holds latin inside hebrew",
+        ))
+    out.push(test.equal_ints(
+            visual("\u{5d0} \u{2066}abc\u{2069} \u{5d1}"),
+            [8, 7, 3, 4, 5, 1, 0],
+            "an isolate reorders as a unit, and draws no isolate characters",
+        ))
+    out.push(test.equal_ints(
+            visual("\u{202e}abc\u{202c}"),
+            [3, 2, 1],
+            "X6: an override forces latin right to left",
+        ))
+
+    // ---- L2, seen as visual order ----
+    out.push(test.equal_ints(visual("abc"), [0, 1, 2], "latin is drawn as written"))
+    out.push(test.equal_ints(visual("\u{5d0}\u{5d1}\u{5d2}"), [2, 1, 0], "hebrew is reversed"))
+    out.push(test.equal_ints(
+            visual("\u{5d0}\u{5d1}\u{5d2} 123"),
+            [4, 5, 6, 3, 2, 1, 0],
+            "digits inside hebrew are reversed twice, so they read forwards",
+        ))
+    out.push(test.equal_ints(
+            visual("\u{5d0}1.2\u{5d1}"),
+            [4, 1, 2, 3, 0],
+            "a number with its separator moves whole",
+        ))
+
+    // ---- runs, as a painter consumes them ----
+    out.push(test.equal_strs(bodies("hello"), ["hello"], "one latin run"))
+    out.push(test.equal_strs(
+            bodies("abc \u{5d0}\u{5d1}\u{5d2}"),
+            ["abc ", "\u{5d0}\u{5d1}\u{5d2}"],
+            "latin then hebrew is two runs in the same order",
+        ))
+    out.push(test.equal_strs(
+            bodies("\u{5d0}\u{5d1}\u{5d2} abc"),
+            ["abc", "\u{5d0}\u{5d1}\u{5d2} "],
+            "hebrew then latin swaps, and the space stays with the hebrew level",
+        ))
+    out.push(test.is_true(text.bidi_runs("\u{5d0}\u{5d1}")[0].rtl, "a hebrew run says so"))
+    out.push(test.is_false(text.bidi_runs("abc")[0].rtl, "a latin run says so"))
+    out.push(test.equal_strs(bodies(""), [""], "an empty line is one empty run"))
+    out.push(test.equal_strs(
+            bodies("\u{202e}abc\u{202c}"),
+            ["cba"],
+            "an overridden latin run arrives pre-reversed, with nothing strong to say so",
+        ))
+    out.push(test.equal_strs(
+            bodies("\u{202e}(x\u{202c}"),
+            ["x)"],
+            "a pre-reversed run mirrors its brackets, which is L4 for the pair table",
+        ))
+    out.push(test.equal_strs(
+            bodies("ab\u{200e}cd"),
+            ["abcd"],
+            "an implicit direction mark is obeyed and not drawn",
+        ))
+
+    // ---- arabic joining ----
+    let bism = text.join_arabic("\u{628}\u{633}\u{645}")
+    out.push(test.equal_int(bism.code_at(0), 0xFE91, "beh joins forwards: initial"))
+    out.push(test.equal_int(bism.code_at(1), 0xFEB4, "seen joins both ways: medial"))
+    out.push(test.equal_int(bism.code_at(2), 0xFEE2, "meem joins backwards: final"))
+    let dar = text.join_arabic("\u{62f}\u{627}\u{631}")
+    out.push(test.equal_int(dar.code_at(0), 0xFEA9, "dal only joins backwards: isolated here"))
+    out.push(test.equal_int(dar.code_at(1), 0xFE8D, "alef after dal cannot join: isolated"))
+    out.push(test.equal_int(dar.code_at(2), 0xFEAD, "reh after alef cannot join: isolated"))
+    out.push(test.equal_int(
+            text.join_arabic("\u{621}").code_at(0),
+            0xFE80,
+            "hamza never joins",
+        ))
+    out.push(test.equal_int(
+            text.join_arabic("\u{644}\u{627}").code_at(0),
+            0xFEFB,
+            "lam alef is the mandatory ligature",
+        ))
+    let bila = text.join_arabic("\u{628}\u{644}\u{627}")
+    out.push(test.equal_int(bila.code_at(1), 0xFEFC, "a joined lam alef takes its final form"))
+    out.push(test.equal_int(bila.len(), 2, "the ligature swallows the alef"))
+    let marked = text.join_arabic("\u{628}\u{64e}\u{633}")
+    out.push(test.equal_int(marked.code_at(0), 0xFE91, "a mark is transparent to joining"))
+    out.push(test.equal_int(marked.code_at(1), 0x064E, "and is itself unchanged"))
+    out.push(test.equal_int(marked.code_at(2), 0xFEB2, "the letter after it still joins"))
+    let stretched = text.join_arabic("\u{628}\u{640}\u{628}")
+    out.push(test.equal_int(stretched.code_at(0), 0xFE91, "tatweel joins backwards"))
+    out.push(test.equal_int(stretched.code_at(2), 0xFE90, "and forwards"))
+    out.push(test.equal_str(text.join_arabic("abc"), "abc", "everything else passes through"))
+
+    return out
+}
+
+fn main() {
+    let results = checks()
+    var failed = 0
+    for e in results {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("text: \(results.len() - failed) passed, \(failed) failed")
+}

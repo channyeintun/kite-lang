@@ -1,0 +1,47 @@
+// Scripts.
+//
+// The same layout and paint path, across the eight scripts the roadmap names:
+// Latin, Cyrillic, Arabic, Hebrew, Devanagari, Thai, CJK and Burmese. Each
+// sample is wrapped to a fixed width and painted, and what this prints — the
+// drawing calls, in order — is a transcript of everything the renderers are
+// told to do.
+//
+// The transcript is deterministic on purpose: under the nominal font every
+// character advances eight units and a line is sixteen tall, on the bytecode
+// VM and under Node alike, so the same program prints the same calls on every
+// machine. That also bounds what it shows: nothing is wide under the nominal
+// font, so the line breaker's break-anywhere rule for CJK never fires here —
+// the CJK sample stays one long run — and it fires in a browser, where the
+// font says what is wide.
+//
+// The right-to-left samples are the point. A regression in the bidi
+// resolution moves a run or reorders the calls, and this transcript catches
+// it; the Arabic joining sample bakes the chosen presentation forms into the
+// drawn text, and a regression there changes the glyphs in place.
+
+use std/ui
+use std/text
+
+fn sample(name: str, body: str) {
+    io.print("== \(name) ==")
+    let node = ui.text_of(name, ui.Style{..ui.style(), width: 176.0 }, body)
+    let frames = ui.layout(node, ui.Size{ width: 176.0, height: 400.0 })
+    ui.paint(frames, [ui.ink(name, 0x102030)])
+}
+
+fn main() {
+    sample("latin", "The quick brown fox jumps over the lazy dog.")
+    sample("cyrillic", "Съешь же ещё этих мягких французских булок.")
+    // Arabic written in its plain letters: the host's own font shapes these
+    // when a browser draws them, and the transcript records their order.
+    sample("arabic", "مرحبا بالعالم 123 abc")
+    // The same alphabet through `text.join_arabic`: every letter arrives as
+    // the presentation form its neighbours demand, which is what a renderer
+    // that draws one glyph at a time needs handed to it.
+    sample("arabic-joined", text.join_arabic("بسم الله الرحمن الرحيم"))
+    sample("hebrew", "שלום עולם (bidi 123) סוף")
+    sample("devanagari", "नमस्ते दुनिया — यह एक परीक्षण है।")
+    sample("thai", "สวัสดีชาวโลก ๑๒๓ ทดสอบ")
+    sample("cjk", "こんにちは世界。漢字と仮名の行。")
+    sample("burmese", "မင်္ဂလာပါ ကမ္ဘာ စာသား စမ်းသပ်")
+}

@@ -11,6 +11,8 @@
 // column, and that is all — which is enough for application UI, and is what
 // every UI toolkit that started after the web converged on.
 
+use std/text
+
 pub struct Size {
     pub width: float
     pub height: float
@@ -600,10 +602,26 @@ fn draw_one(frame: Frame, p: Paint) {
     // — so what is painted is what was laid out, rather than an approximation
     // that happens to look close.
     let box = frame.inner
+    // Lines are broken in logical order and reordered afterwards, which is
+    // the order UAX #9 requires; the paragraph decides its direction once and
+    // every line wrapped out of it inherits, so a Hebrew paragraph whose
+    // second line begins with a number does not change direction mid-text.
+    // Left-to-right text is one run per line and is drawn exactly as before.
+    //
+    // What this does not do: an RTL paragraph is still drawn from the box's
+    // left edge — alignment belongs to the box — and the parallel tree for
+    // screen readers hears a reordered line run by run, in visual order,
+    // which for mixed-direction text is not reading order. Both are stated
+    // rather than solved.
+    let base = text.paragraph_level(body)
     let lines = wrap(body, box.width)
     var y = box.y
     for line in lines {
-        draw.text(box.x, y, line, p.ink)
+        var x = box.x
+        for run in text.bidi_runs_with(line, base) {
+            draw.text(x, y, run.body, p.ink)
+            x = x + text.width(run.body)
+        }
         y = y + line_height()
     }
 }

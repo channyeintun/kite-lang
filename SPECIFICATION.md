@@ -196,12 +196,43 @@ wraps in release builds, matching the default most users expect while keeping
 release performance predictable. `math.wrapping_add` and `math.checked_add` are
 available when the behaviour must be explicit regardless of build mode.
 
-**On `str`:** on the web target, `str` lowers to a JavaScript string reference
-using the **JS String Builtins** proposal, which is baseline in all browsers as
-of 2025. This means passing a string to a DOM API costs nothing — no copy, no
-encoding pass, no glue code. On native and bytecode targets, `str` is a
-GC-managed UTF-8 byte array. Kite programs cannot observe the difference:
-`str` is indexed by grapheme-safe operations only, never by byte offset.
+**On `str`:** the web target has two representations and a program cannot tell
+them apart. By default a `str` is an index into a table the generated glue
+holds, which needs no linear memory and runs in any engine with WasmGC. With
+`--js-strings` it is an `externref` carrying the JavaScript string itself,
+through the **JS String Builtins** proposal: constants arrive as imported
+globals the engine synthesises from the literals, `+` and `==` compile to
+intrinsics, and passing a string to a DOM API costs nothing — no copy, no
+encoding pass, no lookup. It is a flag rather than the default because the
+builtins are not in every engine, and a module that will not instantiate is a
+worse failure than one that makes a call.
+
+On native and bytecode targets, `str` is a GC-managed UTF-8 string. Kite
+programs cannot observe any of this: `str` is indexed by character, never by
+byte offset and never by UTF-16 code unit — which is why `len`, `slice`,
+`index_of` and `code_at` remain host calls even where the builtins offer
+something with the same name and a different meaning.
+
+**What a `str` can do**, and it is deliberately little:
+
+| Operation | Meaning |
+|---|---|
+| `s.len()` | Characters, not bytes and not UTF-16 code units |
+| `s.slice(from, to)` | Characters `from..to`, clamped rather than trapping |
+| `s.index_of(needle)` | The character index, or -1 |
+| `s.trim()` | Leading and trailing whitespace removed |
+| `s.code_at(i)` | The code point at character `i`, or -1 past the end |
+
+Everything else — `split`, `starts_with`, `replace`, `join`, `words`,
+`parse_int`, case folding — is written in Kite on top of these and lives in the
+prelude, where it can be read. Each of these is a boundary two runtimes have to
+agree about, and every one added is a thing that can drift.
+
+`code_at` is the one that is not a string operation at all, and it is here
+because it is the one thing nothing else can be built from: without a way to
+see a character as a number, a hash, an ordering and a number parser each have
+to become a boundary of their own. One general primitive is cheaper than three
+special ones.
 
 ### 3.2 Composite types
 
@@ -941,21 +972,77 @@ responsible.
 
 ### 10.4 Built-in traits
 
-Derived automatically where possible, listed here because they define the
-language's structural operations:
+Three of these the compiler applies on its own; the rest are asked for, and one
+is refused. The distinction is not arbitrary — it is whether a mechanical answer
+is the *right* answer.
 
-| Trait | Meaning | Auto-derived |
+| Trait | Meaning | How it arrives |
 |---|---|---|
-| `Eq` | `==` and `!=` | Yes, structurally |
-| `Ord` | `<` `<=` `>` `>=` | Yes, when all fields are `Ord` |
-| `Hash` | Usable as a map key | Yes, when all fields are `Hash` |
-| `Display` | String interpolation, `io.print` | No — must be written |
-| `Debug` | `\(x:?)` and diagnostics | Yes, structurally |
-| `Iterate` | `for x in …` | No — see below |
-| `Share` | Safe to move across tasks | Yes, inferred — see [§12.4](#124-the-share-marker) |
+| `Eq` | `==` and `!=` | Structural, on every type, always |
+| `Share` | Safe to move across tasks | Inferred structurally — see [§12.4](#124-the-share-marker) |
+| `Display` | String interpolation, `io.print` | Written by hand, never derived |
+| `Debug` | A rendering for a programmer | `@derive(Debug)` |
+| `Hash` | One integer standing for a value | `@derive(Hash)` |
+| `Encode` / `Decode` | To and from `json.Json` | `@derive(Encode, Decode)` |
+| `Ord` | `<` `<=` `>` `>=` | Not a trait — see below |
+| `Iterate` | `for x in …` | Not written — see below |
 
-`Display` is deliberately not derived. How a type presents itself to a human is a
-design decision, not a mechanical one.
+**`Eq` is not a trait.** `==` is structural on every Kite value: a struct
+compares its fields, an enum its tag and then its payload, a slice its length
+and then its elements. There is nothing to implement, nothing to derive, and no
+type that lacks it — so a trait for it would be a second spelling for what the
+language already does, and a second spelling is a chance for two answers.
+
+**`Display` is deliberately not derived.** How a type presents itself to a human
+is a design decision, not a mechanical one, and a `Password` whose derived form
+printed its field is the case where being wrong matters.
+
+**`Ord` is not a trait either.** `<` on aggregates is not defined: what order
+two structs are in is a decision with several defensible answers, and the
+language declines to pick one. Sorting takes the comparison as an argument —
+`sorted(people, |a, b| a.age < b.age)` — which is where the decision belongs.
+
+#### `@derive`
+
+`@derive(…)` writes a body from a type's fields. It is one of the two
+attributes Kite has, and the bar an attribute must clear is that it names
+something the compiler must do which no amount of Kite could say instead.
+
+```kite
+@derive(Debug, Hash, Encode, Decode)
+pub struct User {
+    name: str
+    age: int
+    tags: [str]
+}
+```
+
+What it produces is **ordinary Kite**, expanded before resolution: it is
+checked, lowered and optimised like anything hand-written, `kitec --emit hir`
+shows what actually ran, and a derived method is not privileged over a written
+one. Deriving something a type already implements by hand is an error rather
+than a silent replacement.
+
+The walk handles primitives, slices, maps, optionals, tuples, and other types
+that derive the same trait. Where it cannot go — a function field, a `dyn
+Trait`, a type parameter — it says which field stopped it and what would fix
+it, and the hand-written implementation is still there to write.
+
+`Decode` is an **associated function**, not a trait method: it produces the
+implementing type, and a trait method cannot say that without `Self` in return
+position. So a document becomes a value by naming the type, which is what a
+caller has anyway:
+
+```kite
+let (doc, err) = json.parse(text)
+check err
+let (user, uerr) = User.decode(doc)
+check uerr
+```
+
+There is no `json.decode<T>(text)`. Kite has no turbofish, so the type would
+have to be inferred from the binding, and `User.decode` says the same thing
+where it can be read.
 
 **`Iterate` cannot be written in this language yet, and the implementation says
 so rather than pretending.** A trait that yields values needs to name the type

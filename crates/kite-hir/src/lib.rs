@@ -477,6 +477,14 @@ pub enum StrKind {
     IndexOf,
     /// `s.trim()` — leading and trailing whitespace removed.
     Trim,
+    /// `s.code_at(i)` — the code point at character `i`, or -1 past the end.
+    ///
+    /// The one string primitive that is not itself a string operation, and it
+    /// is here because it is the one thing no amount of `slice` and `index_of`
+    /// can reach: without a way to see a character as a number, a hash, an
+    /// ordering and a parser all have to be host calls of their own. One
+    /// general primitive is cheaper than three special ones.
+    CodeAt,
 }
 
 impl StrKind {
@@ -486,6 +494,7 @@ impl StrKind {
             StrKind::Slice => "str.slice",
             StrKind::IndexOf => "str.index_of",
             StrKind::Trim => "str.trim",
+            StrKind::CodeAt => "str.code_at",
         }
     }
 
@@ -493,7 +502,7 @@ impl StrKind {
     pub fn arity(self) -> usize {
         match self {
             StrKind::Len | StrKind::Trim => 1,
-            StrKind::IndexOf => 2,
+            StrKind::IndexOf | StrKind::CodeAt => 2,
             StrKind::Slice => 3,
         }
     }

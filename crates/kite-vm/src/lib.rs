@@ -169,6 +169,19 @@ fn string_op(
             let to = to.clamp(from as i64, len) as usize;
             Value::Str(Rc::from(chars[from..to].iter().collect::<String>().as_str()))
         }
+        StrKind::CodeAt => {
+            let Value::Int(at) = arg(1) else {
+                return Err(Trap::TypeConfusion { op: "str.code_at", found: "not an int" });
+            };
+            // -1 past the end rather than a trap, for the same reason `slice`
+            // clamps: reading past the end is an ordinary condition in text
+            // processing, and a loop that tests the answer is what a caller
+            // writes anyway.
+            match usize::try_from(at).ok().and_then(|i| chars.get(i)) {
+                Some(c) => Value::Int(*c as i64),
+                None => Value::Int(-1),
+            }
+        }
     })
 }
 

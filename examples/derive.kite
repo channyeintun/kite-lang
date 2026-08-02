@@ -1,0 +1,93 @@
+// Bodies the compiler writes.
+//
+// `@derive(…)` is one of the two attributes Kite has. What it produces is
+// ordinary Kite — expanded before resolution, checked and lowered like
+// anything hand-written — so `kitec --emit hir` shows what actually ran and a
+// derived method is not privileged over a written one.
+//
+// Four things derive: `Debug`, `Hash`, `Encode` and `Decode`. `Display` does
+// not, and that is the interesting one: how a type presents itself to a person
+// is a design decision, and a mechanical answer would be wrong more often than
+// right. `Debug` is the opposite — nobody reads a debug rendering expecting it
+// to have been designed.
+
+use std/json
+
+@derive(Debug, Hash, Encode, Decode)
+struct Book {
+    title: str
+    year: int
+    authors: [str]
+    edition: Option<int>
+}
+
+@derive(Debug, Hash, Encode, Decode)
+enum Shelf {
+    Empty
+    Boxed(int)
+    Named(label: str, capacity: int)
+}
+
+/// `Display` is written, because "how should a book read?" has an answer only
+/// a person can give — and it is not the one a derive would have produced.
+impl Display for Book {
+    fn show(self) -> str {
+        return "\(self.title) (\(self.year))"
+    }
+}
+
+fn round_trip(book: Book) -> (Book, error) {
+    let text = json.stringify(book.encode())
+    io.print(text)
+    let (doc, err) = json.parse(text)
+    check err
+    // `Decode` is an associated function rather than a trait method: it
+    // produces the implementing type, and a trait method cannot say that. So
+    // the type is named — which is what a caller has anyway, Kite having no
+    // turbofish.
+    return Book.decode(doc)
+}
+
+fn main() {
+    let book = Book{
+        title: "The Mythical Man-Month",
+        year: 1975,
+        authors: ["Brooks"],
+        edition: nil,
+    }
+
+    // Written, and derived, and they say different things on purpose.
+    io.print(book)
+    io.print(book.debug())
+
+    io.print(Shelf.Empty.debug())
+    io.print(Shelf.Boxed(3).debug())
+    io.print(Shelf.Named(label: "front", capacity: 40).debug())
+
+    let (back, err) = round_trip(book)
+    if err != nil {
+        io.print(err.message())
+        return
+    }
+    io.print(back.debug() == book.debug())
+
+    // Two values that are `==` hash alike, because the derived walk visits
+    // exactly the fields `==` compares, in the same order.
+    let same = Book{
+        title: "The Mythical Man-Month",
+        year: 1975,
+        authors: ["Brooks"],
+        edition: nil,
+    }
+    io.print(book.hash() == same.hash())
+
+    // A document that is missing a field is an error, not a zero. A decoder
+    // that filled one in would be making the mistake the whole error design
+    // exists to prevent.
+    let (doc, perr) = json.parse("{\"title\": \"untitled\"}")
+    if perr != nil {
+        return
+    }
+    let (broken, berr) = Book.decode(doc)
+    io.print(if berr == nil { "?" } else { berr.message() })
+}

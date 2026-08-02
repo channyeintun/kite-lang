@@ -228,3 +228,46 @@ fn a_declared_dependency_wins_over_a_sibling_of_the_same_name() {
     );
     assert_eq!(p.run(&main).expect("compiles"), "declared\n");
 }
+
+/// A derive inside a module is placed in that module, which is what lets it
+/// reach the type's private fields and lets an unqualified name in the
+/// generated body mean what it means at the declaration.
+///
+/// The interesting half is the call site: `models.User.decode(doc)` names a
+/// type in another module and reaches an associated function the compiler
+/// wrote. Nothing about that path is special-cased — the generated `impl` is
+/// an ordinary one, in the module the type is in.
+#[test]
+fn a_derive_lands_in_the_module_of_the_type_it_is_for() {
+    let p = Project::new("derive-module");
+    p.file(
+        "models/user.kite",
+        "use std/json\n\n\
+         @derive(Debug, Hash, Encode, Decode)\n\
+         pub struct User {\n    pub name: str\n    pub age: int\n}\n\n\
+         @derive(Debug)\n\
+         pub enum Role {\n    Reader\n    Editor(level: int)\n}\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use models\nuse std/json\n\n\
+         fn main() {\n\
+         \x20 let u = models.User{ name: \"ada\", age: 36 }\n\
+         \x20 io.print(u.debug())\n\
+         \x20 io.print(json.stringify(u.encode()))\n\
+         \x20 let (doc, err) = json.parse(\"{\\\"name\\\":\\\"grace\\\",\\\"age\\\":45}\")\n\
+         \x20 if err != nil {\n    return\n  }\n\
+         \x20 let (back, berr) = models.User.decode(doc)\n\
+         \x20 if berr != nil {\n    io.print(berr.message())\n    return\n  }\n\
+         \x20 io.print(back.debug())\n\
+         \x20 io.print(models.Role.Editor(level: 2).debug())\n\
+         }\n",
+    );
+    assert_eq!(
+        p.run(&main).expect("compiles"),
+        "User{ name: \"ada\", age: 36 }\n\
+         {\"name\":\"ada\",\"age\":36}\n\
+         User{ name: \"grace\", age: 45 }\n\
+         Editor(level: 2)\n"
+    );
+}

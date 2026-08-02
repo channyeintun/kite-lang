@@ -9,3 +9,11 @@ site/reference/
 site/docs/
 site/SPECIFICATION.md
 site/README.md
+
+# The rendered package manifests: written by packaging/render.sh from a
+# release's own checksums. The ones in the tree keep their placeholders so they
+# stay reviewable; these are release artefacts.
+packaging/out/
+
+# Wrangler's local state, not the site.
+.wrangler/

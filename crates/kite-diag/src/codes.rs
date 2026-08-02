@@ -11,6 +11,8 @@
 //!   E0300–E0399  error handling (taint analysis)
 //!   E0400–E0499  modules and visibility
 //!   E0500–E0599  concurrency and Share
+//!   E0600–E0699  cryptography
+//!   E0700–E0799  derivation
 
 use std::fmt;
 
@@ -224,6 +226,31 @@ codes! {
     E0521 = "E0521", "`await` outside an async function",
         "`await` suspends the enclosing function, so that function must be \
          declared `async`.";
+
+    // ---- derivation -------------------------------------------------------
+    E0700 = "E0700", "malformed `@derive`",
+        "`@derive(…)` names traits to write bodies for, and goes in front of a \
+         `struct` or an `enum`. A derived body is written from a type's \
+         fields, so there has to be a type and there has to be something to \
+         derive.";
+
+    E0701 = "E0701", "nothing derives that",
+        "The compiler writes bodies for `Debug`, `Hash`, `Encode` and \
+         `Decode`, and for nothing else.\n\n\
+         `Display` is deliberately absent: a mechanical rendering is wrong \
+         more often than right, and a `Password` whose derived form printed \
+         its field is exactly the case where being wrong matters. `Eq` is \
+         absent because `==` is already structural on every Kite value, so a \
+         derived one would be a second spelling for what the language does \
+         anyway.";
+
+    E0702 = "E0702", "a field the derive cannot write",
+        "A derived body is a walk over a type's fields, so every field has to \
+         be something the walk knows how to handle: a primitive, a slice, a \
+         map, an optional, a tuple, or another type that derives the same \
+         trait.\n\n\
+         Where it does not, write the implementation by hand — the derive is a \
+         convenience, not the only way in.";
 
     // ---- cryptography -----------------------------------------------------
     E0600 = "E0600", "comparing a secret with `==`",

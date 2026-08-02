@@ -21,6 +21,30 @@ pub trait Display {
     fn show(self) -> str
 }
 
+/// How a type presents itself to a programmer.
+///
+/// The counterpart to `Display`, and the reason both exist: `Display` is a
+/// design decision and `Debug` is a mechanical one. `@derive(Debug)` writes
+/// the body from the fields, which is right here for exactly the reason it
+/// would be wrong for `Display` — nobody reads a debug rendering expecting it
+/// to have been designed.
+pub trait Debug {
+    fn debug(self) -> str
+}
+
+/// One integer standing for a value, for indexing and for deduplication.
+///
+/// Two values that are `==` must hash alike; two that are not may. The derived
+/// body honours that by walking exactly the fields `==` compares, in the same
+/// order.
+///
+/// It is **not** a security primitive. `crypto` is where a hash that has to
+/// resist an adversary comes from, and this one folds bytes with FNV-1a, which
+/// does not.
+pub trait Hash {
+    fn hash(self) -> int
+}
+
 /// A value of this type may be moved to another task or isolate.
 ///
 /// The one trait nobody implements: the compiler decides, structurally, and a
@@ -617,4 +641,93 @@ pub fn chunked<T>(items: [T], size: int) -> [[T]] {
         out.push(group)
     }
     return out
+}
+
+// ---- hashing and debugging ------------------------------------------------
+//
+// The helpers `@derive(Hash)` and `@derive(Debug)` are written in terms of.
+// They are ordinary functions rather than compiler knowledge, so a
+// hand-written implementation can use the same ones and get the same answers
+// — which is what makes a derived body and a written one comparable.
+
+/// The FNV-1a offset basis.
+///
+/// FNV is chosen because it is four lines, needs no tables, and asks the two
+/// backends to agree about nothing but integer arithmetic.
+///
+/// The **32-bit** parameters, in a 64-bit `int`, and that is not an oversight:
+/// Kite traps on integer overflow, so the 64-bit prime would kill the program
+/// on the first character. Staying inside 32 bits keeps every product well
+/// under the range, which is what lets the arithmetic be ordinary Kite instead
+/// of a wrapping operation the language deliberately does not have.
+pub fn hash_seed() -> int {
+    return 2166136261
+}
+
+/// Fold one more value into a hash.
+pub fn hash_combine(accumulated: int, next: int) -> int {
+    var h = accumulated
+    // Eight bytes, low to high. Mixing byte by byte rather than whole words is
+    // what gives FNV the avalanche it is chosen for.
+    var i = 0
+    for i < 8 {
+        h = ((h ^ ((next >> (i * 8)) & 255)) * 16777619) % 4294967296
+        i = i + 1
+    }
+    return h
+}
+
+pub fn hash_int(value: int) -> int {
+    return hash_combine(hash_seed(), value)
+}
+
+pub fn hash_bool(value: bool) -> int {
+    return hash_combine(hash_seed(), if value { 1 } else { 0 })
+}
+
+/// A float's hash goes through its rendered text.
+///
+/// That is not a shortcut. Rendering is the one thing about a float both
+/// backends already agree on exactly — it is shared with `io.print` and with
+/// interpolation — whereas reinterpreting the bits would need an operation
+/// Kite does not have and the two runtimes would have to be made to match.
+pub fn hash_float(value: float) -> int {
+    return hash_str("\(value)")
+}
+
+/// FNV-1a over the string's code points.
+pub fn hash_str(text: str) -> int {
+    var h = hash_seed()
+    for i in 0..text.len() {
+        h = hash_combine(h, text.code_at(i))
+    }
+    return h
+}
+
+/// A string as it would be written in source: quoted, with the escapes put
+/// back. What `@derive(Debug)` uses for a `str` field, so a value containing a
+/// comma or a brace cannot be mistaken for structure.
+pub fn debug_str(text: str) -> str {
+    var out = "\""
+    for i in 0..text.len() {
+        let c = text.slice(i, i + 1)
+        if c == "\"" {
+            out = out + "\\\""
+        } else {
+            if c == "\\" {
+                out = out + "\\\\"
+            } else {
+                if c == "\n" {
+                    out = out + "\\n"
+                } else {
+                    if c == "\t" {
+                        out = out + "\\t"
+                    } else {
+                        out = out + c
+                    }
+                }
+            }
+        }
+    }
+    return out + "\""
 }

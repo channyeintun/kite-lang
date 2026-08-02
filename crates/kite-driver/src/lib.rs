@@ -8,10 +8,16 @@ use kite_span::{FileId, SourceMap, Span};
 use std::io::Write;
 use std::path::Path;
 
+pub mod derive;
 pub mod manifest;
 pub mod modules;
+pub mod semver;
+pub mod solve;
 
-pub use kite_codegen_wasm::{generate_glue, generate_glue_with_hosts, generate_page};
+pub use kite_codegen_wasm::{
+    generate_glue, generate_glue_for, generate_glue_with_hosts, generate_page, generate_server,
+    listens, Strings,
+};
 pub use kite_vm::Trap;
 
 /// How far to run the pipeline, and what to hand back.
@@ -26,6 +32,9 @@ pub enum Emit {
     Kbc,
     /// A WebAssembly module, plus the JavaScript glue that instantiates it.
     Wasm,
+    /// Machine code through Cranelift: an object file for the linker, and a
+    /// JIT path for running without one.
+    Native,
 }
 
 impl Emit {
@@ -37,11 +46,43 @@ impl Emit {
             "mir" => Emit::Mir,
             "kbc" => Emit::Kbc,
             "wasm" => Emit::Wasm,
+            "native" => Emit::Native,
             _ => return None,
         })
     }
 
-    pub const NAMES: [&'static str; 6] = ["check", "ast", "hir", "mir", "kbc", "wasm"];
+    pub const NAMES: [&'static str; 7] = ["check", "ast", "hir", "mir", "kbc", "wasm", "native"];
+}
+
+/// A program held at MIR, ready for the native backend to finish either way:
+/// an object file for the linker, or straight into this process under the
+/// JIT. The MIR is kept rather than an artefact because the two consumers
+/// want different artefacts and neither wants the other's.
+pub struct NativeProgram {
+    mir: kite_mir::Program,
+    types: kite_hir::Types,
+}
+
+impl NativeProgram {
+    /// Whether there is a `main` to run — the same question `is_runnable`
+    /// answers for the bytecode path.
+    pub fn has_entry(&self) -> bool {
+        self.mir.entry.is_some()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeProgram {
+    /// A relocatable object file, for `cc` to join with `libkite_rt.a`.
+    pub fn object(&self) -> Result<Vec<u8>, String> {
+        kite_codegen_clif::compile_object(&self.mir, &self.types)
+    }
+
+    /// Compile into this process and run to completion — `kitec run
+    /// --native`, with no linker anywhere.
+    pub fn run(&self, out: &mut dyn Write) -> Result<(), String> {
+        kite_codegen_clif::run_jit(&self.mir, &self.types, out)
+    }
 }
 
 pub struct Compilation {
@@ -52,6 +93,9 @@ pub struct Compilation {
     chunk: Option<kite_codegen_kbc::Chunk>,
     /// The compiled WebAssembly module, when `--emit wasm` was requested.
     pub wasm: Option<kite_codegen_wasm::WasmModule>,
+    /// The program held for the native backend, when `--emit native` was
+    /// requested.
+    pub native: Option<NativeProgram>,
     /// What an editor needs: where every name was used and where it was
     /// declared. Built from the same resolution the checker ran on, because a
     /// language server that re-derives its own answers is a second compiler
@@ -67,6 +111,11 @@ pub struct Index {
     pub uses: Vec<Use>,
     /// Every top-level declaration, for a symbol list and for completion.
     pub symbols: Vec<Symbol>,
+    /// Every name grouped with all its occurrences — what rename and
+    /// find-references walk. Built from the same resolution as `uses`.
+    pub bindings: Vec<Binding>,
+    /// What the checker inferred but the source never says, for inlay hints.
+    pub hints: Vec<Hint>,
 }
 
 pub struct Use {
@@ -82,6 +131,43 @@ pub struct Symbol {
     pub at: Span,
     pub kind: &'static str,
     pub label: String,
+}
+
+/// One name and every place it is written.
+///
+/// Only what the resolver's own table covers is here: locals, free functions,
+/// and type declarations. A method's call sites are the checker's business —
+/// they need the receiver's type — so methods are deliberately absent, and a
+/// rename that cannot see every occurrence refuses rather than missing one.
+pub struct Binding {
+    /// As written at a use site: a prelude name is spelled without its module.
+    pub name: String,
+    pub declared_at: Span,
+    /// Occurrences written exactly as `name`, declaration excluded. These are
+    /// the spans a rename may edit.
+    pub uses: Vec<Span>,
+    /// Occurrences that resolve through this declaration but spell more than
+    /// its name — `Rect.square`, a qualified `Shape.Circle`, a shorthand
+    /// `Point{ x }` whose one identifier is also a field. Findable, but not
+    /// editable: a rename with any of these refuses.
+    pub mentions: Vec<Span>,
+    pub kind: &'static str,
+    /// For a local, the name span of the function whose table holds it; a
+    /// top-level name has none. Two locals can only collide inside one scope,
+    /// which is what a rename checks before inventing a clash.
+    pub scope: Option<Span>,
+}
+
+/// Something the checker worked out that the source never says, shown inline
+/// after the span it belongs to.
+pub struct Hint {
+    /// The name or callee the hint follows.
+    pub after: Span,
+    /// The content, without punctuation: a type for a binding, a comma-joined
+    /// argument list for a call. The client chooses the `: ` or the `<>`.
+    pub text: String,
+    /// `"binding"` or `"generics"` — which of those punctuations it takes.
+    pub kind: &'static str,
 }
 
 impl Compilation {
@@ -160,6 +246,21 @@ pub fn compile_with(
     emit: Emit,
     release: bool,
 ) -> Compilation {
+    compile_strings(path, src, emit, release, Strings::Table)
+}
+
+/// Compile, choosing how a `str` is represented in a WebAssembly module.
+///
+/// The choice reaches no other target and no other pass: a `str` is a `str` in
+/// the source, in HIR and in MIR, and only the Wasm backend has two answers to
+/// what one *is*.
+pub fn compile_strings(
+    path: impl AsRef<Path>,
+    src: &str,
+    emit: Emit,
+    release: bool,
+    strings: Strings,
+) -> Compilation {
     let mut sources = SourceMap::new();
     // The prelude is added first, so its spans and the user's never collide and
     // a diagnostic inside it says which file it came from.
@@ -167,10 +268,10 @@ pub fn compile_with(
     let path = path.as_ref().to_path_buf();
     let file = sources.add(&path, src);
     let mut diags = DiagBag::new();
-    let (output, chunk, wasm, index) =
-        run_passes(prelude, file, &path, &mut sources, emit, release, &mut diags);
+    let (output, chunk, wasm, native, index) =
+        run_passes(prelude, file, &path, &mut sources, emit, release, strings, &mut diags);
 
-    let mut c = Compilation { sources, diags, output, chunk, wasm, index };
+    let mut c = Compilation { sources, diags, output, chunk, wasm, native, index };
     // The standard library's own advice is not the user's to act on.
     let library: Vec<FileId> = c
         .sources
@@ -183,6 +284,7 @@ pub fn compile_with(
     c
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_passes(
     prelude: FileId,
     file: FileId,
@@ -190,11 +292,13 @@ fn run_passes(
     sources: &mut SourceMap,
     emit: Emit,
     release: bool,
+    strings: Strings,
     diags: &mut DiagBag,
 ) -> (
     String,
     Option<kite_codegen_kbc::Chunk>,
     Option<kite_codegen_wasm::WasmModule>,
+    Option<NativeProgram>,
     Index,
 ) {
     let src = sources.text(file).to_string();
@@ -202,7 +306,7 @@ fn run_passes(
     let mut ast = kite_parser::parse(file, &src, &tokens, diags);
 
     if emit == Emit::Ast {
-        return (format!("{:#?}\n", ast), None, None, Index::default());
+        return (format!("{:#?}\n", ast), None, None, None, Index::default());
     }
 
     // Modules the program reaches, transitively. Nothing is compiled that
@@ -247,6 +351,25 @@ fn run_passes(
         }
     }
 
+    // `@derive` last, once every declaration is in the list: a derived body
+    // walks the fields, and a field may be a type from another module. What it
+    // produces is ordinary Kite, parsed here like anything else — so nothing
+    // after this point knows derivation happened, and `--emit hir` shows what
+    // actually ran.
+    if let Some(derived) = derive::expand(&ast.items, &item_modules, diags) {
+        let id = sources.add("<derive>", &derived.source);
+        let text = sources.text(id).to_string();
+        let tokens = kite_lexer::tokenize(id, &text, diags);
+        let parsed = kite_parser::parse(id, &text, &tokens, diags);
+        // Each generated `impl` is placed in the module of the type it is for,
+        // so it reaches that type's private fields exactly as an `impl` written
+        // beside the declaration would.
+        for (i, item) in parsed.items.into_iter().enumerate() {
+            item_modules.push(derived.modules.get(i).cloned().unwrap_or_default());
+            ast.items.push(item);
+        }
+    }
+
     // Resolution and checking still run after a syntax error — the parser
     // recovers, so later passes can report their own findings on the parts that
     // did parse. Code generation does not, because its input would be poisoned.
@@ -255,17 +378,28 @@ fn run_passes(
         aliases: loader.aliases.clone(),
     };
     let resolved = kite_resolve::resolve_modules(&ast, module_map, diags);
-    let mut hir = kite_types::check_with(&ast, &resolved, sources, diags, release);
+    let mut solved = kite_types::Solved::default();
+    let mut hir = kite_types::check_recording(&ast, &resolved, sources, diags, release, &mut solved);
     // Built before the early returns below: an editor asks about a file most
     // often when it does *not* compile, and an index that vanished on the
     // first error would be an index nobody could use.
-    let index = build_index(&resolved, sources);
+    let mut index = build_index(&resolved, sources);
+    // Inlay hints come from the checker's own answers rather than from a
+    // re-derivation here, for the same reason everything else in the index
+    // does: one compiler, one opinion.
+    for (at, text) in solved.bindings {
+        index.hints.push(Hint { after: at, text, kind: "binding" });
+    }
+    for (at, text) in solved.calls {
+        index.hints.push(Hint { after: at, text, kind: "generics" });
+    }
+    index.hints.sort_by_key(|h| (h.after.file.0, h.after.start));
 
     if emit == Emit::Hir {
-        return (hir.to_string(), None, None, index);
+        return (hir.to_string(), None, None, None, index);
     }
     if diags.has_errors() {
-        return (String::new(), None, None, index);
+        return (String::new(), None, None, None, index);
     }
 
     // Specialise generic functions before lowering, so no backend ever sees a
@@ -284,7 +418,7 @@ fn run_passes(
     // backends see ordinary functions and neither knows concurrency exists.
     kite_mir::asyncify(&mut mir, &mut hir.types);
     if emit == Emit::Mir {
-        return (mir.render(&hir.types).to_string(), None, None, index);
+        return (mir.render(&hir.types).to_string(), None, None, None, index);
     }
 
     if emit == Emit::Wasm {
@@ -306,23 +440,53 @@ fn run_passes(
                     ),
                 );
             }
-            return (String::new(), None, None, index);
+            return (String::new(), None, None, None, index);
         }
-        let module = kite_codegen_wasm::compile(&mir, &hir.types);
-        return (String::new(), None, Some(module), index);
+        let module = kite_codegen_wasm::compile_with(&mir, &hir.types, strings);
+        return (String::new(), None, Some(module), None, index);
+    }
+
+    if emit == Emit::Native {
+        // The same courtesy the Wasm branch extends: anything this target
+        // cannot lower is a diagnostic here, not a binary that traps with no
+        // explanation. On wasm32 there is no native backend to ask, and
+        // nothing there ever asks for one.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let gaps = kite_codegen_clif::unsupported(&mir, &hir.types);
+            if !gaps.is_empty() {
+                for gap in &gaps {
+                    diags.push(
+                        Diagnostic::error(
+                            kite_diag::codes::E0204,
+                            format!("the native target cannot lower {} yet", gap.what),
+                        )
+                        .with_primary(gap.span, format!("used in `{}`", gap.function))
+                        .with_note(
+                            "the bytecode target supports it: run without `--emit native`. \
+                             See docs/06-roadmap.md for the remaining lowering steps",
+                        ),
+                    );
+                }
+                return (String::new(), None, None, None, index);
+            }
+        }
+        let native = NativeProgram { mir, types: hir.types };
+        return (String::new(), None, None, Some(native), index);
     }
 
     let chunk = kite_codegen_kbc::compile(&mir);
     if emit == Emit::Kbc {
-        return (chunk.to_string(), Some(chunk), None, index);
+        return (chunk.to_string(), Some(chunk), None, None, index);
     }
 
-    (String::new(), Some(chunk), None, index)
+    (String::new(), Some(chunk), None, None, index)
 }
 
 /// What an editor needs, from the resolution the checker already ran.
 fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Index {
     use kite_resolve::Res;
+    use std::collections::HashMap;
     let mut index = Index::default();
 
     for (i, f) in resolved.fns.iter().enumerate() {
@@ -372,6 +536,107 @@ fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Inde
         };
         index.uses.push(Use { at: *at, declared_at, label, kind });
     }
+
+    // ---- bindings ----------------------------------------------------------
+
+    // The resolver records which local slot a use names, but not whose table
+    // the slot is in. Function bodies never overlap — a closure's locals live
+    // in the enclosing function's table — so the owner of a local use is the
+    // nearest function declared at or before it in its file.
+    let mut fn_order: Vec<(u32, u32, usize)> = resolved
+        .fns
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.span.file.0, f.span.start, i))
+        .collect();
+    fn_order.sort_unstable();
+    let owner_of = |at: Span| -> Option<usize> {
+        let n = fn_order.partition_point(|&(file, start, _)| (file, start) <= (at.file.0, at.start));
+        fn_order[..n]
+            .last()
+            .filter(|&&(file, _, _)| file == at.file.0)
+            .map(|&(_, _, i)| i)
+    };
+
+    let mut of_fn: HashMap<u32, usize> = HashMap::new();
+    let mut of_type: HashMap<u32, usize> = HashMap::new();
+    let mut of_local: HashMap<(usize, u32), usize> = HashMap::new();
+    for (i, f) in resolved.fns.iter().enumerate() {
+        // A method is deliberately not a binding: its call sites need the
+        // receiver's type, so they are the checker's and not in this table —
+        // and a rename that cannot see every occurrence must not start.
+        if f.owner.is_some() {
+            continue;
+        }
+        of_fn.insert(i as u32, index.bindings.len());
+        index.bindings.push(Binding {
+            name: spelled(&f.name),
+            declared_at: f.span,
+            uses: Vec::new(),
+            mentions: Vec::new(),
+            kind: if f.is_extern { "host function" } else { "function" },
+            scope: None,
+        });
+    }
+    for (i, t) in resolved.types.iter().enumerate() {
+        of_type.insert(i as u32, index.bindings.len());
+        index.bindings.push(Binding {
+            name: spelled(&t.name),
+            declared_at: t.span,
+            uses: Vec::new(),
+            mentions: Vec::new(),
+            kind: t.kind.describe(),
+            scope: None,
+        });
+    }
+    for (i, locals) in resolved.locals.iter().enumerate() {
+        for (j, l) in locals.iter().enumerate() {
+            // `self` is a keyword, and a synthetic slot was never written;
+            // neither is a name anyone can rename.
+            if l.synthetic || l.name == "self" {
+                continue;
+            }
+            of_local.insert((i, j as u32), index.bindings.len());
+            index.bindings.push(Binding {
+                name: l.name.clone(),
+                declared_at: l.span,
+                uses: Vec::new(),
+                mentions: Vec::new(),
+                kind: "local",
+                scope: Some(resolved.fns[i].span),
+            });
+        }
+    }
+    for (at, res) in &resolved.uses {
+        let found = match res {
+            Res::Fn(i) => of_fn.get(i).copied(),
+            Res::Type(i) => of_type.get(i).copied(),
+            // A qualified variant spells its enum's name, so it counts as a
+            // mention of the enum below. An unqualified one spells only its
+            // own name, which has no recorded declaration to group under.
+            Res::Variant(i, _) => of_type.get(i).copied(),
+            Res::Local(id) => owner_of(*at).and_then(|f| of_local.get(&(f, *id)).copied()),
+            Res::Builtin(_) => None,
+        };
+        let Some(b) = found else { continue };
+        let text = sources
+            .text(at.file)
+            .get(at.start as usize..at.end as usize)
+            .unwrap_or("");
+        let binding = &mut index.bindings[b];
+        if text == binding.name && !resolved.pinned.contains(at) {
+            binding.uses.push(*at);
+        } else if resolved.pinned.contains(at) || text.starts_with(&format!("{}.", binding.name)) {
+            binding.mentions.push(*at);
+        }
+        // Anything else — an unqualified variant, a use whose written form
+        // does not carry this name at all — is not an occurrence of it.
+    }
+    for b in &mut index.bindings {
+        b.uses.sort_by_key(|s| (s.file.0, s.start));
+        b.mentions.sort_by_key(|s| (s.file.0, s.start));
+    }
+
     index.uses.sort_by_key(|u| (u.at.file.0, u.at.start));
     index.symbols.sort_by_key(|s| (s.at.file.0, s.at.start));
     index
@@ -422,8 +687,9 @@ mod tests {
             assert!(!c.failed(), "{} failed:\n{}", name, c.render_diagnostics());
             match emit {
                 Emit::Check => {}
-                // Wasm is bytes, not text.
+                // Wasm and native are bytes, not text.
                 Emit::Wasm => assert!(c.wasm.is_some(), "wasm produced no module"),
+                Emit::Native => assert!(c.native.is_some(), "native produced no program"),
                 _ => assert!(!c.output.is_empty(), "{} produced no output", name),
             }
         }
@@ -448,7 +714,7 @@ mod tests {
         for n in Emit::NAMES {
             assert!(Emit::parse(n).is_some(), "{} does not parse", n);
         }
-        assert!(Emit::parse("native").is_none());
+        assert!(Emit::parse("object").is_none());
     }
 
     #[test]

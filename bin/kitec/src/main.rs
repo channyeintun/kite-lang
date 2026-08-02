@@ -22,15 +22,17 @@ USAGE:
     kitec doc   <file.kite>          the reference, from the doc comments
     kitec fix   <file.kite>          apply every machine-applicable suggestion
     kitec bundle <file.kite>         one executable that needs nothing installed
-    kitec pkg   [directory]          resolve `kite.toml` and write `kite.lock`
+    kitec pkg   [directory]          resolve dependency versions, write `kite.lock`
 
 OPTIONS:
     --release         build for release: `assert` is dropped, `require` is not
-    --offline         with `pkg`, refuse to fetch anything
+    --offline         with `pkg`, resolve only from what is already vendored
     --check           with `fmt`, report rather than rewrite
     --all             with `doc`, include what is not `pub`
-    --emit <stage>    check, ast, hir, mir, kbc, wasm
-    --out <dir>       where `--emit wasm` writes app.wasm and app.js
+    --native          with `run`, execute machine code under the JIT — no linker
+    --js-strings      with `--emit wasm`, a `str` is a real JavaScript string
+    --emit <stage>    check, ast, hir, mir, kbc, wasm, native
+    --out <dir>       where `--emit wasm` and `--emit native` write artefacts
     --explain <CODE>  explain a diagnostic code, e.g. --explain E0301
     --version
     --help
@@ -70,6 +72,8 @@ fn main() -> ExitCode {
     let mut include_private = false;
     let mut release = false;
     let mut offline = false;
+    let mut native = false;
+    let mut js_strings = false;
     let mut i = 0;
 
     while i < args.len() {
@@ -109,6 +113,14 @@ fn main() -> ExitCode {
             }
             "--release" => {
                 release = true;
+                i += 1;
+            }
+            "--native" => {
+                native = true;
+                i += 1;
+            }
+            "--js-strings" => {
+                js_strings = true;
                 i += 1;
             }
             "--offline" => {
@@ -176,8 +188,25 @@ fn main() -> ExitCode {
         return bundle::write(&path, &src, out_dir.as_deref(), release);
     }
 
+    // `run --native` is the same compilation `--emit native` performs; the
+    // two differ only in what happens to the machine code afterwards.
+    if native && emit.is_none() {
+        emit = Some(Emit::Native);
+    }
     let emit = emit.unwrap_or(Emit::Check);
-    let result = kite_driver::compile_with(&path, &src, emit, release);
+    // A `str` is either an index into a table the glue holds or the JavaScript
+    // string itself. The second needs the JS String Builtins, which every
+    // current browser and Node 23 upwards have — but not every engine — so it
+    // is asked for rather than assumed.
+    let strings = if js_strings {
+        kite_driver::Strings::Builtins
+    } else {
+        kite_driver::Strings::Table
+    };
+    if js_strings && emit != Emit::Wasm {
+        return fail("`--js-strings` only means anything with `--emit wasm`");
+    }
+    let result = kite_driver::compile_strings(&path, &src, emit, release, strings);
 
     if !result.diags.is_empty() {
         eprint!("{}", result.render_diagnostics());
@@ -201,8 +230,12 @@ fn main() -> ExitCode {
         if let Err(e) = std::fs::write(&wasm_path, &module.bytes) {
             return fail(&format!("cannot write `{}`: {}", wasm_path, e));
         }
-        let glue =
-            kite_driver::generate_glue_with_hosts(&module.strings, "app.wasm", &module.hosts);
+        let glue = kite_driver::generate_glue_for(
+            &module.strings,
+            "app.wasm",
+            &module.hosts,
+            strings,
+        );
         if let Err(e) = std::fs::write(&js_path, glue) {
             return fail(&format!("cannot write `{}`: {}", js_path, e));
         }
@@ -216,6 +249,27 @@ fn main() -> ExitCode {
         if let Err(e) = std::fs::write(&html_path, kite_driver::generate_page(name)) {
             return fail(&format!("cannot write `{}`: {}", html_path, e));
         }
+        // A program that listens gets an adapter that can listen for it. A page
+        // cannot open a socket, so this is a second entry point rather than
+        // another group in the glue — and a program that only fetches never
+        // sees it.
+        if kite_driver::listens(&module.hosts) {
+            let serve_path = format!("{}/serve.mjs", dir);
+            if let Err(e) = std::fs::write(&serve_path, kite_driver::generate_server("app.wasm")) {
+                return fail(&format!("cannot write `{}`: {}", serve_path, e));
+            }
+            eprintln!(
+                "wrote {} ({} bytes), {}, {} and {}\n\
+                 note: this program listens — run it with `node {}`",
+                wasm_path,
+                module.bytes.len(),
+                js_path,
+                html_path,
+                serve_path,
+                serve_path
+            );
+            return ExitCode::SUCCESS;
+        }
         eprintln!(
             "wrote {} ({} bytes), {} and {}",
             wasm_path,
@@ -224,6 +278,31 @@ fn main() -> ExitCode {
             html_path
         );
         return ExitCode::SUCCESS;
+    }
+
+    // The native backend: `run --native` executes under the JIT with no
+    // linker anywhere; anything else writes an object file and asks `cc` to
+    // join it with the runtime.
+    if let Some(program) = &result.native {
+        if command == "run" {
+            if !program.has_entry() {
+                return fail(&format!(
+                    "`{}` has no `main` function\n\nnote: a program needs `fn main()` as its \
+                     entry point",
+                    path
+                ));
+            }
+            let stdout = io::stdout();
+            let mut out = stdout.lock();
+            return match program.run(&mut out) {
+                Ok(()) => {
+                    let _ = out.flush();
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(&e),
+            };
+        }
+        return write_native(program, &path, out_dir.as_deref());
     }
 
     match command.as_str() {
@@ -368,6 +447,96 @@ fn fix_file(path: &str, src: &str) -> ExitCode {
         }
         Err(e) => fail(&format!("cannot write `{}`: {}", path, e)),
     }
+}
+
+/// `--emit native` — write the object file, then link it into an executable.
+///
+/// The object is written first and survives a failed link: someone
+/// cross-checking the codegen with `objdump` has a use for it that no
+/// executable serves.
+fn write_native(
+    program: &kite_driver::NativeProgram,
+    path: &str,
+    out_dir: Option<&str>,
+) -> ExitCode {
+    let dir = out_dir.unwrap_or(".");
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        return fail(&format!("cannot create `{}`: {}", dir, e));
+    }
+    let object = match program.object() {
+        Ok(bytes) => bytes,
+        Err(e) => return fail(&e),
+    };
+    let obj_path = format!("{}/app.o", dir);
+    if let Err(e) = std::fs::write(&obj_path, &object) {
+        return fail(&format!("cannot write `{}`: {}", obj_path, e));
+    }
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("app");
+    let exe_path = format!("{}/{}", dir, stem);
+    let Some(runtime) = find_runtime_lib() else {
+        eprintln!(
+            "wrote {} ({} bytes)\n\
+             note: `libkite_rt.a` was not found, so no executable was linked; \
+             set KITE_RT_LIB to its path, or link the object yourself",
+            obj_path,
+            object.len()
+        );
+        return ExitCode::SUCCESS;
+    };
+    let linked = std::process::Command::new("cc")
+        .arg(&obj_path)
+        .arg(&runtime)
+        .arg("-o")
+        .arg(&exe_path)
+        .output();
+    match linked {
+        Ok(o) if o.status.success() => {
+            eprintln!("wrote {} ({} bytes) and {}", obj_path, object.len(), exe_path);
+            ExitCode::SUCCESS
+        }
+        Ok(o) => fail(&format!(
+            "`cc` could not link `{}`:\n{}",
+            obj_path,
+            String::from_utf8_lossy(&o.stderr)
+        )),
+        Err(e) => {
+            // No linker is not no result: the object file stands, and the JIT
+            // path needs no linker at all.
+            eprintln!(
+                "wrote {} ({} bytes)\n\
+                 note: `cc` is unavailable ({}), so no executable was linked; \
+                 `kitec run --native` needs no linker",
+                obj_path,
+                object.len(),
+                e
+            );
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+/// Where the runtime's static library is. Next to this binary in a
+/// development tree, or wherever `KITE_RT_LIB` says in an installed one.
+fn find_runtime_lib() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("KITE_RT_LIB") {
+        let p = std::path::PathBuf::from(p);
+        return p.exists().then_some(p);
+    }
+    let exe = std::env::current_exe().ok()?;
+    let mut dir = exe.parent()?.to_path_buf();
+    // `target/debug/kitec` sits beside `libkite_rt.a`; a test binary sits one
+    // level further down, in `deps/`.
+    for _ in 0..3 {
+        let candidate = dir.join("libkite_rt.a");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        dir = dir.parent()?.to_path_buf();
+    }
+    None
 }
 
 /// `kitec fmt` — rewrite a file, or say whether it would change.

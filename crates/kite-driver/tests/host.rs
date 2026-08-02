@@ -428,6 +428,127 @@ fn crypto_binds_to_the_hosts_primitives() {
     );
 }
 
+/// Sealed text opens back to the plaintext, and stops opening the moment a
+/// character changes or the key is wrong — an authentication failure is an
+/// error, not a wrong answer. Importing the same hex twice gives keys that
+/// agree, which is what makes a stored key usable.
+#[test]
+fn aes_gcm_seals_opens_and_rejects_tampering() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let out = run_under_node(
+        "seal",
+        "use std/crypto\n\
+         async fn main() {\n\
+         \x20 let (key, kerr) = await crypto.generate_key()\n\
+         \x20 if kerr != nil {\n    io.print(\"keygen failed: \\(kerr.message())\")\n    return\n  }\n\
+         \x20 let (sealed, serr) = await crypto.seal(key, \"the plan, in the usual place\")\n\
+         \x20 if serr != nil {\n    io.print(\"seal failed: \\(serr.message())\")\n    return\n  }\n\
+         \x20 let (clear, oerr) = await crypto.open(key, sealed)\n\
+         \x20 if oerr != nil {\n    io.print(\"open failed: \\(oerr.message())\")\n    return\n  }\n\
+         \x20 io.print(clear)\n\
+         \x20 let (altered, terr) = await crypto.open(key, sealed + \"00\")\n\
+         \x20 io.print(\"tampered rejected \\(terr != nil)\")\n\
+         \x20 let (other, gerr) = await crypto.generate_key()\n\
+         \x20 if gerr != nil { return }\n\
+         \x20 let (stolen, werr) = await crypto.open(other, sealed)\n\
+         \x20 io.print(\"wrong key rejected \\(werr != nil)\")\n\
+         \x20 let material = crypto.random(32)\n\
+         \x20 let (a, ae) = await crypto.import_key(material)\n\
+         \x20 if ae != nil { return }\n\
+         \x20 let (b, be) = await crypto.import_key(material)\n\
+         \x20 if be != nil { return }\n\
+         \x20 let (again, aerr) = await crypto.seal(a, \"again\")\n\
+         \x20 if aerr != nil { return }\n\
+         \x20 let (back, berr) = await crypto.open(b, again)\n\
+         \x20 if berr != nil {\n    io.print(\"import failed: \\(berr.message())\")\n    return\n  }\n\
+         \x20 io.print(back)\n}\n",
+    );
+    assert_eq!(
+        out,
+        "the plan, in the usual place\ntampered rejected true\nwrong key rejected true\nagain\n",
+        "{}",
+        out
+    );
+}
+
+/// A signature verifies against the exported public key, and stops verifying
+/// when the message changes or the signature is not the real one.
+#[test]
+fn ed25519_signs_and_verifies() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let out = run_under_node(
+        "sign",
+        "use std/crypto\n\
+         async fn main() {\n\
+         \x20 let (pair, perr) = await crypto.signing_key()\n\
+         \x20 if perr != nil {\n    io.print(\"keygen failed: \\(perr.message())\")\n    return\n  }\n\
+         \x20 let (public, kerr) = await crypto.verify_key(pair)\n\
+         \x20 if kerr != nil { return }\n\
+         \x20 io.print(public.len())\n\
+         \x20 let (signature, serr) = await crypto.sign(pair, \"a promise\")\n\
+         \x20 if serr != nil { return }\n\
+         \x20 io.print(signature.len())\n\
+         \x20 let (good, gerr) = await crypto.verify(public, \"a promise\", signature)\n\
+         \x20 if gerr != nil {\n    io.print(\"verify failed: \\(gerr.message())\")\n    return\n  }\n\
+         \x20 let (other, oerr) = await crypto.verify(public, \"another promise\", signature)\n\
+         \x20 if oerr != nil { return }\n\
+         \x20 let (forged, ferr) = await crypto.verify(public, \"a promise\", crypto.random(64))\n\
+         \x20 if ferr != nil { return }\n\
+         \x20 io.print(\"\\(good) \\(other) \\(forged)\")\n}\n",
+    );
+    assert_eq!(out, "64\n128\ntrue false false\n", "{}", out);
+}
+
+/// Two sides that exchange public halves derive the same key — one seals and
+/// the other opens — and a third pair derives something else, which cannot.
+#[test]
+fn x25519_agreement_derives_the_same_key_on_both_sides() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let out = run_under_node(
+        "agree",
+        "use std/crypto\n\
+         async fn main() {\n\
+         \x20 let (alice, aerr) = await crypto.agreement_key()\n\
+         \x20 if aerr != nil {\n    io.print(\"keygen failed: \\(aerr.message())\")\n    return\n  }\n\
+         \x20 let (bob, berr) = await crypto.agreement_key()\n\
+         \x20 if berr != nil { return }\n\
+         \x20 let (to_bob, e1) = await crypto.exchange_key(alice)\n\
+         \x20 if e1 != nil { return }\n\
+         \x20 let (to_alice, e2) = await crypto.exchange_key(bob)\n\
+         \x20 if e2 != nil { return }\n\
+         \x20 let (hers, e3) = await crypto.agree(alice, to_alice)\n\
+         \x20 if e3 != nil {\n    io.print(\"agree failed: \\(e3.message())\")\n    return\n  }\n\
+         \x20 let (his, e4) = await crypto.agree(bob, to_bob)\n\
+         \x20 if e4 != nil { return }\n\
+         \x20 let (sealed, e5) = await crypto.seal(hers, \"meet where we said\")\n\
+         \x20 if e5 != nil { return }\n\
+         \x20 let (clear, e6) = await crypto.open(his, sealed)\n\
+         \x20 if e6 != nil {\n    io.print(\"shared keys differ: \\(e6.message())\")\n    return\n  }\n\
+         \x20 io.print(clear)\n\
+         \x20 let (eve, e7) = await crypto.agreement_key()\n\
+         \x20 if e7 != nil { return }\n\
+         \x20 let (guessed, e8) = await crypto.agree(eve, to_alice)\n\
+         \x20 if e8 != nil { return }\n\
+         \x20 let (overheard, e9) = await crypto.open(guessed, sealed)\n\
+         \x20 io.print(\"eavesdropper rejected \\(e9 != nil)\")\n}\n",
+    );
+    assert_eq!(
+        out,
+        "meet where we said\neavesdropper rejected true\n",
+        "{}",
+        out
+    );
+}
+
 /// A program's own boundary: declared in Kite, supplied by the page.
 #[test]
 fn a_program_may_declare_its_own_host() {

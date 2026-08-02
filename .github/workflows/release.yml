@@ -13,6 +13,12 @@ on:
 
 permissions:
   contents: write
+  # Sigstore's keyless signing: the workflow's own OIDC token is the identity,
+  # so there is no private key to hold, lose or have stolen. For a compiler
+  # that is the right trade — a signing key kept by one person is a single
+  # point of failure in exactly the artefact where "trusting trust" is not
+  # hypothetical.
+  id-token: write
 
 jobs:
   build:
@@ -73,8 +79,39 @@ jobs:
           name: ${{ matrix.target }}
           path: dist/*.*
 
+  # The compiler as a WebAssembly module.
+  #
+  # The site already runs it — that is what makes the playground the compiler
+  # rather than a re-implementation of it — and attaching it to the release
+  # means anything that wants to compile Kite in a browser can have it without
+  # building the site first.
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        env:
+          SOURCE_DATE_EPOCH: "0"
+          RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/kite -C debuginfo=0"
+        run: cargo build --release --locked -p kite-playground --target wasm32-unknown-unknown
+      - name: package
+        run: |
+          set -e
+          mkdir -p dist
+          cp target/wasm32-unknown-unknown/release/kite_playground.wasm dist/kitec-${{ github.ref_name }}.wasm
+          cd dist
+          shasum -a 256 "kitec-${{ github.ref_name }}.wasm" | cut -d' ' -f1 > "kitec-${{ github.ref_name }}.wasm.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm
+          path: dist/*.*
+
   publish:
-    needs: build
+    needs: [build, wasm]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -84,22 +121,52 @@ jobs:
         run: |
           cd dist
           rm -f SHA256SUMS
-          for f in *.tar.gz *.zip; do
+          for f in *.tar.gz *.zip *.wasm; do
             [ -e "$f" ] || continue
             printf '%s  %s\n' "$(cat "$f.sha256")" "$f" >> SHA256SUMS
           done
           cat SHA256SUMS
+      # One signature, over the file that names every artefact. Signing each
+      # archive separately would be five things to check instead of one, and
+      # the checksum file already binds them all.
+      - uses: sigstore/cosign-installer@v3
+      - name: sign the checksums
+        run: |
+          cd dist
+          cosign sign-blob --yes \
+            --bundle SHA256SUMS.sigstore.json \
+            SHA256SUMS
+      # The manifests come out of the release rather than being written beside
+      # it and hoped to match: `render.sh` reads the checksums that were just
+      # computed and signed.
+      - name: render the package manifests
+        run: ./packaging/render.sh "${{ github.ref_name }}" dist
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.wasm
             dist/SHA256SUMS
+            dist/SHA256SUMS.sigstore.json
+            packaging/out/kite.rb
+            packaging/out/kite.json
+            packaging/out/PKGBUILD
           body: |
-            Binaries for macOS, Linux (static, musl) and Windows.
+            Binaries for macOS, Linux (static, musl) and Windows, and `kitec`
+            itself as a WebAssembly module.
 
-            Verify what you downloaded before running it:
+            Verify what you downloaded before running it. The checksum file is
+            signed with Sigstore — no key is held anywhere, the identity is
+            this workflow:
 
             ```
+            cosign verify-blob SHA256SUMS \
+              --bundle SHA256SUMS.sigstore.json \
+              --certificate-identity-regexp 'https://github\.com/${{ github.repository }}/' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com
             shasum -a 256 -c SHA256SUMS --ignore-missing
             ```
+
+            `kite.rb`, `kite.json` and `PKGBUILD` are this release's Homebrew,
+            Scoop and AUR manifests, with the checksums above already in them.

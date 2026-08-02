@@ -1,0 +1,44 @@
+{
+    "##": [
+        "Scoop manifest for Kite. Windows only; the archive holds two binaries",
+        "and the two documents that describe the language.",
+        "",
+        "The hash is a placeholder until a release fills it in.",
+        "`packaging/render.sh <version>` writes the real one from that",
+        "release's own SHA256SUMS, which is the only place it should come from.",
+        "",
+        "`checkver` and `autoupdate` let a bucket follow releases without",
+        "anyone editing this file: Scoop reads the tag, rewrites the URL, and",
+        "takes the hash from the release's own checksum file rather than",
+        "computing one from a download it cannot vouch for."
+    ],
+    "version": "0.0.0",
+    "description": "A small, explicit programming language for application software, with WebAssembly as its primary target",
+    "homepage": "https://github.com/channyeintun/kite-lang",
+    "license": "MIT|Apache-2.0",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/channyeintun/kite-lang/releases/download/v0.0.0/kite-v0.0.0-x86_64-pc-windows-msvc.zip",
+            "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "extract_dir": "kite-v0.0.0-x86_64-pc-windows-msvc"
+        }
+    },
+    "bin": [
+        "kitec.exe",
+        "kite-lsp.exe"
+    ],
+    "checkver": {
+        "github": "https://github.com/channyeintun/kite-lang"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/channyeintun/kite-lang/releases/download/v$version/kite-v$version-x86_64-pc-windows-msvc.zip",
+                "extract_dir": "kite-v$version-x86_64-pc-windows-msvc"
+            }
+        },
+        "hash": {
+            "url": "https://github.com/channyeintun/kite-lang/releases/download/v$version/SHA256SUMS"
+        }
+    }
+}

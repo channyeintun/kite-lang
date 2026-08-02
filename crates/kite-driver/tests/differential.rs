@@ -1,17 +1,20 @@
 //! Differential testing across backends.
 //!
-//! Every program is compiled twice — to bytecode and to WebAssembly — and run
-//! on both. The outputs must match.
+//! Every program is compiled three ways — to bytecode, to WebAssembly, and to
+//! native machine code through Cranelift — and run on all three. The outputs
+//! must match.
 //!
-//! This is the highest-value test in the tree. Two independent implementations
-//! that must agree finds codegen bugs almost for free, and codegen bugs are the
-//! hardest class to find any other way. It is also the reason the bytecode VM
-//! was built before the Wasm backend even though Wasm is the point of the
-//! project.
+//! This is the highest-value test in the tree. Three independent
+//! implementations that must agree find codegen bugs almost for free, and
+//! codegen bugs are the hardest class to find any other way. It is also the
+//! reason the bytecode VM was built before the Wasm backend even though Wasm
+//! is the point of the project.
 //!
 //! The Wasm half needs Node. When Node is absent the module is still compiled
 //! and validated; only the execution comparison is skipped, and the test says
-//! so rather than silently passing.
+//! so rather than silently passing. The native half runs under the JIT and
+//! needs no linker; the one test that does need `cc` — linking a real
+//! executable — skips the same way when there is none.
 
 use kite_driver::{compile, Emit};
 use std::process::Command;
@@ -756,6 +759,56 @@ fn main() {
         "evaluation-order",
         "fn step(n: int) -> int {\n  io.print(n)\n  return n\n}\nfn main() {\n  let x = step(1) + step(2)\n  io.print(x)\n}\n",
     ),
+    // A derived body is generated Kite and nothing downstream knows it was
+    // generated, so this is here for the same reason everything else is: if
+    // the two backends disagreed about it they would be disagreeing about
+    // ordinary code, and this is where that is found.
+    (
+        "derived-debug-and-hash",
+        "@derive(Debug, Hash)\n\
+         enum Shape {\n  Dot\n  Rect(int, int)\n  Named(label: str, size: float)\n}\n\
+         @derive(Debug, Hash)\n\
+         struct Scene {\n  title: str\n  shapes: [Shape]\n  counts: {str: int}\n  note: Option<str>\n}\n\
+         fn main() {\n\
+         \x20 let s = Scene{\n\
+         \x20   title: \"one\",\n\
+         \x20   shapes: [Shape.Dot, Shape.Rect(2, 3), Shape.Named(label: \"n\", size: 1.5)],\n\
+         \x20   counts: {\"k\": 2},\n\
+         \x20   note: nil,\n\
+         \x20 }\n\
+         \x20 io.print(s.debug())\n\
+         \x20 io.print(s.hash())\n\
+         \x20 io.print(Scene{ title: \"one\", shapes: s.shapes, counts: s.counts, note: \"x\" }.debug())\n\
+         \x20 io.print(Shape.Rect(2, 3).hash() == Shape.Rect(2, 3).hash())\n\
+         \x20 io.print(Shape.Rect(2, 3).hash() == Shape.Rect(3, 2).hash())\n}\n",
+    ),
+    (
+        "derived-json-round-trip",
+        "use std/json\n\
+         @derive(Encode, Decode, Debug)\n\
+         enum Colour {\n  Red\n  Rgb(int, int, int)\n}\n\
+         @derive(Encode, Decode, Debug)\n\
+         struct Palette {\n  name: str\n  colours: [Colour]\n  ratio: float\n  tag: Option<str>\n}\n\
+         fn round(p: Palette) -> (Palette, error) {\n\
+         \x20 let text = json.stringify(p.encode())\n\
+         \x20 io.print(text)\n\
+         \x20 let (doc, err) = json.parse(text)\n\
+         \x20 check err\n\
+         \x20 return Palette.decode(doc)\n}\n\
+         fn main() {\n\
+         \x20 let p = Palette{ name: \"warm\", colours: [Colour.Red, Colour.Rgb(1, 2, 3)], ratio: 0.5, tag: nil }\n\
+         \x20 let (back, err) = round(p)\n\
+         \x20 if err != nil {\n    io.print(err.message())\n    return\n  }\n\
+         \x20 io.print(back.debug())\n\
+         \x20 let (bad, berr) = Palette.decode(json.Json.Null)\n\
+         \x20 io.print(if berr == nil { \"?\" } else { berr.message() })\n}\n",
+    ),
+    (
+        "code-at-reads-a-character",
+        "fn main() {\n  let s = \"h\\u{e9}llo\"\n  io.print(s.code_at(0))\n  io.print(s.code_at(1))\n\
+         \x20 io.print(s.code_at(99))\n  io.print(hash_str(\"abc\") == hash_str(\"abc\"))\n\
+         \x20 io.print(hash_str(\"abc\") == hash_str(\"abd\"))\n}\n",
+    ),
 ];
 
 fn run_on_vm(name: &str, src: &str) -> String {
@@ -783,6 +836,36 @@ fn node_available() -> bool {
         .arg("--version")
         .output()
         .is_ok_and(|o| o.status.success())
+}
+
+fn cc_available() -> bool {
+    Command::new("cc")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+fn run_on_native(name: &str, src: &str) -> String {
+    run_on_native_at(&format!("{}.kite", name), name, src)
+}
+
+/// Compile to machine code and run in this process under the JIT — no linker,
+/// which is what lets the whole corpus run natively on any machine that can
+/// build the compiler.
+fn run_on_native_at(path: &str, name: &str, src: &str) -> String {
+    let c = compile(path, src, Emit::Native);
+    assert!(
+        !c.failed(),
+        "{} does not compile natively:\n{}",
+        name,
+        c.render_diagnostics()
+    );
+    let program = c.native.as_ref().expect("a native program");
+    let mut out = Vec::new();
+    program
+        .run(&mut out)
+        .unwrap_or_else(|e| panic!("{} failed on the native backend: {}", name, e));
+    String::from_utf8(out).expect("output is valid UTF-8")
 }
 
 fn run_on_wasm(name: &str, src: &str, dir: &std::path::Path) -> String {
@@ -857,10 +940,32 @@ fn every_example_agrees_across_backends() {
         let dir = root.join(&name);
         std::fs::create_dir_all(&dir).expect("create work directory");
 
-        // Every example must at least run on the bytecode target.
         let full = path.to_string_lossy().to_string();
+
+        // An example that declares a host boundary cannot run here at all:
+        // neither the bytecode VM nor the JIT has a network, and saying so is
+        // the point of a declared boundary. Those examples are exercised where
+        // a host exists — `tests/host.rs` and `tests/serve.rs`, under Node —
+        // and are counted as skipped here rather than quietly dropped.
+        let declared = compile(&full, &src, Emit::Wasm);
+        if declared.wasm.as_ref().is_some_and(|m| !m.hosts.is_empty()) {
+            skipped.push(format!("{} (needs a host)", name));
+            continue;
+        }
+
+        // Every other example must at least run on the bytecode target.
         let vm = run_on_vm_at(&full, &name, &src);
         total += 1;
+
+        // And on the native backend, which refuses nothing and needs nothing
+        // installed.
+        let native = run_on_native_at(&full, &name, &src);
+        if vm != native {
+            mismatches.push(format!(
+                "{}:\n  vm:     {:?}\n  native: {:?}",
+                name, vm, native
+            ));
+        }
 
         // The Wasm target still refuses a few constructs. Those examples are
         // counted as skipped rather than silently passing, so the count below
@@ -890,32 +995,39 @@ fn every_example_agrees_across_backends() {
 }
 
 #[test]
-fn both_backends_agree() {
-    if !node_available() {
+fn all_backends_agree() {
+    let node = node_available();
+    if !node {
         eprintln!("skipping the wasm half: node is not on PATH");
         // The modules are still built and validated by kite-codegen-wasm's own
-        // tests, so this is a reduced check rather than no check.
-        for (name, src) in PROGRAMS {
-            let _ = run_on_vm(name, src);
-        }
-        return;
+        // tests, so this is a reduced check rather than no check — the VM and
+        // the native backend still compare on every program.
     }
 
     let root = std::env::temp_dir().join(format!("kite-diff-{}", std::process::id()));
     let mut mismatches = Vec::new();
 
     for (name, src) in PROGRAMS {
-        let dir = root.join(name);
-        std::fs::create_dir_all(&dir).expect("create work directory");
-
         let vm = run_on_vm(name, src);
-        let wasm = run_on_wasm(name, src, &dir);
 
-        if vm != wasm {
+        let native = run_on_native(name, src);
+        if vm != native {
             mismatches.push(format!(
-                "{}:\n  vm:   {:?}\n  wasm: {:?}",
-                name, vm, wasm
+                "{}:\n  vm:     {:?}\n  native: {:?}",
+                name, vm, native
             ));
+        }
+
+        if node {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).expect("create work directory");
+            let wasm = run_on_wasm(name, src, &dir);
+            if vm != wasm {
+                mismatches.push(format!(
+                    "{}:\n  vm:   {:?}\n  wasm: {:?}",
+                    name, vm, wasm
+                ));
+            }
         }
     }
 
@@ -927,4 +1039,74 @@ fn both_backends_agree() {
         mismatches.len(),
         mismatches.join("\n\n")
     );
+}
+
+/// The object-file path, through the system linker: one program built into a
+/// real executable and run. The JIT above covers the codegen; this covers the
+/// relocations, the symbol names and the `staticlib` runtime — the parts only
+/// a linker exercises.
+#[test]
+fn a_linked_executable_agrees() {
+    if !cc_available() {
+        eprintln!("skipping the linked-executable check: `cc` is not on PATH");
+        return;
+    }
+    let runtime = find_runtime_lib();
+    let Some(runtime) = runtime else {
+        eprintln!("skipping the linked-executable check: libkite_rt.a was not built");
+        return;
+    };
+
+    let (name, src) = PROGRAMS
+        .iter()
+        .find(|(n, _)| *n == "structs")
+        .expect("the corpus has a structs program");
+    let vm = run_on_vm(name, src);
+
+    let c = compile(format!("{}.kite", name), src, Emit::Native);
+    assert!(!c.failed(), "{}", c.render_diagnostics());
+    let object = c
+        .native
+        .as_ref()
+        .expect("a native program")
+        .object()
+        .expect("an object file");
+
+    let dir = std::env::temp_dir().join(format!("kite-link-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create work directory");
+    let obj_path = dir.join("app.o");
+    let exe_path = dir.join("app");
+    std::fs::write(&obj_path, &object).expect("write object");
+    let linked = Command::new("cc")
+        .arg(&obj_path)
+        .arg(&runtime)
+        .arg("-o")
+        .arg(&exe_path)
+        .output()
+        .expect("cc runs");
+    assert!(
+        linked.status.success(),
+        "linking failed:\n{}",
+        String::from_utf8_lossy(&linked.stderr)
+    );
+    let ran = Command::new(&exe_path).output().expect("the executable runs");
+    assert!(ran.status.success(), "the executable exited nonzero");
+    let native = String::from_utf8(ran.stdout).expect("output is valid UTF-8");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(vm, native, "the linked executable disagrees with the VM");
+}
+
+/// The runtime's static library, next to the test binary in the target
+/// directory — where Cargo put it when it built the workspace.
+fn find_runtime_lib() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let mut dir = exe.parent()?.to_path_buf();
+    for _ in 0..3 {
+        let candidate = dir.join("libkite_rt.a");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        dir = dir.parent()?.to_path_buf();
+    }
+    None
 }

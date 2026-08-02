@@ -1,0 +1,23 @@
+// The site's deployment: Cloudflare Workers, serving `site/` as static assets.
+//
+// There is no Worker script. `site/` is a directory of files that any static
+// server can serve, and this deploys it as exactly that — the same bytes
+// `site/build.sh` produces, uploaded and served from Cloudflare's edge.
+{
+  "name": "kite-lang",
+  "compatibility_date": "2026-08-01",
+
+  "assets": {
+    "directory": "./site"
+  },
+
+  // An exact hostname match each, so both spellings of the domain answer.
+  "routes": [
+    { "pattern": "kite-lang.dev", "custom_domain": true },
+    { "pattern": "www.kite-lang.dev", "custom_domain": true }
+  ],
+
+  "observability": {
+    "enabled": true
+  }
+}

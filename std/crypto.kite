@@ -17,6 +17,12 @@
 //   * **Secrets are compared with `crypto.equal`, not `==`.** Structural
 //     equality short-circuits, which is a timing oracle. The compiler warns
 //     when a value that came from here is compared with `==`.
+//
+// Keys are the same idea carried further. A key here is an opaque handle to
+// material the host holds: it cannot be printed, it cannot wander into a log,
+// and the private half of a pair cannot be exported at all — not as a
+// discipline the caller must keep, but because the material never crosses the
+// boundary in the first place.
 
 use std/task
 
@@ -36,6 +42,37 @@ extern fn hmac_start(algorithm: str, key: str, text: str) -> int
 
 @host("crypto")
 extern fn derive_start(password: str, salt_hex: str, iterations: int) -> int
+
+/// Keys are created on the host and stay there: what comes back through
+/// `work_result` is a handle, as decimal text. `kind` is the WebCrypto
+/// algorithm name — `AES-GCM`, `Ed25519` or `X25519`.
+@host("crypto")
+extern fn key_generate_start(kind: str) -> int
+
+@host("crypto")
+extern fn key_import_start(material_hex: str) -> int
+
+/// The public half of a key pair, exported as hex.
+@host("crypto")
+extern fn key_public_start(key: int) -> int
+
+@host("crypto")
+extern fn seal_start(key: int, nonce_hex: str, plaintext: str) -> int
+
+@host("crypto")
+extern fn open_start(key: int, nonce_hex: str, cipher_hex: str) -> int
+
+@host("crypto")
+extern fn sign_start(key: int, text: str) -> int
+
+@host("crypto")
+extern fn verify_start(public_hex: str, text: str, signature_hex: str) -> int
+
+/// X25519 agreement with the other side's public key, then HKDF — what comes
+/// back is a handle to a fresh AES-GCM key, and the raw secret stays on the
+/// host.
+@host("crypto")
+extern fn agree_start(key: int, public_hex: str) -> int
 
 /// 0 while working, 1 when the answer is ready, 2 when it failed.
 @host("crypto")
@@ -123,6 +160,167 @@ pub async fn password_verify(password: str, stored: str) -> (bool, error) {
     return equal(digest, parts[3]), nil
 }
 
+// ---- keys -------------------------------------------------------------------
+
+/// A symmetric key for `seal` and `open`.
+///
+/// A key is a handle, not text: the material lives on the host's side of the
+/// boundary, and this struct only names it. Nothing here implements `Display`,
+/// so a key cannot reach a log by way of `io.print`, and comparing two keys
+/// with `==` compares handles — there is no secret for the comparison to leak.
+/// There is no export either: a generated key lives as long as the program,
+/// and a key that must outlive it should come through `import_key`, whose hex
+/// the caller already holds.
+pub struct Key {
+    handle: int
+}
+
+/// An Ed25519 key pair for `sign`. The public half is exported with
+/// `verify_key`; the private half never crosses the boundary at all, which is
+/// what makes it impossible to leak rather than merely discouraged.
+pub struct SigningKey {
+    handle: int
+}
+
+/// An X25519 key pair for `agree`. The public half is exported with
+/// `exchange_key` and handed to the other side; the private half stays on the
+/// host, as with `SigningKey`.
+pub struct AgreementKey {
+    handle: int
+}
+
+/// A new random 256-bit AES-GCM key, generated and held by the host.
+///
+/// The key is deliberately ephemeral: there is no way to get its material
+/// out, so it lasts as long as the program does and no longer. A key that
+/// must be stored or shared starts as hex the caller already has —
+/// `import_key(crypto.random(32))` — because material that was never in the
+/// program cannot be asked for later.
+pub async fn generate_key() -> (Key, error) {
+    let (handle, err) = await finish_key(key_generate_start("AES-GCM"), "generate_key")
+    check err
+    return Key{ handle: handle }, nil
+}
+
+/// A 256-bit AES-GCM key from 64 hex characters the caller already holds:
+/// from `crypto.random(32)`, a configuration store, or a derivation.
+///
+/// Import is one-way. The hex goes in and a handle comes out, and the module
+/// never hands material back — keeping the source hex safe is the caller's
+/// side of the bargain.
+pub async fn import_key(material: str) -> (Key, error) {
+    let (handle, err) = await finish_key(key_import_start(material), "import_key")
+    check err
+    return Key{ handle: handle }, nil
+}
+
+// ---- sealing ----------------------------------------------------------------
+
+/// `plaintext`, sealed under `key`: encrypted and authenticated AES-256-GCM,
+/// as text that can travel anywhere text can.
+///
+/// The 96-bit nonce is generated fresh on every call and carried in the
+/// result. It is not a parameter, because a nonce that can be passed is a
+/// nonce that will eventually be passed twice, and a repeated nonce under GCM
+/// gives away the authentication key. The result is `gcm$nonce$ciphertext` —
+/// the shape `password_hash` uses, for the same reason: everything needed to
+/// open it travels with it.
+pub async fn seal(key: Key, plaintext: str) -> (str, error) {
+    let nonce = random_hex(12)
+    let (cipher, err) = await finish(seal_start(key.handle, nonce, plaintext), "seal")
+    check err
+    return "gcm$\(nonce)$\(cipher)", nil
+}
+
+/// The plaintext a `seal` under the same key produced.
+///
+/// A failure is an error, not a wrong answer: GCM authenticates before it
+/// decrypts, so sealed text that was altered in transit — or sealed under a
+/// different key — is reported, never returned as garbage.
+pub async fn open(key: Key, sealed: str) -> (str, error) {
+    let parts = split(sealed, "$")
+    if parts.len() != 3 {
+        return _, errors.new("crypto open: not sealed text")
+    }
+    if parts[0] != "gcm" {
+        return _, errors.new("crypto open: not sealed text")
+    }
+    return await finish(open_start(key.handle, parts[1], parts[2]), "open")
+}
+
+// ---- signing ----------------------------------------------------------------
+
+/// A new Ed25519 key pair for signing.
+///
+/// The pair is ephemeral for the same reason a generated key is: the private
+/// half has no way out, so it cannot be stored and cannot be stolen. A
+/// program that needs a signature to outlive it keeps the *public* half —
+/// `verify_key` — which is the only part a verifier ever needs.
+pub async fn signing_key() -> (SigningKey, error) {
+    let (handle, err) = await finish_key(key_generate_start("Ed25519"), "signing_key")
+    check err
+    return SigningKey{ handle: handle }, nil
+}
+
+/// The public half of a signing pair, as 64 hex characters.
+///
+/// This is the one thing about a pair that is exportable, because it is the
+/// half meant to be given away: it verifies, and cannot sign.
+pub async fn verify_key(key: SigningKey) -> (str, error) {
+    return await finish(key_public_start(key.handle), "verify_key")
+}
+
+/// The Ed25519 signature of `text` under the pair's private half, as hex.
+pub async fn sign(key: SigningKey, text: str) -> (str, error) {
+    return await finish(sign_start(key.handle, text), "sign")
+}
+
+/// Whether `signature` is `text`, signed by the pair whose public half
+/// `public` is.
+///
+/// The public key is hex rather than a type of its own because it is the one
+/// piece of key material that is public: it arrives from the other side as
+/// text, and a wrapper would add a step without adding a guarantee. A
+/// signature that does not match answers false; a public key that is not one
+/// at all is an error.
+pub async fn verify(public: str, text: str, signature: str) -> (bool, error) {
+    let (answer, err) = await finish(verify_start(public, text, signature), "verify")
+    check err
+    return answer == "true", nil
+}
+
+// ---- key agreement ----------------------------------------------------------
+
+/// A new X25519 key pair for key agreement. As with a signing pair, the
+/// private half never leaves the host.
+pub async fn agreement_key() -> (AgreementKey, error) {
+    let (handle, err) = await finish_key(key_generate_start("X25519"), "agreement_key")
+    check err
+    return AgreementKey{ handle: handle }, nil
+}
+
+/// The public half of an agreement pair, as 64 hex characters — the piece
+/// each side hands the other before `agree`.
+pub async fn exchange_key(key: AgreementKey) -> (str, error) {
+    return await finish(key_public_start(key.handle), "exchange_key")
+}
+
+/// The key this pair agrees with `their_public` — the other side's
+/// `exchange_key`. Both sides compute the same `Key`; nobody watching the
+/// exchange can.
+///
+/// What comes back is a sealing key, not the raw agreement output. A raw
+/// X25519 secret is a curve point with structure — some bits are fixed, and
+/// related public keys produce related secrets — so handing it out as a key
+/// would quietly weaken whatever used it. The host runs it through
+/// HKDF-SHA-256 instead, which spreads it into a uniform 256-bit AES-GCM key,
+/// and the raw output never crosses the boundary at all.
+pub async fn agree(key: AgreementKey, their_public: str) -> (Key, error) {
+    let (handle, err) = await finish_key(agree_start(key.handle, their_public), "agree")
+    check err
+    return Key{ handle: handle }, nil
+}
+
 /// Wait for a host operation, and turn a failure into an error value.
 async fn finish(id: int, what: str) -> (str, error) {
     for work_state(id) == 0 {
@@ -133,4 +331,15 @@ async fn finish(id: int, what: str) -> (str, error) {
         return _, errors.new("crypto \(what): \(work_error(id))")
     }
     return work_result(id), nil
+}
+
+/// Wait for a host operation that answers with a key handle.
+async fn finish_key(id: int, what: str) -> (int, error) {
+    let (slot, err) = await finish(id, what)
+    check err
+    let handle = parse_int(slot)
+    if handle == nil {
+        return _, errors.new("crypto \(what): the host answered \"\(slot)\", not a key handle")
+    }
+    return handle, nil
 }

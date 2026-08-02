@@ -291,6 +291,11 @@ pub struct ResolveMap {
     pub uses: HashMap<Span, Res>,
     /// Binding occurrences, keyed by the span of the introduced name.
     pub bindings: HashMap<Span, u32>,
+    /// Spans that also spell a struct field: the `x` of a shorthand
+    /// `Point{ x }`, in a literal or a pattern. The one identifier serves two
+    /// roles, so a tool that rewrites the binding's name — rename — must not
+    /// touch these, or the field stops matching its declaration.
+    pub pinned: Vec<Span>,
     /// Unqualified variant names, so `match shape { Circle(r) => … }` works
     /// without writing `Shape.Circle`. Ambiguous names are removed and must be
     /// qualified.
@@ -1107,8 +1112,11 @@ impl<'a> FnResolver<'a> {
                 for f in fields {
                     match &f.pattern {
                         Some(x) => self.pattern(x),
-                        // `Point{ x }` binds `x`.
+                        // `Point{ x }` binds `x`. The one identifier is both
+                        // the field's name and the binding's, so it is pinned:
+                        // renaming the binding here would rename the field.
                         None => {
+                            self.map.pinned.push(f.name.span);
                             self.declare(&f.name, false, false);
                         }
                     }
@@ -1249,6 +1257,16 @@ impl<'a> FnResolver<'a> {
                     self.expr(b);
                 }
                 for f in &lit.fields {
+                    // The parser desugars a shorthand `Point{ x }` into
+                    // `x: x` with both nodes on one span. That span is both
+                    // the field's name and the value's, so it is pinned —
+                    // rewriting it as a use of the binding would rename the
+                    // field along with it.
+                    if let Expr::Path(p) = &f.value {
+                        if p.span == f.name.span {
+                            self.map.pinned.push(p.span);
+                        }
+                    }
                     self.expr(&f.value);
                 }
             }

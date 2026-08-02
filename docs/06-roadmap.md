@@ -419,7 +419,7 @@ valid. `?.` and the `?T` type sigil went with it; the optional type is spelled
 
 ---
 
-## Phase 4 — WebAssembly backend ✅ **complete, less JS String Builtins**
+## Phase 4 — WebAssembly backend ✅ **complete, JS String Builtins included**
 
 `kite-codegen-wasm` emits WebAssembly directly via `wasm-encoder` — no LLVM.
 
@@ -462,10 +462,32 @@ way.
 
 2. ~~GC structs and arrays~~ ✅
 3. ~~Enums via subtyped variant records~~ ✅
-4. `str` as `externref` with JS String Builtins — **not done**. A `str` is a
-   constant index into a table the glue holds, which needs no linear memory at
-   all and costs one call per operation. Builtins would make a string a real JS
-   string and the boundary free; it is an optimisation, not a gap.
+4. ~~`str` as `externref` with JS String Builtins~~ ✅ — `--js-strings`. A `str`
+   becomes the JavaScript string itself: constants arrive as **imported
+   globals whose names are the literals**, which the engine synthesises under
+   the imported-string-constants option, and `+` and `==` are compiled to
+   intrinsics rather than to calls into the glue. There is then no table, no
+   interning, and nothing to look up when a string crosses to a DOM API.
+
+   **Two builtins are taken and the rest deliberately are not.** `length`,
+   `charCodeAt` and `substring` index by **UTF-16 code unit**, and Kite counts
+   **characters** — so a program holding an emoji would get one answer from
+   this backend and another from the bytecode VM, which is the single thing
+   the differential suite exists to prevent. `concat` and `equals` are exact at
+   any code point, so those two are intrinsics and `len`, `slice`, `index_of`,
+   `trim` and `code_at` stay host calls that count code points.
+
+   It is a **flag rather than the default**, because the builtins are not in
+   every engine that runs WasmGC, and a module that will not instantiate is a
+   worse failure than one that makes a call. An engine without them gets a
+   diagnostic that names the flag rather than a link error nobody could place.
+
+   The import table is written out twice — once per representation — rather
+   than transformed, because no transform could tell a boolean `i32` from a
+   string `i32`. `crates/kite-driver/tests/js_strings.rs` compiles five
+   programs both ways, runs each on the bytecode VM as well, and requires all
+   three outputs to be identical: a representation change that a program could
+   observe would not be a representation change.
 5. ~~Trait objects with typed function-reference vtables~~ ✅ — a tag and a
    dispatcher per method, because WasmGC compares types structurally and
    `ref.test` cannot separate two structs of the same shape.
@@ -601,7 +623,7 @@ day either restriction lifts, the same source starts using cores.
 
 ---
 
-## Phase 6 — Standard library core ✅ **complete, less `decode<T>`**
+## Phase 6 — Standard library core ✅ **complete, and derivation with it**
 
 `std/math`, `std/time`, `std/errors`, `std/fmt`, `std/json`, `std/test`,
 `std/buffer`, `std/task`, `std/http`, `std/crypto` and `std/ui` — all written
@@ -641,14 +663,48 @@ programs in `tests/std/`, and they run on the bytecode VM *and* on WebAssembly
 under Node with the outputs compared. The third backend does not exist, so
 "all three" is two.
 
-**Remaining:** `json.decode<T>` — a document straight into a user's struct —
-needs compile-time derivation, and so do `Eq`, `Hash` and `Debug`. None of that
-machinery is built. Until it is, a document is taken apart with accessors that
-each yield an optional, which is more typing and no less safe.
+**Derivation landed, and it is a source-to-source expansion.** `@derive(Debug,
+Hash, Encode, Decode)` in front of a `struct` or an `enum` writes the bodies
+from the fields. What it produces is **ordinary Kite**, expanded before
+resolution: lexed, parsed, checked and lowered like anything a person wrote, so
+both backends handle it without knowing derivation exists, `--emit hir` shows
+exactly what ran, and a derived method is not privileged over a hand-written
+one. The whole expander is one file in the driver and nothing downstream
+changed.
+
+That choice costs precision and buys something worth more. It costs precision
+because the expander works from what a field's type is *written* as rather than
+from what it resolved to — resolution has not happened yet. It buys the absence
+of a second implementation of anything: there is no derived-code path through
+the checker, so there is nothing for the two to disagree about.
+
+Four things derive, and the two that do not are the more interesting half:
+
+- **`Display` does not derive**, for the reason recorded when it was built: a
+  mechanical rendering is wrong more often than right.
+- **`Eq` does not derive** either, and this came out differently from the plan.
+  `==` is already structural on every Kite value on both backends, so a derived
+  `Eq` would be a second spelling for what the language does anyway — and a
+  second spelling is a chance for two answers. The roadmap asked for four
+  things that wanted one machine; it turned out to be three.
+
+**`json.decode<T>` is spelled `User.decode(doc)`.** Kite has no turbofish, so a
+generic `decode` would take its type from the binding's annotation and nowhere
+else. An associated function on the type says the same thing where it can be
+read, and needs no new machinery: a trait method cannot return the implementing
+type without `Self` in return position, and an associated function has no such
+trouble.
+
+**One primitive was added for this**, and it is worth naming because the
+standard library has resisted adding any: `str.code_at(i)`, the code point at a
+character index or -1 past the end. `Hash` needs to see a character as a
+number, and so do an ordering and a number parser — three special boundaries,
+or one general one. The bytecode VM and the glue both walk code points, so the
+two agree on `"héllo日本"` the way they already did for `len`.
 
 ---
 
-## Phase 7 — Layout engine and DOM renderer 🟡 **the application runs; the diff does not**
+## Phase 7 — Layout engine and DOM renderer ✅ **the application runs, and the diff with it**
 
 Done: the flexbox subset in `std/ui.kite`, the Elm-shaped update loop, the DOM
 renderer, events — click, key, wheel, pointer move, down, up, and resize, all
@@ -670,18 +726,44 @@ that.
 
 A frame is **recorded before it is painted**, and an identical one is not
 painted at all: a pointer moving over nothing costs one comparison rather than
-a rebuilt tree. That is the half of damage tracking a model that did not change
-needs. Finding *which* rectangle changed needs a retained scene graph that
-survives between frames, and that is not written.
+a rebuilt tree.
 
-**Remaining:** the retained scene graph and its diff; validation against
-Taffy's fixtures; and a real screen-reader pass. Layout is over ordinary slices
-rather than flat buffers, which is the shape `buffer.F64` exists to change and
-has not yet.
+**The retained scene graph is the recording, kept.** A new frame is compared
+with the last rather than replacing it, and what comes out of the comparison is
+where the two differ and which rectangles that covers. The DOM renderer now
+holds one element per drawing call and **patches** the ones whose call changed,
+so a frame differing in one label costs one `textContent` write rather than a
+rebuilt subtree — `stage.replaceChildren()` per frame is gone. The canvas
+renderer clips to the damage and replays through it, so pixels outside never
+move.
+
+The diff is a common prefix and a common suffix rather than a general edit
+script, and that is the right limit for this shape of data: a `view` is a walk
+over a tree in a fixed order, so a change to a model changes a contiguous run
+of calls, and an inserted row shifts a suffix the suffix scan finds unmoved. A
+general LCS would find fewer differences on pathological input and cost more on
+every frame that is not pathological.
+
+Two things it refuses to do rather than guess at:
+
+- **A changed `clip` or `unclip` repaints everything.** A clip moves everything
+  drawn inside it, and the diff does not track which calls those were.
+- **Frames of different shapes are not patched in place.** Node *i* and call
+  *i* would no longer describe the same thing, and a renderer that guessed at
+  how nodes moved would be a second layout engine.
+
+The diff and the damage calculation are pure functions of two recordings, so
+they are tested directly, under Node, with no browser: `crates/kite-driver/tests/scene.rs`.
+What they *drive* — patching elements, clipping a canvas — needs a real
+document and is not tested, which is stated there rather than implied.
+
+**Remaining:** validation against Taffy's fixtures, and a real screen-reader
+pass. Layout is over ordinary slices rather than flat buffers, which is the
+shape `buffer.F64` exists to change and has not yet.
 
 ---
 
-## Phase 8 — Canvas renderer 🟡 **it draws; text is where it stops**
+## Phase 8 — Canvas renderer 🟡 **text is ordered, shaped and cached; pixels are not compared**
 
 Done: `canvasRenderer` over Canvas2D, drawing the same four calls the DOM
 renderer takes and switchable live in the same page against the same module.
@@ -703,52 +785,141 @@ tabulated — the host owns the font. It will not break a long URL, knows nothin
 of non-breaking spaces, and will leave a closing bracket at the start of a
 line.
 
-**Remaining, and it is most of the phase:** HarfBuzz-quality shaping, UAX #9
-bidi, a glyph atlas, per-rectangle damage tracking, WebGPU, and the
-golden-image tests against the DOM renderer across Latin, Cyrillic, Arabic,
-Hebrew, Devanagari, Thai, CJK and Burmese. Text is the reason this was called
-the hardest phase, and it still is.
+**UAX #9 landed, in Kite.** `std/text.kite` implements the bidirectional
+algorithm — P2–P3, X1–X10 with the directional status stack and isolates, W1–W7,
+N0 with BD16 bracket pairs, N1–N2, I1–I2, L1–L2 — and it lives beside the
+layout engine rather than in a renderer, because a renderer that decided what
+order text went in could disagree with the one next to it. The Bidi_Class table
+is a **compact range table whose covered blocks are listed in the source**;
+anything outside them is treated as `L`, and the comment says which scripts
+that answer is wrong for. L3 is absent, L4 is delegated to the renderer, and
+HL1–HL6 are not implemented.
+
+**Shaping is the joining half, and says so.** `join_arabic` is Joining_Type over
+the Arabic block mapped to Presentation Forms-B, with the mandatory lam-alef
+ligature and marks transparent to joining; a combining mark advances nothing.
+That is the difference between legible and illegible Arabic. It is **not**
+HarfBuzz-quality shaping, which is OpenType GSUB/GPOS — a font's own
+substitution and positioning programs — and cannot be written against a
+boundary that only measures. Indic reordering, Thai mark placement and Burmese
+cluster reordering are stated gaps: a browser-backed renderer gets them from
+the host's font stack, and a glyph-at-a-time one does not.
+
+**The glyph atlas** rasterises each tile once, keyed by code point, font and
+colour, and blits it thereafter. It serves a run **whole or not at all**: where
+the glyph advances do not sum to the run's measured width — kerning, ligatures
+— it falls back to `fillText`, which is the correctness gate rather than a
+special case. Supplementary-plane characters, emoji, ZWJ sequences, unjoined
+Arabic and mixed-direction runs take the same road.
+
+**Per-rectangle damage** is done, and is Phase 7's retained scene graph doing
+the work.
+
+**Golden transcripts, not golden images**, and the difference is stated rather
+than glossed. Nine committed transcripts — Latin, Cyrillic, Arabic (twice, one
+joined), Hebrew, Devanagari, Thai, CJK and Burmese — record the drawing calls a
+frame produces, and are compared on the bytecode VM, against WebAssembly under
+Node, and through the record-and-replay path both real renderers consume. They
+catch reordering, line-breaking, advance and joining regressions. They cannot
+catch a rasterisation difference: that needs a browser and pixels, and this
+project takes no dependency it does not need.
+
+**Remaining:** real golden *images*, which want a browser; and WebGPU, which
+the "where to be willing to cut" list below puts third for a reason —
+Canvas2D is a complete product and WebGPU is an optimisation on top of it.
 
 ---
 
-## Phase 9 — Native backend ❌ **not written. `kitec bundle` is packaging, not codegen**
+## Phase 9 — Native backend ✅ **machine code, and a collector under it**
 
-What exists is a **bundle**: `kitec bundle app.kite` writes one executable that
-is this compiler with the program appended to it. Running it finds the program,
-compiles it and runs it — under a millisecond, with no linker, no runtime to
-unpack and nothing to install. That solves distribution, which is what most
-people mean when they ask for a native binary, and the roadmap's start-up
-criterion is met by a wide margin.
+**Exit criterion met: the differential corpus runs on three backends.** Every
+program is compiled to bytecode, to WebAssembly and to machine code, run on all
+three, and the outputs compared. That is the criterion this phase was written
+around, and it is the thing that makes a third backend safe to have rather than
+a third place for bugs to hide.
 
-It is **not** a third backend, and calling it one would be the kind of
-overstatement this document exists to avoid. The program still runs on the
-bytecode VM. There is no machine code, no Cranelift, and no collector.
+Two crates, and the split is the usual one. `kite-codegen-clif` lowers MIR to
+Cranelift IR — an object file for the linker, or straight into this process
+under the JIT, which is what lets `kitec run --native` need no linker at all
+and what lets the whole corpus run natively on any machine that can build the
+compiler. `kite-rt` is the half that runs at run time: the collector, the host
+functions and the scheduler, behind an `extern "C"` surface that is the same
+whether the code was JIT-compiled or linked against the `staticlib` build.
 
-What the real backend needs, unchanged from the original plan:
-`kite-codegen-clif` over Cranelift, and a precise generational collector in
-`kite-rt` — stack maps at safepoints, precise root scanning, a nursery with a
-bump allocator, and a write barrier for the old generation. The GC is the real
-work, which is why this is the phase the plan says to cut first: the bytecode
-VM already covers native execution adequately, and Cranelift is a performance
-upgrade rather than a capability.
+**Every value is self-describing.** A heap object is a two-word header naming
+what it is, then 8-byte slots. The bytecode VM's values carry their own tags
+and the Wasm backend leans on the engine's typed GC records; a native heap has
+neither, so the header plus registered *shape tables* — which slots of a
+struct, of each enum variant, tuple and closure environment are references —
+stand in. One collector traces everything, one routine renders any value the
+way the VM does, one routine compares structurally the way the VM does, and
+none of it is generated per type.
 
-**Exit criterion, unmet:** the differential corpus runs on two backends, not
-three.
+**The collector is precise, and precision was not optional.** New objects are
+bump-allocated in a nursery; a minor collection evacuates the live ones into
+the old generation and resets the bump pointer — and moving objects means every
+reference to them must be found and updated, which conservative scanning cannot
+promise. Roots come from **Cranelift's user stack maps**: every
+reference-typed local is declared as needing one, so at each safepoint the live
+references sit in recorded stack slots. Collection walks the frame-pointer
+chain, visits the recorded slots of frames whose return address is a registered
+safepoint, and skips every other frame — the runtime's own Rust frames
+included — because nothing in one can hold a Kite reference the maps do not
+already cover.
+
+The old generation does not move: each object is its own allocation, swept by
+an occasional mark-and-sweep once it has grown past a threshold. The **write
+barrier** covers the one in-place heap mutation the language has — a `var`
+field assignment. Everything else is copy-on-write and allocates afresh, so the
+barrier lives in one function and nowhere else, and that is a property of the
+language rather than a convenience.
+
+**The bytecode VM is the specification for everything observable.** Float
+formatting, character counting, map ordering, the virtual clock, the trap
+messages: where a runtime function reads as a transcription of the VM's, it is
+one deliberately, and a difference in any of them is a differential-test
+failure rather than a subtle divergence somebody finds later.
+
+`kitec bundle` is unchanged and is still **packaging rather than code
+generation** — one executable that is this compiler with the program appended,
+which runs on the bytecode VM. Conflating the two would have been the kind of
+overstatement this document exists to avoid, and now that there is a real
+backend it is worth saying that the bundle is still not it.
+
+**What the collector does not do**, said plainly because a collector's gaps are
+where the surprises live:
+
+- **No aging.** Everything alive at a minor collection is promoted on its
+  first one. A generational collector usually keeps a survivor space and
+  promotes on the second or third; this promotes early, which costs old-space
+  occupancy in exchange for a much simpler nursery.
+- **The old generation is never compacted.** It is swept, not moved, so it can
+  fragment under a workload that allocates long-lived objects of many sizes.
+- **Native recursion is bounded by the machine stack**, not by a counter. The
+  bytecode VM traps at 2048 frames with a message; native code runs until the
+  operating system stops it.
+
+Two more things are true and worth writing down. Integer overflow **traps**
+natively, as the specification says and as the VM does — the Wasm backend wraps,
+and that difference is the backend's, not the language's. And the runtime is
+**single-threaded by design**, like the VM and the Wasm host: real parallelism
+is not this phase's to give, and the `Share` marker is still what will make it
+free when the platform allows it.
 
 ---
 
-## Phase 10 — Tooling 🟡 **all but the package manager**
+## Phase 10 — Tooling ✅ **including the package manager**
 
 | Tool | State |
 |---|---|
 | `kitec fmt` | ✅ token-based, comment-preserving, and the whole tree passes `--check` |
-| `kite-lsp` | ✅ diagnostics, hover, definition, completion, symbols, formatting |
+| `kite-lsp` | ✅ diagnostics, hover, definition, references, rename, completion, symbols, inlay hints, formatting |
 | `kitec test` | ✅ every `test_` function, with failures as values so one does not stop the rest |
 | `kitec fix` | ✅ applies the machine-applicable suggestions diagnostics carry |
 | `kitec doc` | ✅ the reference, from `///` comments, with signatures read from the parse |
 | `kitec bundle` | ✅ one executable that needs nothing installed |
 | `--explain` | ✅ |
-| `kitec pkg` | ✅ manifest, path and git dependencies, and a lockfile of content hashes |
+| `kitec pkg` | ✅ manifest, path and git dependencies, semver resolution across the graph, and a lockfile of content hashes |
 
 The formatter works on **tokens**, not the tree: a tree has dropped the
 comments and the blank lines a formatter must keep. It decides indentation,
@@ -764,13 +935,53 @@ script and no build-time code execution because there is nowhere to put one,
 which is the npm supply-chain surface removed by construction rather than by
 policy.
 
-**Remaining:** version resolution. A dependency is a path or a tag, and two
-dependencies wanting different versions of a third is a conflict nothing
-detects yet.
+**Version resolution landed, and the package manager is written.** A dependency
+may now say `version = "^1.2"` instead of pinning a tag, and `kitec pkg` walks
+the whole graph — a dependency's own `kite.toml` names its dependencies — and
+picks **one** version per name that satisfies every requirement on it. One
+version per name, not one per requirer: a name means one thing, which is the
+same stance the manifest took about hoisting.
+
+The solver is chronological backtracking, candidates highest-first, a
+candidate's own requirements withdrawn on unwind. PubGrub-style conflict-driven
+learning would find failures faster on a graph far larger than any Kite package
+has; this is a page of dependency-free code whose behaviour can be explained in
+one sentence, which at this size is worth more.
+
+Where nothing satisfies everyone, the diagnostic names **who wants what** —
+because "resolution failed" is the message that makes a package manager
+hateful:
+
+```
+error: no version of `shared` satisfies everyone who names it
+    a 1.2.0  requires >=2.0.0
+    b 0.3.0  requires >=1.0.0, <2.0.0
+  the versions that exist: 1.4.0
+
+note: a name means one thing — every package that names `shared` gets the same copy,
+so the requirements on it must agree
+```
+
+Three rules came out of writing it:
+
+- **Compatible means the same major, or the same minor while major is 0**, and
+  it is written down rather than inherited by assumption. There is no third
+  guess for `0.0.x`.
+- **A pre-release is chosen only by a requirement that names it.** A `>=1.0.0`
+  does not silently pick up `2.0.0-rc.1`, and when one was in numeric range the
+  error says so rather than leaving a reader to wonder.
+- **A tag and a version together is an error** that says to pick one: a tag
+  pins and a version resolves, and a dependency doing both is a dependency
+  saying two things.
+
+Discovery for an unpinned git dependency is `git ls-remote --tags`, candidates
+are cloned into `.kite/vendor/<name>@<version>`, and the chosen one is
+materialised where a build reads it. `--offline` resolves only from what is
+already vendored and says so when it cannot.
 
 ---
 
-## Phase 11 — Networking 🟡 **the client works; the server has no sockets**
+## Phase 11 — Networking 🟡 **both halves work; WASI does not**
 
 `std/http` is five host declarations and the rest Kite. Three requests started
 together take as long as the slowest, which the tests demonstrate under Node
@@ -782,15 +993,54 @@ for another task, and a fetching one must let the event loop run. Saying which
 is what stops the scheduler spinning through a promise that cannot resolve
 while it holds the thread.
 
-The **server half is the part that needs no sockets**: `Request`, `Response`, a
+The **server half was the part that needs no sockets**: `Request`, `Response`, a
 router with `:name` captures, and handlers that are functions and can be tested
-by calling them. What is missing is the boundary underneath — WASI's
-`wasi:http/incoming-handler`, or a Node adapter — so nothing listens on a port
-yet.
+by calling them. That was true before anything could listen, and it is still
+true — which is the point of having built it in that order.
 
-A web language with no way to talk to a server is a toy, and the two halves are
-not symmetric: the client runs in a sandbox that already has `fetch`, and the
-server runs somewhere with sockets.
+**Now something listens.** `std/http` declares eleven more host functions —
+open, poll, take, read, answer, close — in exactly the shape every other
+boundary in the module takes: numbers and text cross it, a handle stands for
+what the host holds, and **nothing is pushed at the program**. A request is
+*taken*, when a task asks for one. A callback-driven server would be a second
+way for control to enter a program, and the language has one.
+
+```kite
+let (server, err) = http.open(0)
+check err
+let (answered, rerr) = await http.run(server, routes)
+```
+
+Waiting is `task.wait_host()`, for the same reason a fetch waits that way: what
+is being waited for is the host rather than another task, and saying which is
+what lets the runtime hand the event loop back instead of spinning through a
+queue that cannot fill while it holds the thread.
+
+**The adapter is a separate generated file**, not another group in the glue.
+`kitec build --emit wasm` writes `serve.mjs` beside the module **only when a
+program declares the listening half** — a page cannot open a socket, and a
+program that draws a rectangle should not have `node:http` in its import graph.
+It reaches the module through the glue's own `provide("net", …)`, which already
+existed for exactly this, so the boundary needed no change at all.
+
+The socket is held open until the program answers, because a server that
+replied before its handler ran would be a different program. Answering twice
+returns 0 rather than doing it quietly.
+
+Two things came out differently from the plan:
+
+- **`close` became `shut`.** `close` already meant "stop listening to this
+  event stream" in the same module, and Kite has no overloading: one name, one
+  signature. Two things that are not the same thing do not get the same name.
+- **The request handle is beside the `Request`, not inside it.** `Incoming`
+  carries both. Putting the handle in the `Request` would have made a
+  `Request` something only the runtime could produce — and a handler is only
+  testable by calling it if a request is something anyone can write out.
+
+**Remaining: WASI.** `wasi:http/incoming-handler` is the other implementation
+this boundary was shaped for, and it is not written — it is a component-model
+export and `kitec` emits a core module. That is a real gap, recorded rather
+than stubbed: a stub that looked like an answer would be worse than none.
 
 **Client.** `http.get`, `http.post`, and a request builder for the rest. It
 lowers to the host's `fetch`, which means it is `async` — so this cannot land
@@ -815,16 +1065,41 @@ has them, and reaching for them is the whole reason the boundary is declared.
 
 ---
 
-## Phase 12 — Cryptography 🟡 **hashing, HMAC, PBKDF2 and randomness**
+## Phase 12 — Cryptography ✅ **complete, less Argon2, which no host has**
 
 `std/crypto` binds SHA-256/384/512, HMAC-SHA-256, PBKDF2 password hashing with
 a generated salt, cryptographically secure random bytes, and a constant-time
 comparison. Comparing a secret with `==` is a warning (E0600) that says to use
 `crypto.equal`.
 
-**Remaining:** AES-GCM, Ed25519 and X25519 — each is another few declarations
-over WebCrypto, and each needs key handling that has not been designed. Argon2
-is not in WebCrypto at all, so it waits on a runtime that has it.
+**AES-GCM, Ed25519 and X25519 landed, and the key handling they were waiting on
+got designed.** A key is a **host-side handle**, not text: `Key`, `SigningKey`
+and `AgreementKey` are structs with one unmarked field, so a program cannot
+construct one or read what is inside it. Three things follow, and they are why
+it is shaped this way rather than as hex:
+
+- **Private material never crosses the boundary**, so it cannot leak — the keys
+  are created non-extractable, and even the glue could not export one.
+- **A key cannot reach a log.** `Display` is never derived, so `io.print(key)`
+  does not compile.
+- **Comparing two keys compares handles**, so there is no secret for a
+  comparison to leak — which closes a hole E0600's shallow analysis cannot see.
+
+The API is what the design commitments demanded. `seal` generates its own
+96-bit nonce and carries it with the ciphertext, because an API that accepts a
+nonce invites the reuse that is the commonest failure in applied cryptography.
+Authentication failure is an `error`, never a wrong answer, and the message is
+deliberately unspecific — an oracle that said *what* failed would be worth
+attacking. `agree` returns a sealing key rather than the raw X25519 output: the
+agreement, HKDF-SHA-256 and the AES key are one chain inside the host, so the
+structured raw secret never exists anywhere a program could reach it.
+
+Durable symmetric keys come through `import_key(crypto.random(32))` — hex the
+caller already holds — so there is no export path to invent. Public halves
+export as hex, because those are the halves meant to be given away.
+
+**Remaining:** Argon2, which is not in WebCrypto at all and waits on a runtime
+that has it.
 
 The rules the module was built to enforce are in place: no ECB, no CBC, no MD5,
 no SHA-1, no raw RSA; salts generated rather than passed.
@@ -892,7 +1167,7 @@ somewhere to read it that is not a Markdown file on a git host.
 
 ---
 
-## Phase 14 — Editor support ✅ **the server, and an extension over it**
+## Phase 14 — Editor support ✅ **complete, rename and hints included**
 
 `kite-lsp` answers over stdio: diagnostics as you type, hover, go to
 definition, completion, document symbols and formatting. Every answer comes
@@ -905,9 +1180,25 @@ hand: the framing is six lines and the JSON two hundred, which keeps the
 dependency list at nothing a build has to fetch. The VS Code extension has no
 npm dependency either, not even the LSP client library.
 
-**Remaining:** rename, find references, and inlay hints for solved generic
-arguments — the last is worth more here than in a language with a turbofish,
-because there is nowhere else to see what a call inferred.
+**Rename, references and inlay hints landed**, all three over the resolver's own
+binding table rather than over a second analysis. The hints are the ones worth
+most here: the solved type of an unannotated `let`, and the **solved generic
+arguments** at a call site — Kite has no turbofish, so there is nowhere else to
+see what a call inferred.
+
+Rename's rule is the interesting part, and it is a refusal rather than a
+best-effort. It starts only when *every* occurrence of a name is recorded and
+every recorded occurrence is editable, and it says why when it will not: a name
+from the prelude or another module file, a method (whose call sites need the
+receiver's type and were never in the table), a type, a host function whose
+name is the contract, or a binding with a "mention" — a qualified path, or a
+`Point{ x }` shorthand whose one identifier is also a field. The new name must
+lex as a single identifier, must not be a keyword, and must not already be
+bound where the old one is visible.
+
+That is a smaller rename than an editor with a full index would offer. It is
+also one that cannot quietly miss an occurrence, which is the failure that
+makes rename untrustworthy.
 
 **`kite-lsp`, then a thin VS Code extension over it.** The order matters: an
 extension that implements its own analysis is one that only ever works in one
@@ -973,7 +1264,7 @@ the grammar written for VS Code is the same one the submission needs.
 
 ---
 
-## Phase 15 — Distribution 🟡 **the pipeline exists; nothing is published**
+## Phase 15 — Distribution 🟡 **signed, packaged, and not yet published**
 
 `.github/workflows/release.yml` cross-compiles `kitec` and `kite-lsp` for macOS
 (arm64, x86-64), Linux (x86-64 and arm64, static musl) and Windows on a tag,
@@ -983,10 +1274,39 @@ and debug info dropped — because a compiler is exactly the artefact where
 verifies it against the release's own checksums, and refuses rather than warns
 when they differ.
 
-**Remaining:** nothing has been released, so none of it has run in anger. There
-is no Homebrew formula, no Scoop manifest and no AUR package, and releases are
-not signed beyond their checksums. `kitec` as a Wasm module exists — the
-playground is it — but is not published as an artefact.
+**Signing landed, and it holds no key.** `SHA256SUMS` — the one file that names
+every artefact — is signed with Sigstore's keyless flow: the workflow's own
+OIDC token is the identity, the certificate goes in the public transparency
+log, and there is no private key anywhere. For a compiler that is the right
+trade. A signing key held by one person is a key that can be lost, stolen, or
+unavailable when it is needed, and this is exactly the artefact where "trusting
+trust" is not hypothetical.
+
+`install.sh` verifies that signature **when `cosign` is already installed**, and
+says so when it is not. It deliberately does not install `cosign` to check a
+signature: a verifier fetched by the thing it is verifying proves nothing.
+
+**The three package manifests are written**, in `packaging/`: a Homebrew
+formula, a Scoop manifest with `checkver`/`autoupdate`, and an AUR `PKGBUILD`
+for the binary package. Each is committed with a **placeholder checksum**, and
+`packaging/render.sh` fills them in from a release's own signed `SHA256SUMS` —
+so the manifests a tap needs come *out of* the release rather than being
+written beside it and hoped to match. The release runs it and attaches the
+results. A test asserts the five target triples in the release matrix are the
+same five the installer and the three manifests know about, because a manifest
+naming an archive no release produces fails in somebody else's install, long
+after the change that broke it.
+
+**`kitec` as a WebAssembly module is now a release artefact**, built and
+checksummed alongside the binaries — the playground already ran it, and this
+means anything that wants to compile Kite in a browser can have it without
+building the site.
+
+**Remaining, and it is the honest part: nothing has been published.** No tag has
+been pushed, so none of this has run in anger, and the three manifests have no
+homes — Homebrew and Scoop want a separate repository each, the AUR wants an
+account. Those are decisions about identity and hosting rather than code, and
+they are recorded as undone rather than implied to be done.
 
 A compiler nobody can install is a compiler nobody uses.
 
@@ -1017,38 +1337,44 @@ none.
 | 1 — Vertical slice | ✅ complete |
 | 2 — Type system | ✅ complete — structs, enums, match, exhaustiveness, traits, trait objects, slices, optionals, tuples, maps, interpolation, closures, generics on functions and types |
 | 3 — Error handling | ✅ complete |
-| 4 — WebAssembly backend | ✅ every construct the language has, on both backends, compared. ❌ JS String Builtins (an optimisation, not a gap) |
+| 4 — WebAssembly backend | ✅ every construct the language has, and `--js-strings` lowers a `str` to a real JavaScript string with `concat` and `equals` as intrinsics |
 | 5 — Concurrency | ✅ `async`/`await`, the state machine, `Task<T>`, the combinators, `Share`. ❌ real parallelism on any target — the platform forbids it today |
-| 6 — Standard library | ✅ modules, eleven of them written in Kite, tested on both backends. ❌ `json.decode<T>` and the derivation machinery it needs |
-| 7 — Layout and DOM renderer | 🟡 layout, events, the update loop, a widget set with focus, and a keyboard-driven task list; a frame that did not change is not repainted. ❌ retained scene graph and its diff, screen-reader verification |
-| 8 — Canvas renderer | 🟡 draws, measures in the real font, hidden-overlay input, a parallel tree for a screen reader, UAX #14 subset. ❌ shaping, bidi, glyph atlas, per-rectangle damage, golden images |
-| 9 — Native backend | ❌ not written. `kitec bundle` produces one self-contained executable, which is packaging rather than code generation |
-| 10 — Tooling | 🟡 fmt, doc, fix, test, bundle, pkg, `--explain`, and the language server. ❌ version resolution across dependencies |
-| 11 — Networking | 🟡 the client, tested end to end under Node; the router and types for the server. ❌ anything that listens on a port |
-| 12 — Cryptography | 🟡 hashing, HMAC, PBKDF2, randomness, constant-time comparison, and E0600. ❌ AES-GCM, Ed25519, X25519 |
+| 6 — Standard library | ✅ thirteen modules written in Kite, tested on both backends, and `@derive(Debug, Hash, Encode, Decode)` as a source-to-source expansion |
+| 7 — Layout and DOM renderer | ✅ layout, events, the update loop, a widget set with focus, a keyboard-driven task list, and a retained scene graph whose diff patches elements in place. ❌ Taffy's fixtures, a real screen-reader pass |
+| 8 — Canvas renderer | 🟡 UAX #9 bidi and Arabic joining in Kite, a glyph atlas, per-rectangle damage, and golden transcripts across eight scripts. ❌ OpenType shaping, golden *images*, WebGPU |
+| 9 — Native backend | ✅ Cranelift AOT and JIT, with a precise generational collector over Cranelift's stack maps. The differential corpus runs on three backends |
+| 10 — Tooling | ✅ fmt, doc, fix, test, bundle, `--explain`, the language server, and a package manager that resolves semver across the whole graph |
+| 11 — Networking | 🟡 the client, and a server that listens on a real socket through a generated Node adapter. ❌ `wasi:http/incoming-handler`, which needs the component model |
+| 12 — Cryptography | ✅ hashing, HMAC, PBKDF2, randomness, constant-time comparison, E0600, and AES-GCM, Ed25519 and X25519 over opaque key handles. ❌ Argon2, which no host has |
 | 13 — Documentation site | ✅ four pages, the reference generated from the library, and a playground that is the compiler |
-| 14 — Editor support | ✅ the language server and a VS Code extension over it. ❌ rename, references, inlay hints |
-| 15 — Distribution | 🟡 CI, cross-compiled release builds with checksums, an install script. ❌ nothing published yet |
+| 14 — Editor support | ✅ the language server and a VS Code extension over it, with rename, references, and inlay hints for solved generic arguments |
+| 15 — Distribution | 🟡 CI, cross-compiled builds, Sigstore signing, Homebrew/Scoop/AUR manifests rendered from the release's own checksums, `kitec.wasm` as an artefact. ❌ nothing published: no tag has been pushed |
 
-557 tests: unit tests per crate, an annotated compile-fail corpus, a
-differential corpus that runs every program on both backends and compares, the
-standard library's own suite on both backends, the host boundary under Node,
-and every example on the site.
+683 tests: unit tests per crate, an annotated compile-fail corpus, a
+differential corpus that runs every program on **three** backends and compares,
+the standard library's own suite on two of them, the host boundary and a real
+socket under Node, golden text transcripts across eight scripts, both string
+representations compared against each other and against the VM, and every
+example on the site.
 
 ### What is deliberately not done
 
-Three things are absent on purpose rather than pending, and each is recorded
+Four things are absent on purpose rather than pending, and each is recorded
 where the decision was made:
 
 - **Real parallelism.** WasmGC references cannot cross a thread boundary, and
   the VM's values are `Rc`-based. `Share` is enforced *now* so the day either
   changes, no source does.
-- **A third backend.** Cranelift plus a precise collector is the largest single
-  piece of work left, and the plan says to cut it first for a reason: the
-  bytecode VM covers native execution, and `kitec bundle` covers distribution.
-- **`json.decode<T>`, `Eq`, `Hash`, `Debug`.** All four want the same
-  derivation machinery, and building it for one of them alone would be building
-  it twice.
+- **`Eq` as a derivable trait.** `==` is structural on every Kite value on
+  every backend already. A derived `Eq` would be a second spelling for what the
+  language does anyway, and a second spelling is a chance for two answers. The
+  roadmap asked for four things wanting one machine; it turned out to be three.
+- **`Display` as a derivable trait.** How a type presents itself to a person is
+  a design decision, and a `Password` whose derived form printed its field is
+  the case where a mechanical answer being wrong actually costs something.
+- **WebGPU.** The list below puts it third among things to cut, and it is still
+  right: Canvas2D is a complete product, and WebGPU is an optimisation on top
+  of one.
 
 ## Realistic timeline
 
@@ -1069,17 +1395,20 @@ as one is the other common way language projects die.
 
 ## Where to be willing to cut
 
-If time runs short, cut in this order — each is genuinely deferrable:
+This list was written before any of it was built, and it held up: the two
+things at the top were the two that stayed unbuilt longest, and the one thing
+still uncut is the one that was third.
 
-1. **Native backend (Phase 9).** The bytecode VM already covers native execution
-   adequately for early users. Cranelift is a performance upgrade, not a
-   capability.
-2. **Canvas renderer (Phase 8).** DOM rendering is a complete product on its own,
-   and it is the accessible one. Ship it, then add canvas.
-3. **WebGPU path.** Canvas2D first; WebGPU is an optimisation.
-4. **Generics.** Painful, but a language with `dyn` traits and no generics is
-   usable, and generics can be added compatibly later. Adding them later is a
-   real option; adding *error handling* later is not.
+1. ~~**Native backend (Phase 9).**~~ Built. The bytecode VM covered native
+   execution adequately for a long time, and Cranelift was a performance
+   upgrade rather than a capability — which is exactly why it could wait until
+   everything a language actually needs was there.
+2. ~~**Canvas renderer (Phase 8).**~~ Built, and the ordering advice was right:
+   DOM rendering shipped first and is still the accessible one.
+3. **WebGPU path.** Still cut, still deliberately. Canvas2D is a complete
+   product; WebGPU is an optimisation on top of one.
+4. ~~**Generics.**~~ Built, in Phase 2. The note that error handling could not
+   be added later is the half that mattered, and it was heeded.
 
 ## Where not to cut
 

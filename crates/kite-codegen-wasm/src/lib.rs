@@ -46,16 +46,54 @@ use wasm_encoder::{
 
 mod eq;
 mod glue;
+mod serve;
 mod support;
-pub use glue::{generate_glue, generate_glue_with_hosts, generate_page};
+pub use glue::{generate_glue, generate_glue_for, generate_glue_with_hosts, generate_page};
+pub use serve::{generate_server, listens};
 pub use support::{unsupported, Unsupported};
+
+/// How a `str` is represented in the emitted module.
+///
+/// The two are observationally identical — the same program prints the same
+/// thing — and a Kite source file cannot tell them apart. What differs is what
+/// the engine has to do.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Strings {
+    /// An `i32` index into a table the glue holds.
+    ///
+    /// Needs no linear memory and no proposal beyond WasmGC, so it runs in
+    /// every engine that runs Kite at all. It costs one call into JavaScript
+    /// per string operation, including `+` and `==`.
+    #[default]
+    Table,
+    /// A real JavaScript string, as an `externref`, with the **JS String
+    /// Builtins** supplying `concat` and `equals` as engine intrinsics rather
+    /// than as calls.
+    ///
+    /// A `str` crossing to a DOM API is then free: there is nothing to look
+    /// up, because the value already *is* the string. The rest of the string
+    /// operations stay host calls on purpose — see [`js_string_imports`].
+    Builtins,
+}
+
+/// A non-null external reference: what the JS String Builtins return.
+const EXTERN_REF: ValType = ValType::Ref(RefType {
+    nullable: false,
+    heap_type: HeapType::Abstract { shared: false, ty: wasm_encoder::AbstractHeapType::Extern },
+});
+
+/// A nullable external reference: how a `str` is held.
+const EXTERN_REF_NULL: ValType = ValType::Ref(RefType {
+    nullable: true,
+    heap_type: HeapType::Abstract { shared: false, ty: wasm_encoder::AbstractHeapType::Extern },
+});
 
 /// Host functions the module imports, as (name, params, results).
 ///
 /// Deliberately small: the standard library replaces them from Phase 6. String
 /// operations live here because a `str` is an index into a table the host
 /// holds — which is also why the module needs no linear memory.
-const IMPORTS: [(&str, &[ValType], &[ValType]); 25] = [
+const IMPORTS: [(&str, &[ValType], &[ValType]); 26] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
@@ -99,7 +137,102 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 25] = [
     ("task_park", &[], &[]),
     ("task_wait_host", &[], &[]),
     ("time_now", &[], &[ValType::I64]),
+    // A character as a number. The one string operation nothing else can be
+    // written on top of, which is why it is here and `split` is not.
+    ("str_code_at", &[ValType::I32, ValType::I64], &[ValType::I64]),
 ];
+
+/// The same imports again, with `str` as an `externref`.
+///
+/// Written out rather than derived, because there is no rule that maps the
+/// first table onto the second: `print_bool` takes an `i32` that is a boolean
+/// and `print_str` takes an `i32` that is a string, and a transform could not
+/// tell them apart. A test asserts the two tables name the same functions in
+/// the same order with the same arities, which is the drift this could
+/// otherwise have.
+///
+/// Two entries come from the engine rather than from the glue. `concat` and
+/// `equals` are **JS String Builtins**, compiled to intrinsics; their
+/// signatures are fixed by that proposal and are not ours to choose — `concat`
+/// answers a *non-null* reference, which is why [`EXTERN_REF`] exists.
+///
+/// The rest stay ordinary host calls, and that is a semantic decision rather
+/// than an oversight. The builtins index strings by **UTF-16 code unit** and
+/// Kite counts **characters**: `length`, `charCodeAt` and `substring` would
+/// therefore answer differently from the bytecode VM the moment a program held
+/// an astral character, and two backends that disagree is the one thing this
+/// project spends its testing budget preventing. `concat` and `equals` are
+/// exact at any code point, so those two are taken and the others are not.
+const JS_STRING_IMPORTS: [(&str, &[ValType], &[ValType]); 26] = [
+    ("print_int", &[ValType::I64], &[]),
+    ("print_float", &[ValType::F64], &[]),
+    ("print_bool", &[ValType::I32], &[]),
+    ("print_str", &[EXTERN_REF_NULL], &[]),
+    ("str_concat", &[EXTERN_REF_NULL, EXTERN_REF_NULL], &[EXTERN_REF]),
+    ("str_eq", &[EXTERN_REF_NULL, EXTERN_REF_NULL], &[ValType::I32]),
+    ("str_compare", &[EXTERN_REF_NULL, EXTERN_REF_NULL], &[ValType::I64]),
+    ("str_of_int", &[ValType::I64], &[EXTERN_REF_NULL]),
+    ("str_of_float", &[ValType::F64], &[EXTERN_REF_NULL]),
+    ("str_of_bool", &[ValType::I32], &[EXTERN_REF_NULL]),
+    ("str_len", &[EXTERN_REF_NULL], &[ValType::I64]),
+    (
+        "draw_rect",
+        &[ValType::F64, ValType::F64, ValType::F64, ValType::F64, ValType::I64],
+        &[],
+    ),
+    ("draw_text", &[ValType::F64, ValType::F64, EXTERN_REF_NULL, ValType::I64], &[]),
+    ("measure_text", &[EXTERN_REF_NULL], &[ValType::F64]),
+    ("line_height", &[], &[ValType::F64]),
+    ("str_slice", &[EXTERN_REF_NULL, ValType::I64, ValType::I64], &[EXTERN_REF_NULL]),
+    ("str_index_of", &[EXTERN_REF_NULL, EXTERN_REF_NULL], &[ValType::I64]),
+    ("str_trim", &[EXTERN_REF_NULL], &[EXTERN_REF_NULL]),
+    (
+        "draw_clip",
+        &[ValType::F64, ValType::F64, ValType::F64, ValType::F64],
+        &[],
+    ),
+    ("draw_unclip", &[], &[]),
+    ("task_spawn", &[ANY_REF], &[]),
+    ("task_wake_at", &[ValType::I64], &[]),
+    ("task_park", &[], &[]),
+    ("task_wait_host", &[], &[]),
+    ("time_now", &[], &[ValType::I64]),
+    ("str_code_at", &[EXTERN_REF_NULL, ValType::I64], &[ValType::I64]),
+];
+
+/// The import table in force.
+type ImportRow = (&'static str, &'static [ValType], &'static [ValType]);
+
+fn imports_for(strings: Strings) -> &'static [ImportRow] {
+    match strings {
+        Strings::Table => &IMPORTS,
+        Strings::Builtins => &JS_STRING_IMPORTS,
+    }
+}
+
+/// Where an import comes from, and what the host calls it.
+///
+/// Everything is the glue's `kite` module except the two the engine supplies
+/// itself. A builtin is named by the proposal, not by us.
+fn import_origin(index: usize, strings: Strings) -> (&'static str, &'static str) {
+    if strings == Strings::Builtins {
+        if index as u32 == host::STR_CONCAT {
+            return ("wasm:js-string", "concat");
+        }
+        if index as u32 == host::STR_EQ {
+            return ("wasm:js-string", "equals");
+        }
+    }
+    ("kite", IMPORTS[index].0)
+}
+
+/// The import namespace string constants arrive through.
+///
+/// With the imported-string-constants option, the *name* of an import is the
+/// string itself and the engine synthesises the global — so a module carries
+/// its constants without a table, without linear memory, and without the glue
+/// having to hand them over one by one.
+const STRING_CONSTANTS: &str = "kite:strings";
 
 const IMPORT_COUNT: u32 = IMPORTS.len() as u32;
 
@@ -177,7 +310,12 @@ impl Hosts {
 /// of its argument, so printing anything marks all four — and exact elsewhere.
 /// Over-declaring costs bytes; under-declaring produces a module that will not
 /// instantiate, which is why the lookup asserts rather than defaulting.
-fn used_imports(program: &mir::Program, types: &Types, eq_fns: &[eq::EqFn]) -> Hosts {
+fn used_imports(
+    program: &mir::Program,
+    types: &Types,
+    eq_fns: &[eq::EqFn],
+    strings: Strings,
+) -> Hosts {
     let mut used = vec![false; IMPORTS.len()];
     let mut mark = |i: u32| used[i as usize] = true;
 
@@ -185,6 +323,19 @@ fn used_imports(program: &mir::Program, types: &Types, eq_fns: &[eq::EqFn]) -> H
     // through any aggregate holding a `str`.
     if !eq_fns.is_empty() {
         mark(host::STR_EQ);
+    }
+
+    // A map with `str` keys compares them on every lookup. With the table
+    // representation that is an integer compare, because interning makes equal
+    // strings share an index; with the builtins the values are the strings
+    // themselves and there is no index to compare, so `equals` is called.
+    if strings == Strings::Builtins {
+        let str_keyed = program.fns.iter().flat_map(|f| f.locals.iter()).any(|l| {
+            matches!(types.kind(l.ty), TyKind::Map(k, _) if *k == TyId::STR)
+        });
+        if str_keyed {
+            mark(host::STR_EQ);
+        }
     }
 
     for f in &program.fns {
@@ -218,6 +369,7 @@ fn used_imports(program: &mir::Program, types: &Types, eq_fns: &[eq::EqFn]) -> H
                         kite_hir::StrKind::Slice => host::STR_SLICE,
                         kite_hir::StrKind::IndexOf => host::STR_INDEX_OF,
                         kite_hir::StrKind::Trim => host::STR_TRIM,
+                        kite_hir::StrKind::CodeAt => host::STR_CODE_AT,
                     }),
                     mir::Rvalue::Binary { op, .. } => match op {
                         BinOp::ConcatStr => mark(host::STR_CONCAT),
@@ -291,6 +443,7 @@ mod host {
     pub const TASK_PARK: u32 = 22;
     pub const TASK_WAIT_HOST: u32 = 23;
     pub const TIME_NOW: u32 = 24;
+    pub const STR_CODE_AT: u32 = 25;
 }
 
 pub struct WasmModule {
@@ -366,6 +519,9 @@ struct TypeLayout {
     /// Per lifted function reached by a `ClosureNew`: the record holding its
     /// captures, and how many of its leading parameters they are.
     env_record: std::collections::HashMap<u32, (u32, usize)>,
+    /// How a `str` is represented. The layout is where every value type is
+    /// decided, so this is where the question has to be answerable.
+    strings: Strings,
 }
 
 #[derive(Clone, Copy)]
@@ -550,8 +706,14 @@ fn option_payloads(program: &mir::Program, types: &Types) -> Vec<TyId> {
     seen
 }
 
-/// Compile a MIR program to a WebAssembly module.
+/// Compile a MIR program to a WebAssembly module, with `str` as an index into
+/// a table the glue holds.
 pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
+    compile_with(program, types, Strings::Table)
+}
+
+/// Compile, choosing how a `str` is represented.
+pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> WasmModule {
     let mut module = Module::new();
 
     // Type index space: import signatures, then structs, then each enum's base
@@ -603,6 +765,7 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     // Optional boxes need the layout to describe their payload, so build a
     // provisional one first and fill the table in.
     let mut layout = TypeLayout {
+        strings,
         object_record,
         tagged,
         closure_sig: fn_types
@@ -665,7 +828,7 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
 
     // ---- types -------------------------------------------------------------
     let mut type_section = TypeSection::new();
-    for (_, params, results) in IMPORTS.iter() {
+    for (_, params, results) in imports_for(strings).iter() {
         type_section
             .ty()
             .function(params.iter().copied(), results.iter().copied());
@@ -928,7 +1091,7 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     // Which host functions the module declares decides where its own functions
     // start, so this has to be settled before any index is handed out.
     let eq_fns = eq::collect(program, types);
-    let hosts = used_imports(program, types, &eq_fns);
+    let hosts = used_imports(program, types, &eq_fns, strings);
     let fn_base = hosts.base;
     let dispatch_base = fn_base + program.fns.len() as u32;
 
@@ -1020,9 +1183,27 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     // the language has — a `hello world` should not carry string slicing or a
     // font metric it never asks about.
     let mut imports = ImportSection::new();
-    for (i, (name, _, _)) in IMPORTS.iter().enumerate() {
+    for i in 0..IMPORTS.len() {
         if hosts.declared(i as u32) {
-            imports.import("kite", name, EntityType::Function(i as u32));
+            let (module_name, name) = import_origin(i, strings);
+            imports.import(module_name, name, EntityType::Function(i as u32));
+        }
+    }
+    // String constants arrive as imported globals whose *names are the strings
+    // themselves*, which the engine synthesises under the
+    // imported-string-constants option. There is then no table, no interning,
+    // and nothing for the glue to hand over.
+    if strings == Strings::Builtins {
+        for constant in &program.strings {
+            imports.import(
+                STRING_CONSTANTS,
+                constant,
+                EntityType::Global(wasm_encoder::GlobalType {
+                    val_type: EXTERN_REF_NULL,
+                    mutable: false,
+                    shared: false,
+                }),
+            );
         }
     }
     // Then the program's own declared boundary, one import per `extern` it
@@ -1243,8 +1424,10 @@ fn val_type_with(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
             // Only reachable while the layout is still being built.
             None => ValType::I32,
         },
-        // `str` is a constant index for now; with JS String Builtins this
-        // becomes `externref` carrying the JS string with no copy.
+        // A `str` is either an index into the glue's table or the JS string
+        // itself. Everything else that reaches here — `bool`, `unit`, the
+        // error placeholder — is an `i32` either way.
+        TyKind::Str if layout.strings == Strings::Builtins => EXTERN_REF_NULL,
         _ => ValType::I32,
     }
 }
@@ -1847,6 +2030,7 @@ impl<'a> Emitter<'a> {
                     kite_hir::StrKind::Slice => host::STR_SLICE,
                     kite_hir::StrKind::IndexOf => host::STR_INDEX_OF,
                     kite_hir::StrKind::Trim => host::STR_TRIM,
+                    kite_hir::StrKind::CodeAt => host::STR_CODE_AT,
                 })));
                 return true;
             }
@@ -2389,10 +2573,17 @@ impl<'a> Emitter<'a> {
             mir::Operand::Bool(v) => {
                 func.instruction(&Instruction::I32Const(i32::from(*v)));
             }
-            // A string is its index into the constant table the glue holds.
-            mir::Operand::Str(s) => {
-                func.instruction(&Instruction::I32Const(s.0 as i32));
-            }
+            // A string is its index into the constant table the glue holds,
+            // or — with the builtins — the imported global the engine made
+            // from the literal itself.
+            mir::Operand::Str(s) => match self.layout.strings {
+                Strings::Table => {
+                    func.instruction(&Instruction::I32Const(s.0 as i32));
+                }
+                Strings::Builtins => {
+                    func.instruction(&Instruction::GlobalGet(s.0));
+                }
+            },
             mir::Operand::Unit => {
                 func.instruction(&Instruction::I32Const(0));
             }
@@ -2661,9 +2852,18 @@ impl<'a> Emitter<'a> {
         });
     }
 
-    /// Compare two keys. A `str` is a table index the glue interns, so equal
-    /// strings share an index and an integer compare is exact.
+    /// Compare two keys.
+    ///
+    /// With the table representation a `str` is an index the glue interns, so
+    /// equal strings share one and an integer compare is exact. With the
+    /// builtins the value *is* the string and there is no index, so equality
+    /// is the engine's own `equals`.
     fn key_equality(&mut self, func: &mut Function, key_ty: TyId) {
+        if self.layout.strings == Strings::Builtins && matches!(self.types.kind(key_ty), TyKind::Str)
+        {
+            func.instruction(&Instruction::Call(self.hosts.at(host::STR_EQ)));
+            return;
+        }
         let inst = match val_type_with(key_ty, self.types, self.layout) {
             ValType::I64 => Instruction::I64Eq,
             ValType::F64 => Instruction::F64Eq,
