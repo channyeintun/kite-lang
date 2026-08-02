@@ -96,8 +96,13 @@ const ROUTED: &str = "use std/http\n\
 /// Start the program in a child process, wait for it to say which port it
 /// bound, make three requests, and print what came back.
 const CLIENT: &str = r#"import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
-const server = spawn(process.execPath, [new URL("./serve.mjs", import.meta.url).pathname], {
+// `fileURLToPath`, not `.pathname`: a URL path is not a file path. On Windows
+// `.pathname` gives `/C:/Users/...`, which `spawn` resolves against the current
+// drive and cannot find — and it leaves percent-encoding in place, so a
+// directory with a space or a `~` in its name fails the same way anywhere.
+const server = spawn(process.execPath, [fileURLToPath(new URL("./serve.mjs", import.meta.url))], {
   stdio: ["ignore", "pipe", "inherit"],
 });
 
