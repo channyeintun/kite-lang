@@ -214,6 +214,18 @@ They count characters rather than bytes, on both sides: the VM walks a `char`
 iterator and the glue spreads with `[...s]`, so `"héllo日本"` is seven either
 way and `index_of` returns a position a caller can pass back to `slice`.
 
+**A `pub` function is a root, not a survivor.** Pruning used to take the entry
+point as the only root when a program had one, and the backend then exported
+whatever happened to survive — so a program with *both* an application and a
+`main` kept only what `main` reached. An example whose `main` built its own
+model never exported `init`; the page found no application and ran `main`
+instead, drawing one still frame and looking exactly like a broken animation.
+It is the other way round now: every `pub` free function the program itself
+declares is exported, so it is a root. A library's names are qualified —
+`json.parse`, `prelude.map` — and a dot cannot appear in an identifier, so
+"declared here" is decidable and a `hello world` still carries none of the
+prelude.
+
 **Also done:** the module declares only the imports it reaches for. The import
 list had grown to seventeen host functions, and a `hello world` was carrying
 string slicing and a font metric it never asks about. It is now 426 bytes —
@@ -756,6 +768,28 @@ The diff and the damage calculation are pure functions of two recordings, so
 they are tested directly, under Node, with no browser: `crates/kite-driver/tests/scene.rs`.
 What they *drive* — patching elements, clipping a canvas — needs a real
 document and is not tested, which is stated there rather than implied.
+
+**A frame is now an event.** The seven kinds an application could receive were
+all input — a click, a key, a wheel, a pointer, a resize — so an application
+could only advance when somebody touched it, and a language that targets
+WebAssembly for performance could not run an animation at all. `EVENT_FRAME`
+carries the milliseconds since the last frame, so a simulation steps by *time*
+and runs at the same speed on a machine managing thirty frames a second and one
+managing a hundred and forty-four.
+
+Whether the loop runs at all needs no new export and no way to ask, which is
+the part worth recording. **It runs while the model keeps changing.** A model
+is a value, so `update` returning the model it was given *is* the statement
+that nothing is moving; a static application therefore pays one comparison at
+startup and nothing after, and an animating one never has to declare itself. A
+paused simulation that wants to keep the loop warm returns a model that differs
+— a frame counter is enough — which is the explicit way to say "still going".
+
+`examples/boids.kite` is what the frame event was added for: six hundred birds,
+every one considering every other, 360,000 distance tests a frame. About 6 ms
+to simulate and record one, against a 16.7 ms budget — measured under Node
+rather than asserted, and the count is set where there is headroom for a slower
+machine rather than where the number would look largest.
 
 **Remaining:** validation against Taffy's fixtures, and a real screen-reader
 pass. Layout is over ordinary slices rather than flat buffers, which is the

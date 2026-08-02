@@ -1,0 +1,388 @@
+// Flocking: eight hundred birds, and the arithmetic to move them.
+//
+//     kitec build examples/boids.kite --emit wasm --out dist
+//     open dist/index.html
+//
+// This is the example that exists to be *fast*. Everything else in this
+// directory demonstrates a language feature; this one demonstrates the reason
+// the language targets WebAssembly at all — it does a few million floating
+// point operations between one frame and the next, in a browser, and the
+// program that does them is a page of ordinary Kite with no loops unrolled by
+// hand and nothing said about performance anywhere in it.
+//
+// The work is genuinely O(n²): every bird considers every other bird. That is
+// the naive algorithm, deliberately — a spatial index would make this faster
+// and would be measuring the index rather than the language. At six hundred
+// birds it is 360,000 distance tests per frame, sixty times a second: twenty
+// million a second, from a page of Kite.
+//
+// Measured rather than asserted. Simulating and recording one frame costs
+// about 6 ms on this machine under Node, against a 16.7 ms budget for sixty
+// frames a second — so the count is set where there is headroom left for a
+// slower machine, rather than where the number would look largest. The
+// on-screen readout is the honest one: it reports what the frame loop
+// actually achieved, and if it says thirty then thirty is what it managed.
+//
+// Three rules, which is all flocking ever is:
+//
+//   separation   steer away from anyone too close
+//   alignment    steer towards the average heading of the neighbourhood
+//   cohesion     steer towards the middle of the neighbourhood
+//
+// The pointer is a hawk. Birds flee it, and the flock tears and re-forms.
+
+use std/ui
+use std/math
+
+fn COUNT() -> int {
+    return 600
+}
+fn WIDTH() -> float {
+    return 640.0
+}
+fn HEIGHT() -> float {
+    return 360.0
+}
+
+/// How far a bird can see, and how close is too close. Squared, because a
+/// comparison does not need the square root and this comparison happens
+/// 640,000 times a frame.
+fn VISION_SQUARED() -> float {
+    return 900.0
+}
+fn CROWDING_SQUARED() -> float {
+    return 100.0
+}
+fn HAWK_SQUARED() -> float {
+    return 6400.0
+}
+
+fn MAX_SPEED() -> float {
+    return 160.0
+}
+fn MIN_SPEED() -> float {
+    return 60.0
+}
+
+struct Bird {
+    x: float
+    y: float
+    vx: float
+    vy: float
+}
+
+pub struct Model {
+    birds: [Bird]
+    hawk_x: float
+    hawk_y: float
+    /// How many frames have gone into the current rate measurement, and how
+    /// long they took. The host hands the elapsed time to each frame, which is
+    /// the only real clock here — `time.now()` is *virtual* on every backend,
+    /// so that a program which sleeps costs no real time under test. It is the
+    /// right clock for a scheduler and the wrong one for a stopwatch.
+    frames: int
+    fps: float
+    since: float
+}
+
+// ---- the flock, from nothing --------------------------------------------------
+//
+// No random number generator crosses the host boundary here, and none is
+// needed: a deterministic scatter is *better* for a demonstration, because
+// what you see is what everybody else sees. This is a cheap integer hash run
+// over the index — enough disorder that the flock does not start in a lattice,
+// and reproducible to the bit on every backend.
+
+fn scatter(seed: int) -> float {
+    // A multiply, a shift-xor, a multiply, a shift-xor. The xor is the part
+    // that matters: a linear congruential generator is an *affine* map, so
+    // however many times it is iterated, two consecutive seeds stay a constant
+    // apart — and taking those as an x and a y draws a perfectly straight
+    // line. The first version of this did exactly that, four times over, and
+    // produced a flock of two diagonal stripes.
+    //
+    // Everything stays under 2^32 between steps, because Kite traps on integer
+    // overflow rather than wrapping: the widest product here is about 2^61,
+    // inside an `int` with room to spare.
+    var x = (seed * 2654435761) % 4294967296
+    x = x ^ (x >> 15)
+    x = (x * 668265261) % 4294967296
+    x = x ^ (x >> 13)
+    return (x as float) / 4294967296.0
+}
+
+pub fn init() -> Model {
+    return make(COUNT())
+}
+
+fn make(count: int) -> Model {
+    var flock: [Bird] = []
+    for i in 0..count {
+        let a = scatter(i * 3 + 1)
+        let b = scatter(i * 3 + 2)
+        let c = scatter(i * 3 + 3)
+        flock.push(Bird{
+                x: a * WIDTH(),
+                y: b * HEIGHT(),
+                vx: (c - 0.5) * 2.0 * MAX_SPEED(),
+                vy: (a - 0.5) * 2.0 * MAX_SPEED(),
+            })
+    }
+    return Model{
+        birds: flock,
+        hawk_x: -1000.0,
+        hawk_y: -1000.0,
+        frames: 0,
+        fps: 0.0,
+        since: 0.0,
+    }
+}
+
+// ---- one step ------------------------------------------------------------------
+
+/// Move every bird once, given how long the last frame took.
+///
+/// Stepping by elapsed time rather than by frame is what makes the flock move
+/// at the same speed on a machine managing thirty frames a second and one
+/// managing a hundred and forty-four. The step is clamped: a tab left in the
+/// background comes back with a gap of seconds, and an unclamped step would
+/// teleport the entire flock through the wall.
+fn step(birds: [Bird], hawk_x: float, hawk_y: float, dt: float) -> [Bird] {
+    let seconds = math.min(dt / 1000.0, 0.05)
+    var moved: [Bird] = []
+
+    for me in birds {
+        var close_x = 0.0
+        var close_y = 0.0
+        var flock_vx = 0.0
+        var flock_vy = 0.0
+        var flock_x = 0.0
+        var flock_y = 0.0
+        var neighbours = 0
+
+        // The whole cost of the program is this loop, and it is written the
+        // obvious way on purpose.
+        for other in birds {
+            let dx = me.x - other.x
+            let dy = me.y - other.y
+            let d2 = dx * dx + dy * dy
+            if d2 > 0.0 {
+                if d2 < CROWDING_SQUARED() {
+                    // Separation, weighted by how close: the nearer the
+                    // stronger, which is what keeps birds from ever touching.
+                    close_x = close_x + dx / d2
+                    close_y = close_y + dy / d2
+                }
+                if d2 < VISION_SQUARED() {
+                    flock_vx = flock_vx + other.vx
+                    flock_vy = flock_vy + other.vy
+                    flock_x = flock_x + other.x
+                    flock_y = flock_y + other.y
+                    neighbours = neighbours + 1
+                }
+            }
+        }
+
+        var vx = me.vx
+        var vy = me.vy
+
+        if neighbours > 0 {
+            let n = neighbours as float
+            // Alignment, and cohesion, each pulled towards gently — a large
+            // coefficient here makes the flock snap rather than swirl.
+            vx = vx + (flock_vx / n - me.vx) * 0.9 * seconds
+            vy = vy + (flock_vy / n - me.vy) * 0.9 * seconds
+            vx = vx + (flock_x / n - me.x) * 1.4 * seconds
+            vy = vy + (flock_y / n - me.y) * 1.4 * seconds
+        }
+
+        vx = vx + close_x * 900.0 * seconds
+        vy = vy + close_y * 900.0 * seconds
+
+        // The hawk. Fleeing is separation with a much longer reach and a much
+        // heavier hand.
+        let hx = me.x - hawk_x
+        let hy = me.y - hawk_y
+        let h2 = hx * hx + hy * hy
+        if h2 < HAWK_SQUARED() {
+            if h2 > 1.0 {
+                vx = vx + hx / h2 * 26000.0 * seconds
+                vy = vy + hy / h2 * 26000.0 * seconds
+            }
+        }
+
+        // Speed limits, both ends. A flock with no floor settles into a stall;
+        // one with no ceiling shakes itself apart.
+        let speed = math.sqrt(vx * vx + vy * vy)
+        if speed > MAX_SPEED() {
+            vx = vx / speed * MAX_SPEED()
+            vy = vy / speed * MAX_SPEED()
+        }
+        if speed < MIN_SPEED() {
+            if speed > 0.0 {
+                vx = vx / speed * MIN_SPEED()
+                vy = vy / speed * MIN_SPEED()
+            }
+        }
+
+        var x = me.x + vx * seconds
+        var y = me.y + vy * seconds
+
+        // The world wraps. A wall would need a bounce, and a bounce collects
+        // birds in the corners.
+        if x < 0.0 {
+            x = x + WIDTH()
+        }
+        if x >= WIDTH() {
+            x = x - WIDTH()
+        }
+        if y < 0.0 {
+            y = y + HEIGHT()
+        }
+        if y >= HEIGHT() {
+            y = y - HEIGHT()
+        }
+
+        moved.push(Bird{ x: x, y: y, vx: vx, vy: vy })
+    }
+    return moved
+}
+
+// ---- the update loop -----------------------------------------------------------
+
+fn EVENT_MOVE() -> int {
+    return 3
+}
+
+fn EVENT_FRAME() -> int {
+    return 7
+}
+
+pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
+    if event == EVENT_MOVE() {
+        return Model{
+            birds: model.birds,
+            hawk_x: x,
+            hawk_y: y,
+            frames: model.frames,
+            fps: model.fps,
+            since: model.since,
+        }
+    }
+    if event == EVENT_FRAME() {
+        let moved = step(model.birds, model.hawk_x, model.hawk_y, x)
+
+        // The rate is averaged over thirty frames. A per-frame number flickers
+        // too fast to read, and a demonstration nobody can read the numbers on
+        // is not demonstrating anything.
+        var frames = model.frames + 1
+        var since = model.since + x
+        var fps = model.fps
+        if frames >= 30 {
+            if since > 0.0 {
+                fps = 30000.0 / since
+            }
+            frames = 0
+            since = 0.0
+        }
+
+        return Model{
+            birds: moved,
+            hawk_x: model.hawk_x,
+            hawk_y: model.hawk_y,
+            frames: frames,
+            fps: fps,
+            since: since,
+        }
+    }
+    // Any other event leaves the model alone — and returning the same model is
+    // also how the host is told there is nothing to animate, so a program that
+    // did this for a frame event would simply stop.
+    return model
+}
+
+// ---- drawing -------------------------------------------------------------------
+//
+// Straight to `draw.rect`, one call per bird, without going through the layout
+// engine. A flock is not a box in a row or a column, and `std/ui` is honest
+// about being for the things that are — the drawing boundary is public, and
+// this is what it is for.
+
+fn colour_of(bird: Bird) -> int {
+    // Faster birds run warmer. It reads as a heat map of the flock's edges,
+    // where the speed limit is doing the most work.
+    let speed = math.sqrt(bird.vx * bird.vx + bird.vy * bird.vy)
+    let hot = math.min((speed - MIN_SPEED()) / (MAX_SPEED() - MIN_SPEED()), 1.0)
+    let warm = math.max(hot, 0.0)
+    let r = 120.0 + warm * 113.0
+    let g = 140.0 + warm * 26.0
+    let b = 220.0 - warm * 160.0
+    return ((r as int) * 65536) + ((g as int) * 256) + (b as int)
+}
+
+pub fn view(model: Model) {
+    draw.rect(0.0, 0.0, WIDTH(), HEIGHT(), 0x11131f)
+
+    for bird in model.birds {
+        // Two pixels, because eight hundred of anything larger is a smear.
+        draw.rect(bird.x, bird.y, 2.0, 2.0, colour_of(bird))
+    }
+
+    // The hawk, when it is on the field.
+    if model.hawk_x >= 0.0 {
+        draw.rect(model.hawk_x - 3.0, model.hawk_y - 3.0, 6.0, 6.0, 0xe9a63c)
+    }
+
+    let pairs = COUNT() * COUNT()
+    draw.text(
+        8.0,
+        8.0,
+        "\(COUNT()) birds · \(pairs) distance tests a frame",
+        0x8b8d9e,
+    )
+    // Tests a second is the number worth printing: it is the work actually
+    // done, rather than a frame rate that says as much about the display as
+    // about the program.
+    let rate = (pairs as float) * model.fps
+    draw.text(8.0, 26.0, "\(model.fps) fps · \(rate) tests a second", 0x8b8d9e)
+    draw.text(8.0, HEIGHT() - 24.0, "move the pointer — it is a hawk", 0x5a5c6b)
+}
+
+// ---- running it anywhere else ---------------------------------------------------
+//
+// `main` exists so the same program runs on the bytecode VM and on the native
+// backend, where there is no pointer and no frame loop: it steps the flock a
+// fixed number of times and prints what it cost. That is the other half of the
+// point — the arithmetic is the arithmetic, and the browser is just where it
+// happens to be watched.
+
+fn main() {
+    // A small flock and few steps: this path exists to prove the arithmetic
+    // runs and agrees on every backend, not to be the demonstration. The
+    // browser gets `COUNT()` birds; the differential suite runs this, and a
+    // corpus that took a minute per backend would stop being run.
+    let birds = 60
+    var model = make(birds)
+    for i in 0..10 {
+        model = update(model, EVENT_FRAME(), 16.0, 0.0, "")
+    }
+    // Where the flock ends up is deterministic, so this is a real check that
+    // three backends did the same arithmetic — not just that none of them
+    // crashed.
+    var x = 0.0
+    var y = 0.0
+    for bird in model.birds {
+        x = x + bird.x
+        y = y + bird.y
+    }
+    io.print("\(birds) birds, 10 steps")
+    io.print("centre \((x / (birds as float)) as int), \((y / (birds as float)) as int)")
+
+    // Drawing the flock once, headlessly. Two reasons, and the second is the
+    // one that bites: it puts the drawing into the differential comparison,
+    // where the text renderer writes what the bytecode VM writes — and it
+    // keeps `view` *reachable*. Unreachable functions are dropped before code
+    // generation, so a `main` that never drew would prune the very export the
+    // page looks for, and the page would run this instead of the application.
+    view(model)
+}

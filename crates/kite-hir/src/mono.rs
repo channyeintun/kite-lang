@@ -562,16 +562,30 @@ pub fn prune(program: &mut Program) {
     let Program { fns, entry, vtables, .. } = program;
 
     let mut roots: Vec<u32> = Vec::new();
-    match entry {
-        Some(e) => roots.push(e.0),
-        // A program with no entry point is a library; everything public is a
-        // way in.
-        None => {
-            for (i, f) in fns.iter().enumerate() {
-                if f.is_pub {
-                    roots.push(i as u32);
-                }
-            }
+    if let Some(e) = entry {
+        roots.push(e.0);
+    }
+    // Every `pub` free function the *program itself* declares is a way in, and
+    // that is true whether or not it also has a `main`. The backend exports
+    // exactly these, so pruning one would mean pruning something the outside
+    // world can call — and the outside world here is a real caller: a page
+    // looks for `init`, `view` and `update` and drives the program through
+    // them.
+    //
+    // Getting this backwards was a silent failure rather than a loud one. The
+    // set of exports used to be *whatever survived pruning*, so a program with
+    // both an application and a `main` kept only what `main` reached: an
+    // example whose `main` built its own model never exported `init`, the page
+    // found no application, and ran `main` instead — drawing one still frame
+    // and looking for all the world like a broken animation.
+    //
+    // A library's functions are qualified — `json.parse`, `prelude.map` — and
+    // a dot cannot appear in an identifier, so the unqualified name is exactly
+    // "declared here". That is what keeps a `hello world` from carrying the
+    // prelude it never mentions.
+    for (i, f) in fns.iter().enumerate() {
+        if f.is_pub && f.is_free && !f.name.contains('.') {
+            roots.push(i as u32);
         }
     }
     // A value can become a trait object anywhere, and from there any of its

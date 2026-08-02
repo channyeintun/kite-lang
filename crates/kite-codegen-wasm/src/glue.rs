@@ -1145,6 +1145,20 @@ export const EVENT_DOWN = 4n;
 export const EVENT_UP = 5n;
 /// The window was resized: `x` and `y` carry the new size.
 export const EVENT_RESIZE = 6n;
+/// A frame is about to be painted: `x` carries the milliseconds since the last
+/// one, so a simulation steps by *time* rather than by frame — the same
+/// program then runs at the same speed on a machine that manages 30 frames a
+/// second and one that manages 144.
+///
+/// The loop runs **while the model keeps changing**. A program that returns
+/// the model it was given has nothing to animate, so the ticking stops until
+/// real input arrives; one that returns a new model each frame keeps it going.
+/// That rule needs no new export and no way to ask for frames: a static
+/// application pays one comparison at startup and nothing after, and an
+/// animating one never has to say so. A paused simulation that wants to keep
+/// the loop warm returns a model that differs — a frame counter is enough —
+/// which is the explicit way to say "still going".
+export const EVENT_FRAME = 7n;
 
 export function isApplication(exports) {{
   return ["init", "view", "update"].every((n) => typeof exports[n] === "function");
@@ -1565,7 +1579,7 @@ pub fn generate_page(title: &str) -> String {
   import {{ instantiate, setRenderer, setWriter, isApplication, setMeasure,
             setLineHeight, fontMeasure, fontLineHeight, FONT, setAnnouncer,
             EVENT_CLICK, EVENT_KEY, EVENT_WHEEL, EVENT_MOVE, EVENT_DOWN,
-            EVENT_UP, EVENT_RESIZE, str, recordingRenderer, replay, diffFrames,
+            EVENT_UP, EVENT_RESIZE, EVENT_FRAME, str, recordingRenderer, replay, diffFrames,
             damageOf, domRenderer, canvasRenderer, textRenderer }} from "./app.js";
 
   // Measure in the font that will be drawn, before anything is laid out.
@@ -1685,6 +1699,42 @@ pub fn generate_page(title: &str) -> String {
     // becomes index 0.
     model = exports.update(model, kind, x, y, str(key));
     draw(false);
+    // Input may have started something moving.
+    wake();
+  }}
+
+  // The frame loop. It runs while the model keeps changing and stops when it
+  // does not, which is how an application asks for animation without there
+  // being anything to ask: a model is a value, so `update` returning the one
+  // it was given *is* the statement that nothing is moving.
+  let ticking = false;
+  let lastTick = 0;
+
+  function tick(now) {{
+    if (!interactive) {{
+      ticking = false;
+      return;
+    }}
+    // The first frame of a run has no previous one to measure from, and
+    // handing a program a huge first step would make every simulation jump.
+    const elapsed = lastTick === 0 ? 0 : now - lastTick;
+    lastTick = now;
+    const next = exports.update(model, EVENT_FRAME, elapsed, 0, str(""));
+    if (next === model) {{
+      ticking = false;
+      lastTick = 0;
+      return;
+    }}
+    model = next;
+    draw(false);
+    requestAnimationFrame(tick);
+  }}
+
+  function wake() {{
+    if (!interactive || ticking) return;
+    ticking = true;
+    lastTick = 0;
+    requestAnimationFrame(tick);
   }}
 
   const at = (e) => {{
@@ -1758,6 +1808,9 @@ pub fn generate_page(title: &str) -> String {
     button.addEventListener("click", () => show(name));
   }}
   show("dom");
+  // An application that animates from the first frame starts here; a static one
+  // stops after a single comparison.
+  wake();
 </script>
 "#,
         title = title

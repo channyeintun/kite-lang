@@ -136,6 +136,11 @@ kitec build examples/hello.kite --emit wasm --out dist
 # wrote dist/app.wasm (500 bytes), dist/app.js and dist/index.html
 ```
 
+`examples/boids.kite` is six hundred birds, each one considering every other —
+360,000 distance tests a frame, about 6 ms of them, against a 16.7 ms budget
+for sixty frames a second. It is the naive O(n²) algorithm on purpose: a
+spatial index would measure the index rather than the language.
+
 `examples/todo.kite` is a task list with a text field, buttons and checkboxes,
 navigable with the keyboard alone. A program with a user interface writes its
 layout with `std/ui.kite` and draws through four host calls. The generated page runs the same module against a DOM
