@@ -466,17 +466,22 @@ fn relative_to(root: &Path, dir: &Path) -> String {
         // Nothing in common — a different drive. Absolute is the truth then.
         return dir.display().to_string();
     }
-    let mut out = PathBuf::new();
+    // Joined with `/` rather than by the platform's separator. A lockfile is
+    // committed, and `../shared` on one machine and `..\shared` on another is
+    // the same file disagreeing with itself — which is the whole thing writing
+    // a relative path was meant to avoid. Every target reads `/` in a manifest,
+    // so this is what a person would have written too.
+    let mut parts: Vec<String> = Vec::new();
     for _ in shared..root_parts.len() {
-        out.push("..");
+        parts.push("..".to_string());
     }
     for part in &dir_parts[shared..] {
-        out.push(part);
+        parts.push(part.as_os_str().to_string_lossy().to_string());
     }
-    if out.as_os_str().is_empty() {
+    if parts.is_empty() {
         ".".to_string()
     } else {
-        out.display().to_string()
+        parts.join("/")
     }
 }
 
