@@ -5,10 +5,23 @@
 //! construct that broke rather than at a whole program.
 
 mod common;
+
+/// The backend refuses Windows — its own `supported_here` says why — so its
+/// tests say so rather than failing there.
+fn unsupported_here() -> bool {
+    if let Err(why) = kite_codegen_clif::supported_here() {
+        eprintln!("skipping: {}", why);
+        return true;
+    }
+    false
+}
 use common::agree;
 
 #[test]
 fn integers_and_control_flow() {
+    if unsupported_here() {
+        return;
+    }
     agree(
         "fn add(a: int, b: int) -> int {\n  return a + b\n}\n\
          fn main() {\n  let x = add(2, 3)\n  if x > 4 {\n    io.print(x)\n  }\n\
@@ -18,6 +31,9 @@ fn integers_and_control_flow() {
 
 #[test]
 fn arithmetic_and_comparison() {
+    if unsupported_here() {
+        return;
+    }
     agree(
         "fn main() {\n  io.print(2 + 3 * 4 - 10 / 2 % 3)\n  io.print(1.5 + 2.5 * 2.0)\n\
          \x20 io.print(-7)\n  io.print(7 < 9)\n  io.print(2.0 >= 3.0)\n  io.print(!false)\n\
@@ -27,11 +43,17 @@ fn arithmetic_and_comparison() {
 
 #[test]
 fn floats_render_like_the_vm() {
+    if unsupported_here() {
+        return;
+    }
     agree("fn main() {\n  io.print(1.5)\n  io.print(4.0)\n  io.print(1.0 / 4.0)\n  io.print(0.1 + 0.2)\n}\n");
 }
 
 #[test]
 fn strings_concat_compare_and_ops() {
+    if unsupported_here() {
+        return;
+    }
     agree(
         "fn main() {\n  io.print(\"a\" + \"b\" + \"c\")\n  io.print(\"x\" == \"x\")\n\
          \x20 io.print(\"x\" != \"y\")\n  io.print(\"a\" < \"b\")\n\
@@ -43,6 +65,9 @@ fn strings_concat_compare_and_ops() {
 
 #[test]
 fn structs_and_mutation() {
+    if unsupported_here() {
+        return;
+    }
     agree(
         "struct C {\n  var n: int\n}\n\
          impl C {\n  fn bump(var self) {\n    self.n = self.n + 1\n  }\n}\n\
@@ -52,6 +77,9 @@ fn structs_and_mutation() {
 
 #[test]
 fn enums_and_match() {
+    if unsupported_here() {
+        return;
+    }
     agree(
         "enum Shape {\n  Circle(radius: int)\n  Rect(width: int, height: int)\n  Point\n}\n\
          fn area(s: Shape) -> int {\n  return match s {\n    Circle(r) => 3 * r * r,\n\
@@ -63,6 +91,9 @@ fn enums_and_match() {
 
 #[test]
 fn slices_maps_and_tuples() {
+    if unsupported_here() {
+        return;
+    }
     agree(
         "fn main() {\n  var xs = [1, 2, 3]\n  xs.push(4)\n  io.print(xs.len())\n\
          \x20 io.print(xs[3])\n  var ys = xs\n  ys[0] = 9\n  io.print(xs[0])\n  io.print(ys[0])\n\
@@ -74,6 +105,9 @@ fn slices_maps_and_tuples() {
 
 #[test]
 fn optionals_boxed_and_nil() {
+    if unsupported_here() {
+        return;
+    }
     agree(
         "fn maybe(n: int) -> Option<int> {\n  if n > 0 {\n    return n\n  }\n  return nil\n}\n\
          fn main() {\n  let a = maybe(5)\n  io.print(if a == nil { 0 } else { a })\n\
@@ -83,6 +117,9 @@ fn optionals_boxed_and_nil() {
 
 #[test]
 fn errors_and_pairs() {
+    if unsupported_here() {
+        return;
+    }
     agree(
         "fn divide(a: int, b: int) -> (int, error) {\n  if b == 0 {\n\
          \x20   return _, errors.new(\"division by zero\")\n  }\n  return a / b, nil\n}\n\
@@ -94,6 +131,9 @@ fn errors_and_pairs() {
 
 #[test]
 fn closures_capture_and_call() {
+    if unsupported_here() {
+        return;
+    }
     agree(
         "fn apply(f: fn(int) -> int, x: int) -> int {\n  return f(x)\n}\n\
          fn make_adder(n: int) -> fn(int) -> int {\n  return |x: int| x + n\n}\n\
@@ -104,6 +144,9 @@ fn closures_capture_and_call() {
 
 #[test]
 fn trait_objects_dispatch() {
+    if unsupported_here() {
+        return;
+    }
     agree(
         "trait Shape {\n  fn area(self) -> int\n}\n\
          struct Circle {\n  r: int\n}\nstruct Square {\n  s: int\n}\n\
@@ -116,6 +159,9 @@ fn trait_objects_dispatch() {
 
 #[test]
 fn structural_equality() {
+    if unsupported_here() {
+        return;
+    }
     agree(
         "struct Point {\n  x: int\n  y: int\n}\n\
          fn main() {\n  let p = Point{x: 1, y: 2}\n  let q = Point{x: 1, y: 2}\n\
@@ -127,6 +173,9 @@ fn structural_equality() {
 
 #[test]
 fn interpolation_matches_print() {
+    if unsupported_here() {
+        return;
+    }
     agree(
         "fn main() {\n  let n = 42\n  let pi = 2.5\n  let ok = true\n\
          \x20 io.print(\"n=\\(n) pi=\\(pi) ok=\\(ok)\")\n  io.print(\"whole: \\(3.0)\")\n}\n",
@@ -135,6 +184,9 @@ fn interpolation_matches_print() {
 
 #[test]
 fn tasks_interleave_deterministically() {
+    if unsupported_here() {
+        return;
+    }
     agree(
         "async fn work(n: int) -> int {\n  io.print(\"start \\(n)\")\n  task.yield()\n\
          \x20 io.print(\"end \\(n)\")\n  return n * 10\n}\n\
@@ -145,6 +197,9 @@ fn tasks_interleave_deterministically() {
 
 #[test]
 fn drawing_writes_the_same_lines() {
+    if unsupported_here() {
+        return;
+    }
     agree(
         "fn main() {\n  draw.rect(0.0, 0.0, 640.0, 360.0, 0x14161a)\n\
          \x20 draw.text(12.0, 12.0, \"Kite\", 0xf5f7fa)\n\

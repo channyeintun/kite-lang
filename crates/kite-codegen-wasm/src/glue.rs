@@ -122,20 +122,22 @@ export function text(s) {
             "  // An engine without the builtins ignores the options and then cannot\n\
             \x20 // find `wasm:js-string`, which is a link error nobody could place. The\n\
             \x20 // failure is caught and named rather than left as one.\n\
-            \x20 let module;\n\
+            \x20 let instance;\n\
             \x20 try {\n\
-            \x20   module = await WebAssembly.compile(bytes, {\n\
+            \x20   const module = await WebAssembly.compile(bytes, {\n\
             \x20     builtins: ['js-string'],\n\
             \x20     importedStringConstants: 'kite:strings',\n\
             \x20   });\n\
+            \x20   // Given a Module rather than bytes, this answers with the Instance\n\
+            \x20   // itself — there is no `{ instance, module }` pair to take apart.\n\
+            \x20   instance = await WebAssembly.instantiate(module, imports());\n\
             \x20 } catch (e) {\n\
             \x20   throw new Error(\n\
             \x20     'this module was built with --js-strings and needs the JS String ' +\n\
             \x20       'Builtins, which this engine does not have: ' + e.message + '. ' +\n\
             \x20       'Use a current browser or Node 23+, or build without the flag.',\n\
             \x20   );\n\
-            \x20 }\n\
-            \x20 const instance = await WebAssembly.instantiate(module, imports());",
+            \x20 }",
         ),
     };
     let mut groups: Vec<&str> = Vec::new();

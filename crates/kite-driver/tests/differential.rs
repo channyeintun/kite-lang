@@ -838,6 +838,13 @@ fn node_available() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// Whether the native backend runs on this host at all. It refuses Windows,
+/// for a reason its own `supported_here` explains — so the corpus compares two
+/// backends there and three everywhere else, and says which.
+fn native_available() -> bool {
+    kite_codegen_clif::supported_here().is_ok()
+}
+
 fn cc_available() -> bool {
     Command::new("cc")
         .arg("--version")
@@ -958,13 +965,16 @@ fn every_example_agrees_across_backends() {
         total += 1;
 
         // And on the native backend, which refuses nothing and needs nothing
-        // installed.
-        let native = run_on_native_at(&full, &name, &src);
-        if vm != native {
-            mismatches.push(format!(
-                "{}:\n  vm:     {:?}\n  native: {:?}",
-                name, vm, native
-            ));
+        // installed — where it runs at all. The Wasm comparison below happens
+        // either way: skipping one backend must not quietly skip the other.
+        if native_available() {
+            let native = run_on_native_at(&full, &name, &src);
+            if vm != native {
+                mismatches.push(format!(
+                    "{}:\n  vm:     {:?}\n  native: {:?}",
+                    name, vm, native
+                ));
+            }
         }
 
         // The Wasm target still refuses a few constructs. Those examples are
@@ -996,6 +1006,13 @@ fn every_example_agrees_across_backends() {
 
 #[test]
 fn all_backends_agree() {
+    let native = native_available();
+    if !native {
+        eprintln!(
+            "skipping the native half: {}",
+            kite_codegen_clif::supported_here().unwrap_err()
+        );
+    }
     let node = node_available();
     if !node {
         eprintln!("skipping the wasm half: node is not on PATH");
@@ -1010,12 +1027,14 @@ fn all_backends_agree() {
     for (name, src) in PROGRAMS {
         let vm = run_on_vm(name, src);
 
-        let native = run_on_native(name, src);
-        if vm != native {
-            mismatches.push(format!(
-                "{}:\n  vm:     {:?}\n  native: {:?}",
-                name, vm, native
-            ));
+        if native {
+            let out = run_on_native(name, src);
+            if vm != out {
+                mismatches.push(format!(
+                    "{}:\n  vm:     {:?}\n  native: {:?}",
+                    name, vm, out
+                ));
+            }
         }
 
         if node {
@@ -1047,6 +1066,13 @@ fn all_backends_agree() {
 /// a linker exercises.
 #[test]
 fn a_linked_executable_agrees() {
+    if !native_available() {
+        eprintln!(
+            "skipping the linked-executable check: {}",
+            kite_codegen_clif::supported_here().unwrap_err()
+        );
+        return;
+    }
     if !cc_available() {
         eprintln!("skipping the linked-executable check: `cc` is not on PATH");
         return;

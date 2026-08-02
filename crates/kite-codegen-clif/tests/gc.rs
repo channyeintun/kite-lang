@@ -10,6 +10,16 @@
 
 mod common;
 
+/// The backend refuses Windows — its own `supported_here` says why — so its
+/// tests say so rather than failing there.
+fn unsupported_here() -> bool {
+    if let Err(why) = kite_codegen_clif::supported_here() {
+        eprintln!("skipping: {}", why);
+        return true;
+    }
+    false
+}
+
 /// Nursery small enough that every test below must collect many times.
 const SMALL_NURSERY: usize = 16 << 10;
 
@@ -29,6 +39,9 @@ fn agree_with_gc(src: &str) {
 
 #[test]
 fn a_live_list_survives_many_collections() {
+    if unsupported_here() {
+        return;
+    }
     // The list is live from the first allocation to the last print, while
     // the loop churns through far more garbage than the nursery holds —
     // every element is re-boxed on each push because the slice is
@@ -50,6 +63,9 @@ fn a_live_list_survives_many_collections() {
 
 #[test]
 fn a_deep_structure_survives_via_stack_roots() {
+    if unsupported_here() {
+        return;
+    }
     // The tree under construction is reachable only through locals of the
     // recursive builder — precisely the frames the stack maps must describe.
     // A missed root shows up as a corrupt total or a crash, not a quiet pass.
@@ -71,6 +87,9 @@ fn a_deep_structure_survives_via_stack_roots() {
 
 #[test]
 fn old_objects_written_after_promotion_are_remembered() {
+    if unsupported_here() {
+        return;
+    }
     // The holder is promoted early, then keeps having young values stored
     // into its `var` field — the old-to-nursery edges only the write barrier
     // can see. If the remembered set were broken, the field would be read
@@ -90,6 +109,9 @@ fn old_objects_written_after_promotion_are_remembered() {
 
 #[test]
 fn maps_and_closures_survive_collections() {
+    if unsupported_here() {
+        return;
+    }
     agree_with_gc(
         "fn main() {\n  var m: {str: int} = {}\n\
          \x20 for i in 0..300 {\n    m[\"k\\(i)\"] = i * i\n  }\n\

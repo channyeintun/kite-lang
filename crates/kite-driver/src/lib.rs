@@ -20,6 +20,13 @@ pub use kite_codegen_wasm::{
 };
 pub use kite_vm::Trap;
 
+/// Whether the native backend runs on this host. See
+/// `kite_codegen_clif::supported_here` for what it refuses and why.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn native_supported_here() -> Result<(), String> {
+    kite_codegen_clif::supported_here()
+}
+
 /// How far to run the pipeline, and what to hand back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Emit {

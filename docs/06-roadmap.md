@@ -886,6 +886,25 @@ which runs on the bytecode VM. Conflating the two would have been the kind of
 overstatement this document exists to avoid, and now that there is a real
 backend it is worth saying that the bundle is still not it.
 
+**Windows is refused, and the reason is the collector rather than the code
+generator.** The root walk assumes the caller's stack pointer at a call is the
+frame record's address plus sixteen — true on System V and on AArch64, which is
+what makes macOS and Linux work. Cranelift's Win64 prologue establishes the
+frame pointer differently, so the stack-map offsets do not land where the walk
+expects and the collector traces a stack word that was never a reference. It
+surfaces as a corrupted heap under a small nursery, which is exactly the
+failure a precise collector must never have, so `--native` and `--emit native`
+refuse there with that explanation and the corpus compares two backends on
+Windows and three everywhere else. Finishing it needs a Windows machine to
+read the prologue on; guessing at the offset from a distance is how a
+collector acquires a second bug.
+
+It was found the way it should have been. macOS forces frame pointers by ABI,
+so the first version of the walk passed on the machine it was written on and
+corrupted the heap on the other two — which is the argument for running CI on
+three operating systems, and for the differential corpus being the thing that
+noticed.
+
 **What the collector does not do**, said plainly because a collector's gaps are
 where the surprises live:
 
@@ -1342,7 +1361,7 @@ none.
 | 6 — Standard library | ✅ thirteen modules written in Kite, tested on both backends, and `@derive(Debug, Hash, Encode, Decode)` as a source-to-source expansion |
 | 7 — Layout and DOM renderer | ✅ layout, events, the update loop, a widget set with focus, a keyboard-driven task list, and a retained scene graph whose diff patches elements in place. ❌ Taffy's fixtures, a real screen-reader pass |
 | 8 — Canvas renderer | 🟡 UAX #9 bidi and Arabic joining in Kite, a glyph atlas, per-rectangle damage, and golden transcripts across eight scripts. ❌ OpenType shaping, golden *images*, WebGPU |
-| 9 — Native backend | ✅ Cranelift AOT and JIT, with a precise generational collector over Cranelift's stack maps. The differential corpus runs on three backends |
+| 9 — Native backend | ✅ Cranelift AOT and JIT on macOS and Linux, with a precise generational collector over Cranelift's stack maps; three backends compared. ❌ Windows, which the collector's frame walk cannot read yet and which is refused rather than left to corrupt |
 | 10 — Tooling | ✅ fmt, doc, fix, test, bundle, `--explain`, the language server, and a package manager that resolves semver across the whole graph |
 | 11 — Networking | 🟡 the client, and a server that listens on a real socket through a generated Node adapter. ❌ `wasi:http/incoming-handler`, which needs the component model |
 | 12 — Cryptography | ✅ hashing, HMAC, PBKDF2, randomness, constant-time comparison, E0600, and AES-GCM, Ed25519 and X25519 over opaque key handles. ❌ Argon2, which no host has |

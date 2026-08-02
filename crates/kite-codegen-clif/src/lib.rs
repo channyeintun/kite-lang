@@ -1648,7 +1648,38 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
 // ---------------------------------------------------------------------------
 
 /// Compile to a relocatable object file, for the linker.
+/// Whether this host can run the native backend at all.
+///
+/// **Windows x86-64 cannot, yet, and the reason is the collector rather than
+/// the code generator.** Roots are found by walking the frame-pointer chain,
+/// and that walk assumes the caller's stack pointer at a call is the frame
+/// record's address plus sixteen — which holds on the System V ABI and on
+/// AArch64, and is what makes macOS and Linux work. Cranelift's Win64
+/// prologue establishes the frame pointer differently, so the offsets the
+/// stack maps are relative to do not land where the walk expects, and the
+/// collector traces a stack word that was never a reference. It shows up as
+/// a corrupted heap under a small nursery, which is exactly the failure a
+/// precise collector must never have.
+///
+/// Refusing is the honest answer until someone with a Windows machine can
+/// read the prologue and fix the offset. A backend that emitted code which
+/// corrupts memory on one in three platforms would be worse than one that
+/// says where it does not work.
+pub fn supported_here() -> Result<(), String> {
+    if cfg!(all(windows, target_arch = "x86_64")) {
+        return Err(
+            "the native backend does not support Windows yet: the collector finds roots by \
+             walking frame pointers, and Cranelift's Win64 prologue puts the frame record \
+             where that walk does not expect it\n\
+             note: the bytecode and WebAssembly targets work here — run without `--native`"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 pub fn compile_object(program: &mir::Program, types: &Types) -> Result<Vec<u8>, String> {
+    supported_here()?;
     let isa = host_isa(true)?;
     let builder = cranelift_object::ObjectBuilder::new(
         isa,
@@ -1668,6 +1699,7 @@ pub fn compile_object(program: &mir::Program, types: &Types) -> Result<Vec<u8>, 
 /// A trap ends the process, exactly as it would in a linked executable — the
 /// runtime prints the message first, so nothing is quieter than the VM.
 pub fn run_jit(program: &mir::Program, types: &Types, out: &mut dyn std::io::Write) -> Result<(), String> {
+    supported_here()?;
     let _guard = kite_rt::run_lock();
     kite_rt::begin_capture();
 

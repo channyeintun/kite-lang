@@ -23,6 +23,12 @@ fn node_available() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// The phrase the generated glue puts on a module that needs the builtins and
+/// did not get them. Matching on it is how these tests tell "this engine is
+/// too old" from "this backend is wrong" — the two failures look identical
+/// from outside, and only one of them is a bug.
+const NO_BUILTINS: &str = "needs the JS String Builtins";
+
 const RUNNER: &str = "import { readFile } from \"node:fs/promises\";\n\
      import { run, setWriter } from \"./app.js\";\n\
      const out = [];\n\
@@ -30,7 +36,13 @@ const RUNNER: &str = "import { readFile } from \"node:fs/promises\";\n\
      await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
      process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
 
-fn run_under_node(name: &str, src: &str, mode: Strings) -> String {
+/// Run, and say whether the engine simply has not got the builtins.
+///
+/// The check is the real path rather than a version number or a hand-written
+/// probe module: the module is built, handed to the engine, and the engine's
+/// own answer is read. A probe that is subtly wrong would turn this whole file
+/// into a test that passes by not running, which is worse than a failure.
+fn try_under_node(name: &str, src: &str, mode: Strings) -> Option<String> {
     let tag = if mode == Strings::Builtins { "builtins" } else { "table" };
     let dir = std::env::temp_dir().join(format!("kite-str-{}-{}-{}", name, tag, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -57,15 +69,21 @@ fn run_under_node(name: &str, src: &str, mode: Strings) -> String {
         .arg(dir.join("run.mjs"))
         .output()
         .expect("node runs");
-    assert!(
-        output.status.success(),
-        "{} ({}) failed under node:\n{}",
-        name,
-        tag,
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let _ = std::fs::remove_dir_all(&dir);
-    String::from_utf8(output.stdout).expect("utf-8")
+    if !output.status.success() {
+        if mode == Strings::Builtins && stderr.contains(NO_BUILTINS) {
+            return None;
+        }
+        panic!("{} ({}) failed under node:\n{}", name, tag, stderr);
+    }
+    Some(String::from_utf8(output.stdout).expect("utf-8"))
+}
+
+/// The same, for a run that must succeed.
+fn run_under_node(name: &str, src: &str, mode: Strings) -> String {
+    try_under_node(name, src, mode)
+        .unwrap_or_else(|| panic!("{} could not run at all", name))
 }
 
 fn run_on_vm(name: &str, src: &str) -> String {
@@ -156,7 +174,13 @@ fn a_program_cannot_tell_which_representation_it_got() {
     for (name, src) in PROGRAMS {
         let vm = run_on_vm(name, src);
         let table = run_under_node(name, src, Strings::Table);
-        let builtins = run_under_node(name, src, Strings::Builtins);
+        let Some(builtins) = try_under_node(name, src, Strings::Builtins) else {
+            eprintln!(
+                "skipping the builtins half: this engine has no JS String Builtins \
+                 (Node 23+, or a current browser)"
+            );
+            return;
+        };
         if vm != table || vm != builtins {
             mismatches.push(format!(
                 "{}:\n  vm:       {:?}\n  table:    {:?}\n  builtins: {:?}",

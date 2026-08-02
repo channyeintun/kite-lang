@@ -123,7 +123,7 @@ what a call inferred — all over the same passes the compiler runs.
 | `wasm32-gc` | WasmGC via `wasm-encoder` | Every construct the language has. `--emit wasm` refuses nothing it can express |
 | `kbc` | Register bytecode and a VM | The dev loop, the embedding target, and the differential oracle |
 | bundle | This compiler with the program appended | One file, nothing installed, starts in about a millisecond |
-| `native-*` | Cranelift, AOT and JIT | Machine code, with a precise collector in `kite-rt`. `--emit native` writes an object file; `run --native` needs no linker |
+| `native-*` | Cranelift, AOT and JIT | Machine code, with a precise collector in `kite-rt`. `--emit native` writes an object file; `run --native` needs no linker. macOS and Linux; Windows is refused, and says why |
 
 Every program in the differential corpus is compiled to **all three** real
 backends, run on all three, and the outputs compared. Three independent
@@ -181,6 +181,10 @@ Recorded here rather than left to be discovered:
 - **Golden transcripts, not golden images.** The eight scripts are compared by
   the drawing calls they produce, on both backends. A rasterisation difference
   needs a browser and pixels, and would need a dependency this does not have.
+- **No native backend on Windows.** The collector finds roots by walking frame
+  pointers, and Cranelift's Win64 prologue puts the frame record where that
+  walk does not expect it. `--native` refuses there rather than corrupting the
+  heap. Finishing it wants a Windows machine.
 - **No `wasi:http/incoming-handler`.** A Kite program listens on a port through
   a generated Node adapter. WASI's version is a component-model export, and
   `kitec` emits a core module.

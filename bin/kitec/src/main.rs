@@ -206,6 +206,13 @@ fn main() -> ExitCode {
     if js_strings && emit != Emit::Wasm {
         return fail("`--js-strings` only means anything with `--emit wasm`");
     }
+    // The native backend refuses some hosts, and it is better to hear that
+    // before a compilation than after one.
+    if emit == Emit::Native {
+        if let Err(why) = kite_driver::native_supported_here() {
+            return fail(&why);
+        }
+    }
     let result = kite_driver::compile_strings(&path, &src, emit, release, strings);
 
     if !result.diags.is_empty() {
