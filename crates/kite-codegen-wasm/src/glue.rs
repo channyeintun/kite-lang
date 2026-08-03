@@ -765,6 +765,42 @@ export function firstStrongRtl(body) {{
 /// their bases, which is rule L2 applied to a run the resolver already made
 /// single-direction; a run mixing strong directions is refused, because
 /// ordering it is the resolver's job, not the painter's.
+/// Whether one code point can be assumed to be one glyph, at a fixed advance,
+/// in the order it was written.
+///
+/// Deliberately narrow. Being wrong in the permissive direction mangles text;
+/// being wrong in the strict direction costs a `fillText`, which is what the
+/// atlas is an optimisation over in the first place.
+function simpleGlyph(cp) {{
+  // ASCII and the Latin supplements, through Latin Extended-B.
+  if (cp >= 0x20 && cp <= 0x24f) return true;
+  // Greek and Cyrillic.
+  if (cp >= 0x370 && cp <= 0x4ff) return true;
+  // The combining diacriticals, which sit over a Latin, Greek or Cyrillic
+  // base. These reposition vertically and advance nothing, which is the case
+  // the cluster logic above already handles and proves with the advance sum.
+  // What it cannot handle is a mark that moves its *base*, which is what the
+  // Brahmic scripts do and why they are not here.
+  if (cp >= 0x0300 && cp <= 0x036f) return true;
+  // Hebrew, points included: the points are zero-advance marks over a base,
+  // the same case as the diacriticals.
+  if (cp >= 0x0590 && cp <= 0x05ff) return true;
+  // Arabic *presentation* forms — the joined shapes `std/text.join_arabic`
+  // produces, each already one glyph. Unjoined Arabic is refused by omission,
+  // which is the whole point of listing rather than excluding.
+  if (cp >= 0xfe70 && cp <= 0xfefe) return true;
+  // General punctuation, minus the formatting characters refused above.
+  if (cp >= 0x2010 && cp <= 0x205e) return true;
+  // Currency, arrows, and the mathematical and geometric symbols.
+  if (cp >= 0x20a0 && cp <= 0x2bff) return true;
+  // CJK punctuation, kana, and the unified ideographs.
+  if (cp >= 0x3000 && cp <= 0x30ff) return true;
+  if (cp >= 0x4e00 && cp <= 0x9fff) return true;
+  // Halfwidth and fullwidth forms.
+  if (cp >= 0xff00 && cp <= 0xffef) return true;
+  return false;
+}}
+
 export function atlasPlan(body, measureOne) {{
   const measurer = measureOne ?? measure;
   const clusters = [];
@@ -786,15 +822,23 @@ export function atlasPlan(body, measureOne) {{
     ) {{
       return null;
     }}
-    // Unjoined Arabic: the shape of every letter depends on its neighbours,
-    // which is the one thing a cache keyed by code point cannot express.
-    if (
-      (cp >= 0x0600 && cp <= 0x06ff) ||
-      (cp >= 0x0750 && cp <= 0x077f) ||
-      (cp >= 0x0870 && cp <= 0x08ff)
-    ) {{
-      return null;
-    }}
+    // Everything else is an allow-list, and it is an allow-list on purpose.
+    //
+    // This started as a list of scripts to *refuse* — emoji, joiners, unjoined
+    // Arabic — and the trouble with refusing by name is that the ones nobody
+    // named get drawn wrongly in silence. Burmese did: `အပြန်` encodes its
+    // medial ra after the consonant and the font draws it wrapped around the
+    // front, and `မွန်` stacks a medial underneath, so blitting one tile per
+    // code point at its own advance scattered the marks across the line.
+    //
+    // The atlas is only ever valid where one code point is one glyph at a
+    // fixed advance, in visual order. That is true of Latin, Greek, Cyrillic,
+    // the CJK ideographs and kana, and unpointed Hebrew. It is not true of any
+    // Brahmic script — Devanagari, Burmese, Thai, Khmer, Tamil — nor of
+    // Hangul jamo, and it will not be true of the next script Unicode adds.
+    // So the rule now runs the other way: prove a character is simple, or fall
+    // back to `fillText`, which shapes properly and is always correct.
+    if (!simpleGlyph(cp)) return null;
     const advance = measurer(ch);
     if (!(advance >= 0)) return null;
     if (advance === 0 && clusters.length > 0) {{

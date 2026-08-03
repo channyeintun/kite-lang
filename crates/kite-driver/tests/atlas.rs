@@ -97,6 +97,13 @@ fn a_combining_mark_advances_nothing() {
 /// Everything the plan must refuse rather than guess at. Each of these would
 /// draw wrongly one glyph at a time, and the refusal is what routes it to
 /// `fillText`, which draws it correctly.
+///
+/// The Brahmic cases are here because they were once *missing*. The refusals
+/// were a list of scripts named one at a time, and Burmese was not on it: a
+/// medial ra is encoded after its consonant and drawn wrapped around the front
+/// of it, so one tile per code point scattered the marks along the line. The
+/// rule is now an allow-list, and these are the proof that it holds for
+/// scripts nobody thought to name.
 #[test]
 fn the_plan_refuses_what_it_cannot_prove() {
     if !node_available() {
@@ -113,13 +120,20 @@ fn the_plan_refuses_what_it_cannot_prove() {
              say('arabic', atlasPlan('\\u0628\\u0633'));\n\
              say('mixed', atlasPlan('a\\u05D0'));\n\
              say('bracket-rtl', atlasPlan('\\u05D0('));\n\
+             say('burmese', atlasPlan('\\u1006\\u101A\\u103A\\u101C\\u103A'));\n\
+             say('medial-ra', atlasPlan('\\u1021\\u1015\\u103C\\u1014\\u103A'));\n\
+             say('devanagari', atlasPlan('\\u0928\\u092E\\u0938\\u094D\\u0924\\u0947'));\n\
+             say('thai', atlasPlan('\\u0E2A\\u0E27\\u0E31\\u0E2A\\u0E14\\u0E35'));\n\
+             say('hangul-jamo', atlasPlan('\\u1100\\u1161'));\n\
              const kerned = (s) => [...s].length === 1 ? 8 : 14;\n\
              say('kerned', atlasPlan('AV', kerned));\n"
         ),
     );
     assert_eq!(
         out,
-        "emoji null\nzwj null\nselector null\narabic null\nmixed null\nbracket-rtl null\nkerned null\n"
+        "emoji null\nzwj null\nselector null\narabic null\nmixed null\nbracket-rtl null\n\
+         burmese null\nmedial-ra null\ndevanagari null\nthai null\nhangul-jamo null\n\
+         kerned null\n"
     );
 }
 
