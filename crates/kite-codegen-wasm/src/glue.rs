@@ -1160,12 +1160,22 @@ export function recordingRenderer() {{
 /// Replay recorded calls into a real renderer.
 export function replay(calls, renderer) {{
   // Only on a change, so a replay makes the same sequence of font calls the
-  // program made rather than one per run of text — and it starts at the host's
-  // default rather than at nothing, so replaying a picture that never changed
-  // the font emits no font call at all, exactly as the program did.
-  let size = NOMINAL_SIZE;
-  let weight = 400;
-  let opacity = 1;
+  // program made rather than one per run of text.
+  //
+  // Started from what the host is *actually* in — not from the default. A
+  // damage repaint calls this once per call, and each of those replays would
+  // otherwise begin by assuming the font is 16dp: a run stamped 16dp would
+  // match the assumption, no font would be selected, and it would be drawn in
+  // whatever the previous frame left behind. That is the bug where the search
+  // field's placeholder came out at the app bar's 22dp while the list was
+  // being scrolled, and snapped back on the next full frame.
+  //
+  // Reading the state rather than assuming it also keeps the property that
+  // made stamping worthwhile: any subset of a recording replays correctly on
+  // its own.
+  let size = fontSize;
+  let weight = fontWeight;
+  let opacity = alpha;
   // The alpha a call was recorded under, re-selected only when it changes, so
   // a replay makes the same sequence of alpha calls the program made.
   const wantAlpha = (a) => {{
