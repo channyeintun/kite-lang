@@ -1833,7 +1833,19 @@ if (HOSTS.audio) {
       if (element !== null) element.pause();
       element = new Audio(next);
       element.dataset.src = next;
-      element.preload = "metadata";
+      // Buffer the whole thing, not just the metadata.
+      //
+      // Seeking a media element normally asks the server for the bytes at the
+      // new position, over a `Range` request. A host that answers `200` with
+      // the entire body instead — which static asset servers commonly do, and
+      // which the one this is deployed to does — leaves the browser unable to
+      // seek past whatever it has already buffered: the position snaps back
+      // and the control looks broken. With the file buffered whole, a seek is
+      // resolved out of memory and needs nothing from the server.
+      //
+      // The cost is only paid by someone who actually plays the track, since
+      // nothing loads a file until the program asks for one.
+      element.preload = "auto";
     },
     start: () => {
       if (element === null) return;
@@ -1850,7 +1862,14 @@ if (HOSTS.audio) {
       // Before the metadata arrives the duration is NaN, and assigning a time
       // past it throws.
       const limit = Number.isFinite(element.duration) ? element.duration : seconds;
-      element.currentTime = Math.max(0, Math.min(seconds, limit));
+      const want = Math.max(0, Math.min(seconds, limit));
+      try {
+        element.currentTime = want;
+      } catch (e) {
+        // A seek the element is not ready for. The position simply does not
+        // move, which the program sees on its next frame — better than a
+        // trap the program has no way to handle.
+      }
     },
     at: () => (element === null ? 0 : element.currentTime),
     // Zero until the metadata has loaded, which a program reads as "not known
