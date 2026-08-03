@@ -29,7 +29,7 @@ fn sample(name: str, body: str) {
         ui.ink(0x102030),
     )
     let frames = ui.layout(node, ui.Size{ width: 176.0, height: 400.0 })
-    ui.paint(frames, 0xffffff)
+    ui.paint(frames)
 }
 
 fn main() {

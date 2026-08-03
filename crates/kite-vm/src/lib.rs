@@ -1409,6 +1409,30 @@ impl<'a> Vm<'a> {
                 );
                 Ok(Value::Unit)
             }
+            Native::DrawDRRect => {
+                let a = |i: usize| self.regs[base + arg_base as usize + i].clone();
+                let _ = writeln!(
+                    self.out,
+                    "drrect {} {} {} {} {} {} {}",
+                    a(0),
+                    a(1),
+                    a(2),
+                    a(3),
+                    a(4),
+                    a(5),
+                    a(6)
+                );
+                Ok(Value::Unit)
+            }
+            Native::DrawAlpha => {
+                let a = |i: usize| self.regs[base + arg_base as usize + i].clone();
+                // Written, unlike a font selection: alpha changes the pixels a
+                // call produces and shows up nowhere else in the transcript, so
+                // a backend that ignored it would otherwise agree with one that
+                // did not.
+                let _ = writeln!(self.out, "alpha {}", a(0));
+                Ok(Value::Unit)
+            }
             Native::DrawFont => {
                 let a = |i: usize| self.regs[base + arg_base as usize + i].clone();
                 let size = match a(0) {

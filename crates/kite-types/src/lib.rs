@@ -2882,6 +2882,54 @@ impl<'a> Checker<'a> {
             // — 400 is regular, 500 medium, 700 bold — because that is the
             // scale both renderers already speak and inventing a second one
             // would only need translating back.
+            // `draw.drrect(x, y, w, h, radius, width, colour)`.
+            BuiltinFn::DrawDRRect => {
+                if args.len() != 7 {
+                    self.arity_error("draw.drrect", args.len(), 7, span, None);
+                }
+                let wanted = [
+                    TyId::FLOAT,
+                    TyId::FLOAT,
+                    TyId::FLOAT,
+                    TyId::FLOAT,
+                    TyId::FLOAT,
+                    TyId::FLOAT,
+                    TyId::INT,
+                ];
+                let mut hargs = Vec::with_capacity(7);
+                for (i, a) in args.iter().enumerate() {
+                    let want = wanted.get(i).copied();
+                    let e = self.expr(a, want);
+                    if let Some(w) = want {
+                        self.expect_ty(e.ty, w, e.span, None);
+                    }
+                    hargs.push(e);
+                }
+                hir::Expr {
+                    kind: ExprKind::CallBuiltin { builtin: Builtin::DrawDRRect, args: hargs },
+                    ty: TyId::UNIT,
+                    span,
+                }
+            }
+
+            // `draw.alpha(a)`, with `a` in 0..1.
+            BuiltinFn::DrawAlpha => {
+                if args.len() != 1 {
+                    self.arity_error("draw.alpha", args.len(), 1, span, None);
+                }
+                let mut hargs = Vec::with_capacity(1);
+                for a in args {
+                    let e = self.expr(a, Some(TyId::FLOAT));
+                    self.expect_ty(e.ty, TyId::FLOAT, e.span, None);
+                    hargs.push(e);
+                }
+                hir::Expr {
+                    kind: ExprKind::CallBuiltin { builtin: Builtin::DrawAlpha, args: hargs },
+                    ty: TyId::UNIT,
+                    span,
+                }
+            }
+
             BuiltinFn::DrawFont => {
                 if args.len() != 2 {
                     self.arity_error("draw.font", args.len(), 2, span, None);

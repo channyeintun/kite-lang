@@ -168,8 +168,8 @@ fn main() {
          \x20 io.print(\"extent \\(ui.scroll_extent(f, box))\")\n\
          \x20 io.print(ui.clamp_scroll(-10.0, f, box))\n\
          \x20 io.print(ui.clamp_scroll(9999.0, f, box))\n\
-         \x20 ui.paint_scrolled(f, 0x000000, v, 0.0)\n\
-         \x20 ui.paint_scrolled(f, 0x000000, v, 40.0)\n\
+         \x20 ui.paint_scrolled(f, v, 0.0)\n\
+         \x20 ui.paint_scrolled(f, v, 40.0)\n\
          \x20 let a = ui.hit_scrolled(f, v, 0.0, 10.0, 10.0)\n\
          \x20 io.print(if a == nil { \"none\" } else { a.name })\n\
          \x20 let b = ui.hit_scrolled(f, v, 40.0, 10.0, 10.0)\n\
@@ -301,8 +301,8 @@ fn main() {
          \x20 io.print(\"extent \\(ui.scroll_extent(f, box))\")\n\
          \x20 io.print(ui.clamp_scroll(-10.0, f, box))\n\
          \x20 io.print(ui.clamp_scroll(9999.0, f, box))\n\
-         \x20 ui.paint_scrolled(f, 0x000000, v, 0.0)\n\
-         \x20 ui.paint_scrolled(f, 0x000000, v, 40.0)\n\
+         \x20 ui.paint_scrolled(f, v, 0.0)\n\
+         \x20 ui.paint_scrolled(f, v, 40.0)\n\
          \x20 let a = ui.hit_scrolled(f, v, 0.0, 10.0, 10.0)\n\
          \x20 io.print(if a == nil { \"none\" } else { a.name })\n\
          \x20 let b = ui.hit_scrolled(f, v, 40.0, 10.0, 10.0)\n\

@@ -284,6 +284,15 @@ export const NOMINAL_SIZE = 16;
 // The font `draw.font` last selected. State on the host, because that is what
 // the boundary says it is — and it governs measurement as well as drawing, so
 // a run laid out at 22dp is not painted at 16.
+// How opaque everything drawn is, until the next `draw.alpha`. Skia keeps
+// this on the paint that accompanies each call; here it is host state, which
+// is the same idiom the font and the clip already use.
+export let alpha = 1;
+
+export function setAlpha(a) {{
+  alpha = a < 0 ? 0 : a > 1 ? 1 : a;
+}}
+
 export let fontSize = NOMINAL_SIZE;
 export let fontWeight = 400;
 export const fontCss = () => fontWeight + ' ' + fontSize + 'px ' + FAMILY;
@@ -310,6 +319,13 @@ export const textRenderer = {{
       'rrect ' + showFloat(x) + ' ' + showFloat(y) + ' ' +
       showFloat(w) + ' ' + showFloat(h) + ' ' + showFloat(r) + ' ' + colour,
     ),
+  drrect: (x, y, w, h, r, width, colour) =>
+    write(
+      'drrect ' + showFloat(x) + ' ' + showFloat(y) + ' ' +
+      showFloat(w) + ' ' + showFloat(h) + ' ' + showFloat(r) + ' ' +
+      showFloat(width) + ' ' + colour,
+    ),
+  alpha: (a) => write('alpha ' + showFloat(a)),
   text: (x, y, body, colour) =>
     write('text ' + showFloat(x) + ' ' + showFloat(y) + ' ' + body + ' ' + colour),
   // Selecting a font writes nothing: it changes no pixel by itself, and its
@@ -354,11 +370,18 @@ export function domRenderer(container) {{
   let nodes = [];
   let index = 0;
 
+  const opaque = (el) => {{
+    el.style.opacity = alpha === 1 ? '' : String(alpha);
+    return el;
+  }};
+
   const place = (el, x, y) => {{
     el.style.position = 'absolute';
     el.style.left = x - originX + 'px';
     el.style.top = y - originY + 'px';
-    return el;
+    // Every call goes through here, so this is the one place the alpha in
+    // force has to be applied.
+    return opaque(el);
   }};
   const take = () => {{
     const el = document.createElement('div');
@@ -385,6 +408,19 @@ export function domRenderer(container) {{
       el.style.height = h + 'px';
       el.style.background = hex(colour);
       // The one thing a rounded rectangle needs that a square one does not.
+      el.style.borderRadius = r + 'px';
+    }},
+    // The ring between two rounded rectangles, which is what a CSS border is:
+    // `box-sizing: border-box` makes the border eat into the given size rather
+    // than adding to it, so the outer edge is exactly the rectangle asked for.
+    drrect: (x, y, w, h, r, width, colour) => {{
+      const el = place(take(), x, y);
+      el.setAttribute('aria-hidden', 'true');
+      el.style.boxSizing = 'border-box';
+      el.style.width = w + 'px';
+      el.style.height = h + 'px';
+      el.style.background = 'transparent';
+      el.style.border = width + 'px solid ' + hex(colour);
       el.style.borderRadius = r + 'px';
     }},
     text: (x, y, body, colour) => {{
@@ -519,6 +555,29 @@ function announce(body) {{
   announcer.appendChild(line);
 }}
 
+/// One rounded rectangle as a subpath. Shared, because `drrect` needs two of
+/// them in one path and a second copy of the arc arithmetic is a second place
+/// for the two renderers to drift apart.
+///
+/// The radius is clamped to half the shorter side by the caller, which is what
+/// turns a radius past that into a pill rather than a shape the path builder
+/// refuses.
+function roundRectPath(ctx, x, y, w, h, radius) {{
+  if (ctx.roundRect) {{
+    ctx.roundRect(x, y, w, h, radius);
+    return;
+  }}
+  // Four arcs and four edges: the same shape, for a context without
+  // `roundRect`. A renderer that silently drew square corners here would
+  // disagree with the DOM one about the picture.
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + w, y, x + w, y + h, radius);
+  ctx.arcTo(x + w, y + h, x, y + h, radius);
+  ctx.arcTo(x, y + h, x, y, radius);
+  ctx.arcTo(x, y, x + w, y, radius);
+  ctx.closePath();
+}}
+
 export function canvasRenderer(ctx) {{
   // A clip nests with `save`/`restore`, so an unbalanced `unclip` would
   // restore state a caller never saved. The depth is tracked to refuse that
@@ -529,29 +588,40 @@ export function canvasRenderer(ctx) {{
   const atlas = glyphAtlas(ctx);
   const renderer = {{
     rect: (x, y, w, h, colour) => {{
+      ctx.globalAlpha = alpha;
       ctx.fillStyle = hex(colour);
       ctx.fillRect(x, y, w, h);
+      ctx.globalAlpha = 1;
+    }},
+    drrect: (x, y, w, h, r, width, colour) => {{
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = hex(colour);
+      const outer = Math.max(0, Math.min(r, Math.min(w, h) / 2));
+      const inset = Math.max(0, Math.min(width, Math.min(w, h) / 2));
+      const inner = Math.max(0, outer - inset);
+      ctx.beginPath();
+      roundRectPath(ctx, x, y, w, h, outer);
+      roundRectPath(
+        ctx,
+        x + inset,
+        y + inset,
+        Math.max(0, w - inset * 2),
+        Math.max(0, h - inset * 2),
+        inner,
+      );
+      // Even-odd, so the inner rectangle is a hole rather than a second fill.
+      // This is what makes a ring a ring: nothing is painted inside it, so
+      // whatever it sits on shows through without anyone naming that colour.
+      ctx.fill('evenodd');
+      ctx.globalAlpha = 1;
     }},
     rrect: (x, y, w, h, r, colour) => {{
+      ctx.globalAlpha = alpha;
       ctx.fillStyle = hex(colour);
-      // Clamped to half the shorter side, which is what turns a radius past
-      // that into a pill rather than into a shape the path builder refuses.
-      const radius = Math.max(0, Math.min(r, Math.min(w, h) / 2));
       ctx.beginPath();
-      if (ctx.roundRect) {{
-        ctx.roundRect(x, y, w, h, radius);
-      }} else {{
-        // Four arcs and four edges: the same shape, for a context without
-        // `roundRect`. A renderer that silently drew square corners here would
-        // disagree with the DOM one about the picture.
-        ctx.moveTo(x + radius, y);
-        ctx.arcTo(x + w, y, x + w, y + h, radius);
-        ctx.arcTo(x + w, y + h, x, y + h, radius);
-        ctx.arcTo(x, y + h, x, y, radius);
-        ctx.arcTo(x, y, x + w, y, radius);
-      }}
-      ctx.closePath();
+      roundRectPath(ctx, x, y, w, h, Math.max(0, Math.min(r, Math.min(w, h) / 2)));
       ctx.fill();
+      ctx.globalAlpha = 1;
     }},
     text: (x, y, body, colour) => {{
       announce(body);
@@ -560,7 +630,10 @@ export function canvasRenderer(ctx) {{
       // Drawn where the DOM would put it, which is a measured offset below the
       // em box's top — see `baselineOffset`.
       const top = y + baselineOffset();
-      if (fontCss() === FONT && atlas && atlas.text(x, top, body, colour)) return;
+      // The atlas blits pre-rasterised opaque tiles, so it can only answer for
+      // fully opaque text.
+      if (alpha === 1 && fontCss() === FONT && atlas && atlas.text(x, top, body, colour)) return;
+      ctx.globalAlpha = alpha;
       ctx.fillStyle = hex(colour);
       ctx.font = fontCss();
       ctx.textBaseline = 'top';
@@ -569,6 +642,7 @@ export function canvasRenderer(ctx) {{
       ctx.textAlign = 'left';
       ctx.direction = firstStrongRtl(body) ? 'rtl' : 'ltr';
       ctx.fillText(body, x, top);
+      ctx.globalAlpha = 1;
     }},
     clip: (x, y, w, h) => {{
       ctx.save();
@@ -976,6 +1050,12 @@ function imports() {{
         S(a) < S(b) ? -1n : S(a) > S(b) ? 1n : 0n,
       draw_rect: (x, y, w, h, colour) => renderer.rect(x, y, w, h, Number(colour)),
       draw_rrect: (x, y, w, h, r, colour) => renderer.rrect(x, y, w, h, r, Number(colour)),
+      draw_drrect: (x, y, w, h, r, width, colour) =>
+        renderer.drrect(x, y, w, h, r, width, Number(colour)),
+      draw_alpha: (a) => {{
+        setAlpha(a);
+        if (renderer.alpha) renderer.alpha(a);
+      }},
       draw_text: (x, y, i, colour) => renderer.text(x, y, S(i), Number(colour)),
       draw_clip: (x, y, w, h) => renderer.clip(x, y, w, h),
       draw_unclip: () => renderer.unclip(),
@@ -1054,15 +1134,24 @@ export function recordingRenderer() {{
   // graph rests on.
   let size = NOMINAL_SIZE;
   let weight = 400;
+  // Alpha is stamped onto each call for the same reason the font is: a damage
+  // repaint replays only the calls inside the dirty rectangle, and a recorded
+  // `alpha` call would be skipped as often as not.
+  let opacity = 1;
   return {{
     calls,
-    rect: (x, y, w, h, colour) => calls.push(['r', x, y, w, h, colour]),
-    rrect: (x, y, w, h, r, colour) => calls.push(['R', x, y, w, h, r, colour]),
+    rect: (x, y, w, h, colour) => calls.push(['r', x, y, w, h, colour, opacity]),
+    rrect: (x, y, w, h, r, colour) => calls.push(['R', x, y, w, h, r, colour, opacity]),
+    drrect: (x, y, w, h, r, width, colour) =>
+      calls.push(['D', x, y, w, h, r, width, colour, opacity]),
+    alpha: (a) => {{
+      opacity = a;
+    }},
     font: (s, w) => {{
       size = s;
       weight = w;
     }},
-    text: (x, y, body, colour) => calls.push(['t', x, y, body, colour, size, weight]),
+    text: (x, y, body, colour) => calls.push(['t', x, y, body, colour, size, weight, opacity]),
     clip: (x, y, w, h) => calls.push(['c', x, y, w, h]),
     unclip: () => calls.push(['u']),
   }};
@@ -1076,11 +1165,29 @@ export function replay(calls, renderer) {{
   // the font emits no font call at all, exactly as the program did.
   let size = NOMINAL_SIZE;
   let weight = 400;
+  let opacity = 1;
+  // The alpha a call was recorded under, re-selected only when it changes, so
+  // a replay makes the same sequence of alpha calls the program made.
+  const wantAlpha = (a) => {{
+    const next = a ?? 1;
+    if (next !== opacity) {{
+      opacity = next;
+      setAlpha(next);
+      if (renderer.alpha) renderer.alpha(next);
+    }}
+  }};
   for (const call of calls) {{
-    if (call[0] === 'r') renderer.rect(call[1], call[2], call[3], call[4], call[5]);
-    else if (call[0] === 'R')
+    if (call[0] === 'r') {{
+      wantAlpha(call[6]);
+      renderer.rect(call[1], call[2], call[3], call[4], call[5]);
+    }} else if (call[0] === 'R') {{
+      wantAlpha(call[7]);
       renderer.rrect(call[1], call[2], call[3], call[4], call[5], call[6]);
-    else if (call[0] === 't') {{
+    }} else if (call[0] === 'D') {{
+      wantAlpha(call[8]);
+      renderer.drrect(call[1], call[2], call[3], call[4], call[5], call[6], call[7]);
+    }} else if (call[0] === 't') {{
+      wantAlpha(call[7]);
       const want = call[5] ?? NOMINAL_SIZE;
       const wantWeight = call[6] ?? 400;
       if (want !== size || wantWeight !== weight) {{
@@ -1133,6 +1240,7 @@ export function sameFrame(a, b) {{
 /// not a guess about it.
 export function callBounds(call) {{
   if (call[0] === 'r' || call[0] === 'R') return [call[1], call[2], call[3], call[4]];
+  if (call[0] === 'D') return [call[1], call[2], call[3], call[4]];
   if (call[0] === 't') {{
     // Measured in the font the run was recorded in, not in whatever font is
     // current: a damaged rectangle computed against the wrong size would be

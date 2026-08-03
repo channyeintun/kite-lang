@@ -701,16 +701,20 @@ pub struct Border {
 }
 
 pub struct Decor {
-    /// `0xRRGGBB`, or nil for transparent.
+    /// `0xRRGGBB`, or nil to draw no background at all.
     ///
-    /// Transparent at a boundary with no alpha can only mean *the colour of
-    /// whatever is behind*, and the painter works that out: it walks parents
-    /// before children, so it knows the fill of the enclosing box. No caller
-    /// supplies a backdrop. An earlier version made it an argument, and every
-    /// caller had to thread the right colour to every control — a checkbox on
-    /// a selected row sits on a different colour from one on an ordinary row —
-    /// which is a thing to get wrong once per control.
+    /// Nil means *nothing is drawn*, not "draw something invisible". For a
+    /// translucent fill, give a colour and an `alpha` below one.
     pub fill: Option<int>
+    /// How opaque this box is, from 0 to 1.
+    ///
+    /// A separate channel rather than an alpha byte inside `fill`, which is
+    /// what Skia does — `SkColor` packs alpha, and `SkPaint::setAlphaf` sets it
+    /// separately. Packing it here would have meant reinterpreting every
+    /// `0xRRGGBB` a program already contains as `0xAARRGGBB`, giving all of
+    /// them an alpha of zero, and a program that used to draw would compile,
+    /// run, and show nothing.
+    pub alpha: float
     pub radius: float
     /// An outline, or nil for none.
     ///
@@ -735,6 +739,7 @@ pub struct Decor {
 pub fn no_decor() -> Decor {
     return Decor{
         fill: nil,
+        alpha: 1.0,
         radius: 0.0,
         border: nil,
         ink: 0x000000,
@@ -783,86 +788,49 @@ pub fn ink(colour: int) -> Decor {
     return Decor{..no_decor(), ink: colour }
 }
 
-/// Draw a laid-out tree, over a window cleared to `behind`.
+/// The same decoration, at a given opacity.
+pub fn faded(base: Decor, a: float) -> Decor {
+    return Decor{..base, alpha: a }
+}
+
+/// Draw a laid-out tree.
 ///
 /// Frames come out in paint order, so this walks them forwards: a parent's
 /// background is drawn before its children sit on top. A frame whose decor
 /// says nothing is invisible but still laid out, which is how spacers work.
-pub fn paint(frames: [Frame], behind: int) {
-    var backdrop: [int] = []
+///
+/// It used to take the window's colour as well, because a border was two
+/// filled rectangles and the inner one had to be painted in whatever was
+/// behind the box — so the painter carried a backdrop down the tree and every
+/// caller had to name one. `draw.drrect` draws the ring alone, so there is
+/// nothing to fill and nothing to name: the background of a window is the
+/// fill of the node at the root of it, like any other box.
+pub fn paint(frames: [Frame]) {
     for frame in frames {
-        draw_one(frame, backdrop_at(backdrop, frame.depth, behind))
-        backdrop = record_fill(backdrop, frame, behind)
+        draw_one(frame)
     }
 }
 
-/// What is behind a frame: the nearest enclosing box that painted a fill.
-///
-/// Correct exactly while boxes nest visually, which this layout makes true of
-/// siblings — the cursor advances by a child's full size, so two siblings
-/// cannot overlap. It is *not* true of a child that overflows its parent,
-/// because `grow` takes spare space and never gives it back: such a child sits
-/// on pixels this attributes to an ancestor. Overflow already breaks painting
-/// in more visible ways; the assumption is written down rather than defended.
-fn backdrop_at(stack: [int], depth: int, behind: int) -> int {
-    if depth <= 0 {
-        return behind
-    }
-    if depth - 1 < stack.len() {
-        return stack[depth - 1]
-    }
-    return behind
-}
-
-/// The backdrop a frame's children sit on — its own fill if it painted one,
-/// otherwise whatever it was itself sitting on.
-///
-/// A frame that is culled still passes through here. A half-visible child of a
-/// scrolled-away parent needs its parent's colour, and skipping the parent
-/// because it was not drawn would hand the child the window's instead.
-fn record_fill(stack: [int], frame: Frame, behind: int) -> [int] {
-    let own = frame.decor.fill
-    let colour = if own != nil { own } else { backdrop_at(stack, frame.depth, behind) }
-    var out: [int] = []
-    for i in 0..frame.depth {
-        if i < stack.len() {
-            out.push(stack[i])
-        } else {
-            out.push(behind)
-        }
-    }
-    out.push(colour)
-    return out
-}
-
-fn draw_one(frame: Frame, behind: int) {
+fn draw_one(frame: Frame) {
     let r = frame.rect
     let d = frame.decor
-    // Transparent means the colour of what is behind, which is the one thing
-    // a boundary with no alpha can honestly do with the word.
     let own = d.fill
-    let surface = if own != nil { own } else { behind }
+    set_alpha(d.alpha)
+    // A fill, then the border on top of it. They are two calls now rather than
+    // one compound one: `draw.drrect` draws the *ring* between the box and the
+    // box inset by the width, so the border no longer has to fill its own
+    // middle with the colour behind it. That was the whole reason a border and
+    // a fill could not be drawn independently.
+    if own != nil {
+        fill_rect(r.x, r.y, r.width, r.height, d.radius, own)
+    }
     let edge = d.border
-    var drew = false
     if edge != nil {
         // Narrowed one condition at a time: `edge != nil && ...` is a
         // comparison inside a conjunction, and only the comparison alone
         // narrows the option.
         if edge.width > 0.0 {
-            drew = true
-            fill_rect(r.x, r.y, r.width, r.height, d.radius, edge.colour)
-            let w = edge.width
-            let inner = if d.radius - w > 0.0 { d.radius - w } else { 0.0 }
-            // The hole. Filled with the backdrop when the box is transparent,
-            // which is what makes an outlined control an outline rather than a
-            // solid block — the bug this replaces drew the block and claimed
-            // in a comment that the box beneath showed through.
-            fill_rect(r.x + w, r.y + w, r.width - w * 2.0, r.height - w * 2.0, inner, surface)
-        }
-    }
-    if !drew {
-        if own != nil {
-            fill_rect(r.x, r.y, r.width, r.height, d.radius, own)
+            draw.drrect(r.x, r.y, r.width, r.height, d.radius, edge.width, edge.colour)
         }
     }
     let body = frame.content
@@ -918,6 +886,21 @@ fn draw_one(frame: Frame, behind: int) {
         y = y + line_height()
     }
     unset_font(frame.size)
+    unset_alpha(d.alpha)
+}
+
+/// Select an opacity, or leave the host's alone. Paired with [`unset_alpha`],
+/// so one node's translucency cannot leak into the next.
+fn set_alpha(a: float) {
+    if a < 1.0 {
+        draw.alpha(a)
+    }
+}
+
+fn unset_alpha(a: float) {
+    if a < 1.0 {
+        draw.alpha(1.0)
+    }
 }
 
 /// A filled rectangle, round or square. The square call is still the one made
@@ -965,24 +948,15 @@ fn shifted(r: Rect, dx: float, dy: float) -> Rect {
 /// The clip is still needed for the ones that straddle an edge — a half-visible
 /// row has to be cut by the renderer, and painting over it would erase what it
 /// is scrolling past.
-pub fn paint_scrolled(frames: [Frame], behind: int, viewport: Rect, offset: float) {
+pub fn paint_scrolled(frames: [Frame], viewport: Rect, offset: float) {
     draw.clip(viewport.x, viewport.y, viewport.width, viewport.height)
     let dx = viewport.x
     let dy = viewport.y - offset
-    var backdrop: [int] = []
     for frame in frames {
         let r = shifted(frame.rect, dx, dy)
-        // A culled frame still contributes its fill. A half-visible child of a
-        // parent scrolled off the top needs its parent's colour behind it, and
-        // skipping the parent because it was not drawn would hand the child the
-        // window's instead.
         if r.y + r.height >= viewport.y && r.y <= viewport.y + viewport.height{
-            draw_one(
-                Frame {..frame, rect: r, inner: shifted(frame.inner, dx, dy) },
-                backdrop_at(backdrop, frame.depth, behind),
-            )
+            draw_one(Frame{..frame, rect: r, inner: shifted(frame.inner, dx, dy) })
         }
-        backdrop = record_fill(backdrop, frame, behind)
     }
     draw.unclip()
 }

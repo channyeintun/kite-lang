@@ -676,7 +676,7 @@ fn row_viewport(box: ui.Rect) -> ui.Size {
 pub fn view(model: Model) {
     let s = scheme(model)
     let frames = frames_of(model)
-    ui.paint(frames, s.surface)
+    ui.paint(frames)
 
     let box = list_rect(frames)
     let rows = row_frames(model, box)
@@ -684,7 +684,7 @@ pub fn view(model: Model) {
     // The card behind the rows is already painted, so the rows are told what
     // they are sitting on: a transparent thing among them — an unticked
     // checkbox, an outlined chip — needs the colour of *that*, not the window.
-    ui.paint_scrolled(rows, material.surface_at(s, material.LEVEL_1()), box, offset)
+    ui.paint_scrolled(rows, box, offset)
 }
 
 // ---- events -----------------------------------------------------------------------

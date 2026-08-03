@@ -81,7 +81,7 @@ fn frames_of(model: Model) -> [ui.Frame] {
 }
 
 pub fn view(model: Model) {
-    ui.paint(frames_of(model), 0x14161a)
+    ui.paint(frames_of(model))
 }
 
 /// The only way the model changes.

@@ -1820,6 +1820,35 @@ pub extern "C" fn kite_rt_draw_rrect(x: f64, y: f64, w: f64, h: f64, r: f64, col
 }
 
 #[no_mangle]
+pub extern "C" fn kite_rt_draw_drrect(
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    r: f64,
+    width: f64,
+    colour: i64,
+) {
+    write_line(&format!(
+        "drrect {} {} {} {} {} {} {}",
+        float_text(x),
+        float_text(y),
+        float_text(w),
+        float_text(h),
+        float_text(r),
+        float_text(width),
+        colour
+    ));
+}
+
+/// Written, unlike a font selection: alpha changes the pixels a call produces
+/// and shows up nowhere else in the transcript.
+#[no_mangle]
+pub extern "C" fn kite_rt_draw_alpha(a: f64) {
+    write_line(&format!("alpha {}", float_text(a)));
+}
+
+#[no_mangle]
 pub extern "C" fn kite_rt_draw_text(x: f64, y: f64, body: u64, colour: i64) {
     unsafe {
         write_line(&format!(
@@ -2115,6 +2144,8 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         kite_rt_draw_rect,
         kite_rt_draw_rrect,
         kite_rt_draw_font,
+        kite_rt_draw_drrect,
+        kite_rt_draw_alpha,
         kite_rt_draw_text,
         kite_rt_draw_clip,
         kite_rt_draw_unclip,

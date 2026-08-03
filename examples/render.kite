@@ -79,5 +79,5 @@ fn app() -> ui.Node {
 
 fn main() {
     let frames = ui.layout(app(), ui.Size{ width: 640.0, height: 360.0 })
-    ui.paint(frames, 0x14161a)
+    ui.paint(frames)
 }

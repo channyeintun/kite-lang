@@ -413,6 +413,8 @@ pub enum Builtin {
     /// no amount of square ones adds up to.
     DrawRRect,
     DrawFont,
+    DrawDRRect,
+    DrawAlpha,
     /// `draw.text(x, y, body, colour)`
     DrawText,
     /// `text.width(body)` — a host call, because only the host has the font.
@@ -449,6 +451,8 @@ impl Builtin {
             Builtin::DrawRect => "draw.rect",
             Builtin::DrawRRect => "draw.rrect",
             Builtin::DrawFont => "draw.font",
+            Builtin::DrawDRRect => "draw.drrect",
+            Builtin::DrawAlpha => "draw.alpha",
             Builtin::DrawText => "draw.text",
             Builtin::TextWidth => "text.width",
             Builtin::TextHeight => "text.height",

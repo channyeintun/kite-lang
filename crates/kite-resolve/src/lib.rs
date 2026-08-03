@@ -60,6 +60,39 @@ pub enum BuiltinFn {
     /// `draw.text(x, y, body, colour)` — a run of text with its baseline-left
     /// origin at `(x, y)`.
     DrawText,
+    /// `draw.drrect(x, y, w, h, radius, width, colour)` — the ring between a
+    /// rounded rectangle and the same rectangle inset by `width`.
+    ///
+    /// Skia's own `SkCanvas::drawDRRect`, narrowed. Skia takes two arbitrary
+    /// rounded rectangles and draws the region between them, "useful for
+    /// stroked rounded rectangle effects"; this takes the uniform inset,
+    /// because a *border* is what the region between two rrects is used for
+    /// here and an arbitrary pair has no caller.
+    ///
+    /// It earns its place by drawing something that could not be drawn before.
+    /// A border used to be two filled rectangles — the box in the edge colour
+    /// with the box inset drawn back over it — which needs to know the colour
+    /// *behind* the box, because the inner fill is standing in for a hole it
+    /// cannot punch. That is why the painter carries a backdrop down the tree.
+    /// A ring needs no such thing: it draws the border and nothing else.
+    DrawDRRect,
+    /// `draw.alpha(a)` — how opaque everything drawn after it is, until the
+    /// next call. 1.0 is opaque, 0.0 invisible.
+    ///
+    /// State, like the font and the clip. Skia carries alpha two ways — in the
+    /// colour, `SkColor` being `(a << 24) | (r << 16) | (g << 8) | b`, and
+    /// separately as `SkPaint::setAlphaf` — and this is the second of them,
+    /// deliberately.
+    ///
+    /// Packing it into the colour was the obvious move and is a trap: every
+    /// colour in every Kite program is written `0xRRGGBB`, so reinterpreting
+    /// that argument as `0xAARRGGBB` silently gives every existing literal an
+    /// alpha of zero, and a program that used to draw would compile, run, and
+    /// show nothing. Skia has the same hazard and answers it by making the
+    /// caller *say* opaque — `SkColorSetRGB` sets alpha to `0xFF` — which is
+    /// not available to us, the argument already existing with the other
+    /// meaning. A separate channel keeps every existing call correct.
+    DrawAlpha,
     /// `draw.font(size, weight)` — the size and weight everything drawn and
     /// measured after it uses, until the next call.
     ///
@@ -133,6 +166,8 @@ impl BuiltinFn {
             "draw.rrect" => Some(BuiltinFn::DrawRRect),
             "draw.text" => Some(BuiltinFn::DrawText),
             "draw.font" => Some(BuiltinFn::DrawFont),
+            "draw.drrect" => Some(BuiltinFn::DrawDRRect),
+            "draw.alpha" => Some(BuiltinFn::DrawAlpha),
             "text.width" => Some(BuiltinFn::TextWidth),
             "text.height" => Some(BuiltinFn::TextHeight),
             "draw.clip" => Some(BuiltinFn::DrawClip),
@@ -158,6 +193,8 @@ impl BuiltinFn {
             BuiltinFn::DrawRRect => "draw.rrect",
             BuiltinFn::DrawText => "draw.text",
             BuiltinFn::DrawFont => "draw.font",
+            BuiltinFn::DrawDRRect => "draw.drrect",
+            BuiltinFn::DrawAlpha => "draw.alpha",
             BuiltinFn::TextWidth => "text.width",
             BuiltinFn::TextHeight => "text.height",
             BuiltinFn::DrawClip => "draw.clip",
@@ -180,6 +217,8 @@ impl BuiltinFn {
             BuiltinFn::DrawRect | BuiltinFn::DrawText => 5,
             BuiltinFn::DrawRRect => 6,
             BuiltinFn::DrawFont => 2,
+            BuiltinFn::DrawDRRect => 7,
+            BuiltinFn::DrawAlpha => 1,
             BuiltinFn::TextWidth => 1,
             BuiltinFn::TextHeight => 0,
             BuiltinFn::DrawClip => 4,

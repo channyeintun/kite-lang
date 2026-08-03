@@ -82,7 +82,7 @@ pub fn view(model: Model) {
     draw.text(16.0, 16.0, "Scroll with the wheel or arrow keys; click a row", 0x8b93a1)
     draw.text(16.0, 32.0, "offset \(model.offset), selected \(model.selected)", 0x5c6472)
     draw.rect(v.x, v.y, v.width, v.height, 0x14161a)
-    ui.paint_scrolled(frames_of(model.selected), 0x14161a, v, model.offset)
+    ui.paint_scrolled(frames_of(model.selected), v, model.offset)
 }
 
 pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {

@@ -120,7 +120,7 @@ fn frames_of(model: Model) -> [ui.Frame] {
 }
 
 pub fn view(model: Model) {
-    ui.paint(frames_of(model), scheme().surface)
+    ui.paint(frames_of(model))
 }
 
 pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
