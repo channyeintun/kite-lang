@@ -386,3 +386,54 @@ pub fn GRID() -> float {
 pub fn space(units: int) -> float {
     return GRID() * (units as float)
 }
+
+// ---- window size classes ------------------------------------------------------
+//
+// Material's own breakpoints, and the reason they are here rather than in an
+// application: they are part of the specification, they are the same three
+// numbers for every Material app, and the layout decisions that hang off them —
+// a navigation rail becomes a bottom bar, a two-pane view becomes one — are
+// design-system decisions rather than product ones.
+//
+// The widths are of the *window*, in dp. A component inside a smaller box asks
+// about that box instead; nothing here reads a global.
+
+pub fn WINDOW_COMPACT() -> int {
+    return 0
+}
+
+pub fn WINDOW_MEDIUM() -> int {
+    return 1
+}
+
+pub fn WINDOW_EXPANDED() -> int {
+    return 2
+}
+
+/// Compact below 600dp — a phone held upright. Medium to 840dp — a tablet, or a
+/// window someone has made narrow. Expanded above that.
+pub fn window_class(width: float) -> int {
+    if width < 600.0 {
+        return WINDOW_COMPACT()
+    }
+    if width < 840.0 {
+        return WINDOW_MEDIUM()
+    }
+    return WINDOW_EXPANDED()
+}
+
+/// Whether a navigation rail fits. Below the medium breakpoint Material puts
+/// navigation at the bottom instead, because a rail costs 80dp of a width that
+/// does not have 80dp to spare.
+pub fn has_rail(width: float) -> bool {
+    return window_class(width) != WINDOW_COMPACT()
+}
+
+pub fn RAIL_WIDTH() -> float {
+    return 80.0
+}
+
+/// A navigation bar: the compact answer to a rail, 80dp tall across the bottom.
+pub fn NAV_BAR_HEIGHT() -> float {
+    return 80.0
+}

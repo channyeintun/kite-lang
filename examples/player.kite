@@ -284,6 +284,20 @@ fn clock(total: int) -> str {
 
 fn view_node(model: Model) -> ui.Node {
     let s = scheme(model)
+    // Below Material's medium breakpoint a navigation rail costs 80dp of a
+    // width that has none to spare, so navigation moves to the bottom. That is
+    // Material's own rule, which is why the breakpoints live in the package and
+    // not here — and it is a different tree, not a smaller copy of one.
+    if !material.has_rail(model.width) {
+        return ui.decorated(
+            ui.box_of(
+                "app",
+                ui.Style {..ui.column(), align: ui.Align.Stretch },
+                [main_column(model, s), nav_bar(model, s)],
+            ),
+            ui.filled(s.surface),
+        )
+    }
     return ui.decorated(
         ui.box_of(
             "app",
@@ -296,15 +310,59 @@ fn view_node(model: Model) -> ui.Node {
 
 /// The navigation rail: 80dp of destinations down the left, which is Material's
 /// layout for a window this wide.
-fn rail(model: Model, s: material.Scheme) -> ui.Node {
-    let items = [
+/// The three destinations, built once and placed by whichever navigation the
+/// window is wide enough for. One list, two arrangements — so a destination
+/// added here appears in both, and the focus order picks it up either way.
+fn destinations(model: Model) -> [ui.Node] {
+    let s = scheme(model)
+    return [
         material.rail_item(s, "nav-library", "♫", "Library", true, focus(model, "nav-library")),
         material.rail_item(s, "nav-queue", "≡", "Queue", false, focus(model, "nav-queue")),
-        material.rail_item(s, "nav-theme", theme_glyph(model), "Theme", false, focus(model, "nav-theme")),
+        material.rail_item(
+            s,
+            "nav-theme",
+            theme_glyph(model),
+            "Theme",
+            false,
+            focus(model, "nav-theme"),
+        ),
     ]
+}
+
+/// The compact answer to a rail: the same destinations laid across the bottom,
+/// sharing the width between them.
+fn nav_bar(model: Model, s: material.Scheme) -> ui.Node {
+    var slots: [ui.Node] = []
+    var at = 0
+    for one in destinations(model) {
+        slots.push(
+            ui.box_of(
+                "nav-slot\(at)",
+                ui.grown(ui.Style{..ui.column(), align: ui.Align.Center }, 1.0),
+                [one],
+            ),
+        )
+        at = at + 1
+    }
+    let style = ui.padded(
+        ui.sized(
+            ui.Style {..ui.row(), align: ui.Align.Center },
+            0.0,
+            material.NAV_BAR_HEIGHT(),
+        ),
+        material.space(2),
+    )
+    return ui.decorated(
+        ui.box_of("navbar", style, slots),
+        ui.filled(material.surface_at(s, material.LEVEL_2())),
+    )
+}
+
+fn rail(model: Model, s: material.Scheme) -> ui.Node {
+    let items = destinations(model)
     let style = ui.spaced(
         ui.padded(
-            ui.sized(ui.Style{..ui.column(), align: ui.Align.Center }, 80.0, 0.0),
+            ui.sized(ui.Style{..ui.column(), align: ui.Align.Center }, material.RAIL_WIDTH(), 0.0),
             material.space(3),
         ),
         material.space(3),
@@ -326,8 +384,66 @@ fn focus(model: Model, id: str) -> material.State {
     return material.when_focused(model.focused == id)
 }
 
+/// How wide the column beside the navigation is.
+fn content_width(model: Model) -> float {
+    if material.has_rail(model.width) {
+        return model.width - material.RAIL_WIDTH()
+    }
+    return model.width
+}
+
+/// The search field takes what the app bar has left after the title and the
+/// action beside it, between a width too narrow to type in and one wider than
+/// a search box has any use for.
+fn search_width(model: Model) -> float {
+    let title = ui.text_size_in("Library", 22.0, material.REGULAR()).width
+    let spare = content_width(model) - title - 40.0 - material.space(4) * 2.0 - material.space(2) * 2.0
+    if spare < 120.0 {
+        return 120.0
+    }
+    if spare > 320.0 {
+        return 320.0
+    }
+    return spare
+}
+
 fn main_column(model: Model, s: material.Scheme) -> ui.Node {
     let style = ui.Style{..ui.column(), align: ui.Align.Stretch, grow: 1.0 }
+    // A compact window cannot hold a title, a search field and an action on one
+    // row, so the field takes the row under the bar. Which is what Material
+    // does with a search bar on a phone, and it is a layout decision rather
+    // than a smaller version of the same layout.
+    if material.window_class(model.width) == material.WINDOW_COMPACT() {
+        return ui.box_of(
+            "main",
+            style,
+            [
+                material.top_app_bar(
+                    "bar",
+                    s,
+                    "Library",
+                    [material.icon_button(s, "shuffle", "⇄", focus(model, "shuffle"))],
+                ),
+                ui.box_of(
+                    "search-row",
+                    ui.padded(ui.Style{..ui.row(), align: ui.Align.Stretch }, material.space(4)),
+                    [
+                        material.search_field(
+                            s,
+                            "search",
+                            model.search,
+                            "Search tracks",
+                            content_width(model) - material.space(8),
+                            focus(model, "search"),
+                        ),
+                    ],
+                ),
+                chips(model, s),
+                list_viewport(model, s),
+                now_playing(model, s),
+            ],
+        )
+    }
     return ui.box_of(
         "main",
         style,
@@ -342,7 +458,7 @@ fn main_column(model: Model, s: material.Scheme) -> ui.Node {
                         "search",
                         model.search,
                         "Search tracks",
-                        280.0,
+                        search_width(model),
                         focus(model, "search"),
                     ),
                     material.icon_button(s, "shuffle", "⇄", focus(model, "shuffle")),
@@ -468,7 +584,7 @@ fn mark_ink(s: material.Scheme, is_playing: bool) -> int {
 /// transport and a progress track.
 fn now_playing(model: Model, s: material.Scheme) -> ui.Node {
     let track = model.tracks[model.playing]
-    let width = model.width - 80.0 - material.space(8)
+    let width = content_width(model) - material.space(8)
     let fraction = model.elapsed / (track.length as float)
 
     let titles = ui.box_of(
@@ -601,8 +717,12 @@ pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
         return pressed(model, key)
     }
     if event == EVENT_RESIZE() {
-        let w = if x > 900.0 { x } else { 900.0 }
-        let h = if y > 560.0 { y } else { 560.0 }
+        // A floor, not a design size. It used to be 900x560 — wider than the
+        // slot this is embedded in on the front page — so the layout was built
+        // for a window it did not have and simply overflowed. The floor now
+        // only stops the arithmetic going negative; everything above it adapts.
+        let w = if x > 320.0 { x } else { 320.0 }
+        let h = if y > 320.0 { y } else { 320.0 }
         return Model{..model, width: w, height: h }
     }
     if event == EVENT_FRAME() {
@@ -841,6 +961,23 @@ fn main() {
 
     let filtered = Model{..model, genre: "Jazz" }
     io.print("jazz leaves \(shown(filtered).len()) of \(model.tracks.len())")
+
+    // Every size class lays out, and the narrow ones do not simply overflow:
+    // the tree they produce is a different tree. This is the check that the
+    // demo fits the slot it is embedded in on the front page.
+    for w in [360.0, 664.0, 1100.0] {
+        let sized = Model{..model, width: w, height: 460.0 }
+        let laid = frames_of(sized)
+        var widest = 0.0
+        for f in laid {
+            let right = f.rect.x + f.rect.width
+            if right > widest {
+                widest = right
+            }
+        }
+        let rail = if material.has_rail(w) { "rail" } else { "bottom bar" }
+        io.print("at \(w): \(rail), \(laid.len()) frames, widest \(widest)")
+    }
 
     let frames = frames_of(model)
     io.print("frames \(frames.len()), controls \(ui.focus_order(frames).len())")
