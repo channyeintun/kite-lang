@@ -19,6 +19,7 @@
     <a href="docs.html?doc=SPECIFICATION.md">Specification</a>
     <a href="reference.html">Reference</a>
     <a href="playground.html">Playground</a>
+    <a href="#six-hundred-birds">Demo</a>
     <a href="docs.html?doc=docs/06-roadmap.md">Roadmap</a>
     <a class="gh" href="https://github.com/channyeintun/kite-lang">GitHub</a>
   </nav>
@@ -44,6 +45,24 @@
     <a href="playground.html">Run Kite in your browser</a> — the playground is
     the compiler itself, built for WebAssembly. Nothing there talks to a
     server.
+  </p>
+
+  <h2 id="six-hundred-birds">Six hundred birds</h2>
+  <p>
+    Every bird considers every other one: 360,000 distance tests a frame, about
+    6&nbsp;ms of them against a 16.7&nbsp;ms budget for sixty frames a second.
+    The naive O(n²) algorithm on purpose — a spatial index would measure the
+    index rather than the language. <strong>Move the pointer over it; it is a
+    hawk.</strong> The three buttons swap a DOM renderer, a canvas renderer and
+    a text renderer against the same compiled module.
+  </p>
+  <iframe class="demo" src="demo/index.html" title="A flock of six hundred birds, written in Kite"
+          loading="lazy"></iframe>
+  <p class="demo-note">
+    That frame is not a video and not a special case: it is what
+    <code>kitec build examples/boids.kite --emit wasm</code> writes, served
+    unaltered. The source is
+    <a href="https://github.com/channyeintun/kite-lang/blob/main/examples/boids.kite">examples/boids.kite</a>.
   </p>
 
   <h2>Why it exists</h2>

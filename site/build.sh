@@ -29,6 +29,15 @@ for module in "$root"/std/*.kite; do
   echo "  reference/$name.md"
 done
 
+echo "building the demo…"
+# `kitec build` writes the page as well as the module, and what the site serves
+# is exactly that page — the compiler's own output, not a hand-written copy of
+# it. A demonstration of what `kitec build` produces should *be* what `kitec
+# build` produces, or it is a demonstration of something else.
+mkdir -p "$out/demo"
+"$root/target/release/kitec" build "$root/examples/boids.kite" --emit wasm --out "$out/demo"
+echo "  demo/index.html"
+
 echo "copying the documents…"
 mkdir -p "$out/docs"
 cp "$root/SPECIFICATION.md" "$out/SPECIFICATION.md"

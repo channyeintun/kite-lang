@@ -234,3 +234,24 @@ button:disabled { opacity: 0.5; cursor: default; }
 .s { color: var(--string); }
 .c { color: var(--comment); font-style: italic; }
 .n { color: var(--number); }
+
+/* The demo, embedded. It is the page `kitec build` writes, in a frame — so
+   what the site shows and what the compiler produces cannot drift apart. The
+   stage inside is 640x360 plus its own toolbar; the frame is sized to that
+   rather than stretched, because the program draws at a fixed size and
+   scaling it would be showing something the program did not say. */
+iframe.demo {
+  display: block;
+  width: 100%;
+  max-width: 664px;
+  height: 460px;
+  border: 1px solid var(--line, #2b2d3b);
+  border-radius: 6px;
+  background: #11131f;
+  margin: 1.2rem 0 0.6rem;
+}
+
+.demo-note {
+  font-size: 0.9rem;
+  opacity: 0.75;
+}
