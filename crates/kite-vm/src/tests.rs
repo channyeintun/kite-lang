@@ -32,6 +32,31 @@ fn exec(src: &str) -> Result<String, Trap> {
     Ok(String::from_utf8(out).expect("output is valid UTF-8"))
 }
 
+/// The same, built for release — which changes what integer overflow does.
+fn exec_release(src: &str) -> Result<String, Trap> {
+    let mut sources = SourceMap::new();
+    let f = sources.add("t.kite", src);
+    let mut diags = kite_diag::DiagBag::new();
+
+    let tokens = kite_lexer::tokenize(f, src, &mut diags);
+    let ast = kite_parser::parse(f, src, &tokens, &mut diags);
+    let resolved = kite_resolve::resolve(&ast, &mut diags);
+    let mut hir = kite_types::check_with(&ast, &resolved, &sources, &mut diags, true);
+    assert!(
+        !diags.has_errors(),
+        "program does not compile:\n{}",
+        diags.render_all(&sources)
+    );
+
+    kite_hir::mono::monomorphise(&mut hir);
+    let mir = kite_mir::lower(&hir);
+    let chunk = kite_codegen_kbc::compile(&mir);
+
+    let mut out = Vec::new();
+    run(&chunk, &mut out)?;
+    Ok(String::from_utf8(out).expect("output is valid UTF-8"))
+}
+
 /// Run, expecting success, and split the output into lines.
 fn lines(src: &str) -> Vec<String> {
     exec(src)
@@ -482,6 +507,59 @@ fn deferred_initialisation_assigns_on_the_taken_branch() {
     );
 }
 
+// ---- defer ----------------------------------------------------------------
+
+/// The operands are evaluated when the `defer` is reached, not when it runs,
+/// so a later assignment is not visible to it.
+#[test]
+fn a_deferred_call_uses_the_values_it_was_registered_with() {
+    assert_eq!(
+        lines(
+            "fn main() {\n  var name = \"first\"\n  defer io.print(name)\n\
+             \x20 name = \"second\"\n  io.print(\"body\")\n}\n"
+        ),
+        vec!["body", "first"]
+    );
+}
+
+/// A `defer` inside a branch that never runs must not run either — and must
+/// not read a guard that was never written.
+#[test]
+fn an_unreached_defer_does_not_run() {
+    assert_eq!(
+        lines(
+            "fn f(run: bool) {\n  if run {\n    defer io.print(\"done\")\n  }\n}\n\
+             fn main() {\n  f(false)\n  io.print(\"survived\")\n}\n"
+        ),
+        vec!["survived"]
+    );
+}
+
+#[test]
+fn a_reached_defer_still_runs() {
+    assert_eq!(
+        lines(
+            "fn f(run: bool) {\n  if run {\n    defer io.print(\"done\")\n  }\n}\n\
+             fn main() {\n  f(true)\n  io.print(\"after\")\n}\n"
+        ),
+        vec!["done", "after"]
+    );
+}
+
+/// The returned value is evaluated before the deferred stack runs, so a
+/// deferred call cannot change what the caller receives.
+#[test]
+fn the_return_value_is_evaluated_before_deferred_calls() {
+    assert_eq!(
+        lines(
+            "fn note() {\n  io.print(\"deferred\")\n}\n\
+             fn g() -> int {\n  defer note()\n  return 1\n}\n\
+             fn main() {\n  io.print(g())\n}\n"
+        ),
+        vec!["deferred", "1"]
+    );
+}
+
 // ---- traps ----------------------------------------------------------------
 
 /// Division by zero is a bug, not a runtime condition, so it traps rather than
@@ -518,6 +596,33 @@ fn main() {
 }
 ";
     assert_eq!(exec(src), Err(Trap::IntegerOverflow("+")));
+}
+
+/// Section 3.1: overflow traps in a debug build and wraps in a release one.
+/// The choice is made in the checker, so every backend gets it from the same
+/// operation rather than deciding for itself.
+#[test]
+fn integer_overflow_wraps_in_a_release_build() {
+    let src = "\
+fn main() {
+    var n = 9223372036854775807
+    n += 1
+    io.print(n)
+}
+";
+    assert_eq!(exec_release(src).unwrap().trim(), "-9223372036854775808");
+}
+
+#[test]
+fn multiplication_overflow_wraps_in_a_release_build() {
+    let src = "\
+fn main() {
+    var n = 4611686018427387904
+    n = n * 2
+    io.print(n)
+}
+";
+    assert_eq!(exec_release(src).unwrap().trim(), "-9223372036854775808");
 }
 
 #[test]
@@ -623,7 +728,7 @@ fn functional_update_copies_the_untouched_fields() {
 fn mutation_through_a_reference_is_visible_to_the_caller() {
     assert_eq!(
         with_rect(
-            "  let r = Rect{ width: 1, height: 1, label: \"before\" }\n\
+            "  var r = Rect{ width: 1, height: 1, label: \"before\" }\n\
              \x20 r.rename(\"after\")\n  io.print(r.label)"
         ),
         vec!["after"]
@@ -635,7 +740,7 @@ fn assignment_copies_the_reference_not_the_contents() {
     assert_eq!(
         with_rect(
             "  let a = Rect{ width: 1, height: 1, label: \"one\" }\n\
-             \x20 let b = a\n  b.rename(\"two\")\n  io.print(a.label)"
+             \x20 var b = a\n  b.rename(\"two\")\n  io.print(a.label)"
         ),
         vec!["two"]
     );
@@ -645,7 +750,7 @@ fn assignment_copies_the_reference_not_the_contents() {
 fn a_var_field_can_be_assigned_directly() {
     assert_eq!(
         with_rect(
-            "  let r = Rect{ width: 1, height: 1, label: \"one\" }\n\
+            "  var r = Rect{ width: 1, height: 1, label: \"one\" }\n\
              \x20 r.label = \"two\"\n  io.print(r.label)"
         ),
         vec!["two"]

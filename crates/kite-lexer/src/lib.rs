@@ -398,17 +398,27 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Whether the delimiter starts at `self.pos`.
+    ///
+    /// Asked of the bytes rather than the `str`: a block string walks its
+    /// contents one byte at a time, so `self.pos` sits inside a multi-byte
+    /// character for as long as it takes to pass over one, and slicing the
+    /// `str` there would panic. `"""` is ASCII, so a byte match is exact.
+    fn at_block_delim(&self) -> bool {
+        self.bytes[self.pos..self.limit].starts_with(b"\"\"\"")
+    }
+
     fn scan_string(&mut self) -> TokenKind {
         let start = self.pos;
 
-        if self.src[self.pos..self.limit].starts_with("\"\"\"") {
+        if self.at_block_delim() {
             self.pos += 3;
             loop {
                 if self.pos >= self.limit {
                     self.unterminated_string(start);
                     return TokenKind::Str;
                 }
-                if self.src[self.pos..self.limit].starts_with("\"\"\"") {
+                if self.at_block_delim() {
                     self.pos += 3;
                     return TokenKind::Str;
                 }

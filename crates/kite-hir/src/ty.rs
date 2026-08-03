@@ -176,7 +176,10 @@ pub struct TraitMethodDef {
     pub name: String,
     /// Excluding `self`.
     pub params: Vec<TyId>,
+    /// The value the method answers with, unwrapped: `ret` is `int` and
+    /// `fallible` is true for a method declared `-> (int, error)`.
     pub ret: TyId,
+    pub fallible: bool,
     pub takes_self: bool,
     /// Whether the trait supplied a body.
     pub has_default: bool,

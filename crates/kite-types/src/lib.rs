@@ -189,6 +189,7 @@ pub fn check_recording(
                                 r.value_type(), resolved, module, &type_ids, generics, &mut types, diags,
                             ),
                         },
+                        fallible: m.ret.as_ref().is_some_and(|r| r.is_fallible()),
                         takes_self: m.self_param.is_some(),
                         has_default: m.body.is_some(),
                         span: m.name.span,
@@ -384,7 +385,7 @@ pub fn check_recording(
         });
     }
 
-    check_impls(file, resolved, &type_ids, &types, diags);
+    check_impls(file, resolved, &type_ids, &types, &sigs, diags);
 
     for (i, sig) in resolved.fns.iter().enumerate() {
         let mut checker = Checker {
@@ -407,6 +408,7 @@ pub fn check_recording(
             taint: Vec::new(),
             guards: std::collections::HashMap::new(),
             narrowed: std::collections::HashMap::new(),
+            error_nonnil: std::collections::HashSet::new(),
             loop_depth: 0,
             deferred: Vec::new(),
             release,
@@ -783,6 +785,14 @@ struct Checker<'a> {
     /// leave the IR describing a local as `T` that the backend allocated as
     /// `Option<T>`. The narrowed *use* carries an explicit `Unwrap` instead.
     narrowed: std::collections::HashMap<u32, TyId>,
+    /// Error locals control flow has proved are not nil.
+    ///
+    /// `error` is nil-able, so `err.message()` has to reach a value that is
+    /// there. The backends disagree about what a nil receiver does — the VM
+    /// answers with an empty string, Wasm traps on the cast — and the language
+    /// answers by not letting the call be written until the error is known to
+    /// be present.
+    error_nonnil: std::collections::HashSet<u32>,
     loop_depth: u32,
 }
 
@@ -931,6 +941,25 @@ impl<'a> Checker<'a> {
         // any of them running twice.
         if flow == Flow::Falls {
             hir_body.stmts.extend(self.run_deferred());
+        }
+        // Every guard is false on entry, whether or not its `defer` was
+        // reached. The registration sets it true; an exit that runs before any
+        // registration sees false and skips the call.
+        if !self.deferred.is_empty() {
+            let entry: Vec<hir::Stmt> = self
+                .deferred
+                .iter()
+                .map(|d| hir::Stmt::Let {
+                    local: hir::LocalId(d.flag),
+                    init: Some(hir::Expr {
+                        kind: ExprKind::Bool(false),
+                        ty: TyId::BOOL,
+                        span: d.span,
+                    }),
+                    span: d.span,
+                })
+                .collect();
+            hir_body.stmts.splice(0..0, entry);
         }
         self.deferred.clear();
 
@@ -1221,47 +1250,112 @@ impl<'a> Checker<'a> {
             );
             return None;
         }
-        let call = self.expr(expr, None);
-        // The flag starts false and is set here. At every exit the calls run
-        // in reverse, each guarded by its own flag — so one inside an `if`
-        // that never ran never runs.
+        let mut call = self.expr(expr, None);
+        // Evaluate the receiver and arguments *now*, into hidden locals the
+        // deferred call reads at exit. That is what makes `defer f.close()`
+        // close the file `f` names here rather than whatever `f` names by the
+        // time the function returns.
+        let mut stmts = self.hoist_deferred_operands(&mut call, span);
+        // The flag is initialised at function entry, not here: a `defer` inside
+        // an `if` that never runs still has its flag read at every exit, and a
+        // register that was never written is `Unit` in the VM and zero in Wasm
+        // — the same source deciding differently per backend.
         let flag = self.synthetic_local("deferred", TyId::BOOL, span);
         self.deferred.push(Deferred { flag, call, span });
-        Some((
-            hir::Stmt::Block(hir::Block {
-                stmts: vec![
-                    hir::Stmt::Let {
-                        local: hir::LocalId(flag),
-                        init: Some(hir::Expr {
-                            kind: ExprKind::Bool(false),
-                            ty: TyId::BOOL,
-                            span,
-                        }),
-                        span,
-                    },
-                    hir::Stmt::Assign {
-                        local: hir::LocalId(flag),
-                        value: hir::Expr { kind: ExprKind::Bool(true), ty: TyId::BOOL, span },
-                        span,
-                    },
-                ],
-            }),
-            Flow::Falls,
-        ))
+        stmts.push(hir::Stmt::Assign {
+            local: hir::LocalId(flag),
+            value: hir::Expr { kind: ExprKind::Bool(true), ty: TyId::BOOL, span },
+            span,
+        });
+        Some((hir::Stmt::Block(hir::Block { stmts }), Flow::Falls))
+    }
+
+    /// Bind a deferred call's operands to hidden locals, leaving the call
+    /// reading those locals instead of the original expressions.
+    ///
+    /// A literal is left alone: it cannot change, so a temporary for it would
+    /// be a register the backends carry for nothing.
+    fn hoist_deferred_operands(&mut self, call: &mut hir::Expr, span: Span) -> Vec<hir::Stmt> {
+        let mut stmts = Vec::new();
+        let mut args = match &mut call.kind {
+            ExprKind::Call { args, .. }
+            | ExprKind::CallVirtual { args, .. }
+            | ExprKind::CallBuiltin { args, .. }
+            | ExprKind::CallExtern { args, .. }
+            | ExprKind::StrOp { args, .. }
+            | ExprKind::CallClosure { args, .. } => std::mem::take(args),
+            _ => return stmts,
+        };
+        if let ExprKind::CallClosure { callee, .. } = &mut call.kind {
+            // The function value itself is an operand like any other: which
+            // closure runs is decided here, not at the exit.
+            self.hoist_one(callee, &mut stmts, span);
+        }
+        for a in &mut args {
+            self.hoist_one(a, &mut stmts, span);
+        }
+        match &mut call.kind {
+            ExprKind::Call { args: slot, .. }
+            | ExprKind::CallVirtual { args: slot, .. }
+            | ExprKind::CallBuiltin { args: slot, .. }
+            | ExprKind::CallExtern { args: slot, .. }
+            | ExprKind::StrOp { args: slot, .. }
+            | ExprKind::CallClosure { args: slot, .. } => *slot = args,
+            _ => {}
+        }
+        stmts
+    }
+
+    fn hoist_one(&mut self, e: &mut hir::Expr, out: &mut Vec<hir::Stmt>, span: Span) {
+        if matches!(
+            e.kind,
+            ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Str(_)
+                | ExprKind::Bool(_)
+                | ExprKind::Nil
+        ) {
+            return;
+        }
+        let (ty, at) = (e.ty, e.span);
+        let id = self.synthetic_local("deferred_arg", ty, span);
+        let value = std::mem::replace(
+            e,
+            hir::Expr { kind: ExprKind::Local(hir::LocalId(id)), ty, span: at },
+        );
+        out.push(hir::Stmt::Let { local: hir::LocalId(id), init: Some(value), span });
     }
 
     /// A `return`, with whatever was deferred running first.
     ///
-    /// The value is evaluated before the deferred calls — it was written
-    /// before them — and a deferred call cannot change it, because it is
-    /// already in the statement being returned.
-    fn returning(&self, ret: hir::Stmt, span: Span) -> hir::Stmt {
+    /// The returned value is evaluated *before* the deferred calls — it was
+    /// written before them — so it is bound to a hidden local here and that
+    /// local is what the return hands back. Without the binding the expression
+    /// would be evaluated after the deferred stack had run, and a deferred
+    /// mutation could change the answer.
+    fn returning(&mut self, ret: hir::Stmt, span: Span) -> hir::Stmt {
         if self.deferred.is_empty() {
             return ret;
         }
-        let mut stmts = self.run_deferred();
+        let mut stmts = Vec::new();
+        let ret = match ret {
+            hir::Stmt::Return { value: Some(v), span: rs } => {
+                let (ty, at) = (v.ty, v.span);
+                let id = self.synthetic_local("returned", ty, span);
+                stmts.push(hir::Stmt::Let { local: hir::LocalId(id), init: Some(v), span });
+                hir::Stmt::Return {
+                    value: Some(hir::Expr {
+                        kind: ExprKind::Local(hir::LocalId(id)),
+                        ty,
+                        span: at,
+                    }),
+                    span: rs,
+                }
+            }
+            other => other,
+        };
+        stmts.extend(self.run_deferred());
         stmts.push(ret);
-        let _ = span;
         hir::Stmt::Block(hir::Block { stmts })
     }
 
@@ -1424,11 +1518,13 @@ impl<'a> Checker<'a> {
         let entry_taint = self.taint.clone();
         // Inside `if err != nil { … }` the value is still not valid.
         let narrowed = self.apply_narrowing(narrowing, true);
+        let present = self.apply_error_nonnil(tested, true);
         let mut then_entry = self.taint.clone();
         self.clean_guarded(&mut then_entry, tested, true);
         self.taint = then_entry;
         let (then, then_flow) = self.block(&i.then, sig);
         self.undo_narrowing(narrowed);
+        self.undo_error_nonnil(present);
         let then_init = std::mem::replace(&mut self.init, entry_init.clone());
         let then_taint = std::mem::replace(&mut self.taint, entry_taint.clone());
 
@@ -1436,11 +1532,13 @@ impl<'a> Checker<'a> {
             None => (None, Flow::Falls),
             Some(ast::ElseBranch::Block(b)) => {
                 let narrowed = self.apply_narrowing(narrowing, false);
+                let present = self.apply_error_nonnil(tested, false);
                 let mut else_entry = entry_taint.clone();
                 self.clean_guarded(&mut else_entry, tested, false);
                 self.taint = else_entry;
                 let (blk, f) = self.block(b, sig);
                 self.undo_narrowing(narrowed);
+                self.undo_error_nonnil(present);
                 (Some(blk), f)
             }
             Some(ast::ElseBranch::If(nested)) => {
@@ -1463,12 +1561,11 @@ impl<'a> Checker<'a> {
             }
             (Flow::Diverges, _, true) => else_taint.clone(),
             (_, Flow::Diverges, true) => then_taint.clone(),
-            (_, _, false) => entry_taint.clone(),
-            _ => then_taint
-                .iter()
-                .zip(&else_taint)
-                .map(|(a, b)| a.merge(*b))
-                .collect(),
+            // No `else`: control arrives either through the branch or around
+            // it, so both states count. Taking the entry state alone would let
+            // an error declared inside the branch escape uninspected.
+            (_, _, false) => self.join_taint(&entry_taint, &then_taint),
+            _ => self.join_taint(&then_taint, &else_taint),
         };
 
         self.restore_taint(merged_taint);
@@ -1501,6 +1598,9 @@ impl<'a> Checker<'a> {
         // as a positive `if` wrapping everything that followed.
         if then_flow == Flow::Diverges && i.else_.is_none() {
             self.apply_narrowing(narrowing, false);
+            // `if err == nil { return … }` is the standard-library shape: past
+            // it, the error is present and its message can be read.
+            self.apply_error_nonnil(tested, false);
         }
 
         Some((hir::Stmt::If { cond, then, else_, span: i.span }, flow))
@@ -1513,6 +1613,11 @@ impl<'a> Checker<'a> {
         // A loop body may run zero times, so nothing it assigns can be assumed
         // assigned afterwards. The entry state is restored at the end.
         let entry_init = self.init.clone();
+        // Taint needs the same treatment for the same reason: a `check` in a
+        // body that never runs proves nothing, so the state after the loop is
+        // the entry state joined with whatever the body left. Without this, a
+        // `for false { check err }` makes the value it guards readable.
+        let entry_taint = self.taint.clone();
 
         let result = match &f.header {
             ast::ForHeader::In { binding, iter } => {
@@ -1522,6 +1627,7 @@ impl<'a> Checker<'a> {
                     let result = self.for_map(f, binding, iter, sig);
                     self.loop_depth -= 1;
                     self.restore_init(entry_init);
+                    self.merge_loop_taint(&entry_taint);
                     return result;
                 };
                 let ast::Expr::Range { start, end, inclusive, .. } = iter else {
@@ -1545,6 +1651,7 @@ impl<'a> Checker<'a> {
                         }
                         self.loop_depth -= 1;
                         self.restore_init(entry_init);
+                        self.merge_loop_taint(&entry_taint);
                         return None;
                     };
                     let local_id = self.resolved.lookup_binding(name.span)?;
@@ -1554,6 +1661,7 @@ impl<'a> Checker<'a> {
                     let (body, _) = self.block(&f.body, sig);
                     self.loop_depth -= 1;
                     self.restore_init(entry_init);
+                    self.merge_loop_taint(&entry_taint);
                     return Some((
                         hir::Stmt::ForSlice {
                             var: hir::LocalId(local_id),
@@ -1600,6 +1708,7 @@ impl<'a> Checker<'a> {
 
         self.loop_depth -= 1;
         self.restore_init(entry_init);
+        self.merge_loop_taint(&entry_taint);
         // `for { … }` with nothing that breaks out of it never falls through.
         // That is worth knowing here rather than leaving to MIR, because a
         // function whose every exit is a `return` inside such a loop is
@@ -1743,6 +1852,29 @@ impl<'a> Checker<'a> {
         self.taint.resize(self.locals.len(), Taint::Clean);
     }
 
+    /// Leave a loop: join what the body left with the state it was entered in,
+    /// because control also reaches here having run the body zero times.
+    fn merge_loop_taint(&mut self, entry: &[Taint]) {
+        let merged = self.join_taint(entry, &self.taint);
+        self.restore_taint(merged);
+    }
+
+    /// Join two taint states at a point where control arrives from either.
+    ///
+    /// Sides can be different lengths, because a branch declares locals the
+    /// other never saw; a local the incoming path had not reached yet is Clean
+    /// there, which is the identity the merge rule wants.
+    fn join_taint(&self, a: &[Taint], b: &[Taint]) -> Vec<Taint> {
+        let n = a.len().max(b.len()).max(self.locals.len());
+        (0..n)
+            .map(|i| {
+                let x = a.get(i).copied().unwrap_or(Taint::Clean);
+                let y = b.get(i).copied().unwrap_or(Taint::Clean);
+                x.merge(y)
+            })
+            .collect()
+    }
+
     /// A local compared against `nil`, and whether the comparison was `==`.
     ///
     /// Returns `None` unless the local's type is optional, so an `error` test
@@ -1786,6 +1918,27 @@ impl<'a> Checker<'a> {
     fn undo_narrowing(&mut self, saved: Option<u32>) {
         if let Some(id) = saved {
             self.narrowed.remove(&id);
+        }
+    }
+
+    /// The mirror of [`Self::apply_narrowing`] for errors: `err != nil` proves
+    /// the error present in the *then*, `err == nil` in the *else*.
+    fn apply_error_nonnil(&mut self, tested: Option<(u32, bool)>, in_then: bool) -> Option<u32> {
+        let (id, is_eq) = tested?;
+        if is_eq == in_then {
+            return None;
+        }
+        // Already proved by an enclosing test: leave that proof to its owner
+        // rather than removing it when this branch ends.
+        if !self.error_nonnil.insert(id) {
+            return None;
+        }
+        Some(id)
+    }
+
+    fn undo_error_nonnil(&mut self, saved: Option<u32>) {
+        if let Some(id) = saved {
+            self.error_nonnil.remove(&id);
         }
     }
 
@@ -3339,6 +3492,7 @@ impl<'a> Checker<'a> {
             if !args.is_empty() {
                 self.arity_error("message", args.len(), 0, span, None);
             }
+            self.require_error_present(base, name.span);
             return hir::Expr {
                 kind: ExprKind::ErrorMessage { base: Box::new(receiver) },
                 ty: TyId::STR,
@@ -3544,6 +3698,14 @@ impl<'a> Checker<'a> {
                 .with_note(format!("call it as `{}.{}(…)`", type_name, name.name)),
             );
             return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+
+        // The other half of the `var self` contract. A method that may modify
+        // its receiver can only be reached through a binding that may change,
+        // so the modification is predictable from the call site: `c.bump()`
+        // changing `c` is visible in `var c`, and impossible in `let c`.
+        if owner.var_self {
+            self.require_mutable_receiver(base, &name.name);
         }
 
         // A method on a generic type is written once against the parameters
@@ -4118,16 +4280,47 @@ impl<'a> Checker<'a> {
     }
 
     /// Mark an error binding checked, and clean the value it guards.
+    ///
+    /// `check err` is the direct case. `check errors.wrap(err, "…")` is the
+    /// other one the specification shows, and it has to reach the `err` inside:
+    /// a wrapper answers nil exactly when what it wrapped was nil, so falling
+    /// past the `check` proves the wrapped error nil just as surely, and the
+    /// value it guards is readable. Only error-typed arguments count, so
+    /// `check open(path)` — where `path` is a `str` — cleans nothing.
     fn mark_checked(&mut self, expr: &ast::Expr) {
-        let ast::Expr::Path(p) = expr else { return };
-        let Some(Res::Local(id)) = self.resolved.lookup_use(p.span) else {
-            return;
-        };
-        if self.taint[id as usize] == Taint::Unchecked {
-            self.taint[id as usize] = Taint::Clean;
+        match expr {
+            ast::Expr::Paren { inner, .. } => self.mark_checked(inner),
+            ast::Expr::Path(p) => {
+                let Some(Res::Local(id)) = self.resolved.lookup_use(p.span) else {
+                    return;
+                };
+                if self.taint[id as usize] == Taint::Unchecked {
+                    self.taint[id as usize] = Taint::Clean;
+                }
+                if let Some(&guarded) = self.guards.get(&id) {
+                    self.taint[guarded as usize] = Taint::Clean;
+                }
+            }
+            ast::Expr::Call { args, .. } => {
+                for a in args {
+                    if self.is_error_operand(a) {
+                        self.mark_checked(a);
+                    }
+                }
+            }
+            _ => {}
         }
-        if let Some(&guarded) = self.guards.get(&id) {
-            self.taint[guarded as usize] = Taint::Clean;
+    }
+
+    /// Whether an argument is an error the enclosing `check` speaks for.
+    fn is_error_operand(&self, expr: &ast::Expr) -> bool {
+        match expr {
+            ast::Expr::Paren { inner, .. } => self.is_error_operand(inner),
+            ast::Expr::Path(p) => match self.resolved.lookup_use(p.span) {
+                Some(Res::Local(id)) => self.locals[id as usize].ty == TyId::ERR,
+                _ => false,
+            },
+            _ => false,
         }
     }
 
@@ -4361,6 +4554,128 @@ impl<'a> Checker<'a> {
             return None;
         }
         Some(id)
+    }
+
+    /// The local a place expression is ultimately rooted at: `a.b.c[0]` is
+    /// rooted at `a`. `None` when the root is not a plain binding.
+    fn root_binding(&self, e: &ast::Expr) -> Option<u32> {
+        match e {
+            // `self` is local 0 of every method, and is not spelled as a path.
+            ast::Expr::SelfExpr(_) => Some(0),
+            ast::Expr::Path(p) => match self.resolved.lookup_use(p.span) {
+                Some(Res::Local(id)) => Some(id),
+                _ => None,
+            },
+            ast::Expr::Field { base, .. } | ast::Expr::Index { base, .. } => {
+                self.root_binding(base)
+            }
+            ast::Expr::Paren { inner, .. } => self.root_binding(inner),
+            _ => None,
+        }
+    }
+
+    /// Report when what is about to be modified is rooted at an immutable
+    /// binding. `self` is the same rule wearing a different word: the receiver
+    /// is mutable exactly when the method declared `var self`.
+    fn require_mutable_base(&mut self, base: &ast::Expr) {
+        let Some(id) = self.root_binding(base) else { return };
+        if self.locals[id as usize].mutable {
+            return;
+        }
+        let name = self.locals[id as usize].name.clone();
+        let decl = self.locals[id as usize].span;
+        if name == "self" {
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0114,
+                    "cannot modify `self` in a method that does not take `var self`",
+                )
+                .with_primary(base.span(), "this receiver is immutable")
+                .with_secondary(decl, "declared here")
+                .with_note(
+                    "write `var self` as the receiver; a caller then has to hold the value \
+                     in a `var` binding, which is what makes the modification visible at \
+                     the call site rather than hidden inside the method",
+                ),
+            );
+            return;
+        }
+        let mut d = Diagnostic::error(
+            codes::E0114,
+            format!("cannot modify `{}` through an immutable binding", name),
+        )
+        .with_primary(base.span(), "this binding is immutable")
+        .with_secondary(decl, "declared with `let` here");
+        if let Some(kw) = self.let_keyword_span(decl) {
+            d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
+        }
+        self.diags.push(d);
+    }
+
+    /// `err.message()` needs an error that is there.
+    ///
+    /// An `error` is either nil or a failure, so reading the message off one
+    /// nothing has proved present is the same mistake as reading a value whose
+    /// error was never checked — and it is one the backends cannot even agree
+    /// to get wrong the same way.
+    fn require_error_present(&mut self, base: &ast::Expr, span: Span) {
+        // A call answering an `error` cannot be nil-tested by a binding, and a
+        // nil literal is caught by its own diagnostic. Only a local can be
+        // proved, so only a local is required to be.
+        let ast::Expr::Path(p) = base else { return };
+        let Some(Res::Local(id)) = self.resolved.lookup_use(p.span) else {
+            return;
+        };
+        if self.error_nonnil.contains(&id) {
+            return;
+        }
+        let name = self.locals[id as usize].name.clone();
+        self.diags.push(
+            Diagnostic::error(
+                codes::E0301,
+                format!("`{}` may be nil here, so it has no message", name),
+            )
+            .with_primary(span, "reading the message needs an error that is present")
+            .with_secondary(base.span(), format!("`{}` has not been proved non-nil", name))
+            .with_note(format!(
+                "test it first: `if {} != nil {{ … {}.message() … }}`, or leave early with \
+                 `if {} == nil {{ return … }}`",
+                name, name, name
+            ))
+            .with_note(
+                "an `error` is either nil or a failure; there is no message on the nil side, \
+                 and no zero value standing in for one",
+            ),
+        );
+    }
+
+    /// Calling a `var self` method through an immutable binding.
+    fn require_mutable_receiver(&mut self, base: &ast::Expr, method: &str) {
+        let Some(id) = self.root_binding(base) else { return };
+        if self.locals[id as usize].mutable {
+            return;
+        }
+        let name = self.locals[id as usize].name.clone();
+        let decl = self.locals[id as usize].span;
+        let mut d = Diagnostic::error(
+            codes::E0114,
+            format!("`{}` may modify its receiver, but `{}` is immutable", method, name),
+        )
+        .with_primary(base.span(), "this binding cannot change")
+        .with_secondary(decl, "declared here")
+        .with_note(format!(
+            "`{}` takes `var self`, so calling it needs a `var` binding",
+            method
+        ));
+        if name == "self" {
+            d = d.with_note(
+                "the enclosing method takes a plain `self`; it would have to take \
+                 `var self` to pass its receiver on",
+            );
+        } else if let Some(kw) = self.let_keyword_span(decl) {
+            d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
+        }
+        self.diags.push(d);
     }
 
     /// `xs.len()`, `xs.get(i)`, `xs.push(v)`.
@@ -4668,6 +4983,12 @@ impl<'a> Checker<'a> {
         }
 
         let entry_init = self.init.clone();
+        // Arms are alternatives, not a sequence: each starts from the state the
+        // match was entered in, and what survives is the join of the arms that
+        // can fall out. Letting one arm's `check` leak into the next would make
+        // an error checked in one case clean in every other.
+        let entry_taint = self.taint.clone();
+        let mut exit_taint: Option<Vec<Taint>> = None;
         let mut arms = Vec::with_capacity(m.arms.len());
         let mut result_ty: Option<TyId> = None;
         let mut arm_spans: Vec<(Span, TyId)> = Vec::new();
@@ -4680,6 +5001,7 @@ impl<'a> Checker<'a> {
 
         for arm in &m.arms {
             self.restore_init(entry_init.clone());
+            self.restore_taint(entry_taint.clone());
             let bind_ty = match *self.types.kind(scrut_ty) {
                 TyKind::Optional(inner) if nil_covered => inner,
                 _ => scrut_ty,
@@ -4711,6 +5033,15 @@ impl<'a> Checker<'a> {
             // and `other => nil` are arms of one `Option<str>` match rather
             // than a type error about two arms disagreeing.
             let body = self.coerce(body, want);
+
+            // An arm that diverges contributes nothing to the join: control
+            // never arrives at the join from it.
+            if body.ty != TyId::NEVER {
+                exit_taint = Some(match exit_taint {
+                    None => self.taint.clone(),
+                    Some(acc) => self.join_taint(&acc, &self.taint),
+                });
+            }
 
             if body.ty != TyId::NEVER && !self.types.is_poisoned(body.ty) {
                 match result_ty {
@@ -4744,6 +5075,10 @@ impl<'a> Checker<'a> {
         // A binding introduced by one arm's pattern is not in scope after the
         // match, so the entry state is what survives.
         self.restore_init(entry_init);
+        // Every arm diverging means the match does too; the entry state is then
+        // the honest answer for the code that cannot be reached.
+        let merged = exit_taint.unwrap_or_else(|| entry_taint.clone());
+        self.restore_taint(merged);
 
         self.check_exhaustive(m, &arms, scrut_ty);
 
@@ -5881,6 +6216,13 @@ impl<'a> Checker<'a> {
             return None;
         }
 
+        // A `var` field is only assignable through a binding that may itself
+        // change. Inside a method that is what `var self` declares: a plain
+        // `self` receiver promises the caller nothing was modified, and
+        // honouring the field's `var` while ignoring the receiver's would let
+        // it be modified anyway.
+        self.require_mutable_base(base);
+
         let value = self.expr(&a.value, Some(ty));
         let value = match a.op.to_binary() {
             None => {
@@ -5922,17 +6264,22 @@ impl<'a> Checker<'a> {
         // An inline `if` narrows an optional exactly as the statement form
         // does, which is why no `?.` or `??` operator is needed.
         let narrowing = self.nil_test(cond);
+        let tested = self.error_tested_by(cond);
         let c = self.condition(cond);
 
         let narrowed = self.apply_narrowing(narrowing, true);
+        let present = self.apply_error_nonnil(tested, true);
         let t = self.block_value(then);
         self.undo_narrowing(narrowed);
+        self.undo_error_nonnil(present);
 
         let e = match else_ {
             ast::ElseBranch::Block(b) => {
                 let narrowed = self.apply_narrowing(narrowing, false);
+                let present = self.apply_error_nonnil(tested, false);
                 let v = self.block_value(b);
                 self.undo_narrowing(narrowed);
+                self.undo_error_nonnil(present);
                 v
             }
             ast::ElseBranch::If(nested) => {
@@ -6035,6 +6382,10 @@ impl<'a> Checker<'a> {
 
         let t = l.ty;
         let resolved = match (op, t) {
+            // Overflow traps in a debug build and wraps in a release one.
+            (B::Add, TyId::INT) if self.release => Some((H::AddIntWrap, TyId::INT)),
+            (B::Sub, TyId::INT) if self.release => Some((H::SubIntWrap, TyId::INT)),
+            (B::Mul, TyId::INT) if self.release => Some((H::MulIntWrap, TyId::INT)),
             (B::Add, TyId::INT) => Some((H::AddInt, TyId::INT)),
             (B::Sub, TyId::INT) => Some((H::SubInt, TyId::INT)),
             (B::Mul, TyId::INT) => Some((H::MulInt, TyId::INT)),
@@ -6507,6 +6858,7 @@ fn check_impls(
     resolved: &ResolveMap,
     type_ids: &[Option<TypeTarget>],
     types: &Types,
+    sigs: &[Signature],
     diags: &mut DiagBag,
 ) {
     // (trait index, type index) -> the span that first claimed it. Exactly one
@@ -6626,6 +6978,85 @@ fn check_impls(
                         ),
                     )
                     .with_primary(m.sig_span, "signature does not match")
+                    .with_secondary(decl.span, "declared here"),
+                );
+                continue;
+            }
+
+            // Matching arity is not matching types. A call through `dyn Trait`
+            // is typed from the declaration and dispatched to the body, so an
+            // implementation free to disagree about what it accepts is a
+            // reinterpretation of whatever the caller passed: the native
+            // backend will read an `int` as a pointer.
+            let Some(fi) = resolved.trait_method(target, ti, &m.name.name) else {
+                continue;
+            };
+            let sig = &sigs[fi as usize];
+
+            for (i, (&want, &got)) in decl.params.iter().zip(sig.params.iter()).enumerate() {
+                if want == got || types.is_poisoned(want) || types.is_poisoned(got) {
+                    continue;
+                }
+                let span = m.params[i].ty.span();
+                diags.push(
+                    Diagnostic::error(
+                        codes::E0200,
+                        format!(
+                            "`{}` takes {} here, but the trait declares {}",
+                            m.name.name,
+                            types.with_article(got),
+                            types.with_article(want)
+                        ),
+                    )
+                    .with_primary(span, format!("this is {}", types.with_article(got)))
+                    .with_secondary(decl.span, "declared here")
+                    .with_note(
+                        "a call through `dyn Trait` is checked against the trait, so an \
+                         implementation that takes something else would receive a value of \
+                         the wrong type",
+                    ),
+                );
+            }
+
+            let got_ret = if sig.fallible {
+                types.fallible_value(sig.ret).unwrap_or(sig.ret)
+            } else {
+                sig.ret
+            };
+            let ret_span = m.ret.as_ref().map_or(m.sig_span, |r| r.span());
+            if sig.fallible != decl.fallible {
+                diags.push(
+                    Diagnostic::error(
+                        codes::E0200,
+                        format!(
+                            "`{}` {} an error, but the trait declares it {}",
+                            m.name.name,
+                            if sig.fallible { "returns" } else { "does not return" },
+                            if decl.fallible { "fallible" } else { "infallible" },
+                        ),
+                    )
+                    .with_primary(ret_span, "fallibility does not match")
+                    .with_secondary(decl.span, "declared here")
+                    .with_note(
+                        "whether a call can fail is part of the signature every caller sees, \
+                         so the trait and its implementations must agree",
+                    ),
+                );
+            } else if got_ret != decl.ret
+                && !types.is_poisoned(got_ret)
+                && !types.is_poisoned(decl.ret)
+            {
+                diags.push(
+                    Diagnostic::error(
+                        codes::E0200,
+                        format!(
+                            "`{}` returns {}, but the trait declares {}",
+                            m.name.name,
+                            types.with_article(got_ret),
+                            types.with_article(decl.ret)
+                        ),
+                    )
+                    .with_primary(ret_span, format!("this is {}", types.with_article(got_ret)))
                     .with_secondary(decl.span, "declared here"),
                 );
             }

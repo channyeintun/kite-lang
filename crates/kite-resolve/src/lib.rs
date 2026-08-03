@@ -329,6 +329,9 @@ pub struct MethodOwner {
     /// Position within that block's method list.
     pub method_index: usize,
     pub takes_self: bool,
+    /// `var self` — the receiver may be mutated, and the method may only be
+    /// called through a binding that is itself mutable.
+    pub var_self: bool,
     /// The trait being implemented, if this is a trait impl.
     pub trait_index: Option<u32>,
     /// True when the body comes from a trait's default method rather than
@@ -720,6 +723,7 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                             impl_index: i,
                             method_index: mi,
                             takes_self: m.self_param.is_some(),
+                            var_self: m.self_param.as_ref().is_some_and(|s| s.is_var),
                             trait_index,
                             is_default: false,
                         }),
@@ -753,6 +757,7 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                                     impl_index: trait_item,
                                     method_index: mi,
                                     takes_self: m.self_param.is_some(),
+                                    var_self: m.self_param.as_ref().is_some_and(|s| s.is_var),
                                     trait_index: Some(ti),
                                     is_default: true,
                                 }),
@@ -783,14 +788,14 @@ fn resolve_bodies(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) 
             None => match &file.items[decl_index] {
                 Item::Fn(f) => {
                     let mut r = FnResolver::new(map, diags, module);
-                    r.resolve_fn(&f.params, Some(&f.body), false);
+                    r.resolve_fn(&f.params, Some(&f.body), false, false);
                     r.locals
                 }
                 // A host function has no body here; its parameters still get
                 // slots, because the generated stub forwards them.
                 Item::Extern(e) => {
                     let mut r = FnResolver::new(map, diags, module);
-                    r.resolve_fn(&e.params, None, false);
+                    r.resolve_fn(&e.params, None, false, false);
                     r.locals
                 }
                 _ => unreachable!("a free function signature points at a function"),
@@ -803,7 +808,7 @@ fn resolve_bodies(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) 
                 };
                 let m = &methods[o.method_index];
                 let mut r = FnResolver::new(map, diags, module);
-                r.resolve_fn(&m.params, m.body.as_ref(), o.takes_self);
+                r.resolve_fn(&m.params, m.body.as_ref(), o.takes_self, o.var_self);
                 r.locals
             }
         };
@@ -879,12 +884,18 @@ impl<'a> FnResolver<'a> {
         );
     }
 
-    fn resolve_fn(&mut self, params: &[Param], body: Option<&Block>, takes_self: bool) {
+    fn resolve_fn(
+        &mut self,
+        params: &[Param],
+        body: Option<&Block>,
+        takes_self: bool,
+        var_self: bool,
+    ) {
         if takes_self {
             // `self` occupies local 0, so a method's parameters start at 1.
             self.locals.push(LocalInfo {
                 name: "self".to_string(),
-                mutable: false,
+                mutable: var_self,
                 span: params.first().map(|p| p.span).unwrap_or_else(|| {
                     body.map(|b| b.span).unwrap_or(Span::new(kite_span::FileId(0), 0, 0))
                 }),

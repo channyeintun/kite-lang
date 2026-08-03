@@ -55,6 +55,26 @@ fn valid(src: &str) -> Built {
     b
 }
 
+/// The debug-build overflow checks are written out by hand — several
+/// instructions with nested blocks, where the validator is the only thing
+/// standing between a stack mistake and a browser.
+#[test]
+fn checked_integer_arithmetic_validates() {
+    valid(
+        "fn main() {\n  var x = 2\n  x = x + 3\n  x = x - 1\n  x = x * 4\n  io.print(x)\n}\n",
+    );
+}
+
+/// The same arithmetic reached through every operand shape the emitter has to
+/// hold across the check.
+#[test]
+fn checked_arithmetic_on_call_results_validates() {
+    valid(
+        "fn f(n: int) -> int {\n  return n * n + n - 1\n}\n\
+         fn main() {\n  io.print(f(3) * f(4))\n}\n",
+    );
+}
+
 const HELLO: &str = "\
 fn add(a: int, b: int) -> int {
     return a + b
@@ -238,7 +258,7 @@ fn struct_construction_and_field_reads_validate() {
 #[test]
 fn a_var_field_can_be_written() {
     valid(&format!(
-        "{}\nfn main() {{\n  let r = Rect{{ width: 1, height: 1, scale: 1 }}\n  r.scale = 9\n  io.print(r.scale)\n}}\n",
+        "{}\nfn main() {{\n  var r = Rect{{ width: 1, height: 1, scale: 1 }}\n  r.scale = 9\n  io.print(r.scale)\n}}\n",
         RECT
     ));
 }

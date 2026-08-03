@@ -23,7 +23,7 @@ impl Rect {
 }
 
 fn main() {
-    let r = Rect{ width: 3, height: 4, label: "first" }
+    var r = Rect{ width: 3, height: 4, label: "first" }
     io.print(r.area())
     io.print(r.label)
 

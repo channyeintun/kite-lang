@@ -631,6 +631,21 @@ impl<'a> Vm<'a> {
                                                                                           y: i64| {
                     x.checked_mul(y).ok_or(Trap::IntegerOverflow("*"))
                 }),
+                // The release forms. Overflow is defined here rather than
+                // undefined: it wraps, which is what the hardware does and what
+                // section 3.1 promises.
+                Op::AddIntWrap { dst, a, b } => arith!(self, base, dst, a, b, "+", Int, Int, |x: i64,
+                                                                                              y: i64| {
+                    Ok(x.wrapping_add(y))
+                }),
+                Op::SubIntWrap { dst, a, b } => arith!(self, base, dst, a, b, "-", Int, Int, |x: i64,
+                                                                                              y: i64| {
+                    Ok(x.wrapping_sub(y))
+                }),
+                Op::MulIntWrap { dst, a, b } => arith!(self, base, dst, a, b, "*", Int, Int, |x: i64,
+                                                                                              y: i64| {
+                    Ok(x.wrapping_mul(y))
+                }),
                 Op::DivInt { dst, a, b } => arith!(self, base, dst, a, b, "/", Int, Int, |x: i64,
                                                                                           y: i64| {
                     if y == 0 {

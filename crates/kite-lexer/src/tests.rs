@@ -109,6 +109,18 @@ fn string_forms() {
     assert_eq!(bare("\"\"\"\nblock\n\"\"\""), vec![T::Str]);
 }
 
+/// A block string is walked one byte at a time, so every non-ASCII character
+/// in one leaves `pos` mid-character for a step or two. Scanning the delimiter
+/// must not slice the source there.
+#[test]
+fn block_string_holds_non_ascii_text() {
+    assert_eq!(bare("\"\"\"\ncafé\n\"\"\""), vec![T::Str]);
+    assert_eq!(bare("\"\"\"\nမင်္ဂလာပါ\n\"\"\""), vec![T::Str]);
+    assert_eq!(bare("\"\"\"\n😀\n\"\"\""), vec![T::Str]);
+    // The delimiter still ends the literal when it follows one directly.
+    assert_eq!(bare("\"\"\"é\"\"\""), vec![T::Str]);
+}
+
 #[test]
 fn interpolation_with_nested_quotes_stays_one_token() {
     // The `"` inside \( ) must not terminate the outer literal.

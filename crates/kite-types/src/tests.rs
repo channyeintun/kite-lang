@@ -538,7 +538,35 @@ fn a_primitive_has_no_fields() {
 
 #[test]
 fn a_var_field_may_be_assigned() {
-    ok_rect("  let r = Rect{ width: 1, label: \"x\" }\n  r.label = \"y\"");
+    ok_rect("  var r = Rect{ width: 1, label: \"x\" }\n  r.label = \"y\"");
+}
+
+/// A `var` field is still only reachable through a binding that may change:
+/// otherwise `let` would promise nothing at all about the value it names.
+#[test]
+fn a_var_field_cannot_be_assigned_through_a_let() {
+    let c = with_rect("  let r = Rect{ width: 1, label: \"x\" }\n  r.label = \"y\"");
+    assert!(c.has("E0114"), "{}", c.render());
+}
+
+/// Both halves of the `var self` contract from section 8.2.
+#[test]
+fn a_plain_self_receiver_cannot_modify_a_field() {
+    let c = run("struct C {\n  var n: int\n}\nimpl C {\n  fn bump(self) {\n    self.n = self.n + 1\n  }\n}\nfn main() {\n}\n");
+    assert!(c.has("E0114"), "{}", c.render());
+    assert!(c.render().contains("var self"), "{}", c.render());
+}
+
+#[test]
+fn a_var_self_method_needs_a_var_receiver() {
+    let c = run("struct C {\n  var n: int\n}\nimpl C {\n  fn bump(var self) {\n    self.n = self.n + 1\n  }\n}\nfn main() {\n  let c = C{ n: 1 }\n  c.bump()\n}\n");
+    assert!(c.has("E0114"), "{}", c.render());
+}
+
+#[test]
+fn a_var_self_method_through_a_var_binding_is_accepted() {
+    let c = run("struct C {\n  var n: int\n}\nimpl C {\n  fn bump(var self) {\n    self.n = self.n + 1\n  }\n}\nfn main() {\n  var c = C{ n: 1 }\n  c.bump()\n}\n");
+    assert!(!c.diags.has_errors(), "{}", c.render());
 }
 
 /// Fields are immutable by default. The message explains both fixes, because
@@ -1035,6 +1063,91 @@ fn an_early_return_cleans_the_value() {
 #[test]
 fn a_non_diverging_error_branch_does_not_clean_the_value() {
     let c = run("fn load() -> (int, error) {\n  return 1, nil\n}\nfn main() {\n  let (v, err) = load()\n  if err != nil {\n    io.print(\"oops\")\n  }\n  io.print(v)\n}\n");
+    assert!(c.has("E0301"), "{}", c.render());
+}
+
+/// The wrapping form the specification and `std/errors` both show. A wrapper
+/// answers nil exactly when what it wrapped was nil, so passing the `check`
+/// proves the wrapped error nil and its value readable.
+#[test]
+fn checking_a_wrapped_error_cleans_the_value() {
+    let c = run("fn load() -> (int, error) {\n  return 1, nil\n}\nfn wrap(e: error, c: str) -> error {\n  return e\n}\nfn f() -> (int, error) {\n  let (v, err) = load()\n  check wrap(err, \"while loading\")\n  return v, nil\n}\nfn main() {\n}\n");
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+/// Only the error arguments count: a call that happens to return an error
+/// without being handed one proves nothing about an unrelated error.
+#[test]
+fn checking_a_call_without_the_error_does_not_clean_the_value() {
+    let c = run("fn load() -> (int, error) {\n  return 1, nil\n}\nfn other(n: int) -> error {\n  return nil\n}\nfn f() -> (int, error) {\n  let (v, err) = load()\n  check other(3)\n  return v, nil\n}\nfn main() {\n}\n");
+    assert!(c.has("E0301"), "{}", c.render());
+    assert!(c.has("E0302"), "{}", c.render());
+}
+
+/// A loop body may run zero times, so a `check` inside it proves nothing about
+/// the state after the loop.
+#[test]
+fn a_check_inside_a_loop_does_not_clean_the_value_after_it() {
+    let c = run("fn load() -> (int, error) {\n  return 1, nil\n}\nfn f() -> (int, error) {\n  let (v, err) = load()\n  for false {\n    check err\n  }\n  return v, nil\n}\nfn main() {\n}\n");
+    assert!(c.has("E0301"), "{}", c.render());
+    assert!(c.has("E0302"), "{}", c.render());
+}
+
+/// Arms are alternatives: checking in one says nothing about the others.
+#[test]
+fn a_check_in_one_match_arm_does_not_clean_the_others() {
+    let c = run("fn load() -> (int, error) {\n  return 1, nil\n}\nfn f(k: int) -> (int, error) {\n  let (v, err) = load()\n  match k {\n    0 => { check err }\n    _ => { }\n  }\n  return v, nil\n}\nfn main() {\n}\n");
+    assert!(c.has("E0301"), "{}", c.render());
+}
+
+/// Checking in *every* arm does prove it, on every path.
+#[test]
+fn a_check_in_every_match_arm_cleans_the_value() {
+    let c = run("fn load() -> (int, error) {\n  return 1, nil\n}\nfn f(k: int) -> (int, error) {\n  let (v, err) = load()\n  match k {\n    0 => { check err }\n    _ => { check err }\n  }\n  return v, nil\n}\nfn main() {\n}\n");
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+/// An error bound inside a branch still has to be inspected: the join has to
+/// carry the branch's state out, not just the state the branch was entered in.
+#[test]
+fn an_error_bound_inside_a_branch_is_still_reported() {
+    let c = run("fn load() -> (int, error) {\n  return 1, nil\n}\nfn main() {\n  if true {\n    let (v, err) = load()\n  }\n}\n");
+    assert!(c.has("E0302"), "{}", c.render());
+}
+
+#[test]
+fn an_error_bound_inside_a_loop_is_still_reported() {
+    let c = run("fn load() -> (int, error) {\n  return 1, nil\n}\nfn main() {\n  for i in 0..3 {\n    let (v, err) = load()\n  }\n}\n");
+    assert!(c.has("E0302"), "{}", c.render());
+}
+
+/// An `error` is nil-able, so its message needs an error that is there. The
+/// backends cannot even agree what a nil receiver does — the VM answers with an
+/// empty string, Wasm traps — so the call is rejected until control flow proves
+/// the error present.
+#[test]
+fn reading_the_message_of_a_possibly_nil_error_is_rejected() {
+    let c = body("  let err: error = nil\n  io.print(err.message())");
+    assert!(c.has("E0301"), "{}", c.render());
+}
+
+#[test]
+fn a_message_read_inside_a_non_nil_test_is_accepted() {
+    let c = with_fallible("  let (v, err) = load()\n  if err != nil {\n    io.print(err.message())\n  }");
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+/// The shape `std/errors.kite` is written in.
+#[test]
+fn a_message_read_after_a_nil_guard_clause_is_accepted() {
+    let c = run("fn describe(err: error) -> str {\n  if err == nil {\n    return \"none\"\n  }\n  return err.message()\n}\nfn main() {\n}\n");
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+/// The proof does not outlive the branch that established it.
+#[test]
+fn a_message_read_after_the_test_closes_is_rejected() {
+    let c = with_fallible("  let (v, err) = load()\n  if err != nil {\n    io.print(1)\n  }\n  io.print(err.message())");
     assert!(c.has("E0301"), "{}", c.render());
 }
 

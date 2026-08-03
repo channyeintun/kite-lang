@@ -1402,9 +1402,9 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
         let a = self.operand(lhs);
         let b = self.operand(rhs);
         let r = match op {
-            // Overflow is a trap, as it is on the VM. Wasm wraps here — a
-            // known divergence the corpus never exercises, and the VM is the
-            // specification, so the native backend follows the VM.
+            // Overflow traps in a debug build and wraps in a release one. Which
+            // it is was decided in the checker, where the build mode is known,
+            // so every backend gets the same answer from the same operation.
             BinOp::AddInt => {
                 let (v, of) = self.b.ins().sadd_overflow(a, b);
                 self.trap_if(of, trap_code::OVERFLOW_ADD, 0, 0);
@@ -1420,6 +1420,9 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 self.trap_if(of, trap_code::OVERFLOW_MUL, 0, 0);
                 v
             }
+            BinOp::AddIntWrap => self.b.ins().iadd(a, b),
+            BinOp::SubIntWrap => self.b.ins().isub(a, b),
+            BinOp::MulIntWrap => self.b.ins().imul(a, b),
             BinOp::DivInt => {
                 self.div_guards(a, b, trap_code::OVERFLOW_DIV);
                 self.b.ins().sdiv(a, b)

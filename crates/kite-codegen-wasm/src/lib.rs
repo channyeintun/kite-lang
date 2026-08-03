@@ -1709,6 +1709,33 @@ fn compile_fn(
         next_local += 2;
     }
 
+    // Three registers for the debug-build overflow checks, allocated only for
+    // a function that has one: the check has to hold both operands and the
+    // wrapped result to decide whether the sign came out impossible.
+    let checked_arith = f.blocks.iter().any(|b| {
+        b.stmts.iter().any(|i| {
+            matches!(
+                i,
+                mir::Inst::Assign {
+                    value: mir::Rvalue::Binary {
+                        op: BinOp::AddInt | BinOp::SubInt | BinOp::MulInt,
+                        ..
+                    },
+                    ..
+                }
+            )
+        })
+    });
+    let arith_scratch = checked_arith.then(|| {
+        for _ in 0..3 {
+            push_local(&mut locals, ValType::I64);
+        }
+        let base = next_local;
+        next_local += 3;
+        (base, base + 1, base + 2)
+    });
+    let _ = next_local;
+
     let mut func = Function::new(locals);
     let n = f.blocks.len() as u32;
 
@@ -1751,6 +1778,7 @@ fn compile_fn(
             index_scratch,
             map_scratch: &map_scratch,
             slice_scratch: &slice_scratch,
+            arith_scratch,
             block_index: i,
             total: n as usize,
         };
@@ -1804,6 +1832,9 @@ struct Emitter<'a> {
     /// Wasm type space rather than by Kite type — two Kite slices with the same
     /// element share an array type and may share the register.
     slice_scratch: &'a std::collections::HashMap<TyId, u32>,
+    /// Three i64 registers for the debug-build overflow checks, when the
+    /// function has arithmetic that needs them.
+    arith_scratch: Option<(u32, u32, u32)>,
     block_index: usize,
     total: usize,
 }
@@ -3097,12 +3128,104 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// A debug-build `+`, `-` or `*` on integers: wrap, then trap if the sign
+    /// of the answer proves the true result did not fit.
+    ///
+    /// Wasm has no overflow-checking arithmetic, so the check is written out.
+    /// The alternative — leaving Wasm to wrap while the VM and the native
+    /// backend trap — is the same program deciding differently by target.
+    fn checked_int(&mut self, func: &mut Function, op: BinOp) -> bool {
+        let Some((a, b, r)) = self.arith_scratch else { return false };
+        // Operands are on the stack, left then right.
+        func.instruction(&Instruction::LocalSet(b));
+        func.instruction(&Instruction::LocalTee(a));
+        func.instruction(&Instruction::LocalGet(b));
+        match op {
+            BinOp::AddInt => {
+                func.instruction(&Instruction::I64Add);
+                func.instruction(&Instruction::LocalSet(r));
+                // Overflow when both operands differ in sign from the result:
+                // `(a ^ r) & (b ^ r) < 0`.
+                func.instruction(&Instruction::LocalGet(a));
+                func.instruction(&Instruction::LocalGet(r));
+                func.instruction(&Instruction::I64Xor);
+                func.instruction(&Instruction::LocalGet(b));
+                func.instruction(&Instruction::LocalGet(r));
+                func.instruction(&Instruction::I64Xor);
+                func.instruction(&Instruction::I64And);
+            }
+            BinOp::SubInt => {
+                func.instruction(&Instruction::I64Sub);
+                func.instruction(&Instruction::LocalSet(r));
+                // `(a ^ b) & (a ^ r) < 0`: the operands differed in sign and
+                // the result took the wrong one.
+                func.instruction(&Instruction::LocalGet(a));
+                func.instruction(&Instruction::LocalGet(b));
+                func.instruction(&Instruction::I64Xor);
+                func.instruction(&Instruction::LocalGet(a));
+                func.instruction(&Instruction::LocalGet(r));
+                func.instruction(&Instruction::I64Xor);
+                func.instruction(&Instruction::I64And);
+            }
+            BinOp::MulInt => {
+                func.instruction(&Instruction::I64Mul);
+                func.instruction(&Instruction::LocalSet(r));
+                // Division is the check, but it needs two guards of its own:
+                // dividing by zero traps, and `MIN / -1` overflows. Zero never
+                // overflows, and the `MIN * -1` pair always does.
+                func.instruction(&Instruction::LocalGet(a));
+                func.instruction(&Instruction::I64Const(0));
+                func.instruction(&Instruction::I64Eq);
+                func.instruction(&Instruction::If(BlockType::Empty));
+                // a == 0: the product is 0 and cannot have overflowed.
+                func.instruction(&Instruction::Else);
+                func.instruction(&Instruction::LocalGet(a));
+                func.instruction(&Instruction::I64Const(-1));
+                func.instruction(&Instruction::I64Eq);
+                func.instruction(&Instruction::LocalGet(b));
+                func.instruction(&Instruction::I64Const(i64::MIN));
+                func.instruction(&Instruction::I64Eq);
+                func.instruction(&Instruction::I32And);
+                func.instruction(&Instruction::If(BlockType::Empty));
+                func.instruction(&Instruction::Unreachable);
+                func.instruction(&Instruction::Else);
+                func.instruction(&Instruction::LocalGet(r));
+                func.instruction(&Instruction::LocalGet(a));
+                func.instruction(&Instruction::I64DivS);
+                func.instruction(&Instruction::LocalGet(b));
+                func.instruction(&Instruction::I64Ne);
+                func.instruction(&Instruction::If(BlockType::Empty));
+                func.instruction(&Instruction::Unreachable);
+                func.instruction(&Instruction::End);
+                func.instruction(&Instruction::End);
+                func.instruction(&Instruction::End);
+                func.instruction(&Instruction::LocalGet(r));
+                return true;
+            }
+            _ => return false,
+        }
+        func.instruction(&Instruction::I64Const(0));
+        func.instruction(&Instruction::I64LtS);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::Unreachable);
+        func.instruction(&Instruction::End);
+        func.instruction(&Instruction::LocalGet(r));
+        true
+    }
+
     fn binop(&mut self, func: &mut Function, op: BinOp) {
         use BinOp::*;
+        // The checked forms are several instructions, not one, so they are
+        // emitted before the single-instruction table is consulted.
+        if matches!(op, AddInt | SubInt | MulInt) && self.checked_int(func, op) {
+            return;
+        }
         let inst = match op {
-            AddInt => Instruction::I64Add,
-            SubInt => Instruction::I64Sub,
-            MulInt => Instruction::I64Mul,
+            // Reached only when the function had no scratch registers to check
+            // with, which cannot happen: the allocation scans for these ops.
+            AddInt | AddIntWrap => Instruction::I64Add,
+            SubInt | SubIntWrap => Instruction::I64Sub,
+            MulInt | MulIntWrap => Instruction::I64Mul,
             DivInt => Instruction::I64DivS,
             RemInt => Instruction::I64RemS,
             AddFloat => Instruction::F64Add,

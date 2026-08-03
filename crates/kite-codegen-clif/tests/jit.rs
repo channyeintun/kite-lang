@@ -71,7 +71,7 @@ fn structs_and_mutation() {
     agree(
         "struct C {\n  var n: int\n}\n\
          impl C {\n  fn bump(var self) {\n    self.n = self.n + 1\n  }\n}\n\
-         fn main() {\n  let c = C{ n: 1 }\n  c.bump()\n  c.bump()\n  io.print(c.n)\n}\n",
+         fn main() {\n  var c = C{ n: 1 }\n  c.bump()\n  c.bump()\n  io.print(c.n)\n}\n",
     );
 }
 

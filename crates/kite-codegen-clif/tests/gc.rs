@@ -96,7 +96,7 @@ fn old_objects_written_after_promotion_are_remembered() {
     // back as a dangling or stale reference after the next collection.
     agree_with_gc(
         "struct Holder {\n  var latest: str\n  var count: int\n}\n\
-         fn main() {\n  let h = Holder{latest: \"start\", count: 0}\n\
+         fn main() {\n  var h = Holder{latest: \"start\", count: 0}\n\
          \x20 for i in 0..800 {\n\
          \x20   h.latest = \"value \\(i)\"\n\
          \x20   h.count = h.count + 1\n\

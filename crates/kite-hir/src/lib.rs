@@ -523,6 +523,14 @@ pub enum BinOp {
     AddInt,
     SubInt,
     MulInt,
+    /// The release-build forms of the three above. Section 3.1 has integer
+    /// overflow trap in debug builds and wrap in release ones, and putting the
+    /// choice in the operation rather than in each backend's configuration is
+    /// what stops the three of them from deciding it separately — which is how
+    /// debug Wasm came to wrap while debug bytecode trapped.
+    AddIntWrap,
+    SubIntWrap,
+    MulIntWrap,
     DivInt,
     RemInt,
     AddFloat,

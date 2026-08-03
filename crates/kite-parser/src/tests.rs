@@ -586,3 +586,29 @@ fn interpolation_is_split_at_parse_time() {
 fn a_hole_may_contain_a_string_with_parens() {
     assert_eq!(expr_sexp(r#""\(f(")("))""#), r#"(str (call f ")("))"#);
 }
+
+/// Section 2.1: identifiers are compared after NFC normalisation, so two
+/// spellings a reader cannot tell apart are one name. `café` here is written
+/// once with U+00E9 and once with `e` followed by the combining acute U+0301.
+#[test]
+fn identifiers_are_normalised_to_nfc() {
+    let p = ok("fn main() {\n  let caf\u{e9} = 1\n  io.print(cafe\u{301})\n}\n");
+    let f = p.fns()[0];
+    let names: Vec<String> = format!("{:?}", f.body)
+        .split('"')
+        .filter(|s| s.contains("caf"))
+        .map(str::to_string)
+        .collect();
+    assert!(!names.is_empty(), "expected the identifier in the tree");
+    for n in &names {
+        assert_eq!(n, "caf\u{e9}", "identifier was not normalised: {:?}", n);
+    }
+}
+
+/// ASCII is already NFC, and is the overwhelming majority of identifiers.
+#[test]
+fn ascii_identifiers_are_left_alone() {
+    assert!(matches!(normalise("total"), std::borrow::Cow::Borrowed(_)));
+    assert!(matches!(normalise("caf\u{e9}"), std::borrow::Cow::Borrowed(_)));
+    assert!(matches!(normalise("cafe\u{301}"), std::borrow::Cow::Owned(_)));
+}

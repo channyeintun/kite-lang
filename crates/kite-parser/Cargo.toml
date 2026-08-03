@@ -12,3 +12,6 @@ kite-span.workspace = true
 kite-diag.workspace = true
 kite-lexer.workspace = true
 kite-ast.workspace = true
+# Section 2.1 has identifiers compared after NFC normalisation, so `café`
+# written with U+00E9 and with `e` plus U+0301 are one name.
+unicode-normalization = "0.1"

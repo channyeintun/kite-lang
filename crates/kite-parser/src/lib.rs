@@ -77,6 +77,23 @@ fn type_path_of(expr: &Expr) -> Option<TypePath> {
     }
 }
 
+/// An identifier's name, normalised to NFC.
+///
+/// Section 2.1 compares identifiers after normalisation, so `café` written with
+/// U+00E9 and `café` written with `e` followed by U+0301 are one name rather
+/// than two that no reader could tell apart. The span still points at the
+/// original spelling, so diagnostics quote what was written.
+///
+/// Nearly every identifier is ASCII, and ASCII is already NFC — that case
+/// borrows rather than allocating.
+fn normalise(text: &str) -> std::borrow::Cow<'_, str> {
+    use unicode_normalization::{is_nfc_quick, IsNormalized, UnicodeNormalization};
+    if text.is_ascii() || is_nfc_quick(text.chars()) == IsNormalized::Yes {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(text.nfc().collect())
+}
+
 pub fn parse(file: FileId, src: &str, tokens: &[Token], diags: &mut DiagBag) -> SourceFile {
     let mut p = Parser {
         file,
@@ -284,7 +301,7 @@ impl<'a> Parser<'a> {
     fn ident(&mut self) -> Option<Ident> {
         if self.at(T::Ident) {
             let t = self.bump();
-            return Some(Ident::new(self.text(t.span), t.span));
+            return Some(Ident::new(normalise(self.text(t.span)), t.span));
         }
         self.error_expected("an identifier");
         None
