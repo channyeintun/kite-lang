@@ -20,6 +20,7 @@
     <a href="reference.html">Reference</a>
     <a href="playground.html">Playground</a>
     <a href="#six-hundred-birds">Demo</a>
+    <a href="#an-application">App</a>
     <a href="docs.html?doc=docs/06-roadmap.md">Roadmap</a>
     <a class="gh" href="https://github.com/channyeintun/kite-lang">GitHub</a>
   </nav>
@@ -63,6 +64,32 @@
     <code>kitec build examples/boids.kite --emit wasm</code> writes, served
     unaltered. The source is
     <a href="https://github.com/channyeintun/kite-lang/blob/main/examples/boids.kite">examples/boids.kite</a>.
+  </p>
+
+  <h2 id="an-application">An application, in Material 3</h2>
+  <p>
+    The same four drawing calls, put to a different use: a list beside a detail
+    pane, a filter that narrows as you type, controls that take focus in order,
+    and a theme that changes under the whole thing. <strong>Tab moves, the
+    arrows select, space marks a message read.</strong> It is driveable by
+    keyboard alone, and there is no widget object anywhere in it — a widget is
+    a function returning a node, and interaction is a function returning a new
+    model.
+  </p>
+  <p>
+    The colours are Material Design 3's baseline scheme, by role rather than by
+    hue. What Material asks for and this cannot give is <em>shape</em> and a
+    type scale: every corner here is square and every word one size, because a
+    Kite program draws through <code>draw.rect</code> and
+    <code>draw.text</code> and nothing else. The messages are not all in Latin
+    script, and the Arabic and Hebrew are reordered by UAX&nbsp;#9 in the
+    <em>layout</em> — switch renderers and nothing moves.
+  </p>
+  <iframe class="demo" src="reader/" title="A two-pane reader written in Kite, themed with Material Design 3"
+          loading="lazy"></iframe>
+  <p class="demo-note">
+    Source:
+    <a href="https://github.com/channyeintun/kite-lang/blob/main/examples/reader.kite">examples/reader.kite</a>.
   </p>
 
   <h2>Why it exists</h2>
