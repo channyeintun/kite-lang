@@ -20,6 +20,7 @@
     <a href="reference.html">Reference</a>
     <a href="playground.html">Playground</a>
     <a href="#six-hundred-birds">Demo</a>
+    <a href="#a-music-library">App</a>
     <a href="docs.html?doc=docs/06-roadmap.md">Roadmap</a>
     <a class="gh" href="https://github.com/channyeintun/kite-lang">GitHub</a>
   </nav>
@@ -63,6 +64,41 @@
     <code>kitec build examples/boids.kite --emit wasm</code> writes, served
     unaltered. The source is
     <a href="https://github.com/channyeintun/kite-lang/blob/main/examples/boids.kite">examples/boids.kite</a>.
+  </p>
+
+  <h2 id="a-music-library">An application, in Material Design 3</h2>
+  <p>
+    The same drawing calls, put to a different use: a navigation rail, a top app
+    bar, filter chips, a two-line list that scrolls, and a now-playing bar with
+    transport controls. <strong>Click a track, or press Tab and space.</strong>
+    Every component comes from a <code>material</code> package — an ordinary
+    Kite package with a <code>kite.toml</code>, implementing Material 3's
+    colour roles, type scale, shape scale and state layers. The layout engine
+    under it, <code>std/ui</code>, has no button in it and no theme: which
+    design system a program wears is the program's choice, and an iOS or Fluent
+    package would be a different answer against the same core.
+  </p>
+  <p>
+    <strong>The music is generated, not loaded.</strong> There is no audio file
+    here. Each track's melody is composed by the Kite program from the track's
+    own index, and what crosses to the host is a note — a frequency, a start, a
+    duration, a gain — because numbers are what the boundary carries. The
+    oscillator is the browser's; the tune is the program's.
+  </p>
+  <p>
+    Switch between the DOM and canvas renderers and nothing moves. That is not a
+    coincidence and not a tolerance: both are handed the same list of rectangles
+    and runs of text, and neither decides anything about where they go. The
+    track names are not all in Latin script, and the Arabic and Hebrew are
+    reordered by UAX&nbsp;#9 inside the <em>layout</em>.
+  </p>
+  <iframe class="demo" src="player/" title="A music library written in Kite, in Material Design 3"
+          loading="lazy"></iframe>
+  <p class="demo-note">
+    Source:
+    <a href="https://github.com/channyeintun/kite-lang/blob/main/examples/player.kite">examples/player.kite</a>,
+    and the design system it uses is
+    <a href="https://github.com/channyeintun/kite-lang/tree/main/packages/material">packages/material</a>.
   </p>
 
   <h2>Why it exists</h2>

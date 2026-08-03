@@ -11,52 +11,41 @@
 
 use std/ui
 
-fn palette() -> [ui.Paint] {
-    return [
-        ui.fill("app", 0x14161a),
-        ui.fill("header", 0x1f232b),
-        ui.label("title", "Kite", 0xf5f7fa),
-        ui.label("subtitle", "one layout, two renderers", 0x8b93a1),
-        ui.fill("sidebar", 0x1a1e25),
-        ui.label("nav-home", "Home", 0xc9d1dc),
-        ui.label("nav-files", "Files", 0xc9d1dc),
-        ui.label("nav-settings", "Settings", 0xc9d1dc),
-        ui.label("heading", "Welcome back", 0xf5f7fa),
-        ui.label("intro", "Everything here was placed by std/ui.kite.", 0x8b93a1),
-        ui.filled_label(
-            "note",
-            "A text node wraps when it has been given a width, and not otherwise — which width to wrap to is only knowable once a parent has decided, and measurement runs first.",
-            0x1a1e25,
-            0x8b93a1,
-        ),
-        ui.filled_label("cancel", "Cancel", 0x2a2f3a, 0xc9d1dc),
-        ui.filled_label("confirm", "Confirm", 0x3b82f6, 0xffffff),
-    ]
-}
-
 fn app() -> ui.Node {
-    let header = ui.box_of(
-        "header",
-        ui.spaced(ui.padded(ui.Style{..ui.row(), align: ui.Align.Center, justify: ui.Justify.SpaceBetween }, 12.0), 8.0),
-        [ui.text_of("title", ui.style(), "Kite"), ui.text_of("subtitle", ui.style(), "one layout, two renderers")],
-    )
+    let header = ui.decorated(ui.box_of(
+            "header",
+            ui.spaced(ui.padded(ui.Style{..ui.row(), align: ui.Align.Center, justify: ui.Justify.SpaceBetween }, 12.0), 8.0),
+            [
+                ui.decorated(ui.text_of("title", ui.style(), "Kite"), ui.ink(0xf5f7fa)),
+                ui.decorated(
+                    ui.text_of("subtitle", ui.style(), "one layout, two renderers"),
+                    ui.ink(0x8b93a1),
+                ),
+            ],
+        ), ui.filled(0x1f232b))
 
-    let sidebar = ui.box_of(
-        "sidebar",
-        ui.spaced(ui.padded(ui.Style{..ui.column(), width: 160.0 }, 12.0), 8.0),
-        [
-            ui.text_of("nav-home", ui.style(), "Home"),
-            ui.text_of("nav-files", ui.style(), "Files"),
-            ui.text_of("nav-settings", ui.style(), "Settings"),
-        ],
-    )
+    let sidebar = ui.decorated(ui.box_of(
+            "sidebar",
+            ui.spaced(ui.padded(ui.Style{..ui.column(), width: 160.0 }, 12.0), 8.0),
+            [
+                ui.decorated(ui.text_of("nav-home", ui.style(), "Home"), ui.ink(0xc9d1dc)),
+                ui.decorated(ui.text_of("nav-files", ui.style(), "Files"), ui.ink(0xc9d1dc)),
+                ui.decorated(ui.text_of("nav-settings", ui.style(), "Settings"), ui.ink(0xc9d1dc)),
+            ],
+        ), ui.filled(0x1a1e25))
 
     let actions = ui.box_of(
         "actions",
         ui.spaced(ui.Style{..ui.row(), justify: ui.Justify.End }, 8.0),
         [
-            ui.text_of("cancel", ui.padded(ui.style(), 6.0), "Cancel"),
-            ui.text_of("confirm", ui.padded(ui.style(), 6.0), "Confirm"),
+            ui.decorated(
+                ui.text_of("cancel", ui.padded(ui.style(), 6.0), "Cancel"),
+                ui.inked(ui.filled(0x2a2f3a), 0xc9d1dc),
+            ),
+            ui.decorated(
+                ui.text_of("confirm", ui.padded(ui.style(), 6.0), "Confirm"),
+                ui.inked(ui.filled(0x3b82f6), 0xffffff),
+            ),
         ],
     )
 
@@ -64,22 +53,31 @@ fn app() -> ui.Node {
         "content",
         ui.spaced(ui.grown(ui.padded(ui.Style{..ui.column(), align: ui.Align.Stretch }, 16.0), 1.0), 12.0),
         [
-            ui.text_of("heading", ui.style(), "Welcome back"),
-            ui.text_of("intro", ui.style(), "Everything here was placed by std/ui.kite."),
-            ui.text_of(
-                "note",
-                ui.grown(ui.padded(ui.Style{..ui.style(), width: 420.0 }, 10.0), 1.0),
-                "A text node wraps when it has been given a width, and not otherwise — which width to wrap to is only knowable once a parent has decided, and measurement runs first.",
+            ui.decorated(ui.text_of("heading", ui.style(), "Welcome back"), ui.ink(0xf5f7fa)),
+            ui.decorated(
+                ui.text_of("intro", ui.style(), "Everything here was placed by std/ui.kite."),
+                ui.ink(0x8b93a1),
+            ),
+            ui.decorated(
+                ui.text_of(
+                    "note",
+                    ui.grown(ui.padded(ui.Style{..ui.style(), width: 420.0 }, 10.0), 1.0),
+                    "A text node wraps when it has been given a width, and not otherwise — which width to wrap to is only knowable once a parent has decided, and measurement runs first.",
+                ),
+                ui.inked(ui.filled(0x1a1e25), 0x8b93a1),
             ),
             actions,
         ],
     )
 
     let body = ui.box_of("main", ui.Style{..ui.row(), align: ui.Align.Stretch, grow: 1.0 }, [sidebar, content])
-    return ui.box_of("app", ui.Style{..ui.column(), align: ui.Align.Stretch }, [header, body])
+    return ui.decorated(
+        ui.box_of("app", ui.Style{..ui.column(), align: ui.Align.Stretch }, [header, body]),
+        ui.filled(0x14161a),
+    )
 }
 
 fn main() {
     let frames = ui.layout(app(), ui.Size{ width: 640.0, height: 360.0 })
-    ui.paint(frames, palette())
+    ui.paint(frames, 0x14161a)
 }

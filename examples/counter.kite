@@ -23,8 +23,13 @@ pub fn init() -> Model {
     return Model{ count: 0, last: "nothing yet" }
 }
 
-fn tile(name: str, caption: str, width: float) -> ui.Node {
-    return ui.text_of(name, ui.padded(ui.sized(ui.style(), width, 32.0), 8.0), caption)
+/// A tile carries its own look now. Decoration rides on the node rather than
+/// arriving later in a list matched by name, so the caption and the colour it
+/// is drawn in are written in one place — and a tile the tree does not contain
+/// cannot be painted by mistake.
+fn tile(name: str, caption: str, width: float, background: int, ink: int) -> ui.Node {
+    let node = ui.text_of(name, ui.padded(ui.sized(ui.style(), width, 32.0), 8.0), caption)
+    return ui.decorated(node, ui.centered(ui.inked(ui.rounded(background, 6.0), ink)))
 }
 
 fn ui_of(model: Model) -> ui.Node {
@@ -32,37 +37,43 @@ fn ui_of(model: Model) -> ui.Node {
         "controls",
         ui.spaced(ui.Style{..ui.row(), align: ui.Align.Center }, 8.0),
         [
-            tile("minus", "  -  ", 48.0),
-            tile("count", "\(model.count)", 96.0),
-            tile("plus", "  +  ", 48.0),
-            tile("reset", " reset ", 72.0),
+            tile("minus", "  -  ", 48.0, 0x2a2f3a, 0xc9d1dc),
+            tile("count", "\(model.count)", 96.0, accent_of(model), 0xffffff),
+            tile("plus", "  +  ", 48.0, 0x2a2f3a, 0xc9d1dc),
+            tile("reset", " reset ", 72.0, 0x3a2a2a, 0xdcc9c9),
         ],
     )
 
-    return ui.box_of(
-        "app",
-        ui.spaced(ui.padded(ui.Style{..ui.column(), align: ui.Align.Start }, 16.0), 12.0),
-        [
-            ui.text_of("title", ui.style(), "Counter"),
-            controls,
-            ui.text_of("status", ui.style(), "last action: \(model.last)"),
-            ui.text_of("hint", ui.style(), "click, or press + - r; the model lives inside the module"),
-        ],
+    return ui.decorated(
+        ui.box_of(
+            "app",
+            ui.spaced(ui.padded(ui.Style{..ui.column(), align: ui.Align.Start }, 16.0), 12.0),
+            [
+                ui.decorated(ui.text_of("title", ui.style(), "Counter"), ui.ink(0xf5f7fa)),
+                controls,
+                ui.decorated(
+                    ui.text_of("status", ui.style(), "last action: \(model.last)"),
+                    ui.ink(0x8b93a1),
+                ),
+                ui.decorated(
+                    ui.text_of(
+                        "hint",
+                        ui.style(),
+                        "click, or press + - r; the model lives inside the module",
+                    ),
+                    ui.ink(0x5c6472),
+                ),
+            ],
+        ),
+        ui.filled(0x14161a),
     )
 }
 
-fn palette(model: Model) -> [ui.Paint] {
-    let accent = if model.count > 0 { 0x3b82f6 } else { 0x2a2f3a }
-    return [
-        ui.fill("app", 0x14161a),
-        ui.label("title", "Counter", 0xf5f7fa),
-        ui.filled_label("minus", "  -  ", 0x2a2f3a, 0xc9d1dc),
-        ui.filled_label("count", "\(model.count)", accent, 0xffffff),
-        ui.filled_label("plus", "  +  ", 0x2a2f3a, 0xc9d1dc),
-        ui.filled_label("reset", " reset ", 0x3a2a2a, 0xdcc9c9),
-        ui.label("status", "last action: \(model.last)", 0x8b93a1),
-        ui.label("hint", "click, or press + - r; the model lives inside the module", 0x5c6472),
-    ]
+fn accent_of(model: Model) -> int {
+    if model.count > 0 {
+        return 0x3b82f6
+    }
+    return 0x2a2f3a
 }
 
 fn frames_of(model: Model) -> [ui.Frame] {
@@ -70,7 +81,7 @@ fn frames_of(model: Model) -> [ui.Frame] {
 }
 
 pub fn view(model: Model) {
-    ui.paint(frames_of(model), palette(model))
+    ui.paint(frames_of(model), 0x14161a)
 }
 
 /// The only way the model changes.

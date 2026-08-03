@@ -1,0 +1,9 @@
+# Material Design 3, as a Kite package.
+#
+# A design system is not part of a language's standard library. `std/ui` is a
+# layout engine and a painting model with no opinion about how a button looks;
+# this is one answer to that question, and an iOS or Fluent package would be a
+# different answer against the same core.
+[package]
+name = "material"
+version = "0.1.0"

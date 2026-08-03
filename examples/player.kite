@@ -1,0 +1,849 @@
+// A music library: Material Design 3, as an application rather than a swatch.
+//
+//     kitec build examples/player.kite --emit wasm --out dist
+//     open dist/index.html
+//
+// Where `boids.kite` exists to be fast, this exists to be an *interface* — a
+// navigation rail, a top app bar, filter chips, a two-line list, a now-playing
+// bar with transport controls and a progress track, and a theme that changes
+// under the whole thing.
+//
+// Three things are worth watching for.
+//
+// **Nothing here knows what Material is.** Every component comes from the
+// `material` package, which is an ordinary Kite package with a `kite.toml`.
+// `std/ui` — the layout engine underneath — has no button in it, no theme, and
+// no opinion about shape: a design system is the application's to choose, and
+// an iOS or Fluent package would be a different answer against the same core.
+//
+// **It is driveable by keyboard alone.** Tab and Shift+Tab move focus, the
+// arrows move through the queue, space plays and pauses, and typing goes to
+// whichever field has focus. None of that is a special case: focus order is
+// *derived from the tree* — the controls in the order they were laid out — so
+// a control that exists can be tabbed to, and one that was filtered away
+// cannot.
+//
+// **The track names are not all in Latin script.** Arabic and Hebrew run right
+// to left, and are reordered by UAX #9 and joined into contextual forms before
+// anything is painted. This file never mentions `std/text`: the reordering
+// happens inside the *layout*, which is why the DOM and canvas renderers agree
+// about it — switch between them and nothing moves.
+
+use std/math
+use std/ui
+use material
+
+// ---- the sound ------------------------------------------------------------------
+//
+// The tracks are not files. There is no audio to ship and no licence to honour:
+// each one is *composed here*, from its own index, and handed to the host a
+// note at a time.
+//
+// The boundary carries numbers and nothing else — a frequency, when to start,
+// how long to hold, how loud — because `str`, `int` and `float` are what cross
+// it, and a buffer of samples is not among them. That turns out to be the right
+// division anyway: WebAudio schedules on the audio thread, sample accurate, so
+// a frame that arrives late cannot make the music stutter. The melody is the
+// program's; the oscillator is the host's.
+
+@host("audio")
+extern fn note(frequency: float, delay: float, seconds: float, gain: float)
+
+@host("audio")
+extern fn silence()
+
+@host("audio")
+extern fn awake() -> bool
+
+/// How far ahead notes are scheduled, in seconds, and how much of that is left
+/// before the next batch goes out. Scheduling ahead is what makes the playback
+/// independent of the frame rate.
+fn HORIZON() -> float {
+    return 4.0
+}
+
+/// A pentatonic scale, in semitones from the root. Pentatonic because every
+/// pair of its notes sounds consonant, so a melody chosen at random from it
+/// cannot land on a wrong note — which is what makes a generated tune
+/// listenable rather than merely deterministic.
+fn scale() -> [int] {
+    return [0, 2, 4, 7, 9, 12, 14, 16, 19, 21]
+}
+
+/// Equal temperament: each semitone is the twelfth root of two, and this is
+/// that, iterated, from A2 at 110Hz.
+fn pitch(semitone: int) -> float {
+    var hz = 110.0
+    var n = semitone
+    for _up in 0..n {
+        hz = hz * 1.0594630943592953
+    }
+    return hz
+}
+
+/// A cheap integer hash, so a track's melody is its own and is the same every
+/// time it is played. A multiply, a shift-xor, a multiply, a shift-xor: the xor
+/// is the part that matters, because an affine map alone keeps consecutive
+/// seeds a constant apart and would walk the scale in a straight line.
+fn scatter(seed: int) -> int {
+    var x = (seed * 2654435761) % 4294967296
+    x = x ^ (x >> 15)
+    x = (x * 668265261) % 4294967296
+    x = x ^ (x >> 13)
+    return x % 1000000
+}
+
+/// The note a track plays at a given step: a scale degree from the hash, an
+/// octave for the bass on every fourth step.
+fn note_at(track: int, step: int) -> int {
+    let degrees = scale()
+    let roll = scatter(track * 7919 + step * 31)
+    let degree = degrees[roll % degrees.len()]
+    if step % 4 == 0 {
+        return degree + 12 * (track % 2)
+    }
+    return degree + 12
+}
+
+/// Four notes a second, which is a tempo of 120 with two notes to the beat.
+fn STEP() -> float {
+    return 0.25
+}
+
+/// Send every note that starts inside the window `from`..`to`, measured in
+/// seconds from the beginning of the track.
+fn schedule(model: Model, from: float, to: float) {
+    let first = math.trunc_to(from / STEP())
+    let last = math.trunc_to(to / STEP())
+    for step in first..last + 1 {
+        let at = (step as float) * STEP()
+        if at >= from {
+            if at < to {
+                let semitone = note_at(model.playing, step)
+                let gain = if step % 4 == 0 { 0.22 } else { 0.13 }
+                note(pitch(semitone), at - from, STEP() * 1.8, gain)
+            }
+        }
+    }
+}
+
+// ---- the model ---------------------------------------------------------------
+
+struct Track {
+    title: str
+    artist: str
+    genre: str
+    /// Seconds. Printed as m:ss, and the only arithmetic in the file.
+    length: int
+}
+
+pub struct Model {
+    tracks: [Track]
+    /// What the host says the window is. A layout is a function of its size, so
+    /// this is model state like everything else — there is nowhere else to put
+    /// it, Kite having no mutable globals.
+    width: float
+    height: float
+    /// Which track the now-playing bar is showing, as an index into `tracks`
+    /// rather than a reference: the filtered list is rebuilt on every keystroke
+    /// and a reference would be to the old one.
+    playing: int
+    /// How far into it, in seconds. Advanced by the frame event, which is the
+    /// only clock a program on this runtime has that measures real time.
+    elapsed: float
+    running: bool
+    genre: str
+    search: str
+    focused: str
+    dark: bool
+    /// How far into the track notes have been sent, in seconds. Everything up
+    /// to here is already with the host and will play whether or not another
+    /// frame ever arrives.
+    sent: float
+    /// How far the library is scrolled, in pixels. Kite's layout grows a box
+    /// into spare space and never shrinks one below its content, so a list
+    /// longer than its window overflows rather than compressing — which is the
+    /// simpler rule, and the reason a list this long needs somewhere to put the
+    /// part that does not fit.
+    offset: float
+}
+
+fn WIDTH() -> float {
+    return 1100.0
+}
+
+fn HEIGHT() -> float {
+    return 700.0
+}
+
+fn library() -> [Track] {
+    return [
+        Track { title: "Analytical Engine", artist: "Ada Lovelace", genre: "Ambient", length: 254 },
+        Track { title: "مرحبا بالعالم", artist: "أحمد", genre: "Ambient", length: 187 },
+        Track { title: "שלום עולם", artist: "שרה", genre: "Jazz", length: 203 },
+        Track { title: "日本語のテスト", artist: "山田", genre: "Jazz", length: 341 },
+        Track { title: "नमस्ते दुनिया", artist: "आर्या", genre: "Classical", length: 296 },
+        Track { title: "Difference Machine", artist: "Charles Babbage", genre: "Classical", length: 412 },
+        Track { title: "Silent Partition", artist: "Grace Hopper", genre: "Ambient", length: 168 },
+        Track { title: "Tail Call", artist: "Guy Steele", genre: "Jazz", length: 225 },
+    ]
+}
+
+pub fn init() -> Model {
+    return Model{
+        tracks: library(),
+        width: WIDTH(),
+        height: HEIGHT(),
+        playing: 0,
+        elapsed: 0.0,
+        running: false,
+        genre: "All",
+        search: "",
+        focused: "search",
+        dark: true,
+        sent: 0.0,
+        offset: 0.0,
+    }
+}
+
+fn scheme(model: Model) -> material.Scheme {
+    return material.scheme_of(model.dark)
+}
+
+fn viewport(model: Model) -> ui.Size {
+    return ui.Size{ width: model.width, height: model.height }
+}
+
+// ---- what the filters leave -----------------------------------------------------
+
+fn genres() -> [str] {
+    return ["All", "Ambient", "Jazz", "Classical"]
+}
+
+fn shown(model: Model) -> [int] {
+    var out: [int] = []
+    for i in 0..model.tracks.len() {
+        let track = model.tracks[i]
+        var keep = true
+        if model.genre != "All" {
+            if track.genre != model.genre {
+                keep = false
+            }
+        }
+        if model.search.len() > 0 {
+            if !contains(lower(track.title), lower(model.search)) {
+                if !contains(lower(track.artist), lower(model.search)) {
+                    keep = false
+                }
+            }
+        }
+        if keep {
+            out.push(i)
+        }
+    }
+    return out
+}
+
+fn lower(s: str) -> str {
+    var out = ""
+    for i in 0..s.len() {
+        let c = s.code_at(i)
+        if c >= 65 && c <= 90 {
+            out = out + char_of(c + 32)
+        } else {
+            out = out + s.slice(i, i + 1)
+        }
+    }
+    return out
+}
+
+fn char_of(code: int) -> str {
+    let letters = "abcdefghijklmnopqrstuvwxyz"
+    let at = code - 97
+    if at < 0 || at >= 26 {
+        return ""
+    }
+    return letters.slice(at, at + 1)
+}
+
+fn contains(haystack: str, needle: str) -> bool {
+    return haystack.index_of(needle) >= 0
+}
+
+/// `m:ss`, which needs a leading zero on the seconds and nothing else.
+fn clock(total: int) -> str {
+    let minutes = total / 60
+    let seconds = total % 60
+    if seconds < 10 {
+        return "\(minutes):0\(seconds)"
+    }
+    return "\(minutes):\(seconds)"
+}
+
+// ---- the tree --------------------------------------------------------------------
+
+fn view_node(model: Model) -> ui.Node {
+    let s = scheme(model)
+    return ui.decorated(
+        ui.box_of(
+            "app",
+            ui.Style {..ui.row(), align: ui.Align.Stretch },
+            [rail(model, s), main_column(model, s)],
+        ),
+        ui.filled(s.surface),
+    )
+}
+
+/// The navigation rail: 80dp of destinations down the left, which is Material's
+/// layout for a window this wide.
+fn rail(model: Model, s: material.Scheme) -> ui.Node {
+    let items = [
+        material.rail_item(s, "nav-library", "♫", "Library", true, focus(model, "nav-library")),
+        material.rail_item(s, "nav-queue", "≡", "Queue", false, focus(model, "nav-queue")),
+        material.rail_item(s, "nav-theme", theme_glyph(model), "Theme", false, focus(model, "nav-theme")),
+    ]
+    let style = ui.spaced(
+        ui.padded(
+            ui.sized(ui.Style{..ui.column(), align: ui.Align.Center }, 80.0, 0.0),
+            material.space(3),
+        ),
+        material.space(3),
+    )
+    return ui.decorated(
+        ui.box_of("rail", style, items),
+        ui.filled(material.surface_at(s, material.LEVEL_1())),
+    )
+}
+
+fn theme_glyph(model: Model) -> str {
+    if model.dark {
+        return "☀"
+    }
+    return "☾"
+}
+
+fn focus(model: Model, id: str) -> material.State {
+    return material.when_focused(model.focused == id)
+}
+
+fn main_column(model: Model, s: material.Scheme) -> ui.Node {
+    let style = ui.Style{..ui.column(), align: ui.Align.Stretch, grow: 1.0 }
+    return ui.box_of(
+        "main",
+        style,
+        [
+            material.top_app_bar(
+                "bar",
+                s,
+                "Library",
+                [
+                    material.search_field(
+                        s,
+                        "search",
+                        model.search,
+                        "Search tracks",
+                        280.0,
+                        focus(model, "search"),
+                    ),
+                    material.icon_button(s, "shuffle", "⇄", focus(model, "shuffle")),
+                ],
+            ),
+            chips(model, s),
+            list_viewport(model, s),
+            now_playing(model, s),
+        ],
+    )
+}
+
+/// A row of filter chips, one per genre. Exactly Material's use for them: a
+/// set of choices that narrows what is below.
+fn chips(model: Model, s: material.Scheme) -> ui.Node {
+    var out: [ui.Node] = []
+    for name in genres() {
+        out.push(
+            material.filter_chip(
+                s,
+                "genre-\(name)",
+                name,
+                model.genre == name,
+                focus(model, "genre-\(name)"),
+            ),
+        )
+    }
+    let style = ui.spaced(
+        ui.padded(ui.Style{..ui.row(), align: ui.Align.Center }, material.space(4)),
+        material.space(2),
+    )
+    return ui.box_of("chips", style, out)
+}
+
+/// Where the list goes: an empty card that the rows are painted *into*.
+///
+/// Two trees rather than one. The chrome is laid out against the window, and
+/// the rows are laid out separately against the width this box turns out to
+/// have — which is the only way to scroll one part of a screen while the rest
+/// stays put, since a layout has no notion of a thing being partly off its own
+/// parent.
+fn list_viewport(model: Model, s: material.Scheme) -> ui.Node {
+    let card = ui.decorated(
+        ui.box_of("list", ui.Style{..ui.column(), align: ui.Align.Stretch, grow: 1.0 }, []),
+        ui.rounded(material.surface_at(s, material.LEVEL_1()), material.SHAPE_LARGE()),
+    )
+    let holder = ui.padded(
+        ui.Style {..ui.column(), align: ui.Align.Stretch, grow: 1.0 },
+        material.space(4),
+    )
+    return ui.box_of("list-holder", holder, [card])
+}
+
+/// The rows themselves, laid out on their own against a given width.
+fn list(model: Model, s: material.Scheme) -> ui.Node {
+    let found = shown(model)
+    var rows: [ui.Node] = []
+    if found.len() == 0 {
+        rows.push(
+            ui.decorated(
+                ui.text_of(
+                    "empty",
+                    ui.padded(ui.in_font(ui.style(), 16.0, material.REGULAR()), material.space(4)),
+                    "Nothing matches",
+                ),
+                ui.ink(s.on_surface_variant),
+            ),
+        )
+    }
+    for i in found {
+        let track = model.tracks[i]
+        let is_playing = i == model.playing
+        var glyph = "▷"
+        if is_playing {
+            if model.running {
+                glyph = "❚❚"
+            }
+        }
+        let leading = [
+            ui.decorated(
+                ui.text_of(
+                    "track-\(i)-glyph",
+                    ui.sized(ui.in_font(ui.style(), 14.0, material.REGULAR()), 32.0, 32.0),
+                    glyph,
+                ),
+                ui.centered(ui.ink(mark_ink(s, is_playing))),
+            ),
+        ]
+        rows.push(
+            material.list_item_two(
+                s,
+                "track-\(i)",
+                track.title,
+                "\(track.artist) · \(track.genre) · \(clock(track.length))",
+                leading,
+                material.when_selected(is_playing, model.focused == "track-\(i)"),
+            ),
+        )
+    }
+    let inner = ui.spaced(
+        ui.padded(ui.Style{..ui.column(), align: ui.Align.Stretch, grow: 1.0 }, material.space(2)),
+        material.space(1),
+    )
+    let card = ui.decorated(
+        ui.box_of("list", inner, rows),
+        ui.rounded(material.surface_at(s, material.LEVEL_1()), material.SHAPE_LARGE()),
+    )
+    let holder = ui.padded(
+        ui.Style {..ui.column(), align: ui.Align.Stretch, grow: 1.0 },
+        material.space(4),
+    )
+    return ui.box_of("list-holder", holder, [card])
+}
+
+fn mark_ink(s: material.Scheme, is_playing: bool) -> int {
+    if is_playing {
+        return s.on_secondary_container
+    }
+    return s.on_surface_variant
+}
+
+/// The now-playing bar: what Material calls a bottom app bar, carrying the
+/// transport and a progress track.
+fn now_playing(model: Model, s: material.Scheme) -> ui.Node {
+    let track = model.tracks[model.playing]
+    let width = model.width - 80.0 - material.space(8)
+    let fraction = model.elapsed / (track.length as float)
+
+    let titles = ui.box_of(
+        "np-text",
+        ui.spaced(ui.grown(ui.Style{..ui.column(), align: ui.Align.Stretch }, 1.0), 2.0),
+        [
+            ui.decorated(
+                ui.text_of(
+                    "np-title",
+                    ui.in_font(ui.style(), 16.0, material.MEDIUM()),
+                    track.title,
+                ),
+                ui.ink(s.on_surface),
+            ),
+            ui.decorated(
+                ui.text_of(
+                    "np-artist",
+                    ui.in_font(ui.style(), 14.0, material.REGULAR()),
+                    "\(track.artist) · \(clock(math.trunc_to(model.elapsed))) of \(clock(track.length))",
+                ),
+                ui.ink(s.on_surface_variant),
+            ),
+        ],
+    )
+
+    let transport = ui.box_of(
+        "np-transport",
+        ui.spaced(ui.Style{..ui.row(), align: ui.Align.Center }, material.space(1)),
+        [
+            material.icon_button(s, "prev", "◁◁", focus(model, "prev")),
+            material.fab(s, "play", play_glyph(model), focus(model, "play")),
+            material.icon_button(s, "next", "▷▷", focus(model, "next")),
+        ],
+    )
+
+    let row = ui.box_of(
+        "np-row",
+        ui.spaced(ui.Style{..ui.row(), align: ui.Align.Center }, material.space(4)),
+        [titles, transport],
+    )
+
+    let inner = ui.spaced(
+        ui.padded(ui.Style{..ui.column(), align: ui.Align.Stretch }, material.space(4)),
+        material.space(3),
+    )
+    let bar = ui.decorated(
+        ui.box_of(
+            "np",
+            inner,
+            [row, material.linear_progress("np-progress", s, fraction, width - material.space(8))],
+        ),
+        ui.rounded(material.surface_at(s, material.LEVEL_2()), material.SHAPE_LARGE()),
+    )
+    let holder = ui.padded(ui.Style{..ui.column(), align: ui.Align.Stretch }, material.space(4))
+    return ui.box_of("np-holder", holder, [bar])
+}
+
+fn play_glyph(model: Model) -> str {
+    if model.running {
+        return "❚❚"
+    }
+    return "▶"
+}
+
+fn frames_of(model: Model) -> [ui.Frame] {
+    return ui.layout(view_node(model), viewport(model))
+}
+
+/// The card the rows are painted into, as a rectangle in window coordinates.
+fn list_rect(frames: [ui.Frame]) -> ui.Rect {
+    for frame in frames {
+        if frame.name == "list" {
+            return frame.rect
+        }
+    }
+    return ui.Rect{ x: 0.0, y: 0.0, width: 0.0, height: 0.0 }
+}
+
+/// The rows, laid out against the card they will be drawn into.
+fn row_frames(model: Model, box: ui.Rect) -> [ui.Frame] {
+    let s = scheme(model)
+    return ui.layout(list(model, s), ui.Size{ width: box.width, height: box.height })
+}
+
+fn row_viewport(box: ui.Rect) -> ui.Size {
+    return ui.Size{ width: box.width, height: box.height }
+}
+
+pub fn view(model: Model) {
+    let s = scheme(model)
+    let frames = frames_of(model)
+    ui.paint(frames, s.surface)
+
+    let box = list_rect(frames)
+    let rows = row_frames(model, box)
+    let offset = ui.clamp_scroll(model.offset, rows, row_viewport(box))
+    // The card behind the rows is already painted, so the rows are told what
+    // they are sitting on: a transparent thing among them — an unticked
+    // checkbox, an outlined chip — needs the colour of *that*, not the window.
+    ui.paint_scrolled(rows, material.surface_at(s, material.LEVEL_1()), box, offset)
+}
+
+// ---- events -----------------------------------------------------------------------
+
+fn EVENT_CLICK() -> int {
+    return 0
+}
+
+fn EVENT_KEY() -> int {
+    return 1
+}
+
+fn EVENT_RESIZE() -> int {
+    return 6
+}
+
+fn EVENT_FRAME() -> int {
+    return 7
+}
+
+fn EVENT_WHEEL() -> int {
+    return 2
+}
+
+pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
+    if event == EVENT_CLICK() {
+        return clicked(model, x, y)
+    }
+    if event == EVENT_KEY() {
+        return pressed(model, key)
+    }
+    if event == EVENT_RESIZE() {
+        let w = if x > 900.0 { x } else { 900.0 }
+        let h = if y > 560.0 { y } else { 560.0 }
+        return Model{..model, width: w, height: h }
+    }
+    if event == EVENT_FRAME() {
+        return ticked(model, x)
+    }
+    if event == EVENT_WHEEL() {
+        return scrolled(model, y)
+    }
+    return model
+}
+
+/// The frame event carries how long the last frame took, in milliseconds.
+///
+/// Returning the *same* model is how a program says there is nothing moving:
+/// the host stops asking for frames until something else happens. So a paused
+/// player costs nothing, which a loop that ran regardless would not.
+fn ticked(model: Model, elapsed: float) -> Model {
+    if !model.running {
+        return model
+    }
+    let track = model.tracks[model.playing]
+    let next = model.elapsed + elapsed / 1000.0
+    if next >= (track.length as float) {
+        return started(advanced(Model{..model, elapsed: 0.0 }, 1))
+    }
+    // Top the schedule up when it runs low, rather than every frame: notes
+    // already sent are the host's, and sending them twice would play them
+    // twice.
+    if model.sent - next < HORIZON() / 2.0 {
+        let to = next + HORIZON()
+        schedule(model, model.sent, to)
+        return Model{..model, elapsed: next, sent: to }
+    }
+    return Model{..model, elapsed: next }
+}
+
+/// Begin, or begin again: silence whatever is still ringing and fill the
+/// schedule from where the track now is.
+fn started(model: Model) -> Model {
+    silence()
+    if !model.running {
+        return Model{..model, sent: model.elapsed }
+    }
+    let to = model.elapsed + HORIZON()
+    schedule(model, model.elapsed, to)
+    return Model{..model, sent: to }
+}
+
+fn scrolled(model: Model, by: float) -> Model {
+    let frames = frames_of(model)
+    let box = list_rect(frames)
+    let rows = row_frames(model, box)
+    let next = ui.clamp_scroll(model.offset + by, rows, row_viewport(box))
+    return Model{..model, offset: next }
+}
+
+fn clicked(model: Model, x: float, y: float) -> Model {
+    let frames = frames_of(model)
+    let box = list_rect(frames)
+
+    // The rows are drawn scrolled, so a click inside the card is tested
+    // against the scrolled tree rather than the chrome one. Outside it, the
+    // chrome answers.
+    if ui.rect_contains(box, x, y) {
+        let rows = row_frames(model, box)
+        let offset = ui.clamp_scroll(model.offset, rows, row_viewport(box))
+        let found = ui.hit_scrolled(rows, box, offset, x, y)
+        if found == nil {
+            return model
+        }
+        let id = found.control
+        if id == nil {
+            return model
+        }
+        return acted(Model{..model, focused: id }, id)
+    }
+
+    let hit = ui.control_at(frames, x, y)
+    if hit == nil {
+        return model
+    }
+    let focused = Model{..model, focused: hit }
+    return acted(focused, hit)
+}
+
+/// What a control does, by its id.
+///
+/// The ids are this file's own — it minted `track-3` when it built the row —
+/// so reading one back is a comparison against its own vocabulary. Nothing in
+/// `std/ui` or in the `material` package parses them, which is the difference
+/// from the naming convention this replaced: a control used to be found by
+/// splitting a node's name on a colon, and a plain text node that happened to
+/// contain one answered as a control.
+fn acted(model: Model, id: str) -> Model {
+    if id == "play" {
+        return started(Model{..model, running: !model.running })
+    }
+    if id == "next" || id == "shuffle" {
+        return started(advanced(model, 1))
+    }
+    if id == "prev" {
+        return started(advanced(model, -1))
+    }
+    if id == "nav-theme" {
+        return Model{..model, dark: !model.dark }
+    }
+    for name in genres() {
+        if id == "genre-\(name)" {
+            return Model{..model, genre: name }
+        }
+    }
+    let track = track_id(model, id)
+    if track != nil {
+        // Clicking the track already playing is the transport, not a new
+        // selection — which is what every player does and what a listener
+        // expects when they click the row a second time.
+        if track == model.playing {
+            return started(Model{..model, running: !model.running })
+        }
+        return started(Model{..model, playing: track, elapsed: 0.0, running: true })
+    }
+    return model
+}
+
+fn track_id(model: Model, id: str) -> Option<int> {
+    for i in 0..model.tracks.len() {
+        if id == "track-\(i)" {
+            return i
+        }
+    }
+    return nil
+}
+
+/// Focus order across both trees: the chrome, with the rows spliced in where
+/// the card sits. Both come from `ui.focus_order`, which reads whatever was
+/// laid out — so a row the filter removed is not in it, and Tab cannot reach a
+/// track that is not on the screen.
+fn focus_ring(model: Model) -> [str] {
+    let frames = frames_of(model)
+    let box = list_rect(frames)
+    let rows = ui.focus_order(row_frames(model, box))
+    var out: [str] = []
+    for id in ui.focus_order(frames) {
+        out.push(id)
+        if id == "shuffle" {
+            for row in rows {
+                out.push(row)
+            }
+        }
+    }
+    return out
+}
+
+fn pressed(model: Model, key: str) -> Model {
+    let order = focus_ring(model)
+    if key == "Tab" {
+        return Model{..model, focused: ui.next_focus(order, model.focused) }
+    }
+    if key == "ArrowDown" {
+        return started(advanced(model, 1))
+    }
+    if key == "ArrowUp" {
+        return started(advanced(model, -1))
+    }
+    if key == " " {
+        return acted(model, model.focused)
+    }
+    if key == "Enter" {
+        return acted(model, model.focused)
+    }
+    if model.focused == "search" {
+        return Model{..model, search: material.typed(model.search, key) }
+    }
+    return model
+}
+
+/// Move through the *filtered* list, not the whole one — the visible order is
+/// the one a listener is looking at, and moving through the hidden one would
+/// jump past tracks that are not on the screen.
+fn advanced(model: Model, by: int) -> Model {
+    let found = shown(model)
+    if found.len() == 0 {
+        return model
+    }
+    var at = -1
+    for i in 0..found.len() {
+        if found[i] == model.playing {
+            at = i
+        }
+    }
+    if at < 0 {
+        return Model{..model, playing: found[0], elapsed: 0.0 }
+    }
+    let next = ((at + by) % found.len() + found.len()) % found.len()
+    return Model{..model, playing: found[next], elapsed: 0.0 }
+}
+
+// ---- running it anywhere else ------------------------------------------------------
+//
+// A `main` so the example runs on the bytecode and native targets too, where
+// there is no page to click on. It drives the same `update` the page drives,
+// which is what keeps this testable without a browser — and it keeps `view`
+// *reachable*, since unreachable functions are dropped before code generation
+// and a `main` that never drew would prune the export the page looks for.
+
+fn main() {
+    var model = init()
+    io.print("playing \(model.tracks[model.playing].title), running \(model.running)")
+
+    // The composition, which is the part worth comparing across backends: it
+    // is arithmetic, it is deterministic, and three backends that disagreed
+    // about it would be three backends playing different tunes. The *sound* is
+    // not checked here and cannot be — a bytecode or native run has no host to
+    // send a note to, the boundary being declared rather than assumed.
+    var tune = ""
+    for step in 0..8 {
+        tune = tune + "\(note_at(0, step)) "
+    }
+    io.print("track 0 opens: \(tune)")
+    io.print("its first pitch: \(pitch(note_at(0, 0)))")
+
+    // Frames with nothing playing must leave the model *identical*, which is
+    // how the host is told to stop asking for them.
+    for _tick in 0..10 {
+        model = update(model, EVENT_FRAME(), 1000.0 / 60.0, 0.0, "")
+    }
+    io.print("paused after ten frames: \(clock(math.trunc_to(model.elapsed)))")
+
+    // Focus order comes from the tree, so tabbing is a property of what was
+    // laid out rather than of a list written beside it.
+    model = update(model, EVENT_KEY(), 0.0, 0.0, "Tab")
+    io.print("tab moved focus to \(model.focused)")
+
+    model = advanced(model, 1)
+    io.print("next: \(model.tracks[model.playing].title)")
+
+    let filtered = Model{..model, genre: "Jazz" }
+    io.print("jazz leaves \(shown(filtered).len()) of \(model.tracks.len())")
+
+    let frames = frames_of(model)
+    io.print("frames \(frames.len()), controls \(ui.focus_order(frames).len())")
+
+    view(model)
+}

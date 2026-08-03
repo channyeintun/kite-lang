@@ -1788,9 +1788,8 @@ fn font_scale() -> f64 {
 /// `draw.font(size, weight)`. Nothing here has a font, so the weight is
 /// recorded in the transcript and only the size changes measurement.
 #[no_mangle]
-pub extern "C" fn kite_rt_draw_font(size: f64, weight: i64) {
+pub extern "C" fn kite_rt_draw_font(size: f64, _weight: i64) {
     FONT_SCALE.store((size / NOMINAL_LINE_HEIGHT).to_bits(), Ordering::Relaxed);
-    write_line(&format!("font {} {}", float_text(size), weight));
 }
 
 #[no_mangle]

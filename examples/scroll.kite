@@ -22,12 +22,22 @@ fn viewport() -> ui.Rect {
     return ui.Rect{ x: 16.0, y: 56.0, width: 380.0, height: 240.0 }
 }
 
-fn row(i: int) -> ui.Node {
-    return ui.text_of(
-        "row-\(i)",
+/// A row, decorated for whether it is the chosen one.
+///
+/// The selection reaches the tree rather than a paint list beside it. That is
+/// the whole of the change: what a row looks like is settled where the row is
+/// built, so there is no second list to keep the same length as the first.
+fn row(i: int, selected: str) -> ui.Node {
+    let name = "row-\(i)"
+    let chosen = name == selected
+    let background = if chosen { 0x3b82f6 } else { 0x1a1e25 }
+    let ink = if chosen { 0xffffff } else { 0xc9d1dc }
+    let node = ui.text_of(
+        name,
         ui.padded(ui.Style{..row_style(), width: 380.0 }, 6.0),
         "\(i). " + label_for(i),
     )
+    return ui.decorated(node, ui.inked(ui.filled(background), ink))
 }
 
 fn row_style() -> ui.Style {
@@ -47,30 +57,23 @@ fn label_for(i: int) -> str {
     return "an ordinary row"
 }
 
-fn content() -> ui.Node {
+fn content(selected: str) -> ui.Node {
     var rows: [ui.Node] = []
     for i in 1..31 {
-        rows.push(row(i))
+        rows.push(row(i, selected))
     }
-    return ui.box_of("list", ui.spaced(ui.Style{..ui.column(), align: ui.Align.Stretch }, 4.0), rows)
+    let list = ui.box_of(
+        "list",
+        ui.spaced(ui.Style{..ui.column(), align: ui.Align.Stretch }, 4.0),
+        rows,
+    )
+    return ui.decorated(list, ui.filled(0x14161a))
 }
 
-fn frames_of() -> [ui.Frame] {
-    return ui.layout(content(), ui.Size{ width: 380.0, height: 240.0 })
-}
-
-fn palette(model: Model) -> [ui.Paint] {
-    var out = [
-        ui.fill("list", 0x14161a),
-    ]
-    for i in 1..31 {
-        let name = "row-\(i)"
-        let chosen = name == model.selected
-        let background = if chosen { 0x3b82f6 } else { 0x1a1e25 }
-        let ink = if chosen { 0xffffff } else { 0xc9d1dc }
-        out.push(ui.filled_label(name, "\(i). " + label_for(i), background, ink))
-    }
-    return out
+/// Layout does not read decoration, so hit-testing may ask for the tree with
+/// any selection at all — and asking with the real one costs nothing either.
+fn frames_of(selected: str) -> [ui.Frame] {
+    return ui.layout(content(selected), ui.Size{ width: 380.0, height: 240.0 })
 }
 
 pub fn view(model: Model) {
@@ -79,11 +82,11 @@ pub fn view(model: Model) {
     draw.text(16.0, 16.0, "Scroll with the wheel or arrow keys; click a row", 0x8b93a1)
     draw.text(16.0, 32.0, "offset \(model.offset), selected \(model.selected)", 0x5c6472)
     draw.rect(v.x, v.y, v.width, v.height, 0x14161a)
-    ui.paint_scrolled(frames_of(), palette(model), v, model.offset)
+    ui.paint_scrolled(frames_of(model.selected), 0x14161a, v, model.offset)
 }
 
 pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
-    let frames = frames_of()
+    let frames = frames_of(model.selected)
     let box = ui.Size{ width: viewport().width, height: viewport().height }
 
     if event == 0 {

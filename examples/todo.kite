@@ -10,6 +10,7 @@
 // changing one.
 
 use std/ui
+use material
 
 struct Task {
     title: str
@@ -39,35 +40,49 @@ pub fn init() -> Model {
             Task { title: "write something in Kite", done: false },
         ],
         draft: "",
-        focused: ui.field("draft"),
+        focused: "draft",
         message: "tab moves, enter adds, space toggles",
     }
 }
 
-/// Every control, in the order they are laid out — which is also the order tab
-/// moves through them, because a separate tab order is a second thing to keep
-/// in step.
-fn controls(model: Model) -> [str] {
-    var out: [str] = [ui.field("draft"), ui.button("add")]
-    for i in 0..model.tasks.len() {
-        out.push(ui.checkbox("task\(i)"))
-    }
-    return out
+fn scheme() -> material.Scheme {
+    return material.dark()
 }
 
 fn view_node(model: Model) -> ui.Node {
+    let s = scheme()
     var rows: [ui.Node] = []
     for i in 0..model.tasks.len() {
         let task = model.tasks[i]
-        rows.push(ui.checkbox_node("task\(i)", task.title, task.done))
+        rows.push(
+            material.checkbox(
+                s,
+                "task\(i)",
+                task.title,
+                task.done,
+                material.when_focused(model.focused == "task\(i)"),
+            ),
+        )
     }
 
     let header = ui.box_of(
         "header",
         ui.spaced(ui.padded(ui.Style{..ui.row(), align: ui.Align.Center }, 12.0), 8.0),
         [
-            ui.field_node("draft", model.draft, 260.0, model.focused == ui.field("draft")),
-            ui.button_node("add", "add"),
+            material.outlined_field(
+                s,
+                "draft",
+                model.draft,
+                "What needs doing?",
+                260.0,
+                material.when_focused(model.focused == "draft"),
+            ),
+            material.filled_button(
+                s,
+                "add",
+                "Add",
+                material.when_focused(model.focused == "add"),
+            ),
         ],
     )
 
@@ -82,29 +97,30 @@ fn view_node(model: Model) -> ui.Node {
         "status",
         ui.spaced(ui.padded(ui.column(), 12.0), 4.0),
         [
-            ui.text_of("status:count", ui.style(), "\(done) of \(model.tasks.len()) done"),
-            ui.text_of("status:hint", ui.style(), model.message),
+            ui.decorated(
+                ui.text_of("status-count", ui.style(), "\(done) of \(model.tasks.len()) done"),
+                ui.ink(s.on_surface),
+            ),
+            ui.decorated(ui.text_of("status-hint", ui.style(), model.message), ui.ink(s.on_surface_variant)),
         ],
     )
 
-    return ui.box_of(
-        "app",
-        ui.Style {..ui.column(), align: ui.Align.Stretch },
-        [header, list, status],
+    return ui.decorated(
+        ui.box_of(
+            "app",
+            ui.Style {..ui.column(), align: ui.Align.Stretch },
+            [header, list, status],
+        ),
+        ui.filled(s.surface),
     )
 }
 
-pub fn view(model: Model) {
-    let theme = ui.dark_theme()
-    let frames = ui.layout(view_node(model), ui.Size{ width: 640.0, height: 360.0 })
+fn frames_of(model: Model) -> [ui.Frame] {
+    return ui.layout(view_node(model), ui.Size{ width: 640.0, height: 360.0 })
+}
 
-    var paints: [ui.Paint] = [ui.fill("app", theme.background)]
-    for paint in ui.control_paints(theme, controls(model), model.focused) {
-        paints.push(paint)
-    }
-    paints.push(ui.ink("status:count", theme.ink))
-    paints.push(ui.ink("status:hint", theme.muted))
-    ui.paint(frames, paints)
+pub fn view(model: Model) {
+    ui.paint(frames_of(model), scheme().surface)
 }
 
 pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
@@ -124,10 +140,10 @@ fn clicked(model: Model, x: float, y: float) -> Model {
         return model
     }
     let focused = Model{..model, focused: hit }
-    if hit == ui.button("add") {
+    if hit == "add" {
         return added(focused)
     }
-    let box = ui.control_id(hit, "checkbox")
+    let box = task_id(hit)
     if box != nil {
         return toggled(focused, box)
     }
@@ -136,31 +152,31 @@ fn clicked(model: Model, x: float, y: float) -> Model {
 
 fn pressed(model: Model, key: str) -> Model {
     if key == "Tab" {
-        return Model{..model, focused: ui.next_focus(controls(model), model.focused) }
+        return Model{..model, focused: ui.next_focus(ui.focus_order(frames_of(model)), model.focused) }
     }
     if key == "ArrowDown" {
-        return Model{..model, focused: ui.next_focus(controls(model), model.focused) }
+        return Model{..model, focused: ui.next_focus(ui.focus_order(frames_of(model)), model.focused) }
     }
     if key == "ArrowUp" {
-        return Model{..model, focused: ui.previous_focus(controls(model), model.focused) }
+        return Model{..model, focused: ui.previous_focus(ui.focus_order(frames_of(model)), model.focused) }
     }
     if key == "Enter" {
-        if model.focused == ui.field("draft") {
+        if model.focused == "draft" {
             return added(model)
         }
-        if model.focused == ui.button("add") {
+        if model.focused == "add" {
             return added(model)
         }
     }
-    let box = ui.control_id(model.focused, "checkbox")
+    let box = task_id(model.focused)
     if box != nil {
         if key == " " {
             return toggled(model, box)
         }
         return model
     }
-    if model.focused == ui.field("draft") {
-        return Model{..model, draft: ui.typed(model.draft, key) }
+    if model.focused == "draft" {
+        return Model{..model, draft: material.typed(model.draft, key) }
     }
     return model
 }
@@ -178,11 +194,11 @@ fn added(model: Model) -> Model {
     }
 }
 
-fn toggled(model: Model, id: str) -> Model {
+fn toggled(model: Model, at: int) -> Model {
     var out: [Task] = []
     for i in 0..model.tasks.len() {
         let task = model.tasks[i]
-        if "task\(i)" == id {
+        if i == at {
             out.push(Task{..task, done: !task.done })
         } else {
             out.push(task)
@@ -213,4 +229,19 @@ fn main() {
     io.print("first task done: \(model.tasks[0].done)")
 
     view(model)
+}
+
+/// A control id that names a task, or nil.
+///
+/// The ids are the application's own — it minted `task0` when it built the row
+/// — so reading one back is a comparison against its own vocabulary rather than
+/// a convention the widget layer imposed. The old `control_id(name, "checkbox")`
+/// asked `std/ui` to parse a kind out of a name, which is the thing that broke.
+fn task_id(name: str) -> Option<int> {
+    for i in 0..99 {
+        if name == "task\(i)" {
+            return i
+        }
+    }
+    return nil
 }

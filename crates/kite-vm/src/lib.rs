@@ -1416,7 +1416,12 @@ impl<'a> Vm<'a> {
                     _ => NOMINAL_LINE_HEIGHT,
                 };
                 self.font_scale = size / NOMINAL_LINE_HEIGHT;
-                let _ = writeln!(self.out, "font {} {}", a(0), a(1));
+                // Selecting a font writes nothing. It is state, and unlike a
+                // clip it changes no pixel by itself — its whole effect is on
+                // the runs of text that follow, which is where a backend that
+                // got it wrong shows up: the text lands somewhere else. It
+                // also has to stay silent because *measurement* selects a
+                // font, and `ui.layout` must not write drawing calls.
                 Ok(Value::Unit)
             }
             Native::DrawText => {

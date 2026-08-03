@@ -24,9 +24,12 @@ use std/text
 
 fn sample(name: str, body: str) {
     io.print("== \(name) ==")
-    let node = ui.text_of(name, ui.Style{..ui.style(), width: 176.0 }, body)
+    let node = ui.decorated(
+        ui.text_of(name, ui.Style{..ui.style(), width: 176.0 }, body),
+        ui.ink(0x102030),
+    )
     let frames = ui.layout(node, ui.Size{ width: 176.0, height: 400.0 })
-    ui.paint(frames, [ui.ink(name, 0x102030)])
+    ui.paint(frames, 0xffffff)
 }
 
 fn main() {

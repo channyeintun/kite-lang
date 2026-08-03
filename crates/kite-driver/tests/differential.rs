@@ -159,7 +159,7 @@ fn main() {
         "use std/ui\n\
          fn rows() -> ui.Node {\n  var out: [ui.Node] = []\n\
          \x20 for i in 0..8 {\n\
-         \x20   out.push(ui.text_of(\"r\\(i)\", ui.Style{..ui.style(), width: 100.0}, \"row \\(i)\"))\n  }\n\
+         \x20   out.push(ui.decorated(ui.text_of(\"r\\(i)\", ui.Style{..ui.style(), width: 100.0}, \"row \\(i)\"), ui.inked(ui.filled(0x111111), 0xeeeeee)))\n  }\n\
          \x20 return ui.box_of(\"list\", ui.Style{..ui.column(), align: ui.Align.Stretch}, out)\n}\n\
          fn main() {\n\
          \x20 let v = ui.Rect{x: 0.0, y: 0.0, width: 100.0, height: 50.0}\n\
@@ -168,11 +168,8 @@ fn main() {
          \x20 io.print(\"extent \\(ui.scroll_extent(f, box))\")\n\
          \x20 io.print(ui.clamp_scroll(-10.0, f, box))\n\
          \x20 io.print(ui.clamp_scroll(9999.0, f, box))\n\
-         \x20 var paints: [ui.Paint] = []\n\
-         \x20 for i in 0..8 {\n\
-         \x20   paints.push(ui.filled_label(\"r\\(i)\", \"row \\(i)\", 0x111111, 0xeeeeee))\n  }\n\
-         \x20 ui.paint_scrolled(f, paints, v, 0.0)\n\
-         \x20 ui.paint_scrolled(f, paints, v, 40.0)\n\
+         \x20 ui.paint_scrolled(f, 0x000000, v, 0.0)\n\
+         \x20 ui.paint_scrolled(f, 0x000000, v, 40.0)\n\
          \x20 let a = ui.hit_scrolled(f, v, 0.0, 10.0, 10.0)\n\
          \x20 io.print(if a == nil { \"none\" } else { a.name })\n\
          \x20 let b = ui.hit_scrolled(f, v, 40.0, 10.0, 10.0)\n\
@@ -295,7 +292,7 @@ fn main() {
         "use std/ui\n\
          fn rows() -> ui.Node {\n  var out: [ui.Node] = []\n\
          \x20 for i in 0..8 {\n\
-         \x20   out.push(ui.text_of(\"r\\(i)\", ui.Style{..ui.style(), width: 100.0}, \"row \\(i)\"))\n  }\n\
+         \x20   out.push(ui.decorated(ui.text_of(\"r\\(i)\", ui.Style{..ui.style(), width: 100.0}, \"row \\(i)\"), ui.inked(ui.filled(0x111111), 0xeeeeee)))\n  }\n\
          \x20 return ui.box_of(\"list\", ui.Style{..ui.column(), align: ui.Align.Stretch}, out)\n}\n\
          fn main() {\n\
          \x20 let v = ui.Rect{x: 0.0, y: 0.0, width: 100.0, height: 50.0}\n\
@@ -304,11 +301,8 @@ fn main() {
          \x20 io.print(\"extent \\(ui.scroll_extent(f, box))\")\n\
          \x20 io.print(ui.clamp_scroll(-10.0, f, box))\n\
          \x20 io.print(ui.clamp_scroll(9999.0, f, box))\n\
-         \x20 var paints: [ui.Paint] = []\n\
-         \x20 for i in 0..8 {\n\
-         \x20   paints.push(ui.filled_label(\"r\\(i)\", \"row \\(i)\", 0x111111, 0xeeeeee))\n  }\n\
-         \x20 ui.paint_scrolled(f, paints, v, 0.0)\n\
-         \x20 ui.paint_scrolled(f, paints, v, 40.0)\n\
+         \x20 ui.paint_scrolled(f, 0x000000, v, 0.0)\n\
+         \x20 ui.paint_scrolled(f, 0x000000, v, 40.0)\n\
          \x20 let a = ui.hit_scrolled(f, v, 0.0, 10.0, 10.0)\n\
          \x20 io.print(if a == nil { \"none\" } else { a.name })\n\
          \x20 let b = ui.hit_scrolled(f, v, 40.0, 10.0, 10.0)\n\

@@ -114,6 +114,23 @@ pub struct Node {
     pub style: Style
     pub content: Content
     pub children: [Node]
+    /// This subtree is one interactive thing, and this is its id — the string
+    /// the application's `update` is handed back. Nil for a plain box.
+    ///
+    /// It replaces a naming convention. A control used to be found by
+    /// splitting a node's name on `:` — `checkbox:read3:tick` was part of the
+    /// control `checkbox:read3` — and the trouble with a convention is that
+    /// nothing enforces it: a plain text node innocently named `row2:subject`
+    /// answered as a control, so clicking a message moved the focus and
+    /// selected nothing. A field cannot be collided with by accident.
+    ///
+    /// The id alone, with no *kind* in it. One string carrying two meanings
+    /// and punctuation to part them is what went wrong the first time; a
+    /// design system knows what it built, and the application knows what it
+    /// asked for.
+    pub role: Option<str>
+    /// How the box looks. The layout never reads this.
+    pub decor: Decor
 }
 
 /// One laid-out box, in absolute coordinates.
@@ -138,6 +155,18 @@ pub struct Frame {
     /// choosing a size the box was never sized for.
     pub size: float
     pub weight: int
+    /// The nearest enclosing control's id — this node's own if it is one,
+    /// otherwise the closest ancestor that is, or nil for neither.
+    ///
+    /// Stamped once, while the tree is still a tree. Afterwards the frames are
+    /// a flat list and the parent of any one of them is no longer knowable
+    /// without searching, so `control_at` would be a containment search rather
+    /// than a lookup.
+    pub control: Option<str>
+    /// Whether this frame is the control itself rather than something inside
+    /// one, which is what focus order needs to count each control once.
+    pub is_control: bool
+    pub decor: Decor
 }
 
 // ---- construction ---------------------------------------------------------
@@ -196,12 +225,36 @@ pub fn spaced(base: Style, amount: float) -> Style {
     return Style{..base, gap: amount }
 }
 
+/// The same node, made a control: it answers to hit-testing and takes focus.
+pub fn control(node: Node, id: str) -> Node {
+    return Node{..node, role: id }
+}
+
+/// The same node, decorated. Layout is unaffected — that is the invariant.
+pub fn decorated(node: Node, how: Decor) -> Node {
+    return Node{..node, decor: how }
+}
+
 pub fn box_of(name: str, base: Style, children: [Node]) -> Node {
-    return Node{ name: name, style: base, content: Content.Empty, children: children }
+    return Node{
+        name: name,
+        style: base,
+        content: Content.Empty,
+        children: children,
+        role: nil,
+        decor: no_decor(),
+    }
 }
 
 pub fn text_of(name: str, base: Style, body: str) -> Node {
-    return Node{ name: name, style: base, content: Content.Text(body), children: [] }
+    return Node{
+        name: name,
+        style: base,
+        content: Content.Text(body),
+        children: [],
+        role: nil,
+        decor: no_decor(),
+    }
 }
 
 // ---- measurement ----------------------------------------------------------
@@ -234,6 +287,18 @@ pub fn text_size(body: str) -> Size {
 ///
 /// A word longer than the limit gets a line of its own and overflows it, which
 /// is what every wrapper does short of breaking words apart.
+/// The same, in a named size and weight.
+///
+/// A widget that sizes itself to its caption has to measure in the font the
+/// caption will be drawn in — a button laid out against 16dp and captioned at
+/// 14dp is a button with the wrong amount of air in it.
+pub fn text_size_in(body: str, size: float, weight: int) -> Size {
+    set_font(size, weight)
+    let out = text_size(body)
+    unset_font(size)
+    return out
+}
+
 pub fn wrap(body: str, limit: float) -> [str] {
     let pieces = pieces_of(body)
     if pieces.len() == 0 {
@@ -435,7 +500,7 @@ pub fn layout(root: Node, viewport: Size) -> [Frame] {
     let fixed_h = root.style.height
     let w = if fixed_w != nil { fixed_w } else { viewport.width }
     let h = if fixed_h != nil { fixed_h } else { viewport.height }
-    return arrange(root, Rect{ x: 0.0, y: 0.0, width: w, height: h }, 0)
+    return arrange(root, Rect{ x: 0.0, y: 0.0, width: w, height: h }, 0, nil)
 }
 
 /// How far in the first child sits.
@@ -475,7 +540,16 @@ fn cross_offset(a: Align, available: float, natural: float) -> float {
     }
 }
 
-fn arrange(node: Node, rect: Rect, depth: int) -> [Frame] {
+fn arrange(node: Node, rect: Rect, depth: int, inherited: Option<str>) -> [Frame] {
+    // A node with a role owns itself and everything under it.
+    // Narrowing turns `mine` into a `str` inside the guard, so the two are
+    // assigned rather than chosen between: a value `if` needs both branches to
+    // have the one type, and here they deliberately do not.
+    let mine = node.role
+    var owner = inherited
+    if mine != nil {
+        owner = mine
+    }
     let pad = node.style.padding
     let inner = Rect{
         x: rect.x + pad.left,
@@ -496,6 +570,9 @@ fn arrange(node: Node, rect: Rect, depth: int) -> [Frame] {
             },
             size: node.style.size,
             weight: node.style.weight,
+            control: owner,
+            is_control: mine != nil,
+            decor: node.decor,
         },
     ]
     if node.children.len() == 0 {
@@ -540,7 +617,7 @@ fn arrange(node: Node, rect: Rect, depth: int) -> [Frame] {
         } else {
             Rect { x: inner.x + offset, y: inner.y + cursor, width: across, height: along }
         }
-        frames = concat(frames, arrange(child, child_rect, depth + 1))
+        frames = concat(frames, arrange(child, child_rect, depth + 1, owner))
         cursor = cursor + along + between
     }
 
@@ -561,6 +638,41 @@ pub fn hit(frames: [Frame], x: float, y: float) -> Option<Frame> {
 
 /// Whether a point falls inside a rectangle. Named for what it takes, because
 /// `contains` on its own belongs to strings.
+/// The control a point is inside, or nil.
+///
+/// A field read rather than a string parse. A control used to be found by
+/// splitting a node's name on `:` — `checkbox:read3:tick` was part of the
+/// control `checkbox:read3` — and nothing enforced the convention: a plain
+/// text node innocently named `row2:subject` answered as a control, so
+/// clicking a message in the reader demo moved the focus and selected
+/// nothing. `arrange` stamps the owning control on every frame instead.
+pub fn control_at(frames: [Frame], x: float, y: float) -> Option<str> {
+    let found = hit(frames, x, y)
+    if found == nil {
+        return nil
+    }
+    return found.control
+}
+
+/// Controls in the order they were laid out, which is focus order.
+///
+/// Derived, not declared. It used to be a `[str]` the application wrote out by
+/// hand beside the tree, and a second tree-shaped thing is a second thing to
+/// keep in step: add a control and forget the list, and it lays out perfectly
+/// and cannot be tabbed to.
+pub fn focus_order(frames: [Frame]) -> [str] {
+    var out: [str] = []
+    for frame in frames {
+        if frame.is_control {
+            let id = frame.control
+            if id != nil {
+                out.push(id)
+            }
+        }
+    }
+    return out
+}
+
 pub fn rect_contains(rect: Rect, x: float, y: float) -> bool {
     if x < rect.x || y < rect.y {
         return false
@@ -570,165 +682,191 @@ pub fn rect_contains(rect: Rect, x: float, y: float) -> bool {
 
 // ---- painting -------------------------------------------------------------
 //
-// A `Frame` says where; a `Paint` says what it looks like. They are separate
-// because layout runs whether or not anything is drawn — a test asserts on
-// rectangles, and hit-testing reads them — and because keeping them apart is
-// what stops a renderer from being able to move anything.
+// How a box looks rides on the box, in `Decor`. It used to be a parallel list
+// of `Paint`s matched to frames by name, and the trouble with a parallel list
+// is that nothing keeps it in step with the tree: the reader demo ended up
+// pushing *forty* speculative paints for `detail-body0`..`detail-body39`,
+// because the list could not see how many lines the tree had, and a body that
+// wrapped to forty-one lines painted the last one as nothing.
+//
+// The layout does not read `decor`. That is the invariant worth stating
+// plainly, because it is what stops a renderer from being able to move
+// anything: **geometry is a function of style and content only**. A test
+// asserts it — the same tree laid out with every decoration stripped produces
+// identical frames.
 
-pub struct Paint {
-    /// Draw the node's own text rather than one supplied here.
-    pub own: bool
-    /// The frame's `name`, which is how a paint finds its box.
-    pub name: str
-    /// `0xRRGGBB`, or nil to draw no background.
+pub struct Border {
+    pub colour: int
+    pub width: float
+}
+
+pub struct Decor {
+    /// `0xRRGGBB`, or nil for transparent.
+    ///
+    /// Transparent at a boundary with no alpha can only mean *the colour of
+    /// whatever is behind*, and the painter works that out: it walks parents
+    /// before children, so it knows the fill of the enclosing box. No caller
+    /// supplies a backdrop. An earlier version made it an argument, and every
+    /// caller had to thread the right colour to every control — a checkbox on
+    /// a selected row sits on a different colour from one on an ordinary row —
+    /// which is a thing to get wrong once per control.
     pub fill: Option<int>
-    /// Text drawn inside the box, at its top-left corner.
-    pub label: Option<str>
-    pub ink: int
-    /// The corner radius of the fill, in the same units everything else is in.
-    ///
-    /// Zero is a square corner and costs nothing — the square call is still
-    /// the one made — so a paint that says nothing about shape draws exactly
-    /// what it drew before this existed.
     pub radius: float
-    /// An outline drawn around the box, or nil for none.
+    /// An outline, or nil for none.
     ///
-    /// Not a stroke primitive: the drawing boundary has no such thing, and
-    /// adding one would mean line joins and caps. An outline is two filled
-    /// rounded rectangles, the inner one inset by the width — which is exactly
-    /// what a border *is* once it is filled in, and costs the boundary nothing.
-    pub stroke: Option<int>
-    pub stroke_width: float
-    /// Centre the label in the box rather than starting it at the top-left.
+    /// Not a stroke primitive: the boundary has none, and adding one would
+    /// mean joins and caps. An outline is the box in the edge colour with the
+    /// box inset by the width drawn back over it in the fill — which is what a
+    /// border *is* once it is filled in, and asks the boundary for nothing.
+    pub border: Option<Border>
+    /// The colour this node's own text is drawn in.
+    pub ink: int
+    /// Centre the text across the box, and down it.
     ///
-    /// A button's caption is centred in every design system there is, and a
-    /// left-aligned one is the single clearest sign that a control was drawn
-    /// by hand. Centring needs the measured width, which only the painter has.
-    pub center: bool
+    /// Two flags rather than one because the two are wanted separately: a
+    /// button's caption is centred both ways, and a text field's value is
+    /// centred down the box but starts at the left. Either way it is the
+    /// painter that can do it — centring needs the measured width and the
+    /// wrapped line count, and nothing before the painter has both.
+    pub center_x: bool
+    pub center_y: bool
 }
 
-/// Draw whatever the node says, in this colour.
-///
-/// The caption of a button is in the tree, where it was written. A paint list
-/// that repeated it would be a second place for it to be wrong, and the two
-/// disagreeing is how a label ends up saying something the layout was never
-/// measured for.
-pub fn ink(name: str, colour: int) -> Paint {
-    return Paint{
-        own: true,
-        name: name,
+pub fn no_decor() -> Decor {
+    return Decor{
         fill: nil,
-        label: nil,
-        ink: colour,
         radius: 0.0,
-        stroke: nil,
-        stroke_width: 0.0,
-        center: false,
+        border: nil,
+        ink: 0x000000,
+        center_x: false,
+        center_y: false,
     }
 }
 
-/// A label centred in its box, which is what a button's caption wants.
-pub fn ink_centered(name: str, colour: int) -> Paint {
-    return Paint{..ink(name, colour), center: true }
-}
-
-/// A fill with an outline around it: Material's outlined variant, and the
-/// shape of a checkbox that is not yet ticked.
-pub fn outlined(
-    name: str,
-    background: Option<int>,
-    stroke: int,
-    width: float,
-    radius: float,
-) -> Paint {
-    return Paint{
-        ..fill(name, 0x000000),
-        fill: background,
-        radius: radius,
-        stroke: stroke,
-        stroke_width: width,
-    }
+pub fn filled(colour: int) -> Decor {
+    return Decor{..no_decor(), fill: colour }
 }
 
 /// A fill with rounded corners.
 ///
 /// Shape is a property of the *surface*, not of the box in the tree: the same
 /// node is a pill in one design system and a square in another, and the layout
-/// should not have to know which. So it rides on the paint, beside the colour
-/// it belongs with.
-pub fn rounded(name: str, colour: int, radius: float) -> Paint {
-    return Paint{..fill(name, colour), radius: radius }
+/// should not have to know which.
+pub fn rounded(colour: int, radius: float) -> Decor {
+    return Decor{..no_decor(), fill: colour, radius: radius }
 }
 
-pub fn fill(name: str, colour: int) -> Paint {
-    return Paint{..ink(name, 0x000000), own: false, fill: colour }
+pub fn shaped(base: Decor, radius: float) -> Decor {
+    return Decor{..base, radius: radius }
 }
 
-pub fn label(name: str, body: str, colour: int) -> Paint {
-    return Paint{..ink(name, colour), own: false, label: body }
+pub fn inked(base: Decor, colour: int) -> Decor {
+    return Decor{..base, ink: colour }
 }
 
-pub fn filled_label(name: str, body: str, background: int, colour: int) -> Paint {
-    return Paint{..label(name, body, colour), fill: background }
+pub fn bordered(base: Decor, colour: int, width: float) -> Decor {
+    return Decor{..base, border: Border{ colour: colour, width: width } }
 }
 
-fn paint_for(paints: [Paint], name: str) -> Option<Paint> {
-    for p in paints {
-        if p.name == name {
-            return p
-        }
-    }
-    return nil
+pub fn centered(base: Decor) -> Decor {
+    return Decor{..base, center_x: true, center_y: true }
 }
 
-/// Draw a laid-out tree.
+/// Centred down the box only, which is what a single line of text in a control
+/// of a fixed height wants: in the middle, but still starting at the left.
+pub fn vertically_centered(base: Decor) -> Decor {
+    return Decor{..base, center_y: true }
+}
+
+/// Ink alone, on a box that draws no background — what a run of text wants.
+pub fn ink(colour: int) -> Decor {
+    return Decor{..no_decor(), ink: colour }
+}
+
+/// Draw a laid-out tree, over a window cleared to `behind`.
 ///
 /// Frames come out in paint order, so this walks them forwards: a parent's
-/// background is drawn before its children sit on top. A frame with no paint
-/// is invisible but still laid out, which is how spacers work.
-pub fn paint(frames: [Frame], paints: [Paint]) {
+/// background is drawn before its children sit on top. A frame whose decor
+/// says nothing is invisible but still laid out, which is how spacers work.
+pub fn paint(frames: [Frame], behind: int) {
+    var backdrop: [int] = []
     for frame in frames {
-        let found = paint_for(paints, frame.name)
-        if found != nil {
-            draw_one(frame, found)
-        }
+        draw_one(frame, backdrop_at(backdrop, frame.depth, behind))
+        backdrop = record_fill(backdrop, frame, behind)
     }
 }
 
-fn draw_one(frame: Frame, p: Paint) {
+/// What is behind a frame: the nearest enclosing box that painted a fill.
+///
+/// Correct exactly while boxes nest visually, which this layout makes true of
+/// siblings — the cursor advances by a child's full size, so two siblings
+/// cannot overlap. It is *not* true of a child that overflows its parent,
+/// because `grow` takes spare space and never gives it back: such a child sits
+/// on pixels this attributes to an ancestor. Overflow already breaks painting
+/// in more visible ways; the assumption is written down rather than defended.
+fn backdrop_at(stack: [int], depth: int, behind: int) -> int {
+    if depth <= 0 {
+        return behind
+    }
+    if depth - 1 < stack.len() {
+        return stack[depth - 1]
+    }
+    return behind
+}
+
+/// The backdrop a frame's children sit on — its own fill if it painted one,
+/// otherwise whatever it was itself sitting on.
+///
+/// A frame that is culled still passes through here. A half-visible child of a
+/// scrolled-away parent needs its parent's colour, and skipping the parent
+/// because it was not drawn would hand the child the window's instead.
+fn record_fill(stack: [int], frame: Frame, behind: int) -> [int] {
+    let own = frame.decor.fill
+    let colour = if own != nil { own } else { backdrop_at(stack, frame.depth, behind) }
+    var out: [int] = []
+    for i in 0..frame.depth {
+        if i < stack.len() {
+            out.push(stack[i])
+        } else {
+            out.push(behind)
+        }
+    }
+    out.push(colour)
+    return out
+}
+
+fn draw_one(frame: Frame, behind: int) {
     let r = frame.rect
-    // An outline is the box in the outline colour with the box inset by the
-    // width drawn back over it. Two fills, no stroke primitive, and the corner
-    // stays round because the inner radius shrinks with the inset.
-    let edge = p.stroke
-    // Narrowed one condition at a time: `edge != nil && ...` is a comparison
-    // and a conjunction, and only the comparison alone narrows the option.
-    var outlined = false
+    let d = frame.decor
+    // Transparent means the colour of what is behind, which is the one thing
+    // a boundary with no alpha can honestly do with the word.
+    let own = d.fill
+    let surface = if own != nil { own } else { behind }
+    let edge = d.border
+    var drew = false
     if edge != nil {
-        if p.stroke_width > 0.0 {
-            outlined = true
-            fill_rect(r.x, r.y, r.width, r.height, p.radius, edge)
-            let w = p.stroke_width
-            let inner = if p.radius - w > 0.0 { p.radius - w } else { 0.0 }
-            let hole = p.fill
-            // Nothing behind an unfilled outline: the box it sits on shows
-            // through, which is what an outlined control looks like.
-            if hole != nil {
-                fill_rect(r.x + w, r.y + w, r.width - w * 2.0, r.height - w * 2.0, inner, hole)
-            }
+        // Narrowed one condition at a time: `edge != nil && ...` is a
+        // comparison inside a conjunction, and only the comparison alone
+        // narrows the option.
+        if edge.width > 0.0 {
+            drew = true
+            fill_rect(r.x, r.y, r.width, r.height, d.radius, edge.colour)
+            let w = edge.width
+            let inner = if d.radius - w > 0.0 { d.radius - w } else { 0.0 }
+            // The hole. Filled with the backdrop when the box is transparent,
+            // which is what makes an outlined control an outline rather than a
+            // solid block — the bug this replaces drew the block and claimed
+            // in a comment that the box beneath showed through.
+            fill_rect(r.x + w, r.y + w, r.width - w * 2.0, r.height - w * 2.0, inner, surface)
         }
     }
-    if !outlined {
-        let background = p.fill
-        if background != nil {
-            fill_rect(r.x, r.y, r.width, r.height, p.radius, background)
+    if !drew {
+        if own != nil {
+            fill_rect(r.x, r.y, r.width, r.height, d.radius, own)
         }
     }
-    var body = p.label
-    if p.own {
-        body = frame.content
-    }
-    if body == nil {
+    let body = frame.content
+    if body.len() == 0 {
         return
     }
     // Content goes inside the padding, and wraps to the width measurement used
@@ -746,25 +884,35 @@ fn draw_one(frame: Frame, p: Paint) {
     // screen readers hears a reordered line run by run, in visual order,
     // which for mixed-direction text is not reading order. Both are stated
     // rather than solved.
-    // The font the box was measured in. A paint may not choose another: the
-    // room has already been allotted.
+    //
+    // The font is the one the box was measured in. Decoration may not choose
+    // another: the room has already been allotted.
     set_font(frame.size, frame.weight)
     let base = text.paragraph_level(body)
     let lines = wrap(body, box.width)
     var y = box.y
+    if d.center_y {
+        // The whole block of lines is centred, not each line separately: two
+        // lines centred individually would sit in the same place as one.
+        let tall = line_height() * intToFloat(lines.len())
+        let slack = box.height - tall
+        if slack > 0.0 {
+            y = box.y + slack / 2.0
+        }
+    }
     for line in lines {
         // A centred line starts wherever the leftover space puts it. The width
         // is measured in the font just selected, so this is the font the line
         // will actually be drawn in rather than the one before it.
         var x = box.x
-        if p.center {
+        if d.center_x {
             let slack = box.width - text.width(line)
             if slack > 0.0 {
                 x = box.x + slack / 2.0
             }
         }
         for run in text.bidi_runs_with(line, base) {
-            draw.text(x, y, run.body, p.ink)
+            draw.text(x, y, run.body, d.ink)
             x = x + text.width(run.body)
         }
         y = y + line_height()
@@ -817,34 +965,24 @@ fn shifted(r: Rect, dx: float, dy: float) -> Rect {
 /// The clip is still needed for the ones that straddle an edge — a half-visible
 /// row has to be cut by the renderer, and painting over it would erase what it
 /// is scrolling past.
-pub fn paint_scrolled(
-    frames: [Frame],
-    paints: [Paint],
-    viewport: Rect,
-    offset: float,
-) {
+pub fn paint_scrolled(frames: [Frame], behind: int, viewport: Rect, offset: float) {
     draw.clip(viewport.x, viewport.y, viewport.width, viewport.height)
     let dx = viewport.x
     let dy = viewport.y - offset
+    var backdrop: [int] = []
     for frame in frames {
         let r = shifted(frame.rect, dx, dy)
+        // A culled frame still contributes its fill. A half-visible child of a
+        // parent scrolled off the top needs its parent's colour behind it, and
+        // skipping the parent because it was not drawn would hand the child the
+        // window's instead.
         if r.y + r.height >= viewport.y && r.y <= viewport.y + viewport.height{
-            let found = paint_for(paints, frame.name)
-            if found != nil {
-                draw_one(
-                    Frame {
-                        name: frame.name,
-                        rect: r,
-                        inner: shifted(frame.inner, dx, dy),
-                        depth: frame.depth,
-                        content: frame.content,
-                        size: frame.size,
-                        weight: frame.weight,
-                    },
-                    found,
-                )
-            }
+            draw_one(
+                Frame {..frame, rect: r, inner: shifted(frame.inner, dx, dy) },
+                backdrop_at(backdrop, frame.depth, behind),
+            )
         }
+        backdrop = record_fill(backdrop, frame, behind)
     }
     draw.unclip()
 }
@@ -863,241 +1001,6 @@ pub fn hit_scrolled(
         return nil
     }
     return hit(frames, x - viewport.x, y - viewport.y + offset)
-}
-
-// ---- widgets ----------------------------------------------------------------
-//
-// A widget here is a **function that returns a node**, and interaction is a
-// function that returns a new model. There is no widget object with internal
-// state, and no place to hide one: Kite has no mutable globals, so a widget
-// that remembered something would have to be handed it, which is what the
-// model already is.
-//
-// What the set buys over writing boxes by hand is the *names*: a button is a
-// box named `button:save`, and the paint list, the hit test and the focus
-// order all agree about that name without anyone restating it.
-
-/// How a control is drawn: the ordinary state, the one under the pointer, and
-/// the one holding focus.
-pub struct Theme {
-    pub background: int
-    pub surface: int
-    pub ink: int
-    pub muted: int
-    pub accent: int
-    pub focus: int
-}
-
-pub fn dark_theme() -> Theme {
-    return Theme{
-        background: 0x141821,
-        surface: 0x1e2531,
-        ink: 0xe6e9ef,
-        muted: 0x8d95a3,
-        accent: 0x3f7de0,
-        focus: 0xe0a13f,
-    }
-}
-
-pub fn light_theme() -> Theme {
-    return Theme{
-        background: 0xfbfbf9,
-        surface: 0xeceae4,
-        ink: 0x1a1c20,
-        muted: 0x5b6068,
-        accent: 0x2c5fb8,
-        focus: 0xb8442c,
-    }
-}
-
-/// A control's name, which is how everything else refers to it.
-///
-/// The prefix says what kind it is, so a hit test can answer "a button was
-/// clicked, and it was `save`" from the name alone rather than from a parallel
-/// table that has to be kept in step.
-pub fn button(id: str) -> str {
-    return "button:\(id)"
-}
-
-pub fn field(id: str) -> str {
-    return "field:\(id)"
-}
-
-pub fn checkbox(id: str) -> str {
-    return "checkbox:\(id)"
-}
-
-/// The id inside a control's name, or nil when the name is not a control's.
-pub fn control_id(name: str, kind: str) -> Option<str> {
-    let prefix = "\(kind):"
-    if !starts_with(name, prefix) {
-        return nil
-    }
-    return name.slice(prefix.len(), name.len())
-}
-
-/// A button: a box with a label inside it, sized to the label plus padding.
-pub fn button_node(id: str, caption: str) -> Node {
-    return box_of(
-        button(id),
-        padded(sized(style(), text_size(caption).width + 24.0, line_height() + 12.0), 6.0),
-        [text_of("\(button(id)):caption", style(), caption)],
-    )
-}
-
-/// A single-line text field. The caret is drawn as part of the text, because a
-/// caret is a glyph like any other until there is a scene graph to animate it
-/// separately.
-pub fn field_node(id: str, value: str, width: float, focused: bool) -> Node {
-    return field_node_labelled(id, value, width, focused, "")
-}
-
-/// The same, with the text an empty field shows.
-///
-/// A blank rounded rectangle is not a control anyone can read: a placeholder is
-/// what says the box is for typing in. It is drawn as the value, so it lands in
-/// the same node and needs no second paint — and it is *replaced* by what is
-/// typed rather than sitting behind it, which is what a placeholder is.
-pub fn field_node_labelled(
-    id: str,
-    value: str,
-    width: float,
-    focused: bool,
-    placeholder: str,
-) -> Node {
-    var shown = if focused { "\(value)|" } else { value }
-    // An empty field shows its placeholder whether or not it has focus, with
-    // the caret before it — which is what a search field looks like the moment
-    // it is clicked, and the alternative is a blank rounded rectangle.
-    if value.len() == 0 {
-        shown = if focused { "|\(placeholder)" } else { placeholder }
-    }
-    return box_of(
-        field(id),
-        padded(sized(style(), width, line_height() + 12.0), 6.0),
-        [text_of("\(field(id)):value", style(), shown)],
-    )
-}
-
-/// The side of a checkbox's box. Material's is 18dp inside a 40dp target, and
-/// the target is the thing a finger has to hit.
-pub fn CHECKBOX_SIDE() -> float {
-    return 18.0
-}
-
-/// A checkbox and its label, side by side.
-///
-/// The box is a *box*, not the characters `[x]`. It is an empty node of a
-/// fixed size with the tick as its own child, so a design system paints the
-/// two separately — an outline when it is clear, a filled square and a tick
-/// when it is set — and neither is a glyph standing in for a control.
-///
-/// The tick itself is a glyph, and honestly so: a check mark is a shape the
-/// drawing boundary has no way to draw, having neither strokes nor paths, and
-/// U+2713 is the shape. What matters is that the *box* is drawn rather than
-/// typed, because that is the part a design system restyles.
-pub fn checkbox_node(id: str, caption: str, checked: bool) -> Node {
-    let side = CHECKBOX_SIDE()
-    let tick = if checked { "✓" } else { "" }
-    return box_of(
-        checkbox(id),
-        spaced(padded(Style{..row(), align: Align.Center }, 4.0), 8.0),
-        [
-            box_of(
-                "\(checkbox(id)):mark",
-                sized(Style{..column(), align: Align.Center }, side, side),
-                // The tick is sized to the box rather than to the page: an
-                // 18dp square cannot hold a 16dp glyph and its line box.
-                [text_of("\(checkbox(id)):tick", in_font(style(), 13.0, 700), tick)],
-            ),
-            text_of("\(checkbox(id)):caption", style(), caption),
-        ],
-    )
-}
-
-/// Everything a checkbox's own box needs painted.
-///
-/// Set, it is a filled square with a tick on it; clear, it is an outline with
-/// nothing inside. Which colours those are is a design system's business, so
-/// they are arguments — this only knows that a checkbox has two states and
-/// that they look different.
-/// `behind` is the colour of whatever the checkbox is sitting on.
-///
-/// It has to be passed in. The drawing boundary has no alpha and no way to
-/// punch a hole, so an outline with "nothing" inside it is a filled square —
-/// which is exactly what the first version of this drew. "Transparent" here
-/// can only mean *the colour of what is behind*, and the caller is the only
-/// one who knows what that is: a checkbox on a selected row sits on a
-/// different colour from one on an ordinary row.
-pub fn checkbox_paints(
-    id: str,
-    checked: bool,
-    accent: int,
-    on_accent: int,
-    outline: int,
-    behind: int,
-) -> [Paint] {
-    let name = "\(checkbox(id)):mark"
-    if checked {
-        return [rounded(name, accent, 2.0), ink_centered("\(checkbox(id)):tick", on_accent)]
-    }
-    return [
-        outlined(name, behind, outline, 2.0, 2.0),
-        ink("\(checkbox(id)):tick", outline),
-    ]
-}
-
-/// Everything a control needs painted, given the theme and what has focus.
-pub fn control_paints(theme: Theme, names: [str], focused: str) -> [Paint] {
-    return control_paints_rounded(theme, names, focused, 0.0)
-}
-
-/// The same, with a corner radius on every control.
-///
-/// Split rather than parameterised in place, because the square version is the
-/// one every existing program calls and a shape argument it never asked for
-/// would be a change to all of them. Which radius belongs on a button is a
-/// design system's business, and this layer has no opinion — it only carries
-/// the number.
-pub fn control_paints_rounded(
-    theme: Theme,
-    names: [str],
-    focused: str,
-    radius: float,
-) -> [Paint] {
-    var out: [Paint] = []
-    for name in names {
-        let background = if name == focused { theme.focus } else { theme.surface }
-        out.push(rounded(name, background, radius))
-        out.push(ink("\(name):caption", theme.ink))
-        out.push(ink("\(name):value", theme.ink))
-        out.push(ink("\(name):tick", theme.ink))
-    }
-    return out
-}
-
-/// The control a point is inside, or nil.
-///
-/// Frames are read last-first by `hit`, so the innermost thing under the
-/// pointer wins — but a control is a box, and what a caller wants is the box
-/// rather than the label inside it. This walks up by name.
-pub fn control_at(frames: [Frame], x: float, y: float) -> Option<str> {
-    let found = hit(frames, x, y)
-    if found == nil {
-        return nil
-    }
-    let name = found.name
-    // `button:save:caption` is part of `button:save`.
-    let at = name.index_of(":")
-    if at < 0 {
-        return nil
-    }
-    let rest = name.slice(at + 1, name.len())
-    let inner = rest.index_of(":")
-    if inner < 0 {
-        return name
-    }
-    return name.slice(0, at + 1 + inner)
 }
 
 /// The next control in focus order, wrapping at the end.

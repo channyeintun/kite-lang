@@ -1,0 +1,802 @@
+use std/ui
+
+// Material Design 3's components, as functions returning decorated nodes.
+//
+// A component here is a **function that returns a node**. There is no component
+// object, no internal state, and nowhere to hide one — Kite has no mutable
+// globals, so a component that remembered something would have to be handed it,
+// and the application's model is what it would be handed.
+//
+// Every one takes the `Scheme` rather than reading a global, and every
+// interactive one takes an `id` from the caller rather than inventing one. Both
+// are deliberate: a package that invented ids would collide with an
+// application's, and a package that read a global theme could not be used twice
+// on one screen with two schemes.
+//
+// ---- what is here and what is not -------------------------------------------
+//
+// Material specifies its components in terms of shape, colour role, type role,
+// state layer, and elevation. Four of those five survive Kite's drawing
+// boundary intact and are implemented exactly. Elevation's *shadow* does not
+// and cannot: a shadow is a soft alpha gradient, and the boundary has neither
+// softness nor alpha. Material 3's own answer for dark themes is tonal — a
+// raised surface is a lighter container colour, not a shadow — and that is what
+// these do at every level. It is Material's rule rather than a substitute for
+// it, and what is lost is a drop shadow under a light-theme card.
+//
+// Icons are the other absence. Material Symbols is a font, and a font is not
+// something a package can carry; where a component wants an icon it takes the
+// glyph as a `str`, so a caller can pass a Unicode symbol today and a real icon
+// font later without any of this changing.
+
+// ---- state -------------------------------------------------------------------
+//
+// Material's state layers — hover, focus, press — are an on-colour drawn over
+// the container at 8% or 10%. With no alpha they are computed instead of drawn,
+// which produces the same pixel because what they cover is a known flat colour.
+// `tokens.kite` has the arithmetic; this decides which of them applies.
+
+pub struct State {
+    pub hovered: bool
+    pub focused: bool
+    pub pressed: bool
+    pub selected: bool
+    pub disabled: bool
+}
+
+pub fn rest() -> State {
+    return State{
+        hovered: false,
+        focused: false,
+        pressed: false,
+        selected: false,
+        disabled: false,
+    }
+}
+
+/// The common case: a control that is or is not the focused one.
+pub fn when_focused(is_focused: bool) -> State {
+    return State{..rest(), focused: is_focused }
+}
+
+pub fn when_selected(is_selected: bool, is_focused: bool) -> State {
+    return State{..rest(), selected: is_selected, focused: is_focused }
+}
+
+/// A container colour with whatever state layer applies laid over it.
+///
+/// Pressed wins over focus, focus over hover, which is Material's own order:
+/// only one layer is ever drawn, and it is the strongest interaction currently
+/// happening.
+pub fn layered(container: int, on_container: int, state: State) -> int {
+    if state.pressed {
+        return pressed(container, on_container)
+    }
+    if state.focused {
+        return focused(container, on_container)
+    }
+    if state.hovered {
+        return hovered(container, on_container)
+    }
+    return container
+}
+
+// ---- buttons -----------------------------------------------------------------
+//
+// The five common buttons, which differ only in container and outline: 40dp
+// tall, full-radius, label-large centred, 24dp of padding either side. Material
+// distinguishes them by emphasis, and emphasis here is entirely a matter of
+// which colour role the container takes.
+
+fn BUTTON_HEIGHT() -> float {
+    return 40.0
+}
+
+fn BUTTON_PADDING() -> float {
+    return 24.0
+}
+
+/// A control that is one centred line inside a fixed box.
+///
+/// No padding: `ui.centered` centres on both axes, so a control that is a
+/// single line in a box of a known size needs no arithmetic to place it. The
+/// first version computed the top inset from the host's line height, which is
+/// the same answer on one font and the wrong one on every other.
+fn centred_body(id: str, caption: str, size: float, weight: int, w: float, h: float, decor: ui.Decor) -> ui.Node {
+    let style = ui.sized(ui.in_font(ui.style(), size, weight), w, h)
+    return ui.control(ui.decorated(ui.text_of(id, style, caption), ui.centered(decor)), id)
+}
+
+fn button_body(id: str, caption: str, decor: ui.Decor) -> ui.Node {
+    let role = label_large()
+    let width = ui.text_size_in(caption, role.size, role.weight).width + BUTTON_PADDING() * 2.0
+    return centred_body(id, caption, role.size, role.weight, width, BUTTON_HEIGHT(), decor)
+}
+
+/// The highest-emphasis button: a filled primary container.
+pub fn filled_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+    if state.disabled {
+        return button_body(
+            id,
+            caption,
+            ui.inked(
+                ui.rounded(disabled_container(s, s.surface), SHAPE_FULL()),
+                disabled_ink(s, s.surface),
+            ),
+        )
+    }
+    let container = layered(s.primary, s.on_primary, state)
+    return button_body(id, caption, ui.inked(ui.rounded(container, SHAPE_FULL()), s.on_primary))
+}
+
+/// A secondary action beside a primary one: the secondary container, filled.
+pub fn tonal_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+    let container = layered(s.secondary_container, s.on_secondary_container, state)
+    return button_body(
+        id,
+        caption,
+        ui.inked(ui.rounded(container, SHAPE_FULL()), s.on_secondary_container),
+    )
+}
+
+/// Medium emphasis: an outline and no fill. The fill is left transparent, so
+/// whatever the button sits on shows through — the painter knows what that is.
+pub fn outlined_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+    var edge = s.outline
+    var width = 1.0
+    if state.focused {
+        edge = s.primary
+        width = 2.0
+    }
+    let base = ui.shaped(ui.no_decor(), SHAPE_FULL())
+    return button_body(id, caption, ui.bordered(ui.inked(base, s.primary), edge, width))
+}
+
+/// The lowest emphasis: a label and nothing else until it is interacted with.
+pub fn text_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+    var decor = ui.inked(ui.shaped(ui.no_decor(), SHAPE_FULL()), s.primary)
+    if state.focused || state.hovered || state.pressed {
+        decor = ui.rounded(layered(s.surface, s.primary, state), SHAPE_FULL())
+        decor = ui.inked(decor, s.primary)
+    }
+    return button_body(id, caption, decor)
+}
+
+/// Filled, but on a raised surface rather than on the accent.
+pub fn elevated_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+    let container = layered(surface_at(s, LEVEL_1()), s.primary, state)
+    return button_body(id, caption, ui.inked(ui.rounded(container, SHAPE_FULL()), s.primary))
+}
+
+// ---- icon button -------------------------------------------------------------
+
+/// A 40dp target around a 24dp glyph. Material's icon button is a circle, which
+/// a full radius on a square gives exactly.
+pub fn icon_button(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
+    let container = layered(s.surface, s.on_surface_variant, state)
+    var decor = ui.inked(ui.rounded(container, SHAPE_FULL()), s.on_surface_variant)
+    if state.selected {
+        decor = ui.inked(ui.rounded(s.primary_container, SHAPE_FULL()), s.on_primary_container)
+    }
+    return centred_body(id, glyph, 20.0, REGULAR(), 40.0, 40.0, decor)
+}
+
+// ---- floating action button --------------------------------------------------
+
+/// 56dp, `large` shape, on the tertiary container — Material's default FAB.
+pub fn fab(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
+    let container = layered(s.primary_container, s.on_primary_container, state)
+    let decor = ui.inked(ui.rounded(container, SHAPE_LARGE()), s.on_primary_container)
+    return centred_body(id, glyph, 24.0, REGULAR(), 56.0, 56.0, decor)
+}
+
+/// The same with a label beside the glyph, for the one action a screen is for.
+pub fn extended_fab(s: Scheme, id: str, glyph: str, caption: str, state: State) -> ui.Node {
+    let role = label_large()
+    let container = layered(s.primary_container, s.on_primary_container, state)
+    let decor = ui.inked(ui.rounded(container, SHAPE_LARGE()), s.on_primary_container)
+    let inner = ui.spaced(
+        ui.padded(
+            ui.sized(ui.Style{..ui.row(), align: ui.Align.Center }, 0.0, 56.0),
+            space(4),
+        ),
+        space(2),
+    )
+    let box = ui.box_of(
+        id,
+        inner,
+        [
+            ui.text_of("\(id)-glyph", ui.in_font(ui.style(), 24.0, REGULAR()), glyph),
+            ui.text_of("\(id)-label", ui.in_font(ui.style(), role.size, role.weight), caption),
+        ],
+    )
+    return ui.control(ui.decorated(box, decor), id)
+}
+
+// ---- selection ---------------------------------------------------------------
+
+pub fn CHECKBOX_SIDE() -> float {
+    return 18.0
+}
+
+/// A checkbox: an 18dp box in a 40dp target, ticked or outlined.
+///
+/// The box is a box, not the characters `[x]`. The tick is a glyph and honestly
+/// so — a check mark is a shape the drawing boundary cannot draw, having neither
+/// strokes nor paths — but the *container* is drawn, and the container is the
+/// part a design system restyles.
+pub fn checkbox(s: Scheme, id: str, caption: str, checked: bool, state: State) -> ui.Node {
+    let side = CHECKBOX_SIDE()
+    var box_decor = ui.bordered(ui.shaped(ui.no_decor(), 2.0), s.on_surface_variant, 2.0)
+    var tick_ink = s.on_surface_variant
+    if checked {
+        box_decor = ui.rounded(s.primary, 2.0)
+        tick_ink = s.on_primary
+    }
+    if state.focused {
+        box_decor = ui.bordered(box_decor, s.primary, 2.0)
+    }
+    let tick = if checked { "✓" } else { "" }
+    let mark = ui.decorated(
+        ui.box_of(
+            "\(id)-box",
+            ui.sized(ui.Style{..ui.column(), align: ui.Align.Center }, side, side),
+            [
+                ui.decorated(
+                    ui.text_of("\(id)-tick", ui.in_font(ui.style(), 13.0, 700), tick),
+                    ui.centered(ui.ink(tick_ink)),
+                ),
+            ],
+        ),
+        box_decor,
+    )
+    return labelled_control(s, id, mark, caption)
+}
+
+/// A radio button. Same target and label as a checkbox; the mark is a ring with
+/// a dot in it, which is two concentric circles and needs no glyph at all.
+pub fn radio(s: Scheme, id: str, caption: str, chosen: bool, state: State) -> ui.Node {
+    let side = 20.0
+    var edge = s.on_surface_variant
+    if chosen {
+        edge = s.primary
+    }
+    if state.focused {
+        edge = s.primary
+    }
+    var children: [ui.Node] = []
+    if chosen {
+        children.push(
+            ui.decorated(
+                ui.box_of("\(id)-dot", ui.sized(ui.style(), 10.0, 10.0), []),
+                ui.rounded(s.primary, SHAPE_FULL()),
+            ),
+        )
+    }
+    let ring = ui.decorated(
+        ui.box_of(
+            "\(id)-ring",
+            ui.Style {
+                ..ui.column(),
+                align: ui.Align.Center,
+                justify: ui.Justify.Center,
+                width: side,
+                height: side,
+            },
+            children,
+        ),
+        ui.bordered(ui.shaped(ui.no_decor(), SHAPE_FULL()), edge, 2.0),
+    )
+    return labelled_control(s, id, ring, caption)
+}
+
+/// A switch: a 52x32 track with a knob at one end.
+pub fn switch(s: Scheme, id: str, caption: str, on: bool, state: State) -> ui.Node {
+    var track = ui.bordered(
+        ui.rounded(s.surface_container_highest, SHAPE_FULL()),
+        s.outline,
+        2.0,
+    )
+    var knob_colour = s.outline
+    var knob = 16.0
+    var lead = ui.Justify.Start
+    if on {
+        track = ui.rounded(s.primary, SHAPE_FULL())
+        knob_colour = s.on_primary
+        knob = 24.0
+        lead = ui.Justify.End
+    }
+    let body = ui.decorated(
+        ui.box_of(
+            "\(id)-track",
+            ui.Style {
+                ..ui.row(),
+                align: ui.Align.Center,
+                justify: lead,
+                width: 52.0,
+                height: 32.0,
+                padding: insets_all(4.0),
+            },
+            [
+                ui.decorated(
+                    ui.box_of("\(id)-knob", ui.sized(ui.style(), knob, knob), []),
+                    ui.rounded(knob_colour, SHAPE_FULL()),
+                ),
+            ],
+        ),
+        track,
+    )
+    return labelled_control(s, id, body, caption)
+}
+
+fn insets_all(v: float) -> ui.Insets {
+    return ui.insets(v)
+}
+
+/// A mark and its label, side by side, as one control.
+fn labelled_control(s: Scheme, id: str, mark: ui.Node, caption: str) -> ui.Node {
+    let role = body_large()
+    var children = [mark]
+    if caption.len() > 0 {
+        children.push(
+            ui.decorated(
+                ui.text_of(
+                    "\(id)-caption",
+                    ui.in_font(ui.style(), role.size, role.weight),
+                    caption,
+                ),
+                ui.ink(s.on_surface),
+            ),
+        )
+    }
+    let box = ui.box_of(
+        id,
+        ui.spaced(
+            ui.padded(ui.Style{..ui.row(), align: ui.Align.Center }, space(2)),
+            space(3),
+        ),
+        children,
+    )
+    return ui.control(box, id)
+}
+
+// ---- chips -------------------------------------------------------------------
+
+/// A filter chip: 32dp, `small` shape, outlined until it is selected.
+pub fn filter_chip(s: Scheme, id: str, caption: str, on: bool, state: State) -> ui.Node {
+    let role = label_large()
+    var decor = ui.bordered(ui.shaped(ui.no_decor(), SHAPE_SMALL()), s.outline, 1.0)
+    var ink = s.on_surface_variant
+    if on {
+        decor = ui.rounded(s.secondary_container, SHAPE_SMALL())
+        ink = s.on_secondary_container
+    }
+    if state.focused {
+        decor = ui.bordered(decor, s.primary, 2.0)
+    }
+    let shown = if on { "✓ \(caption)" } else { caption }
+    let width = ui.text_size_in(shown, role.size, role.weight).width + space(4) * 2.0
+    return centred_body(id, shown, role.size, role.weight, width, 32.0, ui.inked(decor, ink))
+}
+
+/// An assist chip: the same shape, always outlined, for an action rather than a
+/// choice.
+pub fn assist_chip(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+    return filter_chip(s, id, caption, false, state)
+}
+
+// ---- text fields ---------------------------------------------------------------
+
+/// An outlined text field.
+///
+/// Material draws the label floating on the outline when the field has content.
+/// There is no way to interrupt a border at this boundary — a gap in an outline
+/// is a fifth rectangle and a colour match — so the label sits inside, which is
+/// the filled variant's placement and is honest about what it is.
+pub fn outlined_field(
+    s: Scheme,
+    id: str,
+    value: str,
+    placeholder: str,
+    width: float,
+    state: State,
+) -> ui.Node {
+    let role = body_large()
+    var edge = s.outline
+    var thickness = 1.0
+    if state.focused {
+        edge = s.primary
+        thickness = 2.0
+    }
+    let decor = ui.bordered(ui.shaped(ui.no_decor(), SHAPE_EXTRA_SMALL()), edge, thickness)
+    return field_body(s, id, value, placeholder, width, state, decor)
+}
+
+/// A filled text field: a container instead of an outline, with the same
+/// content. Material's default of the two.
+pub fn filled_field(
+    s: Scheme,
+    id: str,
+    value: str,
+    placeholder: str,
+    width: float,
+    state: State,
+) -> ui.Node {
+    var decor = ui.rounded(s.surface_container_highest, SHAPE_EXTRA_SMALL())
+    if state.focused {
+        decor = ui.bordered(decor, s.primary, 2.0)
+    }
+    return field_body(s, id, value, placeholder, width, state, decor)
+}
+
+/// A search field: the same, at full radius, which is what Material's search
+/// bar is.
+pub fn search_field(
+    s: Scheme,
+    id: str,
+    value: str,
+    placeholder: str,
+    width: float,
+    state: State,
+) -> ui.Node {
+    var decor = ui.rounded(s.surface_container_high, SHAPE_FULL())
+    if state.focused {
+        decor = ui.bordered(decor, s.primary, 2.0)
+    }
+    return field_body(s, id, value, placeholder, width, state, decor)
+}
+
+fn field_body(
+    s: Scheme,
+    id: str,
+    value: str,
+    placeholder: str,
+    width: float,
+    state: State,
+    decor: ui.Decor,
+) -> ui.Node {
+    let role = body_large()
+    // An empty field shows its placeholder whether or not it has focus, with
+    // the caret before it — which is what a field looks like the moment it is
+    // clicked, and the alternative is a blank rounded rectangle.
+    var shown = value
+    var ink = s.on_surface
+    if state.focused {
+        shown = "\(value)|"
+    }
+    if value.len() == 0 {
+        shown = if state.focused { "|\(placeholder)" } else { placeholder }
+        ink = s.on_surface_variant
+    }
+    // Horizontal padding only. The line is centred top to bottom by the
+    // painter, which is what puts it in the middle of a 56dp field whatever
+    // the host's line height turns out to be.
+    let boxed = ui.sized(ui.in_font(ui.style(), role.size, role.weight), width, 56.0)
+    let style = ui.Style{..boxed, padding: ui.insets_xy(space(4), 0.0) }
+    let node = ui.text_of(id, style, shown)
+    return ui.control(ui.decorated(node, ui.vertically_centered(ui.inked(decor, ink))), id)
+}
+
+// ---- containers ----------------------------------------------------------------
+
+/// An elevated card. The elevation is tonal, which for a card is a container
+/// colour one step away from the background.
+pub fn elevated_card(name: str, s: Scheme, children: [ui.Node]) -> ui.Node {
+    return card_body(name, children, ui.rounded(surface_at(s, LEVEL_1()), SHAPE_MEDIUM()))
+}
+
+pub fn filled_card(name: str, s: Scheme, children: [ui.Node]) -> ui.Node {
+    return card_body(name, children, ui.rounded(s.surface_container_highest, SHAPE_MEDIUM()))
+}
+
+pub fn outlined_card(name: str, s: Scheme, children: [ui.Node]) -> ui.Node {
+    return card_body(
+        name,
+        children,
+        ui.bordered(ui.rounded(s.surface, SHAPE_MEDIUM()), s.outline_variant, 1.0),
+    )
+}
+
+fn card_body(name: str, children: [ui.Node], decor: ui.Decor) -> ui.Node {
+    let style = ui.spaced(
+        ui.padded(ui.Style{..ui.column(), align: ui.Align.Stretch }, space(4)),
+        space(2),
+    )
+    return ui.decorated(ui.box_of(name, style, children), decor)
+}
+
+/// A hairline between rows. One dp, in the outline-variant role.
+pub fn divider(name: str, s: Scheme) -> ui.Node {
+    return ui.decorated(
+        ui.box_of(name, ui.sized(ui.style(), 0.0, 1.0), []),
+        ui.filled(s.outline_variant),
+    )
+}
+
+// ---- lists ---------------------------------------------------------------------
+
+/// A one-line list item: 56dp, body-large, with an optional leading node.
+pub fn list_item(s: Scheme, id: str, headline: str, leading: [ui.Node], state: State) -> ui.Node {
+    return list_body(s, id, headline, "", leading, 56.0, state)
+}
+
+/// A two-line list item: 72dp, with body-medium supporting text under the
+/// headline. Material's most common list row.
+pub fn list_item_two(
+    s: Scheme,
+    id: str,
+    headline: str,
+    supporting: str,
+    leading: [ui.Node],
+    state: State,
+) -> ui.Node {
+    return list_body(s, id, headline, supporting, leading, 72.0, state)
+}
+
+fn list_body(
+    s: Scheme,
+    id: str,
+    headline: str,
+    supporting: str,
+    leading: [ui.Node],
+    height: float,
+    state: State,
+) -> ui.Node {
+    let head_role = body_large()
+    let support_role = body_medium()
+    var head_ink = s.on_surface
+    var support_ink = s.on_surface_variant
+    var decor = ui.no_decor()
+    if state.selected {
+        // Material marks a selected list item with a full-radius container —
+        // the shape a navigation drawer uses — rather than a tint on the label,
+        // which is what keeps it legible in either scheme.
+        decor = ui.rounded(s.secondary_container, SHAPE_FULL())
+        head_ink = s.on_secondary_container
+        support_ink = s.on_secondary_container
+    } else if state.focused {
+        decor = ui.rounded(focused(s.surface, s.on_surface), SHAPE_FULL())
+    }
+    var lines = [
+        ui.decorated(
+            ui.text_of(
+                "\(id)-headline",
+                ui.in_font(ui.style(), head_role.size, head_role.weight),
+                headline,
+            ),
+            ui.ink(head_ink),
+        ),
+    ]
+    if supporting.len() > 0 {
+        lines.push(
+            ui.decorated(
+                ui.text_of(
+                    "\(id)-supporting",
+                    ui.in_font(ui.style(), support_role.size, support_role.weight),
+                    supporting,
+                ),
+                ui.ink(support_ink),
+            ),
+        )
+    }
+    var children = leading
+    children.push(
+        ui.box_of(
+            "\(id)-text",
+            ui.spaced(ui.grown(ui.Style{..ui.column(), align: ui.Align.Stretch }, 1.0), 2.0),
+            lines,
+        ),
+    )
+    let style = ui.spaced(
+        ui.padded(
+            ui.sized(ui.Style{..ui.row(), align: ui.Align.Center }, 0.0, height),
+            space(3),
+        ),
+        space(3),
+    )
+    return ui.control(ui.decorated(ui.box_of(id, style, children), decor), id)
+}
+
+// ---- navigation ------------------------------------------------------------------
+
+/// A small top app bar: 64dp, title-large, with whatever actions are handed in.
+pub fn top_app_bar(name: str, s: Scheme, title: str, actions: [ui.Node]) -> ui.Node {
+    let role = title_large()
+    var children = [
+        ui.decorated(
+            ui.text_of(
+                "\(name)-title",
+                ui.grown(ui.in_font(ui.style(), role.size, role.weight), 1.0),
+                title,
+            ),
+            ui.ink(s.on_surface),
+        ),
+    ]
+    for action in actions {
+        children.push(action)
+    }
+    let style = ui.spaced(
+        ui.padded(
+            ui.sized(ui.Style{..ui.row(), align: ui.Align.Center }, 0.0, 64.0),
+            space(4),
+        ),
+        space(2),
+    )
+    return ui.decorated(ui.box_of(name, style, children), ui.filled(s.surface))
+}
+
+/// One tab in a primary tab row: a label with a 3dp indicator under the
+/// selected one.
+pub fn tab(s: Scheme, id: str, caption: str, on: bool, state: State) -> ui.Node {
+    let role = title_small()
+    var ink = s.on_surface_variant
+    if on {
+        ink = s.primary
+    }
+    var indicator = ui.decorated(
+        ui.box_of("\(id)-indicator", ui.sized(ui.style(), 0.0, 3.0), []),
+        ui.no_decor(),
+    )
+    if on {
+        indicator = ui.decorated(
+            ui.box_of("\(id)-indicator", ui.sized(ui.style(), 0.0, 3.0), []),
+            ui.rounded(s.primary, 3.0),
+        )
+    }
+    let width = ui.text_size_in(caption, role.size, role.weight).width + space(6) * 2.0
+    let label = ui.decorated(
+        ui.text_of(
+            "\(id)-label",
+            ui.grown(ui.in_font(ui.style(), role.size, role.weight), 1.0),
+            caption,
+        ),
+        ui.centered(ui.ink(ink)),
+    )
+    var decor = ui.no_decor()
+    if state.focused {
+        decor = ui.filled(focused(s.surface, s.primary))
+    }
+    let box = ui.box_of(
+        id,
+        ui.sized(ui.Style{..ui.column(), align: ui.Align.Stretch }, width, 48.0),
+        [label, indicator],
+    )
+    return ui.control(ui.decorated(box, decor), id)
+}
+
+/// One destination in a navigation rail: a glyph in a pill, with a label under.
+pub fn rail_item(s: Scheme, id: str, glyph: str, caption: str, on: bool, state: State) -> ui.Node {
+    let role = label_medium()
+    var pill = ui.no_decor()
+    var glyph_ink = s.on_surface_variant
+    if on {
+        pill = ui.rounded(s.secondary_container, SHAPE_FULL())
+        glyph_ink = s.on_secondary_container
+    } else if state.focused {
+        pill = ui.rounded(focused(s.surface, s.on_surface), SHAPE_FULL())
+    }
+    let icon = ui.decorated(
+        ui.text_of("\(id)-glyph", ui.in_font(ui.style(), 20.0, REGULAR()), glyph),
+        ui.centered(ui.ink(glyph_ink)),
+    )
+    let holder = ui.decorated(
+        ui.box_of(
+            "\(id)-pill",
+            ui.Style {
+                ..ui.column(),
+                align: ui.Align.Stretch,
+                justify: ui.Justify.Center,
+                width: 56.0,
+                height: 32.0,
+            },
+            [icon],
+        ),
+        pill,
+    )
+    let label = ui.decorated(
+        ui.text_of(
+            "\(id)-label",
+            ui.in_font(ui.style(), role.size, role.weight),
+            caption,
+        ),
+        ui.centered(ui.ink(s.on_surface_variant)),
+    )
+    let box = ui.box_of(
+        id,
+        ui.spaced(ui.Style{..ui.column(), align: ui.Align.Center }, space(1)),
+        [holder, label],
+    )
+    return ui.control(box, id)
+}
+
+// ---- feedback ---------------------------------------------------------------------
+
+/// A linear progress indicator: a track with a filled portion, `progress` in
+/// 0..1.
+pub fn linear_progress(name: str, s: Scheme, progress: float, width: float) -> ui.Node {
+    var fraction = progress
+    if fraction < 0.0 {
+        fraction = 0.0
+    }
+    if fraction > 1.0 {
+        fraction = 1.0
+    }
+    let filled_width = width * fraction
+    let bar = ui.decorated(
+        ui.box_of("\(name)-bar", ui.sized(ui.style(), filled_width, 4.0), []),
+        ui.rounded(s.primary, SHAPE_FULL()),
+    )
+    return ui.decorated(
+        ui.box_of(
+            name,
+            ui.Style {..ui.row(), align: ui.Align.Center, width: width, height: 4.0 },
+            [bar],
+        ),
+        ui.rounded(s.surface_container_highest, SHAPE_FULL()),
+    )
+}
+
+/// A badge: a small count on a container, in the error role, which is what
+/// Material uses to mark something needing attention.
+pub fn badge(name: str, s: Scheme, count: str) -> ui.Node {
+    let role = label_small()
+    let width = ui.text_size_in(count, role.size, role.weight).width + space(2) * 2.0
+    let node = ui.text_of(
+        name,
+        ui.sized(ui.in_font(ui.style(), role.size, role.weight), width, 16.0),
+        count,
+    )
+    return ui.decorated(node, ui.centered(ui.inked(ui.rounded(s.error, SHAPE_FULL()), s.on_error)))
+}
+
+/// A snackbar: a raised container with a message and an optional action.
+pub fn snackbar(name: str, s: Scheme, message: str, action: [ui.Node]) -> ui.Node {
+    let role = body_medium()
+    var children = [
+        ui.decorated(
+            ui.text_of(
+                "\(name)-message",
+                ui.grown(ui.in_font(ui.style(), role.size, role.weight), 1.0),
+                message,
+            ),
+            ui.ink(s.inverse_on_surface),
+        ),
+    ]
+    for one in action {
+        children.push(one)
+    }
+    let style = ui.spaced(
+        ui.padded(
+            ui.sized(ui.Style{..ui.row(), align: ui.Align.Center }, 0.0, 48.0),
+            space(4),
+        ),
+        space(2),
+    )
+    return ui.decorated(
+        ui.box_of(name, style, children),
+        ui.rounded(s.inverse_surface, SHAPE_EXTRA_SMALL()),
+    )
+}
+
+// ---- editing -------------------------------------------------------------------
+
+/// A keystroke applied to a field's value.
+///
+/// It lives here rather than in the core because what a key does to a text
+/// field is the field's behaviour, and the field is this package's component.
+/// A design system that wanted different editing — a formatter that groups
+/// digits, an input mask — would write its own and the core would not care.
+pub fn typed(value: str, key: str) -> str {
+    if key == "Backspace" {
+        if value.len() == 0 {
+            return value
+        }
+        return value.slice(0, value.len() - 1)
+    }
+    // Anything the host names rather than spells is a key this does not
+    // handle: `ArrowLeft` is not four characters of input.
+    if key.len() != 1 {
+        return value
+    }
+    return value + key
+}

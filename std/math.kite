@@ -61,6 +61,25 @@ pub fn round(x: float) -> float {
     return floor(x + 0.5)
 }
 
+/// A float as an `int`, rounded to nearest.
+///
+/// A bare `x as int` warns, and rightly: it truncates towards zero, which is
+/// almost never what code that measured something meant. Saying `round_to` is
+/// saying *which* rounding was intended, and is the escape hatch that makes
+/// keeping the warning worthwhile — without one, every program that has to
+/// produce an integer from a measurement has to ignore a warning to do it.
+pub fn round_to(x: float) -> int {
+    return round(x) as int
+}
+
+/// A float as an `int`, truncated towards zero — the cast, named.
+///
+/// Same purpose as [`round_to`]: the bare cast warns because it is usually a
+/// mistake, and a caller who means it says which rounding they meant.
+pub fn trunc_to(x: float) -> int {
+    return x as int
+}
+
 /// The square root, by Newton's method.
 ///
 /// Written in Kite rather than reached for from the host: a host call is a

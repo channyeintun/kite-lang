@@ -1,0 +1,234 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>player</title>
+<style>
+  html, body { height: 100%; }
+  body { margin: 0; background: #0b0d10; color: #8b97a8; display: flex;
+         flex-direction: column;
+         font: 13px Roboto, "Helvetica Neue", "Segoe UI", system-ui, sans-serif; }
+  header { display: flex; gap: 8px; align-items: center; padding: 8px 12px;
+            border-bottom: 1px solid #1f232b; flex: none; }
+  header strong { font-weight: 500; letter-spacing: .01em; margin-right: 4px; }
+  button { font: inherit; color: inherit; background: transparent; cursor: pointer;
+            border: 1px solid #2a2f3a; border-radius: 999px; padding: 4px 12px; }
+  button[aria-pressed="true"] { background: #c9d1dc; border-color: #c9d1dc; color: #0b0d10; }
+  main { flex: 1; min-height: 0; display: flex; }
+  #stage { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+  pre { margin: 0; white-space: pre-wrap; padding: 12px;
+         font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #announcer { position: absolute; width: 1px; height: 1px; overflow: hidden;
+                clip-path: inset(50%); white-space: nowrap; }
+  #typing { position: absolute; opacity: 0; pointer-events: none; width: 1px; }
+</style>
+
+<header>
+  <strong>player</strong>
+  <button id="dom" aria-pressed="true">DOM</button>
+  <button id="canvas" aria-pressed="false">canvas</button>
+  <button id="text" aria-pressed="false">text</button>
+</header>
+
+<main>
+  <div id="stage"></div>
+  <div id="announcer" role="region" aria-live="polite" aria-label="drawing"></div>
+  <input id="typing" aria-hidden="true" tabindex="-1">
+</main>
+
+<script type="module">
+  import { instantiate, setRenderer, setWriter, isApplication, setMeasure,
+            setLineHeight, fontMeasure, fontLineHeight, FONT, setAnnouncer,
+            EVENT_CLICK, EVENT_KEY, EVENT_WHEEL, EVENT_MOVE, EVENT_DOWN,
+            EVENT_UP, EVENT_RESIZE, EVENT_FRAME, str, recordingRenderer, replay, diffFrames,
+            damageOf, domRenderer, canvasRenderer, textRenderer } from "./app.js";
+
+  setMeasure(fontMeasure());
+  setLineHeight(fontLineHeight());
+
+  const stage = document.getElementById("stage");
+  const announcer = document.getElementById("announcer");
+  const typing = document.getElementById("typing");
+  let currentRenderer = textRenderer;
+  const buttons = {
+    dom: document.getElementById("dom"),
+    canvas: document.getElementById("canvas"),
+    text: document.getElementById("text"),
+  };
+
+  const exports = await instantiate("./app.wasm");
+  const interactive = isApplication(exports);
+  let model = interactive ? exports.init() : null;
+  let mode = "dom";
+
+  function mount(which) {
+    stage.replaceChildren();
+    setAnnouncer(which === "canvas" ? announcer : null);
+    if (which === "text") {
+    }
+    if (which === "canvas") {
+      const canvas = document.createElement("canvas");
+      const scale = window.devicePixelRatio || 1;
+      const box = stage.getBoundingClientRect();
+      canvas.width = Math.max(1, Math.round(box.width * scale));
+      canvas.height = Math.max(1, Math.round(box.height * scale));
+      canvas.style.width = box.width + "px";
+      canvas.style.height = box.height + "px";
+      stage.appendChild(canvas);
+      const ctx = canvas.getContext("2d");
+      ctx.scale(scale, scale);
+      currentRenderer = canvasRenderer(ctx);
+    } else if (which === "text") {
+      const pre = document.createElement("pre");
+      stage.appendChild(pre);
+      setWriter((line) => { pre.textContent += line + "\n"; });
+      currentRenderer = {
+        ...textRenderer,
+        rebuild: (calls) => {
+          pre.textContent = "";
+          replay(calls, textRenderer);
+        },
+      };
+    } else {
+      currentRenderer = domRenderer(stage);
+    }
+  }
+
+  let lastFrame = null;
+
+  function draw(force) {
+    const recorder = recordingRenderer();
+    setRenderer(recorder);
+    if (interactive) {
+      exports.view(model);
+    } else {
+      exports.main();
+    }
+    const next = recorder.calls;
+    const diff = diffFrames(force ? null : lastFrame, next);
+    if (diff.same) return;
+
+    if (!force && diff.patchable && currentRenderer.patch) {
+      currentRenderer.patch(lastFrame, next, diff);
+    } else if (!force && lastFrame !== null && currentRenderer.damage) {
+      const rects = damageOf(lastFrame, next, diff);
+      if (rects === null) {
+        currentRenderer.rebuild(next);
+      } else {
+        currentRenderer.damage(next, rects);
+      }
+    } else {
+      currentRenderer.rebuild(next);
+    }
+    lastFrame = next;
+  }
+
+  function show(which) {
+    mode = which;
+    for (const [name, button] of Object.entries(buttons)) {
+      button.setAttribute("aria-pressed", String(name === which));
+    }
+    mount(which);
+    draw(true);
+  }
+
+  function send(kind, x, y, key) {
+    if (!interactive) return;
+    model = exports.update(model, kind, x, y, str(key));
+    draw(false);
+    wake();
+  }
+
+  let ticking = false;
+  let lastTick = 0;
+
+  function tick(now) {
+    if (!interactive) {
+      ticking = false;
+      return;
+    }
+    const elapsed = lastTick === 0 ? 0 : now - lastTick;
+    lastTick = now;
+    const next = exports.update(model, EVENT_FRAME, elapsed, 0, str(""));
+    if (next === model) {
+      ticking = false;
+      lastTick = 0;
+      return;
+    }
+    model = next;
+    draw(false);
+    requestAnimationFrame(tick);
+  }
+
+  function wake() {
+    if (!interactive || ticking) return;
+    ticking = true;
+    lastTick = 0;
+    requestAnimationFrame(tick);
+  }
+
+  const at = (e) => {
+    const box = stage.getBoundingClientRect();
+    return [e.clientX - box.left, e.clientY - box.top];
+  };
+
+  stage.addEventListener("click", (e) => {
+    const [x, y] = at(e);
+    send(EVENT_CLICK, x, y, "");
+    if (mode === "canvas") {
+      typing.style.left = x + "px";
+      typing.style.top = y + "px";
+      typing.focus({ preventScroll: true });
+    }
+  });
+
+  stage.addEventListener("pointermove", (e) => {
+    const [x, y] = at(e);
+    send(EVENT_MOVE, x, y, "");
+  });
+  stage.addEventListener("pointerdown", (e) => {
+    const [x, y] = at(e);
+    send(EVENT_DOWN, x, y, "");
+  });
+  stage.addEventListener("pointerup", (e) => {
+    const [x, y] = at(e);
+    send(EVENT_UP, x, y, "");
+  });
+
+  typing.addEventListener("input", () => {
+    for (const character of typing.value) {
+      send(EVENT_KEY, 0, 0, character);
+    }
+    typing.value = "";
+  });
+
+  function measured() {
+    const box = stage.getBoundingClientRect();
+    send(EVENT_RESIZE, box.width, box.height, "");
+  }
+
+  window.addEventListener("resize", () => {
+    if (mode === "canvas") mount("canvas");
+    measured();
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (!interactive || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.target !== document.body) return;
+    const before = model;
+    send(EVENT_KEY, 0, 0, e.key);
+    if (model !== before) e.preventDefault();
+  });
+
+  stage.addEventListener("wheel", (e) => {
+    if (!interactive) return;
+    const before = model;
+    send(EVENT_WHEEL, e.deltaX, e.deltaY, "");
+    if (model !== before) e.preventDefault();
+  }, { passive: false });
+
+  for (const [name, button] of Object.entries(buttons)) {
+    button.addEventListener("click", () => show(name));
+  }
+  show("dom");
+  measured();
+  wake();
+</script>
