@@ -223,7 +223,28 @@ const showBool = (v) => (v ? "true" : "false");
 // something went, because neither decides.
 
 const hex = (colour) => '#' + (colour >>> 0).toString(16).padStart(6, '0');
-export const FONT = '16px ui-monospace, monospace';
+// The host's font, and the only place it is decided. A Kite program never
+// names a font: it asks `text.width` how wide a run is and places it, so the
+// answer here changes what a layout *measures* as well as what it looks like.
+// A proportional face is the honest default — it is what an application is set
+// in — and a monospace one was only ever convenient for lining up the text
+// renderer's output, which does not use this at all.
+export const FAMILY = 'Roboto, "Helvetica Neue", "Segoe UI", system-ui, sans-serif';
+export const NOMINAL_SIZE = 16;
+
+// The font `draw.font` last selected. State on the host, because that is what
+// the boundary says it is — and it governs measurement as well as drawing, so
+// a run laid out at 22dp is not painted at 16.
+export let fontSize = NOMINAL_SIZE;
+export let fontWeight = 400;
+export const fontCss = () => fontWeight + ' ' + fontSize + 'px ' + FAMILY;
+export function setFont(size, weight) {{
+  fontSize = size;
+  fontWeight = weight;
+}}
+
+// The default font, for everything that has not asked for another.
+export const FONT = fontCss();
 
 // The default: describe each call. Useful under Node, and the same text the
 // bytecode VM writes, so the two backends can be compared without a browser.
@@ -235,8 +256,15 @@ export const textRenderer = {{
       'rect ' + showFloat(x) + ' ' + showFloat(y) + ' ' +
       showFloat(w) + ' ' + showFloat(h) + ' ' + colour,
     ),
+  rrect: (x, y, w, h, r, colour) =>
+    write(
+      'rrect ' + showFloat(x) + ' ' + showFloat(y) + ' ' +
+      showFloat(w) + ' ' + showFloat(h) + ' ' + showFloat(r) + ' ' + colour,
+    ),
   text: (x, y, body, colour) =>
     write('text ' + showFloat(x) + ' ' + showFloat(y) + ' ' + body + ' ' + colour),
+  font: (size, weight) =>
+    write('font ' + showFloat(size) + ' ' + weight),
   clip: (x, y, w, h) =>
     write(
       'clip ' + showFloat(x) + ' ' + showFloat(y) + ' ' +
@@ -298,10 +326,19 @@ export function domRenderer(container) {{
       el.style.height = h + 'px';
       el.style.background = hex(colour);
     }},
+    rrect: (x, y, w, h, r, colour) => {{
+      const el = place(take(), x, y);
+      el.setAttribute('aria-hidden', 'true');
+      el.style.width = w + 'px';
+      el.style.height = h + 'px';
+      el.style.background = hex(colour);
+      // The one thing a rounded rectangle needs that a square one does not.
+      el.style.borderRadius = r + 'px';
+    }},
     text: (x, y, body, colour) => {{
       const el = place(take(), x, y);
       el.style.color = hex(colour);
-      el.style.font = FONT;
+      el.style.font = fontCss();
       el.style.whiteSpace = 'pre';
       // A drawing call carries no direction, so a single-direction run
       // re-derives its own from its first strong character — rule P2 again.
@@ -368,6 +405,11 @@ export function domRenderer(container) {{
           el.style.width = call[3] + 'px';
           el.style.height = call[4] + 'px';
           el.style.background = hex(call[5]);
+        }} else if (call[0] === 'R') {{
+          el.style.width = call[3] + 'px';
+          el.style.height = call[4] + 'px';
+          el.style.borderRadius = call[5] + 'px';
+          el.style.background = hex(call[6]);
         }} else if (call[0] === 't') {{
           el.style.color = hex(call[4]);
           el.style.direction = firstStrongRtl(call[3]) ? 'rtl' : 'ltr';
@@ -425,11 +467,34 @@ export function canvasRenderer(ctx) {{
       ctx.fillStyle = hex(colour);
       ctx.fillRect(x, y, w, h);
     }},
+    rrect: (x, y, w, h, r, colour) => {{
+      ctx.fillStyle = hex(colour);
+      // Clamped to half the shorter side, which is what turns a radius past
+      // that into a pill rather than into a shape the path builder refuses.
+      const radius = Math.max(0, Math.min(r, Math.min(w, h) / 2));
+      ctx.beginPath();
+      if (ctx.roundRect) {{
+        ctx.roundRect(x, y, w, h, radius);
+      }} else {{
+        // Four arcs and four edges: the same shape, for a context without
+        // `roundRect`. A renderer that silently drew square corners here would
+        // disagree with the DOM one about the picture.
+        ctx.moveTo(x + radius, y);
+        ctx.arcTo(x + w, y, x + w, y + h, radius);
+        ctx.arcTo(x + w, y + h, x, y + h, radius);
+        ctx.arcTo(x, y + h, x, y, radius);
+        ctx.arcTo(x, y, x + w, y, radius);
+      }}
+      ctx.closePath();
+      ctx.fill();
+    }},
     text: (x, y, body, colour) => {{
       announce(body);
-      if (atlas && atlas.text(x, y, body, colour)) return;
+      // The atlas caches tiles keyed by glyph, so it is only safe while the
+      // font it was built for is the one in force.
+      if (fontCss() === FONT && atlas && atlas.text(x, y, body, colour)) return;
       ctx.fillStyle = hex(colour);
-      ctx.font = FONT;
+      ctx.font = fontCss();
       ctx.textBaseline = 'top';
       // The anchor stays the left edge whichever way the run reads — the
       // layout computed an x, not an alignment.
@@ -638,7 +703,7 @@ function defaultTileMaker(font, scale) {{
     const left = Math.ceil(Math.max(0, m.actualBoundingBoxLeft)) + 1;
     const top = Math.ceil(Math.max(0, m.actualBoundingBoxAscent ?? 0)) + 1;
     const w = left + Math.ceil(Math.max(m.actualBoundingBoxRight, m.width)) + 2;
-    const h = top + Math.ceil(Math.max(0, m.actualBoundingBoxDescent ?? lineHeight)) + 2;
+    const h = top + Math.ceil(Math.max(0, m.actualBoundingBoxDescent ?? lineHeight())) + 2;
     const tile = document.createElement('canvas');
     tile.width = Math.max(1, Math.ceil(w * scale));
     tile.height = Math.max(1, Math.ceil(h * scale));
@@ -722,7 +787,8 @@ export function glyphAtlas(ctx, font = FONT, makeTile = null) {{
 // comparable across backends under test. A page that draws installs a real
 // measurer and gets numbers that match what it will actually paint.
 const NOMINAL_ADVANCE = 8;
-export let measure = (body) => [...body].length * NOMINAL_ADVANCE;
+export let measure = (body) =>
+  [...body].length * NOMINAL_ADVANCE * (fontSize / NOMINAL_SIZE);
 
 export function setMeasure(fn) {{
   measure = fn;
@@ -731,32 +797,38 @@ export function setMeasure(fn) {{
 // What one line of text occupies: ascent plus descent plus leading. A canvas
 // reports the first two, and the third is what the difference between them and
 // the em box amounts to.
-export let lineHeight = 16;
+// A function rather than a number, because the font it describes can change
+// between one run of text and the next.
+export let lineHeight = () => NOMINAL_SIZE * (fontSize / NOMINAL_SIZE);
 
-export function setLineHeight(v) {{
-  lineHeight = v;
+export function setLineHeight(fn) {{
+  lineHeight = fn;
 }}
 
 /// Measure with a canvas, in the font the renderers draw with. A canvas is
 /// used even for the DOM renderer: `measureText` is the same shaping the
 /// browser applies to a text node, and it costs no layout.
-export function fontMeasure(font) {{
+export function fontMeasure() {{
   const ctx = document.createElement('canvas').getContext('2d');
-  ctx.font = font;
-  return (body) => ctx.measureText(body).width;
+  return (body) => {{
+    ctx.font = fontCss();
+    return ctx.measureText(body).width;
+  }};
 }}
 
 /// The font's own line height, from the metrics a canvas reports. Falling back
 /// to the nominal value matters: `fontBoundingBox*` is not universal, and a
 /// layout that produced `NaN` would place everything at zero.
-export function fontLineHeight(font) {{
+export function fontLineHeight() {{
   const ctx = document.createElement('canvas').getContext('2d');
-  ctx.font = font;
-  const m = ctx.measureText('Mg');
-  const ascent = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent;
-  const descent = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent;
-  const height = (ascent ?? 0) + (descent ?? 0);
-  return Number.isFinite(height) && height > 0 ? height : 16;
+  return () => {{
+    ctx.font = fontCss();
+    const m = ctx.measureText('Mg');
+    const ascent = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent;
+    const descent = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent;
+    const height = (ascent ?? 0) + (descent ?? 0);
+    return Number.isFinite(height) && height > 0 ? height : fontSize;
+  }};
 }}
 
 export let renderer = textRenderer;
@@ -788,11 +860,16 @@ function imports() {{
       str_compare: (a, b) =>
         S(a) < S(b) ? -1n : S(a) > S(b) ? 1n : 0n,
       draw_rect: (x, y, w, h, colour) => renderer.rect(x, y, w, h, Number(colour)),
+      draw_rrect: (x, y, w, h, r, colour) => renderer.rrect(x, y, w, h, r, Number(colour)),
       draw_text: (x, y, i, colour) => renderer.text(x, y, S(i), Number(colour)),
       draw_clip: (x, y, w, h) => renderer.clip(x, y, w, h),
       draw_unclip: () => renderer.unclip(),
       measure_text: (i) => measure(S(i)),
-      line_height: () => lineHeight,
+      line_height: () => lineHeight(),
+      draw_font: (size, weight) => {{
+        setFont(size, Number(weight));
+        if (renderer.font) renderer.font(size, Number(weight));
+      }},
       // Kite counts characters, JavaScript counts UTF-16 code units, so each
       // of these goes through `[...s]` rather than indexing the string.
       str_slice: (i, from, to) => {{
@@ -853,10 +930,24 @@ function imports() {{
 /// program describes and the work the host does are two different things.
 export function recordingRenderer() {{
   const calls = [];
+  // The font is host *state*, and a damage repaint replays only the calls
+  // inside the dirty rectangle. A recorded `font` call would therefore be
+  // skipped as often as not, and the run after it drawn in whatever font the
+  // last full frame happened to leave behind. Stamping every run of text with
+  // the font in force when it was recorded is what makes any subset of the
+  // recording replayable on its own — which is the property the whole scene
+  // graph rests on.
+  let size = NOMINAL_SIZE;
+  let weight = 400;
   return {{
     calls,
     rect: (x, y, w, h, colour) => calls.push(['r', x, y, w, h, colour]),
-    text: (x, y, body, colour) => calls.push(['t', x, y, body, colour]),
+    rrect: (x, y, w, h, r, colour) => calls.push(['R', x, y, w, h, r, colour]),
+    font: (s, w) => {{
+      size = s;
+      weight = w;
+    }},
+    text: (x, y, body, colour) => calls.push(['t', x, y, body, colour, size, weight]),
     clip: (x, y, w, h) => calls.push(['c', x, y, w, h]),
     unclip: () => calls.push(['u']),
   }};
@@ -864,10 +955,27 @@ export function recordingRenderer() {{
 
 /// Replay recorded calls into a real renderer.
 export function replay(calls, renderer) {{
+  // Only on a change, so a replay makes the same sequence of font calls the
+  // program made rather than one per run of text — and it starts at the host's
+  // default rather than at nothing, so replaying a picture that never changed
+  // the font emits no font call at all, exactly as the program did.
+  let size = NOMINAL_SIZE;
+  let weight = 400;
   for (const call of calls) {{
     if (call[0] === 'r') renderer.rect(call[1], call[2], call[3], call[4], call[5]);
-    else if (call[0] === 't') renderer.text(call[1], call[2], call[3], call[4]);
-    else if (call[0] === 'c') renderer.clip(call[1], call[2], call[3], call[4]);
+    else if (call[0] === 'R')
+      renderer.rrect(call[1], call[2], call[3], call[4], call[5], call[6]);
+    else if (call[0] === 't') {{
+      const want = call[5] ?? NOMINAL_SIZE;
+      const wantWeight = call[6] ?? 400;
+      if (want !== size || wantWeight !== weight) {{
+        size = want;
+        weight = wantWeight;
+        setFont(size, weight);
+        if (renderer.font) renderer.font(size, weight);
+      }}
+      renderer.text(call[1], call[2], call[3], call[4]);
+    }} else if (call[0] === 'c') renderer.clip(call[1], call[2], call[3], call[4]);
     else renderer.unclip();
   }}
 }}
@@ -909,8 +1017,21 @@ export function sameFrame(a, b) {{
 /// rectangle for a run of text is the rectangle the run was laid out into and
 /// not a guess about it.
 export function callBounds(call) {{
-  if (call[0] === 'r') return [call[1], call[2], call[3], call[4]];
-  if (call[0] === 't') return [call[1], call[2], measure(call[3]), lineHeight];
+  if (call[0] === 'r' || call[0] === 'R') return [call[1], call[2], call[3], call[4]];
+  if (call[0] === 't') {{
+    // Measured in the font the run was recorded in, not in whatever font is
+    // current: a damaged rectangle computed against the wrong size would be
+    // the wrong rectangle, and the repaint would leave a strip behind.
+    const size = fontSize;
+    const weight = fontWeight;
+    // A call with no font on it is one from before there was a font to put
+    // there, and it means the default — never `undefined`, which would make
+    // every measurement `NaN` and every damage rectangle empty.
+    setFont(call[5] ?? NOMINAL_SIZE, call[6] ?? 400);
+    const box = [call[1], call[2], measure(call[3]), lineHeight()];
+    setFont(size, weight);
+    return box;
+  }}
   return null;
 }}
 
@@ -1542,16 +1663,25 @@ pub fn generate_page(title: &str) -> String {
 <meta charset="utf-8">
 <title>{title}</title>
 <style>
-  body {{ margin: 0; background: #0b0d10; color: #c9d1dc;
-         font: 14px ui-monospace, SFMono-Regular, Menlo, monospace; }}
-  header {{ display: flex; gap: 12px; align-items: center; padding: 10px 14px;
-            border-bottom: 1px solid #1f232b; }}
-  button {{ font: inherit; color: inherit; background: #1a1e25; cursor: pointer;
-            border: 1px solid #2a2f3a; border-radius: 4px; padding: 4px 10px; }}
-  button[aria-pressed="true"] {{ background: #3b82f6; border-color: #3b82f6; color: #fff; }}
-  main {{ padding: 14px; }}
-  #stage {{ width: 640px; height: 360px; position: relative; }}
-  pre {{ margin: 0; white-space: pre-wrap; }}
+  /* The page around the program, kept deliberately plain: everything with a
+     colour in it is drawn by the module, and chrome that competed with it
+     would be chrome pretending to be the demonstration. */
+  html, body {{ height: 100%; }}
+  body {{ margin: 0; background: #0b0d10; color: #8b97a8; display: flex;
+         flex-direction: column;
+         font: 13px Roboto, "Helvetica Neue", "Segoe UI", system-ui, sans-serif; }}
+  header {{ display: flex; gap: 8px; align-items: center; padding: 8px 12px;
+            border-bottom: 1px solid #1f232b; flex: none; }}
+  header strong {{ font-weight: 500; letter-spacing: .01em; margin-right: 4px; }}
+  button {{ font: inherit; color: inherit; background: transparent; cursor: pointer;
+            border: 1px solid #2a2f3a; border-radius: 999px; padding: 4px 12px; }}
+  button[aria-pressed="true"] {{ background: #c9d1dc; border-color: #c9d1dc; color: #0b0d10; }}
+  main {{ flex: 1; min-height: 0; display: flex; }}
+  /* The program is given the whole area and told how big it is. A fixed box
+     in the corner of a large window is not what an application looks like. */
+  #stage {{ flex: 1; min-height: 0; position: relative; overflow: hidden; }}
+  pre {{ margin: 0; white-space: pre-wrap; padding: 12px;
+         font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }}
   /* The parallel tree for the canvas renderer: read by a screen reader,
      invisible to everyone else. `display: none` would hide it from both. */
   #announcer {{ position: absolute; width: 1px; height: 1px; overflow: hidden;
@@ -1583,8 +1713,9 @@ pub fn generate_page(title: &str) -> String {
             damageOf, domRenderer, canvasRenderer, textRenderer }} from "./app.js";
 
   // Measure in the font that will be drawn, before anything is laid out.
-  setMeasure(fontMeasure(FONT));
-  setLineHeight(fontLineHeight(FONT));
+  // Measurement and line height both follow whatever `draw.font` last chose.
+  setMeasure(fontMeasure());
+  setLineHeight(fontLineHeight());
 
   const stage = document.getElementById("stage");
   const announcer = document.getElementById("announcer");
@@ -1616,10 +1747,11 @@ pub fn generate_page(title: &str) -> String {
     if (which === "canvas") {{
       const canvas = document.createElement("canvas");
       const scale = window.devicePixelRatio || 1;
-      canvas.width = 640 * scale;
-      canvas.height = 360 * scale;
-      canvas.style.width = "640px";
-      canvas.style.height = "360px";
+      const box = stage.getBoundingClientRect();
+      canvas.width = Math.max(1, Math.round(box.width * scale));
+      canvas.height = Math.max(1, Math.round(box.height * scale));
+      canvas.style.width = box.width + "px";
+      canvas.style.height = box.height + "px";
       stage.appendChild(canvas);
       const ctx = canvas.getContext("2d");
       ctx.scale(scale, scale);
@@ -1779,9 +1911,17 @@ pub fn generate_page(title: &str) -> String {
     typing.value = "";
   }});
 
-  window.addEventListener("resize", () => {{
+  // A program is told how big it is before it first draws, not only when the
+  // window changes: an application that only learned its size on a resize
+  // would lay its first frame out against a guess.
+  function measured() {{
     const box = stage.getBoundingClientRect();
     send(EVENT_RESIZE, box.width, box.height, "");
+  }}
+
+  window.addEventListener("resize", () => {{
+    if (mode === "canvas") mount("canvas");
+    measured();
   }});
 
   // Keys go to the document rather than the stage: a div is not focusable, and
@@ -1808,6 +1948,8 @@ pub fn generate_page(title: &str) -> String {
     button.addEventListener("click", () => show(name));
   }}
   show("dom");
+  // The size, once the stage has one. `show` mounted it, so the box is real.
+  measured();
   // An application that animates from the first frame starts here; a static one
   // stops after a single comparison.
   wake();

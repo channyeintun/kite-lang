@@ -409,6 +409,10 @@ pub enum Builtin {
     IoPrint,
     /// `draw.rect(x, y, w, h, colour)`
     DrawRect,
+    /// `draw.rrect(x, y, w, h, radius, colour)` — a rounded rectangle, which
+    /// no amount of square ones adds up to.
+    DrawRRect,
+    DrawFont,
     /// `draw.text(x, y, body, colour)`
     DrawText,
     /// `text.width(body)` — a host call, because only the host has the font.
@@ -443,6 +447,8 @@ impl Builtin {
         match self {
             Builtin::IoPrint => "io.print",
             Builtin::DrawRect => "draw.rect",
+            Builtin::DrawRRect => "draw.rrect",
+            Builtin::DrawFont => "draw.font",
             Builtin::DrawText => "draw.text",
             Builtin::TextWidth => "text.width",
             Builtin::TextHeight => "text.height",

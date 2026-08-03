@@ -373,6 +373,7 @@ pub fn run_with_host<'a>(
         floor: 0,
         result: Value::Unit,
         host,
+        font_scale: 1.0,
     };
     vm.execute(entry)?;
     // `main` returning is not the program ending: a task it started is still
@@ -416,6 +417,7 @@ pub fn run_function(chunk: &Chunk, name: &str, out: &mut dyn Write) -> Result<Va
         floor: 0,
         result: Value::Unit,
         host: None,
+        font_scale: 1.0,
     };
     vm.execute(index)?;
     vm.drive()?;
@@ -452,6 +454,11 @@ struct Vm<'a> {
     result: Value,
     /// What answers a call across the host boundary, if anything does.
     host: Option<&'a mut dyn Host>,
+    /// The font `draw.font` last selected, as a multiple of the nominal size.
+    /// A backend with no font at all still has to *scale* with one, or a
+    /// layout measured at 22dp here and at 22dp in a browser would disagree
+    /// about everything but the default.
+    font_scale: f64,
 }
 
 /// What a program's `extern` declarations reach.
@@ -1388,6 +1395,30 @@ impl<'a> Vm<'a> {
                 );
                 Ok(Value::Unit)
             }
+            Native::DrawRRect => {
+                let a = |i: usize| self.regs[base + arg_base as usize + i].clone();
+                let _ = writeln!(
+                    self.out,
+                    "rrect {} {} {} {} {} {}",
+                    a(0),
+                    a(1),
+                    a(2),
+                    a(3),
+                    a(4),
+                    a(5)
+                );
+                Ok(Value::Unit)
+            }
+            Native::DrawFont => {
+                let a = |i: usize| self.regs[base + arg_base as usize + i].clone();
+                let size = match a(0) {
+                    Value::Float(f) => f,
+                    _ => NOMINAL_LINE_HEIGHT,
+                };
+                self.font_scale = size / NOMINAL_LINE_HEIGHT;
+                let _ = writeln!(self.out, "font {} {}", a(0), a(1));
+                Ok(Value::Unit)
+            }
             Native::DrawText => {
                 let a = |i: usize| self.regs[base + arg_base as usize + i].clone();
                 let _ = writeln!(self.out, "text {} {} {} {}", a(0), a(1), a(2), a(3));
@@ -1406,10 +1437,10 @@ impl<'a> Vm<'a> {
                         found: v.type_name(),
                     });
                 };
-                Ok(Value::Float(s.chars().count() as f64 * NOMINAL_ADVANCE))
+                Ok(Value::Float(s.chars().count() as f64 * NOMINAL_ADVANCE * self.font_scale))
             }
 
-            Native::TextHeight => Ok(Value::Float(NOMINAL_LINE_HEIGHT)),
+            Native::TextHeight => Ok(Value::Float(NOMINAL_LINE_HEIGHT * self.font_scale)),
 
             Native::DrawClip => {
                 let a = |i: usize| self.regs[base + arg_base as usize + i].clone();

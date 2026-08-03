@@ -37,6 +37,8 @@ pub enum Native {
     /// Trap when a claim is false.
     Require,
     DrawRect,
+    DrawRRect,
+    DrawFont,
     DrawText,
     TextWidth,
     TextHeight,
@@ -49,6 +51,8 @@ impl Native {
         match b {
             Builtin::IoPrint => Native::IoPrint,
             Builtin::DrawRect => Native::DrawRect,
+            Builtin::DrawRRect => Native::DrawRRect,
+            Builtin::DrawFont => Native::DrawFont,
             Builtin::DrawText => Native::DrawText,
             Builtin::TextWidth => Native::TextWidth,
             Builtin::TextHeight => Native::TextHeight,
@@ -67,6 +71,8 @@ impl Native {
         match self {
             Native::IoPrint => "io.print",
             Native::DrawRect => "draw.rect",
+            Native::DrawRRect => "draw.rrect",
+            Native::DrawFont => "draw.font",
             Native::DrawText => "draw.text",
             Native::TextWidth => "text.width",
             Native::TextHeight => "text.height",

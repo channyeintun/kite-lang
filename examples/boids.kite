@@ -73,6 +73,11 @@ struct Bird {
 
 pub struct Model {
     birds: [Bird]
+    /// The field the flock wraps around, which is whatever the host says the
+    /// window is. A fixed world in the corner of a large one is not a flock,
+    /// it is a diagram of a flock.
+    width: float
+    height: float
     hawk_x: float
     hawk_y: float
     /// How many frames have gone into the current rate measurement, and how
@@ -116,20 +121,64 @@ pub fn init() -> Model {
 }
 
 fn make(count: int) -> Model {
+    return scattered(count, WIDTH(), HEIGHT())
+}
+
+/// The same flock over a field of a new size.
+///
+/// The birds are kept and folded into the new field rather than scattered
+/// again. Re-scattering was the first version and it is wrong: resizing a
+/// window is not an instruction to restart the simulation, and it threw away
+/// the frame-rate measurement every time — which was most visible as a counter
+/// that kept resetting to zero while the flock flew on.
+fn refielded(model: Model, width: float, height: float) -> Model {
+    var kept: [Bird] = []
+    for bird in model.birds {
+        kept.push(Bird{..bird, x: fold(bird.x, width), y: fold(bird.y, height) })
+    }
+    return Model{..model, birds: kept, width: width, height: height }
+}
+
+/// A coordinate folded into a field. A shrinking window leaves birds outside
+/// it, and a bird outside the field never wraps back in — the wrap only fires
+/// one field-width at a time.
+fn fold(v: float, limit: float) -> float {
+    var out = v
+    for _step in 0..8 {
+        if out < 0.0 {
+            out = out + limit
+        } else if out >= limit {
+            out = out - limit
+        }
+    }
+    if out < 0.0 || out >= limit {
+        return limit / 2.0
+    }
+    return out
+}
+
+/// A flock scattered over a field of a given size.
+///
+/// Re-scattering on a resize rather than rescaling: a bird's velocity is in
+/// pixels a second, and scaling positions without scaling velocities makes the
+/// flock move at the wrong speed for its new world.
+fn scattered(count: int, width: float, height: float) -> Model {
     var flock: [Bird] = []
     for i in 0..count {
         let a = scatter(i * 3 + 1)
         let b = scatter(i * 3 + 2)
         let c = scatter(i * 3 + 3)
         flock.push(Bird{
-                x: a * WIDTH(),
-                y: b * HEIGHT(),
+                x: a * width,
+                y: b * height,
                 vx: (c - 0.5) * 2.0 * MAX_SPEED(),
                 vy: (a - 0.5) * 2.0 * MAX_SPEED(),
             })
     }
     return Model{
         birds: flock,
+        width: width,
+        height: height,
         hawk_x: -1000.0,
         hawk_y: -1000.0,
         frames: 0,
@@ -147,7 +196,14 @@ fn make(count: int) -> Model {
 /// managing a hundred and forty-four. The step is clamped: a tab left in the
 /// background comes back with a gap of seconds, and an unclamped step would
 /// teleport the entire flock through the wall.
-fn step(birds: [Bird], hawk_x: float, hawk_y: float, dt: float) -> [Bird] {
+fn step(
+    birds: [Bird],
+    hawk_x: float,
+    hawk_y: float,
+    dt: float,
+    width: float,
+    height: float,
+) -> [Bird] {
     let seconds = math.min(dt / 1000.0, 0.05)
     var moved: [Bird] = []
 
@@ -231,16 +287,16 @@ fn step(birds: [Bird], hawk_x: float, hawk_y: float, dt: float) -> [Bird] {
         // The world wraps. A wall would need a bounce, and a bounce collects
         // birds in the corners.
         if x < 0.0 {
-            x = x + WIDTH()
+            x = x + width
         }
-        if x >= WIDTH() {
-            x = x - WIDTH()
+        if x >= width {
+            x = x - width
         }
         if y < 0.0 {
-            y = y + HEIGHT()
+            y = y + height
         }
-        if y >= HEIGHT() {
-            y = y - HEIGHT()
+        if y >= height {
+            y = y - height
         }
 
         moved.push(Bird{ x: x, y: y, vx: vx, vy: vy })
@@ -258,10 +314,33 @@ fn EVENT_FRAME() -> int {
     return 7
 }
 
+fn EVENT_RESIZE() -> int {
+    return 6
+}
+
+fn near(a: float, b: float) -> bool {
+    let d = a - b
+    return d < 1.0 && d > -1.0
+}
+
 pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
+    if event == EVENT_RESIZE() {
+        if x < 320.0 || y < 240.0 {
+            return model
+        }
+        // Within a pixel is the same size. A resize fires on sub-pixel
+        // changes, and rebuilding the flock on each one would make the
+        // demonstration stutter whenever the window is nudged.
+        if near(x, model.width) && near(y, model.height) {
+            return model
+        }
+        return refielded(model, x, y)
+    }
     if event == EVENT_MOVE() {
         return Model{
             birds: model.birds,
+            width: model.width,
+            height: model.height,
             hawk_x: x,
             hawk_y: y,
             frames: model.frames,
@@ -270,7 +349,7 @@ pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
         }
     }
     if event == EVENT_FRAME() {
-        let moved = step(model.birds, model.hawk_x, model.hawk_y, x)
+        let moved = step(model.birds, model.hawk_x, model.hawk_y, x, model.width, model.height)
 
         // The rate is averaged over thirty frames. A per-frame number flickers
         // too fast to read, and a demonstration nobody can read the numbers on
@@ -288,6 +367,8 @@ pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
 
         return Model{
             birds: moved,
+            width: model.width,
+            height: model.height,
             hawk_x: model.hawk_x,
             hawk_y: model.hawk_y,
             frames: frames,
@@ -321,7 +402,7 @@ fn colour_of(bird: Bird) -> int {
 }
 
 pub fn view(model: Model) {
-    draw.rect(0.0, 0.0, WIDTH(), HEIGHT(), 0x11131f)
+    draw.rect(0.0, 0.0, model.width, model.height, 0x11131f)
 
     for bird in model.birds {
         // Two pixels, because eight hundred of anything larger is a smear.
@@ -345,7 +426,7 @@ pub fn view(model: Model) {
     // about the program.
     let millions = (pairs as float) * model.fps / 1000000.0
     draw.text(8.0, 26.0, "\(model.fps) fps · \(millions)M tests a second", 0x8b8d9e)
-    draw.text(8.0, HEIGHT() - 24.0, "move the pointer — it is a hawk", 0x5a5c6b)
+    draw.text(8.0, model.height - 24.0, "move the pointer — it is a hawk", 0x5a5c6b)
 }
 
 // ---- running it anywhere else ---------------------------------------------------

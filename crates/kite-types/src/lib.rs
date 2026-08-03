@@ -2833,12 +2833,21 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> hir::Expr {
         let text = b == BuiltinFn::DrawText;
-        let wanted: [TyId; 5] = if text {
-            [TyId::FLOAT, TyId::FLOAT, TyId::STR, TyId::INT, TyId::INT]
+        let rounded = b == BuiltinFn::DrawRRect;
+        let wanted: [TyId; 6] = if text {
+            [TyId::FLOAT, TyId::FLOAT, TyId::STR, TyId::INT, TyId::INT, TyId::INT]
+        } else if rounded {
+            [TyId::FLOAT, TyId::FLOAT, TyId::FLOAT, TyId::FLOAT, TyId::FLOAT, TyId::INT]
         } else {
-            [TyId::FLOAT, TyId::FLOAT, TyId::FLOAT, TyId::FLOAT, TyId::INT]
+            [TyId::FLOAT, TyId::FLOAT, TyId::FLOAT, TyId::FLOAT, TyId::INT, TyId::INT]
         };
-        let arity = if text { 4 } else { 5 };
+        let arity = if text {
+            4
+        } else if rounded {
+            6
+        } else {
+            5
+        };
         if args.len() != arity {
             self.arity_error(b.path(), args.len(), arity, span, None);
         }
@@ -2851,8 +2860,13 @@ impl<'a> Checker<'a> {
             }
             hargs.push(e);
         }
-        let builtin =
-            if text { Builtin::DrawText } else { Builtin::DrawRect };
+        let builtin = if text {
+            Builtin::DrawText
+        } else if rounded {
+            Builtin::DrawRRect
+        } else {
+            Builtin::DrawRect
+        };
         hir::Expr { kind: ExprKind::CallBuiltin { builtin, args: hargs }, ty: TyId::UNIT, span }
     }
 
@@ -2860,7 +2874,34 @@ impl<'a> Checker<'a> {
         match b {
             // Handled above, but named here so adding a builtin fails to
             // compile rather than falling through to something else.
-            BuiltinFn::DrawRect | BuiltinFn::DrawText => self.draw_call(b, args, span),
+            BuiltinFn::DrawRect | BuiltinFn::DrawRRect | BuiltinFn::DrawText => {
+                self.draw_call(b, args, span)
+            }
+
+            // `draw.font(size, weight)`. A weight is an `int` on the CSS scale
+            // — 400 is regular, 500 medium, 700 bold — because that is the
+            // scale both renderers already speak and inventing a second one
+            // would only need translating back.
+            BuiltinFn::DrawFont => {
+                if args.len() != 2 {
+                    self.arity_error("draw.font", args.len(), 2, span, None);
+                }
+                let wanted = [TyId::FLOAT, TyId::INT];
+                let mut hargs = Vec::with_capacity(2);
+                for (i, a) in args.iter().enumerate() {
+                    let want = wanted.get(i).copied();
+                    let e = self.expr(a, want);
+                    if let Some(w) = want {
+                        self.expect_ty(e.ty, w, e.span, None);
+                    }
+                    hargs.push(e);
+                }
+                hir::Expr {
+                    kind: ExprKind::CallBuiltin { builtin: Builtin::DrawFont, args: hargs },
+                    ty: TyId::UNIT,
+                    span,
+                }
+            }
 
             BuiltinFn::DrawClip => {
                 if args.len() != 4 {

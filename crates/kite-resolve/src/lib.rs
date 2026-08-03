@@ -47,9 +47,32 @@ pub enum BuiltinFn {
     /// that narrow can be met by a DOM renderer and a canvas renderer alike —
     /// which is the only way the two can be made to agree.
     DrawRect,
+    /// `draw.rrect(x, y, w, h, radius, colour)` — a filled rectangle with its
+    /// corners rounded.
+    ///
+    /// The fifth call at a boundary that spent a long time at four, and it
+    /// earns the place: a rounded corner cannot be built out of square ones
+    /// without drawing the arc a pixel at a time, and every design system in
+    /// use — Material, iOS, Fluent — puts one on nearly every surface. Both
+    /// renderers already have it (`border-radius`, `roundRect`), so this asks
+    /// nothing new of either.
+    DrawRRect,
     /// `draw.text(x, y, body, colour)` — a run of text with its baseline-left
     /// origin at `(x, y)`.
     DrawText,
+    /// `draw.font(size, weight)` — the size and weight everything drawn and
+    /// measured after it uses, until the next call.
+    ///
+    /// State, like the clip, and for the same reason: the alternative is a
+    /// size and a weight on `draw.text`, `text.width` *and* `text.height`,
+    /// which is three signatures changed to say one thing. A host already
+    /// works this way — `ctx.font` is exactly this — and the important part is
+    /// that it governs **measurement** as well as drawing, so a layout laid
+    /// out at 22dp is not painted at 16.
+    ///
+    /// A program that never calls it is unaffected: the host starts at its own
+    /// default, which is what every existing program already measured against.
+    DrawFont,
     /// `text.width(body)` — how wide a run of text will be, in the same units
     /// drawing uses.
     ///
@@ -107,7 +130,9 @@ impl BuiltinFn {
             "io.print" => Some(BuiltinFn::IoPrint),
             "errors.new" => Some(BuiltinFn::ErrorsNew),
             "draw.rect" => Some(BuiltinFn::DrawRect),
+            "draw.rrect" => Some(BuiltinFn::DrawRRect),
             "draw.text" => Some(BuiltinFn::DrawText),
+            "draw.font" => Some(BuiltinFn::DrawFont),
             "text.width" => Some(BuiltinFn::TextWidth),
             "text.height" => Some(BuiltinFn::TextHeight),
             "draw.clip" => Some(BuiltinFn::DrawClip),
@@ -130,7 +155,9 @@ impl BuiltinFn {
             BuiltinFn::IoPrint => "io.print",
             BuiltinFn::ErrorsNew => "errors.new",
             BuiltinFn::DrawRect => "draw.rect",
+            BuiltinFn::DrawRRect => "draw.rrect",
             BuiltinFn::DrawText => "draw.text",
+            BuiltinFn::DrawFont => "draw.font",
             BuiltinFn::TextWidth => "text.width",
             BuiltinFn::TextHeight => "text.height",
             BuiltinFn::DrawClip => "draw.clip",
@@ -151,6 +178,8 @@ impl BuiltinFn {
         match self {
             BuiltinFn::IoPrint | BuiltinFn::ErrorsNew => 1,
             BuiltinFn::DrawRect | BuiltinFn::DrawText => 5,
+            BuiltinFn::DrawRRect => 6,
+            BuiltinFn::DrawFont => 2,
             BuiltinFn::TextWidth => 1,
             BuiltinFn::TextHeight => 0,
             BuiltinFn::DrawClip => 4,

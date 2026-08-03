@@ -217,6 +217,7 @@ fn a_rectangles_bounds_are_its_own_and_a_runs_are_measured() {
             "{HARNESS}\
              say('rect', callBounds(['r', 1, 2, 3, 4, 0]));\n\
              say('text', callBounds(['t', 1, 2, 'abc', 0]));\n\
+             say('bigger', callBounds(['t', 1, 2, 'abc', 0, 32, 400]));\n\
              say('clip', callBounds(['c', 1, 2, 3, 4]));\n\
              say('unclip', callBounds(['u']));\n"
         ),
@@ -226,6 +227,6 @@ fn a_rectangles_bounds_are_its_own_and_a_runs_are_measured() {
     // rectangle is comparable across backends under test.
     assert_eq!(
         out,
-        "rect [1,2,3,4]\ntext [1,2,24,16]\nclip null\nunclip null\n"
+        "rect [1,2,3,4]\ntext [1,2,24,16]\nbigger [1,2,48,32]\nclip null\nunclip null\n"
     );
 }

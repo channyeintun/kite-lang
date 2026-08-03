@@ -60,6 +60,7 @@
 
 use std::alloc::{alloc as sys_alloc, dealloc as sys_dealloc, Layout};
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 // ---------------------------------------------------------------------------
@@ -1775,6 +1776,23 @@ pub extern "C" fn kite_rt_str_of_ref(p: u64) -> u64 {
 const NOMINAL_ADVANCE: f64 = 8.0;
 const NOMINAL_LINE_HEIGHT: f64 = 16.0;
 
+/// The size `draw.font` last selected, over the nominal one. Global because
+/// the drawing boundary is: there is one host, and `draw.clip` is already kept
+/// this way.
+static FONT_SCALE: AtomicU64 = AtomicU64::new(0x3ff0_0000_0000_0000); // 1.0
+
+fn font_scale() -> f64 {
+    f64::from_bits(FONT_SCALE.load(Ordering::Relaxed))
+}
+
+/// `draw.font(size, weight)`. Nothing here has a font, so the weight is
+/// recorded in the transcript and only the size changes measurement.
+#[no_mangle]
+pub extern "C" fn kite_rt_draw_font(size: f64, weight: i64) {
+    FONT_SCALE.store((size / NOMINAL_LINE_HEIGHT).to_bits(), Ordering::Relaxed);
+    write_line(&format!("font {} {}", float_text(size), weight));
+}
+
 #[no_mangle]
 pub extern "C" fn kite_rt_draw_rect(x: f64, y: f64, w: f64, h: f64, colour: i64) {
     write_line(&format!(
@@ -1783,6 +1801,21 @@ pub extern "C" fn kite_rt_draw_rect(x: f64, y: f64, w: f64, h: f64, colour: i64)
         float_text(y),
         float_text(w),
         float_text(h),
+        colour
+    ));
+}
+
+/// A rounded rectangle. The radius rides between the size and the colour, so
+/// the transcript reads the same as `rect` with one more number in it.
+#[no_mangle]
+pub extern "C" fn kite_rt_draw_rrect(x: f64, y: f64, w: f64, h: f64, r: f64, colour: i64) {
+    write_line(&format!(
+        "rrect {} {} {} {} {} {}",
+        float_text(x),
+        float_text(y),
+        float_text(w),
+        float_text(h),
+        float_text(r),
         colour
     ));
 }
@@ -1818,12 +1851,12 @@ pub extern "C" fn kite_rt_draw_unclip() {
 
 #[no_mangle]
 pub extern "C" fn kite_rt_text_width(s: u64) -> f64 {
-    unsafe { str_str(s).chars().count() as f64 * NOMINAL_ADVANCE }
+    unsafe { str_str(s).chars().count() as f64 * NOMINAL_ADVANCE * font_scale() }
 }
 
 #[no_mangle]
 pub extern "C" fn kite_rt_text_height() -> f64 {
-    NOMINAL_LINE_HEIGHT
+    NOMINAL_LINE_HEIGHT * font_scale()
 }
 
 // ---------------------------------------------------------------------------
@@ -2081,6 +2114,8 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         kite_rt_str_of_bool,
         kite_rt_str_of_ref,
         kite_rt_draw_rect,
+        kite_rt_draw_rrect,
+        kite_rt_draw_font,
         kite_rt_draw_text,
         kite_rt_draw_clip,
         kite_rt_draw_unclip,

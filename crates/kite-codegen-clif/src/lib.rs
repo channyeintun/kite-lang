@@ -162,6 +162,8 @@ const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_str_of_bool", &[I8], Some(I64)),
     ("kite_rt_str_of_ref", &[I64], Some(I64)),
     ("kite_rt_draw_rect", &[F64, F64, F64, F64, I64], None),
+    ("kite_rt_draw_rrect", &[F64, F64, F64, F64, F64, I64], None),
+    ("kite_rt_draw_font", &[F64, I64], None),
     ("kite_rt_draw_text", &[F64, F64, I64, I64], None),
     ("kite_rt_draw_clip", &[F64, F64, F64, F64], None),
     ("kite_rt_draw_unclip", &[], None),
@@ -1550,9 +1552,19 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 self.call_rt("kite_rt_draw_rect", &vals);
                 self.def_zero(dst);
             }
+            Builtin::DrawRRect => {
+                let vals: Vec<Value> = args.iter().map(|a| self.operand(a)).collect();
+                self.call_rt("kite_rt_draw_rrect", &vals);
+                self.def_zero(dst);
+            }
             Builtin::DrawText => {
                 let vals: Vec<Value> = args.iter().map(|a| self.operand(a)).collect();
                 self.call_rt("kite_rt_draw_text", &vals);
+                self.def_zero(dst);
+            }
+            Builtin::DrawFont => {
+                let vals: Vec<Value> = args.iter().map(|a| self.operand(a)).collect();
+                self.call_rt("kite_rt_draw_font", &vals);
                 self.def_zero(dst);
             }
             Builtin::DrawClip => {

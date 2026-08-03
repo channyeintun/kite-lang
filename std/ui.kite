@@ -66,6 +66,39 @@ pub struct Style {
     pub padding: Insets
     /// Space between children, not before the first or after the last.
     pub gap: float
+    /// The size and weight this node's text is measured *and* drawn in, or
+    /// zero for the host's own.
+    ///
+    /// On the style rather than on the paint, because a size changes how much
+    /// room a run of text needs and the paint runs long after the room has
+    /// been allotted. Putting it on the paint — which is where this started —
+    /// lays a title out at 16dp and then draws it at 22, and the title runs
+    /// into whatever was measured to sit beside it.
+    pub size: float
+    pub weight: int
+}
+
+/// The same style in a given size and weight — a type scale's one entry.
+pub fn in_font(base: Style, size: float, weight: int) -> Style {
+    return Style{..base, size: size, weight: weight }
+}
+
+/// The host's default size, which is what a style that names none measures in.
+pub fn DEFAULT_SIZE() -> float {
+    return 16.0
+}
+
+/// Select a font, or leave the host's alone. Paired with [`unset_font`].
+fn set_font(size: float, weight: int) {
+    if size > 0.0 {
+        draw.font(size, weight)
+    }
+}
+
+fn unset_font(size: float) {
+    if size > 0.0 {
+        draw.font(DEFAULT_SIZE(), 400)
+    }
 }
 
 /// What a leaf holds. A box with children holds `Empty`; the two are exclusive
@@ -100,6 +133,11 @@ pub struct Frame {
     /// is written once, in the tree, and a paint list that restated it would
     /// be a second place for it to be wrong.
     pub content: str
+    /// The font the box was measured in, carried through so the painter draws
+    /// in the one the layout used. A painter that chose its own would be
+    /// choosing a size the box was never sized for.
+    pub size: float
+    pub weight: int
 }
 
 // ---- construction ---------------------------------------------------------
@@ -129,6 +167,8 @@ pub fn style() -> Style {
         grow: 0.0,
         padding: insets_none(),
         gap: 0.0,
+        size: 0.0,
+        weight: 400,
     }
 }
 
@@ -344,6 +384,7 @@ fn measure_content(node: Node) -> Size {
         Text(s) => s
     }
     if body.len() > 0 {
+        set_font(node.style.size, node.style.weight)
         // Text wraps when it has been given a width, and not otherwise. Which
         // width to wrap to is only knowable once a parent has decided, and
         // measurement runs before that — so a node that wants to wrap says how
@@ -354,9 +395,13 @@ fn measure_content(node: Node) -> Size {
         // it is most of what makes CSS difficult.
         let fixed = node.style.width
         if fixed != nil {
-            return wrapped_size(body, fixed - horizontal(node.style.padding))
+            let wrapped = wrapped_size(body, fixed - horizontal(node.style.padding))
+            unset_font(node.style.size)
+            return wrapped
         }
-        return text_size(body)
+        let one = text_size(body)
+        unset_font(node.style.size)
+        return one
     }
     if node.children.len() == 0 {
         return Size{ width: 0.0, height: 0.0 }
@@ -449,6 +494,8 @@ fn arrange(node: Node, rect: Rect, depth: int) -> [Frame] {
                 Text(body) => body,
                 Empty => "",
             },
+            size: node.style.size,
+            weight: node.style.weight,
         },
     ]
     if node.children.len() == 0 {
@@ -538,6 +585,26 @@ pub struct Paint {
     /// Text drawn inside the box, at its top-left corner.
     pub label: Option<str>
     pub ink: int
+    /// The corner radius of the fill, in the same units everything else is in.
+    ///
+    /// Zero is a square corner and costs nothing — the square call is still
+    /// the one made — so a paint that says nothing about shape draws exactly
+    /// what it drew before this existed.
+    pub radius: float
+    /// An outline drawn around the box, or nil for none.
+    ///
+    /// Not a stroke primitive: the drawing boundary has no such thing, and
+    /// adding one would mean line joins and caps. An outline is two filled
+    /// rounded rectangles, the inner one inset by the width — which is exactly
+    /// what a border *is* once it is filled in, and costs the boundary nothing.
+    pub stroke: Option<int>
+    pub stroke_width: float
+    /// Centre the label in the box rather than starting it at the top-left.
+    ///
+    /// A button's caption is centred in every design system there is, and a
+    /// left-aligned one is the single clearest sign that a control was drawn
+    /// by hand. Centring needs the measured width, which only the painter has.
+    pub center: bool
 }
 
 /// Draw whatever the node says, in this colour.
@@ -547,19 +614,62 @@ pub struct Paint {
 /// disagreeing is how a label ends up saying something the layout was never
 /// measured for.
 pub fn ink(name: str, colour: int) -> Paint {
-    return Paint{ own: true, name: name, fill: nil, label: nil, ink: colour }
+    return Paint{
+        own: true,
+        name: name,
+        fill: nil,
+        label: nil,
+        ink: colour,
+        radius: 0.0,
+        stroke: nil,
+        stroke_width: 0.0,
+        center: false,
+    }
+}
+
+/// A label centred in its box, which is what a button's caption wants.
+pub fn ink_centered(name: str, colour: int) -> Paint {
+    return Paint{..ink(name, colour), center: true }
+}
+
+/// A fill with an outline around it: Material's outlined variant, and the
+/// shape of a checkbox that is not yet ticked.
+pub fn outlined(
+    name: str,
+    background: Option<int>,
+    stroke: int,
+    width: float,
+    radius: float,
+) -> Paint {
+    return Paint{
+        ..fill(name, 0x000000),
+        fill: background,
+        radius: radius,
+        stroke: stroke,
+        stroke_width: width,
+    }
+}
+
+/// A fill with rounded corners.
+///
+/// Shape is a property of the *surface*, not of the box in the tree: the same
+/// node is a pill in one design system and a square in another, and the layout
+/// should not have to know which. So it rides on the paint, beside the colour
+/// it belongs with.
+pub fn rounded(name: str, colour: int, radius: float) -> Paint {
+    return Paint{..fill(name, colour), radius: radius }
 }
 
 pub fn fill(name: str, colour: int) -> Paint {
-    return Paint{ own: false, name: name, fill: colour, label: nil, ink: 0x000000 }
+    return Paint{..ink(name, 0x000000), own: false, fill: colour }
 }
 
 pub fn label(name: str, body: str, colour: int) -> Paint {
-    return Paint{ own: false, name: name, fill: nil, label: body, ink: colour }
+    return Paint{..ink(name, colour), own: false, label: body }
 }
 
 pub fn filled_label(name: str, body: str, background: int, colour: int) -> Paint {
-    return Paint{ own: false, name: name, fill: background, label: body, ink: colour }
+    return Paint{..label(name, body, colour), fill: background }
 }
 
 fn paint_for(paints: [Paint], name: str) -> Option<Paint> {
@@ -587,9 +697,32 @@ pub fn paint(frames: [Frame], paints: [Paint]) {
 
 fn draw_one(frame: Frame, p: Paint) {
     let r = frame.rect
-    let background = p.fill
-    if background != nil {
-        draw.rect(r.x, r.y, r.width, r.height, background)
+    // An outline is the box in the outline colour with the box inset by the
+    // width drawn back over it. Two fills, no stroke primitive, and the corner
+    // stays round because the inner radius shrinks with the inset.
+    let edge = p.stroke
+    // Narrowed one condition at a time: `edge != nil && ...` is a comparison
+    // and a conjunction, and only the comparison alone narrows the option.
+    var outlined = false
+    if edge != nil {
+        if p.stroke_width > 0.0 {
+            outlined = true
+            fill_rect(r.x, r.y, r.width, r.height, p.radius, edge)
+            let w = p.stroke_width
+            let inner = if p.radius - w > 0.0 { p.radius - w } else { 0.0 }
+            let hole = p.fill
+            // Nothing behind an unfilled outline: the box it sits on shows
+            // through, which is what an outlined control looks like.
+            if hole != nil {
+                fill_rect(r.x + w, r.y + w, r.width - w * 2.0, r.height - w * 2.0, inner, hole)
+            }
+        }
+    }
+    if !outlined {
+        let background = p.fill
+        if background != nil {
+            fill_rect(r.x, r.y, r.width, r.height, p.radius, background)
+        }
     }
     var body = p.label
     if p.own {
@@ -613,16 +746,40 @@ fn draw_one(frame: Frame, p: Paint) {
     // screen readers hears a reordered line run by run, in visual order,
     // which for mixed-direction text is not reading order. Both are stated
     // rather than solved.
+    // The font the box was measured in. A paint may not choose another: the
+    // room has already been allotted.
+    set_font(frame.size, frame.weight)
     let base = text.paragraph_level(body)
     let lines = wrap(body, box.width)
     var y = box.y
     for line in lines {
+        // A centred line starts wherever the leftover space puts it. The width
+        // is measured in the font just selected, so this is the font the line
+        // will actually be drawn in rather than the one before it.
         var x = box.x
+        if p.center {
+            let slack = box.width - text.width(line)
+            if slack > 0.0 {
+                x = box.x + slack / 2.0
+            }
+        }
         for run in text.bidi_runs_with(line, base) {
             draw.text(x, y, run.body, p.ink)
             x = x + text.width(run.body)
         }
         y = y + line_height()
+    }
+    unset_font(frame.size)
+}
+
+/// A filled rectangle, round or square. The square call is still the one made
+/// for a zero radius, so a renderer that never sees a rounded corner draws
+/// exactly what it drew before rounded corners existed.
+fn fill_rect(x: float, y: float, w: float, h: float, radius: float, colour: int) {
+    if radius > 0.0 {
+        draw.rrect(x, y, w, h, radius, colour)
+    } else {
+        draw.rect(x, y, w, h, colour)
     }
 }
 
@@ -681,6 +838,8 @@ pub fn paint_scrolled(
                         inner: shifted(frame.inner, dx, dy),
                         depth: frame.depth,
                         content: frame.content,
+                        size: frame.size,
+                        weight: frame.weight,
                     },
                     found,
                 )
@@ -790,7 +949,29 @@ pub fn button_node(id: str, caption: str) -> Node {
 /// caret is a glyph like any other until there is a scene graph to animate it
 /// separately.
 pub fn field_node(id: str, value: str, width: float, focused: bool) -> Node {
-    let shown = if focused { "\(value)|" } else { value }
+    return field_node_labelled(id, value, width, focused, "")
+}
+
+/// The same, with the text an empty field shows.
+///
+/// A blank rounded rectangle is not a control anyone can read: a placeholder is
+/// what says the box is for typing in. It is drawn as the value, so it lands in
+/// the same node and needs no second paint — and it is *replaced* by what is
+/// typed rather than sitting behind it, which is what a placeholder is.
+pub fn field_node_labelled(
+    id: str,
+    value: str,
+    width: float,
+    focused: bool,
+    placeholder: str,
+) -> Node {
+    var shown = if focused { "\(value)|" } else { value }
+    // An empty field shows its placeholder whether or not it has focus, with
+    // the caret before it — which is what a search field looks like the moment
+    // it is clicked, and the alternative is a blank rounded rectangle.
+    if value.len() == 0 {
+        shown = if focused { "|\(placeholder)" } else { placeholder }
+    }
     return box_of(
         field(id),
         padded(sized(style(), width, line_height() + 12.0), 6.0),
@@ -798,28 +979,99 @@ pub fn field_node(id: str, value: str, width: float, focused: bool) -> Node {
     )
 }
 
+/// The side of a checkbox's box. Material's is 18dp inside a 40dp target, and
+/// the target is the thing a finger has to hit.
+pub fn CHECKBOX_SIDE() -> float {
+    return 18.0
+}
+
 /// A checkbox and its label, side by side.
+///
+/// The box is a *box*, not the characters `[x]`. It is an empty node of a
+/// fixed size with the tick as its own child, so a design system paints the
+/// two separately — an outline when it is clear, a filled square and a tick
+/// when it is set — and neither is a glyph standing in for a control.
+///
+/// The tick itself is a glyph, and honestly so: a check mark is a shape the
+/// drawing boundary has no way to draw, having neither strokes nor paths, and
+/// U+2713 is the shape. What matters is that the *box* is drawn rather than
+/// typed, because that is the part a design system restyles.
 pub fn checkbox_node(id: str, caption: str, checked: bool) -> Node {
-    let mark = if checked { "[x]" } else { "[ ]" }
+    let side = CHECKBOX_SIDE()
+    let tick = if checked { "✓" } else { "" }
     return box_of(
         checkbox(id),
         spaced(padded(Style{..row(), align: Align.Center }, 4.0), 8.0),
         [
-            text_of("\(checkbox(id)):mark", style(), mark),
+            box_of(
+                "\(checkbox(id)):mark",
+                sized(Style{..column(), align: Align.Center }, side, side),
+                // The tick is sized to the box rather than to the page: an
+                // 18dp square cannot hold a 16dp glyph and its line box.
+                [text_of("\(checkbox(id)):tick", in_font(style(), 13.0, 700), tick)],
+            ),
             text_of("\(checkbox(id)):caption", style(), caption),
         ],
     )
 }
 
+/// Everything a checkbox's own box needs painted.
+///
+/// Set, it is a filled square with a tick on it; clear, it is an outline with
+/// nothing inside. Which colours those are is a design system's business, so
+/// they are arguments — this only knows that a checkbox has two states and
+/// that they look different.
+/// `behind` is the colour of whatever the checkbox is sitting on.
+///
+/// It has to be passed in. The drawing boundary has no alpha and no way to
+/// punch a hole, so an outline with "nothing" inside it is a filled square —
+/// which is exactly what the first version of this drew. "Transparent" here
+/// can only mean *the colour of what is behind*, and the caller is the only
+/// one who knows what that is: a checkbox on a selected row sits on a
+/// different colour from one on an ordinary row.
+pub fn checkbox_paints(
+    id: str,
+    checked: bool,
+    accent: int,
+    on_accent: int,
+    outline: int,
+    behind: int,
+) -> [Paint] {
+    let name = "\(checkbox(id)):mark"
+    if checked {
+        return [rounded(name, accent, 2.0), ink_centered("\(checkbox(id)):tick", on_accent)]
+    }
+    return [
+        outlined(name, behind, outline, 2.0, 2.0),
+        ink("\(checkbox(id)):tick", outline),
+    ]
+}
+
 /// Everything a control needs painted, given the theme and what has focus.
 pub fn control_paints(theme: Theme, names: [str], focused: str) -> [Paint] {
+    return control_paints_rounded(theme, names, focused, 0.0)
+}
+
+/// The same, with a corner radius on every control.
+///
+/// Split rather than parameterised in place, because the square version is the
+/// one every existing program calls and a shape argument it never asked for
+/// would be a change to all of them. Which radius belongs on a button is a
+/// design system's business, and this layer has no opinion — it only carries
+/// the number.
+pub fn control_paints_rounded(
+    theme: Theme,
+    names: [str],
+    focused: str,
+    radius: float,
+) -> [Paint] {
     var out: [Paint] = []
     for name in names {
         let background = if name == focused { theme.focus } else { theme.surface }
-        out.push(fill(name, background))
+        out.push(rounded(name, background, radius))
         out.push(ink("\(name):caption", theme.ink))
         out.push(ink("\(name):value", theme.ink))
-        out.push(ink("\(name):mark", theme.ink))
+        out.push(ink("\(name):tick", theme.ink))
     }
     return out
 }

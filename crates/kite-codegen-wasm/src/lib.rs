@@ -93,7 +93,7 @@ const EXTERN_REF_NULL: ValType = ValType::Ref(RefType {
 /// Deliberately small: the standard library replaces them from Phase 6. String
 /// operations live here because a `str` is an index into a table the host
 /// holds — which is also why the module needs no linear memory.
-const IMPORTS: [(&str, &[ValType], &[ValType]); 26] = [
+const IMPORTS: [(&str, &[ValType], &[ValType]); 28] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
@@ -140,6 +140,15 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 26] = [
     // A character as a number. The one string operation nothing else can be
     // written on top of, which is why it is here and `split` is not.
     ("str_code_at", &[ValType::I32, ValType::I64], &[ValType::I64]),
+    // A rounded rectangle: the same five numbers as `draw_rect` with a corner
+    // radius between the size and the colour.
+    (
+        "draw_rrect",
+        &[ValType::F64, ValType::F64, ValType::F64, ValType::F64, ValType::F64, ValType::I64],
+        &[],
+    ),
+    // The font everything after it is drawn *and measured* in.
+    ("draw_font", &[ValType::F64, ValType::I64], &[]),
 ];
 
 /// The same imports again, with `str` as an `externref`.
@@ -163,7 +172,7 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 26] = [
 /// an astral character, and two backends that disagree is the one thing this
 /// project spends its testing budget preventing. `concat` and `equals` are
 /// exact at any code point, so those two are taken and the others are not.
-const JS_STRING_IMPORTS: [(&str, &[ValType], &[ValType]); 26] = [
+const JS_STRING_IMPORTS: [(&str, &[ValType], &[ValType]); 28] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
@@ -198,6 +207,12 @@ const JS_STRING_IMPORTS: [(&str, &[ValType], &[ValType]); 26] = [
     ("task_wait_host", &[], &[]),
     ("time_now", &[], &[ValType::I64]),
     ("str_code_at", &[EXTERN_REF_NULL, ValType::I64], &[ValType::I64]),
+    (
+        "draw_rrect",
+        &[ValType::F64, ValType::F64, ValType::F64, ValType::F64, ValType::F64, ValType::I64],
+        &[],
+    ),
+    ("draw_font", &[ValType::F64, ValType::I64], &[]),
 ];
 
 /// The import table in force.
@@ -351,6 +366,8 @@ fn used_imports(
                             mark(host::PRINT_STR);
                         }
                         Builtin::DrawRect => mark(host::DRAW_RECT),
+                        Builtin::DrawRRect => mark(host::DRAW_RRECT),
+                        Builtin::DrawFont => mark(host::DRAW_FONT),
                         Builtin::DrawText => mark(host::DRAW_TEXT),
                         Builtin::TextWidth => mark(host::MEASURE_TEXT),
                         Builtin::TextHeight => mark(host::LINE_HEIGHT),
@@ -444,6 +461,8 @@ mod host {
     pub const TASK_WAIT_HOST: u32 = 23;
     pub const TIME_NOW: u32 = 24;
     pub const STR_CODE_AT: u32 = 25;
+    pub const DRAW_RRECT: u32 = 26;
+    pub const DRAW_FONT: u32 = 27;
 }
 
 pub struct WasmModule {
@@ -2494,11 +2513,23 @@ impl<'a> Emitter<'a> {
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_RECT)));
             }
+            Builtin::DrawRRect => {
+                for a in args {
+                    self.operand(func, a);
+                }
+                func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_RRECT)));
+            }
             Builtin::DrawText => {
                 for a in args {
                     self.operand(func, a);
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_TEXT)));
+            }
+            Builtin::DrawFont => {
+                for a in args {
+                    self.operand(func, a);
+                }
+                func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_FONT)));
             }
             Builtin::TextWidth => {
                 for a in args {
