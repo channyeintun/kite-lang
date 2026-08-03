@@ -45,16 +45,23 @@ use material
 
 // ---- the sound ------------------------------------------------------------------
 //
-// The tracks are not files. There is no audio to ship and no licence to honour:
-// each one is *composed here*, from its own index, and handed to the host a
-// note at a time.
+// The tracks are real music, and there is not an audio file among them.
+//
+// Every melody here is a **public-domain composition** — old enough that the
+// work itself is free — written out as notes and handed to the host one at a
+// time. No recording is involved, so there is no recording copyright either:
+// what plays is synthesised on the spot, from the notes below, by whatever
+// oscillator the host has.
+//
+// That is the only honest way to put music in a demonstration. Shipping a
+// commercial track would need a licence nobody has, and transcribing one is the
+// same infringement with extra steps.
 //
 // The boundary carries numbers and nothing else — a frequency, when to start,
 // how long to hold, how loud — because `str`, `int` and `float` are what cross
 // it, and a buffer of samples is not among them. That turns out to be the right
 // division anyway: WebAudio schedules on the audio thread, sample accurate, so
-// a frame that arrives late cannot make the music stutter. The melody is the
-// program's; the oscillator is the host's.
+// a frame that arrives late cannot make the music stutter.
 
 @host("audio")
 extern fn note(frequency: float, delay: float, seconds: float, gain: float)
@@ -65,73 +72,164 @@ extern fn silence()
 @host("audio")
 extern fn awake() -> bool
 
-/// How far ahead notes are scheduled, in seconds, and how much of that is left
-/// before the next batch goes out. Scheduling ahead is what makes the playback
-/// independent of the frame rate.
+/// How far ahead notes are scheduled, in seconds. Scheduling ahead is what
+/// makes the playback independent of the frame rate.
 fn HORIZON() -> float {
     return 4.0
 }
 
-/// A pentatonic scale, in semitones from the root. Pentatonic because every
-/// pair of its notes sounds consonant, so a melody chosen at random from it
-/// cannot land on a wrong note — which is what makes a generated tune
-/// listenable rather than merely deterministic.
-fn scale() -> [int] {
-    return [0, 2, 4, 7, 9, 12, 14, 16, 19, 21]
+/// One step is an eighth note at 120 beats a minute, and every duration below
+/// is counted in them: 1 is an eighth, 2 a quarter, 4 a half.
+fn STEP() -> float {
+    return 0.25
 }
 
-/// Equal temperament: each semitone is the twelfth root of two, and this is
-/// that, iterated, from A2 at 110Hz.
-fn pitch(semitone: int) -> float {
+/// How many times a melody repeats before the track is over. These are the
+/// opening phrases rather than whole works, so once through is a few seconds.
+fn REPEATS() -> int {
+    return 6
+}
+
+/// A note: a MIDI number, and how many steps it lasts. `-1` is a rest.
+struct Beat {
+    midi: int
+    steps: int
+}
+
+fn beat(midi: int, steps: int) -> Beat {
+    return Beat{ midi: midi, steps: steps }
+}
+
+/// Equal temperament from A2 at 110Hz, which is MIDI 45. Each semitone is the
+/// twelfth root of two, and this is that, iterated — no `pow` needed for a
+/// whole-number count.
+fn pitch(midi: int) -> float {
     var hz = 110.0
-    var n = semitone
-    for _up in 0..n {
+    for _up in 0..midi - 45 {
         hz = hz * 1.0594630943592953
     }
     return hz
 }
 
-/// A cheap integer hash, so a track's melody is its own and is the same every
-/// time it is played. A multiply, a shift-xor, a multiply, a shift-xor: the xor
-/// is the part that matters, because an affine map alone keeps consecutive
-/// seeds a constant apart and would walk the scale in a straight line.
-fn scatter(seed: int) -> int {
-    var x = (seed * 2654435761) % 4294967296
-    x = x ^ (x >> 15)
-    x = (x * 668265261) % 4294967296
-    x = x ^ (x >> 13)
-    return x % 1000000
-}
-
-/// The note a track plays at a given step: a scale degree from the hash, an
-/// octave for the bass on every fourth step.
-fn note_at(track: int, step: int) -> int {
-    let degrees = scale()
-    let roll = scatter(track * 7919 + step * 31)
-    let degree = degrees[roll % degrees.len()]
-    if step % 4 == 0 {
-        return degree + 12 * (track % 2)
+/// The opening of each piece, as written.
+///
+/// Every one of these is public domain: Beethoven died in 1827, Pachelbel in
+/// 1706, Petzold in 1733, and a traditional melody has no author to outlive.
+fn melody(track: int) -> [Beat] {
+    if track == 0 {
+        // Beethoven, Bagatelle in A minor — "Für Elise", 1810.
+        return [
+            beat(76, 1), beat(75, 1), beat(76, 1), beat(75, 1),
+            beat(76, 1), beat(71, 1), beat(74, 1), beat(72, 1),
+            beat(69, 2), beat(-1, 1), beat(60, 1), beat(64, 1), beat(69, 1),
+            beat(71, 2), beat(-1, 1), beat(64, 1), beat(68, 1), beat(71, 1),
+            beat(72, 2), beat(-1, 1), beat(64, 1),
+        ]
     }
-    return degree + 12
+    if track == 1 {
+        // Beethoven, Symphony No. 9 — the "Ode to Joy" theme, 1824.
+        return [
+            beat(64, 2), beat(64, 2), beat(65, 2), beat(67, 2),
+            beat(67, 2), beat(65, 2), beat(64, 2), beat(62, 2),
+            beat(60, 2), beat(60, 2), beat(62, 2), beat(64, 2),
+            beat(64, 3), beat(62, 1), beat(62, 4),
+        ]
+    }
+    if track == 2 {
+        // Christian Petzold, Minuet in G — long credited to Bach, whose
+        // notebook it sits in.
+        return [
+            beat(74, 2), beat(67, 1), beat(69, 1), beat(71, 1), beat(72, 1),
+            beat(74, 2), beat(67, 2), beat(67, 2),
+            beat(76, 2), beat(72, 1), beat(74, 1), beat(76, 1), beat(77, 1),
+            beat(79, 2), beat(67, 2), beat(67, 2),
+        ]
+    }
+    if track == 3 {
+        // "Greensleeves", English traditional, printed in 1580.
+        return [
+            beat(69, 1), beat(72, 2), beat(74, 1), beat(76, 2), beat(77, 1),
+            beat(76, 2), beat(74, 1), beat(71, 2), beat(67, 1),
+            beat(69, 2), beat(71, 1), beat(72, 2), beat(69, 1),
+            beat(69, 2), beat(68, 1), beat(69, 2), beat(71, 1),
+            beat(68, 2), beat(64, 3),
+        ]
+    }
+    if track == 4 {
+        // さくらさくら, Japanese traditional, Edo period. The in-sen scale it
+        // uses — A B C E F — is why it sounds as it does.
+        return [
+            beat(69, 2), beat(69, 2), beat(71, 4),
+            beat(69, 2), beat(69, 2), beat(71, 4),
+            beat(69, 2), beat(71, 2), beat(72, 2), beat(71, 2),
+            beat(69, 2), beat(71, 2), beat(69, 2), beat(65, 2),
+            beat(64, 4),
+        ]
+    }
+    if track == 5 {
+        // Pachelbel, Canon in D — the ground bass, which is the part everyone
+        // actually knows.
+        return [
+            beat(62, 4), beat(57, 4), beat(59, 4), beat(54, 4),
+            beat(55, 4), beat(50, 4), beat(55, 4), beat(57, 4),
+        ]
+    }
+    // "Ah! vous dirai-je, maman", French traditional — the tune Mozart wrote
+    // variations on, and the one everyone learns first.
+    return [
+        beat(60, 2), beat(60, 2), beat(67, 2), beat(67, 2),
+        beat(69, 2), beat(69, 2), beat(67, 4),
+        beat(65, 2), beat(65, 2), beat(64, 2), beat(64, 2),
+        beat(62, 2), beat(62, 2), beat(60, 4),
+    ]
 }
 
-/// Four notes a second, which is a tempo of 120 with two notes to the beat.
-fn STEP() -> float {
-    return 0.25
+/// The melody with one entry per step: the note on the step it starts, and a
+/// `-1` for each step it is still sounding through. Indexing by step is what
+/// lets the scheduler ask "what begins at this moment" without searching.
+fn line(track: int) -> [Beat] {
+    var out: [Beat] = []
+    for b in melody(track) {
+        out.push(b)
+        for _hold in 1..b.steps {
+            out.push(beat(-1, 0))
+        }
+    }
+    return out
 }
 
-/// Send every note that starts inside the window `from`..`to`, measured in
-/// seconds from the beginning of the track.
+/// How long a track runs, in seconds — its melody, repeated. Computed rather
+/// than written down, so the progress bar reaches the end exactly when the
+/// music does.
+fn duration(track: int) -> int {
+    var steps = 0
+    for b in melody(track) {
+        steps = steps + b.steps
+    }
+    return math.round_to((steps * REPEATS()) as float * STEP())
+}
+
+/// Send every note that begins inside the window `from`..`to`, measured in
+/// seconds from the start of the track.
 fn schedule(model: Model, from: float, to: float) {
+    let notes = line(model.playing)
+    if notes.len() == 0 {
+        return
+    }
     let first = math.trunc_to(from / STEP())
     let last = math.trunc_to(to / STEP())
     for step in first..last + 1 {
         let at = (step as float) * STEP()
         if at >= from {
             if at < to {
-                let semitone = note_at(model.playing, step)
-                let gain = if step % 4 == 0 { 0.22 } else { 0.13 }
-                note(pitch(semitone), at - from, STEP() * 1.8, gain)
+                let b = notes[step % notes.len()]
+                if b.midi >= 0 {
+                    // A note is held a little short of its written length, so
+                    // two of the same pitch in a row are heard as two.
+                    let held = (b.steps as float) * STEP() * 0.9
+                    let gain = if step % 4 == 0 { 0.20 } else { 0.13 }
+                    note(pitch(b.midi), at - from, held, gain)
+                }
             }
         }
     }
@@ -139,12 +237,13 @@ fn schedule(model: Model, from: float, to: float) {
 
 // ---- the model ---------------------------------------------------------------
 
+/// A track has no length of its own. How long it runs is `duration()`, worked
+/// out from the notes, so the progress bar reaches the end exactly when the
+/// music does rather than at a number somebody typed.
 struct Track {
     title: str
     artist: str
     genre: str
-    /// Seconds. Printed as m:ss, and the only arithmetic in the file.
-    length: int
 }
 
 pub struct Model {
@@ -188,19 +287,13 @@ fn HEIGHT() -> float {
 
 fn library() -> [Track] {
     return [
-        Track { title: "Analytical Engine", artist: "Ada Lovelace", genre: "Ambient", length: 254 },
-        Track { title: "مرحبا بالعالم", artist: "أحمد", genre: "Ambient", length: 187 },
-        Track { title: "שלום עולם", artist: "שרה", genre: "Jazz", length: 203 },
-        Track { title: "日本語のテスト", artist: "山田", genre: "Jazz", length: 341 },
-        Track {
-            title: "ဆယ်လ်မွန်ငါးတို့အပြန်",
-            artist: "ခင်မောင်တိုး",
-            genre: "Classical",
-            length: 296,
-        },
-        Track { title: "Difference Machine", artist: "Charles Babbage", genre: "Classical", length: 412 },
-        Track { title: "Silent Partition", artist: "Grace Hopper", genre: "Ambient", length: 168 },
-        Track { title: "Tail Call", artist: "Guy Steele", genre: "Jazz", length: 225 },
+        Track { title: "Für Elise", artist: "Ludwig van Beethoven", genre: "Classical" },
+        Track { title: "Ode to Joy", artist: "Ludwig van Beethoven", genre: "Classical" },
+        Track { title: "Minuet in G", artist: "Christian Petzold", genre: "Baroque" },
+        Track { title: "Greensleeves", artist: "Traditional", genre: "Folk" },
+        Track { title: "さくらさくら", artist: "日本古謡", genre: "Folk" },
+        Track { title: "Canon in D", artist: "Johann Pachelbel", genre: "Baroque" },
+        Track { title: "Ah! vous dirai-je, maman", artist: "Traditional", genre: "Folk" },
     ]
 }
 
@@ -232,7 +325,7 @@ fn viewport(model: Model) -> ui.Size {
 // ---- what the filters leave -----------------------------------------------------
 
 fn genres() -> [str] {
-    return ["All", "Ambient", "Jazz", "Classical"]
+    return ["All", "Classical", "Baroque", "Folk"]
 }
 
 fn shown(model: Model) -> [int] {
@@ -530,6 +623,7 @@ fn list_viewport(model: Model, s: material.Scheme) -> ui.Node {
 /// The rows themselves, laid out on their own against a given width.
 fn list(model: Model, s: material.Scheme) -> ui.Node {
     let found = shown(model)
+    let room = row_room(model)
     var rows: [ui.Node] = []
     if found.len() == 0 {
         rows.push(
@@ -566,8 +660,13 @@ fn list(model: Model, s: material.Scheme) -> ui.Node {
             material.list_item_two(
                 s,
                 "track-\(i)",
-                track.title,
-                "\(track.artist) · \(track.genre) · \(clock(track.length))",
+                fit(track.title, room, 16.0, material.REGULAR()),
+                fit(
+                    "\(track.artist) · \(track.genre) · \(clock(duration(i)))",
+                    room,
+                    14.0,
+                    material.REGULAR(),
+                ),
                 leading,
                 material.when_selected(is_playing, model.focused == "track-\(i)"),
             ),
@@ -588,6 +687,32 @@ fn list(model: Model, s: material.Scheme) -> ui.Node {
     return ui.box_of("list-holder", holder, [card])
 }
 
+/// The first line a run of text wraps to at `limit`, with an ellipsis when
+/// there was more.
+///
+/// Kite's layout grows a box into spare space and never shrinks one below its
+/// content, so a line too long for its column does not compress — it runs out
+/// of the card and off the window. Fitting the text is the caller's job, and
+/// this does it with the same wrapper the layout measures with, in the same
+/// font the line will be drawn in.
+fn fit(body: str, limit: float, size: float, weight: int) -> str {
+    let lines = ui.wrap_in(body, limit, size, weight)
+    if lines.len() < 2 {
+        return body
+    }
+    return "\(lines[0])…"
+}
+
+/// What a row has left for text: the card, less its padding, the leading glyph
+/// and the gaps either side of it.
+fn row_room(model: Model) -> float {
+    let room = content_width(model) - material.space(8) - material.space(6) - 32.0 - material.space(6)
+    if room < 80.0 {
+        return 80.0
+    }
+    return room
+}
+
 fn mark_ink(s: material.Scheme, is_playing: bool) -> int {
     if is_playing {
         return s.on_secondary_container
@@ -600,7 +725,12 @@ fn mark_ink(s: material.Scheme, is_playing: bool) -> int {
 fn now_playing(model: Model, s: material.Scheme) -> ui.Node {
     let track = model.tracks[model.playing]
     let width = content_width(model) - material.space(8)
-    let fraction = model.elapsed / (track.length as float)
+    let fraction = model.elapsed / (duration(model.playing) as float)
+    // What is left for the title and the line under it once the transport has
+    // taken its 144dp. `grow` hands a box the spare space and never takes any
+    // back, so a title longer than this would push the buttons off the window
+    // rather than being cut.
+    let told = room_for_titles(width)
 
     let titles = ui.box_of(
         "np-text",
@@ -610,7 +740,7 @@ fn now_playing(model: Model, s: material.Scheme) -> ui.Node {
                 ui.text_of(
                     "np-title",
                     ui.in_font(ui.style(), 16.0, material.MEDIUM()),
-                    track.title,
+                    fit(track.title, told, 16.0, material.MEDIUM()),
                 ),
                 ui.ink(s.on_surface),
             ),
@@ -618,7 +748,12 @@ fn now_playing(model: Model, s: material.Scheme) -> ui.Node {
                 ui.text_of(
                     "np-artist",
                     ui.in_font(ui.style(), 14.0, material.REGULAR()),
-                    "\(track.artist) · \(clock(math.trunc_to(model.elapsed))) of \(clock(track.length))",
+                    fit(
+                        "\(track.artist) · \(clock(math.trunc_to(model.elapsed))) of \(clock(duration(model.playing)))",
+                        told,
+                        14.0,
+                        material.REGULAR(),
+                    ),
                 ),
                 ui.ink(s.on_surface_variant),
             ),
@@ -664,6 +799,16 @@ fn now_playing(model: Model, s: material.Scheme) -> ui.Node {
     )
     let holder = ui.padded(ui.Style{..ui.column(), align: ui.Align.Stretch }, material.space(4))
     return ui.box_of("np-holder", holder, [bar])
+}
+
+/// The width the now-playing text may take: the bar, less the transport and
+/// the gap before it.
+fn room_for_titles(width: float) -> float {
+    let told = width - 144.0 - material.space(4)
+    if told < 80.0 {
+        return 80.0
+    }
+    return told
 }
 
 fn play_glyph(model: Model) -> str {
@@ -769,7 +914,7 @@ fn ticked(model: Model, elapsed: float) -> Model {
     }
     let track = model.tracks[model.playing]
     let next = model.elapsed + elapsed / 1000.0
-    if next >= (track.length as float) {
+    if next >= (duration(model.playing) as float) {
         return started(advanced(Model{..model, elapsed: 0.0 }, 1))
     }
     // Top the schedule up when it runs low, rather than every frame: notes
@@ -850,7 +995,7 @@ fn clicked(model: Model, x: float, y: float) -> Model {
 /// over the new position.
 fn sought(model: Model, fraction: float) -> Model {
     let track = model.tracks[model.playing]
-    return started(Model{..model, elapsed: fraction * (track.length as float) })
+    return started(Model{..model, elapsed: fraction * (duration(model.playing) as float) })
 }
 
 /// Seek by a number of seconds, held inside the track.
@@ -860,7 +1005,7 @@ fn nudged(model: Model, by: float) -> Model {
     if at < 0.0 {
         at = 0.0
     }
-    let last = track.length as float
+    let last = duration(model.playing) as float
     if at > last {
         at = last
     }
@@ -1005,11 +1150,12 @@ fn main() {
     // not checked here and cannot be — a bytecode or native run has no host to
     // send a note to, the boundary being declared rather than assumed.
     var tune = ""
-    for step in 0..8 {
-        tune = tune + "\(note_at(0, step)) "
+    for b in melody(0) {
+        tune = tune + "\(b.midi)/\(b.steps) "
     }
     io.print("track 0 opens: \(tune)")
-    io.print("its first pitch: \(pitch(note_at(0, 0)))")
+    io.print("its first pitch: \(pitch(melody(0)[0].midi))")
+    io.print("it runs \(clock(duration(0)))")
 
     // Frames with nothing playing must leave the model *identical*, which is
     // how the host is told to stop asking for them.
@@ -1026,8 +1172,8 @@ fn main() {
     model = advanced(model, 1)
     io.print("next: \(model.tracks[model.playing].title)")
 
-    let filtered = Model{..model, genre: "Jazz" }
-    io.print("jazz leaves \(shown(filtered).len()) of \(model.tracks.len())")
+    let filtered = Model{..model, genre: "Folk" }
+    io.print("folk leaves \(shown(filtered).len()) of \(model.tracks.len())")
 
     // Every size class lays out, and the narrow ones do not simply overflow:
     // the tree they produce is a different tree. This is the check that the

@@ -299,6 +299,18 @@ pub fn text_size_in(body: str, size: float, weight: int) -> Size {
     return out
 }
 
+/// The same, in a named size and weight.
+///
+/// Wrapping is measured, so it has to be measured in the font the text will be
+/// drawn in: a caller that wrapped at the host's default and drew at 14dp would
+/// break its lines in the wrong places.
+pub fn wrap_in(body: str, limit: float, size: float, weight: int) -> [str] {
+    set_font(size, weight)
+    let out = wrap(body, limit)
+    unset_font(size)
+    return out
+}
+
 pub fn wrap(body: str, limit: float) -> [str] {
     let pieces = pieces_of(body)
     if pieces.len() == 0 {
