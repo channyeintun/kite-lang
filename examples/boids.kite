@@ -343,8 +343,8 @@ pub fn view(model: Model) {
     // Tests a second is the number worth printing: it is the work actually
     // done, rather than a frame rate that says as much about the display as
     // about the program.
-    let rate = (pairs as float) * model.fps
-    draw.text(8.0, 26.0, "\(model.fps) fps · \(rate) tests a second", 0x8b8d9e)
+    let millions = (pairs as float) * model.fps / 1000000.0
+    draw.text(8.0, 26.0, "\(model.fps) fps · \(millions)M tests a second", 0x8b8d9e)
     draw.text(8.0, HEIGHT() - 24.0, "move the pointer — it is a hawk", 0x5a5c6b)
 }
 
