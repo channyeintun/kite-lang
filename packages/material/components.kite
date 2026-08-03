@@ -745,22 +745,37 @@ pub fn linear_progress(name: str, s: Scheme, progress: float, width: float) -> u
 /// progress indicator reports; a slider is a *control* — it takes an id, it
 /// answers to hit-testing, and it takes focus. A seek bar is a slider.
 ///
-/// The shape is Material 3's current one, and it is what makes this drawable
-/// here at all: the handle is a bar standing in a **gap** in the track rather
-/// than a knob sitting on top of it. That is a row — active track, gap, handle,
-/// gap, inactive track — and a row is something this layout can express. A knob
-/// overlapping a continuous track would need absolute positioning or a z-order,
-/// and the layout has neither.
+/// A 4dp track with a round handle on it: the classic slider, which is what a
+/// media scrubber is. Material also specifies an *expressive* slider — a 16dp
+/// track with a tall bar for a handle — and that one is for volume and
+/// brightness, where the control is the whole point of the row it sits in. Used
+/// as a seek bar it reads as a segmented progress bar rather than something
+/// draggable, which is exactly what the first version of this looked like.
+///
+/// The row is a concession the layout forces: with no absolute positioning and
+/// no z-order, a handle cannot sit *on* a continuous track, so the track is
+/// drawn either side of it. The seam is two device pixels and does not read.
+/// The touch target, which is what the control occupies. The *track* is 4dp;
+/// the rest is the room a finger needs and is not drawn.
 pub fn SLIDER_HEIGHT() -> float {
-    return 44.0
+    return 40.0
 }
 
-fn HANDLE_WIDTH() -> float {
+fn TRACK_HEIGHT() -> float {
     return 4.0
 }
 
+/// A circle, because the handle is `full`-radius and square.
+fn HANDLE_WIDTH() -> float {
+    return 12.0
+}
+
+/// Barely visible, and only here because the layout cannot overlap a handle
+/// onto a continuous track: there is no absolute positioning and no z-order,
+/// so the track is drawn in two pieces with the handle between them. At two
+/// device pixels the seam does not read as a gap.
 fn HANDLE_GAP() -> float {
-    return 6.0
+    return 2.0
 }
 
 pub fn slider(s: Scheme, id: str, value: float, width: float, state: State) -> ui.Node {
@@ -782,11 +797,11 @@ pub fn slider(s: Scheme, id: str, value: float, width: float, state: State) -> u
     }
 
     let parts = [
-        bar("\(id)-active", active, 16.0, s.primary),
+        bar("\(id)-active", active, TRACK_HEIGHT(), s.primary),
         spacer("\(id)-gap-a", gap),
-        bar("\(id)-handle", handle, 44.0, handle_colour),
+        bar("\(id)-handle", handle, HANDLE_WIDTH(), handle_colour),
         spacer("\(id)-gap-b", gap),
-        bar("\(id)-inactive", inactive, 16.0, s.surface_container_highest),
+        bar("\(id)-inactive", inactive, TRACK_HEIGHT(), s.surface_container_highest),
     ]
     let style = ui.Style{
         ..ui.row(),
