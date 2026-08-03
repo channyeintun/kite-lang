@@ -72,6 +72,38 @@ extern fn silence()
 @host("audio")
 extern fn awake() -> bool
 
+// ---- recorded audio ----------------------------------------------------------
+//
+// A track is either a melody this file writes out, or a recording it names.
+// The two are not the same mechanism and are not pretended to be: an
+// oscillator is fed notes, and a file is played by the host, which decodes it.
+// Kite never sees a sample — a buffer of them is not something `str`, `int` and
+// `float` can carry, and decoding audio to hand it back would be the wrong
+// place to do the work anyway.
+//
+// The difference that matters to the rest of this file is *whose clock it is*.
+// A synthesised track counts frames; a recorded one is timed by the element
+// playing it, and `at()` is how the program reads that clock instead of
+// guessing at it. Counting frames alongside a file would drift within seconds.
+
+@host("audio")
+extern fn load(url: str)
+
+@host("audio")
+extern fn start()
+
+@host("audio")
+extern fn pause()
+
+@host("audio")
+extern fn seek(seconds: float)
+
+@host("audio")
+extern fn at() -> float
+
+@host("audio")
+extern fn length() -> float
+
 /// How far ahead notes are scheduled, in seconds. Scheduling ahead is what
 /// makes the playback independent of the frame rate.
 fn HORIZON() -> float {
@@ -116,7 +148,11 @@ fn pitch(midi: int) -> float {
 /// Every one of these is public domain: Beethoven died in 1827, Pachelbel in
 /// 1706, Petzold in 1733, and a traditional melody has no author to outlive.
 fn melody(track: int) -> [Beat] {
+    // Index 0 is the recording, which has no notes of its own.
     if track == 0 {
+        return []
+    }
+    if track == 1 {
         // Beethoven, Bagatelle in A minor — "Für Elise", 1810.
         return [
             beat(76, 1), beat(75, 1), beat(76, 1), beat(75, 1),
@@ -126,7 +162,7 @@ fn melody(track: int) -> [Beat] {
             beat(72, 2), beat(-1, 1), beat(64, 1),
         ]
     }
-    if track == 1 {
+    if track == 2 {
         // Beethoven, Symphony No. 9 — the "Ode to Joy" theme, 1824.
         return [
             beat(64, 2), beat(64, 2), beat(65, 2), beat(67, 2),
@@ -135,7 +171,7 @@ fn melody(track: int) -> [Beat] {
             beat(64, 3), beat(62, 1), beat(62, 4),
         ]
     }
-    if track == 2 {
+    if track == 3 {
         // Christian Petzold, Minuet in G — long credited to Bach, whose
         // notebook it sits in.
         return [
@@ -145,7 +181,7 @@ fn melody(track: int) -> [Beat] {
             beat(79, 2), beat(67, 2), beat(67, 2),
         ]
     }
-    if track == 3 {
+    if track == 4 {
         // "Greensleeves", English traditional, printed in 1580.
         return [
             beat(69, 1), beat(72, 2), beat(74, 1), beat(76, 2), beat(77, 1),
@@ -155,7 +191,7 @@ fn melody(track: int) -> [Beat] {
             beat(68, 2), beat(64, 3),
         ]
     }
-    if track == 4 {
+    if track == 5 {
         // さくらさくら, Japanese traditional, Edo period. The in-sen scale it
         // uses — A B C E F — is why it sounds as it does.
         return [
@@ -166,7 +202,7 @@ fn melody(track: int) -> [Beat] {
             beat(64, 4),
         ]
     }
-    if track == 5 {
+    if track == 6 {
         // Pachelbel, Canon in D — the ground bass, which is the part everyone
         // actually knows.
         return [
@@ -201,7 +237,7 @@ fn line(track: int) -> [Beat] {
 /// How long a track runs, in seconds — its melody, repeated. Computed rather
 /// than written down, so the progress bar reaches the end exactly when the
 /// music does.
-fn duration(track: int) -> int {
+fn composed_duration(track: int) -> int {
     var steps = 0
     for b in melody(track) {
         steps = steps + b.steps
@@ -244,6 +280,13 @@ struct Track {
     title: str
     artist: str
     genre: str
+    /// A recording to play, or empty for a track this file composes.
+    source: str
+    /// How long the recording runs. The host knows once its metadata has
+    /// loaded and answers zero until then, so this is what the list shows in
+    /// the meantime — a duration that appeared a second late would look like a
+    /// bug rather than like loading.
+    seconds: int
 }
 
 pub struct Model {
@@ -285,16 +328,45 @@ fn HEIGHT() -> float {
     return 700.0
 }
 
+fn composed(title: str, artist: str, genre: str) -> Track {
+    return Track{ title: title, artist: artist, genre: genre, source: "", seconds: 0 }
+}
+
 fn library() -> [Track] {
     return [
-        Track { title: "Für Elise", artist: "Ludwig van Beethoven", genre: "Classical" },
-        Track { title: "Ode to Joy", artist: "Ludwig van Beethoven", genre: "Classical" },
-        Track { title: "Minuet in G", artist: "Christian Petzold", genre: "Baroque" },
-        Track { title: "Greensleeves", artist: "Traditional", genre: "Folk" },
-        Track { title: "さくらさくら", artist: "日本古謡", genre: "Folk" },
-        Track { title: "Canon in D", artist: "Johann Pachelbel", genre: "Baroque" },
-        Track { title: "Ah! vous dirai-je, maman", artist: "Traditional", genre: "Folk" },
+        Track {
+            title: "ဆယ်လ်မွန်ငါးတို့အပြန်",
+            artist: "ခင်မောင်တိုး",
+            genre: "Burmese",
+            source: "khin-maung-toe.mp3",
+            seconds: 271,
+        },
+        composed("Für Elise", "Ludwig van Beethoven", "Classical"),
+        composed("Ode to Joy", "Ludwig van Beethoven", "Classical"),
+        composed("Minuet in G", "Christian Petzold", "Baroque"),
+        composed("Greensleeves", "Traditional", "Folk"),
+        composed("さくらさくら", "日本古謡", "Folk"),
+        composed("Canon in D", "Johann Pachelbel", "Baroque"),
+        composed("Ah! vous dirai-je, maman", "Traditional", "Folk"),
     ]
+}
+
+/// Whether a track is played from a file rather than composed.
+fn recorded(model: Model, track: int) -> bool {
+    return model.tracks[track].source.len() > 0
+}
+
+/// How long a track runs, in seconds.
+///
+/// A composed one adds up its own notes, so the progress bar reaches the end
+/// exactly when the music does. A recording is however long the file is, which
+/// only the host knows — and only once its metadata has loaded, so the written
+/// figure stands in until then.
+fn duration(model: Model, track: int) -> int {
+    if recorded(model, track) {
+        return model.tracks[track].seconds
+    }
+    return composed_duration(track)
 }
 
 pub fn init() -> Model {
@@ -325,7 +397,7 @@ fn viewport(model: Model) -> ui.Size {
 // ---- what the filters leave -----------------------------------------------------
 
 fn genres() -> [str] {
-    return ["All", "Classical", "Baroque", "Folk"]
+    return ["All", "Burmese", "Classical", "Baroque", "Folk"]
 }
 
 fn shown(model: Model) -> [int] {
@@ -582,9 +654,31 @@ fn main_column(model: Model, s: material.Scheme) -> ui.Node {
 /// A row of filter chips, one per genre. Exactly Material's use for them: a
 /// set of choices that narrows what is below.
 fn chips(model: Model, s: material.Scheme) -> ui.Node {
-    var out: [ui.Node] = []
+    // Packed into as many rows as it takes, measured.
+    //
+    // Material scrolls a chip row sideways when it does not fit. This layout
+    // has no horizontal scrolling and no wrapping of its own, so the packing
+    // happens here — which an application *can* do, because it can measure. A
+    // row that simply overflowed would push its last chips off the window,
+    // which is what five genres did at 360dp.
+    let room = content_width(model) - material.space(8)
+    var rows: [ui.Node] = []
+    var line: [ui.Node] = []
+    var used = 0.0
+    var at = 0
     for name in genres() {
-        out.push(
+        let width = chip_width(name)
+        if line.len() > 0 && used + material.space(2) + width > room {
+            rows.push(chip_row(at, line))
+            at = at + 1
+            line = []
+            used = 0.0
+        }
+        if line.len() > 0 {
+            used = used + material.space(2)
+        }
+        used = used + width
+        line.push(
             material.filter_chip(
                 s,
                 "genre-\(name)",
@@ -594,11 +688,28 @@ fn chips(model: Model, s: material.Scheme) -> ui.Node {
             ),
         )
     }
+    if line.len() > 0 {
+        rows.push(chip_row(at, line))
+    }
     let style = ui.spaced(
-        ui.padded(ui.Style{..ui.row(), align: ui.Align.Center }, material.space(4)),
+        ui.padded(ui.Style{..ui.column(), align: ui.Align.Start }, material.space(4)),
         material.space(2),
     )
-    return ui.box_of("chips", style, out)
+    return ui.box_of("chips", style, rows)
+}
+
+/// A chip's width, measured as the *selected* form — the tick is the widest it
+/// gets, so choosing a genre never reflows the rows underneath it.
+fn chip_width(name: str) -> float {
+    return ui.text_size_in("✓ \(name)", 14.0, material.MEDIUM()).width + material.space(4) * 2.0
+}
+
+fn chip_row(at: int, line: [ui.Node]) -> ui.Node {
+    return ui.box_of(
+        "chip-row\(at)",
+        ui.spaced(ui.Style{..ui.row(), align: ui.Align.Center }, material.space(2)),
+        line,
+    )
 }
 
 /// Where the list goes: an empty card that the rows are painted *into*.
@@ -662,7 +773,7 @@ fn list(model: Model, s: material.Scheme) -> ui.Node {
                 "track-\(i)",
                 fit(track.title, room, 16.0, material.REGULAR()),
                 fit(
-                    "\(track.artist) · \(track.genre) · \(clock(duration(i)))",
+                    "\(track.artist) · \(track.genre) · \(clock(duration(model, i)))",
                     room,
                     14.0,
                     material.REGULAR(),
@@ -725,7 +836,7 @@ fn mark_ink(s: material.Scheme, is_playing: bool) -> int {
 fn now_playing(model: Model, s: material.Scheme) -> ui.Node {
     let track = model.tracks[model.playing]
     let width = content_width(model) - material.space(8)
-    let fraction = model.elapsed / (duration(model.playing) as float)
+    let fraction = model.elapsed / (duration(model, model.playing) as float)
     // What is left for the title and the line under it once the transport has
     // taken its 144dp. `grow` hands a box the spare space and never takes any
     // back, so a title longer than this would push the buttons off the window
@@ -749,7 +860,7 @@ fn now_playing(model: Model, s: material.Scheme) -> ui.Node {
                     "np-artist",
                     ui.in_font(ui.style(), 14.0, material.REGULAR()),
                     fit(
-                        "\(track.artist) · \(clock(math.trunc_to(model.elapsed))) of \(clock(duration(model.playing)))",
+                        "\(track.artist) · \(clock(math.trunc_to(model.elapsed))) of \(clock(duration(model, model.playing)))",
                         told,
                         14.0,
                         material.REGULAR(),
@@ -912,9 +1023,18 @@ fn ticked(model: Model, elapsed: float) -> Model {
     if !model.running {
         return model
     }
-    let track = model.tracks[model.playing]
+    // A recording is timed by the host that is playing it. Counting frames
+    // alongside it would drift within seconds, and the two clocks disagreeing
+    // is how a progress bar ends up in a different place from the sound.
+    if recorded(model, model.playing) {
+        let position = at()
+        if position >= (duration(model, model.playing) as float) - 0.25 {
+            return started(advanced(Model{..model, elapsed: 0.0 }, 1))
+        }
+        return Model{..model, elapsed: position }
+    }
     let next = model.elapsed + elapsed / 1000.0
-    if next >= (duration(model.playing) as float) {
+    if next >= (duration(model, model.playing) as float) {
         return started(advanced(Model{..model, elapsed: 0.0 }, 1))
     }
     // Top the schedule up when it runs low, rather than every frame: notes
@@ -931,7 +1051,19 @@ fn ticked(model: Model, elapsed: float) -> Model {
 /// Begin, or begin again: silence whatever is still ringing and fill the
 /// schedule from where the track now is.
 fn started(model: Model) -> Model {
+    // Whichever way the *other* kind of track was making a sound, stop it: the
+    // two mechanisms know nothing about each other, so switching between them
+    // has to silence both.
     silence()
+    pause()
+    if recorded(model, model.playing) {
+        load(model.tracks[model.playing].source)
+        seek(model.elapsed)
+        if model.running {
+            start()
+        }
+        return Model{..model, sent: model.elapsed }
+    }
     if !model.running {
         return Model{..model, sent: model.elapsed }
     }
@@ -995,7 +1127,7 @@ fn clicked(model: Model, x: float, y: float) -> Model {
 /// over the new position.
 fn sought(model: Model, fraction: float) -> Model {
     let track = model.tracks[model.playing]
-    return started(Model{..model, elapsed: fraction * (duration(model.playing) as float) })
+    return started(Model{..model, elapsed: fraction * (duration(model, model.playing) as float) })
 }
 
 /// Seek by a number of seconds, held inside the track.
@@ -1005,7 +1137,7 @@ fn nudged(model: Model, by: float) -> Model {
     if at < 0.0 {
         at = 0.0
     }
-    let last = duration(model.playing) as float
+    let last = duration(model, model.playing) as float
     if at > last {
         at = last
     }
@@ -1150,12 +1282,13 @@ fn main() {
     // not checked here and cannot be — a bytecode or native run has no host to
     // send a note to, the boundary being declared rather than assumed.
     var tune = ""
-    for b in melody(0) {
+    for b in melody(1) {
         tune = tune + "\(b.midi)/\(b.steps) "
     }
-    io.print("track 0 opens: \(tune)")
-    io.print("its first pitch: \(pitch(melody(0)[0].midi))")
-    io.print("it runs \(clock(duration(0)))")
+    io.print("Für Elise opens: \(tune)")
+    io.print("its first pitch: \(pitch(melody(1)[0].midi))")
+    io.print("Für Elise runs \(clock(composed_duration(1)))")
+    io.print("the recorded track is \(clock(duration(model, 0))), from a file")
 
     // Frames with nothing playing must leave the model *identical*, which is
     // how the host is told to stop asking for them.

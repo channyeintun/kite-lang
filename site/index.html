@@ -100,11 +100,13 @@
     it — and the value on a failure path is a zero value that flows onward
     looking valid.
   </p>
-<pre><code class="kite sketch">fn load_user(id: int) -> (User, error) {
-    let (raw, err) = db.query("SELECT ...", id)
-    // `raw` cannot be read yet: on the failure path there is no value at all.
+<pre><code class="kite sketch">use std/json
+
+fn title_of(document: str) -&gt; (str, error) {
+    let (parsed, err) = json.parse(document)
+    // `parsed` cannot be read yet: on the failure path there is no value at all.
     check err
-    return parse_user(raw)
+    return json.text_or(parsed, "title", "untitled"), nil
 }
 </code></pre>
   <p>

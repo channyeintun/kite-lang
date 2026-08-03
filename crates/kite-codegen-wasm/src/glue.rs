@@ -1757,6 +1757,8 @@ if (HOSTS.net) {
 const AUDIO_HOST: &str = r#"
 if (HOSTS.audio) {
   let context = null;
+  // The one recorded track in play, if a program asked for one.
+  let element = null;
   let master = null;
   let voices = [];
   const ready = () => {
@@ -1813,6 +1815,51 @@ if (HOSTS.audio) {
       const ctx = ready();
       return ctx !== null && ctx.state === "running";
     },
+
+    // ---- recorded audio ----
+    //
+    // A second way to make a sound, for programs that have a file rather than
+    // a tune. It is deliberately not the same mechanism: an oscillator is fed
+    // notes and a file is played, and pretending one is the other would mean
+    // decoding audio in Kite to hand back samples the boundary cannot carry.
+    //
+    // The element is the clock. A program that asked the host to start a file
+    // and then counted frames itself would drift — the audio runs on its own
+    // clock, and `at()` is how a program reads that clock rather than guessing
+    // at it.
+    load: (url) => {
+      const next = S(url);
+      if (element !== null && element.dataset.src === next) return;
+      if (element !== null) element.pause();
+      element = new Audio(next);
+      element.dataset.src = next;
+      element.preload = "metadata";
+    },
+    start: () => {
+      if (element === null) return;
+      // Rejected when no gesture has happened yet, which is not an error worth
+      // trapping over — the next click will succeed.
+      const played = element.play();
+      if (played && played.catch) played.catch(() => {});
+    },
+    pause: () => {
+      if (element !== null) element.pause();
+    },
+    seek: (seconds) => {
+      if (element === null) return;
+      // Before the metadata arrives the duration is NaN, and assigning a time
+      // past it throws.
+      const limit = Number.isFinite(element.duration) ? element.duration : seconds;
+      element.currentTime = Math.max(0, Math.min(seconds, limit));
+    },
+    at: () => (element === null ? 0 : element.currentTime),
+    // Zero until the metadata has loaded, which a program reads as "not known
+    // yet" rather than as "an empty file".
+    length: () => {
+      if (element === null) return 0;
+      return Number.isFinite(element.duration) ? element.duration : 0;
+    },
+    ended: () => element !== null && element.ended,
   };
 }
 "#;

@@ -653,7 +653,7 @@ reaching for an unmarked declaration across a module boundary is E0401.
 Writing `std/json` — a parser, a writer, a pretty-printer and accessors — found
 four things the language now does, which is exactly what this phase was for:
 
-- **Returning a fallible call's result directly**, `return parse_user(raw)`,
+- **Returning a fallible call's result directly**, `return parse_object(input, at)`,
   which the specification's own example does and the checker refused.
 - **Match arms coerce into an expected optional**, so `Text(s) => s` and
   `other => nil` are arms of one `Option<str>`.

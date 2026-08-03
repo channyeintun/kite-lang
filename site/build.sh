@@ -40,6 +40,10 @@ echo "  demo/index.html"
 mkdir -p "$out/player"
 "$root/target/release/kitec" build "$root/examples/player.kite" --emit wasm --out "$out/player"
 echo "  player/index.html"
+# The recording the player names. Copied rather than referenced, because the
+# module asks the host for a URL relative to the page it is served from.
+cp "$root/assets/khin-maung-toe.mp3" "$out/player/khin-maung-toe.mp3"
+echo "  player/khin-maung-toe.mp3"
 
 echo "copying the documents…"
 mkdir -p "$out/docs"

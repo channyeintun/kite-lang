@@ -642,43 +642,43 @@ lattice has height two.
 In practice:
 
 ```kite
-fn load_user(id: UserId) -> (User, error) {
-    let (raw, err) = db.query("SELECT ...", id)
-    // raw: Tainted    err: Unchecked
+fn title_of(document: str) -> (str, error) {
+    let (parsed, err) = json.parse(document)
+    // parsed: Tainted    err: Unchecked
 
     if err != nil {
-        return _, err       // raw is still Tainted here — cannot be used
+        return _, err       // parsed is still Tainted here — cannot be used
     }
-    // raw: Clean     err: Checked
+    // parsed: Clean     err: Checked
 
-    return parse_user(raw)
+    return json.text_or(parsed, "title", "untitled"), nil
 }
 ```
 
 Attempting to skip the check:
 
 ```kite
-fn broken(id: UserId) -> User {
-    let (raw, err) = db.query("SELECT ...", id)
-    return parse_user(raw)
+fn broken(document: str) -> str {
+    let (parsed, err) = json.parse(document)
+    return json.text_or(parsed, "title", "untitled")
 }
 ```
 
 ```
-error[E0301]: `raw` is used before `err` has been checked
-   ┌─ users.kite:3:23
+error[E0301]: `parsed` is used before `err` has been checked
+   ┌─ titles.kite:3:31
    │
- 2 │     let (raw, err) = db.query("SELECT ...", id)
-   │          ---  --- this error is never checked
+ 2 │     let (parsed, err) = json.parse(document)
+   │          ------  --- this error is never checked
    │          │
-   │          `raw` is only valid when `err` is nil
- 3 │     return parse_user(raw)
-   │                       ^^^ used here while still tainted
+   │          `parsed` is only valid when `err` is nil
+ 3 │     return json.text_or(parsed, "title", "untitled")
+   │                         ^^^^^^ used here while still tainted
    │
 help: check the error first
    │
  3 │     check err
- 4 │     return parse_user(raw)
+ 4 │     return json.text_or(parsed, "title", "untitled"), nil
    │
 ```
 
