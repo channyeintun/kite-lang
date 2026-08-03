@@ -318,6 +318,15 @@ pub struct Model {
     /// simpler rule, and the reason a list this long needs somewhere to put the
     /// part that does not fit.
     offset: float
+    /// Hover, press, focus and the ripple, for every control on the screen.
+    ///
+    /// It is in the model because there is nowhere else it could be: a state
+    /// layer arriving over two hundred milliseconds is a fact that outlives a
+    /// frame, and Kite has no mutable globals for a component to keep one in.
+    /// So the design system hands it back as a value, `update` threads it
+    /// through, and `view` reads it — the same shape as `elapsed` and `offset`
+    /// above rather than an exception to them.
+    ui_state: material.Interaction
 }
 
 fn WIDTH() -> float {
@@ -383,6 +392,7 @@ pub fn init() -> Model {
         dark: true,
         sent: 0.0,
         offset: 0.0,
+        ui_state: material.no_interaction(),
     }
 }
 
@@ -496,15 +506,15 @@ fn view_node(model: Model) -> ui.Node {
 fn destinations(model: Model) -> [ui.Node] {
     let s = scheme(model)
     return [
-        material.rail_item(s, "nav-library", "♫", "Library", true, focus(model, "nav-library")),
-        material.rail_item(s, "nav-queue", "≡", "Queue", false, focus(model, "nav-queue")),
+        material.rail_item(s, "nav-library", "♫", "Library", true, choice(model, "nav-library", true)),
+        material.rail_item(s, "nav-queue", "≡", "Queue", false, choice(model, "nav-queue", false)),
         material.rail_item(
             s,
             "nav-theme",
             theme_glyph(model),
             "Theme",
             false,
-            focus(model, "nav-theme"),
+            choice(model, "nav-theme", false),
         ),
     ]
 }
@@ -560,8 +570,30 @@ fn theme_glyph(model: Model) -> str {
     return "☾"
 }
 
+/// What a control is doing: hovered, focused, pressed — and how far into each.
+///
+/// It used to be `when_focused(model.focused == id)`, which is a boolean and
+/// draws a control in one of two states. Everything the pointer knows lives in
+/// `ui_state` now, so this is a lookup rather than a comparison, and what comes
+/// back carries the fractions the state layers are actually at.
+/// Focus moved, in both the places that have to know.
+///
+/// The model keeps `focused` because that is what routes a keystroke; the
+/// interaction keeps its own because that is what animates the focus ring. Two
+/// records of one fact is two things to keep in step, so nothing else in this
+/// file assigns either of them.
+fn focused_on(model: Model, id: str) -> Model {
+    return Model{..model, focused: id, ui_state: material.focus_to(model.ui_state, id) }
+}
+
 fn focus(model: Model, id: str) -> material.State {
-    return material.when_focused(model.focused == id)
+    return material.state_of(model.ui_state, id)
+}
+
+/// The same for a control that is also selected — a filter chip, a rail
+/// destination, a row in the queue.
+fn choice(model: Model, id: str, on: bool) -> material.State {
+    return material.state_marked(model.ui_state, id, on)
 }
 
 /// How wide the column beside the navigation is.
@@ -684,7 +716,7 @@ fn chips(model: Model, s: material.Scheme) -> ui.Node {
                 "genre-\(name)",
                 name,
                 model.genre == name,
-                focus(model, "genre-\(name)"),
+                choice(model, "genre-\(name)", model.genre == name),
             ),
         )
     }
@@ -779,7 +811,7 @@ fn list(model: Model, s: material.Scheme) -> ui.Node {
                     material.REGULAR(),
                 ),
                 leading,
-                material.when_selected(is_playing, model.focused == "track-\(i)"),
+                choice(model, "track-\(i)", is_playing),
             ),
         )
     }
@@ -933,6 +965,50 @@ fn frames_of(model: Model) -> [ui.Frame] {
     return ui.layout(view_node(model), viewport(model))
 }
 
+/// Every frame the pointer at `(x, y)` can land on, in window coordinates.
+///
+/// The library rows are laid out in a tree of their own and drawn scrolled, so
+/// their rectangles are in the viewport's space rather than the window's.
+/// Shifting them into the window's is what lets one hit-test answer for the
+/// whole screen — `material.moved` and its siblings take a flat list and know
+/// nothing about viewports, which is the right division: a design system should
+/// not have to be told how an application scrolls.
+///
+/// The rows are only offered when the point is inside the card. They are not
+/// merely filtered by whether each row is visible, because the tree's *root* is
+/// as tall as all of its content — six hundred pixels of it, in a card three
+/// hundred and sixty tall — so it contains points far below the card and would
+/// answer for the now-playing bar underneath. That is precisely the bug this
+/// shape avoids, and it is why `clicked` has always tested the card first.
+fn hit_frames(model: Model, x: float, y: float) -> [ui.Frame] {
+    let frames = frames_of(model)
+    let box = list_rect(frames)
+    if !ui.rect_contains(box, x, y) {
+        return frames
+    }
+    let rows = row_frames(model, box)
+    let offset = ui.clamp_scroll(model.offset, rows, row_viewport(box))
+    var out = frames
+    for row in rows {
+        // Shifted, not clipped. The offset the painter applies is the exact
+        // inverse of this, so a ripple started on a row lands where the finger
+        // did — `pressed_down` records its origin against the shifted rectangle
+        // and `paint_scrolled` puts it back against the unshifted one.
+        out.push(
+            ui.Frame {
+                ..row,
+                rect: ui.Rect{
+                    x: row.rect.x + box.x,
+                    y: row.rect.y + box.y - offset,
+                    width: row.rect.width,
+                    height: row.rect.height,
+                },
+            },
+        )
+    }
+    return out
+}
+
 /// The card the rows are painted into, as a rectangle in window coordinates.
 fn list_rect(frames: [ui.Frame]) -> ui.Rect {
     for frame in frames {
@@ -956,7 +1032,10 @@ fn row_viewport(box: ui.Rect) -> ui.Size {
 pub fn view(model: Model) {
     let s = scheme(model)
     let frames = frames_of(model)
-    ui.paint(frames)
+    // `material.paint` is `ui.paint` with one extra pass: the ripples, which go
+    // over the containers they belong to and cannot be children of them —
+    // a layout of rows and columns has no z-order to put them in.
+    material.paint(frames, model.ui_state)
 
     let box = list_rect(frames)
     let rows = row_frames(model, box)
@@ -964,7 +1043,8 @@ pub fn view(model: Model) {
     // The card behind the rows is already painted, so the rows are told what
     // they are sitting on: a transparent thing among them — an unticked
     // checkbox, an outlined chip — needs the colour of *that*, not the window.
-    ui.paint_scrolled(rows, box, offset)
+    // A ripple started on a row is clipped to the same viewport the row is.
+    material.paint_scrolled(rows, model.ui_state, box, offset)
 }
 
 // ---- events -----------------------------------------------------------------------
@@ -989,12 +1069,39 @@ fn EVENT_WHEEL() -> int {
     return 2
 }
 
+/// The three the pointer sends. A program that ignores them is a program whose
+/// controls cannot hover or press — which is what this one was before, and the
+/// reason nothing in it lit up until it was clicked.
+fn EVENT_MOVE() -> int {
+    return 3
+}
+
+fn EVENT_DOWN() -> int {
+    return 4
+}
+
+fn EVENT_UP() -> int {
+    return 5
+}
+
 pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
     if event == EVENT_CLICK() {
         return clicked(model, x, y)
     }
     if event == EVENT_KEY() {
         return pressed(model, key)
+    }
+    if event == EVENT_MOVE() {
+        return Model{..model, ui_state: material.moved(model.ui_state, hit_frames(model, x, y), x, y) }
+    }
+    if event == EVENT_DOWN() {
+        return Model{
+            ..model,
+            ui_state: material.pressed_down(model.ui_state, hit_frames(model, x, y), x, y),
+        }
+    }
+    if event == EVENT_UP() {
+        return Model{..model, ui_state: material.lifted(model.ui_state) }
     }
     if event == EVENT_RESIZE() {
         // A floor, not a design size. It used to be 900x560 — wider than the
@@ -1020,9 +1127,19 @@ pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
 /// the host stops asking for frames until something else happens. So a paused
 /// player costs nothing, which a loop that ran regardless would not.
 fn ticked(model: Model, elapsed: float) -> Model {
-    if !model.running {
-        return model
+    // The state layers first: a button's hover is arriving whether or not the
+    // music is playing. The guard is what keeps the *same* model coming back
+    // when neither is moving — `Model{..model, …}` is a new value even when
+    // every field in it is unchanged, and a new value is the host's signal to
+    // schedule another frame.
+    var base = model
+    if material.animating(model.ui_state) {
+        base = Model{..model, ui_state: material.advance(model.ui_state, elapsed) }
     }
+    if !base.running {
+        return base
+    }
+    let model = base
     // A recording is timed by the host that is playing it. Counting frames
     // alongside it would drift within seconds, and the two clocks disagreeing
     // is how a progress bar ends up in a different place from the sound.
@@ -1098,14 +1215,14 @@ fn clicked(model: Model, x: float, y: float) -> Model {
         if id == nil {
             return model
         }
-        return acted(Model{..model, focused: id }, id)
+        return acted(focused_on(model, id), id)
     }
 
     let hit = ui.control_at(frames, x, y)
     if hit == nil {
         return model
     }
-    let focused = Model{..model, focused: hit }
+    let focused = focused_on(model, hit)
     // The seek bar is the one control whose answer depends on *where* in it the
     // click landed, so it needs the rectangle it was laid out into rather than
     // only its id.
@@ -1167,7 +1284,15 @@ fn acted(model: Model, id: str) -> Model {
     }
     for name in genres() {
         if id == "genre-\(name)" {
-            return Model{..model, genre: name }
+            // The chips have to be *told* the choice changed. Selection is the
+            // model's fact — this file knows which genre is on and the design
+            // system cannot — so the animation is asked for at the moment the
+            // fact changes, one line from the line that changes it.
+            return Model{
+                ..model,
+                genre: name,
+                ui_state: material.choose_one(model.ui_state, genre_ids(), "genre-\(name)"),
+            }
         }
     }
     let track = track_id(model, id)
@@ -1178,9 +1303,33 @@ fn acted(model: Model, id: str) -> Model {
         if track == model.playing {
             return started(Model{..model, running: !model.running })
         }
-        return started(Model{..model, playing: track, elapsed: 0.0, running: true })
+        return started(
+            Model {
+                ..model,
+                playing: track,
+                elapsed: 0.0,
+                running: true,
+                ui_state: material.choose_one(model.ui_state, track_ids(model), id),
+            },
+        )
     }
     return model
+}
+
+fn genre_ids() -> [str] {
+    var out: [str] = []
+    for name in genres() {
+        out.push("genre-\(name)")
+    }
+    return out
+}
+
+fn track_ids(model: Model) -> [str] {
+    var out: [str] = []
+    for i in 0..model.tracks.len() {
+        out.push("track-\(i)")
+    }
+    return out
 }
 
 fn track_id(model: Model, id: str) -> Option<int> {
@@ -1215,7 +1364,7 @@ fn focus_ring(model: Model) -> [str] {
 fn pressed(model: Model, key: str) -> Model {
     let order = focus_ring(model)
     if key == "Tab" {
-        return Model{..model, focused: ui.next_focus(order, model.focused) }
+        return focused_on(model, ui.next_focus(order, model.focused))
     }
     if key == "ArrowDown" {
         return started(advanced(model, 1))
@@ -1340,8 +1489,57 @@ fn main() {
         io.print("far right: \(material.slider_value_at(bar.rect, right))")
     }
 
+    // Hover, press and the ripple, driven exactly the way the page drives them.
+    //
+    // Nothing here used to light up until it was clicked: `update` handled
+    // click, key, resize, frame and wheel, and the three pointer events that
+    // carry hover and press fell through to the default branch. They are
+    // handled now, and this is what that bought — checked without a browser,
+    // because the state layer is arithmetic on a model like everything else.
+    let play = ui.frame_of(frames_of(wide), "play")
+    if play != nil {
+        let px = play.rect.x + play.rect.width / 2.0
+        let py = play.rect.y + play.rect.height / 2.0
+        var live = update(wide, EVENT_MOVE(), px, py, "")
+        io.print("hover on arrival: \(percent(hover_of(live)))")
+        live = update(live, EVENT_FRAME(), 50.0, 0.0, "")
+        io.print("hover after 50ms: \(percent(hover_of(live)))")
+        live = update(live, EVENT_FRAME(), 50.0, 0.0, "")
+        io.print("hover after 100ms: \(percent(hover_of(live)))")
+
+        // A settled interaction must come back *identical*, or the host keeps
+        // asking for frames forever and the fan comes on.
+        let again = update(live, EVENT_FRAME(), 16.0, 0.0, "")
+        io.print("still after settling: \(!material.animating(again.ui_state))")
+
+        // Pressing starts a ripple, whose colour is the control's own ink.
+        live = update(live, EVENT_DOWN(), px, py, "")
+        let reaction = material.reaction_of(live.ui_state, "play")
+        if reaction != nil {
+            io.print("ripple on press: \(reaction.ripple.live), ink \(reaction.ripple.ink)")
+        }
+        live = update(live, EVENT_UP(), 0.0, 0.0, "")
+        live = update(live, EVENT_FRAME(), 4.0, 0.0, "")
+        let brief = material.reaction_of(live.ui_state, "play")
+        if brief != nil {
+            io.print("ripple survives a 4ms tap: \(brief.ripple.live)")
+        }
+        // And the pointer leaving takes the layer back down.
+        live = update(live, EVENT_MOVE(), 0.0, 0.0, "")
+        live = update(live, EVENT_FRAME(), 200.0, 0.0, "")
+        io.print("hover once the pointer left: \(percent(hover_of(live)))")
+    }
+
     let frames = frames_of(model)
     io.print("frames \(frames.len()), controls \(ui.focus_order(frames).len())")
 
     view(model)
+}
+
+fn hover_of(model: Model) -> float {
+    return material.state_of(model.ui_state, "play").hover
+}
+
+fn percent(v: float) -> str {
+    return "\(math.round_to(v * 100.0))%"
 }

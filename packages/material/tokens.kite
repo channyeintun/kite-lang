@@ -51,10 +51,47 @@ pub struct Scheme {
     pub surface_container: int
     pub surface_container_high: int
     pub surface_container_highest: int
+    /// The dimmest and brightest a surface gets. Material uses the pair for
+    /// large areas that need to read as background without becoming a
+    /// container — a scaffold behind cards, a sheet behind a list.
+    pub surface_dim: int
+    pub surface_bright: int
+    /// The colour elevation tints a surface with. Under a renderer with real
+    /// translucency this is what a raised surface is mixed toward; here the
+    /// container tones already carry it, and it is kept because a caller
+    /// drawing its own surface needs it.
+    pub surface_tint: int
     pub inverse_surface: int
     pub inverse_on_surface: int
+    /// The accent that reads correctly *on* `inverse_surface` — a snackbar's
+    /// action, which sits on the opposite scheme to everything around it.
+    pub inverse_primary: int
     pub outline: int
     pub outline_variant: int
+    /// What a modal darkens the screen behind it with, and what a shadow would
+    /// be drawn in. Both are pure black in every Material scheme, light and
+    /// dark alike; they are roles rather than constants because a scheme is
+    /// allowed to say otherwise.
+    pub scrim: int
+    pub shadow: int
+    /// The *fixed* roles: an accent that stays the same in light and dark.
+    ///
+    /// Material added these for elements that must not change with the theme —
+    /// a brand strip, a chart series, a colour used to identify a thing rather
+    /// than to style it. They are the light scheme's container tones, in both
+    /// schemes, which is why a dark app still shows them light.
+    pub primary_fixed: int
+    pub primary_fixed_dim: int
+    pub on_primary_fixed: int
+    pub on_primary_fixed_variant: int
+    pub secondary_fixed: int
+    pub secondary_fixed_dim: int
+    pub on_secondary_fixed: int
+    pub on_secondary_fixed_variant: int
+    pub tertiary_fixed: int
+    pub tertiary_fixed_dim: int
+    pub on_tertiary_fixed: int
+    pub on_tertiary_fixed_variant: int
     /// Whether this is a dark scheme. Not decoration: a state layer lightens
     /// on dark and darkens on light, so the blend needs to know.
     pub dark: bool
@@ -62,6 +99,13 @@ pub struct Scheme {
 
 /// The MD3 **baseline** light scheme — the default, the one a Material app
 /// gets before anyone picks a source colour.
+///
+/// Every value here is a *tone of a palette*, and `color.kite` is where those
+/// come from: `scheme_from(0x6750a4, false)` reproduces this table, because
+/// `#6750A4` is the seed Material generated it from. Keeping the numbers
+/// written out anyway is worth the duplication — a scheme is thirty-odd
+/// searches through a colour appearance model, and an application that only
+/// ever wants the default should not have to run them to start up.
 pub fn light() -> Scheme {
     return Scheme{
         primary: 0x6750a4,
@@ -76,10 +120,10 @@ pub fn light() -> Scheme {
         on_tertiary: 0xffffff,
         tertiary_container: 0xffd8e4,
         on_tertiary_container: 0x31111d,
-        error: 0xb3261e,
+        error: 0xba1a1a,
         on_error: 0xffffff,
-        error_container: 0xf9dedc,
-        on_error_container: 0x410e0b,
+        error_container: 0xffdad6,
+        on_error_container: 0x410002,
         surface: 0xfef7ff,
         on_surface: 0x1d1b20,
         on_surface_variant: 0x49454f,
@@ -89,10 +133,28 @@ pub fn light() -> Scheme {
         surface_container: 0xf3edf7,
         surface_container_high: 0xece6f0,
         surface_container_highest: 0xe6e0e9,
+        surface_dim: 0xded8e1,
+        surface_bright: 0xfef7ff,
+        surface_tint: 0x6750a4,
         inverse_surface: 0x322f35,
         inverse_on_surface: 0xf5eff7,
+        inverse_primary: 0xd0bcff,
         outline: 0x79747e,
         outline_variant: 0xcac4d0,
+        scrim: 0x000000,
+        shadow: 0x000000,
+        primary_fixed: 0xeaddff,
+        primary_fixed_dim: 0xd0bcff,
+        on_primary_fixed: 0x21005d,
+        on_primary_fixed_variant: 0x4f378b,
+        secondary_fixed: 0xe8def8,
+        secondary_fixed_dim: 0xccc2dc,
+        on_secondary_fixed: 0x1d192b,
+        on_secondary_fixed_variant: 0x4a4458,
+        tertiary_fixed: 0xffd8e4,
+        tertiary_fixed_dim: 0xefb8c8,
+        on_tertiary_fixed: 0x31111d,
+        on_tertiary_fixed_variant: 0x633b48,
         dark: false,
     }
 }
@@ -112,10 +174,10 @@ pub fn dark() -> Scheme {
         on_tertiary: 0x492532,
         tertiary_container: 0x633b48,
         on_tertiary_container: 0xffd8e4,
-        error: 0xf2b8b5,
-        on_error: 0x601410,
-        error_container: 0x8c1d18,
-        on_error_container: 0xf9dedc,
+        error: 0xffb4ab,
+        on_error: 0x690005,
+        error_container: 0x93000a,
+        on_error_container: 0xffdad6,
         surface: 0x141218,
         on_surface: 0xe6e0e9,
         on_surface_variant: 0xcac4d0,
@@ -125,10 +187,30 @@ pub fn dark() -> Scheme {
         surface_container: 0x211f26,
         surface_container_high: 0x2b2930,
         surface_container_highest: 0x36343b,
+        surface_dim: 0x141218,
+        surface_bright: 0x3b383e,
+        surface_tint: 0xd0bcff,
         inverse_surface: 0xe6e0e9,
         inverse_on_surface: 0x322f35,
+        inverse_primary: 0x6750a4,
         outline: 0x938f99,
         outline_variant: 0x49454f,
+        scrim: 0x000000,
+        shadow: 0x000000,
+        // The fixed roles do not change between the schemes. That is what
+        // "fixed" means, and it is why these repeat the light values exactly.
+        primary_fixed: 0xeaddff,
+        primary_fixed_dim: 0xd0bcff,
+        on_primary_fixed: 0x21005d,
+        on_primary_fixed_variant: 0x4f378b,
+        secondary_fixed: 0xe8def8,
+        secondary_fixed_dim: 0xccc2dc,
+        on_secondary_fixed: 0x1d192b,
+        on_secondary_fixed_variant: 0x4a4458,
+        tertiary_fixed: 0xffd8e4,
+        tertiary_fixed_dim: 0xefb8c8,
+        on_tertiary_fixed: 0x31111d,
+        on_tertiary_fixed_variant: 0x633b48,
         dark: true,
     }
 }
@@ -170,28 +252,76 @@ fn blend(from: int, to: int, t: float) -> int {
     return math.round_to(math.clamp(out, 0.0, 255.0))
 }
 
+// Material's state-layer opacities, as tokens rather than as literals at each
+// use. They are four numbers that appear in every component in the system, and
+// a design that wants heavier feedback changes them here rather than in ninety
+// places.
+
+pub fn HOVER_OPACITY() -> float {
+    return 0.08
+}
+
+pub fn FOCUS_OPACITY() -> float {
+    return 0.10
+}
+
+pub fn PRESS_OPACITY() -> float {
+    return 0.10
+}
+
+/// What something being dragged wears. Heavier than a press because a drag
+/// lasts, and has to stay legible against whatever it is passing over.
+pub fn DRAG_OPACITY() -> float {
+    return 0.16
+}
+
+/// Disabled content is `on_surface` at 38%; a disabled container at 12%.
+pub fn DISABLED_INK_OPACITY() -> float {
+    return 0.38
+}
+
+pub fn DISABLED_CONTAINER_OPACITY() -> float {
+    return 0.12
+}
+
 /// A state layer of `role` over `surface`, at Material's own opacities.
 pub fn hovered(surface: int, role: int) -> int {
-    return mix(surface, role, 0.08)
+    return mix(surface, role, HOVER_OPACITY())
 }
 
 pub fn focused(surface: int, role: int) -> int {
-    return mix(surface, role, 0.10)
+    return mix(surface, role, FOCUS_OPACITY())
 }
 
 pub fn pressed(surface: int, role: int) -> int {
-    return mix(surface, role, 0.10)
+    return mix(surface, role, PRESS_OPACITY())
+}
+
+/// A state layer at a *fraction* of its opacity — a hover that is halfway in.
+///
+/// This is the whole difference between a Material control and a control that
+/// merely uses Material's colours. The layer is not on or off; it arrives over
+/// two hundred milliseconds, and every intermediate value is a real colour that
+/// has to be computed rather than picked from a table.
+pub fn layer(surface: int, role: int, opacity: float, amount: float) -> int {
+    return mix(surface, role, opacity * clampf(amount, 0.0, 1.0))
+}
+
+/// What a scrim leaves of what is behind it: black at 32%, which is Material's
+/// own figure for a modal backdrop.
+pub fn scrimmed(behind: int, scheme: Scheme) -> int {
+    return mix(behind, scheme.scrim, 0.32)
 }
 
 /// Disabled content is `on_surface` at 38%, and a disabled container is
 /// `on_surface` at 12% — both over whatever is behind, which is why the
 /// backdrop is an argument.
 pub fn disabled_ink(scheme: Scheme, behind: int) -> int {
-    return mix(behind, scheme.on_surface, 0.38)
+    return mix(behind, scheme.on_surface, DISABLED_INK_OPACITY())
 }
 
 pub fn disabled_container(scheme: Scheme, behind: int) -> int {
-    return mix(behind, scheme.on_surface, 0.12)
+    return mix(behind, scheme.on_surface, DISABLED_CONTAINER_OPACITY())
 }
 
 // ---- elevation -------------------------------------------------------------

@@ -1,0 +1,638 @@
+use std/ui
+use std/math
+
+// The things other things sit on: cards, dividers, lists, and the four
+// containers that arrive over the top of a screen — dialog, menu, sheet and
+// tooltip.
+//
+// ---- what an overlay can and cannot be here ----------------------------------
+//
+// A dialog, a menu, a tooltip and a sheet all *overlay*: they appear above the
+// screen rather than in it, and everything else stays where it was. A layout
+// that is only rows and columns has no z-order, so none of them can be a child
+// of the screen they cover.
+//
+// So they are not. Each is an ordinary node, and the application composes it as
+// the last thing in the window — which is what a `Stack` would have done, with
+// the ordering written out rather than implied. `scrim` gives the darkened
+// backdrop, `modal` puts the two together. The cost is that the application
+// says where its dialog goes; the gain is that there is no hidden layer and no
+// portal, and the ordering is visible in the code that built it.
+
+// ---- cards ------------------------------------------------------------------
+
+/// An elevated card. The elevation is tonal, which for a card is a container
+/// colour one step away from the background — and one step further under the
+/// pointer, continuously, because a tone can be interpolated where a shadow
+/// could not.
+pub fn elevated_card(name: str, s: Scheme, children: [ui.Node]) -> ui.Node {
+    return card_body(name, children, ui.rounded(surface_at(s, LEVEL_1()), SHAPE_MEDIUM()))
+}
+
+pub fn filled_card(name: str, s: Scheme, children: [ui.Node]) -> ui.Node {
+    return card_body(name, children, ui.rounded(s.surface_container_highest, SHAPE_MEDIUM()))
+}
+
+pub fn outlined_card(name: str, s: Scheme, children: [ui.Node]) -> ui.Node {
+    return card_body(
+        name,
+        children,
+        ui.bordered(ui.rounded(s.surface, SHAPE_MEDIUM()), s.outline_variant, 1.0),
+    )
+}
+
+/// A card that answers to the pointer: it takes an id, so it can be clicked,
+/// focused and hovered, and it rises as it is.
+pub fn clickable_card(
+    name: str,
+    s: Scheme,
+    children: [ui.Node],
+    state: State,
+) -> ui.Node {
+    let lift = maxf(state.hover, state.focus) * (1.0 - state.press)
+    let container = layered(raised(s, LEVEL_1(), LEVEL_2(), lift), s.on_surface, state)
+    let inner = card_body(name, children, ui.inked(ui.rounded(container, SHAPE_MEDIUM()), s.on_surface))
+    return ui.control(inner, name)
+}
+
+fn card_body(name: str, children: [ui.Node], decor: ui.Decor) -> ui.Node {
+    let style = ui.spaced(
+        ui.padded(ui.Style{..ui.column(), align: ui.Align.Stretch }, space(4)),
+        space(2),
+    )
+    return ui.decorated(ui.box_of(name, style, children), decor)
+}
+
+/// A hairline between rows. One dp, in the outline-variant role.
+pub fn divider(name: str, s: Scheme) -> ui.Node {
+    return ui.decorated(
+        ui.box_of(name, tall(ui.style(), 1.0), []),
+        ui.filled(s.outline_variant),
+    )
+}
+
+/// The same, inset from the leading edge, which is what Material uses inside a
+/// list so the rule starts where the text does rather than under the icons.
+pub fn inset_divider(name: str, s: Scheme, inset: float) -> ui.Node {
+    return ui.box_of(
+        name,
+        ui.Style {..ui.row(), padding: ui.Insets{ top: 0.0, right: 0.0, bottom: 0.0, left: inset } },
+        [
+            ui.decorated(
+                ui.box_of(
+                    "\(name)-rule",
+                    ui.grown(tall(ui.style(), 1.0), 1.0),
+                    [],
+                ),
+                ui.filled(s.outline_variant),
+            ),
+        ],
+    )
+}
+
+// ---- lists ---------------------------------------------------------------------
+
+/// A one-line list item: 56dp, body-large, with an optional leading node.
+pub fn list_item(s: Scheme, id: str, headline: str, leading: [ui.Node], state: State) -> ui.Node {
+    return list_body(s, id, headline, "", "", leading, [], 56.0, state)
+}
+
+/// A two-line list item: 72dp, with body-medium supporting text under the
+/// headline. Material's most common list row.
+pub fn list_item_two(
+    s: Scheme,
+    id: str,
+    headline: str,
+    supporting: str,
+    leading: [ui.Node],
+    state: State,
+) -> ui.Node {
+    return list_body(s, id, headline, supporting, "", leading, [], 72.0, state)
+}
+
+/// Three lines, 88dp. The third is a second line of supporting text rather
+/// than a different role, which is what Material's three-line item is.
+pub fn list_item_three(
+    s: Scheme,
+    id: str,
+    headline: str,
+    supporting: str,
+    third: str,
+    leading: [ui.Node],
+    state: State,
+) -> ui.Node {
+    return list_body(s, id, headline, supporting, third, leading, [], 88.0, state)
+}
+
+/// Any of the above with something on the trailing edge — a switch, a
+/// checkbox, a time, a chevron.
+pub fn list_item_with(
+    s: Scheme,
+    id: str,
+    headline: str,
+    supporting: str,
+    leading: [ui.Node],
+    trailing: [ui.Node],
+    state: State,
+) -> ui.Node {
+    let height = if supporting.len() > 0 { 72.0 } else { 56.0 }
+    return list_body(s, id, headline, supporting, "", leading, trailing, height, state)
+}
+
+fn list_body(
+    s: Scheme,
+    id: str,
+    headline: str,
+    supporting: str,
+    third: str,
+    leading: [ui.Node],
+    trailing: [ui.Node],
+    height: float,
+    state: State,
+) -> ui.Node {
+    let head_role = body_large()
+    let support_role = body_medium()
+    let amount = state.select
+    // Material marks a selected list item with a full-radius container — the
+    // shape a navigation drawer uses — rather than a tint on the label, which
+    // is what keeps it legible in either scheme. The container arrives on the
+    // `select` channel, so a row becoming selected fills rather than flashes.
+    let selected_fill = mix(s.surface, s.secondary_container, amount)
+    let head_ink = mix(s.on_surface, s.on_secondary_container, amount)
+    let support_ink = mix(s.on_surface_variant, s.on_secondary_container, amount)
+    var decor = ui.shaped(ui.no_decor(), SHAPE_FULL())
+    if amount > 0.0 {
+        decor = ui.rounded(layered(selected_fill, head_ink, state), SHAPE_FULL())
+    } else {
+        decor = layer_decor(s.surface, s.on_surface, state, SHAPE_FULL())
+    }
+
+    var lines = [
+        ui.decorated(
+            ui.text_of(
+                "\(id)-headline",
+                ui.in_font(ui.style(), head_role.size, head_role.weight),
+                headline,
+            ),
+            ui.ink(head_ink),
+        ),
+    ]
+    if supporting.len() > 0 {
+        lines.push(
+            ui.decorated(
+                ui.text_of(
+                    "\(id)-supporting",
+                    ui.in_font(ui.style(), support_role.size, support_role.weight),
+                    supporting,
+                ),
+                ui.ink(support_ink),
+            ),
+        )
+    }
+    if third.len() > 0 {
+        lines.push(
+            ui.decorated(
+                ui.text_of(
+                    "\(id)-third",
+                    ui.in_font(ui.style(), support_role.size, support_role.weight),
+                    third,
+                ),
+                ui.ink(support_ink),
+            ),
+        )
+    }
+    var children = leading
+    children.push(
+        ui.box_of(
+            "\(id)-text",
+            ui.spaced(ui.grown(ui.Style{..ui.column(), align: ui.Align.Stretch }, 1.0), 2.0),
+            lines,
+        ),
+    )
+    for one in trailing {
+        children.push(one)
+    }
+    let style = ui.spaced(
+        ui.padded(
+            tall(ui.Style{..ui.row(), align: ui.Align.Center }, height),
+            space(3),
+        ),
+        space(3),
+    )
+    return ui.control(ui.decorated(ui.box_of(id, style, children), ui.inked(decor, s.on_surface)), id)
+}
+
+/// A list's section heading: the label that names the rows under it.
+pub fn list_subheader(name: str, s: Scheme, caption: str) -> ui.Node {
+    let role = title_small()
+    return ui.decorated(
+        ui.text_of(
+            name,
+            ui.Style {
+                ..ui.in_font(ui.style(), role.size, role.weight),
+                height: 48.0,
+                padding: ui.insets_xy(space(4), 0.0),
+            },
+            caption,
+        ),
+        ui.vertically_centered(ui.ink(s.on_surface_variant)),
+    )
+}
+
+// ---- overlays --------------------------------------------------------------------
+
+/// The darkened backdrop under a modal.
+///
+/// A filled box at the window's size, in the scrim role at Material's own 32%.
+/// It is opaque rather than translucent because the layout has no compositing
+/// order to be translucent *against* — so what it is mixed with is passed in,
+/// which is the colour of whatever it covers.
+pub fn scrim(name: str, s: Scheme, behind: int, size: ui.Size, amount: float) -> ui.Node {
+    return ui.decorated(
+        ui.box_of(name, ui.sized(ui.style(), size.width, size.height), []),
+        ui.filled(mix(behind, s.scrim, 0.32 * clampf(amount, 0.0, 1.0))),
+    )
+}
+
+/// A dialog: the container Material puts a question in.
+///
+/// 280dp minimum, extra-large corners, on the highest container tone — which is
+/// how a dialog reads as being above everything without a shadow to say so.
+pub fn dialog(
+    name: str,
+    s: Scheme,
+    headline: str,
+    body: str,
+    actions: [ui.Node],
+    width: float,
+) -> ui.Node {
+    let head_role = headline_small()
+    let body_role = body_medium()
+    var children = [
+        ui.decorated(
+            ui.text_of(
+                "\(name)-headline",
+                ui.Style {
+                    ..ui.in_font(ui.style(), head_role.size, head_role.weight),
+                    width: width - space(6) * 2.0,
+                },
+                headline,
+            ),
+            ui.ink(s.on_surface),
+        ),
+        ui.decorated(
+            ui.text_of(
+                "\(name)-body",
+                ui.Style {
+                    ..ui.in_font(ui.style(), body_role.size, body_role.weight),
+                    width: width - space(6) * 2.0,
+                },
+                body,
+            ),
+            ui.ink(s.on_surface_variant),
+        ),
+    ]
+    if actions.len() > 0 {
+        children.push(
+            ui.box_of(
+                "\(name)-actions",
+                ui.spaced(ui.Style{..ui.row(), justify: ui.Justify.End }, space(2)),
+                actions,
+            ),
+        )
+    }
+    let style = ui.spaced(
+        ui.padded(
+            ui.Style {..ui.column(), align: ui.Align.Stretch, width: maxf(280.0, width) },
+            space(6),
+        ),
+        space(4),
+    )
+    return ui.decorated(
+        ui.box_of(name, style, children),
+        ui.rounded(surface_at(s, LEVEL_3()), SHAPE_EXTRA_LARGE()),
+    )
+}
+
+/// A dialog and its scrim, arranged over a window of a given size.
+///
+/// `amount` is how far the dialog has come in, from 0 to 1, which the
+/// application animates with a `Track`: Material brings a dialog in on the
+/// emphasized-decelerate curve over `long1`, with the scrim arriving alongside
+/// it. Below 1 the dialog is narrower and the scrim lighter, which is the
+/// scale-and-fade Material specifies.
+pub fn modal(
+    name: str,
+    s: Scheme,
+    behind: int,
+    size: ui.Size,
+    content: ui.Node,
+    amount: float,
+) -> ui.Node {
+    let shown = clampf(amount, 0.0, 1.0)
+    return ui.decorated(
+        ui.box_of(
+            name,
+            ui.Style {
+                ..ui.column(),
+                align: ui.Align.Center,
+                justify: ui.Justify.Center,
+                width: size.width,
+                height: size.height,
+            },
+            [content],
+        ),
+        ui.filled(mix(behind, s.scrim, 0.32 * shown)),
+    )
+}
+
+/// A menu: a raised list of choices.
+pub fn menu(name: str, s: Scheme, items: [ui.Node], width: float) -> ui.Node {
+    return ui.decorated(
+        ui.box_of(
+            name,
+            ui.Style {
+                ..ui.column(),
+                align: ui.Align.Stretch,
+                width: width,
+                padding: ui.insets_xy(0.0, space(2)),
+            },
+            items,
+        ),
+        ui.rounded(surface_at(s, LEVEL_2()), SHAPE_EXTRA_SMALL()),
+    )
+}
+
+/// One row of a menu: 48dp, label-large, with an optional trailing shortcut.
+pub fn menu_item(
+    s: Scheme,
+    id: str,
+    caption: str,
+    shortcut: str,
+    state: State,
+) -> ui.Node {
+    let role = label_large()
+    var children = [
+        ui.decorated(
+            ui.text_of(
+                "\(id)-label",
+                ui.grown(ui.in_font(ui.style(), role.size, role.weight), 1.0),
+                caption,
+            ),
+            ui.ink(if state.disabled { disabled_ink(s, s.surface) } else { s.on_surface }),
+        ),
+    ]
+    if shortcut.len() > 0 {
+        children.push(
+            ui.decorated(
+                ui.text_of(
+                    "\(id)-shortcut",
+                    ui.in_font(ui.style(), role.size, role.weight),
+                    shortcut,
+                ),
+                ui.ink(s.on_surface_variant),
+            ),
+        )
+    }
+    let style = ui.spaced(
+        ui.padded(
+            tall(ui.Style{..ui.row(), align: ui.Align.Center }, 48.0),
+            space(3),
+        ),
+        space(3),
+    )
+    return ui.control(
+        ui.decorated(
+            ui.box_of(id, style, children),
+            ui.inked(layer_decor(surface_at(s, LEVEL_2()), s.on_surface, state, 0.0), s.on_surface),
+        ),
+        id,
+    )
+}
+
+/// A plain tooltip: the small dark label that names a control.
+pub fn tooltip(name: str, s: Scheme, caption: str) -> ui.Node {
+    let role = body_small()
+    let width = ui.text_size_in(caption, role.size, role.weight).width + space(2) * 2.0
+    return ui.decorated(
+        ui.text_of(
+            name,
+            ui.sized(ui.in_font(ui.style(), role.size, role.weight), width, 24.0),
+            caption,
+        ),
+        ui.centered(ui.inked(ui.rounded(s.inverse_surface, SHAPE_EXTRA_SMALL()), s.inverse_on_surface)),
+    )
+}
+
+/// A rich tooltip: a titled paragraph with its own actions, on the surface
+/// rather than inverted, for explaining something a label cannot.
+pub fn rich_tooltip(
+    name: str,
+    s: Scheme,
+    title: str,
+    body: str,
+    actions: [ui.Node],
+    width: float,
+) -> ui.Node {
+    let title_role = title_small()
+    let body_role = body_medium()
+    var children = [
+        ui.decorated(
+            ui.text_of(
+                "\(name)-title",
+                ui.in_font(ui.style(), title_role.size, title_role.weight),
+                title,
+            ),
+            ui.ink(s.on_surface_variant),
+        ),
+        ui.decorated(
+            ui.text_of(
+                "\(name)-body",
+                ui.Style {
+                    ..ui.in_font(ui.style(), body_role.size, body_role.weight),
+                    width: width - space(4) * 2.0,
+                },
+                body,
+            ),
+            ui.ink(s.on_surface_variant),
+        ),
+    ]
+    if actions.len() > 0 {
+        children.push(
+            ui.box_of(
+                "\(name)-actions",
+                ui.spaced(ui.Style{..ui.row() }, space(2)),
+                actions,
+            ),
+        )
+    }
+    return ui.decorated(
+        ui.box_of(
+            name,
+            ui.spaced(
+                ui.padded(ui.Style{..ui.column(), align: ui.Align.Stretch, width: width }, space(4)),
+                space(1),
+            ),
+            children,
+        ),
+        ui.rounded(surface_at(s, LEVEL_2()), SHAPE_MEDIUM()),
+    )
+}
+
+/// A bottom sheet: a container that comes up from the bottom of the window.
+///
+/// `amount` is how far it has come, and the sheet is *positioned* by it —
+/// Material slides a sheet in on the emphasized-decelerate curve rather than
+/// fading it, because a sheet that faded would not say which edge it came from.
+/// A leading spacer of the remaining height is what slides it, which is the
+/// same technique the switch's knob uses.
+pub fn bottom_sheet(
+    name: str,
+    s: Scheme,
+    children: [ui.Node],
+    size: ui.Size,
+    height: float,
+    amount: float,
+) -> ui.Node {
+    let shown = clampf(amount, 0.0, 1.0)
+    let visible = height * shown
+    let sheet = ui.decorated(
+        ui.box_of(
+            "\(name)-sheet",
+            ui.spaced(
+                ui.padded(
+                    ui.Style {
+                        ..ui.column(),
+                        align: ui.Align.Stretch,
+                        width: size.width,
+                        height: visible,
+                    },
+                    space(4),
+                ),
+                space(2),
+            ),
+            drag_handle_and(name, s, children),
+        ),
+        ui.rounded(surface_at(s, LEVEL_1()), SHAPE_EXTRA_LARGE()),
+    )
+    return ui.box_of(
+        name,
+        ui.Style {
+            ..ui.column(),
+            align: ui.Align.Stretch,
+            justify: ui.Justify.End,
+            width: size.width,
+            height: size.height,
+        },
+        [sheet],
+    )
+}
+
+/// The 32×4 bar at the top of a sheet that says it can be dragged.
+fn drag_handle_and(name: str, s: Scheme, children: [ui.Node]) -> [ui.Node] {
+    var out = [
+        ui.box_of(
+            "\(name)-handle-row",
+            ui.Style {..ui.row(), justify: ui.Justify.Center },
+            [
+                ui.decorated(
+                    ui.box_of("\(name)-handle", ui.sized(ui.style(), 32.0, 4.0), []),
+                    ui.rounded(s.on_surface_variant, SHAPE_FULL()),
+                ),
+            ],
+        ),
+    ]
+    for child in children {
+        out.push(child)
+    }
+    return out
+}
+
+/// A side sheet: the same idea against the trailing edge, which is what a
+/// wide window uses instead of a bottom sheet.
+pub fn side_sheet(
+    name: str,
+    s: Scheme,
+    children: [ui.Node],
+    size: ui.Size,
+    width: float,
+    amount: float,
+) -> ui.Node {
+    let visible = width * clampf(amount, 0.0, 1.0)
+    let sheet = ui.decorated(
+        ui.box_of(
+            "\(name)-sheet",
+            ui.spaced(
+                ui.padded(
+                    ui.Style {
+                        ..ui.column(),
+                        align: ui.Align.Stretch,
+                        width: visible,
+                        height: size.height,
+                    },
+                    space(4),
+                ),
+                space(2),
+            ),
+            children,
+        ),
+        ui.rounded(surface_at(s, LEVEL_1()), SHAPE_EXTRA_LARGE()),
+    )
+    return ui.box_of(
+        name,
+        ui.Style {
+            ..ui.row(),
+            justify: ui.Justify.End,
+            width: size.width,
+            height: size.height,
+        },
+        [sheet],
+    )
+}
+
+/// A snackbar: a raised container with a message and an optional action.
+pub fn snackbar(name: str, s: Scheme, message: str, action: [ui.Node]) -> ui.Node {
+    let role = body_medium()
+    var children = [
+        ui.decorated(
+            ui.text_of(
+                "\(name)-message",
+                ui.grown(ui.in_font(ui.style(), role.size, role.weight), 1.0),
+                message,
+            ),
+            ui.ink(s.inverse_on_surface),
+        ),
+    ]
+    for one in action {
+        children.push(one)
+    }
+    let style = ui.spaced(
+        ui.padded(
+            tall(ui.Style{..ui.row(), align: ui.Align.Center }, 48.0),
+            space(4),
+        ),
+        space(2),
+    )
+    return ui.decorated(
+        ui.box_of(name, style, children),
+        ui.rounded(s.inverse_surface, SHAPE_EXTRA_SMALL()),
+    )
+}
+
+/// A snackbar's action button, which is the one place `inverse_primary` is
+/// for: a text button on a snackbar sits on the opposite scheme to everything
+/// around it, and the ordinary accent would be unreadable there.
+pub fn snackbar_action(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+    let role = label_large()
+    let width = ui.text_size_in(caption, role.size, role.weight).width + space(2) * 2.0
+    let decor = layer_decor(s.inverse_surface, s.inverse_primary, state, SHAPE_EXTRA_SMALL())
+    return centred_body(
+        id,
+        caption,
+        role.size,
+        role.weight,
+        width,
+        36.0,
+        ui.inked(decor, s.inverse_primary),
+    )
+}

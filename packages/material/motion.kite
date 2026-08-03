@@ -1,0 +1,498 @@
+use std/math
+
+// Material Design 3's motion system: easing, duration, and springs.
+//
+// Motion is the half of Material that a still screenshot cannot show, and the
+// half that most implementations leave out. A button that snaps between two
+// colours is not a Material button with the animation missing — it is a
+// different component, because the state layer's *arrival* is what tells
+// someone the press registered before the application has done anything about
+// it.
+//
+// Nothing here knows what a button is, or what a colour is. A curve takes a
+// number from zero to one and gives one back; a duration is a number of
+// milliseconds; a track is a number on its way somewhere. What moves, and why,
+// is `interaction.kite`'s business and the components'.
+//
+// ---- how time reaches this package ------------------------------------------
+//
+// The host hands the application `EVENT_FRAME` with the milliseconds since the
+// last frame, and keeps doing so **while the model keeps changing**. A model
+// that comes back unchanged is the statement that nothing is moving, and the
+// loop stops until real input arrives. Everything below is built to respect
+// that: `stepped` on a settled track returns the track it was given, so an
+// application whose animations have finished stops being asked for frames
+// rather than burning a core drawing the same pixels.
+
+// ---- easing ------------------------------------------------------------------
+//
+// Material's easing tokens are cubic béziers, and one of them — `emphasized`,
+// the one the system uses for anything that crosses the screen — is not a
+// single cubic at all. It is a *path* of two, spliced at (0.166666, 0.4), which
+// is what gives it the long slow tail that a single cubic cannot produce. CSS
+// cannot express it, which is why the web implementations quietly substitute
+// `cubic-bezier(0.2, 0, 0, 1)` and why the two do not look the same side by
+// side.
+//
+// A curve here is therefore a list of segments rather than four numbers, and
+// the emphasized token is the real two-segment path.
+
+/// One cubic bézier segment, by its four control points.
+pub struct Segment {
+    pub x0: float
+    pub y0: float
+    pub x1: float
+    pub y1: float
+    pub x2: float
+    pub y2: float
+    pub x3: float
+    pub y3: float
+}
+
+/// A timing curve: a path of cubic segments whose x runs from 0 to 1.
+pub struct Easing {
+    pub segments: [Segment]
+}
+
+/// The CSS spelling — one segment from (0,0) to (1,1) with two control points.
+pub fn cubic(x1: float, y1: float, x2: float, y2: float) -> Easing {
+    return Easing{
+        segments: [
+            Segment {
+                x0: 0.0,
+                y0: 0.0,
+                x1: x1,
+                y1: y1,
+                x2: x2,
+                y2: y2,
+                x3: 1.0,
+                y3: 1.0,
+            },
+        ],
+    }
+}
+
+pub fn linear() -> Easing {
+    return cubic(0.0, 0.0, 1.0, 1.0)
+}
+
+/// The everyday curve: most transitions that stay where they are and merely
+/// change — a colour, an opacity, a state layer.
+pub fn standard() -> Easing {
+    return cubic(0.2, 0.0, 0.0, 1.0)
+}
+
+/// Something leaving the screen. It begins at rest and never settles, because
+/// it is gone before it would have.
+pub fn standard_accelerate() -> Easing {
+    return cubic(0.3, 0.0, 1.0, 1.0)
+}
+
+/// Something arriving. It enters at speed and eases to a stop.
+pub fn standard_decelerate() -> Easing {
+    return cubic(0.0, 0.0, 0.0, 1.0)
+}
+
+/// Material's signature curve, and the reason this file models a curve as a
+/// path rather than as four numbers.
+///
+/// The published token is an SVG path with two cubic segments:
+///
+///     M 0,0 C 0.05,0 0.133333,0.06 0.166666,0.4 C 0.208333,0.82 0.25,1 1,1
+///
+/// Forty per cent of the distance is covered in the first sixth of the time,
+/// and the remaining sixty per cent takes the other five sixths. That shape —
+/// fast off the mark, then a long deliberate settle — is what makes a Material
+/// transition read as *weighty* rather than merely smooth, and no single cubic
+/// bézier has it.
+pub fn emphasized() -> Easing {
+    return Easing{
+        segments: [
+            Segment {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 0.05,
+                y1: 0.0,
+                x2: 0.133333,
+                y2: 0.06,
+                x3: 0.166666,
+                y3: 0.4,
+            },
+            Segment {
+                x0: 0.166666,
+                y0: 0.4,
+                x1: 0.208333,
+                y1: 0.82,
+                x2: 0.25,
+                y2: 1.0,
+                x3: 1.0,
+                y3: 1.0,
+            },
+        ],
+    }
+}
+
+pub fn emphasized_accelerate() -> Easing {
+    return cubic(0.3, 0.0, 0.8, 0.15)
+}
+
+pub fn emphasized_decelerate() -> Easing {
+    return cubic(0.05, 0.7, 0.1, 1.0)
+}
+
+/// Material 2's curves, kept because Material 3 keeps them: a design being
+/// migrated has components on both, and matching the old one exactly is what
+/// stops the two from looking like a mistake side by side.
+pub fn legacy() -> Easing {
+    return cubic(0.4, 0.0, 0.2, 1.0)
+}
+
+pub fn legacy_accelerate() -> Easing {
+    return cubic(0.4, 0.0, 1.0, 1.0)
+}
+
+pub fn legacy_decelerate() -> Easing {
+    return cubic(0.0, 0.0, 0.2, 1.0)
+}
+
+/// A curve evaluated at `t`, which is a fraction of the duration and gives back
+/// a fraction of the distance.
+///
+/// A bézier is parametric — both x and y are functions of a parameter that is
+/// neither of them — so this is two steps: find the parameter at which the
+/// curve reaches this x, then read off its y. There is no closed form for the
+/// first, which is why every implementation of `cubic-bezier` in every browser
+/// is also an iterative solve.
+pub fn ease(curve: Easing, t: float) -> float {
+    let x = clampf(t, 0.0, 1.0)
+    if curve.segments.len() == 0 {
+        return x
+    }
+    for segment in curve.segments {
+        if x <= segment.x3 {
+            return solve(segment, x)
+        }
+    }
+    return curve.segments[curve.segments.len() - 1].y3
+}
+
+/// A point `t` of the way from `a` to `b`, along a curve rather than a line.
+pub fn eased(curve: Easing, a: float, b: float, t: float) -> float {
+    return math.lerp(a, b, ease(curve, t))
+}
+
+fn solve(segment: Segment, x: float) -> float {
+    let span = segment.x3 - segment.x0
+    if span <= 0.0 {
+        return segment.y3
+    }
+    // Newton's method from the linear guess. Six iterations is far more than
+    // a monotone cubic needs; the loop leaves early when it stops moving.
+    var s = (x - segment.x0) / span
+    for i in 0..6 {
+        let error = bezier(segment.x0, segment.x1, segment.x2, segment.x3, s) - x
+        if absf(error) < 0.0000001 {
+            return bezier(segment.y0, segment.y1, segment.y2, segment.y3, s)
+        }
+        let slope = slope_of(segment.x0, segment.x1, segment.x2, segment.x3, s)
+        // A control point directly above its neighbour makes the curve
+        // momentarily vertical in x, and Newton divides by that. Bisection
+        // has no such failure and is what every browser falls back to.
+        if absf(slope) < 0.000001 {
+            return bisect(segment, x)
+        }
+        s = clampf(s - error / slope, 0.0, 1.0)
+    }
+    return bezier(segment.y0, segment.y1, segment.y2, segment.y3, s)
+}
+
+/// Halving the interval, thirty times, which is a `float`'s whole precision.
+fn bisect(segment: Segment, x: float) -> float {
+    var low = 0.0
+    var high = 1.0
+    var s = 0.5
+    for i in 0..30 {
+        s = (low + high) / 2.0
+        let at = bezier(segment.x0, segment.x1, segment.x2, segment.x3, s)
+        if at < x {
+            low = s
+        } else {
+            high = s
+        }
+    }
+    return bezier(segment.y0, segment.y1, segment.y2, segment.y3, s)
+}
+
+/// One coordinate of a cubic bézier at parameter `s`, by Bernstein's basis.
+fn bezier(p0: float, p1: float, p2: float, p3: float, s: float) -> float {
+    let u = 1.0 - s
+    return u * u * u * p0 + 3.0 * u * u * s * p1 + 3.0 * u * s * s * p2 + s * s * s * p3
+}
+
+fn slope_of(p0: float, p1: float, p2: float, p3: float, s: float) -> float {
+    let u = 1.0 - s
+    return 3.0 * u * u * (p1 - p0) + 6.0 * u * s * (p2 - p1) + 3.0 * s * s * (p3 - p2)
+}
+
+// ---- duration ------------------------------------------------------------------
+//
+// Material's duration tokens, in milliseconds. The scale is not arbitrary: the
+// short group is for things that change in place, the medium group for things
+// that move within a component, the long group for things that cross the
+// screen, and the extra-long group is for the ambient — a splash, a shared
+// element between screens.
+//
+// Choosing by *token* rather than by number is what keeps a design coherent.
+// Two components that both take 200ms because someone typed 200 twice will
+// drift apart the moment one of them is edited; two that both take `short4`
+// will not.
+
+pub fn SHORT_1() -> float {
+    return 50.0
+}
+
+pub fn SHORT_2() -> float {
+    return 100.0
+}
+
+pub fn SHORT_3() -> float {
+    return 150.0
+}
+
+pub fn SHORT_4() -> float {
+    return 200.0
+}
+
+pub fn MEDIUM_1() -> float {
+    return 250.0
+}
+
+pub fn MEDIUM_2() -> float {
+    return 300.0
+}
+
+pub fn MEDIUM_3() -> float {
+    return 350.0
+}
+
+pub fn MEDIUM_4() -> float {
+    return 400.0
+}
+
+pub fn LONG_1() -> float {
+    return 450.0
+}
+
+pub fn LONG_2() -> float {
+    return 500.0
+}
+
+pub fn LONG_3() -> float {
+    return 550.0
+}
+
+pub fn LONG_4() -> float {
+    return 600.0
+}
+
+pub fn EXTRA_LONG_1() -> float {
+    return 700.0
+}
+
+pub fn EXTRA_LONG_2() -> float {
+    return 800.0
+}
+
+pub fn EXTRA_LONG_3() -> float {
+    return 900.0
+}
+
+pub fn EXTRA_LONG_4() -> float {
+    return 1000.0
+}
+
+// ---- tracks ---------------------------------------------------------------------
+//
+// One number on its way to another. This is what a state layer's opacity, a
+// switch's knob, and a sheet's offset all are.
+//
+// A track stores where the current transition *started* rather than where the
+// value is now, and the value is computed. That is the difference between a
+// transition and a smoothing filter, and it matters when a transition is
+// interrupted: someone who moves the pointer away from a half-hovered button
+// should see the layer retreat from where it had got to, along the curve, in
+// the full duration — not jump, and not creep back at whatever rate an
+// exponential filter happens to give. `retargeted` is the whole of that
+// behaviour, and it is the same rule CSS transitions follow.
+
+pub struct Track {
+    /// The value when the current transition began.
+    pub from: float
+    pub to: float
+    /// Milliseconds into the transition.
+    pub elapsed: float
+    pub duration: float
+}
+
+/// A track at rest at `value`, with nothing running.
+pub fn still(value: float) -> Track {
+    return Track{ from: value, to: value, elapsed: 0.0, duration: 0.0 }
+}
+
+/// Where the track is now.
+pub fn at(track: Track, curve: Easing) -> float {
+    if track.duration <= 0.0 {
+        return track.to
+    }
+    let t = clampf(track.elapsed / track.duration, 0.0, 1.0)
+    return eased(curve, track.from, track.to, t)
+}
+
+/// Whether the track has arrived. A settled track is what lets the frame loop
+/// stop, so this is the question the whole animation system is asked once a
+/// frame.
+pub fn settled(track: Track) -> bool {
+    return track.duration <= 0.0 || track.elapsed >= track.duration
+}
+
+/// The same track, `ms` further along. A settled track is returned *as it was*,
+/// so nothing downstream sees a change and the loop can halt.
+pub fn stepped(track: Track, ms: float) -> Track {
+    if settled(track) {
+        return track
+    }
+    return Track{..track, elapsed: track.elapsed + ms }
+}
+
+/// The track aimed at a new target.
+///
+/// Aimed at the one it already has, it is returned untouched — which is what
+/// keeps a hovered button that is still hovered from restarting its animation
+/// sixty times a second and pinning the frame loop open forever.
+pub fn retargeted(track: Track, curve: Easing, target: float, duration: float) -> Track {
+    if absf(track.to - target) < 0.000001 {
+        return track
+    }
+    return Track{
+        from: at(track, curve),
+        to: target,
+        elapsed: 0.0,
+        duration: duration,
+    }
+}
+
+// ---- springs ----------------------------------------------------------------------
+//
+// Material 3 Expressive replaced most durations with springs, and the reason is
+// worth stating because it is not decoration: a duration has to be *chosen* for
+// a distance, and a spring does not. A sheet dragged half open and released
+// finishes in the time that distance deserves, with the velocity the finger
+// left behind carried into the settle. A 400ms curve cannot do that — it takes
+// 400ms whether it has 8dp to travel or 800.
+//
+// Two families. **Spatial** springs move things and are slightly underdamped,
+// so they overshoot by a few per cent and come back — which is what reads as
+// physical. **Effects** springs change colour and opacity and are critically
+// damped, because a colour that overshoots is a colour that is briefly wrong.
+
+pub struct Spring {
+    /// The damping ratio. Below one overshoots; one is the fastest approach
+    /// with no overshoot at all.
+    pub damping: float
+    pub stiffness: float
+}
+
+pub fn spatial_fast() -> Spring {
+    return Spring{ damping: 0.9, stiffness: 1400.0 }
+}
+
+pub fn spatial_default() -> Spring {
+    return Spring{ damping: 0.9, stiffness: 700.0 }
+}
+
+pub fn spatial_slow() -> Spring {
+    return Spring{ damping: 0.9, stiffness: 300.0 }
+}
+
+pub fn effects_fast() -> Spring {
+    return Spring{ damping: 1.0, stiffness: 3800.0 }
+}
+
+pub fn effects_default() -> Spring {
+    return Spring{ damping: 1.0, stiffness: 1600.0 }
+}
+
+pub fn effects_slow() -> Spring {
+    return Spring{ damping: 1.0, stiffness: 800.0 }
+}
+
+/// A value on a spring: where it is, and how fast it is going.
+pub struct Sprung {
+    pub value: float
+    pub velocity: float
+    pub target: float
+}
+
+pub fn sprung(value: float) -> Sprung {
+    return Sprung{ value: value, velocity: 0.0, target: value }
+}
+
+pub fn aimed(motion: Sprung, target: float) -> Sprung {
+    return Sprung{..motion, target: target }
+}
+
+/// A spring stepped forward by `ms`, solved rather than integrated.
+///
+/// The closed form is used because the numerical one is not stable at the
+/// step sizes a browser actually delivers: a stiff spring at `effects_fast`
+/// has a period near 100ms, a dropped frame is 32ms, and explicit Euler at a
+/// third of a period diverges — the value grows instead of settling, which
+/// looks like the component exploding. The analytic solution is exact at any
+/// step, so a stalled tab that resumes after two seconds finds the spring
+/// exactly where it should be rather than in orbit.
+pub fn advanced(motion: Sprung, spring: Spring, ms: float) -> Sprung {
+    if at_rest(motion) {
+        return motion
+    }
+    let t = ms / 1000.0
+    let w0 = math.sqrt(spring.stiffness)
+    let zeta = spring.damping
+    let offset = motion.value - motion.target
+    let decay = math.exp(-zeta * w0 * t)
+
+    if zeta < 1.0 {
+        let wd = w0 * math.sqrt(1.0 - zeta * zeta)
+        let c1 = offset
+        let c2 = (motion.velocity + zeta * w0 * offset) / wd
+        let sin = math.sin(wd * t)
+        let cos = math.cos(wd * t)
+        let position = decay * (c1 * cos + c2 * sin)
+        let speed = decay * ((c2 * wd - c1 * zeta * w0) * cos - (c1 * wd + c2 * zeta * w0) * sin)
+        return settle(Sprung{..motion, value: motion.target + position, velocity: speed })
+    }
+    // Critically damped, and the overdamped case with it: at ζ ≥ 1 Material
+    // specifies no overshoot, and the critical solution is the one that gets
+    // there soonest without any.
+    let c1 = offset
+    let c2 = motion.velocity + w0 * offset
+    let position = (c1 + c2 * t) * decay
+    let speed = (c2 - w0 * (c1 + c2 * t)) * decay
+    return settle(Sprung{..motion, value: motion.target + position, velocity: speed })
+}
+
+/// Whether a spring has stopped, in the only sense a spring ever does: close
+/// enough to its target and slow enough that no pixel would differ.
+///
+/// A spring approaches its target asymptotically and so never arrives. Without
+/// a threshold the frame loop would run forever at a millionth of a device
+/// pixel, which is the classic way a spring animation becomes a battery bug.
+pub fn at_rest(motion: Sprung) -> bool {
+    return absf(motion.value - motion.target) < 0.0001 && absf(motion.velocity) < 0.0001
+}
+
+fn settle(motion: Sprung) -> Sprung {
+    if at_rest(motion) {
+        return Sprung{ value: motion.target, velocity: 0.0, target: motion.target }
+    }
+    return motion
+}

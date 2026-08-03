@@ -1,0 +1,314 @@
+use std/ui
+use std/math
+
+// Text fields.
+//
+// Material's text field is the component with the most going on: a container, a
+// label that starts inside the field and rises out of the way when there is
+// something to make room for, an activity indicator, supporting text under it,
+// and an error state that recolours all four at once.
+//
+// The label's rise is the part worth getting right, and the part that is
+// usually faked. It is not two pictures — a placeholder and a caption — swapped
+// at the moment focus arrives. It is one run of text moving up and shrinking,
+// and the movement is what tells someone that the grey word they were looking
+// at has become the name of the box rather than disappearing.
+
+/// Everything a text field can be told. The common cases have their own
+/// functions below; this is for the ones that need a label *and* supporting
+/// text *and* an error, which is most real forms.
+pub struct Field {
+    /// The name of the field, which starts inside it and rises out.
+    pub label: str
+    pub value: str
+    /// What is shown in an empty focused field, under the risen label.
+    pub placeholder: str
+    /// A line under the field: a hint, a format, or the reason it is wrong.
+    pub supporting: str
+    pub error: bool
+    /// Glyphs before and after the value. Strings for the reason every glyph in
+    /// this package is one.
+    pub leading: str
+    pub trailing: str
+    pub width: float
+}
+
+pub fn field(label: str, value: str, width: float) -> Field {
+    return Field{
+        label: label,
+        value: value,
+        placeholder: "",
+        supporting: "",
+        error: false,
+        leading: "",
+        trailing: "",
+        width: width,
+    }
+}
+
+pub fn FIELD_HEIGHT() -> float {
+    return 56.0
+}
+
+/// An outlined text field.
+///
+/// Material draws the label floating *on* the outline when the field has
+/// content, with the outline interrupted behind it. There is no way to break a
+/// border at this boundary — a gap in an outline is a fifth rectangle and a
+/// colour match — so the label rises inside the field instead, which is the
+/// filled variant's placement and is honest about what it is. Everything else
+/// about the outlined field is exact.
+pub fn outlined_field(
+    s: Scheme,
+    id: str,
+    value: str,
+    placeholder: str,
+    width: float,
+    state: State,
+) -> ui.Node {
+    return outlined_field_of(s, id, Field{..field(placeholder, value, width) }, state)
+}
+
+pub fn outlined_field_of(s: Scheme, id: str, spec: Field, state: State) -> ui.Node {
+    let accent = field_accent(s, spec, state)
+    let edge = mix(s.outline, accent, maxf(state.focus, if spec.error { 1.0 } else { 0.0 }))
+    let thickness = math.lerp(1.0, 2.0, maxf(state.focus, if spec.error { 1.0 } else { 0.0 }))
+    let container = ui.bordered(
+        ui.shaped(ui.no_decor(), SHAPE_EXTRA_SMALL()),
+        if state.disabled { disabled_container(s, s.surface) } else { edge },
+        thickness,
+    )
+    return field_body(s, id, spec, state, container, false)
+}
+
+/// A filled text field: a container and an activity indicator instead of an
+/// outline. Material's default of the two.
+pub fn filled_field(
+    s: Scheme,
+    id: str,
+    value: str,
+    placeholder: str,
+    width: float,
+    state: State,
+) -> ui.Node {
+    return filled_field_of(s, id, Field{..field(placeholder, value, width) }, state)
+}
+
+pub fn filled_field_of(s: Scheme, id: str, spec: Field, state: State) -> ui.Node {
+    let base = if state.disabled {
+        disabled_container(s, s.surface)
+    } else {
+        layered(s.surface_container_highest, s.on_surface, state)
+    }
+    return field_body(s, id, spec, state, ui.rounded(base, SHAPE_EXTRA_SMALL()), true)
+}
+
+/// A search field: the same, at full radius, which is what Material's search
+/// bar is. No label rises in one — a search bar's placeholder simply goes away.
+pub fn search_field(
+    s: Scheme,
+    id: str,
+    value: str,
+    placeholder: str,
+    width: float,
+    state: State,
+) -> ui.Node {
+    let container = layered(s.surface_container_high, s.on_surface, state)
+    var decor = ui.rounded(container, SHAPE_FULL())
+    if state.focus > 0.0 {
+        decor = ui.bordered(decor, s.primary, math.lerp(0.0, 2.0, state.focus))
+    }
+    let role = body_large()
+    let shown = search_text(value, placeholder, state)
+    let ink = if value.len() == 0 { s.on_surface_variant } else { s.on_surface }
+    let boxed = ui.sized(ui.in_font(ui.style(), role.size, role.weight), width, FIELD_HEIGHT())
+    let style = ui.Style{..boxed, padding: ui.insets_xy(space(4), 0.0) }
+    let node = ui.text_of(id, style, shown)
+    return ui.control(ui.decorated(node, ui.vertically_centered(ui.inked(decor, ink))), id)
+}
+
+fn search_text(value: str, placeholder: str, state: State) -> str {
+    if value.len() == 0 {
+        return if state.focused { "|\(placeholder)" } else { placeholder }
+    }
+    if state.focused {
+        return "\(value)|"
+    }
+    return value
+}
+
+/// The colour a field's outline, label and indicator take when they are
+/// active. An erroring field is error-coloured whether or not it has focus,
+/// which is the point of an error.
+fn field_accent(s: Scheme, spec: Field, state: State) -> int {
+    if spec.error {
+        return s.error
+    }
+    if state.disabled {
+        return disabled_ink(s, s.surface)
+    }
+    return s.primary
+}
+
+/// How far the label has risen out of the field, from 0 to 1.
+///
+/// It rises when there is anything to make room for — focus, a value, or a
+/// placeholder waiting to be shown — and the `focus` channel is already
+/// animated, so a field that is clicked into shows the label travelling rather
+/// than teleporting. A field that merely *has* a value has its label up
+/// already, with nothing to animate, which is correct: it did not just move.
+fn risen(spec: Field, state: State) -> float {
+    if spec.value.len() > 0 {
+        return 1.0
+    }
+    return state.focus
+}
+
+fn field_body(
+    s: Scheme,
+    id: str,
+    spec: Field,
+    state: State,
+    container: ui.Decor,
+    indicated: bool,
+) -> ui.Node {
+    let label_role = body_large()
+    let small_role = body_small()
+    let float_amount = risen(spec, state)
+    let accent = field_accent(s, spec, state)
+
+    // The label's size and colour cross together as it rises: 16dp
+    // on-surface-variant inside the field, 12dp accent above the value.
+    let label_size = math.lerp(label_role.size, small_role.size, float_amount)
+    let label_ink = if state.disabled {
+        disabled_ink(s, s.surface)
+    } else {
+        mix(s.on_surface_variant, accent, float_amount * maxf(state.focus, if spec.error { 1.0 } else { 0.0 }))
+    }
+    let value_ink = if state.disabled { disabled_ink(s, s.surface) } else { s.on_surface }
+
+    // A single line sits in the middle of a 56dp field; a risen label and its
+    // value sit 8dp from the top. The leading spacer is what carries the label
+    // between the two, and it is the whole of the animation.
+    let line = ui.line_height()
+    let centred_top = maxf(0.0, (FIELD_HEIGHT() - line) / 2.0)
+    let lead = math.lerp(centred_top, 8.0, float_amount)
+
+    let shown_value = if state.focused { "\(spec.value)|" } else { spec.value }
+    let placeholder = if state.focused && spec.value.len() == 0 { spec.placeholder } else { "" }
+    let value_line = if spec.value.len() > 0 { shown_value } else { placeholder }
+
+    var stack: [ui.Node] = [
+        spacer("\(id)-lead", 0.0),
+        ui.decorated(
+            ui.text_of("\(id)-label", ui.in_font(ui.style(), label_size, label_role.weight), spec.label),
+            ui.ink(label_ink),
+        ),
+    ]
+    // The value's box has *height* rather than content driving it: at rest it
+    // is zero tall, so it does not push the label off centre, and it grows into
+    // place as the label rises.
+    stack.push(
+        ui.decorated(
+            ui.text_of(
+                "\(id)-value",
+                ui.Style {
+                    ..ui.in_font(ui.style(), label_role.size, label_role.weight),
+                    height: line * float_amount,
+                },
+                value_line,
+            ),
+            ui.ink(value_ink),
+        ),
+    )
+    let column = ui.box_of(
+        "\(id)-content",
+        ui.Style {
+            ..ui.column(),
+            align: ui.Align.Stretch,
+            width: spec.width,
+            height: FIELD_HEIGHT(),
+            padding: ui.Insets{ top: lead, right: space(4), bottom: 0.0, left: space(4) },
+        },
+        stack,
+    )
+
+    var rows = [ui.decorated(column, container)]
+    if indicated {
+        // The activity indicator: a hairline under a filled field that thickens
+        // and takes the accent as focus arrives.
+        rows.push(
+            ui.decorated(
+                ui.box_of(
+                    "\(id)-indicator",
+                    ui.sized(ui.style(), spec.width, math.lerp(1.0, 2.0, maxf(state.focus, if spec.error { 1.0 } else { 0.0 }))),
+                    [],
+                ),
+                ui.filled(mix(s.on_surface_variant, accent, maxf(state.focus, if spec.error { 1.0 } else { 0.0 }))),
+            ),
+        )
+    }
+    if spec.supporting.len() > 0 {
+        rows.push(
+            ui.decorated(
+                ui.text_of(
+                    "\(id)-supporting",
+                    ui.Style {
+                        ..ui.in_font(ui.style(), small_role.size, small_role.weight),
+                        width: spec.width,
+                        padding: ui.Insets{ top: 4.0, right: space(4), bottom: 0.0, left: space(4) },
+                    },
+                    spec.supporting,
+                ),
+                ui.ink(if spec.error { s.error } else { s.on_surface_variant }),
+            ),
+        )
+    }
+    let whole = ui.box_of(
+        id,
+        ui.Style {..ui.column(), align: ui.Align.Stretch, width: spec.width },
+        rows,
+    )
+    return ui.control(ui.decorated(whole, ui.ink(s.on_surface)), id)
+}
+
+/// A text area: the same field, several lines tall.
+///
+/// The value wraps because the box has a width, which is `std/ui`'s own rule
+/// for when text wraps — so this is a filled field with its height given rather
+/// than a component with anything new in it.
+pub fn text_area(
+    s: Scheme,
+    id: str,
+    value: str,
+    placeholder: str,
+    width: float,
+    height: float,
+    state: State,
+) -> ui.Node {
+    let role = body_large()
+    let container = if state.disabled {
+        disabled_container(s, s.surface)
+    } else {
+        layered(s.surface_container_highest, s.on_surface, state)
+    }
+    var decor = ui.rounded(container, SHAPE_EXTRA_SMALL())
+    if state.focus > 0.0 {
+        decor = ui.bordered(decor, s.primary, math.lerp(0.0, 2.0, state.focus))
+    }
+    var shown = value
+    var ink = s.on_surface
+    if value.len() == 0 {
+        shown = placeholder
+        ink = s.on_surface_variant
+    } else if state.focused {
+        shown = "\(value)|"
+    }
+    let style = ui.Style{
+        ..ui.in_font(ui.style(), role.size, role.weight),
+        width: width,
+        height: height,
+        padding: ui.insets_xy(space(4), space(3)),
+    }
+    return ui.control(ui.decorated(ui.text_of(id, style, shown), ui.inked(decor, ink)), id)
+}

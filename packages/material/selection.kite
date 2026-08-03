@@ -1,0 +1,469 @@
+use std/ui
+use std/math
+
+// The controls that hold a choice: checkbox, radio, switch, slider, and the
+// segmented button.
+//
+// These are the components where Material's motion is doing the most work. A
+// checkbox that snaps between two pictures is legible; one whose box fills from
+// the outline inward tells you *which way* it went, which matters when a list
+// of twelve of them is being ticked quickly. A switch's knob is the clearest
+// case of all — the travel is the affordance, and a switch without it is two
+// unrelated pictures sharing a name.
+
+// ---- checkbox -----------------------------------------------------------------
+
+pub fn CHECKBOX_SIDE() -> float {
+    return 18.0
+}
+
+/// A checkbox: an 18dp box in a 40dp target, ticked or outlined.
+///
+/// The box is a box, not the characters `[x]`. The tick is a glyph and honestly
+/// so — a check mark is a shape the drawing boundary cannot draw, having neither
+/// strokes nor paths — but the *container* is drawn, and the container is the
+/// part a design system restyles and the part that animates.
+///
+/// Unchecked to checked is a 2dp outline becoming a filled accent square. Both
+/// the fill and the edge cross together on the `select` channel, so what is seen
+/// is the box filling in rather than one picture replacing another.
+pub fn checkbox(s: Scheme, id: str, caption: str, checked: bool, state: State) -> ui.Node {
+    let side = CHECKBOX_SIDE()
+    let amount = chosen_amount(checked, state)
+    if state.disabled {
+        return checkbox_body(
+            s,
+            id,
+            caption,
+            checked,
+            state,
+            ui.bordered(
+                ui.shaped(ui.no_decor(), 2.0),
+                disabled_container(s, s.surface),
+                2.0,
+            ),
+            disabled_ink(s, s.surface),
+        )
+    }
+    // An unchecked box is an outline with nothing in it, and a checked one is a
+    // solid square. Between them the fill grows *from* the outline colour, so
+    // the intermediate frames are a box filling rather than a box flashing.
+    let fill = mix(s.surface, s.primary, amount)
+    let edge = mix(mix(s.on_surface_variant, s.primary, state.focus), s.primary, amount)
+    var decor = ui.bordered(ui.rounded(fill, 2.0), edge, 2.0)
+    if amount <= 0.0 {
+        decor = ui.bordered(ui.shaped(ui.no_decor(), 2.0), edge, 2.0)
+    }
+    // The state layer of a checkbox is a 40dp circle behind the 18dp box, which
+    // is why the target is so much larger than the mark.
+    return checkbox_body(s, id, caption, checked, state, decor, mix(s.primary, s.on_primary, amount))
+}
+
+fn checkbox_body(
+    s: Scheme,
+    id: str,
+    caption: str,
+    checked: bool,
+    state: State,
+    box_decor: ui.Decor,
+    tick_ink: int,
+) -> ui.Node {
+    let side = CHECKBOX_SIDE()
+    let tick = if checked { "✓" } else { "" }
+    let mark = ui.decorated(
+        ui.box_of(
+            "\(id)-box",
+            ui.sized(ui.Style{..ui.column(), align: ui.Align.Center }, side, side),
+            [
+                ui.decorated(
+                    ui.text_of("\(id)-tick", ui.in_font(ui.style(), 13.0, 700), tick),
+                    ui.centered(ui.ink(tick_ink)),
+                ),
+            ],
+        ),
+        box_decor,
+    )
+    let halo = ui.decorated(
+        ui.box_of(
+            "\(id)-target",
+            ui.Style {
+                ..ui.column(),
+                align: ui.Align.Center,
+                justify: ui.Justify.Center,
+                width: 40.0,
+                height: 40.0,
+            },
+            [mark],
+        ),
+        layer_decor(s.surface, if checked { s.primary } else { s.on_surface }, state, SHAPE_FULL()),
+    )
+    return labelled_control(s, id, halo, caption, state)
+}
+
+/// A checkbox in its third state: neither on nor off, because the things it
+/// stands for disagree. Material draws a dash rather than a tick.
+pub fn checkbox_mixed(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+    let side = CHECKBOX_SIDE()
+    let decor = ui.bordered(ui.rounded(s.primary, 2.0), s.primary, 2.0)
+    let mark = ui.decorated(
+        ui.box_of(
+            "\(id)-box",
+            ui.sized(ui.Style{..ui.column(), align: ui.Align.Center }, side, side),
+            [
+                ui.decorated(
+                    ui.text_of("\(id)-tick", ui.in_font(ui.style(), 13.0, 700), "—"),
+                    ui.centered(ui.ink(s.on_primary)),
+                ),
+            ],
+        ),
+        decor,
+    )
+    let halo = ui.decorated(
+        ui.box_of(
+            "\(id)-target",
+            ui.Style {
+                ..ui.column(),
+                align: ui.Align.Center,
+                justify: ui.Justify.Center,
+                width: 40.0,
+                height: 40.0,
+            },
+            [mark],
+        ),
+        layer_decor(s.surface, s.primary, state, SHAPE_FULL()),
+    )
+    return labelled_control(s, id, halo, caption, state)
+}
+
+// ---- radio --------------------------------------------------------------------
+
+/// A radio button. Same target and label as a checkbox; the mark is a ring with
+/// a dot in it, which is two concentric circles and needs no glyph at all.
+///
+/// The dot grows from nothing rather than appearing, which is the whole of
+/// Material's radio animation and the reason the dot is a sized box rather than
+/// a character.
+pub fn radio(s: Scheme, id: str, caption: str, chosen: bool, state: State) -> ui.Node {
+    let side = 20.0
+    let amount = chosen_amount(chosen, state)
+    var edge = mix(s.on_surface_variant, s.primary, maxf(amount, state.focus))
+    if state.disabled {
+        edge = disabled_ink(s, s.surface)
+    }
+    // 10dp when chosen, nothing when not. A box of zero size lays out as
+    // nothing at all, so the unchosen case needs no branch of its own.
+    let dot = 10.0 * amount
+    var children: [ui.Node] = []
+    if dot > 0.0 {
+        children.push(
+            ui.decorated(
+                ui.box_of("\(id)-dot", ui.sized(ui.style(), dot, dot), []),
+                ui.rounded(if state.disabled { edge } else { s.primary }, SHAPE_FULL()),
+            ),
+        )
+    }
+    let ring = ui.decorated(
+        ui.box_of(
+            "\(id)-ring",
+            ui.Style {
+                ..ui.column(),
+                align: ui.Align.Center,
+                justify: ui.Justify.Center,
+                width: side,
+                height: side,
+            },
+            children,
+        ),
+        ui.bordered(ui.shaped(ui.no_decor(), SHAPE_FULL()), edge, 2.0),
+    )
+    let halo = ui.decorated(
+        ui.box_of(
+            "\(id)-target",
+            ui.Style {
+                ..ui.column(),
+                align: ui.Align.Center,
+                justify: ui.Justify.Center,
+                width: 40.0,
+                height: 40.0,
+            },
+            [ring],
+        ),
+        layer_decor(s.surface, if chosen { s.primary } else { s.on_surface }, state, SHAPE_FULL()),
+    )
+    return labelled_control(s, id, halo, caption, state)
+}
+
+// ---- switch -------------------------------------------------------------------
+
+fn SWITCH_WIDTH() -> float {
+    return 52.0
+}
+
+fn SWITCH_HEIGHT() -> float {
+    return 32.0
+}
+
+/// A switch: a 52×32 track with a knob that travels along it.
+///
+/// Everything about it moves. The track crosses from the outlined container to
+/// the accent, the knob grows from 16dp to 24dp, and it travels 20dp — and the
+/// travel is what a switch *is*. A switch drawn in two states with nothing
+/// between them is a checkbox wearing the wrong shape.
+///
+/// The knob is placed by a spacer whose width is computed rather than by any
+/// absolute positioning, which the layout does not have. That is not a
+/// workaround: a spacer of a computed width is exactly as expressive here, and
+/// it keeps the knob inside the same row the track lays out.
+pub fn switch(s: Scheme, id: str, caption: str, on: bool, state: State) -> ui.Node {
+    let amount = chosen_amount(on, state)
+    // Material's own numbers: the unselected knob is 16dp and sits 8dp in from
+    // the end; the selected one is 24dp and sits 4dp in from the other.
+    let knob = math.lerp(16.0, 24.0, amount)
+    let centre = math.lerp(16.0, SWITCH_WIDTH() - 16.0, amount)
+    let lead = maxf(0.0, centre - knob / 2.0)
+
+    var track_fill = mix(s.surface_container_highest, s.primary, amount)
+    var knob_colour = mix(s.outline, s.on_primary, amount)
+    var edge = mix(s.outline, s.primary, amount)
+    if state.disabled {
+        track_fill = disabled_container(s, s.surface)
+        knob_colour = disabled_ink(s, s.surface)
+        edge = disabled_container(s, s.surface)
+    }
+    // The state layer of a switch is a circle around the *knob*, not the track.
+    let knob_ink = if on { s.primary } else { s.on_surface }
+    let halo = layer_decor(track_fill, knob_ink, state, SHAPE_FULL())
+
+    var track = ui.rounded(track_fill, SHAPE_FULL())
+    if amount < 1.0 {
+        track = ui.bordered(track, edge, 2.0)
+    }
+    let body = ui.decorated(
+        ui.box_of(
+            "\(id)-track",
+            ui.Style {
+                ..ui.row(),
+                align: ui.Align.Center,
+                justify: ui.Justify.Start,
+                width: SWITCH_WIDTH(),
+                height: SWITCH_HEIGHT(),
+            },
+            [
+                spacer("\(id)-lead", lead),
+                ui.decorated(
+                    ui.box_of(
+                        "\(id)-knob",
+                        ui.Style {
+                            ..ui.column(),
+                            align: ui.Align.Center,
+                            justify: ui.Justify.Center,
+                            width: knob,
+                            height: knob,
+                        },
+                        [],
+                    ),
+                    ui.rounded(knob_colour, SHAPE_FULL()),
+                ),
+            ],
+        ),
+        // The layer is drawn on the track rather than around the knob, which
+        // is where the layout can put it. Material puts a 40dp circle behind
+        // the knob; that needs the knob to overflow its row, and nothing here
+        // overflows anything.
+        ui.shaped(halo, SHAPE_FULL()),
+    )
+    if amount >= 1.0 {
+        return labelled_control(s, id, ui.decorated(body, track), caption, state)
+    }
+    return labelled_control(s, id, ui.decorated(body, track), caption, state)
+}
+
+// ---- slider ---------------------------------------------------------------------
+//
+// A track a value can be dragged along, which is Material's interactive
+// counterpart to `linear_progress`.
+//
+// The two are not variants of each other and should not be confused. A progress
+// indicator reports; a slider is a *control* — it takes an id, it answers to
+// hit-testing, and it takes focus. A seek bar is a slider.
+//
+// A 4dp track with a round handle on it: the classic slider, which is what a
+// media scrubber is. Material also specifies an *expressive* slider — a 16dp
+// track with a tall bar for a handle — and that one is for volume and
+// brightness, where the control is the whole point of the row it sits in. Used
+// as a seek bar it reads as a segmented progress bar rather than something
+// draggable, which is exactly what the first version of this looked like.
+
+/// The touch target, which is what the control occupies. The *track* is 4dp;
+/// the rest is the room a finger needs and is not drawn.
+pub fn SLIDER_HEIGHT() -> float {
+    return 40.0
+}
+
+fn TRACK_HEIGHT() -> float {
+    return 4.0
+}
+
+/// A circle, because the handle is `full`-radius and square. It grows under the
+/// finger, which is Material's press feedback for a slider and the thing that
+/// tells someone they have hold of it rather than of the row behind it.
+fn HANDLE_WIDTH() -> float {
+    return 12.0
+}
+
+fn HANDLE_PRESSED() -> float {
+    return 16.0
+}
+
+/// Barely visible, and only here because the layout cannot overlap a handle
+/// onto a continuous track: there is no absolute positioning and no z-order,
+/// so the track is drawn in two pieces with the handle between them. At two
+/// device pixels the seam does not read as a gap.
+fn HANDLE_GAP() -> float {
+    return 2.0
+}
+
+pub fn slider(s: Scheme, id: str, value: float, width: float, state: State) -> ui.Node {
+    return slider_of(s, id, value, width, 0, state)
+}
+
+/// A slider with `steps` stops along it, or 0 for a continuous one.
+///
+/// Material draws a tick at every stop; without absolute positioning the ticks
+/// would have to be laid out as part of the track, which would break the track
+/// into `steps` pieces and make the seam that one gap already costs into
+/// `steps` of them. So a stepped slider here snaps its *value* and does not
+/// draw the ticks, which is the half of the feature that changes what the
+/// control does rather than what it looks like.
+pub fn slider_of(
+    s: Scheme,
+    id: str,
+    value: float,
+    width: float,
+    steps: int,
+    state: State,
+) -> ui.Node {
+    let fraction = snapped(clampf(value, 0.0, 1.0), steps)
+    let handle = math.lerp(HANDLE_WIDTH(), HANDLE_PRESSED(), state.press)
+    let gap = HANDLE_GAP()
+    // The handle's centre travels the full width, so the track either side of
+    // it is what is left after the handle and its two gaps are taken out.
+    let travel = width - handle - gap * 2.0
+    let active = clampf(travel * fraction, 0.0, travel)
+    let inactive = travel - active
+
+    var handle_colour = s.primary
+    var active_colour = s.primary
+    var rest_colour = s.surface_container_highest
+    if state.disabled {
+        handle_colour = disabled_ink(s, s.surface)
+        active_colour = disabled_ink(s, s.surface)
+        rest_colour = disabled_container(s, s.surface)
+    } else {
+        handle_colour = layered(s.primary, s.on_primary, state)
+    }
+
+    let parts = [
+        bar("\(id)-active", active, TRACK_HEIGHT(), active_colour),
+        spacer("\(id)-gap-a", gap),
+        bar("\(id)-handle", handle, handle, handle_colour),
+        spacer("\(id)-gap-b", gap),
+        bar("\(id)-inactive", inactive, TRACK_HEIGHT(), rest_colour),
+    ]
+    let style = ui.Style{
+        ..ui.row(),
+        align: ui.Align.Center,
+        width: width,
+        height: SLIDER_HEIGHT(),
+    }
+    return ui.control(ui.decorated(ui.box_of(id, style, parts), ui.ink(s.primary)), id)
+}
+
+fn snapped(v: float, steps: int) -> float {
+    if steps <= 0 {
+        return v
+    }
+    let n = steps as float
+    return math.round(v * n) / n
+}
+
+/// Where along a slider a point falls, as a fraction from 0 to 1.
+///
+/// The caller has the slider's rectangle — `ui.frame_of` finds it — and this
+/// turns a pointer position into a value. It accounts for the handle and its
+/// gaps, so clicking the far left gives exactly 0 and the far right exactly 1
+/// rather than stopping a handle's width short.
+pub fn slider_value_at(box: ui.Rect, x: float) -> float {
+    let travel = box.width - HANDLE_WIDTH() - HANDLE_GAP() * 2.0
+    if travel <= 0.0 {
+        return 0.0
+    }
+    let along = x - box.x - (HANDLE_WIDTH() / 2.0 + HANDLE_GAP())
+    return clampf(along / travel, 0.0, 1.0)
+}
+
+// ---- segmented button ------------------------------------------------------------
+
+/// One segment of a segmented button.
+pub struct Segment2 {
+    pub id: str
+    pub caption: str
+    pub selected: bool
+}
+
+pub fn segment(id: str, caption: str, selected: bool) -> Segment2 {
+    return Segment2{ id: id, caption: caption, selected: selected }
+}
+
+/// A segmented button: two to five choices in a row, exactly one or several of
+/// them made.
+///
+/// Material draws it as a single outlined pill divided by hairlines, with the
+/// selected segments filled. A single pill needs per-corner radii — the two end
+/// segments are half-round on their outer edges and square on their inner ones
+/// — and `Decor` has one radius for all four corners, so each segment here is a
+/// full-radius pill of its own inside a shared outline. That is Material 3
+/// Expressive's *connected button group* rather than its segmented button: the
+/// same control, the newer drawing of it, and the one this boundary can render
+/// honestly.
+pub fn segmented_button(
+    s: Scheme,
+    name: str,
+    segments: [Segment2],
+    states: [State],
+) -> ui.Node {
+    let role = label_large()
+    var children: [ui.Node] = []
+    for i in 0..segments.len() {
+        let seg = segments[i]
+        let state = if i < states.len() { states[i] } else { rest() }
+        let amount = chosen_amount(seg.selected, state)
+        let container = mix(s.surface, s.secondary_container, amount)
+        let ink = mix(s.on_surface, s.on_secondary_container, amount)
+        let shown = if seg.selected { "✓ \(seg.caption)" } else { seg.caption }
+        let width = ui.text_size_in(shown, role.size, role.weight).width + space(3) * 2.0
+        let radius = morphed(SHAPE_FULL(), width, 40.0, state.press)
+        children.push(
+            centred_body(
+                seg.id,
+                shown,
+                role.size,
+                role.weight,
+                width,
+                40.0,
+                ui.inked(ui.rounded(layered(container, ink, state), radius), ink),
+            ),
+        )
+    }
+    return ui.decorated(
+        ui.box_of(
+            name,
+            ui.spaced(
+                ui.padded(ui.Style{..ui.row(), align: ui.Align.Center }, 1.0),
+                2.0,
+            ),
+            children,
+        ),
+        ui.bordered(ui.shaped(ui.no_decor(), SHAPE_FULL()), s.outline, 1.0),
+    )
+}

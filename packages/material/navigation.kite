@@ -1,0 +1,516 @@
+use std/ui
+use std/math
+
+// App bars, tabs, and the three shapes navigation takes at the three window
+// sizes: a bar along the bottom when the window is narrow, a rail down the side
+// when it is not, and a drawer when there is room to name the destinations.
+//
+// Which of the three a window gets is `window_class` in `tokens.kite`, and it is
+// part of the design system rather than of the application for the reason the
+// breakpoints are: they are the same three numbers for every Material app, and
+// an application that picked its own would be a Material app that behaved
+// differently from every other one at 700dp.
+
+// ---- top app bars ---------------------------------------------------------------
+//
+// Four sizes. The small one is a title beside its actions; the centre-aligned
+// one puts the title in the middle, which is what a screen with a single action
+// either side wants; the medium and large ones give the title a line of its own
+// under the actions, at a bigger type role, for a screen that is *about*
+// something.
+//
+// Material collapses the medium and large ones into the small one as their
+// screen scrolls. That is the `collapse` argument: 0 is fully expanded, 1 is
+// fully collapsed, and the application drives it from its own scroll offset —
+// which it has, and this does not.
+
+pub fn top_app_bar(name: str, s: Scheme, title: str, actions: [ui.Node]) -> ui.Node {
+    return bar_body(name, s, title, [], actions, 64.0, title_large(), false)
+}
+
+/// The title centred, with room for a leading control either side of it.
+pub fn center_app_bar(
+    name: str,
+    s: Scheme,
+    title: str,
+    leading: [ui.Node],
+    actions: [ui.Node],
+) -> ui.Node {
+    return bar_body(name, s, title, leading, actions, 64.0, title_large(), true)
+}
+
+/// 112dp, headline-small, with the title on its own line. Collapses to the
+/// small bar as `collapse` goes from 0 to 1.
+pub fn medium_app_bar(
+    name: str,
+    s: Scheme,
+    title: str,
+    leading: [ui.Node],
+    actions: [ui.Node],
+    collapse: float,
+) -> ui.Node {
+    return tall_bar(name, s, title, leading, actions, 112.0, headline_small(), collapse)
+}
+
+/// 152dp, headline-medium. The largest, for a screen whose title is the point.
+pub fn large_app_bar(
+    name: str,
+    s: Scheme,
+    title: str,
+    leading: [ui.Node],
+    actions: [ui.Node],
+    collapse: float,
+) -> ui.Node {
+    return tall_bar(name, s, title, leading, actions, 152.0, headline_medium(), collapse)
+}
+
+fn tall_bar(
+    name: str,
+    s: Scheme,
+    title: str,
+    leading: [ui.Node],
+    actions: [ui.Node],
+    expanded: float,
+    expanded_role: TypeRole,
+    collapse: float,
+) -> ui.Node {
+    let shut = clampf(collapse, 0.0, 1.0)
+    let small = title_large()
+    // Height, type size and weight all cross together, so a bar half collapsed
+    // is a real intermediate bar rather than one of the two ends.
+    let height = math.lerp(expanded, 64.0, shut)
+    let size = math.lerp(expanded_role.size, small.size, shut)
+    // The title starts on its own line under the actions and ends beside them.
+    // At full collapse the row is the small bar exactly.
+    if shut >= 1.0 {
+        return bar_body(name, s, title, leading, actions, 64.0, small, false)
+    }
+    var top: [ui.Node] = []
+    for one in leading {
+        top.push(one)
+    }
+    top.push(ui.box_of("\(name)-gap", ui.grown(ui.style(), 1.0), []))
+    for one in actions {
+        top.push(one)
+    }
+    let row = ui.box_of(
+        "\(name)-row",
+        ui.spaced(
+            tall(ui.Style{..ui.row(), align: ui.Align.Center }, 64.0),
+            space(2),
+        ),
+        top,
+    )
+    let heading = ui.decorated(
+        ui.text_of(
+            "\(name)-title",
+            ui.grown(ui.in_font(ui.style(), size, expanded_role.weight), 1.0),
+            title,
+        ),
+        ui.ink(s.on_surface),
+    )
+    let style = ui.padded(
+        tall(ui.Style{..ui.column(), align: ui.Align.Stretch }, height),
+        space(4),
+    )
+    return ui.decorated(
+        ui.box_of(name, style, [row, heading]),
+        // A collapsing bar takes a container tone as it scrolls, which is
+        // Material's way of separating it from the content sliding under it.
+        ui.filled(mix(s.surface, surface_at(s, LEVEL_2()), shut)),
+    )
+}
+
+fn bar_body(
+    name: str,
+    s: Scheme,
+    title: str,
+    leading: [ui.Node],
+    actions: [ui.Node],
+    height: float,
+    role: TypeRole,
+    centred: bool,
+) -> ui.Node {
+    var children: [ui.Node] = []
+    for one in leading {
+        children.push(one)
+    }
+    let title_node = ui.decorated(
+        ui.text_of(
+            "\(name)-title",
+            ui.grown(ui.in_font(ui.style(), role.size, role.weight), 1.0),
+            title,
+        ),
+        if centred { ui.centered(ui.ink(s.on_surface)) } else { ui.ink(s.on_surface) },
+    )
+    children.push(title_node)
+    for action in actions {
+        children.push(action)
+    }
+    let style = ui.spaced(
+        ui.padded(
+            tall(ui.Style{..ui.row(), align: ui.Align.Center }, height),
+            space(4),
+        ),
+        space(2),
+    )
+    return ui.decorated(ui.box_of(name, style, children), ui.filled(s.surface))
+}
+
+/// A bottom app bar: actions along the bottom of a narrow window, usually with
+/// a floating action button at the trailing end.
+pub fn bottom_app_bar(name: str, s: Scheme, actions: [ui.Node], trailing: [ui.Node]) -> ui.Node {
+    var children: [ui.Node] = []
+    for one in actions {
+        children.push(one)
+    }
+    children.push(ui.box_of("\(name)-gap", ui.grown(ui.style(), 1.0), []))
+    for one in trailing {
+        children.push(one)
+    }
+    let style = ui.spaced(
+        ui.padded(
+            tall(ui.Style{..ui.row(), align: ui.Align.Center }, 80.0),
+            space(4),
+        ),
+        space(2),
+    )
+    return ui.decorated(
+        ui.box_of(name, style, children),
+        ui.filled(surface_at(s, LEVEL_2())),
+    )
+}
+
+// ---- tabs ----------------------------------------------------------------------
+
+/// One tab in a primary tab row: a label with a 3dp indicator under the
+/// selected one.
+///
+/// The indicator does not appear — it *grows*, from nothing to the label's
+/// width, on the `select` channel. Material slides one indicator between tabs;
+/// sliding needs the indicator to be a single element positioned across the
+/// row, and here each tab owns its own, so what a caller sees is the old one
+/// shrinking as the new one grows. Both are on the emphasized curve and the
+/// crossing reads as a hand-off.
+pub fn tab(s: Scheme, id: str, caption: str, on: bool, state: State) -> ui.Node {
+    return tab_body(s, id, caption, "", on, state, true)
+}
+
+/// A secondary tab: the same, with a full-width indicator and the label in the
+/// on-surface role, for tabs *inside* a screen rather than at the top of one.
+pub fn secondary_tab(s: Scheme, id: str, caption: str, on: bool, state: State) -> ui.Node {
+    return tab_body(s, id, caption, "", on, state, false)
+}
+
+/// A tab with a glyph above its label, which is what Material's taller tab is.
+pub fn icon_tab(s: Scheme, id: str, glyph: str, caption: str, on: bool, state: State) -> ui.Node {
+    return tab_body(s, id, caption, glyph, on, state, true)
+}
+
+fn tab_body(
+    s: Scheme,
+    id: str,
+    caption: str,
+    glyph: str,
+    on: bool,
+    state: State,
+    primary: bool,
+) -> ui.Node {
+    let role = title_small()
+    let amount = chosen_amount(on, state)
+    let ink = mix(s.on_surface_variant, if primary { s.primary } else { s.on_surface }, amount)
+    let width = ui.text_size_in(caption, role.size, role.weight).width + space(6) * 2.0
+    let height = if glyph.len() > 0 { 64.0 } else { 48.0 }
+
+    // A primary tab's indicator is as wide as its label; a secondary tab's runs
+    // the full width of the tab. Both grow from the middle, which is why the
+    // indicator sits in a centring row rather than in the column directly.
+    let full = if primary { width - space(6) * 2.0 } else { width }
+    let indicator = ui.box_of(
+        "\(id)-indicator-row",
+        ui.Style {..ui.row(), justify: ui.Justify.Center, width: width, height: 3.0 },
+        [
+            ui.decorated(
+                ui.box_of("\(id)-indicator", ui.sized(ui.style(), full * amount, 3.0), []),
+                ui.rounded(s.primary, 3.0),
+            ),
+        ],
+    )
+    var stack: [ui.Node] = []
+    if glyph.len() > 0 {
+        stack.push(
+            ui.decorated(
+                ui.text_of("\(id)-glyph", ui.in_font(ui.style(), 24.0, REGULAR()), glyph),
+                ui.centered(ui.ink(ink)),
+            ),
+        )
+    }
+    stack.push(
+        ui.decorated(
+            ui.text_of(
+                "\(id)-label",
+                ui.grown(ui.in_font(ui.style(), role.size, role.weight), 1.0),
+                caption,
+            ),
+            ui.centered(ui.ink(ink)),
+        ),
+    )
+    stack.push(indicator)
+    let box = ui.box_of(
+        id,
+        ui.sized(ui.Style{..ui.column(), align: ui.Align.Stretch }, width, height),
+        stack,
+    )
+    return ui.control(
+        ui.decorated(box, ui.inked(layer_decor(s.surface, ink, state, 0.0), ink)),
+        id,
+    )
+}
+
+/// A row of tabs with a rule under it, which is what separates the row from
+/// the content it switches between.
+pub fn tab_row(name: str, s: Scheme, tabs: [ui.Node]) -> ui.Node {
+    return ui.decorated(
+        ui.box_of(
+            name,
+            ui.Style {..ui.column(), align: ui.Align.Stretch },
+            [
+                ui.box_of("\(name)-tabs", ui.Style{..ui.row() }, tabs),
+                divider("\(name)-rule", s),
+            ],
+        ),
+        ui.filled(s.surface),
+    )
+}
+
+// ---- navigation bar, rail and drawer -------------------------------------------
+
+/// One destination in a navigation rail: a glyph in a pill, with a label under.
+///
+/// The pill behind the glyph grows from nothing as the destination is chosen,
+/// which is Material's own transition for it and the thing that makes a rail
+/// feel like one control rather than five.
+pub fn rail_item(s: Scheme, id: str, glyph: str, caption: str, on: bool, state: State) -> ui.Node {
+    return destination(s, id, glyph, caption, on, state, 56.0, 32.0, true)
+}
+
+/// One destination in a navigation bar — the compact answer to a rail.
+pub fn bar_item(s: Scheme, id: str, glyph: str, caption: str, on: bool, state: State) -> ui.Node {
+    return destination(s, id, glyph, caption, on, state, 64.0, 32.0, true)
+}
+
+fn destination(
+    s: Scheme,
+    id: str,
+    glyph: str,
+    caption: str,
+    on: bool,
+    state: State,
+    pill_width: float,
+    pill_height: float,
+    labelled: bool,
+) -> ui.Node {
+    let role = label_medium()
+    let amount = chosen_amount(on, state)
+    let pill_fill = mix(s.surface, s.secondary_container, amount)
+    let glyph_ink = mix(s.on_surface_variant, s.on_secondary_container, amount)
+    var pill = layer_decor(s.surface, s.on_surface, state, SHAPE_FULL())
+    if amount > 0.0 {
+        pill = ui.rounded(layered(pill_fill, glyph_ink, state), SHAPE_FULL())
+    }
+    // The pill grows in width as the destination is chosen, from the glyph's
+    // own size out to the full 56dp. A pill that merely appeared would be the
+    // same information with the movement taken out.
+    let grown_width = math.lerp(pill_height, pill_width, amount)
+    let icon = ui.decorated(
+        ui.text_of("\(id)-glyph", ui.in_font(ui.style(), 20.0, REGULAR()), glyph),
+        ui.centered(ui.ink(glyph_ink)),
+    )
+    let holder = ui.decorated(
+        ui.box_of(
+            "\(id)-pill",
+            ui.Style {
+                ..ui.column(),
+                align: ui.Align.Stretch,
+                justify: ui.Justify.Center,
+                width: grown_width,
+                height: pill_height,
+            },
+            [icon],
+        ),
+        pill,
+    )
+    var stack = [holder]
+    if labelled {
+        stack.push(
+            ui.decorated(
+                ui.text_of(
+                    "\(id)-label",
+                    ui.in_font(ui.style(), role.size, role.weight),
+                    caption,
+                ),
+                ui.centered(
+                    ui.ink(mix(s.on_surface_variant, s.on_surface, amount)),
+                ),
+            ),
+        )
+    }
+    let box = ui.box_of(
+        id,
+        ui.spaced(ui.Style{..ui.column(), align: ui.Align.Center }, space(1)),
+        stack,
+    )
+    return ui.control(ui.decorated(box, ui.ink(s.on_surface)), id)
+}
+
+/// The rail itself: 80dp down the leading edge, with whatever sits at the top
+/// of it — Material puts a floating action button there — above the
+/// destinations.
+pub fn navigation_rail(
+    name: str,
+    s: Scheme,
+    header: [ui.Node],
+    items: [ui.Node],
+    height: float,
+) -> ui.Node {
+    var children: [ui.Node] = []
+    for one in header {
+        children.push(one)
+    }
+    for one in items {
+        children.push(one)
+    }
+    let style = ui.spaced(
+        ui.padded(
+            ui.Style {
+                ..ui.column(),
+                align: ui.Align.Center,
+                width: RAIL_WIDTH(),
+                height: height,
+            },
+            space(3),
+        ),
+        space(3),
+    )
+    return ui.decorated(ui.box_of(name, style, children), ui.filled(s.surface))
+}
+
+/// The bar: 80dp across the bottom, for a compact window.
+pub fn navigation_bar(name: str, s: Scheme, items: [ui.Node], width: float) -> ui.Node {
+    let style = ui.padded(
+        ui.Style {
+            ..ui.row(),
+            align: ui.Align.Center,
+            justify: ui.Justify.SpaceBetween,
+            width: width,
+            height: NAV_BAR_HEIGHT(),
+        },
+        space(3),
+    )
+    return ui.decorated(
+        ui.box_of(name, style, items),
+        ui.filled(surface_at(s, LEVEL_2())),
+    )
+}
+
+/// One row of a navigation drawer: a full-width pill with a glyph and a label.
+pub fn drawer_item(
+    s: Scheme,
+    id: str,
+    glyph: str,
+    caption: str,
+    trailing: str,
+    on: bool,
+    state: State,
+) -> ui.Node {
+    let role = label_large()
+    let amount = chosen_amount(on, state)
+    let fill = mix(s.surface, s.secondary_container, amount)
+    let ink = mix(s.on_surface_variant, s.on_secondary_container, amount)
+    var decor = layer_decor(s.surface, s.on_surface, state, SHAPE_FULL())
+    if amount > 0.0 {
+        decor = ui.rounded(layered(fill, ink, state), SHAPE_FULL())
+    }
+    var children = [
+        ui.decorated(
+            ui.text_of("\(id)-glyph", ui.in_font(ui.style(), 24.0, REGULAR()), glyph),
+            ui.ink(ink),
+        ),
+        ui.decorated(
+            ui.text_of(
+                "\(id)-label",
+                ui.grown(ui.in_font(ui.style(), role.size, role.weight), 1.0),
+                caption,
+            ),
+            ui.ink(ink),
+        ),
+    ]
+    if trailing.len() > 0 {
+        children.push(
+            ui.decorated(
+                ui.text_of(
+                    "\(id)-trailing",
+                    ui.in_font(ui.style(), role.size, role.weight),
+                    trailing,
+                ),
+                ui.ink(ink),
+            ),
+        )
+    }
+    let style = ui.spaced(
+        ui.padded(
+            tall(ui.Style{..ui.row(), align: ui.Align.Center }, 56.0),
+            space(4),
+        ),
+        space(3),
+    )
+    return ui.control(ui.decorated(ui.box_of(id, style, children), ui.inked(decor, ink)), id)
+}
+
+/// The drawer: 360dp of destinations, for a window wide enough to name them.
+///
+/// `amount` slides it in from the leading edge, the same way a side sheet
+/// arrives, so a modal drawer on a narrow window can be animated by the caller
+/// with a `Track` and a standard-decelerate curve.
+pub fn navigation_drawer(
+    name: str,
+    s: Scheme,
+    items: [ui.Node],
+    height: float,
+    amount: float,
+) -> ui.Node {
+    let width = 360.0 * clampf(amount, 0.0, 1.0)
+    let style = ui.spaced(
+        ui.padded(
+            ui.Style {
+                ..ui.column(),
+                align: ui.Align.Stretch,
+                width: width,
+                height: height,
+            },
+            space(3),
+        ),
+        space(1),
+    )
+    return ui.decorated(
+        ui.box_of(name, style, items),
+        ui.rounded(surface_at(s, LEVEL_1()), SHAPE_LARGE()),
+    )
+}
+
+/// A drawer's section heading.
+pub fn drawer_headline(name: str, s: Scheme, caption: str) -> ui.Node {
+    let role = title_small()
+    return ui.decorated(
+        ui.text_of(
+            name,
+            ui.Style {
+                ..ui.in_font(ui.style(), role.size, role.weight),
+                height: 56.0,
+                padding: ui.insets_xy(space(4), 0.0),
+            },
+            caption,
+        ),
+        ui.vertically_centered(ui.ink(s.on_surface_variant)),
+    )
+}

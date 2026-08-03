@@ -1,0 +1,574 @@
+// The material package's own suite.
+//
+// An ordinary Kite program that runs its checks and prints what failed, like
+// the standard library's — being a program rather than a harness is what lets
+// the same file run on the bytecode VM *and* on WebAssembly and be compared. A
+// design system whose easing curve gave different numbers on two backends would
+// be a design system that animated differently on two backends.
+
+use std/test
+use std/math
+use std/ui
+use material
+
+fn near(found: float, want: float, what: str) -> error {
+    return test.equal_float(found, want, 0.001, what)
+}
+
+// ---- easing --------------------------------------------------------------------
+
+fn easing_checks() -> [error] {
+    var out: [error] = []
+    let std = material.standard()
+    out.push(near(material.ease(std, 0.0), 0.0, "standard at zero"))
+    out.push(near(material.ease(std, 1.0), 1.0, "standard at one"))
+    // Against an independent solve of cubic-bezier(0.2, 0, 0, 1).
+    out.push(near(material.ease(std, 0.25), 0.607220, "standard at a quarter"))
+    out.push(near(material.ease(std, 0.5), 0.877834, "standard at a half"))
+
+    // The emphasized curve is a *path* of two cubics spliced at (1/6, 0.4), and
+    // the splice is the thing worth pinning: a single cubic cannot pass through
+    // it, so a value of 0.4 here is proof the second segment is being used.
+    let emph = material.emphasized()
+    out.push(near(material.ease(emph, 0.166666), 0.4, "emphasized at the splice"))
+    out.push(near(material.ease(emph, 0.5), 0.950612, "emphasized at a half"))
+    out.push(near(material.ease(emph, 0.1), 0.093480, "emphasized early"))
+    out.push(near(material.ease(emph, 1.0), 1.0, "emphasized at one"))
+
+    out.push(near(material.ease(material.linear(), 0.37), 0.37, "linear is linear"))
+    out.push(
+        near(
+            material.ease(material.emphasized_decelerate(), 0.5),
+            0.950247,
+            "emphasized decelerate",
+        ),
+    )
+    // A curve is monotone, which is what stops a transition running backwards
+    // in the middle of itself.
+    var previous = -1.0
+    var monotone = true
+    for i in 0..21 {
+        let v = material.ease(emph, (i as float) / 20.0)
+        if v < previous {
+            monotone = false
+        }
+        previous = v
+    }
+    out.push(test.is_true(monotone, "emphasized never goes backwards"))
+
+    // Out of range is clamped rather than extrapolated.
+    out.push(near(material.ease(std, -1.0), 0.0, "before the start"))
+    out.push(near(material.ease(std, 2.0), 1.0, "after the end"))
+    return out
+}
+
+// ---- durations ------------------------------------------------------------------
+
+fn duration_checks() -> [error] {
+    var out: [error] = []
+    out.push(near(material.SHORT_1(), 50.0, "short1"))
+    out.push(near(material.SHORT_4(), 200.0, "short4"))
+    out.push(near(material.MEDIUM_1(), 250.0, "medium1"))
+    out.push(near(material.MEDIUM_4(), 400.0, "medium4"))
+    out.push(near(material.LONG_2(), 500.0, "long2"))
+    out.push(near(material.EXTRA_LONG_4(), 1000.0, "extraLong4"))
+    return out
+}
+
+// ---- tracks ---------------------------------------------------------------------
+
+fn track_checks() -> [error] {
+    var out: [error] = []
+    let curve = material.standard()
+    let at_rest = material.still(0.0)
+    out.push(test.is_true(material.settled(at_rest), "a still track has arrived"))
+    out.push(near(material.at(at_rest, curve), 0.0, "a still track is where it is"))
+
+    let running = material.retargeted(at_rest, curve, 1.0, 100.0)
+    out.push(test.is_false(material.settled(running), "a retargeted track is moving"))
+    out.push(near(material.at(running, curve), 0.0, "it starts where it was"))
+
+    let half = material.stepped(running, 50.0)
+    out.push(near(material.at(half, curve), 0.877834, "and follows the curve"))
+    let whole = material.stepped(half, 50.0)
+    out.push(near(material.at(whole, curve), 1.0, "and arrives"))
+    out.push(test.is_true(material.settled(whole), "and says so"))
+
+    // Aimed where it already points, a track is left alone — which is what
+    // stops a hovered control from restarting its animation sixty times a
+    // second and pinning the frame loop open.
+    let again = material.retargeted(whole, curve, 1.0, 100.0)
+    out.push(test.is_true(material.settled(again), "retargeting to the same place is a no-op"))
+
+    // Interrupted, it retreats from where it got to rather than from the end.
+    let reversed = material.retargeted(half, curve, 0.0, 100.0)
+    out.push(near(reversed.from, 0.877834, "an interrupted track starts where it was"))
+    out.push(near(material.at(reversed, curve), 0.877834, "and does not jump"))
+    return out
+}
+
+// ---- springs ---------------------------------------------------------------------
+
+fn spring_checks() -> [error] {
+    var out: [error] = []
+    var sprung = material.aimed(material.sprung(0.0), 1.0)
+    out.push(test.is_false(material.at_rest(sprung), "a spring with somewhere to go is moving"))
+    for i in 0..200 {
+        sprung = material.advanced(sprung, material.spatial_default(), 16.0)
+    }
+    out.push(test.is_true(material.at_rest(sprung), "a spatial spring settles"))
+    out.push(near(sprung.value, 1.0, "on its target"))
+
+    // A critically damped spring must not overshoot: a colour that overshoots
+    // is a colour that is briefly wrong.
+    var effect = material.aimed(material.sprung(0.0), 1.0)
+    var overshot = false
+    for i in 0..200 {
+        effect = material.advanced(effect, material.effects_default(), 16.0)
+        if effect.value > 1.0001 {
+            overshot = true
+        }
+    }
+    out.push(test.is_false(overshot, "an effects spring never overshoots"))
+    out.push(test.is_true(material.at_rest(effect), "and settles"))
+
+    // A huge step must not diverge — a stalled tab that resumes two seconds
+    // later finds the spring where it should be rather than in orbit.
+    var jumped = material.aimed(material.sprung(0.0), 1.0)
+    jumped = material.advanced(jumped, material.spatial_slow(), 2000.0)
+    out.push(test.is_true(material.at_rest(jumped), "a two-second step lands settled"))
+    out.push(near(jumped.value, 1.0, "and on target"))
+    return out
+}
+
+// ---- state layers -----------------------------------------------------------------
+
+fn layer_checks() -> [error] {
+    var out: [error] = []
+    let s = material.light()
+    out.push(near(material.HOVER_OPACITY(), 0.08, "hover is eight per cent"))
+    out.push(near(material.FOCUS_OPACITY(), 0.10, "focus is ten"))
+    out.push(near(material.PRESS_OPACITY(), 0.10, "press is ten"))
+
+    out.push(
+        test.equal_int(
+            material.layered(s.primary, s.on_primary, material.rest()),
+            s.primary,
+            "a control at rest wears its own colour",
+        ),
+    )
+    // Half a hover is a real colour, not one of the two ends. This is the whole
+    // difference between an animated state layer and a boolean one.
+    let half = material.State{..material.rest(), hover: 0.5, hovered: true }
+    let full = material.State{..material.rest(), hover: 1.0, hovered: true }
+    let a = material.layered(s.primary, s.on_primary, half)
+    let b = material.layered(s.primary, s.on_primary, full)
+    out.push(test.is_true(a != s.primary, "half a hover is not the resting colour"))
+    out.push(test.is_true(a != b, "and is not the arrived colour either"))
+    out.push(test.equal_int(a, material.mix(s.primary, s.on_primary, 0.04), "it is the layer, halved"))
+
+    // The strongest interaction wins, and a press beats a hover.
+    let both = material.State{
+        ..material.rest(),
+        hover: 1.0,
+        hovered: true,
+        press: 1.0,
+        pressed: true,
+    }
+    out.push(
+        test.equal_int(
+            material.layered(s.primary, s.on_primary, both),
+            material.mix(s.primary, s.on_primary, 0.10),
+            "a press outweighs a hover",
+        ),
+    )
+    // A disabled control shows no layer at all.
+    let off = material.State{..material.rest(), disabled: true, hover: 1.0, hovered: true }
+    out.push(
+        test.equal_int(
+            material.layered(s.primary, s.on_primary, off),
+            s.primary,
+            "a disabled control does not light up",
+        ),
+    )
+    return out
+}
+
+// ---- the interaction state machine ------------------------------------------------
+
+fn tree(s: material.Scheme, inter: material.Interaction) -> ui.Node {
+    return ui.box_of(
+        "root",
+        ui.spaced(ui.padded(ui.Style{..ui.column() }, 16.0), 8.0),
+        [
+            material.filled_button(s, "save", "Save", material.state_of(inter, "save")),
+            material.text_button(s, "cancel", "Cancel", material.state_of(inter, "cancel")),
+        ],
+    )
+}
+
+fn interaction_checks() -> [error] {
+    var out: [error] = []
+    let s = material.light()
+    let view = ui.Size{ width: 400.0, height: 300.0 }
+    var inter = material.no_interaction()
+    let frames = ui.layout(tree(s, inter), view)
+    let box = ui.frame_of(frames, "save")
+    if box == nil {
+        out.push(test.fail("the button laid out"))
+        return out
+    }
+    let cx = box.rect.x + box.rect.width / 2.0
+    let cy = box.rect.y + box.rect.height / 2.0
+
+    out.push(test.is_false(material.animating(inter), "nothing moves before anything happens"))
+    out.push(near(material.state_of(inter, "save").hover, 0.0, "an untouched control is at rest"))
+
+    inter = material.moved(inter, frames, cx, cy)
+    out.push(test.is_true(material.animating(inter), "the pointer arriving starts something"))
+    out.push(near(material.state_of(inter, "save").hover, 0.0, "which has not moved yet"))
+
+    inter = material.advance(inter, 50.0)
+    out.push(near(material.state_of(inter, "save").hover, 0.877834, "and is half way at 50ms"))
+    inter = material.advance(inter, 50.0)
+    out.push(near(material.state_of(inter, "save").hover, 1.0, "and arrived at 100ms"))
+    out.push(test.is_false(material.animating(inter), "and stops"))
+
+    // The load-bearing one. The host's frame loop runs while the model keeps
+    // changing, so a settled interaction has to come back *identical* — this is
+    // the difference between an idle application and a warm laptop.
+    let settled_again = material.advance(inter, 16.0)
+    out.push(test.is_true(settled_again == inter, "a settled interaction is returned unchanged"))
+
+    // Moving to the same control changes nothing either.
+    out.push(
+        test.is_true(
+            material.moved(inter, frames, cx + 1.0, cy) == inter,
+            "moving within a control is not an event",
+        ),
+    )
+
+    // Pressing starts a ripple, and its colour is the control's own ink —
+    // `on_primary` inside a filled button.
+    inter = material.pressed_down(inter, frames, cx, cy)
+    let reaction = material.reaction_of(inter, "save")
+    if reaction == nil {
+        out.push(test.fail("a press is recorded"))
+        return out
+    }
+    out.push(test.is_true(reaction.ripple.live, "a press starts a ripple"))
+    out.push(test.equal_int(reaction.ripple.ink, s.on_primary, "in the control's own ink"))
+    out.push(test.equal_str(inter.focused, "save", "and takes focus"))
+
+    inter = material.advance(inter, 50.0)
+    out.push(near(material.state_of(inter, "save").press, 1.0, "the press layer arrives in one frame"))
+
+    // Material shows a ripple for a minimum time however brief the tap, which
+    // is what makes a four-millisecond touch visible at all.
+    inter = material.lifted(inter)
+    inter = material.advance(inter, 4.0)
+    let brief = material.reaction_of(inter, "save")
+    if brief != nil {
+        out.push(test.is_true(brief.ripple.live, "a ripple outlives a four-millisecond tap"))
+    }
+    for i in 0..80 {
+        inter = material.advance(inter, 16.0)
+    }
+    let after = material.reaction_of(inter, "save")
+    if after != nil {
+        out.push(test.is_false(after.ripple.live, "and is gone a second later"))
+    }
+    out.push(test.is_false(material.animating(inter), "and everything has settled"))
+
+    // A control that is no longer anything is forgotten, or the list grows for
+    // the lifetime of the program.
+    var leaving = material.moved(material.no_interaction(), frames, cx, cy)
+    leaving = material.advance(leaving, 200.0)
+    leaving = material.left(leaving)
+    for i in 0..40 {
+        leaving = material.advance(leaving, 16.0)
+    }
+    out.push(test.equal_int(leaving.reactions.len(), 0, "a spent reaction is pruned"))
+
+    // Selection animates when it is routed through `choose`, and is exact when
+    // it is not.
+    var chosen = material.choose(material.no_interaction(), "tab-a", true)
+    out.push(near(material.state_of(chosen, "tab-a").select, 0.0, "a selection starts where it was"))
+    chosen = material.advance(chosen, material.SELECT_CHANGE())
+    out.push(near(material.state_of(chosen, "tab-a").select, 1.0, "and arrives"))
+    let unrouted = material.state_marked(material.no_interaction(), "tab-b", true)
+    out.push(near(unrouted.select, 1.0, "an unrouted selection is simply on"))
+    out.push(test.equal_bool(unrouted.selected, true, "and says so"))
+    return out
+}
+
+// ---- components --------------------------------------------------------------------
+
+fn component_checks() -> [error] {
+    var out: [error] = []
+    let s = material.light()
+    let inter = material.no_interaction()
+    let size = ui.Size{ width: 900.0, height: 1200.0 }
+
+    // Material's own measurements. A button is 40dp tall with 24dp either side
+    // of its label; a chip is 32; an icon button is a 40dp square.
+    let button = ui.layout(material.filled_button(s, "b", "Save", material.rest()), size)
+    let b = ui.frame_of(button, "b")
+    if b == nil {
+        out.push(test.fail("a button lays out"))
+        return out
+    }
+    out.push(near(b.rect.height, 40.0, "a button is forty tall"))
+    let label = ui.text_size_in("Save", material.label_large().size, material.label_large().weight)
+    out.push(near(b.rect.width, label.width + 48.0, "with twenty-four either side"))
+
+    let icon = ui.layout(material.icon_button(s, "i", "★", material.rest()), size)
+    let i = ui.frame_of(icon, "i")
+    if i != nil {
+        out.push(near(i.rect.width, 40.0, "an icon button is a forty-dp square"))
+        out.push(near(i.rect.height, 40.0, "on both axes"))
+    }
+
+    let fab = ui.layout(material.fab(s, "f", "＋", material.rest()), size)
+    let f = ui.frame_of(fab, "f")
+    if f != nil {
+        out.push(near(f.rect.height, 56.0, "a FAB is fifty-six"))
+    }
+
+    // A pressed button's corners square off, which is Material 3 Expressive's
+    // press morph and the clearest evidence a press registered.
+    let held = material.State{..material.rest(), press: 1.0, pressed: true }
+    let pressed_frames = ui.layout(material.filled_button(s, "b", "Save", held), size)
+    let p = ui.frame_of(pressed_frames, "b")
+    if p != nil {
+        out.push(test.is_true(p.decor.radius < b.decor.radius, "a held button is squarer"))
+        // …and the geometry is untouched, which is the invariant the whole
+        // decoration model rests on.
+        out.push(near(p.rect.width, b.rect.width, "and exactly as wide"))
+        out.push(near(p.rect.height, b.rect.height, "and as tall"))
+    }
+
+    // Every component in the system lays out, is a real rectangle, and paints.
+    let gallery = ui.layout(one_of_everything(s, inter), ui.Size{ width: 1200.0, height: 4000.0 })
+    out.push(test.is_true(gallery.len() > 100, "the gallery lays out"))
+    var empty = 0
+    for frame in gallery {
+        if frame.is_control {
+            if frame.rect.width <= 0.0 || frame.rect.height <= 0.0 {
+                empty += 1
+            }
+        }
+    }
+    out.push(test.equal_int(empty, 0, "no control lays out to nothing"))
+
+    // Every control is reachable by keyboard, which is what focus order being
+    // derived from the tree buys.
+    let order = ui.focus_order(gallery)
+    out.push(test.is_true(order.len() >= 20, "every control is in the focus order"))
+    return out
+}
+
+fn one_of_everything(s: material.Scheme, inter: material.Interaction) -> ui.Node {
+    let r = material.rest()
+    return ui.box_of(
+        "gallery",
+        ui.spaced(ui.Style{..ui.column(), align: ui.Align.Start }, 8.0),
+        [
+            material.filled_button(s, "g-filled", "Filled", r),
+            material.tonal_button(s, "g-tonal", "Tonal", r),
+            material.outlined_button(s, "g-outlined", "Outlined", r),
+            material.text_button(s, "g-text", "Text", r),
+            material.elevated_button(s, "g-elevated", "Elevated", r),
+            material.icon_button(s, "g-icon", "★", r),
+            material.filled_icon_button(s, "g-icon-filled", "★", r),
+            material.outlined_icon_button(s, "g-icon-out", "★", r),
+            material.icon_toggle(s, "g-toggle", "★", true, material.when_selected(true, false)),
+            material.small_fab(s, "g-fab-s", "＋", r),
+            material.fab(s, "g-fab", "＋", r),
+            material.large_fab(s, "g-fab-l", "＋", r),
+            material.extended_fab(s, "g-fab-x", "＋", "Compose", r),
+            material.assist_chip(s, "g-chip-a", "Assist", r),
+            material.filter_chip(s, "g-chip-f", "Filter", true, material.when_selected(true, false)),
+            material.input_chip(s, "g-chip-i", "Input", r),
+            material.suggestion_chip(s, "g-chip-s", "Suggest", r),
+            material.checkbox(s, "g-check", "Check", true, material.when_selected(true, false)),
+            material.radio(s, "g-radio", "Radio", true, material.when_selected(true, false)),
+            material.switch(s, "g-switch", "Switch", true, material.when_selected(true, false)),
+            material.slider(s, "g-slider", 0.5, 200.0, r),
+            material.filled_field(s, "g-field", "value", "Label", 240.0, r),
+            material.outlined_field(s, "g-field-o", "", "Label", 240.0, r),
+            material.search_field(s, "g-search", "", "Search", 240.0, r),
+            material.text_area(s, "g-area", "text", "Notes", 240.0, 96.0, r),
+            material.list_item(s, "g-list", "One line", [], r),
+            material.list_item_two(s, "g-list2", "Two", "Lines", [], r),
+            material.list_item_three(s, "g-list3", "Three", "Of", "Them", [], r),
+            material.menu_item(s, "g-menu", "Cut", "⌘X", r),
+            material.drawer_item(s, "g-drawer", "✉", "Inbox", "24", true, material.when_selected(true, false)),
+            material.rail_item(s, "g-rail", "♫", "Library", true, material.when_selected(true, false)),
+            material.bar_item(s, "g-bar", "♫", "Library", false, r),
+            material.tab(s, "g-tab", "Songs", true, material.when_selected(true, false)),
+            material.secondary_tab(s, "g-tab2", "Albums", false, r),
+            material.clickable_card("g-card", s, [], r),
+            material.snackbar_action(s, "g-snack", "Undo", r),
+            material.top_app_bar("g-appbar", s, "Title", []),
+            material.divider("g-divider", s),
+            material.badge("g-badge", s, "12"),
+            material.linear_progress("g-progress", s, 0.4, 200.0),
+            material.circular_progress("g-circular", 48.0),
+            material.tooltip("g-tooltip", s, "Tip"),
+            material.dialog("g-dialog", s, "Delete?", "Gone for good.", [], 320.0),
+        ],
+    )
+}
+
+// ---- colour -----------------------------------------------------------------------
+
+fn colour_checks() -> [error] {
+    var out: [error] = []
+    // Lightness, against the CIE definition.
+    out.push(test.equal_float(material.lstar_of(0xffffff), 100.0, 0.01, "white is tone 100"))
+    out.push(test.equal_float(material.lstar_of(0x000000), 0.0, 0.01, "black is tone 0"))
+    out.push(test.equal_float(material.lstar_of(0x808080), 53.585, 0.01, "mid grey is 53.6"))
+
+    // HCT, against the values Material's own utilities publish.
+    let red = material.hct_of(0xff0000)
+    out.push(test.equal_float(red.hue, 27.408, 0.1, "red's hue"))
+    out.push(test.equal_float(red.chroma, 113.357, 0.2, "red's chroma"))
+    out.push(test.equal_float(red.tone, 53.237, 0.05, "red's tone"))
+    let green = material.hct_of(0x00ff00)
+    out.push(test.equal_float(green.hue, 142.139, 0.1, "green's hue"))
+    out.push(test.equal_float(green.chroma, 108.410, 0.2, "green's chroma"))
+    let blue = material.hct_of(0x0000ff)
+    out.push(test.equal_float(blue.hue, 282.788, 0.1, "blue's hue"))
+    out.push(test.equal_float(blue.chroma, 87.230, 0.2, "blue's chroma"))
+
+    // A colour survives the round trip through a space it has no closed-form
+    // inverse for, which is what the search is for.
+    for colour in [0x6750a4, 0xba1a1a, 0x00639b, 0x2e7d32, 0xffffff, 0x000000] {
+        let back = material.argb_of_hct(material.hct_of(colour))
+        out.push(test.equal_int(back, colour, "\(colour) round-trips through HCT"))
+    }
+
+    // The baseline scheme is a *result* of this file, and the seed is the one
+    // Material used.
+    let generated = material.scheme_from(0x6750a4, false)
+    let baseline = material.light()
+    out.push(test.equal_int(generated.primary, baseline.primary, "generated primary is the baseline"))
+    out.push(test.equal_int(generated.secondary, baseline.secondary, "and secondary"))
+    out.push(test.equal_int(generated.error, baseline.error, "and error"))
+    out.push(test.equal_int(generated.on_surface, baseline.on_surface, "and on-surface"))
+    let generated_dark = material.scheme_from(0x6750a4, true)
+    let baseline_dark = material.dark()
+    out.push(test.equal_int(generated_dark.surface, baseline_dark.surface, "and the dark surface"))
+    out.push(test.equal_int(generated_dark.on_surface, baseline_dark.on_surface, "and its on-surface"))
+
+    // The claim tone makes, tested rather than assumed: whatever seed is
+    // handed in, the on-colours are legible on the colours they name.
+    for seed in [0x00639b, 0xb33b15, 0x769cdf, 0x2e7d32, 0x111111, 0xfff59d] {
+        let scheme = material.scheme_from(seed, false)
+        out.push(
+            test.is_true(
+                material.contrast_between(scheme.on_primary, scheme.primary) >= 4.5,
+                "on-primary is legible on primary for \(seed)",
+            ),
+        )
+        out.push(
+            test.is_true(
+                material.contrast_between(scheme.on_surface, scheme.surface) >= 4.5,
+                "on-surface is legible on surface for \(seed)",
+            ),
+        )
+        out.push(
+            test.is_true(
+                material.contrast_between(scheme.on_primary_container, scheme.primary_container) >= 4.5,
+                "on-primary-container is legible for \(seed)",
+            ),
+        )
+        let dark = material.scheme_from(seed, true)
+        out.push(
+            test.is_true(
+                material.contrast_between(dark.on_surface, dark.surface) >= 4.5,
+                "and in the dark scheme for \(seed)",
+            ),
+        )
+    }
+
+    // Contrast is symmetric and bounded, which is worth pinning because the
+    // formula is easy to get the wrong way round.
+    out.push(near(material.contrast_between(0x000000, 0xffffff), 21.0, "black on white is 21:1"))
+    out.push(near(material.contrast_between(0xffffff, 0x000000), 21.0, "and so is white on black"))
+    out.push(near(material.contrast_between(0x808080, 0x808080), 1.0, "a colour on itself is 1:1"))
+    return out
+}
+
+// ---- window size classes ------------------------------------------------------------
+
+fn window_checks() -> [error] {
+    var out: [error] = []
+    out.push(test.equal_int(material.window_class(359.0), material.WINDOW_COMPACT(), "a phone is compact"))
+    out.push(test.equal_int(material.window_class(599.0), material.WINDOW_COMPACT(), "just under 600"))
+    out.push(test.equal_int(material.window_class(600.0), material.WINDOW_MEDIUM(), "600 is medium"))
+    out.push(test.equal_int(material.window_class(839.0), material.WINDOW_MEDIUM(), "just under 840"))
+    out.push(test.equal_int(material.window_class(840.0), material.WINDOW_EXPANDED(), "840 is expanded"))
+    out.push(test.equal_bool(material.has_rail(500.0), false, "a narrow window gets a bottom bar"))
+    out.push(test.equal_bool(material.has_rail(900.0), true, "a wide one gets a rail"))
+    return out
+}
+
+// ---- editing -------------------------------------------------------------------------
+
+fn editing_checks() -> [error] {
+    var out: [error] = []
+    out.push(test.equal_str(material.typed("ab", "c"), "abc", "a character is typed"))
+    out.push(test.equal_str(material.typed("abc", "Backspace"), "ab", "backspace deletes"))
+    out.push(test.equal_str(material.typed("", "Backspace"), "", "and stops at the start"))
+    out.push(test.equal_str(material.typed("ab", "ArrowLeft"), "ab", "a named key is not four letters"))
+    return out
+}
+
+fn checks() -> [error] {
+    var out: [error] = []
+    for e in easing_checks() {
+        out.push(e)
+    }
+    for e in duration_checks() {
+        out.push(e)
+    }
+    for e in track_checks() {
+        out.push(e)
+    }
+    for e in spring_checks() {
+        out.push(e)
+    }
+    for e in layer_checks() {
+        out.push(e)
+    }
+    for e in interaction_checks() {
+        out.push(e)
+    }
+    for e in component_checks() {
+        out.push(e)
+    }
+    for e in colour_checks() {
+        out.push(e)
+    }
+    for e in window_checks() {
+        out.push(e)
+    }
+    for e in editing_checks() {
+        out.push(e)
+    }
+    return out
+}
+
+fn main() {
+    let results = checks()
+    var failed = 0
+    for e in results {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("material: \(results.len() - failed) passed, \(failed) failed")
+}

@@ -147,3 +147,253 @@ pub fn pi() -> float {
 pub fn e() -> float {
     return 2.718281828459045
 }
+
+pub fn tau() -> float {
+    return 6.283185307179586
+}
+
+pub fn ln2() -> float {
+    return 0.6931471805599453
+}
+
+// ---- transcendentals -------------------------------------------------------
+//
+// Written out here for the same reason `sqrt` is: a host call is a boundary two
+// runtimes have to agree about, and `Math.sin` in a browser is not required to
+// give the same bits as libm on a laptop. Everything below converges to one
+// answer everywhere, which is what makes a layout computed from it identical
+// across backends — the property the whole two-renderer design rests on.
+//
+// Each is the textbook arrangement: reduce the argument to a range where a
+// series converges quickly, sum the series, then undo the reduction. The
+// reduction is what matters; a Taylor series alone is accurate near zero and
+// useless anywhere else.
+
+/// `e` raised to `x`.
+///
+/// Reduced by `x = k·ln2 + r`, so the series only ever sees `|r| ≤ ln2/2` and
+/// the rest is a power of two. Without that a series for `exp(20)` would need
+/// hundreds of terms and lose most of its precision to cancellation.
+pub fn exp(x: float) -> float {
+    if x > 709.0 {
+        // Past the largest `float`. Saturating rather than trapping, which is
+        // what the casts do too.
+        return 1.7976931348623157e308
+    }
+    if x < -745.0 {
+        return 0.0
+    }
+    let k = round(x / ln2())
+    // `ln2` in two pieces, high part first. Subtracting `k · ln2` as one
+    // rounded double throws away the low bits of the product before the series
+    // ever sees them, and at `k = 29` that is already four units in the last
+    // place of the answer. Splitting the constant so the high part multiplies
+    // exactly keeps them. It is fdlibm's arrangement, and the reason every
+    // libm carries a two-word ln2.
+    let r = (x - k * 0.6931471803691238) - k * 1.9082149292705877e-10
+    // e^r by its Taylor series. At |r| ≤ 0.347 the terms fall off by better
+    // than a factor of three each, so eighteen of them is well past the point
+    // where adding another changes nothing.
+    var term = 1.0
+    var sum = 1.0
+    for n in 1..18 {
+        term = term * r / (n as float)
+        sum = sum + term
+    }
+    return sum * pow(2.0, round_to(k))
+}
+
+/// The natural logarithm. Zero and negatives have none; both answer zero,
+/// which is the same choice `sqrt` makes above.
+///
+/// Reduced to a mantissa in `[√½, √2)` so the series argument stays under
+/// 0.172 in magnitude. The series is the one for `atanh`, which converges
+/// twice as fast here as the direct series for `ln(1 + s)`.
+pub fn ln(x: float) -> float {
+    if x <= 0.0 {
+        return 0.0
+    }
+    var m = x
+    var k = 0
+    // 1.4142… is √2: the mantissa is halved or doubled until it straddles one
+    // rather than merely being in `[1, 2)`, which halves the series argument.
+    for i in 0..2100 {
+        if m >= 1.4142135623730951 {
+            m = m / 2.0
+            k += 1
+        } else if m < 0.7071067811865476 {
+            m = m * 2.0
+            k -= 1
+        } else {
+            break
+        }
+    }
+    let s = (m - 1.0) / (m + 1.0)
+    let squared = s * s
+    var power = s
+    var sum = s
+    for n in 1..12 {
+        power = power * squared
+        sum = sum + power / ((2 * n + 1) as float)
+    }
+    return 2.0 * sum + (k as float) * ln2()
+}
+
+/// `base` raised to a `float` power, by `exp(exponent · ln base)`.
+///
+/// Only defined for a non-negative base: a negative one raised to a fractional
+/// power is not a real number, and raised to a whole one is [`pow`], which is
+/// exact where this would be approximate. Naming the two separately is what
+/// keeps a caller from getting an approximation of something exact.
+pub fn powf(base: float, exponent: float) -> float {
+    if base == 0.0 {
+        return 0.0
+    }
+    if base < 0.0 {
+        return 0.0
+    }
+    return exp(exponent * ln(base))
+}
+
+/// The cube root, keeping the sign — unlike `powf`, which cannot.
+pub fn cbrt(x: float) -> float {
+    if x == 0.0 {
+        return 0.0
+    }
+    if x < 0.0 {
+        return -cbrt(-x)
+    }
+    // Newton on `t³ = x`, from a seed good to a few digits already.
+    var guess = exp(ln(x) / 3.0)
+    for i in 0..12 {
+        let next = (2.0 * guess + x / (guess * guess)) / 3.0
+        if abs(next - guess) < 0.0000000001 * guess{
+            return next
+        }
+        guess = next
+    }
+    return guess
+}
+
+/// `x` folded into `[-π, π]`, which is where the sine and cosine series are
+/// asked to work.
+///
+/// `τ` in two pieces, for the reason `exp` splits `ln2`: at `x = 100` the fold
+/// subtracts about 100.5, and a single rounded `τ` has already lost the low
+/// bits of that product before the series sees the remainder. The high part
+/// here has its bottom thirty mantissa bits clear, so `k · τ_hi` is *exact*
+/// for any `k` a program will plausibly reach, and the correction carries the
+/// rest.
+fn wrapped(x: float) -> float {
+    let k = round(x / tau())
+    return (x - k * 6.28318500518798828125) - k * 3.019915981956753e-7
+}
+
+pub fn sin(x: float) -> float {
+    var r = wrapped(x)
+    // Folded again about ±π/2, where the series needs half as many terms:
+    // sin(π − r) = sin(r).
+    if r > pi() / 2.0 {
+        r = pi() - r
+    } else if r < -pi() / 2.0 {
+        r = -pi() - r
+    }
+    let squared = r * r
+    var term = r
+    var sum = r
+    for n in 1..12 {
+        let k = 2 * n
+        term = -term * squared / ((k * (k + 1)) as float)
+        sum = sum + term
+    }
+    return sum
+}
+
+pub fn cos(x: float) -> float {
+    return sin(x + pi() / 2.0)
+}
+
+pub fn tan(x: float) -> float {
+    let c = cos(x)
+    if c == 0.0 {
+        return 0.0
+    }
+    return sin(x) / c
+}
+
+/// The arctangent, in radians, in `(-π/2, π/2)`.
+///
+/// Twice reduced. `atan(x) = π/2 − atan(1/x)` brings anything past 1 inside;
+/// the addition formula then brings anything past `tan(π/12)` down to
+/// `0.2679`, where the series loses a decimal digit per two terms. Applying the
+/// series directly at `x = 1` — where it is Leibniz's series for π/4 — would
+/// need thousands of terms.
+pub fn atan(x: float) -> float {
+    if x < 0.0 {
+        return -atan(-x)
+    }
+    if x > 1.0 {
+        return pi() / 2.0 - atan(1.0 / x)
+    }
+    let root3 = 1.7320508075688772
+    if x > 0.2679491924311227 {
+        return pi() / 6.0 + atan((x * root3 - 1.0) / (root3 + x))
+    }
+    let squared = x * x
+    var power = x
+    var sum = x
+    for n in 1..24 {
+        power = -power * squared
+        sum = sum + power / ((2 * n + 1) as float)
+    }
+    return sum
+}
+
+/// The angle of the point `(x, y)` from the positive x axis, in `(-π, π]`.
+///
+/// The quadrant comes from the signs, which is the whole reason this exists
+/// separately from `atan(y / x)`: that division throws away which quadrant the
+/// point was in, and `(-1, -1)` and `(1, 1)` are not the same direction.
+pub fn atan2(y: float, x: float) -> float {
+    if x > 0.0 {
+        return atan(y / x)
+    }
+    if x < 0.0 {
+        if y >= 0.0 {
+            return atan(y / x) + pi()
+        }
+        return atan(y / x) - pi()
+    }
+    if y > 0.0 {
+        return pi() / 2.0
+    }
+    if y < 0.0 {
+        return -pi() / 2.0
+    }
+    // The origin has no direction. Zero is the conventional answer and the one
+    // every libm gives.
+    return 0.0
+}
+
+pub fn asin(x: float) -> float {
+    let c = clamp(x, -1.0, 1.0)
+    if c >= 1.0 {
+        return pi() / 2.0
+    }
+    if c <= -1.0 {
+        return -pi() / 2.0
+    }
+    return atan(c / sqrt(1.0 - c * c))
+}
+
+pub fn acos(x: float) -> float {
+    return pi() / 2.0 - asin(x)
+}
+
+pub fn degrees(radians: float) -> float {
+    return radians * 180.0 / pi()
+}
+
+pub fn radians(degrees: float) -> float {
+    return degrees * pi() / 180.0
+}

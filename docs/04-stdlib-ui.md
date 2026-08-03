@@ -425,9 +425,26 @@ code elimination sound and therefore keeps binaries small.
 
 Genuinely undecided, and worth deciding before implementation rather than during:
 
-1. **Animation.** Declarative transitions on style properties, or an imperative
-   animation driver? Declarative composes better with the retained scene graph;
-   imperative is more flexible for gesture-driven interaction.
+1. ~~**Animation.**~~ **Settled: neither.** A transition is a *value in the
+   model*, and the design system owns it rather than `std/ui`.
+
+   The host already sends `EVENT_FRAME` with the milliseconds since the last
+   one, and keeps sending it *while the model keeps changing* — so an
+   application asks for animation by returning a model that differs, and stops
+   by returning the one it was given. That needs no new export, no
+   `requestAnimationFrame`, and nothing declarative in `Style`.
+
+   `packages/material` is the worked answer. `motion.kite` has the easing
+   curves, duration tokens and springs; `interaction.kite` holds one
+   `Interaction` value that the application threads through `update`, which
+   carries every control's hover, focus, press and ripple between frames.
+   Geometry stays a function of style and content — the invariant in §4 — so an
+   animated state layer changes colours and never moves anything.
+
+   The reason it is not in `std/ui`: what a hover *looks like*, how long it
+   takes and which curve it follows are design-system decisions. An iOS package
+   would answer differently against the same layout engine, and a core that had
+   already decided would have decided for both.
 2. **Incremental view diffing.** Rebuild the whole `Node` tree each frame and
    diff (simple, allocates), or track dependencies and rebuild only dirty
    subtrees (faster, needs a reactivity concept the language currently lacks)?

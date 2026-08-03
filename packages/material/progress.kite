@@ -1,0 +1,199 @@
+use std/ui
+use std/math
+
+// Progress indicators: linear and circular, determinate and not.
+//
+// ---- why the circular one is painted rather than laid out --------------------
+//
+// A linear indicator is two rectangles, so it is a node like everything else. A
+// circular one is an *arc*, and the drawing boundary has no arcs: `draw.rrect`
+// draws a rounded rectangle, and a rounded rectangle at half its own side is a
+// circle but never a piece of one.
+//
+// An arc can still be drawn — as a run of small circles along it, which is what
+// a stroked path is once it has been flattened, and is how every renderer draws
+// one underneath. That needs `draw` calls in a loop rather than a tree of boxes,
+// so the circular indicator comes in two halves: a node that reserves the space,
+// and a painter that fills it, called after `paint` the way the ripple overlay
+// is.
+//
+//     let node = circular_progress("loading", 48.0)   // in `view`
+//     …
+//     material.paint(frames, model.ui)                 // the tree
+//     paint_circular(frames, "loading", scheme, 0.4)   // the arc, on top
+//
+// Two calls rather than one is the honest cost of an arc at this boundary, and
+// it is written out rather than hidden behind a component that would silently
+// draw nothing.
+
+// ---- linear ----------------------------------------------------------------------
+
+fn LINEAR_HEIGHT() -> float {
+    return 4.0
+}
+
+/// The gap Material 3 leaves between the active and inactive halves of a
+/// linear indicator, and the width of the dot it leaves at the far end.
+fn LINEAR_GAP() -> float {
+    return 4.0
+}
+
+/// A linear progress indicator: a track with a filled portion, `progress` in
+/// 0..1.
+///
+/// Material 3 separates the two halves with a gap and marks the end of the
+/// track with a stop indicator, which is what tells a full bar from a bar that
+/// has simply been drawn wide.
+pub fn linear_progress(name: str, s: Scheme, progress: float, width: float) -> ui.Node {
+    let fraction = clampf(progress, 0.0, 1.0)
+    let stop = LINEAR_HEIGHT()
+    let usable = maxf(0.0, width - LINEAR_GAP() - stop)
+    let filled = usable * fraction
+    let rest = usable - filled
+    return ui.box_of(
+        name,
+        ui.Style {
+            ..ui.row(),
+            align: ui.Align.Center,
+            width: width,
+            height: LINEAR_HEIGHT(),
+            gap: LINEAR_GAP() / 2.0,
+        },
+        [
+            bar("\(name)-active", filled, LINEAR_HEIGHT(), s.primary),
+            bar("\(name)-track", rest, LINEAR_HEIGHT(), s.surface_container_highest),
+            bar("\(name)-stop", stop, LINEAR_HEIGHT(), s.primary),
+        ],
+    )
+}
+
+/// A linear indicator with no idea how long it will take.
+///
+/// `phase` runs from 0 to 1 and loops; the application steps it from the
+/// milliseconds it is handed each frame, which is the only place time exists.
+/// Material sweeps a bar along the track and back; this is that sweep, and it
+/// is pure layout — a leading spacer, the bar, and whatever is left.
+pub fn linear_indeterminate(name: str, s: Scheme, phase: float, width: float) -> ui.Node {
+    let t = phase - math.floor(phase)
+    // The bar is a third of the track and travels one and a third track-widths,
+    // so it enters at one end while still leaving at the other.
+    let bar_width = width / 3.0
+    let travel = width + bar_width
+    let head = math.lerp(-bar_width, width, ease(standard(), t))
+    let lead = maxf(0.0, head)
+    let shown = minf(bar_width, minf(width - lead, head + bar_width))
+    let trail = maxf(0.0, width - lead - shown)
+    return ui.decorated(
+        ui.box_of(
+            name,
+            ui.Style {
+                ..ui.row(),
+                align: ui.Align.Center,
+                width: width,
+                height: LINEAR_HEIGHT(),
+            },
+            [
+                spacer("\(name)-lead", lead),
+                bar("\(name)-bar", maxf(0.0, shown), LINEAR_HEIGHT(), s.primary),
+                spacer("\(name)-trail", trail),
+            ],
+        ),
+        ui.rounded(s.surface_container_highest, SHAPE_FULL()),
+    )
+}
+
+/// A phase from 0 to 1 that loops every `period` milliseconds.
+///
+/// What an indeterminate indicator needs and cannot have on its own: the
+/// application accumulates the milliseconds it is handed, and this turns the
+/// running total into the fraction the indicator wants.
+pub fn phase_of(elapsed: float, period: float) -> float {
+    if period <= 0.0 {
+        return 0.0
+    }
+    let t = elapsed / period
+    return t - math.floor(t)
+}
+
+// ---- circular -----------------------------------------------------------------------
+
+pub fn CIRCULAR_SIDE() -> float {
+    return 48.0
+}
+
+fn CIRCULAR_STROKE() -> float {
+    return 4.0
+}
+
+/// The space a circular indicator occupies. It draws nothing — see the note at
+/// the top of this file — so it is a box of the right size and no more.
+pub fn circular_progress(name: str, side: float) -> ui.Node {
+    return ui.box_of(name, ui.sized(ui.style(), side, side), [])
+}
+
+/// The arc of a determinate circular indicator, drawn into the box
+/// [`circular_progress`] reserved.
+///
+/// Material starts the arc at twelve o'clock and runs it clockwise, and leaves
+/// the rest of the ring in the track colour.
+pub fn paint_circular(frames: [ui.Frame], name: str, s: Scheme, progress: float) {
+    let box = ui.frame_of(frames, name)
+    if box == nil {
+        return
+    }
+    let fraction = clampf(progress, 0.0, 1.0)
+    let start = -math.pi() / 2.0
+    // The track first, then the arc over it, so the two meet with no seam.
+    arc(box.rect, start, math.tau(), s.surface_container_highest)
+    arc(box.rect, start, math.tau() * fraction, s.primary)
+}
+
+/// The same with no idea how long it will take: an arc that spins, and grows
+/// and shrinks as it goes.
+///
+/// `phase` loops from 0 to 1 — [`phase_of`] makes one — and Material's own
+/// indeterminate turns twice per cycle while the sweep breathes between a tenth
+/// of the ring and three quarters of it.
+pub fn paint_circular_indeterminate(frames: [ui.Frame], name: str, s: Scheme, phase: float) {
+    let box = ui.frame_of(frames, name)
+    if box == nil {
+        return
+    }
+    let t = phase - math.floor(phase)
+    let turn = math.tau() * 2.0 * t
+    // A sine makes the sweep grow and shrink smoothly and return to where it
+    // started, so the loop has no seam in it.
+    let sweep = math.lerp(0.1, 0.75, (1.0 - math.cos(math.tau() * t)) / 2.0)
+    arc(box.rect, -math.pi() / 2.0 + turn, math.tau() * sweep, s.primary)
+}
+
+/// One arc, as the run of overlapping circles a stroked arc is once it has been
+/// flattened.
+///
+/// The number of steps comes from the geometry rather than from the sweep, so a
+/// given indicator makes the same number of draw calls whatever it is showing.
+/// That is not a micro-optimisation: the renderer keeps a retained scene graph
+/// indexed by call, and a frame with a different number of calls than the last
+/// cannot be patched — it redraws the window. An indicator whose call count
+/// followed its progress would force one of those on almost every frame.
+fn arc(rect: ui.Rect, from: float, sweep: float, colour: int) {
+    let side = minf(rect.width, rect.height)
+    if side <= 0.0 {
+        return
+    }
+    let stroke = minf(CIRCULAR_STROKE(), side / 4.0)
+    let radius = (side - stroke) / 2.0
+    let cx = rect.x + rect.width / 2.0
+    let cy = rect.y + rect.height / 2.0
+    // Spaced at half the stroke, which is what makes consecutive dots overlap
+    // into a line rather than a dotted one.
+    let steps = maxf(8.0, math.tau() * radius / (stroke / 2.0))
+    let count = math.round_to(steps)
+    for i in 0..count + 1 {
+        let along = (i as float) / (count as float)
+        let angle = from + sweep * along
+        let x = cx + radius * math.cos(angle)
+        let y = cy + radius * math.sin(angle)
+        draw.rrect(x - stroke / 2.0, y - stroke / 2.0, stroke, stroke, stroke / 2.0, colour)
+    }
+}

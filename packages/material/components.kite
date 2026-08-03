@@ -1,4 +1,5 @@
 use std/ui
+use std/math
 
 // Material Design 3's components, as functions returning decorated nodes.
 //
@@ -13,16 +14,23 @@ use std/ui
 // application's, and a package that read a global theme could not be used twice
 // on one screen with two schemes.
 //
+// This file has the pressables — buttons in all five emphases and five sizes,
+// icon buttons, floating action buttons, chips and badges. The rest of the
+// system is beside it: `selection.kite`, `fields.kite`, `surfaces.kite`,
+// `navigation.kite`, `progress.kite`, with `tokens.kite` under all of them and
+// `motion.kite` and `interaction.kite` supplying the movement.
+//
 // ---- what is here and what is not -------------------------------------------
 //
 // Material specifies its components in terms of shape, colour role, type role,
-// state layer, and elevation. Four of those five survive Kite's drawing
+// state layer, elevation and motion. Five of those six survive Kite's drawing
 // boundary intact and are implemented exactly. Elevation's *shadow* does not
-// and cannot: a shadow is a soft alpha gradient, and the boundary has neither
-// softness nor alpha. Material 3's own answer for dark themes is tonal — a
-// raised surface is a lighter container colour, not a shadow — and that is what
-// these do at every level. It is Material's rule rather than a substitute for
-// it, and what is lost is a drop shadow under a light-theme card.
+// and cannot: a shadow is a soft alpha gradient, and while `draw.alpha` gives
+// translucency there is no blur, so a shadow would be a hard-edged grey
+// rectangle. Material 3's own answer for dark themes is tonal — a raised
+// surface is a lighter container colour, not a shadow — and that is what these
+// do at every level, continuously, so a card that rises under the pointer
+// *changes tone as it rises* rather than stepping.
 //
 // Icons are the other absence. Material Symbols is a font, and a font is not
 // something a package can carry; where a component wants an icon it takes the
@@ -32,9 +40,10 @@ use std/ui
 // ---- state -------------------------------------------------------------------
 //
 // Material's state layers — hover, focus, press — are an on-colour drawn over
-// the container at 8% or 10%. With no alpha they are computed instead of drawn,
-// which produces the same pixel because what they cover is a known flat colour.
-// `tokens.kite` has the arithmetic; this decides which of them applies.
+// the container at 8% or 10%. With no alpha in the layout they are computed
+// instead of drawn, which produces the same pixel because what they cover is a
+// known flat colour. `tokens.kite` has the arithmetic; this decides which of
+// them applies, and `interaction.kite` decides how far each has come.
 
 pub struct State {
     pub hovered: bool
@@ -42,6 +51,17 @@ pub struct State {
     pub pressed: bool
     pub selected: bool
     pub disabled: bool
+    /// How far each layer has come in, from 0 to 1.
+    ///
+    /// The booleans say *what* is happening and these say *how far* — which is
+    /// the difference between a control that changes colour and a Material
+    /// control. They come from `interaction.kite`, which is the only thing that
+    /// can hold a value between frames, and a `State` built by hand leaves them
+    /// pinned to its booleans so a component reading either agrees.
+    pub hover: float
+    pub focus: float
+    pub press: float
+    pub select: float
 }
 
 pub fn rest() -> State {
@@ -51,50 +71,194 @@ pub fn rest() -> State {
         pressed: false,
         selected: false,
         disabled: false,
+        hover: 0.0,
+        focus: 0.0,
+        press: 0.0,
+        select: 0.0,
     }
 }
 
 /// The common case: a control that is or is not the focused one.
 pub fn when_focused(is_focused: bool) -> State {
-    return State{..rest(), focused: is_focused }
+    return State{
+        ..rest(),
+        focused: is_focused,
+        focus: if is_focused { 1.0 } else { 0.0 },
+    }
 }
 
 pub fn when_selected(is_selected: bool, is_focused: bool) -> State {
-    return State{..rest(), selected: is_selected, focused: is_focused }
+    return State{
+        ..when_focused(is_focused),
+        selected: is_selected,
+        select: if is_selected { 1.0 } else { 0.0 },
+    }
+}
+
+pub fn when_disabled() -> State {
+    return State{..rest(), disabled: true }
+}
+
+/// How strong the state layer is, from 0 to Material's heaviest opacity.
+///
+/// Material draws one layer at a time — the strongest interaction currently
+/// happening — and this used to be three `if`s in that order. It is a maximum
+/// now, and the change is the point rather than a tidying: with the layers
+/// animated, a control being pressed while its hover retreats has *two* layers
+/// part-way, and picking the branch that wins throws away the one that is
+/// fading. Taking the strongest crossfades between them instead, which is what
+/// the branch was approximating all along and what makes a press on an
+/// already-hovered button look like one movement rather than two.
+pub fn layer_strength(state: State) -> float {
+    if state.disabled {
+        return 0.0
+    }
+    return maxf(
+        maxf(state.press * PRESS_OPACITY(), state.focus * FOCUS_OPACITY()),
+        state.hover * HOVER_OPACITY(),
+    )
 }
 
 /// A container colour with whatever state layer applies laid over it.
-///
-/// Pressed wins over focus, focus over hover, which is Material's own order:
-/// only one layer is ever drawn, and it is the strongest interaction currently
-/// happening.
 pub fn layered(container: int, on_container: int, state: State) -> int {
-    if state.pressed {
-        return pressed(container, on_container)
+    let strength = layer_strength(state)
+    if strength <= 0.0 {
+        return container
     }
-    if state.focused {
-        return focused(container, on_container)
-    }
-    if state.hovered {
-        return hovered(container, on_container)
-    }
-    return container
+    return mix(container, on_container, strength)
 }
 
-// ---- buttons -----------------------------------------------------------------
+/// The state layer alone, as a decoration, for a control that has no container
+/// of its own — a text button, a standard icon button, a list row.
+///
+/// A decoration rather than a colour because a layer at zero draws *nothing*:
+/// painting the surface colour instead would put an opaque patch over whatever
+/// the control happens to sit on, which for a button in an app bar is the app
+/// bar.
+pub fn layer_decor(surface: int, role: int, state: State, radius: float) -> ui.Decor {
+    let strength = layer_strength(state)
+    if strength <= 0.0 {
+        return ui.shaped(ui.no_decor(), radius)
+    }
+    return ui.rounded(mix(surface, role, strength), radius)
+}
+
+/// How far a component's selection has come, given both the application's own
+/// boolean and whatever the interaction happens to be animating.
+///
+/// A component is told two things about being selected — the model's fact, and
+/// the state layer's progress — and they can disagree in exactly one way that
+/// matters: a `State` built by hand, or built for a different control, carries
+/// no animation for this one. When the two agree the animated value leads and
+/// intermediate frames are honoured; when they do not, the boolean is the whole
+/// truth and the component snaps rather than showing the wrong thing.
+pub fn chosen_amount(on: bool, state: State) -> float {
+    if state.selected == on {
+        return state.select
+    }
+    return if on { 1.0 } else { 0.0 }
+}
+
+/// The surface colour between two elevation levels, `amount` of the way up.
+///
+/// Elevation here is tonal, and tone is a colour, so a component rising under
+/// the pointer can rise *continuously* — which a stack of six named levels
+/// cannot express and a shadow would have done for free.
+pub fn raised(s: Scheme, from: int, to: int, amount: float) -> int {
+    return mix(surface_at(s, from), surface_at(s, to), clampf(amount, 0.0, 1.0))
+}
+
+/// A shape token resolved against the box it applies to.
+///
+/// `SHAPE_FULL` is a sentinel — a number past half the shorter side, which the
+/// painter clamps — and a sentinel cannot be interpolated. Resolving it first
+/// is what lets a corner be animated at all.
+pub fn resolved_shape(radius: float, w: float, h: float) -> float {
+    return minf(radius, minf(w, h) / 2.0)
+}
+
+/// A corner squared off under the finger.
+///
+/// Material 3 Expressive morphs a pressed button from its resting shape toward
+/// a squarer one and back. It is the clearest single piece of evidence that a
+/// press registered — clearer than the state layer, because it changes the
+/// component's *outline* rather than its fill, and an outline changing is
+/// visible against any background.
+pub fn morphed(radius: float, w: float, h: float, press: float) -> float {
+    let resting = resolved_shape(radius, w, h)
+    return math.lerp(resting, minf(resting, SHAPE_SMALL()), clampf(press, 0.0, 1.0))
+}
+
+// ---- sizes ---------------------------------------------------------------------
 //
-// The five common buttons, which differ only in container and outline: 40dp
-// tall, full-radius, label-large centred, 24dp of padding either side. Material
-// distinguishes them by emphasis, and emphasis here is entirely a matter of
-// which colour role the container takes.
+// Material 3 Expressive gave the common buttons a size scale, and it is not
+// five arbitrary heights: each size pairs a height with the type role that fits
+// in it and the padding that keeps the label off the edge. Passing the three
+// around together is what stops a 96dp button from being captioned at 14dp.
 
-fn BUTTON_HEIGHT() -> float {
-    return 40.0
+pub struct Sizing {
+    pub height: float
+    pub padding: float
+    pub label: TypeRole
+    /// The resting corner radius, before any press morph.
+    pub shape: float
+    /// The size a leading glyph is drawn at.
+    pub icon: float
 }
 
-fn BUTTON_PADDING() -> float {
-    return 24.0
+pub fn button_xsmall() -> Sizing {
+    return Sizing{
+        height: 32.0,
+        padding: 12.0,
+        label: label_large(),
+        shape: SHAPE_FULL(),
+        icon: 20.0,
+    }
 }
+
+/// The default, and what Material called simply "button" before the scale
+/// existed: 40dp tall, label-large, 24dp either side.
+pub fn button_small() -> Sizing {
+    return Sizing{
+        height: 40.0,
+        padding: 24.0,
+        label: label_large(),
+        shape: SHAPE_FULL(),
+        icon: 20.0,
+    }
+}
+
+pub fn button_medium() -> Sizing {
+    return Sizing{
+        height: 56.0,
+        padding: 24.0,
+        label: title_medium(),
+        shape: SHAPE_FULL(),
+        icon: 24.0,
+    }
+}
+
+pub fn button_large() -> Sizing {
+    return Sizing{
+        height: 96.0,
+        padding: 48.0,
+        label: headline_small(),
+        shape: SHAPE_FULL(),
+        icon: 32.0,
+    }
+}
+
+pub fn button_xlarge() -> Sizing {
+    return Sizing{
+        height: 136.0,
+        padding: 64.0,
+        label: headline_large(),
+        shape: SHAPE_FULL(),
+        icon: 40.0,
+    }
+}
+
+// ---- shared shapes --------------------------------------------------------------
 
 /// A control that is one centred line inside a fixed box.
 ///
@@ -102,239 +266,21 @@ fn BUTTON_PADDING() -> float {
 /// single line in a box of a known size needs no arithmetic to place it. The
 /// first version computed the top inset from the host's line height, which is
 /// the same answer on one font and the wrong one on every other.
-fn centred_body(id: str, caption: str, size: float, weight: int, w: float, h: float, decor: ui.Decor) -> ui.Node {
+fn centred_body(
+    id: str,
+    caption: str,
+    size: float,
+    weight: int,
+    w: float,
+    h: float,
+    decor: ui.Decor,
+) -> ui.Node {
     let style = ui.sized(ui.in_font(ui.style(), size, weight), w, h)
     return ui.control(ui.decorated(ui.text_of(id, style, caption), ui.centered(decor)), id)
 }
 
-fn button_body(id: str, caption: str, decor: ui.Decor) -> ui.Node {
-    let role = label_large()
-    let width = ui.text_size_in(caption, role.size, role.weight).width + BUTTON_PADDING() * 2.0
-    return centred_body(id, caption, role.size, role.weight, width, BUTTON_HEIGHT(), decor)
-}
-
-/// The highest-emphasis button: a filled primary container.
-pub fn filled_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
-    if state.disabled {
-        return button_body(
-            id,
-            caption,
-            ui.inked(
-                ui.rounded(disabled_container(s, s.surface), SHAPE_FULL()),
-                disabled_ink(s, s.surface),
-            ),
-        )
-    }
-    let container = layered(s.primary, s.on_primary, state)
-    return button_body(id, caption, ui.inked(ui.rounded(container, SHAPE_FULL()), s.on_primary))
-}
-
-/// A secondary action beside a primary one: the secondary container, filled.
-pub fn tonal_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
-    let container = layered(s.secondary_container, s.on_secondary_container, state)
-    return button_body(
-        id,
-        caption,
-        ui.inked(ui.rounded(container, SHAPE_FULL()), s.on_secondary_container),
-    )
-}
-
-/// Medium emphasis: an outline and no fill. The fill is left transparent, so
-/// whatever the button sits on shows through — the painter knows what that is.
-pub fn outlined_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
-    var edge = s.outline
-    var width = 1.0
-    if state.focused {
-        edge = s.primary
-        width = 2.0
-    }
-    let base = ui.shaped(ui.no_decor(), SHAPE_FULL())
-    return button_body(id, caption, ui.bordered(ui.inked(base, s.primary), edge, width))
-}
-
-/// The lowest emphasis: a label and nothing else until it is interacted with.
-pub fn text_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
-    var decor = ui.inked(ui.shaped(ui.no_decor(), SHAPE_FULL()), s.primary)
-    if state.focused || state.hovered || state.pressed {
-        decor = ui.rounded(layered(s.surface, s.primary, state), SHAPE_FULL())
-        decor = ui.inked(decor, s.primary)
-    }
-    return button_body(id, caption, decor)
-}
-
-/// Filled, but on a raised surface rather than on the accent.
-pub fn elevated_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
-    let container = layered(surface_at(s, LEVEL_1()), s.primary, state)
-    return button_body(id, caption, ui.inked(ui.rounded(container, SHAPE_FULL()), s.primary))
-}
-
-// ---- icon button -------------------------------------------------------------
-
-/// A 40dp target around a 24dp glyph. Material's icon button is a circle, which
-/// a full radius on a square gives exactly.
-pub fn icon_button(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
-    let container = layered(s.surface, s.on_surface_variant, state)
-    var decor = ui.inked(ui.rounded(container, SHAPE_FULL()), s.on_surface_variant)
-    if state.selected {
-        decor = ui.inked(ui.rounded(s.primary_container, SHAPE_FULL()), s.on_primary_container)
-    }
-    return centred_body(id, glyph, 20.0, REGULAR(), 40.0, 40.0, decor)
-}
-
-// ---- floating action button --------------------------------------------------
-
-/// 56dp, `large` shape, on the tertiary container — Material's default FAB.
-pub fn fab(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
-    let container = layered(s.primary_container, s.on_primary_container, state)
-    let decor = ui.inked(ui.rounded(container, SHAPE_LARGE()), s.on_primary_container)
-    return centred_body(id, glyph, 24.0, REGULAR(), 56.0, 56.0, decor)
-}
-
-/// The same with a label beside the glyph, for the one action a screen is for.
-pub fn extended_fab(s: Scheme, id: str, glyph: str, caption: str, state: State) -> ui.Node {
-    let role = label_large()
-    let container = layered(s.primary_container, s.on_primary_container, state)
-    let decor = ui.inked(ui.rounded(container, SHAPE_LARGE()), s.on_primary_container)
-    let inner = ui.spaced(
-        ui.padded(
-            ui.sized(ui.Style{..ui.row(), align: ui.Align.Center }, 0.0, 56.0),
-            space(4),
-        ),
-        space(2),
-    )
-    let box = ui.box_of(
-        id,
-        inner,
-        [
-            ui.text_of("\(id)-glyph", ui.in_font(ui.style(), 24.0, REGULAR()), glyph),
-            ui.text_of("\(id)-label", ui.in_font(ui.style(), role.size, role.weight), caption),
-        ],
-    )
-    return ui.control(ui.decorated(box, decor), id)
-}
-
-// ---- selection ---------------------------------------------------------------
-
-pub fn CHECKBOX_SIDE() -> float {
-    return 18.0
-}
-
-/// A checkbox: an 18dp box in a 40dp target, ticked or outlined.
-///
-/// The box is a box, not the characters `[x]`. The tick is a glyph and honestly
-/// so — a check mark is a shape the drawing boundary cannot draw, having neither
-/// strokes nor paths — but the *container* is drawn, and the container is the
-/// part a design system restyles.
-pub fn checkbox(s: Scheme, id: str, caption: str, checked: bool, state: State) -> ui.Node {
-    let side = CHECKBOX_SIDE()
-    var box_decor = ui.bordered(ui.shaped(ui.no_decor(), 2.0), s.on_surface_variant, 2.0)
-    var tick_ink = s.on_surface_variant
-    if checked {
-        box_decor = ui.rounded(s.primary, 2.0)
-        tick_ink = s.on_primary
-    }
-    if state.focused {
-        box_decor = ui.bordered(box_decor, s.primary, 2.0)
-    }
-    let tick = if checked { "✓" } else { "" }
-    let mark = ui.decorated(
-        ui.box_of(
-            "\(id)-box",
-            ui.sized(ui.Style{..ui.column(), align: ui.Align.Center }, side, side),
-            [
-                ui.decorated(
-                    ui.text_of("\(id)-tick", ui.in_font(ui.style(), 13.0, 700), tick),
-                    ui.centered(ui.ink(tick_ink)),
-                ),
-            ],
-        ),
-        box_decor,
-    )
-    return labelled_control(s, id, mark, caption)
-}
-
-/// A radio button. Same target and label as a checkbox; the mark is a ring with
-/// a dot in it, which is two concentric circles and needs no glyph at all.
-pub fn radio(s: Scheme, id: str, caption: str, chosen: bool, state: State) -> ui.Node {
-    let side = 20.0
-    var edge = s.on_surface_variant
-    if chosen {
-        edge = s.primary
-    }
-    if state.focused {
-        edge = s.primary
-    }
-    var children: [ui.Node] = []
-    if chosen {
-        children.push(
-            ui.decorated(
-                ui.box_of("\(id)-dot", ui.sized(ui.style(), 10.0, 10.0), []),
-                ui.rounded(s.primary, SHAPE_FULL()),
-            ),
-        )
-    }
-    let ring = ui.decorated(
-        ui.box_of(
-            "\(id)-ring",
-            ui.Style {
-                ..ui.column(),
-                align: ui.Align.Center,
-                justify: ui.Justify.Center,
-                width: side,
-                height: side,
-            },
-            children,
-        ),
-        ui.bordered(ui.shaped(ui.no_decor(), SHAPE_FULL()), edge, 2.0),
-    )
-    return labelled_control(s, id, ring, caption)
-}
-
-/// A switch: a 52x32 track with a knob at one end.
-pub fn switch(s: Scheme, id: str, caption: str, on: bool, state: State) -> ui.Node {
-    var track = ui.bordered(
-        ui.rounded(s.surface_container_highest, SHAPE_FULL()),
-        s.outline,
-        2.0,
-    )
-    var knob_colour = s.outline
-    var knob = 16.0
-    var lead = ui.Justify.Start
-    if on {
-        track = ui.rounded(s.primary, SHAPE_FULL())
-        knob_colour = s.on_primary
-        knob = 24.0
-        lead = ui.Justify.End
-    }
-    let body = ui.decorated(
-        ui.box_of(
-            "\(id)-track",
-            ui.Style {
-                ..ui.row(),
-                align: ui.Align.Center,
-                justify: lead,
-                width: 52.0,
-                height: 32.0,
-                padding: insets_all(4.0),
-            },
-            [
-                ui.decorated(
-                    ui.box_of("\(id)-knob", ui.sized(ui.style(), knob, knob), []),
-                    ui.rounded(knob_colour, SHAPE_FULL()),
-                ),
-            ],
-        ),
-        track,
-    )
-    return labelled_control(s, id, body, caption)
-}
-
-fn insets_all(v: float) -> ui.Insets {
-    return ui.insets(v)
-}
-
 /// A mark and its label, side by side, as one control.
-fn labelled_control(s: Scheme, id: str, mark: ui.Node, caption: str) -> ui.Node {
+fn labelled_control(s: Scheme, id: str, mark: ui.Node, caption: str, state: State) -> ui.Node {
     let role = body_large()
     var children = [mark]
     if caption.len() > 0 {
@@ -345,7 +291,7 @@ fn labelled_control(s: Scheme, id: str, mark: ui.Node, caption: str) -> ui.Node 
                     ui.in_font(ui.style(), role.size, role.weight),
                     caption,
                 ),
-                ui.ink(s.on_surface),
+                ui.ink(if state.disabled { disabled_ink(s, s.surface) } else { s.on_surface }),
             ),
         )
     }
@@ -357,459 +303,10 @@ fn labelled_control(s: Scheme, id: str, mark: ui.Node, caption: str) -> ui.Node 
         ),
         children,
     )
-    return ui.control(box, id)
-}
-
-// ---- chips -------------------------------------------------------------------
-
-/// A filter chip: 32dp, `small` shape, outlined until it is selected.
-pub fn filter_chip(s: Scheme, id: str, caption: str, on: bool, state: State) -> ui.Node {
-    let role = label_large()
-    var decor = ui.bordered(ui.shaped(ui.no_decor(), SHAPE_SMALL()), s.outline, 1.0)
-    var ink = s.on_surface_variant
-    if on {
-        decor = ui.rounded(s.secondary_container, SHAPE_SMALL())
-        ink = s.on_secondary_container
-    }
-    if state.focused {
-        decor = ui.bordered(decor, s.primary, 2.0)
-    }
-    let shown = if on { "✓ \(caption)" } else { caption }
-    let width = ui.text_size_in(shown, role.size, role.weight).width + space(4) * 2.0
-    return centred_body(id, shown, role.size, role.weight, width, 32.0, ui.inked(decor, ink))
-}
-
-/// An assist chip: the same shape, always outlined, for an action rather than a
-/// choice.
-pub fn assist_chip(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
-    return filter_chip(s, id, caption, false, state)
-}
-
-// ---- text fields ---------------------------------------------------------------
-
-/// An outlined text field.
-///
-/// Material draws the label floating on the outline when the field has content.
-/// There is no way to interrupt a border at this boundary — a gap in an outline
-/// is a fifth rectangle and a colour match — so the label sits inside, which is
-/// the filled variant's placement and is honest about what it is.
-pub fn outlined_field(
-    s: Scheme,
-    id: str,
-    value: str,
-    placeholder: str,
-    width: float,
-    state: State,
-) -> ui.Node {
-    let role = body_large()
-    var edge = s.outline
-    var thickness = 1.0
-    if state.focused {
-        edge = s.primary
-        thickness = 2.0
-    }
-    let decor = ui.bordered(ui.shaped(ui.no_decor(), SHAPE_EXTRA_SMALL()), edge, thickness)
-    return field_body(s, id, value, placeholder, width, state, decor)
-}
-
-/// A filled text field: a container instead of an outline, with the same
-/// content. Material's default of the two.
-pub fn filled_field(
-    s: Scheme,
-    id: str,
-    value: str,
-    placeholder: str,
-    width: float,
-    state: State,
-) -> ui.Node {
-    var decor = ui.rounded(s.surface_container_highest, SHAPE_EXTRA_SMALL())
-    if state.focused {
-        decor = ui.bordered(decor, s.primary, 2.0)
-    }
-    return field_body(s, id, value, placeholder, width, state, decor)
-}
-
-/// A search field: the same, at full radius, which is what Material's search
-/// bar is.
-pub fn search_field(
-    s: Scheme,
-    id: str,
-    value: str,
-    placeholder: str,
-    width: float,
-    state: State,
-) -> ui.Node {
-    var decor = ui.rounded(s.surface_container_high, SHAPE_FULL())
-    if state.focused {
-        decor = ui.bordered(decor, s.primary, 2.0)
-    }
-    return field_body(s, id, value, placeholder, width, state, decor)
-}
-
-fn field_body(
-    s: Scheme,
-    id: str,
-    value: str,
-    placeholder: str,
-    width: float,
-    state: State,
-    decor: ui.Decor,
-) -> ui.Node {
-    let role = body_large()
-    // An empty field shows its placeholder whether or not it has focus, with
-    // the caret before it — which is what a field looks like the moment it is
-    // clicked, and the alternative is a blank rounded rectangle.
-    var shown = value
-    var ink = s.on_surface
-    if state.focused {
-        shown = "\(value)|"
-    }
-    if value.len() == 0 {
-        shown = if state.focused { "|\(placeholder)" } else { placeholder }
-        ink = s.on_surface_variant
-    }
-    // Horizontal padding only. The line is centred top to bottom by the
-    // painter, which is what puts it in the middle of a 56dp field whatever
-    // the host's line height turns out to be.
-    let boxed = ui.sized(ui.in_font(ui.style(), role.size, role.weight), width, 56.0)
-    let style = ui.Style{..boxed, padding: ui.insets_xy(space(4), 0.0) }
-    let node = ui.text_of(id, style, shown)
-    return ui.control(ui.decorated(node, ui.vertically_centered(ui.inked(decor, ink))), id)
-}
-
-// ---- containers ----------------------------------------------------------------
-
-/// An elevated card. The elevation is tonal, which for a card is a container
-/// colour one step away from the background.
-pub fn elevated_card(name: str, s: Scheme, children: [ui.Node]) -> ui.Node {
-    return card_body(name, children, ui.rounded(surface_at(s, LEVEL_1()), SHAPE_MEDIUM()))
-}
-
-pub fn filled_card(name: str, s: Scheme, children: [ui.Node]) -> ui.Node {
-    return card_body(name, children, ui.rounded(s.surface_container_highest, SHAPE_MEDIUM()))
-}
-
-pub fn outlined_card(name: str, s: Scheme, children: [ui.Node]) -> ui.Node {
-    return card_body(
-        name,
-        children,
-        ui.bordered(ui.rounded(s.surface, SHAPE_MEDIUM()), s.outline_variant, 1.0),
-    )
-}
-
-fn card_body(name: str, children: [ui.Node], decor: ui.Decor) -> ui.Node {
-    let style = ui.spaced(
-        ui.padded(ui.Style{..ui.column(), align: ui.Align.Stretch }, space(4)),
-        space(2),
-    )
-    return ui.decorated(ui.box_of(name, style, children), decor)
-}
-
-/// A hairline between rows. One dp, in the outline-variant role.
-pub fn divider(name: str, s: Scheme) -> ui.Node {
-    return ui.decorated(
-        ui.box_of(name, ui.sized(ui.style(), 0.0, 1.0), []),
-        ui.filled(s.outline_variant),
-    )
-}
-
-// ---- lists ---------------------------------------------------------------------
-
-/// A one-line list item: 56dp, body-large, with an optional leading node.
-pub fn list_item(s: Scheme, id: str, headline: str, leading: [ui.Node], state: State) -> ui.Node {
-    return list_body(s, id, headline, "", leading, 56.0, state)
-}
-
-/// A two-line list item: 72dp, with body-medium supporting text under the
-/// headline. Material's most common list row.
-pub fn list_item_two(
-    s: Scheme,
-    id: str,
-    headline: str,
-    supporting: str,
-    leading: [ui.Node],
-    state: State,
-) -> ui.Node {
-    return list_body(s, id, headline, supporting, leading, 72.0, state)
-}
-
-fn list_body(
-    s: Scheme,
-    id: str,
-    headline: str,
-    supporting: str,
-    leading: [ui.Node],
-    height: float,
-    state: State,
-) -> ui.Node {
-    let head_role = body_large()
-    let support_role = body_medium()
-    var head_ink = s.on_surface
-    var support_ink = s.on_surface_variant
-    var decor = ui.no_decor()
-    if state.selected {
-        // Material marks a selected list item with a full-radius container —
-        // the shape a navigation drawer uses — rather than a tint on the label,
-        // which is what keeps it legible in either scheme.
-        decor = ui.rounded(s.secondary_container, SHAPE_FULL())
-        head_ink = s.on_secondary_container
-        support_ink = s.on_secondary_container
-    } else if state.focused {
-        decor = ui.rounded(focused(s.surface, s.on_surface), SHAPE_FULL())
-    }
-    var lines = [
-        ui.decorated(
-            ui.text_of(
-                "\(id)-headline",
-                ui.in_font(ui.style(), head_role.size, head_role.weight),
-                headline,
-            ),
-            ui.ink(head_ink),
-        ),
-    ]
-    if supporting.len() > 0 {
-        lines.push(
-            ui.decorated(
-                ui.text_of(
-                    "\(id)-supporting",
-                    ui.in_font(ui.style(), support_role.size, support_role.weight),
-                    supporting,
-                ),
-                ui.ink(support_ink),
-            ),
-        )
-    }
-    var children = leading
-    children.push(
-        ui.box_of(
-            "\(id)-text",
-            ui.spaced(ui.grown(ui.Style{..ui.column(), align: ui.Align.Stretch }, 1.0), 2.0),
-            lines,
-        ),
-    )
-    let style = ui.spaced(
-        ui.padded(
-            ui.sized(ui.Style{..ui.row(), align: ui.Align.Center }, 0.0, height),
-            space(3),
-        ),
-        space(3),
-    )
-    return ui.control(ui.decorated(ui.box_of(id, style, children), decor), id)
-}
-
-// ---- navigation ------------------------------------------------------------------
-
-/// A small top app bar: 64dp, title-large, with whatever actions are handed in.
-pub fn top_app_bar(name: str, s: Scheme, title: str, actions: [ui.Node]) -> ui.Node {
-    let role = title_large()
-    var children = [
-        ui.decorated(
-            ui.text_of(
-                "\(name)-title",
-                ui.grown(ui.in_font(ui.style(), role.size, role.weight), 1.0),
-                title,
-            ),
-            ui.ink(s.on_surface),
-        ),
-    ]
-    for action in actions {
-        children.push(action)
-    }
-    let style = ui.spaced(
-        ui.padded(
-            ui.sized(ui.Style{..ui.row(), align: ui.Align.Center }, 0.0, 64.0),
-            space(4),
-        ),
-        space(2),
-    )
-    return ui.decorated(ui.box_of(name, style, children), ui.filled(s.surface))
-}
-
-/// One tab in a primary tab row: a label with a 3dp indicator under the
-/// selected one.
-pub fn tab(s: Scheme, id: str, caption: str, on: bool, state: State) -> ui.Node {
-    let role = title_small()
-    var ink = s.on_surface_variant
-    if on {
-        ink = s.primary
-    }
-    var indicator = ui.decorated(
-        ui.box_of("\(id)-indicator", ui.sized(ui.style(), 0.0, 3.0), []),
-        ui.no_decor(),
-    )
-    if on {
-        indicator = ui.decorated(
-            ui.box_of("\(id)-indicator", ui.sized(ui.style(), 0.0, 3.0), []),
-            ui.rounded(s.primary, 3.0),
-        )
-    }
-    let width = ui.text_size_in(caption, role.size, role.weight).width + space(6) * 2.0
-    let label = ui.decorated(
-        ui.text_of(
-            "\(id)-label",
-            ui.grown(ui.in_font(ui.style(), role.size, role.weight), 1.0),
-            caption,
-        ),
-        ui.centered(ui.ink(ink)),
-    )
-    var decor = ui.no_decor()
-    if state.focused {
-        decor = ui.filled(focused(s.surface, s.primary))
-    }
-    let box = ui.box_of(
-        id,
-        ui.sized(ui.Style{..ui.column(), align: ui.Align.Stretch }, width, 48.0),
-        [label, indicator],
-    )
-    return ui.control(ui.decorated(box, decor), id)
-}
-
-/// One destination in a navigation rail: a glyph in a pill, with a label under.
-pub fn rail_item(s: Scheme, id: str, glyph: str, caption: str, on: bool, state: State) -> ui.Node {
-    let role = label_medium()
-    var pill = ui.no_decor()
-    var glyph_ink = s.on_surface_variant
-    if on {
-        pill = ui.rounded(s.secondary_container, SHAPE_FULL())
-        glyph_ink = s.on_secondary_container
-    } else if state.focused {
-        pill = ui.rounded(focused(s.surface, s.on_surface), SHAPE_FULL())
-    }
-    let icon = ui.decorated(
-        ui.text_of("\(id)-glyph", ui.in_font(ui.style(), 20.0, REGULAR()), glyph),
-        ui.centered(ui.ink(glyph_ink)),
-    )
-    let holder = ui.decorated(
-        ui.box_of(
-            "\(id)-pill",
-            ui.Style {
-                ..ui.column(),
-                align: ui.Align.Stretch,
-                justify: ui.Justify.Center,
-                width: 56.0,
-                height: 32.0,
-            },
-            [icon],
-        ),
-        pill,
-    )
-    let label = ui.decorated(
-        ui.text_of(
-            "\(id)-label",
-            ui.in_font(ui.style(), role.size, role.weight),
-            caption,
-        ),
-        ui.centered(ui.ink(s.on_surface_variant)),
-    )
-    let box = ui.box_of(
-        id,
-        ui.spaced(ui.Style{..ui.column(), align: ui.Align.Center }, space(1)),
-        [holder, label],
-    )
-    return ui.control(box, id)
-}
-
-// ---- feedback ---------------------------------------------------------------------
-
-/// A linear progress indicator: a track with a filled portion, `progress` in
-/// 0..1.
-pub fn linear_progress(name: str, s: Scheme, progress: float, width: float) -> ui.Node {
-    var fraction = progress
-    if fraction < 0.0 {
-        fraction = 0.0
-    }
-    if fraction > 1.0 {
-        fraction = 1.0
-    }
-    let filled_width = width * fraction
-    let bar = ui.decorated(
-        ui.box_of("\(name)-bar", ui.sized(ui.style(), filled_width, 4.0), []),
-        ui.rounded(s.primary, SHAPE_FULL()),
-    )
-    return ui.decorated(
-        ui.box_of(
-            name,
-            ui.Style {..ui.row(), align: ui.Align.Center, width: width, height: 4.0 },
-            [bar],
-        ),
-        ui.rounded(s.surface_container_highest, SHAPE_FULL()),
-    )
-}
-
-// ---- slider ---------------------------------------------------------------------
-
-/// A slider: a track a value can be dragged along, which is Material's
-/// interactive counterpart to `linear_progress`.
-///
-/// The two are not variants of each other and should not be confused. A
-/// progress indicator reports; a slider is a *control* — it takes an id, it
-/// answers to hit-testing, and it takes focus. A seek bar is a slider.
-///
-/// A 4dp track with a round handle on it: the classic slider, which is what a
-/// media scrubber is. Material also specifies an *expressive* slider — a 16dp
-/// track with a tall bar for a handle — and that one is for volume and
-/// brightness, where the control is the whole point of the row it sits in. Used
-/// as a seek bar it reads as a segmented progress bar rather than something
-/// draggable, which is exactly what the first version of this looked like.
-///
-/// The row is a concession the layout forces: with no absolute positioning and
-/// no z-order, a handle cannot sit *on* a continuous track, so the track is
-/// drawn either side of it. The seam is two device pixels and does not read.
-/// The touch target, which is what the control occupies. The *track* is 4dp;
-/// the rest is the room a finger needs and is not drawn.
-pub fn SLIDER_HEIGHT() -> float {
-    return 40.0
-}
-
-fn TRACK_HEIGHT() -> float {
-    return 4.0
-}
-
-/// A circle, because the handle is `full`-radius and square.
-fn HANDLE_WIDTH() -> float {
-    return 12.0
-}
-
-/// Barely visible, and only here because the layout cannot overlap a handle
-/// onto a continuous track: there is no absolute positioning and no z-order,
-/// so the track is drawn in two pieces with the handle between them. At two
-/// device pixels the seam does not read as a gap.
-fn HANDLE_GAP() -> float {
-    return 2.0
-}
-
-pub fn slider(s: Scheme, id: str, value: float, width: float, state: State) -> ui.Node {
-    let fraction = clamped(value)
-    let handle = HANDLE_WIDTH()
-    let gap = HANDLE_GAP()
-    // The handle's centre travels the full width, so the track either side of
-    // it is what is left after the handle and its two gaps are taken out.
-    let travel = width - handle - gap * 2.0
-    let active = clamp_to(travel * fraction, 0.0, travel)
-    let inactive = travel - active
-
-    var handle_colour = s.primary
-    if state.focused {
-        handle_colour = focused(s.primary, s.on_primary)
-    }
-    if state.disabled {
-        handle_colour = disabled_container(s, s.surface)
-    }
-
-    let parts = [
-        bar("\(id)-active", active, TRACK_HEIGHT(), s.primary),
-        spacer("\(id)-gap-a", gap),
-        bar("\(id)-handle", handle, HANDLE_WIDTH(), handle_colour),
-        spacer("\(id)-gap-b", gap),
-        bar("\(id)-inactive", inactive, TRACK_HEIGHT(), s.surface_container_highest),
-    ]
-    let style = ui.Style{
-        ..ui.row(),
-        align: ui.Align.Center,
-        width: width,
-        height: SLIDER_HEIGHT(),
-    }
-    return ui.control(ui.box_of(id, style, parts), id)
+    // The control carries the ink even though it draws no text of its own: a
+    // ripple takes its colour from the control's ink, and a checkbox whose
+    // control node had none would ripple in black on a dark theme.
+    return ui.control(ui.decorated(box, ui.ink(s.on_surface)), id)
 }
 
 fn bar(name: str, width: float, height: float, colour: int) -> ui.Node {
@@ -823,34 +320,638 @@ fn spacer(name: str, width: float) -> ui.Node {
     return ui.box_of(name, ui.sized(ui.style(), width, 1.0), [])
 }
 
-fn clamped(v: float) -> float {
-    return clamp_to(v, 0.0, 1.0)
-}
-
 fn clamp_to(v: float, low: float, high: float) -> float {
-    if v < low {
-        return low
-    }
-    if v > high {
-        return high
-    }
-    return v
+    return clampf(v, low, high)
 }
 
-/// Where along a slider a point falls, as a fraction from 0 to 1.
-///
-/// The caller has the slider's rectangle — `ui.frame_of` finds it — and this
-/// turns a pointer position into a value. It accounts for the handle and its
-/// gaps, so clicking the far left gives exactly 0 and the far right exactly 1
-/// rather than stopping a handle's width short.
-pub fn slider_value_at(box: ui.Rect, x: float) -> float {
-    let travel = box.width - HANDLE_WIDTH() - HANDLE_GAP() * 2.0
-    if travel <= 0.0 {
-        return 0.0
-    }
-    let along = x - box.x - (HANDLE_WIDTH() / 2.0 + HANDLE_GAP())
-    return clamped(along / travel)
+fn insets_all(v: float) -> ui.Insets {
+    return ui.insets(v)
 }
+
+/// A style with a fixed height and its width left to the content.
+///
+/// The components that span their parent — an app bar, a list row, a snackbar —
+/// used to say `ui.sized(style, 0.0, height)`, and a *fixed* width of zero is
+/// not the same claim as no fixed width at all. It measures as zero, so such a
+/// component was only ever the right size when its parent happened to stretch
+/// it; dropped into a `Start`-aligned column it laid out one pixel wide with
+/// its content spilling out of it. Leaving the width nil measures the content
+/// and still stretches when a parent says to.
+fn tall(base: ui.Style, height: float) -> ui.Style {
+    return ui.Style{..base, height: height }
+}
+
+/// A run of text in a known colour — what a glyph or a label inside a composed
+/// control needs.
+///
+/// The painter draws each frame's own text in that frame's own ink, so a text
+/// node left undecorated inside a decorated box is drawn in black however the
+/// box was inked. That is how the extended FAB's caption came out black on
+/// purple.
+fn inked_text(name: str, style: ui.Style, body: str, colour: int) -> ui.Node {
+    return ui.decorated(ui.text_of(name, style, body), ui.ink(colour))
+}
+
+// ---- buttons -----------------------------------------------------------------
+//
+// The five common buttons, which differ only in container and outline. Material
+// distinguishes them by emphasis, and emphasis is entirely a matter of which
+// colour role the container takes.
+//
+// All five morph squarer under the finger and all five animate their state
+// layer. The elevated one also *rises*, tonally, which is the one place the
+// missing shadow is visible and the one place Material's own dark-theme rule
+// says a tone is the right answer anyway.
+
+fn BUTTON_HEIGHT() -> float {
+    return 40.0
+}
+
+fn BUTTON_PADDING() -> float {
+    return 24.0
+}
+
+fn button_width(caption: str, sizing: Sizing) -> float {
+    let measured = ui.text_size_in(caption, sizing.label.size, sizing.label.weight).width
+    return measured + sizing.padding * 2.0
+}
+
+fn button_body(id: str, caption: str, sizing: Sizing, decor: ui.Decor) -> ui.Node {
+    return centred_body(
+        id,
+        caption,
+        sizing.label.size,
+        sizing.label.weight,
+        button_width(caption, sizing),
+        sizing.height,
+        decor,
+    )
+}
+
+/// The container decoration a button of this size wears, with its corner
+/// morphed by however far the press has come.
+fn button_decor(
+    caption: str,
+    sizing: Sizing,
+    container: int,
+    ink: int,
+    state: State,
+) -> ui.Decor {
+    let w = button_width(caption, sizing)
+    let radius = morphed(sizing.shape, w, sizing.height, state.press)
+    return ui.inked(ui.rounded(container, radius), ink)
+}
+
+/// The highest-emphasis button: a filled primary container.
+pub fn filled_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+    return filled_button_of(s, id, caption, button_small(), state)
+}
+
+pub fn filled_button_of(
+    s: Scheme,
+    id: str,
+    caption: str,
+    sizing: Sizing,
+    state: State,
+) -> ui.Node {
+    if state.disabled {
+        return button_body(
+            id,
+            caption,
+            sizing,
+            button_decor(
+                caption,
+                sizing,
+                disabled_container(s, s.surface),
+                disabled_ink(s, s.surface),
+                state,
+            ),
+        )
+    }
+    let container = layered(s.primary, s.on_primary, state)
+    return button_body(id, caption, sizing, button_decor(caption, sizing, container, s.on_primary, state))
+}
+
+/// A secondary action beside a primary one: the secondary container, filled.
+pub fn tonal_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+    return tonal_button_of(s, id, caption, button_small(), state)
+}
+
+pub fn tonal_button_of(
+    s: Scheme,
+    id: str,
+    caption: str,
+    sizing: Sizing,
+    state: State,
+) -> ui.Node {
+    if state.disabled {
+        return button_body(
+            id,
+            caption,
+            sizing,
+            button_decor(
+                caption,
+                sizing,
+                disabled_container(s, s.surface),
+                disabled_ink(s, s.surface),
+                state,
+            ),
+        )
+    }
+    let container = layered(s.secondary_container, s.on_secondary_container, state)
+    return button_body(
+        id,
+        caption,
+        sizing,
+        button_decor(caption, sizing, container, s.on_secondary_container, state),
+    )
+}
+
+/// Medium emphasis: an outline and no fill until it is interacted with.
+///
+/// The outline thickens and takes the accent on focus, which is Material's
+/// focus indicator for an outlined component — and it is animated, so the
+/// thickening is a movement rather than a jump.
+pub fn outlined_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+    return outlined_button_of(s, id, caption, button_small(), state)
+}
+
+pub fn outlined_button_of(
+    s: Scheme,
+    id: str,
+    caption: str,
+    sizing: Sizing,
+    state: State,
+) -> ui.Node {
+    let w = button_width(caption, sizing)
+    let radius = morphed(sizing.shape, w, sizing.height, state.press)
+    if state.disabled {
+        let flat = ui.shaped(ui.no_decor(), radius)
+        return button_body(
+            id,
+            caption,
+            sizing,
+            ui.bordered(
+                ui.inked(flat, disabled_ink(s, s.surface)),
+                disabled_container(s, s.surface),
+                1.0,
+            ),
+        )
+    }
+    let edge = mix(s.outline, s.primary, state.focus)
+    let width = math.lerp(1.0, 2.0, state.focus)
+    let base = layer_decor(s.surface, s.primary, state, radius)
+    return button_body(id, caption, sizing, ui.bordered(ui.inked(base, s.primary), edge, width))
+}
+
+/// The lowest emphasis: a label and nothing else until it is interacted with.
+pub fn text_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+    return text_button_of(s, id, caption, button_small(), state)
+}
+
+pub fn text_button_of(
+    s: Scheme,
+    id: str,
+    caption: str,
+    sizing: Sizing,
+    state: State,
+) -> ui.Node {
+    let w = button_width(caption, sizing)
+    let radius = morphed(sizing.shape, w, sizing.height, state.press)
+    let ink = if state.disabled { disabled_ink(s, s.surface) } else { s.primary }
+    return button_body(
+        id,
+        caption,
+        sizing,
+        ui.inked(layer_decor(s.surface, s.primary, state, radius), ink),
+    )
+}
+
+/// Filled, but on a raised surface rather than on the accent.
+///
+/// The one button whose elevation changes with the pointer: level 1 at rest,
+/// level 2 hovered, back to level 1 while held. Under a renderer with shadows
+/// that is a shadow growing; here it is the container tone shifting, which is
+/// Material's own rule for a dark theme and the honest half of the two.
+pub fn elevated_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+    return elevated_button_of(s, id, caption, button_small(), state)
+}
+
+pub fn elevated_button_of(
+    s: Scheme,
+    id: str,
+    caption: str,
+    sizing: Sizing,
+    state: State,
+) -> ui.Node {
+    if state.disabled {
+        return button_body(
+            id,
+            caption,
+            sizing,
+            button_decor(
+                caption,
+                sizing,
+                disabled_container(s, s.surface),
+                disabled_ink(s, s.surface),
+                state,
+            ),
+        )
+    }
+    let lift = maxf(state.hover, state.focus) * (1.0 - state.press)
+    let container = layered(raised(s, LEVEL_1(), LEVEL_2(), lift), s.primary, state)
+    return button_body(id, caption, sizing, button_decor(caption, sizing, container, s.primary, state))
+}
+
+/// A button with a glyph before its label.
+///
+/// Material's leading icon, which is how a destructive or a confirming action
+/// is told apart at a glance. The glyph is a `str` for the reason every glyph
+/// in this package is: an icon font is not something a package can carry.
+pub fn icon_label_button(
+    s: Scheme,
+    id: str,
+    glyph: str,
+    caption: str,
+    sizing: Sizing,
+    state: State,
+) -> ui.Node {
+    let container = layered(s.primary, s.on_primary, state)
+    let ink = if state.disabled { disabled_ink(s, s.surface) } else { s.on_primary }
+    let fill = if state.disabled { disabled_container(s, s.surface) } else { container }
+    let measured = ui.text_size_in(caption, sizing.label.size, sizing.label.weight).width
+    let w = measured + sizing.icon + space(2) + sizing.padding * 2.0
+    let radius = morphed(sizing.shape, w, sizing.height, state.press)
+    let inner = ui.Style{
+        ..ui.row(),
+        align: ui.Align.Center,
+        justify: ui.Justify.Center,
+        width: w,
+        height: sizing.height,
+        gap: space(2),
+    }
+    let box = ui.box_of(
+        id,
+        inner,
+        [
+            inked_text("\(id)-glyph", ui.in_font(ui.style(), sizing.icon, REGULAR()), glyph, ink),
+            inked_text(
+                "\(id)-label",
+                ui.in_font(ui.style(), sizing.label.size, sizing.label.weight),
+                caption,
+                ink,
+            ),
+        ],
+    )
+    return ui.control(ui.decorated(box, ui.inked(ui.rounded(fill, radius), ink)), id)
+}
+
+// ---- icon buttons -------------------------------------------------------------
+//
+// Four emphases, the same four the common buttons have, and each of them also a
+// *toggle*: an icon button that is either on or off, which is what a star, a
+// mute and a bookmark are. Material draws the two differently enough that a
+// toggle is not simply an icon button with a flag — the standard toggle changes
+// its glyph's colour, and the filled one swaps its container entirely.
+
+fn ICON_BUTTON_SIDE() -> float {
+    return 40.0
+}
+
+fn ICON_GLYPH() -> float {
+    return 20.0
+}
+
+fn icon_button_body(id: str, glyph: str, decor: ui.Decor) -> ui.Node {
+    return centred_body(
+        id,
+        glyph,
+        ICON_GLYPH(),
+        REGULAR(),
+        ICON_BUTTON_SIDE(),
+        ICON_BUTTON_SIDE(),
+        decor,
+    )
+}
+
+fn icon_radius(state: State) -> float {
+    return morphed(SHAPE_FULL(), ICON_BUTTON_SIDE(), ICON_BUTTON_SIDE(), state.press)
+}
+
+/// A 40dp target around a 20dp glyph, with no container of its own.
+pub fn icon_button(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
+    let ink = if state.disabled {
+        disabled_ink(s, s.surface)
+    } else {
+        s.on_surface_variant
+    }
+    let decor = layer_decor(s.surface, s.on_surface_variant, state, icon_radius(state))
+    return icon_button_body(id, glyph, ui.inked(decor, ink))
+}
+
+/// The same, on or off. Selected takes the accent; unselected does not.
+pub fn icon_toggle(s: Scheme, id: str, glyph: str, on: bool, state: State) -> ui.Node {
+    let role = mix(s.on_surface_variant, s.primary, if on { 1.0 } else { state.select })
+    let decor = layer_decor(s.surface, role, state, icon_radius(state))
+    return icon_button_body(id, glyph, ui.inked(decor, role))
+}
+
+/// The highest-emphasis icon button: a filled primary container.
+pub fn filled_icon_button(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
+    if state.disabled {
+        return icon_button_body(
+            id,
+            glyph,
+            ui.inked(
+                ui.rounded(disabled_container(s, s.surface), icon_radius(state)),
+                disabled_ink(s, s.surface),
+            ),
+        )
+    }
+    let container = layered(s.primary, s.on_primary, state)
+    return icon_button_body(
+        id,
+        glyph,
+        ui.inked(ui.rounded(container, icon_radius(state)), s.on_primary),
+    )
+}
+
+/// A filled icon *toggle*: the container itself crosses from the unselected
+/// surface to the accent, which is the strongest way Material says "on".
+pub fn filled_icon_toggle(s: Scheme, id: str, glyph: str, on: bool, state: State) -> ui.Node {
+    let amount = if on { 1.0 } else { state.select }
+    let resting = mix(s.surface_container_highest, s.primary, amount)
+    let ink = mix(s.primary, s.on_primary, amount)
+    let container = layered(resting, ink, state)
+    return icon_button_body(id, glyph, ui.inked(ui.rounded(container, icon_radius(state)), ink))
+}
+
+pub fn tonal_icon_button(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
+    let container = layered(s.secondary_container, s.on_secondary_container, state)
+    return icon_button_body(
+        id,
+        glyph,
+        ui.inked(ui.rounded(container, icon_radius(state)), s.on_secondary_container),
+    )
+}
+
+pub fn outlined_icon_button(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
+    let radius = icon_radius(state)
+    let edge = mix(s.outline, s.primary, state.focus)
+    let base = layer_decor(s.surface, s.on_surface_variant, state, radius)
+    return icon_button_body(
+        id,
+        glyph,
+        ui.bordered(
+            ui.inked(base, s.on_surface_variant),
+            edge,
+            math.lerp(1.0, 2.0, state.focus),
+        ),
+    )
+}
+
+// ---- floating action buttons ----------------------------------------------------
+//
+// Three sizes and an extended form. A FAB rests at elevation 3 and rises to 4
+// under the pointer, which here is a tone rather than a shadow — see the note
+// at the top of this file.
+
+pub fn FAB_SMALL() -> float {
+    return 40.0
+}
+
+pub fn FAB_REGULAR() -> float {
+    return 56.0
+}
+
+pub fn FAB_LARGE() -> float {
+    return 96.0
+}
+
+fn fab_shape(side: float) -> float {
+    if side <= FAB_SMALL() {
+        return SHAPE_MEDIUM()
+    }
+    if side >= FAB_LARGE() {
+        return SHAPE_EXTRA_LARGE()
+    }
+    return SHAPE_LARGE()
+}
+
+fn fab_glyph(side: float) -> float {
+    if side <= FAB_SMALL() {
+        return 24.0
+    }
+    if side >= FAB_LARGE() {
+        return 36.0
+    }
+    return 24.0
+}
+
+/// 56dp on the primary container — Material's default FAB.
+pub fn fab(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
+    return fab_of(s, id, glyph, FAB_REGULAR(), state)
+}
+
+pub fn small_fab(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
+    return fab_of(s, id, glyph, FAB_SMALL(), state)
+}
+
+pub fn large_fab(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
+    return fab_of(s, id, glyph, FAB_LARGE(), state)
+}
+
+pub fn fab_of(s: Scheme, id: str, glyph: str, side: float, state: State) -> ui.Node {
+    let lift = maxf(state.hover, state.focus) * (1.0 - state.press)
+    let base = mix(s.primary_container, surface_tinted(s, s.primary_container), lift)
+    let container = layered(base, s.on_primary_container, state)
+    let radius = morphed(fab_shape(side), side, side, state.press)
+    let decor = ui.inked(ui.rounded(container, radius), s.on_primary_container)
+    return centred_body(id, glyph, fab_glyph(side), REGULAR(), side, side, decor)
+}
+
+/// A FAB in the secondary or tertiary role, for a screen whose primary action
+/// is not the accent one.
+pub fn secondary_fab(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
+    let container = layered(s.secondary_container, s.on_secondary_container, state)
+    let side = FAB_REGULAR()
+    let radius = morphed(fab_shape(side), side, side, state.press)
+    return centred_body(
+        id,
+        glyph,
+        fab_glyph(side),
+        REGULAR(),
+        side,
+        side,
+        ui.inked(ui.rounded(container, radius), s.on_secondary_container),
+    )
+}
+
+pub fn tertiary_fab(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
+    let container = layered(s.tertiary_container, s.on_tertiary_container, state)
+    let side = FAB_REGULAR()
+    let radius = morphed(fab_shape(side), side, side, state.press)
+    return centred_body(
+        id,
+        glyph,
+        fab_glyph(side),
+        REGULAR(),
+        side,
+        side,
+        ui.inked(ui.rounded(container, radius), s.on_tertiary_container),
+    )
+}
+
+/// The same with a label beside the glyph, for the one action a screen is for.
+pub fn extended_fab(s: Scheme, id: str, glyph: str, caption: str, state: State) -> ui.Node {
+    let role = label_large()
+    let lift = maxf(state.hover, state.focus) * (1.0 - state.press)
+    let base = mix(s.primary_container, surface_tinted(s, s.primary_container), lift)
+    let container = layered(base, s.on_primary_container, state)
+    let height = FAB_REGULAR()
+    let measured = ui.text_size_in(caption, role.size, role.weight).width
+    let width = measured + 24.0 + space(2) + space(4) * 2.0
+    let radius = morphed(SHAPE_LARGE(), width, height, state.press)
+    let decor = ui.inked(ui.rounded(container, radius), s.on_primary_container)
+    let inner = ui.Style{
+        ..ui.row(),
+        align: ui.Align.Center,
+        justify: ui.Justify.Center,
+        width: width,
+        height: height,
+        padding: ui.insets_xy(space(4), 0.0),
+        gap: space(2),
+    }
+    let box = ui.box_of(
+        id,
+        inner,
+        [
+            inked_text(
+                "\(id)-glyph",
+                ui.in_font(ui.style(), 24.0, REGULAR()),
+                glyph,
+                s.on_primary_container,
+            ),
+            inked_text(
+                "\(id)-label",
+                ui.in_font(ui.style(), role.size, role.weight),
+                caption,
+                s.on_primary_container,
+            ),
+        ],
+    )
+    return ui.control(ui.decorated(box, decor), id)
+}
+
+/// A container tinted the way elevation tints one. Material raises a surface by
+/// mixing the tint role into it; the fraction is the one Material's own
+/// elevation overlay uses at level 4.
+fn surface_tinted(s: Scheme, container: int) -> int {
+    return mix(container, s.surface_tint, 0.12)
+}
+
+// ---- chips -------------------------------------------------------------------
+//
+// All four kinds. They share a shape and a height and differ in what they mean:
+// an *assist* chip is an action, a *filter* chip is a choice that stays made, an
+// *input* chip is a thing the user put there and can take away, and a
+// *suggestion* chip is something the application is proposing.
+
+fn CHIP_HEIGHT() -> float {
+    return 32.0
+}
+
+fn chip_body(
+    id: str,
+    caption: str,
+    leading: str,
+    trailing: str,
+    decor: ui.Decor,
+    state: State,
+) -> ui.Node {
+    let role = label_large()
+    var shown = caption
+    if leading.len() > 0 {
+        shown = "\(leading) \(caption)"
+    }
+    if trailing.len() > 0 {
+        shown = "\(shown) \(trailing)"
+    }
+    let width = ui.text_size_in(shown, role.size, role.weight).width + space(4) * 2.0
+    let radius = morphed(SHAPE_SMALL(), width, CHIP_HEIGHT(), state.press)
+    return centred_body(
+        id,
+        shown,
+        role.size,
+        role.weight,
+        width,
+        CHIP_HEIGHT(),
+        ui.shaped(decor, radius),
+    )
+}
+
+/// A filter chip: outlined until it is selected, then a filled secondary
+/// container with a tick.
+///
+/// The crossing between the two is animated on the `select` channel, so the
+/// outline fades as the fill arrives rather than the two swapping in one frame.
+pub fn filter_chip(s: Scheme, id: str, caption: str, on: bool, state: State) -> ui.Node {
+    let amount = chosen_amount(on, state)
+    let container = mix(s.surface, s.secondary_container, amount)
+    let ink = mix(s.on_surface_variant, s.on_secondary_container, amount)
+    let edge_alpha = 1.0 - amount
+    var decor = ui.inked(ui.rounded(layered(container, ink, state), SHAPE_SMALL()), ink)
+    if edge_alpha > 0.0 {
+        decor = ui.bordered(
+            decor,
+            mix(container, mix(s.outline, s.primary, state.focus), edge_alpha),
+            math.lerp(1.0, 2.0, state.focus),
+        )
+    }
+    let tick = if on { "✓" } else { "" }
+    return chip_body(id, caption, tick, "", decor, state)
+}
+
+/// An assist chip: always outlined, for an action rather than a choice.
+pub fn assist_chip(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+    let base = layer_decor(s.surface, s.on_surface_variant, state, SHAPE_SMALL())
+    let decor = ui.bordered(
+        ui.inked(base, s.on_surface),
+        mix(s.outline, s.primary, state.focus),
+        math.lerp(1.0, 2.0, state.focus),
+    )
+    return chip_body(id, caption, "", "", decor, state)
+}
+
+/// A suggestion chip: the same as an assist chip but labelled in the variant
+/// ink, because it is the application talking rather than the user.
+pub fn suggestion_chip(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+    let base = layer_decor(s.surface, s.on_surface_variant, state, SHAPE_SMALL())
+    let decor = ui.bordered(
+        ui.inked(base, s.on_surface_variant),
+        mix(s.outline, s.primary, state.focus),
+        math.lerp(1.0, 2.0, state.focus),
+    )
+    return chip_body(id, caption, "", "", decor, state)
+}
+
+/// An input chip: something the user entered, with a way to remove it.
+///
+/// The trailing glyph is part of the label rather than a control of its own,
+/// which is the honest limit of a layout with no absolute positioning: a
+/// nested hit target inside a chip would need the two rectangles to be
+/// separately addressable, and here the whole chip is one control.
+pub fn input_chip(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+    let base = layer_decor(s.surface_container_low, s.on_surface_variant, state, SHAPE_SMALL())
+    let decor = ui.bordered(
+        ui.inked(base, s.on_surface_variant),
+        mix(s.outline_variant, s.primary, state.focus),
+        math.lerp(1.0, 2.0, state.focus),
+    )
+    return chip_body(id, caption, "", "✕", decor, state)
+}
+
+// ---- badges -------------------------------------------------------------------
 
 /// A badge: a small count on a container, in the error role, which is what
 /// Material uses to mark something needing attention.
@@ -865,32 +966,12 @@ pub fn badge(name: str, s: Scheme, count: str) -> ui.Node {
     return ui.decorated(node, ui.centered(ui.inked(ui.rounded(s.error, SHAPE_FULL()), s.on_error)))
 }
 
-/// A snackbar: a raised container with a message and an optional action.
-pub fn snackbar(name: str, s: Scheme, message: str, action: [ui.Node]) -> ui.Node {
-    let role = body_medium()
-    var children = [
-        ui.decorated(
-            ui.text_of(
-                "\(name)-message",
-                ui.grown(ui.in_font(ui.style(), role.size, role.weight), 1.0),
-                message,
-            ),
-            ui.ink(s.inverse_on_surface),
-        ),
-    ]
-    for one in action {
-        children.push(one)
-    }
-    let style = ui.spaced(
-        ui.padded(
-            ui.sized(ui.Style{..ui.row(), align: ui.Align.Center }, 0.0, 48.0),
-            space(4),
-        ),
-        space(2),
-    )
+/// A badge with no number in it — a 6dp dot, which is Material's small badge
+/// and is what marks "something changed" where a count would be noise.
+pub fn small_badge(name: str, s: Scheme) -> ui.Node {
     return ui.decorated(
-        ui.box_of(name, style, children),
-        ui.rounded(s.inverse_surface, SHAPE_EXTRA_SMALL()),
+        ui.box_of(name, ui.sized(ui.style(), 6.0, 6.0), []),
+        ui.rounded(s.error, SHAPE_FULL()),
     )
 }
 

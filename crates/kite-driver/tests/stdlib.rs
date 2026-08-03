@@ -1,25 +1,36 @@
-//! The standard library's own test suite.
+//! The standard library's own test suite, and the packages that ship beside it.
 //!
-//! Each file in `tests/std/` is an ordinary Kite program that runs its checks
-//! and prints what failed. Being a program rather than a harness is what lets
-//! the same file run on the bytecode VM *and* on WebAssembly and be compared:
-//! a library test that only ran on one backend would not be testing the thing
-//! most likely to be wrong.
+//! Each file in `tests/std/` and `tests/packages/` is an ordinary Kite program
+//! that runs its checks and prints what failed. Being a program rather than a
+//! harness is what lets the same file run on the bytecode VM *and* on
+//! WebAssembly and be compared: a library test that only ran on one backend
+//! would not be testing the thing most likely to be wrong.
 //!
 //! The library is written in Kite, so this is also the largest body of Kite
 //! code the compiler is asked to get right.
+//!
+//! `tests/packages/` is separate from `tests/std/` because what it tests is
+//! separate: `material` is a design system, which is not something a language's
+//! standard library should contain. It has a `kite.toml` beside it saying where
+//! the package lives, and it reaches the package the way any program would.
 
 use kite_driver::{compile, Emit};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn std_tests() -> Vec<PathBuf> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/std");
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("no tests/std directory at {}: {}", dir.display(), e))
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "kite"))
-        .collect();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests");
+    let mut files = Vec::new();
+    for group in ["std", "packages"] {
+        let dir = root.join(group);
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("no tests/{} directory at {}: {}", group, dir.display(), e));
+        files.extend(
+            entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|x| x == "kite")),
+        );
+    }
     files.sort();
     files
 }
