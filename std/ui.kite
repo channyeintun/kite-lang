@@ -654,6 +654,20 @@ pub fn control_at(frames: [Frame], x: float, y: float) -> Option<str> {
     return found.control
 }
 
+/// The frame with a given name, or nil.
+///
+/// What a caller needs to turn a click into a value: a slider answers to
+/// hit-testing by its id, but converting a pointer position into a fraction
+/// needs the rectangle it was laid out into, and only the frames have that.
+pub fn frame_of(frames: [Frame], name: str) -> Option<Frame> {
+    for frame in frames {
+        if frame.name == name {
+            return frame
+        }
+    }
+    return nil
+}
+
 /// Controls in the order they were laid out, which is focus order.
 ///
 /// Derived, not declared. It used to be a `[str]` the application wrote out by

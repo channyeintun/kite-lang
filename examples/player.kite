@@ -634,7 +634,16 @@ fn now_playing(model: Model, s: material.Scheme) -> ui.Node {
         ui.box_of(
             "np",
             inner,
-            [row, material.linear_progress("np-progress", s, fraction, width - material.space(8))],
+            [
+                row,
+                material.slider(
+                    s,
+                    "seek",
+                    fraction,
+                    width - material.space(8),
+                    focus(model, "seek"),
+                ),
+            ],
         ),
         ui.rounded(material.surface_at(s, material.LEVEL_2()), material.SHAPE_LARGE()),
     )
@@ -805,7 +814,42 @@ fn clicked(model: Model, x: float, y: float) -> Model {
         return model
     }
     let focused = Model{..model, focused: hit }
+    // The seek bar is the one control whose answer depends on *where* in it the
+    // click landed, so it needs the rectangle it was laid out into rather than
+    // only its id.
+    if hit == "seek" {
+        let box = ui.frame_of(frames, "seek")
+        if box != nil {
+            return sought(focused, material.slider_value_at(box.rect, x))
+        }
+        return focused
+    }
     return acted(focused, hit)
+}
+
+/// Move the playhead to a fraction of the track.
+///
+/// The notes already sent are the host's and cannot be recalled, so `started`
+/// silences them and fills the schedule again from where the track now is.
+/// Without that, seeking would leave the previous four seconds still sounding
+/// over the new position.
+fn sought(model: Model, fraction: float) -> Model {
+    let track = model.tracks[model.playing]
+    return started(Model{..model, elapsed: fraction * (track.length as float) })
+}
+
+/// Seek by a number of seconds, held inside the track.
+fn nudged(model: Model, by: float) -> Model {
+    let track = model.tracks[model.playing]
+    var at = model.elapsed + by
+    if at < 0.0 {
+        at = 0.0
+    }
+    let last = track.length as float
+    if at > last {
+        at = last
+    }
+    return started(Model{..model, elapsed: at })
 }
 
 /// What a control does, by its id.
@@ -886,6 +930,14 @@ fn pressed(model: Model, key: str) -> Model {
     }
     if key == "ArrowUp" {
         return started(advanced(model, -1))
+    }
+    // Left and right scrub rather than moving through the queue, which is what
+    // every player does and leaves up and down for the list.
+    if key == "ArrowRight" {
+        return nudged(model, 5.0)
+    }
+    if key == "ArrowLeft" {
+        return nudged(model, -5.0)
     }
     if key == " " {
         return acted(model, model.focused)
@@ -977,6 +1029,21 @@ fn main() {
         }
         let rail = if material.has_rail(w) { "rail" } else { "bottom bar" }
         io.print("at \(w): \(rail), \(laid.len()) frames, widest \(widest)")
+    }
+
+    // Seeking, without a browser: a click at a known fraction of the seek bar
+    // moves the playhead there, and the arrows scrub. The audio is not checked
+    // — a bytecode or native run has no host to send a note to — but the
+    // arithmetic that decides *where* is, and it is the part that can be wrong.
+    let wide = Model{..model, width: 1100.0, height: 700.0 }
+    let bar = ui.frame_of(frames_of(wide), "seek")
+    if bar != nil {
+        let middle = bar.rect.x + bar.rect.width / 2.0
+        let at = material.slider_value_at(bar.rect, middle)
+        io.print("clicking the middle of the seek bar: \(math.round_to(at * 100.0))%")
+        io.print("far left: \(material.slider_value_at(bar.rect, bar.rect.x))")
+        let right = bar.rect.x + bar.rect.width
+        io.print("far right: \(material.slider_value_at(bar.rect, right))")
     }
 
     let frames = frames_of(model)

@@ -736,6 +736,107 @@ pub fn linear_progress(name: str, s: Scheme, progress: float, width: float) -> u
     )
 }
 
+// ---- slider ---------------------------------------------------------------------
+
+/// A slider: a track a value can be dragged along, which is Material's
+/// interactive counterpart to `linear_progress`.
+///
+/// The two are not variants of each other and should not be confused. A
+/// progress indicator reports; a slider is a *control* — it takes an id, it
+/// answers to hit-testing, and it takes focus. A seek bar is a slider.
+///
+/// The shape is Material 3's current one, and it is what makes this drawable
+/// here at all: the handle is a bar standing in a **gap** in the track rather
+/// than a knob sitting on top of it. That is a row — active track, gap, handle,
+/// gap, inactive track — and a row is something this layout can express. A knob
+/// overlapping a continuous track would need absolute positioning or a z-order,
+/// and the layout has neither.
+pub fn SLIDER_HEIGHT() -> float {
+    return 44.0
+}
+
+fn HANDLE_WIDTH() -> float {
+    return 4.0
+}
+
+fn HANDLE_GAP() -> float {
+    return 6.0
+}
+
+pub fn slider(s: Scheme, id: str, value: float, width: float, state: State) -> ui.Node {
+    let fraction = clamped(value)
+    let handle = HANDLE_WIDTH()
+    let gap = HANDLE_GAP()
+    // The handle's centre travels the full width, so the track either side of
+    // it is what is left after the handle and its two gaps are taken out.
+    let travel = width - handle - gap * 2.0
+    let active = clamp_to(travel * fraction, 0.0, travel)
+    let inactive = travel - active
+
+    var handle_colour = s.primary
+    if state.focused {
+        handle_colour = focused(s.primary, s.on_primary)
+    }
+    if state.disabled {
+        handle_colour = disabled_container(s, s.surface)
+    }
+
+    let parts = [
+        bar("\(id)-active", active, 16.0, s.primary),
+        spacer("\(id)-gap-a", gap),
+        bar("\(id)-handle", handle, 44.0, handle_colour),
+        spacer("\(id)-gap-b", gap),
+        bar("\(id)-inactive", inactive, 16.0, s.surface_container_highest),
+    ]
+    let style = ui.Style{
+        ..ui.row(),
+        align: ui.Align.Center,
+        width: width,
+        height: SLIDER_HEIGHT(),
+    }
+    return ui.control(ui.box_of(id, style, parts), id)
+}
+
+fn bar(name: str, width: float, height: float, colour: int) -> ui.Node {
+    return ui.decorated(
+        ui.box_of(name, ui.sized(ui.style(), width, height), []),
+        ui.rounded(colour, SHAPE_FULL()),
+    )
+}
+
+fn spacer(name: str, width: float) -> ui.Node {
+    return ui.box_of(name, ui.sized(ui.style(), width, 1.0), [])
+}
+
+fn clamped(v: float) -> float {
+    return clamp_to(v, 0.0, 1.0)
+}
+
+fn clamp_to(v: float, low: float, high: float) -> float {
+    if v < low {
+        return low
+    }
+    if v > high {
+        return high
+    }
+    return v
+}
+
+/// Where along a slider a point falls, as a fraction from 0 to 1.
+///
+/// The caller has the slider's rectangle — `ui.frame_of` finds it — and this
+/// turns a pointer position into a value. It accounts for the handle and its
+/// gaps, so clicking the far left gives exactly 0 and the far right exactly 1
+/// rather than stopping a handle's width short.
+pub fn slider_value_at(box: ui.Rect, x: float) -> float {
+    let travel = box.width - HANDLE_WIDTH() - HANDLE_GAP() * 2.0
+    if travel <= 0.0 {
+        return 0.0
+    }
+    let along = x - box.x - (HANDLE_WIDTH() / 2.0 + HANDLE_GAP())
+    return clamped(along / travel)
+}
+
 /// A badge: a small count on a container, in the error role, which is what
 /// Material uses to mark something needing attention.
 pub fn badge(name: str, s: Scheme, count: str) -> ui.Node {
