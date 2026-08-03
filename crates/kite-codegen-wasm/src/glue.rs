@@ -2322,6 +2322,23 @@ pub fn generate_page(title: &str) -> String {
     send(EVENT_UP, x, y, "");
   }});
 
+  // The pointer leaving, which the browser does not otherwise report.
+  //
+  // `pointermove` fires while the pointer is over the stage and stops when it
+  // is not — there is no final event for the pixel outside the edge. A program
+  // that lights a control under the pointer therefore has no way to learn the
+  // pointer has gone, and the last thing hovered stays lit until something else
+  // is: move off the window and a row keeps its state layer forever.
+  //
+  // Sent as an ordinary move to a point outside every rectangle rather than as
+  // a new kind of event. A move to nowhere *is* what happened, it needs no new
+  // constant, and every program that already handles `EVENT_MOVE` is fixed by
+  // it without being edited — which a new constant, ignored by default, would
+  // not have done.
+  stage.addEventListener("pointerleave", () => {{
+    send(EVENT_MOVE, -1, -1, "");
+  }});
+
   // Text typed into the hidden input arrives one character at a time, which
   // is the same shape a key press has. An IME's composition arrives here too,
   // once it is committed.

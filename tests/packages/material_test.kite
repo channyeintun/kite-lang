@@ -191,6 +191,48 @@ fn layer_checks() -> [error] {
             "a disabled control does not light up",
         ),
     )
+
+    // A layer on a control with no container of its own is *translucent*, and
+    // this is a regression rather than a nicety.
+    //
+    // It used to be mixed against `surface`, and the controls that use it —
+    // list rows, menu items — sit on a container two tones lighter than that.
+    // So the blend began below what was behind it: a row darkened before it
+    // lightened on the way in, and on the way out a dark patch appeared and
+    // then vanished. What made it hard to see in a screenshot is that the *end*
+    // of the animation was right; only the middle was wrong.
+    //
+    // A translucent layer cannot have the fault, because it never names a
+    // backdrop. What is pinned here is that it does not: the fill is the role
+    // colour exactly, at the state's opacity, whatever it is drawn on.
+    let dark = material.dark()
+    for amount in [0.05, 0.2, 0.5, 1.0] {
+        let partial = material.State{..material.rest(), hover: amount, hovered: true }
+        let decor = material.layer_decor(dark.on_surface, partial, 999.0)
+        let fill = decor.fill
+        if fill == nil {
+            out.push(test.fail("a layer part-way in draws something"))
+        } else {
+            out.push(
+                test.equal_int(
+                    fill,
+                    dark.on_surface,
+                    "the layer is the role colour, not a blend with a guessed backdrop",
+                ),
+            )
+            out.push(
+                near(
+                    decor.alpha,
+                    amount * material.HOVER_OPACITY(),
+                    "at the state's own opacity",
+                ),
+            )
+        }
+    }
+    // At rest it draws nothing at all, rather than painting an opaque patch of
+    // whatever it guessed was behind.
+    let none = material.layer_decor(dark.on_surface, material.rest(), 999.0)
+    out.push(test.is_true(none.fill == nil, "a layer at rest draws nothing"))
     return out
 }
 

@@ -262,7 +262,7 @@ fn tab_body(
         stack,
     )
     return ui.control(
-        ui.decorated(box, ui.inked(layer_decor(s.surface, ink, state, 0.0), ink)),
+        ui.decorated(box, ui.inked(layer_decor(ink, state, 0.0), ink)),
         id,
     )
 }
@@ -314,7 +314,7 @@ fn destination(
     let amount = chosen_amount(on, state)
     let pill_fill = mix(s.surface, s.secondary_container, amount)
     let glyph_ink = mix(s.on_surface_variant, s.on_secondary_container, amount)
-    var pill = layer_decor(s.surface, s.on_surface, state, SHAPE_FULL())
+    var pill = layer_decor(s.on_surface, state, SHAPE_FULL())
     if amount > 0.0 {
         pill = ui.rounded(layered(pill_fill, glyph_ink, state), SHAPE_FULL())
     }
@@ -427,7 +427,7 @@ pub fn drawer_item(
     let amount = chosen_amount(on, state)
     let fill = mix(s.surface, s.secondary_container, amount)
     let ink = mix(s.on_surface_variant, s.on_secondary_container, amount)
-    var decor = layer_decor(s.surface, s.on_surface, state, SHAPE_FULL())
+    var decor = layer_decor(s.on_surface, state, SHAPE_FULL())
     if amount > 0.0 {
         decor = ui.rounded(layered(fill, ink, state), SHAPE_FULL())
     }

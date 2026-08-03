@@ -40,10 +40,23 @@ use std/math
 // ---- state -------------------------------------------------------------------
 //
 // Material's state layers — hover, focus, press — are an on-colour drawn over
-// the container at 8% or 10%. With no alpha in the layout they are computed
-// instead of drawn, which produces the same pixel because what they cover is a
-// known flat colour. `tokens.kite` has the arithmetic; this decides which of
-// them applies, and `interaction.kite` decides how far each has come.
+// the container at 8% or 10%. There are two ways to draw one and this package
+// uses both, for a reason worth stating because getting it wrong is invisible
+// until it is animated.
+//
+// Over a container whose colour is *known* — a filled button is `primary`, and
+// nothing shows through it — the layer is `mix`ed in, which produces exactly
+// the pixel the alpha blend would have. That is `layered`.
+//
+// Over a control with no container of its own — a text button, a list row —
+// there is nothing known to mix with, and `layer_decor` draws the layer
+// translucent instead. Mixing there means guessing a backdrop, and a guess that
+// is one container tone out does not merely shift the colour: it puts the whole
+// transition on the wrong side of what is behind, so the control darkens on its
+// way in and leaves a dark patch on its way out.
+//
+// `tokens.kite` has the arithmetic; this decides which of them applies, and
+// `interaction.kite` decides how far each has come.
 
 pub struct State {
     pub hovered: bool
@@ -128,19 +141,32 @@ pub fn layered(container: int, on_container: int, state: State) -> int {
     return mix(container, on_container, strength)
 }
 
-/// The state layer alone, as a decoration, for a control that has no container
-/// of its own — a text button, a standard icon button, a list row.
+/// The state layer alone, for a control that has no container of its own — a
+/// text button, a standard icon button, a list row.
 ///
-/// A decoration rather than a colour because a layer at zero draws *nothing*:
-/// painting the surface colour instead would put an opaque patch over whatever
-/// the control happens to sit on, which for a button in an app bar is the app
-/// bar.
-pub fn layer_decor(surface: int, role: int, state: State, radius: float) -> ui.Decor {
+/// **Translucent**, not pre-blended, and that is the whole point of it. A layer
+/// mixed against an assumed backdrop is only right when the assumption is: a
+/// list row's layer computed against `surface` is drawn on a *card*, which is
+/// two container tones lighter, so the blend starts two tones too dark. On the
+/// way in the row darkens before it lightens, and on the way out a dark patch
+/// appears and then vanishes — which is what a state layer looks like when it
+/// is guessing what it sits on.
+///
+/// `Decor.alpha` removes the guess. The layer is the role colour at the state's
+/// own opacity over whatever is behind it, which is Material's own definition
+/// and needs to know nothing at all.
+///
+/// It works because alpha is *per frame*: a box's own frame carries no text, so
+/// fading it fades its fill and nothing else — the label inside is a separate
+/// frame at full opacity. That is also why [`centred_body`] puts the container
+/// on a box rather than on the caption; a layer sharing a node with its label
+/// would take the label down to eight per cent with it.
+pub fn layer_decor(role: int, state: State, radius: float) -> ui.Decor {
     let strength = layer_strength(state)
     if strength <= 0.0 {
         return ui.shaped(ui.no_decor(), radius)
     }
-    return ui.rounded(mix(surface, role, strength), radius)
+    return ui.faded(ui.rounded(role, radius), strength)
 }
 
 /// How far a component's selection has come, given both the application's own
@@ -266,6 +292,14 @@ pub fn button_xlarge() -> Sizing {
 /// single line in a box of a known size needs no arithmetic to place it. The
 /// first version computed the top inset from the host's line height, which is
 /// the same answer on one font and the wrong one on every other.
+///
+/// The container and the caption are two nodes rather than one, and they have
+/// to be. A state layer is translucent — see [`layer_decor`] — and `Decor.alpha`
+/// fades a frame's *text* along with its fill, so a layer sharing a node with
+/// the label would fade the label to eight per cent along with itself. Split,
+/// the box carries the container and the caption carries only its ink, which is
+/// also what lets a ripple find the control's colour: `decor.ink` is on the
+/// frame the ripple is clipped to.
 fn centred_body(
     id: str,
     caption: str,
@@ -275,8 +309,16 @@ fn centred_body(
     h: float,
     decor: ui.Decor,
 ) -> ui.Node {
-    let style = ui.sized(ui.in_font(ui.style(), size, weight), w, h)
-    return ui.control(ui.decorated(ui.text_of(id, style, caption), ui.centered(decor)), id)
+    let label = ui.decorated(
+        ui.text_of(
+            "\(id)-label",
+            ui.sized(ui.in_font(ui.style(), size, weight), w, h),
+            caption,
+        ),
+        ui.centered(ui.ink(decor.ink)),
+    )
+    let box = ui.box_of(id, ui.sized(ui.style(), w, h), [label])
+    return ui.control(ui.decorated(box, decor), id)
 }
 
 /// A mark and its label, side by side, as one control.
@@ -500,7 +542,7 @@ pub fn outlined_button_of(
     }
     let edge = mix(s.outline, s.primary, state.focus)
     let width = math.lerp(1.0, 2.0, state.focus)
-    let base = layer_decor(s.surface, s.primary, state, radius)
+    let base = layer_decor(s.primary, state, radius)
     return button_body(id, caption, sizing, ui.bordered(ui.inked(base, s.primary), edge, width))
 }
 
@@ -523,7 +565,7 @@ pub fn text_button_of(
         id,
         caption,
         sizing,
-        ui.inked(layer_decor(s.surface, s.primary, state, radius), ink),
+        ui.inked(layer_decor(s.primary, state, radius), ink),
     )
 }
 
@@ -645,14 +687,14 @@ pub fn icon_button(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
     } else {
         s.on_surface_variant
     }
-    let decor = layer_decor(s.surface, s.on_surface_variant, state, icon_radius(state))
+    let decor = layer_decor(s.on_surface_variant, state, icon_radius(state))
     return icon_button_body(id, glyph, ui.inked(decor, ink))
 }
 
 /// The same, on or off. Selected takes the accent; unselected does not.
 pub fn icon_toggle(s: Scheme, id: str, glyph: str, on: bool, state: State) -> ui.Node {
     let role = mix(s.on_surface_variant, s.primary, if on { 1.0 } else { state.select })
-    let decor = layer_decor(s.surface, role, state, icon_radius(state))
+    let decor = layer_decor(role, state, icon_radius(state))
     return icon_button_body(id, glyph, ui.inked(decor, role))
 }
 
@@ -698,7 +740,7 @@ pub fn tonal_icon_button(s: Scheme, id: str, glyph: str, state: State) -> ui.Nod
 pub fn outlined_icon_button(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
     let radius = icon_radius(state)
     let edge = mix(s.outline, s.primary, state.focus)
-    let base = layer_decor(s.surface, s.on_surface_variant, state, radius)
+    let base = layer_decor(s.on_surface_variant, state, radius)
     return icon_button_body(
         id,
         glyph,
@@ -914,7 +956,7 @@ pub fn filter_chip(s: Scheme, id: str, caption: str, on: bool, state: State) -> 
 
 /// An assist chip: always outlined, for an action rather than a choice.
 pub fn assist_chip(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
-    let base = layer_decor(s.surface, s.on_surface_variant, state, SHAPE_SMALL())
+    let base = layer_decor(s.on_surface_variant, state, SHAPE_SMALL())
     let decor = ui.bordered(
         ui.inked(base, s.on_surface),
         mix(s.outline, s.primary, state.focus),
@@ -926,7 +968,7 @@ pub fn assist_chip(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
 /// A suggestion chip: the same as an assist chip but labelled in the variant
 /// ink, because it is the application talking rather than the user.
 pub fn suggestion_chip(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
-    let base = layer_decor(s.surface, s.on_surface_variant, state, SHAPE_SMALL())
+    let base = layer_decor(s.on_surface_variant, state, SHAPE_SMALL())
     let decor = ui.bordered(
         ui.inked(base, s.on_surface_variant),
         mix(s.outline, s.primary, state.focus),
@@ -942,7 +984,7 @@ pub fn suggestion_chip(s: Scheme, id: str, caption: str, state: State) -> ui.Nod
 /// nested hit target inside a chip would need the two rectangles to be
 /// separately addressable, and here the whole chip is one control.
 pub fn input_chip(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
-    let base = layer_decor(s.surface_container_low, s.on_surface_variant, state, SHAPE_SMALL())
+    let base = layer_decor(s.on_surface_variant, state, SHAPE_SMALL())
     let decor = ui.bordered(
         ui.inked(base, s.on_surface_variant),
         mix(s.outline_variant, s.primary, state.focus),

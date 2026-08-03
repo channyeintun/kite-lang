@@ -877,6 +877,14 @@ fn draw_one(frame: Frame) {
     }
     let body = frame.content
     if body.len() == 0 {
+        // Paired with the `set_alpha` above, and the pairing is the point: a
+        // box with no text of its own left through here without restoring the
+        // opacity, so everything drawn *after* a translucent box was drawn
+        // translucent too. Nothing had noticed, because until a design system
+        // wanted a state layer nothing set `alpha` on a box — the one place it
+        // was used was on text, which leaves by the bottom of this function.
+        // The symptom was a whole list fading out below a hovered row.
+        unset_alpha(d.alpha)
         return
     }
     // Content goes inside the padding, and wraps to the width measurement used

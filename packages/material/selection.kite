@@ -95,7 +95,7 @@ fn checkbox_body(
             },
             [mark],
         ),
-        layer_decor(s.surface, if checked { s.primary } else { s.on_surface }, state, SHAPE_FULL()),
+        layer_decor(if checked { s.primary } else { s.on_surface }, state, SHAPE_FULL()),
     )
     return labelled_control(s, id, halo, caption, state)
 }
@@ -130,7 +130,7 @@ pub fn checkbox_mixed(s: Scheme, id: str, caption: str, state: State) -> ui.Node
             },
             [mark],
         ),
-        layer_decor(s.surface, s.primary, state, SHAPE_FULL()),
+        layer_decor(s.primary, state, SHAPE_FULL()),
     )
     return labelled_control(s, id, halo, caption, state)
 }
@@ -188,7 +188,7 @@ pub fn radio(s: Scheme, id: str, caption: str, chosen: bool, state: State) -> ui
             },
             [ring],
         ),
-        layer_decor(s.surface, if chosen { s.primary } else { s.on_surface }, state, SHAPE_FULL()),
+        layer_decor(if chosen { s.primary } else { s.on_surface }, state, SHAPE_FULL()),
     )
     return labelled_control(s, id, halo, caption, state)
 }
@@ -232,7 +232,7 @@ pub fn switch(s: Scheme, id: str, caption: str, on: bool, state: State) -> ui.No
     }
     // The state layer of a switch is a circle around the *knob*, not the track.
     let knob_ink = if on { s.primary } else { s.on_surface }
-    let halo = layer_decor(track_fill, knob_ink, state, SHAPE_FULL())
+    let halo = layer_decor(knob_ink, state, SHAPE_FULL())
 
     var track = ui.rounded(track_fill, SHAPE_FULL())
     if amount < 1.0 {

@@ -164,7 +164,7 @@ fn list_body(
     if amount > 0.0 {
         decor = ui.rounded(layered(selected_fill, head_ink, state), SHAPE_FULL())
     } else {
-        decor = layer_decor(s.surface, s.on_surface, state, SHAPE_FULL())
+        decor = layer_decor(s.on_surface, state, SHAPE_FULL())
     }
 
     var lines = [
@@ -404,7 +404,7 @@ pub fn menu_item(
     return ui.control(
         ui.decorated(
             ui.box_of(id, style, children),
-            ui.inked(layer_decor(surface_at(s, LEVEL_2()), s.on_surface, state, 0.0), s.on_surface),
+            ui.inked(layer_decor(s.on_surface, state, 0.0), s.on_surface),
         ),
         id,
     )
@@ -625,7 +625,7 @@ pub fn snackbar(name: str, s: Scheme, message: str, action: [ui.Node]) -> ui.Nod
 pub fn snackbar_action(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
     let role = label_large()
     let width = ui.text_size_in(caption, role.size, role.weight).width + space(2) * 2.0
-    let decor = layer_decor(s.inverse_surface, s.inverse_primary, state, SHAPE_EXTRA_SMALL())
+    let decor = layer_decor(s.inverse_primary, state, SHAPE_EXTRA_SMALL())
     return centred_body(
         id,
         caption,

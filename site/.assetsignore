@@ -1,2 +1,9 @@
 # The build script builds the site; it is not part of it.
 build.sh
+
+# Wrangler's own state, which it writes into whatever directory it was run
+# from. Deploying from inside `site/` therefore drops a `.wrangler` into the
+# assets and publishes it — the account id in `cache/wrangler-account.json`
+# ends up served from the site's root. Deploy from the repository root; this is
+# the second line of defence for when someone does not.
+.wrangler
