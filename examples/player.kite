@@ -28,6 +28,16 @@
 // anything is painted. This file never mentions `std/text`: the reordering
 // happens inside the *layout*, which is why the DOM and canvas renderers agree
 // about it — switch between them and nothing moves.
+//
+// Burmese is here for a different reason, and it is the hardest line in the
+// list. It reads left to right, so UAX #9 has nothing to do — and it still has
+// no useful relationship between the number of characters and the number of
+// things on the screen. `ဆယ်လ်` carries two asat marks that kill the vowel of
+// the consonant before them; `မွန်` hangs a medial under its consonant; and in
+// `အပြန်` the medial ra is written *after* its consonant and drawn wrapped
+// around the front of it. A layout that measured by counting characters would
+// get every Latin line right and this one wrong, which is exactly why it is
+// here.
 
 use std/math
 use std/ui
@@ -182,7 +192,12 @@ fn library() -> [Track] {
         Track { title: "مرحبا بالعالم", artist: "أحمد", genre: "Ambient", length: 187 },
         Track { title: "שלום עולם", artist: "שרה", genre: "Jazz", length: 203 },
         Track { title: "日本語のテスト", artist: "山田", genre: "Jazz", length: 341 },
-        Track { title: "नमस्ते दुनिया", artist: "आर्या", genre: "Classical", length: 296 },
+        Track {
+            title: "ဆယ်လ်မွန်ငါးတို့အပြန်",
+            artist: "ခင်မောင်တိုး",
+            genre: "Classical",
+            length: 296,
+        },
         Track { title: "Difference Machine", artist: "Charles Babbage", genre: "Classical", length: 412 },
         Track { title: "Silent Partition", artist: "Grace Hopper", genre: "Ambient", length: 168 },
         Track { title: "Tail Call", artist: "Guy Steele", genre: "Jazz", length: 225 },
