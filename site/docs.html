@@ -8,7 +8,7 @@
 <link rel="stylesheet" href="kite.css">
 </head>
 <body>
-<header>
+<header class="topbar">
   <a class="brand" href="index.html">
     <img class="mark" src="kite-mark.svg" alt="" width="28" height="28">
     <span class="name">Kite</span>
@@ -23,7 +23,47 @@
   </nav>
 </header>
 
-<main id="content"><p class="muted">Loading…</p></main>
+<main class="doc">
+  <div class="container" id="content"><p class="muted">Loading…</p></div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="columns">
+      <div>
+        <h4>Learn</h4>
+        <ul>
+          <li><a href="docs.html?doc=SPECIFICATION.md">Specification</a></li>
+          <li><a href="reference.html">Standard library reference</a></li>
+          <li><a href="playground.html">Playground</a></li>
+          <li><a href="docs.html?doc=README.md">README</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Design notes</h4>
+        <ul>
+          <li><a href="docs.html?doc=docs/01-platform-research.md">Platform research</a></li>
+          <li><a href="docs.html?doc=docs/02-concurrency.md">Concurrency</a></li>
+          <li><a href="docs.html?doc=docs/03-compiler-architecture.md">Compiler architecture</a></li>
+          <li><a href="docs.html?doc=docs/04-stdlib-ui.md">The UI layer</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>The project</h4>
+        <ul>
+          <li><a href="https://github.com/channyeintun/kite-lang">GitHub</a></li>
+          <li><a href="docs.html?doc=docs/06-roadmap.md">Roadmap</a></li>
+          <li><a href="brand.html">Brand sheet</a></li>
+          <li><a href="https://github.com/channyeintun/kite-lang/blob/main/LICENSE">MIT licence</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="attribution">
+      <p>Kite is a draft. The specification moves, and the compiler moves behind it.</p>
+      <p>This site fetches nothing: no fonts, no analytics, no framework.</p>
+    </div>
+  </div>
+</footer>
 
 <script type="module">
 import { markdown } from "./kite.js";

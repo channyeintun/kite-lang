@@ -1,88 +1,139 @@
 /* The site's whole stylesheet. No framework: a language's documentation
    should load on a bad connection and read on a phone, and neither of those
-   needs a build step. */
+   needs a build step.
+
+   ---- the layout system -------------------------------------------------
+   The structure is the one rust-lang.org uses, because it suits a language
+   site: full-bleed bands of solid colour rather than a single scrolling
+   page, a highlighter bar under every section heading, uppercase bordered
+   buttons, and a dark footer. What is borrowed is the *system*; every colour
+   and the wordmark's face come from Kite's own brand sheet (brand.html),
+   which stays the authority for both.
+
+   Type is on rust-lang.org's root scale — 62.5% then 75% — so the rem
+   figures below are the same ones that site uses, and they land at the same
+   sizes. Container widths stay in px, where a scaling root would only
+   obscure them. */
 
 :root {
-  --ink: #1a1c20;
-  --paper: #fbfbf9;
-  --muted: #5b6068;
-  --rule: #e2e2dd;
-  --accent: #b8442c;
-  --code-bg: #f4f4f0;
-  --keyword: #a3336b;
-  --string: #2c6e49;
-  --comment: #8a8f98;
-  --number: #b45309;
-
   /* ---- brand ------------------------------------------------------------
      The brand sheet is the authority for this block: the mark's colourways,
-     the wordmark's face and tracking, and the header's metrics.
+     the wordmark's face and tracking, and the grounds a mark may sit on.
 
      --kite-mark is a variable rather than `currentColor` because the mark is
      loaded as an <img>, and colour does not cross that boundary. kite-mark.svg
      reads this token itself, so one file serves every colourway. */
   --kite-mark: #c9812a;             /* on light */
+  --gold: #e9a63c;                  /* on dark, and every accent below */
+  --gold-deep: #c9812a;
+  --gold-knockout: #2c1c05;         /* the sheet's text colour on a gold ground */
   --brand-ground: #f4f1ec;          /* the sheet's light ground */
-  --brand-ink: #23212a;             /* the sheet names this for the wordmark */
-  --brand-dim: #6c6a74;
-  --brand-rule: rgba(35, 33, 42, 0.16);
+  --brand-dark: #1d1f2d;            /* the sheet's dark ground */
+  /* The paper band has to stay a step away from the dark band on either side
+     of it, and after dark the sheet's own two grounds are too close to do
+     that. This is the light ground when there is one and a lifted step when
+     there is not. */
+  --band-paper-bg: #f4f1ec;
+  --brand-ink: #23212a;
   --brand-violet: #5f51b0;
-  --brand-violet-ink: #4b3f96;
+  --brand-violet-deep: #4b3f96;
+  --brand-violet-light: #9184d9;
+
+  /* ---- the page -------------------------------------------------------- */
+  --paper: #ffffff;
+  --ink: #23212a;
+  --muted: #5b5966;
+  --rule: #e4e1dc;
+  --panel: #f6f4f0;
+  --brand-rule: rgba(35, 33, 42, 0.16);
+  --link-underline: var(--gold-deep);
+
+  /* ---- code, which is dark on every ground -----------------------------
+     rust-lang.org colours code the same way whatever band it lands in, and
+     that is the right call: a code block is a quotation from a terminal, and
+     a quotation does not change costume to suit the page. */
+  --code-bg: #12141f;
+  --code-ink: #d5d6de;
+  --code-rule: rgba(233, 233, 237, 0.12);
+  --keyword: #9184d9;
+  --string: #7fbf9a;
+  --comment: #767c86;
+  --number: #dba55a;
+
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+  /* JetBrains Mono Medium at −2% tracking is the wordmark. The sheet fetches
+     the face from Google Fonts; this site fetches nothing, so it asks for
+     JetBrains Mono and falls back to whatever monospace face is installed.
+     The weight and the tracking are what carry the wordmark either way. */
+  --display: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  --container: 1152px;
+  --measure: 40rem;
 }
 
+/* Only the grounds that are *paper* follow the reader's theme. A band of
+   violet is a band of violet at midnight: inverting it would be showing a
+   different design, not the same one after dark. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --ink: #e6e6e1;
-    --paper: #161826;
-    --muted: #9aa0a8;
-    --rule: #2c3037;
-    --accent: #e8795c;
-    --code-bg: #1d1f2d;
-    --keyword: #e78ab5;
-    --string: #7fbf9a;
-    --comment: #767c86;
-    --number: #dba55a;
-
     --kite-mark: #e9a63c;
-    --brand-ground: #1d1f2d;
-    --brand-ink: #e9e9ed;
-    --brand-dim: #8b8d9e;
+    --paper: #15161f;
+    --ink: #e6e6e1;
+    --muted: #9a97a6;
+    --rule: #2c2f3d;
+    --panel: #1b1d29;
     --brand-rule: rgba(233, 233, 237, 0.16);
-    /* The violet is the sheet's own #9184d9. Its light-ground counterpart
-       above is the same hue taken down far enough to read on paper. */
-    --brand-violet: #9184d9;
-    --brand-violet-ink: #c3bbee;
+    --brand-ground: #1b1d29;
+    --band-paper-bg: #282c3f;
+    --link-underline: var(--gold);
   }
 }
 
 * { box-sizing: border-box; }
 
+html { font-size: 62.5%; }
+@media screen and (min-width: 30em) { html { font-size: 75%; } }
+
 body {
   margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
   background: var(--paper);
   color: var(--ink);
-  font: 17px/1.65 ui-serif, Georgia, "Times New Roman", serif;
+  font-family: var(--sans);
+  font-size: 1.5rem;
+  line-height: 1.6;
   -webkit-text-size-adjust: 100%;
 }
 
-/* ---- the header, as the brand sheet draws it ----
-   Metrics are the sheet's: 26px of side padding, a 28px mark, 12px to the
-   wordmark, 26px between nav items. The mark's clear space is a quarter of its
-   height — 7px at this size — and every gap here is larger than that. */
+body > main { flex: 1; }
 
-header {
-  border-bottom: 1px solid var(--brand-rule);
-  background: var(--brand-ground);
-  color: var(--brand-dim);
-  padding: 16px 26px;
+.container {
+  width: 100%;
+  max-width: var(--container);
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* ---- the top bar, as the brand sheet draws it ----
+   Metrics are the sheet's: a 28px mark, 12px to the wordmark, 26px between
+   nav items. The mark's clear space is a quarter of its height — 7px at this
+   size — and every gap here is larger than that. */
+
+.topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 32px;
   flex-wrap: wrap;
+  gap: 16px 32px;
+  padding: 18px 26px;
+  background: var(--brand-ground);
 }
 
-header .brand {
+.topbar .brand {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -90,168 +141,516 @@ header .brand {
   color: inherit;
 }
 
-header .mark { display: block; width: 28px; height: 28px; }
+.topbar .mark { display: block; width: 28px; height: 28px; }
 
-/* JetBrains Mono Medium at −2% tracking. The sheet fetches the face from
-   Google Fonts; this site fetches nothing, so it asks for JetBrains Mono and
-   falls back to whatever monospace face is already installed. The weight and
-   the tracking are what carry the wordmark either way. */
-header .name {
-  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+.topbar .name {
+  font-family: var(--display);
   font-weight: 500;
-  font-size: 19px;
+  font-size: 2rem;
   letter-spacing: -0.02em;
-  color: var(--brand-ink);
+  color: var(--ink);
 }
 
-header .chip {
-  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-  font-size: 11px;
-  color: var(--brand-dim);
-  border: 1px solid var(--brand-rule);
+.topbar .chip {
+  font-family: var(--display);
+  font-size: 1.05rem;
+  color: var(--muted);
+  border: 1px solid var(--rule);
   border-radius: 4px;
   padding: 2px 6px;
 }
 
-header nav {
+.topbar nav {
   display: flex;
   align-items: center;
-  gap: 26px;
   flex-wrap: wrap;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  font-size: 13.5px;
+  gap: 8px 26px;
+  font-size: 1.35rem;
 }
 
-header nav a { color: var(--brand-dim); text-decoration: none; }
-header nav a:hover,
-header nav a[aria-current="page"] { color: var(--brand-ink); }
+.topbar nav a {
+  color: var(--ink);
+  text-decoration: none;
+  padding: 4px 0;
+  border-bottom: 2px solid transparent;
+}
+.topbar nav a:hover,
+.topbar nav a[aria-current="page"] { border-bottom-color: var(--gold); }
 
-header nav a.gh {
+.topbar nav a.gh {
   border: 1px solid var(--brand-violet);
-  border-radius: 8px;
-  padding: 6px 13px;
-  font-size: 12.5px;
-  color: var(--brand-violet-ink);
+  border-radius: 4px;
+  padding: 6px 14px;
+  font-weight: 600;
+  font-size: 1.2rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--brand-violet-deep);
 }
-header nav a.gh:hover { color: var(--brand-violet-ink); background: color-mix(in srgb, var(--brand-violet) 12%, transparent); }
-
-a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
-
-main { max-width: 46rem; margin: 0 auto; padding: 2rem 1.5rem 5rem; }
-main.wide { max-width: 72rem; }
-
-h1 { font-size: 2.1rem; line-height: 1.2; letter-spacing: -0.02em; margin: 1.5rem 0 0.5rem; }
-h2 { font-size: 1.4rem; margin: 2.5rem 0 0.5rem; letter-spacing: -0.01em; }
-h3 { font-size: 1.1rem; margin: 2rem 0 0.5rem; }
-
-.lede { font-size: 1.15rem; color: var(--muted); }
-
-code, pre, textarea, .out {
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-  font-size: 0.86em;
+.topbar nav a.gh:hover {
+  background: var(--brand-violet);
+  border-color: var(--brand-violet);
+  color: #fff;
+}
+@media (prefers-color-scheme: dark) {
+  .topbar nav a.gh { color: var(--brand-violet-light); border-color: var(--brand-violet-light); }
+  .topbar nav a.gh:hover { background: var(--brand-violet-light); color: #15161f; }
 }
 
-code { background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 3px; }
+@media screen and (max-width: 60em) {
+  .topbar { justify-content: center; text-align: center; }
+  .topbar nav { justify-content: center; }
+}
+
+/* ---- the hero ---- */
+
+.hero { padding: 56px 0 64px; }
+
+.hero-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+@media screen and (min-width: 60em) {
+  .hero-grid { flex-direction: row; align-items: flex-start; }
+  .hero-grid > :first-child { flex: 1 1 68%; }
+  .hero-grid > :last-child { flex: 0 0 30%; }
+}
+
+.hero h1 {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 8rem;
+  font-weight: 500;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+
+.hero h2 {
+  margin: 2rem 0 0;
+  max-width: 22em;
+  font-size: 3.4rem;
+  font-weight: 300;
+  line-height: 1.25;
+}
+@media screen and (min-width: 60em) { .hero h2 { font-size: 4.2rem; } }
+
+.hero .version {
+  margin: 1.4rem 0 0;
+  text-align: center;
+  font-size: 1.5rem;
+  color: var(--muted);
+}
+
+/* ---- the bands ----
+   A section is a full-bleed ground; `.container` inside it holds the measure.
+   `section header` is inline-block so the highlighter bar can be sized off
+   the heading it underlines rather than off the column. */
+
+/* Only a band gets the band's padding. The cards inside one are `<section>`
+   too — they are sections of the page, and marking them anything else to
+   dodge a selector would be writing the document around the stylesheet. */
+main > section { padding: 52px 0 64px; }
+
+section > .container > header {
+  display: inline-block;
+  padding: 8px 0 26px;
+  max-width: 100%;
+}
+
+section h2 {
+  margin: 0;
+  font-size: 3rem;
+  font-weight: 800;
+  line-height: 1.25;
+  letter-spacing: 0.02em;
+}
+
+/* The highlighter: a bar that overhangs its heading, the one piece of
+   furniture that makes the bands read as one page rather than five. */
+.highlight {
+  position: relative;
+  left: -10px;
+  height: 12px;
+  width: 120%;
+  max-width: 90vw;
+  border-radius: 2px;
+}
+
+section h3 {
+  margin: 0 0 1rem;
+  font-size: 2.1rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+/* A heading that opens a new subject inside a band, rather than one that
+   labels the card it sits at the top of. */
+section h3.sub { margin-top: 4rem; }
+
+section p { margin: 0 0 2rem; }
+section p:last-child { margin-bottom: 0; }
+
+.lede { font-size: 1.9rem; line-height: 1.5; font-weight: 300; }
+
+/* Two widths, and the difference matters: `.measure` is how wide a line of
+   prose may get before it is hard to track back to; `.column` is how wide the
+   block holding it may get. Code takes the column, prose takes the measure,
+   and they share a left edge. */
+.measure { max-width: var(--measure); }
+.column { max-width: 66rem; }
+
+.cols-3, .cols-2 {
+  display: grid;
+  gap: 32px;
+}
+@media screen and (min-width: 60em) {
+  .cols-3 { grid-template-columns: repeat(3, 1fr); gap: 48px; }
+  .cols-2 { grid-template-columns: repeat(2, 1fr); gap: 48px; }
+}
+/* Stretched, so that a row of cards ends its buttons on one line however
+   unevenly the prose above them falls. */
+.cols-3 > *, .cols-2 > * { display: flex; flex-direction: column; }
+.cols-3 .button, .cols-2 .button { margin-top: auto; align-self: flex-start; }
+
+/* A band that is one claim and one button. */
+.cta-row {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  align-items: flex-start;
+}
+@media screen and (min-width: 60em) {
+  .cta-row { flex-direction: row; align-items: center; gap: 48px; }
+  .cta-row > :first-child { flex: 1; }
+  .cta-row > .button { flex: none; }
+}
+.cta-row h2 { margin-bottom: 1.4rem; }
+
+/* ---- the grounds ----
+   Four, as the brand sheet approves them: the dark ground, the violet, the
+   gold with its knockout, and paper. */
+
+.band-ink    { background: var(--brand-dark); color: #e9e9ed; }
+.band-violet { background: var(--brand-violet-deep); color: #fff; }
+.band-gold   { background: var(--gold); color: var(--gold-knockout); }
+.band-paper  { background: var(--band-paper-bg); color: var(--ink); }
+.band-page   { background: var(--paper); color: var(--ink); }
+
+.band-ink .highlight,
+.band-violet .highlight { background: var(--gold); }
+.band-gold .highlight { background: var(--gold-knockout); }
+.band-paper .highlight,
+.band-page .highlight { background: var(--brand-violet); }
+
+.band-ink .muted { color: #9a9cae; }
+.band-violet .muted { color: #cdc7ea; }
+.band-gold .muted { color: #6b4a13; }
+
+/* Links inside a coloured band are the band's own text, underlined — an
+   accent colour there would compete with the ground. The accent is kept for
+   the one button that matters and for the footer. A button is not a link for
+   this purpose, hence the exclusion: it carries its own ground already. */
+.band-ink a:not(.button),
+.band-violet a:not(.button),
+.band-gold a:not(.button) {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.band-ink a:not(.button):hover,
+.band-violet a:not(.button):hover { color: var(--gold); }
+.band-gold a:not(.button):hover { opacity: 0.7; }
+
+/* ---- buttons ---- */
+
+.button {
+  display: inline-block;
+  min-height: 38px;
+  padding: 10px 30px;
+  text-align: center;
+  font-family: var(--sans);
+  font-size: 1.35rem;
+  font-weight: 600;
+  letter-spacing: 0.1rem;
+  text-transform: uppercase;
+  text-decoration: none;
+  border: 1px solid;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.12s ease, filter 0.12s ease;
+}
+/* A button's label never changes colour on hover — the ground it sits on is
+   what it is legible against. The border and a slight deepening carry the
+   state instead. */
+.button:hover, .button:focus-visible { filter: brightness(0.94); }
+
+/* The primary call to action is the sheet's gold ground with its #2C1C05
+   knockout — an approved colourway, not a new one. */
+.button-primary {
+  display: block;
+  width: 100%;
+  padding: 20px;
+  font-size: 2rem;
+  background: var(--gold);
+  border-color: var(--gold);
+  color: var(--gold-knockout);
+}
+.button-primary:hover, .button-primary:focus { border-color: var(--gold-knockout); }
+
+.button-secondary { font-size: 1.2rem; text-decoration: none; }
+
+.band-ink .button-secondary,
+.band-violet .button-secondary {
+  background: var(--gold);
+  border-color: var(--gold);
+  color: var(--gold-knockout);
+}
+.band-ink .button-secondary:hover,
+.band-violet .button-secondary:hover { border-color: #fff; }
+
+.band-gold .button-secondary {
+  background: var(--gold-knockout);
+  border-color: var(--gold-knockout);
+  color: var(--gold);
+}
+.band-gold .button-secondary:hover { border-color: #fff; }
+
+.band-paper .button-secondary,
+.band-page .button-secondary {
+  background: var(--brand-violet);
+  border-color: var(--brand-violet);
+  color: #fff;
+}
+.band-paper .button-secondary:hover,
+.band-page .button-secondary:hover { border-color: var(--ink); }
+
+/* ---- prose on paper ---- */
+
+/* `:not(.button)` throughout: a button carries its own ground, and the link
+   hover colour landing on it would tint the label towards that ground — on
+   the gold call to action, to the point of vanishing. */
+a:not(.button) {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--link-underline);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+a:not(.button):hover { color: var(--gold-deep); }
+@media (prefers-color-scheme: dark) { a:not(.button):hover { color: var(--gold); } }
+
+h1, h2, h3, h4 { letter-spacing: -0.01em; }
+
+/* ---- code ---- */
+
+code, pre, textarea, .out { font-family: var(--mono); }
+
+code {
+  font-size: 0.88em;
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+  background: rgba(127, 127, 127, 0.2);
+}
 
 /* The sheet gives a code block a 2px left edge in the mark's colour and
    squares that corner off, so the accent reads as a margin rule. */
 pre {
+  margin: 0 0 2rem;
+  padding: 1.6rem 1.8rem;
   background: var(--code-bg);
-  border: 1px solid var(--rule);
-  border-left: 2px solid var(--kite-mark);
+  color: var(--code-ink);
+  border: 1px solid var(--code-rule);
+  border-left: 2px solid var(--gold);
   border-radius: 0 6px 6px 0;
-  padding: 0.9rem 1rem;
   overflow-x: auto;
-  line-height: 1.5;
+  font-size: 1.3rem;
+  line-height: 1.55;
 }
 
-pre code { background: none; padding: 0; }
-
-table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.95rem; }
-th, td { border-bottom: 1px solid var(--rule); padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
-th { font-weight: 600; }
-
-blockquote {
-  margin: 1rem 0;
-  padding-left: 1rem;
-  border-left: 3px solid var(--rule);
-  color: var(--muted);
-}
-
-/* ---- the playground ---- */
-
-.pad { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; align-items: start; }
-@media (max-width: 60rem) { .pad { grid-template-columns: 1fr; } }
-
-textarea {
-  width: 100%;
-  min-height: 26rem;
-  padding: 0.9rem 1rem;
-  border: 1px solid var(--rule);
-  border-radius: 6px;
-  background: var(--code-bg);
-  color: var(--ink);
-  resize: vertical;
-  line-height: 1.5;
-  tab-size: 4;
-}
-
-.out {
-  white-space: pre-wrap;
-  min-height: 26rem;
-  padding: 0.9rem 1rem;
-  border: 1px solid var(--rule);
-  border-radius: 6px;
-  background: var(--code-bg);
-  overflow-x: auto;
-}
-
-.controls { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin: 0 0 0.75rem; }
-
-button, select {
-  font: inherit;
-  font-size: 0.9rem;
-  padding: 0.35rem 0.8rem;
-  border: 1px solid var(--rule);
-  border-radius: 5px;
-  background: var(--paper);
-  color: var(--ink);
-  cursor: pointer;
-}
-
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-button:disabled { opacity: 0.5; cursor: default; }
-
-.samples { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.75rem; }
-.samples button { font-size: 0.8rem; padding: 0.2rem 0.55rem; }
-
-.muted { color: var(--muted); }
-.status { color: var(--muted); font-size: 0.85rem; }
-
-/* ---- syntax colours ---- */
+pre code { background: none; padding: 0; font-size: inherit; white-space: pre; }
 
 .k { color: var(--keyword); }
 .s { color: var(--string); }
 .c { color: var(--comment); font-style: italic; }
 .n { color: var(--number); }
 
-/* The demo, embedded. It is the page `kitec build` writes, in a frame — so
-   what the site shows and what the compiler produces cannot drift apart. The
-   stage inside is 640x360 plus its own toolbar; the frame is sized to that
-   rather than stretched, because the program draws at a fixed size and
-   scaling it would be showing something the program did not say. */
+/* ---- tables, quotes, rules ---- */
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0 0 2rem;
+  font-size: 1.4rem;
+}
+th, td {
+  border-bottom: 1px solid var(--rule);
+  padding: 0.8rem 1rem 0.8rem 0;
+  text-align: left;
+  vertical-align: top;
+}
+th { font-weight: 700; }
+
+.band-ink th, .band-ink td,
+.band-violet th, .band-violet td { border-bottom-color: rgba(255, 255, 255, 0.22); }
+
+blockquote {
+  margin: 0 0 2rem;
+  padding-left: 1.6rem;
+  border-left: 3px solid var(--gold);
+  color: var(--muted);
+}
+
+hr { border: 0; border-top: 1px solid var(--rule); margin: 3rem 0; }
+
+ul, ol { padding-left: 1.6em; margin: 0 0 2rem; }
+li { margin-bottom: 0.6rem; }
+
+.muted { color: var(--muted); }
+
+/* ---- the demos ----
+   The embedded page is the one `kitec build` writes, in a frame, so what the
+   site shows and what the compiler produces cannot drift apart. The stage
+   inside is 640x360 plus its own toolbar; the frame is sized to that rather
+   than stretched, because the program draws at a fixed size and scaling it
+   would be showing something the program did not say. */
+
+.demo-row {
+  display: grid;
+  gap: 28px;
+  align-items: start;
+  margin-bottom: 40px;
+}
+@media screen and (min-width: 68em) {
+  .demo-row { grid-template-columns: 664px 1fr; gap: 40px; }
+}
+.demo-row:last-child { margin-bottom: 0; }
+
 iframe.demo {
   display: block;
   width: 100%;
   max-width: 664px;
   height: 460px;
-  border: 1px solid var(--line, #2b2d3b);
+  border: 1px solid var(--brand-rule);
   border-radius: 6px;
   background: #11131f;
-  margin: 1.2rem 0 0.6rem;
 }
 
-.demo-note {
-  font-size: 0.9rem;
-  opacity: 0.75;
+/* ---- document pages ----
+   The specification, the reference and the playground are documents, not a
+   landing page: one ground, one column, and a measure that can be read. */
+
+main.doc { padding: 40px 0 80px; }
+/* 60rem is 720px at the wide root, which is the width these documents were
+   written to: long enough for the specification's grammar blocks to sit on
+   one line, short enough that its prose does not need a ruler. */
+main.doc > .container { max-width: 60rem; }
+main.doc.wide > .container { max-width: var(--container); }
+
+main.doc h1 { font-size: 4rem; font-weight: 800; line-height: 1.2; margin: 0 0 1.5rem; }
+main.doc h2 { font-size: 2.6rem; font-weight: 700; margin: 4rem 0 1.2rem; }
+main.doc h3 { font-size: 1.9rem; font-weight: 600; margin: 3rem 0 1rem; }
+main.doc h4 { font-size: 1.6rem; font-weight: 600; margin: 2.4rem 0 1rem; }
+main.doc p { margin: 0 0 1.8rem; }
+main.doc .lede { color: var(--muted); margin-bottom: 3rem; }
+
+/* ---- the playground ---- */
+
+.pad { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+@media (max-width: 60em) { .pad { grid-template-columns: 1fr; } }
+
+textarea, .out {
+  width: 100%;
+  min-height: 34rem;
+  padding: 1.4rem 1.6rem;
+  border: 1px solid var(--code-rule);
+  border-radius: 6px;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  font-size: 1.3rem;
+  line-height: 1.55;
+  tab-size: 4;
 }
+
+textarea { resize: vertical; }
+.out { white-space: pre-wrap; overflow-x: auto; }
+
+.controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 0 0 16px; }
+
+button, select {
+  font-family: var(--sans);
+  font-size: 1.3rem;
+  padding: 7px 16px;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+button:hover, select:hover { border-color: var(--gold); }
+
+button.primary {
+  background: var(--gold);
+  border-color: var(--gold);
+  color: var(--gold-knockout);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+button:disabled { opacity: 0.45; cursor: default; }
+button:disabled:hover { border-color: var(--rule); }
+
+.samples { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0 32px; }
+.samples button { font-size: 1.2rem; padding: 5px 14px; border-radius: 999px; }
+.samples button[aria-current="true"] {
+  background: var(--gold);
+  border-color: var(--gold);
+  color: var(--gold-knockout);
+  font-weight: 600;
+}
+
+.status { color: var(--muted); font-size: 1.3rem; }
+
+/* ---- the footer ---- */
+
+footer {
+  padding: 48px 0 32px;
+  background: var(--brand-ink);
+  color: #e9e9ed;
+  font-size: 1.4rem;
+}
+
+footer .columns {
+  display: grid;
+  gap: 32px;
+  grid-template-columns: 1fr;
+}
+@media screen and (min-width: 48em) {
+  footer .columns { grid-template-columns: repeat(3, 1fr); gap: 48px; }
+}
+
+footer h4 {
+  margin: 0 0 1.6rem;
+  font-size: 1.4rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #a9a6b6;
+}
+
+footer ul { list-style: none; padding: 0; margin: 0; }
+footer li { margin-bottom: 1rem; }
+
+footer a { color: var(--gold); text-decoration: none; }
+footer a:hover { color: var(--gold); text-decoration: underline; }
+
+footer .attribution {
+  margin-top: 40px;
+  padding-top: 24px;
+  border-top: 1px solid rgba(233, 233, 237, 0.14);
+  color: #8f8c9c;
+  font-size: 1.3rem;
+}
+footer .attribution p { margin: 0 0 0.6rem; }
+footer .attribution a { color: #c3bbee; }

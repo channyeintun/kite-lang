@@ -15,19 +15,21 @@
 .panel {
   border: 1px solid var(--rule);
   border-radius: 8px;
-  background: var(--code-bg);
+  background: var(--panel);
   padding: 26px 28px;
-  margin: 1rem 0;
+  margin: 16px 0;
 }
 
-.panel > h2 {
+/* Scoped through `main.doc` to outrank the stylesheet's own heading scale:
+   these are labels on a specimen, not headings in a document. */
+main.doc .panel > h2 {
   margin: 0 0 18px;
-  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  font-family: var(--sans);
   font-size: 10px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--muted);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 /* The mark, at any size and in any colourway, from the one file. */
@@ -48,21 +50,21 @@
 .row.bottom { align-items: flex-end; }
 
 .wordmark {
-  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-family: var(--display);
   font-weight: 500;
   letter-spacing: -0.02em;
   line-height: 1;
-  color: var(--brand-ink);
+  color: var(--ink);
 }
 
-.note { font-size: 13px; line-height: 1.6; color: var(--muted); font-family: ui-sans-serif, system-ui, sans-serif; }
-.note strong { color: var(--ink); font-weight: 500; }
+.note { font-size: 13px; line-height: 1.6; color: var(--muted); font-family: var(--sans); }
+.note strong { color: var(--ink); font-weight: 600; }
 
 .spec {
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 6px 22px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--mono);
   font-size: 11.5px;
   line-height: 1.7;
   color: var(--muted);
@@ -81,7 +83,7 @@
   justify-content: center;
 }
 .way .label {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--mono);
   font-size: 11px;
   color: var(--muted);
   margin-top: 8px;
@@ -118,7 +120,7 @@
   gap: 9px;
   border-radius: 8px 8px 0 0;
   padding: 9px 14px 11px;
-  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--sans);
   font-size: 12px;
   white-space: nowrap;
 }
@@ -130,7 +132,7 @@
 </style>
 </head>
 <body>
-<header>
+<header class="topbar">
   <a class="brand" href="index.html">
     <img class="mark" src="kite-mark.svg" alt="" width="28" height="28">
     <span class="name">Kite</span>
@@ -145,7 +147,8 @@
   </nav>
 </header>
 
-<main>
+<main class="doc">
+  <div class="container">
   <h1>Kite — Flight</h1>
   <p class="lede">
     Geometry, clear space, colourways and the three places the mark lives.
@@ -289,6 +292,45 @@
       left edge.
     </p>
   </div>
+  </div>
 </main>
+
+<footer>
+  <div class="container">
+    <div class="columns">
+      <div>
+        <h4>Learn</h4>
+        <ul>
+          <li><a href="docs.html?doc=SPECIFICATION.md">Specification</a></li>
+          <li><a href="reference.html">Standard library reference</a></li>
+          <li><a href="playground.html">Playground</a></li>
+          <li><a href="docs.html?doc=README.md">README</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Design notes</h4>
+        <ul>
+          <li><a href="docs.html?doc=docs/01-platform-research.md">Platform research</a></li>
+          <li><a href="docs.html?doc=docs/02-concurrency.md">Concurrency</a></li>
+          <li><a href="docs.html?doc=docs/03-compiler-architecture.md">Compiler architecture</a></li>
+          <li><a href="docs.html?doc=docs/04-stdlib-ui.md">The UI layer</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>The project</h4>
+        <ul>
+          <li><a href="https://github.com/channyeintun/kite-lang">GitHub</a></li>
+          <li><a href="docs.html?doc=docs/06-roadmap.md">Roadmap</a></li>
+          <li><a href="brand.html">Brand sheet</a></li>
+          <li><a href="https://github.com/channyeintun/kite-lang/blob/main/LICENSE">MIT licence</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="attribution">
+      <p>Kite is a draft. The specification moves, and the compiler moves behind it.</p>
+      <p>This site fetches nothing: no fonts, no analytics, no framework.</p>
+    </div>
+  </div>
+</footer>
 </body>
 </html>

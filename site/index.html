@@ -9,7 +9,7 @@
 <link rel="stylesheet" href="kite.css">
 </head>
 <body>
-<header>
+<header class="topbar">
   <a class="brand" href="index.html">
     <img class="mark" src="kite-mark.svg" alt="" width="28" height="28">
     <span class="name">Kite</span>
@@ -25,81 +25,128 @@
 </header>
 
 <main>
-  <h1>A small, explicit language for application software</h1>
-  <p class="lede">
-    WebAssembly is the primary target, not an afterthought. Errors are values
-    and the compiler enforces it. There is one concurrency concept. Nothing
-    hides control flow.
-  </p>
 
-<pre><code class="kite sketch">fn main() {
-    let (cfg, err) = config.load("app.toml")
-    check err
+<header class="hero">
+  <div class="container">
+    <div class="hero-grid">
+      <div>
+        <h1>Kite</h1>
+        <h2>A small, explicit language for application software.</h2>
+      </div>
+      <div>
+        <a class="button button-primary" href="playground.html">Try it in your browser</a>
+        <p class="version">
+          <a href="docs.html?doc=docs/06-roadmap.md">v0.1.0-dev — see the roadmap</a>
+        </p>
+      </div>
+    </div>
+  </div>
+</header>
 
-    ui.run(App{ title: cfg.title })
-}
-</code></pre>
+<section class="band-violet">
+  <div class="container">
+    <header>
+      <h2>Why Kite?</h2>
+      <div class="highlight"></div>
+    </header>
+    <div class="cols-3">
+      <section>
+        <h3>Explicit</h3>
+        <p>
+          Nothing hides control flow. There is no exception unwinding, no
+          implicit conversion and no overloading — every branch a program can
+          take is written down where it happens. Verbosity is an acceptable
+          price for that; hidden control flow is not.
+        </p>
+      </section>
+      <section>
+        <h3>Checked</h3>
+        <p>
+          Failures are ordinary values, and the compiler enforces it: an error
+          you have not checked makes the value beside it unreadable. Matches
+          are exhaustive, bindings are immutable by default, and the
+          diagnostics name one cause and one fix.
+        </p>
+      </section>
+      <section>
+        <h3>Web-first</h3>
+        <p>
+          WebAssembly is the primary target, not a backend bolted on. Kite
+          emits WasmGC directly, so it ships no garbage collector of its own —
+          the difference between a 300&nbsp;KB hello world and a 5&nbsp;KB
+          one.
+        </p>
+      </section>
+    </div>
+  </div>
+</section>
 
-  <p>
-    <a href="playground.html">Run Kite in your browser</a> — the playground is
-    the compiler itself, built for WebAssembly. Nothing there talks to a
-    server.
-  </p>
+<section class="band-paper">
+  <div class="container">
+    <header>
+      <h2>See it run</h2>
+      <div class="highlight"></div>
+    </header>
 
-  <h2 id="six-hundred-birds">Six hundred birds</h2>
-  <p>
-    Every bird considers every other one: 360,000 distance tests a frame, about
-    6&nbsp;ms of them against a 16.7&nbsp;ms budget for sixty frames a second.
-    The naive O(n²) algorithm on purpose — a spatial index would measure the
-    index rather than the language. <strong>Move the pointer over it; it is a
-    hawk.</strong> The three buttons swap a DOM renderer, a canvas renderer and
-    a text renderer against the same compiled module.
-  </p>
-  <iframe class="demo" src="demo/" title="A flock of six hundred birds, written in Kite"
-          loading="lazy"></iframe>
-  <p class="demo-note">
-    That frame is not a video and not a special case: it is what
-    <code>kitec build examples/boids.kite --emit wasm</code> writes, served
-    unaltered. The source is
-    <a href="https://github.com/channyeintun/kite-lang/blob/main/examples/boids.kite">examples/boids.kite</a>.
-  </p>
+    <div class="demo-row">
+      <iframe class="demo" src="demo/" title="A flock of six hundred birds, written in Kite"
+              loading="lazy"></iframe>
+      <div>
+        <h3>Six hundred birds</h3>
+        <p>
+          Every bird considers every other one: 360,000 distance tests a frame,
+          about 6&nbsp;ms of them against a 16.7&nbsp;ms budget for sixty
+          frames a second. The naive O(n²) algorithm on purpose — a spatial
+          index would measure the index rather than the language.
+          <strong>Move the pointer over it; it is a hawk.</strong> The three
+          buttons swap a DOM renderer, a canvas renderer and a text renderer
+          against the same compiled module.
+        </p>
+        <p class="muted">
+          That frame is not a video and not a special case: it is what
+          <code>kitec build examples/boids.kite --emit wasm</code> writes,
+          served unaltered. The source is
+          <a href="https://github.com/channyeintun/kite-lang/blob/main/examples/boids.kite">examples/boids.kite</a>.
+        </p>
+      </div>
+    </div>
 
-  <h2 id="a-music-library">Music app demo</h2>
-  <iframe class="demo" src="player/" title="A music library written in Kite, in Material Design 3"
-          loading="lazy"></iframe>
-  <p class="demo-note">
-    Source:
-    <a href="https://github.com/channyeintun/kite-lang/blob/main/examples/player.kite">examples/player.kite</a>,
-    and the design system it uses is
-    <a href="https://github.com/channyeintun/kite-lang/tree/main/packages/material">packages/material</a>.
-  </p>
+    <div class="demo-row">
+      <iframe class="demo" src="player/" title="A music library written in Kite, in Material Design 3"
+              loading="lazy"></iframe>
+      <div>
+        <h3>A music library</h3>
+        <p>
+          The same compiler, pointed at an application rather than a
+          simulation: a library, a seekable transport and a design
+          system, all drawn by the UI standard library.
+        </p>
+        <p class="muted">
+          Source:
+          <a href="https://github.com/channyeintun/kite-lang/blob/main/examples/player.kite">examples/player.kite</a>,
+          and the design system it uses is
+          <a href="https://github.com/channyeintun/kite-lang/tree/main/packages/material">packages/material</a>.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
 
-  <h2>Why it exists</h2>
-  <p>
-    JavaScript and TypeScript grew into application development by accident.
-    Every serious web application today ships a compiler, a bundler, a type
-    checker bolted on from outside, a virtual DOM, and a runtime that
-    re-derives structure the compiler already knew and threw away.
-  </p>
-  <p>
-    WebAssembly 3.0 — ratified 13 June 2026 — removed the last technical
-    reason to accept that. It standardises garbage collection, native
-    exception handling, tail calls and typed function references, and all of
-    it is baseline across Chrome, Firefox and Safari. A language targeting
-    Wasm today does not need to ship a garbage collector inside its own
-    binary. That single fact is the difference between a 300 KB "hello world"
-    and a 5 KB one.
-  </p>
+<section class="band-ink">
+  <div class="container">
+    <header>
+      <h2>What is different</h2>
+      <div class="highlight"></div>
+    </header>
 
-  <h2>What is different</h2>
-
-  <h3>An error you have not checked makes the value unreadable</h3>
-  <p>
-    Go's <code>(T, error)</code> shape is right: failures are ordinary values
-    and every one is visible in the source. Its flaw is that nothing enforces
-    it — and the value on a failure path is a zero value that flows onward
-    looking valid.
-  </p>
+    <div class="column">
+    <h3>An error you have not checked makes the value unreadable</h3>
+    <p class="measure">
+      Go's <code>(T, error)</code> shape is right: failures are ordinary values
+      and every one is visible in the source. Its flaw is that nothing enforces
+      it — and the value on a failure path is a zero value that flows onward
+      looking valid.
+    </p>
 <pre><code class="kite sketch">use std/json
 
 fn title_of(document: str) -&gt; (str, error) {
@@ -109,29 +156,30 @@ fn title_of(document: str) -&gt; (str, error) {
     return json.text_or(parsed, "title", "untitled"), nil
 }
 </code></pre>
-  <p>
-    Reading <code>raw</code> before the check is <code>E0301</code>. Letting
-    <code>err</code> go out of scope unexamined is <code>E0302</code>.
-  </p>
+    <p class="measure">
+      Reading <code>parsed</code> before the check is <code>E0301</code>.
+      Letting <code>err</code> go out of scope unexamined is
+      <code>E0302</code>.
+    </p>
 
-  <h3>Concurrency is one concept</h3>
-  <p>
-    Some operations take time: mark them <code>async</code> and
-    <code>await</code> them. Calling an <code>async fn</code> starts it and
-    yields a <code>Task&lt;T&gt;</code>, which is how two things happen at
-    once. There are no channels, no goroutines and no <code>select</code>.
-  </p>
+    <h3>Concurrency is one concept</h3>
+    <p class="measure">
+      Some operations take time: mark them <code>async</code> and
+      <code>await</code> them. Calling an <code>async fn</code> starts it and
+      yields a <code>Task&lt;T&gt;</code>, which is how two things happen at
+      once. There are no channels, no goroutines and no <code>select</code>.
+    </p>
 <pre><code class="kite sketch">let a = fetch("alpha", 100)
 let b = fetch("beta", 50)
 let (first, second) = await task.both(a, b)   // 100ms, not 150
 </code></pre>
-  <p>
-    The source never says how many threads exist. <code>Share</code> — a
-    marker the compiler infers structurally — is what will make the same
-    program parallel on the web the day shared-everything-threads ships.
-  </p>
+    <p class="measure">
+      The source never says how many threads exist. <code>Share</code> — a
+      marker the compiler infers structurally — is what will make the same
+      program parallel on the web the day shared-everything-threads ships.
+    </p>
 
-  <h3>Exhaustive matching, and a compiler that names what is missing</h3>
+    <h3>Exhaustive matching, and a compiler that names what is missing</h3>
 <pre><code class="kite">enum Shape {
     Circle(radius: float)
     Rect(width: float, height: float)
@@ -145,25 +193,21 @@ fn area(s: Shape) -> float {
         Point => 0.0,
     }
 }
-
-fn main() {
-    io.print(area(Shape.Rect(width: 2.0, height: 3.0)))
-}
 </code></pre>
-  <p>
-    Leave out <code>Point</code> and the error names it. That is what makes
-    adding a variant safe: the compiler shows every place that must change.
-  </p>
+    <p class="measure">
+      Leave out <code>Point</code> and the error names it. That is what makes
+      adding a variant safe: the compiler shows every place that must change.
+    </p>
 
-  <h3>Immutable by default</h3>
-  <p>
-    <code>let</code> bindings and struct fields are immutable unless marked
-    <code>var</code>. That maps directly onto WasmGC's per-field mutability
-    flag, removes the value-versus-pointer distinction, and makes most types
-    shareable across tasks without their author doing anything.
-  </p>
+    <h3>Immutable by default</h3>
+    <p class="measure">
+      <code>let</code> bindings and struct fields are immutable unless marked
+      <code>var</code>. That maps directly onto WasmGC's per-field mutability
+      flag, removes the value-versus-pointer distinction, and makes most types
+      shareable across tasks without their author doing anything.
+    </p>
 
-  <h3>Diagnostics are the product</h3>
+    <h3>Diagnostics are the product</h3>
 <pre><code>error[E0114]: cannot assign to immutable binding `total`
    ┌─ cart.kite:14:5
    │
@@ -178,28 +222,73 @@ help: make the binding mutable
  9 │     var total = 0
    │     ~~~
 </code></pre>
-  <p>
-    Several decisions in the language — nominal traits, explicit
-    <code>dyn</code>, no implicit conversions, no overloading — were made
-    because they let the compiler name one cause and one fix.
-  </p>
+    <p class="measure">
+      Several decisions in the language — nominal traits, explicit
+      <code>dyn</code>, no implicit conversions, no overloading — were made
+      because they let the compiler name one cause and one fix.
+    </p>
+    </div>
+  </div>
+</section>
 
-  <h2>Where it runs</h2>
-  <table>
-    <thead><tr><th>Target</th><th>How</th><th>State</th></tr></thead>
-    <tbody>
-      <tr><td><code>wasm32-gc</code></td><td>WasmGC, emitted directly</td><td>Every construct the language has</td></tr>
-      <tr><td><code>kbc</code></td><td>Register bytecode and a VM</td><td>The dev loop, the embedding target, and the differential oracle</td></tr>
-      <tr><td><code>native-*</code></td><td>Cranelift, ahead of time</td><td>Not yet — see the roadmap</td></tr>
-    </tbody>
-  </table>
-  <p>
-    Every program in the test corpus is compiled to <em>both</em> backends,
-    run on both, and the outputs compared. Two independent implementations
-    that must agree is what makes codegen bugs findable.
-  </p>
+<section class="band-gold">
+  <div class="container">
+    <div class="cta-row">
+      <div>
+        <h2>Run Kite with no server</h2>
+        <p>
+          The playground is the compiler itself, built for WebAssembly. It
+          checks, formats, runs, and will show you the AST, the HIR, the MIR
+          and the bytecode. Nothing on that page talks to a server.
+        </p>
+      </div>
+      <a class="button button-secondary" href="playground.html">Open the playground</a>
+    </div>
+  </div>
+</section>
 
-  <h2>The tools</h2>
+<section class="band-page">
+  <div class="container">
+    <header>
+      <h2>Why it exists</h2>
+      <div class="highlight"></div>
+    </header>
+    <div class="cols-2">
+      <p>
+        JavaScript and TypeScript grew into application development by
+        accident. Every serious web application today ships a compiler, a
+        bundler, a type checker bolted on from outside, a virtual DOM, and a
+        runtime that re-derives structure the compiler already knew and threw
+        away.
+      </p>
+      <p>
+        WebAssembly 3.0 — ratified 13 June 2026 — removed the last technical
+        reason to accept that. It standardises garbage collection, native
+        exception handling, tail calls and typed function references, and all
+        of it is baseline across Chrome, Firefox and Safari. A language
+        targeting Wasm today does not need to ship a garbage collector inside
+        its own binary. That single fact is the difference between a 300&nbsp;KB
+        "hello world" and a 5&nbsp;KB one.
+      </p>
+    </div>
+
+    <div class="column">
+    <h3 class="sub">Where it runs</h3>
+    <table>
+      <thead><tr><th>Target</th><th>How</th><th>State</th></tr></thead>
+      <tbody>
+        <tr><td><code>wasm32-gc</code></td><td>WasmGC, emitted directly</td><td>Every construct the language has</td></tr>
+        <tr><td><code>kbc</code></td><td>Register bytecode and a VM</td><td>The dev loop, the embedding target, and the differential oracle</td></tr>
+        <tr><td><code>native-*</code></td><td>Cranelift, ahead of time</td><td>Not yet — see the roadmap</td></tr>
+      </tbody>
+    </table>
+    <p class="measure">
+      Every program in the test corpus is compiled to <em>both</em> backends,
+      run on both, and the outputs compared. Two independent implementations
+      that must agree is what makes codegen bugs findable.
+    </p>
+
+    <h3 class="sub">The tools</h3>
 <pre><code>kitec run     file.kite          compile and run
 kitec check   file.kite          check only
 kitec test    file.kite          run every `test_` function
@@ -209,19 +298,93 @@ kitec fix     file.kite          apply every machine-applicable suggestion
 kitec build   file.kite --emit wasm --out dist
 kitec --explain E0301            why a rule exists
 </code></pre>
+    </div>
+  </div>
+</section>
 
-  <h2>Reading order</h2>
-  <ul>
-    <li><a href="docs.html?doc=SPECIFICATION.md">The specification</a> — the language itself.</li>
-    <li><a href="reference.html">The standard library reference</a>, generated from its own source.</li>
-    <li><a href="docs.html?doc=docs/01-platform-research.md">Platform research</a> — what Wasm can and cannot do in 2026, with sources.</li>
-    <li><a href="docs.html?doc=docs/02-concurrency.md">Concurrency</a> — the async model and the <code>Share</code> marker.</li>
-    <li><a href="docs.html?doc=docs/03-compiler-architecture.md">Compiler architecture</a> — crates, IRs, and the WasmGC lowering.</li>
-    <li><a href="docs.html?doc=docs/04-stdlib-ui.md">The UI layer</a> — layout, and the dual DOM/canvas renderer.</li>
-    <li><a href="docs.html?doc=docs/06-roadmap.md">The roadmap</a> — what is done, and what is honestly not.</li>
-    <li><a href="brand.html">The brand sheet</a> — the mark, its geometry, and where it is allowed to go.</li>
-  </ul>
+<section class="band-violet">
+  <div class="container">
+    <header>
+      <h2>Reading order</h2>
+      <div class="highlight"></div>
+    </header>
+    <div class="cols-3">
+      <section>
+        <h3>The specification</h3>
+        <p>The language itself — grammar, type system, semantics and the
+          diagnostic catalogue.</p>
+        <a class="button button-secondary" href="docs.html?doc=SPECIFICATION.md">Read the spec</a>
+      </section>
+      <section>
+        <h3>The standard library</h3>
+        <p>Generated from its own source by <code>kitec doc</code>, because
+          the library is written in Kite too.</p>
+        <a class="button button-secondary" href="reference.html">Read the reference</a>
+      </section>
+      <section>
+        <h3>The roadmap</h3>
+        <p>What is done, and what is honestly not. Kite is a draft and the
+          page says so.</p>
+        <a class="button button-secondary" href="docs.html?doc=docs/06-roadmap.md">See the roadmap</a>
+      </section>
+      <section>
+        <h3>Platform research</h3>
+        <p>What Wasm can and cannot do in 2026, with sources.</p>
+        <a class="button button-secondary" href="docs.html?doc=docs/01-platform-research.md">Read the research</a>
+      </section>
+      <section>
+        <h3>Concurrency</h3>
+        <p>The async model and the <code>Share</code> marker.</p>
+        <a class="button button-secondary" href="docs.html?doc=docs/02-concurrency.md">Read the design</a>
+      </section>
+      <section>
+        <h3>Compiler architecture</h3>
+        <p>Crates, IRs, and the WasmGC lowering.</p>
+        <a class="button button-secondary" href="docs.html?doc=docs/03-compiler-architecture.md">Read the architecture</a>
+      </section>
+    </div>
+  </div>
+</section>
+
 </main>
+
+<footer>
+  <div class="container">
+    <div class="columns">
+      <div>
+        <h4>Learn</h4>
+        <ul>
+          <li><a href="docs.html?doc=SPECIFICATION.md">Specification</a></li>
+          <li><a href="reference.html">Standard library reference</a></li>
+          <li><a href="playground.html">Playground</a></li>
+          <li><a href="docs.html?doc=README.md">README</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Design notes</h4>
+        <ul>
+          <li><a href="docs.html?doc=docs/01-platform-research.md">Platform research</a></li>
+          <li><a href="docs.html?doc=docs/02-concurrency.md">Concurrency</a></li>
+          <li><a href="docs.html?doc=docs/03-compiler-architecture.md">Compiler architecture</a></li>
+          <li><a href="docs.html?doc=docs/04-stdlib-ui.md">The UI layer</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>The project</h4>
+        <ul>
+          <li><a href="https://github.com/channyeintun/kite-lang">GitHub</a></li>
+          <li><a href="docs.html?doc=docs/06-roadmap.md">Roadmap</a></li>
+          <li><a href="brand.html">Brand sheet</a></li>
+          <li><a href="https://github.com/channyeintun/kite-lang/blob/main/LICENSE">MIT licence</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="attribution">
+      <p>Kite is a draft. The specification moves, and the compiler moves behind it.</p>
+      <p>This site fetches nothing: no fonts, no analytics, no framework.</p>
+    </div>
+  </div>
+</footer>
 
 <script type="module">
 import { colourCodeBlocks } from "./kite.js";
