@@ -42,8 +42,15 @@ mkdir -p "$out/player"
 echo "  player/index.html"
 # The recording the player names. Copied rather than referenced, because the
 # module asks the host for a URL relative to the page it is served from.
-cp "$root/assets/khin-maung-toe.mp3" "$out/player/khin-maung-toe.mp3"
-echo "  player/khin-maung-toe.mp3"
+#
+# AAC in an MP4 container rather than MP3, and the container is the point. An
+# MP3 is a bare run of frames with no index, so a player can only *estimate*
+# where a timestamp lives and a variable-rate file defeats even that. MP4
+# carries a sample table — an exact map from time to byte — and `+faststart`
+# puts it at the front, so the whole index has arrived within the first fifty
+# kilobytes. It is also half the size at the same audible quality.
+cp "$root/assets/khin-maung-toe.m4a" "$out/player/khin-maung-toe.m4a"
+echo "  player/khin-maung-toe.m4a"
 
 echo "copying the documents…"
 mkdir -p "$out/docs"
