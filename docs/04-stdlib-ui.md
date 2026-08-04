@@ -82,60 +82,101 @@ canvas is first-class, and it is not the only option.
 
 ## 3. Widgets
 
+The idiom before the widgets, because every example below is written in it.
+
+Kite structs have no default field values: a literal names every field, or
+extends a base with `..`
+([spec §5.3](../SPECIFICATION.md#53-struct-literals)). A `Style` has ten
+fields, and a call site that wrote out all ten to say *a centred row* would
+bury the two that matter. So the layer ships **one authored default per
+struct** — `ui.style()` is a function, which means there is exactly one place
+to read to learn what a default is — and a call site extends it, or composes
+the combinators that do:
+
+```kite
+ui.Style{..ui.row(), align: ui.Align.Center }    // name the two that matter
+ui.spaced(ui.padded(ui.column(), 16.0), 12.0)    // or chain the common ones
+```
+
+The same constraint decides what is required and what is optional, with no
+named arguments and no overloading needed: **required is a parameter, optional
+is a field behind a default.** A widget that cannot work without an id and a
+caption takes them positionally, and a call site that forgets one does not
+compile — every call site, forever. Everything optional lives on a struct
+reachable with `..`, where omitting it means accepting an authored default
+rather than a compiler-invented zero.
+
+A component is a **function that returns a node**. There is no component class
+and no internal state — Kite has no mutable globals, so a component that
+remembered something would have to be handed it, and the application's model
+is what it would be handed.
+
 ```kite
 use std/ui
+use material
 
-pub fn app(state: State) -> ui.Node {
-    return ui.Box{
-        dir:     ui.Col,
-        gap:     16.0,
-        padding: ui.all(24.0),
-        children: [
-            ui.Text{
-                value: "Tasks",
-                style: ui.TextStyle{ size: 28.0, weight: ui.Bold },
-            },
-            ui.Box{
-                dir:      ui.Row,
-                gap:      8.0,
-                align:    ui.Center,
-                children: [
-                    ui.Input{
-                        value:    state.draft,
-                        hint:     "what needs doing?",
-                        grow:     1.0,
-                        on_change: |text| Msg.DraftChanged(text),
-                    },
-                    ui.Button{
-                        label:   "Add",
-                        on_press: || Msg.Add,
-                    },
-                ],
-            },
-            ui.Scroll{
-                grow:     1.0,
-                children: state.tasks.map(task_row),
-            },
-        ],
-    }
-}
+fn view_node(model: Model) -> ui.Node {
+    let s = material.dark()
 
-fn task_row(t: Task) -> ui.Node {
-    return ui.Box{
-        dir:      ui.Row,
-        gap:      12.0,
-        align:    ui.Center,
-        padding:  ui.xy(12.0, 8.0),
-        radius:   8.0,
-        bg:       ui.rgb(0xF5, 0xF5, 0xF7),
-        children: [
-            ui.Checkbox{ checked: t.done, on_toggle: |v| Msg.Toggle(t.id, v) },
-            ui.Text{ value: t.title, grow: 1.0 },
-            ui.Button{ label: "×", variant: ui.Ghost, on_press: || Msg.Delete(t.id) },
-        ],
+    var rows: [ui.Node] = []
+    for i in 0..model.tasks.len() {
+        let task = model.tasks[i]
+        rows.push(material.checkbox(
+            s,
+            "task\(i)",
+            task.title,
+            task.done,
+            material.when_focused(model.focused == "task\(i)"),
+        ))
     }
+
+    let header = ui.box_of(
+        "header",
+        ui.spaced(ui.padded(ui.Style{..ui.row(), align: ui.Align.Center }, 12.0), 8.0),
+        [
+            material.outlined_field(
+                s,
+                "draft",
+                model.draft,
+                "What needs doing?",
+                260.0,
+                material.when_focused(model.focused == "draft"),
+            ),
+            material.filled_button(
+                s,
+                "add",
+                "Add",
+                material.when_focused(model.focused == "add"),
+            ),
+        ],
+    )
+
+    let list = ui.box_of(
+        "list",
+        ui.spaced(ui.padded(ui.Style{..ui.column(), align: ui.Align.Stretch }, 12.0), 4.0),
+        rows,
+    )
+
+    return ui.decorated(
+        ui.box_of("app", ui.Style{..ui.column(), align: ui.Align.Stretch }, [header, list]),
+        ui.filled(s.surface),
+    )
 }
 ```
+
+[examples/todo.kite](../examples/todo.kite) is this program complete, with the
+keyboard.
+
+Declarative here means exactly one thing: **the tree is a value.** `view_node`
+is a pure function from the model to a `Node`; nothing in it draws, and
+nothing it returns can reach back and change the model it was shown. What it
+does not mean is markup. The sparse literal this document used to sketch —
+`ui.Box{ dir: ui.Col, gap: 16.0, children: [...] }`, every unnamed field
+silently defaulted — is not legal Kite: it needs default field values, which
+the spec does not have, and whether it should is
+[§10 question 3](#10-open-questions). Until it does, the constructor functions
+cost a few characters over markup and keep every omission an authored decision
+with one place to read.
 
 ### The widget set
 
@@ -157,12 +198,18 @@ Kept small on purpose. Everything else composes from these.
 | `Canvas` | Escape hatch for custom drawing (charts, games, visualisations) |
 | `Portal` | Renders outside the parent's clip — modals, tooltips |
 
-Note that `Input`, `TextArea`, and `Select` are the widgets a canvas-only design
-would force you to reimplement. Under `DomRenderer` they are real elements and
-get IME, autofill, and selection for free. Under `CanvasRenderer` they are backed
-by a hidden, positioned real element that receives the events — the same
-technique Flutter and Google Docs use, and the reason those widgets are in the
-standard set rather than left to users.
+Today the split is: `std/ui` owns the tree, the layout and the paint —
+`box_of`, `text_of`, `control`, `decorated` — and the interactive widgets are
+functions in design-system packages
+([packages/material](../packages/material) ships the Material 3 set: buttons,
+fields, selection, navigation, progress). The table above is the set `std/ui`
+itself grows as the renderers land, because the middle rows cannot stay a
+package's problem: `Input`, `TextArea`, and `Select` are the widgets a
+canvas-only design would force you to reimplement. Under `DomRenderer` they
+are real elements and get IME, autofill, and selection for free. Under
+`CanvasRenderer` they are backed by a hidden, positioned real element that
+receives the events — the same technique Flutter and Google Docs use, and the
+reason those widgets are in the standard set rather than left to users.
 
 ---
 
@@ -174,49 +221,49 @@ independently implemented (Taffy, Yoga) — which means it can be validated agai
 a reference.
 
 ```kite
-pub struct Box {
-    // Direction and flow
-    pub dir:     Direction     // Row | Col
-    pub wrap:    Wrap          // NoWrap | Wrap
-    pub justify: Justify       // Start | Center | End | SpaceBetween | SpaceAround | SpaceEvenly
-    pub align:   Align         // Start | Center | End | Stretch | Baseline
-
-    // Child participation
-    pub grow:    float         // flex-grow
-    pub shrink:  float         // flex-shrink
-    pub basis:   ?float        // flex-basis
-
-    // Sizing
-    pub width:   ?Size         // Px(f) | Pct(f) | Auto
-    pub height:  ?Size
-    pub min:     ?Constraints
-    pub max:     ?Constraints
-
-    // Spacing
-    pub gap:     float
-    pub padding: Edges
-    pub margin:  Edges
-
-    // Appearance
-    pub bg:      ?Color
-    pub radius:  float
-    pub border:  ?Border
-    pub shadow:  ?Shadow
-    pub opacity: float
-    pub clip:    bool
-
+pub struct Node {
+    pub name: str
+    pub style: Style           // where the box goes — the layout reads only this
+    pub content: Content       // Empty, or Text(str); a box holds children instead
     pub children: [Node]
+    pub role: Option<str>      // this subtree is one control, and this is its id
+    pub decor: Decor           // how the box looks — the layout never reads it
+}
+
+pub struct Style {
+    pub axis: Axis             // Row | Column
+    pub justify: Justify       // Start | Center | End | SpaceBetween
+    pub align: Align           // Start | Center | End | Stretch
+    pub width: Option<float>   // fixed, or nil to size from the content
+    pub height: Option<float>
+    pub grow: float            // share of the leftover main-axis space
+    pub padding: Insets
+    pub gap: float             // between children, not around them
+    pub size: float            // the font the node is measured *and* drawn in
+    pub weight: int
 }
 ```
 
-Deliberately excluded from v1: grid, absolute positioning (use `Stack`), floats,
-`z-index` beyond `Stack` ordering, and CSS cascade of any kind. There are **no
-stylesheets** — style is a value, passed explicitly, and therefore type-checked,
-refactorable, and dead-code-eliminable.
+Appearance — fill, ink, border, corner radius, opacity, centring — is `Decor`,
+a separate struct riding on the node. The separation is the invariant the
+two-renderer design rests on: **geometry is a function of style and content
+only.** The layout never reads `decor`, so a renderer may draw a box any way
+it likes and cannot move one; a test asserts it, by laying out the same tree
+with every decoration stripped and comparing frames.
+
+Deliberately excluded from v1: grid; wrapping; `flex-shrink` and `flex-basis`;
+margins (gap and padding say the same thing without collapsing rules);
+percentage sizes; minimum and maximum constraints; absolute positioning (use
+`Stack`); floats; `z-index` beyond `Stack` ordering; and CSS cascade of any
+kind. There are **no stylesheets** — style is a value, passed explicitly, and
+therefore type-checked, refactorable, and dead-code-eliminable.
 
 ### Implementation
 
-Two passes over a flat buffer, not a pointer-chasing tree walk:
+What ships today in [std/ui.kite](../std/ui.kite) is the simple thing: a
+recursive `measure` bottom-up, then `arrange` top-down, over the node tree
+itself — correct first, and small enough to read in one sitting. Where it goes
+when profiling says the walk is the cost is a flat arena:
 
 ```kite
 // Layout works over parallel flat buffers, not GC object graphs.
@@ -239,9 +286,11 @@ flagged: WasmGC arrays of structs are arrays of *references*, so a hot numeric
 inner loop would chase pointers. `buffer.F64` gives a flat linear-memory buffer,
 and the layout engine is the main consumer of that escape hatch.
 
-Pass 1 measures intrinsic sizes bottom-up. Pass 2 resolves flexible lengths
-top-down. Subtrees whose inputs are unchanged are skipped via a dirty flag, so a
-typical frame re-lays out only the changed branch.
+The passes are the same two either way — measure intrinsic sizes bottom-up,
+resolve flexible lengths top-down — and nothing in the API names the
+representation, which is what makes the arena a swap rather than a rewrite.
+With it come dirty flags: subtrees whose inputs are unchanged are skipped, so
+a typical frame re-lays out only the changed branch.
 
 ---
 
@@ -272,66 +321,93 @@ by the canvas renderer, so DOM-rendered applications never pay for it.
 
 ## 6. Events and state
 
-The application is a pure function of state, with messages as the only way to
-change it. This is the Elm architecture, chosen because it needs no new language
-concept — it is a `struct`, an `enum`, a `match`, and a `fn`.
+An application is three exported functions and a model the host holds between
+events:
 
 ```kite
-pub enum Msg {
-    DraftChanged(str)
-    Add
-    Toggle(id: int, done: bool)
-    Delete(id: int)
-    Loaded(tasks: [Task])
-    LoadFailed(err: error)
+pub fn init() -> Model
+pub fn view(model: Model)
+pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model
+```
+
+The model never crosses the boundary as data — it is a Wasm reference the page
+holds and hands back, opaque to JavaScript, which is what lets it be any Kite
+type at all — and `update` returns a new model rather than changing one. There
+is nowhere else to keep state: Kite has no mutable globals, so the shape every
+state-management library eventually converges on arrives without a library,
+and with no way to draw from an update or to mutate from a view. It is the Elm
+architecture, chosen because it needs no new language concept — a `struct`, a
+`fn`, and a `match`.
+
+Events come through one door. A click fills `x` and `y`; a key press fills
+`key`; a new kind of event is a new constant rather than a new export, and a
+program that ignores a kind never tests for it. Turning a point into a
+decision is a hit-test against the same tree `view` drew: `ui.control_at`
+answers with the id of the control the point landed in — an id the application
+minted when it built the node — so dispatch is a comparison against the
+application's own vocabulary:
+
+```kite
+fn frames_of(model: Model) -> [ui.Frame] {
+    return ui.layout(view_node(model), ui.Size{ width: 640.0, height: 360.0 })
 }
 
-pub fn update(state: State, msg: Msg) -> (State, ui.Effect) {
-    return match msg {
-        DraftChanged(text) => (State{ ..state, draft: text }, ui.none),
+pub fn view(model: Model) {
+    ui.paint(frames_of(model))
+}
 
-        Add => {
-            let t = Task{ id: state.next_id, title: state.draft, done: false }
-            (State{
-                ..state,
-                tasks:   state.tasks.push(t),
-                draft:   "",
-                next_id: state.next_id + 1,
-            }, ui.save(t))
-        },
-
-        Toggle(id, done) => (State{
-            ..state,
-            tasks: state.tasks.map(|t| if t.id == id { Task{ ..t, done: done } } else { t }),
-        }, ui.none),
-
-        Delete(id)     => (State{ ..state, tasks: state.tasks.filter(|t| t.id != id) }, ui.none),
-        Loaded(tasks)  => (State{ ..state, tasks: tasks, loading: false }, ui.none),
-        LoadFailed(e)  => (State{ ..state, error: e.message(), loading: false }, ui.none),
+fn clicked(model: Model, x: float, y: float) -> Model {
+    let hit = ui.control_at(frames_of(model), x, y)
+    if hit == nil {
+        return model
     }
+    let focused = Model{..model, focused: hit }
+    if hit == "add" {
+        return added(focused)
+    }
+    return focused
 }
 
-pub async fn main() {
-    await ui.run(ui.App{
-        init:   || (State.empty(), ui.load_tasks()),
-        update: update,
-        view:   app,
-    })
+fn added(model: Model) -> Model {
+    let title = model.draft.trim()
+    if title.len() == 0 {
+        return Model{..model, message: "nothing to add" }
+    }
+    return Model{
+        ..model,
+        tasks: concat(model.tasks, [Task{ title: title, done: false }]),
+        draft: "",
+        message: "added \(title)",
+    }
 }
 ```
 
-State is immutable, so it is `Share` ([docs/02 §4](02-concurrency.md#4-share-the-invariant-made-nearly-invisible)),
-so it can move across tasks without ceremony. `ui.Effect` is how a message
-handler requests I/O without performing it — which keeps `update` pure and
-therefore trivially testable:
+Because `update` is pure, testing the application is calling it —
+`EVENT_KEY()` is the application's own name for the door's keyboard constant:
 
 ```kite
-let (next, effect) = update(state, Msg.Add)
-assert(next.tasks.len() == 1)
-assert(next.draft == "")
+var model = init()                                    // two tasks in it
+model = update(model, EVENT_KEY(), 0.0, 0.0, "m")     // typed into the draft
+model = update(model, EVENT_KEY(), 0.0, 0.0, "Enter")
+assert(model.tasks.len() == 3, "enter adds the draft")
+assert(model.draft == "", "and clears it")
 ```
 
 No mock DOM, no test renderer, no async in the test.
+[examples/todo.kite](../examples/todo.kite) drives itself exactly this way in
+its `main`, which is how the bytecode target — where there is no page to click
+on — exercises the same program.
+
+The model is immutable, so it is `Share`
+([docs/02 §4](02-concurrency.md#4-share-the-invariant-made-nearly-invisible)),
+so it can move across tasks without ceremony.
+
+Two layers are deliberately absent, not forgotten. A **typed message layer** —
+an `enum Msg` a widget produces, in place of a string id matched by hand —
+waits on [§10 question 4](#10-open-questions), because how a message rides on
+a node decides what a `Node` is. An **effect value** — how an update would ask
+for I/O without performing it, keeping the purity the test above leans on —
+arrives with the same decision, because an effect's reply is a message.
 
 ---
 
@@ -346,14 +422,14 @@ Flutter uses. Where Kite differs is that it fixes Flutter's known failures:
 | Flutter Web problem | Kite's approach |
 |---|---|
 | Accessibility **off by default** behind an invisible button | **Always on.** The semantics tree is built during layout, which already walks every node, so the marginal cost is small. |
-| Text fields announce as "edit, blank" — no `<label>` emitted | `Input` requires a `label` field. Omitting it is a compile error, not a runtime warning. |
+| Text fields announce as "edit, blank" — no `<label>` emitted | A field takes its label as a positional parameter — `outlined_field(s, id, value, label, …)`. Omitting it is a compile error, not a runtime warning. |
 | Lighthouse reports a perfect score inaccurately | `kite check --a11y` audits the widget tree at build time — contrast ratios, missing labels, focus order, touch target sizes. |
 | Semantics drift from visuals | The semantics tree is derived from the *same* scene graph that renders, so it cannot go stale. |
 
-Making `label` a required field on `Input` is the single highest-leverage
-decision here. A required field is checked by the compiler on every build, for
-every developer, forever — whereas a lint is disabled and a runtime warning is
-ignored.
+Making the label a required parameter is the single highest-leverage decision
+here — the *required is a parameter* rule from §3, doing accessibility work. A
+parameter is checked by the compiler on every build, for every developer,
+forever — whereas a lint is disabled and a runtime warning is ignored.
 
 ---
 
@@ -450,8 +526,31 @@ Genuinely undecided, and worth deciding before implementation rather than during
    subtrees (faster, needs a reactivity concept the language currently lacks)?
    Leaning toward rebuild-and-diff for v1, since Kite's allocation is host-GC
    and cheap.
-3. **Fonts on canvas.** Ship a default font subset (~50 KB) so first paint is
+3. **Default field values.** §3 is written with authored defaults and `..`
+   because that is what the spec permits: a literal that omits a field without
+   `..` is an error ([§5.3](../SPECIFICATION.md#53-struct-literals)). A field
+   with a declared constant default — `grow: float = 0.0` — would let a
+   literal name only what it means, and §3 would shed most of its constructor
+   calls. It is not Go's zero value: the value is authored, visible at one
+   declaration, and nothing executes. But it is a literal that no longer lists
+   what it sets, and it is a candidate eleventh concept. The widget layer is
+   so far the only customer asking; whether one customer justifies a spec
+   change is the question.
+4. **Event wiring for the widget layer.** Today a control is a string id the
+   application minted, and `update` compares against its own vocabulary — pure
+   data, and stringly typed. The markup-flavoured alternative, a closure on
+   the node (`on_press: fn() -> Msg`), reads best at the call site and costs
+   the most everywhere else: two closures have no structural equality, the
+   `@derive` walk already refuses function fields, and a handler rebuilt each
+   frame never compares equal to last frame's — so `Node` would need
+   carve-outs from `==`, `Share` and the differ in exactly the places the
+   language is uniform. Between the two sits messages as data — `on_press:
+   Option<Msg>`, a function only where an event carries a payload — which
+   keeps `Node` plain data and every invariant that buys. Leaning there, but
+   it is entangled with question 2: a differ has to decide what handler
+   equality means before either can land.
+5. **Fonts on canvas.** Ship a default font subset (~50 KB) so first paint is
    correct, or always use `document.fonts` and accept a flash of unstyled text?
-4. **Native windowing.** `winit` for the native target is the obvious choice, but
+6. **Native windowing.** `winit` for the native target is the obvious choice, but
    it pulls a substantial dependency tree into what is otherwise a small
    toolchain.
