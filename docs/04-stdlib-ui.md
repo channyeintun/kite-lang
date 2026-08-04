@@ -1,6 +1,7 @@
 # Standard library: the UI layer
 
-One API. Two renderers. Layout computed in Kite so both agree exactly.
+One API. Two peer renderers — the DOM by default, canvas by choice. Layout
+computed in Kite so both agree exactly.
 
 ---
 
@@ -52,7 +53,7 @@ canvas otherwise — the same heuristic on both, because layout already agrees.
 
 ---
 
-## 2. Why both, and not canvas alone
+## 2. Why both, and why the DOM leads
 
 The full evidence is in [docs/01 §6](01-platform-research.md#6-html-in-canvas-correcting-a-common-misreading).
 The short version:
@@ -73,10 +74,23 @@ What canvas-only costs you, concretely, because the browser stops helping:
 - Browser find-in-page
 - Screen reader semantics, unless you rebuild the whole tree yourself
 
-The instinct that GPU-composited retained-mode UI is the future is **right** —
-Figma, Zed, Google Docs and Flutter all took it deliberately. What does not
-follow is that the *standard library* should be able to target only canvas. So
-canvas is first-class, and it is not the only option.
+That list is the answer. Every item on it is something a web application gets
+for free and a canvas application rebuilds — and the rebuild is never as good,
+because these are not features, they are decades of platform behaviour that
+people already know how to use.
+
+**So the DOM is the default and canvas is its peer.** Kite is for building web
+applications, and the way to do that is to use the web rather than to fight it:
+a field is a real `<input>`, a picture a real `<img>`, a control a real ARIA
+role. None of that is a compromise reached because canvas was too hard; it is
+the better implementation, and §5 and §7 are the itemised proof.
+
+Canvas is the equal alternative for what it is genuinely better at — charts,
+games, visualisations, dense animated surfaces where a thousand boxes would be a
+thousand elements. Figma, Zed and Google Docs each chose it for one specific
+demanding surface, not for their settings pages. Choosing it in Kite is a
+decision about a screen, not about the language, and the API does not change
+either way.
 
 ---
 
@@ -522,7 +536,29 @@ forever — whereas a lint is disabled and a runtime warning is ignored.
 
 ---
 
-## 8. The canvas renderer
+## 8. The renderers
+
+**Two peers, and the DOM is the default.** A web application is the thing Kite
+is for, and the DOM is how the web draws: a field that is a real `<input>` gets
+the caret, the selection, the IME, autofill, the password manager and the mobile
+keyboard for nothing, and a control with a real ARIA role is reachable without a
+parallel anything. §5 and §7 are the record of how much a canvas has to rebuild
+to catch up, and the answer is *most of it, worse*.
+
+So the DOM renderer is not a fallback and canvas is not an ascension. Canvas is
+the equal alternative for the surfaces it is genuinely better at — charts,
+games, visualisations, anything where a thousand boxes would be a thousand
+elements — and choosing it is a decision about one screen rather than about the
+language. The API does not change either way, which is the entire point of
+computing layout in Kite.
+
+The corollary is the rule the drawing boundary is designed around: **it holds
+what both renderers can do exactly.** That is not the DOM holding canvas back;
+it is what makes a program mean the same thing in both. Where the two differ in
+*kind* rather than in medium — a text field, a picture, a semantic role — the
+call says what is wanted and each renderer answers as well as it can, which is
+how a real `<input>` and a drawn approximation can be the same call.
+
 
 ```kite
 pub trait Renderer {
@@ -568,6 +604,11 @@ hidden overlay, recovering native text behaviour inside the canvas path. Because
 it is confined to one trait implementation, adopting it is a library change with
 no effect on application code — and if it never ships beyond Chrome, nothing was
 staked on it.
+
+Note which direction that runs in. It would let the canvas path borrow real DOM
+elements, which is the proposal's own purpose; it is not a route to rendering an
+application's chrome on a canvas and calling it finished. A screen that wants
+real inputs already has a renderer that gives it real inputs.
 
 That containment is the whole point of the two-renderer design.
 

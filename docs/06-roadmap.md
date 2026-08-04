@@ -724,6 +724,19 @@ through one door — and a **widget layer**: buttons, text fields, checkboxes, a
 theme, focus order, and hit-testing that answers with the control rather than
 the label inside it.
 
+**The DOM renderer makes real elements**, which is the whole reason it is the
+default. A field is an `<input>` or a `<textarea>`, pooled by control id, so the
+caret, the selection, IME composition, autofill, the password manager and the
+mobile keyboard are the browser's rather than reimplemented. A picture is an
+`<img>`, with the browser's decoding and cache. Every control carries an ARIA
+role and a label — the label being a *required parameter* of every control
+constructor, so a control without one does not compile.
+
+It used to make one thing: a `div`. A field was a run of drawn text with a `|`
+glyph standing in for the caret, and every element was `aria-hidden`, which made
+the DOM path less reachable than the canvas one. Both are fixed, and the second
+was the more embarrassing.
+
 A widget is a function that returns a node, and interaction is a function that
 returns a new model. There is no widget object with internal state and nowhere
 to hide one, because Kite has no mutable globals — a widget that remembered
@@ -732,9 +745,11 @@ something would have to be handed it, which is what the model already is.
 `examples/todo.kite` is the task-list application this phase asks for, and it
 was driven in a browser with the keyboard alone: typing into the focused field,
 `Enter` to add, `Tab` to move, space to toggle. Under the canvas renderer the
-same text reaches the parallel tree. **VoiceOver has not been run against it**,
-so the accessibility half of the exit criterion is claimed no further than
-that.
+same controls reach the parallel semantics tree. **VoiceOver has not been run
+against it**, so the accessibility half of the exit criterion is claimed no
+further than what `kite check --a11y` verifies mechanically: every control
+labelled, every touch target 48dp, every run of text at 4.5:1 against what is
+behind it.
 
 A frame is **recorded before it is painted**, and an identical one is not
 painted at all: a pointer moving over nothing costs one comparison rather than
@@ -797,9 +812,15 @@ shape `buffer.F64` exists to change and has not yet.
 
 ---
 
-## Phase 8 — Canvas renderer 🟡 **text is ordered, shaped and cached; pixels are not compared**
+## Phase 8 — Canvas renderer 🟡 **a peer, not a successor; pixels are not compared**
 
-Done: `canvasRenderer` over Canvas2D, drawing the same four calls the DOM
+The renderers are **peers, and the DOM is the default** — Kite targets web
+applications, and the DOM is how the web draws. This phase is not the one where
+the real renderer arrives; it is the one where the second one does, for the
+surfaces a canvas is genuinely better at. What it must never become is the path
+an application is pushed onto because the DOM path was allowed to rot.
+
+Done: `canvasRenderer` over Canvas2D, drawing the same eleven calls the DOM
 renderer takes and switchable live in the same page against the same module.
 Text is measured through `measureText` in the font that will be drawn, so
 layout matches what is painted.
@@ -808,16 +829,29 @@ layout matches what is painted.
 input positioned where the pointer was, which is the trick every canvas editor
 uses and what brings up the on-screen keyboard on a phone.
 
-**A parallel tree** is done, and is deliberately not called an accessibility
-tree: the same runs of text, in the same order, in hidden DOM beside the
-canvas, so a screen reader is not left with a picture. There are no roles, no
-focus and no live regions.
+**A parallel accessibility tree** is done, and now earns the name. `ui.paint`
+emits a `draw.semantics` call for every control — role, label, checked state,
+focus — and the canvas renderer turns each into a positioned, focusable,
+non-interactive element over the canvas, pooled between frames. The DOM
+renderer reads the same declarations and puts them on the elements it was
+already making, labelling the real `<input>` rather than announcing over it.
+One description, two consumers, so they cannot drift.
 
-**Line breaking is a named subset of UAX #14**: Latin breaks between words, CJK
-between characters, and which characters are wide is *measured* rather than
-tabulated — the host owns the font. It will not break a long URL, knows nothing
-of non-breaking spaces, and will leave a closing bracket at the start of a
-line.
+The announcer — runs of text in order, in hidden DOM — remains beside it for
+text that is not a control.
+
+**UAX #14 landed, in Kite.** `std/text.kite` implements rules LB1–LB31 over a
+Line_Break class table, so a URL breaks after its solidi, a non-breaking space
+does not break, a closing bracket does not start a line, `$1,000.00%` is one
+run, and CJK breaks between ideographs but not before a small kana. Two
+departures the annex itself names: SA — Thai, Lao, Khmer — is treated as AL,
+which §5.1 prescribes without a dictionary, and CB has nothing to break around.
+
+What this replaced mattered more than what it added: the old rule called
+anything wider than `W` *under the host's font* its own piece, which made line
+breaking depend on the font. Two hosts could legitimately disagree about where
+a paragraph broke — the one disagreement the two-renderer design exists to
+prevent.
 
 **UAX #9 landed, in Kite.** `std/text.kite` implements the bidirectional
 algorithm — P2–P3, X1–X10 with the directional status stack and isolates, W1–W7,

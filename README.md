@@ -47,6 +47,7 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 | **No pointers, no references, no lifetimes** | Structs are GC-managed reference types. There is no `*T`, no `&T`, and no value/pointer receiver distinction. |
 | **One concurrency concept, not two** | `async`/`await`. No goroutines, no channels, no mutex-by-default. Calling an `async fn` starts it; `await` is how the value comes out. |
 | **Wasm is the reference target** | The semantics are chosen so that lowering to WasmGC is direct. |
+| **The DOM is the default, and canvas is its peer** | Kite targets web applications, so it uses the platform rather than rebuilding it: a field is a real `<input>`, a picture a real `<img>`, a control a real ARIA role. Canvas is the equal alternative for charts, games and dense animated surfaces — one API, chosen per screen. |
 
 ## What runs today
 
@@ -143,9 +144,16 @@ spatial index would measure the index rather than the language.
 
 `examples/todo.kite` is a task list with a text field, buttons and checkboxes,
 navigable with the keyboard alone. A program with a user interface writes its
-layout with `std/ui.kite` and draws through four host calls. The generated page runs the same module against a DOM
-renderer, a canvas renderer, and a text renderer, switched live — the program
-cannot tell which is running.
+layout with `std/ui.kite` and draws through eleven host calls. The generated page
+runs the same module against a DOM renderer, a canvas renderer, and a text
+renderer, switched live — the program cannot tell which is running.
+
+The DOM one is what a web application ships. It makes real elements: an
+`<input>` or `<textarea>` for a field, so the caret, selection, IME, autofill
+and the mobile keyboard are the browser's; an `<img>` for a picture; and an ARIA
+role and label on every control. The canvas one is the peer you pick for a
+screen that wants pixels, and it carries a parallel semantics tree so it is
+reachable too.
 
 ## The playground is the compiler
 
@@ -166,7 +174,7 @@ python3 -m http.server -d site 8000
 | [docs/01-platform-research.md](docs/01-platform-research.md) | What Wasm can and cannot do in 2026, with sources. Every constraint that shaped the design. |
 | [docs/02-concurrency.md](docs/02-concurrency.md) | The async model, the `Share` marker, and how single-source code becomes parallel when the platform allows. |
 | [docs/03-compiler-architecture.md](docs/03-compiler-architecture.md) | Crate layout, IR pipeline, WasmGC lowering, diagnostics. |
-| [docs/04-stdlib-ui.md](docs/04-stdlib-ui.md) | The UI layer: layout engine, retained scene graph, and the dual DOM/canvas renderer. |
+| [docs/04-stdlib-ui.md](docs/04-stdlib-ui.md) | The UI layer: layout engine, retained scene graph, and the two peer renderers — DOM by default, canvas by choice. |
 | [docs/05-grammar.ebnf](docs/05-grammar.ebnf) | Complete formal grammar. |
 | [docs/06-roadmap.md](docs/06-roadmap.md) | Implementation phases, and exactly how far each one got. |
 | [site/brand.html](site/brand.html) | The mark: geometry, clear space, colourways, lockups. Open it in a browser. |

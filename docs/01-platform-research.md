@@ -190,16 +190,34 @@ must reimplement from nothing.
 
 ### The conclusion Kite draws
 
-The underlying instinct — that GPU-composited, retained-mode UI is the future —
-is **correct**. Figma, Zed, Google Docs and Flutter all took that path for good
-reasons. What does not follow is that the *standard library* should be able to
-target only canvas.
+The underlying instinct — that GPU-composited, retained-mode UI is worth having
+— is **correct for the applications that need it**. Figma, Zed and Google Docs
+took that path for good reasons, and every one of those reasons is about a
+specific, demanding surface: a document canvas, a code editor, a design tool.
+None of them is a reason to render a settings page that way. What does not
+follow from any of it is that the *standard library* should be able to target
+only canvas.
 
 Kite therefore specifies **one UI API with two renderers**
 ([docs/04](04-stdlib-ui.md)): the same `Box`/`Flex`/`Text` program emits either a
 real DOM tree or canvas draw commands, chosen at build time. Layout is computed
-in Kite so both paths agree exactly. Canvas is first-class, as intended — and
-nothing in the language bets on a Chrome-only origin trial.
+in Kite so both paths agree exactly, and nothing in the language bets on a
+Chrome-only origin trial.
+
+**The two are peers, and the DOM is the default.** An earlier draft of this
+document called canvas first-class; that was the wrong conclusion to draw from
+the evidence above, and it is corrected here. Everything this section catalogues
+— the parallel semantics tree, the reimplemented text input, IME, autofill,
+selection, the Lighthouse score that lies — is the cost of *not* using the
+platform. Kite's target is web applications, and a web application that renders
+to a canvas is one that has to rebuild HTML and CSS badly before it can start.
+
+So the DOM renderer uses the platform rather than working around it: a field is a
+real `<input>` or `<textarea>`, a picture is a real `<img>`, a control carries a
+real ARIA role and label. Canvas is the equal alternative for the work it is
+actually better at — dense, animated, GPU-composited surfaces; charts; games;
+anything where a thousand elements would be a thousand elements. Choosing it is a
+decision about *that screen*, not a decision about the language.
 
 Sources: [HTML-in-Canvas browser support](https://html-in-canvas.dev/docs/browser-support/) ·
 [WICG HTML-in-Canvas explainer](https://wicg.github.io/html-in-canvas/) ·

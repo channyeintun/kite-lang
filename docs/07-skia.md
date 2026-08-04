@@ -106,10 +106,16 @@ worth more than arbitrary geometry, and a path is exactly where the DOM
 renderer would start deciding.
 
 This is a real limit and it should be stated as one rather than worked around
-quietly. It means icons are glyphs, a slider's thumb is a rounded rectangle,
-and a chart is not drawable. If that becomes intolerable, the honest move is a
-canvas-only renderer with a documented reduced fidelity on the DOM path — not
-a path primitive that one renderer approximates.
+quietly. It means icons are glyphs and a slider's thumb is a rounded rectangle.
+
+It does **not** mean a chart is undrawable, and the resolution is not a
+canvas-only renderer with the DOM path degraded to match — the two are peers and
+neither is allowed to become the lesser one. A chart is a `Canvas` node
+(§3): the layout reserves a box, `ui.paint_into` clips to it, and `std/canvas`
+draws inside. That confines arbitrary geometry to the region that asked for it,
+which is the honest shape of the problem — the surfaces that need paths are
+specific and bounded, and the rest of the application is boxes and text that both
+renderers agree about exactly.
 
 ## Declined: stroke style with caps and joins
 

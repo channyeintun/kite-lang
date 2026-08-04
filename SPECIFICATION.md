@@ -1381,7 +1381,9 @@ Because `str` is already a JavaScript string via JS String Builtins, string
 arguments cross with no marshalling.
 
 Application code does not use `extern` directly. It is the mechanism by which
-`std/dom`, `std/canvas`, and `std/net` are built.
+`std/fs`, `std/dom`, `std/http` and `std/socket` are built — and, on the web,
+the escape hatches beneath them. Drawing does not go through it: the renderers
+sit on compiler builtins, so a program that paints needs no `extern` at all.
 
 ---
 
