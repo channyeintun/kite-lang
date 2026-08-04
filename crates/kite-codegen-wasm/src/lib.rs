@@ -93,7 +93,7 @@ const EXTERN_REF_NULL: ValType = ValType::Ref(RefType {
 /// Deliberately small: the standard library replaces them from Phase 6. String
 /// operations live here because a `str` is an index into a table the host
 /// holds — which is also why the module needs no linear memory.
-const IMPORTS: [(&str, &[ValType], &[ValType]); 33] = [
+const IMPORTS: [(&str, &[ValType], &[ValType]); 34] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
@@ -208,6 +208,9 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 33] = [
         ],
         &[],
     ),
+    // A character from a code point. A host call because a `str` is the host's
+    // — the module holds an index into a table it keeps.
+    ("str_from_code", &[ValType::I64], &[ValType::I32]),
 ];
 
 /// The same imports again, with `str` as an `externref`.
@@ -231,7 +234,7 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 33] = [
 /// an astral character, and two backends that disagree is the one thing this
 /// project spends its testing budget preventing. `concat` and `equals` are
 /// exact at any code point, so those two are taken and the others are not.
-const JS_STRING_IMPORTS: [(&str, &[ValType], &[ValType]); 33] = [
+const JS_STRING_IMPORTS: [(&str, &[ValType], &[ValType]); 34] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
@@ -320,6 +323,7 @@ const JS_STRING_IMPORTS: [(&str, &[ValType], &[ValType]); 33] = [
         ],
         &[],
     ),
+    ("str_from_code", &[ValType::I64], &[EXTERN_REF_NULL]),
 ];
 
 /// The import table in force.
@@ -483,6 +487,7 @@ fn used_imports(
                         Builtin::DrawSemantics => mark(host::DRAW_SEMANTICS),
                         Builtin::TextWidth => mark(host::MEASURE_TEXT),
                         Builtin::TextHeight => mark(host::LINE_HEIGHT),
+                        Builtin::TextFromCode => mark(host::STR_FROM_CODE),
                         Builtin::DrawClip => mark(host::DRAW_CLIP),
                         Builtin::DrawUnclip => mark(host::DRAW_UNCLIP),
                         Builtin::TaskSpawn => mark(host::TASK_SPAWN),
@@ -583,6 +588,7 @@ mod host {
     pub const DRAW_FIELD: u32 = 30;
     pub const DRAW_IMAGE: u32 = 31;
     pub const DRAW_SEMANTICS: u32 = 32;
+    pub const STR_FROM_CODE: u32 = 33;
 }
 
 pub struct WasmModule {
@@ -2225,11 +2231,19 @@ impl<'a> Emitter<'a> {
             mir::Rvalue::CallBuiltin { builtin, args } => {
                 self.builtin(func, *builtin, args);
                 // Drawing returns nothing; measuring returns a width, the
-                // clock returns a reading, and identity returns an answer.
+                // clock returns a reading, identity returns an answer, and
+                // building a character returns the character.
+                //
+                // A builtin missing from this list does not fail to compile:
+                // its result is silently dropped and the destination keeps
+                // whatever it held, which for a `str` is index 0 — the first
+                // string in the table. `text.from_code` was returning `"["`,
+                // the first literal in the program that called it.
                 return matches!(
                     builtin,
                     Builtin::TextWidth
                         | Builtin::TextHeight
+                        | Builtin::TextFromCode
                         | Builtin::TimeNow
                         | Builtin::PtrSame
                 );
@@ -2723,6 +2737,12 @@ impl<'a> Emitter<'a> {
             }
             Builtin::TextHeight => {
                 func.instruction(&Instruction::Call(self.hosts.at(host::LINE_HEIGHT)));
+            }
+            Builtin::TextFromCode => {
+                for a in args {
+                    self.operand(func, a);
+                }
+                func.instruction(&Instruction::Call(self.hosts.at(host::STR_FROM_CODE)));
             }
             // Structs, enums and maps are all WasmGC structs, and every one of
             // them is a subtype of `eq` — so the comparison the checker has

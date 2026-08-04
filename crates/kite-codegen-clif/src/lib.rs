@@ -158,6 +158,7 @@ const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_print_unit", &[], None),
     ("kite_rt_print_ref", &[I64], None),
     ("kite_rt_str_of_int", &[I64], Some(I64)),
+    ("kite_rt_text_from_code", &[I64], Some(I64)),
     ("kite_rt_str_of_float", &[F64], Some(I64)),
     ("kite_rt_str_of_bool", &[I8], Some(I64)),
     ("kite_rt_str_of_ref", &[I64], Some(I64)),
@@ -1616,6 +1617,11 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
             }
             Builtin::TextHeight => {
                 let r = self.call_rt("kite_rt_text_height", &[]).unwrap();
+                self.def(dst, r);
+            }
+            Builtin::TextFromCode => {
+                let v = self.operand(&args[0]);
+                let r = self.call_rt("kite_rt_text_from_code", &[v]).unwrap();
                 self.def(dst, r);
             }
             Builtin::TaskSpawn => {

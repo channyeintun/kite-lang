@@ -1544,6 +1544,27 @@ impl<'a> Vm<'a> {
 
             Native::TextHeight => Ok(Value::Float(NOMINAL_LINE_HEIGHT * self.font_scale)),
 
+            // A code point that is not a character — a surrogate, or past the
+            // end of Unicode — answers with the empty string. Not U+FFFD: a
+            // caller who wanted a replacement character can write one, and one
+            // who did not would have no way to tell it from a real one in the
+            // text.
+            Native::TextFromCode => {
+                let arg = self.regs[base + arg_base as usize].clone();
+                let Value::Int(code) = arg else {
+                    return Err(Trap::TypeConfusion {
+                        op: "text.from_code",
+                        found: arg.type_name(),
+                    });
+                };
+                let text = u32::try_from(code)
+                    .ok()
+                    .and_then(char::from_u32)
+                    .map(String::from)
+                    .unwrap_or_default();
+                Ok(Value::Str(Rc::from(text.as_str())))
+            }
+
             Native::DrawClip => {
                 let a = |i: usize| self.regs[base + arg_base as usize + i].clone();
                 let _ = writeln!(self.out, "clip {} {} {} {}", a(0), a(1), a(2), a(3));

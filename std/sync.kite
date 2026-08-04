@@ -1,0 +1,144 @@
+// std/sync — Mutex and Atomic, for genuinely shared mutable state.
+//
+// **Why this exists even though Kite has no OS threads yet.**
+//
+// It is tempting to argue that a lock is pointless without parallelism, and
+// that argument is wrong. Kite's tasks are cooperative: they interleave at
+// `await` and `task.yield`, and *anywhere a task yields, another task runs*. A
+// read-modify-write that spans a yield —
+//
+//     let n = counter.value        // task A reads 5
+//     await something()            // task B runs, reads 5, writes 6
+//     counter.value = n + 1        // task A writes 6; B's increment is lost
+//
+// — is a lost update on one thread, today, with the scheduler that ships. That
+// is the same bug a mutex prevents on twenty cores, and it is why Tokio ships
+// an async `Mutex` for a runtime that may well be single-threaded.
+//
+// What real threads will change is the *cost* of these, not their meaning: a
+// `lock` that today yields until a flag clears becomes one that parks on a
+// futex, and no source changes.
+//
+// **The type-system half.** `Share` means "deeply immutable, and so safe to
+// move to another task" — a type with a `var` field anywhere in it is not
+// `Share`. `Mutex<T>` has a `var` field and *is* `Share` regardless of `T`,
+// because reaching the value requires taking the lock. The compiler knows
+// these two types by name, which is the one carve-out in an otherwise purely
+// structural rule; `docs/02 §4` is where that is specified.
+
+use std/task
+
+// ---- Mutex ------------------------------------------------------------------
+
+/// Mutual exclusion around a value.
+///
+/// The value is *inside* the lock rather than beside it, which is the whole
+/// point: there is no way to name it without holding the lock, so "I forgot to
+/// take the lock" is not a mistake that can be written.
+pub struct Mutex<T> {
+    var value: T
+    var held: bool
+}
+
+pub fn mutex<T>(value: T) -> Mutex<T> {
+    return Mutex{ value: value, held: false }
+}
+
+/// Whether the lock is currently held. For diagnostics — a program that
+/// branches on this has a race between asking and acting.
+pub fn is_held<T>(m: Mutex<T>) -> bool {
+    return m.held
+}
+
+/// Take the lock if it is free, and hand back what it guards.
+///
+/// Nil means somebody else holds it. Every caller that takes the lock must
+/// [`release`] it; prefer [`update`], which cannot be got wrong.
+pub fn try_lock<T>(var m: Mutex<T>) -> Option<T> {
+    if m.held {
+        return nil
+    }
+    m.held = true
+    return m.value
+}
+
+/// Take the lock, yielding until it is free.
+///
+/// Yielding rather than spinning is what makes this work at all under a
+/// cooperative scheduler: a spin would never let the holder run, so the lock
+/// would never be released and the program would hang rather than wait.
+pub async fn lock<T>(var m: Mutex<T>) -> T {
+    for {
+        if !m.held {
+            m.held = true
+            return m.value
+        }
+        task.yield()
+    }
+}
+
+/// Put a value back and release the lock.
+pub fn release<T>(var m: Mutex<T>, value: T) {
+    m.value = value
+    m.held = false
+}
+
+/// Take the lock, transform the value, put it back — as one step.
+///
+/// The shape to reach for. `f` runs while the lock is held and cannot yield,
+/// because it is an ordinary function rather than an `async` one — so nothing
+/// interleaves with it and the read-modify-write is atomic with respect to
+/// every other task.
+pub async fn update<T>(var m: Mutex<T>, f: fn(T) -> T) {
+    let held = await lock(m)
+    release(m, f(held))
+}
+
+// ---- Atomic -----------------------------------------------------------------
+
+/// An integer that can be read and written as one step.
+///
+/// `int` only, and deliberately: an atomic of an arbitrary type is a lock
+/// wearing a misleading name, and the whole value of the word "atomic" is that
+/// the operation cannot be interleaved. Everything here is a single expression
+/// with no yield in it, which is exactly that guarantee under the cooperative
+/// scheduler and maps to a real atomic instruction under a threaded one.
+pub struct Atomic {
+    var value: int
+}
+
+pub fn atomic(value: int) -> Atomic {
+    return Atomic{ value: value }
+}
+
+pub fn load(a: Atomic) -> int {
+    return a.value
+}
+
+pub fn store(var a: Atomic, value: int) {
+    a.value = value
+}
+
+/// Add and return the new value.
+pub fn add(var a: Atomic, delta: int) -> int {
+    a.value = a.value + delta
+    return a.value
+}
+
+/// Set to `next` only if the current value is `expect`. Answers whether it was.
+///
+/// The primitive every other lock-free operation is built out of.
+pub fn compare_swap(var a: Atomic, expect: int, next: int) -> bool {
+    if a.value != expect {
+        return false
+    }
+    a.value = next
+    return true
+}
+
+/// Replace the value and return what was there.
+pub fn swap(var a: Atomic, next: int) -> int {
+    let was = a.value
+    a.value = next
+    return was
+}

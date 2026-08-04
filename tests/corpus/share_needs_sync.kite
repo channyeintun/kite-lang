@@ -1,0 +1,44 @@
+// `Share` is what lets a value move to another task, and it means *deeply
+// immutable*: a `var` anywhere in a type disqualifies it.
+//
+// The escape is `sync.Mutex`, which holds a `var` and is `Share` anyway,
+// because reaching what it guards requires taking the lock. That exemption is
+// by name and belongs to the standard library — a user type is judged
+// structurally however it is spelled, which is what this file pins down.
+
+use std/task
+use std/sync
+
+struct Counter {
+    var hits: int
+}
+
+/// A home-made lock earns nothing: the exemption is on `sync.Mutex` by name,
+/// and a type that merely looks like one is judged structurally.
+struct Padlock {
+    var value: int
+}
+
+async fn checks() {
+    // A bare `var` field cannot cross a task boundary.
+    let counters = [Counter{ hits: 0 }]
+    let a = await task.parallel(counters, |c: Counter| c.hits) //~ ERROR E0520
+
+    // Nor can a home-made lookalike, however it is named.
+    let fakes = [Padlock{ value: 0 }]
+    let b = await task.parallel(fakes, |p: Padlock| p.value) //~ ERROR E0520
+
+    // The real one may, and that is the whole point of it.
+    let locks = [sync.mutex(0)]
+    let c = await task.parallel(locks, |m: sync.Mutex<int>| 1)
+
+    // Including one guarding a type that is itself not `Share` — which is
+    // exactly the case docs/02 §4 describes: a `Counter` cannot cross on its
+    // own, and a `Mutex<Counter>` can.
+    let guarded = [sync.mutex(Counter{ hits: 0 })]
+    let d = await task.parallel(guarded, |m: sync.Mutex<Counter>| 1)
+}
+
+async fn main() {
+    await checks()
+}

@@ -11,11 +11,14 @@
 //
 //   * comments, to end of line
 //   * bare and quoted keys, and dotted keys — `a.b.c = 1`
-//   * `[table]` and `[a.b]` headers, and `[[array.of.tables]]`
-//   * basic strings with the standard escapes, and literal `'…'` strings
+//   * `[table]` and `[a.b]` headers, and `[[array.of.tables]]`, which emit
+//     back out in the same form they were read
+//   * basic strings with the standard escapes including `\uXXXX` and
+//     `\UXXXXXXXX`, and literal `'…'` strings
 //   * multi-line `"""…"""` and `'''…'''` strings
 //   * integers, including `+`/`-` signs and `_` separators
-//   * floats, including exponents, `inf` and `nan`
+//   * floats, including exponents. `inf` and `nan` are refused: Kite has no
+//     literal for either, and dividing to reach one is a trap
 //   * booleans
 //   * arrays, which may span lines and may hold anything
 //   * inline tables — `{ a = 1, b = 2 }`
@@ -61,6 +64,14 @@ struct Key {
     next: int
 }
 
+/// A table header: where it points, whether it was `[[doubled]]`, and where
+/// the line ended.
+struct Header {
+    path: [str]
+    repeated: bool
+    next: int
+}
+
 // ---- reading ---------------------------------------------------------------
 
 /// The table a document holds, or an error saying where it went wrong.
@@ -72,6 +83,9 @@ pub fn parse(input: str) -> (Toml, error) {
     // The table that bare `key = value` lines currently belong to. `[a.b]`
     // moves it; the top of the document starts at the root.
     var path: [str] = []
+    // Whether the current header was `[[doubled]]`, in which case assignments
+    // belong to the last element of an array rather than to a table.
+    var in_array = false
     var at = 0
     for {
         at = skip_blank(input, at)
@@ -84,8 +98,20 @@ pub fn parse(input: str) -> (Toml, error) {
             check err
             path = header.path
             at = header.next
+            if header.repeated {
+                // `[[a.b]]` starts a *new element*. Everything assigned until
+                // the next header goes into it, so the index is remembered
+                // alongside the path — a key path alone cannot say "the third
+                // one".
+                let (grown, grow_err) = push_table(root, path)
+                check grow_err
+                root = grown
+                in_array = true
+                continue
+            }
             // A header creates the table even when nothing is assigned in it,
             // which is what makes an empty `[section]` mean something.
+            in_array = false
             let (seeded, seed_err) = ensure_table(root, path)
             check seed_err
             root = seeded
@@ -99,9 +125,15 @@ pub fn parse(input: str) -> (Toml, error) {
         }
         let (step, value_err) = parse_value(input, skip_inline(input, eq + 1))
         check value_err
-        let (placed, place_err) = assign(root, concat(path, key.path), step.value)
-        check place_err
-        root = placed
+        if in_array {
+            let (into, into_err) = assign_in_last(root, path, key.path, step.value)
+            check into_err
+            root = into
+        } else {
+            let (placed, place_err) = assign(root, concat(path, key.path), step.value)
+            check place_err
+            root = placed
+        }
         at = step.next
         let (after, line_err) = end_of_line(input, at)
         check line_err
@@ -110,24 +142,22 @@ pub fn parse(input: str) -> (Toml, error) {
     return Toml.Table(root), nil
 }
 
-/// A `[table]` or `[[array of tables]]` header.
-fn parse_header(input: str, at: int) -> (Key, error) {
+/// A `[table]` or `[[array of tables]]` header, and which of the two it was.
+fn parse_header(input: str, at: int) -> (Header, error) {
     let doubled = at + 1 < input.len() && input.slice(at + 1, at + 2) == "["
-    if doubled {
-        // An array-of-tables header is recognised and refused, rather than
-        // silently read as a plain table — which would put every element of
-        // the array on top of the last.
-        return _, errors.new("toml: `[[array of tables]]` is not supported at \(at)")
-    }
-    let (key, err) = parse_key(input, skip_inline(input, at + 1))
+    let opens = if doubled { 2 } else { 1 }
+    let (key, err) = parse_key(input, skip_inline(input, at + opens))
     check err
-    let close = skip_inline(input, key.next)
-    if close >= input.len() || input.slice(close, close + 1) != "]" {
-        return _, errors.new("toml: expected `]` at \(close)")
+    var close = skip_inline(input, key.next)
+    for k in 0..opens {
+        if close >= input.len() || input.slice(close, close + 1) != "]" {
+            return _, errors.new("toml: expected `]` at \(close)")
+        }
+        close = close + 1
     }
-    let (after, line_err) = end_of_line(input, close + 1)
+    let (after, line_err) = end_of_line(input, close)
     check line_err
-    return Key{ path: key.path, next: after }, nil
+    return Header{ path: key.path, repeated: doubled, next: after }, nil
 }
 
 /// A key: bare, quoted, or dotted segments of either.
@@ -307,15 +337,28 @@ fn parse_escape(input: str, at: int) -> (Text, error) {
         return Text{ text: "\u{c}", next: at + 2 }, nil
     }
     if c == "u" || c == "U" {
-        // Refused rather than passed through as its own digits, which is what
-        // `std/json` does and is the one thing worse than not supporting it: a
-        // configuration file that loads with `\u00e9` where an `é` belongs is
-        // wrong somewhere else, later, and nowhere near here.
-        //
-        // Decoding it needs a way to build a character from a code point, and
-        // `str` has no such operation. When it grows one this becomes four
-        // lines and the error goes away.
-        return _, errors.new("toml: `\\u` escapes are not supported yet, at \(at)")
+        // `\uXXXX` is four hex digits, `\UXXXXXXXX` is eight.
+        let width = if c == "u" { 4 } else { 8 }
+        let from = at + 2
+        if from + width > input.len() {
+            return _, errors.new("toml: short unicode escape at \(at)")
+        }
+        var code = 0
+        for k in 0..width {
+            let digit = hex_of(input.slice(from + k, from + k + 1))
+            if digit < 0 {
+                return _, errors.new("toml: bad unicode escape at \(at)")
+            }
+            code = code * 16 + digit
+        }
+        let ch = text.from_code(code)
+        // A surrogate or a value past the end of Unicode is not a character,
+        // and `from_code` says so by answering with nothing. Passing that
+        // through would silently drop the escape.
+        if ch.len() == 0 {
+            return _, errors.new("toml: `\(code)` is not a character, at \(at)")
+        }
+        return Text{ text: ch, next: from + width }, nil
     }
     return _, errors.new("toml: unknown escape `\\\(c)` at \(at)")
 }
@@ -437,6 +480,41 @@ fn as_table(value: Toml) -> { str: Toml } {
     return out
 }
 
+/// The array a value holds, or nil for anything else.
+fn as_array(value: Toml) -> Option<[Toml]> {
+    var out: Option<[Toml]> = nil
+    match value {
+        Array(a) => { out = a }
+        Table(t) => {}
+        Bool(b) => {}
+        Int(n) => {}
+        Float(f) => {}
+        Text(s) => {}
+    }
+    return out
+}
+
+/// Whether a value is a non-empty array of tables, which is the one shape that
+/// has a header syntax of its own.
+///
+/// An *empty* array is deliberately not one: there would be no header to
+/// write, and `k = []` is the only way to say it at all.
+fn all_tables(value: Toml) -> bool {
+    let items = as_array(value)
+    if items == nil {
+        return false
+    }
+    if items.len() == 0 {
+        return false
+    }
+    for item in items {
+        if !is_table(item) {
+            return false
+        }
+    }
+    return true
+}
+
 fn is_table(value: Toml) -> bool {
     var out = false
     match value {
@@ -448,6 +526,91 @@ fn is_table(value: Toml) -> bool {
         Array(a) => {}
     }
     return out
+}
+
+/// Append a fresh table to the array at `path`, creating the array if it is not
+/// there yet.
+///
+/// This is what `[[a.b]]` does: every occurrence adds an element, and the keys
+/// after it fill that element. The tables *above* the last segment are ordinary
+/// tables — only the last is an array.
+fn push_table(root: { str: Toml }, path: [str]) -> ({ str: Toml }, error) {
+    if path.len() == 0 {
+        return _, errors.new("toml: `[[]]` names nothing")
+    }
+    if path.len() == 1 {
+        var here = root
+        let head = path[0]
+        var items: [Toml] = []
+        let existing = here[head]
+        if existing != nil {
+            let held = as_array(existing)
+            if held == nil {
+                return _, errors.new("toml: `\(head)` is already a value, not an array of tables")
+            }
+            items = held
+        }
+        items.push(Toml.Table({ }))
+        here[head] = Toml.Array(items)
+        return here, nil
+    }
+    // Walk down, rebuilding: a map is a value, so an inner table has to be put
+    // back into the one above it.
+    var here = root
+    let head = path[0]
+    let existing = here[head]
+    var inner: { str: Toml } = { }
+    if existing != nil {
+        if !is_table(existing) {
+            return _, errors.new("toml: `\(head)` is already a value, not a table")
+        }
+        inner = as_table(existing)
+    }
+    let (filled, err) = push_table(inner, tail(path))
+    check err
+    here[head] = Toml.Table(filled)
+    return here, nil
+}
+
+/// Set `key` inside the last element of the array of tables at `path`.
+fn assign_in_last(
+    root: { str: Toml },
+    path: [str],
+    key: [str],
+    value: Toml,
+) -> ({ str: Toml }, error) {
+    if path.len() == 0 {
+        return _, errors.new("toml: no array of tables is open")
+    }
+    var here = root
+    let head = path[0]
+    let existing = here[head]
+    if existing == nil {
+        return _, errors.new("toml: `\(head)` was never opened")
+    }
+    if path.len() == 1 {
+        let items = as_array(existing)
+        if items == nil {
+            return _, errors.new("toml: `\(head)` is not an array of tables")
+        }
+        if items.len() == 0 {
+            return _, errors.new("toml: `\(head)` has no element to fill")
+        }
+        var elements = items
+        let last = elements.len() - 1
+        let (filled, err) = assign(as_table(elements[last]), key, value)
+        check err
+        elements[last] = Toml.Table(filled)
+        here[head] = Toml.Array(elements)
+        return here, nil
+    }
+    if !is_table(existing) {
+        return _, errors.new("toml: `\(head)` is not a table")
+    }
+    let (filled, err) = assign_in_last(as_table(existing), tail(path), key, value)
+    check err
+    here[head] = Toml.Table(filled)
+    return here, nil
 }
 
 /// A table with `path` present, creating the tables along the way.
@@ -625,6 +788,23 @@ pub fn emit(doc: Toml) -> str {
     return emit_table(doc, [])
 }
 
+/// The scalar assignments of a table, with no header of its own.
+///
+/// An array-of-tables element needs this: the loop above has already written
+/// its `[[header]]`, and writing a second one here would nest it under itself.
+fn emit_table_body(table: { str: Toml }) -> str {
+    var out = ""
+    for key in keys_of(table) {
+        let held = table[key]
+        if held != nil {
+            if !is_table(held) && !all_tables(held) {
+                out = out + "\(emit_key(key)) = \(emit_value(held))\n"
+            }
+        }
+    }
+    return out
+}
+
 fn emit_table(value: Toml, path: [str]) -> str {
     let table = as_table(value)
     var out = ""
@@ -635,17 +815,26 @@ fn emit_table(value: Toml, path: [str]) -> str {
     for key in keys_of(table) {
         let held = table[key]
         if held != nil {
-            if !is_table(held) {
+            if !is_table(held) && !all_tables(held) {
                 out = out + "\(emit_key(key)) = \(emit_value(held))\n"
             }
         }
     }
-    // Then the sub-tables, each with its own header.
+    // Then the sub-tables, each with its own header, and the arrays of tables,
+    // each element with a `[[doubled]]` one.
     for key in keys_of(table) {
         let held = table[key]
         if held != nil {
             if is_table(held) {
                 out = out + "\n" + emit_table(held, concat(path, [key]))
+            } else if all_tables(held) {
+                let items = as_array(held)
+                if items != nil {
+                    for element in items {
+                        out = out + "\n[[\(join_dots(concat(path, [key])))]]\n"
+                        out = out + emit_table_body(as_table(element))
+                    }
+                }
             }
         }
     }

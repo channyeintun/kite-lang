@@ -157,6 +157,59 @@ fn blank_checks() -> [error] {
     return out
 }
 
+fn array_of_tables_checks() -> [error] {
+    var out: [error] = []
+    let src = "[[fruit]]\nname = \"apple\"\n\n[[fruit]]\nname = \"pear\"\n\n[owner]\nname = \"me\"\n"
+    let (doc, err) = toml.parse(src)
+    out.push(test.ok(err, "an array of tables parses"))
+    if err != nil {
+        return out
+    }
+    let fruit = toml.at(doc, "fruit")
+    out.push(test.is_true(fruit != nil, "the array is present"))
+    out.push(test.equal_str(text_of(doc, "owner.name"), "me", "a table after it still works"))
+
+    // Emitted as headers rather than inline, which is what it was read as.
+    let written = toml.emit(doc)
+    out.push(test.is_true(written.index_of("[[fruit]]") >= 0, "it emits as `[[fruit]]`"))
+
+    let (again, again_err) = toml.parse(written)
+    out.push(test.ok(again_err, "and parses back"))
+    if again_err != nil {
+        return out
+    }
+    out.push(test.equal_str(text_of(again, "owner.name"), "me", "with everything else intact"))
+
+    let (nested, nested_err) = toml.parse("[[a.b]]\nx = 1\n\n[[a.b]]\nx = 2\n")
+    out.push(test.ok(nested_err, "a nested array of tables parses"))
+    if nested_err != nil {
+        return out
+    }
+    out.push(test.is_true(toml.at(nested, "a.b") != nil, "and nests"))
+    return out
+}
+
+fn unicode_checks() -> [error] {
+    var out: [error] = []
+    let (doc, err) = toml.parse("k = \"caf\\u00e9 \\U0001F600 \\u4E2D\"\n")
+    out.push(test.ok(err, "unicode escapes parse"))
+    if err != nil {
+        return out
+    }
+    out.push(test.equal_str(text_of(doc, "k"), "café 😀 中", "in both widths"))
+
+    // A surrogate is not a character, and dropping it silently would lose text.
+    let (_, surrogate) = toml.parse("k = \"\\uD800\"\n")
+    out.push(test.failed(surrogate, "a lone surrogate is refused"))
+
+    let (_, short) = toml.parse("k = \"\\u00\"\n")
+    out.push(test.failed(short, "a short escape is refused"))
+
+    let (_, bad) = toml.parse("k = \"\\uZZZZ\"\n")
+    out.push(test.failed(bad, "a non-hex escape is refused"))
+    return out
+}
+
 /// The cases where being lenient would be being wrong.
 fn refusal_checks() -> [error] {
     var out: [error] = []
@@ -169,8 +222,8 @@ fn refusal_checks() -> [error] {
     let (_, junk) = toml.parse("k = 1 oops\n")
     out.push(test.failed(junk, "trailing junk on a line is an error"))
 
-    let (_, arrays) = toml.parse("[[items]]\nk = 1\n")
-    out.push(test.failed(arrays, "an unsupported form is refused, not misread"))
+    let (_, over_scalar) = toml.parse("fruit = 1\n[[fruit]]\nk = 1\n")
+    out.push(test.failed(over_scalar, "an array of tables over a scalar is an error"))
 
     let (_, unterminated) = toml.parse("k = \"oops\n")
     out.push(test.failed(unterminated, "an unterminated string is an error"))
@@ -187,6 +240,8 @@ fn main() {
     results = concat(results, number_checks())
     results = concat(results, string_checks())
     results = concat(results, blank_checks())
+    results = concat(results, array_of_tables_checks())
+    results = concat(results, unicode_checks())
     results = concat(results, refusal_checks())
     var failed = 0
     for e in results {

@@ -1745,6 +1745,18 @@ pub extern "C" fn kite_rt_str_of_int(v: i64) -> u64 {
     make_str(v.to_string().as_bytes())
 }
 
+/// A one-character string from a code point, or the empty string when the
+/// value is not a character — a surrogate, or past the end of Unicode.
+#[no_mangle]
+pub extern "C" fn kite_rt_text_from_code(code: i64) -> u64 {
+    let text = u32::try_from(code)
+        .ok()
+        .and_then(char::from_u32)
+        .map(String::from)
+        .unwrap_or_default();
+    make_str(text.as_bytes())
+}
+
 #[no_mangle]
 pub extern "C" fn kite_rt_str_of_float(v: f64) -> u64 {
     make_str(float_text(v).as_bytes())
@@ -2220,6 +2232,7 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         kite_rt_print_unit,
         kite_rt_print_ref,
         kite_rt_str_of_int,
+        kite_rt_text_from_code,
         kite_rt_str_of_float,
         kite_rt_str_of_bool,
         kite_rt_str_of_ref,

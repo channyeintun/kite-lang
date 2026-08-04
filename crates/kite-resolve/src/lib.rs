@@ -117,6 +117,20 @@ pub enum BuiltinFn {
     /// `text.height()` — the line height of the host's font: ascent plus
     /// descent plus leading, which is what a line of text actually occupies.
     TextHeight,
+    /// `text.from_code(code)` — the one-character string for a code point.
+    ///
+    /// The inverse of `str.code_at`, and the primitive whose absence meant
+    /// neither `std/json` nor `std/toml` could decode a `\uXXXX` escape: both
+    /// had a comment saying so. A string cannot be built out of the four
+    /// string operations, because every one of them takes a string to start
+    /// with.
+    ///
+    /// A surrogate or a value above the Unicode range has no character, so it
+    /// answers with the empty string rather than a replacement character —
+    /// a caller that wanted U+FFFD can ask for it, and one that did not would
+    /// otherwise have no way to tell a real replacement character from a
+    /// failure.
+    TextFromCode,
     /// `draw.field(x, y, w, h, value, hint, colour, id, multiline)` — a text
     /// field goes here, showing `value`, or `hint` when the value is empty, in
     /// `colour`.
@@ -246,6 +260,7 @@ impl BuiltinFn {
             "draw.alpha" => Some(BuiltinFn::DrawAlpha),
             "text.width" => Some(BuiltinFn::TextWidth),
             "text.height" => Some(BuiltinFn::TextHeight),
+            "text.from_code" => Some(BuiltinFn::TextFromCode),
             "draw.field" => Some(BuiltinFn::DrawField),
             "draw.image" => Some(BuiltinFn::DrawImage),
             "draw.semantics" => Some(BuiltinFn::DrawSemantics),
@@ -277,6 +292,7 @@ impl BuiltinFn {
             BuiltinFn::DrawAlpha => "draw.alpha",
             BuiltinFn::TextWidth => "text.width",
             BuiltinFn::TextHeight => "text.height",
+            BuiltinFn::TextFromCode => "text.from_code",
             BuiltinFn::DrawField => "draw.field",
             BuiltinFn::DrawImage => "draw.image",
             BuiltinFn::DrawSemantics => "draw.semantics",
@@ -308,6 +324,7 @@ impl BuiltinFn {
             BuiltinFn::DrawAlpha => 1,
             BuiltinFn::TextWidth => 1,
             BuiltinFn::TextHeight => 0,
+            BuiltinFn::TextFromCode => 1,
             BuiltinFn::DrawClip => 4,
             BuiltinFn::DrawUnclip => 0,
             BuiltinFn::TaskYield

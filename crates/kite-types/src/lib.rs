@@ -3409,6 +3409,24 @@ impl<'a> Checker<'a> {
                 }
             }
 
+            // `text.from_code(code)` — a code point in, one character out.
+            BuiltinFn::TextFromCode => {
+                if args.len() != 1 {
+                    self.arity_error("text.from_code", args.len(), 1, span, None);
+                }
+                let mut hargs = Vec::with_capacity(1);
+                for a in args.iter() {
+                    let e = self.expr(a, Some(TyId::INT));
+                    self.expect_ty(e.ty, TyId::INT, e.span, None);
+                    hargs.push(e);
+                }
+                hir::Expr {
+                    kind: ExprKind::CallBuiltin { builtin: Builtin::TextFromCode, args: hargs },
+                    ty: TyId::STR,
+                    span,
+                }
+            }
+
             BuiltinFn::TextWidth => {
                 if args.len() != 1 {
                     self.arity_error("text.width", args.len(), 1, span, None);

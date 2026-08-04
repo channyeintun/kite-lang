@@ -220,6 +220,20 @@ impl Default for Types {
     }
 }
 
+/// Whether a struct is one of the two the standard library synchronises.
+///
+/// Matched on the qualified name, which a module gives its declarations —
+/// `Mutex` in module `sync` is declared as `sync.Mutex`. A user type called
+/// `Mutex` in their own module is `mine.Mutex` and gets no exemption, which is
+/// the property that makes matching on a name safe here.
+fn is_synchronised(name: &str) -> bool {
+    // A specialisation carries its arguments in its name — `instantiate_struct`
+    // makes `sync.Mutex<int>` — and it is the specialisation that reaches
+    // `is_share`, never the template. So the arguments are cut off first.
+    let base = name.split('<').next().unwrap_or(name);
+    base == "sync.Mutex" || base == "sync.Atomic"
+}
+
 impl Types {
     pub fn new() -> Self {
         let kinds = vec![
@@ -801,6 +815,19 @@ impl Types {
                 self.is_share_inner(*k, visiting) && self.is_share_inner(*v, visiting)
             }
             TyKind::Tuple(elems) => elems.iter().all(|e| self.is_share_inner(*e, visiting)),
+            // `sync.Mutex<T>` and `sync.Atomic` are `Share` despite holding a
+            // `var`, because reaching what they guard requires going through
+            // them. This is the one carve-out in an otherwise purely
+            // structural rule, and it is the mechanism `docs/02 §4` specifies:
+            // *"it is explicitly synchronised: `sync.Mutex<T>`,
+            // `sync.Atomic<T>`"*.
+            //
+            // By name, because there is nothing else to go on — a marker trait
+            // would have to be implementable by anyone, and "I promise this is
+            // synchronised" is exactly the claim a type system should not
+            // accept on trust. Two names the standard library owns is the
+            // smaller hole.
+            TyKind::Struct(s) if is_synchronised(&self.struct_def(*s).name) => true,
             TyKind::Struct(s) => self
                 .struct_def(*s)
                 .fields

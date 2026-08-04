@@ -575,7 +575,7 @@ std/
   json        encode/decode with compile-time derivation
   toml        parse/emit — a named subset; no dates
   task        Task, scope, all, both, race, timeout, parallel
-  sync        NOT BUILT, deliberately — see below
+  sync        Mutex, Atomic — only for genuinely shared mutable state
   buffer      flat typed buffers over linear memory
   test        assertions, table tests, snapshots, property tests
   ui          everything in this document
@@ -588,25 +588,36 @@ std/
 is no reflection — this is a compile-time derivation, which is what keeps dead
 code elimination sound and therefore keeps binaries small.
 
-### Why `sync` is not built
+### Why `sync` matters before threads do
 
 [docs/02 §4](02-concurrency.md#4-share-the-invariant-made-nearly-invisible) names
-`sync.Mutex<T>` and `sync.Atomic<T>` as the explicit-synchronisation escape from
-`Share`: a type with a `var` field is not `Share`, and wrapping it in a mutex is
-supposed to make it so.
+`sync.Mutex<T>` and `sync.Atomic` as the explicit-synchronisation escape from
+`Share`, and it is tempting to say a lock is pointless until `task.parallel` uses
+real cores. That is wrong, and `tests/std/sync_test.kite` demonstrates it in its
+first assertion.
 
-**There is nothing to synchronise yet.** `task.parallel` says so in its own doc
-comment — it is not parallelism on any target, because a WasmGC reference cannot
-cross a thread boundary until shared-everything-threads ships, and the bytecode
-VM's values are not `Send` either. There are no OS threads for Kite code to run
-on.
+Kite's tasks are cooperative: they interleave at `await` and `task.yield`, and
+**anywhere a task yields, another task runs**. A read-modify-write spanning a
+yield is a lost update on one thread, today:
 
-So a `sync.Mutex` today would be a lock that locks nothing, and the compiler
-would have to special-case it in the `Share` rule to make it work — which means
-the type system would begin permitting `var` state across a boundary that does
-not exist, with a no-op behind it. The day real threads arrive, that permission
-would already be granted and that no-op would already be shipped. Absence is the
-safer state, and this paragraph is why.
+```kite
+let seen = c.value        // task A reads 5
+task.yield()              // task B runs, reads 5, writes 6
+c.value = seen + 1        // task A writes 6 — B's increment is gone
+```
+
+Two increments, one survivor. Under `sync.update` both survive. That is the same
+bug a mutex prevents on twenty cores, and it is why Tokio ships an async `Mutex`
+for a runtime that may well be single-threaded. What real threads will change is
+the *cost* — a lock that yields until a flag clears becomes one that parks on a
+futex — not the meaning, and not a line of source.
+
+The type-system half is one carve-out in an otherwise structural rule:
+`sync.Mutex<T>` holds a `var` and is `Share` regardless of `T`, because reaching
+what it guards means taking the lock. The compiler knows the two by qualified
+name, because a marker trait would let anyone assert "this is synchronised" and
+that is exactly the claim a type system should not take on trust. A user type
+spelled `Mutex` in their own module is `theirs.Mutex` and gets nothing.
 
 ---
 

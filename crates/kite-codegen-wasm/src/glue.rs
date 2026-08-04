@@ -1811,6 +1811,15 @@ function imports() {{
       // Interpolation shares its formatting with printing, so a value cannot
       // look one way in `io.print(x)` and another in `"\(x)"`.
       str_of_int: (v) => intern(showInt(v)),
+      // A code point that is not a character — a surrogate, or past the end of
+      // Unicode — is the empty string. `String.fromCodePoint` throws on those,
+      // so the range is tested rather than the exception caught.
+      str_from_code: (code) => {{
+        const n = Number(code);
+        const real =
+          Number.isInteger(n) && n >= 0 && n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff);
+        return intern(real ? String.fromCodePoint(n) : "");
+      }},
       str_of_float: (v) => intern(showFloat(v)),
       str_of_bool: (v) => intern(showBool(v)),
       // Characters, not UTF-16 code units: `[...s]` iterates code points, so

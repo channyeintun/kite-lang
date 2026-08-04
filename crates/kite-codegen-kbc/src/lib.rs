@@ -49,6 +49,7 @@ pub enum Native {
     DrawSemantics,
     TextWidth,
     TextHeight,
+    TextFromCode,
     DrawClip,
     DrawUnclip,
 }
@@ -68,6 +69,7 @@ impl Native {
             Builtin::DrawSemantics => Native::DrawSemantics,
             Builtin::TextWidth => Native::TextWidth,
             Builtin::TextHeight => Native::TextHeight,
+            Builtin::TextFromCode => Native::TextFromCode,
             Builtin::DrawClip => Native::DrawClip,
             Builtin::DrawUnclip => Native::DrawUnclip,
             Builtin::TaskSpawn => Native::TaskSpawn,
@@ -94,6 +96,7 @@ impl Native {
             Native::DrawSemantics => "draw.semantics",
             Native::TextWidth => "text.width",
             Native::TextHeight => "text.height",
+            Native::TextFromCode => "text.from_code",
             Native::DrawClip => "draw.clip",
             Native::DrawUnclip => "draw.unclip",
             Native::TaskSpawn => "task.spawn",

@@ -1,0 +1,117 @@
+// std/sync — the lost update, and the lock that prevents it.
+//
+// The interesting test is the *first* one: it demonstrates the race on a single
+// thread, with the scheduler that ships. Two tasks read a counter, yield, and
+// write back what they read plus one — and one increment disappears. That is
+// not a hypothetical about future threads; it is what cooperative interleaving
+// does today, and it is why this module exists.
+
+use std/test
+use std/sync
+use std/task
+
+struct Counter {
+    var value: int
+}
+
+/// Read, yield, write. The yield is what makes this a race: another task runs
+/// in the middle, between the read and the write.
+async fn racy_increment(var c: Counter) {
+    let seen = c.value
+    task.yield()
+    task.yield()
+    c.value = seen + 1
+}
+
+/// The same, under a lock. `update` holds it across the read and the write, and
+/// `f` is an ordinary function so nothing can yield inside it.
+async fn safe_increment(var m: sync.Mutex<int>) {
+    await sync.update(m, |n: int| n + 1)
+}
+
+async fn race_checks() -> [error] {
+    var out: [error] = []
+    let c = Counter{ value: 0 }
+    let a = racy_increment(c)
+    let b = racy_increment(c)
+    await task.both(a, b)
+    // Two increments, one survivor. If this ever reads 2, the scheduler stopped
+    // interleaving and the rest of this file needs rereading.
+    out.push(test.equal_int(c.value, 1, "unlocked, an increment is lost"))
+    return out
+}
+
+async fn lock_checks() -> [error] {
+    var out: [error] = []
+    let m = sync.mutex(0)
+    let a = safe_increment(m)
+    let b = safe_increment(m)
+    await task.both(a, b)
+    let final = await sync.lock(m)
+    sync.release(m, final)
+    out.push(test.equal_int(final, 2, "locked, both increments survive"))
+    return out
+}
+
+fn try_lock_checks() -> [error] {
+    var out: [error] = []
+    let m = sync.mutex(7)
+    out.push(test.is_false(sync.is_held(m), "a fresh mutex is free"))
+
+    let held = sync.try_lock(m)
+    out.push(test.is_true(held != nil, "the first take succeeds"))
+    out.push(test.is_true(sync.is_held(m), "and the lock is held"))
+
+    let second = sync.try_lock(m)
+    out.push(test.is_true(second == nil, "the second take fails"))
+
+    if held != nil {
+        sync.release(m, held + 1)
+    }
+    out.push(test.is_false(sync.is_held(m), "releasing frees it"))
+
+    let after = sync.try_lock(m)
+    out.push(test.is_true(after != nil, "and it can be taken again"))
+    if after != nil {
+        out.push(test.equal_int(after, 8, "holding what was put back"))
+        sync.release(m, after)
+    }
+    return out
+}
+
+fn atomic_checks() -> [error] {
+    var out: [error] = []
+    let a = sync.atomic(10)
+    out.push(test.equal_int(sync.load(a), 10, "an atomic starts where it was put"))
+
+    sync.store(a, 3)
+    out.push(test.equal_int(sync.load(a), 3, "and stores"))
+
+    out.push(test.equal_int(sync.add(a, 4), 7, "add answers with the new value"))
+    out.push(test.equal_int(sync.load(a), 7, "and leaves it there"))
+
+    out.push(test.is_true(sync.compare_swap(a, 7, 9), "a matching swap succeeds"))
+    out.push(test.equal_int(sync.load(a), 9, "and takes effect"))
+    out.push(test.is_false(sync.compare_swap(a, 7, 11), "a mismatched one fails"))
+    out.push(test.equal_int(sync.load(a), 9, "and changes nothing"))
+
+    out.push(test.equal_int(sync.swap(a, 1), 9, "swap answers with what was there"))
+    out.push(test.equal_int(sync.load(a), 1, "and leaves the new value"))
+    return out
+}
+
+async fn main() {
+    var results: [error] = []
+    results = concat(results, await race_checks())
+    results = concat(results, await lock_checks())
+    results = concat(results, try_lock_checks())
+    results = concat(results, atomic_checks())
+    var failed = 0
+    for e in results {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("sync: \(results.len() - failed) passed, \(failed) failed")
+}
