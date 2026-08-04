@@ -3208,6 +3208,50 @@ impl<'a> Checker<'a> {
                 }
             }
 
+            BuiltinFn::PtrSame => {
+                if args.len() != 2 {
+                    self.arity_error("ptr.same", args.len(), 2, span, None);
+                    return self.lit(ExprKind::Error, TyId::BOOL, span);
+                }
+                let left = self.expr(&args[0], None);
+                // The second argument is checked against the first, so
+                // `ptr.same(model, "model")` names the mismatch rather than
+                // reporting two unrelated complaints.
+                let right = self.expr(&args[1], Some(left.ty));
+                self.expect_ty(right.ty, left.ty, right.span, None);
+
+                if !self.types.has_identity(left.ty) && !self.types.is_poisoned(left.ty) {
+                    let article = self.types.with_article(left.ty);
+                    let mut d = Diagnostic::error(
+                        codes::E0213,
+                        format!("`ptr.same` cannot compare {}", article),
+                    )
+                    .with_primary(left.span, format!("this is {}", article));
+                    // A slice is the near miss worth naming: it *is* a heap
+                    // allocation, so being told it has no identity is
+                    // surprising without the reason.
+                    d = match self.types.kind(left.ty) {
+                        TyKind::Slice(_) => d.with_note(
+                            "slices are copy-on-write values: whether two share a buffer \
+                             is an allocator detail, and a write to either ends it",
+                        ),
+                        _ => d.with_note(
+                            "only structs, enums and maps are one cell two names can share",
+                        ),
+                    };
+                    self.diags.push(d);
+                }
+
+                hir::Expr {
+                    kind: ExprKind::CallBuiltin {
+                        builtin: Builtin::PtrSame,
+                        args: vec![left, right],
+                    },
+                    ty: TyId::BOOL,
+                    span,
+                }
+            }
+
             BuiltinFn::TaskPark | BuiltinFn::TaskWaitHost => {
                 if !args.is_empty() {
                     self.arity_error(b.path(), args.len(), 0, span, None);

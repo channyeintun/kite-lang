@@ -181,6 +181,20 @@ codes! {
          makes adding an enum variant safe: the compiler shows you every place \
          that must change.";
 
+    E0213 = "E0213", "type has no identity",
+        "`ptr.same` asks whether two names refer to one heap cell. Structs, \
+         enums and maps have such a cell; nothing else does.\n\n\
+         A number, a string or a `bool` is a value with no cell to share, so \
+         the question has no answer other than the one `==` already gives.\n\n\
+         A slice is excluded for a different reason: slices are \
+         copy-on-write, so two of them sharing a buffer is a fact about the \
+         allocator that stops being true as soon as either is written to. A \
+         program that could observe it would be reading an implementation \
+         detail.\n\n\
+         Functions and `dyn` values are excluded because they have no stable \
+         identity to report — which is the same reason `==` is not defined on \
+         them.";
+
     // ---- error handling ---------------------------------------------------
     E0301 = "E0301", "value used before its error was checked",
         "A function returning `(T, error)` returns a correlated pair. The \

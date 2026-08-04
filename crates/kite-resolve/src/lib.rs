@@ -148,6 +148,22 @@ pub enum BuiltinFn {
     TaskGet,
     /// `time.now()` — milliseconds since the program started.
     TimeNow,
+    /// `ptr.same(a, b)` — whether two values are the *same* heap cell, rather
+    /// than two cells with equal contents.
+    ///
+    /// `==` is structural everywhere in Kite, which is the right default and
+    /// the expensive one: comparing two models field by field costs the size
+    /// of the model, and the question a frame loop actually asks is "did
+    /// `update` hand back the value I gave it?". That is a pointer comparison,
+    /// and it is not expressible in terms of `==` — two distinct models with
+    /// identical fields are `==` and are not the same cell.
+    ///
+    /// Restricted to types that *have* a cell to compare — structs, enums and
+    /// maps. A slice is deliberately excluded: slices are copy-on-write
+    /// values, so whether two of them share a buffer is an allocator detail
+    /// that a program must not be able to observe, and one that changes the
+    /// moment either is written to.
+    PtrSame,
     /// `assert(cond, message)` — trap when `cond` is false. Compiled out in a
     /// release build, because an assertion is a claim about the program rather
     /// than about its input.
@@ -179,6 +195,7 @@ impl BuiltinFn {
             "task.finished" => Some(BuiltinFn::TaskFinished),
             "task.get" => Some(BuiltinFn::TaskGet),
             "time.now" => Some(BuiltinFn::TimeNow),
+            "ptr.same" => Some(BuiltinFn::PtrSame),
             "assert" => Some(BuiltinFn::Assert),
             "require" => Some(BuiltinFn::Require),
             _ => None,
@@ -206,6 +223,7 @@ impl BuiltinFn {
             BuiltinFn::TaskFinished => "task.finished",
             BuiltinFn::TaskGet => "task.get",
             BuiltinFn::TimeNow => "time.now",
+            BuiltinFn::PtrSame => "ptr.same",
             BuiltinFn::Assert => "assert",
             BuiltinFn::Require => "require",
         }
@@ -228,7 +246,7 @@ impl BuiltinFn {
             | BuiltinFn::TaskPark
             | BuiltinFn::TaskWaitHost => 0,
             BuiltinFn::TaskWakeAt | BuiltinFn::TaskFinished | BuiltinFn::TaskGet => 1,
-            BuiltinFn::Assert | BuiltinFn::Require => 2,
+            BuiltinFn::Assert | BuiltinFn::Require | BuiltinFn::PtrSame => 2,
         }
     }
 }

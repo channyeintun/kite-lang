@@ -737,6 +737,28 @@ impl Types {
         )
     }
 
+    /// Whether `ptr.same` is defined: the value is one heap cell that two
+    /// bindings can refer to, so "the same one" means something.
+    ///
+    /// Narrower than [`Self::is_reference`], which asks what codegen must
+    /// treat as a pointer. Three of those are excluded here because their
+    /// identity is not a fact about the program:
+    ///
+    /// * a **slice** is copy-on-write, so sharing a buffer is an allocator
+    ///   detail that stops being true the moment either side is written to;
+    /// * a **function** has no identity in this language — that is the rule
+    ///   `==` already follows, and a second answer here would undo it;
+    /// * a **`dyn`** is a record made at the coercion site, so two coercions
+    ///   of one value would compare unequal.
+    ///
+    /// What is left is what a program can hold two names for and mean it.
+    pub fn has_identity(&self, id: TyId) -> bool {
+        matches!(
+            self.kind(id),
+            TyKind::Struct(_) | TyKind::Enum(_) | TyKind::Map(..)
+        )
+    }
+
     /// The element type of a slice.
     pub fn slice_elem(&self, id: TyId) -> Option<TyId> {
         match self.kind(id) {
@@ -1068,5 +1090,35 @@ mod tests {
         assert!(!t.is_reference(TyId::INT));
         let sl = t.slice_of(TyId::INT);
         assert!(!t.is_reference(sl), "a slice has value semantics");
+    }
+
+    /// `ptr.same`'s domain. Narrower than `is_reference` in both directions
+    /// that matter: it keeps maps, and it drops the two reference kinds whose
+    /// identity a program must not be able to observe.
+    #[test]
+    fn identity_is_narrower_than_reference() {
+        let mut t = Types::new();
+        let s = struct_with(&mut t, "Model", vec![("count", TyId::INT, false)]);
+        assert!(t.has_identity(s));
+
+        let m = t.map_of(TyId::STR, TyId::INT);
+        assert!(t.has_identity(m));
+
+        // Scalars have no cell at all.
+        assert!(!t.has_identity(TyId::INT));
+        assert!(!t.has_identity(TyId::STR));
+
+        // A slice is a reference to codegen and a value to the program, and
+        // the program's view is the one `ptr.same` answers to.
+        let sl = t.slice_of(TyId::INT);
+        assert!(!t.has_identity(sl));
+
+        // These two are references and are excluded: a closure and a `dyn`
+        // have no identity `==` would recognise either.
+        let f = t.fn_of(vec![], TyId::UNIT);
+        assert!(t.is_reference(f) && !t.has_identity(f));
+        let tr = t.declare_trait("Shape", true, span());
+        let d = t.dyn_ty(tr);
+        assert!(t.is_reference(d) && !t.has_identity(d));
     }
 }

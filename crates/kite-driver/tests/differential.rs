@@ -710,6 +710,28 @@ fn main() {
          \x20 io.print(total)\n}\n",
     ),
     (
+        // Identity is the one thing three very different representations —
+        // WasmGC's `ref.eq`, a native pointer compare, and `Rc::ptr_eq` —
+        // could each answer plausibly and differently. The last two lines are
+        // the frame-loop rule: a model handed back unchanged is the same cell,
+        // and a rebuilt one is not, however equal its fields.
+        "ptr-same",
+        "struct Model {\n  count: int\n}\n\
+         enum Msg {\n  Tick\n  Set(int)\n}\n\
+         fn step(m: Model, grow: bool) -> Model {\n\
+         \x20 if grow {\n    return Model{ count: m.count + 1 }\n  }\n  return m\n}\n\
+         fn main() {\n\
+         \x20 let a = Model{ count: 1 }\n  let b = Model{ count: 1 }\n\
+         \x20 io.print(a == b)\n  io.print(ptr.same(a, b))\n\
+         \x20 let c = a\n  io.print(ptr.same(a, c))\n\
+         \x20 let m = Msg.Set(3)\n\
+         \x20 io.print(ptr.same(m, m))\n  io.print(ptr.same(m, Msg.Set(3)))\n\
+         \x20 let t = {\"a\": 1}\n\
+         \x20 io.print(ptr.same(t, t))\n  io.print(ptr.same(t, {\"a\": 1}))\n\
+         \x20 io.print(ptr.same(a, step(a, false)))\n\
+         \x20 io.print(ptr.same(a, step(a, true)))\n}\n",
+    ),
+    (
         "tuple-bindings",
         "fn pair() -> (int, str) {\n  return (7, \"seven\")\n}\n\
          fn main() {\n  let (n, name) = pair()\n  io.print(n)\n  io.print(name)\n\

@@ -1,0 +1,23 @@
+// `ptr.same` asks whether two names are one heap cell. A type with no cell
+// has no answer to give, and the near miss worth rejecting loudly is the
+// slice: it *is* a heap allocation, but a copy-on-write one, so whether two
+// share a buffer is an allocator detail that a write would end.
+
+struct Model {
+    count: int
+}
+
+fn main() {
+    let a = Model{ count: 1 }
+    let b = Model{ count: 1 }
+    io.print(ptr.same(a, b))
+
+    io.print(ptr.same(1, 2)) //~ ERROR E0213
+    io.print(ptr.same("x", "y")) //~ ERROR E0213
+    io.print(ptr.same(true, false)) //~ ERROR E0213
+    io.print(ptr.same([1], [1])) //~ ERROR E0213
+
+    // The second argument is checked against the first, so a mismatch is one
+    // complaint about the pair rather than two about the arguments.
+    io.print(ptr.same(a, 1)) //~ ERROR E0200
+}

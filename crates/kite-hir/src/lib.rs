@@ -438,6 +438,10 @@ pub enum Builtin {
     TaskWaitHost,
     /// `time.now()` — milliseconds since the program started.
     TimeNow,
+    /// `ptr.same(a, b)` — whether two references are one cell. Not a host
+    /// call: every backend already has the comparison, it is `ref.eq` on
+    /// WasmGC, an integer compare on native, and `Rc::ptr_eq` in the VM.
+    PtrSame,
     /// `require(cond, message)` — trap when the claim is false. `assert`
     /// lowers to this too, in a debug build; in a release build it lowers to
     /// nothing at all.
@@ -463,6 +467,7 @@ impl Builtin {
             Builtin::TaskPark => "task.park",
             Builtin::TaskWaitHost => "task.wait_host",
             Builtin::TimeNow => "time.now",
+            Builtin::PtrSame => "ptr.same",
             Builtin::Require => "require",
         }
     }

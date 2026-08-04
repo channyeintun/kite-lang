@@ -1622,6 +1622,16 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 let r = self.call_rt("kite_rt_time_now", &[]).unwrap();
                 self.def(dst, r);
             }
+            // A struct, an enum and a map are each a pointer here, so identity
+            // is the same `icmp` that `==` on two ints compiles to — and it
+            // yields an `i8`, which is what a `bool` is on this backend.
+            Builtin::PtrSame => {
+                use cranelift_codegen::ir::condcodes::IntCC;
+                let a = self.operand(&args[0]);
+                let b = self.operand(&args[1]);
+                let r = self.b.ins().icmp(IntCC::Equal, a, b);
+                self.def(dst, r);
+            }
         }
     }
 

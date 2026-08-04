@@ -1531,6 +1531,28 @@ impl<'a> Vm<'a> {
             }
             Native::TimeNow => Ok(Value::Int(self.clock)),
 
+            // The checker admits only structs, enums and maps here, and each
+            // of those is an `Rc` — so identity is the handle comparison the
+            // representation already supports. A pair that reached this point
+            // holding anything else is a compiler bug rather than a program
+            // error, which is what `TypeConfusion` says.
+            Native::PtrSame => {
+                let a = self.regs[base + arg_base as usize].clone();
+                let b = self.regs[base + arg_base as usize + 1].clone();
+                let same = match (&a, &b) {
+                    (Value::Struct(x), Value::Struct(y)) => Rc::ptr_eq(x, y),
+                    (Value::Enum(x), Value::Enum(y)) => Rc::ptr_eq(x, y),
+                    (Value::Map(x), Value::Map(y)) => Rc::ptr_eq(x, y),
+                    _ => {
+                        return Err(Trap::TypeConfusion {
+                            op: "ptr.same",
+                            found: a.type_name(),
+                        })
+                    }
+                };
+                Ok(Value::Bool(same))
+            }
+
             // A failed claim is a trap: not catchable, and it says what was
             // claimed. Kite has no `recover`, so this ends the program.
             Native::Require => {

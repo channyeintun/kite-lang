@@ -409,6 +409,9 @@ fn used_imports(
                         Builtin::TaskPark => mark(host::TASK_PARK),
                         Builtin::TaskWaitHost => mark(host::TASK_WAIT_HOST),
                         Builtin::TimeNow => mark(host::TIME_NOW),
+                        // `ref.eq` is an instruction, so identity costs no
+                        // import — a program may ask it with no host at all.
+                        Builtin::PtrSame => {}
                         // A failed claim prints what was claimed and traps.
                         Builtin::Require => mark(host::PRINT_STR),
                     },
@@ -2137,11 +2140,14 @@ impl<'a> Emitter<'a> {
 
             mir::Rvalue::CallBuiltin { builtin, args } => {
                 self.builtin(func, *builtin, args);
-                // Drawing returns nothing; measuring returns a width, and the
-                // clock returns a reading.
+                // Drawing returns nothing; measuring returns a width, the
+                // clock returns a reading, and identity returns an answer.
                 return matches!(
                     builtin,
-                    Builtin::TextWidth | Builtin::TextHeight | Builtin::TimeNow
+                    Builtin::TextWidth
+                        | Builtin::TextHeight
+                        | Builtin::TimeNow
+                        | Builtin::PtrSame
                 );
             }
 
@@ -2615,6 +2621,15 @@ impl<'a> Emitter<'a> {
             }
             Builtin::TextHeight => {
                 func.instruction(&Instruction::Call(self.hosts.at(host::LINE_HEIGHT)));
+            }
+            // Structs, enums and maps are all WasmGC structs, and every one of
+            // them is a subtype of `eq` — so the comparison the checker has
+            // already restricted to those three is one instruction.
+            Builtin::PtrSame => {
+                for a in args {
+                    self.operand(func, a);
+                }
+                func.instruction(&Instruction::RefEq);
             }
             Builtin::DrawClip => {
                 for a in args {

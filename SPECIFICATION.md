@@ -436,8 +436,22 @@ non-associative: `a < b < c` is a syntax error, not a silent bug.
 
 `==` is structural for all types: two structs are equal when their fields are
 equal, two slices when their elements are. There is no reference equality
-operator in the surface language; `ptr.same(a, b)` exists in the standard library
-for the rare case that needs it.
+operator in the surface language; `ptr.same(a, b)` is a compiler builtin, for
+the rare case that needs it.
+
+`ptr.same` answers whether two names refer to one heap cell, which `==` cannot
+express: two distinct values with identical fields are equal and are not the
+same cell. Both arguments must have the same type, and that type must be a
+**struct, enum or map** — the three that *are* a cell two names can share.
+Everything else is rejected — `E0213` — each for its own reason: a number or a
+`str` has no cell; a slice has one but is copy-on-write, so two sharing a
+buffer is an allocator fact that a write to either would end; a function and a
+`dyn` have no stable identity to report, which is why `==` is undefined on them
+too.
+
+The motivating case is a fixpoint. A loop that repeats while a value keeps
+changing must ask "is this the value I passed in?", and structural equality
+answers a different question at the cost of walking the whole value.
 
 Floating-point `==` follows IEEE-754, so `nan != nan`. The compiler emits a
 warning when both operands of `==` are statically known to be floats and neither

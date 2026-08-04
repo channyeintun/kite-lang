@@ -34,6 +34,8 @@ pub enum Native {
     TaskWaitHost,
     /// Milliseconds since the program started.
     TimeNow,
+    /// Whether two references are one cell.
+    PtrSame,
     /// Trap when a claim is false.
     Require,
     DrawRect,
@@ -67,6 +69,7 @@ impl Native {
             Builtin::TaskPark => Native::TaskPark,
             Builtin::TaskWaitHost => Native::TaskWaitHost,
             Builtin::TimeNow => Native::TimeNow,
+            Builtin::PtrSame => Native::PtrSame,
             Builtin::Require => Native::Require,
         }
     }
@@ -89,6 +92,7 @@ impl Native {
             Native::TaskPark => "task.park",
             Native::TaskWaitHost => "task.wait_host",
             Native::TimeNow => "time.now",
+            Native::PtrSame => "ptr.same",
             Native::Require => "require",
         }
     }
