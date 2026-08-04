@@ -498,16 +498,21 @@ fn view_node(model: Model) -> ui.Node {
     )
 }
 
-/// The navigation rail: 80dp of destinations down the left, which is Material's
-/// layout for a window this wide.
-/// The three destinations, built once and placed by whichever navigation the
-/// window is wide enough for. One list, two arrangements — so a destination
-/// added here appears in both, and the focus order picks it up either way.
+/// The destinations, built once and placed by whichever navigation the window
+/// is wide enough for. One list, two arrangements — so a destination added here
+/// appears in both, and the focus order picks it up either way.
+///
+/// There was a third, `Queue`, and it went nowhere: `acted` had no branch for
+/// it, so it was permanently unselected and clicking it returned the model
+/// unchanged. It was scenery — a navigation bar wants three destinations to
+/// look like one, and it was there to make up the number. That was harmless
+/// while nothing in the rail reacted to anything; it stopped being harmless
+/// once these grew hover, focus and a ripple, because a control that answers
+/// every affordance except the one it exists for is worse than no control.
 fn destinations(model: Model) -> [ui.Node] {
     let s = scheme(model)
     return [
         material.rail_item(s, "nav-library", "♫", "Library", true, choice(model, "nav-library", true)),
-        material.rail_item(s, "nav-queue", "≡", "Queue", false, choice(model, "nav-queue", false)),
         material.rail_item(
             s,
             "nav-theme",
