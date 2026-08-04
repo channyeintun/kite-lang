@@ -1866,21 +1866,62 @@ if (HOSTS.audio) {
       const next = S(url);
       if (element !== null && element.dataset.src === next) return;
       if (element !== null) element.pause();
-      element = new Audio(next);
-      element.dataset.src = next;
-      // Buffer the whole thing, not just the metadata.
+      const el = new Audio();
+      el.dataset.src = next;
+      element = el;
+      // Streaming first, seekable second — in that order, and both.
       //
-      // Seeking a media element normally asks the server for the bytes at the
-      // new position, over a `Range` request. A host that answers `200` with
-      // the entire body instead — which static asset servers commonly do, and
-      // which the one this is deployed to does — leaves the browser unable to
-      // seek past whatever it has already buffered: the position snaps back
-      // and the control looks broken. With the file buffered whole, a seek is
-      // resolved out of memory and needs nothing from the server.
+      // A media element seeks by asking the server for the bytes at the new
+      // position, over a `Range` request. This asset server answers `200` with
+      // the whole body and advertises no `Accept-Ranges`, so an element loaded
+      // from the URL is never *seekable*: `seekable` stays empty and every
+      // `currentTime` assignment reverts to zero, however much has been
+      // buffered. That is what the previous attempt at this missed —
+      // `preload = "auto"` buffers the file, and buffering is not seekability.
+      // A seek to ten seconds failed with two minutes already in hand.
       //
-      // The cost is only paid by someone who actually plays the track, since
-      // nothing loads a file until the program asks for one.
-      element.preload = "auto";
+      // The obvious fix is to fetch the file and play it from a blob, which a
+      // browser can range over itself. On its own that is a worse bug: nothing
+      // plays until six megabytes have arrived, and the element's own
+      // progressive streaming — the thing that makes a track start now rather
+      // than in ten seconds — is thrown away to buy a seek nobody has asked
+      // for yet.
+      //
+      // So the URL is played immediately, and the bytes are fetched *beside*
+      // it. When they land the element is handed the blob and put back exactly
+      // where it was, still playing if it was playing. Starting is as quick as
+      // it ever was, seeking becomes possible once the file is down, and the
+      // one visible cost is a single gap at the swap.
+      el.src = next;
+      el.preload = "auto";
+      fetch(next)
+        .then((r) => r.blob())
+        .then((b) => {
+          // A different track may have been chosen while the bytes came.
+          if (element !== el) return;
+          const at = el.currentTime;
+          const playing = !el.paused;
+          el.src = URL.createObjectURL(b);
+          el.addEventListener("loadedmetadata", () => {
+            const want = Number(el.dataset.at || at || 0);
+            if (want > 0) {
+              try {
+                el.currentTime = Math.min(want, el.duration);
+              } catch (e) {
+                // A position the element will not take. It does not move,
+                // which the program sees on its next frame.
+              }
+            }
+            if (playing || el.dataset.wanted === "1") {
+              const p = el.play();
+              if (p && p.catch) p.catch(() => {});
+            }
+          }, { once: true });
+        })
+        .catch(() => {
+          // No bytes: the element goes on streaming from the URL, where
+          // forward playback works and seeking does not. Better than silence.
+        });
     },
     start: () => {
       if (element === null) return;
