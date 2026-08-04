@@ -43,17 +43,24 @@ pub fn outlined_card<Msg>(name: str, s: Scheme, children: [ui.Node<Msg>]) -> ui.
 
 /// A card that answers to the pointer: it takes an id, so it can be clicked,
 /// focused and hovered, and it rises as it is.
+/// A card that can be pressed.
+///
+/// `label` is what it is called, and it is a parameter because a card has no
+/// caption of its own to fall back on: its content is arbitrary nodes, and
+/// "whatever text happens to be inside it" is not a name. §3's rule — what is
+/// required is a parameter — is doing the work here that a lint could not.
 pub fn clickable_card<Msg>(
     name: str,
     msg: Msg,
     s: Scheme,
+    label: str,
     children: [ui.Node<Msg>],
     state: State,
 ) -> ui.Node<Msg> {
     let lift = maxf(state.hover, state.focus) * (1.0 - state.press)
     let container = layered(raised(s, LEVEL_1(), LEVEL_2(), lift), s.on_surface, state)
     let inner = card_body(name, children, ui.inked(ui.rounded(container, SHAPE_MEDIUM()), s.on_surface))
-    let whole = ui.means(inner, name, msg)
+    let whole = ui.means(inner, name, msg, label)
     if state.disabled {
         return ui.disabled(whole)
     }
@@ -228,7 +235,12 @@ fn list_body<Msg>(
         ),
         space(3),
     )
-    let whole = ui.means(ui.decorated(ui.box_of(id, style, children), ui.inked(decor, s.on_surface)), id, msg)
+    let whole = ui.means(
+        ui.decorated(ui.box_of(id, style, children), ui.inked(decor, s.on_surface)),
+        id,
+        msg,
+        headline,
+    )
     if state.disabled {
         return ui.disabled(whole)
     }
@@ -422,6 +434,7 @@ pub fn menu_item<Msg>(
         ),
         id,
         msg,
+        caption,
     )
     if state.disabled {
         return ui.disabled(whole)

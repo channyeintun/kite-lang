@@ -1476,10 +1476,53 @@ impl<'a> Vm<'a> {
             // honoured: only a DOM has a real `<input>` to become.
             Native::DrawField => {
                 let a = |i: usize| self.regs[base + arg_base as usize + i].clone();
+                // A field's value may contain a newline — that is what a text
+                // area is for — and a transcript is read a line at a time.
+                // Escaping keeps one call to one line, which is the only
+                // property anything reading a transcript relies on.
+                let show = |i: usize| {
+                    a(i).to_string().replace('\\', "\\\\").replace('\n', "\\n")
+                };
                 let _ = writeln!(
                     self.out,
-                    "field {} {} {} {} {} {} {}",
-                    a(0), a(1), a(2), a(3), a(4), a(5), a(6)
+                    "field {} {} {} {} {} {} {} {} {}",
+                    a(0), a(1), a(2), a(3), show(4), show(5), a(6), show(7), a(8)
+                );
+                Ok(Value::Unit)
+            }
+
+            // A transcript has no pixels to put a picture in, so it records
+            // where one goes and what it would have been. That is the honest
+            // degradation: the geometry is the part a transcript can check,
+            // and it is the part the differential suite compares.
+            Native::DrawImage => {
+                let a = |i: usize| self.regs[base + arg_base as usize + i].clone();
+                let _ = writeln!(
+                    self.out,
+                    "image {} {} {} {} {}",
+                    a(0), a(1), a(2), a(3), a(4)
+                );
+                Ok(Value::Unit)
+            }
+
+            // The parallel tree, written down. A transcript is the one backend
+            // for which semantics and pixels are the same kind of thing —
+            // both are lines — which is what makes it the natural place to
+            // audit them from. `kite check --a11y` reads exactly this.
+            Native::DrawSemantics => {
+                let a = |i: usize| self.regs[base + arg_base as usize + i].clone();
+                let show = |i: usize| {
+                    a(i).to_string().replace('\\', "\\\\").replace('\n', "\\n")
+                };
+                // The label goes last, and it is the only field that may
+                // contain a space — so everything before it is fixed and
+                // whatever follows is the label, empty or not. That is what
+                // makes this line parseable by `kite check --a11y`, which is
+                // the whole reason it is written down.
+                let _ = writeln!(
+                    self.out,
+                    "semantics {} {} {} {} {} {} {} {}",
+                    a(0), a(1), a(2), a(3), a(4), a(6), show(7), show(5)
                 );
                 Ok(Value::Unit)
             }

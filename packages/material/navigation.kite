@@ -266,6 +266,7 @@ fn tab_body<Msg>(
         ui.decorated(box, ui.inked(layer_decor(ink, state, 0.0), ink)),
         id,
         msg,
+        caption,
     )
     if state.disabled {
         return ui.disabled(whole)
@@ -367,7 +368,7 @@ fn destination<Msg>(
         ui.spaced(ui.Style{..ui.column(), align: ui.Align.Center }, space(1)),
         stack,
     )
-    let whole = ui.means(ui.decorated(box, ui.ink(s.on_surface)), id, msg)
+    let whole = ui.means(ui.decorated(box, ui.ink(s.on_surface)), id, msg, caption)
     if state.disabled {
         return ui.disabled(whole)
     }
@@ -476,7 +477,12 @@ pub fn drawer_item<Msg>(
         ),
         space(3),
     )
-    let whole = ui.means(ui.decorated(ui.box_of(id, style, children), ui.inked(decor, ink)), id, msg)
+    let whole = ui.means(
+        ui.decorated(ui.box_of(id, style, children), ui.inked(decor, ink)),
+        id,
+        msg,
+        caption,
+    )
     if state.disabled {
         return ui.disabled(whole)
     }

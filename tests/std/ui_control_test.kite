@@ -19,6 +19,7 @@ fn tree(focused: Option<str>, third_off: bool) -> ui.Node<Msg> {
         ui.text_of("third", ui.sized(ui.style(), 80.0, 20.0), "third"),
         "third",
         Msg.Toggle(3),
+        "third",
     )
     if third_off {
         third = ui.disabled(third)
@@ -31,11 +32,13 @@ fn tree(focused: Option<str>, third_off: bool) -> ui.Node<Msg> {
                 ui.text_of("draft", ui.sized(ui.style(), 80.0, 20.0), "milk"),
                 "draft",
                 "milk",
+                "Draft",
             ),
             ui.means(
                 ui.text_of("add", ui.sized(ui.style(), 80.0, 20.0), "Add"),
                 "add",
                 Msg.Add,
+                "Add",
             ),
             third,
         ],
@@ -74,9 +77,10 @@ fn checks() -> [error] {
 
     // ---- setters compose rather than reset ----
     let both: ui.Node<Msg> = ui.means(
-        ui.editable(ui.text_of("f", ui.style(), "x"), "f", "x"),
+        ui.editable(ui.text_of("f", ui.style(), "x"), "f", "x", "Field"),
         "f",
         Msg.Add,
+        "Field",
     )
     let f = ui.control_of(both, "f")
     out.push(test.is_true(f != nil, "the control survives both setters"))

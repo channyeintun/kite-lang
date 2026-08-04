@@ -167,7 +167,9 @@ const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_draw_alpha", &[F64], None),
     ("kite_rt_draw_font", &[F64, I64], None),
     ("kite_rt_draw_text", &[F64, F64, I64, I64], None),
-    ("kite_rt_draw_field", &[F64, F64, F64, F64, I64, I64, I64], None),
+    ("kite_rt_draw_field", &[F64, F64, F64, F64, I64, I64, I64, I64, I8], None),
+    ("kite_rt_draw_image", &[F64, F64, F64, F64, I64], None),
+    ("kite_rt_draw_semantics", &[F64, F64, F64, F64, I64, I64, I64, I64], None),
     ("kite_rt_draw_clip", &[F64, F64, F64, F64], None),
     ("kite_rt_draw_unclip", &[], None),
     ("kite_rt_text_width", &[I64], Some(F64)),
@@ -1595,6 +1597,16 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
             Builtin::DrawField => {
                 let vals: Vec<Value> = args.iter().map(|a| self.operand(a)).collect();
                 self.call_rt("kite_rt_draw_field", &vals);
+                self.def_zero(dst);
+            }
+            Builtin::DrawImage => {
+                let vals: Vec<Value> = args.iter().map(|a| self.operand(a)).collect();
+                self.call_rt("kite_rt_draw_image", &vals);
+                self.def_zero(dst);
+            }
+            Builtin::DrawSemantics => {
+                let vals: Vec<Value> = args.iter().map(|a| self.operand(a)).collect();
+                self.call_rt("kite_rt_draw_semantics", &vals);
                 self.def_zero(dst);
             }
             Builtin::TextWidth => {

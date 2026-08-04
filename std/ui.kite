@@ -36,6 +36,20 @@ pub struct Insets {
 pub enum Axis {
     Row
     Column
+    /// Children share the box instead of dividing it: every one is given the
+    /// whole of it, and later children are painted over earlier ones.
+    ///
+    /// This is the escape hatch §4 names when it excludes absolute
+    /// positioning. Without it a modal is a box that *contains* the screen
+    /// rather than one that covers it, which is what `material.modal` was —
+    /// and every overlay in a design system is the same shape: a dialog, a
+    /// menu, a tooltip, a snackbar, a scrim.
+    ///
+    /// It is a third axis rather than a flag because it is exactly what an
+    /// axis decides — how the main-axis space is shared out. A row divides it,
+    /// a column divides it the other way, and a stack does not divide it at
+    /// all. Nothing else about a box changes.
+    Stack
 }
 
 /// How spare space along the main axis is distributed.
@@ -107,6 +121,15 @@ fn unset_font(size: float) {
 pub enum Content {
     Empty
     Text(str)
+    /// A picture, named by whatever the host can resolve — a URL, a path, a
+    /// `data:` URI.
+    ///
+    /// It carries no size. An image's intrinsic size is only knowable once the
+    /// bytes have arrived, and a layout that waited for that would be a layout
+    /// that could not run until the network had — so a picture is given a box
+    /// by its style and fitted into it. That is a real constraint and it is
+    /// stated here rather than discovered: [`image_of`] takes the size.
+    Image(str)
 }
 
 /// Everything a control states about itself, in one value.
@@ -117,6 +140,79 @@ pub enum Content {
 /// not a control is not a state anything can act on. Loose fields would make
 /// those spellable and leave every reader to decide what they meant; a single
 /// optional makes "is this a control" one question with one answer.
+/// What a control *is*, to something that cannot see it.
+///
+/// The parallel tree §7 describes is built out of this. It is a closed set
+/// rather than a free string because every value here has to mean something to
+/// three different backends — an ARIA role on the DOM, a node in the canvas
+/// renderer's parallel tree, a word in a transcript — and a role nobody
+/// implements is worse than no role at all: it announces confidently and
+/// wrongly.
+pub enum Role {
+    /// Something that groups other things and says nothing itself.
+    Group
+    Button
+    Link
+    Checkbox
+    Radio
+    Switch
+    Slider
+    TextField
+    /// A picture that carries meaning — ARIA's `img`.
+    ///
+    /// Named `Picture` rather than `Image` because a pattern names a variant
+    /// without its enum, so two enums cannot share a variant name; `Content`
+    /// already has an `Image`, and it is the one that had the better claim to
+    /// the word.
+    Picture
+    Heading
+    Tab
+    MenuItem
+    Dialog
+    Progress
+}
+
+/// The number a role crosses the boundary as.
+///
+/// Written out rather than derived from the declaration order, because the
+/// order of an enum is a thing anyone may reasonably change and this is a wire
+/// format three backends agree on.
+pub fn role_code(r: Role) -> int {
+    return match r {
+        Group => 0
+        Button => 1
+        Link => 2
+        Checkbox => 3
+        Radio => 4
+        Switch => 5
+        Slider => 6
+        TextField => 7
+        Picture => 8
+        Heading => 9
+        Tab => 10
+        MenuItem => 11
+        Dialog => 12
+        Progress => 13
+    }
+}
+
+/// What a control is editing.
+///
+/// One value rather than a `str` and a loose flag beside it, for the reason
+/// [`Control`] itself is one value: the two are not independent. Text that
+/// nothing is editing has no line policy, and a line policy with no text is
+/// not a state anything can be in.
+///
+/// The distinction it carries cannot be recovered from geometry. A box four
+/// lines tall is not the same claim as a field that accepts a newline: the
+/// first is a size, the second is what Enter means — and a renderer that makes
+/// real elements has to choose between an `<input>` and a `<textarea>` before
+/// it knows either.
+pub struct Edit {
+    pub text: str
+    pub multiline: bool
+}
+
 pub struct Control<Msg> {
     /// Who this is: hit-testing, focus order, and the semantics tree.
     ///
@@ -135,8 +231,8 @@ pub struct Control<Msg> {
     /// knew the index rather than parsed back out of a name. Nil for a control
     /// that is a place rather than an action.
     pub msg: Option<Msg>
-    /// The text this control is editing, or nil for not editable.
-    pub edits: Option<str>
+    /// What this control is editing, or nil for not editable.
+    pub edits: Option<Edit>
     /// Whether the model believes this control holds focus.
     ///
     /// Set by [`with_focus`] over the whole tree rather than by each component,
@@ -149,6 +245,63 @@ pub struct Control<Msg> {
     /// paints exactly as it did; it leaves focus order, and it means nothing
     /// when activated.
     pub enabled: bool
+    /// What this control is called, for anything that cannot see it.
+    ///
+    /// **Required, and a parameter of every constructor.** That is §7's
+    /// highest-leverage rule doing its work: a parameter is checked by the
+    /// compiler on every build, for every developer, forever — whereas a lint
+    /// is switched off and a runtime warning is scrolled past. A control with
+    /// no label is the single most common accessibility defect there is, and
+    /// here it is a program that does not compile.
+    ///
+    /// It is not the caption. A caption is what is drawn; a label is what is
+    /// announced, and for an icon button there is no caption at all.
+    pub label: str
+    /// What kind of thing this is. Defaulted by inference — see
+    /// [`role_of`] — and overridden with [`as_role`] where the tree knows
+    /// better than the inference can.
+    pub role: Role
+    /// On, off, or neither.
+    ///
+    /// Nil is not "off": a button is not an unchecked checkbox, and a reader
+    /// that announced every control as unchecked would be worse than one that
+    /// said nothing. Only a control that *can* be on carries this.
+    pub checked: Option<bool>
+}
+
+/// The role a control gets when nothing said otherwise.
+///
+/// Inferred from what the control already claims rather than defaulted to
+/// `Group`, because the two commonest kinds are exactly the two the rest of
+/// the structure already distinguishes: something that says something when
+/// activated is a button, and something that edits text is a text field. What
+/// is left — a place rather than an action — is a group, which is what it is.
+pub fn role_of<Msg>(c: Control<Msg>) -> Role {
+    return match c.role {
+        // An explicit role wins. `Group` is also the value that means "not
+        // set", which is sound because a control that really is a group is
+        // what the inference would answer anyway.
+        Group => if c.edits != nil {
+            Role.TextField
+        } else if c.msg != nil {
+            Role.Button
+        } else {
+            Role.Group
+        }
+        Button => c.role
+        Link => c.role
+        Checkbox => c.role
+        Radio => c.role
+        Switch => c.role
+        Slider => c.role
+        TextField => c.role
+        Picture => c.role
+        Heading => c.role
+        Tab => c.role
+        MenuItem => c.role
+        Dialog => c.role
+        Progress => c.role
+    }
 }
 
 /// The message type of a tree that says nothing.
@@ -172,6 +325,15 @@ pub struct Node<Msg> {
     pub control: Option<Control<Msg>>
     /// How the box looks. The layout never reads this.
     pub decor: Decor
+    /// This subtree is painted last, outside whatever clip encloses it.
+    ///
+    /// It is still laid out exactly where it sits — that is the whole point,
+    /// and the difference between a portal and simply declaring the thing at
+    /// the root. A tooltip has to know where the control it belongs to ended
+    /// up, and only its parent knows that; what it must *not* inherit is the
+    /// parent's clip, because the row it is anchored to is inside a scrolling
+    /// viewport and the tooltip has to hang outside one.
+    pub portal: bool
 }
 
 /// One laid-out box, in absolute coordinates.
@@ -213,16 +375,47 @@ pub struct Frame {
     /// pointer even when it is inert, and focus order wants only what can be
     /// reached. One flag standing for both is the mistake `role` made.
     pub enabled: bool
-    /// The text this frame's control is editing, or nil for anything else.
+    /// What this frame's control is editing, or nil for anything else.
     ///
     /// A renderer never sees the tree, so a fact the renderer must act on has
     /// to travel on the frame. This is the only one that is not about where
     /// the box is or how it looks: it says *this region is a text input*, and
-    /// a DOM renderer answers it with a real `<input>` — which is the only way
-    /// to get a caret that can be dragged, a selection, an IME and a phone's
-    /// keyboard, none of which can be drawn.
-    pub edits: Option<str>
+    /// a DOM renderer answers it with a real `<input>` or `<textarea>` — which
+    /// is the only way to get a caret that can be dragged, a selection, an IME
+    /// and a phone's keyboard, none of which can be drawn.
+    pub edits: Option<Edit>
+    /// The picture this frame holds, or nil for anything else.
+    ///
+    /// Beside `content` rather than replacing it, for the same reason `edits`
+    /// is its own field: a renderer never sees the tree, so what it must act on
+    /// travels on the frame, and the three are different claims. `content` is
+    /// text to draw; this is a picture to fetch.
+    pub image: Option<str>
+    /// What this control is called, its kind, and whether it is on — the three
+    /// things the parallel tree in §7 is built from.
+    ///
+    /// Carried on every frame and meaningful only where `is_control` is true,
+    /// which is the same arrangement `control` and `enabled` already have: a
+    /// frame is a flat record, and an optional group would cost a narrowing at
+    /// every use to save nothing.
+    pub label: str
+    pub role: Role
+    pub checked: Option<bool>
+    /// Whether the model believes this control holds focus.
+    ///
+    /// The DOM gets focus right on its own — a real element either has it or
+    /// does not. This is for the renderers that have no real elements, where
+    /// the parallel tree is the only thing that can say so.
+    pub focused: bool
     pub decor: Decor
+    /// Whether this frame came out of a portal — see [`Node.portal`].
+    ///
+    /// Frames are handed back in paint order, and `layout` has already moved
+    /// portals to the end, so anything reading the list in order gets them on
+    /// top for free: `hit` finds them first, `paint` draws them last. The flag
+    /// remains because one caller has to treat them differently — a painter
+    /// that opened a clip has to close it before it reaches them.
+    pub portal: bool
 }
 
 // ---- construction ---------------------------------------------------------
@@ -261,6 +454,12 @@ pub fn row() -> Style {
     return style()
 }
 
+/// A box whose children share it rather than divide it — the overlay
+/// primitive. Later children paint over earlier ones.
+pub fn stack() -> Style {
+    return Style{..style(), axis: Axis.Stack }
+}
+
 pub fn column() -> Style {
     return Style{..style(), axis: Axis.Column }
 }
@@ -288,34 +487,95 @@ pub fn spaced(base: Style, amount: float) -> Style {
 /// second call quietly discarding what the first said. A setter that reset the
 /// fields it does not mention would make the order of two independent
 /// statements matter, which is the kind of rule nobody remembers.
-fn controlled<Msg>(node: Node<Msg>, id: str) -> Control<Msg> {
+fn controlled<Msg>(node: Node<Msg>, id: str, label: str) -> Control<Msg> {
     let existing = node.control
     if existing != nil {
-        return Control{..existing, id: id }
+        return Control{..existing, id: id, label: label }
     }
-    return Control{ id: id, msg: nil, edits: nil, focused: false, enabled: true }
+    return Control{
+        id: id,
+        msg: nil,
+        edits: nil,
+        focused: false,
+        enabled: true,
+        label: label,
+        role: Role.Group,
+        checked: nil,
+    }
 }
 
 /// The same node, made a control that is a place rather than an action:
 /// hit-testable and focusable, saying nothing when activated.
-pub fn control<Msg>(node: Node<Msg>, id: str) -> Node<Msg> {
-    return Node{..node, control: controlled(node, id) }
+pub fn control<Msg>(node: Node<Msg>, id: str, label: str) -> Node<Msg> {
+    return Node{..node, control: controlled(node, id, label) }
+}
+
+/// The same control, told what kind of thing it is.
+///
+/// Only needed where the inference cannot reach: a checkbox and a button both
+/// say something when activated, and nothing in the tree distinguishes them.
+pub fn as_role<Msg>(node: Node<Msg>, r: Role) -> Node<Msg> {
+    let mine = node.control
+    if mine == nil {
+        return node
+    }
+    return Node{..node, control: Control{..mine, role: r } }
+}
+
+/// The same control, on or off.
+///
+/// This is what a reader announces beside the label — "Read receipts, switch,
+/// on" — and it is the state the picture already shows to anyone who can see
+/// it. A control that is neither on nor off does not call this.
+pub fn checked<Msg>(node: Node<Msg>, on: bool) -> Node<Msg> {
+    let mine = node.control
+    if mine == nil {
+        return node
+    }
+    return Node{..node, control: Control{..mine, checked: on } }
 }
 
 /// The same node, made a control that says something when activated.
 ///
 /// `id` is who it is and `msg` is what it means — the two set together,
 /// because a meaning without an identity would be unreachable.
-pub fn means<Msg>(node: Node<Msg>, id: str, msg: Msg) -> Node<Msg> {
-    return Node{..node, control: Control{..controlled(node, id), msg: msg } }
+pub fn means<Msg>(node: Node<Msg>, id: str, msg: Msg, label: str) -> Node<Msg> {
+    return Node{..node, control: Control{..controlled(node, id, label), msg: msg } }
 }
 
 /// The same node, made an editable control currently showing `value`.
 ///
 /// The tree carries the current text down and an edit carries the next text
 /// up, so the model stays the only thing that remembers what a field holds.
-pub fn editable<Msg>(node: Node<Msg>, id: str, value: str) -> Node<Msg> {
-    return Node{..node, control: Control{..controlled(node, id), edits: value } }
+///
+/// One line. Enter is the application's — it submits, or it does whatever the
+/// program says a key means. For a field that takes a newline instead, see
+/// [`editable_lines`].
+pub fn editable<Msg>(node: Node<Msg>, id: str, value: str, label: str) -> Node<Msg> {
+    return Node{
+        ..node,
+        control: Control{
+            ..controlled(node, id, label),
+            edits: Edit{ text: value, multiline: false },
+        },
+    }
+}
+
+/// The same, for a field that takes more than one line.
+///
+/// Enter belongs to the field here rather than to the application: it puts a
+/// newline in, and the program does not hear it. That is the whole difference
+/// between the two, and it is why this is a separate constructor rather than a
+/// height — a text area three lines tall and a text area ten lines tall differ
+/// in size, while a text area and an input differ in what a key means.
+pub fn editable_lines<Msg>(node: Node<Msg>, id: str, value: str, label: str) -> Node<Msg> {
+    return Node{
+        ..node,
+        control: Control{
+            ..controlled(node, id, label),
+            edits: Edit{ text: value, multiline: true },
+        },
+    }
 }
 
 /// The same control, turned off: still laid out, still painted, no longer in
@@ -410,6 +670,7 @@ pub fn box_of<Msg>(name: str, base: Style, children: [Node<Msg>]) -> Node<Msg> {
         children: children,
         control: nil,
         decor: no_decor(),
+        portal: false,
     }
 }
 
@@ -421,7 +682,41 @@ pub fn text_of<Msg>(name: str, base: Style, body: str) -> Node<Msg> {
         children: [],
         control: nil,
         decor: no_decor(),
+        portal: false,
     }
+}
+
+/// A picture, in a box you state.
+///
+/// The size is a parameter rather than a field on `Style` for the reason §3
+/// gives for labels: what is required is a parameter. An image whose box was
+/// omitted would lay out as nothing and disappear, and the first anyone would
+/// know of it is an empty space in a running program — whereas a missing
+/// argument is a compile error.
+pub fn image_of<Msg>(name: str, base: Style, src: str, width: float, height: float) -> Node<Msg> {
+    return Node{
+        name: name,
+        style: Style{..base, width: width, height: height },
+        content: Content.Image(src),
+        children: [],
+        control: nil,
+        decor: no_decor(),
+        portal: false,
+    }
+}
+
+/// The same subtree, painted last and outside any clip around it.
+///
+/// Where [`stack`] puts one child over another *within a box*, a portal takes a
+/// subtree out of the box entirely at paint time while leaving it in place at
+/// layout time. That is the combination nothing else can express: a menu that
+/// belongs to a button three levels inside a scrolling list has to be positioned
+/// by that button and must not be cut off by the list.
+///
+/// It also becomes topmost for hit-testing, because `layout` moves it to the end
+/// of the frame list and everything that reads that list reads it in order.
+pub fn portal<Msg>(node: Node<Msg>) -> Node<Msg> {
+    return Node{..node, portal: true }
 }
 
 // ---- measurement ----------------------------------------------------------
@@ -441,7 +736,46 @@ pub fn line_height() -> float {
 /// comparable across backends.
 ///
 pub fn text_size(body: str) -> Size {
-    return Size{ width: text.width(body), height: line_height() }
+    // A hard break ends a line whether or not anything is wrapping, so a run
+    // that is never given a width is still as many lines tall as it has breaks
+    // in it.
+    //
+    // Measuring it as a single run is what let a `\n` mean nothing to the
+    // layout while the DOM renderer, which sets `white-space: pre`, drew it as
+    // two lines and overflowed the box it was given. The two renderers
+    // disagreed about a plain text node, which is the one thing the split is
+    // not allowed to do.
+    let lines = hard_lines(body)
+    if lines.len() == 1 {
+        return Size{ width: text.width(body), height: line_height() }
+    }
+    var widest = 0.0
+    for line in lines {
+        widest = maxf(widest, text.width(line))
+    }
+    return Size{ width: widest, height: intToFloat(lines.len()) * line_height() }
+}
+
+/// A run split at its mandatory breaks and nowhere else.
+///
+/// This is the part of line breaking that is not a measurement: where `wrap`
+/// asks how much fits, a break in the text says the line ends here regardless.
+/// UAX #14 calls these the mandatory break classes; the only one Kite reads is
+/// `\n`, because that is the only one a Kite string literal can carry.
+pub fn hard_lines(body: str) -> [str] {
+    var out: [str] = []
+    var current = ""
+    for i in 0..body.len() {
+        let c = body.slice(i, i + 1)
+        if c == "\n" {
+            out.push(current)
+            current = ""
+        } else {
+            current = current + c
+        }
+    }
+    out.push(current)
+    return out
 }
 
 /// A run broken into lines that fit within `limit`.
@@ -485,23 +819,43 @@ pub fn wrap(body: str, limit: float) -> [str] {
     }
 
     var lines: [str] = []
-    var current = pieces[0].body
-    for i in 1..pieces.len() {
+    var current = ""
+    // Whether anything has been accumulated yet. The first piece begins the
+    // first line rather than being appended to it — unless a break stands in
+    // front of it, in which case the first line is the empty one before it.
+    var started = false
+    for i in 0..pieces.len() {
         let piece = pieces[i]
-        // Whether a space goes back between two pieces is *recorded* when they
-        // are split, not guessed at afterwards. It used to be inferred — a
-        // one-character piece wide enough to be CJK was assumed to have had no
-        // space before it, anything else was assumed to have had one — and the
-        // inference was wrong for every script that gets split for some other
-        // reason. Burmese does: a mark measured on its own is wide, so a
-        // cluster came apart, and the rejoin then pushed a space into the
-        // middle of a word. `ဆယ်လ်` became `ဆယ် လ်` on screen.
-        let candidate = if piece.spaced { current + " " + piece.body } else { current + piece.body }
-        if text.width(candidate) <= limit {
-            current = candidate
-        } else {
+        if piece.breaks > 0 {
+            // A mandatory break is not a measurement: the line ends here
+            // whether or not the next piece would have fitted. Every break
+            // after the first leaves a line with nothing on it, which is what
+            // a blank line in the text is.
             lines.push(current)
+            for b in 1..piece.breaks {
+                lines.push("")
+            }
             current = piece.body
+            started = true
+        } else if !started {
+            current = piece.body
+            started = true
+        } else {
+            // Whether a space goes back between two pieces is *recorded* when
+            // they are split, not guessed at afterwards. It used to be inferred
+            // — a one-character piece wide enough to be CJK was assumed to have
+            // had no space before it, anything else was assumed to have had one
+            // — and the inference was wrong for every script that gets split
+            // for some other reason. Burmese does: a mark measured on its own is
+            // wide, so a cluster came apart, and the rejoin then pushed a space
+            // into the middle of a word. `ဆယ်လ်` became `ဆယ် လ်` on screen.
+            let candidate = if piece.spaced { current + " " + piece.body } else { current + piece.body }
+            if text.width(candidate) <= limit {
+                current = candidate
+            } else {
+                lines.push(current)
+                current = piece.body
+            }
         }
     }
     lines.push(current)
@@ -529,6 +883,10 @@ pub fn wrap(body: str, limit: float) -> [str] {
 struct Piece {
     body: str
     spaced: bool
+    /// How many mandatory breaks stand between this piece and the one before
+    /// it. Counted rather than flagged, because two breaks in a row are a
+    /// blank line and a boolean cannot say how many lines to leave.
+    breaks: int
 }
 
 fn pieces_of(body: str) -> [Piece] {
@@ -536,32 +894,51 @@ fn pieces_of(body: str) -> [Piece] {
     var current = ""
     // Whether the piece being accumulated had a space before it.
     var after_space = false
+    // Mandatory breaks standing in front of the piece being accumulated.
+    var pending = 0
     for i in 0..body.len() {
         let c = body.slice(i, i + 1)
-        if c == " " {
+        if c == "\n" {
             if current.len() > 0 {
-                out.push(Piece{ body: current, spaced: after_space })
+                out.push(Piece{ body: current, spaced: after_space, breaks: pending })
                 current = ""
+                pending = 0
+            }
+            pending = pending + 1
+            // A break subsumes the space in front of it. The space was only
+            // ever a separator, and the break separates more strongly — so a
+            // rejoined line does not start with the space that ended the last
+            // one.
+            after_space = false
+        } else if c == " " {
+            if current.len() > 0 {
+                out.push(Piece{ body: current, spaced: after_space, breaks: pending })
+                current = ""
+                pending = 0
             }
             after_space = true
-        } else {
-            if wide(c) {
-                // A wide character is its own piece, and so is whatever
-                // preceded it. Neither had a space between them.
-                if current.len() > 0 {
-                    out.push(Piece{ body: current, spaced: after_space })
-                    current = ""
-                    after_space = false
-                }
-                out.push(Piece{ body: c, spaced: after_space })
+        } else if wide(c) {
+            // A wide character is its own piece, and so is whatever
+            // preceded it. Neither had a space between them.
+            if current.len() > 0 {
+                out.push(Piece{ body: current, spaced: after_space, breaks: pending })
+                current = ""
+                pending = 0
                 after_space = false
-            } else {
-                current = current + c
             }
+            out.push(Piece{ body: c, spaced: after_space, breaks: pending })
+            pending = 0
+            after_space = false
+        } else {
+            current = current + c
         }
     }
     if current.len() > 0 {
-        out.push(Piece{ body: current, spaced: after_space })
+        out.push(Piece{ body: current, spaced: after_space, breaks: pending })
+    } else if pending > 0 {
+        // A body ending in a break ends with an empty line, and something has
+        // to carry it: `"a\n"` is two lines, the second of them blank.
+        out.push(Piece{ body: "", spaced: false, breaks: pending })
     }
     return out
 }
@@ -610,6 +987,15 @@ fn is_row(a: Axis) -> bool {
     return match a {
         Row => true
         Column => false
+        Stack => false
+    }
+}
+
+fn is_stack(a: Axis) -> bool {
+    return match a {
+        Stack => true
+        Row => false
+        Column => false
     }
 }
 
@@ -642,6 +1028,11 @@ fn measure_content<Msg>(node: Node<Msg>) -> Size {
     let body = match node.content {
         Empty => ""
         Text(s) => s
+        // A picture is whatever box it was given, and `measure` applies that
+        // from the style. There is nothing to measure here: an intrinsic size
+        // would have to be asked of the host, and the host does not have it
+        // until the bytes arrive.
+        Image(src) => ""
     }
     if body.len() > 0 {
         set_font(node.style.size, node.style.weight)
@@ -665,6 +1056,21 @@ fn measure_content<Msg>(node: Node<Msg>) -> Size {
     }
     if node.children.len() == 0 {
         return Size{ width: 0.0, height: 0.0 }
+    }
+
+    // A stack wants the room its largest child wants, on both axes at once:
+    // nothing is placed after anything else, so nothing accumulates. The gap
+    // means nothing here and is not applied — there is no space *between* two
+    // children that occupy the same place.
+    if is_stack(node.style.axis) {
+        var widest = 0.0
+        var tallest = 0.0
+        for child in node.children {
+            let size = measure(child)
+            widest = maxf(widest, size.width)
+            tallest = maxf(tallest, size.height)
+        }
+        return Size{ width: widest, height: tallest }
     }
 
     let gaps = node.style.gap * intToFloat(node.children.len() - 1)
@@ -695,7 +1101,59 @@ pub fn layout<Msg>(root: Node<Msg>, viewport: Size) -> [Frame] {
     let fixed_h = root.style.height
     let w = if fixed_w != nil { fixed_w } else { viewport.width }
     let h = if fixed_h != nil { fixed_h } else { viewport.height }
-    return arrange(root, Rect{ x: 0.0, y: 0.0, width: w, height: h }, 0, nil, true)
+    return lifted(arrange(root, Rect{ x: 0.0, y: 0.0, width: w, height: h }, 0, nil, true))
+}
+
+/// Move every portal subtree to the end, keeping the order they were declared.
+///
+/// Done once, here, rather than by each consumer: paint order, hit order and
+/// focus order are all *the order of this list*, so a portal that is last in it
+/// is on top in all three at once. A painter that reordered for itself would
+/// have left `hit` disagreeing with what a person can see, which is the worst
+/// kind of bug to find.
+///
+/// A subtree is the portal's own frame plus every frame after it that is
+/// deeper, which is exactly what `arrange` emits: parents before children,
+/// depth-first.
+fn lifted(frames: [Frame]) -> [Frame] {
+    // Almost every tree has no portal in it, and that case should cost one
+    // pass and no copying.
+    var any = false
+    for f in frames {
+        if f.portal {
+            any = true
+            break
+        }
+    }
+    if !any {
+        return frames
+    }
+
+    var grounded: [Frame] = []
+    var raised: [Frame] = []
+    // How far the subtree currently being raised extends. Frames up to and
+    // including it go up with it rather than being reconsidered.
+    var raising_until = -1
+    for k in 0..frames.len() {
+        let f = frames[k]
+        if k <= raising_until {
+            raised.push(f)
+        } else if f.portal {
+            raised.push(f)
+            var last = k
+            for j in (k + 1)..frames.len() {
+                if frames[j].depth > f.depth {
+                    last = j
+                } else {
+                    break
+                }
+            }
+            raising_until = last
+        } else {
+            grounded.push(f)
+        }
+    }
+    return concat(grounded, raised)
 }
 
 /// How far in the first child sits.
@@ -726,6 +1184,20 @@ fn cross_size(a: Align, available: float, natural: float) -> float {
     }
 }
 
+/// Where a stacked child sits along the box's width.
+///
+/// `justify` reads the same way it does in a row — start, centre, end — which
+/// is what keeps a stack legible beside the other two axes. `SpaceBetween` has
+/// nothing to spread when every child is in the same place, so it means start.
+fn along_offset(j: Justify, available: float, natural: float) -> float {
+    return match j {
+        Start => 0.0
+        Center => maxf(0.0, (available - natural) / 2.0)
+        End => maxf(0.0, available - natural)
+        SpaceBetween => 0.0
+    }
+}
+
 fn cross_offset(a: Align, available: float, natural: float) -> float {
     return match a {
         Start => 0.0
@@ -749,13 +1221,24 @@ fn arrange<Msg>(
     let mine = node.control
     var owner = inherited
     var live = inherited_enabled
-    var editing: Option<str> = nil
+    var editing: Option<Edit> = nil
+    // Only the control's own frame carries the semantics, for the same reason
+    // it alone carries the field: a box inside a button is not a second button,
+    // and a reader given both would announce the same thing twice.
+    var says = ""
+    var kind = Role.Group
+    var on: Option<bool> = nil
+    var has_focus = false
     if mine != nil {
         owner = mine.id
         live = mine.enabled
         // Only the control's own frame is the field. A box inside an editable
         // control is not a second input, and stamping it would make one.
         editing = mine.edits
+        says = mine.label
+        kind = role_of(mine)
+        on = mine.checked
+        has_focus = mine.focused
     }
     let pad = node.style.padding
     let inner = Rect{
@@ -774,6 +1257,12 @@ fn arrange<Msg>(
             content: match node.content {
                 Text(body) => body,
                 Empty => "",
+                Image(src) => "",
+            },
+            image: match node.content {
+                Image(src) => src,
+                Text(body) => nil,
+                Empty => nil,
             },
             size: node.style.size,
             weight: node.style.weight,
@@ -781,10 +1270,57 @@ fn arrange<Msg>(
             is_control: mine != nil,
             enabled: live,
             edits: editing,
+            label: says,
+            role: kind,
+            checked: on,
+            focused: has_focus,
             decor: node.decor,
+            portal: node.portal,
         },
     ]
     if node.children.len() == 0 {
+        return frames
+    }
+
+    // A stack shares the box out to nobody: every child is given all of it and
+    // placed inside it on its own, so there is no cursor, no leftover and no
+    // gap. Paint order is child order, which is what makes the last child the
+    // one on top.
+    if is_stack(node.style.axis) {
+        for child in node.children {
+            let size = measure(child)
+            // In a stack, `grow` means **fill the box on whichever axis you
+            // did not size yourself.**
+            //
+            // There is no spare space to share out here, so the field would
+            // otherwise mean nothing — and filling is exactly what overlays
+            // ask for. A scrim says `grow` and covers everything; a bar says
+            // `grow` and a height, and covers the width at the height it
+            // chose. `measure` has already applied a fixed size, so a child
+            // that stated one keeps it and only the unstated axis is filled.
+            let fills = child.style.grow > 0.0
+            let w = if child.style.width != nil {
+                size.width
+            } else if fills {
+                inner.width
+            } else {
+                size.width
+            }
+            let h = if child.style.height != nil {
+                size.height
+            } else if fills {
+                inner.height
+            } else {
+                cross_size(node.style.align, inner.height, size.height)
+            }
+            let child_rect = Rect {
+                x: inner.x + along_offset(node.style.justify, inner.width, w),
+                y: inner.y + cross_offset(node.style.align, inner.height, h),
+                width: w,
+                height: h,
+            }
+            frames = concat(frames, arrange(child, child_rect, depth + 1, owner, live))
+        }
         return frames
     }
 
@@ -1037,7 +1573,72 @@ pub fn paint(frames: [Frame]) {
     }
 }
 
+/// The bits `draw.semantics` packs its state into.
+fn SEMANTIC_DISABLED() -> int {
+    return 1
+}
+
+fn SEMANTIC_CHECKED() -> int {
+    return 2
+}
+
+fn SEMANTIC_FOCUSED() -> int {
+    return 4
+}
+
+/// Whether the control can be on at all, which is not the same as being off.
+/// A reader that called every button "not checked" would be worse than one
+/// that said nothing.
+fn SEMANTIC_CHECKABLE() -> int {
+    return 8
+}
+
+/// Say what this region is, for anything that cannot see it.
+///
+/// Emitted for the control's own frame and nothing else, and *after* the frame
+/// has painted rather than before.
+///
+/// The order matters for exactly one case, and it is the case that matters
+/// most: a text field. A renderer that makes a real element for the field can
+/// put the label on that element instead of announcing the region twice — but
+/// only if the element exists by the time the declaration arrives. Declaring
+/// first would leave the first frame of every field with both a real input and
+/// a stray description of it.
+fn declare(frame: Frame) {
+    if !frame.is_control {
+        return
+    }
+    let who = frame.control
+    let id = if who != nil { who } else { frame.name }
+    var flags = 0
+    if !frame.enabled {
+        flags = flags + SEMANTIC_DISABLED()
+    }
+    if frame.focused {
+        flags = flags + SEMANTIC_FOCUSED()
+    }
+    let on = frame.checked
+    if on != nil {
+        flags = flags + SEMANTIC_CHECKABLE()
+        if on {
+            flags = flags + SEMANTIC_CHECKED()
+        }
+    }
+    let r = frame.rect
+    draw.semantics(r.x, r.y, r.width, r.height, role_code(frame.role), frame.label, flags, id)
+}
+
+/// Paint one frame, then say what it is.
+///
+/// Two calls rather than one function because `paint_box` leaves by several
+/// paths — a picture, a field and an empty box each return early — and the
+/// declaration has to happen on all of them.
 fn draw_one(frame: Frame) {
+    paint_box(frame)
+    declare(frame)
+}
+
+fn paint_box(frame: Frame) {
     let r = frame.rect
     let d = frame.decor
     let own = d.fill
@@ -1059,6 +1660,16 @@ fn draw_one(frame: Frame) {
             draw.drrect(r.x, r.y, r.width, r.height, d.radius, edge.width, edge.colour)
         }
     }
+    // A picture goes inside the padding, like text, and over the fill, like
+    // text — so a framed photograph is one node with a border and an inset
+    // rather than two boxes arranged to look like one.
+    let picture = frame.image
+    if picture != nil {
+        let box = frame.inner
+        draw.image(box.x, box.y, box.width, box.height, picture)
+        unset_alpha(d.alpha)
+        return
+    }
     // A text input is a region rather than a picture, so it is declared and
     // the renderer decides what to make of it. On the DOM that is a real
     // `<input>` with the browser's own caret, selection, IME and keyboard;
@@ -1076,15 +1687,31 @@ fn draw_one(frame: Frame) {
     // draws its box and its label as before and leaves the input to whichever
     // frame carries the text; declaring it on the wrapper would put an input
     // over the label as well.
-    // Narrowing takes one local and one `if`, so the two conditions nest.
+    // Narrowing takes one local and one `if`, so the conditions nest.
     if editing != nil {
         if body.len() > 0 {
+            // Who this field is, which the renderer needs to hand the same
+            // element back to the same field next frame. A frame that edits is
+            // a control's own frame, so it has an id; the name stands in only
+            // to keep the narrowing total, and nothing reaches it.
+            let who = frame.control
+            let key = if who != nil { who } else { frame.name }
             let box = frame.inner
             // The value, and what to show in place of it while it is empty. The
             // frame's own content is already that: the component put the
             // placeholder there when there was nothing to show.
-            let hint = if editing.len() == 0 { body } else { "" }
-            draw.field(box.x, box.y, box.width, box.height, editing, hint, d.ink)
+            let hint = if editing.text.len() == 0 { body } else { "" }
+            draw.field(
+                box.x,
+                box.y,
+                box.width,
+                box.height,
+                editing.text,
+                hint,
+                d.ink,
+                key,
+                editing.multiline,
+            )
             unset_alpha(d.alpha)
             return
         }
@@ -1215,13 +1842,27 @@ pub fn paint_scrolled(frames: [Frame], viewport: Rect, offset: float) {
     draw.clip(viewport.x, viewport.y, viewport.width, viewport.height)
     let dx = viewport.x
     let dy = viewport.y - offset
+    // Portals are last in the list, so the clip can be closed once, when the
+    // first one is reached, rather than opened and shut around each of them.
+    var clipped = true
     for frame in frames {
+        if frame.portal && clipped {
+            draw.unclip()
+            clipped = false
+        }
         let r = shifted(frame.rect, dx, dy)
-        if r.y + r.height >= viewport.y && r.y <= viewport.y + viewport.height{
+        // A portal is not cut by the viewport and is not skipped for leaving
+        // it: hanging outside is what it is for. It still scrolls with the
+        // content, because it was laid out against the row it belongs to.
+        if frame.portal {
+            draw_one(Frame{..frame, rect: r, inner: shifted(frame.inner, dx, dy) })
+        } else if r.y + r.height >= viewport.y && r.y <= viewport.y + viewport.height {
             draw_one(Frame{..frame, rect: r, inner: shifted(frame.inner, dx, dy) })
         }
     }
-    draw.unclip()
+    if clipped {
+        draw.unclip()
+    }
 }
 
 /// The frame under a point in a scrolled viewport. The offset is subtracted

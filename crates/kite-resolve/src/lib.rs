@@ -117,8 +117,18 @@ pub enum BuiltinFn {
     /// `text.height()` — the line height of the host's font: ascent plus
     /// descent plus leading, which is what a line of text actually occupies.
     TextHeight,
-    /// `draw.field(x, y, w, h, value, hint, colour)` — a text field goes here,
-    /// showing `value`, or `hint` when the value is empty, in `colour`.
+    /// `draw.field(x, y, w, h, value, hint, colour, id, multiline)` — a text
+    /// field goes here, showing `value`, or `hint` when the value is empty, in
+    /// `colour`.
+    ///
+    /// `id` is the control's, and it is the field's *identity across frames*
+    /// rather than a label: a renderer that makes a real element has to hand
+    /// the same element back to the same field next frame, or a form with two
+    /// fields in it would move one element between them and lose the caret on
+    /// every keystroke. `multiline` is the difference between an `<input>` and
+    /// a `<textarea>`, which is a difference no amount of geometry can convey:
+    /// a box four lines tall is not the same claim as a field that accepts a
+    /// newline.
     ///
     /// The one drawing call that is not drawing. Every other call says what a
     /// pixel should look like and every renderer can honour it; this one says
@@ -134,6 +144,39 @@ pub enum BuiltinFn {
     /// text with a `|` glyph standing in for the caret, and a glyph cannot be
     /// put where a caret goes without pushing the text aside.
     DrawField,
+    /// `draw.semantics(x, y, w, h, role, label, flags, id)` — what the thing
+    /// in this box *is*, for anything that cannot see it.
+    ///
+    /// The only call that paints nothing. It is a drawing call anyway because
+    /// a renderer never sees the tree, and this is the one fact about a region
+    /// that has no pixels: a screen reader needs to be told there is a button
+    /// here called Play, and no combination of rectangles says that.
+    ///
+    /// One implementation serves both renderers, which is why it is a call and
+    /// not a DOM feature. §7 specifies a *parallel tree* — the technique
+    /// Flutter uses for canvas — and a parallel tree is exactly what a stream
+    /// of positioned regions builds. The DOM renderer happens to be able to
+    /// put the roles on the elements it was already making; the canvas
+    /// renderer has to build the tree beside its pixels. The call is the same.
+    ///
+    /// `flags` is a bitfield: 1 disabled, 2 checked, 4 focused, 8 checkable.
+    /// Packed rather than passed as four booleans because it crosses the
+    /// boundary on every control of every frame, and because the set will grow.
+    DrawSemantics,
+    /// `draw.image(x, y, w, h, src)` — a picture goes in this box, fetched
+    /// from `src`.
+    ///
+    /// The box comes from the layout and the picture is fitted to it, rather
+    /// than the picture deciding how big it is. That is not a simplification:
+    /// an intrinsic size is only knowable once the bytes have arrived, so a
+    /// layout that waited for it would be a layout that could not run until
+    /// the network had. A box is stated and the picture goes in it.
+    ///
+    /// `src` is whatever the host can resolve — a URL, a path, a `data:` URI.
+    /// Kite never sees the pixels: a decoded image is not something `str`,
+    /// `int` and `float` can carry across the boundary, and decoding it to
+    /// hand it back would be the wrong place to do the work.
+    DrawImage,
     /// `draw.clip(x, y, w, h)` — confine drawing to a rectangle until
     /// `draw.unclip()`.
     ///
@@ -204,6 +247,8 @@ impl BuiltinFn {
             "text.width" => Some(BuiltinFn::TextWidth),
             "text.height" => Some(BuiltinFn::TextHeight),
             "draw.field" => Some(BuiltinFn::DrawField),
+            "draw.image" => Some(BuiltinFn::DrawImage),
+            "draw.semantics" => Some(BuiltinFn::DrawSemantics),
             "draw.clip" => Some(BuiltinFn::DrawClip),
             "draw.unclip" => Some(BuiltinFn::DrawUnclip),
             "task.yield" => Some(BuiltinFn::TaskYield),
@@ -233,6 +278,8 @@ impl BuiltinFn {
             BuiltinFn::TextWidth => "text.width",
             BuiltinFn::TextHeight => "text.height",
             BuiltinFn::DrawField => "draw.field",
+            BuiltinFn::DrawImage => "draw.image",
+            BuiltinFn::DrawSemantics => "draw.semantics",
             BuiltinFn::DrawClip => "draw.clip",
             BuiltinFn::DrawUnclip => "draw.unclip",
             BuiltinFn::TaskYield => "task.yield",
@@ -252,7 +299,9 @@ impl BuiltinFn {
         match self {
             BuiltinFn::IoPrint | BuiltinFn::ErrorsNew => 1,
             BuiltinFn::DrawRect | BuiltinFn::DrawText => 5,
-            BuiltinFn::DrawField => 7,
+            BuiltinFn::DrawField => 9,
+            BuiltinFn::DrawImage => 5,
+            BuiltinFn::DrawSemantics => 8,
             BuiltinFn::DrawRRect => 6,
             BuiltinFn::DrawFont => 2,
             BuiltinFn::DrawDRRect => 7,

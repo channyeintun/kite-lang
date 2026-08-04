@@ -325,8 +325,15 @@ fn HANDLE_GAP() -> float {
     return 2.0
 }
 
-pub fn slider<Msg>(s: Scheme, id: str, value: float, width: float, state: State) -> ui.Node<Msg> {
-    return slider_of(s, id, value, width, 0, state)
+pub fn slider<Msg>(
+    s: Scheme,
+    id: str,
+    value: float,
+    label: str,
+    width: float,
+    state: State,
+) -> ui.Node<Msg> {
+    return slider_of(s, id, value, label, width, 0, state)
 }
 
 /// A slider with `steps` stops along it, or 0 for a continuous one.
@@ -341,6 +348,7 @@ pub fn slider_of<Msg>(
     s: Scheme,
     id: str,
     value: float,
+    label: str,
     width: float,
     steps: int,
     state: State,
@@ -388,7 +396,10 @@ pub fn slider_of<Msg>(
     // application with this id and the control's own width, and the
     // application turns them into a value with [`slider_value_at`]. Payload
     // messages are a proposal of their own.
-    return ui.control(ui.decorated(ui.box_of(id, style, parts), ui.ink(s.primary)), id)
+    return ui.as_role(
+        ui.control(ui.decorated(ui.box_of(id, style, parts), ui.ink(s.primary)), id, label),
+        ui.Role.Slider,
+    )
 }
 
 fn snapped(v: float, steps: int) -> float {

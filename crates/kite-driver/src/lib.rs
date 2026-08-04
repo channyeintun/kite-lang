@@ -8,6 +8,7 @@ use kite_span::{FileId, SourceMap, Span};
 use std::io::Write;
 use std::path::Path;
 
+pub mod a11y;
 pub mod derive;
 pub mod manifest;
 pub mod modules;

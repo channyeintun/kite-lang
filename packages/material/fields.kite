@@ -130,6 +130,7 @@ pub fn search_field<Msg>(
         ui.decorated(node, ui.vertically_centered(ui.inked(decor, ink))),
         id,
         value,
+        placeholder,
     )
     if state.disabled {
         return ui.disabled(whole)
@@ -287,7 +288,12 @@ fn field_body<Msg>(
         ui.Style {..ui.column(), align: ui.Align.Stretch, width: spec.width },
         rows,
     )
-    let field = ui.editable(ui.decorated(whole, ui.ink(s.on_surface)), id, spec.value)
+    let field = ui.editable(
+        ui.decorated(whole, ui.ink(s.on_surface)),
+        id,
+        spec.value,
+        spec.label,
+    )
     if state.disabled {
         return ui.disabled(field)
     }
@@ -303,6 +309,7 @@ pub fn text_area<Msg>(
     s: Scheme,
     id: str,
     value: str,
+    label: str,
     placeholder: str,
     width: float,
     height: float,
@@ -318,13 +325,16 @@ pub fn text_area<Msg>(
     if state.focus > 0.0 {
         decor = ui.bordered(decor, s.primary, math.lerp(0.0, 2.0, state.focus))
     }
+    // No caret to draw, and none to pay for. The element the DOM renderer makes
+    // has the browser's own, and the renderers that cannot make one draw the
+    // text — which is what a `|` was standing in for, badly: it occupied the
+    // column it was pointing at, so the text moved sideways when the field took
+    // focus.
     var shown = value
     var ink = s.on_surface
     if value.len() == 0 {
         shown = placeholder
         ink = s.on_surface_variant
-    } else if state.focused {
-        shown = "\(value)|"
     }
     let style = ui.Style{
         ..ui.in_font(ui.style(), role.size, role.weight),
@@ -336,7 +346,11 @@ pub fn text_area<Msg>(
         ui.text_of(id, style, shown),
         ui.inked(decor, ink),
     )
-    let whole = ui.editable(shell, id, value)
+    // The one widget in the set that says Enter belongs to it. Under the DOM
+    // renderer this is what makes the element a `<textarea>` rather than an
+    // `<input>`, and a text area that came out single-line was the state of
+    // this component until the call could carry the difference.
+    let whole = ui.editable_lines(shell, id, value, label)
     if state.disabled {
         return ui.disabled(whole)
     }

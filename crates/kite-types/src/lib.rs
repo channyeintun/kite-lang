@@ -3339,17 +3339,19 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            // `draw.field(x, y, w, h, value, hint, colour)` — a region, its text
-            // and its ink.
+            // `draw.field(x, y, w, h, value, hint, colour, id, multiline)` — a
+            // region, its text, its ink, who it is and whether it takes more
+            // than one line.
             BuiltinFn::DrawField => {
-                if args.len() != 7 {
-                    self.arity_error("draw.field", args.len(), 7, span, None);
+                if args.len() != 9 {
+                    self.arity_error("draw.field", args.len(), 9, span, None);
                 }
-                let mut hargs = Vec::with_capacity(7);
+                let mut hargs = Vec::with_capacity(9);
                 for (i, a) in args.iter().enumerate() {
                     let want = match i {
-                        4 | 5 => TyId::STR,
+                        4 | 5 | 7 => TyId::STR,
                         6 => TyId::INT,
+                        8 => TyId::BOOL,
                         _ => TyId::FLOAT,
                     };
                     let e = self.expr(a, Some(want));
@@ -3358,6 +3360,50 @@ impl<'a> Checker<'a> {
                 }
                 hir::Expr {
                     kind: ExprKind::CallBuiltin { builtin: Builtin::DrawField, args: hargs },
+                    ty: TyId::UNIT,
+                    span,
+                }
+            }
+
+            // `draw.image(x, y, w, h, src)` — a box, and where the picture
+            // comes from.
+            BuiltinFn::DrawImage => {
+                if args.len() != 5 {
+                    self.arity_error("draw.image", args.len(), 5, span, None);
+                }
+                let mut hargs = Vec::with_capacity(5);
+                for (i, a) in args.iter().enumerate() {
+                    let want = if i == 4 { TyId::STR } else { TyId::FLOAT };
+                    let e = self.expr(a, Some(want));
+                    self.expect_ty(e.ty, want, e.span, None);
+                    hargs.push(e);
+                }
+                hir::Expr {
+                    kind: ExprKind::CallBuiltin { builtin: Builtin::DrawImage, args: hargs },
+                    ty: TyId::UNIT,
+                    span,
+                }
+            }
+
+            // `draw.semantics(x, y, w, h, role, label, flags, id)` — a region,
+            // and what it is.
+            BuiltinFn::DrawSemantics => {
+                if args.len() != 8 {
+                    self.arity_error("draw.semantics", args.len(), 8, span, None);
+                }
+                let mut hargs = Vec::with_capacity(8);
+                for (i, a) in args.iter().enumerate() {
+                    let want = match i {
+                        4 | 6 => TyId::INT,
+                        5 | 7 => TyId::STR,
+                        _ => TyId::FLOAT,
+                    };
+                    let e = self.expr(a, Some(want));
+                    self.expect_ty(e.ty, want, e.span, None);
+                    hargs.push(e);
+                }
+                hir::Expr {
+                    kind: ExprKind::CallBuiltin { builtin: Builtin::DrawSemantics, args: hargs },
                     ty: TyId::UNIT,
                     span,
                 }

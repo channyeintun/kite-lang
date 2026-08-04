@@ -50,7 +50,7 @@ fn tile(name: str, caption: str, width: float, background: int, ink: int) -> ui.
 /// here, by the code that knows which tile this is — not recovered later from
 /// the name.
 fn button(name: str, msg: Msg, caption: str, width: float, background: int, ink: int) -> ui.Node<Msg> {
-    return ui.means(tile(name, caption, width, background, ink), name, msg)
+    return ui.means(tile(name, caption, width, background, ink), name, msg, caption)
 }
 
 fn ui_of(model: Model) -> ui.Node<Msg> {

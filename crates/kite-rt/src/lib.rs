@@ -1873,17 +1873,72 @@ pub extern "C" fn kite_rt_draw_field(
     value: u64,
     hint: u64,
     colour: i64,
+    id: u64,
+    multiline: i8,
 ) {
     unsafe {
+        // A value may contain a newline, and a transcript is read a line at a
+        // time. Escaping keeps one call to one line.
+        let show = |s: &str| s.replace('\\', "\\\\").replace('\n', "\\n");
         write_line(&format!(
-            "field {} {} {} {} {} {} {}",
+            "field {} {} {} {} {} {} {} {} {}",
             float_text(x),
             float_text(y),
             float_text(w),
             float_text(h),
-            str_str(value),
-            str_str(hint),
-            colour
+            show(&str_str(value)),
+            show(&str_str(hint)),
+            colour,
+            show(&str_str(id)),
+            multiline != 0
+        ));
+    }
+}
+
+/// A picture. Native has no surface to decode one onto, so it records the box
+/// and the source — the geometry being the part anything reading a transcript
+/// can check.
+#[no_mangle]
+pub extern "C" fn kite_rt_draw_image(x: f64, y: f64, w: f64, h: f64, src: u64) {
+    unsafe {
+        write_line(&format!(
+            "image {} {} {} {} {}",
+            float_text(x),
+            float_text(y),
+            float_text(w),
+            float_text(h),
+            str_str(src)
+        ));
+    }
+}
+
+/// The parallel tree, written down. Nothing here paints; the point is that a
+/// transcript can be audited, which is what `kite check --a11y` does.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn kite_rt_draw_semantics(
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    role: i64,
+    label: u64,
+    flags: i64,
+    id: u64,
+) {
+    unsafe {
+        let show = |s: &str| s.replace('\\', "\\\\").replace('\n', "\\n");
+        // Label last: it is the only field that may contain a space.
+        write_line(&format!(
+            "semantics {} {} {} {} {} {} {} {}",
+            float_text(x),
+            float_text(y),
+            float_text(w),
+            float_text(h),
+            role,
+            flags,
+            show(&str_str(id)),
+            show(&str_str(label))
         ));
     }
 }
@@ -2175,6 +2230,8 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         kite_rt_draw_alpha,
         kite_rt_draw_text,
         kite_rt_draw_field,
+        kite_rt_draw_image,
+        kite_rt_draw_semantics,
         kite_rt_draw_clip,
         kite_rt_draw_unclip,
         kite_rt_text_width,

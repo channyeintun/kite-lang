@@ -93,7 +93,7 @@ const EXTERN_REF_NULL: ValType = ValType::Ref(RefType {
 /// Deliberately small: the standard library replaces them from Phase 6. String
 /// operations live here because a `str` is an index into a table the host
 /// holds — which is also why the module needs no linear memory.
-const IMPORTS: [(&str, &[ValType], &[ValType]); 31] = [
+const IMPORTS: [(&str, &[ValType], &[ValType]); 33] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
@@ -165,9 +165,10 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 31] = [
         &[],
     ),
     ("draw_alpha", &[ValType::F64], &[]),
-    // A text input: four numbers and the value it currently shows. Appended
-    // rather than filed beside the other `draw_` calls, because an import's
-    // index *is* its position — inserting one renumbers every call after it.
+    // A text input: four numbers, the value it currently shows, who it is, and
+    // whether it takes more than one line. Appended rather than filed beside
+    // the other `draw_` calls, because an import's index *is* its position —
+    // inserting one renumbers every call after it.
     (
         "draw_field",
         &[
@@ -178,6 +179,32 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 31] = [
             ValType::I32,
             ValType::I32,
             ValType::I64,
+            ValType::I32,
+            ValType::I32,
+        ],
+        &[],
+    ),
+    // A picture: a box and where to get it. Like `draw_field` this is a call
+    // whose backends differ in what they *can* do rather than in medium — a
+    // transcript names the source and draws nothing — but unlike it, every
+    // backend that draws at all can honour this one.
+    (
+        "draw_image",
+        &[ValType::F64, ValType::F64, ValType::F64, ValType::F64, ValType::I32],
+        &[],
+    ),
+    // What a region *is*. The only import that paints nothing.
+    (
+        "draw_semantics",
+        &[
+            ValType::F64,
+            ValType::F64,
+            ValType::F64,
+            ValType::F64,
+            ValType::I64,
+            ValType::I32,
+            ValType::I64,
+            ValType::I32,
         ],
         &[],
     ),
@@ -204,7 +231,7 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 31] = [
 /// an astral character, and two backends that disagree is the one thing this
 /// project spends its testing budget preventing. `concat` and `equals` are
 /// exact at any code point, so those two are taken and the others are not.
-const JS_STRING_IMPORTS: [(&str, &[ValType], &[ValType]); 31] = [
+const JS_STRING_IMPORTS: [(&str, &[ValType], &[ValType]); 33] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
@@ -269,6 +296,27 @@ const JS_STRING_IMPORTS: [(&str, &[ValType], &[ValType]); 31] = [
             EXTERN_REF_NULL,
             EXTERN_REF_NULL,
             ValType::I64,
+            EXTERN_REF_NULL,
+            ValType::I32,
+        ],
+        &[],
+    ),
+    (
+        "draw_image",
+        &[ValType::F64, ValType::F64, ValType::F64, ValType::F64, EXTERN_REF_NULL],
+        &[],
+    ),
+    (
+        "draw_semantics",
+        &[
+            ValType::F64,
+            ValType::F64,
+            ValType::F64,
+            ValType::F64,
+            ValType::I64,
+            EXTERN_REF_NULL,
+            ValType::I64,
+            EXTERN_REF_NULL,
         ],
         &[],
     ),
@@ -431,6 +479,8 @@ fn used_imports(
                         Builtin::DrawAlpha => mark(host::DRAW_ALPHA),
                         Builtin::DrawText => mark(host::DRAW_TEXT),
                         Builtin::DrawField => mark(host::DRAW_FIELD),
+                        Builtin::DrawImage => mark(host::DRAW_IMAGE),
+                        Builtin::DrawSemantics => mark(host::DRAW_SEMANTICS),
                         Builtin::TextWidth => mark(host::MEASURE_TEXT),
                         Builtin::TextHeight => mark(host::LINE_HEIGHT),
                         Builtin::DrawClip => mark(host::DRAW_CLIP),
@@ -531,6 +581,8 @@ mod host {
     pub const DRAW_DRRECT: u32 = 28;
     pub const DRAW_ALPHA: u32 = 29;
     pub const DRAW_FIELD: u32 = 30;
+    pub const DRAW_IMAGE: u32 = 31;
+    pub const DRAW_SEMANTICS: u32 = 32;
 }
 
 pub struct WasmModule {
@@ -2650,6 +2702,18 @@ impl<'a> Emitter<'a> {
                     self.operand(func, a);
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_FIELD)));
+            }
+            Builtin::DrawImage => {
+                for a in args {
+                    self.operand(func, a);
+                }
+                func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_IMAGE)));
+            }
+            Builtin::DrawSemantics => {
+                for a in args {
+                    self.operand(func, a);
+                }
+                func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_SEMANTICS)));
             }
             Builtin::TextWidth => {
                 for a in args {

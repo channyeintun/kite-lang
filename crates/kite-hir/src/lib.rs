@@ -417,10 +417,15 @@ pub enum Builtin {
     DrawAlpha,
     /// `draw.text(x, y, body, colour)`
     DrawText,
-    /// `draw.field(x, y, w, h, value, hint, colour)` — a text input goes here. The only
-    /// call whose renderers differ in kind: a real element on the DOM, drawn
-    /// text everywhere else.
+    /// `draw.field(x, y, w, h, value, hint, colour, id, multiline)` — a text
+    /// input goes here. The only call whose renderers differ in kind: a real
+    /// element on the DOM, drawn text everywhere else.
     DrawField,
+    /// `draw.image(x, y, w, h, src)` — a picture goes in this box.
+    DrawImage,
+    /// `draw.semantics(x, y, w, h, role, label, flags, id)` — what the thing
+    /// in this box is, for anything that cannot see it. Paints nothing.
+    DrawSemantics,
     /// `text.width(body)` — a host call, because only the host has the font.
     TextWidth,
     /// `text.height()` — the host font's line height.
@@ -463,6 +468,8 @@ impl Builtin {
             Builtin::DrawAlpha => "draw.alpha",
             Builtin::DrawText => "draw.text",
             Builtin::DrawField => "draw.field",
+            Builtin::DrawImage => "draw.image",
+            Builtin::DrawSemantics => "draw.semantics",
             Builtin::TextWidth => "text.width",
             Builtin::TextHeight => "text.height",
             Builtin::DrawClip => "draw.clip",

@@ -320,7 +320,7 @@ fn centred_body<Msg>(
         ui.centered(ui.ink(decor.ink)),
     )
     let box: ui.Node<Msg> = ui.box_of(id, ui.sized(ui.style(), w, h), [label])
-    let whole = ui.means(ui.decorated(box, decor), id, msg)
+    let whole = ui.means(ui.decorated(box, decor), id, msg, caption)
     if enabled {
         return whole
     }
@@ -361,7 +361,7 @@ fn labelled_control<Msg>(
     // The control carries the ink even though it draws no text of its own: a
     // ripple takes its colour from the control's ink, and a checkbox whose
     // control node had none would ripple in black on a dark theme.
-    let whole = ui.means(ui.decorated(box, ui.ink(s.on_surface)), id, msg)
+    let whole = ui.means(ui.decorated(box, ui.ink(s.on_surface)), id, msg, caption)
     if state.disabled {
         return ui.disabled(whole)
     }
@@ -689,7 +689,7 @@ pub fn icon_label_button<Msg>(
             ),
         ],
     )
-    let whole = ui.means(ui.decorated(box, ui.inked(ui.rounded(fill, radius), ink)), id, msg)
+    let whole = ui.means(ui.decorated(box, ui.inked(ui.rounded(fill, radius), ink)), id, msg, caption)
     if state.disabled {
         return ui.disabled(whole)
     }
@@ -950,7 +950,7 @@ pub fn extended_fab<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, caption: str,
             ),
         ],
     )
-    let whole = ui.means(ui.decorated(box, decor), id, msg)
+    let whole = ui.means(ui.decorated(box, decor), id, msg, caption)
     if state.disabled {
         return ui.disabled(whole)
     }

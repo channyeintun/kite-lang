@@ -263,6 +263,11 @@ const showFloat = (v) =>
 
 const showBool = (v) => (v ? "true" : "false");
 
+// A string that has to survive being written into a line-oriented transcript.
+// A field's value can hold a newline — that is what a text area is for — and a
+// transcript is read a line at a time, so one call has to stay one line.
+const showLine = (v) => String(v).replace(/\\/g, "\\\\").replace(/\n/g, "\\n");
+
 // ---- rendering ------------------------------------------------------------
 //
 // A Kite program draws by calling `draw.rect` and `draw.text`, and knows
@@ -329,11 +334,28 @@ export const textRenderer = {{
   text: (x, y, body, colour) =>
     write('text ' + showFloat(x) + ' ' + showFloat(y) + ' ' + body + ' ' + colour),
   // A transcript has no regions, so it writes what the field says. The same
-  // degradation the canvas makes: only a DOM has a real `<input>` to become.
-  field: (x, y, w, h, value, hint, colour) =>
+  // degradation the canvas makes: only a DOM has a real element to become.
+  field: (x, y, w, h, value, hint, colour, id, multiline) =>
     write(
       'field ' + showFloat(x) + ' ' + showFloat(y) + ' ' +
-      showFloat(w) + ' ' + showFloat(h) + ' ' + value + ' ' + hint + ' ' + colour,
+      showFloat(w) + ' ' + showFloat(h) + ' ' + showLine(value) + ' ' +
+      showLine(hint) + ' ' + colour + ' ' + showLine(id) + ' ' + multiline,
+    ),
+  image: (x, y, w, h, src) =>
+    write(
+      'image ' + showFloat(x) + ' ' + showFloat(y) + ' ' +
+      showFloat(w) + ' ' + showFloat(h) + ' ' + showLine(src),
+    ),
+  // A transcript is the one backend where the parallel tree and the picture
+  // are the same kind of thing, which is what makes it the thing an audit
+  // reads. `kite check --a11y` parses these lines.
+  // Label last: it is the only field that may contain a space, so everything
+  // before it is fixed and the rest of the line is the label.
+  semantics: (x, y, w, h, role, label, flags, id) =>
+    write(
+      'semantics ' + showFloat(x) + ' ' + showFloat(y) + ' ' +
+      showFloat(w) + ' ' + showFloat(h) + ' ' + role + ' ' + flags + ' ' +
+      showLine(id) + ' ' + showLine(label),
     ),
   // Selecting a font writes nothing: it changes no pixel by itself, and its
   // whole effect is on where the runs after it land. Measurement selects a
@@ -390,15 +412,18 @@ export function domRenderer(container) {{
     // force has to be applied.
     return opaque(el);
   }};
-  const take = () => {{
-    const el = document.createElement('div');
+  // `div` unless a call needs a different element. The tag is a parameter
+  // rather than always a div because an `<img>` cannot be faked with one: a
+  // background image would lose the browser's decoding, its cache and any
+  // description a screen reader could read.
+  const take = (tag = 'div') => {{
+    const el = document.createElement(tag);
     nodes[index] = el;
     index += 1;
     host.appendChild(el);
     return el;
   }};
 
-  let fieldSeen = false;
   const renderer = {{
     rect: (x, y, w, h, colour) => {{
       const el = place(take(), x, y);
@@ -435,7 +460,7 @@ export function domRenderer(container) {{
     // A real `<input>`: the browser's caret, selection, IME, autofill and the
     // phone's keyboard — none of which can be drawn, and all of which a field
     // made of glyphs has to fake or do without.
-    field: (x, y, w, h, value, hint, colour) => {{
+    field: (x, y, w, h, value, hint, colour, id, multiline) => {{
       // Claim a node slot, even though the element this draws is not in it.
       //
       // `patch` pairs `nodes[i]` with `calls[i]` by index — that is the whole
@@ -446,9 +471,9 @@ export function domRenderer(container) {{
       // is claimed here is an empty slot that `patch` skips.
       nodes[index] = null;
       index += 1;
-      const el = fieldEl();
-      fieldSeen = true;
-      fieldBox = [x - originX, y - originY, w, h];
+      const el = fieldEl(id, multiline);
+      fieldsSeen.add(id);
+      fieldBoxes.set(id, [x - originX, y - originY, w, h]);
       const box = container.getBoundingClientRect();
       el.style.left = box.left + (x - originX) + 'px';
       el.style.top = box.top + (y - originY) + 'px';
@@ -464,6 +489,54 @@ export function domRenderer(container) {{
       // typed into is left alone: while it has focus it *is* the truth, and
       // the model is downstream of it.
       if (document.activeElement !== el && el.value !== value) el.value = value;
+    }},
+    // What this region is. A transparent element over the box, carrying the
+    // role and the label — which is the parallel tree §7 specifies, built here
+    // rather than only in the canvas renderer because the DOM renderer has the
+    // same problem: every element it draws is `aria-hidden`, and a picture made
+    // of hidden boxes is not reachable however real its elements are.
+    //
+    // A field is the exception, and it is the interesting one. The pooled
+    // `<input>` is already a real control with real semantics, so this labels
+    // *it* instead of putting a second announcement over the top — which is
+    // what fixes "edit, blank", the specific Flutter failure §7 names.
+    semantics: (x, y, w, h, role, label, flags, id) => {{
+      const field = fieldElements.get(id);
+      if (field !== undefined && field.style.display !== 'none') {{
+        if (label.length > 0) field.setAttribute('aria-label', label);
+        else field.removeAttribute('aria-label');
+        if (flags & SEMANTIC_DISABLED) field.setAttribute('aria-disabled', 'true');
+        else field.removeAttribute('aria-disabled');
+        // The element is real, so it needs no node of its own — but the call
+        // still claims its slot, or every element after it takes the wrong one.
+        nodes[index] = null;
+        index += 1;
+        return;
+      }}
+      const el = place(take(), x, y);
+      el.style.width = w + 'px';
+      el.style.height = h + 'px';
+      // It describes; it does not draw and it does not catch the pointer.
+      // Hit-testing is the program's, against the tree it laid out, and an
+      // element over the top would take presses away from it.
+      el.style.pointerEvents = 'none';
+      el.style.opacity = '';
+      describe(el, role, label, flags, id);
+    }},
+    // A real `<img>`, which is what gets the browser's own decoding, its cache
+    // and its lazy loading. The box is the layout's; the picture is fitted into
+    // it with `object-fit: contain`, so an image whose proportions differ from
+    // its box is letterboxed rather than stretched.
+    image: (x, y, w, h, src) => {{
+      const el = place(take('img'), x, y);
+      el.style.width = w + 'px';
+      el.style.height = h + 'px';
+      el.style.objectFit = 'contain';
+      // Decorative until a semantics call says otherwise — the same default
+      // every other drawn thing here has. A picture that carries meaning gets
+      // its description from the tree, not from the drawing call.
+      el.setAttribute('alt', '');
+      if (el.getAttribute('src') !== src) el.setAttribute('src', src);
     }},
     text: (x, y, body, colour) => {{
       const el = place(take(), x, y);
@@ -537,12 +610,12 @@ export function domRenderer(container) {{
       stack = [];
       nodes = [];
       index = 0;
-      // The input is not among the children that were just discarded, so a
-      // frame that no longer has a field has to say so — otherwise it stays
-      // on screen over whatever replaced it.
-      fieldSeen = false;
+      // The fields are not among the children that were just discarded, so a
+      // frame that no longer has one has to say so — otherwise it stays on
+      // screen over whatever replaced it.
+      fieldsSeen = new Set();
       replay(calls, renderer);
-      if (!fieldSeen) hideField();
+      hideUnseenFields();
     }},
 
     /// Update the nodes whose calls changed, and leave the rest alone.
@@ -597,6 +670,19 @@ export function domRenderer(container) {{
           el.style.color = hex(call[4]);
           el.style.direction = firstStrongRtl(call[3]) ? 'rtl' : 'ltr';
           if (el.textContent !== call[3]) el.textContent = call[3];
+        }} else if (call[0] === 'i') {{
+          el.style.width = call[3] + 'px';
+          el.style.height = call[4] + 'px';
+          // Only on a change: reassigning the same `src` makes the browser
+          // drop the decoded picture and fetch it again, which flickers.
+          if (el.getAttribute('src') !== call[5]) el.setAttribute('src', call[5]);
+        }} else if (call[0] === 's') {{
+          // A declaration that landed on the pooled field element has no node
+          // of its own, and `nodes[i]` is null there — so this branch is only
+          // reached for the ones that made a describing element.
+          el.style.width = call[3] + 'px';
+          el.style.height = call[4] + 'px';
+          describe(el, call[5], call[6], call[7], call[8]);
         }} else if (call[0] === 'c') {{
           el.style.width = call[3] + 'px';
           el.style.height = call[4] + 'px';
@@ -620,68 +706,122 @@ export function domRenderer(container) {{
 /// claim this does not earn.
 let announcer = null;
 
-/// Where a real `<input>`'s edits go.
+/// Where a real field's edits go.
 ///
 /// The element is the browser's and the model is Kite's, so something has to
 /// carry a value across. This is that: the page sets it, and the DOM renderer
 /// calls it whenever the element the person is typing in changes.
 let onFieldEdit = null;
 
-/// The one element that must outlive a frame.
+/// The elements that must outlive a frame, keyed by the control's id.
 ///
 /// `rebuild` calls `replaceChildren`, and a repaint happens on every keystroke
-/// — so an `<input>` pooled with the divs would be destroyed and remade between
+/// — so an element pooled with the divs would be destroyed and remade between
 /// one letter and the next, losing focus, the caret and any selection every
-/// time. It therefore lives on `document.body`, positioned `fixed` against the
-/// container's own rectangle, where nothing a renderer does can reach it.
+/// time. They therefore live on `document.body`, positioned `fixed` against the
+/// container's own rectangle, where nothing a renderer does can reach them.
 ///
 /// Module-level rather than inside the DOM renderer's closure, because
-/// something outside it has to be able to put it away: a canvas renderer draws
-/// the field itself, and an input left showing over the top would say
+/// something outside it has to be able to put them away: a canvas renderer
+/// draws the field itself, and an element left showing over the top would say
 /// everything twice.
 ///
-/// One input, not a pool. Only one control can hold focus, and every
-/// application here shows one field; several at once wants the control's id as
-/// a key, which the call does not carry yet.
-let fieldElement = null;
-/// Where the field last drew, in the container's own coordinates.
-let fieldBox = [0, 0, 0, 0];
+/// **Keyed, not single.** One element was enough only while one field could be
+/// on screen at a time. A text area makes two the ordinary case — a title
+/// beside a body is the shape every compose form has — and a shared element
+/// would have drawn the second field over the first and handed both the same
+/// value. The tag is part of the identity as well: an `<input>` cannot be
+/// turned into a `<textarea>`, so a field that changes kind is given a new
+/// element rather than a mutated one.
+const fieldElements = new Map();
+/// Where each field last drew, in the container's own coordinates.
+const fieldBoxes = new Map();
+/// The ids that drew in the frame being built, so the ones that did not can be
+/// put away before it is shown.
+let fieldsSeen = new Set();
 let onFieldFocus = null;
+/// A key that types nothing, from inside a field. See `fieldEl`.
+let onFieldKey = null;
 
-function fieldEl() {{
-  if (fieldElement === null) {{
-    fieldElement = document.createElement('input');
-    fieldElement.type = 'text';
-    // The container is Kite's — the box, the border and the state layer are
-    // all drawn. Only the editing is the browser's, so the element brings its
-    // behaviour and none of its appearance.
-    fieldElement.style.cssText =
-      'position:fixed;background:transparent;border:none;outline:none;' +
-      'padding:0;margin:0;box-sizing:border-box';
-    document.body.appendChild(fieldElement);
-    fieldElement.addEventListener('input', () => {{
-      if (typeof onFieldEdit === 'function') onFieldEdit(fieldElement.value);
-    }});
-    // Clicking the element is how a person focuses this field, and the element
-    // is *over* the stage — so the press never reaches the hit-test and the
-    // model never learns focus moved. It finds out here instead.
-    //
-    // Reported as a press at the middle of the field rather than through a
-    // channel of its own: the application already turns a press into focus,
-    // and a control that is editable carries no message, so there is nothing
-    // else for the press to set off. Letting the element keep the pointer is
-    // what preserves clicking *into* the text to place the caret.
-    fieldElement.addEventListener('focus', () => {{
-      if (typeof onFieldFocus === 'function') onFieldFocus(fieldBox);
-    }});
+function fieldEl(id, multiline) {{
+  const kind = multiline ? 'textarea' : 'input';
+  const existing = fieldElements.get(id);
+  if (existing !== undefined) {{
+    if (existing.tagName.toLowerCase() === kind) return existing;
+    // A field that changed kind cannot keep its element. Nothing is preserved
+    // across the swap because there is nothing to preserve: the value lives in
+    // the model, which is where it came from.
+    existing.remove();
   }}
-  return fieldElement;
+  const el = document.createElement(kind);
+  if (multiline) {{
+    // A text area scrolls; it does not grow. The box came from the layout, and
+    // an element that resized itself to its content would be a second layout
+    // engine quietly disagreeing with the first.
+    el.rows = 1;
+    el.style.resize = 'none';
+  }} else {{
+    el.type = 'text';
+  }}
+  // The container is Kite's — the box, the border and the state layer are
+  // all drawn. Only the editing is the browser's, so the element brings its
+  // behaviour and none of its appearance.
+  el.style.cssText =
+    'position:fixed;background:transparent;border:none;outline:none;' +
+    'padding:0;margin:0;box-sizing:border-box;resize:none;overflow:auto';
+  document.body.appendChild(el);
+  el.addEventListener('input', () => {{
+    if (typeof onFieldEdit === 'function') onFieldEdit(el.value, id);
+  }});
+  // Clicking the element is how a person focuses this field, and the element
+  // is *over* the stage — so the press never reaches the hit-test and the
+  // model never learns focus moved. It finds out here instead.
+  //
+  // Reported as a press at the middle of the field rather than through a
+  // channel of its own: the application already turns a press into focus,
+  // and a control that is editable carries no message, so there is nothing
+  // else for the press to set off. Letting the element keep the pointer is
+  // what preserves clicking *into* the text to place the caret.
+  el.addEventListener('focus', () => {{
+    const box = fieldBoxes.get(id);
+    if (typeof onFieldFocus === 'function' && box !== undefined) onFieldFocus(box, id);
+  }});
+  // A key that types nothing has to be forwarded from here, and this is the
+  // half of the keyboard a real element had been swallowing.
+  //
+  // The document's own handler ignores any key whose target is not the body or
+  // the canvas renderer's hidden input — which is every key pressed inside this
+  // element. `input` reports what was *typed*, and Enter, Escape, Tab and the
+  // arrows type nothing, so they were reaching nothing at all: a focused field
+  // could be typed into, and Enter would not submit what was typed.
+  //
+  // The exception is Enter in a text area, which types a newline and is
+  // therefore the element's own. Forwarding it would submit a form that the
+  // person is still in the middle of writing.
+  el.addEventListener('keydown', (e) => {{
+    if ([...e.key].length === 1) return;
+    if (multiline && e.key === 'Enter') return;
+    if (typeof onFieldKey === 'function') onFieldKey(e);
+  }});
+  fieldElements.set(id, el);
+  return el;
 }}
 
-/// Put the input away. A renderer that cannot make one calls this, and so does
-/// the page when it switches to one.
-export function hideField() {{
-  if (fieldElement !== null) fieldElement.style.display = 'none';
+/// Put every field away. A renderer that cannot make one calls this, and so
+/// does the page when it switches to one.
+export function hideFields() {{
+  for (const el of fieldElements.values()) el.style.display = 'none';
+}}
+
+/// Put away the fields that did not draw in the frame just built.
+///
+/// A field that has left the tree has to stop being on screen, and it cannot
+/// notice that by itself — nothing calls it to say it was not drawn. So the
+/// renderer records what it saw and this hides the rest.
+function hideUnseenFields() {{
+  for (const [id, el] of fieldElements) {{
+    if (!fieldsSeen.has(id)) el.style.display = 'none';
+  }}
 }}
 
 export function setFieldEdit(fn) {{
@@ -690,6 +830,10 @@ export function setFieldEdit(fn) {{
 
 export function setFieldFocus(fn) {{
   onFieldFocus = fn;
+}}
+
+export function setFieldKey(fn) {{
+  onFieldKey = fn;
 }}
 
 export function setAnnouncer(element) {{
@@ -780,13 +924,56 @@ export function canvasRenderer(ctx) {{
     // A canvas cannot hold a caret, so a field here is the text it shows —
     // which is exactly what it was before this call existed. The page's hidden
     // `#typing` input is what brings a keyboard and an IME up over it.
-    field: (x, y, w, h, value, hint, colour) => {{
-      // The call hands over the *box*, because that is what a real input would
-      // occupy. Drawing one line into it means centring the line, which the
-      // element would have done with its own line box.
+    field: (x, y, w, h, value, hint, colour, id, multiline) => {{
+      const body = value.length > 0 ? value : hint;
       const line = lineHeight();
-      const top = h > line ? y + (h - line) / 2 : y;
-      renderer.text(x, top, value.length > 0 ? value : hint, colour);
+      if (!multiline) {{
+        // The call hands over the *box*, because that is what a real input
+        // would occupy. Drawing one line into it means centring the line,
+        // which the element would have done with its own line box.
+        const top = h > line ? y + (h - line) / 2 : y;
+        renderer.text(x, top, body, colour);
+        return;
+      }}
+      // A text area starts at the top and runs down: there is no single line to
+      // centre, and centring the block would put the first line somewhere the
+      // caret in the DOM's own `<textarea>` never goes.
+      //
+      // Broken here rather than by the layout, because a `\n` in a value is not
+      // a `\n` in the tree — the value is the model's, and it changes on every
+      // keystroke without the tree being rebuilt around it.
+      let top = y;
+      for (const l of wrapText(body, w)) {{
+        if (top + line > y + h) break;
+        renderer.text(x, top, l, colour);
+        top += line;
+      }}
+    }},
+    // The parallel tree, which is the whole of §7's answer for a canvas. It is
+    // built from the *same* declarations the DOM renderer reads, so the two
+    // cannot drift: there is one description of a control and two things that
+    // consume it.
+    semantics: (x, y, w, h, role, label, flags, id) => {{
+      const el = semanticNode();
+      if (el === null) return;
+      el.style.left = x + 'px';
+      el.style.top = y + 'px';
+      el.style.width = w + 'px';
+      el.style.height = h + 'px';
+      describe(el, role, label, flags, id);
+    }},
+    // Fitted into its box the way `object-fit: contain` fits an `<img>`, so
+    // the two renderers letterbox a mismatched picture identically instead of
+    // one of them stretching it.
+    image: (x, y, w, h, src) => {{
+      const img = imageFor(src);
+      if (!img || !img.complete || img.naturalWidth === 0) return;
+      const scale = Math.min(w / img.naturalWidth, h / img.naturalHeight);
+      const dw = img.naturalWidth * scale;
+      const dh = img.naturalHeight * scale;
+      ctx.globalAlpha = alpha;
+      ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+      ctx.globalAlpha = 1;
     }},
     text: (x, y, body, colour) => {{
       announce(body);
@@ -826,7 +1013,9 @@ export function canvasRenderer(ctx) {{
     rebuild: (calls) => {{
       ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
       setAnnouncer(announcer);
+      beginSemantics();
       replay(calls, renderer);
+      endSemantics();
     }},
 
     /// Repaint only the rectangles that changed.
@@ -844,6 +1033,19 @@ export function canvasRenderer(ctx) {{
         if (call[0] === 't') announce(call[3]);
       }}
       announcing = false;
+      // The tree is rebuilt whole, like the announced text and for the same
+      // reason: a control whose label changed without its pixels moving would
+      // otherwise keep the old one, and half a description is worse than a
+      // repeated one.
+      beginSemantics();
+      for (const call of calls) {{
+        if (call[0] === 's') {{
+          renderer.semantics(
+            call[1], call[2], call[3], call[4], call[5], call[6], call[7], call[8],
+          );
+        }}
+      }}
+      endSemantics();
       for (const rect of rects) {{
         ctx.save();
         ctx.beginPath();
@@ -851,6 +1053,10 @@ export function canvasRenderer(ctx) {{
         ctx.clip();
         ctx.clearRect(rect[0], rect[1], rect[2], rect[3]);
         for (const call of calls) {{
+          // The tree was rebuilt whole above, and it paints nothing — a second
+          // pass per damage rectangle would describe the same control once for
+          // each rectangle it happened to touch.
+          if (call[0] === 's') continue;
           const bounds = callBounds(call);
           if (bounds === null || rectsOverlap(bounds, rect)) {{
             replay([call], renderer);
@@ -1156,6 +1362,201 @@ export function setLineHeight(fn) {{
   lineHeight = fn;
 }}
 
+// ---- the parallel tree ------------------------------------------------------
+//
+// §7's answer for a renderer with no elements, and — as it turns out — the
+// right answer for the one that has them too. A control declares what it is;
+// this turns each declaration into something a screen reader can reach.
+//
+// It is **always on**. That is the first of Flutter's failures the design
+// document names, and it is a failure of defaults rather than of capability:
+// accessibility behind a switch is accessibility nobody switches on. The cost
+// is one element per control per frame, reused between frames like everything
+// else here.
+
+/// ARIA's name for each `ui.Role`, by the number the role crosses as.
+///
+/// `null` means the role has no ARIA equivalent worth claiming — a group is a
+/// `div`, and dressing it up as `role="group"` would add noise to the tree
+/// without adding meaning.
+const ROLES = [
+  null, 'button', 'link', 'checkbox', 'radio', 'switch', 'slider',
+  'textbox', 'img', 'heading', 'tab', 'menuitem', 'dialog', 'progressbar',
+];
+
+const SEMANTIC_DISABLED = 1;
+const SEMANTIC_CHECKED = 2;
+const SEMANTIC_FOCUSED = 4;
+const SEMANTIC_CHECKABLE = 8;
+
+/// Put the state a declaration carries onto a real element.
+///
+/// Shared by the DOM renderer and the canvas renderer's parallel tree, because
+/// the two differ in *what element* they are describing and not at all in what
+/// they have to say about it.
+function describe(el, role, label, flags, id) {{
+  const name = ROLES[role] ?? null;
+  if (name === null) el.removeAttribute('role');
+  else el.setAttribute('role', name);
+  // A label is required by the tree, so an empty one is a program that has not
+  // said anything yet rather than one that means "no name". Setting an empty
+  // `aria-label` would actively silence the element.
+  if (label.length > 0) el.setAttribute('aria-label', label);
+  else el.removeAttribute('aria-label');
+  if (flags & SEMANTIC_DISABLED) el.setAttribute('aria-disabled', 'true');
+  else el.removeAttribute('aria-disabled');
+  if (flags & SEMANTIC_CHECKABLE) {{
+    el.setAttribute('aria-checked', (flags & SEMANTIC_CHECKED) ? 'true' : 'false');
+  }} else el.removeAttribute('aria-checked');
+  // Reachable by keyboard, in the order declared — which is the order the
+  // controls were laid out, and the order `ui.focus_order` walks. A disabled
+  // control leaves the tab order, exactly as it leaves focus order.
+  el.tabIndex = (flags & SEMANTIC_DISABLED) ? -1 : 0;
+}}
+
+/// Where a renderer with no real elements puts its parallel tree.
+///
+/// The canvas renderer draws pixels and cannot be read; this is the element it
+/// describes itself into, positioned over the canvas. Pooled between frames the
+/// same way the DOM renderer's nodes are, because rebuilding it wholesale would
+/// move focus off whatever held it every time anything moved.
+let semanticsLayer = null;
+let semanticsNodes = [];
+let semanticsIndex = 0;
+
+export function setSemanticsLayer(el) {{
+  semanticsLayer = el;
+  semanticsNodes = [];
+  semanticsIndex = 0;
+  if (el) el.replaceChildren();
+}}
+
+function beginSemantics() {{
+  semanticsIndex = 0;
+}}
+
+/// Drop the nodes left over from the last frame — they describe controls that
+/// are no longer there, and a reader would still find them.
+function endSemantics() {{
+  for (let i = semanticsIndex; i < semanticsNodes.length; i += 1) {{
+    semanticsNodes[i].remove();
+  }}
+  semanticsNodes.length = semanticsIndex;
+}}
+
+function semanticNode() {{
+  if (semanticsLayer === null) return null;
+  const existing = semanticsNodes[semanticsIndex];
+  if (existing !== undefined) {{
+    semanticsIndex += 1;
+    return existing;
+  }}
+  const el = document.createElement('div');
+  el.style.position = 'absolute';
+  semanticsLayer.appendChild(el);
+  semanticsNodes.push(el);
+  semanticsIndex += 1;
+  return el;
+}}
+
+/// Pictures the canvas renderer has asked for, by source.
+///
+/// A canvas draws now and an image arrives later, which is the one place a
+/// drawing call cannot be satisfied synchronously. Rather than let a frame
+/// block, the first sight of a source starts the fetch and draws nothing; when
+/// the bytes land, the page is asked to paint again and the second frame has
+/// the picture in it.
+///
+/// The DOM renderer needs none of this — an `<img>` is the browser's own
+/// version of exactly this cache, and a far better one.
+const IMAGES = new Map();
+/// What to call when a picture arrives and the frame that wanted it is stale.
+let onImageLoad = null;
+
+export function setImageLoad(fn) {{
+  onImageLoad = fn;
+}}
+
+function imageFor(src) {{
+  const cached = IMAGES.get(src);
+  if (cached !== undefined) return cached;
+  if (typeof Image === 'undefined') {{
+    IMAGES.set(src, null);
+    return null;
+  }}
+  const img = new Image();
+  // A record with no picture in it yet. `complete` is what the draw path
+  // tests, so a half-loaded entry draws nothing rather than throwing.
+  IMAGES.set(src, img);
+  img.addEventListener('load', () => {{
+    if (typeof onImageLoad === 'function') onImageLoad(src);
+  }});
+  // A source that will not load is remembered as having failed, so the frame
+  // loop is not woken once per frame forever by something that is never
+  // coming.
+  img.addEventListener('error', () => {{
+    IMAGES.set(src, null);
+  }});
+  img.src = src;
+  return img;
+}}
+
+/// Break a run into lines the way `std/ui.wrap` does.
+///
+/// A second implementation of a rule that already exists in Kite, which is
+/// normally the thing to avoid — but the string this breaks is the *value of a
+/// field*. That belongs to the model, it changes on every keystroke, and the
+/// layout never saw it: the tree carries the box, not the text inside it. So
+/// there is nothing here to reuse.
+///
+/// It is kept faithful rather than approximate — hard breaks first, then words,
+/// then single wide characters, measured with the same measurer — because the
+/// two renderers agreeing about where a line ends is the property the whole
+/// split rests on. Where it is used is narrow: only a renderer that cannot make
+/// a real element has to draw a text area itself.
+export function wrapText(body, limit) {{
+  const wideAt = measure('W') * 1.2;
+  const out = [];
+  for (const paragraph of body.split('\n')) {{
+    const pieces = [];
+    let current = '';
+    let spaced = false;
+    for (const c of paragraph) {{
+      if (c === ' ') {{
+        if (current.length > 0) {{
+          pieces.push([current, spaced]);
+          current = '';
+        }}
+        spaced = true;
+      }} else if (measure(c) > wideAt) {{
+        if (current.length > 0) {{
+          pieces.push([current, spaced]);
+          current = '';
+          spaced = false;
+        }}
+        pieces.push([c, spaced]);
+        spaced = false;
+      }} else current += c;
+    }}
+    if (current.length > 0) pieces.push([current, spaced]);
+    if (pieces.length === 0) {{
+      out.push('');
+      continue;
+    }}
+    let line = pieces[0][0];
+    for (let i = 1; i < pieces.length; i += 1) {{
+      const candidate = pieces[i][1] ? line + ' ' + pieces[i][0] : line + pieces[i][0];
+      if (measure(candidate) <= limit) line = candidate;
+      else {{
+        out.push(line);
+        line = pieces[i][0];
+      }}
+    }}
+    out.push(line);
+  }}
+  return out;
+}}
+
 /// Measure with a canvas, in the font the renderers draw with. A canvas is
 /// used even for the DOM renderer: `measureText` is the same shaping the
 /// browser applies to a text node, and it costs no layout.
@@ -1266,8 +1667,18 @@ function imports() {{
         if (renderer.alpha) renderer.alpha(a);
       }},
       draw_text: (x, y, i, colour) => renderer.text(x, y, S(i), Number(colour)),
-      draw_field: (x, y, w, h, v, hint, colour) =>
-        renderer.field(x, y, w, h, S(v), S(hint), Number(colour)),
+      draw_field: (x, y, w, h, v, hint, colour, id, multiline) =>
+        renderer.field(
+          x, y, w, h, S(v), S(hint), Number(colour), S(id), multiline !== 0,
+        ),
+      draw_image: (x, y, w, h, src) => renderer.image(x, y, w, h, S(src)),
+      draw_semantics: (x, y, w, h, role, label, flags, id) => {{
+        if (renderer.semantics) {{
+          renderer.semantics(
+            x, y, w, h, Number(role), S(label), Number(flags), S(id),
+          );
+        }}
+      }},
       draw_clip: (x, y, w, h) => renderer.clip(x, y, w, h),
       draw_unclip: () => renderer.unclip(),
       measure_text: (i) => measure(S(i)),
@@ -1363,8 +1774,11 @@ export function recordingRenderer() {{
       weight = w;
     }},
     text: (x, y, body, colour) => calls.push(['t', x, y, body, colour, size, weight, opacity]),
-    field: (x, y, w, h, value, hint, colour) =>
-      calls.push(['f', x, y, w, h, value, hint, colour, size, weight, opacity]),
+    field: (x, y, w, h, value, hint, colour, id, multiline) =>
+      calls.push(['f', x, y, w, h, value, hint, colour, id, multiline, size, weight, opacity]),
+    image: (x, y, w, h, src) => calls.push(['i', x, y, w, h, src, opacity]),
+    semantics: (x, y, w, h, role, label, flags, id) =>
+      calls.push(['s', x, y, w, h, role, label, flags, id]),
     clip: (x, y, w, h) => calls.push(['c', x, y, w, h]),
     unclip: () => calls.push(['u']),
   }};
@@ -1421,16 +1835,29 @@ export function replay(calls, renderer) {{
       }}
       renderer.text(call[1], call[2], call[3], call[4]);
     }} else if (call[0] === 'f') {{
-      wantAlpha(call[10]);
-      const want = call[8] ?? NOMINAL_SIZE;
-      const wantWeight = call[9] ?? 400;
+      wantAlpha(call[12]);
+      const want = call[10] ?? NOMINAL_SIZE;
+      const wantWeight = call[11] ?? 400;
       if (want !== size || wantWeight !== weight) {{
         size = want;
         weight = wantWeight;
         setFont(size, weight);
         if (renderer.font) renderer.font(size, weight);
       }}
-      renderer.field(call[1], call[2], call[3], call[4], call[5], call[6], call[7]);
+      renderer.field(
+        call[1], call[2], call[3], call[4], call[5], call[6], call[7], call[8], call[9],
+      );
+    }} else if (call[0] === 'i') {{
+      wantAlpha(call[6]);
+      renderer.image(call[1], call[2], call[3], call[4], call[5]);
+    }} else if (call[0] === 's') {{
+      // Paints nothing, so it takes no alpha and no font. A renderer with no
+      // parallel tree to build simply does not offer the method.
+      if (renderer.semantics) {{
+        renderer.semantics(
+          call[1], call[2], call[3], call[4], call[5], call[6], call[7], call[8],
+        );
+      }}
     }} else if (call[0] === 'c') renderer.clip(call[1], call[2], call[3], call[4]);
     else renderer.unclip();
   }}
@@ -1474,8 +1901,13 @@ export function sameFrame(a, b) {{
 /// not a guess about it.
 export function callBounds(call) {{
   if (call[0] === 'r' || call[0] === 'R') return [call[1], call[2], call[3], call[4]];
-  // A field carries its own box, so its damage needs no measuring.
-  if (call[0] === 'f') return [call[1], call[2], call[3], call[4]];
+  // A field and an image both carry their own box, so their damage needs no
+  // measuring.
+  if (call[0] === 'f' || call[0] === 'i') return [call[1], call[2], call[3], call[4]];
+  // A declaration damages nothing: it changes what a control is *called*, not
+  // a single pixel. It still has to reach the tree when it changes, which the
+  // renderers handle by rebuilding the tree rather than by painting.
+  if (call[0] === 's') return null;
   if (call[0] === 'D') return [call[1], call[2], call[3], call[4]];
   if (call[0] === 't') {{
     // Measured in the font the run was recorded in, not in whatever font is
@@ -2350,6 +2782,11 @@ pub fn generate_page(title: &str) -> String {
      caret, so the text lands in a real input positioned under the pointer and
      kept invisible — the same trick every canvas editor uses. */
   #typing {{ position: absolute; opacity: 0; pointer-events: none; width: 1px; }}
+  /* Over the stage, describing it. Invisible and untouchable: the boxes it
+     names are hit-tested by the program against the tree it laid out, so an
+     element here that caught a press would be taking it from the program. */
+  #semantics {{ position: absolute; inset: 0; pointer-events: none; }}
+  #semantics div {{ pointer-events: none; }}
 </style>
 
 <header>
@@ -2362,6 +2799,10 @@ pub fn generate_page(title: &str) -> String {
 <main>
   <div id="stage"></div>
   <div id="announcer" role="region" aria-live="polite" aria-label="drawing"></div>
+  <!-- The parallel tree, for the renderers that draw pixels instead of
+       elements. It sits over the stage and catches nothing: every node inside
+       it is describing a box the program already hit-tests for itself. -->
+  <div id="semantics"></div>
   <input id="typing" aria-hidden="true" tabindex="-1">
 </main>
 
@@ -2369,7 +2810,8 @@ pub fn generate_page(title: &str) -> String {
   import {{ instantiate, setRenderer, setWriter, isApplication, setMeasure,
             setLineHeight, fontMeasure, fontLineHeight, FONT, setAnnouncer,
             EVENT_CLICK, EVENT_KEY, EVENT_WHEEL, EVENT_MOVE, EVENT_DOWN,
-            EVENT_UP, EVENT_RESIZE, EVENT_FRAME, EVENT_EDIT, setFieldEdit, setFieldFocus, hideField, str,
+            EVENT_UP, EVENT_RESIZE, EVENT_FRAME, EVENT_EDIT, setFieldEdit, setFieldFocus,
+            setFieldKey, hideFields, setImageLoad, setSemanticsLayer, str,
             recordingRenderer, replay, diffFrames,
             damageOf, domRenderer, canvasRenderer, textRenderer }} from "./app.js";
 
@@ -2380,6 +2822,7 @@ pub fn generate_page(title: &str) -> String {
 
   const stage = document.getElementById("stage");
   const announcer = document.getElementById("announcer");
+  const semantics = document.getElementById("semantics");
   const typing = document.getElementById("typing");
   let currentRenderer = textRenderer;
   const buttons = {{
@@ -2402,8 +2845,12 @@ pub fn generate_page(title: &str) -> String {
     stage.replaceChildren();
     // Only the DOM renderer can make a real input. The others draw the field
     // themselves, so one left showing over the top would say it all twice.
-    if (which !== "dom") hideField();
+    if (which !== "dom") hideFields();
     setAnnouncer(which === "canvas" ? announcer : null);
+    // Only a renderer with no real elements needs the parallel tree built
+    // beside the picture. The DOM renderer puts the roles on the elements it
+    // was already making, which is strictly better: they are the real ones.
+    setSemanticsLayer(which === "canvas" ? semantics : null);
     if (which === "text") {{
       // The text renderer writes rather than draws, so it needs somewhere to
       // write to before the frame is replayed.
@@ -2539,6 +2986,25 @@ pub fn generate_page(title: &str) -> String {
   }});
   setFieldFocus((box) => {{
     send(EVENT_CLICK, box[0] + box[2] / 2, box[1] + box[3] / 2, "");
+  }});
+  // A picture the canvas renderer asked for has arrived, so the frame that
+  // drew a gap where it goes is now wrong. Repaint rather than wake the model:
+  // nothing about the model changed, and an animation loop started here would
+  // never stop.
+  setImageLoad(() => {{
+    if (mode === "canvas") draw(true);
+  }});
+  // Enter, Escape, Tab and the arrows, from inside a real field.
+  //
+  // They type nothing, so they never arrive through `input`, and the document's
+  // handler ignores them because their target is the element rather than the
+  // body — which left a focused field able to take letters and unable to
+  // submit them. A text area keeps its own Enter; `setFieldKey` is not called
+  // for that one.
+  setFieldKey((e) => {{
+    const before = model;
+    send(EVENT_KEY, 0, 0, e.key);
+    if (model !== before) e.preventDefault();
   }});
 
   const at = (e) => {{

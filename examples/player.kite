@@ -966,6 +966,7 @@ fn now_playing(model: Model, s: material.Scheme) -> ui.Node<Msg> {
                     s,
                     "seek",
                     fraction,
+                    "Seek",
                     width - material.space(8),
                     focus(model, "seek"),
                 ),

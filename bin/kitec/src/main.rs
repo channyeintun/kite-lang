@@ -31,6 +31,8 @@ OPTIONS:
     --all             with `doc`, include what is not `pub`
     --native          with `run`, execute machine code under the JIT — no linker
     --js-strings      with `--emit wasm`, a `str` is a real JavaScript string
+    --a11y            with `check`, audit what the program draws for labels,
+                      touch target sizes and contrast
     --emit <stage>    check, ast, hir, mir, kbc, wasm, native
     --out <dir>       where `--emit wasm` and `--emit native` write artefacts
     --explain <CODE>  explain a diagnostic code, e.g. --explain E0301
@@ -74,6 +76,7 @@ fn main() -> ExitCode {
     let mut offline = false;
     let mut native = false;
     let mut js_strings = false;
+    let mut a11y = false;
     let mut i = 0;
 
     while i < args.len() {
@@ -121,6 +124,10 @@ fn main() -> ExitCode {
             }
             "--js-strings" => {
                 js_strings = true;
+                i += 1;
+            }
+            "--a11y" => {
+                a11y = true;
                 i += 1;
             }
             "--offline" => {
@@ -314,6 +321,9 @@ fn main() -> ExitCode {
 
     match command.as_str() {
         "check" => {
+            if a11y {
+                return audit_a11y(&result, &path);
+            }
             if result.output.is_empty() {
                 eprintln!("ok");
             }
@@ -357,6 +367,49 @@ fn main() -> ExitCode {
 /// A failure is an error *value* with a message, not a trap, so one failing
 /// test does not stop the rest — which is the whole reason `std/test`'s
 /// assertions return errors rather than asserting.
+/// `kite check --a11y` — audit what the program draws.
+///
+/// It runs the program. That is the whole idea and it is why this is not a
+/// lint: the tree a lint could read is built by `view`, from a model, and
+/// nothing about it is knowable until something has run. So the program is run
+/// under the bytecode VM, its drawing calls are captured as a transcript, and
+/// the transcript is audited — labels, touch targets, contrast.
+///
+/// A Lighthouse score on a canvas application is a score for a page with one
+/// element in it. This looks at the picture instead.
+fn audit_a11y(result: &kite_driver::Compilation, path: &str) -> ExitCode {
+    if !result.is_runnable() {
+        return fail(&format!(
+            "`{}` has no `main` function\n\nnote: `--a11y` audits what a program draws, so it \
+             has to run it — give the file a `fn main()` that paints a frame",
+            path
+        ));
+    }
+    let mut transcript: Vec<u8> = Vec::new();
+    if let Err(trap) = result.run(&mut transcript) {
+        eprintln!("error: {}", trap);
+        return ExitCode::FAILURE;
+    }
+    let text = String::from_utf8_lossy(&transcript);
+    let findings = kite_driver::a11y::audit(&text);
+    if findings.is_empty() {
+        // Said plainly, and said honestly: this is what was checked, not a
+        // claim that the program is accessible.
+        eprintln!("ok — no unlabelled controls, undersized targets or low-contrast text");
+        return ExitCode::SUCCESS;
+    }
+    for finding in &findings {
+        eprintln!("a11y: {}\n", finding);
+    }
+    eprintln!(
+        "{} finding{} in `{}`",
+        findings.len(),
+        if findings.len() == 1 { "" } else { "s" },
+        path
+    );
+    ExitCode::FAILURE
+}
+
 fn run_tests(result: &kite_driver::Compilation, path: &str) -> ExitCode {
     let tests = result.tests();
     if tests.is_empty() {
