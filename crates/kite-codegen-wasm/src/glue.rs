@@ -2114,7 +2114,17 @@ pub fn generate_page(title: &str) -> String {
   main {{ flex: 1; min-height: 0; display: flex; }}
   /* The program is given the whole area and told how big it is. A fixed box
      in the corner of a large window is not what an application looks like. */
-  #stage {{ flex: 1; min-height: 0; position: relative; overflow: hidden; }}
+  /* The stage is an application surface, not a document.
+     `user-select` matters more than it looks. Under the DOM renderer every
+     label is a real text node, so without this a click begins a *selection*:
+     drag a few pixels and the browser highlights half the screen, a click that
+     ends on a different node than it began on may not be delivered at all, and
+     the next click goes to clearing the selection rather than to the program.
+     What that feels like is a program that has to be clicked several times.
+     `touch-action` is the same problem on a phone: without it a drag is a pan
+     and never reaches the application. */
+  #stage {{ flex: 1; min-height: 0; position: relative; overflow: hidden;
+            user-select: none; -webkit-user-select: none; touch-action: none; }}
   pre {{ margin: 0; white-space: pre-wrap; padding: 12px;
          font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }}
   /* The parallel tree for the canvas renderer: read by a screen reader,
@@ -2329,9 +2339,35 @@ pub fn generate_page(title: &str) -> String {
   }});
   stage.addEventListener("pointerdown", (e) => {{
     const [x, y] = at(e);
+    // Capture, so the *release* is reported here wherever it happens.
+    //
+    // Without it a press that ends outside the stage — dragged off a control
+    // and let go, which is how anyone cancels — is never reported at all: the
+    // program is left believing the button is still held, and its pressed
+    // state and its ripple stay on the screen for good. Capture also makes a
+    // drag across the stage one continuous gesture, which is what a slider
+    // being scrubbed needs.
+    try {{
+      stage.setPointerCapture(e.pointerId);
+    }} catch (err) {{
+      // Not every pointer can be captured; the release still arrives when the
+      // pointer is over the stage, which is the common case.
+    }}
     send(EVENT_DOWN, x, y, "");
   }});
   stage.addEventListener("pointerup", (e) => {{
+    const [x, y] = at(e);
+    try {{
+      stage.releasePointerCapture(e.pointerId);
+    }} catch (err) {{
+      // Already released, which is not a failure.
+    }}
+    send(EVENT_UP, x, y, "");
+  }});
+  // A gesture the browser takes away — a system swipe, a context menu — ends
+  // the press as surely as a release does, and leaves the same stuck state
+  // behind if it is ignored.
+  stage.addEventListener("pointercancel", (e) => {{
     const [x, y] = at(e);
     send(EVENT_UP, x, y, "");
   }});

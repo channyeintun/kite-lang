@@ -688,39 +688,33 @@ fn paint_one_ripple(box: ui.Frame, ripple: Ripple, dx: float, dy: float) {
     if w <= 0.0 || h <= 0.0 {
         return
     }
-    // Material's own geometry. The circle starts at a fifth of the longest
-    // side and finishes past the far corner, so it has left the container
-    // before it stops growing.
-    let start = maxf(w, h) * RIPPLE_INITIAL_SCALE() / 2.0
-    let finish = math.hypot(w, h) / 2.0 + RIPPLE_OVERSHOOT()
+    // The press layer, in the container's own shape.
+    //
+    // This drew an expanding *circle* from the point of contact, which is what
+    // a Material ripple is, and it had to be clipped to the container or a pill
+    // button's ripple filled the square corners outside the pill. The drawing
+    // boundary clips to rectangles only, so the shape was approximated by
+    // taking it in horizontal bands — and eight bands across a 36dp corner is a
+    // 4.5dp stair, which at two device pixels a dp is a visible staircase down
+    // both ends of every row that was touched. It also cost fifty-one draw
+    // calls a frame, every one of them a DOM node to reconcile, for the whole
+    // life of the press.
+    //
+    // A shaped overlay has neither problem: one rounded rectangle, in exactly
+    // the container's own shape, at the state layer's opacity. What is lost is
+    // the circle travelling out from the finger. Getting that back honestly
+    // needs `draw.clip` to take a radius — a rounded clip is a real capability
+    // that `std/ui` wants anyway, since a scrolled rounded card clips square
+    // today — rather than another approximation of one.
     let grow = at(ripple.grow, standard())
-    let radius = math.lerp(start, finish, grow)
-
-    // The origin travels from the point of contact toward the centre as the
-    // circle grows, which is what keeps a ripple started at the very edge from
-    // looking lopsided when it has filled the control.
-    let from_x = rect.x + ripple.x
-    let from_y = rect.y + ripple.y
-    let cx = math.lerp(from_x, rect.x + w / 2.0, grow) + dx
-    let cy = math.lerp(from_y, rect.y + h / 2.0, grow) + dy
-
     let fade = at(ripple.fade, standard())
-    let opacity = PRESS_OPACITY() * (1.0 - fade)
+    let opacity = PRESS_OPACITY() * grow * (1.0 - fade)
     if opacity <= 0.0 {
         return
     }
-    // The shape to stay inside is the container's, which is on the frame's own
-    // decor: a pill button's ripple has to stop at the pill.
     let shape = shape_radius(box, w, h)
     draw.alpha(opacity)
-    fill_circle_in(
-        ui.Rect { x: rect.x + dx, y: rect.y + dy, width: w, height: h },
-        shape,
-        cx,
-        cy,
-        radius,
-        ripple.ink,
-    )
+    draw.rrect(rect.x + dx, rect.y + dy, w, h, shape, ripple.ink)
     draw.alpha(1.0)
 }
 
@@ -729,84 +723,4 @@ fn paint_one_ripple(box: ui.Frame, ripple: Ripple, dx: float, dy: float) {
 /// what the painter does to the fill too.
 fn shape_radius(box: ui.Frame, w: float, h: float) -> float {
     return minf(box.decor.radius, minf(w, h) / 2.0)
-}
-
-/// A circle, drawn only where it falls inside a rounded rectangle.
-///
-/// The drawing boundary clips to rectangles, and a rounded rectangle is not
-/// one. Clipping a pill button's ripple to its bounding box would put a
-/// twelve-per-cent tint in the four corners *outside* the pill, against
-/// whatever the page is — which is exactly the artefact that makes a hand-rolled
-/// ripple look hand-rolled.
-///
-/// So the shape is taken in bands. The middle of a rounded rectangle spans its
-/// full width and is one clip; each corner band spans a width the circle
-/// equation gives exactly, and is `STEPS` clips. The stepping is in y only —
-/// every band's x extent is exact — and at a couple of device pixels against a
-/// tint this light, it does not read.
-fn fill_circle_in(rect: ui.Rect, corner: float, cx: float, cy: float, radius: float, colour: int) {
-    if radius <= 0.0 {
-        return
-    }
-    let r = maxf(0.0, corner)
-    if r <= 0.5 {
-        clipped_circle(rect.x, rect.y, rect.width, rect.height, cx, cy, radius, colour)
-        return
-    }
-    // The straight middle, full width.
-    let middle = rect.height - r * 2.0
-    if middle > 0.0 {
-        clipped_circle(rect.x, rect.y + r, rect.width, middle, cx, cy, radius, colour)
-    }
-    // The two corner bands. Each strip is inset by however far the corner arc
-    // has come in at that height.
-    let steps = 8
-    let band = r / (steps as float)
-    for i in 0..steps {
-        let up = (i as float) * band
-        // The arc's horizontal inset at this height, from the circle the corner
-        // is a quarter of. Measured at the *outermost* edge of the strip, so
-        // the fill stays inside the shape rather than straddling it.
-        let dy = r - up
-        let inset = r - math.sqrt(maxf(0.0, r * r - dy * dy))
-        let x = rect.x + inset
-        let width = rect.width - inset * 2.0
-        if width > 0.0 {
-            clipped_circle(x, rect.y + up, width, band, cx, cy, radius, colour)
-            clipped_circle(
-                x,
-                rect.y + rect.height - up - band,
-                width,
-                band,
-                cx,
-                cy,
-                radius,
-                colour,
-            )
-        }
-    }
-}
-
-/// The circle, clipped to one rectangle. A `draw.rrect` whose radius is half
-/// its side is a circle, which is the whole reason a ripple is drawable at a
-/// boundary with no arcs in it.
-fn clipped_circle(
-    x: float,
-    y: float,
-    w: float,
-    h: float,
-    cx: float,
-    cy: float,
-    radius: float,
-    colour: int,
-) {
-    // A strip the circle misses is still drawn, and the clip rejects it.
-    // Skipping it would be faster per call and much slower overall: the scene
-    // graph is indexed by call, so a frame that emitted fewer calls than the
-    // last would not be *patchable* — the renderer would fall back to redrawing
-    // the window. A ripple that grows past a strip would force one of those
-    // every few frames, which is the opposite of the saving.
-    draw.clip(x, y, w, h)
-    draw.rrect(cx - radius, cy - radius, radius * 2.0, radius * 2.0, radius, colour)
-    draw.unclip()
 }
