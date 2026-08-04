@@ -1502,13 +1502,19 @@ fn main() {
         let py = play.rect.y + play.rect.height / 2.0
         var live = update(wide, EVENT_MOVE(), px, py, "")
         io.print("hover on arrival: \(percent(hover_of(live)))")
-        live = update(live, EVENT_FRAME(), 50.0, 0.0, "")
-        io.print("hover after 50ms: \(percent(hover_of(live)))")
-        live = update(live, EVENT_FRAME(), 50.0, 0.0, "")
-        io.print("hover after 100ms: \(percent(hover_of(live)))")
+        // One frame, not a transition: a hover layer is saying where the
+        // pointer *is*, and the only correct time to say so is now. Anything
+        // slower leaves a trail of half-lit controls behind a moving cursor.
+        live = update(live, EVENT_FRAME(), 16.0, 0.0, "")
+        io.print("hover one frame later: \(percent(hover_of(live)))")
 
         // A settled interaction must come back *identical*, or the host keeps
-        // asking for frames forever and the fan comes on.
+        // asking for frames forever and the fan comes on. Focus is the slowest
+        // of the layers at 45ms — the Tab above set one — so this gives
+        // everything a few frames to arrive before asking.
+        for _settle in 0..8 {
+            live = update(live, EVENT_FRAME(), 16.0, 0.0, "")
+        }
         let again = update(live, EVENT_FRAME(), 16.0, 0.0, "")
         io.print("still after settling: \(!material.animating(again.ui_state))")
 
@@ -1524,10 +1530,11 @@ fn main() {
         if brief != nil {
             io.print("ripple survives a 4ms tap: \(brief.ripple.live)")
         }
-        // And the pointer leaving takes the layer back down.
-        live = update(live, EVENT_MOVE(), 0.0, 0.0, "")
-        live = update(live, EVENT_FRAME(), 200.0, 0.0, "")
-        io.print("hover once the pointer left: \(percent(hover_of(live)))")
+        // And the pointer leaving takes the layer back down, in a frame —
+        // which is what stops a list from wearing a comet tail.
+        live = update(live, EVENT_MOVE(), -1.0, -1.0, "")
+        live = update(live, EVENT_FRAME(), 16.0, 0.0, "")
+        io.print("hover one frame after the pointer left: \(percent(hover_of(live)))")
     }
 
     let frames = frames_of(model)

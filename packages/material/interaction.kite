@@ -4,8 +4,8 @@ use std/math
 // Hover, focus, press, selection — and the ripple.
 //
 // This is the part of Material that a pure `view(model) -> Node` cannot do on
-// its own. A state layer that fades in over 200ms is a fact about a control
-// that exists *between* frames, and Kite has no mutable globals to hide it in:
+// its own. A state layer part-way in is a fact about a control that exists
+// *between* frames, and Kite has no mutable globals to hide it in:
 // there is nowhere for a component to keep it, and a component that kept it
 // would be a component that could not be called twice.
 //
@@ -107,30 +107,71 @@ pub fn no_interaction() -> Interaction {
 
 // ---- the durations these channels use -----------------------------------------
 //
-// Material specifies state-layer transitions in the short group, and specifies
-// them asymmetrically: a layer arrives faster than it leaves. That is not a
-// flourish. A press has to feel like it happened *before* the application
-// reacts, so it arrives in one frame at 60Hz; a release that vanished as
-// abruptly would read as the control being cancelled rather than activated.
+// **Hover is not a transition. It is pointer tracking**, and that distinction is
+// the whole of what these numbers are for.
+//
+// The duration scale — `short2`, `short4`, the rest — is for things that
+// *travel*: a sheet coming up, an indicator moving between tabs, a dialog
+// arriving. A hover state layer travels nowhere. It says "the pointer is here",
+// and the only correct time for it to say so is *now*. Give it two hundred
+// milliseconds to leave and it goes on claiming the pointer is somewhere it is
+// not: drag the cursor down a list of 72dp rows at an ordinary speed — call it
+// a row every 140ms — and a row is still half lit when the next two have come
+// and gone. What that looks like is a comet tail following the cursor, which is
+// exactly what it is.
+//
+// This file had it slower still, and backwards: 100ms in and 200ms *out*, so
+// the trail outlasted the arrival. The reasoning was that Material specifies
+// state-layer transitions asymmetrically. It does — for *press*, where a
+// release that vanished abruptly reads as a cancellation rather than an
+// activation. Hover is not press, and copying the shape of one onto the other
+// is how a plausible-sounding rule produces an obviously wrong result.
+//
+// Material's own implementations are far quicker than the token scale suggests.
+// Compose's state layer crosses hover on a **fifteen millisecond linear tween
+// in both directions** — one frame at sixty hertz — and Material Web transitions
+// its state layer in fifteen milliseconds linear too. Focus is the one that
+// gets a real transition, because focus is a *state* rather than a position: it
+// outlives the input that set it, so it is allowed to arrive and leave visibly.
 
+/// One frame at sixty hertz. Not a duration so much as "next time you draw".
 pub fn HOVER_IN() -> float {
-    return SHORT_2()
+    return 15.0
 }
 
 pub fn HOVER_OUT() -> float {
-    return SHORT_4()
+    return 15.0
 }
 
+/// Focus persists after the key that set it, so unlike hover it is worth
+/// watching arrive — and worth watching leave more slowly than it came.
 pub fn FOCUS_IN() -> float {
-    return SHORT_2()
+    return 45.0
 }
 
+pub fn FOCUS_OUT() -> float {
+    return SHORT_3()
+}
+
+/// A press has to feel like it registered *before* the application reacts, so
+/// it arrives in a frame. Letting go is the asymmetric one: the layer follows
+/// the ripple out rather than snapping off under the finger.
 pub fn PRESS_IN() -> float {
-    return SHORT_1()
+    return 15.0
 }
 
 pub fn PRESS_OUT() -> float {
     return SHORT_3()
+}
+
+/// The curve a state layer crosses on.
+///
+/// Linear, and Material's implementations agree. At fifteen milliseconds an
+/// easing curve is a distinction without a difference — there is one frame to
+/// apply it to — and a layer's job is to *be there*, not to make an entrance.
+/// The easing tokens are spent on the things that move.
+fn layer_curve() -> Easing {
+    return linear()
 }
 
 /// A selection change moves something — a tab's indicator, a switch's knob, a
@@ -333,10 +374,10 @@ fn spent(reaction: Reaction) -> bool {
     if !resting(reaction) {
         return false
     }
-    if at(reaction.hover, standard()) > 0.0 || at(reaction.focus, standard()) > 0.0 {
+    if at(reaction.hover, layer_curve()) > 0.0 || at(reaction.focus, layer_curve()) > 0.0 {
         return false
     }
-    if at(reaction.press, standard()) > 0.0 || at(reaction.select, emphasized()) > 0.0 {
+    if at(reaction.press, layer_curve()) > 0.0 || at(reaction.select, emphasized()) > 0.0 {
         return false
     }
     return !reaction.ripple.live
@@ -383,9 +424,9 @@ pub fn state_of(inter: Interaction, id: str) -> State {
     if reaction == nil {
         return rest()
     }
-    let hover = at(reaction.hover, standard())
-    let focus = at(reaction.focus, standard())
-    let press = at(reaction.press, standard())
+    let hover = at(reaction.hover, layer_curve())
+    let focus = at(reaction.focus, layer_curve())
+    let press = at(reaction.press, layer_curve())
     let select = at(reaction.select, emphasized())
     return State{
         // The booleans are what the layer *is*, the floats are how far it has
@@ -475,14 +516,19 @@ fn synced(inter: Interaction) -> Interaction {
                 ..reaction,
                 hover: retargeted(
                     reaction.hover,
-                    standard(),
+                    layer_curve(),
                     wants_hover,
                     if wants_hover > 0.0 { HOVER_IN() } else { HOVER_OUT() },
                 ),
-                focus: retargeted(reaction.focus, standard(), wants_focus, FOCUS_IN()),
+                focus: retargeted(
+                    reaction.focus,
+                    layer_curve(),
+                    wants_focus,
+                    if wants_focus > 0.0 { FOCUS_IN() } else { FOCUS_OUT() },
+                ),
                 press: retargeted(
                     reaction.press,
-                    standard(),
+                    layer_curve(),
                     wants_press,
                     if wants_press > 0.0 { PRESS_IN() } else { PRESS_OUT() },
                 ),

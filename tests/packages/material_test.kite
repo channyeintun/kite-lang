@@ -249,6 +249,28 @@ fn tree(s: material.Scheme, inter: material.Interaction) -> ui.Node {
     )
 }
 
+/// Six 72dp rows, for sweeping a pointer down.
+fn list_of_rows(s: material.Scheme, inter: material.Interaction) -> ui.Node {
+    var out: [ui.Node] = []
+    for i in 0..6 {
+        out.push(
+            material.list_item_two(
+                s,
+                "row-\(i)",
+                "Row \(i)",
+                "supporting",
+                [],
+                material.state_of(inter, "row-\(i)"),
+            ),
+        )
+    }
+    return ui.box_of(
+        "sweep-list",
+        ui.Style {..ui.column(), align: ui.Align.Stretch, width: 400.0 },
+        out,
+    )
+}
+
 fn interaction_checks() -> [error] {
     var out: [error] = []
     let s = material.light()
@@ -270,11 +292,38 @@ fn interaction_checks() -> [error] {
     out.push(test.is_true(material.animating(inter), "the pointer arriving starts something"))
     out.push(near(material.state_of(inter, "save").hover, 0.0, "which has not moved yet"))
 
-    inter = material.advance(inter, 50.0)
-    out.push(near(material.state_of(inter, "save").hover, 0.877834, "and is half way at 50ms"))
-    inter = material.advance(inter, 50.0)
-    out.push(near(material.state_of(inter, "save").hover, 1.0, "and arrived at 100ms"))
+    // Hover arrives in a *frame*, because it is pointer tracking rather than a
+    // transition. Anything slower is the control claiming the pointer is
+    // somewhere it is not.
+    inter = material.advance(inter, 16.0)
+    out.push(near(material.state_of(inter, "save").hover, 1.0, "and has arrived one frame later"))
     out.push(test.is_false(material.animating(inter), "and stops"))
+
+    // The regression this timing exists for. Moving from one control to the
+    // next must leave *nothing* behind: with hover on the duration scale — it
+    // was two hundred milliseconds — dragging a cursor down a list left a comet
+    // tail of half-lit rows a dozen frames long behind it.
+    let second = ui.frame_of(frames, "cancel")
+    if second != nil {
+        var swept = material.moved(inter, frames, cx, cy)
+        swept = material.advance(swept, 16.0)
+        out.push(near(material.state_of(swept, "save").hover, 1.0, "the first control is lit"))
+        swept = material.moved(
+            swept,
+            frames,
+            second.rect.x + second.rect.width / 2.0,
+            second.rect.y + second.rect.height / 2.0,
+        )
+        swept = material.advance(swept, 16.0)
+        out.push(near(material.state_of(swept, "cancel").hover, 1.0, "the next one lights"))
+        out.push(
+            near(
+                material.state_of(swept, "save").hover,
+                0.0,
+                "and the one behind it is out, in the same frame",
+            ),
+        )
+    }
 
     // The load-bearing one. The host's frame loop runs while the model keeps
     // changing, so a settled interaction has to come back *identical* — this is
@@ -331,6 +380,37 @@ fn interaction_checks() -> [error] {
         leaving = material.advance(leaving, 16.0)
     }
     out.push(test.equal_int(leaving.reactions.len(), 0, "a spent reaction is pruned"))
+
+    // A pointer dragged down a list, one 60Hz frame at a time.
+    //
+    // This is the shape of the bug rather than a corner of it. Hover used to sit
+    // on the duration scale — 100ms in, 200ms *out* — and a row is only under an
+    // unhurried cursor for about 140ms, so the one being left was still lit when
+    // the next arrived. Measured at 500px/s over 72dp rows, two rows were lit for
+    // the whole sweep, and at the crossover the row the pointer had *left* was
+    // exactly as bright as the one it was on.
+    //
+    // One is the only correct answer: the pointer is over one row.
+    var sweep = material.no_interaction()
+    let sheet = ui.layout(list_of_rows(s, sweep), ui.Size{ width: 400.0, height: 600.0 })
+    var y = 10.0
+    var most = 0
+    for step in 0..40 {
+        // 500 px/s at 60Hz.
+        y = y + 8.333
+        sweep = material.moved(sweep, sheet, 200.0, y)
+        sweep = material.advance(sweep, 16.667)
+        var lit = 0
+        for i in 0..6 {
+            if material.state_of(sweep, "row-\(i)").hover > 0.0 {
+                lit += 1
+            }
+        }
+        if lit > most {
+            most = lit
+        }
+    }
+    out.push(test.equal_int(most, 1, "a pointer swept down a list lights one row at a time"))
 
     // Selection animates when it is routed through `choose`, and is exact when
     // it is not.
