@@ -211,6 +211,28 @@ are real elements and get IME, autofill, and selection for free. Under
 receives the events — the same technique Flutter and Google Docs use, and the
 reason those widgets are in the standard set rather than left to users.
 
+**None of that is built yet, and this is the gap that shows.** `domRenderer`
+creates one kind of element — a `div` — for every node, because the paint
+boundary is eight drawing calls (`rect`, `rrect`, `text`, `drrect`, `alpha`,
+`font`, `clip`, `unclip`) and none of them can say *this one is a text input*.
+So an editable field is a run of drawn text, and its caret is a literal `|`
+glyph in that run: `packages/material`'s search field has to buy the caret's
+width back out of its own padding to stop the placeholder moving. Every native
+ability an `<input>` would have given free — the real caret, selection, IME,
+autofill, the mobile keyboard — is either faked or absent.
+
+There is a specific structural reason it cannot simply be added to the
+renderer. A renderer never sees the tree; it sees `Frame`s, and a `Frame`
+carries `content: str` — the text to draw — with no notion of that text being
+*editable*. The edit state lives on `Control.edits`, on the tree, which is
+flattened away before anything paints. Closing this needs three things
+together: `Frame` carrying the edit state, a ninth drawing call meaning "a
+field goes here", and an answer for what the canvas renderer does with it —
+the hidden positioned element described above, which is why that paragraph
+exists. It is the first call whose three implementations would differ in
+*kind* rather than in medium, which is the property the differential suite
+exists to protect, and the reason it is a proposal rather than a patch.
+
 ---
 
 ## 4. Layout
