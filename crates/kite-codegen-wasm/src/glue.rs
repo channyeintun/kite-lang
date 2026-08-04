@@ -2497,7 +2497,23 @@ pub fn generate_page(title: &str) -> String {
   // making it so would put a focus ring around the whole application.
   document.addEventListener("keydown", (e) => {{
     if (!interactive || e.metaKey || e.ctrlKey || e.altKey) return;
-    if (e.target !== document.body) return;
+    // Keys reach the document from two places: the page itself, and the hidden
+    // input the canvas renderer focuses to bring up a keyboard and an IME.
+    //
+    // That input reports what was *typed*, through its own `input` event, and
+    // a Backspace types nothing — neither do Enter, Tab, or the arrows. They
+    // were therefore dropped twice over in canvas mode: the `input` event had
+    // no character to report, and this handler ignored the event because its
+    // target was the input rather than the body. A field could be typed into
+    // and never corrected.
+    //
+    // So keys from the input are taken here, except the ones it will report
+    // itself. A character must come through `input` and only `input`: that is
+    // the path an IME commits along, and taking it here as well would put
+    // every letter in twice.
+    const typed = e.target === typing;
+    if (e.target !== document.body && !typed) return;
+    if (typed && [...e.key].length === 1) return;
     // A key the program acts on should not also scroll the page. Which keys
     // those are is the program's business, so this asks by comparing the model
     // it gives back — an application that ignores the key is left alone.
