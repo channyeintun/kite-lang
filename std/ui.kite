@@ -102,14 +102,33 @@ pub fn DEFAULT_SIZE() -> float {
     return 16.0
 }
 
-/// Select a font, or leave the host's alone. Paired with [`unset_font`].
-fn set_font(size: float, weight: int) {
+/// Select a font on a renderer, or leave the one it has. Paired with
+/// [`unset_font`].
+fn set_font(var into: dyn Renderer, size: float, weight: int) {
+    if size > 0.0 {
+        into.font(size, weight)
+    }
+}
+
+fn unset_font(var into: dyn Renderer, size: float) {
+    if size > 0.0 {
+        into.font(DEFAULT_SIZE(), 400)
+    }
+}
+
+/// The same, on the host, for the measurement paths.
+///
+/// Measuring is not rendering: `text.width` asks the host what a run comes to
+/// in the font the host has selected, and no renderer is involved. These two
+/// exist so that selecting a font *to measure in* does not have to pretend to
+/// be a drawing call.
+fn set_host_font(size: float, weight: int) {
     if size > 0.0 {
         draw.font(size, weight)
     }
 }
 
-fn unset_font(size: float) {
+fn unset_host_font(size: float) {
     if size > 0.0 {
         draw.font(DEFAULT_SIZE(), 400)
     }
@@ -838,9 +857,9 @@ pub fn hard_lines(body: str) -> [str] {
 /// caption will be drawn in — a button laid out against 16dp and captioned at
 /// 14dp is a button with the wrong amount of air in it.
 pub fn text_size_in(body: str, size: float, weight: int) -> Size {
-    set_font(size, weight)
+    set_host_font(size, weight)
     let out = text_size(body)
-    unset_font(size)
+    unset_host_font(size)
     return out
 }
 
@@ -850,9 +869,9 @@ pub fn text_size_in(body: str, size: float, weight: int) -> Size {
 /// drawn in: a caller that wrapped at the host's default and drew at 14dp would
 /// break its lines in the wrong places.
 pub fn wrap_in(body: str, limit: float, size: float, weight: int) -> [str] {
-    set_font(size, weight)
+    set_host_font(size, weight)
     let out = wrap(body, limit)
-    unset_font(size)
+    unset_host_font(size)
     return out
 }
 
@@ -1079,7 +1098,7 @@ fn measure_content<Msg>(node: Node<Msg>) -> Size {
         Image(src) => ""
     }
     if body.len() > 0 {
-        set_font(node.style.size, node.style.weight)
+        set_host_font(node.style.size, node.style.weight)
         // Text wraps when it has been given a width, and not otherwise. Which
         // width to wrap to is only knowable once a parent has decided, and
         // measurement runs before that — so a node that wants to wrap says how
@@ -1091,11 +1110,11 @@ fn measure_content<Msg>(node: Node<Msg>) -> Size {
         let fixed = node.style.width
         if fixed != nil {
             let wrapped = wrapped_size(body, fixed - horizontal(node.style.padding))
-            unset_font(node.style.size)
+            unset_host_font(node.style.size)
             return wrapped
         }
         let one = text_size(body)
-        unset_font(node.style.size)
+        unset_host_font(node.style.size)
         return one
     }
     if node.children.len() == 0 {
@@ -1636,8 +1655,18 @@ pub fn faded(base: Decor, a: float) -> Decor {
 /// nothing to fill and nothing to name: the background of a window is the
 /// fill of the node at the root of it, like any other box.
 pub fn paint(frames: [Frame]) {
+    paint_with(frames, host_renderer())
+}
+
+/// The same, into a renderer of your own.
+///
+/// This is the entry point that makes [`Renderer`] worth being a trait: a
+/// Metal backend, an SVG writer for server-side rendering, or a test double
+/// that records what it was asked to draw and asserts about it — each is a
+/// library, and this is the one call it needs from here.
+pub fn paint_with(frames: [Frame], var into: dyn Renderer) {
     for frame in frames {
-        draw_one(frame)
+        draw_one(frame, into)
     }
 }
 
@@ -1672,7 +1701,7 @@ fn SEMANTIC_CHECKABLE() -> int {
 /// only if the element exists by the time the declaration arrives. Declaring
 /// first would leave the first frame of every field with both a real input and
 /// a stray description of it.
-fn declare(frame: Frame) {
+fn declare(frame: Frame, var into: dyn Renderer) {
     if !frame.is_control {
         return
     }
@@ -1692,8 +1721,120 @@ fn declare(frame: Frame) {
             flags = flags + SEMANTIC_CHECKED()
         }
     }
-    let r = frame.rect
-    draw.semantics(r.x, r.y, r.width, r.height, role_code(frame.role), frame.label, flags, id)
+    into.describe(frame.rect, role_code(frame.role), frame.label, flags, id)
+}
+
+// ---- the renderer boundary ------------------------------------------------
+
+/// Everything a backend has to be able to do.
+///
+/// **This is the whole of what a renderer is.** Ten methods, no state that the
+/// caller can see, and nothing about trees, layout or events — a renderer is
+/// handed rectangles in absolute coordinates and puts them somewhere.
+///
+/// The point of it being an ordinary trait is that a third backend is an
+/// ordinary library. A Metal or Vulkan renderer for a native window, an SVG
+/// renderer for server-side rendering, a renderer that records what it was
+/// asked to draw and asserts about it in a test — none of them are changes to
+/// this file, to the compiler, or to any application. They are `impl Renderer
+/// for MyThing`, and `paint_with` takes them.
+///
+/// The methods mirror the host's drawing calls one for one, deliberately. A
+/// prettier vocabulary — paints, styles, handles, display lists — would be a
+/// second boundary sitting on the first, and every backend would have to
+/// translate back through it. What is here is what crosses.
+///
+/// Two of the ten are not drawing at all, and they are the two that matter
+/// most for anything other than a screen. `describe` is the parallel semantics
+/// tree of §7: a renderer that can be read aloud implements it, and one that
+/// cannot leaves it empty. `field` says *a text input goes here*, which a DOM
+/// answers with a real element and everything else answers by drawing the
+/// text.
+pub trait Renderer {
+    /// A filled rectangle, square when `radius` is zero.
+    fn fill(var self, r: Rect, radius: float, colour: int)
+    /// The ring between a box and the same box inset by `width` — a border
+    /// that does not fill its own middle.
+    fn ring(var self, r: Rect, radius: float, width: float, colour: int)
+    /// One run of text, on one line, at the top left of its line box.
+    fn glyphs(var self, x: float, y: float, body: str, colour: int)
+    /// A text input goes in this box.
+    fn field(var self, r: Rect, value: str, hint: str, colour: int, id: str, multiline: bool)
+    /// A picture goes in this box.
+    fn picture(var self, r: Rect, src: str)
+    /// What the thing in this box *is*, for anything that cannot see it.
+    fn describe(var self, r: Rect, role: int, label: str, flags: int, id: str)
+    /// Select the size and weight of the text that follows.
+    fn font(var self, size: float, weight: int)
+    /// Select the opacity of everything that follows, from 0.0 to 1.0.
+    fn alpha(var self, a: float)
+    /// Confine what follows to a rectangle, until the matching `unclip`.
+    fn clip(var self, r: Rect)
+    fn unclip(var self)
+}
+
+/// The renderer that draws through the host.
+///
+/// Every method is one drawing call and nothing else, which is what makes this
+/// the reference implementation of the trait: anything a backend has to decide
+/// for itself is a decision this one does not make.
+///
+/// It holds no state. The host holds the font, the opacity and the clip stack,
+/// because those are the host's — a second copy here would be a second opinion
+/// about them.
+pub struct HostRenderer { }
+
+pub fn host_renderer() -> HostRenderer {
+    return HostRenderer{ }
+}
+
+impl Renderer for HostRenderer {
+    fn fill(var self, r: Rect, radius: float, colour: int) {
+        // The square call is still the one made for a zero radius, so a
+        // renderer that never sees a rounded corner draws exactly what it drew
+        // before rounded corners existed.
+        if radius > 0.0 {
+            draw.rrect(r.x, r.y, r.width, r.height, radius, colour)
+        } else {
+            draw.rect(r.x, r.y, r.width, r.height, colour)
+        }
+    }
+
+    fn ring(var self, r: Rect, radius: float, width: float, colour: int) {
+        draw.drrect(r.x, r.y, r.width, r.height, radius, width, colour)
+    }
+
+    fn glyphs(var self, x: float, y: float, body: str, colour: int) {
+        draw.text(x, y, body, colour)
+    }
+
+    fn field(var self, r: Rect, value: str, hint: str, colour: int, id: str, multiline: bool) {
+        draw.field(r.x, r.y, r.width, r.height, value, hint, colour, id, multiline)
+    }
+
+    fn picture(var self, r: Rect, src: str) {
+        draw.image(r.x, r.y, r.width, r.height, src)
+    }
+
+    fn describe(var self, r: Rect, role: int, label: str, flags: int, id: str) {
+        draw.semantics(r.x, r.y, r.width, r.height, role, label, flags, id)
+    }
+
+    fn font(var self, size: float, weight: int) {
+        draw.font(size, weight)
+    }
+
+    fn alpha(var self, a: float) {
+        draw.alpha(a)
+    }
+
+    fn clip(var self, r: Rect) {
+        draw.clip(r.x, r.y, r.width, r.height)
+    }
+
+    fn unclip(var self) {
+        draw.unclip()
+    }
 }
 
 /// Paint one frame, then say what it is.
@@ -1701,23 +1842,23 @@ fn declare(frame: Frame) {
 /// Two calls rather than one function because `paint_box` leaves by several
 /// paths — a picture, a field and an empty box each return early — and the
 /// declaration has to happen on all of them.
-fn draw_one(frame: Frame) {
-    paint_box(frame)
-    declare(frame)
+fn draw_one(frame: Frame, into: dyn Renderer) {
+    paint_box(frame, into)
+    declare(frame, into)
 }
 
-fn paint_box(frame: Frame) {
+fn paint_box(frame: Frame, into: dyn Renderer) {
     let r = frame.rect
     let d = frame.decor
     let own = d.fill
-    set_alpha(d.alpha)
+    set_alpha(into, d.alpha)
     // A fill, then the border on top of it. They are two calls now rather than
     // one compound one: `draw.drrect` draws the *ring* between the box and the
     // box inset by the width, so the border no longer has to fill its own
     // middle with the colour behind it. That was the whole reason a border and
     // a fill could not be drawn independently.
     if own != nil {
-        fill_rect(r.x, r.y, r.width, r.height, d.radius, own)
+        into.fill(r, d.radius, own)
     }
     let edge = d.border
     if edge != nil {
@@ -1725,7 +1866,7 @@ fn paint_box(frame: Frame) {
         // comparison inside a conjunction, and only the comparison alone
         // narrows the option.
         if edge.width > 0.0 {
-            draw.drrect(r.x, r.y, r.width, r.height, d.radius, edge.width, edge.colour)
+            into.ring(r, d.radius, edge.width, edge.colour)
         }
     }
     // A picture goes inside the padding, like text, and over the fill, like
@@ -1733,9 +1874,8 @@ fn paint_box(frame: Frame) {
     // rather than two boxes arranged to look like one.
     let picture = frame.image
     if picture != nil {
-        let box = frame.inner
-        draw.image(box.x, box.y, box.width, box.height, picture)
-        unset_alpha(d.alpha)
+        into.picture(frame.inner, picture)
+        unset_alpha(into, d.alpha)
         return
     }
     // A text input is a region rather than a picture, so it is declared and
@@ -1769,18 +1909,8 @@ fn paint_box(frame: Frame) {
             // frame's own content is already that: the component put the
             // placeholder there when there was nothing to show.
             let hint = if editing.text.len() == 0 { body } else { "" }
-            draw.field(
-                box.x,
-                box.y,
-                box.width,
-                box.height,
-                editing.text,
-                hint,
-                d.ink,
-                key,
-                editing.multiline,
-            )
-            unset_alpha(d.alpha)
+            into.field(box, editing.text, hint, d.ink, key, editing.multiline)
+            unset_alpha(into, d.alpha)
             return
         }
     }
@@ -1792,7 +1922,7 @@ fn paint_box(frame: Frame) {
         // wanted a state layer nothing set `alpha` on a box — the one place it
         // was used was on text, which leaves by the bottom of this function.
         // The symptom was a whole list fading out below a hovered row.
-        unset_alpha(d.alpha)
+        unset_alpha(into, d.alpha)
         return
     }
     // Content goes inside the padding, and wraps to the width measurement used
@@ -1813,7 +1943,7 @@ fn paint_box(frame: Frame) {
     //
     // The font is the one the box was measured in. Decoration may not choose
     // another: the room has already been allotted.
-    set_font(frame.size, frame.weight)
+    set_font(into, frame.size, frame.weight)
     let base = text.paragraph_level(body)
     let lines = wrap(body, box.width)
     var y = box.y
@@ -1838,37 +1968,26 @@ fn paint_box(frame: Frame) {
             }
         }
         for run in text.bidi_runs_with(line, base) {
-            draw.text(x, y, run.body, d.ink)
+            into.glyphs(x, y, run.body, d.ink)
             x = x + text.width(run.body)
         }
         y = y + line_height()
     }
-    unset_font(frame.size)
-    unset_alpha(d.alpha)
+    unset_font(into, frame.size)
+    unset_alpha(into, d.alpha)
 }
 
-/// Select an opacity, or leave the host's alone. Paired with [`unset_alpha`],
-/// so one node's translucency cannot leak into the next.
-fn set_alpha(a: float) {
+/// Select an opacity on a renderer, or leave the one it has. Paired with
+/// [`unset_alpha`], so one node's translucency cannot leak into the next.
+fn set_alpha(var into: dyn Renderer, a: float) {
     if a < 1.0 {
-        draw.alpha(a)
+        into.alpha(a)
     }
 }
 
-fn unset_alpha(a: float) {
+fn unset_alpha(var into: dyn Renderer, a: float) {
     if a < 1.0 {
-        draw.alpha(1.0)
-    }
-}
-
-/// A filled rectangle, round or square. The square call is still the one made
-/// for a zero radius, so a renderer that never sees a rounded corner draws
-/// exactly what it drew before rounded corners existed.
-fn fill_rect(x: float, y: float, w: float, h: float, radius: float, colour: int) {
-    if radius > 0.0 {
-        draw.rrect(x, y, w, h, radius, colour)
-    } else {
-        draw.rect(x, y, w, h, colour)
+        into.alpha(1.0)
     }
 }
 
@@ -1907,7 +2026,17 @@ fn shifted(r: Rect, dx: float, dy: float) -> Rect {
 /// row has to be cut by the renderer, and painting over it would erase what it
 /// is scrolling past.
 pub fn paint_scrolled(frames: [Frame], viewport: Rect, offset: float) {
-    draw.clip(viewport.x, viewport.y, viewport.width, viewport.height)
+    paint_scrolled_with(frames, viewport, offset, host_renderer())
+}
+
+/// The same, into a renderer of your own.
+pub fn paint_scrolled_with(
+    frames: [Frame],
+    viewport: Rect,
+    offset: float,
+    var into: dyn Renderer,
+) {
+    into.clip(viewport)
     let dx = viewport.x
     let dy = viewport.y - offset
     // Portals are last in the list, so the clip can be closed once, when the
@@ -1915,7 +2044,7 @@ pub fn paint_scrolled(frames: [Frame], viewport: Rect, offset: float) {
     var clipped = true
     for frame in frames {
         if frame.portal && clipped {
-            draw.unclip()
+            into.unclip()
             clipped = false
         }
         let r = shifted(frame.rect, dx, dy)
@@ -1923,13 +2052,13 @@ pub fn paint_scrolled(frames: [Frame], viewport: Rect, offset: float) {
         // it: hanging outside is what it is for. It still scrolls with the
         // content, because it was laid out against the row it belongs to.
         if frame.portal {
-            draw_one(Frame{..frame, rect: r, inner: shifted(frame.inner, dx, dy) })
+            draw_one(Frame{..frame, rect: r, inner: shifted(frame.inner, dx, dy) }, into)
         } else if r.y + r.height >= viewport.y && r.y <= viewport.y + viewport.height {
-            draw_one(Frame{..frame, rect: r, inner: shifted(frame.inner, dx, dy) })
+            draw_one(Frame{..frame, rect: r, inner: shifted(frame.inner, dx, dy) }, into)
         }
     }
     if clipped {
-        draw.unclip()
+        into.unclip()
     }
 }
 

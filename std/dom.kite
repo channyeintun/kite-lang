@@ -1,0 +1,193 @@
+// std/dom — low-level DOM access. **Web only.**
+//
+// The escape hatch, and it is meant to be used as one. Everything a Kite
+// application draws goes through `std/ui`, which is what keeps the same program
+// running under the canvas renderer, the transcript, and whatever a third
+// backend turns out to be. Reaching for this module gives that up for whatever
+// it touches: a program that positions its own `<div>` has stopped being a
+// program that runs anywhere but a browser.
+//
+// It exists because the alternative is worse. Without it, the first thing a
+// real application needs that `std/ui` has no opinion about — a `<video>`, a
+// third-party embed, the page title, a file picker — is a reason to abandon
+// Kite for that screen. One documented door is better than a wall people climb.
+//
+// **Nodes are handles, not references.** A `str`, an `int` and a `float` are
+// what cross the boundary, so an element arrives as a number indexing a table
+// the host keeps. A handle of 0 means nothing was found: every call takes one
+// and every call tolerates it, so a chain of lookups on a missing element does
+// nothing rather than trapping halfway through.
+
+/// The host's side. Anything not on the web leaves this group unimplemented,
+/// and a call fails saying which function had no host — which is the honest
+/// answer to asking a terminal for a DOM.
+@host("dom")
+extern fn query(selector: str) -> int
+
+@host("dom")
+extern fn query_all(selector: str) -> str
+
+@host("dom")
+extern fn create(tag: str) -> int
+
+@host("dom")
+extern fn append(parent: int, child: int)
+
+@host("dom")
+extern fn detach(node: int)
+
+@host("dom")
+extern fn get_text(node: int) -> str
+
+@host("dom")
+extern fn set_text(node: int, body: str)
+
+@host("dom")
+extern fn get_attr(node: int, name: str) -> str
+
+@host("dom")
+extern fn set_attr(node: int, name: str, value: str)
+
+@host("dom")
+extern fn drop_attr(node: int, name: str)
+
+@host("dom")
+extern fn set_style(node: int, property: str, value: str)
+
+@host("dom")
+extern fn set_class(node: int, name: str, on: bool)
+
+@host("dom")
+extern fn has_class(node: int, name: str) -> bool
+
+@host("dom")
+extern fn get_title() -> str
+
+@host("dom")
+extern fn set_title(body: str)
+
+/// A handle on an element.
+///
+/// A struct rather than a bare `int` so that a node cannot be added to a
+/// number by accident, and so the nothing-found case has a name.
+pub struct Node {
+    pub handle: int
+}
+
+/// The handle that means nothing was found.
+pub fn none() -> Node {
+    return Node{ handle: 0 }
+}
+
+/// Whether a handle refers to anything.
+pub fn found(node: Node) -> bool {
+    return node.handle != 0
+}
+
+/// The first element matching a CSS selector, or [`none`].
+pub fn find(selector: str) -> Node {
+    return Node{ handle: query(selector) }
+}
+
+/// Every element matching a CSS selector, in document order.
+pub fn find_all(selector: str) -> [Node] {
+    let handles = query_all(selector)
+    var out: [Node] = []
+    var current = ""
+    for i in 0..handles.len() {
+        let c = handles.slice(i, i + 1)
+        if c == "," {
+            out.push(Node{ handle: int_of(current) })
+            current = ""
+        } else {
+            current = current + c
+        }
+    }
+    if current.len() > 0 {
+        out.push(Node{ handle: int_of(current) })
+    }
+    return out
+}
+
+/// A new element, not yet in the document.
+pub fn element(tag: str) -> Node {
+    return Node{ handle: create(tag) }
+}
+
+/// Put `child` at the end of `parent`.
+pub fn add(parent: Node, child: Node) {
+    append(parent.handle, child.handle)
+}
+
+/// Take an element out of the document. Its handle stops referring to
+/// anything the page can see.
+pub fn remove(node: Node) {
+    detach(node.handle)
+}
+
+/// The element's text content.
+pub fn text(node: Node) -> str {
+    return get_text(node.handle)
+}
+
+/// Replace the element's text content.
+///
+/// Text, never markup. There is no `set_html` here and there is not going to
+/// be one: it is the single most common way a program built out of strings
+/// grows a script-injection bug, and a standard library should not ship the
+/// loaded gun beside the safe call.
+pub fn set(node: Node, body: str) {
+    set_text(node.handle, body)
+}
+
+pub fn attribute(node: Node, name: str) -> str {
+    return get_attr(node.handle, name)
+}
+
+pub fn set_attribute(node: Node, name: str, value: str) {
+    set_attr(node.handle, name, value)
+}
+
+pub fn remove_attribute(node: Node, name: str) {
+    drop_attr(node.handle, name)
+}
+
+/// One CSS property, by its CSS name — `background-color`, not
+/// `backgroundColor`. The host translates; a caller writes what it would write
+/// in a stylesheet.
+pub fn style(node: Node, property: str, value: str) {
+    set_style(node.handle, property, value)
+}
+
+pub fn add_class(node: Node, name: str) {
+    set_class(node.handle, name, true)
+}
+
+pub fn remove_class(node: Node, name: str) {
+    set_class(node.handle, name, false)
+}
+
+pub fn in_class(node: Node, name: str) -> bool {
+    return has_class(node.handle, name)
+}
+
+/// The document's title.
+pub fn title() -> str {
+    return get_title()
+}
+
+pub fn retitle(body: str) {
+    set_title(body)
+}
+
+fn int_of(body: str) -> int {
+    var value = 0
+    for i in 0..body.len() {
+        let digit = body.code_at(i) - 0x30
+        if digit < 0 || digit > 9 {
+            return 0
+        }
+        value = value * 10 + digit
+    }
+    return value
+}

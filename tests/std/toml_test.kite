@@ -1,0 +1,199 @@
+// std/toml — the subset a configuration file uses.
+//
+// The cases are the shapes `kite.toml` and its neighbours actually contain,
+// plus the ones where a lenient parser quietly does the wrong thing: a date
+// read as an integer, a key set twice, a table header over a scalar.
+//
+// Each group is its own function because a parsed value is tainted until its
+// error is tested, and a group that fails to parse has nothing left to assert
+// about — so it returns what it has and the next group carries on.
+
+use std/test
+use std/toml
+
+fn text_of(doc: toml.Toml, path: str) -> str {
+    return toml.text_at(doc, path, "<missing>")
+}
+
+/// The shape of a real manifest. Written with escapes because a `"` string may
+/// not span lines, and the document itself is full of quotes.
+fn manifest_source() -> str {
+    return "# a comment\nname = \"kite\"\nversion = \"0.1.0\"\nedition = 2021\n\n[package]\nauthors = [\"one\", \"two\"]\nkeywords = []\nstrict = true\nratio = 1.5\n\n[package.meta]\nhomepage = 'https://example.invalid'\n"
+}
+
+fn manifest_checks() -> [error] {
+    var out: [error] = []
+    let (doc, err) = toml.parse(manifest_source())
+    out.push(test.ok(err, "a manifest parses"))
+    if err != nil {
+        return out
+    }
+    out.push(test.equal_str(text_of(doc, "name"), "kite", "a top-level string"))
+    out.push(test.equal_int(toml.int_at(doc, "edition", 0), 2021, "a top-level integer"))
+    out.push(test.equal_bool(toml.bool_at(doc, "package.strict", false), true, "a nested bool"))
+    out.push(test.equal_float(toml.float_at(doc, "package.ratio", 0.0), 1.5, 0.0001, "a float"))
+    out.push(
+        test.equal_str(
+            text_of(doc, "package.meta.homepage"),
+            "https://example.invalid",
+            "a literal string two tables deep",
+        ),
+    )
+    out.push(test.is_true(toml.at(doc, "package.authors") != nil, "an array is present"))
+    out.push(test.is_true(toml.at(doc, "package.nothing") == nil, "an absent key is nil"))
+
+    // ---- round trip ----
+    let (again, again_err) = toml.parse(toml.emit(doc))
+    out.push(test.ok(again_err, "what was emitted parses"))
+    if again_err != nil {
+        return out
+    }
+    out.push(test.equal_str(text_of(again, "name"), "kite", "a scalar survives"))
+    out.push(
+        test.equal_str(
+            text_of(again, "package.meta.homepage"),
+            "https://example.invalid",
+            "and so does a nested one",
+        ),
+    )
+    out.push(
+        test.equal_bool(
+            toml.bool_at(again, "package.strict", false),
+            true,
+            "and a bool below a header",
+        ),
+    )
+    return out
+}
+
+fn key_checks() -> [error] {
+    var out: [error] = []
+    let (dotted, dotted_err) = toml.parse("a.b.c = 7\n")
+    out.push(test.ok(dotted_err, "a dotted key parses"))
+    if dotted_err != nil {
+        return out
+    }
+    out.push(test.equal_int(toml.int_at(dotted, "a.b.c", 0), 7, "and nests"))
+
+    let (inline, inline_err) = toml.parse("point = { x = 1, y = 2 }\n")
+    out.push(test.ok(inline_err, "an inline table parses"))
+    if inline_err != nil {
+        return out
+    }
+    out.push(test.equal_int(toml.int_at(inline, "point.y", 0), 2, "and is a table"))
+
+    let (quoted, quoted_err) = toml.parse("\"a key\" = 1\n")
+    out.push(test.ok(quoted_err, "a quoted key parses"))
+    if quoted_err != nil {
+        return out
+    }
+    out.push(test.equal_int(toml.int_at(quoted, "a key", 0), 1, "and holds its spaces"))
+    return out
+}
+
+fn number_checks() -> [error] {
+    var out: [error] = []
+    let (nums, err) = toml.parse("big = 1_000_000\nneg = -42\nf = 3.25\ne = 2e3\n")
+    out.push(test.ok(err, "numbers parse"))
+    if err != nil {
+        return out
+    }
+    out.push(test.equal_int(toml.int_at(nums, "big", 0), 1000000, "underscores separate"))
+    out.push(test.equal_int(toml.int_at(nums, "neg", 0), -42, "a sign is read"))
+    out.push(test.equal_float(toml.float_at(nums, "f", 0.0), 3.25, 0.0001, "a float"))
+    out.push(test.equal_float(toml.float_at(nums, "e", 0.0), 2000.0, 0.0001, "an exponent"))
+
+    // A date is not an integer, and reading `1979-05-27` as `1979` is the
+    // quiet wrong answer this guards against.
+    let (dated, dated_err) = toml.parse("when = 1979-05-27\n")
+    out.push(test.ok(dated_err, "a date parses"))
+    if dated_err != nil {
+        return out
+    }
+    out.push(test.equal_str(text_of(dated, "when"), "1979-05-27", "and is kept verbatim"))
+    return out
+}
+
+fn string_checks() -> [error] {
+    var out: [error] = []
+    let (multi, err) = toml.parse("body = \"\"\"\none\ntwo\"\"\"\n")
+    out.push(test.ok(err, "a multi-line string parses"))
+    if err != nil {
+        return out
+    }
+    out.push(test.equal_str(text_of(multi, "body"), "one\ntwo", "with the first newline trimmed"))
+
+    let (escaped, escaped_err) = toml.parse("k = \"a\\tb\"\n")
+    out.push(test.ok(escaped_err, "escapes parse"))
+    if escaped_err != nil {
+        return out
+    }
+    out.push(test.equal_str(text_of(escaped, "k"), "a\tb", "and are decoded"))
+
+    let (literal, literal_err) = toml.parse("path = 'C:\\nope'\n")
+    out.push(test.ok(literal_err, "a literal string parses"))
+    if literal_err != nil {
+        return out
+    }
+    out.push(test.equal_str(text_of(literal, "path"), "C:\\nope", "with no escapes at all"))
+    return out
+}
+
+fn blank_checks() -> [error] {
+    var out: [error] = []
+    let (spaced, err) = toml.parse("\n# one\n\nk = 1 # trailing\n\n# two\n")
+    out.push(test.ok(err, "comments and blank lines are skipped"))
+    if err != nil {
+        return out
+    }
+    out.push(test.equal_int(toml.int_at(spaced, "k", 0), 1, "and the value survives"))
+
+    let (empty, empty_err) = toml.parse("[section]\n")
+    out.push(test.ok(empty_err, "an empty section parses"))
+    if empty_err != nil {
+        return out
+    }
+    out.push(test.is_true(toml.at(empty, "section") != nil, "and the table exists"))
+    return out
+}
+
+/// The cases where being lenient would be being wrong.
+fn refusal_checks() -> [error] {
+    var out: [error] = []
+    let (_, twice) = toml.parse("k = 1\nk = 2\n")
+    out.push(test.failed(twice, "a key set twice is an error"))
+
+    let (_, clash) = toml.parse("a = 1\n[a]\nb = 2\n")
+    out.push(test.failed(clash, "a table over a scalar is an error"))
+
+    let (_, junk) = toml.parse("k = 1 oops\n")
+    out.push(test.failed(junk, "trailing junk on a line is an error"))
+
+    let (_, arrays) = toml.parse("[[items]]\nk = 1\n")
+    out.push(test.failed(arrays, "an unsupported form is refused, not misread"))
+
+    let (_, unterminated) = toml.parse("k = \"oops\n")
+    out.push(test.failed(unterminated, "an unterminated string is an error"))
+
+    let (_, no_eq) = toml.parse("k 1\n")
+    out.push(test.failed(no_eq, "a missing `=` is an error"))
+    return out
+}
+
+fn main() {
+    var results: [error] = []
+    results = concat(results, manifest_checks())
+    results = concat(results, key_checks())
+    results = concat(results, number_checks())
+    results = concat(results, string_checks())
+    results = concat(results, blank_checks())
+    results = concat(results, refusal_checks())
+    var failed = 0
+    for e in results {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("toml: \(results.len() - failed) passed, \(failed) failed")
+}

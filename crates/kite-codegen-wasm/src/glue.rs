@@ -229,6 +229,7 @@ export function text(s) {
             NET_HOST,
             CRYPTO_HOST,
             AUDIO_HOST,
+            DOM_HOST,
             "",
             "function missing(group, name) {",
             "  return () => {",
@@ -2291,6 +2292,72 @@ export function isApplication(exports) {{
         wasm = json_string(wasm_path),
     ))
 }
+
+/// The `dom` group, which `std/dom` declares.
+///
+/// Supplied here for the same reason `net` is: a standard module whose one
+/// boundary had to be wired up by hand would not be much of a standard module.
+///
+/// Elements cross as handles into a table, because a `str`, an `int` and a
+/// `float` are what cross and a DOM node is none of those. Index 0 is
+/// permanently empty, so a handle of 0 is "nothing found" and every function
+/// tolerates it — a chain of lookups on a missing element does nothing rather
+/// than throwing halfway along.
+const DOM_HOST: &str = r#"
+if (HOSTS.dom) {
+  // Index 0 is the empty slot that means "not found", so the table starts with
+  // a hole in it rather than reserving one by convention.
+  const NODES = [null];
+  const at = (id) => NODES[Number(id)] ?? null;
+  const handle = (el) => (el ? BigInt(NODES.push(el) - 1) : 0n);
+  HOSTS.dom = {
+    query: (selector) => handle(document.querySelector(S(selector))),
+    query_all: (selector) =>
+      str([...document.querySelectorAll(S(selector))].map((el) => handle(el)).join(",")),
+    create: (tag) => handle(document.createElement(S(tag))),
+    append: (parent, child) => {
+      const p = at(parent);
+      const c = at(child);
+      if (p && c) p.appendChild(c);
+    },
+    detach: (node) => {
+      const el = at(node);
+      if (el) el.remove();
+    },
+    get_text: (node) => str(at(node)?.textContent ?? ""),
+    set_text: (node, body) => {
+      const el = at(node);
+      // `textContent`, never `innerHTML`. `std/dom` deliberately offers no way
+      // to set markup, and the host must not quietly provide one.
+      if (el) el.textContent = S(body);
+    },
+    get_attr: (node, name) => str(at(node)?.getAttribute(S(name)) ?? ""),
+    set_attr: (node, name, value) => {
+      const el = at(node);
+      if (el) el.setAttribute(S(name), S(value));
+    },
+    drop_attr: (node, name) => {
+      const el = at(node);
+      if (el) el.removeAttribute(S(name));
+    },
+    set_style: (node, property, value) => {
+      const el = at(node);
+      // `setProperty` takes the CSS spelling — `background-color` — which is
+      // what a caller writes in a stylesheet and what `std/dom` documents.
+      if (el) el.style.setProperty(S(property), S(value));
+    },
+    set_class: (node, name, on) => {
+      const el = at(node);
+      if (el) el.classList.toggle(S(name), on !== 0);
+    },
+    has_class: (node, name) => (at(node)?.classList.contains(S(name)) ? 1 : 0),
+    get_title: () => str(document.title),
+    set_title: (body) => {
+      document.title = S(body);
+    },
+  };
+}
+"#;
 
 /// The `net` group, which `std/http` and `std/socket` declare.
 ///

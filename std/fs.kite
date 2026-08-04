@@ -1,0 +1,162 @@
+// std/fs — files and directories.
+//
+// Native and, in time, WASI. **Unavailable on the web**, which is not an
+// oversight and not a limitation to be worked around: a page has no filesystem,
+// and a shim that pretended otherwise — local storage dressed up as a disk —
+// would be a different thing wearing the same name. A program that reads a file
+// is a program that does not run in a browser, and it should find that out when
+// it runs rather than when it silently reads nothing.
+//
+// Every call that can fail returns `(T, error)`. There is no exception to catch
+// and no errno to inspect: what went wrong arrives as a message, in the same
+// shape as everything else in this library.
+//
+// The host implements one object called `fs`. A runtime that does not — the
+// browser — leaves it unimplemented, and a call traps with a message naming
+// the function, which is the honest failure for asking a page for a file.
+
+use std/errors
+
+/// The host's side. Each returns a string because a `str` crosses the boundary
+/// and a `(T, error)` does not: an empty first field with the reason in the
+/// second is the shape, and the functions below turn it back into a pair.
+@host("fs")
+extern fn read_text(path: str) -> str
+
+@host("fs")
+extern fn write_text(path: str, body: str) -> str
+
+@host("fs")
+extern fn list_dir(path: str) -> str
+
+@host("fs")
+extern fn remove_path(path: str) -> str
+
+@host("fs")
+extern fn path_kind(path: str) -> int
+
+/// How the host reports a failure.
+///
+/// A leading `\u{1}` marks an error, because a path, a file's contents and a
+/// directory listing are all ordinary strings and none of them may be confused
+/// with a failure. A sentinel byte no text file starts with is the cheapest
+/// discriminator that crosses a boundary carrying only `str`.
+fn FAILURE_MARK() -> str {
+    return "\u{1}"
+}
+
+fn unwrap(answer: str, what: str) -> (str, error) {
+    if answer.len() > 0 {
+        if answer.slice(0, 1) == FAILURE_MARK() {
+            return _, errors.new("fs: \(what): \(answer.slice(1, answer.len()))")
+        }
+    }
+    return answer, nil
+}
+
+/// The whole of a file, as text.
+///
+/// Text, not bytes: `str` is what crosses the boundary, and a file that is not
+/// valid UTF-8 is an error rather than a string of replacement characters —
+/// silently substituting them is how a binary file becomes corrupt data that
+/// looks fine.
+pub fn read(path: str) -> (str, error) {
+    return unwrap(read_text(path), "read \(path)")
+}
+
+/// Write `body` to `path`, replacing whatever was there.
+///
+/// The directory above it must exist. Creating parents silently is the kind of
+/// convenience that writes a file where nobody meant to put one.
+pub fn write(path: str, body: str) -> error {
+    let (_, err) = unwrap(write_text(path, body), "write \(path)")
+    return err
+}
+
+/// The names in a directory, without `.` and `..`, in the order the host gives
+/// them — which is not sorted, on any platform worth relying on.
+pub fn list(path: str) -> ([str], error) {
+    let (answer, err) = unwrap(list_dir(path), "list \(path)")
+    check err
+    if answer.len() == 0 {
+        return [], nil
+    }
+    return split_lines(answer), nil
+}
+
+/// Delete a file, or an empty directory.
+///
+/// It will not delete a directory that has anything in it. Recursive deletion
+/// is one typo away from catastrophe and is not something a standard library
+/// should make a one-liner.
+pub fn remove(path: str) -> error {
+    let (_, err) = unwrap(remove_path(path), "remove \(path)")
+    return err
+}
+
+/// What is at a path.
+pub enum Kind {
+    Missing
+    File
+    Directory
+}
+
+pub fn kind(path: str) -> Kind {
+    let code = path_kind(path)
+    if code == 1 {
+        return Kind.File
+    }
+    if code == 2 {
+        return Kind.Directory
+    }
+    return Kind.Missing
+}
+
+/// Whether anything is at a path.
+///
+/// A convenience over [`kind`], and one to use sparingly: between asking and
+/// acting, the answer may have changed. Prefer doing the thing and handling
+/// the error.
+pub fn exists(path: str) -> bool {
+    return match kind(path) {
+        Missing => false
+        File => true
+        Directory => true
+    }
+}
+
+pub fn is_file(path: str) -> bool {
+    return match kind(path) {
+        File => true
+        Missing => false
+        Directory => false
+    }
+}
+
+pub fn is_dir(path: str) -> bool {
+    return match kind(path) {
+        Directory => true
+        Missing => false
+        File => false
+    }
+}
+
+fn split_lines(body: str) -> [str] {
+    var out: [str] = []
+    var current = ""
+    for i in 0..body.len() {
+        let c = body.slice(i, i + 1)
+        if c == "\n" {
+            if current.len() > 0 {
+                out.push(current)
+            }
+            current = ""
+        } else {
+            current = current + c
+        }
+    }
+    if current.len() > 0 {
+        out.push(current)
+    }
+    return out
+}

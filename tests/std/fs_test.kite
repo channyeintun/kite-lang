@@ -1,0 +1,125 @@
+// std/fs — files, and what happens when they are not there.
+//
+// The test writes into the system temporary directory and removes what it
+// wrote. It asserts about failures as much as successes: a filesystem module
+// whose error path is untested is a filesystem module whose error path is
+// wrong, and "no such file" is the most common thing it will ever have to say.
+
+use std/test
+use std/fs
+
+fn scratch() -> str {
+    return "/tmp/kite-fs-test-file.txt"
+}
+
+fn scratch_dir() -> str {
+    return "/tmp/kite-fs-test-dir"
+}
+
+fn round_trip_checks() -> [error] {
+    var out: [error] = []
+    let path = scratch()
+    let body = "hello from kite\nsecond line\n"
+
+    let write_err = fs.write(path, body)
+    out.push(test.ok(write_err, "a file is written"))
+    if write_err != nil {
+        return out
+    }
+    out.push(test.equal_bool(fs.exists(path), true, "and then exists"))
+    out.push(test.equal_bool(fs.is_file(path), true, "as a file"))
+    out.push(test.equal_bool(fs.is_dir(path), false, "and not a directory"))
+
+    let (read_back, read_err) = fs.read(path)
+    out.push(test.ok(read_err, "and reads back"))
+    if read_err != nil {
+        return out
+    }
+    out.push(test.equal_str(read_back, body, "byte for byte"))
+
+    // Writing again replaces rather than appends.
+    let again_err = fs.write(path, "short")
+    out.push(test.ok(again_err, "a second write succeeds"))
+    if again_err != nil {
+        return out
+    }
+    let (second, second_err) = fs.read(path)
+    out.push(test.ok(second_err, "and reads back"))
+    if second_err != nil {
+        return out
+    }
+    out.push(test.equal_str(second, "short", "replacing what was there"))
+
+    let remove_err = fs.remove(path)
+    out.push(test.ok(remove_err, "and is removed"))
+    out.push(test.equal_bool(fs.exists(path), false, "and is gone"))
+    return out
+}
+
+fn listing_checks() -> [error] {
+    var out: [error] = []
+    let path = scratch()
+    let write_err = fs.write(path, "x")
+    out.push(test.ok(write_err, "a file to find"))
+    if write_err != nil {
+        return out
+    }
+    let (names, list_err) = fs.list("/tmp")
+    out.push(test.ok(list_err, "a directory lists"))
+    if list_err != nil {
+        return out
+    }
+    var found = false
+    for name in names {
+        if name == "kite-fs-test-file.txt" {
+            found = true
+        }
+    }
+    out.push(test.is_true(found, "and the file is in it"))
+    // Neither `.` nor `..` is ever a name in the listing.
+    var dots = false
+    for name in names {
+        if name == "." || name == ".." {
+            dots = true
+        }
+    }
+    out.push(test.is_false(dots, "and `.` and `..` are not"))
+    out.push(test.ok(fs.remove(path), "tidied up"))
+    return out
+}
+
+fn failure_checks() -> [error] {
+    var out: [error] = []
+
+    let (_, missing) = fs.read("/definitely/not/here/at/all")
+    out.push(test.failed(missing, "reading a missing file is an error"))
+
+    let write_err = fs.write("/definitely/not/here/at/all/file.txt", "x")
+    out.push(test.failed(write_err, "writing into a missing directory is an error"))
+
+    let (_, not_a_dir) = fs.list("/definitely/not/here/at/all")
+    out.push(test.failed(not_a_dir, "listing a missing directory is an error"))
+
+    let remove_err = fs.remove("/definitely/not/here/at/all")
+    out.push(test.failed(remove_err, "removing what is not there is an error"))
+
+    out.push(test.equal_bool(fs.exists("/definitely/not/here"), false, "a missing path does not exist"))
+    out.push(test.equal_bool(fs.is_file("/tmp"), false, "a directory is not a file"))
+    out.push(test.equal_bool(fs.is_dir("/tmp"), true, "and is a directory"))
+    return out
+}
+
+fn main() {
+    var results: [error] = []
+    results = concat(results, round_trip_checks())
+    results = concat(results, listing_checks())
+    results = concat(results, failure_checks())
+    var failed = 0
+    for e in results {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("fs: \(results.len() - failed) passed, \(failed) failed")
+}

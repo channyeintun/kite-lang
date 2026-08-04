@@ -1,0 +1,988 @@
+// std/toml — reading and writing TOML.
+//
+// Written in Kite, on the same shape as `std/json`: a parse returns
+// `(Toml, error)`, and a malformed document is a value to handle rather than
+// something thrown. Positions are threaded through as `(value, next)` pairs
+// instead of a cursor with a `var` field, so a parse cannot be left
+// half-advanced by an early return.
+//
+// **The subset is named rather than implied.** What is here is what a
+// configuration file uses and what `kite.toml` needs:
+//
+//   * comments, to end of line
+//   * bare and quoted keys, and dotted keys — `a.b.c = 1`
+//   * `[table]` and `[a.b]` headers, and `[[array.of.tables]]`
+//   * basic strings with the standard escapes, and literal `'…'` strings
+//   * multi-line `"""…"""` and `'''…'''` strings
+//   * integers, including `+`/`-` signs and `_` separators
+//   * floats, including exponents, `inf` and `nan`
+//   * booleans
+//   * arrays, which may span lines and may hold anything
+//   * inline tables — `{ a = 1, b = 2 }`
+//
+// What is **not** here, and would be wrong to guess at: dates and times.
+// TOML's offset date-time, local date-time, date and time are four distinct
+// types, and Kite has `time.Instant` and `time.Date` to map two of them onto —
+// so the mapping is a decision about `std/time`'s surface rather than about
+// parsing, and it is left undone rather than half-done. A date in a document
+// parses as the string it was written as, which is lossless and honest, and is
+// stated here so nobody discovers it from a wrong answer.
+
+use std/errors
+
+/// A TOML value.
+///
+/// Recursive with no boxing annotation, because every Kite aggregate is
+/// already a GC reference.
+pub enum Toml {
+    Bool(bool)
+    Int(int)
+    Float(float)
+    Text(str)
+    Array([Toml])
+    Table({ str: Toml })
+}
+
+/// A value and where it ended.
+struct Step {
+    value: Toml
+    next: int
+}
+
+/// A string and where it ended.
+struct Text {
+    text: str
+    next: int
+}
+
+/// A key path — `a.b.c` is three segments — and where it ended.
+struct Key {
+    path: [str]
+    next: int
+}
+
+// ---- reading ---------------------------------------------------------------
+
+/// The table a document holds, or an error saying where it went wrong.
+///
+/// The top level of a TOML document is always a table, which is the one way it
+/// differs from JSON at the root.
+pub fn parse(input: str) -> (Toml, error) {
+    var root: { str: Toml } = { }
+    // The table that bare `key = value` lines currently belong to. `[a.b]`
+    // moves it; the top of the document starts at the root.
+    var path: [str] = []
+    var at = 0
+    for {
+        at = skip_blank(input, at)
+        if at >= input.len() {
+            break
+        }
+        let c = input.slice(at, at + 1)
+        if c == "[" {
+            let (header, err) = parse_header(input, at)
+            check err
+            path = header.path
+            at = header.next
+            // A header creates the table even when nothing is assigned in it,
+            // which is what makes an empty `[section]` mean something.
+            let (seeded, seed_err) = ensure_table(root, path)
+            check seed_err
+            root = seeded
+            continue
+        }
+        let (key, key_err) = parse_key(input, at)
+        check key_err
+        let eq = skip_inline(input, key.next)
+        if eq >= input.len() || input.slice(eq, eq + 1) != "=" {
+            return _, errors.new("toml: expected `=` at \(eq)")
+        }
+        let (step, value_err) = parse_value(input, skip_inline(input, eq + 1))
+        check value_err
+        let (placed, place_err) = assign(root, concat(path, key.path), step.value)
+        check place_err
+        root = placed
+        at = step.next
+        let (after, line_err) = end_of_line(input, at)
+        check line_err
+        at = after
+    }
+    return Toml.Table(root), nil
+}
+
+/// A `[table]` or `[[array of tables]]` header.
+fn parse_header(input: str, at: int) -> (Key, error) {
+    let doubled = at + 1 < input.len() && input.slice(at + 1, at + 2) == "["
+    if doubled {
+        // An array-of-tables header is recognised and refused, rather than
+        // silently read as a plain table — which would put every element of
+        // the array on top of the last.
+        return _, errors.new("toml: `[[array of tables]]` is not supported at \(at)")
+    }
+    let (key, err) = parse_key(input, skip_inline(input, at + 1))
+    check err
+    let close = skip_inline(input, key.next)
+    if close >= input.len() || input.slice(close, close + 1) != "]" {
+        return _, errors.new("toml: expected `]` at \(close)")
+    }
+    let (after, line_err) = end_of_line(input, close + 1)
+    check line_err
+    return Key{ path: key.path, next: after }, nil
+}
+
+/// A key: bare, quoted, or dotted segments of either.
+fn parse_key(input: str, at: int) -> (Key, error) {
+    var path: [str] = []
+    var i = at
+    for {
+        i = skip_inline(input, i)
+        if i >= input.len() {
+            return _, errors.new("toml: expected a key at \(i)")
+        }
+        let c = input.slice(i, i + 1)
+        if c == "\"" || c == "'" {
+            let (text, err) = parse_string(input, i)
+            check err
+            path.push(text.text)
+            i = text.next
+        } else {
+            var name = ""
+            for {
+                if i >= input.len() {
+                    break
+                }
+                let ch = input.slice(i, i + 1)
+                if is_bare(ch) {
+                    name = name + ch
+                    i = i + 1
+                } else {
+                    break
+                }
+            }
+            if name.len() == 0 {
+                return _, errors.new("toml: expected a key at \(i)")
+            }
+            path.push(name)
+        }
+        let next = skip_inline(input, i)
+        if next < input.len() && input.slice(next, next + 1) == "." {
+            i = next + 1
+            continue
+        }
+        return Key{ path: path, next: i }, nil
+    }
+}
+
+fn parse_value(input: str, at: int) -> (Step, error) {
+    if at >= input.len() {
+        return _, errors.new("toml: expected a value at \(at)")
+    }
+    let c = input.slice(at, at + 1)
+    if c == "\"" || c == "'" {
+        let (text, err) = parse_string(input, at)
+        check err
+        return Step{ value: Toml.Text(text.text), next: text.next }, nil
+    }
+    if c == "[" {
+        return parse_array(input, at)
+    }
+    if c == "{" {
+        return parse_inline_table(input, at)
+    }
+    return parse_scalar(input, at)
+}
+
+/// A basic `"…"`, literal `'…'`, or either of their multi-line forms.
+fn parse_string(input: str, at: int) -> (Text, error) {
+    let quote = input.slice(at, at + 1)
+    let triple = quote + quote + quote
+    if at + 3 <= input.len() && input.slice(at, at + 3) == triple {
+        return parse_multiline(input, at + 3, triple, quote == "\"")
+    }
+    var out = ""
+    var i = at + 1
+    for {
+        if i >= input.len() {
+            return _, errors.new("toml: unterminated string at \(at)")
+        }
+        let c = input.slice(i, i + 1)
+        if c == quote {
+            return Text{ text: out, next: i + 1 }, nil
+        }
+        // A literal string has no escapes at all — that is its whole purpose,
+        // and it is why Windows paths go in one.
+        if c == "\\" && quote == "\"" {
+            let (piece, err) = parse_escape(input, i)
+            check err
+            out = out + piece.text
+            i = piece.next
+            continue
+        }
+        if c == "\n" {
+            return _, errors.new("toml: newline in a single-line string at \(i)")
+        }
+        out = out + c
+        i = i + 1
+    }
+}
+
+fn parse_multiline(input: str, at: int, closing: str, escapes: bool) -> (Text, error) {
+    var out = ""
+    var i = at
+    // A newline immediately after the opening delimiter is trimmed, which is
+    // what lets the content start on its own line.
+    if i < input.len() && input.slice(i, i + 1) == "\n" {
+        i = i + 1
+    }
+    for {
+        if i >= input.len() {
+            return _, errors.new("toml: unterminated multi-line string at \(at)")
+        }
+        if i + 3 <= input.len() && input.slice(i, i + 3) == closing {
+            return Text{ text: out, next: i + 3 }, nil
+        }
+        let c = input.slice(i, i + 1)
+        if c == "\\" && escapes {
+            // A backslash at the end of a line swallows the line break and the
+            // whitespace after it, which is how a long string is wrapped in the
+            // source without wrapping in the value.
+            let peek = i + 1
+            if peek < input.len() && is_line_fold(input, peek) {
+                i = skip_blank(input, peek)
+                continue
+            }
+            let (piece, err) = parse_escape(input, i)
+            check err
+            out = out + piece.text
+            i = piece.next
+            continue
+        }
+        out = out + c
+        i = i + 1
+    }
+}
+
+/// Whether what follows a backslash is only whitespace up to a line break.
+fn is_line_fold(input: str, at: int) -> bool {
+    var i = at
+    for {
+        if i >= input.len() {
+            return false
+        }
+        let c = input.slice(i, i + 1)
+        if c == "\n" {
+            return true
+        }
+        if c != " " && c != "\t" && c != "\r" {
+            return false
+        }
+        i = i + 1
+    }
+}
+
+fn parse_escape(input: str, at: int) -> (Text, error) {
+    if at + 1 >= input.len() {
+        return _, errors.new("toml: trailing escape at \(at)")
+    }
+    let c = input.slice(at + 1, at + 2)
+    if c == "n" {
+        return Text{ text: "\n", next: at + 2 }, nil
+    }
+    if c == "t" {
+        return Text{ text: "\t", next: at + 2 }, nil
+    }
+    if c == "r" {
+        return Text{ text: "\r", next: at + 2 }, nil
+    }
+    if c == "\"" {
+        return Text{ text: "\"", next: at + 2 }, nil
+    }
+    if c == "\\" {
+        return Text{ text: "\\", next: at + 2 }, nil
+    }
+    if c == "b" {
+        return Text{ text: "\u{8}", next: at + 2 }, nil
+    }
+    if c == "f" {
+        return Text{ text: "\u{c}", next: at + 2 }, nil
+    }
+    if c == "u" || c == "U" {
+        // Refused rather than passed through as its own digits, which is what
+        // `std/json` does and is the one thing worse than not supporting it: a
+        // configuration file that loads with `\u00e9` where an `é` belongs is
+        // wrong somewhere else, later, and nowhere near here.
+        //
+        // Decoding it needs a way to build a character from a code point, and
+        // `str` has no such operation. When it grows one this becomes four
+        // lines and the error goes away.
+        return _, errors.new("toml: `\\u` escapes are not supported yet, at \(at)")
+    }
+    return _, errors.new("toml: unknown escape `\\\(c)` at \(at)")
+}
+
+fn parse_array(input: str, at: int) -> (Step, error) {
+    var items: [Toml] = []
+    var i = skip_blank(input, at + 1)
+    for {
+        if i >= input.len() {
+            return _, errors.new("toml: unterminated array at \(at)")
+        }
+        if input.slice(i, i + 1) == "]" {
+            return Step{ value: Toml.Array(items), next: i + 1 }, nil
+        }
+        let (step, err) = parse_value(input, i)
+        check err
+        items.push(step.value)
+        i = skip_blank(input, step.next)
+        if i < input.len() && input.slice(i, i + 1) == "," {
+            i = skip_blank(input, i + 1)
+            continue
+        }
+        if i < input.len() && input.slice(i, i + 1) == "]" {
+            return Step{ value: Toml.Array(items), next: i + 1 }, nil
+        }
+        return _, errors.new("toml: expected `,` or `]` at \(i)")
+    }
+}
+
+fn parse_inline_table(input: str, at: int) -> (Step, error) {
+    var table: { str: Toml } = { }
+    var i = skip_inline(input, at + 1)
+    if i < input.len() && input.slice(i, i + 1) == "}" {
+        return Step{ value: Toml.Table(table), next: i + 1 }, nil
+    }
+    for {
+        let (key, key_err) = parse_key(input, i)
+        check key_err
+        let eq = skip_inline(input, key.next)
+        if eq >= input.len() || input.slice(eq, eq + 1) != "=" {
+            return _, errors.new("toml: expected `=` at \(eq)")
+        }
+        let (step, err) = parse_value(input, skip_inline(input, eq + 1))
+        check err
+        let (placed, place_err) = assign(table, key.path, step.value)
+        check place_err
+        table = placed
+        i = skip_inline(input, step.next)
+        if i < input.len() && input.slice(i, i + 1) == "," {
+            i = skip_inline(input, i + 1)
+            continue
+        }
+        if i < input.len() && input.slice(i, i + 1) == "}" {
+            return Step{ value: Toml.Table(table), next: i + 1 }, nil
+        }
+        return _, errors.new("toml: expected `,` or `}` at \(i)")
+    }
+}
+
+/// A bare word: a boolean, a number, or something this subset does not read.
+fn parse_scalar(input: str, at: int) -> (Step, error) {
+    var word = ""
+    var i = at
+    for {
+        if i >= input.len() {
+            break
+        }
+        let c = input.slice(i, i + 1)
+        if c == "\n" || c == "," || c == "]" || c == "}" || c == "#" {
+            break
+        }
+        word = word + c
+        i = i + 1
+    }
+    let body = word.trim()
+    if body.len() == 0 {
+        return _, errors.new("toml: expected a value at \(at)")
+    }
+    if body == "true" {
+        return Step{ value: Toml.Bool(true), next: i }, nil
+    }
+    if body == "false" {
+        return Step{ value: Toml.Bool(false), next: i }, nil
+    }
+    // A date or a time is recognised well enough to be kept as text rather
+    // than misread as a number: `1979-05-27` is not the integer 1979.
+    if looks_like_date(body) {
+        return Step{ value: Toml.Text(body), next: i }, nil
+    }
+    let cleaned = without_underscores(body)
+    if is_float_text(cleaned) {
+        let (f, err) = float_of(cleaned)
+        check err
+        return Step{ value: Toml.Float(f), next: i }, nil
+    }
+    let (n, err) = int_of(cleaned)
+    check err
+    return Step{ value: Toml.Int(n), next: i }, nil
+}
+
+// ---- placing values in tables -----------------------------------------------
+
+/// The table a value holds, or an empty one.
+///
+/// A `match` in expression position cannot answer this: the arms that are not
+/// tables would each need an empty map literal, and `{ }` in an arm is a block.
+/// So it is a statement, once, here — which is better anyway, because the five
+/// dead arms were repeated at every site that asked.
+fn as_table(value: Toml) -> { str: Toml } {
+    var out: { str: Toml } = { }
+    match value {
+        Table(t) => { out = t }
+        Bool(b) => {}
+        Int(n) => {}
+        Float(f) => {}
+        Text(s) => {}
+        Array(a) => {}
+    }
+    return out
+}
+
+fn is_table(value: Toml) -> bool {
+    var out = false
+    match value {
+        Table(t) => { out = true }
+        Bool(b) => {}
+        Int(n) => {}
+        Float(f) => {}
+        Text(s) => {}
+        Array(a) => {}
+    }
+    return out
+}
+
+/// A table with `path` present, creating the tables along the way.
+fn ensure_table(root: { str: Toml }, path: [str]) -> ({ str: Toml }, error) {
+    if path.len() == 0 {
+        return root, nil
+    }
+    let head = path[0]
+    let rest = tail(path)
+    var here = root
+    let existing = here[head]
+    var inner: { str: Toml } = { }
+    if existing != nil {
+        inner = as_table(existing)
+        let is_table = is_table(existing)
+        if !is_table {
+            return _, errors.new("toml: `\(head)` is already a value, not a table")
+        }
+    }
+    let (filled, err) = ensure_table(inner, rest)
+    check err
+    here[head] = Toml.Table(filled)
+    return here, nil
+}
+
+/// The same table with `path` set to `value`.
+fn assign(root: { str: Toml }, path: [str], value: Toml) -> ({ str: Toml }, error) {
+    if path.len() == 0 {
+        return _, errors.new("toml: a value needs a key")
+    }
+    let head = path[0]
+    var here = root
+    if path.len() == 1 {
+        if here[head] != nil {
+            return _, errors.new("toml: `\(head)` is set twice")
+        }
+        here[head] = value
+        return here, nil
+    }
+    let existing = here[head]
+    var inner: { str: Toml } = { }
+    if existing != nil {
+        let ok = is_table(existing)
+        if !ok {
+            return _, errors.new("toml: `\(head)` is already a value, not a table")
+        }
+        inner = as_table(existing)
+    }
+    let (filled, err) = assign(inner, tail(path), value)
+    check err
+    here[head] = Toml.Table(filled)
+    return here, nil
+}
+
+fn tail(path: [str]) -> [str] {
+    var out: [str] = []
+    for i in 1..path.len() {
+        out.push(path[i])
+    }
+    return out
+}
+
+// ---- reading a document ------------------------------------------------------
+
+/// The value at a dotted path, or nil.
+///
+/// `toml.at(doc, "package.name")` rather than three lookups and two matches,
+/// because reading a configuration file is the thing this module is for.
+pub fn at(doc: Toml, path: str) -> Option<Toml> {
+    var here = doc
+    for segment in split_dots(path) {
+        let table = as_table(here)
+        let next = table[segment]
+        if next == nil {
+            return nil
+        }
+        here = next
+    }
+    return here
+}
+
+/// The string at a path, or `fallback` if it is absent or is not a string.
+pub fn text_at(doc: Toml, path: str, fallback: str) -> str {
+    let found = at(doc, path)
+    if found == nil {
+        return fallback
+    }
+    return match found {
+        Text(s) => s
+        Bool(b) => fallback
+        Int(n) => fallback
+        Float(f) => fallback
+        Array(a) => fallback
+        Table(t) => fallback
+    }
+}
+
+/// The integer at a path, or `fallback`.
+pub fn int_at(doc: Toml, path: str, fallback: int) -> int {
+    let found = at(doc, path)
+    if found == nil {
+        return fallback
+    }
+    return match found {
+        Int(n) => n
+        Text(s) => fallback
+        Bool(b) => fallback
+        Float(f) => fallback
+        Array(a) => fallback
+        Table(t) => fallback
+    }
+}
+
+/// The float at a path, or `fallback`.
+///
+/// An integer answers too. TOML distinguishes `1` from `1.0` and a caller
+/// asking for a float has already said which it wants, so refusing to widen
+/// would fail on a configuration that simply wrote a round number.
+pub fn float_at(doc: Toml, path: str, fallback: float) -> float {
+    let found = at(doc, path)
+    if found == nil {
+        return fallback
+    }
+    return match found {
+        Float(f) => f
+        Int(n) => n as float
+        Text(s) => fallback
+        Bool(b) => fallback
+        Array(a) => fallback
+        Table(t) => fallback
+    }
+}
+
+/// The boolean at a path, or `fallback`.
+pub fn bool_at(doc: Toml, path: str, fallback: bool) -> bool {
+    let found = at(doc, path)
+    if found == nil {
+        return fallback
+    }
+    return match found {
+        Bool(b) => b
+        Text(s) => fallback
+        Int(n) => fallback
+        Float(f) => fallback
+        Array(a) => fallback
+        Table(t) => fallback
+    }
+}
+
+fn split_dots(path: str) -> [str] {
+    var out: [str] = []
+    var current = ""
+    for i in 0..path.len() {
+        let c = path.slice(i, i + 1)
+        if c == "." {
+            out.push(current)
+            current = ""
+        } else {
+            current = current + c
+        }
+    }
+    out.push(current)
+    return out
+}
+
+// ---- writing ----------------------------------------------------------------
+
+/// A document, written back out.
+///
+/// Scalars first and tables afterwards, which is not a style preference: a
+/// key written after a `[table]` header belongs to that table, so a top-level
+/// key emitted after one would be read back into the wrong place. Emitting in
+/// this order is what makes `parse(emit(doc))` give back `doc`.
+pub fn emit(doc: Toml) -> str {
+    return emit_table(doc, [])
+}
+
+fn emit_table(value: Toml, path: [str]) -> str {
+    let table = as_table(value)
+    var out = ""
+    if path.len() > 0 {
+        out = out + "[\(join_dots(path))]\n"
+    }
+    // Scalars.
+    for key in keys_of(table) {
+        let held = table[key]
+        if held != nil {
+            if !is_table(held) {
+                out = out + "\(emit_key(key)) = \(emit_value(held))\n"
+            }
+        }
+    }
+    // Then the sub-tables, each with its own header.
+    for key in keys_of(table) {
+        let held = table[key]
+        if held != nil {
+            if is_table(held) {
+                out = out + "\n" + emit_table(held, concat(path, [key]))
+            }
+        }
+    }
+    return out
+}
+
+/// The keys of a table, in insertion order — which the specification
+/// guarantees for a map, so a document read and written again keeps its order.
+fn keys_of(table: { str: Toml }) -> [str] {
+    var out: [str] = []
+    for (key, value) in table {
+        out.push(key)
+    }
+    return out
+}
+
+fn join_dots(path: [str]) -> str {
+    var out = ""
+    for i in 0..path.len() {
+        if i > 0 {
+            out = out + "."
+        }
+        out = out + emit_key(path[i])
+    }
+    return out
+}
+
+/// A key, quoted only when it has to be.
+fn emit_key(key: str) -> str {
+    var bare = key.len() > 0
+    for i in 0..key.len() {
+        if !is_bare(key.slice(i, i + 1)) {
+            bare = false
+        }
+    }
+    if bare {
+        return key
+    }
+    return emit_string(key)
+}
+
+fn emit_value(value: Toml) -> str {
+    return match value {
+        Bool(b) => if b { "true" } else { "false" }
+        Int(n) => "\(n)"
+        Float(f) => "\(f)"
+        Text(s) => emit_string(s)
+        Array(items) => emit_array(items)
+        Table(t) => emit_inline(t)
+    }
+}
+
+fn emit_array(items: [Toml]) -> str {
+    var out = "["
+    for i in 0..items.len() {
+        if i > 0 {
+            out = out + ", "
+        }
+        out = out + emit_value(items[i])
+    }
+    return out + "]"
+}
+
+/// A table nested inside a value position has to be inline — a header would
+/// change what the keys after it belong to.
+fn emit_inline(table: { str: Toml }) -> str {
+    var out = "{ "
+    var first = true
+    for (key, held) in table {
+        if !first {
+            out = out + ", "
+        }
+        out = out + "\(emit_key(key)) = \(emit_value(held))"
+        first = false
+    }
+    return out + " }"
+}
+
+fn emit_string(body: str) -> str {
+    var out = "\""
+    for i in 0..body.len() {
+        let c = body.slice(i, i + 1)
+        if c == "\"" {
+            out = out + "\\\""
+        } else if c == "\\" {
+            out = out + "\\\\"
+        } else if c == "\n" {
+            out = out + "\\n"
+        } else if c == "\t" {
+            out = out + "\\t"
+        } else if c == "\r" {
+            out = out + "\\r"
+        } else {
+            out = out + c
+        }
+    }
+    return out + "\""
+}
+
+// ---- lexical helpers ---------------------------------------------------------
+
+/// Whitespace on this line only, and comments. Stops at a line break.
+fn skip_inline(input: str, at: int) -> int {
+    var i = at
+    for {
+        if i >= input.len() {
+            return i
+        }
+        let c = input.slice(i, i + 1)
+        if c == " " || c == "\t" || c == "\r" {
+            i = i + 1
+            continue
+        }
+        if c == "#" {
+            // A comment runs to the end of the line, and the line break itself
+            // is left for the caller — it is a separator, not whitespace.
+            for {
+                if i >= input.len() || input.slice(i, i + 1) == "\n" {
+                    return i
+                }
+                i = i + 1
+            }
+        }
+        return i
+    }
+}
+
+/// Whitespace, comments and line breaks alike.
+fn skip_blank(input: str, at: int) -> int {
+    var i = at
+    for {
+        let next = skip_inline(input, i)
+        if next < input.len() && input.slice(next, next + 1) == "\n" {
+            i = next + 1
+            continue
+        }
+        return next
+    }
+}
+
+/// Nothing but whitespace and a comment may follow a value on its line.
+fn end_of_line(input: str, at: int) -> (int, error) {
+    let i = skip_inline(input, at)
+    if i >= input.len() {
+        return i, nil
+    }
+    if input.slice(i, i + 1) == "\n" {
+        return i + 1, nil
+    }
+    return _, errors.new("toml: unexpected text at \(i)")
+}
+
+fn is_bare(c: str) -> bool {
+    if c.len() == 0 {
+        return false
+    }
+    let code = c.code_at(0)
+    if code >= 0x41 && code <= 0x5A {
+        return true
+    }
+    if code >= 0x61 && code <= 0x7A {
+        return true
+    }
+    if code >= 0x30 && code <= 0x39 {
+        return true
+    }
+    return c == "_" || c == "-"
+}
+
+fn hex_of(c: str) -> int {
+    let code = c.code_at(0)
+    if code >= 0x30 && code <= 0x39 {
+        return code - 0x30
+    }
+    if code >= 0x61 && code <= 0x66 {
+        return code - 0x61 + 10
+    }
+    if code >= 0x41 && code <= 0x46 {
+        return code - 0x41 + 10
+    }
+    return -1
+}
+
+fn without_underscores(body: str) -> str {
+    var out = ""
+    for i in 0..body.len() {
+        let c = body.slice(i, i + 1)
+        if c != "_" {
+            out = out + c
+        }
+    }
+    return out
+}
+
+/// Whether a bare word is a date or a time rather than a number.
+///
+/// A `-` after the first character, or a `:` anywhere, is enough: no integer
+/// or float in TOML contains either.
+fn looks_like_date(body: str) -> bool {
+    for i in 0..body.len() {
+        let c = body.slice(i, i + 1)
+        if c == ":" {
+            return true
+        }
+        if c == "-" && i > 0 {
+            return true
+        }
+    }
+    return false
+}
+
+fn is_float_text(body: str) -> bool {
+    if body == "inf" || body == "+inf" || body == "-inf" || body == "nan" {
+        return true
+    }
+    for i in 0..body.len() {
+        let c = body.slice(i, i + 1)
+        if c == "." || c == "e" || c == "E" {
+            return true
+        }
+    }
+    return false
+}
+
+fn float_of(body: str) -> (float, error) {
+    if body == "inf" || body == "+inf" || body == "-inf" || body == "nan" {
+        // Kite has no literal for either and dividing to reach one is a trap,
+        // so these are refused rather than approximated. A configuration file
+        // containing them is rare; one silently holding a very large number
+        // where it said `inf` would be a bug nobody could find.
+        return _, errors.new("toml: `\(body)` has no value in Kite")
+    }
+    var whole = 0.0
+    var fraction = 0.0
+    var scale = 1.0
+    var seen_point = false
+    var negative = false
+    var i = 0
+    var digits = 0
+    if body.len() > 0 {
+        let first = body.slice(0, 1)
+        if first == "-" {
+            negative = true
+            i = 1
+        } else if first == "+" {
+            i = 1
+        }
+    }
+    for {
+        if i >= body.len() {
+            break
+        }
+        let c = body.slice(i, i + 1)
+        if c == "e" || c == "E" {
+            let (exp, err) = int_of(body.slice(i + 1, body.len()))
+            check err
+            var value = whole + fraction
+            if negative {
+                value = -value
+            }
+            return value * power_of_ten(exp), nil
+        }
+        if c == "." {
+            if seen_point {
+                return _, errors.new("toml: two decimal points in `\(body)`")
+            }
+            seen_point = true
+            i = i + 1
+            continue
+        }
+        let digit = c.code_at(0) - 0x30
+        if digit < 0 || digit > 9 {
+            return _, errors.new("toml: `\(body)` is not a number")
+        }
+        digits = digits + 1
+        if seen_point {
+            scale = scale * 10.0
+            fraction = fraction + (digit as float) / scale
+        } else {
+            whole = whole * 10.0 + (digit as float)
+        }
+        i = i + 1
+    }
+    if digits == 0 {
+        return _, errors.new("toml: `\(body)` is not a number")
+    }
+    var value = whole + fraction
+    if negative {
+        value = -value
+    }
+    return value, nil
+}
+
+fn power_of_ten(exp: int) -> float {
+    var out = 1.0
+    if exp >= 0 {
+        for i in 0..exp {
+            out = out * 10.0
+        }
+        return out
+    }
+    for i in 0..(0 - exp) {
+        out = out / 10.0
+    }
+    return out
+}
+
+fn int_of(body: str) -> (int, error) {
+    if body.len() == 0 {
+        return _, errors.new("toml: expected a number")
+    }
+    var negative = false
+    var i = 0
+    let first = body.slice(0, 1)
+    if first == "-" {
+        negative = true
+        i = 1
+    } else if first == "+" {
+        i = 1
+    }
+    if i >= body.len() {
+        return _, errors.new("toml: `\(body)` is not a number")
+    }
+    var value = 0
+    for {
+        if i >= body.len() {
+            break
+        }
+        let digit = body.code_at(i) - 0x30
+        if digit < 0 || digit > 9 {
+            return _, errors.new("toml: `\(body)` is not a number")
+        }
+        value = value * 10 + digit
+        i = i + 1
+    }
+    if negative {
+        return 0 - value, nil
+    }
+    return value, nil
+}

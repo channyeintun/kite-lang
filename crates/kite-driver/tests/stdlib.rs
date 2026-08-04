@@ -64,6 +64,12 @@ fn the_standard_librarys_tests_pass() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Tests for modules that exist only off the web.
+///
+/// Not a workaround: it is the design. `std/fs` documents itself as native and
+/// WASI only, and the differential comparison needs both sides to exist.
+const NATIVE_ONLY: &[&str] = &["fs_test"];
+
 /// The same files, compiled to WebAssembly and run under Node. A library that
 /// passed on one backend and not the other would be a codegen bug, which is
 /// the class this whole arrangement exists to find.
@@ -83,6 +89,16 @@ fn the_standard_librarys_tests_pass_on_wasm_too() {
     for path in &std_tests() {
         let src = std::fs::read_to_string(path).expect("read");
         let name = path.file_stem().unwrap().to_string_lossy().to_string();
+
+        // A module the web deliberately does not have cannot be compared
+        // across the two backends: there is nothing on the other side to
+        // compare with. `std/fs` is native and WASI only — a page has no
+        // filesystem, and the glue supplies no `fs` host precisely so that
+        // asking for one fails loudly rather than reading nothing.
+        if NATIVE_ONLY.contains(&name.as_str()) {
+            continue;
+        }
+
         let dir = root.join(&name);
         std::fs::create_dir_all(&dir).expect("work directory");
 
@@ -99,7 +115,10 @@ fn the_standard_librarys_tests_pass_on_wasm_too() {
         std::fs::write(dir.join("app.wasm"), &module.bytes).expect("write wasm");
         std::fs::write(
             dir.join("app.js"),
-            kite_driver::generate_glue(&module.strings, "app.wasm"),
+            // With the program's own host groups, which `kitec build` passes
+            // and this did not: a module declaring `@host("…")` imports it,
+            // and glue built without it cannot be instantiated at all.
+            kite_driver::generate_glue_with_hosts(&module.strings, "app.wasm", &module.hosts),
         )
         .expect("write glue");
         std::fs::write(

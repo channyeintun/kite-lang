@@ -10,6 +10,7 @@ use std::path::Path;
 
 pub mod a11y;
 pub mod derive;
+pub mod host;
 pub mod manifest;
 pub mod modules;
 pub mod semver;
@@ -197,7 +198,14 @@ impl Compilation {
     pub fn run(&self, out: &mut dyn Write) -> Result<bool, Trap> {
         match &self.chunk {
             None => Ok(false),
-            Some(c) => kite_vm::run(c, out).map(|_| true),
+            // With a host, so that `@host("fs")` resolves instead of trapping.
+            // A namespace nothing implements still traps, naming the function
+            // — which is the right answer for a program that asks a browser
+            // for a file.
+            Some(c) => {
+                let mut host = host::NativeHost;
+                kite_vm::run_with_host(c, out, Some(&mut host)).map(|_| true)
+            }
         }
     }
 

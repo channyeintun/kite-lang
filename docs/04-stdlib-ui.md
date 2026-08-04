@@ -196,11 +196,12 @@ Kept small on purpose. Everything else composes from these.
 | `Scroll` | Scrollable viewport |
 | `Stack` | Z-ordered overlay |
 | `Canvas` | Escape hatch for custom drawing (charts, games, visualisations) |
-| `Portal` | Renders outside the parent's clip — modals, tooltips |
+| `Portal` | Out of flow: painted last, outside the parent's clip, occupying no space |
 
-Today the split is: `std/ui` owns the tree, the layout and the paint —
-`box_of`, `text_of`, `control`, `decorated` — and the interactive widgets are
-functions in design-system packages
+The split is: `std/ui` owns the tree, the layout, the paint and the primitives
+nothing else can supply — `box_of`, `text_of`, `image_of`, `canvas_of`,
+`stack`, `portal`, `control`, `editable`, `editable_lines`, `decorated` — and
+the interactive widgets are functions in design-system packages
 ([packages/material](../packages/material) ships the Material 3 set: buttons,
 fields, selection, navigation, progress). The table above is the set `std/ui`
 itself grows as the renderers land, because the middle rows cannot stay a
@@ -211,29 +212,28 @@ are real elements and get IME, autofill, and selection for free. Under
 receives the events — the same technique Flutter and Google Docs use, and the
 reason those widgets are in the standard set rather than left to users.
 
-**None of that is built yet, and this is the gap that shows.** `domRenderer`
-creates one kind of element — a `div` — for every node, because the paint
-boundary is eight drawing calls (`rect`, `rrect`, `text`, `drrect`, `alpha`,
-`font`, `clip`, `unclip`) and none of them can say *this one is a text input*.
-So an editable field is a run of drawn text, and its caret is a literal `|`
-glyph in that run: `packages/material`'s search field has to buy the caret's
-width back out of its own padding to stop the placeholder moving. Every native
-ability an `<input>` would have given free — the real caret, selection, IME,
-autofill, the mobile keyboard — is either faked or absent.
+**This is now built.** `domRenderer` makes a real `<input>` or `<textarea>` for
+a field, a real `<img>` for a picture, and puts a role and a label on every
+control. The paint boundary is eleven drawing calls rather than eight:
+`rect`, `rrect`, `drrect`, `text`, `image`, `field`, `semantics`, `alpha`,
+`font`, `clip`, `unclip`.
 
-There is a specific structural reason it cannot simply be added to the
-renderer. A renderer never sees the tree; it sees `Frame`s, and a `Frame`
-carries `content: str` — the text to draw — with no notion of that text being
-*editable*. The edit state lives on `Control.edits`, on the tree, which is
-flattened away before anything paints. Closing this needs three things
-together: `Frame` carrying the edit state, a ninth drawing call meaning "a
-field goes here", and an answer for what the canvas renderer does with it —
-the hidden positioned element described above, which is why that paragraph
-exists. It is the first call whose three implementations would differ in
-*kind* rather than in medium, which is the property the differential suite
-exists to protect, and the reason it is a proposal rather than a patch.
+Three of them are worth naming, because they are the ones that are not drawing:
 
----
+* **`field`** says *a text input goes here*, carrying the value, the control's
+  id and whether it takes more than one line. The DOM answers with a real
+  element — caret, selection, IME, autofill, the mobile keyboard — pooled by id
+  so a form with two fields keeps two elements. The canvas and the transcript
+  draw the text, which is what they did before it existed.
+* **`image`** carries a box and a source. The box is stated rather than
+  intrinsic: an image's own size is only knowable once the bytes have arrived,
+  and a layout that waited for that could not run until the network had.
+* **`semantics`** carries a role, a label and what is on. It paints nothing.
+  See [§7](#7-accessibility).
+
+`Frame` carries `edits`, `image`, `label`, `role`, `checked` and `focused`
+because a renderer never sees the tree, and a fact a renderer must act on has to
+travel with the geometry.
 
 ## 4. Layout
 
@@ -333,14 +333,24 @@ a typical frame re-lays out only the changed branch.
 Text is the hardest part of any UI toolkit and the place a canvas renderer is
 most likely to be wrong.
 
-| | `DomRenderer` | `CanvasRenderer` |
-|---|---|---|
-| Shaping | Browser | HarfBuzz compiled to Wasm |
-| Line breaking | Browser | UAX #14, in Kite |
-| Bidirectional text | Browser | UAX #9, in Kite |
-| Font fallback | Browser | Explicit font stack + `document.fonts` query |
-| Selection | Native | Reimplemented over hit-test rectangles |
-| IME | Native | Hidden real `<input>` overlay |
+| | `DomRenderer` | `CanvasRenderer` | Built? |
+|---|---|---|---|
+| Shaping | Browser | HarfBuzz compiled to Wasm | **No.** `std/text` does Arabic joining and the mandatory lam-alef ligature, and says itself that this is not HarfBuzz-quality: real shaping is OpenType GSUB/GPOS, which is a font's own program |
+| Line breaking | Browser | UAX #14, in Kite | **A named subset.** Words, CJK per character, and mandatory breaks at `\n`. Not the property table: it will not break a URL and knows no non-breaking space |
+| Bidirectional text | Browser | UAX #9, in Kite | **Yes.** P2–P3, X1–X10, W1–W7, N0–N2, I1–I2, L1–L2 |
+| Font fallback | Browser | Explicit font stack + `document.fonts` | **Yes**, and by measuring rather than asking — see below |
+| Selection | Native | Reimplemented over hit-test rectangles | **No.** There is no selection model |
+| IME | Native | Hidden real `<input>` overlay | **Yes** |
+
+The font row is worth a paragraph, because the obvious implementation does not
+work. `document.fonts.check` reports on the `FontFace`s in the document's own
+set, so for a family that is not a web font — every system font — it finds
+nothing pending and returns true. Asked about a family the machine has never
+heard of, it says yes. So a family is *measured* instead: a probe string set in
+`Family, monospace` renders in monospace when `Family` did not resolve, and the
+widths differ. `document.fonts` is still used for the event that matters — a web
+font arriving, after which every width the last layout was computed from is
+wrong, and the frame is laid out again rather than merely repainted.
 
 Both paths must produce identical line breaks and identical measured widths for
 layout to agree, so the text measurement API is a single interface with two
@@ -467,17 +477,28 @@ The **typed message layer** it used to wait beside has landed; see
 
 ## 7. Accessibility
 
-Under `DomRenderer` it is largely automatic — widgets emit correct elements and
-ARIA attributes, and the browser does the rest.
+Both renderers build the **same parallel tree**, from the same source: `ui.paint`
+emits a `draw.semantics` call for every control, carrying its role, its label,
+whether it is on, and its id. A renderer decides what to do with it.
 
-Under `CanvasRenderer`, Kite maintains a parallel ARIA tree, the same technique
-Flutter uses. Where Kite differs is that it fixes Flutter's known failures:
+* `DomRenderer` puts the role and the label on the elements it was already
+  making — and where the control is a field, on the real `<input>` itself
+  rather than announcing over the top of it. That is "edit, blank" fixed at the
+  source.
+* `CanvasRenderer` builds the tree beside its pixels, which is the technique
+  Flutter uses. Transparent, non-interactive elements over the canvas, pooled
+  between frames so focus is not thrown away whenever anything moves.
+* A third renderer that has never heard of ARIA still receives the
+  declarations, and can do whatever it likes with them.
+
+It is **always on**, which is the first of Flutter's failures below and is a
+failure of defaults rather than of capability. Where Kite differs:
 
 | Flutter Web problem | Kite's approach |
 |---|---|
 | Accessibility **off by default** behind an invisible button | **Always on.** The semantics tree is built during layout, which already walks every node, so the marginal cost is small. |
-| Text fields announce as "edit, blank" — no `<label>` emitted | A field takes its label as a positional parameter — `outlined_field(s, id, value, label, …)`. Omitting it is a compile error, not a runtime warning. |
-| Lighthouse reports a perfect score inaccurately | `kite check --a11y` audits the widget tree at build time — contrast ratios, missing labels, focus order, touch target sizes. |
+| Text fields announce as "edit, blank" — no `<label>` emitted | **Every** control constructor takes its label positionally — `ui.means(node, id, msg, label)`, `ui.editable(node, id, value, label)`. Omitting it is a compile error, not a runtime warning. |
+| Lighthouse reports a perfect score inaccurately | `kite check --a11y` audits what the program **draws**. It runs the program, captures its drawing calls, and checks every control for a label, every touch target against 48dp, and every run of text against the rectangle painted behind it at 4.5:1. A Lighthouse score on a canvas application is a score for a page with one element in it; this looks at the picture. It finds five real defects in `examples/counter.kite`. |
 | Semantics drift from visuals | The semantics tree is derived from the *same* scene graph that renders, so it cannot go stale. |
 
 Making the label a required parameter is the single highest-leverage decision
@@ -491,15 +512,27 @@ forever — whereas a lint is disabled and a runtime warning is ignored.
 
 ```kite
 pub trait Renderer {
-    fn begin_frame(var self, size: Size)
-    fn draw_rect(var self, r: Rect, style: RectStyle)
-    fn draw_text(var self, run: TextRun, at: Point)
-    fn draw_image(var self, img: ImageHandle, dst: Rect)
-    fn push_clip(var self, r: Rect, radius: float)
-    fn pop_clip(var self)
-    fn end_frame(var self)
+    fn fill(var self, r: Rect, radius: float, colour: int)
+    fn ring(var self, r: Rect, radius: float, width: float, colour: int)
+    fn glyphs(var self, x: float, y: float, body: str, colour: int)
+    fn field(var self, r: Rect, value: str, hint: str, colour: int, id: str, multiline: bool)
+    fn picture(var self, r: Rect, src: str)
+    fn describe(var self, r: Rect, role: int, label: str, flags: int, id: str)
+    fn font(var self, size: float, weight: int)
+    fn alpha(var self, a: float)
+    fn clip(var self, r: Rect)
+    fn unclip(var self)
 }
 ```
+
+Ten methods, mirroring the host's drawing calls one for one. A prettier
+vocabulary — paints, styles, handles, display lists — would be a second boundary
+sitting on the first, and every backend would have to translate back through it.
+What is here is what crosses.
+
+Two of the ten are not drawing, and they are the two that matter most for
+anything other than a screen: `field` says *a text input goes here*, and
+`describe` is [§7](#7-accessibility)'s parallel tree.
 
 `CanvasRenderer` implements this over Canvas2D by default and WebGPU when
 available. It batches draw calls by material, keeps a glyph atlas on the GPU, and
@@ -508,6 +541,10 @@ only redraws damaged rectangles.
 Because `Renderer` is an ordinary trait, a third backend is a normal library —
 a Metal or Vulkan renderer for native desktop, an SVG renderer for server-side
 rendering, or a test renderer that records draw calls for golden-image tests.
+`ui.paint_with(frames, into)` is the only call such a backend needs, and
+`tests/std/renderer_test.kite` is that sentence executed: an `impl Renderer for
+Recorder` in ordinary Kite, touching neither the compiler nor the glue, receiving
+the same frames — semantics included — that the DOM receives.
 
 ### If HTML-in-Canvas ships broadly
 
@@ -526,28 +563,50 @@ That containment is the whole point of the two-renderer design.
 
 ```
 std/
-  core        int, float, str, slice, map, option, result, iterate
+  prelude     int, float, str, slice, map, option, result, iterate
   errors      Error trait, new, wrap, chain, is<T>, as<T>
   fmt         Display, Debug, number and date formatting
   math        arithmetic, trig, random, checked/wrapping/saturating ops
   time        Instant, Duration, Date, timezone-aware formatting
-  io          print, error, read_line
-  fs          files and directories (native + WASI; unavailable on web)
-  net         http client and server (native), fetch (web)
+  io          print — `read_line` is not built
+  fs          files and directories (native; unavailable on web, by design)
+  http        client and server (native), fetch (web)
+  socket      websockets and server-sent events
   json        encode/decode with compile-time derivation
-  toml        parse/emit
+  toml        parse/emit — a named subset; no dates
   task        Task, scope, all, both, race, timeout, parallel
-  sync        Mutex, Atomic — only for genuinely shared mutable state
+  sync        NOT BUILT, deliberately — see below
   buffer      flat typed buffers over linear memory
   test        assertions, table tests, snapshots, property tests
   ui          everything in this document
   canvas      low-level drawing, for the Canvas widget
+  crypto      hashing and random bytes
   dom         low-level DOM access (web only, escape hatch)
 ```
 
 `json.decode<T>` derives its decoder at compile time from `T`'s structure. There
 is no reflection — this is a compile-time derivation, which is what keeps dead
 code elimination sound and therefore keeps binaries small.
+
+### Why `sync` is not built
+
+[docs/02 §4](02-concurrency.md#4-share-the-invariant-made-nearly-invisible) names
+`sync.Mutex<T>` and `sync.Atomic<T>` as the explicit-synchronisation escape from
+`Share`: a type with a `var` field is not `Share`, and wrapping it in a mutex is
+supposed to make it so.
+
+**There is nothing to synchronise yet.** `task.parallel` says so in its own doc
+comment — it is not parallelism on any target, because a WasmGC reference cannot
+cross a thread boundary until shared-everything-threads ships, and the bytecode
+VM's values are not `Send` either. There are no OS threads for Kite code to run
+on.
+
+So a `sync.Mutex` today would be a lock that locks nothing, and the compiler
+would have to special-case it in the `Share` rule to make it work — which means
+the type system would begin permitting `var` state across a boundary that does
+not exist, with a no-op behind it. The day real threads arrive, that permission
+would already be granted and that no-op would already be shipped. Absence is the
+safer state, and this paragraph is why.
 
 ---
 
@@ -579,7 +638,10 @@ Genuinely undecided, and worth deciding before implementation rather than during
    diff (simple, allocates), or track dependencies and rebuild only dirty
    subtrees (faster, needs a reactivity concept the language currently lacks)?
    Leaning toward rebuild-and-diff for v1, since Kite's allocation is host-GC
-   and cheap.
+   and cheap. **Rebuild-and-diff is what ships**, at the *drawing call* level
+   rather than the tree level: the recording is the retained scene graph, and a
+   frame is diffed against it into a patch or a damage list. The tree question
+   is still open; the picture question is answered.
 3. **Default field values.** §3 is written with authored defaults and `..`
    because that is what the spec permits: a literal that omits a field without
    `..` is an error ([§5.3](../SPECIFICATION.md#53-struct-literals)). A field
@@ -610,8 +672,14 @@ Genuinely undecided, and worth deciding before implementation rather than during
    `material.slider_of` stays identified and unmeaning and its value is
    recovered from the pointer. That is a proposal of its own, and it is the
    one still entangled with question 2.
-5. **Fonts on canvas.** Ship a default font subset (~50 KB) so first paint is
-   correct, or always use `document.fonts` and accept a flash of unstyled text?
+5. ~~**Fonts on canvas.**~~ **Settled: neither, and the question was wrong.**
+   The stack is queried by *measurement* — `document.fonts.check` cannot answer
+   it, because for any family that is not a web font it finds nothing pending
+   and returns true. What the font API is good for is the *event*: when a web
+   font lands, every width the last layout used is wrong, so the frame is laid
+   out again rather than repainted. There is no flash to accept, because the
+   first paint is correct in whatever font is really there, and the relayout is
+   one frame.
 6. **Native windowing.** `winit` for the native target is the obvious choice, but
    it pulls a substantial dependency tree into what is otherwise a small
    toolchain.
