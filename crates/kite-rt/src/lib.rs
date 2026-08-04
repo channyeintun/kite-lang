@@ -1898,10 +1898,10 @@ pub extern "C" fn kite_rt_draw_field(
             float_text(y),
             float_text(w),
             float_text(h),
-            show(&str_str(value)),
-            show(&str_str(hint)),
+            show(str_str(value)),
+            show(str_str(hint)),
             colour,
-            show(&str_str(id)),
+            show(str_str(id)),
             multiline != 0
         ));
     }
@@ -1949,8 +1949,8 @@ pub extern "C" fn kite_rt_draw_semantics(
             float_text(h),
             role,
             flags,
-            show(&str_str(id)),
-            show(&str_str(label))
+            show(str_str(id)),
+            show(str_str(label))
         ));
     }
 }

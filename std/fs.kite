@@ -35,6 +35,9 @@ extern fn remove_path(path: str) -> str
 @host("fs")
 extern fn path_kind(path: str) -> int
 
+@host("fs")
+extern fn temp_path() -> str
+
 /// How the host reports a failure.
 ///
 /// A leading `\u{1}` marks an error, because a path, a file's contents and a
@@ -139,6 +142,18 @@ pub fn is_dir(path: str) -> bool {
         Missing => false
         File => false
     }
+}
+
+/// The directory this host puts temporary files in, without a trailing
+/// separator.
+///
+/// Asked of the host rather than assumed, because `/tmp` is a POSIX
+/// convention and not a fact: Windows has no such directory, and a test that
+/// hard-codes one passes on two platforms and fails on the third. Paths below
+/// it may be joined with `/`, which every platform this runs on accepts —
+/// including Windows, whose API takes either separator.
+pub fn temp_dir() -> str {
+    return temp_path()
 }
 
 fn split_lines(body: str) -> [str] {

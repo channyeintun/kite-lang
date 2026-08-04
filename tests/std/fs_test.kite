@@ -8,12 +8,15 @@
 use std/test
 use std/fs
 
+/// Asked of the host rather than hard-coded. `/tmp` is a POSIX convention and
+/// not a fact — Windows has no such directory, and a test that assumes one
+/// passes on two platforms and fails on the third, which is what this one did.
 fn scratch() -> str {
-    return "/tmp/kite-fs-test-file.txt"
+    return "\(fs.temp_dir())/kite-fs-test-file.txt"
 }
 
-fn scratch_dir() -> str {
-    return "/tmp/kite-fs-test-dir"
+fn scratch_name() -> str {
+    return "kite-fs-test-file.txt"
 }
 
 fn round_trip_checks() -> [error] {
@@ -64,14 +67,14 @@ fn listing_checks() -> [error] {
     if write_err != nil {
         return out
     }
-    let (names, list_err) = fs.list("/tmp")
+    let (names, list_err) = fs.list(fs.temp_dir())
     out.push(test.ok(list_err, "a directory lists"))
     if list_err != nil {
         return out
     }
     var found = false
     for name in names {
-        if name == "kite-fs-test-file.txt" {
+        if name == scratch_name() {
             found = true
         }
     }
@@ -91,21 +94,21 @@ fn listing_checks() -> [error] {
 fn failure_checks() -> [error] {
     var out: [error] = []
 
-    let (_, missing) = fs.read("/definitely/not/here/at/all")
+    let (_, missing) = fs.read("\(fs.temp_dir())/kite-no-such-dir")
     out.push(test.failed(missing, "reading a missing file is an error"))
 
-    let write_err = fs.write("/definitely/not/here/at/all/file.txt", "x")
+    let write_err = fs.write("\(fs.temp_dir())/kite-no-such-dir/file.txt", "x")
     out.push(test.failed(write_err, "writing into a missing directory is an error"))
 
-    let (_, not_a_dir) = fs.list("/definitely/not/here/at/all")
+    let (_, not_a_dir) = fs.list("\(fs.temp_dir())/kite-no-such-dir")
     out.push(test.failed(not_a_dir, "listing a missing directory is an error"))
 
-    let remove_err = fs.remove("/definitely/not/here/at/all")
+    let remove_err = fs.remove("\(fs.temp_dir())/kite-no-such-dir")
     out.push(test.failed(remove_err, "removing what is not there is an error"))
 
-    out.push(test.equal_bool(fs.exists("/definitely/not/here"), false, "a missing path does not exist"))
-    out.push(test.equal_bool(fs.is_file("/tmp"), false, "a directory is not a file"))
-    out.push(test.equal_bool(fs.is_dir("/tmp"), true, "and is a directory"))
+    out.push(test.equal_bool(fs.exists("\(fs.temp_dir())/kite-no-such-thing"), false, "a missing path does not exist"))
+    out.push(test.equal_bool(fs.is_file(fs.temp_dir()), false, "a directory is not a file"))
+    out.push(test.equal_bool(fs.is_dir(fs.temp_dir()), true, "and is a directory"))
     return out
 }
 

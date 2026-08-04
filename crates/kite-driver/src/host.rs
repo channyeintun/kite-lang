@@ -103,6 +103,15 @@ impl Host for NativeHost {
                     Err(_) => 0,
                 }))
             }
+            "fs.temp_path" => {
+                // Whatever this platform calls it: `/tmp` on Unix, and
+                // `%TEMP%` — usually under `AppData\Local` — on Windows.
+                let dir = std::env::temp_dir();
+                let text = dir.to_string_lossy();
+                // Without a trailing separator, so a caller joins with one and
+                // never gets two.
+                Ok(ok(text.trim_end_matches(['/', '\\']).to_string()))
+            }
             _ => Err(Trap::NoHostFunction { name: name.to_string() }),
         }
     }

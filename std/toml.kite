@@ -471,11 +471,11 @@ fn as_table(value: Toml) -> { str: Toml } {
     var out: { str: Toml } = { }
     match value {
         Table(t) => { out = t }
-        Bool(b) => {}
-        Int(n) => {}
-        Float(f) => {}
-        Text(s) => {}
-        Array(a) => {}
+        Bool(b) => { }
+        Int(n) => { }
+        Float(f) => { }
+        Text(s) => { }
+        Array(a) => { }
     }
     return out
 }
@@ -485,11 +485,11 @@ fn as_array(value: Toml) -> Option<[Toml]> {
     var out: Option<[Toml]> = nil
     match value {
         Array(a) => { out = a }
-        Table(t) => {}
-        Bool(b) => {}
-        Int(n) => {}
-        Float(f) => {}
-        Text(s) => {}
+        Table(t) => { }
+        Bool(b) => { }
+        Int(n) => { }
+        Float(f) => { }
+        Text(s) => { }
     }
     return out
 }
@@ -519,11 +519,11 @@ fn is_table(value: Toml) -> bool {
     var out = false
     match value {
         Table(t) => { out = true }
-        Bool(b) => {}
-        Int(n) => {}
-        Float(f) => {}
-        Text(s) => {}
-        Array(a) => {}
+        Bool(b) => { }
+        Int(n) => { }
+        Float(f) => { }
+        Text(s) => { }
+        Array(a) => { }
     }
     return out
 }

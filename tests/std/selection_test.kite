@@ -17,7 +17,7 @@ enum Msg {
 }
 
 fn label(body: str, width: float) -> ui.Node<Msg> {
-    return ui.text_of("label", ui.Style{ ..ui.style(), width: width }, body)
+    return ui.text_of("label", ui.Style{..ui.style(), width: width }, body)
 }
 
 fn frames_of(body: str, width: float) -> [ui.Frame] {
@@ -28,7 +28,7 @@ fn found_frame(body: str, width: float) -> ui.Frame {
     let frames = frames_of(body, width)
     let f = ui.frame_of(frames, "label")
     if f == nil {
-        return ui.Frame {
+        return ui.Frame{
             name: "",
             rect: ui.Rect{ x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
             inner: ui.Rect{ x: 0.0, y: 0.0, width: 0.0, height: 0.0 },

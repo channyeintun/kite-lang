@@ -70,16 +70,16 @@ fn checks() -> [error] {
     // ---- a closure called for its effect ----
     let one = tally()
     run_it(|n: int| {
-        note(one, "ran \(n)")
-    })
+            note(one, "ran \(n)")
+        })
     out.push(test.equal_int(one.count, 1, "a closure called for effect runs"))
     out.push(test.equal_str(one.last, "ran 7", "and receives its argument"))
 
     // ---- every call, not merely the last ----
     let many = tally()
     twice(|n: int| {
-        note(many, "\(n)")
-    })
+            note(many, "\(n)")
+        })
     out.push(test.equal_int(many.count, 2, "both calls happen"))
     out.push(test.equal_str(many.last, "2", "in the order written"))
 

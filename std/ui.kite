@@ -1623,7 +1623,7 @@ fn arrange<Msg>(
             } else {
                 cross_size(node.style.align, inner.height, size.height)
             }
-            let child_rect = Rect {
+            let child_rect = Rect{
                 x: inner.x + along_offset(node.style.justify, inner.width, w),
                 y: inner.y + cross_offset(node.style.align, inner.height, h),
                 width: w,
@@ -2292,7 +2292,7 @@ pub fn paint_scrolled_with(
         // content, because it was laid out against the row it belongs to.
         if frame.portal {
             draw_one(Frame{..frame, rect: r, inner: shifted(frame.inner, dx, dy) }, into)
-        } else if r.y + r.height >= viewport.y && r.y <= viewport.y + viewport.height {
+        } else if r.y + r.height >= viewport.y && r.y <= viewport.y + viewport.height{
             draw_one(Frame{..frame, rect: r, inner: shifted(frame.inner, dx, dy) }, into)
         }
     }
