@@ -6614,8 +6614,19 @@ impl<'a> Checker<'a> {
             );
         }
 
-        // Float equality is a footgun the specification calls out.
-        if matches!(hop, H::EqFloat | H::NeFloat) {
+        // Float equality is a footgun the specification calls out — with an
+        // exception the specification also states, and this used to ignore:
+        // *neither operand may be a literal*.
+        //
+        // The carve-out is the whole difference between a useful lint and a
+        // noisy one. `a == b` on two computed floats is almost always a bug.
+        // `x == 0.0` is almost always deliberate: it is the guard written
+        // before a division or a logarithm, where the question really is
+        // "exactly zero?" and a tolerance would answer a different one. The
+        // lint fired on every such guard in `std/math`, which is how a warning
+        // teaches people to stop reading warnings.
+        let literal = |e: &hir::Expr| matches!(e.kind, ExprKind::Float(_));
+        if matches!(hop, H::EqFloat | H::NeFloat) && !literal(&l) && !literal(&r) {
             self.diags.push(
                 Diagnostic::warning(codes::E0201, "comparing floats for exact equality")
                     .with_primary(span, "floating-point equality is rarely what you want")

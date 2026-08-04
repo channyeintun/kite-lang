@@ -160,6 +160,19 @@ fn float_equality_warns() {
     assert!(!c.diags.has_errors(), "must be a warning, not an error");
 }
 
+/// The carve-out the specification states: a literal operand means the
+/// comparison is deliberate. `x == 0.0` is the guard written before a division
+/// or a logarithm — the question really is "exactly zero?", and a tolerance
+/// answers a different one. Warning on it fired on every such guard in
+/// `std/math`, which is how a warning teaches people to stop reading warnings.
+#[test]
+fn float_equality_against_a_literal_is_deliberate() {
+    let c = body("  let a = 1.0\n  let e = a == 0.0");
+    assert!(!c.has("E0201"), "{}", c.render());
+    let flipped = body("  let a = 1.0\n  let e = 0.0 == a");
+    assert!(!flipped.has("E0201"), "{}", flipped.render());
+}
+
 #[test]
 fn float_remainder_suggests_the_library_function() {
     let c = body("  let a = 1.0 % 2.0");
