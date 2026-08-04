@@ -24,7 +24,7 @@ use std/text
 
 fn sample(name: str, body: str) {
     io.print("== \(name) ==")
-    let node = ui.decorated(
+    let node: ui.Node<ui.Silent> = ui.decorated(
         ui.text_of(name, ui.Style{..ui.style(), width: 176.0 }, body),
         ui.ink(0x102030),
     )

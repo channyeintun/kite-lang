@@ -25,15 +25,15 @@ use std/math
 /// colour one step away from the background — and one step further under the
 /// pointer, continuously, because a tone can be interpolated where a shadow
 /// could not.
-pub fn elevated_card(name: str, s: Scheme, children: [ui.Node]) -> ui.Node {
+pub fn elevated_card<Msg>(name: str, s: Scheme, children: [ui.Node<Msg>]) -> ui.Node<Msg> {
     return card_body(name, children, ui.rounded(surface_at(s, LEVEL_1()), SHAPE_MEDIUM()))
 }
 
-pub fn filled_card(name: str, s: Scheme, children: [ui.Node]) -> ui.Node {
+pub fn filled_card<Msg>(name: str, s: Scheme, children: [ui.Node<Msg>]) -> ui.Node<Msg> {
     return card_body(name, children, ui.rounded(s.surface_container_highest, SHAPE_MEDIUM()))
 }
 
-pub fn outlined_card(name: str, s: Scheme, children: [ui.Node]) -> ui.Node {
+pub fn outlined_card<Msg>(name: str, s: Scheme, children: [ui.Node<Msg>]) -> ui.Node<Msg> {
     return card_body(
         name,
         children,
@@ -43,19 +43,24 @@ pub fn outlined_card(name: str, s: Scheme, children: [ui.Node]) -> ui.Node {
 
 /// A card that answers to the pointer: it takes an id, so it can be clicked,
 /// focused and hovered, and it rises as it is.
-pub fn clickable_card(
+pub fn clickable_card<Msg>(
     name: str,
+    msg: Msg,
     s: Scheme,
-    children: [ui.Node],
+    children: [ui.Node<Msg>],
     state: State,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let lift = maxf(state.hover, state.focus) * (1.0 - state.press)
     let container = layered(raised(s, LEVEL_1(), LEVEL_2(), lift), s.on_surface, state)
     let inner = card_body(name, children, ui.inked(ui.rounded(container, SHAPE_MEDIUM()), s.on_surface))
-    return ui.control(inner, name)
+    let whole = ui.means(inner, name, msg)
+    if state.disabled {
+        return ui.disabled(whole)
+    }
+    return whole
 }
 
-fn card_body(name: str, children: [ui.Node], decor: ui.Decor) -> ui.Node {
+fn card_body<Msg>(name: str, children: [ui.Node<Msg>], decor: ui.Decor) -> ui.Node<Msg> {
     let style = ui.spaced(
         ui.padded(ui.Style{..ui.column(), align: ui.Align.Stretch }, space(4)),
         space(2),
@@ -64,7 +69,7 @@ fn card_body(name: str, children: [ui.Node], decor: ui.Decor) -> ui.Node {
 }
 
 /// A hairline between rows. One dp, in the outline-variant role.
-pub fn divider(name: str, s: Scheme) -> ui.Node {
+pub fn divider<Msg>(name: str, s: Scheme) -> ui.Node<Msg> {
     return ui.decorated(
         ui.box_of(name, tall(ui.style(), 1.0), []),
         ui.filled(s.outline_variant),
@@ -73,7 +78,7 @@ pub fn divider(name: str, s: Scheme) -> ui.Node {
 
 /// The same, inset from the leading edge, which is what Material uses inside a
 /// list so the rule starts where the text does rather than under the icons.
-pub fn inset_divider(name: str, s: Scheme, inset: float) -> ui.Node {
+pub fn inset_divider<Msg>(name: str, s: Scheme, inset: float) -> ui.Node<Msg> {
     return ui.box_of(
         name,
         ui.Style {..ui.row(), padding: ui.Insets{ top: 0.0, right: 0.0, bottom: 0.0, left: inset } },
@@ -93,63 +98,67 @@ pub fn inset_divider(name: str, s: Scheme, inset: float) -> ui.Node {
 // ---- lists ---------------------------------------------------------------------
 
 /// A one-line list item: 56dp, body-large, with an optional leading node.
-pub fn list_item(s: Scheme, id: str, headline: str, leading: [ui.Node], state: State) -> ui.Node {
-    return list_body(s, id, headline, "", "", leading, [], 56.0, state)
+pub fn list_item<Msg>(s: Scheme, id: str, msg: Msg, headline: str, leading: [ui.Node<Msg>], state: State) -> ui.Node<Msg> {
+    return list_body(s, id, msg, headline, "", "", leading, [], 56.0, state)
 }
 
 /// A two-line list item: 72dp, with body-medium supporting text under the
 /// headline. Material's most common list row.
-pub fn list_item_two(
+pub fn list_item_two<Msg>(
     s: Scheme,
     id: str,
+    msg: Msg,
     headline: str,
     supporting: str,
-    leading: [ui.Node],
+    leading: [ui.Node<Msg>],
     state: State,
-) -> ui.Node {
-    return list_body(s, id, headline, supporting, "", leading, [], 72.0, state)
+) -> ui.Node<Msg> {
+    return list_body(s, id, msg, headline, supporting, "", leading, [], 72.0, state)
 }
 
 /// Three lines, 88dp. The third is a second line of supporting text rather
 /// than a different role, which is what Material's three-line item is.
-pub fn list_item_three(
+pub fn list_item_three<Msg>(
     s: Scheme,
     id: str,
+    msg: Msg,
     headline: str,
     supporting: str,
     third: str,
-    leading: [ui.Node],
+    leading: [ui.Node<Msg>],
     state: State,
-) -> ui.Node {
-    return list_body(s, id, headline, supporting, third, leading, [], 88.0, state)
+) -> ui.Node<Msg> {
+    return list_body(s, id, msg, headline, supporting, third, leading, [], 88.0, state)
 }
 
 /// Any of the above with something on the trailing edge — a switch, a
 /// checkbox, a time, a chevron.
-pub fn list_item_with(
+pub fn list_item_with<Msg>(
     s: Scheme,
     id: str,
+    msg: Msg,
     headline: str,
     supporting: str,
-    leading: [ui.Node],
-    trailing: [ui.Node],
+    leading: [ui.Node<Msg>],
+    trailing: [ui.Node<Msg>],
     state: State,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let height = if supporting.len() > 0 { 72.0 } else { 56.0 }
-    return list_body(s, id, headline, supporting, "", leading, trailing, height, state)
+    return list_body(s, id, msg, headline, supporting, "", leading, trailing, height, state)
 }
 
-fn list_body(
+fn list_body<Msg>(
     s: Scheme,
     id: str,
+    msg: Msg,
     headline: str,
     supporting: str,
     third: str,
-    leading: [ui.Node],
-    trailing: [ui.Node],
+    leading: [ui.Node<Msg>],
+    trailing: [ui.Node<Msg>],
     height: float,
     state: State,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let head_role = body_large()
     let support_role = body_medium()
     let amount = state.select
@@ -167,7 +176,7 @@ fn list_body(
         decor = layer_decor(s.on_surface, state, SHAPE_FULL())
     }
 
-    var lines = [
+    var lines: [ui.Node<Msg>] = [
         ui.decorated(
             ui.text_of(
                 "\(id)-headline",
@@ -219,11 +228,15 @@ fn list_body(
         ),
         space(3),
     )
-    return ui.control(ui.decorated(ui.box_of(id, style, children), ui.inked(decor, s.on_surface)), id)
+    let whole = ui.means(ui.decorated(ui.box_of(id, style, children), ui.inked(decor, s.on_surface)), id, msg)
+    if state.disabled {
+        return ui.disabled(whole)
+    }
+    return whole
 }
 
 /// A list's section heading: the label that names the rows under it.
-pub fn list_subheader(name: str, s: Scheme, caption: str) -> ui.Node {
+pub fn list_subheader<Msg>(name: str, s: Scheme, caption: str) -> ui.Node<Msg> {
     let role = title_small()
     return ui.decorated(
         ui.text_of(
@@ -247,7 +260,7 @@ pub fn list_subheader(name: str, s: Scheme, caption: str) -> ui.Node {
 /// It is opaque rather than translucent because the layout has no compositing
 /// order to be translucent *against* — so what it is mixed with is passed in,
 /// which is the colour of whatever it covers.
-pub fn scrim(name: str, s: Scheme, behind: int, size: ui.Size, amount: float) -> ui.Node {
+pub fn scrim<Msg>(name: str, s: Scheme, behind: int, size: ui.Size, amount: float) -> ui.Node<Msg> {
     return ui.decorated(
         ui.box_of(name, ui.sized(ui.style(), size.width, size.height), []),
         ui.filled(mix(behind, s.scrim, 0.32 * clampf(amount, 0.0, 1.0))),
@@ -258,17 +271,17 @@ pub fn scrim(name: str, s: Scheme, behind: int, size: ui.Size, amount: float) ->
 ///
 /// 280dp minimum, extra-large corners, on the highest container tone — which is
 /// how a dialog reads as being above everything without a shadow to say so.
-pub fn dialog(
+pub fn dialog<Msg>(
     name: str,
     s: Scheme,
     headline: str,
     body: str,
-    actions: [ui.Node],
+    actions: [ui.Node<Msg>],
     width: float,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let head_role = headline_small()
     let body_role = body_medium()
-    var children = [
+    var children: [ui.Node<Msg>] = [
         ui.decorated(
             ui.text_of(
                 "\(name)-headline",
@@ -321,14 +334,14 @@ pub fn dialog(
 /// emphasized-decelerate curve over `long1`, with the scrim arriving alongside
 /// it. Below 1 the dialog is narrower and the scrim lighter, which is the
 /// scale-and-fade Material specifies.
-pub fn modal(
+pub fn modal<Msg>(
     name: str,
     s: Scheme,
     behind: int,
     size: ui.Size,
-    content: ui.Node,
+    content: ui.Node<Msg>,
     amount: float,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let shown = clampf(amount, 0.0, 1.0)
     return ui.decorated(
         ui.box_of(
@@ -347,7 +360,7 @@ pub fn modal(
 }
 
 /// A menu: a raised list of choices.
-pub fn menu(name: str, s: Scheme, items: [ui.Node], width: float) -> ui.Node {
+pub fn menu<Msg>(name: str, s: Scheme, items: [ui.Node<Msg>], width: float) -> ui.Node<Msg> {
     return ui.decorated(
         ui.box_of(
             name,
@@ -364,15 +377,16 @@ pub fn menu(name: str, s: Scheme, items: [ui.Node], width: float) -> ui.Node {
 }
 
 /// One row of a menu: 48dp, label-large, with an optional trailing shortcut.
-pub fn menu_item(
+pub fn menu_item<Msg>(
     s: Scheme,
     id: str,
+    msg: Msg,
     caption: str,
     shortcut: str,
     state: State,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let role = label_large()
-    var children = [
+    var children: [ui.Node<Msg>] = [
         ui.decorated(
             ui.text_of(
                 "\(id)-label",
@@ -401,17 +415,22 @@ pub fn menu_item(
         ),
         space(3),
     )
-    return ui.control(
+    let whole = ui.means(
         ui.decorated(
             ui.box_of(id, style, children),
             ui.inked(layer_decor(s.on_surface, state, 0.0), s.on_surface),
         ),
         id,
+        msg,
     )
+    if state.disabled {
+        return ui.disabled(whole)
+    }
+    return whole
 }
 
 /// A plain tooltip: the small dark label that names a control.
-pub fn tooltip(name: str, s: Scheme, caption: str) -> ui.Node {
+pub fn tooltip<Msg>(name: str, s: Scheme, caption: str) -> ui.Node<Msg> {
     let role = body_small()
     let width = ui.text_size_in(caption, role.size, role.weight).width + space(2) * 2.0
     return ui.decorated(
@@ -426,17 +445,17 @@ pub fn tooltip(name: str, s: Scheme, caption: str) -> ui.Node {
 
 /// A rich tooltip: a titled paragraph with its own actions, on the surface
 /// rather than inverted, for explaining something a label cannot.
-pub fn rich_tooltip(
+pub fn rich_tooltip<Msg>(
     name: str,
     s: Scheme,
     title: str,
     body: str,
-    actions: [ui.Node],
+    actions: [ui.Node<Msg>],
     width: float,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let title_role = title_small()
     let body_role = body_medium()
-    var children = [
+    var children: [ui.Node<Msg>] = [
         ui.decorated(
             ui.text_of(
                 "\(name)-title",
@@ -486,17 +505,17 @@ pub fn rich_tooltip(
 /// fading it, because a sheet that faded would not say which edge it came from.
 /// A leading spacer of the remaining height is what slides it, which is the
 /// same technique the switch's knob uses.
-pub fn bottom_sheet(
+pub fn bottom_sheet<Msg>(
     name: str,
     s: Scheme,
-    children: [ui.Node],
+    children: [ui.Node<Msg>],
     size: ui.Size,
     height: float,
     amount: float,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let shown = clampf(amount, 0.0, 1.0)
     let visible = height * shown
-    let sheet = ui.decorated(
+    let sheet: ui.Node<Msg> = ui.decorated(
         ui.box_of(
             "\(name)-sheet",
             ui.spaced(
@@ -529,8 +548,8 @@ pub fn bottom_sheet(
 }
 
 /// The 32×4 bar at the top of a sheet that says it can be dragged.
-fn drag_handle_and(name: str, s: Scheme, children: [ui.Node]) -> [ui.Node] {
-    var out = [
+fn drag_handle_and<Msg>(name: str, s: Scheme, children: [ui.Node<Msg>]) -> [ui.Node<Msg>] {
+    var out: [ui.Node<Msg>] = [
         ui.box_of(
             "\(name)-handle-row",
             ui.Style {..ui.row(), justify: ui.Justify.Center },
@@ -550,16 +569,16 @@ fn drag_handle_and(name: str, s: Scheme, children: [ui.Node]) -> [ui.Node] {
 
 /// A side sheet: the same idea against the trailing edge, which is what a
 /// wide window uses instead of a bottom sheet.
-pub fn side_sheet(
+pub fn side_sheet<Msg>(
     name: str,
     s: Scheme,
-    children: [ui.Node],
+    children: [ui.Node<Msg>],
     size: ui.Size,
     width: float,
     amount: float,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let visible = width * clampf(amount, 0.0, 1.0)
-    let sheet = ui.decorated(
+    let sheet: ui.Node<Msg> = ui.decorated(
         ui.box_of(
             "\(name)-sheet",
             ui.spaced(
@@ -591,9 +610,9 @@ pub fn side_sheet(
 }
 
 /// A snackbar: a raised container with a message and an optional action.
-pub fn snackbar(name: str, s: Scheme, message: str, action: [ui.Node]) -> ui.Node {
+pub fn snackbar<Msg>(name: str, s: Scheme, message: str, action: [ui.Node<Msg>]) -> ui.Node<Msg> {
     let role = body_medium()
-    var children = [
+    var children: [ui.Node<Msg>] = [
         ui.decorated(
             ui.text_of(
                 "\(name)-message",
@@ -622,12 +641,20 @@ pub fn snackbar(name: str, s: Scheme, message: str, action: [ui.Node]) -> ui.Nod
 /// A snackbar's action button, which is the one place `inverse_primary` is
 /// for: a text button on a snackbar sits on the opposite scheme to everything
 /// around it, and the ordinary accent would be unreadable there.
-pub fn snackbar_action(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+pub fn snackbar_action<Msg>(
+    s: Scheme,
+    id: str,
+    msg: Msg,
+    caption: str,
+    state: State,
+) -> ui.Node<Msg> {
     let role = label_large()
     let width = ui.text_size_in(caption, role.size, role.weight).width + space(2) * 2.0
     let decor = layer_decor(s.inverse_primary, state, SHAPE_EXTRA_SMALL())
     return centred_body(
         id,
+        msg,
+        !state.disabled,
         caption,
         role.size,
         role.weight,

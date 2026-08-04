@@ -7,8 +7,8 @@
 
 use std/ui
 
-fn app() -> ui.Node {
-    let header = ui.box_of(
+fn app() -> ui.Node<ui.Silent> {
+    let header: ui.Node<ui.Silent> = ui.box_of(
         "header",
         ui.spaced(ui.padded(ui.Style{..ui.row(), align: ui.Align.Center, justify: ui.Justify.SpaceBetween }, 12.0), 8.0),
         [
@@ -17,7 +17,7 @@ fn app() -> ui.Node {
         ],
     )
 
-    let sidebar = ui.box_of(
+    let sidebar: ui.Node<ui.Silent> = ui.box_of(
         "sidebar",
         ui.spaced(ui.padded(ui.Style{..ui.column(), width: 160.0 }, 8.0), 6.0),
         [
@@ -27,7 +27,7 @@ fn app() -> ui.Node {
         ],
     )
 
-    let content = ui.box_of(
+    let content: ui.Node<ui.Silent> = ui.box_of(
         "content",
         ui.grown(ui.padded(ui.Style{..ui.column(), align: ui.Align.Stretch }, 16.0), 1.0),
         [
@@ -44,7 +44,7 @@ fn app() -> ui.Node {
         ],
     )
 
-    let body = ui.box_of("body", ui.Style{..ui.row(), align: ui.Align.Stretch, grow: 1.0 }, [sidebar, content])
+    let body: ui.Node<ui.Silent> = ui.box_of("body", ui.Style{..ui.row(), align: ui.Align.Stretch, grow: 1.0 }, [sidebar, content])
 
     return ui.box_of("app", ui.Style{..ui.column(), align: ui.Align.Stretch }, [header, body])
 }

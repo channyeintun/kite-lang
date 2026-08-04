@@ -289,6 +289,26 @@ struct Track {
     seconds: int
 }
 
+/// What this application can be told.
+///
+/// Every control in the tree carries one of these, built by the code that knew
+/// which control it was making. `ChooseGenre` and `PlayTrack` carry payloads
+/// for the same reason: the loop that built the row had the name and the index
+/// in hand, so nothing later has to recover them from a string.
+///
+/// The seek bar is deliberately absent. What dragging it says is a *number*,
+/// which is not known when the node is built — see `slider_of` in the material
+/// package for why that is a different proposal.
+pub enum Msg {
+    PlayPause
+    Next
+    Prev
+    Shuffle
+    ToggleTheme
+    ChooseGenre(str)
+    PlayTrack(int)
+}
+
 pub struct Model {
     tracks: [Track]
     /// What the host says the window is. A layout is a function of its size, so
@@ -472,7 +492,7 @@ fn clock(total: int) -> str {
 
 // ---- the tree --------------------------------------------------------------------
 
-fn view_node(model: Model) -> ui.Node {
+fn view_node(model: Model) -> ui.Node<Msg> {
     let s = scheme(model)
     // Below Material's medium breakpoint a navigation rail costs 80dp of a
     // width that has none to spare, so navigation moves to the bottom. That is
@@ -509,13 +529,14 @@ fn view_node(model: Model) -> ui.Node {
 /// while nothing in the rail reacted to anything; it stopped being harmless
 /// once these grew hover, focus and a ripple, because a control that answers
 /// every affordance except the one it exists for is worse than no control.
-fn destinations(model: Model) -> [ui.Node] {
+fn destinations(model: Model) -> [ui.Node<Msg>] {
     let s = scheme(model)
     return [
-        material.rail_item(s, "nav-library", "♫", "Library", true, choice(model, "nav-library", true)),
+        material.rail_item(s, "nav-library", Msg.PlayPause, "♫", "Library", true, choice(model, "nav-library", true)),
         material.rail_item(
             s,
             "nav-theme",
+            Msg.ToggleTheme,
             theme_glyph(model),
             "Theme",
             false,
@@ -526,8 +547,8 @@ fn destinations(model: Model) -> [ui.Node] {
 
 /// The compact answer to a rail: the same destinations laid across the bottom,
 /// sharing the width between them.
-fn nav_bar(model: Model, s: material.Scheme) -> ui.Node {
-    var slots: [ui.Node] = []
+fn nav_bar(model: Model, s: material.Scheme) -> ui.Node<Msg> {
+    var slots: [ui.Node<Msg>] = []
     var at = 0
     for one in destinations(model) {
         slots.push(
@@ -553,7 +574,7 @@ fn nav_bar(model: Model, s: material.Scheme) -> ui.Node {
     )
 }
 
-fn rail(model: Model, s: material.Scheme) -> ui.Node {
+fn rail(model: Model, s: material.Scheme) -> ui.Node<Msg> {
     let items = destinations(model)
     let style = ui.spaced(
         ui.padded(
@@ -624,7 +645,7 @@ fn search_width(model: Model) -> float {
     return spare
 }
 
-fn main_column(model: Model, s: material.Scheme) -> ui.Node {
+fn main_column(model: Model, s: material.Scheme) -> ui.Node<Msg> {
     let style = ui.Style{..ui.column(), align: ui.Align.Stretch, grow: 1.0 }
     // A compact window cannot hold a title, a search field and an action on one
     // row, so the field takes the row under the bar. Which is what Material
@@ -639,7 +660,7 @@ fn main_column(model: Model, s: material.Scheme) -> ui.Node {
                     "bar",
                     s,
                     "Library",
-                    [material.icon_button(s, "shuffle", "⇄", focus(model, "shuffle"))],
+                    [material.icon_button(s, "shuffle", Msg.Shuffle, "⇄", focus(model, "shuffle"))],
                 ),
                 ui.box_of(
                     "search-row",
@@ -678,7 +699,7 @@ fn main_column(model: Model, s: material.Scheme) -> ui.Node {
                         search_width(model),
                         focus(model, "search"),
                     ),
-                    material.icon_button(s, "shuffle", "⇄", focus(model, "shuffle")),
+                    material.icon_button(s, "shuffle", Msg.Shuffle, "⇄", focus(model, "shuffle")),
                 ],
             ),
             chips(model, s),
@@ -690,7 +711,7 @@ fn main_column(model: Model, s: material.Scheme) -> ui.Node {
 
 /// A row of filter chips, one per genre. Exactly Material's use for them: a
 /// set of choices that narrows what is below.
-fn chips(model: Model, s: material.Scheme) -> ui.Node {
+fn chips(model: Model, s: material.Scheme) -> ui.Node<Msg> {
     // Packed into as many rows as it takes, measured.
     //
     // Material scrolls a chip row sideways when it does not fit. This layout
@@ -699,8 +720,8 @@ fn chips(model: Model, s: material.Scheme) -> ui.Node {
     // row that simply overflowed would push its last chips off the window,
     // which is what five genres did at 360dp.
     let room = content_width(model) - material.space(8)
-    var rows: [ui.Node] = []
-    var line: [ui.Node] = []
+    var rows: [ui.Node<Msg>] = []
+    var line: [ui.Node<Msg>] = []
     var used = 0.0
     var at = 0
     for name in genres() {
@@ -719,6 +740,7 @@ fn chips(model: Model, s: material.Scheme) -> ui.Node {
             material.filter_chip(
                 s,
                 "genre-\(name)",
+                Msg.ChooseGenre(name),
                 name,
                 model.genre == name,
                 choice(model, "genre-\(name)", model.genre == name),
@@ -741,7 +763,7 @@ fn chip_width(name: str) -> float {
     return ui.text_size_in("✓ \(name)", 14.0, material.MEDIUM()).width + material.space(4) * 2.0
 }
 
-fn chip_row(at: int, line: [ui.Node]) -> ui.Node {
+fn chip_row(at: int, line: [ui.Node<Msg>]) -> ui.Node<Msg> {
     return ui.box_of(
         "chip-row\(at)",
         ui.spaced(ui.Style{..ui.row(), align: ui.Align.Center }, material.space(2)),
@@ -756,8 +778,8 @@ fn chip_row(at: int, line: [ui.Node]) -> ui.Node {
 /// have — which is the only way to scroll one part of a screen while the rest
 /// stays put, since a layout has no notion of a thing being partly off its own
 /// parent.
-fn list_viewport(model: Model, s: material.Scheme) -> ui.Node {
-    let card = ui.decorated(
+fn list_viewport(model: Model, s: material.Scheme) -> ui.Node<Msg> {
+    let card: ui.Node<Msg> = ui.decorated(
         ui.box_of("list", ui.Style{..ui.column(), align: ui.Align.Stretch, grow: 1.0 }, []),
         ui.rounded(material.surface_at(s, material.LEVEL_1()), material.SHAPE_LARGE()),
     )
@@ -769,10 +791,10 @@ fn list_viewport(model: Model, s: material.Scheme) -> ui.Node {
 }
 
 /// The rows themselves, laid out on their own against a given width.
-fn list(model: Model, s: material.Scheme) -> ui.Node {
+fn list(model: Model, s: material.Scheme) -> ui.Node<Msg> {
     let found = shown(model)
     let room = row_room(model)
-    var rows: [ui.Node] = []
+    var rows: [ui.Node<Msg>] = []
     if found.len() == 0 {
         rows.push(
             ui.decorated(
@@ -794,7 +816,7 @@ fn list(model: Model, s: material.Scheme) -> ui.Node {
                 glyph = "❚❚"
             }
         }
-        let leading = [
+        let leading: [ui.Node<Msg>] = [
             ui.decorated(
                 ui.text_of(
                     "track-\(i)-glyph",
@@ -808,6 +830,7 @@ fn list(model: Model, s: material.Scheme) -> ui.Node {
             material.list_item_two(
                 s,
                 "track-\(i)",
+                Msg.PlayTrack(i),
                 fit(track.title, room, 16.0, material.REGULAR()),
                 fit(
                     "\(track.artist) · \(track.genre) · \(clock(duration(model, i)))",
@@ -824,7 +847,7 @@ fn list(model: Model, s: material.Scheme) -> ui.Node {
         ui.padded(ui.Style{..ui.column(), align: ui.Align.Stretch, grow: 1.0 }, material.space(2)),
         material.space(1),
     )
-    let card = ui.decorated(
+    let card: ui.Node<Msg> = ui.decorated(
         ui.box_of("list", inner, rows),
         ui.rounded(material.surface_at(s, material.LEVEL_1()), material.SHAPE_LARGE()),
     )
@@ -870,7 +893,7 @@ fn mark_ink(s: material.Scheme, is_playing: bool) -> int {
 
 /// The now-playing bar: what Material calls a bottom app bar, carrying the
 /// transport and a progress track.
-fn now_playing(model: Model, s: material.Scheme) -> ui.Node {
+fn now_playing(model: Model, s: material.Scheme) -> ui.Node<Msg> {
     let track = model.tracks[model.playing]
     let width = content_width(model) - material.space(8)
     let fraction = model.elapsed / (duration(model, model.playing) as float)
@@ -880,7 +903,7 @@ fn now_playing(model: Model, s: material.Scheme) -> ui.Node {
     // rather than being cut.
     let told = room_for_titles(width)
 
-    let titles = ui.box_of(
+    let titles: ui.Node<Msg> = ui.box_of(
         "np-text",
         ui.spaced(ui.grown(ui.Style{..ui.column(), align: ui.Align.Stretch }, 1.0), 2.0),
         [
@@ -908,17 +931,17 @@ fn now_playing(model: Model, s: material.Scheme) -> ui.Node {
         ],
     )
 
-    let transport = ui.box_of(
+    let transport: ui.Node<Msg> = ui.box_of(
         "np-transport",
         ui.spaced(ui.Style{..ui.row(), align: ui.Align.Center }, material.space(1)),
         [
-            material.icon_button(s, "prev", "◁◁", focus(model, "prev")),
-            material.fab(s, "play", play_glyph(model), focus(model, "play")),
-            material.icon_button(s, "next", "▷▷", focus(model, "next")),
+            material.icon_button(s, "prev", Msg.Prev, "◁◁", focus(model, "prev")),
+            material.fab(s, "play", Msg.PlayPause, play_glyph(model), focus(model, "play")),
+            material.icon_button(s, "next", Msg.Next, "▷▷", focus(model, "next")),
         ],
     )
 
-    let row = ui.box_of(
+    let row: ui.Node<Msg> = ui.box_of(
         "np-row",
         ui.spaced(ui.Style{..ui.row(), align: ui.Align.Center }, material.space(4)),
         [titles, transport],
@@ -928,7 +951,7 @@ fn now_playing(model: Model, s: material.Scheme) -> ui.Node {
         ui.padded(ui.Style{..ui.column(), align: ui.Align.Stretch }, material.space(4)),
         material.space(3),
     )
-    let bar = ui.decorated(
+    let bar: ui.Node<Msg> = ui.decorated(
         ui.box_of(
             "np",
             inner,
@@ -1024,10 +1047,17 @@ fn list_rect(frames: [ui.Frame]) -> ui.Rect {
     return ui.Rect{ x: 0.0, y: 0.0, width: 0.0, height: 0.0 }
 }
 
+/// The rows, as a tree. Separate from the chrome because they are laid out
+/// against the card rather than the window, and separate from [`row_frames`]
+/// because a meaning is read from the tree while a position is read from the
+/// frames.
+fn row_tree(model: Model, box: ui.Rect) -> ui.Node<Msg> {
+    return list(model, scheme(model))
+}
+
 /// The rows, laid out against the card they will be drawn into.
 fn row_frames(model: Model, box: ui.Rect) -> [ui.Frame] {
-    let s = scheme(model)
-    return ui.layout(list(model, s), ui.Size{ width: box.width, height: box.height })
+    return ui.layout(row_tree(model, box), ui.Size{ width: box.width, height: box.height })
 }
 
 fn row_viewport(box: ui.Rect) -> ui.Size {
@@ -1220,7 +1250,11 @@ fn clicked(model: Model, x: float, y: float) -> Model {
         if id == nil {
             return model
         }
-        return acted(focused_on(model, id), id)
+        let said = meaning_of(row_tree(model, box), id)
+        if said == nil {
+            return model
+        }
+        return acted(focused_on(model, id), said)
     }
 
     let hit = ui.control_at(frames, x, y)
@@ -1238,7 +1272,27 @@ fn clicked(model: Model, x: float, y: float) -> Model {
         }
         return focused
     }
-    return acted(focused, hit)
+    let said = meaning_of(view_node(model), hit)
+    if said == nil {
+        return focused
+    }
+    return acted(focused, said)
+}
+
+/// What a control in a tree says, if it says anything and is able to.
+///
+/// Two trees answer here — the chrome and the scrolled rows — which is why
+/// this takes the tree rather than reaching for one: the rows are laid out
+/// separately, so a row's meaning is not in the chrome tree at all.
+fn meaning_of(tree: ui.Node<Msg>, id: str) -> Option<Msg> {
+    let found = ui.control_of(tree, id)
+    if found == nil {
+        return nil
+    }
+    if !found.enabled {
+        return nil
+    }
+    return found.msg
 }
 
 /// Move the playhead to a fraction of the track.
@@ -1274,51 +1328,48 @@ fn nudged(model: Model, by: float) -> Model {
 /// from the naming convention this replaced: a control used to be found by
 /// splitting a node's name on a colon, and a plain text node that happened to
 /// contain one answered as a control.
-fn acted(model: Model, id: str) -> Model {
-    if id == "play" {
+/// Everything a control in this application can say.
+///
+/// Exhaustive. What it replaces was a chain of string comparisons ending in a
+/// `track_id` helper that walked every index the model had to recover a number
+/// the view already knew — and a control whose branch was never written laid
+/// out perfectly and did nothing.
+fn acted(model: Model, msg: Msg) -> Model {
+    return match msg {
+        PlayPause => started(Model{..model, running: !model.running }),
+        Next => started(advanced(model, 1)),
+        Shuffle => started(advanced(model, 1)),
+        Prev => started(advanced(model, -1)),
+        ToggleTheme => Model{..model, dark: !model.dark },
+        // The chips have to be *told* the choice changed. Selection is the
+        // model's fact — this file knows which genre is on and the design
+        // system cannot — so the animation is asked for at the moment the
+        // fact changes, one line from the line that changes it.
+        ChooseGenre(name) => Model{
+            ..model,
+            genre: name,
+            ui_state: material.choose_one(model.ui_state, genre_ids(), "genre-\(name)"),
+        },
+        PlayTrack(track) => played(model, track),
+    }
+}
+
+/// Clicking the track already playing is the transport, not a new selection —
+/// which is what every player does and what a listener expects when they click
+/// the row a second time.
+fn played(model: Model, track: int) -> Model {
+    if track == model.playing {
         return started(Model{..model, running: !model.running })
     }
-    if id == "next" || id == "shuffle" {
-        return started(advanced(model, 1))
-    }
-    if id == "prev" {
-        return started(advanced(model, -1))
-    }
-    if id == "nav-theme" {
-        return Model{..model, dark: !model.dark }
-    }
-    for name in genres() {
-        if id == "genre-\(name)" {
-            // The chips have to be *told* the choice changed. Selection is the
-            // model's fact — this file knows which genre is on and the design
-            // system cannot — so the animation is asked for at the moment the
-            // fact changes, one line from the line that changes it.
-            return Model{
-                ..model,
-                genre: name,
-                ui_state: material.choose_one(model.ui_state, genre_ids(), "genre-\(name)"),
-            }
-        }
-    }
-    let track = track_id(model, id)
-    if track != nil {
-        // Clicking the track already playing is the transport, not a new
-        // selection — which is what every player does and what a listener
-        // expects when they click the row a second time.
-        if track == model.playing {
-            return started(Model{..model, running: !model.running })
-        }
-        return started(
-            Model {
-                ..model,
-                playing: track,
-                elapsed: 0.0,
-                running: true,
-                ui_state: material.choose_one(model.ui_state, track_ids(model), id),
-            },
-        )
-    }
-    return model
+    return started(
+        Model {
+            ..model,
+            playing: track,
+            elapsed: 0.0,
+            running: true,
+            ui_state: material.choose_one(model.ui_state, track_ids(model), "track-\(track)"),
+        },
+    )
 }
 
 fn genre_ids() -> [str] {
@@ -1385,11 +1436,17 @@ fn pressed(model: Model, key: str) -> Model {
     if key == "ArrowLeft" {
         return nudged(model, -5.0)
     }
-    if key == " " {
-        return acted(model, model.focused)
-    }
-    if key == "Enter" {
-        return acted(model, model.focused)
+    if key == " " || key == "Enter" {
+        // The focused control may be in either tree, and a field types its
+        // own space rather than activating.
+        let box = list_rect(frames_of(model))
+        var said = meaning_of(view_node(model), model.focused)
+        if said == nil {
+            said = meaning_of(row_tree(model, box), model.focused)
+        }
+        if said != nil {
+            return acted(model, said)
+        }
     }
     if model.focused == "search" {
         return Model{..model, search: material.typed(model.search, key) }

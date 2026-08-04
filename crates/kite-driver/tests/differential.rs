@@ -157,7 +157,7 @@ fn main() {
     (
         "clipping-and-scrolling",
         "use std/ui\n\
-         fn rows() -> ui.Node {\n  var out: [ui.Node] = []\n\
+         fn rows() -> ui.Node<ui.Silent> {\n  var out: [ui.Node<ui.Silent>] = []\n\
          \x20 for i in 0..8 {\n\
          \x20   out.push(ui.decorated(ui.text_of(\"r\\(i)\", ui.Style{..ui.style(), width: 100.0}, \"row \\(i)\"), ui.inked(ui.filled(0x111111), 0xeeeeee)))\n  }\n\
          \x20 return ui.box_of(\"list\", ui.Style{..ui.column(), align: ui.Align.Stretch}, out)\n}\n\
@@ -290,7 +290,7 @@ fn main() {
     (
         "clipping-and-scrolling",
         "use std/ui\n\
-         fn rows() -> ui.Node {\n  var out: [ui.Node] = []\n\
+         fn rows() -> ui.Node<ui.Silent> {\n  var out: [ui.Node<ui.Silent>] = []\n\
          \x20 for i in 0..8 {\n\
          \x20   out.push(ui.decorated(ui.text_of(\"r\\(i)\", ui.Style{..ui.style(), width: 100.0}, \"row \\(i)\"), ui.inked(ui.filled(0x111111), 0xeeeeee)))\n  }\n\
          \x20 return ui.box_of(\"list\", ui.Style{..ui.column(), align: ui.Align.Stretch}, out)\n}\n\

@@ -24,56 +24,56 @@ use std/math
 // fully collapsed, and the application drives it from its own scroll offset —
 // which it has, and this does not.
 
-pub fn top_app_bar(name: str, s: Scheme, title: str, actions: [ui.Node]) -> ui.Node {
+pub fn top_app_bar<Msg>(name: str, s: Scheme, title: str, actions: [ui.Node<Msg>]) -> ui.Node<Msg> {
     return bar_body(name, s, title, [], actions, 64.0, title_large(), false)
 }
 
 /// The title centred, with room for a leading control either side of it.
-pub fn center_app_bar(
+pub fn center_app_bar<Msg>(
     name: str,
     s: Scheme,
     title: str,
-    leading: [ui.Node],
-    actions: [ui.Node],
-) -> ui.Node {
+    leading: [ui.Node<Msg>],
+    actions: [ui.Node<Msg>],
+) -> ui.Node<Msg> {
     return bar_body(name, s, title, leading, actions, 64.0, title_large(), true)
 }
 
 /// 112dp, headline-small, with the title on its own line. Collapses to the
 /// small bar as `collapse` goes from 0 to 1.
-pub fn medium_app_bar(
+pub fn medium_app_bar<Msg>(
     name: str,
     s: Scheme,
     title: str,
-    leading: [ui.Node],
-    actions: [ui.Node],
+    leading: [ui.Node<Msg>],
+    actions: [ui.Node<Msg>],
     collapse: float,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     return tall_bar(name, s, title, leading, actions, 112.0, headline_small(), collapse)
 }
 
 /// 152dp, headline-medium. The largest, for a screen whose title is the point.
-pub fn large_app_bar(
+pub fn large_app_bar<Msg>(
     name: str,
     s: Scheme,
     title: str,
-    leading: [ui.Node],
-    actions: [ui.Node],
+    leading: [ui.Node<Msg>],
+    actions: [ui.Node<Msg>],
     collapse: float,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     return tall_bar(name, s, title, leading, actions, 152.0, headline_medium(), collapse)
 }
 
-fn tall_bar(
+fn tall_bar<Msg>(
     name: str,
     s: Scheme,
     title: str,
-    leading: [ui.Node],
-    actions: [ui.Node],
+    leading: [ui.Node<Msg>],
+    actions: [ui.Node<Msg>],
     expanded: float,
     expanded_role: TypeRole,
     collapse: float,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let shut = clampf(collapse, 0.0, 1.0)
     let small = title_large()
     // Height, type size and weight all cross together, so a bar half collapsed
@@ -85,7 +85,7 @@ fn tall_bar(
     if shut >= 1.0 {
         return bar_body(name, s, title, leading, actions, 64.0, small, false)
     }
-    var top: [ui.Node] = []
+    var top: [ui.Node<Msg>] = []
     for one in leading {
         top.push(one)
     }
@@ -93,7 +93,7 @@ fn tall_bar(
     for one in actions {
         top.push(one)
     }
-    let row = ui.box_of(
+    let row: ui.Node<Msg> = ui.box_of(
         "\(name)-row",
         ui.spaced(
             tall(ui.Style{..ui.row(), align: ui.Align.Center }, 64.0),
@@ -101,7 +101,7 @@ fn tall_bar(
         ),
         top,
     )
-    let heading = ui.decorated(
+    let heading: ui.Node<Msg> = ui.decorated(
         ui.text_of(
             "\(name)-title",
             ui.grown(ui.in_font(ui.style(), size, expanded_role.weight), 1.0),
@@ -121,21 +121,21 @@ fn tall_bar(
     )
 }
 
-fn bar_body(
+fn bar_body<Msg>(
     name: str,
     s: Scheme,
     title: str,
-    leading: [ui.Node],
-    actions: [ui.Node],
+    leading: [ui.Node<Msg>],
+    actions: [ui.Node<Msg>],
     height: float,
     role: TypeRole,
     centred: bool,
-) -> ui.Node {
-    var children: [ui.Node] = []
+) -> ui.Node<Msg> {
+    var children: [ui.Node<Msg>] = []
     for one in leading {
         children.push(one)
     }
-    let title_node = ui.decorated(
+    let title_node: ui.Node<Msg> = ui.decorated(
         ui.text_of(
             "\(name)-title",
             ui.grown(ui.in_font(ui.style(), role.size, role.weight), 1.0),
@@ -159,8 +159,8 @@ fn bar_body(
 
 /// A bottom app bar: actions along the bottom of a narrow window, usually with
 /// a floating action button at the trailing end.
-pub fn bottom_app_bar(name: str, s: Scheme, actions: [ui.Node], trailing: [ui.Node]) -> ui.Node {
-    var children: [ui.Node] = []
+pub fn bottom_app_bar<Msg>(name: str, s: Scheme, actions: [ui.Node<Msg>], trailing: [ui.Node<Msg>]) -> ui.Node<Msg> {
+    var children: [ui.Node<Msg>] = []
     for one in actions {
         children.push(one)
     }
@@ -192,30 +192,31 @@ pub fn bottom_app_bar(name: str, s: Scheme, actions: [ui.Node], trailing: [ui.No
 /// row, and here each tab owns its own, so what a caller sees is the old one
 /// shrinking as the new one grows. Both are on the emphasized curve and the
 /// crossing reads as a hand-off.
-pub fn tab(s: Scheme, id: str, caption: str, on: bool, state: State) -> ui.Node {
-    return tab_body(s, id, caption, "", on, state, true)
+pub fn tab<Msg>(s: Scheme, id: str, msg: Msg, caption: str, on: bool, state: State) -> ui.Node<Msg> {
+    return tab_body(s, id, msg, caption, "", on, state, true)
 }
 
 /// A secondary tab: the same, with a full-width indicator and the label in the
 /// on-surface role, for tabs *inside* a screen rather than at the top of one.
-pub fn secondary_tab(s: Scheme, id: str, caption: str, on: bool, state: State) -> ui.Node {
-    return tab_body(s, id, caption, "", on, state, false)
+pub fn secondary_tab<Msg>(s: Scheme, id: str, msg: Msg, caption: str, on: bool, state: State) -> ui.Node<Msg> {
+    return tab_body(s, id, msg, caption, "", on, state, false)
 }
 
 /// A tab with a glyph above its label, which is what Material's taller tab is.
-pub fn icon_tab(s: Scheme, id: str, glyph: str, caption: str, on: bool, state: State) -> ui.Node {
-    return tab_body(s, id, caption, glyph, on, state, true)
+pub fn icon_tab<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, caption: str, on: bool, state: State) -> ui.Node<Msg> {
+    return tab_body(s, id, msg, caption, glyph, on, state, true)
 }
 
-fn tab_body(
+fn tab_body<Msg>(
     s: Scheme,
     id: str,
+    msg: Msg,
     caption: str,
     glyph: str,
     on: bool,
     state: State,
     primary: bool,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let role = title_small()
     let amount = chosen_amount(on, state)
     let ink = mix(s.on_surface_variant, if primary { s.primary } else { s.on_surface }, amount)
@@ -226,7 +227,7 @@ fn tab_body(
     // the full width of the tab. Both grow from the middle, which is why the
     // indicator sits in a centring row rather than in the column directly.
     let full = if primary { width - space(6) * 2.0 } else { width }
-    let indicator = ui.box_of(
+    let indicator: ui.Node<Msg> = ui.box_of(
         "\(id)-indicator-row",
         ui.Style {..ui.row(), justify: ui.Justify.Center, width: width, height: 3.0 },
         [
@@ -236,7 +237,7 @@ fn tab_body(
             ),
         ],
     )
-    var stack: [ui.Node] = []
+    var stack: [ui.Node<Msg>] = []
     if glyph.len() > 0 {
         stack.push(
             ui.decorated(
@@ -256,20 +257,25 @@ fn tab_body(
         ),
     )
     stack.push(indicator)
-    let box = ui.box_of(
+    let box: ui.Node<Msg> = ui.box_of(
         id,
         ui.sized(ui.Style{..ui.column(), align: ui.Align.Stretch }, width, height),
         stack,
     )
-    return ui.control(
+    let whole = ui.means(
         ui.decorated(box, ui.inked(layer_decor(ink, state, 0.0), ink)),
         id,
+        msg,
     )
+    if state.disabled {
+        return ui.disabled(whole)
+    }
+    return whole
 }
 
 /// A row of tabs with a rule under it, which is what separates the row from
 /// the content it switches between.
-pub fn tab_row(name: str, s: Scheme, tabs: [ui.Node]) -> ui.Node {
+pub fn tab_row<Msg>(name: str, s: Scheme, tabs: [ui.Node<Msg>]) -> ui.Node<Msg> {
     return ui.decorated(
         ui.box_of(
             name,
@@ -290,18 +296,19 @@ pub fn tab_row(name: str, s: Scheme, tabs: [ui.Node]) -> ui.Node {
 /// The pill behind the glyph grows from nothing as the destination is chosen,
 /// which is Material's own transition for it and the thing that makes a rail
 /// feel like one control rather than five.
-pub fn rail_item(s: Scheme, id: str, glyph: str, caption: str, on: bool, state: State) -> ui.Node {
-    return destination(s, id, glyph, caption, on, state, 56.0, 32.0, true)
+pub fn rail_item<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, caption: str, on: bool, state: State) -> ui.Node<Msg> {
+    return destination(s, id, msg, glyph, caption, on, state, 56.0, 32.0, true)
 }
 
 /// One destination in a navigation bar — the compact answer to a rail.
-pub fn bar_item(s: Scheme, id: str, glyph: str, caption: str, on: bool, state: State) -> ui.Node {
-    return destination(s, id, glyph, caption, on, state, 64.0, 32.0, true)
+pub fn bar_item<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, caption: str, on: bool, state: State) -> ui.Node<Msg> {
+    return destination(s, id, msg, glyph, caption, on, state, 64.0, 32.0, true)
 }
 
-fn destination(
+fn destination<Msg>(
     s: Scheme,
     id: str,
+    msg: Msg,
     glyph: str,
     caption: str,
     on: bool,
@@ -309,7 +316,7 @@ fn destination(
     pill_width: float,
     pill_height: float,
     labelled: bool,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let role = label_medium()
     let amount = chosen_amount(on, state)
     let pill_fill = mix(s.surface, s.secondary_container, amount)
@@ -322,11 +329,11 @@ fn destination(
     // own size out to the full 56dp. A pill that merely appeared would be the
     // same information with the movement taken out.
     let grown_width = math.lerp(pill_height, pill_width, amount)
-    let icon = ui.decorated(
+    let icon: ui.Node<Msg> = ui.decorated(
         ui.text_of("\(id)-glyph", ui.in_font(ui.style(), 20.0, REGULAR()), glyph),
         ui.centered(ui.ink(glyph_ink)),
     )
-    let holder = ui.decorated(
+    let holder: ui.Node<Msg> = ui.decorated(
         ui.box_of(
             "\(id)-pill",
             ui.Style {
@@ -355,25 +362,29 @@ fn destination(
             ),
         )
     }
-    let box = ui.box_of(
+    let box: ui.Node<Msg> = ui.box_of(
         id,
         ui.spaced(ui.Style{..ui.column(), align: ui.Align.Center }, space(1)),
         stack,
     )
-    return ui.control(ui.decorated(box, ui.ink(s.on_surface)), id)
+    let whole = ui.means(ui.decorated(box, ui.ink(s.on_surface)), id, msg)
+    if state.disabled {
+        return ui.disabled(whole)
+    }
+    return whole
 }
 
 /// The rail itself: 80dp down the leading edge, with whatever sits at the top
 /// of it — Material puts a floating action button there — above the
 /// destinations.
-pub fn navigation_rail(
+pub fn navigation_rail<Msg>(
     name: str,
     s: Scheme,
-    header: [ui.Node],
-    items: [ui.Node],
+    header: [ui.Node<Msg>],
+    items: [ui.Node<Msg>],
     height: float,
-) -> ui.Node {
-    var children: [ui.Node] = []
+) -> ui.Node<Msg> {
+    var children: [ui.Node<Msg>] = []
     for one in header {
         children.push(one)
     }
@@ -396,7 +407,7 @@ pub fn navigation_rail(
 }
 
 /// The bar: 80dp across the bottom, for a compact window.
-pub fn navigation_bar(name: str, s: Scheme, items: [ui.Node], width: float) -> ui.Node {
+pub fn navigation_bar<Msg>(name: str, s: Scheme, items: [ui.Node<Msg>], width: float) -> ui.Node<Msg> {
     let style = ui.padded(
         ui.Style {
             ..ui.row(),
@@ -414,15 +425,16 @@ pub fn navigation_bar(name: str, s: Scheme, items: [ui.Node], width: float) -> u
 }
 
 /// One row of a navigation drawer: a full-width pill with a glyph and a label.
-pub fn drawer_item(
+pub fn drawer_item<Msg>(
     s: Scheme,
     id: str,
+    msg: Msg,
     glyph: str,
     caption: str,
     trailing: str,
     on: bool,
     state: State,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let role = label_large()
     let amount = chosen_amount(on, state)
     let fill = mix(s.surface, s.secondary_container, amount)
@@ -431,7 +443,7 @@ pub fn drawer_item(
     if amount > 0.0 {
         decor = ui.rounded(layered(fill, ink, state), SHAPE_FULL())
     }
-    var children = [
+    var children: [ui.Node<Msg>] = [
         ui.decorated(
             ui.text_of("\(id)-glyph", ui.in_font(ui.style(), 24.0, REGULAR()), glyph),
             ui.ink(ink),
@@ -464,7 +476,11 @@ pub fn drawer_item(
         ),
         space(3),
     )
-    return ui.control(ui.decorated(ui.box_of(id, style, children), ui.inked(decor, ink)), id)
+    let whole = ui.means(ui.decorated(ui.box_of(id, style, children), ui.inked(decor, ink)), id, msg)
+    if state.disabled {
+        return ui.disabled(whole)
+    }
+    return whole
 }
 
 /// The drawer: 360dp of destinations, for a window wide enough to name them.
@@ -472,13 +488,13 @@ pub fn drawer_item(
 /// `amount` slides it in from the leading edge, the same way a side sheet
 /// arrives, so a modal drawer on a narrow window can be animated by the caller
 /// with a `Track` and a standard-decelerate curve.
-pub fn navigation_drawer(
+pub fn navigation_drawer<Msg>(
     name: str,
     s: Scheme,
-    items: [ui.Node],
+    items: [ui.Node<Msg>],
     height: float,
     amount: float,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let width = 360.0 * clampf(amount, 0.0, 1.0)
     let style = ui.spaced(
         ui.padded(
@@ -499,7 +515,7 @@ pub fn navigation_drawer(
 }
 
 /// A drawer's section heading.
-pub fn drawer_headline(name: str, s: Scheme, caption: str) -> ui.Node {
+pub fn drawer_headline<Msg>(name: str, s: Scheme, caption: str) -> ui.Node<Msg> {
     let role = title_small()
     return ui.decorated(
         ui.text_of(

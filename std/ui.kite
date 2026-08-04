@@ -109,13 +109,16 @@ pub enum Content {
     Text(str)
 }
 
-pub struct Node {
-    pub name: str
-    pub style: Style
-    pub content: Content
-    pub children: [Node]
-    /// This subtree is one interactive thing, and this is its id — the string
-    /// the application's `update` is handed back. Nil for a plain box.
+/// Everything a control states about itself, in one value.
+///
+/// One field rather than five loose ones on `Node`, because the combinations
+/// are not independent. A meaning with no identity is unreachable — activation
+/// and focus find controls by id — and text being edited by something that is
+/// not a control is not a state anything can act on. Loose fields would make
+/// those spellable and leave every reader to decide what they meant; a single
+/// optional makes "is this a control" one question with one answer.
+pub struct Control<Msg> {
+    /// Who this is: hit-testing, focus order, and the semantics tree.
     ///
     /// It replaces a naming convention. A control used to be found by
     /// splitting a node's name on `:` — `checkbox:read3:tick` was part of the
@@ -125,10 +128,48 @@ pub struct Node {
     /// selected nothing. A field cannot be collided with by accident.
     ///
     /// The id alone, with no *kind* in it. One string carrying two meanings
-    /// and punctuation to part them is what went wrong the first time; a
-    /// design system knows what it built, and the application knows what it
-    /// asked for.
-    pub role: Option<str>
+    /// and punctuation to part them is what went wrong the first time.
+    pub id: str
+    /// What activating this says: a value, built when the node was built. The
+    /// row for task 3 carries `Msg.Toggle(3)`, constructed by the code that
+    /// knew the index rather than parsed back out of a name. Nil for a control
+    /// that is a place rather than an action.
+    pub msg: Option<Msg>
+    /// The text this control is editing, or nil for not editable.
+    pub edits: Option<str>
+    /// Whether the model believes this control holds focus.
+    ///
+    /// Set by [`with_focus`] over the whole tree rather than by each component,
+    /// which is what keeps "exactly one control is focused" true by
+    /// construction. It is deliberately *not* derived from an animated focus
+    /// ring: a ring fading out and a ring fading in overlap, and for those few
+    /// frames two controls would claim focus.
+    pub focused: bool
+    /// Whether this control answers at all. A disabled control lays out and
+    /// paints exactly as it did; it leaves focus order, and it means nothing
+    /// when activated.
+    pub enabled: bool
+}
+
+/// The message type of a tree that says nothing.
+///
+/// A tree with no controls still has to name a message type, and in such a
+/// program the parameter is doing no work — which is the honest description of
+/// that program rather than a wart to hide. This is the name for it. An enum
+/// with no variants has no values, so a `Node<Silent>` is one in which no
+/// control *can* carry a meaning: the layout demos and the golden tests say so
+/// in their types instead of picking an unrelated type and hoping a reader
+/// understands why.
+pub enum Silent {}
+
+pub struct Node<Msg> {
+    pub name: str
+    pub style: Style
+    pub content: Content
+    pub children: [Node<Msg>]
+    /// This subtree is one interactive thing, and this is what it says about
+    /// itself. Nil for a plain box.
+    pub control: Option<Control<Msg>>
     /// How the box looks. The layout never reads this.
     pub decor: Decor
 }
@@ -166,6 +207,12 @@ pub struct Frame {
     /// Whether this frame is the control itself rather than something inside
     /// one, which is what focus order needs to count each control once.
     pub is_control: bool
+    /// Whether the control this frame belongs to answers. Carried separately
+    /// from `is_control` rather than folded into it, because the two are asked
+    /// by different callers: hit-testing wants to know what is under the
+    /// pointer even when it is inert, and focus order wants only what can be
+    /// reached. One flag standing for both is the mistake `role` made.
+    pub enabled: bool
     pub decor: Decor
 }
 
@@ -225,34 +272,145 @@ pub fn spaced(base: Style, amount: float) -> Style {
     return Style{..base, gap: amount }
 }
 
-/// The same node, made a control: it answers to hit-testing and takes focus.
-pub fn control(node: Node, id: str) -> Node {
-    return Node{..node, role: id }
+/// This node's control, or a fresh one under `id`.
+///
+/// Every setter below goes through here, so they compose: making a field
+/// editable and then giving it a meaning leaves it editable, rather than the
+/// second call quietly discarding what the first said. A setter that reset the
+/// fields it does not mention would make the order of two independent
+/// statements matter, which is the kind of rule nobody remembers.
+fn controlled<Msg>(node: Node<Msg>, id: str) -> Control<Msg> {
+    let existing = node.control
+    if existing != nil {
+        return Control{..existing, id: id }
+    }
+    return Control{ id: id, msg: nil, edits: nil, focused: false, enabled: true }
+}
+
+/// The same node, made a control that is a place rather than an action:
+/// hit-testable and focusable, saying nothing when activated.
+pub fn control<Msg>(node: Node<Msg>, id: str) -> Node<Msg> {
+    return Node{..node, control: controlled(node, id) }
+}
+
+/// The same node, made a control that says something when activated.
+///
+/// `id` is who it is and `msg` is what it means — the two set together,
+/// because a meaning without an identity would be unreachable.
+pub fn means<Msg>(node: Node<Msg>, id: str, msg: Msg) -> Node<Msg> {
+    return Node{..node, control: Control{..controlled(node, id), msg: msg } }
+}
+
+/// The same node, made an editable control currently showing `value`.
+///
+/// The tree carries the current text down and an edit carries the next text
+/// up, so the model stays the only thing that remembers what a field holds.
+pub fn editable<Msg>(node: Node<Msg>, id: str, value: str) -> Node<Msg> {
+    return Node{..node, control: Control{..controlled(node, id), edits: value } }
+}
+
+/// The same control, turned off: still laid out, still painted, no longer in
+/// focus order and no longer meaning anything. A node that is not a control
+/// is returned unchanged — there is nothing to disable.
+pub fn disabled<Msg>(node: Node<Msg>) -> Node<Msg> {
+    let mine = node.control
+    if mine == nil {
+        return node
+    }
+    return Node{..node, control: Control{..mine, enabled: false } }
+}
+
+/// The tree, with focus where the model says it is.
+///
+/// Applied once at the root rather than by each component, which is what makes
+/// "exactly one control is focused" true by construction instead of true by
+/// thirty call sites agreeing. Passing `nil` focuses nothing, which is the
+/// honest state before anything has been touched.
+pub fn with_focus<Msg>(root: Node<Msg>, id: Option<str>) -> Node<Msg> {
+    var children: [Node<Msg>] = []
+    for child in root.children {
+        children.push(with_focus(child, id))
+    }
+    let mine = root.control
+    if mine == nil {
+        return Node{..root, children: children }
+    }
+    // Narrowing works on a local through an `if`, not through `&&` inside an
+    // expression, so the optional is opened before it is compared.
+    var holds = false
+    if id != nil {
+        holds = mine.id == id
+    }
+    return Node{..root, children: children, control: Control{..mine, focused: holds } }
+}
+
+/// The control with this id, anywhere in the tree, or nil.
+///
+/// Dispatch is *derived* rather than kept. An application could maintain a
+/// `{id: Msg}` table beside its tree and look the answer up in one step, and
+/// the reader demo is the standing evidence for what happens next: a second
+/// tree-shaped thing maintained by hand falls out of step with the first, and
+/// nothing tells you. A walk cannot disagree with the tree it walked.
+pub fn control_of<Msg>(root: Node<Msg>, id: str) -> Option<Control<Msg>> {
+    let mine = root.control
+    if mine != nil {
+        if mine.id == id {
+            return mine
+        }
+    }
+    for child in root.children {
+        let found = control_of(child, id)
+        if found != nil {
+            return found
+        }
+    }
+    return nil
+}
+
+/// What activating the control at a point would say, or nil.
+///
+/// Nil covers three different situations on purpose — nothing was hit, what
+/// was hit is a place rather than an action, and what was hit is disabled —
+/// because an application does the same thing in all three: nothing. A caller
+/// that needs to tell them apart has [`control_at`] and [`control_of`].
+pub fn msg_at<Msg>(root: Node<Msg>, frames: [Frame], x: float, y: float) -> Option<Msg> {
+    let id = control_at(frames, x, y)
+    if id == nil {
+        return nil
+    }
+    let found = control_of(root, id)
+    if found == nil {
+        return nil
+    }
+    if !found.enabled {
+        return nil
+    }
+    return found.msg
 }
 
 /// The same node, decorated. Layout is unaffected — that is the invariant.
-pub fn decorated(node: Node, how: Decor) -> Node {
+pub fn decorated<Msg>(node: Node<Msg>, how: Decor) -> Node<Msg> {
     return Node{..node, decor: how }
 }
 
-pub fn box_of(name: str, base: Style, children: [Node]) -> Node {
+pub fn box_of<Msg>(name: str, base: Style, children: [Node<Msg>]) -> Node<Msg> {
     return Node{
         name: name,
         style: base,
         content: Content.Empty,
         children: children,
-        role: nil,
+        control: nil,
         decor: no_decor(),
     }
 }
 
-pub fn text_of(name: str, base: Style, body: str) -> Node {
+pub fn text_of<Msg>(name: str, base: Style, body: str) -> Node<Msg> {
     return Node{
         name: name,
         style: base,
         content: Content.Text(body),
         children: [],
-        role: nil,
+        control: nil,
         decor: no_decor(),
     }
 }
@@ -451,7 +609,7 @@ fn is_row(a: Axis) -> bool {
 /// A fixed width or height wins outright. Otherwise a leaf measures its
 /// content and a box measures its children: summed along the main axis with
 /// the gaps, and the largest along the cross axis.
-pub fn measure(node: Node) -> Size {
+pub fn measure<Msg>(node: Node<Msg>) -> Size {
     let pad = node.style.padding
     let inner = measure_content(node)
 
@@ -471,7 +629,7 @@ pub fn measure(node: Node) -> Size {
     return Size{ width: w, height: h }
 }
 
-fn measure_content(node: Node) -> Size {
+fn measure_content<Msg>(node: Node<Msg>) -> Size {
     let body = match node.content {
         Empty => ""
         Text(s) => s
@@ -523,12 +681,12 @@ fn measure_content(node: Node) -> Size {
 /// Lay a tree out inside a viewport, producing one frame per node in paint
 /// order — parents before their children, which is the order a painter needs
 /// and the reverse of the order hit-testing needs.
-pub fn layout(root: Node, viewport: Size) -> [Frame] {
+pub fn layout<Msg>(root: Node<Msg>, viewport: Size) -> [Frame] {
     let fixed_w = root.style.width
     let fixed_h = root.style.height
     let w = if fixed_w != nil { fixed_w } else { viewport.width }
     let h = if fixed_h != nil { fixed_h } else { viewport.height }
-    return arrange(root, Rect{ x: 0.0, y: 0.0, width: w, height: h }, 0, nil)
+    return arrange(root, Rect{ x: 0.0, y: 0.0, width: w, height: h }, 0, nil, true)
 }
 
 /// How far in the first child sits.
@@ -568,15 +726,23 @@ fn cross_offset(a: Align, available: float, natural: float) -> float {
     }
 }
 
-fn arrange(node: Node, rect: Rect, depth: int, inherited: Option<str>) -> [Frame] {
-    // A node with a role owns itself and everything under it.
-    // Narrowing turns `mine` into a `str` inside the guard, so the two are
+fn arrange<Msg>(
+    node: Node<Msg>,
+    rect: Rect,
+    depth: int,
+    inherited: Option<str>,
+    inherited_enabled: bool,
+) -> [Frame] {
+    // A control owns itself and everything under it.
+    // Narrowing turns `mine` into a `Control` inside the guard, so the two are
     // assigned rather than chosen between: a value `if` needs both branches to
     // have the one type, and here they deliberately do not.
-    let mine = node.role
+    let mine = node.control
     var owner = inherited
+    var live = inherited_enabled
     if mine != nil {
-        owner = mine
+        owner = mine.id
+        live = mine.enabled
     }
     let pad = node.style.padding
     let inner = Rect{
@@ -600,6 +766,7 @@ fn arrange(node: Node, rect: Rect, depth: int, inherited: Option<str>) -> [Frame
             weight: node.style.weight,
             control: owner,
             is_control: mine != nil,
+            enabled: live,
             decor: node.decor,
         },
     ]
@@ -645,7 +812,7 @@ fn arrange(node: Node, rect: Rect, depth: int, inherited: Option<str>) -> [Frame
         } else {
             Rect { x: inner.x + offset, y: inner.y + cursor, width: across, height: along }
         }
-        frames = concat(frames, arrange(child, child_rect, depth + 1, owner))
+        frames = concat(frames, arrange(child, child_rect, depth + 1, owner, live))
         cursor = cursor + along + between
     }
 
@@ -705,7 +872,10 @@ pub fn frame_of(frames: [Frame], name: str) -> Option<Frame> {
 pub fn focus_order(frames: [Frame]) -> [str] {
     var out: [str] = []
     for frame in frames {
-        if frame.is_control {
+        // A disabled control is still laid out and still hit-tested — the
+        // pointer is entitled to know what it is over — but Tab must not stop
+        // on something that cannot answer.
+        if frame.is_control && frame.enabled {
             let id = frame.control
             if id != nil {
                 out.push(id)

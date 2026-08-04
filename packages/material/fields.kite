@@ -58,18 +58,18 @@ pub fn FIELD_HEIGHT() -> float {
 /// colour match — so the label rises inside the field instead, which is the
 /// filled variant's placement and is honest about what it is. Everything else
 /// about the outlined field is exact.
-pub fn outlined_field(
+pub fn outlined_field<Msg>(
     s: Scheme,
     id: str,
     value: str,
     placeholder: str,
     width: float,
     state: State,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     return outlined_field_of(s, id, Field{..field(placeholder, value, width) }, state)
 }
 
-pub fn outlined_field_of(s: Scheme, id: str, spec: Field, state: State) -> ui.Node {
+pub fn outlined_field_of<Msg>(s: Scheme, id: str, spec: Field, state: State) -> ui.Node<Msg> {
     let accent = field_accent(s, spec, state)
     let edge = mix(s.outline, accent, maxf(state.focus, if spec.error { 1.0 } else { 0.0 }))
     let thickness = math.lerp(1.0, 2.0, maxf(state.focus, if spec.error { 1.0 } else { 0.0 }))
@@ -83,18 +83,18 @@ pub fn outlined_field_of(s: Scheme, id: str, spec: Field, state: State) -> ui.No
 
 /// A filled text field: a container and an activity indicator instead of an
 /// outline. Material's default of the two.
-pub fn filled_field(
+pub fn filled_field<Msg>(
     s: Scheme,
     id: str,
     value: str,
     placeholder: str,
     width: float,
     state: State,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     return filled_field_of(s, id, Field{..field(placeholder, value, width) }, state)
 }
 
-pub fn filled_field_of(s: Scheme, id: str, spec: Field, state: State) -> ui.Node {
+pub fn filled_field_of<Msg>(s: Scheme, id: str, spec: Field, state: State) -> ui.Node<Msg> {
     let base = if state.disabled {
         disabled_container(s, s.surface)
     } else {
@@ -105,14 +105,14 @@ pub fn filled_field_of(s: Scheme, id: str, spec: Field, state: State) -> ui.Node
 
 /// A search field: the same, at full radius, which is what Material's search
 /// bar is. No label rises in one — a search bar's placeholder simply goes away.
-pub fn search_field(
+pub fn search_field<Msg>(
     s: Scheme,
     id: str,
     value: str,
     placeholder: str,
     width: float,
     state: State,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let container = layered(s.surface_container_high, s.on_surface, state)
     var decor = ui.rounded(container, SHAPE_FULL())
     if state.focus > 0.0 {
@@ -123,8 +123,16 @@ pub fn search_field(
     let ink = if value.len() == 0 { s.on_surface_variant } else { s.on_surface }
     let boxed = ui.sized(ui.in_font(ui.style(), role.size, role.weight), width, FIELD_HEIGHT())
     let style = ui.Style{..boxed, padding: ui.insets_xy(space(4), 0.0) }
-    let node = ui.text_of(id, style, shown)
-    return ui.control(ui.decorated(node, ui.vertically_centered(ui.inked(decor, ink))), id)
+    let node: ui.Node<Msg> = ui.text_of(id, style, shown)
+    let whole = ui.editable(
+        ui.decorated(node, ui.vertically_centered(ui.inked(decor, ink))),
+        id,
+        value,
+    )
+    if state.disabled {
+        return ui.disabled(whole)
+    }
+    return whole
 }
 
 fn search_text(value: str, placeholder: str, state: State) -> str {
@@ -164,14 +172,14 @@ fn risen(spec: Field, state: State) -> float {
     return state.focus
 }
 
-fn field_body(
+fn field_body<Msg>(
     s: Scheme,
     id: str,
     spec: Field,
     state: State,
     container: ui.Decor,
     indicated: bool,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let label_role = body_large()
     let small_role = body_small()
     let float_amount = risen(spec, state)
@@ -198,7 +206,7 @@ fn field_body(
     let placeholder = if state.focused && spec.value.len() == 0 { spec.placeholder } else { "" }
     let value_line = if spec.value.len() > 0 { shown_value } else { placeholder }
 
-    var stack: [ui.Node] = [
+    var stack: [ui.Node<Msg>] = [
         spacer("\(id)-lead", 0.0),
         ui.decorated(
             ui.text_of("\(id)-label", ui.in_font(ui.style(), label_size, label_role.weight), spec.label),
@@ -221,7 +229,7 @@ fn field_body(
             ui.ink(value_ink),
         ),
     )
-    let column = ui.box_of(
+    let column: ui.Node<Msg> = ui.box_of(
         "\(id)-content",
         ui.Style {
             ..ui.column(),
@@ -264,12 +272,16 @@ fn field_body(
             ),
         )
     }
-    let whole = ui.box_of(
+    let whole: ui.Node<Msg> = ui.box_of(
         id,
         ui.Style {..ui.column(), align: ui.Align.Stretch, width: spec.width },
         rows,
     )
-    return ui.control(ui.decorated(whole, ui.ink(s.on_surface)), id)
+    let field = ui.editable(ui.decorated(whole, ui.ink(s.on_surface)), id, spec.value)
+    if state.disabled {
+        return ui.disabled(field)
+    }
+    return field
 }
 
 /// A text area: the same field, several lines tall.
@@ -277,7 +289,7 @@ fn field_body(
 /// The value wraps because the box has a width, which is `std/ui`'s own rule
 /// for when text wraps — so this is a filled field with its height given rather
 /// than a component with anything new in it.
-pub fn text_area(
+pub fn text_area<Msg>(
     s: Scheme,
     id: str,
     value: str,
@@ -285,7 +297,7 @@ pub fn text_area(
     width: float,
     height: float,
     state: State,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let role = body_large()
     let container = if state.disabled {
         disabled_container(s, s.surface)
@@ -310,5 +322,13 @@ pub fn text_area(
         height: height,
         padding: ui.insets_xy(space(4), space(3)),
     }
-    return ui.control(ui.decorated(ui.text_of(id, style, shown), ui.inked(decor, ink)), id)
+    let shell: ui.Node<Msg> = ui.decorated(
+        ui.text_of(id, style, shown),
+        ui.inked(decor, ink),
+    )
+    let whole = ui.editable(shell, id, value)
+    if state.disabled {
+        return ui.disabled(whole)
+    }
+    return whole
 }

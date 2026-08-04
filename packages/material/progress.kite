@@ -44,7 +44,7 @@ fn LINEAR_GAP() -> float {
 /// Material 3 separates the two halves with a gap and marks the end of the
 /// track with a stop indicator, which is what tells a full bar from a bar that
 /// has simply been drawn wide.
-pub fn linear_progress(name: str, s: Scheme, progress: float, width: float) -> ui.Node {
+pub fn linear_progress<Msg>(name: str, s: Scheme, progress: float, width: float) -> ui.Node<Msg> {
     let fraction = clampf(progress, 0.0, 1.0)
     let stop = LINEAR_HEIGHT()
     let usable = maxf(0.0, width - LINEAR_GAP() - stop)
@@ -73,7 +73,7 @@ pub fn linear_progress(name: str, s: Scheme, progress: float, width: float) -> u
 /// milliseconds it is handed each frame, which is the only place time exists.
 /// Material sweeps a bar along the track and back; this is that sweep, and it
 /// is pure layout — a leading spacer, the bar, and whatever is left.
-pub fn linear_indeterminate(name: str, s: Scheme, phase: float, width: float) -> ui.Node {
+pub fn linear_indeterminate<Msg>(name: str, s: Scheme, phase: float, width: float) -> ui.Node<Msg> {
     let t = phase - math.floor(phase)
     // The bar is a third of the track and travels one and a third track-widths,
     // so it enters at one end while still leaving at the other.
@@ -127,7 +127,7 @@ fn CIRCULAR_STROKE() -> float {
 
 /// The space a circular indicator occupies. It draws nothing — see the note at
 /// the top of this file — so it is a box of the right size and no more.
-pub fn circular_progress(name: str, side: float) -> ui.Node {
+pub fn circular_progress<Msg>(name: str, side: float) -> ui.Node<Msg> {
     return ui.box_of(name, ui.sized(ui.style(), side, side), [])
 }
 

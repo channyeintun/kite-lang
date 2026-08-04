@@ -2797,6 +2797,7 @@ impl<'a> Checker<'a> {
         callee_span: Span,
         args: &[ast::Expr],
         span: Span,
+        expected: Option<TyId>,
     ) -> hir::Expr {
         let sig_params = self.sigs[id as usize].params.clone();
         let ret = self.sigs[id as usize].ret;
@@ -2807,11 +2808,23 @@ impl<'a> Checker<'a> {
             self.arity_error(text, args.len(), sig_params.len(), span, Some(decl_span));
         }
 
-        // A generic call works its type arguments out from the arguments
-        // themselves. There is no turbofish, so a parameter that appears in no
-        // parameter type cannot be supplied at all — which is reported rather
-        // than silently defaulted.
+        // A generic call works its type arguments out from the values around
+        // it. There is no turbofish, so a parameter nothing mentions cannot be
+        // supplied at all — which is reported rather than silently defaulted.
+        //
+        // The arguments are the usual source, and the type the result is
+        // *used* as is the other one. It is consulted first, so that what it
+        // settles is known while the arguments are checked: `ui.box_of(name,
+        // style, [])` returning a `Node<Msg>` needs `Msg` before the empty
+        // slice can be given an element type, and no argument will ever supply
+        // it. Seeding only ever fills a parameter that was unknown, so a call
+        // that compiles without a context compiles the same way with one.
         let mut subst: Vec<Option<TyId>> = vec![None; generics.len()];
+        if !generics.is_empty() {
+            if let Some(want) = expected {
+                self.unify(ret, want, &generics, &mut subst, span);
+            }
+        }
         let mut hargs = Vec::with_capacity(args.len());
         for (i, a) in args.iter().enumerate() {
             let declared = sig_params.get(i).copied();
@@ -2901,6 +2914,7 @@ impl<'a> Checker<'a> {
                         *fspan,
                         args,
                         span,
+                        expected,
                     ),
                     Some(Res::Type(ti)) => {
                         self.associated_call_named(ti, &name.name, *fspan, args, span, expected)
@@ -2919,7 +2933,7 @@ impl<'a> Checker<'a> {
         };
 
         match self.resolved.lookup_use(p.span) {
-            Some(Res::Fn(id)) => self.fn_call(id, &p.text(), p.span, args, span),
+            Some(Res::Fn(id)) => self.fn_call(id, &p.text(), p.span, args, span, expected),
 
             Some(Res::Builtin(b)) => self.builtin_call(b, args, span),
 
@@ -3924,6 +3938,31 @@ impl<'a> Checker<'a> {
         // An annotation settles it outright: `let p: Pair<int, str> = Pair{..}`.
         if let Some(want) = expected {
             if let TyKind::Struct(s) = *self.types.kind(want) {
+                if self.instance_of(s) == Some(template) {
+                    return Some(s);
+                }
+            }
+        }
+
+        // So does a spread base. `Control{..base, enabled: false}` is the same
+        // type as `base`, whatever the listed fields happen to mention — and
+        // the fields alone routinely mention nothing: a functional update that
+        // changes only the non-generic part of a value would otherwise be
+        // unwritable inside the generic function that holds it, which is the
+        // one place it is most needed.
+        //
+        // Checked before the field pass rather than folded into it, because it
+        // is an answer rather than a constraint: the base's type names every
+        // argument at once.
+        // The base is checked again for real once the specialisation is known,
+        // so this look is a trial like the field pass below: its diagnostics
+        // are discarded rather than reported twice.
+        if let Some(base) = &lit.base {
+            let mut scratch = DiagBag::new();
+            std::mem::swap(self.diags, &mut scratch);
+            let seen = self.expr(base, None);
+            std::mem::swap(self.diags, &mut scratch);
+            if let TyKind::Struct(s) = *self.types.kind(seen.ty) {
                 if self.instance_of(s) == Some(template) {
                     return Some(s);
                 }
@@ -5309,10 +5348,52 @@ impl<'a> Checker<'a> {
     /// parameter — in which case there is nothing useful to expect of an
     /// argument, and it is checked on its own terms.
     fn apply_subst_opt(&mut self, ty: TyId, subst: &[Option<TyId>]) -> Option<TyId> {
-        let applied = self.apply_subst(ty, subst);
-        (!self.mentions_param(applied)).then_some(applied)
+        if self.unsolved_in(ty, subst) {
+            return None;
+        }
+        Some(self.apply_subst(ty, subst))
     }
 
+    /// Whether this *declared* type still mentions a parameter the call has
+    /// not worked out yet.
+    ///
+    /// Asked of the signature rather than of the substituted result, because
+    /// the result cannot answer it. Inside a generic function the enclosing
+    /// function's own parameters are ordinary bound types — as good as
+    /// concrete — and they are `TyKind::Param` exactly like an unsolved one,
+    /// down to sharing an index. Testing the result therefore threw away every
+    /// expectation inside a generic function: `ui.decorated(ui.text_of(…), …)`
+    /// could not tell its argument what it wanted, though it knew.
+    ///
+    /// The declared type has no such ambiguity. Every parameter in it is the
+    /// callee's, so `subst` answers for each one directly.
+    fn unsolved_in(&self, ty: TyId, subst: &[Option<TyId>]) -> bool {
+        match self.types.kind(ty) {
+            TyKind::Param { index, .. } => {
+                subst.get(*index as usize).copied().flatten().is_none()
+            }
+            TyKind::Struct(s) => self
+                .types
+                .struct_origin_of(*s)
+                .is_some_and(|(_, args)| args.iter().any(|a| self.unsolved_in(*a, subst))),
+            TyKind::Enum(e) => self
+                .types
+                .enum_origin_of(*e)
+                .is_some_and(|(_, args)| args.iter().any(|a| self.unsolved_in(*a, subst))),
+            TyKind::Slice(e) | TyKind::Optional(e) | TyKind::Fallible(e) => {
+                self.unsolved_in(*e, subst)
+            }
+            TyKind::Map(k, v) => self.unsolved_in(*k, subst) || self.unsolved_in(*v, subst),
+            TyKind::Tuple(es) => es.iter().any(|e| self.unsolved_in(*e, subst)),
+            TyKind::Fn { params, ret } => {
+                params.iter().any(|p| self.unsolved_in(*p, subst))
+                    || self.unsolved_in(*ret, subst)
+            }
+            _ => false,
+        }
+    }
+
+    #[allow(dead_code)]
     fn mentions_param(&self, ty: TyId) -> bool {
         match self.types.kind(ty) {
             TyKind::Param { .. } => true,

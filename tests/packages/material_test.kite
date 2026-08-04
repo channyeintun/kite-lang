@@ -11,6 +11,19 @@ use std/math
 use std/ui
 use material
 
+/// One message with the id in it: this file builds every component the
+/// package has, and what each would say is beside the point — that it *can*
+/// say something, in a type the caller chose, is the point.
+enum Msg {
+    Pressed(str)
+}
+
+/// No children, with the element type stated — an empty slice literal has
+/// nothing to infer from.
+fn empty() -> [ui.Node<Msg>] {
+    return []
+}
+
 fn near(found: float, want: float, what: str) -> error {
     return test.equal_float(found, want, 0.001, what)
 }
@@ -238,25 +251,26 @@ fn layer_checks() -> [error] {
 
 // ---- the interaction state machine ------------------------------------------------
 
-fn tree(s: material.Scheme, inter: material.Interaction) -> ui.Node {
+fn tree(s: material.Scheme, inter: material.Interaction) -> ui.Node<Msg> {
     return ui.box_of(
         "root",
         ui.spaced(ui.padded(ui.Style{..ui.column() }, 16.0), 8.0),
         [
-            material.filled_button(s, "save", "Save", material.state_of(inter, "save")),
-            material.text_button(s, "cancel", "Cancel", material.state_of(inter, "cancel")),
+            material.filled_button(s, "save", Msg.Pressed("save"), "Save", material.state_of(inter, "save")),
+            material.text_button(s, "cancel", Msg.Pressed("cancel"), "Cancel", material.state_of(inter, "cancel")),
         ],
     )
 }
 
 /// Six 72dp rows, for sweeping a pointer down.
-fn list_of_rows(s: material.Scheme, inter: material.Interaction) -> ui.Node {
-    var out: [ui.Node] = []
+fn list_of_rows(s: material.Scheme, inter: material.Interaction) -> ui.Node<Msg> {
+    var out: [ui.Node<Msg>] = []
     for i in 0..6 {
         out.push(
             material.list_item_two(
                 s,
                 "row-\(i)",
+                Msg.Pressed("row-\(i)"),
                 "Row \(i)",
                 "supporting",
                 [],
@@ -434,7 +448,7 @@ fn component_checks() -> [error] {
 
     // Material's own measurements. A button is 40dp tall with 24dp either side
     // of its label; a chip is 32; an icon button is a 40dp square.
-    let button = ui.layout(material.filled_button(s, "b", "Save", material.rest()), size)
+    let button = ui.layout(material.filled_button(s, "b", Msg.Pressed("b"), "Save", material.rest()), size)
     let b = ui.frame_of(button, "b")
     if b == nil {
         out.push(test.fail("a button lays out"))
@@ -444,14 +458,14 @@ fn component_checks() -> [error] {
     let label = ui.text_size_in("Save", material.label_large().size, material.label_large().weight)
     out.push(near(b.rect.width, label.width + 48.0, "with twenty-four either side"))
 
-    let icon = ui.layout(material.icon_button(s, "i", "★", material.rest()), size)
+    let icon = ui.layout(material.icon_button(s, "i", Msg.Pressed("i"), "★", material.rest()), size)
     let i = ui.frame_of(icon, "i")
     if i != nil {
         out.push(near(i.rect.width, 40.0, "an icon button is a forty-dp square"))
         out.push(near(i.rect.height, 40.0, "on both axes"))
     }
 
-    let fab = ui.layout(material.fab(s, "f", "＋", material.rest()), size)
+    let fab = ui.layout(material.fab(s, "f", Msg.Pressed("f"), "＋", material.rest()), size)
     let f = ui.frame_of(fab, "f")
     if f != nil {
         out.push(near(f.rect.height, 56.0, "a FAB is fifty-six"))
@@ -460,7 +474,7 @@ fn component_checks() -> [error] {
     // A pressed button's corners square off, which is Material 3 Expressive's
     // press morph and the clearest evidence a press registered.
     let held = material.State{..material.rest(), press: 1.0, pressed: true }
-    let pressed_frames = ui.layout(material.filled_button(s, "b", "Save", held), size)
+    let pressed_frames = ui.layout(material.filled_button(s, "b", Msg.Pressed("b"), "Save", held), size)
     let p = ui.frame_of(pressed_frames, "b")
     if p != nil {
         out.push(test.is_true(p.decor.radius < b.decor.radius, "a held button is squarer"))
@@ -490,48 +504,48 @@ fn component_checks() -> [error] {
     return out
 }
 
-fn one_of_everything(s: material.Scheme, inter: material.Interaction) -> ui.Node {
+fn one_of_everything(s: material.Scheme, inter: material.Interaction) -> ui.Node<Msg> {
     let r = material.rest()
     return ui.box_of(
         "gallery",
         ui.spaced(ui.Style{..ui.column(), align: ui.Align.Start }, 8.0),
         [
-            material.filled_button(s, "g-filled", "Filled", r),
-            material.tonal_button(s, "g-tonal", "Tonal", r),
-            material.outlined_button(s, "g-outlined", "Outlined", r),
-            material.text_button(s, "g-text", "Text", r),
-            material.elevated_button(s, "g-elevated", "Elevated", r),
-            material.icon_button(s, "g-icon", "★", r),
-            material.filled_icon_button(s, "g-icon-filled", "★", r),
-            material.outlined_icon_button(s, "g-icon-out", "★", r),
-            material.icon_toggle(s, "g-toggle", "★", true, material.when_selected(true, false)),
-            material.small_fab(s, "g-fab-s", "＋", r),
-            material.fab(s, "g-fab", "＋", r),
-            material.large_fab(s, "g-fab-l", "＋", r),
-            material.extended_fab(s, "g-fab-x", "＋", "Compose", r),
-            material.assist_chip(s, "g-chip-a", "Assist", r),
-            material.filter_chip(s, "g-chip-f", "Filter", true, material.when_selected(true, false)),
-            material.input_chip(s, "g-chip-i", "Input", r),
-            material.suggestion_chip(s, "g-chip-s", "Suggest", r),
-            material.checkbox(s, "g-check", "Check", true, material.when_selected(true, false)),
-            material.radio(s, "g-radio", "Radio", true, material.when_selected(true, false)),
-            material.switch(s, "g-switch", "Switch", true, material.when_selected(true, false)),
+            material.filled_button(s, "g-filled", Msg.Pressed("g-filled"), "Filled", r),
+            material.tonal_button(s, "g-tonal", Msg.Pressed("g-tonal"), "Tonal", r),
+            material.outlined_button(s, "g-outlined", Msg.Pressed("g-outlined"), "Outlined", r),
+            material.text_button(s, "g-text", Msg.Pressed("g-text"), "Text", r),
+            material.elevated_button(s, "g-elevated", Msg.Pressed("g-elevated"), "Elevated", r),
+            material.icon_button(s, "g-icon", Msg.Pressed("g-icon"), "★", r),
+            material.filled_icon_button(s, "g-icon-filled", Msg.Pressed("g-icon-filled"), "★", r),
+            material.outlined_icon_button(s, "g-icon-out", Msg.Pressed("g-icon-out"), "★", r),
+            material.icon_toggle(s, "g-toggle", Msg.Pressed("g-toggle"), "★", true, material.when_selected(true, false)),
+            material.small_fab(s, "g-fab-s", Msg.Pressed("g-fab-s"), "＋", r),
+            material.fab(s, "g-fab", Msg.Pressed("g-fab"), "＋", r),
+            material.large_fab(s, "g-fab-l", Msg.Pressed("g-fab-l"), "＋", r),
+            material.extended_fab(s, "g-fab-x", Msg.Pressed("g-fab-x"), "＋", "Compose", r),
+            material.assist_chip(s, "g-chip-a", Msg.Pressed("g-chip-a"), "Assist", r),
+            material.filter_chip(s, "g-chip-f", Msg.Pressed("g-chip-f"), "Filter", true, material.when_selected(true, false)),
+            material.input_chip(s, "g-chip-i", Msg.Pressed("g-chip-i"), "Input", r),
+            material.suggestion_chip(s, "g-chip-s", Msg.Pressed("g-chip-s"), "Suggest", r),
+            material.checkbox(s, "g-check", Msg.Pressed("g-check"), "Check", true, material.when_selected(true, false)),
+            material.radio(s, "g-radio", Msg.Pressed("g-radio"), "Radio", true, material.when_selected(true, false)),
+            material.switch(s, "g-switch", Msg.Pressed("g-switch"), "Switch", true, material.when_selected(true, false)),
             material.slider(s, "g-slider", 0.5, 200.0, r),
             material.filled_field(s, "g-field", "value", "Label", 240.0, r),
             material.outlined_field(s, "g-field-o", "", "Label", 240.0, r),
             material.search_field(s, "g-search", "", "Search", 240.0, r),
             material.text_area(s, "g-area", "text", "Notes", 240.0, 96.0, r),
-            material.list_item(s, "g-list", "One line", [], r),
-            material.list_item_two(s, "g-list2", "Two", "Lines", [], r),
-            material.list_item_three(s, "g-list3", "Three", "Of", "Them", [], r),
-            material.menu_item(s, "g-menu", "Cut", "⌘X", r),
-            material.drawer_item(s, "g-drawer", "✉", "Inbox", "24", true, material.when_selected(true, false)),
-            material.rail_item(s, "g-rail", "♫", "Library", true, material.when_selected(true, false)),
-            material.bar_item(s, "g-bar", "♫", "Library", false, r),
-            material.tab(s, "g-tab", "Songs", true, material.when_selected(true, false)),
-            material.secondary_tab(s, "g-tab2", "Albums", false, r),
-            material.clickable_card("g-card", s, [], r),
-            material.snackbar_action(s, "g-snack", "Undo", r),
+            material.list_item(s, "g-list", Msg.Pressed("g-list"), "One line", [], r),
+            material.list_item_two(s, "g-list2", Msg.Pressed("g-list2"), "Two", "Lines", [], r),
+            material.list_item_three(s, "g-list3", Msg.Pressed("g-list3"), "Three", "Of", "Them", [], r),
+            material.menu_item(s, "g-menu", Msg.Pressed("g-menu"), "Cut", "⌘X", r),
+            material.drawer_item(s, "g-drawer", Msg.Pressed("g-drawer"), "✉", "Inbox", "24", true, material.when_selected(true, false)),
+            material.rail_item(s, "g-rail", Msg.Pressed("g-rail"), "♫", "Library", true, material.when_selected(true, false)),
+            material.bar_item(s, "g-bar", Msg.Pressed("g-bar"), "♫", "Library", false, r),
+            material.tab(s, "g-tab", Msg.Pressed("g-tab"), "Songs", true, material.when_selected(true, false)),
+            material.secondary_tab(s, "g-tab2", Msg.Pressed("g-tab2"), "Albums", false, r),
+            material.clickable_card("g-card", Msg.Pressed("g-card"), s, empty(), r),
+            material.snackbar_action(s, "g-snack", Msg.Pressed("g-snack"), "Undo", r),
             material.top_app_bar("g-appbar", s, "Title", []),
             material.divider("g-divider", s),
             material.badge("g-badge", s, "12"),

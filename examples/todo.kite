@@ -17,6 +17,17 @@ struct Task {
     done: bool
 }
 
+/// What this application can be told.
+///
+/// `Toggle` carries the index, built by the loop that knew it when it made the
+/// row. The old version minted `"task3"` there and then pattern-matched
+/// ninety-nine possible names in `update` to recover a number it had already
+/// had — which is what a message with a payload is for.
+enum Msg {
+    Add
+    Toggle(int)
+}
+
 struct Model {
     tasks: [Task]
     draft: str
@@ -49,15 +60,16 @@ fn scheme() -> material.Scheme {
     return material.dark()
 }
 
-fn view_node(model: Model) -> ui.Node {
+fn view_node(model: Model) -> ui.Node<Msg> {
     let s = scheme()
-    var rows: [ui.Node] = []
+    var rows: [ui.Node<Msg>] = []
     for i in 0..model.tasks.len() {
         let task = model.tasks[i]
         rows.push(
             material.checkbox(
                 s,
                 "task\(i)",
+                Msg.Toggle(i),
                 task.title,
                 task.done,
                 material.when_focused(model.focused == "task\(i)"),
@@ -65,7 +77,7 @@ fn view_node(model: Model) -> ui.Node {
         )
     }
 
-    let header = ui.box_of(
+    let header: ui.Node<Msg> = ui.box_of(
         "header",
         ui.spaced(ui.padded(ui.Style{..ui.row(), align: ui.Align.Center }, 12.0), 8.0),
         [
@@ -80,20 +92,21 @@ fn view_node(model: Model) -> ui.Node {
             material.filled_button(
                 s,
                 "add",
+                Msg.Add,
                 "Add",
                 material.when_focused(model.focused == "add"),
             ),
         ],
     )
 
-    let list = ui.box_of(
+    let list: ui.Node<Msg> = ui.box_of(
         "list",
         ui.spaced(ui.padded(ui.Style{..ui.column(), align: ui.Align.Stretch }, 12.0), 4.0),
         rows,
     )
 
     let done = count(model.tasks, |t: Task| t.done)
-    let status = ui.box_of(
+    let status: ui.Node<Msg> = ui.box_of(
         "status",
         ui.spaced(ui.padded(ui.column(), 12.0), 4.0),
         [
@@ -115,8 +128,12 @@ fn view_node(model: Model) -> ui.Node {
     )
 }
 
+fn viewport() -> ui.Size {
+    return ui.Size{ width: 640.0, height: 360.0 }
+}
+
 fn frames_of(model: Model) -> [ui.Frame] {
-    return ui.layout(view_node(model), ui.Size{ width: 640.0, height: 360.0 })
+    return ui.layout(view_node(model), viewport())
 }
 
 pub fn view(model: Model) {
@@ -134,20 +151,33 @@ pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
 }
 
 fn clicked(model: Model, x: float, y: float) -> Model {
-    let frames = ui.layout(view_node(model), ui.Size{ width: 640.0, height: 360.0 })
+    let tree = view_node(model)
+    let frames = ui.layout(tree, viewport())
     let hit = ui.control_at(frames, x, y)
     if hit == nil {
         return model
     }
+    // A click both moves focus and activates, and the two are separate facts:
+    // every control takes focus, and only a control with a meaning acts.
     let focused = Model{..model, focused: hit }
-    if hit == "add" {
-        return added(focused)
+    let said = ui.msg_at(tree, frames, x, y)
+    if said == nil {
+        return Model{..focused, message: "typing goes to the field" }
     }
-    let box = task_id(hit)
-    if box != nil {
-        return toggled(focused, box)
+    return act(focused, said)
+}
+
+/// Everything a control in this application can say.
+///
+/// Exhaustive, so a control added with a new variant will not compile until it
+/// is handled here. What it replaces was an `if hit == "add"` and a
+/// `task_id` helper that matched ninety-nine possible names to recover an
+/// index the view already had.
+fn act(model: Model, msg: Msg) -> Model {
+    return match msg {
+        Add => added(model),
+        Toggle(at) => toggled(model, at),
     }
-    return Model{..focused, message: "typing goes to the field" }
 }
 
 fn pressed(model: Model, key: str) -> Model {
@@ -160,25 +190,46 @@ fn pressed(model: Model, key: str) -> Model {
     if key == "ArrowUp" {
         return Model{..model, focused: ui.previous_focus(ui.focus_order(frames_of(model)), model.focused) }
     }
-    if key == "Enter" {
-        if model.focused == "draft" {
-            return added(model)
-        }
-        if model.focused == "add" {
-            return added(model)
-        }
+    // Enter and Space activate the focused control — and what that control
+    // means is asked of the tree, not worked out from its name. Space is the
+    // exception an editable control makes: a field types its space.
+    let focused = ui.control_of(view_node(model), model.focused)
+    // Narrowing works through an `if`, not through `&&` in an expression.
+    var editing = false
+    if focused != nil {
+        editing = focused.edits != nil
     }
-    let box = task_id(model.focused)
-    if box != nil {
-        if key == " " {
-            return toggled(model, box)
+    if key == "Enter" || (key == " " && !editing) {
+        let said = activation(focused)
+        if said != nil {
+            return act(model, said)
+        }
+        // A field with no meaning of its own still submits on Enter, which is
+        // what every form does.
+        if key == "Enter" && editing {
+            return added(model)
         }
         return model
     }
-    if model.focused == "draft" {
+    if editing {
         return Model{..model, draft: material.typed(model.draft, key) }
     }
     return model
+}
+
+/// What a control says when activated, given the control itself.
+///
+/// Disabled is checked here rather than at each call site, because "it looks
+/// pressable and does nothing" is precisely the bug an enabled flag exists to
+/// prevent.
+fn activation(found: Option<ui.Control<Msg>>) -> Option<Msg> {
+    if found == nil {
+        return nil
+    }
+    if !found.enabled {
+        return nil
+    }
+    return found.msg
 }
 
 fn added(model: Model) -> Model {
@@ -229,19 +280,4 @@ fn main() {
     io.print("first task done: \(model.tasks[0].done)")
 
     view(model)
-}
-
-/// A control id that names a task, or nil.
-///
-/// The ids are the application's own — it minted `task0` when it built the row
-/// — so reading one back is a comparison against its own vocabulary rather than
-/// a convention the widget layer imposed. The old `control_id(name, "checkbox")`
-/// asked `std/ui` to parse a kind out of a name, which is the thing that broke.
-fn task_id(name: str) -> Option<int> {
-    for i in 0..99 {
-        if name == "task\(i)" {
-            return i
-        }
-    }
-    return nil
 }

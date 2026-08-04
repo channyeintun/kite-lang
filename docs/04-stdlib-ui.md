@@ -221,13 +221,25 @@ independently implemented (Taffy, Yoga) — which means it can be validated agai
 a reference.
 
 ```kite
-pub struct Node {
+pub struct Node<Msg> {
     pub name: str
     pub style: Style           // where the box goes — the layout reads only this
     pub content: Content       // Empty, or Text(str); a box holds children instead
-    pub children: [Node]
-    pub role: Option<str>      // this subtree is one control, and this is its id
+    pub children: [Node<Msg>]
+    pub control: Option<Control<Msg>>   // this subtree is one control — see below
     pub decor: Decor           // how the box looks — the layout never reads it
+}
+
+/// Everything a control states about itself, in one value rather than five
+/// loose fields, because the combinations are not independent: a meaning with
+/// no identity is unreachable, and text edited by something that is not a
+/// control is not a state anything can act on.
+pub struct Control<Msg> {
+    pub id: str                // who this is: hit-testing, focus order, semantics
+    pub msg: Option<Msg>       // what activating it says, or nil for a place
+    pub edits: Option<str>     // the text it is editing, or nil for not editable
+    pub focused: bool          // set by `with_focus` over the whole tree
+    pub enabled: bool          // out of focus order and inert when false
 }
 
 pub struct Style {
@@ -342,14 +354,17 @@ architecture, chosen because it needs no new language concept — a `struct`, a
 Events come through one door. A click fills `x` and `y`; a key press fills
 `key`; a new kind of event is a new constant rather than a new export, and a
 program that ignores a kind never tests for it. Turning a point into a
-decision is a hit-test against the same tree `view` drew: `ui.control_at`
-answers with the id of the control the point landed in — an id the application
-minted when it built the node — so dispatch is a comparison against the
-application's own vocabulary:
+decision is a hit-test against the same tree `view` drew. `ui.control_at`
+answers with the id of the control the point landed in, and `ui.msg_at` answers
+with what that control *says* — a value the application built when it built the
+node, rather than a string it has to recognise. Dispatch is therefore an
+exhaustive `match` over the application's own vocabulary, so a control whose
+branch was never written fails to compile instead of laying out perfectly and
+doing nothing when pressed:
 
 ```kite
 fn frames_of(model: Model) -> [ui.Frame] {
-    return ui.layout(view_node(model), ui.Size{ width: 640.0, height: 360.0 })
+    return ui.layout(view_node(model), viewport())
 }
 
 pub fn view(model: Model) {
@@ -357,15 +372,29 @@ pub fn view(model: Model) {
 }
 
 fn clicked(model: Model, x: float, y: float) -> Model {
-    let hit = ui.control_at(frames_of(model), x, y)
+    let tree = view_node(model)
+    let frames = ui.layout(tree, viewport())
+    let hit = ui.control_at(frames, x, y)
     if hit == nil {
         return model
     }
+    // A click both moves focus and activates, and the two are separate facts:
+    // every control takes focus, and only a control with a meaning acts.
     let focused = Model{..model, focused: hit }
-    if hit == "add" {
-        return added(focused)
+    let said = ui.msg_at(tree, frames, x, y)
+    if said == nil {
+        return focused
     }
-    return focused
+    return act(focused, said)
+}
+
+/// Exhaustive, which is the point: a control added with a new variant will not
+/// compile until it is handled here.
+fn act(model: Model, msg: Msg) -> Model {
+    return match msg {
+        Add => added(model),
+        Toggle(at) => toggled(model, at),
+    }
 }
 
 fn added(model: Model) -> Model {
@@ -402,12 +431,15 @@ The model is immutable, so it is `Share`
 ([docs/02 §4](02-concurrency.md#4-share-the-invariant-made-nearly-invisible)),
 so it can move across tasks without ceremony.
 
-Two layers are deliberately absent, not forgotten. A **typed message layer** —
-an `enum Msg` a widget produces, in place of a string id matched by hand —
-waits on [§10 question 4](#10-open-questions), because how a message rides on
-a node decides what a `Node` is. An **effect value** — how an update would ask
-for I/O without performing it, keeping the purity the test above leans on —
-arrives with the same decision, because an effect's reply is a message.
+One layer is deliberately absent, not forgotten. An **effect value** — how an
+update would ask for I/O without performing it, keeping the purity the test
+above leans on — is specified in
+[proposal 0001 §7](proposals/0001-typed-messages.md#7-effects-unstarted-tasks)
+and not yet built: it needs the loop to start what an update describes, and the
+loop needs an application ABI this document does not yet name.
+
+The **typed message layer** it used to wait beside has landed; see
+[§10 question 4](#10-open-questions).
 
 ---
 
@@ -536,19 +568,26 @@ Genuinely undecided, and worth deciding before implementation rather than during
    what it sets, and it is a candidate eleventh concept. The widget layer is
    so far the only customer asking; whether one customer justifies a spec
    change is the question.
-4. **Event wiring for the widget layer.** Today a control is a string id the
-   application minted, and `update` compares against its own vocabulary — pure
-   data, and stringly typed. The markup-flavoured alternative, a closure on
-   the node (`on_press: fn() -> Msg`), reads best at the call site and costs
-   the most everywhere else: two closures have no structural equality, the
-   `@derive` walk already refuses function fields, and a handler rebuilt each
-   frame never compares equal to last frame's — so `Node` would need
-   carve-outs from `==`, `Share` and the differ in exactly the places the
-   language is uniform. Between the two sits messages as data — `on_press:
-   Option<Msg>`, a function only where an event carries a payload — which
-   keeps `Node` plain data and every invariant that buys. Leaning there, but
-   it is entangled with question 2: a differ has to decide what handler
-   equality means before either can land.
+4. ~~**Event wiring for the widget layer.**~~ **Settled** by
+   [proposal 0001](proposals/0001-typed-messages.md), as messages-as-data. A
+   node carries `Option<Control<Msg>>`, and a control carries an
+   `Option<Msg>` built where the node was built — so `update` matches
+   exhaustively over the application's own enum instead of comparing strings,
+   and a control whose branch was never written fails to compile.
+
+   The closure alternative (`on_press: fn() -> Msg`) was rejected for the
+   reason it was always going to be: two closures have no structural
+   equality, the `@derive` walk already refuses function fields, and a handler
+   rebuilt each frame never compares equal to last frame's — so `Node` would
+   have needed carve-outs from `==`, `Share` and the differ in exactly the
+   places the language is uniform. Functions live on the `App` and on an
+   `Effect`, and nowhere in the tree.
+
+   What is *not* settled is payload-bearing activation: a slider says a
+   number, which is not known when the node is built, so
+   `material.slider_of` stays identified and unmeaning and its value is
+   recovered from the pointer. That is a proposal of its own, and it is the
+   one still entangled with question 2.
 5. **Fonts on canvas.** Ship a default font subset (~50 KB) so first paint is
    correct, or always use `document.fonts` and accept a flash of unstyled text?
 6. **Native windowing.** `winit` for the native target is the obvious choice, but

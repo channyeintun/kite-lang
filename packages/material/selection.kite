@@ -27,13 +27,14 @@ pub fn CHECKBOX_SIDE() -> float {
 /// Unchecked to checked is a 2dp outline becoming a filled accent square. Both
 /// the fill and the edge cross together on the `select` channel, so what is seen
 /// is the box filling in rather than one picture replacing another.
-pub fn checkbox(s: Scheme, id: str, caption: str, checked: bool, state: State) -> ui.Node {
+pub fn checkbox<Msg>(s: Scheme, id: str, msg: Msg, caption: str, checked: bool, state: State) -> ui.Node<Msg> {
     let side = CHECKBOX_SIDE()
     let amount = chosen_amount(checked, state)
     if state.disabled {
         return checkbox_body(
             s,
             id,
+            msg,
             caption,
             checked,
             state,
@@ -56,21 +57,22 @@ pub fn checkbox(s: Scheme, id: str, caption: str, checked: bool, state: State) -
     }
     // The state layer of a checkbox is a 40dp circle behind the 18dp box, which
     // is why the target is so much larger than the mark.
-    return checkbox_body(s, id, caption, checked, state, decor, mix(s.primary, s.on_primary, amount))
+    return checkbox_body(s, id, msg, caption, checked, state, decor, mix(s.primary, s.on_primary, amount))
 }
 
-fn checkbox_body(
+fn checkbox_body<Msg>(
     s: Scheme,
     id: str,
+    msg: Msg,
     caption: str,
     checked: bool,
     state: State,
     box_decor: ui.Decor,
     tick_ink: int,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let side = CHECKBOX_SIDE()
     let tick = if checked { "✓" } else { "" }
-    let mark = ui.decorated(
+    let mark: ui.Node<Msg> = ui.decorated(
         ui.box_of(
             "\(id)-box",
             ui.sized(ui.Style{..ui.column(), align: ui.Align.Center }, side, side),
@@ -83,7 +85,7 @@ fn checkbox_body(
         ),
         box_decor,
     )
-    let halo = ui.decorated(
+    let halo: ui.Node<Msg> = ui.decorated(
         ui.box_of(
             "\(id)-target",
             ui.Style {
@@ -97,15 +99,15 @@ fn checkbox_body(
         ),
         layer_decor(if checked { s.primary } else { s.on_surface }, state, SHAPE_FULL()),
     )
-    return labelled_control(s, id, halo, caption, state)
+    return labelled_control(s, id, msg, halo, caption, state)
 }
 
 /// A checkbox in its third state: neither on nor off, because the things it
 /// stands for disagree. Material draws a dash rather than a tick.
-pub fn checkbox_mixed(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+pub fn checkbox_mixed<Msg>(s: Scheme, id: str, msg: Msg, caption: str, state: State) -> ui.Node<Msg> {
     let side = CHECKBOX_SIDE()
     let decor = ui.bordered(ui.rounded(s.primary, 2.0), s.primary, 2.0)
-    let mark = ui.decorated(
+    let mark: ui.Node<Msg> = ui.decorated(
         ui.box_of(
             "\(id)-box",
             ui.sized(ui.Style{..ui.column(), align: ui.Align.Center }, side, side),
@@ -118,7 +120,7 @@ pub fn checkbox_mixed(s: Scheme, id: str, caption: str, state: State) -> ui.Node
         ),
         decor,
     )
-    let halo = ui.decorated(
+    let halo: ui.Node<Msg> = ui.decorated(
         ui.box_of(
             "\(id)-target",
             ui.Style {
@@ -132,7 +134,7 @@ pub fn checkbox_mixed(s: Scheme, id: str, caption: str, state: State) -> ui.Node
         ),
         layer_decor(s.primary, state, SHAPE_FULL()),
     )
-    return labelled_control(s, id, halo, caption, state)
+    return labelled_control(s, id, msg, halo, caption, state)
 }
 
 // ---- radio --------------------------------------------------------------------
@@ -143,7 +145,7 @@ pub fn checkbox_mixed(s: Scheme, id: str, caption: str, state: State) -> ui.Node
 /// The dot grows from nothing rather than appearing, which is the whole of
 /// Material's radio animation and the reason the dot is a sized box rather than
 /// a character.
-pub fn radio(s: Scheme, id: str, caption: str, chosen: bool, state: State) -> ui.Node {
+pub fn radio<Msg>(s: Scheme, id: str, msg: Msg, caption: str, chosen: bool, state: State) -> ui.Node<Msg> {
     let side = 20.0
     let amount = chosen_amount(chosen, state)
     var edge = mix(s.on_surface_variant, s.primary, maxf(amount, state.focus))
@@ -153,7 +155,7 @@ pub fn radio(s: Scheme, id: str, caption: str, chosen: bool, state: State) -> ui
     // 10dp when chosen, nothing when not. A box of zero size lays out as
     // nothing at all, so the unchosen case needs no branch of its own.
     let dot = 10.0 * amount
-    var children: [ui.Node] = []
+    var children: [ui.Node<Msg>] = []
     if dot > 0.0 {
         children.push(
             ui.decorated(
@@ -162,7 +164,7 @@ pub fn radio(s: Scheme, id: str, caption: str, chosen: bool, state: State) -> ui
             ),
         )
     }
-    let ring = ui.decorated(
+    let ring: ui.Node<Msg> = ui.decorated(
         ui.box_of(
             "\(id)-ring",
             ui.Style {
@@ -176,7 +178,7 @@ pub fn radio(s: Scheme, id: str, caption: str, chosen: bool, state: State) -> ui
         ),
         ui.bordered(ui.shaped(ui.no_decor(), SHAPE_FULL()), edge, 2.0),
     )
-    let halo = ui.decorated(
+    let halo: ui.Node<Msg> = ui.decorated(
         ui.box_of(
             "\(id)-target",
             ui.Style {
@@ -190,7 +192,7 @@ pub fn radio(s: Scheme, id: str, caption: str, chosen: bool, state: State) -> ui
         ),
         layer_decor(if chosen { s.primary } else { s.on_surface }, state, SHAPE_FULL()),
     )
-    return labelled_control(s, id, halo, caption, state)
+    return labelled_control(s, id, msg, halo, caption, state)
 }
 
 // ---- switch -------------------------------------------------------------------
@@ -214,7 +216,7 @@ fn SWITCH_HEIGHT() -> float {
 /// absolute positioning, which the layout does not have. That is not a
 /// workaround: a spacer of a computed width is exactly as expressive here, and
 /// it keeps the knob inside the same row the track lays out.
-pub fn switch(s: Scheme, id: str, caption: str, on: bool, state: State) -> ui.Node {
+pub fn switch<Msg>(s: Scheme, id: str, msg: Msg, caption: str, on: bool, state: State) -> ui.Node<Msg> {
     let amount = chosen_amount(on, state)
     // Material's own numbers: the unselected knob is 16dp and sits 8dp in from
     // the end; the selected one is 24dp and sits 4dp in from the other.
@@ -238,7 +240,7 @@ pub fn switch(s: Scheme, id: str, caption: str, on: bool, state: State) -> ui.No
     if amount < 1.0 {
         track = ui.bordered(track, edge, 2.0)
     }
-    let body = ui.decorated(
+    let body: ui.Node<Msg> = ui.decorated(
         ui.box_of(
             "\(id)-track",
             ui.Style {
@@ -273,9 +275,9 @@ pub fn switch(s: Scheme, id: str, caption: str, on: bool, state: State) -> ui.No
         ui.shaped(halo, SHAPE_FULL()),
     )
     if amount >= 1.0 {
-        return labelled_control(s, id, ui.decorated(body, track), caption, state)
+        return labelled_control(s, id, msg, ui.decorated(body, track), caption, state)
     }
-    return labelled_control(s, id, ui.decorated(body, track), caption, state)
+    return labelled_control(s, id, msg, ui.decorated(body, track), caption, state)
 }
 
 // ---- slider ---------------------------------------------------------------------
@@ -323,7 +325,7 @@ fn HANDLE_GAP() -> float {
     return 2.0
 }
 
-pub fn slider(s: Scheme, id: str, value: float, width: float, state: State) -> ui.Node {
+pub fn slider<Msg>(s: Scheme, id: str, value: float, width: float, state: State) -> ui.Node<Msg> {
     return slider_of(s, id, value, width, 0, state)
 }
 
@@ -335,14 +337,14 @@ pub fn slider(s: Scheme, id: str, value: float, width: float, state: State) -> u
 /// `steps` of them. So a stepped slider here snaps its *value* and does not
 /// draw the ticks, which is the half of the feature that changes what the
 /// control does rather than what it looks like.
-pub fn slider_of(
+pub fn slider_of<Msg>(
     s: Scheme,
     id: str,
     value: float,
     width: float,
     steps: int,
     state: State,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let fraction = snapped(clampf(value, 0.0, 1.0), steps)
     let handle = math.lerp(HANDLE_WIDTH(), HANDLE_PRESSED(), state.press)
     let gap = HANDLE_GAP()
@@ -363,7 +365,7 @@ pub fn slider_of(
         handle_colour = layered(s.primary, s.on_primary, state)
     }
 
-    let parts = [
+    let parts: [ui.Node<Msg>] = [
         bar("\(id)-active", active, TRACK_HEIGHT(), active_colour),
         spacer("\(id)-gap-a", gap),
         bar("\(id)-handle", handle, handle, handle_colour),
@@ -376,6 +378,16 @@ pub fn slider_of(
         width: width,
         height: SLIDER_HEIGHT(),
     }
+    // A place, not an action — the one control in this package that carries no
+    // message. What moving a slider says is a *number*, and a value on a node
+    // is built when the node is built, long before the pointer has said which
+    // number. A message here would have to be a function of the drag, and a
+    // function is the one thing the tree may not hold.
+    //
+    // So a slider stays identified and unmeaning: the pointer events reach the
+    // application with this id and the control's own width, and the
+    // application turns them into a value with [`slider_value_at`]. Payload
+    // messages are a proposal of their own.
     return ui.control(ui.decorated(ui.box_of(id, style, parts), ui.ink(s.primary)), id)
 }
 
@@ -405,14 +417,19 @@ pub fn slider_value_at(box: ui.Rect, x: float) -> float {
 // ---- segmented button ------------------------------------------------------------
 
 /// One segment of a segmented button.
-pub struct Segment2 {
+pub struct Segment2<Msg> {
     pub id: str
+    /// What choosing this segment says. Per segment rather than per button,
+    /// because which one was pressed is the whole content of the event — a
+    /// single message for the row would leave the caller parsing the id back
+    /// out, which is the thing this design exists to stop.
+    pub msg: Msg
     pub caption: str
     pub selected: bool
 }
 
-pub fn segment(id: str, caption: str, selected: bool) -> Segment2 {
-    return Segment2{ id: id, caption: caption, selected: selected }
+pub fn segment<Msg>(id: str, msg: Msg, caption: str, selected: bool) -> Segment2<Msg> {
+    return Segment2{ id: id, msg: msg, caption: caption, selected: selected }
 }
 
 /// A segmented button: two to five choices in a row, exactly one or several of
@@ -426,14 +443,14 @@ pub fn segment(id: str, caption: str, selected: bool) -> Segment2 {
 /// Expressive's *connected button group* rather than its segmented button: the
 /// same control, the newer drawing of it, and the one this boundary can render
 /// honestly.
-pub fn segmented_button(
+pub fn segmented_button<Msg>(
     s: Scheme,
     name: str,
-    segments: [Segment2],
+    segments: [Segment2<Msg>],
     states: [State],
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let role = label_large()
-    var children: [ui.Node] = []
+    var children: [ui.Node<Msg>] = []
     for i in 0..segments.len() {
         let seg = segments[i]
         let state = if i < states.len() { states[i] } else { rest() }
@@ -446,6 +463,8 @@ pub fn segmented_button(
         children.push(
             centred_body(
                 seg.id,
+                seg.msg,
+                !state.disabled,
                 shown,
                 role.size,
                 role.weight,

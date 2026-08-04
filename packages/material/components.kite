@@ -300,16 +300,18 @@ pub fn button_xlarge() -> Sizing {
 /// the box carries the container and the caption carries only its ink, which is
 /// also what lets a ripple find the control's colour: `decor.ink` is on the
 /// frame the ripple is clipped to.
-fn centred_body(
+fn centred_body<Msg>(
     id: str,
+    msg: Msg,
+    enabled: bool,
     caption: str,
     size: float,
     weight: int,
     w: float,
     h: float,
     decor: ui.Decor,
-) -> ui.Node {
-    let label = ui.decorated(
+) -> ui.Node<Msg> {
+    let label: ui.Node<Msg> = ui.decorated(
         ui.text_of(
             "\(id)-label",
             ui.sized(ui.in_font(ui.style(), size, weight), w, h),
@@ -317,12 +319,23 @@ fn centred_body(
         ),
         ui.centered(ui.ink(decor.ink)),
     )
-    let box = ui.box_of(id, ui.sized(ui.style(), w, h), [label])
-    return ui.control(ui.decorated(box, decor), id)
+    let box: ui.Node<Msg> = ui.box_of(id, ui.sized(ui.style(), w, h), [label])
+    let whole = ui.means(ui.decorated(box, decor), id, msg)
+    if enabled {
+        return whole
+    }
+    return ui.disabled(whole)
 }
 
 /// A mark and its label, side by side, as one control.
-fn labelled_control(s: Scheme, id: str, mark: ui.Node, caption: str, state: State) -> ui.Node {
+fn labelled_control<Msg>(
+    s: Scheme,
+    id: str,
+    msg: Msg,
+    mark: ui.Node<Msg>,
+    caption: str,
+    state: State,
+) -> ui.Node<Msg> {
     let role = body_large()
     var children = [mark]
     if caption.len() > 0 {
@@ -337,7 +350,7 @@ fn labelled_control(s: Scheme, id: str, mark: ui.Node, caption: str, state: Stat
             ),
         )
     }
-    let box = ui.box_of(
+    let box: ui.Node<Msg> = ui.box_of(
         id,
         ui.spaced(
             ui.padded(ui.Style{..ui.row(), align: ui.Align.Center }, space(2)),
@@ -348,17 +361,21 @@ fn labelled_control(s: Scheme, id: str, mark: ui.Node, caption: str, state: Stat
     // The control carries the ink even though it draws no text of its own: a
     // ripple takes its colour from the control's ink, and a checkbox whose
     // control node had none would ripple in black on a dark theme.
-    return ui.control(ui.decorated(box, ui.ink(s.on_surface)), id)
+    let whole = ui.means(ui.decorated(box, ui.ink(s.on_surface)), id, msg)
+    if state.disabled {
+        return ui.disabled(whole)
+    }
+    return whole
 }
 
-fn bar(name: str, width: float, height: float, colour: int) -> ui.Node {
+fn bar<Msg>(name: str, width: float, height: float, colour: int) -> ui.Node<Msg> {
     return ui.decorated(
         ui.box_of(name, ui.sized(ui.style(), width, height), []),
         ui.rounded(colour, SHAPE_FULL()),
     )
 }
 
-fn spacer(name: str, width: float) -> ui.Node {
+fn spacer<Msg>(name: str, width: float) -> ui.Node<Msg> {
     return ui.box_of(name, ui.sized(ui.style(), width, 1.0), [])
 }
 
@@ -390,7 +407,7 @@ fn tall(base: ui.Style, height: float) -> ui.Style {
 /// node left undecorated inside a decorated box is drawn in black however the
 /// box was inked. That is how the extended FAB's caption came out black on
 /// purple.
-fn inked_text(name: str, style: ui.Style, body: str, colour: int) -> ui.Node {
+fn inked_text<Msg>(name: str, style: ui.Style, body: str, colour: int) -> ui.Node<Msg> {
     return ui.decorated(ui.text_of(name, style, body), ui.ink(colour))
 }
 
@@ -418,9 +435,18 @@ fn button_width(caption: str, sizing: Sizing) -> float {
     return measured + sizing.padding * 2.0
 }
 
-fn button_body(id: str, caption: str, sizing: Sizing, decor: ui.Decor) -> ui.Node {
+fn button_body<Msg>(
+    id: str,
+    msg: Msg,
+    enabled: bool,
+    caption: str,
+    sizing: Sizing,
+    decor: ui.Decor,
+) -> ui.Node<Msg> {
     return centred_body(
         id,
+        msg,
+        enabled,
         caption,
         sizing.label.size,
         sizing.label.weight,
@@ -445,20 +471,23 @@ fn button_decor(
 }
 
 /// The highest-emphasis button: a filled primary container.
-pub fn filled_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
-    return filled_button_of(s, id, caption, button_small(), state)
+pub fn filled_button<Msg>(s: Scheme, id: str, msg: Msg, caption: str, state: State) -> ui.Node<Msg> {
+    return filled_button_of(s, id, msg, caption, button_small(), state)
 }
 
-pub fn filled_button_of(
+pub fn filled_button_of<Msg>(
     s: Scheme,
     id: str,
+    msg: Msg,
     caption: str,
     sizing: Sizing,
     state: State,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     if state.disabled {
         return button_body(
             id,
+            msg,
+            !state.disabled,
             caption,
             sizing,
             button_decor(
@@ -471,24 +500,27 @@ pub fn filled_button_of(
         )
     }
     let container = layered(s.primary, s.on_primary, state)
-    return button_body(id, caption, sizing, button_decor(caption, sizing, container, s.on_primary, state))
+    return button_body(id, msg, !state.disabled, caption, sizing, button_decor(caption, sizing, container, s.on_primary, state))
 }
 
 /// A secondary action beside a primary one: the secondary container, filled.
-pub fn tonal_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
-    return tonal_button_of(s, id, caption, button_small(), state)
+pub fn tonal_button<Msg>(s: Scheme, id: str, msg: Msg, caption: str, state: State) -> ui.Node<Msg> {
+    return tonal_button_of(s, id, msg, caption, button_small(), state)
 }
 
-pub fn tonal_button_of(
+pub fn tonal_button_of<Msg>(
     s: Scheme,
     id: str,
+    msg: Msg,
     caption: str,
     sizing: Sizing,
     state: State,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     if state.disabled {
         return button_body(
             id,
+            msg,
+            !state.disabled,
             caption,
             sizing,
             button_decor(
@@ -503,6 +535,8 @@ pub fn tonal_button_of(
     let container = layered(s.secondary_container, s.on_secondary_container, state)
     return button_body(
         id,
+        msg,
+        !state.disabled,
         caption,
         sizing,
         button_decor(caption, sizing, container, s.on_secondary_container, state),
@@ -514,23 +548,26 @@ pub fn tonal_button_of(
 /// The outline thickens and takes the accent on focus, which is Material's
 /// focus indicator for an outlined component — and it is animated, so the
 /// thickening is a movement rather than a jump.
-pub fn outlined_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
-    return outlined_button_of(s, id, caption, button_small(), state)
+pub fn outlined_button<Msg>(s: Scheme, id: str, msg: Msg, caption: str, state: State) -> ui.Node<Msg> {
+    return outlined_button_of(s, id, msg, caption, button_small(), state)
 }
 
-pub fn outlined_button_of(
+pub fn outlined_button_of<Msg>(
     s: Scheme,
     id: str,
+    msg: Msg,
     caption: str,
     sizing: Sizing,
     state: State,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let w = button_width(caption, sizing)
     let radius = morphed(sizing.shape, w, sizing.height, state.press)
     if state.disabled {
         let flat = ui.shaped(ui.no_decor(), radius)
         return button_body(
             id,
+            msg,
+            !state.disabled,
             caption,
             sizing,
             ui.bordered(
@@ -543,26 +580,29 @@ pub fn outlined_button_of(
     let edge = mix(s.outline, s.primary, state.focus)
     let width = math.lerp(1.0, 2.0, state.focus)
     let base = layer_decor(s.primary, state, radius)
-    return button_body(id, caption, sizing, ui.bordered(ui.inked(base, s.primary), edge, width))
+    return button_body(id, msg, !state.disabled, caption, sizing, ui.bordered(ui.inked(base, s.primary), edge, width))
 }
 
 /// The lowest emphasis: a label and nothing else until it is interacted with.
-pub fn text_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
-    return text_button_of(s, id, caption, button_small(), state)
+pub fn text_button<Msg>(s: Scheme, id: str, msg: Msg, caption: str, state: State) -> ui.Node<Msg> {
+    return text_button_of(s, id, msg, caption, button_small(), state)
 }
 
-pub fn text_button_of(
+pub fn text_button_of<Msg>(
     s: Scheme,
     id: str,
+    msg: Msg,
     caption: str,
     sizing: Sizing,
     state: State,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let w = button_width(caption, sizing)
     let radius = morphed(sizing.shape, w, sizing.height, state.press)
     let ink = if state.disabled { disabled_ink(s, s.surface) } else { s.primary }
     return button_body(
         id,
+        msg,
+        !state.disabled,
         caption,
         sizing,
         ui.inked(layer_decor(s.primary, state, radius), ink),
@@ -575,20 +615,23 @@ pub fn text_button_of(
 /// level 2 hovered, back to level 1 while held. Under a renderer with shadows
 /// that is a shadow growing; here it is the container tone shifting, which is
 /// Material's own rule for a dark theme and the honest half of the two.
-pub fn elevated_button(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
-    return elevated_button_of(s, id, caption, button_small(), state)
+pub fn elevated_button<Msg>(s: Scheme, id: str, msg: Msg, caption: str, state: State) -> ui.Node<Msg> {
+    return elevated_button_of(s, id, msg, caption, button_small(), state)
 }
 
-pub fn elevated_button_of(
+pub fn elevated_button_of<Msg>(
     s: Scheme,
     id: str,
+    msg: Msg,
     caption: str,
     sizing: Sizing,
     state: State,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     if state.disabled {
         return button_body(
             id,
+            msg,
+            !state.disabled,
             caption,
             sizing,
             button_decor(
@@ -602,7 +645,7 @@ pub fn elevated_button_of(
     }
     let lift = maxf(state.hover, state.focus) * (1.0 - state.press)
     let container = layered(raised(s, LEVEL_1(), LEVEL_2(), lift), s.primary, state)
-    return button_body(id, caption, sizing, button_decor(caption, sizing, container, s.primary, state))
+    return button_body(id, msg, !state.disabled, caption, sizing, button_decor(caption, sizing, container, s.primary, state))
 }
 
 /// A button with a glyph before its label.
@@ -610,14 +653,15 @@ pub fn elevated_button_of(
 /// Material's leading icon, which is how a destructive or a confirming action
 /// is told apart at a glance. The glyph is a `str` for the reason every glyph
 /// in this package is: an icon font is not something a package can carry.
-pub fn icon_label_button(
+pub fn icon_label_button<Msg>(
     s: Scheme,
     id: str,
+    msg: Msg,
     glyph: str,
     caption: str,
     sizing: Sizing,
     state: State,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let container = layered(s.primary, s.on_primary, state)
     let ink = if state.disabled { disabled_ink(s, s.surface) } else { s.on_primary }
     let fill = if state.disabled { disabled_container(s, s.surface) } else { container }
@@ -632,7 +676,7 @@ pub fn icon_label_button(
         height: sizing.height,
         gap: space(2),
     }
-    let box = ui.box_of(
+    let box: ui.Node<Msg> = ui.box_of(
         id,
         inner,
         [
@@ -645,7 +689,11 @@ pub fn icon_label_button(
             ),
         ],
     )
-    return ui.control(ui.decorated(box, ui.inked(ui.rounded(fill, radius), ink)), id)
+    let whole = ui.means(ui.decorated(box, ui.inked(ui.rounded(fill, radius), ink)), id, msg)
+    if state.disabled {
+        return ui.disabled(whole)
+    }
+    return whole
 }
 
 // ---- icon buttons -------------------------------------------------------------
@@ -664,9 +712,17 @@ fn ICON_GLYPH() -> float {
     return 20.0
 }
 
-fn icon_button_body(id: str, glyph: str, decor: ui.Decor) -> ui.Node {
+fn icon_button_body<Msg>(
+    id: str,
+    msg: Msg,
+    enabled: bool,
+    glyph: str,
+    decor: ui.Decor,
+) -> ui.Node<Msg> {
     return centred_body(
         id,
+        msg,
+        enabled,
         glyph,
         ICON_GLYPH(),
         REGULAR(),
@@ -681,28 +737,30 @@ fn icon_radius(state: State) -> float {
 }
 
 /// A 40dp target around a 20dp glyph, with no container of its own.
-pub fn icon_button(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
+pub fn icon_button<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, state: State) -> ui.Node<Msg> {
     let ink = if state.disabled {
         disabled_ink(s, s.surface)
     } else {
         s.on_surface_variant
     }
     let decor = layer_decor(s.on_surface_variant, state, icon_radius(state))
-    return icon_button_body(id, glyph, ui.inked(decor, ink))
+    return icon_button_body(id, msg, !state.disabled, glyph, ui.inked(decor, ink))
 }
 
 /// The same, on or off. Selected takes the accent; unselected does not.
-pub fn icon_toggle(s: Scheme, id: str, glyph: str, on: bool, state: State) -> ui.Node {
+pub fn icon_toggle<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, on: bool, state: State) -> ui.Node<Msg> {
     let role = mix(s.on_surface_variant, s.primary, if on { 1.0 } else { state.select })
     let decor = layer_decor(role, state, icon_radius(state))
-    return icon_button_body(id, glyph, ui.inked(decor, role))
+    return icon_button_body(id, msg, !state.disabled, glyph, ui.inked(decor, role))
 }
 
 /// The highest-emphasis icon button: a filled primary container.
-pub fn filled_icon_button(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
+pub fn filled_icon_button<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, state: State) -> ui.Node<Msg> {
     if state.disabled {
         return icon_button_body(
             id,
+            msg,
+            !state.disabled,
             glyph,
             ui.inked(
                 ui.rounded(disabled_container(s, s.surface), icon_radius(state)),
@@ -713,6 +771,8 @@ pub fn filled_icon_button(s: Scheme, id: str, glyph: str, state: State) -> ui.No
     let container = layered(s.primary, s.on_primary, state)
     return icon_button_body(
         id,
+        msg,
+        !state.disabled,
         glyph,
         ui.inked(ui.rounded(container, icon_radius(state)), s.on_primary),
     )
@@ -720,29 +780,33 @@ pub fn filled_icon_button(s: Scheme, id: str, glyph: str, state: State) -> ui.No
 
 /// A filled icon *toggle*: the container itself crosses from the unselected
 /// surface to the accent, which is the strongest way Material says "on".
-pub fn filled_icon_toggle(s: Scheme, id: str, glyph: str, on: bool, state: State) -> ui.Node {
+pub fn filled_icon_toggle<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, on: bool, state: State) -> ui.Node<Msg> {
     let amount = if on { 1.0 } else { state.select }
     let resting = mix(s.surface_container_highest, s.primary, amount)
     let ink = mix(s.primary, s.on_primary, amount)
     let container = layered(resting, ink, state)
-    return icon_button_body(id, glyph, ui.inked(ui.rounded(container, icon_radius(state)), ink))
+    return icon_button_body(id, msg, !state.disabled, glyph, ui.inked(ui.rounded(container, icon_radius(state)), ink))
 }
 
-pub fn tonal_icon_button(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
+pub fn tonal_icon_button<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, state: State) -> ui.Node<Msg> {
     let container = layered(s.secondary_container, s.on_secondary_container, state)
     return icon_button_body(
         id,
+        msg,
+        !state.disabled,
         glyph,
         ui.inked(ui.rounded(container, icon_radius(state)), s.on_secondary_container),
     )
 }
 
-pub fn outlined_icon_button(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
+pub fn outlined_icon_button<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, state: State) -> ui.Node<Msg> {
     let radius = icon_radius(state)
     let edge = mix(s.outline, s.primary, state.focus)
     let base = layer_decor(s.on_surface_variant, state, radius)
     return icon_button_body(
         id,
+        msg,
+        !state.disabled,
         glyph,
         ui.bordered(
             ui.inked(base, s.on_surface_variant),
@@ -791,35 +855,37 @@ fn fab_glyph(side: float) -> float {
 }
 
 /// 56dp on the primary container — Material's default FAB.
-pub fn fab(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
-    return fab_of(s, id, glyph, FAB_REGULAR(), state)
+pub fn fab<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, state: State) -> ui.Node<Msg> {
+    return fab_of(s, id, msg, glyph, FAB_REGULAR(), state)
 }
 
-pub fn small_fab(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
-    return fab_of(s, id, glyph, FAB_SMALL(), state)
+pub fn small_fab<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, state: State) -> ui.Node<Msg> {
+    return fab_of(s, id, msg, glyph, FAB_SMALL(), state)
 }
 
-pub fn large_fab(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
-    return fab_of(s, id, glyph, FAB_LARGE(), state)
+pub fn large_fab<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, state: State) -> ui.Node<Msg> {
+    return fab_of(s, id, msg, glyph, FAB_LARGE(), state)
 }
 
-pub fn fab_of(s: Scheme, id: str, glyph: str, side: float, state: State) -> ui.Node {
+pub fn fab_of<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, side: float, state: State) -> ui.Node<Msg> {
     let lift = maxf(state.hover, state.focus) * (1.0 - state.press)
     let base = mix(s.primary_container, surface_tinted(s, s.primary_container), lift)
     let container = layered(base, s.on_primary_container, state)
     let radius = morphed(fab_shape(side), side, side, state.press)
     let decor = ui.inked(ui.rounded(container, radius), s.on_primary_container)
-    return centred_body(id, glyph, fab_glyph(side), REGULAR(), side, side, decor)
+    return centred_body(id, msg, !state.disabled, glyph, fab_glyph(side), REGULAR(), side, side, decor)
 }
 
 /// A FAB in the secondary or tertiary role, for a screen whose primary action
 /// is not the accent one.
-pub fn secondary_fab(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
+pub fn secondary_fab<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, state: State) -> ui.Node<Msg> {
     let container = layered(s.secondary_container, s.on_secondary_container, state)
     let side = FAB_REGULAR()
     let radius = morphed(fab_shape(side), side, side, state.press)
     return centred_body(
         id,
+        msg,
+        !state.disabled,
         glyph,
         fab_glyph(side),
         REGULAR(),
@@ -829,12 +895,14 @@ pub fn secondary_fab(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
     )
 }
 
-pub fn tertiary_fab(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
+pub fn tertiary_fab<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, state: State) -> ui.Node<Msg> {
     let container = layered(s.tertiary_container, s.on_tertiary_container, state)
     let side = FAB_REGULAR()
     let radius = morphed(fab_shape(side), side, side, state.press)
     return centred_body(
         id,
+        msg,
+        !state.disabled,
         glyph,
         fab_glyph(side),
         REGULAR(),
@@ -845,7 +913,7 @@ pub fn tertiary_fab(s: Scheme, id: str, glyph: str, state: State) -> ui.Node {
 }
 
 /// The same with a label beside the glyph, for the one action a screen is for.
-pub fn extended_fab(s: Scheme, id: str, glyph: str, caption: str, state: State) -> ui.Node {
+pub fn extended_fab<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, caption: str, state: State) -> ui.Node<Msg> {
     let role = label_large()
     let lift = maxf(state.hover, state.focus) * (1.0 - state.press)
     let base = mix(s.primary_container, surface_tinted(s, s.primary_container), lift)
@@ -864,7 +932,7 @@ pub fn extended_fab(s: Scheme, id: str, glyph: str, caption: str, state: State) 
         padding: ui.insets_xy(space(4), 0.0),
         gap: space(2),
     }
-    let box = ui.box_of(
+    let box: ui.Node<Msg> = ui.box_of(
         id,
         inner,
         [
@@ -882,7 +950,11 @@ pub fn extended_fab(s: Scheme, id: str, glyph: str, caption: str, state: State) 
             ),
         ],
     )
-    return ui.control(ui.decorated(box, decor), id)
+    let whole = ui.means(ui.decorated(box, decor), id, msg)
+    if state.disabled {
+        return ui.disabled(whole)
+    }
+    return whole
 }
 
 /// A container tinted the way elevation tints one. Material raises a surface by
@@ -903,14 +975,15 @@ fn CHIP_HEIGHT() -> float {
     return 32.0
 }
 
-fn chip_body(
+fn chip_body<Msg>(
     id: str,
+    msg: Msg,
     caption: str,
     leading: str,
     trailing: str,
     decor: ui.Decor,
     state: State,
-) -> ui.Node {
+) -> ui.Node<Msg> {
     let role = label_large()
     var shown = caption
     if leading.len() > 0 {
@@ -923,6 +996,8 @@ fn chip_body(
     let radius = morphed(SHAPE_SMALL(), width, CHIP_HEIGHT(), state.press)
     return centred_body(
         id,
+        msg,
+        !state.disabled,
         shown,
         role.size,
         role.weight,
@@ -937,7 +1012,7 @@ fn chip_body(
 ///
 /// The crossing between the two is animated on the `select` channel, so the
 /// outline fades as the fill arrives rather than the two swapping in one frame.
-pub fn filter_chip(s: Scheme, id: str, caption: str, on: bool, state: State) -> ui.Node {
+pub fn filter_chip<Msg>(s: Scheme, id: str, msg: Msg, caption: str, on: bool, state: State) -> ui.Node<Msg> {
     let amount = chosen_amount(on, state)
     let container = mix(s.surface, s.secondary_container, amount)
     let ink = mix(s.on_surface_variant, s.on_secondary_container, amount)
@@ -951,30 +1026,30 @@ pub fn filter_chip(s: Scheme, id: str, caption: str, on: bool, state: State) -> 
         )
     }
     let tick = if on { "✓" } else { "" }
-    return chip_body(id, caption, tick, "", decor, state)
+    return chip_body(id, msg, caption, tick, "", decor, state)
 }
 
 /// An assist chip: always outlined, for an action rather than a choice.
-pub fn assist_chip(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+pub fn assist_chip<Msg>(s: Scheme, id: str, msg: Msg, caption: str, state: State) -> ui.Node<Msg> {
     let base = layer_decor(s.on_surface_variant, state, SHAPE_SMALL())
     let decor = ui.bordered(
         ui.inked(base, s.on_surface),
         mix(s.outline, s.primary, state.focus),
         math.lerp(1.0, 2.0, state.focus),
     )
-    return chip_body(id, caption, "", "", decor, state)
+    return chip_body(id, msg, caption, "", "", decor, state)
 }
 
 /// A suggestion chip: the same as an assist chip but labelled in the variant
 /// ink, because it is the application talking rather than the user.
-pub fn suggestion_chip(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+pub fn suggestion_chip<Msg>(s: Scheme, id: str, msg: Msg, caption: str, state: State) -> ui.Node<Msg> {
     let base = layer_decor(s.on_surface_variant, state, SHAPE_SMALL())
     let decor = ui.bordered(
         ui.inked(base, s.on_surface_variant),
         mix(s.outline, s.primary, state.focus),
         math.lerp(1.0, 2.0, state.focus),
     )
-    return chip_body(id, caption, "", "", decor, state)
+    return chip_body(id, msg, caption, "", "", decor, state)
 }
 
 /// An input chip: something the user entered, with a way to remove it.
@@ -983,24 +1058,24 @@ pub fn suggestion_chip(s: Scheme, id: str, caption: str, state: State) -> ui.Nod
 /// which is the honest limit of a layout with no absolute positioning: a
 /// nested hit target inside a chip would need the two rectangles to be
 /// separately addressable, and here the whole chip is one control.
-pub fn input_chip(s: Scheme, id: str, caption: str, state: State) -> ui.Node {
+pub fn input_chip<Msg>(s: Scheme, id: str, msg: Msg, caption: str, state: State) -> ui.Node<Msg> {
     let base = layer_decor(s.on_surface_variant, state, SHAPE_SMALL())
     let decor = ui.bordered(
         ui.inked(base, s.on_surface_variant),
         mix(s.outline_variant, s.primary, state.focus),
         math.lerp(1.0, 2.0, state.focus),
     )
-    return chip_body(id, caption, "", "✕", decor, state)
+    return chip_body(id, msg, caption, "", "✕", decor, state)
 }
 
 // ---- badges -------------------------------------------------------------------
 
 /// A badge: a small count on a container, in the error role, which is what
 /// Material uses to mark something needing attention.
-pub fn badge(name: str, s: Scheme, count: str) -> ui.Node {
+pub fn badge<Msg>(name: str, s: Scheme, count: str) -> ui.Node<Msg> {
     let role = label_small()
     let width = ui.text_size_in(count, role.size, role.weight).width + space(2) * 2.0
-    let node = ui.text_of(
+    let node: ui.Node<Msg> = ui.text_of(
         name,
         ui.sized(ui.in_font(ui.style(), role.size, role.weight), width, 16.0),
         count,
@@ -1010,7 +1085,7 @@ pub fn badge(name: str, s: Scheme, count: str) -> ui.Node {
 
 /// A badge with no number in it — a 6dp dot, which is Material's small badge
 /// and is what marks "something changed" where a count would be noise.
-pub fn small_badge(name: str, s: Scheme) -> ui.Node {
+pub fn small_badge<Msg>(name: str, s: Scheme) -> ui.Node<Msg> {
     return ui.decorated(
         ui.box_of(name, ui.sized(ui.style(), 6.0, 6.0), []),
         ui.rounded(s.error, SHAPE_FULL()),

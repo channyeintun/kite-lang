@@ -1,6 +1,6 @@
 # Proposal 0001 — typed messages, and the loop that delivers them
 
-**Status:** Draft
+**Status:** Draft — §§2, 5 and 9 implemented; see *Implementation status* below
 **Date:** August 2026
 **Resolves:** [docs/04 §10 question 4](../04-stdlib-ui.md#10-open-questions) (event wiring), and delivers the effect shape [docs/04 §6](../04-stdlib-ui.md#6-events-and-state) forward-references
 **Unblocks:** question 2 (incremental view diffing)
@@ -11,6 +11,54 @@ small a vocabulary to host `packages/material`'s interaction layer, whose
 ripple needs the press point and whose hover needs the pointer — and it
 deferred effects while docs/04 §6 pointed here for them. Both are repaired.
 The first draft also gave the loop custody of focus; §5 takes it back.
+
+---
+
+## Implementation status
+
+*Added after the [review](0001-typed-messages-review.md). This records what is
+in the tree, not a third draft.*
+
+**Landed.** The tree half, with the review's corrections:
+
+- `Node<Msg>` carries **one** `Option<Control<Msg>>` rather than four loose
+  fields — the review's P1, adopted. `Control` holds `id`, `msg`, `edits`,
+  `focused` and `enabled`, so "is this a control" is one question.
+- `enabled` is real: a disabled control is laid out and hit-tested but leaves
+  focus order and means nothing. `Frame` gained `enabled` to derive that.
+- Focus is set by `ui.with_focus(tree, id)` at the root rather than by each
+  component, which makes "exactly one control is focused" true by construction
+  and keeps logical focus away from the animated focus ring — the trap the
+  review names.
+- Setters compose: `means`, `editable`, `control` and `disabled` each preserve
+  what the others set, so the order of two independent statements does not
+  matter.
+- `ui.control_of` and `ui.msg_at` derive dispatch by walking the tree (§9), so
+  nothing is kept in parallel with it.
+- `packages/material` and every example are migrated; `examples/player.kite`
+  included, which the review asked for. All six examples paint byte-identically
+  to before.
+- `ptr.same`, which §4 and §12 both need and which did not exist despite
+  [SPECIFICATION.md §5.2](../../SPECIFICATION.md#52-equality) claiming it did.
+
+**Not landed, and why.** Everything that needs the loop: `App`, `run`, `Event`,
+`Effect`. The review's first P0 is correct and unresolved — the generated host
+recognises an application only by its `init`/`view`/`update` exports, owns the
+model and `requestAnimationFrame`, and never drives the task scheduler at all,
+so an effect has no pump. That needs an ABI decision, not more `std/ui`.
+
+Nothing here forecloses it. The tree now states everything the loop will need
+to read.
+
+**Found on the way.** Three inference gaps, all fixed, none specific to this
+proposal: a struct literal's spread base did not settle its type arguments; a
+generic call ignored the type it was used as; and inside a generic function,
+argument expectations were dropped because a bound parameter of the enclosing
+function is indistinguishable from an unsolved one after substitution.
+
+**Still open.** `Msg` is unconstrained, so §12's diffing claim does not hold
+yet — the review is right, and the precise gap is `Map`, which is `Share` and
+is not equatable.
 
 ---
 
