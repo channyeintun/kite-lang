@@ -516,6 +516,15 @@ export function domRenderer(container) {{
         const oy = Number(el.style.top.replace('px', '')) - was[2];
         el.style.left = call[1] + ox + 'px';
         el.style.top = call[2] + oy + 'px';
+        // Opacity is a property of the *call*, and a patched node keeps
+        // whatever it was created with unless it is written here. Leaving it
+        // out meant a node reused across frames wore a stale translucency:
+        // a state layer that had faded went on being drawn at the opacity it
+        // had when its node was made, and one that had arrived stayed
+        // invisible. Every branch below needs it, so it is done once, above.
+        const want = call[call.length - 1];
+        const opacity = typeof want === 'number' && want < 1 ? String(want) : '';
+        if (call[0] !== 'c' && el.style.opacity !== opacity) el.style.opacity = opacity;
         if (call[0] === 'r') {{
           el.style.width = call[3] + 'px';
           el.style.height = call[4] + 'px';
@@ -525,6 +534,18 @@ export function domRenderer(container) {{
           el.style.height = call[4] + 'px';
           el.style.borderRadius = call[5] + 'px';
           el.style.background = hex(call[6]);
+        }} else if (call[0] === 'D') {{
+          // The border ring, which was missing entirely: a patched frame moved
+          // it and never resized or recoloured it. So an outlined control that
+          // changed width — a filter chip gaining its tick — kept the outline
+          // of its old size around its new fill, which is the mismatched box
+          // that looked like the control had grown a second edge. A control
+          // that changed only its border, as an outlined field does when it
+          // takes focus, did not appear to change at all.
+          el.style.width = call[3] + 'px';
+          el.style.height = call[4] + 'px';
+          el.style.borderRadius = call[5] + 'px';
+          el.style.border = call[6] + 'px solid ' + hex(call[7]);
         }} else if (call[0] === 't') {{
           el.style.color = hex(call[4]);
           el.style.direction = firstStrongRtl(call[3]) ? 'rtl' : 'ltr';
@@ -2319,8 +2340,22 @@ pub fn generate_page(title: &str) -> String {
     return [e.clientX - box.left, e.clientY - box.top];
   }};
 
-  stage.addEventListener("click", (e) => {{
-    const [x, y] = at(e);
+  // A click is *derived* from the press, rather than taken from the browser.
+  //
+  // `click` is a compatibility event and the browser is entitled to withhold
+  // it: it is suppressed when the press turned into a text selection, when the
+  // pointer moved far enough to be a drag, and when down and up resolve to
+  // different targets. Every one of those happens constantly on a surface made
+  // of absolutely-positioned text nodes, and the symptom is not subtle — the
+  // program simply does not respond, and whoever is using it clicks again.
+  //
+  // A press that went down on the stage and came up on it is a click. That is
+  // the whole rule, it is the one every canvas application uses, and it cannot
+  // be taken away. `pressedOn` also keeps a release that began *outside* the
+  // stage — finishing a drag that started on the page — from counting as one.
+  let pressedOn = false;
+
+  const activate = (x, y) => {{
     send(EVENT_CLICK, x, y, "");
     // Typing goes to a real input placed where the pointer is: a canvas
     // cannot hold a caret, and an invisible input is how every canvas editor
@@ -2330,7 +2365,7 @@ pub fn generate_page(title: &str) -> String {
       typing.style.top = y + "px";
       typing.focus({{ preventScroll: true }});
     }}
-  }});
+  }};
 
   // Pointer events, all through the same door as everything else.
   stage.addEventListener("pointermove", (e) => {{
@@ -2353,6 +2388,7 @@ pub fn generate_page(title: &str) -> String {
       // Not every pointer can be captured; the release still arrives when the
       // pointer is over the stage, which is the common case.
     }}
+    pressedOn = true;
     send(EVENT_DOWN, x, y, "");
   }});
   stage.addEventListener("pointerup", (e) => {{
@@ -2363,12 +2399,18 @@ pub fn generate_page(title: &str) -> String {
       // Already released, which is not a failure.
     }}
     send(EVENT_UP, x, y, "");
+    if (pressedOn) {{
+      pressedOn = false;
+      activate(x, y);
+    }}
   }});
   // A gesture the browser takes away — a system swipe, a context menu — ends
   // the press as surely as a release does, and leaves the same stuck state
   // behind if it is ignored.
   stage.addEventListener("pointercancel", (e) => {{
     const [x, y] = at(e);
+    // A cancelled gesture releases the press but is *not* an activation.
+    pressedOn = false;
     send(EVENT_UP, x, y, "");
   }});
 
