@@ -230,3 +230,80 @@ fn a_rectangles_bounds_are_its_own_and_a_runs_are_measured() {
         "rect [1,2,3,4]\ntext [1,2,24,16]\nbigger [1,2,48,32]\nclip null\nunclip null\n"
     );
 }
+
+/// A minimal `document` — enough for `domRenderer`, and no more.
+///
+/// The DOM renderer is the one part of the glue that needs a document, and the
+/// header above says it is not tested here. That was true until an alpha set on
+/// one box dimmed a whole scrolling list: `opacity` on an element forms a
+/// stacking context, so it applies to everything inside it, and a clip is
+/// *structure* rather than paint. The stub is twenty lines and the bug was
+/// invisible from the recording alone, which is what makes it worth having.
+const DOM_STUB: &str = r#"
+const make = (tag) => ({
+  tag,
+  style: {},
+  children: [],
+  textContent: '',
+  dataset: {},
+  setAttribute() {},
+  removeAttribute() {},
+  appendChild(child) { this.children.push(child); child.parent = this; return child; },
+  replaceChildren(...kids) { this.children = kids; },
+  remove() {},
+  getBoundingClientRect: () => ({ left: 0, top: 0, width: 0, height: 0 }),
+});
+globalThis.document = { createElement: make };
+const root = make('div');
+"#;
+
+#[test]
+fn a_clip_is_structure_and_never_carries_the_alpha_in_force() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let out = under_node(
+        "clip-opacity",
+        &format!(
+            r#"import {{ domRenderer, setAlpha }} from "./app.js";
+{stub}
+const say = (label, value) => console.log(label + " " + JSON.stringify(value));
+const r = domRenderer(root);
+
+// A translucent thing, then a clip opened while that alpha is still in force —
+// which is exactly what a state layer followed by a scrolling viewport does.
+setAlpha(0.08);
+r.rect(0, 0, 10, 10, 0x000000);
+r.clip(0, 0, 100, 100);
+r.rect(0, 0, 10, 10, 0xffffff);
+r.unclip();
+
+const painted = [];
+const walk = (el) => {{
+  if (el.style.overflow === 'hidden') painted.push(['clip', el.style.opacity]);
+  else if (el.tag) painted.push([el.tag, el.style.opacity]);
+  for (const kid of el.children) walk(kid);
+}};
+for (const kid of root.children) walk(kid);
+const clips = painted.filter((p) => p[0] === 'clip');
+say("clipOpacity", clips.map((c) => c[1]));
+say("translucentThingsStillFade", painted.some((p) => p[1] === '0.08'));
+"#,
+            stub = DOM_STUB
+        ),
+    );
+    // A clip must be fully opaque — an empty string is how the renderer says
+    // "no opacity of my own". Anything else dims everything it contains.
+    assert!(
+        out.contains(r#"clipOpacity [""]"#),
+        "a clip carried an opacity:\n{}",
+        out
+    );
+    // …while the things that actually draw still honour the alpha.
+    assert!(
+        out.contains("translucentThingsStillFade true"),
+        "alpha stopped reaching the calls that draw:\n{}",
+        out
+    );
+}

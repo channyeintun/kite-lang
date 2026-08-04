@@ -453,6 +453,20 @@ export function domRenderer(container) {{
       el.style.width = w + 'px';
       el.style.height = h + 'px';
       el.style.overflow = 'hidden';
+      // A clip is *structure*, not paint, so it is always fully opaque —
+      // whatever alpha happens to be in force when it is opened.
+      //
+      // `place` applies the current alpha to everything it positions, which is
+      // right for the things that draw and catastrophic here: an element with
+      // `opacity` set forms a stacking context and dims **everything inside
+      // it**. A clip opened while a translucent state layer was in force
+      // therefore took its whole contents down with it — a design system drew
+      // one eight-per-cent hover layer and the entire scrolling list behind it
+      // rendered at eight per cent.
+      //
+      // Nothing had noticed because nothing had ever set alpha and then
+      // clipped: the two features were independently correct and had never met.
+      el.style.opacity = '';
       stack.push([host, originX, originY]);
       host = el;
       originX = x;
