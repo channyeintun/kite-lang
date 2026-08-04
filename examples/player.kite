@@ -300,6 +300,11 @@ struct Track {
 /// which is not known when the node is built — see `slider_of` in the material
 /// package for why that is a different proposal.
 pub enum Msg {
+    /// The rail's Library destination. There is one page, so arriving at it
+    /// changes nothing — but a navigation control that says *nothing* would be
+    /// a control the exhaustive match cannot account for, and "already here"
+    /// is a real answer rather than a missing one.
+    ShowLibrary
     PlayPause
     Next
     Prev
@@ -532,7 +537,7 @@ fn view_node(model: Model) -> ui.Node<Msg> {
 fn destinations(model: Model) -> [ui.Node<Msg>] {
     let s = scheme(model)
     return [
-        material.rail_item(s, "nav-library", Msg.PlayPause, "♫", "Library", true, choice(model, "nav-library", true)),
+        material.rail_item(s, "nav-library", Msg.ShowLibrary, "♫", "Library", true, choice(model, "nav-library", true)),
         material.rail_item(
             s,
             "nav-theme",
@@ -1336,6 +1341,7 @@ fn nudged(model: Model, by: float) -> Model {
 /// out perfectly and did nothing.
 fn acted(model: Model, msg: Msg) -> Model {
     return match msg {
+        ShowLibrary => model,
         PlayPause => started(Model{..model, running: !model.running }),
         Next => started(advanced(model, 1)),
         Shuffle => started(advanced(model, 1)),
