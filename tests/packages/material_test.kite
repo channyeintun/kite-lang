@@ -465,6 +465,45 @@ fn component_checks() -> [error] {
         out.push(near(i.rect.height, 40.0, "on both axes"))
     }
 
+    // Focusing an empty search field must not move its placeholder. The caret
+    // is a glyph in the same run as the text, so it is paid for out of the left
+    // padding: the run starts a caret-width earlier and the placeholder lands
+    // exactly where it was.
+    // A search field is editable rather than activated, so it carries no
+    // message and the binding has to say what the tree's message type is.
+    let at_rest: ui.Node<Msg> = material.search_field(
+        s,
+        "q",
+        "",
+        "Search",
+        300.0,
+        material.when_focused(false),
+    )
+    let in_focus: ui.Node<Msg> = material.search_field(
+        s,
+        "q",
+        "",
+        "Search",
+        300.0,
+        material.when_focused(true),
+    )
+    let rested = ui.layout(at_rest, size)
+    let lived = ui.layout(in_focus, size)
+    let q_rest = ui.frame_of(rested, "q")
+    let q_live = ui.frame_of(lived, "q")
+    // Narrowing takes one local and one `if`, not a disjunction of two.
+    if q_rest == nil {
+        out.push(test.fail("a search field lays out at rest"))
+        return out
+    }
+    if q_live == nil {
+        out.push(test.fail("a search field lays out focused"))
+        return out
+    }
+    let caret = ui.text_size_in("|", material.body_large().size, material.body_large().weight)
+    out.push(near(q_live.inner.x + caret.width, q_rest.inner.x, "the placeholder does not move"))
+    out.push(test.is_true(q_live.inner.x < q_rest.inner.x, "and the caret sits in the padding"))
+
     let fab = ui.layout(material.fab(s, "f", Msg.Pressed("f"), "＋", material.rest()), size)
     let f = ui.frame_of(fab, "f")
     if f != nil {
