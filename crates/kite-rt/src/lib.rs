@@ -1955,6 +1955,54 @@ pub extern "C" fn kite_rt_draw_semantics(
     }
 }
 
+
+// ---- standard error, and standard input -------------------------------------
+//
+// A diagnostic goes to a different stream from what a program produces, which
+// is what lets output be piped somewhere while a person still reads the
+// complaints.
+
+#[no_mangle]
+pub extern "C" fn kite_rt_error_int(v: i64) {
+    eprintln!("{}", v);
+}
+
+#[no_mangle]
+pub extern "C" fn kite_rt_error_float(v: f64) {
+    eprintln!("{}", float_text(v));
+}
+
+#[no_mangle]
+pub extern "C" fn kite_rt_error_bool(v: i8) {
+    eprintln!("{}", v != 0);
+}
+
+#[no_mangle]
+pub extern "C" fn kite_rt_error_str(v: u64) {
+    unsafe {
+        eprintln!("{}", str_str(v));
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn kite_rt_error_unit() {
+    eprintln!("()");
+}
+
+/// One line from standard input, without its newline. The empty string at end
+/// of input.
+#[no_mangle]
+pub extern "C" fn kite_rt_read_line() -> u64 {
+    use std::io::BufRead;
+    let mut line = String::new();
+    let read = std::io::stdin().lock().read_line(&mut line).unwrap_or(0);
+    if read == 0 {
+        return make_str(b"");
+    }
+    let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+    make_str(trimmed.as_bytes())
+}
+
 #[no_mangle]
 pub extern "C" fn kite_rt_draw_clip(x: f64, y: f64, w: f64, h: f64) {
     write_line(&format!(
@@ -2233,6 +2281,12 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         kite_rt_print_ref,
         kite_rt_str_of_int,
         kite_rt_text_from_code,
+        kite_rt_read_line,
+        kite_rt_error_int,
+        kite_rt_error_float,
+        kite_rt_error_bool,
+        kite_rt_error_str,
+        kite_rt_error_unit,
         kite_rt_str_of_float,
         kite_rt_str_of_bool,
         kite_rt_str_of_ref,

@@ -23,6 +23,8 @@ pub type Reg = u16;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Native {
     IoPrint,
+    IoError,
+    IoReadLine,
     /// Hand the scheduler a task's resume closure. The state-machine
     /// transform emits this; no program writes it.
     TaskSpawn,
@@ -58,6 +60,8 @@ impl Native {
     pub fn from_builtin(b: Builtin) -> Native {
         match b {
             Builtin::IoPrint => Native::IoPrint,
+            Builtin::IoError => Native::IoError,
+            Builtin::IoReadLine => Native::IoReadLine,
             Builtin::DrawRect => Native::DrawRect,
             Builtin::DrawRRect => Native::DrawRRect,
             Builtin::DrawFont => Native::DrawFont,
@@ -85,6 +89,8 @@ impl Native {
     pub fn name(self) -> &'static str {
         match self {
             Native::IoPrint => "io.print",
+            Native::IoError => "io.error",
+            Native::IoReadLine => "io.read_line",
             Native::DrawRect => "draw.rect",
             Native::DrawRRect => "draw.rrect",
             Native::DrawFont => "draw.font",

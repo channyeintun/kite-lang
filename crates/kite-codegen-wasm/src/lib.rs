@@ -93,7 +93,7 @@ const EXTERN_REF_NULL: ValType = ValType::Ref(RefType {
 /// Deliberately small: the standard library replaces them from Phase 6. String
 /// operations live here because a `str` is an index into a table the host
 /// holds — which is also why the module needs no linear memory.
-const IMPORTS: [(&str, &[ValType], &[ValType]); 34] = [
+const IMPORTS: [(&str, &[ValType], &[ValType]); 36] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
@@ -211,6 +211,11 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 34] = [
     // A character from a code point. A host call because a `str` is the host's
     // — the module holds an index into a table it keeps.
     ("str_from_code", &[ValType::I64], &[ValType::I32]),
+    // Standard input and standard error. A page has neither; the glue answers
+    // with the empty string and with `console.error`, which is the nearest
+    // honest equivalent of each.
+    ("read_line", &[], &[ValType::I32]),
+    ("error_str", &[ValType::I32], &[]),
 ];
 
 /// The same imports again, with `str` as an `externref`.
@@ -234,7 +239,7 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 34] = [
 /// an astral character, and two backends that disagree is the one thing this
 /// project spends its testing budget preventing. `concat` and `equals` are
 /// exact at any code point, so those two are taken and the others are not.
-const JS_STRING_IMPORTS: [(&str, &[ValType], &[ValType]); 34] = [
+const JS_STRING_IMPORTS: [(&str, &[ValType], &[ValType]); 36] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
@@ -324,6 +329,8 @@ const JS_STRING_IMPORTS: [(&str, &[ValType], &[ValType]); 34] = [
         &[],
     ),
     ("str_from_code", &[ValType::I64], &[EXTERN_REF_NULL]),
+    ("read_line", &[], &[EXTERN_REF_NULL]),
+    ("error_str", &[EXTERN_REF_NULL], &[]),
 ];
 
 /// The import table in force.
@@ -476,6 +483,13 @@ fn used_imports(
                             mark(host::PRINT_BOOL);
                             mark(host::PRINT_STR);
                         }
+                        Builtin::IoError => {
+                            mark(host::ERROR_STR);
+                            mark(host::STR_OF_INT);
+                            mark(host::STR_OF_FLOAT);
+                            mark(host::STR_OF_BOOL);
+                        }
+                        Builtin::IoReadLine => mark(host::READ_LINE),
                         Builtin::DrawRect => mark(host::DRAW_RECT),
                         Builtin::DrawRRect => mark(host::DRAW_RRECT),
                         Builtin::DrawFont => mark(host::DRAW_FONT),
@@ -589,6 +603,8 @@ mod host {
     pub const DRAW_IMAGE: u32 = 31;
     pub const DRAW_SEMANTICS: u32 = 32;
     pub const STR_FROM_CODE: u32 = 33;
+    pub const READ_LINE: u32 = 34;
+    pub const ERROR_STR: u32 = 35;
 }
 
 pub struct WasmModule {
@@ -2244,6 +2260,7 @@ impl<'a> Emitter<'a> {
                     Builtin::TextWidth
                         | Builtin::TextHeight
                         | Builtin::TextFromCode
+                        | Builtin::IoReadLine
                         | Builtin::TimeNow
                         | Builtin::PtrSame
                 );
@@ -2653,6 +2670,28 @@ impl<'a> Emitter<'a> {
 
     fn builtin(&mut self, func: &mut Function, builtin: Builtin, args: &[mir::Operand]) {
         match builtin {
+            Builtin::IoError => {
+                let Some(arg) = args.first() else {
+                    func.instruction(&Instruction::Unreachable);
+                    return;
+                };
+                // One import rather than four: the argument is already a `str`
+                // by the time it reaches here for anything but a primitive,
+                // and a diagnostic has no formatting the printer does not.
+                self.operand(func, arg);
+                if !self.is_str(arg) {
+                    let render = match self.operand_type(arg) {
+                        ValType::I64 => host::STR_OF_INT,
+                        ValType::F64 => host::STR_OF_FLOAT,
+                        _ => host::STR_OF_BOOL,
+                    };
+                    func.instruction(&Instruction::Call(self.hosts.at(render)));
+                }
+                func.instruction(&Instruction::Call(self.hosts.at(host::ERROR_STR)));
+            }
+            Builtin::IoReadLine => {
+                func.instruction(&Instruction::Call(self.hosts.at(host::READ_LINE)));
+            }
             Builtin::IoPrint => {
                 let Some(arg) = args.first() else {
                     func.instruction(&Instruction::Unreachable);

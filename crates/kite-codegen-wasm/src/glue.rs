@@ -1811,6 +1811,14 @@ function imports() {{
       // Interpolation shares its formatting with printing, so a value cannot
       // look one way in `io.print(x)` and another in `"\(x)"`.
       str_of_int: (v) => intern(showInt(v)),
+      // A page has no standard input and no standard error. `console.error` is
+      // the nearest honest equivalent of the second; there is no equivalent of
+      // the first, so a read answers with the empty string — which is what a
+      // program reading until it runs out already tests for.
+      read_line: () => intern(""),
+      error_str: (i) => {{
+        if (typeof console !== "undefined") console.error(S(i));
+      }},
       // A code point that is not a character — a surrogate, or past the end of
       // Unicode — is the empty string. `String.fromCodePoint` throws on those,
       // so the range is tested rather than the exception caught.

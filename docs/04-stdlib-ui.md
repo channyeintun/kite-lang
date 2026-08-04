@@ -582,7 +582,7 @@ std/
   fmt         Display, Debug, number and date formatting
   math        arithmetic, trig, random, checked/wrapping/saturating ops
   time        Instant, Duration, Date, timezone-aware formatting
-  io          print — `read_line` is not built
+  io          print, error, read_line
   fs          files and directories (native; unavailable on web, by design)
   http        client and server (native), fetch (web)
   socket      websockets and server-sent events

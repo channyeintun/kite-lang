@@ -1646,6 +1646,36 @@ impl<'a> Vm<'a> {
                 Err(Trap::Failed { message })
             }
 
+            // Standard error, not the sink. The sink exists so a test can
+            // capture what a program *produced*; a diagnostic is not that, and
+            // a test asserting on stdout should not see one.
+            Native::IoError => {
+                let v = self.regs[base + arg_base as usize].clone();
+                #[cfg(not(target_arch = "wasm32"))]
+                eprintln!("{}", v);
+                #[cfg(target_arch = "wasm32")]
+                let _ = &v;
+                Ok(Value::Unit)
+            }
+
+            // One line, without its newline. The empty string at end of input:
+            // a program reading until it runs out tests for that, and one
+            // reading a fixed number of lines does not test at all.
+            Native::IoReadLine => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let mut line = String::new();
+                    let read = std::io::stdin().read_line(&mut line).unwrap_or(0);
+                    if read == 0 {
+                        return Ok(Value::Str(Rc::from("")));
+                    }
+                    let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+                    Ok(Value::Str(Rc::from(trimmed)))
+                }
+                #[cfg(target_arch = "wasm32")]
+                Ok(Value::Str(Rc::from("")))
+            }
+
             Native::IoPrint => {
                 let v = if argc == 0 {
                     Value::Unit

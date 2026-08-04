@@ -3457,9 +3457,27 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            BuiltinFn::IoPrint => {
+            BuiltinFn::IoReadLine => {
+                if !args.is_empty() {
+                    self.arity_error("io.read_line", args.len(), 0, span, None);
+                }
+                hir::Expr {
+                    kind: ExprKind::CallBuiltin {
+                        builtin: Builtin::IoReadLine,
+                        args: Vec::new(),
+                    },
+                    ty: TyId::STR,
+                    span,
+                }
+            }
+
+            // `io.error` is `io.print` to the other stream, and shares its
+            // whole rule: the same types print, and a `Display` type renders
+            // through the same call, so the two cannot drift.
+            BuiltinFn::IoPrint | BuiltinFn::IoError => {
+                let name = if matches!(b, BuiltinFn::IoError) { "io.error" } else { "io.print" };
                 if args.len() != 1 {
-                    self.arity_error("io.print", args.len(), 1, span, None);
+                    self.arity_error(name, args.len(), 1, span, None);
                 }
                 let mut hargs = Vec::new();
                 for a in args {
@@ -3477,14 +3495,18 @@ impl<'a> Checker<'a> {
                             Diagnostic::error(
                                 codes::E0200,
                                 format!(
-                                    "`io.print` cannot print a `{}`",
+                                    "`{}` cannot print a `{}`",
+                                    name,
                                     self.types.name(e.ty)
                                 ),
                             )
                             .with_primary(e.span, format!("this is {}", article))
                             .with_note(
-                                "`io.print` takes `int`, `float`, `bool` and `str` directly, \
-                                 and anything that implements `Display`",
+                                format!(
+                                    "`{}` takes `int`, `float`, `bool` and `str` directly, \
+                                     and anything that implements `Display`",
+                                    name
+                                ),
                             )
                             .with_note(format!(
                                 "write `impl Display for {} {{ fn show(self) -> str {{ … }} }}`",
@@ -3495,7 +3517,14 @@ impl<'a> Checker<'a> {
                     hargs.push(e);
                 }
                 hir::Expr {
-                    kind: ExprKind::CallBuiltin { builtin: Builtin::IoPrint, args: hargs },
+                    kind: ExprKind::CallBuiltin {
+                        builtin: if matches!(b, BuiltinFn::IoError) {
+                            Builtin::IoError
+                        } else {
+                            Builtin::IoPrint
+                        },
+                        args: hargs,
+                    },
                     ty: TyId::UNIT,
                     span,
                 }

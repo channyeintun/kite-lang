@@ -407,6 +407,10 @@ impl Pattern {
 pub enum Builtin {
     /// `io.print(v)` — writes `v` followed by a newline.
     IoPrint,
+    /// `io.error(v)` — the same, to standard error.
+    IoError,
+    /// `io.read_line()` — one line from standard input, without its newline.
+    IoReadLine,
     /// `draw.rect(x, y, w, h, colour)`
     DrawRect,
     /// `draw.rrect(x, y, w, h, radius, colour)` — a rounded rectangle, which
@@ -463,6 +467,8 @@ impl Builtin {
     pub fn path(self) -> &'static str {
         match self {
             Builtin::IoPrint => "io.print",
+            Builtin::IoError => "io.error",
+            Builtin::IoReadLine => "io.read_line",
             Builtin::DrawRect => "draw.rect",
             Builtin::DrawRRect => "draw.rrect",
             Builtin::DrawFont => "draw.font",

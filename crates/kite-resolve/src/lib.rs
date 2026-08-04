@@ -37,6 +37,19 @@ pub enum Res {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BuiltinFn {
     IoPrint,
+    /// `io.error(value)` — the same as `io.print`, to standard error.
+    ///
+    /// A separate call rather than a flag, because the two go to different
+    /// places for a reason: a program whose output is piped into another
+    /// program should be able to say something to the person running it
+    /// without corrupting what it produced.
+    IoError,
+    /// `io.read_line()` — one line from standard input, without its newline.
+    ///
+    /// The empty string at end of input. Not an error and not an optional: a
+    /// program reading until it runs out tests for the empty string, and one
+    /// reading a fixed number of lines does not test at all.
+    IoReadLine,
     /// `errors.new(message)` — builds an error value. Errors are ordinary
     /// values in Kite, never exceptions.
     ErrorsNew,
@@ -251,6 +264,8 @@ impl BuiltinFn {
     pub fn from_path(path: &str) -> Option<BuiltinFn> {
         match path {
             "io.print" => Some(BuiltinFn::IoPrint),
+            "io.error" => Some(BuiltinFn::IoError),
+            "io.read_line" => Some(BuiltinFn::IoReadLine),
             "errors.new" => Some(BuiltinFn::ErrorsNew),
             "draw.rect" => Some(BuiltinFn::DrawRect),
             "draw.rrect" => Some(BuiltinFn::DrawRRect),
@@ -283,6 +298,8 @@ impl BuiltinFn {
     pub fn path(self) -> &'static str {
         match self {
             BuiltinFn::IoPrint => "io.print",
+            BuiltinFn::IoError => "io.error",
+            BuiltinFn::IoReadLine => "io.read_line",
             BuiltinFn::ErrorsNew => "errors.new",
             BuiltinFn::DrawRect => "draw.rect",
             BuiltinFn::DrawRRect => "draw.rrect",
@@ -313,7 +330,8 @@ impl BuiltinFn {
 
     pub fn arity(self) -> usize {
         match self {
-            BuiltinFn::IoPrint | BuiltinFn::ErrorsNew => 1,
+            BuiltinFn::IoPrint | BuiltinFn::IoError | BuiltinFn::ErrorsNew => 1,
+            BuiltinFn::IoReadLine => 0,
             BuiltinFn::DrawRect | BuiltinFn::DrawText => 5,
             BuiltinFn::DrawField => 9,
             BuiltinFn::DrawImage => 5,

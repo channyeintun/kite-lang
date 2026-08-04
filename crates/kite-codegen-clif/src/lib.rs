@@ -159,6 +159,12 @@ const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_print_ref", &[I64], None),
     ("kite_rt_str_of_int", &[I64], Some(I64)),
     ("kite_rt_text_from_code", &[I64], Some(I64)),
+    ("kite_rt_read_line", &[], Some(I64)),
+    ("kite_rt_error_int", &[I64], None),
+    ("kite_rt_error_float", &[F64], None),
+    ("kite_rt_error_bool", &[I8], None),
+    ("kite_rt_error_str", &[I64], None),
+    ("kite_rt_error_unit", &[], None),
     ("kite_rt_str_of_float", &[F64], Some(I64)),
     ("kite_rt_str_of_bool", &[I8], Some(I64)),
     ("kite_rt_str_of_ref", &[I64], Some(I64)),
@@ -1530,6 +1536,26 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
 
     fn builtin(&mut self, dst: mir::Local, builtin: Builtin, args: &[mir::Operand]) {
         match builtin {
+            Builtin::IoError => {
+                if args.is_empty() {
+                    self.call_rt("kite_rt_error_unit", &[]);
+                } else {
+                    let ty = self.operand_ty(&args[0]);
+                    let v = self.operand(&args[0]);
+                    match self.kind(ty) {
+                        kite_rt::kind::INT => self.call_rt("kite_rt_error_int", &[v]),
+                        kite_rt::kind::FLOAT => self.call_rt("kite_rt_error_float", &[v]),
+                        kite_rt::kind::BOOL => self.call_rt("kite_rt_error_bool", &[v]),
+                        _ if ty == TyId::STR => self.call_rt("kite_rt_error_str", &[v]),
+                        _ => self.call_rt("kite_rt_error_str", &[v]),
+                    };
+                }
+                self.def_zero(dst);
+            }
+            Builtin::IoReadLine => {
+                let r = self.call_rt("kite_rt_read_line", &[]).unwrap();
+                self.def(dst, r);
+            }
             Builtin::IoPrint => {
                 if args.is_empty() {
                     self.call_rt("kite_rt_print_unit", &[]);
