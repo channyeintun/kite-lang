@@ -336,11 +336,25 @@ most likely to be wrong.
 | | `DomRenderer` | `CanvasRenderer` | Built? |
 |---|---|---|---|
 | Shaping | Browser | HarfBuzz compiled to Wasm | **No.** `std/text` does Arabic joining and the mandatory lam-alef ligature, and says itself that this is not HarfBuzz-quality: real shaping is OpenType GSUB/GPOS, which is a font's own program |
-| Line breaking | Browser | UAX #14, in Kite | **A named subset.** Words, CJK per character, and mandatory breaks at `\n`. Not the property table: it will not break a URL and knows no non-breaking space |
+| Line breaking | Browser | UAX #14, in Kite | **Yes**, rules LB1–LB31 over a Line_Break class table. Two named departures: SA (Thai, Lao, Khmer) is treated as AL, which UAX #14 §5.1 prescribes without a dictionary; CB has nothing to break around |
 | Bidirectional text | Browser | UAX #9, in Kite | **Yes.** P2–P3, X1–X10, W1–W7, N0–N2, I1–I2, L1–L2 |
 | Font fallback | Browser | Explicit font stack + `document.fonts` | **Yes**, and by measuring rather than asking — see below |
-| Selection | Native | Reimplemented over hit-test rectangles | **No.** There is no selection model |
+| Selection | Native | Reimplemented over hit-test rectangles | **Yes.** `ui.Selection` is two offsets in the model; `index_at` maps a point to a character by measurement, `selection_rects` gives one rectangle per line spanned |
 | IME | Native | Hidden real `<input>` overlay | **Yes** |
+
+Line breaking is worth a note, because what it replaced was worse than merely
+incomplete: the old rule split on spaces and called anything wider than `W`
+*under the host's font* its own piece. That made **line breaking depend on the
+font**, so two hosts could legitimately disagree about where a paragraph broke —
+which is precisely the disagreement this whole column exists to prevent. The
+class table is a property of the text, and both renderers now get the same
+answer from it.
+
+Selection is a note too, for the opposite reason: a field under `DomRenderer`
+needs none of it. The real `<input>` has the browser's own selection, which is
+better than anything reimplementable. `ui.Selection` is for *drawn* text — a
+label, a canvas, a transcript — and it lives in the model beside focus rather
+than inside a renderer.
 
 The font row is worth a paragraph, because the obvious implementation does not
 work. `document.fonts.check` reports on the `FontFace`s in the document's own

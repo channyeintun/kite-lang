@@ -927,22 +927,23 @@ pub fn wrap(body: str, limit: float) -> [str] {
 
 /// The pieces a line may be broken between.
 ///
-/// This is a **subset of UAX #14**, and the subset is named rather than
-/// implied: a run of Latin text breaks between words, and CJK breaks between
-/// characters — which is most of what the rules say for most text, and is the
-/// difference between a Japanese paragraph laid out and one drawn as a single
-/// enormous word.
+/// **UAX #14**, from `std/text`. Each piece runs from one break opportunity to
+/// the next, and carries whether a space stood at the boundary and how many
+/// mandatory breaks did.
 ///
-/// What it does not do: it will not break a long URL, it does not know
-/// non-breaking spaces, and it will happily leave a closing bracket at the
-/// start of a line. Each of those needs the line-breaking property table,
-/// which belongs with the canvas renderer.
-/// A run of text that may be broken from the one before it, and whether a
-/// space stood between them.
+/// What this replaced: a rule that split on spaces, treated any character wider
+/// than `W` under the host's font as its own piece, and knew nothing else. That
+/// got CJK roughly right and everything else wrong — a URL was one enormous
+/// word, a non-breaking space broke like an ordinary one, and `(a)` could lose
+/// its bracket to the next line. It also made line breaking depend on the
+/// *font*, so two hosts could disagree about where a paragraph broke.
+/// A run of text that may be broken from the one before it, whether a space
+/// stood between them, and how many mandatory breaks did.
 ///
-/// The flag is the whole point. Splitting is lossy — a break at a space and a
-/// break between two CJK characters look identical afterwards — so what was
-/// there is recorded rather than reconstructed from the shape of the piece.
+/// The flags are the whole point. Splitting is lossy — a break at a space, a
+/// break between two ideographs and a break after a solidus look identical
+/// afterwards — so what was there is recorded rather than reconstructed from
+/// the shape of the piece.
 struct Piece {
     body: str
     spaced: bool
@@ -950,77 +951,315 @@ struct Piece {
     /// it. Counted rather than flagged, because two breaks in a row are a
     /// blank line and a boolean cannot say how many lines to leave.
     breaks: int
+    /// Where this piece starts in the body it came from.
+    ///
+    /// Carried so a wrapped line can be mapped back to the text it was wrapped
+    /// out of, which is what a selection needs: a caret is an offset into the
+    /// string the program holds, not into the picture.
+    at: int
 }
 
 fn pieces_of(body: str) -> [Piece] {
+    let allowed = text.break_opportunities(body)
     var out: [Piece] = []
     var current = ""
-    // Whether the piece being accumulated had a space before it.
+    // Whether a space stood before the piece being accumulated, and how many
+    // mandatory breaks did. Both are recorded rather than reconstructed: a
+    // break at a space and a break between two ideographs look identical once
+    // the pieces are apart.
     var after_space = false
-    // Mandatory breaks standing in front of the piece being accumulated.
     var pending = 0
+    // Where the piece being accumulated began.
+    var start = 0
     for i in 0..body.len() {
         let c = body.slice(i, i + 1)
-        if c == "\n" {
+        let hard = c == "\n"
+        // A break is taken where the algorithm allows one and something has
+        // been accumulated to break off. Position 0 is never an opportunity.
+        if i > 0 && allowed[i] && current.len() > 0 && !hard && c != " " {
+            out.push(Piece{ body: current, spaced: after_space, breaks: pending, at: start })
+            current = ""
+            pending = 0
+            after_space = false
+        }
+        if current.len() == 0 {
+            start = i
+        }
+        if hard {
             if current.len() > 0 {
-                out.push(Piece{ body: current, spaced: after_space, breaks: pending })
+                out.push(Piece{ body: current, spaced: after_space, breaks: pending, at: start })
                 current = ""
                 pending = 0
             }
             pending = pending + 1
             // A break subsumes the space in front of it. The space was only
-            // ever a separator, and the break separates more strongly — so a
-            // rejoined line does not start with the space that ended the last
-            // one.
+            // ever a separator, and the break separates more strongly.
             after_space = false
         } else if c == " " {
+            // A space belongs to neither side: it is where the line ends, and
+            // a line does not end with it.
             if current.len() > 0 {
-                out.push(Piece{ body: current, spaced: after_space, breaks: pending })
+                out.push(Piece{ body: current, spaced: after_space, breaks: pending, at: start })
                 current = ""
                 pending = 0
             }
             after_space = true
-        } else if wide(c) {
-            // A wide character is its own piece, and so is whatever
-            // preceded it. Neither had a space between them.
-            if current.len() > 0 {
-                out.push(Piece{ body: current, spaced: after_space, breaks: pending })
-                current = ""
-                pending = 0
-                after_space = false
-            }
-            out.push(Piece{ body: c, spaced: after_space, breaks: pending })
-            pending = 0
-            after_space = false
         } else {
             current = current + c
         }
     }
     if current.len() > 0 {
-        out.push(Piece{ body: current, spaced: after_space, breaks: pending })
+        out.push(Piece{ body: current, spaced: after_space, breaks: pending, at: start })
     } else if pending > 0 {
         // A body ending in a break ends with an empty line, and something has
         // to carry it: `"a\n"` is two lines, the second of them blank.
-        out.push(Piece{ body: "", spaced: false, breaks: pending })
+        out.push(Piece{ body: "", spaced: false, breaks: pending, at: body.len() })
     }
     return out
 }
 
-/// Whether a piece joins the line before it with no space.
-///
-/// A piece that came from a wide character had no space before it, so putting
-/// one back would open a gap that was never in the text.
+/// A wrapped line, and where it came from.
+pub struct LineSpan {
+    /// The text of the line, as `wrap` would give it.
+    pub body: str
+    /// Where it starts and ends in the body it was wrapped out of. `end` is
+    /// exclusive, and the gap between one line's `end` and the next line's
+    /// `start` is the whitespace the break consumed.
+    pub start: int
+    pub end: int
+}
 
-/// Whether a character is one a line may break either side of.
+/// The same wrapping as [`wrap`], with each line's place in the original.
 ///
-/// Measured rather than tabulated: a character wider than a Latin one under
-/// the host's own font is a CJK or full-width character, and the host is the
-/// only thing that knows its font. A runtime with no font answers with a
-/// nominal advance per character, where every character is the same width and
-/// nothing is wide — which is the right answer there, because nothing is being
-/// drawn.
-fn wide(c: str) -> bool {
-    return text.width(c) > text.width("W") * 1.2
+/// `wrap` throws the positions away, which is fine for drawing and useless for
+/// selecting: a caret is an offset into the string the program holds, and the
+/// picture cannot say what that is. Both walk the same pieces, so a line here
+/// is the same line there.
+pub fn wrap_spans(body: str, limit: float) -> [LineSpan] {
+    let pieces = pieces_of(body)
+    if pieces.len() == 0 {
+        return [LineSpan{ body: "", start: 0, end: 0 }]
+    }
+    var lines: [LineSpan] = []
+    var current = ""
+    var from = 0
+    var to = 0
+    var started = false
+    for i in 0..pieces.len() {
+        let piece = pieces[i]
+        if piece.breaks > 0 {
+            lines.push(LineSpan{ body: current, start: from, end: to })
+            for b in 1..piece.breaks {
+                lines.push(LineSpan{ body: "", start: piece.at, end: piece.at })
+            }
+            current = piece.body
+            from = piece.at
+            to = piece.at + piece.body.len()
+            started = true
+        } else if !started {
+            current = piece.body
+            from = piece.at
+            to = piece.at + piece.body.len()
+            started = true
+        } else {
+            let candidate = if piece.spaced { current + " " + piece.body } else { current + piece.body }
+            if text.width(candidate) <= limit {
+                current = candidate
+                to = piece.at + piece.body.len()
+            } else {
+                lines.push(LineSpan{ body: current, start: from, end: to })
+                current = piece.body
+                from = piece.at
+                to = piece.at + piece.body.len()
+            }
+        }
+    }
+    lines.push(LineSpan{ body: current, start: from, end: to })
+    return lines
+}
+
+// ---- selection --------------------------------------------------------------
+//
+// §5 gives the canvas renderer "selection reimplemented over hit-test
+// rectangles", against the browser's own on the DOM side. This is that.
+//
+// A selection is **in the model**, like everything else: two offsets into the
+// text a frame holds. It is not renderer state and it is not hidden anywhere —
+// an application that wants a selection stores one, hands it to `paint`, and
+// updates it from pointer events, which is the same shape focus already has.
+//
+// A field under the DOM renderer needs none of this: the real `<input>` has the
+// browser's own selection, which is better than anything reimplementable. This
+// is for drawn text — a canvas, a transcript, a label a program lets you copy.
+
+/// A range of characters in one frame's text.
+///
+/// `anchor` is where a drag began and `focus` is where it is now, so a
+/// selection knows its direction; `from`/`to` order them for anything that
+/// does not care.
+pub struct Selection {
+    /// The frame this selects inside. Empty selects nothing.
+    pub name: str
+    pub anchor: int
+    pub focus: int
+}
+
+pub fn no_selection() -> Selection {
+    return Selection{ name: "", anchor: 0, focus: 0 }
+}
+
+pub fn selection_empty(s: Selection) -> bool {
+    return s.name.len() == 0 || s.anchor == s.focus
+}
+
+pub fn selection_from(s: Selection) -> int {
+    return if s.anchor < s.focus { s.anchor } else { s.focus }
+}
+
+pub fn selection_to(s: Selection) -> int {
+    return if s.anchor < s.focus { s.focus } else { s.anchor }
+}
+
+/// The character offset nearest a point inside a frame's text.
+///
+/// Nearest, not containing: a click lands *between* two characters, and the
+/// one it belongs to is whichever edge is closer. That is what makes clicking
+/// the right half of a letter put the caret after it, which is what every text
+/// editor does and what anyone clicking expects.
+///
+/// A point above the first line answers 0 and one below the last answers the
+/// length, so a drag that leaves the box selects to its end rather than
+/// stopping.
+pub fn index_at(frame: Frame, x: float, y: float) -> int {
+    let body = frame.content
+    if body.len() == 0 {
+        return 0
+    }
+    set_host_font(frame.size, frame.weight)
+    let box = frame.inner
+    let lines = wrap_spans(body, box.width)
+    let height = line_height()
+    // Which line the point is on, clamped into the text.
+    var row = 0
+    if y > box.y {
+        row = ((y - box.y) / height) as int
+    }
+    if row < 0 {
+        row = 0
+    }
+    if row >= lines.len() {
+        row = lines.len() - 1
+    }
+    let line = lines[row]
+    // Walk the line, stopping where the pointer is closer to this edge than to
+    // the next one.
+    var at = 0
+    var drawn = box.x
+    for i in 0..line.body.len() {
+        let advance = text.width(line.body.slice(i, i + 1))
+        if x < drawn + advance / 2.0 {
+            unset_host_font(frame.size)
+            return line.start + at
+        }
+        drawn = drawn + advance
+        at = at + 1
+    }
+    unset_host_font(frame.size)
+    return line.end
+}
+
+/// The rectangles a selection covers — one per line it spans.
+///
+/// A selection across three lines is three rectangles, not one: the middle
+/// line is full width and the ends are partial, which is what a selection
+/// looks like everywhere and what a single bounding box gets wrong.
+pub fn selection_rects(frame: Frame, s: Selection) -> [Rect] {
+    if selection_empty(s) || s.name != frame.name {
+        return []
+    }
+    let body = frame.content
+    if body.len() == 0 {
+        return []
+    }
+    set_host_font(frame.size, frame.weight)
+    let box = frame.inner
+    let lines = wrap_spans(body, box.width)
+    let height = line_height()
+    let from = selection_from(s)
+    let to = selection_to(s)
+    var out: [Rect] = []
+    var y = box.y
+    for line in lines {
+        // The part of this line the selection covers, in the line's own
+        // coordinates. A line entirely outside contributes nothing.
+        let lo = if from > line.start { from } else { line.start }
+        let hi = if to < line.end { to } else { line.end }
+        if lo < hi {
+            let before = line.body.slice(0, lo - line.start)
+            let inside = line.body.slice(lo - line.start, hi - line.start)
+            out.push(
+                Rect {
+                    x: box.x + text.width(before),
+                    y: y,
+                    width: text.width(inside),
+                    height: height,
+                },
+            )
+        }
+        y = y + height
+    }
+    unset_host_font(frame.size)
+    return out
+}
+
+/// The text a selection covers.
+pub fn selected_text(frame: Frame, s: Selection) -> str {
+    if selection_empty(s) || s.name != frame.name {
+        return ""
+    }
+    let body = frame.content
+    let from = selection_from(s)
+    let to = selection_to(s)
+    if from >= body.len() {
+        return ""
+    }
+    return body.slice(from, if to > body.len() { body.len() } else { to })
+}
+
+/// Begin a selection at a point, or extend the one already there.
+///
+/// The two are one function because they differ in one thing — whether the
+/// anchor moves — and a caller that had to choose would have to track which
+/// press was the first, which the model already knows.
+pub fn select_at(frames: [Frame], name: str, x: float, y: float, extend: Selection) -> Selection {
+    let found = frame_of(frames, name)
+    if found == nil {
+        return no_selection()
+    }
+    let at = index_at(found, x, y)
+    if extend.name == name {
+        return Selection{ name: name, anchor: extend.anchor, focus: at }
+    }
+    return Selection{ name: name, anchor: at, focus: at }
+}
+
+/// Paint a selection's highlight. Call it *before* `paint`, so the text is
+/// drawn over it rather than under it.
+pub fn paint_selection(frames: [Frame], s: Selection, colour: int) {
+    paint_selection_with(frames, s, colour, host_renderer())
+}
+
+pub fn paint_selection_with(frames: [Frame], s: Selection, colour: int, var into: dyn Renderer) {
+    if selection_empty(s) {
+        return
+    }
+    let found = frame_of(frames, s.name)
+    if found == nil {
+        return
+    }
+    for r in selection_rects(found, s) {
+        into.fill(r, 0.0, colour)
+    }
 }
 
 /// How much space a run needs once wrapped to `limit`.

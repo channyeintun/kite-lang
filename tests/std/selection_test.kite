@@ -1,0 +1,190 @@
+// Text selection over hit-test rectangles.
+//
+// §5 of docs/04 gives the canvas renderer "selection reimplemented over
+// hit-test rectangles", against the browser's own on the DOM side. A field
+// under the DOM renderer needs none of this — the real element has the
+// browser's selection, which is better than anything reimplementable — so what
+// is tested here is drawn text: a label, a canvas, a transcript.
+//
+// The nominal font makes every character 8 wide and every line 16 tall, which
+// is what lets these assert exact coordinates rather than approximate ones.
+
+use std/test
+use std/ui
+
+enum Msg {
+    Nothing
+}
+
+fn label(body: str, width: float) -> ui.Node<Msg> {
+    return ui.text_of("label", ui.Style{ ..ui.style(), width: width }, body)
+}
+
+fn frames_of(body: str, width: float) -> [ui.Frame] {
+    return ui.layout(label(body, width), ui.Size{ width: width, height: 200.0 })
+}
+
+fn found_frame(body: str, width: float) -> ui.Frame {
+    let frames = frames_of(body, width)
+    let f = ui.frame_of(frames, "label")
+    if f == nil {
+        return ui.Frame {
+            name: "",
+            rect: ui.Rect{ x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+            inner: ui.Rect{ x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+            depth: 0,
+            content: "",
+            size: 0.0,
+            weight: 400,
+            control: nil,
+            is_control: false,
+            enabled: true,
+            edits: nil,
+            image: nil,
+            label: "",
+            role: ui.Role.Group,
+            checked: nil,
+            focused: false,
+            decor: ui.no_decor(),
+            portal: false,
+        }
+    }
+    return f
+}
+
+fn span_checks() -> [error] {
+    var out: [error] = []
+    // Two lines, and each knows where it came from.
+    let spans = ui.wrap_spans("one two three", 80.0)
+    out.push(test.is_true(spans.len() >= 2, "a long run wraps"))
+    if spans.len() < 2 {
+        return out
+    }
+    out.push(test.equal_int(spans[0].start, 0, "the first line starts at 0"))
+    // The gap between one line's end and the next line's start is the space
+    // the break consumed.
+    out.push(test.is_true(spans[1].start > spans[0].end, "the break consumed a space"))
+    // A span slices back to exactly what it says.
+    let source = "one two three"
+    out.push(
+        test.equal_str(
+            source.slice(spans[0].start, spans[0].end),
+            spans[0].body,
+            "a span slices back to its own line",
+        ),
+    )
+    return out
+}
+
+fn index_checks() -> [error] {
+    var out: [error] = []
+    let f = found_frame("abcdef", 400.0)
+    out.push(test.equal_str(f.content, "abcdef", "the frame holds the text"))
+    // Every character is 8 wide under the nominal font, so the boundaries are
+    // at 0, 8, 16… and the midpoints at 4, 12, 20.
+    out.push(test.equal_int(ui.index_at(f, f.inner.x, f.inner.y), 0, "the left edge is 0"))
+    out.push(test.equal_int(ui.index_at(f, f.inner.x + 3.0, f.inner.y), 0, "before the midpoint"))
+    out.push(test.equal_int(ui.index_at(f, f.inner.x + 5.0, f.inner.y), 1, "after the midpoint"))
+    out.push(test.equal_int(ui.index_at(f, f.inner.x + 13.0, f.inner.y), 2, "and again"))
+    // Past the end clamps to the end rather than running off.
+    out.push(test.equal_int(ui.index_at(f, f.inner.x + 999.0, f.inner.y), 6, "past the end"))
+    // Above the first line is the start.
+    out.push(test.equal_int(ui.index_at(f, f.inner.x, f.inner.y - 50.0), 0, "above the text"))
+    return out
+}
+
+fn rect_checks() -> [error] {
+    var out: [error] = []
+    let f = found_frame("abcdef", 400.0)
+    // Characters 1..3 — "bc" — is one rectangle, 8 in and 16 wide.
+    let s = ui.Selection{ name: "label", anchor: 1, focus: 3 }
+    let rects = ui.selection_rects(f, s)
+    out.push(test.equal_int(rects.len(), 1, "one line, one rectangle"))
+    if rects.len() != 1 {
+        return out
+    }
+    out.push(test.equal_float(rects[0].x, f.inner.x + 8.0, 0.001, "starting after one character"))
+    out.push(test.equal_float(rects[0].width, 16.0, 0.001, "and two characters wide"))
+    out.push(test.equal_str(ui.selected_text(f, s), "bc", "and covering what it says"))
+
+    // Backwards is the same range.
+    let back = ui.Selection{ name: "label", anchor: 3, focus: 1 }
+    out.push(test.equal_str(ui.selected_text(f, back), "bc", "a backwards drag selects the same"))
+    out.push(test.equal_int(ui.selection_from(back), 1, "and orders itself"))
+    out.push(test.equal_int(ui.selection_to(back), 3, "both ways"))
+
+    // An empty selection covers nothing.
+    let empty = ui.Selection{ name: "label", anchor: 2, focus: 2 }
+    out.push(test.is_true(ui.selection_empty(empty), "an unmoved drag is empty"))
+    out.push(test.equal_int(ui.selection_rects(f, empty).len(), 0, "and paints nothing"))
+
+    // A selection naming a different frame covers nothing here.
+    let elsewhere = ui.Selection{ name: "other", anchor: 0, focus: 3 }
+    out.push(test.equal_int(ui.selection_rects(f, elsewhere).len(), 0, "another frame's selection"))
+    return out
+}
+
+fn multiline_checks() -> [error] {
+    var out: [error] = []
+    // Narrow enough to wrap into three lines.
+    let f = found_frame("one two three", 40.0)
+    let spans = ui.wrap_spans(f.content, f.inner.width)
+    out.push(test.is_true(spans.len() >= 2, "it wrapped"))
+    if spans.len() < 2 {
+        return out
+    }
+    // Everything selected: one rectangle per line that has anything on it.
+    let all = ui.Selection{ name: "label", anchor: 0, focus: f.content.len() }
+    let rects = ui.selection_rects(f, all)
+    out.push(test.equal_int(rects.len(), spans.len(), "one rectangle per line"))
+    // The rectangles descend, one line height apart.
+    if rects.len() >= 2 {
+        out.push(
+            test.equal_float(
+                rects[1].y - rects[0].y,
+                ui.line_height(),
+                0.001,
+                "a line apart",
+            ),
+        )
+    }
+    out.push(test.equal_str(ui.selected_text(f, all), "one two three", "and cover the whole text"))
+    return out
+}
+
+fn drag_checks() -> [error] {
+    var out: [error] = []
+    let frames = frames_of("abcdef", 400.0)
+    let f = found_frame("abcdef", 400.0)
+    // A press starts a selection; a drag extends it without moving the anchor.
+    let down = ui.select_at(frames, "label", f.inner.x + 5.0, f.inner.y, ui.no_selection())
+    out.push(test.equal_int(down.anchor, 1, "the press sets the anchor"))
+    out.push(test.is_true(ui.selection_empty(down), "and selects nothing yet"))
+
+    let moved = ui.select_at(frames, "label", f.inner.x + 29.0, f.inner.y, down)
+    out.push(test.equal_int(moved.anchor, 1, "the drag keeps the anchor"))
+    out.push(test.equal_int(moved.focus, 4, "and moves the focus"))
+    out.push(test.equal_str(ui.selected_text(f, moved), "bcd", "selecting what was dragged over"))
+
+    // A press on a frame that is not there selects nothing.
+    let missing = ui.select_at(frames, "nope", 0.0, 0.0, ui.no_selection())
+    out.push(test.is_true(ui.selection_empty(missing), "a missing frame selects nothing"))
+    return out
+}
+
+fn main() {
+    var results: [error] = []
+    results = concat(results, span_checks())
+    results = concat(results, index_checks())
+    results = concat(results, rect_checks())
+    results = concat(results, multiline_checks())
+    results = concat(results, drag_checks())
+    var failed = 0
+    for e in results {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("selection: \(results.len() - failed) passed, \(failed) failed")
+}

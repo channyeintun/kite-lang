@@ -7,9 +7,8 @@
 // next to it, and the point of computing everything in Kite is that neither
 // renderer decides anything.
 //
-// Everything in this module is a **named subset** of a Unicode algorithm, in
-// the same spirit as the line breaker in `std/ui`: what is implemented is
-// stated, what is not is stated, and nothing is implied.
+// Everything in this module is a **named subset** of a Unicode algorithm: what
+// is implemented is stated, what is not is stated, and nothing is implied.
 //
 // - `bidi_runs` is UAX #9, the bidirectional algorithm: rules P2–P3, X1–X10,
 //   W1–W7, N0–N2 (bracket pairs included), I1–I2 and L1–L2. What it does not
@@ -20,6 +19,12 @@
 //   character — which is what both of ours do — will not honour an override
 //   that contradicts the letters. Higher-level protocols (HL1–HL6) are not
 //   implemented at all.
+// - `break_opportunities` is UAX #14, the line breaking algorithm: rules
+//   LB1–LB31 over a Line_Break class table. Two departures, both of which the
+//   annex itself names: SA (Thai, Lao, Khmer, and Burmese syllable breaking)
+//   is treated as AL, which §5.1 prescribes in the absence of a dictionary,
+//   and CB is not implemented because nothing can be embedded in a run of Kite
+//   text to break around.
 // - `join_arabic` is the joining half of Arabic shaping: Joining_Type over
 //   the Arabic block's own letters, mapped to Arabic Presentation Forms-B,
 //   with the mandatory lam-alef ligature. It is **not HarfBuzz-quality
@@ -1761,4 +1766,583 @@ pub fn join_arabic(run: str) -> str {
         i += 1
     }
     return out
+}
+
+// ---- UAX #14: line breaking -------------------------------------------------
+//
+// Where a line *may* break, as opposed to where it *must* fit. The two are
+// different questions and only the second needs a font: this decides the
+// opportunities, and `ui.wrap` decides which of them to take.
+//
+// **The subset, named.** The Line_Break property is a table of every assigned
+// code point, and what is here covers the classes that occur in the scripts the
+// golden suite draws — Latin, Cyrillic, Greek, Arabic, Hebrew, Devanagari,
+// Thai, CJK, Hangul, Burmese — plus the punctuation and symbols that appear
+// beside them. A code point this table does not know is `AL`, alphabetic, which
+// is what UAX #14 itself prescribes for unassigned code points (rule LB1, XX →
+// AL) and gives the safe answer: no break inside an unknown word.
+//
+// Two deliberate departures, both of which UAX #14 permits and names:
+//
+//   * **SA is treated as AL.** Thai, Lao, Khmer and Burmese break between
+//     syllables, and finding those requires a dictionary — UAX #14 §5.1 says
+//     so, and says "in the absence of such a analysis, treat as AL". So Thai
+//     wraps at spaces here. A dictionary is a different kind of artefact from
+//     a property table and would be the larger half of this module.
+//   * **CB is not implemented**, because there is nothing embedded to break
+//     around: `Content` holds text or a picture, never text with a picture
+//     inside it.
+//
+// The pair rules are LB2–LB31 with the tailorable ones at their defaults. What
+// this buys over breaking at spaces: a URL breaks after its slashes, a
+// non-breaking space does not break, `(a)` keeps its brackets, a number is not
+// split from its sign or its percent, and a closing quote does not start a line.
+
+/// The Line_Break classes this module distinguishes.
+pub enum LineBreak {
+    /// Mandatory break: newline and friends.
+    BK
+    /// Carriage return, line feed — sequenced by LB5.
+    CR
+    LF
+    /// Next line, U+0085.
+    NL
+    /// Space.
+    SP
+    /// Zero-width space: a break opportunity that shows nothing.
+    ZW
+    /// Word joiner and friends: never break either side.
+    WJ
+    /// Non-breaking glue: a no-break space, a narrow no-break space.
+    GL
+    /// Combining mark: takes the class of what it attaches to.
+    CM
+    /// Opening punctuation — no break after.
+    OP
+    /// Closing punctuation — no break before.
+    CL
+    /// Closing parenthesis, which LB30 treats slightly differently from CL.
+    CP
+    /// Quotation mark — no break either side.
+    QU
+    /// Exclamation and interrogation — no break before.
+    EX
+    /// Infix separator: a comma or a full stop inside a number.
+    IS
+    /// Symbol allowing a break after: the solidus.
+    SY
+    /// Numeric prefix: a currency sign.
+    PR
+    /// Numeric postfix: a percent sign, a degree sign.
+    PO
+    /// Hyphen-minus.
+    HY
+    /// Break after: an en dash, a slash-like separator.
+    BA
+    /// Break before.
+    BB
+    /// Em dash: breaks either side.
+    B2
+    /// Non-starter: a small kana, a middle dot.
+    NS
+    /// Ideographic: CJK, which breaks between almost any two.
+    ID
+    /// Numeric.
+    NU
+    /// Alphabetic — the default, and what an unknown code point becomes.
+    AL
+    /// Hangul syllable and jamo classes, which LB26/LB27 keep together.
+    H2
+    H3
+    JL
+    JV
+    JT
+}
+
+/// The Line_Break class of a code point.
+///
+/// Range checks rather than a lookup table, for the reason `bidi_class` uses
+/// them: a table of every assigned code point is a megabyte, and the ranges
+/// that matter are few enough to read.
+pub fn line_break_class(code: int) -> LineBreak {
+    // ---- mandatory breaks and spaces ----
+    if code == 0x000A {
+        return LineBreak.LF
+    }
+    if code == 0x000D {
+        return LineBreak.CR
+    }
+    if code == 0x000B || code == 0x000C || code == 0x2028 || code == 0x2029 {
+        return LineBreak.BK
+    }
+    if code == 0x0085 {
+        return LineBreak.NL
+    }
+    if code == 0x0020 {
+        return LineBreak.SP
+    }
+    if code == 0x200B {
+        return LineBreak.ZW
+    }
+    if code == 0x2060 || code == 0xFEFF {
+        return LineBreak.WJ
+    }
+    // A no-break space, a narrow one, a figure space, a word-joining tie.
+    if code == 0x00A0 || code == 0x202F || code == 0x2007 || code == 0x2011 {
+        return LineBreak.GL
+    }
+
+    // ---- punctuation ----
+    if code == 0x0028 || code == 0x005B || code == 0x007B {
+        return LineBreak.OP
+    }
+    if code == 0x0029 || code == 0x005D {
+        return LineBreak.CP
+    }
+    if code == 0x007D {
+        return LineBreak.CL
+    }
+    if code == 0x0022 || code == 0x0027 || code == 0x00AB || code == 0x00BB {
+        return LineBreak.QU
+    }
+    if code >= 0x2018 && code <= 0x201F {
+        return LineBreak.QU
+    }
+    if code == 0x0021 || code == 0x003F {
+        return LineBreak.EX
+    }
+    if code == 0x002C || code == 0x002E || code == 0x003A || code == 0x003B {
+        return LineBreak.IS
+    }
+    if code == 0x002F {
+        return LineBreak.SY
+    }
+    if code == 0x002D {
+        return LineBreak.HY
+    }
+    if code == 0x2014 {
+        return LineBreak.B2
+    }
+    // En dash, and the spaces that permit a break after themselves.
+    if code == 0x2013 || code == 0x2010 || code == 0x2012 || code == 0x058A {
+        return LineBreak.BA
+    }
+    if code >= 0x2000 && code <= 0x2006 {
+        return LineBreak.BA
+    }
+    if code == 0x00B4 || code == 0x1FFD {
+        return LineBreak.BB
+    }
+    // Currency signs before a number, percent and degree after one.
+    if code == 0x0024 || code == 0x00A3 || code == 0x00A5 || code == 0x20AC || code == 0x00A2 {
+        return LineBreak.PR
+    }
+    if code == 0x0025 || code == 0x00B0 || code == 0x2030 {
+        return LineBreak.PO
+    }
+
+    // ---- numbers and letters ----
+    if code >= 0x0030 && code <= 0x0039 {
+        return LineBreak.NU
+    }
+
+    // ---- combining marks ----
+    //
+    // Reusing the bidi module's own test, so a mark is a mark to exactly one
+    // piece of code. Devanagari, Thai, Arabic and Burmese all depend on this:
+    // a mark that started a line would be drawn over nothing.
+    if is_combining(code) {
+        return LineBreak.CM
+    }
+
+    // ---- ideographs ----
+    //
+    // CJK breaks between almost any two characters, which is what makes a
+    // Japanese paragraph lay out instead of becoming one enormous word.
+    if code >= 0x1100 && code <= 0x115F {
+        return LineBreak.JL
+    }
+    if code >= 0x1160 && code <= 0x11A7 {
+        return LineBreak.JV
+    }
+    if code >= 0x11A8 && code <= 0x11FF {
+        return LineBreak.JT
+    }
+    if code >= 0xAC00 && code <= 0xD7A3 {
+        // A Hangul syllable is LV (H2) when it has no trailing consonant and
+        // LVT (H3) when it has one; the block is laid out in runs of 28.
+        if (code - 0xAC00) % 28 == 0 {
+            return LineBreak.H2
+        }
+        return LineBreak.H3
+    }
+    // Small kana and the middle dots, which may not start a line.
+    if code == 0x3005 || code == 0x303B || code == 0x309D || code == 0x309E {
+        return LineBreak.NS
+    }
+    if code == 0x30FB || code == 0xFF65 || code == 0x30FD || code == 0x30FE {
+        return LineBreak.NS
+    }
+    if code >= 0x3041 && code <= 0x3096 {
+        // The small kana are non-starters; the rest are ideographic.
+        if small_kana(code) {
+            return LineBreak.NS
+        }
+        return LineBreak.ID
+    }
+    if code >= 0x30A1 && code <= 0x30FA {
+        if small_kana(code - 0x60) {
+            return LineBreak.NS
+        }
+        return LineBreak.ID
+    }
+    // CJK ideographs, and the fullwidth forms.
+    if code >= 0x3400 && code <= 0x4DBF {
+        return LineBreak.ID
+    }
+    if code >= 0x4E00 && code <= 0x9FFF {
+        return LineBreak.ID
+    }
+    if code >= 0xF900 && code <= 0xFAFF {
+        return LineBreak.ID
+    }
+    if code >= 0x20000 && code <= 0x2FA1F {
+        return LineBreak.ID
+    }
+    // CJK punctuation: the brackets are OP and CL, the stops are CL.
+    if code == 0x3008 || code == 0x300A || code == 0x300C || code == 0x300E {
+        return LineBreak.OP
+    }
+    if code == 0x3010 || code == 0x3014 || code == 0x3016 || code == 0xFF08 {
+        return LineBreak.OP
+    }
+    if code == 0x3009 || code == 0x300B || code == 0x300D || code == 0x300F {
+        return LineBreak.CL
+    }
+    if code == 0x3011 || code == 0x3015 || code == 0x3017 || code == 0xFF09 {
+        return LineBreak.CL
+    }
+    if code == 0x3001 || code == 0x3002 || code == 0xFF0C || code == 0xFF0E {
+        return LineBreak.CL
+    }
+    if code == 0xFF01 || code == 0xFF1F {
+        return LineBreak.EX
+    }
+    // An emoji, which breaks like an ideograph rather than like a letter.
+    if code >= 0x1F300 && code <= 0x1FAFF {
+        return LineBreak.ID
+    }
+
+    // Everything else — every letter of every alphabet, and every code point
+    // this table has never heard of. UAX #14 rule LB1: XX becomes AL.
+    return LineBreak.AL
+}
+
+/// The small kana, which are non-starters: they may not begin a line.
+fn small_kana(code: int) -> bool {
+    if code == 0x3041 || code == 0x3043 || code == 0x3045 || code == 0x3047 {
+        return true
+    }
+    if code == 0x3049 || code == 0x3063 || code == 0x3083 || code == 0x3085 {
+        return true
+    }
+    if code == 0x3087 || code == 0x308E || code == 0x3095 || code == 0x3096 {
+        return true
+    }
+    return false
+}
+
+/// Whether a class is one of the mandatory-break ones.
+fn is_mandatory(c: LineBreak) -> bool {
+    return match c {
+        BK => true
+        CR => true
+        LF => true
+        NL => true
+        SP => false
+        ZW => false
+        WJ => false
+        GL => false
+        CM => false
+        OP => false
+        CL => false
+        CP => false
+        QU => false
+        EX => false
+        IS => false
+        SY => false
+        PR => false
+        PO => false
+        HY => false
+        BA => false
+        BB => false
+        B2 => false
+        NS => false
+        ID => false
+        NU => false
+        AL => false
+        H2 => false
+        H3 => false
+        JL => false
+        JV => false
+        JT => false
+    }
+}
+
+/// Where a line may break.
+///
+/// Answers one flag per character: whether a break is allowed **before** it.
+/// Position 0 is always false — UAX #14 rule LB2, never break at the start —
+/// and a mandatory break is reported as an allowed one, because `ui.wrap`
+/// already knows a `\n` ends a line and needs to be told the rest.
+///
+/// The classes are resolved first, then the pairs. Doing it in two passes is
+/// what makes LB9 — a combining mark takes the class of what it attaches to —
+/// a single loop rather than a special case at every rule.
+pub fn break_opportunities(body: str) -> [bool] {
+    var codes: [int] = []
+    for i in 0..body.len() {
+        codes.push(body.code_at(i))
+    }
+    if codes.len() == 0 {
+        return []
+    }
+
+    // ---- LB1 and LB9: resolve the classes ----
+    var classes: [LineBreak] = []
+    for code in codes {
+        classes.push(line_break_class(code))
+    }
+    // LB9: `X CM* → X`. A mark takes the class of the character it attaches
+    // to, so a run of marks after a letter is part of that letter. A mark with
+    // nothing before it is AL (LB10), which is the case a line beginning with
+    // one falls into.
+    for i in 0..classes.len() {
+        if classes[i] == LineBreak.CM {
+            if i == 0 {
+                classes[i] = LineBreak.AL
+            } else {
+                let before = classes[i - 1]
+                // A mark does not attach to a space or a mandatory break.
+                if before == LineBreak.SP || is_mandatory(before) {
+                    classes[i] = LineBreak.AL
+                } else if before == LineBreak.ZW {
+                    classes[i] = LineBreak.AL
+                } else {
+                    classes[i] = before
+                }
+            }
+        }
+    }
+
+    var out: [bool] = []
+    // LB2: never break at the start.
+    out.push(false)
+    for i in 1..classes.len() {
+        out.push(may_break(classes, i))
+    }
+    return out
+}
+
+/// Whether a break is allowed before position `i`.
+///
+/// The rules are tried in their numbered order and the first that applies
+/// decides, which is how UAX #14 is specified: a later rule never overrides an
+/// earlier one.
+fn may_break(classes: [LineBreak], i: int) -> bool {
+    let before = classes[i - 1]
+    let here = classes[i]
+
+    // LB4, LB5: always break after a mandatory break. LB6: never before one.
+    if is_mandatory(before) {
+        return true
+    }
+    if is_mandatory(here) {
+        return false
+    }
+    // LB7: never before a space or a zero-width space.
+    if here == LineBreak.SP || here == LineBreak.ZW {
+        return false
+    }
+    // LB8: always after a zero-width space, even across spaces.
+    if before == LineBreak.ZW {
+        return true
+    }
+    // LB11: never either side of a word joiner.
+    if here == LineBreak.WJ || before == LineBreak.WJ {
+        return false
+    }
+    // LB12: never after non-breaking glue. LB12a: nor before it, unless what
+    // precedes is a space, a break-after or a hyphen.
+    if before == LineBreak.GL {
+        return false
+    }
+    if here == LineBreak.GL {
+        if before == LineBreak.SP || before == LineBreak.BA {
+            return true
+        }
+        if before == LineBreak.HY {
+            return true
+        }
+        return false
+    }
+
+    // The space before this one, if any: several rules below look through
+    // spaces rather than at them.
+    let anchor = looking_back(classes, i)
+
+    // LB13: never before a closer, an exclamation, a separator or a solidus.
+    if here == LineBreak.CL || here == LineBreak.CP {
+        return false
+    }
+    if here == LineBreak.EX || here == LineBreak.IS {
+        return false
+    }
+    if here == LineBreak.SY {
+        return false
+    }
+    // LB14: never after an opener, across any spaces.
+    if anchor == LineBreak.OP {
+        return false
+    }
+    // LB15: never between a quote and an opener.
+    if anchor == LineBreak.QU && here == LineBreak.OP {
+        return false
+    }
+    // LB16: never between a closer and a non-starter.
+    if anchor == LineBreak.CL || anchor == LineBreak.CP {
+        if here == LineBreak.NS {
+            return false
+        }
+    }
+    // LB17: never inside an em dash pair.
+    if anchor == LineBreak.B2 && here == LineBreak.B2 {
+        return false
+    }
+    // LB18: always after a space. Everything that must look through spaces has
+    // already had its turn.
+    if before == LineBreak.SP {
+        return true
+    }
+    // LB19: never either side of a quotation mark.
+    if here == LineBreak.QU || before == LineBreak.QU {
+        return false
+    }
+    // LB21: never before a break-after, a hyphen or a non-starter; never after
+    // a break-before.
+    if here == LineBreak.BA || here == LineBreak.HY {
+        return false
+    }
+    if here == LineBreak.NS {
+        return false
+    }
+    if before == LineBreak.BB {
+        return false
+    }
+    // LB22: never before an ellipsis-like non-starter — folded into LB21 here,
+    // the class having been resolved already.
+
+    // LB23: never between a letter and a number, either way round.
+    if before == LineBreak.AL && here == LineBreak.NU {
+        return false
+    }
+    if before == LineBreak.NU && here == LineBreak.AL {
+        return false
+    }
+    // LB23a, LB24, LB25: numbers keep their prefixes, postfixes, separators
+    // and internal punctuation. `$1,000.00%` is one unbreakable run.
+    if before == LineBreak.PR && here == LineBreak.NU {
+        return false
+    }
+    if before == LineBreak.NU && here == LineBreak.PO {
+        return false
+    }
+    if before == LineBreak.PR && here == LineBreak.AL {
+        return false
+    }
+    if before == LineBreak.AL && here == LineBreak.PO {
+        return false
+    }
+    if before == LineBreak.IS && here == LineBreak.NU {
+        return false
+    }
+    if before == LineBreak.SY && here == LineBreak.NU {
+        return false
+    }
+    if before == LineBreak.HY && here == LineBreak.NU {
+        return false
+    }
+    if before == LineBreak.NU && here == LineBreak.NU {
+        return false
+    }
+    // LB26, LB27: a Hangul syllable holds together, and takes its affixes.
+    if hangul_joins(before, here) {
+        return false
+    }
+    // LB28: never between two letters — this is what keeps a word whole.
+    if before == LineBreak.AL && here == LineBreak.AL {
+        return false
+    }
+    // LB29: never between a separator and a letter.
+    if before == LineBreak.IS && here == LineBreak.AL {
+        return false
+    }
+    // LB30: never between a letter or number and an opener, nor between a
+    // closing parenthesis and a letter or number.
+    if before == LineBreak.AL || before == LineBreak.NU {
+        if here == LineBreak.OP {
+            return false
+        }
+    }
+    if before == LineBreak.CP {
+        if here == LineBreak.AL || here == LineBreak.NU {
+            return false
+        }
+    }
+    // LB31: everything else may break — which is what makes CJK break between
+    // any two ideographs, and a solidus break after itself.
+    return true
+}
+
+/// The class before position `i`, looking through spaces.
+///
+/// Several rules are written `X SP* ÷ Y`, meaning the spaces between are not
+/// what decides. This is that lookback.
+fn looking_back(classes: [LineBreak], i: int) -> LineBreak {
+    var k = i - 1
+    for {
+        if k < 0 {
+            return LineBreak.AL
+        }
+        if classes[k] != LineBreak.SP {
+            return classes[k]
+        }
+        k = k - 1
+    }
+}
+
+/// LB26 and LB27: the Hangul rules, which keep a syllable and its jamo whole.
+fn hangul_joins(before: LineBreak, here: LineBreak) -> bool {
+    // JL × (JL | JV | H2 | H3)
+    if before == LineBreak.JL {
+        if here == LineBreak.JL || here == LineBreak.JV {
+            return true
+        }
+        if here == LineBreak.H2 || here == LineBreak.H3 {
+            return true
+        }
+    }
+    // (JV | H2) × (JV | JT)
+    if before == LineBreak.JV || before == LineBreak.H2 {
+        if here == LineBreak.JV || here == LineBreak.JT {
+            return true
+        }
+    }
+    // (JT | H3) × JT
+    if before == LineBreak.JT || before == LineBreak.H3 {
+        if here == LineBreak.JT {
+            return true
+        }
+    }
+    return false
 }

@@ -1,0 +1,146 @@
+// UAX #14 — where a line may break.
+//
+// The cases are the ones the old rule got wrong. It split on spaces and treated
+// anything wider than `W` under the host's font as its own piece, which meant a
+// URL was one enormous word, a non-breaking space broke like an ordinary one, a
+// closing bracket could start a line, and — worst — line breaking depended on
+// the *font*, so two hosts could disagree about where a paragraph broke.
+
+use std/test
+use std/text
+
+/// Where breaks are allowed, as a string of `|` and `.`, so a failure reads as
+/// a picture of the answer rather than as a list of indices.
+fn shape(body: str) -> str {
+    let allowed = text.break_opportunities(body)
+    var out = ""
+    for a in allowed {
+        out = out + (if a { "|" } else { "." })
+    }
+    return out
+}
+
+fn class_checks() -> [error] {
+    var out: [error] = []
+    out.push(test.is_true(text.line_break_class(0x0041) == text.LineBreak.AL, "A is AL"))
+    out.push(test.is_true(text.line_break_class(0x0020) == text.LineBreak.SP, "space is SP"))
+    out.push(test.is_true(text.line_break_class(0x000A) == text.LineBreak.LF, "newline is LF"))
+    out.push(test.is_true(text.line_break_class(0x00A0) == text.LineBreak.GL, "nbsp is GL"))
+    out.push(test.is_true(text.line_break_class(0x0030) == text.LineBreak.NU, "0 is NU"))
+    out.push(test.is_true(text.line_break_class(0x002D) == text.LineBreak.HY, "hyphen is HY"))
+    out.push(test.is_true(text.line_break_class(0x002F) == text.LineBreak.SY, "solidus is SY"))
+    out.push(test.is_true(text.line_break_class(0x0028) == text.LineBreak.OP, "( is OP"))
+    out.push(test.is_true(text.line_break_class(0x0029) == text.LineBreak.CP, ") is CP"))
+    out.push(test.is_true(text.line_break_class(0x4E2D) == text.LineBreak.ID, "中 is ID"))
+    out.push(test.is_true(text.line_break_class(0x3041) == text.LineBreak.NS, "small a is NS"))
+    out.push(test.is_true(text.line_break_class(0x30A2) == text.LineBreak.ID, "katakana A is ID"))
+    out.push(test.is_true(text.line_break_class(0xAC00) == text.LineBreak.H2, "가 is H2"))
+    // An unassigned code point is AL, which is UAX #14's own rule LB1.
+    out.push(test.is_true(text.line_break_class(0xE0000) == text.LineBreak.AL, "unknown is AL"))
+    return out
+}
+
+fn word_checks() -> [error] {
+    var out: [error] = []
+    // Never at the start; after a space; never inside a word.
+    out.push(test.equal_str(shape("ab cd"), "...|.", "a break only after the space"))
+    out.push(test.equal_str(shape("a b"), "..|", "a break after the space"))
+    // The space itself is never broken *before*.
+    out.push(test.equal_str(shape("a  b"), "...|", "two spaces, one opportunity"))
+    return out
+}
+
+fn punctuation_checks() -> [error] {
+    var out: [error] = []
+    // A closing bracket may not start a line, and an opener may not end one.
+    out.push(test.equal_str(shape("(a)"), "...", "brackets hold to their content"))
+    out.push(test.equal_str(shape("a, b"), "...|", "a comma stays with what it follows"))
+    out.push(test.equal_str(shape("a! b"), "...|", "so does an exclamation"))
+    // A quote takes nothing with it on either side.
+    out.push(test.equal_str(shape("\"a\""), "...", "quotes hold to their content"))
+    return out
+}
+
+fn nbsp_checks() -> [error] {
+    var out: [error] = []
+    // The one the old rule could not express at all: a no-break space is a
+    // space that does not break.
+    let nbsp = text.from_code(0x00A0)
+    out.push(test.equal_str(shape("a\(nbsp)b"), "...", "a non-breaking space does not break"))
+    out.push(test.equal_str(shape("a b"), "..|", "an ordinary one does"))
+    return out
+}
+
+fn url_checks() -> [error] {
+    var out: [error] = []
+    // A URL breaks after its solidi rather than being one unbreakable word.
+    let shaped = shape("a/b")
+    out.push(test.equal_str(shaped, "..|", "a solidus breaks after itself"))
+    out.push(test.is_true(shape("ab/cd").index_of("|") > 0, "and inside a longer run"))
+    return out
+}
+
+fn number_checks() -> [error] {
+    var out: [error] = []
+    // `$1,000.00%` is one run: a number keeps its prefix, its separators and
+    // its postfix.
+    out.push(test.equal_str(shape("$1,000.00%"), "..........", "a money amount holds together"))
+    out.push(test.equal_str(shape("a1"), "..", "a letter and a digit do not part"))
+    out.push(test.equal_str(shape("1a"), "..", "nor the other way round"))
+    return out
+}
+
+fn cjk_checks() -> [error] {
+    var out: [error] = []
+    // CJK breaks between almost any two characters, which is what makes a
+    // Japanese paragraph lay out rather than becoming one enormous word.
+    out.push(test.equal_str(shape("中文字"), ".||", "ideographs break between"))
+    // A small kana may not start a line.
+    let small = text.from_code(0x3041)
+    out.push(test.equal_str(shape("\(small)"), ".", "a lone small kana"))
+    out.push(test.equal_str(shape("か\(small)"), "..", "a small kana does not start a line"))
+    // A Hangul syllable holds together with its jamo.
+    out.push(test.equal_str(shape("가나"), ".|", "Hangul syllables break between"))
+    return out
+}
+
+fn mark_checks() -> [error] {
+    var out: [error] = []
+    // A combining mark takes the class of what it attaches to, so it never
+    // starts a line — the case Devanagari, Thai, Arabic and Burmese all need.
+    let acute = text.from_code(0x0301)
+    out.push(test.equal_str(shape("e\(acute)"), "..", "a mark stays with its base"))
+    let burmese = "ဆယ်လ်"
+    let shaped = shape(burmese)
+    out.push(test.equal_str(shaped.slice(0, 1), ".", "Burmese does not break at the start"))
+    out.push(test.is_true(shaped.index_of("|") < 0, "and a cluster holds together"))
+    return out
+}
+
+fn mandatory_checks() -> [error] {
+    var out: [error] = []
+    out.push(test.equal_str(shape("a\nb"), "..|", "a newline is a break after it"))
+    out.push(test.equal_str(shape("a\n"), "..", "and before it, never"))
+    return out
+}
+
+fn main() {
+    var results: [error] = []
+    results = concat(results, class_checks())
+    results = concat(results, word_checks())
+    results = concat(results, punctuation_checks())
+    results = concat(results, nbsp_checks())
+    results = concat(results, url_checks())
+    results = concat(results, number_checks())
+    results = concat(results, cjk_checks())
+    results = concat(results, mark_checks())
+    results = concat(results, mandatory_checks())
+    var failed = 0
+    for e in results {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("line breaking: \(results.len() - failed) passed, \(failed) failed")
+}
