@@ -1,0 +1,109 @@
+// A call made for its effect alone has to happen.
+//
+// Every kind of call is a statement someone writes for what it *does* rather
+// than what it returns, and two kinds were being lowered to nothing: a closure
+// invoked through a `fn(T)` parameter, and a trait method invoked through a
+// `dyn`. The statement vanished silently and the program carried on without it,
+// which is the worst shape a miscompilation can take — nothing fails, the work
+// simply does not happen.
+//
+// It surfaced through `ui.paint_into`, which hands a canvas node's rectangle to
+// a `fn(ui.Rect)` and expects it to draw. The chart came out empty and the clip
+// around it did not, which is what pointed at the statement rather than at the
+// drawing.
+//
+// The tally is a struct, and the closure writes to it through a function taking
+// `var`, because Kite has no mutable globals and a closure may not capture a
+// `var` — captures are by value, so a captured `var` would be a write nobody
+// could see. A struct is a reference, so a `let` handle passed on is how an
+// effect is made observable here.
+
+use std/test
+
+struct Tally {
+    var count: int
+    var last: str
+}
+
+fn tally() -> Tally {
+    return Tally{ count: 0, last: "" }
+}
+
+fn note(var into: Tally, what: str) {
+    into.count = into.count + 1
+    into.last = what
+}
+
+fn run_it(f: fn(int)) {
+    f(7)
+}
+
+fn twice(f: fn(int)) {
+    f(1)
+    f(2)
+}
+
+fn apply(f: fn(int) -> int, n: int) -> int {
+    return f(n)
+}
+
+trait Speaks {
+    fn speak(self, into: Tally)
+    fn named(self) -> str
+}
+
+struct Cat { }
+
+impl Speaks for Cat {
+    fn speak(self, into: Tally) {
+        note(into, "meow")
+    }
+
+    fn named(self) -> str {
+        return "cat"
+    }
+}
+
+fn checks() -> [error] {
+    var out: [error] = []
+
+    // ---- a closure called for its effect ----
+    let one = tally()
+    run_it(|n: int| {
+        note(one, "ran \(n)")
+    })
+    out.push(test.equal_int(one.count, 1, "a closure called for effect runs"))
+    out.push(test.equal_str(one.last, "ran 7", "and receives its argument"))
+
+    // ---- every call, not merely the last ----
+    let many = tally()
+    twice(|n: int| {
+        note(many, "\(n)")
+    })
+    out.push(test.equal_int(many.count, 2, "both calls happen"))
+    out.push(test.equal_str(many.last, "2", "in the order written"))
+
+    // ---- the path that always worked, still working ----
+    out.push(test.equal_int(apply(|n: int| n * 2, 21), 42, "a value-returning closure"))
+
+    // ---- a trait method through a `dyn` ----
+    let spoken = tally()
+    let animal: dyn Speaks = Cat{ }
+    animal.speak(spoken)
+    out.push(test.equal_int(spoken.count, 1, "a dyn method called for effect runs"))
+    out.push(test.equal_str(animal.named(), "cat", "and one returning a value still does"))
+
+    return out
+}
+
+fn main() {
+    let results = checks()
+    var failed = 0
+    for e in results {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("effect calls: \(results.len() - failed) passed, \(failed) failed")
+}

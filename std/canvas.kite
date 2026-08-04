@@ -1,0 +1,136 @@
+//! Low-level drawing, for the `Canvas` widget.
+//!
+//! `std/ui` draws boxes and text because that is what a layout produces. This
+//! is the other door: a chart, a game or a visualisation knows where its own
+//! marks go, and needs to put them there without describing a tree first.
+//!
+//! It is a **named surface over the drawing calls**, not a graphics library.
+//! Every function here is one of the calls a renderer implements, or something
+//! assembled from them — and where a shape cannot be assembled, it is absent
+//! rather than approximated. There is no line, no path and no polygon, because
+//! the boundary has no line, path or polygon and faking one out of rectangles
+//! would produce something that looked wrong on every backend in a different
+//! way. What is here is exact everywhere.
+//!
+//! Coordinates are floats in layout units, with the origin at the top left —
+//! the same space `ui.Frame` reports. Colours are `0xRRGGBB`.
+//!
+//! ```kite
+//! use std/ui
+//! use std/canvas
+//!
+//! ui.paint_into(frames, "chart", |r: ui.Rect| {
+//!     canvas.fill(r.x, r.y, r.width, r.height, 0x101216)
+//!     canvas.circle(r.x + r.width / 2.0, r.y + r.height / 2.0, 40.0, 0x3b82f6)
+//! })
+//! ```
+
+// ---- shapes ---------------------------------------------------------------
+
+/// A filled rectangle.
+pub fn fill(x: float, y: float, w: float, h: float, colour: int) {
+    draw.rect(x, y, w, h, colour)
+}
+
+/// A filled rectangle with rounded corners.
+///
+/// The radius is clamped by the renderer to half the shorter side, so a radius
+/// larger than the box gives a stadium rather than an error.
+pub fn rounded(x: float, y: float, w: float, h: float, radius: float, colour: int) {
+    draw.rrect(x, y, w, h, radius, colour)
+}
+
+/// A circle centred on `(cx, cy)`.
+///
+/// A rounded rectangle as wide as it is tall, with the radius at half the side
+/// — which is a circle exactly, on every backend, because that is the case the
+/// clamp in `rrect` was already handling.
+pub fn circle(cx: float, cy: float, radius: float, colour: int) {
+    let side = radius * 2.0
+    draw.rrect(cx - radius, cy - radius, side, side, radius, colour)
+}
+
+/// The ring between a box and the same box inset by `width` — a border, drawn
+/// without filling the middle.
+///
+/// This is what makes an outline independent of a fill: the two are separate
+/// calls, so an outlined shape does not have to paint its own interior in
+/// whatever colour it happens to be sitting on.
+pub fn ring(x: float, y: float, w: float, h: float, radius: float, width: float, colour: int) {
+    draw.drrect(x, y, w, h, radius, width, colour)
+}
+
+/// The ring of a circle: an outlined circle of the given stroke width.
+pub fn circle_ring(cx: float, cy: float, radius: float, width: float, colour: int) {
+    let side = radius * 2.0
+    draw.drrect(cx - radius, cy - radius, side, side, radius, width, colour)
+}
+
+// ---- text -----------------------------------------------------------------
+
+/// A run of text, with `(x, y)` at the top left of its line box.
+///
+/// One run on one line: this draws what it is given and does not wrap. Wrapping
+/// is a measurement, and `ui.wrap` is where it lives.
+pub fn text(x: float, y: float, body: str, colour: int) {
+    draw.text(x, y, body, colour)
+}
+
+/// Select the size and weight that subsequent text is drawn *and measured* in.
+///
+/// Measurement follows the same selection, which is what keeps a caller's own
+/// layout arithmetic agreeing with what appears.
+pub fn font(size: float, weight: int) {
+    draw.font(size, weight)
+}
+
+/// How wide a run is in the font currently selected.
+pub fn width_of(body: str) -> float {
+    return text.width(body)
+}
+
+/// How tall one line is in the font currently selected: ascent plus descent
+/// plus leading.
+pub fn line_height() -> float {
+    return text.height()
+}
+
+// ---- pictures -------------------------------------------------------------
+
+/// A picture, fitted into the box without distorting it.
+///
+/// `src` is whatever the host can resolve — a URL, a path, a `data:` URI. A
+/// backend that has not loaded it yet draws nothing and asks to be called
+/// again when it has; a backend that cannot draw pictures at all records that
+/// one goes here.
+pub fn image(x: float, y: float, w: float, h: float, src: str) {
+    draw.image(x, y, w, h, src)
+}
+
+// ---- state ----------------------------------------------------------------
+
+/// Confine everything drawn until [`unclip`] to a rectangle.
+///
+/// Clips nest, and every one has to be closed. `ui.paint_into` opens and closes
+/// one around a canvas node for you, so a chart is already confined to its own
+/// box before it draws anything.
+pub fn clip(x: float, y: float, w: float, h: float) {
+    draw.clip(x, y, w, h)
+}
+
+pub fn unclip() {
+    draw.unclip()
+}
+
+/// Draw everything after this at `a` of full opacity, from 0.0 to 1.0.
+///
+/// It applies until it is set back. A caller that sets it and returns leaves
+/// every later mark translucent, which is a bug that shows up somewhere else
+/// entirely — so set it back explicitly.
+pub fn alpha(a: float) {
+    draw.alpha(a)
+}
+
+pub fn opaque() {
+    draw.alpha(1.0)
+}

@@ -686,6 +686,42 @@ pub fn text_of<Msg>(name: str, base: Style, body: str) -> Node<Msg> {
     }
 }
 
+/// A box reserved for drawing that `std/ui` does not do — charts, games,
+/// visualisations.
+///
+/// It is an ordinary empty box, and that is the point: it takes part in the
+/// layout like anything else, so a chart sits in a column beside a heading and
+/// is pushed around by the same rules. What makes it a canvas is [`paint_into`],
+/// which hands its rectangle to a function and clips to it.
+///
+/// The alternative — what `examples/boids.kite` does — is to call `draw.rect`
+/// straight from `main` and never build a tree at all. That works, and it works
+/// by *accident*: the drawing calls are global, so anything can call them at any
+/// time, over anything. This is the version that composes.
+pub fn canvas_of<Msg>(name: str, base: Style) -> Node<Msg> {
+    return box_of(name, base, [])
+}
+
+/// Draw into a canvas node's box, clipped to it.
+///
+/// The rectangle handed over is the box's *inner* one — inside the padding —
+/// because that is the region the node reserved for its contents, and it is
+/// what everything else in this file draws into.
+///
+/// Clipped rather than trusted. A chart that miscomputes a bar height is an
+/// ordinary bug and should show as a wrong bar, not as a stripe across the
+/// heading above it.
+pub fn paint_into(frames: [Frame], name: str, draw_it: fn(Rect)) {
+    let box = frame_of(frames, name)
+    if box == nil {
+        return
+    }
+    let r = box.inner
+    draw.clip(r.x, r.y, r.width, r.height)
+    draw_it(r)
+    draw.unclip()
+}
+
 /// A picture, in a box you state.
 ///
 /// The size is a parameter rather than a field on `Style` for the reason §3
@@ -705,16 +741,24 @@ pub fn image_of<Msg>(name: str, base: Style, src: str, width: float, height: flo
     }
 }
 
-/// The same subtree, painted last and outside any clip around it.
+/// The same subtree, taken out of the flow: painted last, outside any clip
+/// around it, and occupying no space among its siblings.
 ///
-/// Where [`stack`] puts one child over another *within a box*, a portal takes a
-/// subtree out of the box entirely at paint time while leaving it in place at
-/// layout time. That is the combination nothing else can express: a menu that
-/// belongs to a button three levels inside a scrolling list has to be positioned
-/// by that button and must not be cut off by the list.
+/// Three things at once, and they are the three a dropdown needs.
 ///
-/// It also becomes topmost for hit-testing, because `layout` moves it to the end
-/// of the frame list and everything that reads that list reads it in order.
+/// * **Out of flow.** It is placed where the cursor stands and the cursor does
+///   not advance, so a menu declared after its trigger opens directly below it
+///   and pushes nothing down. A closed menu that reserved its own height would
+///   leave a hole in the form.
+/// * **Outside the clip.** A trigger three levels inside a scrolling list is
+///   still positioned by that list, and its menu must not be cut off by it.
+/// * **Painted last, and therefore topmost.** `layout` moves the subtree to the
+///   end of the frame list, and everything that reads that list in order — the
+///   painter, `hit`, focus order — gets that for free.
+///
+/// Where [`stack`] puts one child over another *within* a box, this takes a
+/// subtree out of the box. A stack is for things that share a region; a portal
+/// is for things that escape one.
 pub fn portal<Msg>(node: Node<Msg>) -> Node<Msg> {
     return Node{..node, portal: true }
 }
@@ -1077,6 +1121,14 @@ fn measure_content<Msg>(node: Node<Msg>) -> Size {
     var main = 0.0
     var cross = 0.0
     for child in node.children {
+        // A portal is **out of flow**: it does not add to what its parent
+        // wants, and below it does not move the cursor either. That is the
+        // half of the feature a clip cannot express — a menu belonging to a
+        // closed dropdown must not reserve the space it will need when it
+        // opens, or every control under it would sit a menu's height too low.
+        if child.portal {
+            continue
+        }
         let size = measure(child)
         let along = if is_row(node.style.axis) { size.width } else { size.height }
         let across = if is_row(node.style.axis) { size.height } else { size.width }
@@ -1332,6 +1384,9 @@ fn arrange<Msg>(
     var used = 0.0
     var total_grow = 0.0
     for child in node.children {
+        if child.portal {
+            continue
+        }
         let size = measure(child)
         used = used + (if row_axis { size.width } else { size.height })
         total_grow = total_grow + child.style.grow
@@ -1347,6 +1402,19 @@ fn arrange<Msg>(
 
     for child in node.children {
         let size = measure(child)
+        // Placed where the cursor stands and the cursor does not move — so a
+        // menu declared after its trigger appears directly below it and
+        // displaces nothing. It takes its own size rather than being stretched
+        // or grown: nothing is sharing space with it.
+        if child.portal {
+            let at = if row_axis {
+                Rect { x: inner.x + cursor, y: inner.y, width: size.width, height: size.height }
+            } else {
+                Rect { x: inner.x, y: inner.y + cursor, width: size.width, height: size.height }
+            }
+            frames = concat(frames, arrange(child, at, depth + 1, owner, live))
+            continue
+        }
         var along = if row_axis { size.width } else { size.height }
         if total_grow > 0.0 {
             along = along + leftover * (child.style.grow / total_grow)

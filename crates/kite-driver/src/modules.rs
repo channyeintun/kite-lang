@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 /// was missing something.
 pub const STD_MODULES: &[(&str, &str)] = &[
     ("ui", include_str!("../../../std/ui.kite")),
+    ("canvas", include_str!("../../../std/canvas.kite")),
     ("text", include_str!("../../../std/text.kite")),
     ("task", include_str!("../../../std/task.kite")),
     ("math", include_str!("../../../std/math.kite")),

@@ -309,6 +309,106 @@ export function setFont(size, weight) {{
 // The default font, for everything that has not asked for another.
 export const FONT = fontCss();
 
+// ---- font fallback ----------------------------------------------------------
+//
+// §5's table gives the canvas renderer "explicit font stack + `document.fonts`
+// query", against the browser's own fallback on the DOM side. The stack is
+// `FAMILY` above. This is the query, and the reason it is needed:
+//
+// A canvas measures with whatever font is resolved *at the moment it asks*.
+// If the first choice in the stack is a web font that has not arrived, the
+// measurement is taken in the fallback, the layout is computed from it, and
+// then the web font loads and every line is the wrong width — the whole page
+// reflows one frame late, or worse, does not reflow at all because nothing
+// told the program anything changed.
+//
+// The DOM renderer is immune: the browser re-lays-out its own text nodes. So
+// this exists for the canvas, which is exactly where §5 says it does.
+
+/// The families in `FAMILY`, unquoted, in order.
+///
+/// Parsed rather than listed separately so the two cannot drift — the stack is
+/// written once, at the top of this file.
+export function fontStack() {{
+  return FAMILY.split(',').map((f) => f.trim().replace(/^["']|["']$/g, ''));
+}}
+
+/// Whether a family is really there, decided by measuring rather than asking.
+///
+/// `document.fonts.check` is the obvious call and it does not answer this
+/// question: it reports on the `FontFace`s in the document's own font set, so
+/// for a family that is not a web font — every system font — it finds nothing
+/// pending and returns true. Asked about a family the machine has never heard
+/// of, it says yes.
+///
+/// So the family is measured against a generic instead. A string set in
+/// `Family, monospace` renders in monospace if `Family` did not resolve, and in
+/// `Family` if it did; the widths differ in the first case and match in the
+/// second. Two generics are used because a family that happens to be metrically
+/// identical to one of them would be a false negative against that one alone.
+const FAMILY_PRESENT = new Map();
+
+export function familyPresent(family) {{
+  const cached = FAMILY_PRESENT.get(family);
+  if (cached !== undefined) return cached;
+  if (typeof document === 'undefined') return false;
+  // Glyphs with wide metric variation between typefaces, so two different
+  // faces are unlikely to measure the same by accident.
+  const probe = 'mmmwwwiiilll@#%WM';
+  const ctx = document.createElement('canvas').getContext('2d');
+  const width = (spec) => {{
+    ctx.font = '72px ' + spec;
+    return ctx.measureText(probe).width;
+  }};
+  const present = ['monospace', 'serif'].some(
+    (generic) => width('"' + family + '", ' + generic) !== width(generic),
+  );
+  FAMILY_PRESENT.set(family, present);
+  return present;
+}}
+
+/// The first family in the stack the host can actually render.
+///
+/// The last entry is `sans-serif`, a generic that always resolves — so this
+/// always answers, and always answers with something drawable.
+export function resolvedFamily() {{
+  const stack = fontStack();
+  for (const family of stack) {{
+    // A generic keyword always resolves and is never *loaded*, so it ends the
+    // search wherever it appears.
+    if (family === 'system-ui' || family === 'sans-serif' || family === 'serif') return family;
+    if (familyPresent(family)) return family;
+  }}
+  return stack[stack.length - 1];
+}}
+
+/// Tell `whenReady` to run once the font situation has settled.
+///
+/// Two things have to happen and either may be first: the document's fonts
+/// finish loading, and the family the stack resolves to stops changing. A page
+/// with no web fonts at all settles immediately, which is the common case and
+/// costs one promise.
+export function watchFonts(whenReady) {{
+  if (typeof document === 'undefined' || !document.fonts) return;
+  let settled = resolvedFamily();
+  const check = () => {{
+    // A web font that has just arrived changes what the probe measures, so the
+    // answer cached before it landed is stale.
+    FAMILY_PRESENT.clear();
+    const now = resolvedFamily();
+    if (now === settled) return;
+    settled = now;
+    // The measurements every laid-out line was computed from have changed, so
+    // this is not a repaint — it is a relayout, and only the program can do
+    // that. The caller is expected to draw a fresh frame from the model.
+    whenReady(now);
+  }};
+  document.fonts.addEventListener('loadingdone', check);
+  // `ready` covers the fonts already in flight when this runs, which
+  // `loadingdone` does not fire for if they finished first.
+  document.fonts.ready.then(check);
+}}
+
 // The default: describe each call. Useful under Node, and the same text the
 // bytecode VM writes, so the two backends can be compared without a browser.
 // Coordinates print the way Kite prints a float, so this and the bytecode VM
@@ -2811,7 +2911,7 @@ pub fn generate_page(title: &str) -> String {
             setLineHeight, fontMeasure, fontLineHeight, FONT, setAnnouncer,
             EVENT_CLICK, EVENT_KEY, EVENT_WHEEL, EVENT_MOVE, EVENT_DOWN,
             EVENT_UP, EVENT_RESIZE, EVENT_FRAME, EVENT_EDIT, setFieldEdit, setFieldFocus,
-            setFieldKey, hideFields, setImageLoad, setSemanticsLayer, str,
+            setFieldKey, hideFields, setImageLoad, setSemanticsLayer, watchFonts, str,
             recordingRenderer, replay, diffFrames,
             damageOf, domRenderer, canvasRenderer, textRenderer }} from "./app.js";
 
@@ -2986,6 +3086,17 @@ pub fn generate_page(title: &str) -> String {
   }});
   setFieldFocus((box) => {{
     send(EVENT_CLICK, box[0] + box[2] / 2, box[1] + box[3] / 2, "");
+  }});
+  // The font the stack resolves to has changed, which means every width the
+  // last layout was computed from is now wrong.
+  //
+  // A repaint is not enough and a repaint is not what this asks for: the atlas
+  // is keyed by the font it was built for, the measurements are the program's,
+  // and only the program can lay out again. So the frame is discarded and
+  // rebuilt from the model, in the font that is now actually there.
+  watchFonts(() => {{
+    measured();
+    draw(true);
   }});
   // A picture the canvas renderer asked for has arrived, so the frame that
   // drew a gap where it goes is now wrong. Repaint rather than wake the model:

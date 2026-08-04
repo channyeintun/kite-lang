@@ -356,3 +356,105 @@ pub fn text_area<Msg>(
     }
     return whole
 }
+
+// ---- select ---------------------------------------------------------------------
+//
+// The third widget §5 of docs/04 says a canvas-only design would force everyone
+// to reimplement, after the input and the text area. It is here rather than in
+// `std/ui` for the reason every other component is: what a dropdown *looks*
+// like is a design system's decision. What `std/ui` had to provide first was
+// the ability to put a menu over the page at all, which is `ui.portal`.
+
+/// A dropdown: a trigger showing the current choice, and a menu when open.
+///
+/// `items` are ordinary [`menu_item`]s, which means each one carries its own
+/// message and the application matches on it exhaustively — the same wiring
+/// every other control here uses. The select does not own the choosing; it owns
+/// where the choices appear.
+///
+/// The menu is a portal, and that is the whole reason this component can exist:
+/// it opens *over* whatever is under it and pushes nothing down, so a form does
+/// not reflow when a dropdown opens and a select near the bottom of a scrolling
+/// list is not cut off by it.
+pub fn select<Msg>(
+    s: Scheme,
+    id: str,
+    label: str,
+    chosen: str,
+    items: [ui.Node<Msg>],
+    open: bool,
+    msg: Msg,
+    width: float,
+    state: State,
+) -> ui.Node<Msg> {
+    let role = body_large()
+    let container = if state.disabled {
+        disabled_container(s, s.surface)
+    } else {
+        layered(s.surface_container_highest, s.on_surface, state)
+    }
+    var decor = ui.rounded(container, SHAPE_EXTRA_SMALL())
+    if state.focus > 0.0 || open {
+        decor = ui.bordered(decor, s.primary, math.lerp(1.0, 2.0, maxf(state.focus, if open { 1.0 } else { 0.0 })))
+    }
+    let ink = if state.disabled {
+        disabled_ink(s, s.surface)
+    } else if chosen.len() == 0 {
+        s.on_surface_variant
+    } else {
+        s.on_surface
+    }
+    // The caret turns over when the menu is open, which is the one thing on a
+    // select that says whether pressing it will open or close.
+    let caret: ui.Node<Msg> = ui.decorated(
+        ui.text_of(
+            "\(id)-caret",
+            ui.in_font(ui.style(), role.size, role.weight),
+            if open { "▴" } else { "▾" },
+        ),
+        ui.ink(ink),
+    )
+    let shown: ui.Node<Msg> = ui.decorated(
+        ui.text_of(
+            "\(id)-value",
+            ui.grown(ui.in_font(ui.style(), role.size, role.weight), 1.0),
+            if chosen.len() == 0 { label } else { chosen },
+        ),
+        ui.ink(ink),
+    )
+    let trigger: ui.Node<Msg> = ui.means(
+        ui.decorated(
+            ui.box_of(
+                id,
+                ui.spaced(
+                    ui.padded(
+                        ui.Style {
+                            ..ui.row(),
+                            align: ui.Align.Center,
+                            width: width,
+                            height: FIELD_HEIGHT(),
+                        },
+                        space(4),
+                    ),
+                    space(2),
+                ),
+                [shown, caret],
+            ),
+            ui.inked(decor, ink),
+        ),
+        id,
+        msg,
+        label,
+    )
+    let live = if state.disabled { ui.disabled(trigger) } else { trigger }
+    if !open {
+        return live
+    }
+    // A column of the trigger and the menu. The menu is out of flow, so the
+    // column is exactly as tall as the trigger and the menu hangs below it.
+    return ui.box_of(
+        "\(id)-select",
+        ui.Style {..ui.column(), align: ui.Align.Stretch, width: width },
+        [live, ui.portal(menu("\(id)-menu", s, items, width))],
+    )
+}

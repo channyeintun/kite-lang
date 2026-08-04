@@ -212,12 +212,21 @@ impl<'a> FnLowerer<'a> {
             hir::Stmt::Expr(e) => {
                 // Evaluated for its effects. A call still has to happen — and
                 // so does a suspension, which is the effect it *is*.
+                //
+                // Every kind of call belongs here, and two were missing. A
+                // closure or a trait method invoked for its effect alone —
+                // `f(7)` where `f` returns nothing — was lowered to nothing at
+                // all: the statement vanished, silently, and the program ran on
+                // without it. It showed up the moment anything took a `fn(T)`
+                // and called it to draw.
                 let v = self.rvalue(e);
                 if matches!(
                     v,
                     Rvalue::Call { .. }
                         | Rvalue::CallBuiltin { .. }
                         | Rvalue::CallExtern { .. }
+                        | Rvalue::CallClosure { .. }
+                        | Rvalue::CallVirtual { .. }
                         | Rvalue::Await { .. }
                         | Rvalue::Yield
                 ) {
