@@ -122,36 +122,24 @@ fn checks() -> [error] {
     // ---- disabled: laid out and hit-tested, but unreachable and inert ----
     let off = tree("add", true)
     let off_frames = frames(off)
-    out.push(test.equal_strs(
-        ui.focus_order(live),
-        ["draft", "add", "third"],
-        "every enabled control is in focus order",
-    ))
-    out.push(test.equal_strs(
-        ui.focus_order(off_frames),
-        ["draft", "add"],
-        "a disabled control leaves focus order",
-    ))
-    out.push(test.equal_int(
-        off_frames.len(),
-        live.len(),
-        "and is still laid out — disabling changes no geometry",
-    ))
-    out.push(test.is_true(
-        ui.control_at(off_frames, 40.0, 50.0) != nil,
-        "the pointer still knows what it is over",
-    ))
-    out.push(test.is_true(
-        ui.msg_at(off, off_frames, 40.0, 50.0) == nil,
-        "but activating it says nothing",
-    ))
+    let all_three = ui.focus_order(live)
+    let without = ui.focus_order(off_frames)
+    out.push(test.equal_strs(all_three, ["draft", "add", "third"], "enabled controls are reachable"))
+    out.push(test.equal_strs(without, ["draft", "add"], "a disabled one leaves focus order"))
+
+    let same_shape = off_frames.len() == live.len()
+    out.push(test.is_true(same_shape, "disabling changes no geometry"))
+
+    let still_there = ui.control_at(off_frames, 40.0, 50.0) != nil
+    out.push(test.is_true(still_there, "the pointer still knows what it is over"))
+
+    let says_nothing = ui.msg_at(off, off_frames, 40.0, 50.0) == nil
+    out.push(test.is_true(says_nothing, "but activating it says nothing"))
 
     // ---- a tree with no controls ----
     let quiet: ui.Node<ui.Silent> = ui.box_of("plain", ui.column(), [])
-    out.push(test.is_true(
-        ui.control_of(quiet, "anything") == nil,
-        "a Silent tree holds no controls to find",
-    ))
+    let none_found = ui.control_of(quiet, "anything") == nil
+    out.push(test.is_true(none_found, "a Silent tree holds no controls to find"))
 
     return out
 }

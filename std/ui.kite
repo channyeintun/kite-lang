@@ -160,7 +160,7 @@ pub struct Control<Msg> {
 /// control *can* carry a meaning: the layout demos and the golden tests say so
 /// in their types instead of picking an unrelated type and hoping a reader
 /// understands why.
-pub enum Silent {}
+pub enum Silent { }
 
 pub struct Node<Msg> {
     pub name: str
