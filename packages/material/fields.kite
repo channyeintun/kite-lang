@@ -135,9 +135,21 @@ pub fn search_field<Msg>(
     return whole
 }
 
+/// What a search field shows: the value, the placeholder standing in for it,
+/// and a caret when there is text to put one after.
+///
+/// **No caret on the empty field.** A caret is a *position*, and this draws it
+/// as a character — which is fine after the text, where it occupies the space
+/// it points at, and wrong before it, where it pushes what it points at aside.
+/// Focusing an empty field used to shift `Search tracks` right by the width of
+/// a `|`, which reads as the field growing a left padding it never had.
+///
+/// A real field draws the caret *at* the start and the placeholder *at* the
+/// start, overlapping; one run of text cannot. So the ring says the field is
+/// focused, which is what [`field_body`] already relies on for the same case.
 fn search_text(value: str, placeholder: str, state: State) -> str {
     if value.len() == 0 {
-        return if state.focused { "|\(placeholder)" } else { placeholder }
+        return placeholder
     }
     if state.focused {
         return "\(value)|"
