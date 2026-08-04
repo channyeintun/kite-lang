@@ -1469,6 +1469,21 @@ impl<'a> Vm<'a> {
                 Ok(Value::Unit)
             }
 
+            // A field is a *region*, and a transcript renderer has no regions —
+            // so it writes what the field says, the way it writes what a label
+            // says. That is also what the canvas renderer does, and the reason
+            // this call degrades rather than failing where it cannot be
+            // honoured: only a DOM has a real `<input>` to become.
+            Native::DrawField => {
+                let a = |i: usize| self.regs[base + arg_base as usize + i].clone();
+                let _ = writeln!(
+                    self.out,
+                    "field {} {} {} {} {} {} {}",
+                    a(0), a(1), a(2), a(3), a(4), a(5), a(6)
+                );
+                Ok(Value::Unit)
+            }
+
             // No font here, so the nominal advance stands. This is the same
             // number the generated glue uses by default, which is what keeps a
             // layout comparable across backends under test — a browser installs

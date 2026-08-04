@@ -3339,6 +3339,30 @@ impl<'a> Checker<'a> {
                 }
             }
 
+            // `draw.field(x, y, w, h, value, hint, colour)` — a region, its text
+            // and its ink.
+            BuiltinFn::DrawField => {
+                if args.len() != 7 {
+                    self.arity_error("draw.field", args.len(), 7, span, None);
+                }
+                let mut hargs = Vec::with_capacity(7);
+                for (i, a) in args.iter().enumerate() {
+                    let want = match i {
+                        4 | 5 => TyId::STR,
+                        6 => TyId::INT,
+                        _ => TyId::FLOAT,
+                    };
+                    let e = self.expr(a, Some(want));
+                    self.expect_ty(e.ty, want, e.span, None);
+                    hargs.push(e);
+                }
+                hir::Expr {
+                    kind: ExprKind::CallBuiltin { builtin: Builtin::DrawField, args: hargs },
+                    ty: TyId::UNIT,
+                    span,
+                }
+            }
+
             BuiltinFn::TextWidth => {
                 if args.len() != 1 {
                     self.arity_error("text.width", args.len(), 1, span, None);

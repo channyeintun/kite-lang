@@ -417,6 +417,10 @@ pub enum Builtin {
     DrawAlpha,
     /// `draw.text(x, y, body, colour)`
     DrawText,
+    /// `draw.field(x, y, w, h, value, hint, colour)` — a text input goes here. The only
+    /// call whose renderers differ in kind: a real element on the DOM, drawn
+    /// text everywhere else.
+    DrawField,
     /// `text.width(body)` — a host call, because only the host has the font.
     TextWidth,
     /// `text.height()` — the host font's line height.
@@ -458,6 +462,7 @@ impl Builtin {
             Builtin::DrawDRRect => "draw.drrect",
             Builtin::DrawAlpha => "draw.alpha",
             Builtin::DrawText => "draw.text",
+            Builtin::DrawField => "draw.field",
             Builtin::TextWidth => "text.width",
             Builtin::TextHeight => "text.height",
             Builtin::DrawClip => "draw.clip",

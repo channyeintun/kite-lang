@@ -117,6 +117,23 @@ pub enum BuiltinFn {
     /// `text.height()` — the line height of the host's font: ascent plus
     /// descent plus leading, which is what a line of text actually occupies.
     TextHeight,
+    /// `draw.field(x, y, w, h, value, hint, colour)` — a text field goes here,
+    /// showing `value`, or `hint` when the value is empty, in `colour`.
+    ///
+    /// The one drawing call that is not drawing. Every other call says what a
+    /// pixel should look like and every renderer can honour it; this one says
+    /// *this region is a text input*, and what that means differs in kind
+    /// between renderers rather than in medium. Under a DOM renderer it is a
+    /// real `<input>`, which is the only way to get a caret that can be
+    /// dragged, a selection, an IME and a phone's keyboard — none of which can
+    /// be drawn. A canvas renderer cannot honour it and says so by falling
+    /// back to drawing the text, which is what it did before this existed.
+    ///
+    /// It earns its place the way `draw.rrect` did: by doing something that
+    /// could not be assembled out of the others. A field used to be a run of
+    /// text with a `|` glyph standing in for the caret, and a glyph cannot be
+    /// put where a caret goes without pushing the text aside.
+    DrawField,
     /// `draw.clip(x, y, w, h)` — confine drawing to a rectangle until
     /// `draw.unclip()`.
     ///
@@ -186,6 +203,7 @@ impl BuiltinFn {
             "draw.alpha" => Some(BuiltinFn::DrawAlpha),
             "text.width" => Some(BuiltinFn::TextWidth),
             "text.height" => Some(BuiltinFn::TextHeight),
+            "draw.field" => Some(BuiltinFn::DrawField),
             "draw.clip" => Some(BuiltinFn::DrawClip),
             "draw.unclip" => Some(BuiltinFn::DrawUnclip),
             "task.yield" => Some(BuiltinFn::TaskYield),
@@ -214,6 +232,7 @@ impl BuiltinFn {
             BuiltinFn::DrawAlpha => "draw.alpha",
             BuiltinFn::TextWidth => "text.width",
             BuiltinFn::TextHeight => "text.height",
+            BuiltinFn::DrawField => "draw.field",
             BuiltinFn::DrawClip => "draw.clip",
             BuiltinFn::DrawUnclip => "draw.unclip",
             BuiltinFn::TaskYield => "task.yield",
@@ -233,6 +252,7 @@ impl BuiltinFn {
         match self {
             BuiltinFn::IoPrint | BuiltinFn::ErrorsNew => 1,
             BuiltinFn::DrawRect | BuiltinFn::DrawText => 5,
+            BuiltinFn::DrawField => 7,
             BuiltinFn::DrawRRect => 6,
             BuiltinFn::DrawFont => 2,
             BuiltinFn::DrawDRRect => 7,

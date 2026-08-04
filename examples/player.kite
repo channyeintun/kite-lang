@@ -1124,12 +1124,27 @@ fn EVENT_UP() -> int {
     return 5
 }
 
+/// A real `<input>` reported its value. Under `DomRenderer` a field *is* an
+/// element, so what comes back is the whole value rather than a keystroke —
+/// a paste, an IME commit and an autofill are all edits and none is a key.
+fn EVENT_EDIT() -> int {
+    return 8
+}
+
 pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
     if event == EVENT_CLICK() {
         return clicked(model, x, y)
     }
     if event == EVENT_KEY() {
         return pressed(model, key)
+    }
+    // The event carries no id because it needs none: one control holds focus,
+    // and this file is what decided which.
+    if event == EVENT_EDIT() {
+        if model.focused == "search" {
+            return Model{..model, search: key }
+        }
+        return model
     }
     if event == EVENT_MOVE() {
         return Model{..model, ui_state: material.moved(model.ui_state, hit_frames(model, x, y), x, y) }

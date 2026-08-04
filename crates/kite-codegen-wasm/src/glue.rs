@@ -328,6 +328,13 @@ export const textRenderer = {{
   alpha: (a) => write('alpha ' + showFloat(a)),
   text: (x, y, body, colour) =>
     write('text ' + showFloat(x) + ' ' + showFloat(y) + ' ' + body + ' ' + colour),
+  // A transcript has no regions, so it writes what the field says. The same
+  // degradation the canvas makes: only a DOM has a real `<input>` to become.
+  field: (x, y, w, h, value, hint, colour) =>
+    write(
+      'field ' + showFloat(x) + ' ' + showFloat(y) + ' ' +
+      showFloat(w) + ' ' + showFloat(h) + ' ' + value + ' ' + hint + ' ' + colour,
+    ),
   // Selecting a font writes nothing: it changes no pixel by itself, and its
   // whole effect is on where the runs after it land. Measurement selects a
   // font too, so a transcript that recorded it would be a transcript of the
@@ -390,6 +397,8 @@ export function domRenderer(container) {{
     host.appendChild(el);
     return el;
   }};
+
+  let fieldSeen = false;
   const renderer = {{
     rect: (x, y, w, h, colour) => {{
       const el = place(take(), x, y);
@@ -422,6 +431,39 @@ export function domRenderer(container) {{
       el.style.background = 'transparent';
       el.style.border = width + 'px solid ' + hex(colour);
       el.style.borderRadius = r + 'px';
+    }},
+    // A real `<input>`: the browser's caret, selection, IME, autofill and the
+    // phone's keyboard — none of which can be drawn, and all of which a field
+    // made of glyphs has to fake or do without.
+    field: (x, y, w, h, value, hint, colour) => {{
+      // Claim a node slot, even though the element this draws is not in it.
+      //
+      // `patch` pairs `nodes[i]` with `calls[i]` by index — that is the whole
+      // basis of the retained scene graph — so a call that claimed no slot
+      // hands every element after it the wrong call. The symptom is not
+      // subtle: chips drew at the transport's coordinates and the list drew
+      // over the app bar. The real input lives outside the container, so what
+      // is claimed here is an empty slot that `patch` skips.
+      nodes[index] = null;
+      index += 1;
+      const el = fieldEl();
+      fieldSeen = true;
+      fieldBox = [x - originX, y - originY, w, h];
+      const box = container.getBoundingClientRect();
+      el.style.left = box.left + (x - originX) + 'px';
+      el.style.top = box.top + (y - originY) + 'px';
+      el.style.width = w + 'px';
+      el.style.height = h + 'px';
+      el.style.color = hex(colour);
+      el.style.font = fontCss();
+      el.style.lineHeight = lineHeight() + 'px';
+      el.style.opacity = alpha === 1 ? '' : String(alpha);
+      el.placeholder = hint;
+      el.style.display = '';
+      // Assigning `value` moves the caret to the end, so the element being
+      // typed into is left alone: while it has focus it *is* the truth, and
+      // the model is downstream of it.
+      if (document.activeElement !== el && el.value !== value) el.value = value;
     }},
     text: (x, y, body, colour) => {{
       const el = place(take(), x, y);
@@ -495,7 +537,12 @@ export function domRenderer(container) {{
       stack = [];
       nodes = [];
       index = 0;
+      // The input is not among the children that were just discarded, so a
+      // frame that no longer has a field has to say so — otherwise it stays
+      // on screen over whatever replaced it.
+      fieldSeen = false;
       replay(calls, renderer);
+      if (!fieldSeen) hideField();
     }},
 
     /// Update the nodes whose calls changed, and leave the rest alone.
@@ -572,6 +619,78 @@ export function domRenderer(container) {{
 /// roles, no focus and no live regions yet — and calling it one would be a
 /// claim this does not earn.
 let announcer = null;
+
+/// Where a real `<input>`'s edits go.
+///
+/// The element is the browser's and the model is Kite's, so something has to
+/// carry a value across. This is that: the page sets it, and the DOM renderer
+/// calls it whenever the element the person is typing in changes.
+let onFieldEdit = null;
+
+/// The one element that must outlive a frame.
+///
+/// `rebuild` calls `replaceChildren`, and a repaint happens on every keystroke
+/// — so an `<input>` pooled with the divs would be destroyed and remade between
+/// one letter and the next, losing focus, the caret and any selection every
+/// time. It therefore lives on `document.body`, positioned `fixed` against the
+/// container's own rectangle, where nothing a renderer does can reach it.
+///
+/// Module-level rather than inside the DOM renderer's closure, because
+/// something outside it has to be able to put it away: a canvas renderer draws
+/// the field itself, and an input left showing over the top would say
+/// everything twice.
+///
+/// One input, not a pool. Only one control can hold focus, and every
+/// application here shows one field; several at once wants the control's id as
+/// a key, which the call does not carry yet.
+let fieldElement = null;
+/// Where the field last drew, in the container's own coordinates.
+let fieldBox = [0, 0, 0, 0];
+let onFieldFocus = null;
+
+function fieldEl() {{
+  if (fieldElement === null) {{
+    fieldElement = document.createElement('input');
+    fieldElement.type = 'text';
+    // The container is Kite's — the box, the border and the state layer are
+    // all drawn. Only the editing is the browser's, so the element brings its
+    // behaviour and none of its appearance.
+    fieldElement.style.cssText =
+      'position:fixed;background:transparent;border:none;outline:none;' +
+      'padding:0;margin:0;box-sizing:border-box';
+    document.body.appendChild(fieldElement);
+    fieldElement.addEventListener('input', () => {{
+      if (typeof onFieldEdit === 'function') onFieldEdit(fieldElement.value);
+    }});
+    // Clicking the element is how a person focuses this field, and the element
+    // is *over* the stage — so the press never reaches the hit-test and the
+    // model never learns focus moved. It finds out here instead.
+    //
+    // Reported as a press at the middle of the field rather than through a
+    // channel of its own: the application already turns a press into focus,
+    // and a control that is editable carries no message, so there is nothing
+    // else for the press to set off. Letting the element keep the pointer is
+    // what preserves clicking *into* the text to place the caret.
+    fieldElement.addEventListener('focus', () => {{
+      if (typeof onFieldFocus === 'function') onFieldFocus(fieldBox);
+    }});
+  }}
+  return fieldElement;
+}}
+
+/// Put the input away. A renderer that cannot make one calls this, and so does
+/// the page when it switches to one.
+export function hideField() {{
+  if (fieldElement !== null) fieldElement.style.display = 'none';
+}}
+
+export function setFieldEdit(fn) {{
+  onFieldEdit = fn;
+}}
+
+export function setFieldFocus(fn) {{
+  onFieldFocus = fn;
+}}
 
 export function setAnnouncer(element) {{
   announcer = element;
@@ -657,6 +776,17 @@ export function canvasRenderer(ctx) {{
       roundRectPath(ctx, x, y, w, h, Math.max(0, Math.min(r, Math.min(w, h) / 2)));
       ctx.fill();
       ctx.globalAlpha = 1;
+    }},
+    // A canvas cannot hold a caret, so a field here is the text it shows —
+    // which is exactly what it was before this call existed. The page's hidden
+    // `#typing` input is what brings a keyboard and an IME up over it.
+    field: (x, y, w, h, value, hint, colour) => {{
+      // The call hands over the *box*, because that is what a real input would
+      // occupy. Drawing one line into it means centring the line, which the
+      // element would have done with its own line box.
+      const line = lineHeight();
+      const top = h > line ? y + (h - line) / 2 : y;
+      renderer.text(x, top, value.length > 0 ? value : hint, colour);
     }},
     text: (x, y, body, colour) => {{
       announce(body);
@@ -1136,6 +1266,8 @@ function imports() {{
         if (renderer.alpha) renderer.alpha(a);
       }},
       draw_text: (x, y, i, colour) => renderer.text(x, y, S(i), Number(colour)),
+      draw_field: (x, y, w, h, v, hint, colour) =>
+        renderer.field(x, y, w, h, S(v), S(hint), Number(colour)),
       draw_clip: (x, y, w, h) => renderer.clip(x, y, w, h),
       draw_unclip: () => renderer.unclip(),
       measure_text: (i) => measure(S(i)),
@@ -1231,6 +1363,8 @@ export function recordingRenderer() {{
       weight = w;
     }},
     text: (x, y, body, colour) => calls.push(['t', x, y, body, colour, size, weight, opacity]),
+    field: (x, y, w, h, value, hint, colour) =>
+      calls.push(['f', x, y, w, h, value, hint, colour, size, weight, opacity]),
     clip: (x, y, w, h) => calls.push(['c', x, y, w, h]),
     unclip: () => calls.push(['u']),
   }};
@@ -1286,6 +1420,17 @@ export function replay(calls, renderer) {{
         if (renderer.font) renderer.font(size, weight);
       }}
       renderer.text(call[1], call[2], call[3], call[4]);
+    }} else if (call[0] === 'f') {{
+      wantAlpha(call[10]);
+      const want = call[8] ?? NOMINAL_SIZE;
+      const wantWeight = call[9] ?? 400;
+      if (want !== size || wantWeight !== weight) {{
+        size = want;
+        weight = wantWeight;
+        setFont(size, weight);
+        if (renderer.font) renderer.font(size, weight);
+      }}
+      renderer.field(call[1], call[2], call[3], call[4], call[5], call[6], call[7]);
     }} else if (call[0] === 'c') renderer.clip(call[1], call[2], call[3], call[4]);
     else renderer.unclip();
   }}
@@ -1329,6 +1474,8 @@ export function sameFrame(a, b) {{
 /// not a guess about it.
 export function callBounds(call) {{
   if (call[0] === 'r' || call[0] === 'R') return [call[1], call[2], call[3], call[4]];
+  // A field carries its own box, so its damage needs no measuring.
+  if (call[0] === 'f') return [call[1], call[2], call[3], call[4]];
   if (call[0] === 'D') return [call[1], call[2], call[3], call[4]];
   if (call[0] === 't') {{
     // Measured in the font the run was recorded in, not in whatever font is
@@ -1592,6 +1739,14 @@ export const EVENT_RESIZE = 6n;
 /// the loop warm returns a model that differs — a frame counter is enough —
 /// which is the explicit way to say "still going".
 export const EVENT_FRAME = 7n;
+/// A real `<input>`'s value changed: `key` carries the whole new value.
+///
+/// The value, not the keystroke. A DOM input edits itself — a paste, a drag, an
+/// IME commit and an autofill are all edits and none of them is a key — so what
+/// comes back is what the field now says. It carries no id: only one control
+/// holds focus, and focus is in the model, so the program already knows which
+/// field this is. That is what lets an edit cross a door with one string on it.
+export const EVENT_EDIT = 8n;
 
 export function isApplication(exports) {{
   return ["init", "view", "update"].every((n) => typeof exports[n] === "function");
@@ -2214,7 +2369,8 @@ pub fn generate_page(title: &str) -> String {
   import {{ instantiate, setRenderer, setWriter, isApplication, setMeasure,
             setLineHeight, fontMeasure, fontLineHeight, FONT, setAnnouncer,
             EVENT_CLICK, EVENT_KEY, EVENT_WHEEL, EVENT_MOVE, EVENT_DOWN,
-            EVENT_UP, EVENT_RESIZE, EVENT_FRAME, str, recordingRenderer, replay, diffFrames,
+            EVENT_UP, EVENT_RESIZE, EVENT_FRAME, EVENT_EDIT, setFieldEdit, setFieldFocus, hideField, str,
+            recordingRenderer, replay, diffFrames,
             damageOf, domRenderer, canvasRenderer, textRenderer }} from "./app.js";
 
   // Measure in the font that will be drawn, before anything is laid out.
@@ -2244,6 +2400,9 @@ pub fn generate_page(title: &str) -> String {
 
   function mount(which) {{
     stage.replaceChildren();
+    // Only the DOM renderer can make a real input. The others draw the field
+    // themselves, so one left showing over the top would say it all twice.
+    if (which !== "dom") hideField();
     setAnnouncer(which === "canvas" ? announcer : null);
     if (which === "text") {{
       // The text renderer writes rather than draws, so it needs somewhere to
@@ -2373,6 +2532,14 @@ pub fn generate_page(title: &str) -> String {
     lastTick = 0;
     requestAnimationFrame(tick);
   }}
+
+  // A real input's edits reach the model the same way every other event does.
+  setFieldEdit((value) => {{
+    send(EVENT_EDIT, 0, 0, value);
+  }});
+  setFieldFocus((box) => {{
+    send(EVENT_CLICK, box[0] + box[2] / 2, box[1] + box[3] / 2, "");
+  }});
 
   const at = (e) => {{
     const box = stage.getBoundingClientRect();

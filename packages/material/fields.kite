@@ -122,20 +122,9 @@ pub fn search_field<Msg>(
     let shown = search_text(value, placeholder, state)
     let ink = if value.len() == 0 { s.on_surface_variant } else { s.on_surface }
     let boxed = ui.sized(ui.in_font(ui.style(), role.size, role.weight), width, FIELD_HEIGHT())
-    // The caret is paid for out of the padding rather than out of the text's
-    // position — see [`caret_lead`]. The box is a fixed width, so narrowing the
-    // left inset moves the run's start left by exactly the caret's width and
-    // leaves the placeholder where it was.
-    let lead = caret_lead(value, state, role.size, role.weight)
-    let style = ui.Style{
-        ..boxed,
-        padding: ui.Insets{
-            top: 0.0,
-            right: space(4),
-            bottom: 0.0,
-            left: maxf(0.0, space(4) - lead),
-        },
-    }
+    // No caret width to buy back: the caret is the browser's now, and it is
+    // drawn inside the element rather than in the run.
+    let style = ui.Style{..boxed, padding: ui.insets_xy(space(4), 0.0) }
     let node: ui.Node<Msg> = ui.text_of(id, style, shown)
     let whole = ui.editable(
         ui.decorated(node, ui.vertically_centered(ui.inked(decor, ink))),
@@ -148,31 +137,22 @@ pub fn search_field<Msg>(
     return whole
 }
 
+/// What a search field shows when nobody can draw it a real caret.
+///
+/// No `|` anywhere. This field's control node *is* its text node, so
+/// `ui.paint` declares it as an input — and under a DOM renderer that is a
+/// real `<input>` whose caret, selection and IME are the browser's. A glyph
+/// standing in for the caret would be drawn *as well as* the real one, and
+/// would push the placeholder aside doing it.
+///
+/// A renderer that cannot make an element falls back to drawing this text and
+/// gets no caret. That is the honest state of a canvas, and the reason the
+/// page keeps a hidden input over it for the keyboard and the IME.
 fn search_text(value: str, placeholder: str, state: State) -> str {
     if value.len() == 0 {
-        return if state.focused { "|\(placeholder)" } else { placeholder }
-    }
-    if state.focused {
-        return "\(value)|"
+        return placeholder
     }
     return value
-}
-
-/// How far a leading caret pushes the text that follows it.
-///
-/// The caret is a glyph in the same run as the text, so it takes up room the
-/// text then starts after — and the text is what must not move. This is the
-/// room it takes, and [`search_field`] takes it back out of the left padding:
-/// the caret ends up drawn *in* the padding, which is where a caret at column
-/// zero belongs, and the placeholder starts exactly where it started.
-///
-/// Only a *leading* caret needs this. After the value it occupies the position
-/// it points at, which is correct and displaces nothing.
-fn caret_lead(value: str, state: State, size: float, weight: int) -> float {
-    if value.len() > 0 || !state.focused {
-        return 0.0
-    }
-    return ui.text_size_in("|", size, weight).width
 }
 
 /// The colour a field's outline, label and indicator take when they are

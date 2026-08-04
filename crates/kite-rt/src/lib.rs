@@ -1861,6 +1861,33 @@ pub extern "C" fn kite_rt_draw_text(x: f64, y: f64, body: u64, colour: i64) {
     }
 }
 
+/// A text input. Native has no DOM to put a real one in, so it writes what the
+/// field says — the same degradation the canvas renderer makes, and the reason
+/// this call is safe to add to a boundary three backends have to agree on.
+#[no_mangle]
+pub extern "C" fn kite_rt_draw_field(
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    value: u64,
+    hint: u64,
+    colour: i64,
+) {
+    unsafe {
+        write_line(&format!(
+            "field {} {} {} {} {} {} {}",
+            float_text(x),
+            float_text(y),
+            float_text(w),
+            float_text(h),
+            str_str(value),
+            str_str(hint),
+            colour
+        ));
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn kite_rt_draw_clip(x: f64, y: f64, w: f64, h: f64) {
     write_line(&format!(
@@ -2147,6 +2174,7 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         kite_rt_draw_drrect,
         kite_rt_draw_alpha,
         kite_rt_draw_text,
+        kite_rt_draw_field,
         kite_rt_draw_clip,
         kite_rt_draw_unclip,
         kite_rt_text_width,

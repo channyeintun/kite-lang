@@ -213,6 +213,15 @@ pub struct Frame {
     /// pointer even when it is inert, and focus order wants only what can be
     /// reached. One flag standing for both is the mistake `role` made.
     pub enabled: bool
+    /// The text this frame's control is editing, or nil for anything else.
+    ///
+    /// A renderer never sees the tree, so a fact the renderer must act on has
+    /// to travel on the frame. This is the only one that is not about where
+    /// the box is or how it looks: it says *this region is a text input*, and
+    /// a DOM renderer answers it with a real `<input>` — which is the only way
+    /// to get a caret that can be dragged, a selection, an IME and a phone's
+    /// keyboard, none of which can be drawn.
+    pub edits: Option<str>
     pub decor: Decor
 }
 
@@ -740,9 +749,13 @@ fn arrange<Msg>(
     let mine = node.control
     var owner = inherited
     var live = inherited_enabled
+    var editing: Option<str> = nil
     if mine != nil {
         owner = mine.id
         live = mine.enabled
+        // Only the control's own frame is the field. A box inside an editable
+        // control is not a second input, and stamping it would make one.
+        editing = mine.edits
     }
     let pad = node.style.padding
     let inner = Rect{
@@ -767,6 +780,7 @@ fn arrange<Msg>(
             control: owner,
             is_control: mine != nil,
             enabled: live,
+            edits: editing,
             decor: node.decor,
         },
     ]
@@ -1045,7 +1059,36 @@ fn draw_one(frame: Frame) {
             draw.drrect(r.x, r.y, r.width, r.height, d.radius, edge.width, edge.colour)
         }
     }
+    // A text input is a region rather than a picture, so it is declared and
+    // the renderer decides what to make of it. On the DOM that is a real
+    // `<input>` with the browser's own caret, selection, IME and keyboard;
+    // everywhere else it falls back to drawing the text, which is what this
+    // did before the call existed.
+    //
+    // Declared *after* the fill and border and instead of the text: the
+    // container is still Kite's to draw, and only the editable part is the
+    // host's. A field that drew its own box would lose the design system.
+    let editing = frame.edits
     let body = frame.content
+    // **A field is declared where the value is drawn.** A control that shows
+    // its own text — a search box, a text area — becomes the input. A control
+    // that is a *container* for a value node, as Material's outlined field is,
+    // draws its box and its label as before and leaves the input to whichever
+    // frame carries the text; declaring it on the wrapper would put an input
+    // over the label as well.
+    // Narrowing takes one local and one `if`, so the two conditions nest.
+    if editing != nil {
+        if body.len() > 0 {
+            let box = frame.inner
+            // The value, and what to show in place of it while it is empty. The
+            // frame's own content is already that: the component put the
+            // placeholder there when there was nothing to show.
+            let hint = if editing.len() == 0 { body } else { "" }
+            draw.field(box.x, box.y, box.width, box.height, editing, hint, d.ink)
+            unset_alpha(d.alpha)
+            return
+        }
+    }
     if body.len() == 0 {
         // Paired with the `set_alpha` above, and the pairing is the point: a
         // box with no text of its own left through here without restoring the
