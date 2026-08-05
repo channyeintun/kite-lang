@@ -1271,7 +1271,16 @@ fn the_example_page_program_works() {
          \x20   classList: { add: () => {}, remove: () => {}, contains: () => false },\n\
          \x20   getAttribute(n) { return n in this.attrs ? this.attrs[n] : null; },\n\
          \x20   setAttribute(n, v) { this.attrs[n] = v; },\n\
-         \x20   appendChild(c) { this.children.push(c); return c; },\n\
+         \x20   appendChild(c) {\n\
+         \x20     const at = this.children.indexOf(c);\n\
+         \x20     if (at !== -1) this.children.splice(at, 1);\n\
+         \x20     this.children.push(c); c.parent = this; return c;\n\
+         \x20   },\n\
+         \x20   remove() {\n\
+         \x20     const p = this.parent; if (!p) return;\n\
+         \x20     const at = p.children.indexOf(this);\n\
+         \x20     if (at !== -1) p.children.splice(at, 1);\n\
+         \x20   },\n\
          \x20   addEventListener(n, f) {\n\
          \x20     listeners.set(this.attrs.id ?? this.attrs[\"data-key\"], f);\n\
          \x20   },\n\
@@ -1490,4 +1499,90 @@ fn typescript_type_checks_against_the_declarations() {
         text
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- std/html --------------------------------------------------------------
+
+/// A described tree becomes real elements.
+///
+/// The three things the builder decides, asserted rather than described: an
+/// element with a single text child gets that text directly rather than a
+/// `<span>` inside it — which is what a stylesheet's `td { … }` is written
+/// against — attributes are set as attributes, and nesting is preserved.
+#[test]
+fn a_described_tree_becomes_elements() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/dom\nuse std/html\n\n\
+        fn cells() -> [html.Node] {\n\
+        \x20 return [\n\
+        \x20   html.txt(\"td\", [html.class(\"num\")], \"1000\"),\n\
+        \x20   html.txt(\"td\", [], \"Ada Lovelace\"),\n\
+        \x20 ]\n\
+        }\n\
+        fn tree() -> html.Node {\n\
+        \x20 let row = html.el(\"tr\", [html.data(\"row\", \"1\")], cells())\n\
+        \x20 let body = html.el(\"tbody\", [], [row])\n\
+        \x20 return html.el(\"table\", [html.class(\"ledger\")], [body])\n\
+        }\n\
+        fn main() {\n\
+        \x20 let root = dom.find(\"#root\")\n\
+        \x20 if root == nil {\n    return\n  }\n\
+        \x20 let (view, err) = html.mount(root, [tree()])\n\
+        \x20 if err != nil {\n    io.print(\"failed: \\(err.message())\")\n  }\n\
+        }\n";
+    let runner = "import { readFile } from \"node:fs/promises\";\n\
+         import { instantiate, resident, setWriter } from \"./app.js\";\n\
+         class Element {}\n\
+         const mk = (tag) => {\n\
+         \x20 const el = {\n\
+         \x20   tag, attrs: {}, children: [], _text: \"\",\n\
+         \x20   get textContent() {\n\
+         \x20     return this._text + this.children.map((c) => c.textContent).join(\"\");\n\
+         \x20   },\n\
+         \x20   set textContent(v) { this.children = []; this._text = v; },\n\
+         \x20   setAttribute(n, v) { this.attrs[n] = v; },\n\
+         \x20   getAttribute(n) { return n in this.attrs ? this.attrs[n] : null; },\n\
+         \x20   appendChild(c) {\n\
+         \x20     const at = this.children.indexOf(c);\n\
+         \x20     if (at !== -1) this.children.splice(at, 1);\n\
+         \x20     this.children.push(c); c.parent = this; return c;\n\
+         \x20   },\n\
+         \x20   remove() {\n\
+         \x20     const p = this.parent; if (!p) return;\n\
+         \x20     const at = p.children.indexOf(this);\n\
+         \x20     if (at !== -1) p.children.splice(at, 1);\n\
+         \x20   },\n\
+         \x20   addEventListener() {}, removeEventListener() {},\n\
+         \x20 };\n\
+         \x20 Object.setPrototypeOf(el, Element.prototype);\n\
+         \x20 return el;\n\
+         };\n\
+         const root = mk(\"div\");\n\
+         globalThis.Element = Element;\n\
+         globalThis.document = {\n\
+         \x20 querySelector: (s) => (s === \"#root\" ? root : null),\n\
+         \x20 querySelectorAll: () => [],\n\
+         \x20 createElement: (t) => mk(t),\n\
+         };\n\
+         const out = [];\n\
+         setWriter((l) => out.push(l));\n\
+         const exports = await instantiate(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         resident(exports);\n\
+         exports.main();\n\
+         const shape = (e) =>\n\
+         \x20 e.children.length === 0\n\
+         \x20   ? e.tag + '[' + JSON.stringify(e.attrs) + ']=' + e._text\n\
+         \x20   : e.tag + '[' + JSON.stringify(e.attrs) + '](' +\n\
+         \x20     e.children.map(shape).join(',') + ')';\n\
+         out.push(shape(root.children[0]));\n\
+         process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+    let out = run_runner_under_node("htmltree", src, runner, &[]);
+    assert_eq!(
+        out,
+        "table[{\"class\":\"ledger\"}](tbody[{}](tr[{\"data-row\":\"1\"}](\
+         td[{\"class\":\"num\"}]=1000,td[{}]=Ada Lovelace)))\n"
+    );
 }

@@ -4,6 +4,7 @@
 //     python3 -m http.server -d examples/page 8000
 
 use std/dom
+use std/html
 use std/time
 
 struct Row {
@@ -73,44 +74,30 @@ fn ordered(items: [Row], key: str, descending: bool) -> [Row] {
     return if descending { reversed(up) } else { up }
 }
 
-fn cell(row: dom.Element, body: str, class: str) {
-    let (td, err) = dom.create("td")
-    if err != nil {
-        return
-    }
-    dom.set_text(td, body)
-    if class.len() > 0 {
-        dom.add_class(td, class)
-    }
-    dom.append(row, td)
-}
-
 fn money(amount: int) -> str {
     return "$\(amount / 100).\(pad_start("\(amount % 100)", 2, "0"))"
 }
 
-fn draw(body: dom.Element, shown: [Row]) {
-    dom.set_text(body, "")
-    for r in shown {
-        let (tr, err) = dom.create("tr")
-        if err != nil {
-            return
-        }
-        cell(tr, "\(r.id)", "num")
-        cell(tr, r.name, "")
-        cell(tr, r.region, "")
-        cell(tr, money(r.amount), "num")
-        cell(tr, r.status, "tag \(r.status)")
-        dom.append(body, tr)
-    }
+fn row_of(r: Row) -> html.Node {
+    return html.keyed("\(r.id)", html.el("tr", [], [
+        html.txt("td", [html.class("num")], "\(r.id)"),
+        html.txt("td", [], r.name),
+        html.txt("td", [], r.region),
+        html.txt("td", [html.class("num")], money(r.amount)),
+        html.txt("td", [html.class("tag \(r.status)")], r.status),
+    ]))
 }
 
-fn refresh(all: [Row], v: View, body: dom.Element, note: dom.Element) {
+fn refresh(all: [Row], var view: html.Mounted, v: View, note: dom.Element) {
     let started = time.now()
     let needle = lower(v.query)
     let found = filter(all, |r: Row| matches(r, needle))
     let shown = take(ordered(found, v.key, v.descending), 100)
-    draw(body, shown)
+    let err = html.update(view, map(shown, row_of))
+    if err != nil {
+        io.error("could not draw: \(err.message())")
+        return
+    }
     let took = time.now() - started
     dom.set_text(note, "\(all.len()) rows · \(found.len()) matched · \(shown.len()) shown · \(took) ms")
 }
@@ -146,12 +133,17 @@ fn main() {
     }
 
     let all = rows()
-    let view = View{ query: "", key: "id", descending: false }
-    refresh(all, view, body, note)
+    let state = View{ query: "", key: "id", descending: false }
+    let (mounted, merr) = html.mount(body, [])
+    if merr != nil {
+        io.error("could not mount: \(merr.message())")
+        return
+    }
+    refresh(all, mounted, state, note)
 
     let (typed, terr) = dom.on(search, "input", |e: dom.Event| {
-        set_query(view, dom.event_value(e))
-        refresh(all, view, body, note)
+        set_query(state, dom.event_value(e))
+        refresh(all, mounted, state, note)
     })
     if terr != nil {
         io.error("could not listen: \(terr.message())")
@@ -165,8 +157,8 @@ fn main() {
         }
         let column = key
         let (sub, err) = dom.on(th, "click", |e: dom.Event| {
-            set_key(view, column)
-            refresh(all, view, body, note)
+            set_key(state, column)
+            refresh(all, mounted, state, note)
         })
         if err != nil {
             io.error("could not listen: \(err.message())")

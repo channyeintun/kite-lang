@@ -256,15 +256,35 @@ producing HTML rather than rectangles makes that comparison readable: a
 difference reads as `<button class="btn" disabled>`, not as
 `rect 12.0 40.0 88.0 32.0 0x2a2f3a`.
 
-## 9. What is deferred
+## 9. Describing elements
 
-**A view layer.** `std/html` — a description of elements built with functions,
-compared against the last one, applied to the document — is not in version 1.
+`std/html` is a description: a `Node` is a tag, its attributes and its children,
+held as an ordinary value, and nothing exists in the page until `mount` walks
+it.
 
-The reasoning is in [the roadmap](06-roadmap.md#deferred-the-view-layer). Two
-things about it are settled in advance so that deferring is not the same as
-deciding nothing: element trees are built with **ordinary functions**, not a
-template language and not a change to the grammar; and updates work by
-**comparing trees**, not by a reactive graph, because a value that silently
-registers a dependency when it is read is hidden control flow in a much larger
-dose than the sigils the language already refuses.
+```kite
+html.el("tr", [], [
+    html.txt("td", [html.class("num")], "\(r.id)"),
+    html.txt("td", [], r.name),
+])
+```
+
+**Two constructors, not one per tag.** `el` and `txt` take the tag as a string,
+so the module is a page of code rather than a hundred and ten near-identical
+functions — and a tag the specification adds next year works the day it ships.
+A mistyped tag is a `<flase>` in the document rather than a compile error, which
+is the price.
+
+**`update` compares and writes the difference.** `mount` builds and remembers;
+a new description is matched against the remembered one, and a reused element
+stays where it is with its focus, its scroll position and its listeners intact.
+
+Children are matched by key where there is one and by position where there is
+not, and a reused element moves only when its position actually changed. On the
+demo, a thirty-five row sort creates nothing and moves thirty-three elements;
+without keys the same sort would rewrite the text of every cell it passed.
+
+Element trees are built with **ordinary functions** — no template language and
+no change to the grammar — and updates work by comparing trees rather than by a
+reactive graph, because a value that silently registers a dependency when it is
+read is hidden control flow.

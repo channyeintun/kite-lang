@@ -114,7 +114,7 @@ fn load(path: str) -> ([Task], error) {
 
 **A standard library, in Kite.** `math`, `time`, `errors`, `fmt`, `json`,
 `toml`, `text`, `test`, `buffer`, `task`, `sync`, `fs`, `http`, `socket`,
-`crypto`, `canvas`, `js`, `dom`. Its own tests are ordinary Kite programs that run on *both*
+`crypto`, `canvas`, `js`, `dom`, `html`. Its own tests are ordinary Kite programs that run on *both*
 backends and must agree.
 
 **Bodies the compiler writes.** `@derive(Debug, Hash, Encode, Decode)` in front
@@ -130,6 +130,23 @@ struct User { name: str, age: int }
 let (doc, err) = json.parse(text)
 check err
 let (user, uerr) = User.decode(doc)
+```
+
+**Elements described, and only the difference written.** `std/html` holds a
+tree as a value; `update` compares it against the last one and touches what
+changed. Children are matched by key where there is one, so a thirty-five row
+sort moves thirty-three elements and creates none — instead of rewriting every
+cell it moved past.
+
+```kite
+fn row(r: Row) -> html.Node {
+    return html.keyed("\(r.id)", html.el("tr", [], [
+        html.txt("td", [html.class("num")], "\(r.id)"),
+        html.txt("td", [], r.name),
+    ]))
+}
+
+html.update(view, map(rows, row))
 ```
 
 **A declared host boundary.** `@host("net") extern fn` becomes a Wasm import
@@ -184,7 +201,8 @@ kitec build examples/hello.kite --emit wasm --out dist
 
 **A Kite program goes in a page.** `examples/page` is a table of five thousand
 rows. Every keystroke in the filter walks all of them, sorts what survives and
-redraws — in about **3 ms**, from a **12 KB** module. The markup is HTML, the
+writes only the cells that changed — in about **3 ms**, from an **18 KB**
+module. The markup is HTML, the
 hover and the alignment and the colour of a status are CSS, and Kite holds the
 rows, does the work and writes text and class names. Finding an element and
 setting a class costs 2 KB, and there is a budget in CI that fails the build if
@@ -241,12 +259,6 @@ Recorded here rather than left to be discovered:
   `errors.chain`, `errors.is<T>` and `errors.as<T>` are still absent. Carrying
   the value needs a change to the error representation in all three backends:
   [Phase 24's remaining half](docs/06-roadmap.md#phase-24--concrete-error-types).
-- **No view layer, deliberately.** `std/dom` finds elements, changes them and
-  listens to them; what is absent is the layer above — a description of
-  elements built with functions, compared against the last one and applied to
-  the document. It is deferred past 1.0 because the most contested design space
-  in front-end software is the worst thing to freeze into a standard library:
-  [the roadmap](docs/06-roadmap.md#deferred-the-view-layer).
 - **No line breaking outside the browser.** `ui.wrap` was the only one, and it
   went with `std/ui`. The browser wraps its own text, so this only matters to a
   program painting into a `<canvas>` — `std/text` has the UAX #14 break

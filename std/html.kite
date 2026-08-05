@@ -1,0 +1,329 @@
+//! Elements described, compared, and changed where they differ. **Web only.**
+//!
+//! A `Node` is a description: a tag, its attributes and its children, held as
+//! an ordinary value. [`mount`] builds it once and remembers it; [`update`]
+//! compares a new description against the remembered one and touches only the
+//! parts that differ.
+//!
+//! ```kite
+//! use std/html
+//!
+//! fn row(r: Row) -> html.Node {
+//!     return html.keyed("\(r.id)", html.el("tr", [], [
+//!         html.txt("td", [html.class("num")], "\(r.id)"),
+//!         html.txt("td", [], r.name),
+//!     ]))
+//! }
+//!
+//! var view = html.mount(body, map(rows, row))
+//! html.update(view, map(next, row))
+//! ```
+//!
+//! **Two constructors, not one per tag.** `el` and `txt` take the tag as a
+//! string, so this is a page of code rather than a hundred and ten
+//! near-identical functions, and a tag added to HTML next year works the day it
+//! ships. A mistyped tag becomes a `<flase>` in the document rather than a
+//! compile error, which is the price.
+//!
+//! **Give list items a key.** Without one, children are matched by position, so
+//! a list that reorders rewrites the text of every element it moved past. With
+//! one, the element itself moves and its contents are left alone — which is the
+//! difference between a sort touching a hundred elements and five hundred.
+//!
+//! Class names pass through exactly as written. A stylesheet somebody else
+//! wrote is the thing styling this.
+
+use std/dom
+
+/// One attribute.
+pub struct Attr {
+    name: str
+    value: str
+}
+
+/// A described element, or a run of text.
+///
+/// A text node is a `Node` whose tag is empty. One type rather than two keeps
+/// `[Node]` the only child list there is.
+pub struct Node {
+    tag: str
+    body: str
+    key: str
+    attrs: [Attr]
+    kids: [Node]
+}
+
+/// What was built, kept so the next description has something to compare
+/// against.
+///
+/// Held by the caller rather than in a table inside this module: a page with
+/// three islands has three of these, and nothing here has to know how many
+/// there are or when one goes away.
+pub struct Mounted {
+    into: dom.Element
+    var live: [Live]
+}
+
+/// One built element and the description it was built from.
+struct Live {
+    key: str
+    tag: str
+    body: str
+    attrs: [Attr]
+    el: dom.Element
+    kids: [Live]
+}
+
+// ---- describing ------------------------------------------------------------
+
+pub fn attr(name: str, value: str) -> Attr {
+    return Attr{ name: name, value: value }
+}
+
+/// The class attribute, taken whole — the way it is written everywhere else.
+pub fn class(names: str) -> Attr {
+    return Attr{ name: "class", value: names }
+}
+
+pub fn id(name: str) -> Attr {
+    return Attr{ name: "id", value: name }
+}
+
+/// A `data-` attribute. The prefix is added here so a caller writes the name.
+pub fn data(name: str, value: str) -> Attr {
+    return Attr{ name: "data-\(name)", value: value }
+}
+
+/// A run of text.
+pub fn text(body: str) -> Node {
+    return Node{ tag: "", body: body, key: "", attrs: [], kids: [] }
+}
+
+/// An element with children.
+pub fn el(tag: str, attrs: [Attr], kids: [Node]) -> Node {
+    return Node{ tag: tag, body: "", key: "", attrs: attrs, kids: kids }
+}
+
+/// An element whose only child is text.
+pub fn txt(tag: str, attrs: [Attr], body: str) -> Node {
+    return Node{ tag: tag, body: body, key: "", attrs: attrs, kids: [] }
+}
+
+/// An element with nothing in it: an `<input>`, an `<img>`.
+pub fn empty(tag: str, attrs: [Attr]) -> Node {
+    return Node{ tag: tag, body: "", key: "", attrs: attrs, kids: [] }
+}
+
+/// The same node, identified.
+///
+/// Two nodes with the same key are the same thing in a new position. Without a
+/// key an element is identified by where it sits, which is right for a fixed
+/// layout and wrong for a list.
+pub fn keyed(key: str, node: Node) -> Node {
+    return Node{
+        tag: node.tag,
+        body: node.body,
+        key: key,
+        attrs: node.attrs,
+        kids: node.kids,
+    }
+}
+
+// ---- building --------------------------------------------------------------
+
+fn set_attrs(on: dom.Element, attrs: [Attr]) -> error {
+    for a in attrs {
+        let err = dom.set_attribute(on, a.name, a.value)
+        if err != nil {
+            return err
+        }
+    }
+    return nil
+}
+
+fn build(node: Node) -> (Live, error) {
+    let tag = if node.tag.len() == 0 { "span" } else { node.tag }
+    let (made, err) = dom.create(tag)
+    if err != nil {
+        return _, err
+    }
+    let aerr = set_attrs(made, node.attrs)
+    if aerr != nil {
+        return _, aerr
+    }
+    if node.body.len() > 0 || node.kids.len() == 0 {
+        dom.set_text(made, node.body)
+    }
+    var kids: [Live] = []
+    for k in node.kids {
+        let (live, kerr) = build(k)
+        if kerr != nil {
+            return _, kerr
+        }
+        dom.append(made, live.el)
+        kids.push(live)
+    }
+    return Live{
+        key: node.key,
+        tag: node.tag,
+        body: node.body,
+        attrs: node.attrs,
+        el: made,
+        kids: kids,
+    }, nil
+}
+
+// ---- comparing ---------------------------------------------------------------
+
+fn same_attrs(was: [Attr], now: [Attr]) -> bool {
+    if was.len() != now.len() {
+        return false
+    }
+    for i in 0..was.len() {
+        if was[i].name != now[i].name || was[i].value != now[i].value {
+            return false
+        }
+    }
+    return true
+}
+
+/// Bring one element up to date, or replace it when it cannot be.
+///
+/// A tag change is a different element, so it is rebuilt. Everything else is
+/// reused: the element stays where it is, keeps its focus and its scroll
+/// position, and only what differs is written.
+fn patch(old: Live, next: Node) -> (Live, error) {
+    if old.tag != next.tag {
+        return build(next)
+    }
+    if !same_attrs(old.attrs, next.attrs) {
+        let err = set_attrs(old.el, next.attrs)
+        if err != nil {
+            return _, err
+        }
+    }
+    if next.kids.len() == 0 {
+        // A leaf: its text is all there is. Writing the same text back would
+        // still be a DOM write, so it is compared first.
+        if old.body != next.body || old.kids.len() > 0 {
+            dom.set_text(old.el, next.body)
+        }
+        return Live{
+            key: next.key,
+            tag: next.tag,
+            body: next.body,
+            attrs: next.attrs,
+            el: old.el,
+            kids: [],
+        }, nil
+    }
+    let (kids, kerr) = reconcile(old.el, old.kids, next.kids)
+    if kerr != nil {
+        return _, kerr
+    }
+    return Live{
+        key: next.key,
+        tag: next.tag,
+        body: next.body,
+        attrs: next.attrs,
+        el: old.el,
+        kids: kids,
+    }, nil
+}
+
+/// Match a new child list against the old one, and leave the parent holding
+/// exactly the new one.
+///
+/// Keyed children are matched by key wherever they moved to; unkeyed ones by
+/// position. A reused element is only moved when its position actually changed,
+/// so a list that did not reorder costs no DOM writes at all.
+fn reconcile(parent: dom.Element, olds: [Live], nexts: [Node]) -> ([Live], error) {
+    var by_key: {str: int} = {}
+    for i in 0..olds.len() {
+        if olds[i].key.len() > 0 {
+            by_key[olds[i].key] = i
+        }
+    }
+
+    var taken: [bool] = []
+    for i in 0..olds.len() {
+        taken.push(false)
+    }
+
+    var out: [Live] = []
+    for i in 0..nexts.len() {
+        let want = nexts[i]
+        var from = -1
+        if want.key.len() > 0 {
+            let found = by_key[want.key]
+            if found != nil {
+                if !taken[found] {
+                    from = found
+                }
+            }
+        } else {
+            if i < olds.len() && !taken[i] && olds[i].key.len() == 0 {
+                from = i
+            }
+        }
+
+        if from < 0 {
+            let (made, err) = build(want)
+            if err != nil {
+                return _, err
+            }
+            dom.append(parent, made.el)
+            out.push(made)
+        } else {
+            taken[from] = true
+            let (live, err) = patch(olds[from], want)
+            if err != nil {
+                return _, err
+            }
+            // Only when it actually moved. `append` on an element already in
+            // the tree relocates it, so doing this unconditionally would be a
+            // write per child on every update.
+            if from != i {
+                dom.append(parent, live.el)
+            }
+            out.push(live)
+        }
+    }
+
+    for i in 0..olds.len() {
+        if !taken[i] {
+            let err = dom.remove(olds[i].el)
+            if err != nil {
+                return _, err
+            }
+        }
+    }
+    return out, nil
+}
+
+// ---- mounting ----------------------------------------------------------------
+
+/// Build a description inside `into`, replacing whatever was there.
+pub fn mount(into: dom.Element, nodes: [Node]) -> (Mounted, error) {
+    dom.set_text(into, "")
+    var live: [Live] = []
+    for n in nodes {
+        let (made, err) = build(n)
+        if err != nil {
+            return _, err
+        }
+        dom.append(into, made.el)
+        live.push(made)
+    }
+    return Mounted{ into: into, live: live }, nil
+}
+
+/// Compare a new description against what is there, and change the difference.
+pub fn update(var view: Mounted, nodes: [Node]) -> error {
+    let (live, err) = reconcile(view.into, view.live, nodes)
+    if err != nil {
+        return err
+    }
+    view.live = live
+    return nil
+}

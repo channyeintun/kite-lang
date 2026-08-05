@@ -95,9 +95,9 @@
         <h3>Five thousand rows</h3>
         <p>
           Type in the filter. Every keystroke walks all five thousand rows,
-          sorts what survives and redraws the table — in about
+          sorts what survives, and writes only the cells that changed — in about
           <strong>3&nbsp;ms</strong>. Click a column heading to sort by it, and
-          again to reverse.
+          again to reverse; the rows move, they are not rebuilt.
         </p>
         <p>
           The page in that frame is an ordinary HTML file with an ordinary
@@ -106,7 +106,7 @@
           the work, and writes text and class names.
         </p>
         <p class="muted">
-          <strong>12&nbsp;KB</strong> of WebAssembly, with a budget in CI that
+          <strong>18&nbsp;KB</strong> of WebAssembly, with a budget in CI that
           fails the build if it grows. The page, the stylesheet and the program
           are
           <a href="https://github.com/channyeintun/kite-lang/tree/main/examples/page">examples/page</a>;

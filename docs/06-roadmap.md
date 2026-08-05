@@ -2108,30 +2108,52 @@ the end of one.
 
 ---
 
-## Deferred: the view layer
+## Phase 25 — `std/html`
 
-`std/html` — a description of elements built with functions, compared against
-the last one, applied to the document — is **not in version 1**, and the
-deferral is a decision rather than a shortfall.
+**Goal:** elements described as values, and only what changed written to the
+page.
 
-View layers are the most actively contested design space in front-end software,
-and anything in a standard library is frozen at 1.0 and regretted by 2.0.
-JavaScript ships no view layer, which is precisely why React, Vue, Svelte and
-Solid could all happen. Kite reaching version 1 as a fast, safe alternative to
-JavaScript — with the DOM, the platform, and interop in both directions — is a
-complete product. A view layer can then be a package, written by anyone, over
-primitives that were public the whole time.
+`std/dom` makes a program say `create`, `set_text`, `append` in sequence.
+`examples/page` had thirty lines of that to draw one table row.
 
-Two things are settled about it in advance, so that deferring it does not mean
-deciding nothing:
+**The description.** A `Node` is a tag, its attributes and its children, held as
+an ordinary value. Two constructors — `el` and `txt`, taking the tag as a string
+— rather than a hundred and ten named tag functions, so the module is a page of
+code and a tag added to HTML next year works the day it ships. A mistyped tag
+becomes a `<flase>` in the document rather than a compile error, and that is the
+price.
 
-- **No template language and no JSX.** A template is a second language in the
-  toolchain and JSX is a grammar change; the tree is built with ordinary
-  functions.
-- **Comparing trees, not a reactive graph.** Fine-grained reactivity wins the
-  benchmarks and loses this language's own argument: reading a value silently
-  registering a dependency is hidden control flow, in much larger a dose than
-  the sigils §17 already refuses.
+**The diff.** `mount` builds and remembers; `update` compares a new description
+against the remembered one and writes only the difference. A tag change rebuilds
+that element; everything else is reused in place, so it keeps its focus, its
+scroll position and its listeners.
+
+Children are matched **by key where there is one, by position where there is
+not**, and a reused element is moved only when its position actually changed.
+Measured on the demo, filtered to thirty-five rows:
+
+| | elements created | text writes | moves |
+|---|---|---|---|
+| Re-render, same data | 0 | 0 | 0 |
+| Sort by name | 0 | 0 | 33 |
+| Reverse that sort | 0 | 0 | 34 |
+
+Zero creations and thirty-three moves for a thirty-five row reorder is what the
+key buys. Without one the same sort rewrites the text of every cell it moved
+past — five hundred writes instead of thirty-three moves.
+
+**Held by the caller, not in a table here.** `mount` returns a `Mounted` and
+`update` takes it. A page with three islands has three of them, and nothing in
+this module has to know how many exist or when one goes away.
+
+Two things were settled before the phase and did not change: element trees are
+built with **ordinary functions**, not a template language and not a change to
+the grammar; and updates work by **comparing trees**, not by a reactive graph,
+because a value that silently registers a dependency when it is read is hidden
+control flow in a much larger dose than the sigils the language already refuses.
+
+The diff costs about 4.5 KB, which is why the island budget moved from 16 KB to
+24 KB. The budget that measures the language rather than the demo did not move.
 
 ---
 
@@ -2167,7 +2189,7 @@ none.
 | 22 — Interop backwards | ✅ `api.js` and `api.d.ts` from `kitec build`, verified with real `tsc`. `@export` proved unnecessary. ❌ the Vite plugin |
 | 23 — Size gate | ✅ complete — four budgets in CI; 388 B for hello world, 2 KB for a DOM change, 5.7 KB for the island |
 | 24 — Concrete error types | 🟡 `impl Error for MyType` works on all three backends and Appendix A compiles with its `LoadError`. ❌ the error carries only its message, so `cause`, `chain`, `is<T>` and `as<T>` wait on the representation |
-| — View layer | ⬜ deferred past 1.0, deliberately |
+| 25 — `std/html` | ✅ complete — descriptions, a keyed diff that writes only what changed, and `examples/page` written against it |
 
 768 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,

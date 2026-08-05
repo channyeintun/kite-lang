@@ -52,19 +52,23 @@ fn a_library_of_four_functions_stays_small() {
     assert!(size < 2048, "the library is {} bytes, budget 2048", size);
 }
 
-/// A real island: five thousand rows, filtered and sorted on every keystroke.
+/// A real island: five thousand rows, filtered, sorted and diffed on every
+/// keystroke.
 ///
-/// Today: about 12.4 KB. It was 5.7 KB when it was a counter, and the budget
-/// moved with the demo rather than the demo being kept small to suit the
-/// budget — the number worth watching is the one below, which measures the
-/// language rather than whatever `examples/page` happens to contain.
+/// Today about 18.5 KB, of which roughly 4.5 KB is `std/html`'s keyed diff. It
+/// was 5.7 KB when it was a counter that changed one number, and the budget has
+/// moved with the demo rather than the demo being trimmed to suit the budget.
+///
+/// The number worth watching is the one below, which measures the language
+/// rather than whatever `examples/page` happens to contain, and it has not
+/// moved at all.
 #[test]
-fn a_dom_island_stays_under_sixteen_kilobytes() {
+fn a_dom_island_stays_under_twenty_four_kilobytes() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/page/main.kite");
     let src = std::fs::read_to_string(&path).expect("read examples/page/main.kite");
     let size = size_of("island", &src);
-    assert!(size < 16384, "the island is {} bytes, budget 16384", size);
+    assert!(size < 24576, "the island is {} bytes, budget 24576", size);
 }
 
 /// Importing `std/dom` does not drag the rest of the library in with it.

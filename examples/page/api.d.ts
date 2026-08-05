@@ -10,6 +10,6 @@ export declare function prelude.lower(text: string): string;
 export declare function prelude.pad_start(text: string, width: bigint, with_2: string): string;
 
 // Left out, because these take or answer with a type JavaScript has no
-// representation for yet: js.global, js.get, js.set, js.at, js.length, js.call1, js.call2, js.is_nothing, js.of_str, js.as_str, js.as_num, js.as_int, js.str_or, dom.find, dom.find_all, dom.create, dom.set_text, dom.attribute, dom.add_class, dom.append, dom.on, dom.event_value.
+// representation for yet: js.global, js.get, js.set, js.at, js.length, js.call0, js.call1, js.call2, js.is_nothing, js.of_str, js.as_str, js.as_num, js.as_int, js.str_or, dom.find, dom.find_all, dom.create, dom.set_text, dom.attribute, dom.set_attribute, dom.append, dom.remove, dom.on, dom.event_value, html.class, html.el, html.txt, html.keyed, html.mount, html.update.
 // The module still exports them; describing them wrongly would be worse
 // than not describing them.
