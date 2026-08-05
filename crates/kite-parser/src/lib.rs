@@ -1060,6 +1060,16 @@ impl<'a> Parser<'a> {
                 self.expect_terminator();
                 Some(Stmt::Defer { expr, span })
             }
+            // `_ = expr` — thrown away on purpose. Only `=`: `_ += x` would be
+            // reading the hole, and there is nothing there to read.
+            T::Underscore if self.peek_at(1) == T::Eq => {
+                self.bump();
+                self.bump();
+                let value = self.parse_expr()?;
+                let span = start.to(value.span());
+                self.expect_terminator();
+                Some(Stmt::Discard { value, span })
+            }
             T::Break | T::Continue => {
                 let is_break = self.at(T::Break);
                 self.bump();

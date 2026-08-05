@@ -84,7 +84,8 @@ fn using_the_dom_does_not_pull_in_the_whole_library() {
         fn main() {\n\
         \x20 let e = dom.find(\"#a\")\n\
         \x20 if e == nil {\n    return\n  }\n\
-        \x20 dom.set_class(e, \"on\", true)\n\
+        \x20 let err = dom.set_class(e, \"on\", true)\n\
+        \x20 if err != nil {\n    io.error(err.message())\n  }\n\
         }\n";
     let size = size_of("smalldom", src);
     assert!(size < 4096, "a class change costs {} bytes, budget 4096", size);

@@ -152,7 +152,10 @@ fn build(node: Node) -> (Live, error) {
         return _, aerr
     }
     if node.body.len() > 0 || node.kids.len() == 0 {
-        dom.set_text(made, node.body)
+        let terr = dom.set_text(made, node.body)
+        if terr != nil {
+            return _, terr
+        }
     }
     var kids: [Live] = []
     for k in node.kids {
@@ -160,7 +163,10 @@ fn build(node: Node) -> (Live, error) {
         if kerr != nil {
             return _, kerr
         }
-        dom.append(made, live.el)
+        let perr = dom.append(made, live.el)
+        if perr != nil {
+            return _, perr
+        }
         kids.push(live)
     }
     return Live{
@@ -206,7 +212,10 @@ fn patch(old: Live, next: Node) -> (Live, error) {
         // A leaf: its text is all there is. Writing the same text back would
         // still be a DOM write, so it is compared first.
         if old.body != next.body || old.kids.len() > 0 {
-            dom.set_text(old.el, next.body)
+            let terr = dom.set_text(old.el, next.body)
+            if terr != nil {
+                return _, terr
+            }
         }
         return Live{
             key: next.key,
@@ -272,7 +281,10 @@ fn reconcile(parent: dom.Element, olds: [Live], nexts: [Node]) -> ([Live], error
             if err != nil {
                 return _, err
             }
-            dom.append(parent, made.el)
+            let perr = dom.append(parent, made.el)
+            if perr != nil {
+                return _, perr
+            }
             out.push(made)
         } else {
             taken[from] = true
@@ -284,7 +296,10 @@ fn reconcile(parent: dom.Element, olds: [Live], nexts: [Node]) -> ([Live], error
             // the tree relocates it, so doing this unconditionally would be a
             // write per child on every update.
             if from != i {
-                dom.append(parent, live.el)
+                let perr = dom.append(parent, live.el)
+                if perr != nil {
+                    return _, perr
+                }
             }
             out.push(live)
         }
@@ -305,14 +320,20 @@ fn reconcile(parent: dom.Element, olds: [Live], nexts: [Node]) -> ([Live], error
 
 /// Build a description inside `into`, replacing whatever was there.
 pub fn mount(into: dom.Element, nodes: [Node]) -> (Mounted, error) {
-    dom.set_text(into, "")
+    let cerr = dom.set_text(into, "")
+    if cerr != nil {
+        return _, cerr
+    }
     var live: [Live] = []
     for n in nodes {
         let (made, err) = build(n)
         if err != nil {
             return _, err
         }
-        dom.append(into, made.el)
+        let perr = dom.append(into, made.el)
+        if perr != nil {
+            return _, perr
+        }
         live.push(made)
     }
     return Mounted{ into: into, live: live }, nil

@@ -405,6 +405,14 @@ pub enum Stmt {
     Return(ReturnStmt),
     Check { expr: Expr, span: Span },
     Defer { expr: Expr, span: Span },
+    /// `_ = expr` — the value is deliberately thrown away.
+    ///
+    /// It exists for one reason: a call whose result is an `error` may not be
+    /// left as a bare statement, because that is how an error gets dropped
+    /// without anybody deciding to. `_` already means *a hole where a value
+    /// would go* in a return and in a destructuring, and this is the same idea
+    /// in the one position that was missing it.
+    Discard { value: Expr, span: Span },
     If(IfStmt),
     For(ForStmt),
     Match(MatchExpr),
@@ -423,6 +431,7 @@ impl Stmt {
             Stmt::Return(s) => s.span,
             Stmt::Check { span, .. }
             | Stmt::Defer { span, .. }
+            | Stmt::Discard { span, .. }
             | Stmt::Break { span, .. }
             | Stmt::Continue { span, .. }
             | Stmt::Error(span) => *span,

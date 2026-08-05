@@ -99,7 +99,10 @@ fn refresh(all: [Row], var view: html.Mounted, v: View, note: dom.Element) {
         return
     }
     let took = time.now() - started
-    dom.set_text(note, "\(all.len()) rows · \(found.len()) matched · \(shown.len()) shown · \(took) ms")
+    let nerr = dom.set_text(note, "\(all.len()) rows · \(found.len()) matched · \(shown.len()) shown · \(took) ms")
+    if nerr != nil {
+        io.error("could not write the count: \(nerr.message())")
+    }
 }
 
 fn set_key(var v: View, key: str) {

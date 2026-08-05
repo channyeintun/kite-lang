@@ -1180,6 +1180,7 @@ impl<'a> FnResolver<'a> {
                 None => {}
             },
             Stmt::Check { expr, .. } | Stmt::Defer { expr, .. } => self.expr(expr),
+            Stmt::Discard { value, .. } => self.expr(value),
             Stmt::If(i) => self.if_stmt(i),
             Stmt::For(f) => self.for_stmt(f),
             Stmt::Match(m) => self.match_expr(m),

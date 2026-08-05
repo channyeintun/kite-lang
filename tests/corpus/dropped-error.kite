@@ -1,0 +1,25 @@
+// An error left as a bare statement is dropped, and dropping it is the thing
+// the whole error design exists to prevent. The taint analysis is written about
+// bindings, so until this rule existed a call that bound nothing escaped it —
+// which is most of `std/dom`, where nearly every function answers with a bare
+// `error`.
+
+fn touch() -> error {
+    return errors.new("no")
+}
+
+fn load() -> (int, error) {
+    return 1, nil
+}
+
+fn main() {
+    touch() //~ ERROR E0302
+    load() //~ ERROR E0302
+
+    // Said out loud, it is allowed: `_` is a hole where a value would go, the
+    // same as in a return and in a destructuring.
+    _ = touch()
+    _ = load()
+
+    io.print("done")
+}

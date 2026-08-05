@@ -1070,6 +1070,16 @@ impl<'a> Checker<'a> {
 
             ast::Stmt::Expr(e) => {
                 let expr = self.expr(e, None);
+                self.dropped_error(&expr);
+                let flow = if expr.ty == TyId::NEVER { Flow::Diverges } else { Flow::Falls };
+                Some((hir::Stmt::Expr(expr), flow))
+            }
+
+            // `_ = f()`. The value is evaluated and thrown away, which is the
+            // same lowering an expression statement gets — the difference is
+            // entirely that somebody wrote it down.
+            ast::Stmt::Discard { value, .. } => {
+                let expr = self.expr(value, None);
                 let flow = if expr.ty == TyId::NEVER { Flow::Diverges } else { Flow::Falls };
                 Some((hir::Stmt::Expr(expr), flow))
             }
@@ -4462,6 +4472,45 @@ impl<'a> Checker<'a> {
             hir::Stmt::Block(hir::Block { stmts }),
             Flow::Falls,
         ))
+    }
+
+    /// An error thrown away by leaving a call as a bare statement.
+    ///
+    /// The taint analysis in [§7.3] is written about *bindings*: `let (v, e) =
+    /// f()` marks `e` Unchecked and complains when it goes out of scope. A call
+    /// written as a statement binds nothing, so none of that ever ran — and
+    /// `dom.set_text(e, "hi")` dropped its error in silence.
+    ///
+    /// That is Go's first flaw, the one §7.1 opens by naming as the thing this
+    /// language fixes, surviving in the one shape the analysis did not cover.
+    /// It matters most exactly where Kite is aimed: almost every function in
+    /// `std/dom` returns a bare `error`, so on the web the dropped error was
+    /// the ordinary case rather than an unusual one.
+    ///
+    /// Writing `_ = f()` says the same thing on purpose, and is the only way to
+    /// get the old behaviour — which is the point, because now it is a decision
+    /// somebody made and a reader can see.
+    ///
+    /// [§7.3]: ../../../SPECIFICATION.md#73-correlated-results-and-taint-analysis
+    fn dropped_error(&mut self, expr: &hir::Expr) {
+        let pair = self.types.fallible_value(expr.ty).is_some();
+        if expr.ty != TyId::ERR && !pair {
+            return;
+        }
+        let what = if pair {
+            "this call returns a value and an error, and both are thrown away"
+        } else {
+            "this call returns an error, and it is thrown away"
+        };
+        self.diags.push(
+            Diagnostic::error(codes::E0302, "error is never checked")
+                .with_primary(expr.span, what)
+                .with_note(
+                    "write `check` to propagate it, or bind it and test it — \
+                     `let err = …` then `if err != nil { … }`",
+                )
+                .with_note("to throw it away on purpose, write `_ = …`"),
+        );
     }
 
     /// `check err` — propagate if the error is not nil.

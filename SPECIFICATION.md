@@ -689,6 +689,28 @@ The rules:
 > **R5.** On any path where `e != nil`, `e` becomes Checked and `v` remains
 > Tainted permanently. The value slot on an error path holds no value at all —
 > not a zero value — and cannot be read.
+>
+> **R6.** A call left as a bare statement, whose type is `error` or `(T,
+> error)`, is a compile error (`E0302`). Binding nothing is not a way out of
+> binding an error.
+
+R1–R5 are about bindings, and R6 is what closes the shape they leave open: a
+call written as a statement makes no binding, so nothing in R1–R5 ever sees it,
+and `dom.set_text(e, "hi")` would drop its failure in silence. That is
+[§7.1](#71-the-problem-being-solved)'s first flaw arriving through the one door
+the analysis did not watch, and it is the ordinary shape on the web, where
+nearly every `std/dom` function answers with a bare `error`.
+
+To drop one deliberately, say so:
+
+```kite
+_ = dom.set_text(note, "…")
+```
+
+`_` already means *a hole where a value would go* in a return and in a
+destructuring; this is the same word in the one position that lacked it. What
+it buys is not safety — the error is just as gone — but that it is gone because
+somebody decided, on a line a reader can see and `grep` can find.
 
 The analysis is a standard forward dataflow pass over the control-flow graph,
 run after type checking. It is not a borrow checker; it has no notion of

@@ -118,6 +118,7 @@ Block        = "{" { Statement } "}" ;
 Statement    = LetStmt
              | VarStmt
              | AssignStmt
+             | DiscardStmt
              | CheckStmt
              | DeferStmt
              | ReturnStmt
@@ -138,6 +139,12 @@ BindElem     = Ident | "_" ;
 AssignStmt   = LValue AssignOp Expr ;
 LValue       = Ident { "." Ident | "[" Expr "]" } ;
 AssignOp     = "=" | "+=" | "-=" | "*=" | "/=" | "%=" ;
+
+(* `_ = f()` — the result is thrown away on purpose. Only `=`: a compound
+   assignment would be reading the hole, and there is nothing there to read.
+   It exists because a call whose type is `error` or `(T, error)` may not be
+   left as a bare ExprStmt; see SPECIFICATION §7.3 R6.                        *)
+DiscardStmt  = "_" "=" Expr ;
 
 CheckStmt    = "check" Expr ;
 
