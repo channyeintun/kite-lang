@@ -1,0 +1,24 @@
+// A host object has no structure Kite can see, so `==` has nothing to compare
+// — and `externref` is outside Wasm's `eq` hierarchy, so there is no
+// comparison to lower it to either. Identity is `js.same`, which asks the host.
+//
+// The wrapper matters as much as the bare value: `std/dom` is built on opaque
+// structs holding one, and a struct that compared "equal" by walking a field it
+// cannot see would be worse than one that refuses.
+
+@host("js")
+extern fn global(name: str) -> JsValue
+
+struct Element {
+    raw: JsValue
+}
+
+fn main() {
+    let a = global("document")
+    let b = global("window")
+    io.print(a == b) //~ ERROR E0201
+
+    let e = Element{ raw: a }
+    let f = Element{ raw: b }
+    io.print(e == f) //~ ERROR E0201
+}

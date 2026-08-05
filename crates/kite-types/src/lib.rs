@@ -534,14 +534,27 @@ pub fn check_recording(
 
 /// Whether a type may cross the host boundary.
 ///
-/// Numbers, booleans and strings only. An aggregate would need a
+/// Numbers, booleans, strings — and a `JsValue`, which is the host's own object
+/// going back to the host that made it. An aggregate of Kite's would need a
 /// representation both sides agreed on, and inventing one silently is how an
-/// FFI becomes a source of corruption — a host that wants structure is handed
-/// a `str` of JSON, or an opaque handle it made itself.
+/// FFI becomes a source of corruption: a host that wants structure is handed a
+/// `str` of JSON, or a reference it made itself.
+///
+/// `JsValue` is the second of those, given a type. It was always the intended
+/// answer — the specification described it before the compiler had it — and
+/// until it existed the only way to spell "a thing the host made" was an `int`
+/// indexing a table, which is the shape that leaks, cannot be collected, and
+/// answers identity wrongly.
 fn check_host_type(ty: TyId, span: Span, types: &Types, diags: &mut DiagBag) {
     let ok = matches!(
         types.kind(ty),
-        TyKind::Int | TyKind::Float | TyKind::Bool | TyKind::Str | TyKind::Unit | TyKind::Error
+        TyKind::Int
+            | TyKind::Float
+            | TyKind::Bool
+            | TyKind::Str
+            | TyKind::Unit
+            | TyKind::Error
+            | TyKind::JsValue
     );
     if ok {
         return;
@@ -553,8 +566,9 @@ fn check_host_type(ty: TyId, span: Span, types: &Types, diags: &mut DiagBag) {
         )
         .with_primary(span, "not a host type")
         .with_note(
-            "a host declaration takes and returns `int`, `float`, `bool` or `str`; \
-             structure crosses as text, or as a handle the host made and understands",
+            "a host declaration takes and returns `int`, `float`, `bool`, `str` or \
+             `JsValue`; Kite's own structures cross as text, or as a `JsValue` the \
+             host made and understands",
         ),
     );
 }
@@ -5626,6 +5640,19 @@ impl<'a> Checker<'a> {
         )
         .with_primary(span, format!("`{}` is not Share", name))
         .with_secondary(bound, format!("`{}` is required to be Share here", param));
+        // Two different causes, and they want opposite advice. A mutable field
+        // is a data race and the fix is to stop mutating; a host reference is
+        // not a race at all — it is simply meaningless in another isolate, and
+        // no change to the type makes it travel.
+        if self.types.mentions_host_value(ty) {
+            self.diags.push(d.with_note(
+                "it holds a `JsValue`, which belongs to the isolate that created it. \
+                 A worker has its own JavaScript heap and nothing there for the \
+                 reference to name, so send what the other task needs — a string, a \
+                 number, a copy — and leave the host object here",
+            ));
+            return;
+        }
         if let Some((field, owner)) = self.first_mutable_field(ty) {
             d = d.with_secondary(
                 field,
@@ -6714,10 +6741,24 @@ impl<'a> Checker<'a> {
             if op == B::Rem && t == TyId::FLOAT {
                 d = d.with_note("use `math.rem` for floating-point remainder");
             }
-            if op.is_comparison() && !self.types.is_ordered(t) {
+            // Only for the ordering operators. `==` on an unordered type is not
+            // failing because the type has no order — it is failing for its own
+            // reason, which the notes below give, and "is not ordered" beside
+            // them reads as a second, wrong explanation.
+            if matches!(op, B::Lt | B::Le | B::Gt | B::Ge) && !self.types.is_ordered(t) {
                 d = d.with_note(format!("`{}` is not ordered", self.types.name(t)));
             }
-            if matches!(op, B::Eq | B::Ne) && !self.types.is_equatable(t) {
+            if matches!(op, B::Eq | B::Ne) && self.types.mentions_host_value(t) {
+                // Not an omission: `externref` is outside Wasm's `eq`
+                // hierarchy, so there is no comparison to lower this to. The
+                // question people mean is identity, and identity is the host's
+                // `===` rather than anything structural.
+                d = d.with_note(
+                    "a host object has no structure Kite can see, so there is nothing to \
+                     compare field by field",
+                );
+                d = d.with_note("`js.same(a, b)` asks the host whether they are the same object");
+            } else if matches!(op, B::Eq | B::Ne) && !self.types.is_equatable(t) {
                 d = d.with_note(
                     "equality is structural, so every field must itself be equatable; \
                      functions and trait objects are not",

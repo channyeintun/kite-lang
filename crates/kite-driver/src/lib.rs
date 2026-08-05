@@ -437,6 +437,40 @@ fn run_passes(
         return (mir.render(&hir.types).to_string(), None, None, None, index);
     }
 
+    // A host object is the web's, and only the web's. A target asked to emit
+    // an artefact that cannot hold one is told so here, rather than at the
+    // point some backend has to invent a representation for a reference it
+    // cannot keep — which is the failure mode that produced the integer handle
+    // table this type exists to replace.
+    //
+    // `Emit::Check` is deliberately not among them. Checking asks whether this
+    // is valid Kite, and a program written for the web is; it is also what
+    // `kitec run` and the language server use, and a web program should not
+    // stop type-checking in an editor. Running one on the bytecode VM fails at
+    // its first host call, which already says which function had no host.
+    if matches!(emit, Emit::Native | Emit::Kbc) {
+        let gaps = host_types_used(&mir, &hir.types);
+        let refused = !gaps.is_empty();
+        for gap in gaps {
+            diags.push(
+                Diagnostic::error(
+                    kite_diag::codes::E0204,
+                    "`JsValue` is a host object, and this target has no host",
+                )
+                .with_primary(gap.span, format!("used in `{}`", gap.function))
+                .with_note(
+                    "a `JsValue` is a reference the JavaScript engine owns. There is \
+                     nothing outside a browser for one to refer to, so it is refused \
+                     here rather than lowered to a number that would mean nothing",
+                )
+                .with_note("build for the web: `--emit wasm`"),
+            );
+        }
+        if refused {
+            return (String::new(), None, None, None, index);
+        }
+    }
+
     if emit == Emit::Wasm {
         // Report anything this target cannot lower, rather than emitting a
         // module that validates and then traps at run time with no
@@ -500,6 +534,32 @@ fn run_passes(
 }
 
 /// What an editor needs, from the resolution the checker already ran.
+/// Where a host object appears in a program.
+struct HostTypeUse {
+    function: String,
+    span: kite_span::Span,
+}
+
+/// Every function whose locals mention `JsValue`, once each.
+///
+/// A signature or a local is enough: a type that cannot be represented cannot
+/// be held, so there is no need to look at what is done with it. One report per
+/// function, because a function that threads a node through twenty statements
+/// has one problem and not twenty.
+fn host_types_used(program: &kite_mir::Program, types: &kite_hir::Types) -> Vec<HostTypeUse> {
+    let mut found: Vec<HostTypeUse> = Vec::new();
+    for f in &program.fns {
+        // A signature or a local is enough. A type that cannot be represented
+        // cannot be held, so there is nothing to learn from what is done with
+        // it — and the walk reaches through `?Element`, `[Element]` and the
+        // opaque wrapper struct that `std/dom` is built on.
+        if f.locals.iter().any(|l| types.mentions_host_value(l.ty)) {
+            found.push(HostTypeUse { function: f.name.clone(), span: f.span });
+        }
+    }
+    found
+}
+
 fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Index {
     use kite_resolve::Res;
     use std::collections::HashMap;

@@ -44,8 +44,10 @@ impl TyId {
     /// The `error` type. Distinct from [`TyId::ERROR`], which is compiler
     /// poison: this one is a value a program can hold.
     pub const ERR: TyId = TyId(7);
+    /// An opaque host object. Web only.
+    pub const JS_VALUE: TyId = TyId(8);
 
-    const PRIMITIVE_COUNT: usize = 8;
+    const PRIMITIVE_COUNT: usize = 9;
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -71,6 +73,15 @@ pub enum TyKind {
     /// the value is only meaningful when the error is nil, which is what the
     /// taint analysis enforces.
     Fallible(TyId),
+    /// An opaque reference to a host object — a DOM node, a promise, a
+    /// constructor. `externref` on the web; nothing anywhere else, where naming
+    /// the type is refused rather than lowered to something that would trap.
+    ///
+    /// Kite cannot look inside one, cannot forge one, and cannot compare two
+    /// with `==`: `externref` sits outside Wasm's `eq` hierarchy, so there is
+    /// no structural answer to give and identity is a host call instead. It is
+    /// never `Share` — a host reference belongs to the isolate that made it.
+    JsValue,
 
     Struct(StructId),
     Enum(EnumId),
@@ -245,6 +256,7 @@ impl Types {
             TyKind::Never,
             TyKind::Error,
             TyKind::Err,
+            TyKind::JsValue,
         ];
         debug_assert_eq!(kinds.len(), TyId::PRIMITIVE_COUNT);
         let index = kinds
@@ -727,6 +739,51 @@ impl Types {
         }
     }
 
+    /// Whether this type is, or contains, a host object.
+    ///
+    /// Separate from [`Types::is_equatable`] returning false, because the two
+    /// have different fixes: a type that is not equatable because it holds a
+    /// function wants a different comparison written; one that holds a host
+    /// object wants `js.same`, and no amount of restructuring will make `==`
+    /// work on it.
+    pub fn mentions_host_value(&self, id: TyId) -> bool {
+        self.mentions_host_inner(id, &mut Vec::new())
+    }
+
+    fn mentions_host_inner(&self, id: TyId, visiting: &mut Vec<TyId>) -> bool {
+        if visiting.contains(&id) {
+            return false;
+        }
+        visiting.push(id);
+        match self.kind(id) {
+            TyKind::JsValue => true,
+            TyKind::Optional(t) | TyKind::Slice(t) | TyKind::Fallible(t) => {
+                self.mentions_host_inner(*t, visiting)
+            }
+            TyKind::Map(k, v) => {
+                self.mentions_host_inner(*k, visiting) || self.mentions_host_inner(*v, visiting)
+            }
+            TyKind::Tuple(elems) => {
+                elems.iter().any(|e| self.mentions_host_inner(*e, visiting))
+            }
+            TyKind::Struct(s) => {
+                let fields: Vec<TyId> =
+                    self.struct_def(*s).fields.iter().map(|f| f.ty).collect();
+                fields.into_iter().any(|t| self.mentions_host_inner(t, visiting))
+            }
+            TyKind::Enum(e) => {
+                let fields: Vec<TyId> = self
+                    .enum_def(*e)
+                    .variants
+                    .iter()
+                    .flat_map(|v| v.fields.iter().map(|f| f.ty))
+                    .collect();
+                fields.into_iter().any(|t| self.mentions_host_inner(t, visiting))
+            }
+            _ => false,
+        }
+    }
+
     /// Whether `<`, `<=`, `>`, `>=` are defined.
     pub fn is_ordered(&self, id: TyId) -> bool {
         matches!(self.kind(id), TyKind::Int | TyKind::Float | TyKind::Str)
@@ -807,6 +864,11 @@ impl Types {
             | TyKind::Never
             | TyKind::Error
             | TyKind::Err => true,
+            // A host reference belongs to the isolate that made it. An integer
+            // handle standing in for one would satisfy every rule here and mean
+            // nothing on the other side, which is the whole reason this is a
+            // type the compiler knows rather than an `int` by convention.
+            TyKind::JsValue => false,
             // Slices are copy-on-write *values*, not shared references, so a
             // slice is shareable exactly when its elements are. This is what
             // keeps ordinary data types `Share` without the author noticing.
@@ -861,6 +923,7 @@ impl Types {
             TyKind::Never => "!".into(),
             TyKind::Error => "<error>".into(),
             TyKind::Err => "error".into(),
+            TyKind::JsValue => "JsValue".into(),
             TyKind::Fallible(v) => format!("({}, error)", self.name(*v)),
             TyKind::Struct(s) => self.struct_def(*s).name.clone(),
             TyKind::Enum(e) => self.enum_def(*e).name.clone(),
@@ -916,11 +979,13 @@ impl Types {
             "float" => TyId::FLOAT,
             "str" => TyId::STR,
             "error" => TyId::ERR,
+            "JsValue" => TyId::JS_VALUE,
             _ => return None,
         })
     }
 
-    pub const PRIMITIVE_NAMES: [&'static str; 5] = ["bool", "int", "float", "str", "error"];
+    pub const PRIMITIVE_NAMES: [&'static str; 6] =
+        ["bool", "int", "float", "str", "error", "JsValue"];
 }
 
 #[cfg(test)]

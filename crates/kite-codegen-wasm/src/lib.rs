@@ -1585,6 +1585,12 @@ fn val_type_with(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
             // Only reachable while the layout is still being built.
             None => ValType::I32,
         },
+        // A host object *is* the host's object. There is no table it could be
+        // an index into and no representation Kite could give it, so it is an
+        // `externref` whatever the string mode happens to be — which is also
+        // what makes the engine trace it, and what makes a cycle between a Kite
+        // struct and a DOM node something one collector can collect.
+        TyKind::JsValue => EXTERN_REF_NULL,
         // A `str` is either an index into the glue's table or the JS string
         // itself. Everything else that reaches here — `bool`, `unit`, the
         // error placeholder — is an `i32` either way.
@@ -2939,6 +2945,22 @@ impl<'a> Emitter<'a> {
         match val_type_with(ty, self.types, self.layout) {
             ValType::I64 => func.instruction(&Instruction::I64Const(0)),
             ValType::F64 => func.instruction(&Instruction::F64Const(0.0.into())),
+            // Wasm has two reference hierarchies and `nullref` is only in one
+            // of them, so a slot typed `externref` needs `nullexternref`
+            // instead. The one place this shows up is the state machine
+            // `asyncify` builds: a host object held across an `await` becomes a
+            // field, and the field is initialised with this before it is set.
+            // Emitting the internal null there produces a module that fails
+            // validation rather than one that misbehaves, which is the good
+            // version of getting it wrong.
+            ValType::Ref(RefType {
+                heap_type:
+                    HeapType::Abstract { ty: wasm_encoder::AbstractHeapType::Extern, .. },
+                ..
+            }) => func.instruction(&Instruction::RefNull(HeapType::Abstract {
+                shared: false,
+                ty: wasm_encoder::AbstractHeapType::NoExtern,
+            })),
             ValType::Ref(_) => func.instruction(&Instruction::RefNull(HeapType::Abstract {
                 shared: false,
                 ty: wasm_encoder::AbstractHeapType::None,

@@ -1,0 +1,23 @@
+// A `JsValue` belongs to the isolate that made it. A worker has its own
+// JavaScript heap, and nothing in it for the reference to name — so this is not
+// a data race being prevented, it is a reference that would mean nothing on
+// arrival. No change to the type makes it travel.
+
+use std/task
+
+@host("js")
+extern fn global(name: str) -> JsValue
+
+struct Element {
+    raw: JsValue
+}
+
+async fn touch(e: Element) -> int {
+    return 1
+}
+
+async fn main() {
+    let e = Element{ raw: global("document") }
+    let r = await task.parallel([e], |x: Element| touch(x)) //~ ERROR E0520
+    io.print(r.len())
+}

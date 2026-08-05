@@ -652,3 +652,106 @@ fn comparing_a_secret_with_equals_warns() {
         c.render_diagnostics()
     );
 }
+
+// ---- host objects ----------------------------------------------------------
+
+/// A runner that supplies a `js` group and two objects to point at.
+///
+/// Nothing here is a DOM: what is being tested is that a reference the host
+/// made survives a round trip through Kite, including being stored in a struct
+/// field and taken out again. A plain object proves that as well as a node
+/// would, and needs no browser.
+const HOST_OBJECT_RUNNER: &str = "import { readFile } from \"node:fs/promises\";\n\
+     import { run, provide, setWriter, str, text } from \"./app.js\";\n\
+     const WORLD = { document: { tag: \"doc\" }, window: { tag: \"win\" } };\n\
+     // A `str` crosses as an index into the glue's table unless the module was\n\
+     // built with --js-strings, so a host reads one with `text` and returns one\n\
+     // with `str`. A `JsValue` needs neither: it is already the object.\n\
+     provide(\"js\", {\n\
+     \x20 global: (name) => WORLD[text(name)],\n\
+     \x20 same: (a, b) => a === b,\n\
+     \x20 tag_of: (v) => str(v.tag),\n\
+     });\n\
+     const out = [];\n\
+     setWriter((l) => out.push(l));\n\
+     // `run` calls `main` and then drives whatever it started, which an\n\
+     // `async fn main` needs and a plain one does not mind.\n\
+     await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+     process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+
+const HOST_OBJECT_DECLS: &str = "@host(\"js\")\nextern fn global(name: str) -> JsValue\n\
+     @host(\"js\")\nextern fn same(a: JsValue, b: JsValue) -> bool\n\
+     @host(\"js\")\nextern fn tag_of(v: JsValue) -> str\n";
+
+/// A host object crosses into Kite, is held, and goes back out unchanged.
+///
+/// This is the property the integer handle table could not provide. Two lookups
+/// of the same thing pushed two entries and produced two different numbers, so
+/// `same` answered false for one object — and every event handler ever written
+/// asks exactly that question about `event.target`.
+#[test]
+fn a_host_object_keeps_its_identity_across_the_boundary() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = format!(
+        "{}struct Element {{\n  raw: JsValue\n}}\n\
+         fn main() {{\n\
+         \x20 let a = global(\"document\")\n\
+         \x20 let b = global(\"window\")\n\
+         \x20 io.print(same(a, a))\n\
+         \x20 io.print(same(a, b))\n\
+         \x20 let e = Element{{ raw: a }}\n\
+         \x20 io.print(same(e.raw, a))\n\
+         \x20 io.print(tag_of(e.raw))\n}}\n",
+        HOST_OBJECT_DECLS
+    );
+    let out = run_runner_under_node("hostobject", &src, HOST_OBJECT_RUNNER, &[]);
+    assert_eq!(out, "true\nfalse\ntrue\ndoc\n");
+}
+
+/// A host object survives an `await`.
+///
+/// The reference is held across a suspension point, which means it is a field
+/// of the state machine `asyncify` builds rather than a value on the stack. An
+/// `externref` in a GC struct is exactly what makes that work without the
+/// program doing anything.
+#[test]
+fn a_host_object_survives_a_suspension() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = format!(
+        "use std/task\n{}async fn later(v: JsValue) -> str {{\n\
+         \x20 await task.sleep(1)\n  return tag_of(v)\n}}\n\
+         async fn main() {{\n\
+         \x20 let a = global(\"document\")\n\
+         \x20 io.print(await later(a))\n\
+         \x20 io.print(same(a, global(\"document\")))\n}}\n",
+        HOST_OBJECT_DECLS
+    );
+    let out = run_runner_under_node("hostawait", &src, HOST_OBJECT_RUNNER, &[]);
+    assert_eq!(out, "doc\ntrue\n");
+}
+
+/// `JsValue` is refused by the targets that have no host, rather than lowered
+/// to a number that would mean nothing there.
+#[test]
+fn a_host_object_is_refused_off_the_web() {
+    let src = format!(
+        "{}fn main() {{\n  io.print(same(global(\"a\"), global(\"a\")))\n}}\n",
+        HOST_OBJECT_DECLS
+    );
+    // Checking is target-independent: this is valid Kite, and an editor must
+    // not report it as broken.
+    let checked = compile(Path::new("hostoff.kite"), &src, Emit::Check);
+    assert!(!checked.failed(), "{}", checked.render_diagnostics());
+
+    let bytecode = compile(Path::new("hostoff.kite"), &src, Emit::Kbc);
+    assert!(bytecode.failed(), "the bytecode target has no host to refer to");
+    let text = bytecode.render_diagnostics();
+    assert!(text.contains("E0204"), "{}", text);
+    assert!(text.contains("has no host"), "{}", text);
+}

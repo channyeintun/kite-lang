@@ -1639,6 +1639,38 @@ reference and receives it back through `kite_poll`.
 **Exit criterion:** a Kite program holds an element across an await point, drops
 it, and the browser collects it.
 
+**Done, with the second half claimed no further than it was tested.** A host
+object crosses into Kite, is stored in a struct field, comes back out, survives
+an `await`, and answers identity correctly — all asserted under Node in
+`crates/kite-driver/tests/host.rs`. **Collection is not asserted**, because
+observing it needs a heap snapshot and there is no dependency here that takes
+one. The argument for it is structural rather than measured: the field is an
+`externref` in a GC struct, so the engine traces it like any other reference,
+and there is no side table left for a leak to accumulate in.
+
+Three things the work turned up:
+
+- **`extern` had to admit the type.** Host signatures were restricted to
+  numbers, booleans and strings, with a note saying structure crosses "as a
+  handle the host made" — which was the right answer and had no way to be
+  spelled. `JsValue` is that handle, given a type.
+- **`Emit::Check` must stay permissive.** It is what `kitec check`, `kitec run`
+  and the language server all use, so refusing there would make a web program
+  stop type-checking in an editor. The refusal belongs to `--emit native` and
+  `--emit kbc`, which are asked for an artefact that cannot hold a reference.
+- **Wasm has two null references, and `asyncify` found it.** A host object held
+  across an `await` becomes a field of the generated state machine, initialised
+  with the backend's "value no program can observe" — which emitted `nullref`,
+  from the internal hierarchy, into a slot typed `externref`. The module failed
+  validation rather than misbehaving, which is the good way to get this wrong.
+
+Two diagnostics were rewritten rather than left to be technically correct and
+useless. `==` on a host object said "`JsValue` is not ordered", which is true
+and not the reason; it now says there is no structure to compare and points at
+`js.same`. `Share` said "two tasks holding one mutable value is a data race",
+which is the wrong advice entirely — the field *is* immutable, and no change to
+the type makes a reference meaningful in another isolate.
+
 ---
 
 ## Phase 18 — `std/js`, the primitives
@@ -1891,7 +1923,7 @@ none.
 | 14 — Editor support | ✅ the language server and a VS Code extension over it, with rename, references, and inlay hints for solved generic arguments |
 | 15 — Distribution | 🟡 CI, cross-compiled builds, Sigstore signing, Homebrew/Scoop/AUR manifests rendered from the release's own checksums, `kitec.wasm` as an artefact. ❌ nothing published: no tag has been pushed |
 | 16 — Demolition | ✅ complete — 19,700 lines out; build and tests green with nothing rendering |
-| 17 — `JsValue` / `externref` | ⬜ not started |
+| 17 — `JsValue` / `externref` | ✅ complete — crosses, is held, survives an `await`, refused off the web. ❌ collection asserted, which needs a heap snapshot |
 | 18 — `std/js` primitives | ⬜ not started |
 | 19 — Resident runtime, real clock | ⬜ not started |
 | 20 — `std/dom` | ⬜ not started |
@@ -1900,7 +1932,7 @@ none.
 | 23 — Size gate | ⬜ not started |
 | — View layer | ⬜ deferred past 1.0, deliberately |
 
-738 tests: unit tests per crate, an annotated compile-fail corpus, a
+741 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the host boundary and a real
 socket under Node, both string
