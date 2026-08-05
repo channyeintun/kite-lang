@@ -117,6 +117,62 @@ pub fn pow(base: float, exponent: int) -> float {
     return out
 }
 
+// ---- integer overflow ------------------------------------------------------
+//
+// Kite traps on integer overflow in debug builds and wraps in release. That is
+// the default most people want, and it means the *same* addition has two
+// meanings depending on how the program was built. These two say which one
+// they mean, in both builds — which is the only reason they exist.
+//
+// Both are ordinary Kite, and neither may overflow while deciding whether an
+// overflow would happen: computing `a + b` to find out is exactly the trap
+// being avoided. So each rearranges the arithmetic to stay in range.
+
+/// The largest `int`.
+pub fn max_int() -> int {
+    return 9223372036854775807
+}
+
+/// The smallest `int`. Written as a subtraction because `9223372036854775808`
+/// is not an `int` and so cannot be negated in source.
+pub fn min_int() -> int {
+    return -9223372036854775807 - 1
+}
+
+/// `a + b`, or nil when that does not fit.
+///
+/// The test is done by subtraction rather than by adding and looking at the
+/// result, because adding is what traps. `max_int() - b` is in range whenever
+/// `b` is positive, and `min_int() - b` is in range whenever `b` is negative,
+/// so neither side of the question can overflow while it is being asked.
+pub fn checked_add(a: int, b: int) -> Option<int> {
+    if b > 0 && a > max_int() - b {
+        return nil
+    }
+    if b < 0 && a < min_int() - b {
+        return nil
+    }
+    return a + b
+}
+
+/// `a + b`, wrapped into the range of an `int` — in every build.
+///
+/// On overflow the answer is `a + b ∓ 2⁶⁴`, and that is computed rather than
+/// discovered: with two positives too large, `(a + min_int()) + (b +
+/// min_int())` is the same number and every step of it is in range, because
+/// `min_int()` is exactly `-2⁶³` and shifting both operands down by it lands
+/// the sum in `[min_int(), -2]`. The negative case is the mirror image.
+pub fn wrapping_add(a: int, b: int) -> int {
+    let fits = checked_add(a, b)
+    if fits != nil {
+        return fits
+    }
+    if a > 0 {
+        return (a + min_int()) + (b + min_int())
+    }
+    return (a - min_int()) + (b - min_int())
+}
+
 /// The length of the hypotenuse — the distance from the origin to (x, y).
 pub fn hypot(x: float, y: float) -> float {
     return sqrt(x * x + y * y)

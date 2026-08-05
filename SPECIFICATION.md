@@ -185,9 +185,12 @@ because a statement never begins with `(` or `[`.
 **There are no implicit numeric conversions.** `let x: i64 = my_i32` is a
 compile error; write `my_i32 as i64`. Integer overflow traps in debug builds and
 wraps in release builds, matching the default most users expect while keeping
-release performance predictable. There is no way yet to ask for one behaviour
-regardless of build mode; a `math.wrapping_add` and a `math.checked_add` would
-be it, and neither is written.
+release performance predictable. `math.wrapping_add` wraps in both, and
+`math.checked_add` answers `Option<int>` in both, for the code that has to mean
+one of the two regardless of how it was built. Both are ordinary Kite over
+`math.max_int()` and `math.min_int()`, and neither may overflow while deciding
+whether an overflow would happen — which is why they subtract to ask rather
+than adding and looking.
 
 **On `str`:** the web target has two representations and a program cannot tell
 them apart. By default a `str` is an index into a table the generated glue

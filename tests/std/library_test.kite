@@ -29,6 +29,29 @@ fn checks() -> [error] {
     out.push(test.equal_float(math.lerp(0.0, 10.0, 0.25), 2.5, 0.0001, "lerp"))
     out.push(test.equal_int(math.sign(-3.0), -1, "sign"))
 
+    // ---- integer overflow ----
+    //
+    // The two builds disagree about `a + b` at the boundary — debug traps,
+    // release wraps — so these are the two functions that say which they mean.
+    // Every case below is checked against what two's complement gives, because
+    // "wrapping" with a different answer from the hardware's would be worse
+    // than not offering it.
+    let mx = math.max_int()
+    let mn = math.min_int()
+    out.push(test.equal_int(or_else(math.checked_add(1, 1), -1), 2, "checked_add adds"))
+    out.push(test.is_true(math.checked_add(mx, 1) == nil, "MAX + 1 does not fit"))
+    out.push(test.is_true(math.checked_add(mn, -1) == nil, "MIN - 1 does not fit"))
+    out.push(test.is_true(math.checked_add(mx, mx) == nil, "MAX + MAX does not fit"))
+    out.push(test.is_true(math.checked_add(mn, mn) == nil, "MIN + MIN does not fit"))
+    out.push(test.equal_int(or_else(math.checked_add(mx, 0), -1), mx, "MAX + 0 fits"))
+    out.push(test.equal_int(or_else(math.checked_add(mx, mn), 1), -1, "MAX + MIN is -1"))
+    out.push(test.equal_int(math.wrapping_add(1, 1), 2, "wrapping_add adds"))
+    out.push(test.equal_int(math.wrapping_add(mx, 1), mn, "MAX + 1 wraps to MIN"))
+    out.push(test.equal_int(math.wrapping_add(mx, 2), mn + 1, "MAX + 2 wraps past MIN"))
+    out.push(test.equal_int(math.wrapping_add(mn, -1), mx, "MIN - 1 wraps to MAX"))
+    out.push(test.equal_int(math.wrapping_add(mx, mx), -2, "MAX + MAX wraps to -2"))
+    out.push(test.equal_int(math.wrapping_add(mn, mn), 0, "MIN + MIN wraps to 0"))
+
     // ---- fmt ----
     out.push(test.equal_str(fmt.pad("ab", 4), "ab  ", "pad"))
     out.push(test.equal_str(fmt.pad_left("ab", 4), "  ab", "pad_left"))
