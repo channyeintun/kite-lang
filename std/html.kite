@@ -238,7 +238,7 @@ fn patch(old: Live, next: Node) -> (Live, error) {
 /// position. A reused element is only moved when its position actually changed,
 /// so a list that did not reorder costs no DOM writes at all.
 fn reconcile(parent: dom.Element, olds: [Live], nexts: [Node]) -> ([Live], error) {
-    var by_key: {str: int} = {}
+    var by_key: { str: int } = { }
     for i in 0..olds.len() {
         if olds[i].key.len() > 0 {
             by_key[olds[i].key] = i

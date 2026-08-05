@@ -30,11 +30,11 @@ fn word(table: [str], n: int) -> str {
 /// Deterministic data, so the page is the same on every machine.
 fn rows() -> [Row] {
     let firsts = ["Ada", "Grace", "Alan", "Barbara", "Edsger", "Katherine",
-                  "Donald", "Margaret", "Tony", "Radia", "John", "Frances"]
+        "Donald", "Margaret", "Tony", "Radia", "John", "Frances"]
     let lasts = ["Lovelace", "Hopper", "Turing", "Liskov", "Dijkstra", "Johnson",
-                 "Knuth", "Hamilton", "Hoare", "Perlman", "McCarthy", "Allen"]
+        "Knuth", "Hamilton", "Hoare", "Perlman", "McCarthy", "Allen"]
     let regions = ["Yangon", "Reykjavík", "São Paulo", "Kraków", "Nairobi",
-                   "Osaka", "Toronto", "Lisboa", "Chennai", "Auckland"]
+        "Osaka", "Toronto", "Lisboa", "Chennai", "Auckland"]
     let states = ["active", "pending", "closed"]
 
     var out: [Row] = []
@@ -46,13 +46,13 @@ fn rows() -> [Row] {
         let region = word(regions, a / 3 + i * 2)
         let status = word(states, a / 11 + i)
         out.push(Row{
-            id: 1000 + i,
-            name: name,
-            region: region,
-            amount: 40 + (a % 9960),
-            status: status,
-            haystack: lower("\(name) \(region) \(status)"),
-        })
+                id: 1000 + i,
+                name: name,
+                region: region,
+                amount: 40 + (a % 9960),
+                status: status,
+                haystack: lower("\(name) \(region) \(status)"),
+            })
     }
     return out
 }
@@ -80,12 +80,12 @@ fn money(amount: int) -> str {
 
 fn row_of(r: Row) -> html.Node {
     return html.keyed("\(r.id)", html.el("tr", [], [
-        html.txt("td", [html.class("num")], "\(r.id)"),
-        html.txt("td", [], r.name),
-        html.txt("td", [], r.region),
-        html.txt("td", [html.class("num")], money(r.amount)),
-        html.txt("td", [html.class("tag \(r.status)")], r.status),
-    ]))
+                html.txt("td", [html.class("num")], "\(r.id)"),
+                html.txt("td", [], r.name),
+                html.txt("td", [], r.region),
+                html.txt("td", [html.class("num")], money(r.amount)),
+                html.txt("td", [html.class("tag \(r.status)")], r.status),
+            ]))
 }
 
 fn refresh(all: [Row], var view: html.Mounted, v: View, note: dom.Element) {
@@ -142,9 +142,9 @@ fn main() {
     refresh(all, mounted, state, note)
 
     let (typed, terr) = dom.on(search, "input", |e: dom.Event| {
-        set_query(state, dom.event_value(e))
-        refresh(all, mounted, state, note)
-    })
+            set_query(state, dom.event_value(e))
+            refresh(all, mounted, state, note)
+        })
     if terr != nil {
         io.error("could not listen: \(terr.message())")
         return
@@ -157,9 +157,9 @@ fn main() {
         }
         let column = key
         let (sub, err) = dom.on(th, "click", |e: dom.Event| {
-            set_key(state, column)
-            refresh(all, mounted, state, note)
-        })
+                set_key(state, column)
+                refresh(all, mounted, state, note)
+            })
         if err != nil {
             io.error("could not listen: \(err.message())")
             return

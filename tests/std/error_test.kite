@@ -20,7 +20,7 @@ pub enum LoadError {
 impl Error for LoadError {
     fn message(self) -> str {
         return match self {
-            Absent(path)            => "no task file at \(path)",
+            Absent(path) => "no task file at \(path)",
             Malformed(path, detail) => "\(path) is not valid: \(detail)",
         }
     }
@@ -100,10 +100,10 @@ fn wrapping_checks() -> [error] {
     out.push(test.is_true(wrapped != nil, "wrapping a failure keeps it a failure"))
     if wrapped != nil {
         out.push(test.equal_str(
-            wrapped.message(),
-            "starting up: no task file at <none>",
-            "context goes in front of a concrete error",
-        ))
+                wrapped.message(),
+                "starting up: no task file at <none>",
+                "context goes in front of a concrete error",
+            ))
     }
     out.push(test.is_true(errors.wrap(nil, "x") == nil, "wrapping nil is still nil"))
     out.push(test.is_true(errors.mentions(err, "no task file"), "and the text is searchable"))
