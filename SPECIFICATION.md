@@ -185,8 +185,9 @@ because a statement never begins with `(` or `[`.
 **There are no implicit numeric conversions.** `let x: i64 = my_i32` is a
 compile error; write `my_i32 as i64`. Integer overflow traps in debug builds and
 wraps in release builds, matching the default most users expect while keeping
-release performance predictable. `math.wrapping_add` and `math.checked_add` are
-available when the behaviour must be explicit regardless of build mode.
+release performance predictable. There is no way yet to ask for one behaviour
+regardless of build mode; a `math.wrapping_add` and a `math.checked_add` would
+be it, and neither is written.
 
 **On `str`:** the web target has two representations and a program cannot tell
 them apart. By default a `str` is an index into a table the generated glue
@@ -364,7 +365,10 @@ no overloading. If a function needs many optional inputs, it takes a struct:
 ```kite
 pub struct RequestOptions {
     method: str
-    timeout: Duration
+    /// Milliseconds. There is no `Duration` type: `std/time` names the units
+    /// in the functions that build one — `time.seconds(30)` is `30000` — and a
+    /// wrapper around an `int` would buy nothing the name does not.
+    timeout: int
     headers: {str: str}
 }
 
@@ -506,13 +510,13 @@ let ys: [int] = []
 let m = {"a": 1, "b": 2}
 
 xs[0]                 // int — bounds-checked, traps on failure
-xs.get(0)             // ?int — bounds-checked, returns nil on failure
+xs.get(0)             // Option<int> — bounds-checked, nil on failure
 xs[1..3]              // [int] — subslice, half-open
 xs.len()              // int
-m["a"]                // ?int — map indexing always yields an optional
+m["a"]                // Option<int> — map indexing always yields an optional
 ```
 
-Map indexing returns `?V`, never a zero value. Slice indexing with `[]` traps on
+Map indexing returns `Option<V>`, never a zero value. Slice indexing with `[]` traps on
 out-of-bounds because that is a program bug, not a runtime condition; `.get()` is
 provided for the case where it genuinely is a runtime condition.
 
@@ -1153,7 +1157,7 @@ pub struct Cache<K: Hash, V> {
 }
 
 impl<K: Hash, V> Cache<K, V> {
-    pub fn get(self, key: K) -> ?V {
+    pub fn get(self, key: K) -> Option<V> {
         return self.entries[key]
     }
 }
@@ -1187,8 +1191,11 @@ pub async fn fetch_user(id: UserId) -> (User, error) {
     let (res, err) = await http.get("/api/users/\(id)")
     check err
 
-    let (user, err) = await json.decode<User>(res.body)
+    let (doc, err) = json.parse(res.body)
     check err
+
+    let (user, uerr) = User.decode(doc)
+    check uerr
 
     return user, nil
 }
@@ -1213,21 +1220,28 @@ check ea
 check eb
 ```
 
-`task.all([...])`, `task.race([...])`, and `task.timeout(t, duration)` cover the
+`task.all([...])`, `task.race([...])`, and `task.timeout(t, ms)` cover the
 remaining combinators. There is no channel type; a `Task<T>` *is* the
 one-shot result channel, and it is awaited rather than received from.
 
 ### 12.2 Parallelism: the surface is thread-agnostic
 
 **`async` says nothing about how many threads exist.** That is a property of the
-runtime, and Kite's runtime is multi-threaded wherever the platform permits:
+runtime, and the surface does not change when the runtime gains one:
 
 | Target | Scheduler | Real parallelism |
 |---|---|---|
-| `native-*` | Work-stealing pool, one worker per core | **Yes, today** |
-| `kbc` (bytecode VM) | Work-stealing pool | **Yes, today** |
-| `wasm32-gc` (web) | Cooperative loop on the main thread; `task.parallel` offloads to an isolate pool backed by Web Workers | **Partially, today** |
-| `wasm32-gc` (web, future) | Same work-stealing pool as native | **Yes, when shared-everything-threads ships** |
+| `wasm32-gc` (web) | Cooperative loop on the main thread | **No** |
+| `kbc` (bytecode VM) | Cooperative loop; the VM's values are `Rc`-based | **No** |
+| `native-*` | Cooperative loop | **No** |
+| any, later | Work-stealing pool, one worker per core | **When the runtime has one, with no source change** |
+
+**Nothing here runs on two cores today, and this table used to claim two of
+them did.** That was the specification describing the intended runtime rather
+than the one that exists: there is no thread spawned anywhere in the compiler or
+the runtime, and `task.parallel` walks its input in order. The rest of this
+section is about why the *type system* is finished even though the scheduler is
+not, and that part is true.
 
 The web restriction is not a design choice. WasmGC references **cannot currently
 cross a thread boundary at all** — there is no way to share a reference value
@@ -1243,11 +1257,12 @@ the web the day that proposal ships, without a source change.** The type system
 already enforces the invariant the proposal will require. This is the single
 most important forward-compatibility decision in the language.
 
-For CPU-bound work on the web today, `task.parallel` runs a function in a
-separate isolate. Because its argument and result must be `Share`, and `Share`
-values are deeply immutable, they serialise safely across `postMessage` — and
-when true shared-heap threads arrive, the identical code stops serialising and
-starts sharing:
+`task.parallel` is the shape that work will arrive in, and **it is not
+parallel on any target today** — it applies the function to each item in turn,
+yielding between them. What is real about it now is the *rule*: its argument and
+its result must be `Share`, so the day a reference can cross a thread boundary,
+the same source starts using cores and nothing about it is rewritten. That is
+the whole point of specifying the marker before the platform can honour it:
 
 ```kite
 let results = await task.parallel(chunks, |chunk| {
@@ -1267,7 +1282,7 @@ A type is `Share` when:
 - it is a struct or enum **all of whose fields are `Share` and none of which is
   `var`**, or
 - it is a slice, map, or tuple of `Share` elements, or
-- it is explicitly wrapped: `sync.Mutex<T>`, `sync.Atomic<T>`, `sync.Channel<T>`.
+- it is explicitly wrapped: `sync.Mutex<T>` or `sync.Atomic`.
 
 A type is **not** `Share` when it has a `var` field anywhere in its transitive
 structure, or when it holds a `JsValue` — a DOM node, a canvas context, a file
@@ -1517,22 +1532,31 @@ anything it calls often enough for a name lookup to matter. Drawing does not use
 it at all: the drawing calls are compiler builtins, so a program that paints
 needs no `extern`.
 
-**`std/js` declares nothing.** It is a fixed set of about fifteen primitives
+**`std/js` declares nothing.** It is a fixed set of about twenty primitives
 through which any host object can be reached:
 
 | | |
 |---|---|
-| `js.global(name)` | the root — `window`, `document`, a constructor |
+| `js.global(name)` / `js.nothing()` | the root — `window`, `document`, a constructor — and `null` |
 | `js.get(v, name)` / `js.set(v, name, x)` | properties |
+| `js.at(v, i)` / `js.length(v)` | an array-like thing |
 | `js.call0(v, name)` … `js.call4(v, name, a, b, c, d)` | methods, by arity |
-| `js.new(name, args)` | construction |
+| `js.new0(name)` … `js.new3(name, a, b, c)` | construction, by arity |
 | `js.func(f)` | a Kite closure the host can call |
-| `js.await(p)` | a promise, as a `Task` |
-| `js.same(a, b)` / `js.is_nil(v)` / `js.instance_of(v, name)` | identity and kind |
-| `of_str` `of_num` `of_bool` / `as_str` `as_num` `as_bool` | conversion, both ways |
+| `js.settle(p, done, failed)` | both halves of a promise |
+| `js.same(a, b)` / `js.is_nothing(v)` / `js.kind_of(v)` / `js.instance_of(v, name)` | identity and kind |
+| `of_str` `of_num` `of_bool` `of_int` / `as_str` `as_num` `as_bool` `as_int` | conversion, both ways |
+| `str_or` `num_or` `bool_or` | a property with a value to fall back on |
 
 Everything else — `std/dom`, and any browser API a program needs — is ordinary
 Kite written over these.
+
+**One function per arity, and no `js.await`.** A slice is a Kite aggregate and
+does not cross the boundary, so `call` and `new` are spelled out rather than
+taking an argument list. And a promise arrives through `js.settle`, which
+requires a handler for the rejection as well as the result: `then` with one
+callback compiles, runs, and throws a rejection away, which is the failure this
+language spends its error design preventing everywhere else.
 
 **Why the general mechanism is the primary one.** The browser has thousands of
 interfaces. With `extern` alone, the first one the standard library never
@@ -1572,7 +1596,7 @@ must be tested before the number can be used.
 i64, so every crossing would otherwise allocate a BigInt. The safe-integer check
 happens on the Kite side, where the failure is a value.
 
-**Absence is `Option`.** A host call that may find nothing returns `?T`. There is
+**Absence is `Option`.** A host call that may find nothing returns `Option<T>`. There is
 no tolerated zero handle and no null object anywhere in the boundary — a
 convention that returns something usable-looking for "not found" is the zero
 zero value [§5.3](#53-struct-literals) exists to prevent, wearing a different
@@ -1615,8 +1639,8 @@ overloads, which Kite has no way to express, and unions, which each need a
 decision.
 
 **This is reflection over the host.** Not over Kite — no Kite metadata is
-retained, so dead-code elimination stays sound and the reason §17 rejects
-reflection is untouched. But the spirit of "no second language inside the
+retained, so dead-code elimination stays sound and the reason Kite has no
+reflection over its own values is untouched. But the spirit of "no second language inside the
 language" is genuinely strained at the raw layer, where a typo is a runtime
 mystery rather than a diagnostic. The honest resolution is the one above: a
 bounded dynamic floor, marked, fenced at public boundaries, with generation as
