@@ -196,12 +196,12 @@ point of the project.
 
 ```bash
 kitec build examples/hello.kite --emit wasm --out dist
-# wrote dist/app.wasm (500 bytes), dist/app.js and dist/index.html
+# wrote dist/app.wasm (648 bytes), dist/app.js and dist/index.html
 ```
 
 **A Kite program goes in a page.** `examples/page` is a table of five thousand
 rows. Every keystroke in the filter walks all of them, sorts what survives and
-writes only the cells that changed — in about **3 ms**, from an **18 KB**
+writes only the cells that changed — in about **3 ms**, from a **19 KB**
 module. The markup is HTML, the
 hover and the alignment and the colour of a status are CSS, and Kite holds the
 rows, does the work and writes text and class names. Finding an element and

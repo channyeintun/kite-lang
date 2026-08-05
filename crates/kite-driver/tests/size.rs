@@ -30,7 +30,7 @@ fn size_of(name: &str, src: &str) -> usize {
     c.wasm.as_ref().expect("a module").bytes.len()
 }
 
-/// A program that prints. Today: 388 bytes.
+/// A program that prints. Today: 399 bytes.
 ///
 /// The floor, and the number the whole premise rests on — a language that
 /// needed a garbage collector inside its own binary could not be near it.
@@ -40,7 +40,10 @@ fn hello_world_stays_small() {
     assert!(size < 1024, "hello world is {} bytes, budget 1024", size);
 }
 
-/// A module a JavaScript project would import. Today: 393 bytes.
+/// A module a JavaScript project would import. Today: 618 bytes.
+///
+/// Four exported functions rather than one, and each `pub fn` is a real export
+/// with a wrapper — which is where the difference over `hello` goes.
 #[test]
 fn a_library_of_four_functions_stays_small() {
     let src = "pub fn add(a: int, b: int) -> int {\n  return a + b\n}\n\
@@ -55,7 +58,7 @@ fn a_library_of_four_functions_stays_small() {
 /// A real island: five thousand rows, filtered, sorted and diffed on every
 /// keystroke.
 ///
-/// Today about 18.5 KB, of which roughly 4.5 KB is `std/html`'s keyed diff. It
+/// Today about 19 KB, of which roughly 4.5 KB is `std/html`'s keyed diff. It
 /// was 5.7 KB when it was a counter that changed one number, and the budget has
 /// moved with the demo rather than the demo being trimmed to suit the budget.
 ///
