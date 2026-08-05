@@ -1311,3 +1311,77 @@ fn the_example_page_program_works() {
         "the step comes from the field, and the class comes from the sign"
     );
 }
+
+// ---- promises --------------------------------------------------------------
+
+/// A `fetch` that resolves, and one that rejects.
+const FETCH_RUNNER: &str = "import { readFile } from \"node:fs/promises\";\n\
+     import { instantiate, resident, setWriter } from \"./app.js\";\n\
+     globalThis.fetch = async (url) => {\n\
+     \x20 if (String(url).includes(\"missing\")) throw new Error(\"404\");\n\
+     \x20 return { status: 200 };\n\
+     };\n\
+     const out = [];\n\
+     setWriter((l) => out.push(l));\n\
+     const exports = await instantiate(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+     exports.main();\n\
+     resident(exports);\n\
+     await new Promise((r) => setTimeout(r, 50));\n\
+     process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+
+/// A promise needs nothing from the language.
+///
+/// Worth its own test because the roadmap once claimed otherwise. A promise is
+/// an object, `then` is a method, and `js.func` is a callback — so `fetch` and
+/// everything shaped like it work with the primitives and no compiler support
+/// at all. If that stops being true, this fails.
+#[test]
+fn fetch_works_with_no_promise_support_in_the_language() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/js\n\n\
+        fn main() {\n\
+        \x20 let (p, err) = js.call1(js.global(\"globalThis\"), \"fetch\", js.of_str(\"/data\"))\n\
+        \x20 if err != nil {\n    io.print(\"call failed\")\n    return\n  }\n\
+        \x20 let (_, terr) = js.call1(p, \"then\", js.func(|r: JsValue| {\n\
+        \x20   io.print(\"status \\(js.num_or(r, \"status\", 0.0))\")\n\
+        \x20 }))\n\
+        \x20 if terr != nil {\n    io.print(\"then failed\")\n    return\n  }\n\
+        \x20 io.print(\"asked\")\n\
+        }\n";
+    let out = run_runner_under_node("fetch", src, FETCH_RUNNER, &[]);
+    assert_eq!(out, "asked\nstatus 200.0\n");
+}
+
+/// A rejection becomes an error, and cannot be dropped on the floor.
+///
+/// This is the one thing the platform's own arrangement gets wrong for this
+/// language. `then` with a single callback runs nothing on a rejection and
+/// reports nothing, so the failure is silently gone — in a language whose
+/// central claim is that an error cannot be ignored. `js.settle` requires both
+/// halves, so ignoring a rejection is at least something somebody wrote down.
+#[test]
+fn a_rejected_promise_becomes_an_error() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/js\n\n\
+        fn ask(url: str, label: str) {\n\
+        \x20 let (p, err) = js.call1(js.global(\"globalThis\"), \"fetch\", js.of_str(url))\n\
+        \x20 if err != nil {\n    return\n  }\n\
+        \x20 let serr = js.settle(p,\n\
+        \x20   |r: JsValue| { io.print(\"\\(label): status \\(js.num_or(r, \"status\", 0.0))\") },\n\
+        \x20   |why: str| { io.print(\"\\(label): \\(why)\") },\n\
+        \x20 )\n\
+        \x20 if serr != nil {\n    io.print(\"could not attach\")\n  }\n\
+        }\n\
+        fn main() {\n\
+        \x20 ask(\"/data\", \"ok\")\n\
+        \x20 ask(\"/missing\", \"bad\")\n\
+        }\n";
+    let out = run_runner_under_node("reject", src, FETCH_RUNNER, &[]);
+    assert_eq!(out, "ok: status 200.0\nbad: 404\n");
+}

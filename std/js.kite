@@ -402,6 +402,74 @@ pub fn as_int(v: JsValue) -> (int, error) {
     return js_as_int(v), nil
 }
 
+// ---- promises --------------------------------------------------------------
+//
+// **There is nothing here that makes promises work.** They already do. A
+// promise is an object, `then` is a method on it, and [`func`] supplies the
+// callback — so `fetch` and everything shaped like it can be called today with
+// the primitives above and nothing else:
+//
+// ```kite
+// let (p, err) = js.call1(js.global("globalThis"), "fetch", js.of_str(url))
+// check err
+// let (_, terr) = js.call1(p, "then", js.func(|response: JsValue| { … }))
+// ```
+//
+// What *is* here is the one thing that arrangement gets wrong. `then` with a
+// single callback handles success only, so a rejected promise runs nothing and
+// reports nothing — the failure is silently gone. In a language whose main
+// argument is that an error cannot be dropped, that is not a rough edge to live
+// with, and it is the only reason this section exists.
+
+/// Why a promise rejected, as text.
+///
+/// A promise may reject with anything at all: an `Error`, a string, a number, a
+/// response object. So the message is taken from whichever of those it turns
+/// out to be, rather than assuming the polite case.
+fn rejection(reason: JsValue) -> str {
+    let kind = js_kind_of(reason)
+    if kind == "string" {
+        return js_as_str(reason)
+    }
+    let detail = str_or(reason, "message", "")
+    if detail.len() > 0 {
+        return detail
+    }
+    return "the host rejected with a \(kind)"
+}
+
+/// Handle both halves of a promise.
+///
+/// Both callbacks are required, and that is the whole design. `then` with one
+/// callback compiles, runs, and throws a rejection away — which is exactly the
+/// failure this language spends its error design preventing everywhere else.
+/// Passing a `failed` that ignores its argument is still a decision somebody
+/// wrote down; a missing one is a decision nobody made.
+///
+/// The failure arrives as text rather than as an `error`, and that is
+/// deliberate. An `error` in Kite is either nil or a failure, so a handler
+/// taking one would have to test it for nil at every call site — for a callback
+/// that only ever runs when something went wrong. A parameter that can never be
+/// nil should not be typed as though it can. Anything wanting an `error` to
+/// propagate writes `errors.new(why)`, which is all this layer would have done.
+///
+/// ```kite
+/// let (p, err) = js.call1(js.global("globalThis"), "fetch", js.of_str(url))
+/// check err
+/// check js.settle(p,
+///     |response: JsValue| { show(response) },
+///     |why: str| { io.error("could not load: \(why)") },
+/// )
+/// ```
+pub fn settle(promise: JsValue, done: fn(JsValue), failed: fn(str)) -> error {
+    // `js.func` is a compiler builtin, not a function in this module, so it
+    // keeps its full path even here.
+    let on_done = js.func(done)
+    let on_failed = js.func(|reason: JsValue| { failed(rejection(reason)) })
+    let (_, err) = call2(promise, "then", on_done, on_failed)
+    return err
+}
+
 // ---- shorthands ------------------------------------------------------------
 //
 // Three lines of ceremony to read one property is right for a call that must

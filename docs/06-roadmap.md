@@ -1887,27 +1887,55 @@ as `null` and nothing failed anywhere.
 
 ---
 
-## Phase 21 — Effects across the boundary
+## Phase 21 — A rejection that cannot be dropped
 
-**Goal:** `fetch` works, and so does everything shaped like it.
+**Goal:** the one thing the platform's own arrangement gets wrong for this
+language.
 
-Every modern browser API returns a promise. `js.await(p)` bridges one into a
-`Task`, with a rejection arriving as an `error`.
+**This phase was wrong when it was written, and it is corrected rather than
+quietly edited.** It said "every modern browser API returns a promise" and
+planned `js.await` as though promises were a capability Kite lacked. They are
+not. A promise is an object, `then` is a method on it, and `js.func` supplies
+the callback — so `fetch` and everything shaped like it work with the
+primitives from Phase 18 and no compiler support whatever. There is a test
+asserting exactly that, named for the claim it disproves.
 
-Kite gets a simplification here that Elm structurally cannot have. Elm needs a
-command algebra because it has no way to *do* anything — an effect must be
-described as data for a runtime to perform. Kite has `async`/`await` and a
-runtime managing real tasks, so an effect is a function that does the work and
-sends a message back. No `Cmd`, no `Sub`, no interpreter.
+The mistake is worth recording because of its shape: it came from assuming that
+because JavaScript needed a language feature for this, Kite must too. What
+JavaScript needed the feature *for* was ergonomics — escaping nested callbacks —
+and ergonomics is not a capability gap.
 
-`update` stays pure. Effects get their own door, for the same reason everything
-else in this language does.
+What is genuinely wrong is smaller and worse. **`then` with one callback throws
+a rejection away.** Nothing runs, nothing is reported, and the failure is gone —
+in a language whose central claim is that an error cannot be ignored. So
+`js.settle(promise, done, failed)` takes both halves and requires both. Ignoring
+a rejection is then something somebody wrote down, rather than something nobody
+noticed.
 
-One hazard to close rather than find later: a handler that starts an `async fn`
-returning `(T, error)` and drops the `Task` has dropped an error, and the taint
-analysis cannot see inside a `Task`. Either handlers return nothing, or an
-unawaited failing task is reported by the runtime. Silence is not an option in a
-language whose main argument is that errors cannot be ignored.
+The failure arrives as a `str` rather than an `error`. An `error` in Kite is
+either nil or a failure, so a handler taking one would nil-test it at every call
+site — for a callback that only runs when something has gone wrong. A parameter
+that can never be nil should not be typed as though it can.
+
+**Done.** Twelve lines of Kite over the existing primitives. No compiler work,
+no new host functions, nothing added to the fixed glue block.
+
+### Still open, and clearly marked as comfort
+
+Reading a response body needs a callback inside a callback, and three levels is
+ordinary. That is the thing JavaScript spent a decade escaping, and Kite already
+has `async`/`await` that does not meet the browser's version.
+
+It is deliberately **not** built yet. It is a convenience rather than a
+capability, and the honest way to decide whether the nesting hurts is to write
+enough real code to find out. If it does, the shape is a primitive that parks a
+task and resumes it on settle — `task_wait_host` already marks a task as
+waiting, and `wake` already brings the pump back, so the machinery is in place
+and only the joining is missing.
+
+Elm needs a command algebra because it has no way to *do* anything; effects must
+be described as data for a runtime to perform. Kite does not, and that
+observation stands whether or not the `await` form is ever built.
 
 ---
 
@@ -2014,12 +2042,12 @@ none.
 | 18 — `std/js` primitives | ✅ complete — 23 primitives, a fixed ~90-line host block, throws caught as errors. `js.func` moved to 20, `js.await` to 21 |
 | 19 — Resident runtime, real clock | ✅ complete — `resident` beside `drive`, real clock, zero timers when idle |
 | 20 — `std/dom` | ✅ complete — no externs, `Option` for absence, events with cancel, and a real page in `examples/page` |
-| 21 — Effects across the boundary | ⬜ not started |
+| 21 — Rejections as errors | ✅ complete, and the phase was rescoped: promises never needed language support. The straight-line `await` form is open, and marked as comfort |
 | 22 — Interop backwards | ⬜ not started |
 | 23 — Size gate | ⬜ not started |
 | — View layer | ⬜ deferred past 1.0, deliberately |
 
-755 tests: unit tests per crate, an annotated compile-fail corpus, a
+757 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the host boundary and a real
 socket under Node, both string
