@@ -606,7 +606,7 @@ main.doc .lede { color: var(--muted); margin-bottom: 3rem; }
 .pad { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
 @media (max-width: 60em) { .pad { grid-template-columns: 1fr; } }
 
-textarea, .out {
+textarea, .out, .editor .hl {
   width: 100%;
   min-height: 34rem;
   padding: 1.4rem 1.6rem;
@@ -614,6 +614,7 @@ textarea, .out {
   border-radius: 6px;
   background: var(--code-bg);
   color: var(--code-ink);
+  font-family: var(--mono);
   font-size: 1.3rem;
   line-height: 1.55;
   tab-size: 4;
@@ -621,6 +622,43 @@ textarea, .out {
 
 textarea { resize: vertical; }
 .out { white-space: pre-wrap; overflow-x: auto; }
+
+/* ---- the editor ----
+   A `<textarea>` cannot colour its own text, so the colour is drawn behind it:
+   the same source, highlighted, in a `<pre>` that occupies exactly the same
+   box, with the textarea transparent on top of it. Every property that decides
+   where a glyph lands — the face, the size, the leading, the padding, the
+   border, the wrapping — is shared between the two above, because the illusion
+   is that they line up and one pixel of disagreement ends it.
+
+   The alternative is a `contenteditable`, which means owning the caret, undo,
+   and paste. This way the editor is still the browser's. */
+
+.editor { position: relative; }
+
+.editor .hl {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  overflow: hidden;
+  border-color: transparent;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  pointer-events: none;
+}
+/* Italics would be a different set of advance widths, and the mirror has to
+   keep the ones the textarea is using. */
+.editor .hl .c { font-style: normal; }
+
+/* The text is the layer underneath; what stays is the caret, and the selection
+   — which is how a node chosen in the tree shows what it covers. */
+.editor textarea {
+  position: relative;
+  display: block;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--code-ink);
+}
 
 .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 0 0 16px; }
 
@@ -657,6 +695,105 @@ button:disabled:hover { border-color: var(--rule); }
 }
 
 .status { color: var(--muted); font-size: 1.3rem; }
+
+/* ---- the AST tree ----
+   The output panel holds text at every stage but one. The AST is a tree, and
+   a tree printed as text is a wall of brackets — so it is drawn as one here,
+   in the same colours the highlighter gives the source it came from: violet
+   for a node's name, green for a string, amber for a number. */
+
+.out.tree-out {
+  padding: 0;
+  white-space: normal;
+  overflow: auto;
+  max-height: max(34rem, 70vh);
+}
+
+.tree-tools {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 14px;
+  background: var(--code-bg);
+  border-bottom: 1px solid var(--code-rule);
+}
+.tree-tools button {
+  font-size: 1.15rem;
+  padding: 3px 12px;
+  border-radius: 999px;
+  border-color: var(--code-rule);
+  color: var(--code-ink);
+  white-space: nowrap;
+}
+.tree-tools button:hover:not(:disabled) { border-color: var(--gold); color: var(--gold); }
+.tree-tools button[aria-pressed="true"] {
+  background: var(--gold);
+  border-color: var(--gold);
+  color: var(--gold-knockout);
+}
+.tree-tools .hint { margin-left: auto; color: var(--comment); font-size: 1.15rem; }
+
+ul.tree, ul.tree ul { margin: 0; padding: 0; list-style: none; }
+ul.tree { padding: 10px 14px 16px; font-size: 1.25rem; line-height: 1.65; }
+/* The rule down the left is what makes a level readable at a glance: without
+   it the eye has to count indents to know which fields belong to which node. */
+ul.tree ul { margin-left: 0.6em; padding-left: 0.9em; border-left: 1px solid var(--code-rule); }
+
+.tree li { outline: none; }
+/* A hanging indent, so that a row too long for the column carries on under
+   its own text rather than back at the twisty. */
+.tree .row {
+  display: block;
+  padding: 0 5px 0 calc(5px + 1.1em);
+  text-indent: -1.1em;
+  border-radius: 3px;
+  overflow-wrap: anywhere;
+}
+.tree .row:hover { background: rgba(233, 233, 237, 0.06); }
+.tree li[aria-selected="true"] > .row { background: rgba(233, 166, 60, 0.18); }
+.tree li:focus > .row { box-shadow: inset 0 0 0 1px var(--gold); }
+
+.tree .twisty {
+  display: inline-block;
+  width: 1.1em;
+  margin-left: -0.2em;
+  /* The row's hanging indent is inherited, and an inline-block applies it to
+     its own first line — which would carry the mark out of its own box. */
+  text-indent: 0;
+  color: var(--comment);
+  text-align: center;
+  user-select: none;
+}
+.tree li[aria-expanded] > .row { cursor: default; }
+.tree li[aria-expanded] > .row .twisty { cursor: pointer; }
+.tree li[aria-expanded] > .row .twisty::before {
+  content: "▸";
+  display: inline-block;
+  transition: transform 0.12s ease;
+}
+.tree li[aria-expanded="true"] > .row .twisty::before { transform: rotate(90deg); }
+.tree li[aria-expanded="false"] > ul { display: none; }
+
+/* `.s` and `.n` are the highlighter's own, and a string is a string. */
+.tree .f { color: var(--code-ink); }
+.tree .t { color: var(--keyword); }
+.tree .dim, .tree .count { color: var(--comment); }
+/* The source a node covers, when it is short enough to be a help rather than
+   a second copy of the tree. */
+.tree .snip { color: var(--comment); }
+
+.tree-raw {
+  margin: 0;
+  padding: 10px 14px 16px;
+  font-size: 1.25rem;
+  line-height: 1.55;
+  white-space: pre;
+  overflow-x: auto;
+}
 
 /* ---- the footer ---- */
 

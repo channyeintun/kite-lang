@@ -47,7 +47,10 @@
     </div>
 
     <div class="pad">
-      <textarea id="source" spellcheck="false"></textarea>
+      <div class="editor">
+        <pre id="paint" class="hl" aria-hidden="true"></pre>
+        <textarea id="source" spellcheck="false" aria-label="The program"></textarea>
+      </div>
       <div id="out" class="out"></div>
     </div>
 
@@ -95,6 +98,8 @@
 
 <script type="module">
 import * as playground from "./playground.js";
+import { astTree, isAstDump } from "./ast-tree.js";
+import { highlight } from "./kite.js";
 
 const SAMPLES = {
   "Hello": `fn main() {
@@ -204,23 +209,68 @@ fn main() {
 };
 
 const source = document.getElementById("source");
+const paint = document.getElementById("paint");
 const out = document.getElementById("out");
 const status = document.getElementById("status");
 const samples = document.getElementById("samples");
+
+/// The colour under the editor. Everything that changes the program goes
+/// through here, because the layer behind it is only right for as long as it
+/// holds the same text.
+///
+/// The trailing newline is the mirror's: a `<pre>` drops the last one and the
+/// textarea does not, and without it the final line of a program that ends the
+/// way every program ends sits one line too high.
+const repaint = () => {
+  paint.innerHTML = `${highlight(source.value)}\n`;
+  paint.scrollTop = source.scrollTop;
+};
+
+const load = (text) => {
+  source.value = text;
+  repaint();
+};
 
 for (const [name, text] of Object.entries(SAMPLES)) {
   const button = document.createElement("button");
   button.textContent = name;
   button.onclick = () => {
-    source.value = text;
+    load(text);
     out.textContent = "";
+    out.classList.remove("tree-out");
   };
   samples.appendChild(button);
 }
-source.value = SAMPLES["Hello"];
+load(SAMPLES["Hello"]);
+
+source.addEventListener("input", repaint);
+source.addEventListener("scroll", () => {
+  paint.scrollTop = source.scrollTop;
+});
 
 const show = (text) => {
+  out.classList.remove("tree-out");
   out.textContent = text === "" ? "(no output)" : text;
+};
+
+/// The AST arrives as a tree and is shown as one. Selecting a node highlights
+/// the run of source it covers, which is the question the AST is usually being
+/// asked: what does this node *say*.
+const showTree = (dump) => {
+  const tree = astTree(dump, {
+    source: source.value,
+    // The range first and the focus after: focusing a textarea scrolls to
+    // wherever its caret is, and setting one on an unfocused element does not
+    // scroll at all. Done the other way round the editor jumps to the end of
+    // the program — where assigning `value` left the caret — and stays there.
+    onSelect: (from, to) => {
+      source.setSelectionRange(from, to);
+      source.focus();
+    },
+  });
+  out.textContent = "";
+  out.classList.add("tree-out");
+  out.append(tree);
 };
 
 playground
@@ -241,12 +291,16 @@ document.getElementById("check").onclick = () => {
   show(text === "" ? "ok" : text);
 };
 document.getElementById("format").onclick = () => {
-  source.value = playground.format(source.value);
+  load(playground.format(source.value));
   show("formatted");
 };
 document.getElementById("stage").onchange = (e) => {
   if (!e.target.value) return;
-  show(playground.emit(source.value, e.target.value));
+  const emitted = playground.emit(source.value, e.target.value);
+  // A program that does not compile answers with diagnostics instead, at every
+  // stage, and diagnostics are text.
+  if (e.target.value === "ast" && isAstDump(emitted)) showTree(emitted);
+  else show(emitted);
   e.target.value = "";
 };
 
@@ -257,6 +311,7 @@ source.addEventListener("keydown", (e) => {
   const at = source.selectionStart;
   source.value = source.value.slice(0, at) + "    " + source.value.slice(source.selectionEnd);
   source.selectionStart = source.selectionEnd = at + 4;
+  repaint();
 });
 </script>
 </body>
