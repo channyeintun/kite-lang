@@ -156,11 +156,10 @@ pub fn SAFE_INTEGER() -> int {
 
 /// The failures this layer reports.
 ///
-/// Built with `errors.new` rather than declared as a type implementing `Error`,
-/// because concrete error types carrying their own data are the half of the
-/// error design that is not built yet — `std/errors` says so itself. When they
-/// arrive these become variants and every call site keeps working, because what
-/// a caller holds is an `error` either way.
+/// Text through `errors.new`, because a failure at this boundary *is* its
+/// message: what a caller can do about a mistyped method name or a value of the
+/// wrong kind does not depend on which of the two it was. A caller holds an
+/// `error` either way.
 fn threw_error(detail: str) -> error {
     return errors.new("the host threw: \(detail)")
 }
