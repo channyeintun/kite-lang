@@ -1,0 +1,35 @@
+// One object under two argument names. The collector makes this memory-safe
+// and leaves it wrong: each write lands where the other name expected its own
+// value, so the balance ends where it started.
+
+struct Account {
+    var balance: int
+}
+
+struct Ledger {
+    house: Account
+    var entries: int
+}
+
+fn transfer(var from: Account, var to: Account, amount: int) {
+    from.balance = from.balance - amount
+    to.balance = to.balance + amount
+}
+
+fn post(var book: Ledger, var into: Account, amount: int) {
+    book.entries = book.entries + 1
+    into.balance = into.balance + amount
+}
+
+fn main() {
+    let a = Account{ balance: 100 }
+    let b = Account{ balance: 0 }
+
+    transfer(a, b, 50)
+    transfer(a, a, 50) //~ ERROR E0800
+
+    let book = Ledger{ house: Account{ balance: 0 }, entries: 0 }
+
+    // `book.house` is inside `book`, so writing through `book` writes it too.
+    post(book, book.house, 10) //~ ERROR E0800
+}

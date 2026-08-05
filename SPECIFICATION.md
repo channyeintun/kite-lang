@@ -1355,6 +1355,63 @@ viable before WasmGC reached cross-browser baseline in Safari 18.2.
 - **No weak references or finalizers.** A `Cache` that must not retain its
   entries uses an explicit eviction policy rather than weak keys.
 
+### 14.1 Exclusivity
+
+Collection settles memory safety. It does not settle the one hazard that
+reference semantics introduce on their own: the same object arriving at a
+function twice, under two names, where writing through one is invisible to the
+other.
+
+```kite
+fn transfer(var from: Account, var to: Account, amount: int) {
+    from.balance = from.balance - amount
+    to.balance   = to.balance   + amount
+}
+
+transfer(a, a, 50)          // rejected: E0800
+```
+
+Written this way the balance is set to 50 and then back to 100. Nothing traps
+and nothing is unsafe — the memory is real on both lines — and the program is
+silently wrong.
+
+**The rule: while an object is being written through one argument, no other
+argument of the same call may name it.** Two arguments name the same object when
+one path is a prefix of the other, so `f(o, o.inner)` is rejected alongside
+`f(a, a)`; `f(o.left, o.right)` is not, because neither path contains the other.
+A literal index distinguishes elements, so `f(xs[0], xs[1])` is accepted and
+`f(xs[i], xs[j])` is not — the compiler cannot show that `i` and `j` differ, and
+the call is wrong on the run where they do not.
+
+Only reference types participate — a struct or a `dyn Trait`. Slices, maps and
+tuples are copy-on-write values, so a `var [T]` parameter is the callee's own
+copy and two of them cannot interfere.
+
+**This is not borrowing.** There is no ownership, no move, no lifetime, and
+nothing to annotate. A borrow checker exists to replace a collector, which is
+what forces it to reason about every reference in the program and to be complete
+enough that a rejected program has a rewrite. Kite collects, so this rule is free
+to be incomplete: it reads one call site, and it reports only what is written
+there.
+
+The consequence, stated plainly: **aliasing arranged elsewhere is not detected.**
+
+```kite
+let shared = Account{ balance: 100 }
+let pair   = Pair{ left: shared, right: shared }
+
+transfer(pair.left, pair.right, 50)     // accepted — the same bug
+```
+
+Seeing through that assignment is alias analysis, and alias analysis is the rest
+of a borrow checker. The bug it leaves behind is a wrong number, not a wrong
+address, and the collector guarantees it stays that way.
+
+Two rules a Rust programmer would expect are absent because Kite's value
+semantics already settle them. A `for x in xs` loop walks a snapshot, so growing
+`xs` in the body terminates and is defined; and a slice passed to a function is
+copied, so a push inside is not something the caller can observe.
+
 ---
 
 ## 15. Foreign function interface
@@ -1445,7 +1502,7 @@ being re-litigated, and makes it clear when a decision should be revisited.
 | `null` | Replaced by `?T`. |
 | Zero values | Replaced by mandatory struct literal fields. Removes Go's most common production bug. |
 | Pointers and references | GC references only. Eliminates the value/pointer receiver distinction. |
-| Lifetimes and borrowing | The cost that stops Rust being a mainstream application language. |
+| Lifetimes and borrowing | The cost that stops Rust being a mainstream application language. A collector removes the reason for them; [§14.1](#141-exclusivity) keeps the one rule that reference semantics still need, and it needs no annotation. |
 | Goroutines and channels | Replaced by `async`/`await` and `Task<T>`. |
 | Structural interfaces | Nominal `impl` produces better errors and prevents accidental satisfaction. |
 | Associated / higher-kinded types | Expressiveness that application code does not need, at real cost to error quality. |

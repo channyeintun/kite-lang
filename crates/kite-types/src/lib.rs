@@ -22,6 +22,7 @@ use kite_hir::{Builtin, ExprKind, TyId, TyKind, Types};
 use kite_resolve::{BuiltinFn, Res, ResolveMap};
 use kite_span::{SourceMap, Span};
 
+mod exclusive;
 mod exhaustive;
 
 pub fn check(
@@ -512,13 +513,23 @@ pub fn check_recording(
 
     let vtables = build_vtables(resolved, &type_ids, &types);
 
-    hir::Program {
+    let program = hir::Program {
         types,
         externs,
         fns,
         entry: resolved.fn_by_name("main").map(hir::FnId),
         vtables,
+    };
+
+    // Exclusivity runs on the finished HIR rather than alongside inference: it
+    // needs each callee's parameters, and a call may precede the declaration it
+    // reaches. Skipped once anything else has failed, because a poisoned
+    // argument list produces places that were never written.
+    if !diags.has_errors() {
+        exclusive::check(&program, diags);
     }
+
+    program
 }
 
 /// Whether a type may cross the host boundary.

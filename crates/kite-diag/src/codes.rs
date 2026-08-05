@@ -13,6 +13,7 @@
 //!   E0500–E0599  concurrency and Share
 //!   E0600–E0699  cryptography
 //!   E0700–E0799  derivation
+//!   E0800–E0899  exclusivity
 
 use std::fmt;
 
@@ -273,4 +274,22 @@ codes! {
          timing oracle, and it is how tokens and signatures are guessed one \
          character at a time.\n\n\
          `crypto.equal` compares in time that does not depend on the values.";
+
+    // ---- exclusivity ------------------------------------------------------
+    E0800 = "E0800", "one object under two argument names",
+        "A struct is a GC reference and is always passed by reference, so a \
+         `var` parameter is a handle the callee writes through. When one call \
+         passes the same object to two parameters and either of them is \
+         `var`, each write lands where the other name expects its own value:\n\n\
+         \x20   transfer(a, a, 50)\n\n\
+         takes 50 from the balance and puts it back. Nothing traps, nothing is \
+         unsafe — Kite collects, so the memory is real either way — and the \
+         program is silently wrong.\n\n\
+         Two arguments name the same object when one path is a prefix of the \
+         other, so `f(o, o.inner)` counts as well as `f(a, a)`. Pass distinct \
+         objects, or take one `var` parameter and return the second result.\n\n\
+         This sees one call site. Aliasing arranged elsewhere — two fields \
+         holding one reference — is not detected, and needs no detection to be \
+         memory-safe; Kite has no borrowing and no lifetimes, and this rule is \
+         not the beginning of either.";
 }

@@ -238,6 +238,33 @@ Maranget's usefulness algorithm on the match matrix. Reports the *missing
 patterns*, not just "non-exhaustive", including nested and range patterns. This
 is what makes adding an enum variant safe.
 
+### 5.5 Exclusivity — `E0800`
+
+Not one of the four: it carries no state across statements and needs no
+fixpoint. It runs once over finished HIR, after every other check has passed,
+and looks at one thing — the argument list of a direct call.
+
+For each call, arguments of reference type (`Struct`, `Dyn`) that are *places* —
+paths rooted at a local, built from field and index steps — are collected
+alongside the parameter they bind. Two places conflict when their roots match,
+no step definitely differs, and at least one of the two parameters is `var`. A
+literal index compares exactly; an unknown one may be any element. Because the
+walk stops at the shorter path, a prefix relation counts, which is what makes
+`f(o, o.inner)` a conflict as well as `f(a, a)`.
+
+The pass enforces [spec §14.1](../SPECIFICATION.md#141-exclusivity), and it is a
+deliberately incomplete rule rather than the first half of a borrow checker.
+It knows nothing about ownership, moves, or lifetimes, and it does not follow a
+reference through the heap: two fields holding one object are two places here.
+Completing it would require alias analysis, and alias analysis is what a
+collector exists to make unnecessary. What is left after the collector is the
+part a collector cannot help with — a wrong number, produced because two
+parameter names turned out to be one object — and that part is checkable at the
+call site, in one pass, with no annotation anywhere in the language.
+
+Implementation is on the order of three hundred lines
+(`crates/kite-types/src/exclusive.rs`).
+
 ---
 
 ## 6. MIR

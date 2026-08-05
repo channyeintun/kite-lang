@@ -1377,3 +1377,167 @@ fn a_claim_needs_a_message() {
     let c = body("  require(true)");
     assert!(c.has("E0113"), "{}", c.render());
 }
+
+// ---- exclusivity ----------------------------------------------------------
+
+/// The prelude for these: a struct with a mutable field, and a function that
+/// writes two of them.
+fn two_writers(call: &str) -> Ctx {
+    run(&format!(
+        "struct Account {{\n  var balance: int\n}}\n\
+         fn transfer(var from: Account, var to: Account, amount: int) {{\n\
+         \x20 from.balance = from.balance - amount\n\
+         \x20 to.balance = to.balance + amount\n}}\n\
+         fn main() {{\n\
+         \x20 let a = Account{{ balance: 100 }}\n\
+         \x20 let b = Account{{ balance: 0 }}\n\
+         {}\n}}\n",
+        call
+    ))
+}
+
+#[test]
+fn one_object_under_two_var_parameters() {
+    let c = two_writers("  transfer(a, a, 50)");
+    assert!(c.has("E0800"), "{}", c.render());
+}
+
+#[test]
+fn distinct_objects_are_fine() {
+    let c = two_writers("  transfer(a, b, 50)");
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+/// The prefix case: writing through the outer object writes the inner one, so
+/// passing both is the same aliasing spelled differently.
+#[test]
+fn a_field_and_its_owner_are_one_object() {
+    let c = run(
+        "struct Inner {\n  var n: int\n}\n\
+         struct Outer {\n  inner: Inner\n  var tag: int\n}\n\
+         fn bump(var i: Inner, var o: Outer) {\n\
+         \x20 i.n = i.n + 1\n  o.tag = o.tag + i.n\n}\n\
+         fn main() {\n\
+         \x20 let o = Outer{ inner: Inner{ n: 1 }, tag: 0 }\n\
+         \x20 bump(o.inner, o)\n}\n",
+    );
+    assert!(c.has("E0800"), "{}", c.render());
+}
+
+/// Two different fields are two different objects, whatever they were built
+/// from. Seeing through the heap is what this pass does not do.
+#[test]
+fn sibling_fields_are_distinct() {
+    let c = run(
+        "struct Inner {\n  var n: int\n}\n\
+         struct Pair {\n  left: Inner\n  right: Inner\n}\n\
+         fn swap_in(var a: Inner, var b: Inner) {\n\
+         \x20 a.n = b.n\n}\n\
+         fn main() {\n\
+         \x20 let p = Pair{ left: Inner{ n: 1 }, right: Inner{ n: 2 } }\n\
+         \x20 swap_in(p.left, p.right)\n}\n",
+    );
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+/// One `var` is enough: the read is a reference too, so the callee watches the
+/// value change under it.
+#[test]
+fn a_read_alongside_a_write_is_reported() {
+    let c = run(
+        "struct Account {\n  var balance: int\n}\n\
+         fn audit(var live: Account, snapshot: Account) {\n\
+         \x20 live.balance = live.balance + snapshot.balance\n}\n\
+         fn main() {\n\
+         \x20 let a = Account{ balance: 100 }\n\
+         \x20 audit(a, a)\n}\n",
+    );
+    assert!(c.has("E0800"), "{}", c.render());
+}
+
+/// Nothing is written, so two names for one object are two ways of reading it.
+#[test]
+fn two_reads_are_not_a_conflict() {
+    let c = run(
+        "struct Account {\n  balance: int\n}\n\
+         fn total(x: Account, y: Account) -> int {\n\
+         \x20 return x.balance + y.balance\n}\n\
+         fn main() {\n\
+         \x20 let a = Account{ balance: 100 }\n\
+         \x20 let n = total(a, a)\n}\n",
+    );
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+/// Slices are copy-on-write values, so a `var [T]` parameter is the callee's
+/// own copy and two of them cannot interfere.
+#[test]
+fn slice_arguments_are_values() {
+    let c = run(
+        "fn grow(var xs: [int], var ys: [int]) {\n\
+         \x20 xs.push(1)\n  ys.push(2)\n}\n\
+         fn main() {\n\
+         \x20 var xs: [int] = [1]\n\
+         \x20 grow(xs, xs)\n}\n",
+    );
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+/// A literal index distinguishes elements; an unknown one could be any of
+/// them, so it is taken to overlap.
+#[test]
+fn indices_compare_when_they_are_known() {
+    let src = |args: &str| {
+        format!(
+            "struct Account {{\n  var balance: int\n}}\n\
+             fn transfer(var from: Account, var to: Account) {{\n\
+             \x20 from.balance = to.balance\n}}\n\
+             fn main() {{\n\
+             \x20 let xs = [Account{{ balance: 1 }}, Account{{ balance: 2 }}]\n\
+             \x20 let i = 0\n\
+             \x20 let j = 1\n\
+             \x20 transfer({})\n}}\n",
+            args
+        )
+    };
+    assert!(!run(&src("xs[0], xs[1]")).diags.has_errors());
+    assert!(run(&src("xs[0], xs[0]")).has("E0800"));
+    assert!(run(&src("xs[i], xs[j]")).has("E0800"));
+}
+
+/// A method's receiver is its first parameter, so `var self` is checked like
+/// any other write.
+#[test]
+fn a_var_receiver_counts() {
+    let c = run(
+        "struct Account {\n  var balance: int\n}\n\
+         impl Account {\n\
+         \x20 fn drain_into(var self, var other: Account) {\n\
+         \x20   other.balance = other.balance + self.balance\n\
+         \x20   self.balance = 0\n  }\n}\n\
+         fn main() {\n\
+         \x20 var a = Account{ balance: 100 }\n\
+         \x20 a.drain_into(a)\n}\n",
+    );
+    assert!(c.has("E0800"), "{}", c.render());
+}
+
+/// A virtual call reaches an implementation the compiler cannot name, so the
+/// parameters checked are every implementation's at once.
+#[test]
+fn a_virtual_call_is_checked_through_the_vtable() {
+    let c = run(
+        "trait Sink {\n\
+         \x20 fn drain(var self, other: dyn Sink)\n}\n\
+         struct Bucket {\n  var level: int\n}\n\
+         impl Sink for Bucket {\n\
+         \x20 fn drain(var self, other: dyn Sink) {\n\
+         \x20   self.level = 0\n  }\n}\n\
+         fn empty(var s: dyn Sink) {\n\
+         \x20 s.drain(s)\n}\n\
+         fn main() {\n\
+         \x20 var b = Bucket{ level: 1 }\n\
+         \x20 empty(b)\n}\n",
+    );
+    assert!(c.has("E0800"), "{}", c.render());
+}
