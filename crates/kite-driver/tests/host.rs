@@ -1385,3 +1385,174 @@ fn a_rejected_promise_becomes_an_error() {
     let out = run_runner_under_node("reject", src, FETCH_RUNNER, &[]);
     assert_eq!(out, "ok: status 200.0\nbad: 404\n");
 }
+
+// ---- the typed door --------------------------------------------------------
+
+fn tsc_available() -> bool {
+    Command::new("tsc")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Build a library and return its output directory.
+fn build_library(name: &str, src: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("kite-api-{}-{}", name, std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("work directory");
+    let c = compile(format!("{}.kite", name), src, Emit::Wasm);
+    assert!(!c.failed(), "{}", c.render_diagnostics());
+    let module = c.wasm.as_ref().expect("a module");
+    std::fs::write(dir.join("app.wasm"), &module.bytes).expect("write wasm");
+    std::fs::write(
+        dir.join("app.js"),
+        kite_driver::generate_glue_with_hosts(&module.strings, "app.wasm", &module.hosts),
+    )
+    .expect("write glue");
+    let (api_js, api_dts) = kite_driver::generate_api(&module.api, "app.wasm");
+    std::fs::write(dir.join("api.js"), api_js).expect("write api.js");
+    std::fs::write(dir.join("api.d.ts"), api_dts).expect("write api.d.ts");
+    dir
+}
+
+const LIBRARY: &str = "pub fn add(a: int, b: int) -> int {\n  return a + b\n}\n\
+     pub fn greet(name: str) -> str {\n  return \"hello, \" + name\n}\n\
+     pub fn ratio(a: float, b: float) -> float {\n\
+     \x20 if b == 0.0 {\n    return 0.0\n  }\n  return a / b\n}\n\
+     pub fn positive(n: int) -> bool {\n  return n > 0\n}\n\
+     fn main() {\n}\n";
+
+/// JavaScript calls a Kite module through the generated wrapper, with none of
+/// the calling convention visible.
+///
+/// A `pub fn` was always a real Wasm export — what stopped anyone using one was
+/// having to know that an `int` arrives as a BigInt and that a `str` is an index
+/// into a table you must intern into and read back out of. A calling convention
+/// nobody wrote down is a reason not to adopt something.
+#[test]
+fn javascript_calls_a_kite_module_through_the_wrapper() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let dir = build_library("lib", LIBRARY);
+    std::fs::write(
+        dir.join("run.mjs"),
+        "import { readFile } from \"node:fs/promises\";\n\
+         import { load, add, greet, ratio, positive } from \"./api.js\";\n\
+         await load(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         console.log(String(add(2n, 3n)));\n\
+         console.log(greet(\"world\"));\n\
+         console.log(ratio(1, 4));\n\
+         console.log(positive(-1n));\n",
+    )
+    .expect("write runner");
+    let output = Command::new("node").arg(dir.join("run.mjs")).output().expect("node runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "5\nhello, world\n0.25\nfalse\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The declaration file describes what is there, by its own names.
+#[test]
+fn the_declaration_file_names_the_parameters() {
+    let dir = build_library("named", LIBRARY);
+    let dts = std::fs::read_to_string(dir.join("api.d.ts")).expect("api.d.ts");
+    // `int` is 64-bit. A `number` would hold it to 2^53 and lose the rest in
+    // silence, which is the sort of edge that reaches production.
+    assert!(dts.contains("export declare function add(a: bigint, b: bigint): bigint;"), "{}", dts);
+    assert!(dts.contains("export declare function greet(name: string): string;"), "{}", dts);
+    assert!(dts.contains("export declare function ratio(a: number, b: number): number;"), "{}", dts);
+    assert!(dts.contains("export declare function positive(n: bigint): boolean;"), "{}", dts);
+    // `main` is the program's entry, not part of its interface.
+    assert!(!dts.contains(" main("), "{}", dts);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A signature JavaScript has no representation for is left out of both files
+/// rather than described wrongly.
+#[test]
+fn an_undescribable_signature_is_omitted_and_said_so() {
+    let src = "pub struct Point {\n  pub x: int\n  pub y: int\n}\n\
+        pub fn origin() -> Point {\n  return Point{ x: 0, y: 0 }\n}\n\
+        pub fn twice(n: int) -> int {\n  return n * 2\n}\n\
+        fn main() {\n}\n";
+    let dir = build_library("undescribable", src);
+    let dts = std::fs::read_to_string(dir.join("api.d.ts")).expect("api.d.ts");
+    assert!(dts.contains("twice(n: bigint): bigint"), "{}", dts);
+    assert!(!dts.contains("declare function origin"), "{}", dts);
+    // Said, not silently dropped: a caller wondering where their function went
+    // should find the answer in the file rather than in a changelog.
+    assert!(dts.contains("origin"), "the omission must be explained: {}", dts);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// TypeScript accepts correct use and rejects incorrect use.
+///
+/// The phase's exit criterion, checked with the real compiler rather than by
+/// reading the file. Skipped where `tsc` is not installed, because a language
+/// project should not require one to run its own tests.
+#[test]
+fn typescript_type_checks_against_the_declarations() {
+    if !tsc_available() {
+        eprintln!("skipping: tsc is not on PATH");
+        return;
+    }
+    let dir = build_library("typed", LIBRARY);
+    std::fs::write(
+        dir.join("good.ts"),
+        "import { load, add, greet, ratio } from \"./api.js\";\n\
+         export async function demo(): Promise<string> {\n\
+         \x20 await load();\n\
+         \x20 const sum: bigint = add(2n, 3n);\n\
+         \x20 const hello: string = greet(\"world\");\n\
+         \x20 const r: number = ratio(1, 4);\n\
+         \x20 return `${sum} ${hello} ${r}`;\n\
+         }\n",
+    )
+    .expect("write good.ts");
+    std::fs::write(
+        dir.join("bad.ts"),
+        "import { load, add } from \"./api.js\";\n\
+         export async function wrong() {\n\
+         \x20 await load();\n\
+         \x20 return add(2, 3);\n\
+         }\n",
+    )
+    .expect("write bad.ts");
+
+    let check = |file: &str| {
+        Command::new("tsc")
+            .current_dir(&dir)
+            .args([
+                "--noEmit", "--strict", "--target", "es2020", "--module", "es2020",
+                "--moduleResolution", "node", file,
+            ])
+            .output()
+            .expect("tsc runs")
+    };
+
+    let good = check("good.ts");
+    assert!(
+        good.status.success(),
+        "correct use must type-check:\n{}",
+        String::from_utf8_lossy(&good.stdout)
+    );
+
+    let bad = check("bad.ts");
+    assert!(!bad.status.success(), "`add(2, 3)` must not type-check");
+    let text = String::from_utf8_lossy(&bad.stdout);
+    assert!(
+        text.contains("not assignable to parameter of type 'bigint'"),
+        "{}",
+        text
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

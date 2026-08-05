@@ -48,7 +48,9 @@ mod eq;
 mod glue;
 mod serve;
 mod support;
-pub use glue::{generate_glue, generate_glue_for, generate_glue_with_hosts, generate_page};
+pub use glue::{
+    generate_api, generate_glue, generate_glue_for, generate_glue_with_hosts, generate_page,
+};
 pub use serve::{generate_server, listens};
 pub use support::{unsupported, Unsupported};
 
@@ -627,6 +629,10 @@ mod host {
 
 pub struct WasmModule {
     pub bytes: Vec<u8>,
+    /// The functions a host may call, with the types they take and answer
+    /// with. Collected here because this is where the export list is decided,
+    /// and a typed wrapper generated from anywhere else could disagree with it.
+    pub api: Vec<Export>,
     /// String constants, in index order. The glue turns these into real
     /// strings; the module only refers to them by index.
     pub strings: Vec<String>,
@@ -634,6 +640,16 @@ pub struct WasmModule {
     /// The glue is generated from these, so a declaration and the stub that
     /// answers it cannot drift apart.
     pub hosts: Vec<HostImport>,
+}
+
+/// One exported function, described well enough to write a wrapper for.
+#[derive(Clone, Debug)]
+pub struct Export {
+    pub name: String,
+    /// Each parameter, as `(name, Kite type name)`.
+    pub params: Vec<(String, String)>,
+    /// What it answers with, or `None` for nothing.
+    pub ret: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1490,8 +1506,35 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
     }
     module.section(&code);
 
+    // The same list the export section was built from, and built from it in
+    // the same pass, so a wrapper cannot describe a function the module does
+    // not have.
+    let mut api: Vec<Export> = Vec::new();
+    let mut named: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for f in program.fns.iter() {
+        if !f.exportable || !named.insert(f.name.as_str()) {
+            continue;
+        }
+        api.push(Export {
+            name: f.name.clone(),
+            // The parameter's own name, so a generated `.d.ts` reads like the
+            // source rather than like `a0, a1`. An editor showing the signature
+            // is one of the few places a wrapper is *seen*, and `add(a: bigint,
+            // b: bigint)` is worth carrying the name for.
+            params: f.locals[..f.param_count]
+                .iter()
+                .enumerate()
+                .map(|(i, l)| {
+                    (l.name.clone().unwrap_or_else(|| format!("a{}", i)), types.name(l.ty))
+                })
+                .collect(),
+            ret: if f.ret == TyId::UNIT { None } else { Some(types.name(f.ret)) },
+        });
+    }
+
     WasmModule {
         bytes: module.finish(),
+        api,
         strings: program.strings.clone(),
         hosts: program
             .externs

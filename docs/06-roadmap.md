@@ -1966,6 +1966,40 @@ meet the ecosystem where it is.
 **Exit criterion:** an existing TypeScript project imports a Kite function,
 type-checks against it, and builds with no configuration beyond the plugin.
 
+**Done, and `@export` turned out to be unnecessary.** A `pub fn` has been a real
+Wasm export the whole time — JavaScript could always call one. Two things
+stopped anyone doing it, and neither was a missing feature:
+
+- **The calling convention was undocumented.** An `int` arrives as a `BigInt`, a
+  `str` is an index into a table you must intern into and read back out of, and
+  a `bool` is an i32. A calling convention nobody wrote down is a reason not to
+  adopt something.
+- **There were no types.** A TypeScript project had nothing to check against.
+
+So `kitec build` now writes `api.js` and `api.d.ts` beside the module: one
+wrapper function per export with the conversions applied, and a declaration for
+each. Parameters keep their own names, because a signature in an editor is one
+of the few places a wrapper is actually *seen*. `int` is `bigint`, not `number`
+— a `number` holds it to 2^53 and loses the rest in silence, which is the sort
+of edge that reaches production.
+
+Real `tsc` is run in the test suite, where it is installed: correct use
+type-checks, and `add(2, 3)` is rejected because the parameter is a `bigint`.
+
+A signature JavaScript has no representation for — anything taking or returning
+a struct, enum, slice or map — is **left out of both files and named in a
+comment saying why**. Describing it wrongly would type-check code that cannot
+work, and dropping it silently would send someone looking through a changelog.
+
+One bug, found by a test rather than by reasoning: a `bool` crosses as an i32,
+so a caller passing `true` was sending `undefined` and a returned `false`
+arrived as `0` — which the declaration file called a `boolean`. A wrapper whose
+types are a lie is worse than no wrapper.
+
+**Still open:** the Vite plugin. Nothing depends on it — the generated files are
+ordinary ES modules a bundler already understands — so it is convenience rather
+than capability, and it is marked as such.
+
 ---
 
 ## Phase 23 — The size gate
@@ -2043,11 +2077,11 @@ none.
 | 19 — Resident runtime, real clock | ✅ complete — `resident` beside `drive`, real clock, zero timers when idle |
 | 20 — `std/dom` | ✅ complete — no externs, `Option` for absence, events with cancel, and a real page in `examples/page` |
 | 21 — Rejections as errors | ✅ complete, and the phase was rescoped: promises never needed language support. The straight-line `await` form is open, and marked as comfort |
-| 22 — Interop backwards | ⬜ not started |
+| 22 — Interop backwards | ✅ `api.js` and `api.d.ts` from `kitec build`, verified with real `tsc`. `@export` proved unnecessary. ❌ the Vite plugin |
 | 23 — Size gate | ⬜ not started |
 | — View layer | ⬜ deferred past 1.0, deliberately |
 
-757 tests: unit tests per crate, an annotated compile-fail corpus, a
+761 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the host boundary and a real
 socket under Node, both string

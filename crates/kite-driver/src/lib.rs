@@ -17,7 +17,8 @@ pub mod semver;
 pub mod solve;
 
 pub use kite_codegen_wasm::{
-    generate_glue, generate_glue_for, generate_glue_with_hosts, generate_page, generate_server,
+    generate_api, generate_glue, generate_glue_for, generate_glue_with_hosts, generate_page,
+    generate_server,
     listens, Strings,
 };
 pub use kite_vm::Trap;

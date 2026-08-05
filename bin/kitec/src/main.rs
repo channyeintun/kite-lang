@@ -267,6 +267,22 @@ fn main() -> ExitCode {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("kite");
+        // The typed door for JavaScript and TypeScript. Written whenever there
+        // is anything to describe, because the whole adoption story is somebody
+        // replacing one file in a project that is not otherwise Kite.
+        let (api_js, api_dts) = kite_driver::generate_api(&module.api, "app.wasm");
+        let api_js_path = format!("{}/api.js", dir);
+        let api_dts_path = format!("{}/api.d.ts", dir);
+        let has_api = module.api.iter().any(|e| e.name != "main");
+        if has_api {
+            if let Err(e) = std::fs::write(&api_js_path, api_js) {
+                return fail(&format!("cannot write `{}`: {}", api_js_path, e));
+            }
+            if let Err(e) = std::fs::write(&api_dts_path, api_dts) {
+                return fail(&format!("cannot write `{}`: {}", api_dts_path, e));
+            }
+        }
+
         let page_kept = std::path::Path::new(&html_path).exists();
         if !page_kept {
             if let Err(e) = std::fs::write(&html_path, kite_driver::generate_page(name)) {
@@ -293,6 +309,9 @@ fn main() -> ExitCode {
                 serve_path
             );
             return ExitCode::SUCCESS;
+        }
+        if has_api {
+            eprintln!("  and {} with {}", api_js_path, api_dts_path);
         }
         if page_kept {
             eprintln!(
