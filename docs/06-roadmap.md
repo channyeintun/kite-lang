@@ -269,10 +269,12 @@ NaN gives a number rather than killing the program, and the two agree on every
 input.
 
 **Also done:** strings. `str` has four methods, all host calls: `len`, `slice`,
-`index_of` and `trim`. Everything else — `contains`, `starts_with`,
-`ends_with`, `split`, `join`, `replace`, `words` — is written in Kite on top of
-them, which is where it belongs. A host call is a boundary two runtimes have to
-agree about, and every one added is a thing that can drift.
+`index_of` and `trim` — `code_at` became the fifth further down this same
+phase, when `Hash` needed one, and is the only one added since.
+Everything else — `contains`, `starts_with`, `ends_with`, `split`, `join`,
+`replace`, `words` — is written in Kite on top of them, which is where it
+belongs. A host call is a boundary two runtimes have to agree about, and every
+one added is a thing that can drift.
 
 They count characters rather than bytes, on both sides: the VM walks a `char`
 iterator and the glue spreads with `[...s]`, so `"héllo日本"` is seven either

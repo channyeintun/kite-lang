@@ -312,10 +312,10 @@ pub fn sumf(items: [float]) -> float {
 
 // ---- strings --------------------------------------------------------------
 //
-// `str` has four methods, all of them host calls: `len`, `slice`, `index_of`
-// and `trim`. Everything below is written on top of them, which is where it
-// belongs — a host call is a boundary two runtimes have to agree about, and
-// every one added is a thing that can drift.
+// `str` has five methods, all of them host calls: `len`, `slice`, `index_of`,
+// `trim` and `code_at`. Everything below is written on top of them, which is
+// where it belongs — a host call is a boundary two runtimes have to agree
+// about, and every one added is a thing that can drift.
 
 /// Whether `needle` appears anywhere in `s`.
 pub fn contains(s: str, needle: str) -> bool {

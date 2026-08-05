@@ -1,9 +1,11 @@
 # What has to be true of every commit.
 #
 # The differential job is the one that matters: every program in the corpus is
-# compiled to both backends, run on both, and the outputs compared. Two
-# independent implementations that must agree is what makes codegen bugs
-# findable, and it is the reason the bytecode VM exists at all.
+# compiled to all three backends — WasmGC, the bytecode VM and Cranelift — run
+# on all three, and the outputs compared. Three independent implementations
+# that must agree is what makes codegen bugs findable, and it is the reason the
+# bytecode VM was built before the Wasm backend even though Wasm is the point
+# of the project.
 
 name: CI
 

@@ -1,6 +1,6 @@
 // std/json — reading and writing JSON.
 //
-// Written in Kite, on top of the four string primitives the language has. It
+// Written in Kite, on top of the five string primitives the language has. It
 // is the first substantial body of Kite code in the standard library, and a
 // parse returns `(Json, error)` like anything else that can fail: a malformed
 // document is a value to handle, not something thrown.

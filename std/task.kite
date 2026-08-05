@@ -6,10 +6,10 @@
 // awaits is how two things happen at once, and there is no second keyword for
 // spawning.
 //
-// Everything here is written in Kite. The compiler supplies four primitives —
-// `task.yield`, `task.park`, `task.wake_at` and `time.now` — and every
-// combinator below is built from them, which is the test a standard library
-// should have to pass.
+// Everything here is written in Kite. The compiler supplies seven primitives —
+// `task.yield`, `task.park`, `task.wake_at`, `task.wait_host`,
+// `task.finished`, `task.get` and `time.now` — and every combinator below is
+// built from them, which is the test a standard library should have to pass.
 
 /// Both results, once both tasks have produced one.
 ///

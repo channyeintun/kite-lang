@@ -81,8 +81,8 @@ fn the_complete_program_reaches_the_web_target() {
 
 /// The document does not claim to be unimplemented.
 ///
-/// It said "Design document. Not yet implemented." while three backends ran
-/// 765 tests against it. A status line nobody maintains is worse than none,
+/// It said "Design document. Not yet implemented." while three backends ran the
+/// whole suite against it. A status line nobody maintains is worse than none,
 /// because it is read first and believed.
 #[test]
 fn the_status_line_is_not_the_old_one() {

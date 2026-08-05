@@ -79,9 +79,9 @@ closures, slices, tuples, maps with `keys()`/`values()` and `for (k, v) in m`,
 handling with `check`.
 
 **Concurrency.** `async fn` compiles to a state machine in MIR — a starter and
-a resume function — so both backends see ordinary code and neither knows
+a resume function — so every backend sees ordinary code and none of them knows
 concurrency exists. `std/task` supplies `both`, `all`, `race`, `sleep`,
-`timeout`, `scope` and `parallel`, all written in Kite over four compiler
+`timeout`, `scope` and `parallel`, all written in Kite over seven compiler
 primitives.
 
 ```kite
@@ -119,7 +119,7 @@ backends and must agree.
 
 **Bodies the compiler writes.** `@derive(Debug, Hash, Encode, Decode)` in front
 of a struct or an enum writes them from the fields — as ordinary Kite, expanded
-before resolution, so both backends handle it without knowing derivation
+before resolution, so every backend handles it without knowing derivation
 exists. `Display` is deliberately not derivable, and `Eq` is not derivable
 because `==` is already structural on every value.
 
