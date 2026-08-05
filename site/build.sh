@@ -48,6 +48,10 @@ mkdir -p "$out/docs"
 cp "$root/SPECIFICATION.md" "$out/SPECIFICATION.md"
 cp "$root/README.md" "$out/README.md"
 cp "$root"/docs/*.md "$out/docs/"
+# The installer is served from the site, because that is the URL its own first
+# line tells people to pipe into a shell. It was not copied, so the documented
+# one-liner fetched a 404.
+cp "$root/install.sh" "$out/install.sh"
 
 echo
 echo "done. serve it with any static server:"

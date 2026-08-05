@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # Install `kitec` and `kite-lsp`.
 #
-#   curl -fsSL https://kite-lang.org/install.sh | sh
+#   curl -fsSL https://kite-lang.dev/install.sh | sh
 #
 # It downloads one archive, checks it against the release's own checksum file,
 # and unpacks two binaries. Nothing is compiled, nothing is run from the

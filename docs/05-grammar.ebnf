@@ -27,13 +27,20 @@ SourceFile   = { UseDecl } { Declaration } ;
 UseDecl      = "use" ModulePath [ "as" Ident ] ;
 ModulePath   = Ident { "/" Ident } ;
 
-Declaration  = [ "pub" ] ( FnDecl
-                         | StructDecl
-                         | EnumDecl
-                         | TraitDecl
-                         | ImplDecl
-                         | TypeAlias
-                         | ExternDecl ) ;
+Declaration  = [ DeriveAttr ] [ "pub" ] ( FnDecl
+                                       | StructDecl
+                                       | EnumDecl
+                                       | TraitDecl
+                                       | ImplDecl
+                                       | TypeAlias
+                                       | ExternDecl ) ;
+
+(* `@derive` and `@host` are the only two attributes Kite has, and each is
+   admitted in exactly one place: `@derive` in front of a struct or an enum,
+   `@host` in front of an `extern fn`. There is no general attribute syntax,
+   because an attribute the compiler does not act on is a comment with a
+   grammar.                                                                  *)
+DeriveAttr   = "@" "derive" "(" Ident { "," Ident } [ "," ] ")" ;
 
 
 (* ------------------------------------------------------------------
@@ -201,7 +208,12 @@ FieldPattern = Ident [ ":" Pattern ] ;
    Expressions — precedence climbing, loosest to tightest
    ------------------------------------------------------------------ *)
 
-Expr         = OrExpr ;
+Expr         = RangeExpr ;
+
+(* A range is an infix operator, and the loosest one there is, so `0..n + 1`
+   is `0..(n + 1)` — which is how it reads. It is non-associative: `a..b..c`
+   has no meaning to give.                                                   *)
+RangeExpr    = OrExpr [ ( ".." | "..=" ) OrExpr ] ;    (* non-assoc    *)
 
 OrExpr       = AndExpr { "||" AndExpr } ;
 AndExpr      = CmpExpr { "&&" CmpExpr } ;
@@ -232,8 +244,7 @@ PrimaryExpr  = Literal
              | StructLit
              | Closure
              | IfExpr
-             | MatchExpr
-             | RangeExpr ;
+             | MatchExpr ;
 
 TupleLit     = "(" Expr "," [ Expr { "," Expr } ] ")" ;
 SliceLit     = "[" [ Expr { "," Expr } [ "," ] ] "]" ;
@@ -252,7 +263,6 @@ ClosureParam = Ident [ ":" Type ] ;
 
 IfExpr       = "if" Expr Block "else" ( Block | IfExpr ) ;
 MatchExpr    = "match" Expr "{" { MatchArm } "}" ;
-RangeExpr    = Expr ".." [ "=" ] Expr ;
 
 
 (* ------------------------------------------------------------------
@@ -290,9 +300,10 @@ CharLit      = "'" ( Char | Escape ) "'" ;
 
 Ident        = XIDStart { XIDContinue } ;   (* Unicode; NFC-normalised *)
 
-Comment      = LineComment | DocComment ;
+Comment      = LineComment | DocComment | ModuleDoc ;
 LineComment  = "//" { AnyCharButNewline } ;
 DocComment   = "///" { AnyCharButNewline } ;
+ModuleDoc    = "//!" { AnyCharButNewline } ;   (* the file's own text *)
 
 
 (* Note: `?` is not a token in Kite. There is no optional chaining, no

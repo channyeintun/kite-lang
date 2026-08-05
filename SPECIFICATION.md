@@ -457,11 +457,15 @@ Highest to lowest:
 | 8 | `==` `!=` `<` `<=` `>` `>=` | non-associative |
 | 9 | `&&` | left |
 | 10 | `\|\|` | left |
+| 11 | `..`  `..=` | non-associative |
 
 
 Bitwise operators bind tighter than comparison, unlike C. `a & b == c` means
 `(a & b) == c`, which is what everyone intends and C gets wrong. Comparison is
 non-associative: `a < b < c` is a syntax error, not a silent bug.
+
+A range is the loosest operator there is, so `0..n + 1` is `0..(n + 1)`, which
+is how it reads. It is non-associative too: `a..b..c` has no meaning to give.
 
 ### 5.2 Equality
 
