@@ -2,29 +2,20 @@
 //
 // `site/` is a directory of files that any static server can serve, and this
 // deploys it as exactly that — the same bytes `site/build.sh` produces, from
-// Cloudflare's edge.
+// Cloudflare's edge. There is no Worker script: nothing here is dynamic, and
+// the asset server answers every request the site makes.
 //
-// There is a Worker script now, for one missing capability rather than for any
-// dynamic behaviour: the asset server answers a `Range` request with `200` and
-// the whole body, which leaves a media element unable to seek at all. See
-// `site-worker.js`. Everything that is not a media file is passed straight
-// through, so a page, a stylesheet and a wasm module are served exactly as
-// they were before.
+// There was one, briefly, and only for a missing capability rather than for
+// any behaviour of ours: the asset server answers a `Range` request with `200`
+// and the whole body, which left the music demo's audio element unable to seek
+// at all. That demo is gone and nothing else on the site is seekable, so the
+// Worker went with it.
 {
   "name": "kite-lang",
   "compatibility_date": "2026-08-01",
 
-  "main": "./site-worker.js",
-
   "assets": {
-    "directory": "./site",
-    // Named, so the Worker can reach the files and answer for them itself.
-    "binding": "ASSETS",
-    // Assets are served *before* the Worker by default, which is right for
-    // every file here but one: the Worker exists to add byte ranges, and it
-    // cannot add them to a response it never sees. Only the media file is
-    // routed through it, so nothing else pays for the indirection.
-    "run_worker_first": ["/player/khin-maung-toe.m4a"]
+    "directory": "./site"
   },
 
   // An exact hostname match each, so both spellings of the domain answer.
