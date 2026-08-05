@@ -88,6 +88,31 @@ fn a_comparison_before_a_block_is_not_a_struct_literal() {
     assert!(literal.contains("Point{ x: 1 }"), "{}", literal);
 }
 
+/// Arithmetic before a block is a block, not a struct literal.
+///
+/// `+ - * /` look like positions a value could start in, and are not reachable
+/// ones: Kite has no operator overloading, so nothing can be added to or
+/// multiplied by a struct. Treating them as literal heads meant a condition
+/// ending in an identifier kept whatever spacing it was written with — and
+/// `std/math` had one, which `fmt --check` and the CI job that runs it both
+/// called formatted.
+#[test]
+fn arithmetic_before_a_block_is_not_a_struct_literal() {
+    for op in ["+", "-", "*", "/"] {
+        let out = format(&format!(
+            "fn f(a: float, b: float) {{\nif a < 0.5 {} b{{\nio.print(1)\n}}\n}}\n",
+            op
+        ));
+        assert!(out.contains(&format!("0.5 {} b {{", op)), "{}", out);
+    }
+    // And what the exclusion could have cost, which is nothing: a literal in
+    // any of the positions one really does appear in still hugs its brace.
+    for head in ["let p = ", "return ", "check ", "f(", "[", "x: "] {
+        let src = format!("fn f() {{\n{}Point{{ x: 1 }}\n}}\n", head);
+        assert!(format(&src).contains("Point{ x: 1 }"), "{}", src);
+    }
+}
+
 #[test]
 fn a_comment_on_its_own_line_stays_there() {
     let out = idempotent("// a note\nfn main() {\n    io.print(1)\n}\n");

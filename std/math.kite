@@ -267,7 +267,7 @@ pub fn cbrt(x: float) -> float {
     var guess = exp(ln(x) / 3.0)
     for i in 0..12 {
         let next = (2.0 * guess + x / (guess * guess)) / 3.0
-        if abs(next - guess) < 0.0000000001 * guess{
+        if abs(next - guess) < 0.0000000001 * guess {
             return next
         }
         guess = next

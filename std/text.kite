@@ -1158,7 +1158,7 @@ fn resolve_brackets(
             if s == e_dir {
                 found_e = true
             }
-            if s == 1 - e_dir{
+            if s == 1 - e_dir {
                 found_o = true
             }
             k += 1
@@ -1180,7 +1180,7 @@ fn resolve_brackets(
                 }
                 j -= 1
             }
-            if ctx == 1 - e_dir{
+            if ctx == 1 - e_dir {
                 direction = 1 - e_dir
             }
         }

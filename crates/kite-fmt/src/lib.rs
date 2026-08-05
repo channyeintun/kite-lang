@@ -264,7 +264,14 @@ impl Formatter<'_> {
         if ["<=", ">=", "==", "!="].iter().any(|op| head.ends_with(op)) {
             return false;
         }
-        ["=", "(", "[", ",", ":", "=>", "+", "-", "*", "/", "return", "check", "await"]
+        // Arithmetic is *not* in this list, and that is the point of the list
+        // being written out. `+ - * /` look like value positions and are not
+        // reachable ones: Kite has no operator overloading, so nothing may be
+        // added to or multiplied by a struct, and a literal can never follow
+        // one. Including them meant `if a < 0.5 * b{` was read as a literal
+        // head and kept whatever spacing it was written with — two spellings
+        // of the same code, both of which `fmt --check` called formatted.
+        ["=", "(", "[", ",", ":", "=>", "return", "check", "await"]
             .iter()
             .any(|token| head.ends_with(token))
     }
