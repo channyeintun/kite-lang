@@ -258,6 +258,20 @@ pub enum BuiltinFn {
     /// `require(cond, message)` — the same, always on. What a library uses to
     /// state a precondition it will not check twice.
     Require,
+    /// `js.func(handler) -> JsValue` — a Kite closure the host can call.
+    ///
+    /// A builtin rather than an `extern`, because a closure is a GC struct and
+    /// JavaScript has no way to enter one. The module exports a trampoline that
+    /// can, and this is what hands the closure over — the same arrangement
+    /// `task.spawn` already uses for a task's resume closure, generalised to
+    /// carry an argument back.
+    ///
+    /// Every event listener, timer and observer a program installs goes through
+    /// here. The closure's lifetime is the JavaScript wrapper's lifetime is the
+    /// listener's lifetime, all traced by the one collector — which is why
+    /// there is no registry of numbered handlers, and nothing that would pin
+    /// every listener a page ever had.
+    JsFunc,
 }
 
 impl BuiltinFn {
@@ -291,6 +305,7 @@ impl BuiltinFn {
             "ptr.same" => Some(BuiltinFn::PtrSame),
             "assert" => Some(BuiltinFn::Assert),
             "require" => Some(BuiltinFn::Require),
+            "js.func" => Some(BuiltinFn::JsFunc),
             _ => None,
         }
     }
@@ -325,6 +340,7 @@ impl BuiltinFn {
             BuiltinFn::PtrSame => "ptr.same",
             BuiltinFn::Assert => "assert",
             BuiltinFn::Require => "require",
+            BuiltinFn::JsFunc => "js.func",
         }
     }
 
@@ -349,7 +365,10 @@ impl BuiltinFn {
             | BuiltinFn::TimeNow
             | BuiltinFn::TaskPark
             | BuiltinFn::TaskWaitHost => 0,
-            BuiltinFn::TaskWakeAt | BuiltinFn::TaskFinished | BuiltinFn::TaskGet => 1,
+            BuiltinFn::TaskWakeAt
+            | BuiltinFn::TaskFinished
+            | BuiltinFn::TaskGet
+            | BuiltinFn::JsFunc => 1,
             BuiltinFn::Assert | BuiltinFn::Require | BuiltinFn::PtrSame => 2,
         }
     }

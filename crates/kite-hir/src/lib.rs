@@ -443,6 +443,9 @@ pub enum Builtin {
     /// `task.spawn(poll)` — hand a task's resume closure to the scheduler.
     /// Emitted by the state-machine transform; no program writes it.
     TaskSpawn,
+    /// `js.func(handler)` — hand a Kite closure to the host as something it can
+    /// call. See `BuiltinFn::JsFunc`.
+    JsFunc,
     /// `task.wake_at(ms)` — tell the scheduler not to poll the running task
     /// again before a deadline. A hint, not a guarantee: a scheduler is free
     /// to poll early, and the code that asked must re-check the clock.
@@ -484,6 +487,7 @@ impl Builtin {
             Builtin::DrawClip => "draw.clip",
             Builtin::DrawUnclip => "draw.unclip",
             Builtin::TaskSpawn => "task.spawn",
+            Builtin::JsFunc => "js.func",
             Builtin::TaskWakeAt => "task.wake_at",
             Builtin::TaskPark => "task.park",
             Builtin::TaskWaitHost => "task.wait_host",

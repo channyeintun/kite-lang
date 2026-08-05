@@ -93,7 +93,7 @@ const EXTERN_REF_NULL: ValType = ValType::Ref(RefType {
 /// Deliberately small: the standard library replaces them from Phase 6. String
 /// operations live here because a `str` is an index into a table the host
 /// holds — which is also why the module needs no linear memory.
-const IMPORTS: [(&str, &[ValType], &[ValType]); 36] = [
+const IMPORTS: [(&str, &[ValType], &[ValType]); 37] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
@@ -216,6 +216,14 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 36] = [
     // honest equivalent of each.
     ("read_line", &[], &[ValType::I32]),
     ("error_str", &[ValType::I32], &[]),
+    // A Kite closure the host can call.
+    //
+    // The mirror of `task_spawn`: what crosses is a reference the host cannot
+    // enter, and it comes back through the module's own `kite_invoke`
+    // trampoline. What is different is the argument — a handler is given the
+    // host value that caused it, so the trampoline takes two references rather
+    // than one.
+    ("js_func", &[ANY_REF], &[EXTERN_REF_NULL]),
 ];
 
 /// The same imports again, with `str` as an `externref`.
@@ -239,7 +247,7 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 36] = [
 /// an astral character, and two backends that disagree is the one thing this
 /// project spends its testing budget preventing. `concat` and `equals` are
 /// exact at any code point, so those two are taken and the others are not.
-const JS_STRING_IMPORTS: [(&str, &[ValType], &[ValType]); 36] = [
+const JS_STRING_IMPORTS: [(&str, &[ValType], &[ValType]); 37] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
@@ -331,6 +339,14 @@ const JS_STRING_IMPORTS: [(&str, &[ValType], &[ValType]); 36] = [
     ("str_from_code", &[ValType::I64], &[EXTERN_REF_NULL]),
     ("read_line", &[], &[EXTERN_REF_NULL]),
     ("error_str", &[EXTERN_REF_NULL], &[]),
+    // A Kite closure the host can call.
+    //
+    // The mirror of `task_spawn`: what crosses is a reference the host cannot
+    // enter, and it comes back through the module's own `kite_invoke`
+    // trampoline. What is different is the argument — a handler is given the
+    // host value that caused it, so the trampoline takes two references rather
+    // than one.
+    ("js_func", &[ANY_REF], &[EXTERN_REF_NULL]),
 ];
 
 /// The import table in force.
@@ -505,6 +521,7 @@ fn used_imports(
                         Builtin::DrawClip => mark(host::DRAW_CLIP),
                         Builtin::DrawUnclip => mark(host::DRAW_UNCLIP),
                         Builtin::TaskSpawn => mark(host::TASK_SPAWN),
+                        Builtin::JsFunc => mark(host::JS_FUNC),
                         Builtin::TaskWakeAt => mark(host::TASK_WAKE_AT),
                         Builtin::TaskPark => mark(host::TASK_PARK),
                         Builtin::TaskWaitHost => mark(host::TASK_WAIT_HOST),
@@ -605,6 +622,7 @@ mod host {
     pub const STR_FROM_CODE: u32 = 33;
     pub const READ_LINE: u32 = 34;
     pub const ERROR_STR: u32 = 35;
+    pub const JS_FUNC: u32 = 36;
 }
 
 pub struct WasmModule {
@@ -1305,17 +1323,30 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
     // module exports the one function that can: cast it back and `call_ref`.
     let poll_ty = types.find_fn(&[], TyId::BOOL);
     let poll_trampoline = hosts.declared(host::TASK_SPAWN);
+    // The same arrangement for a handler: the host holds a closure it cannot
+    // enter, and this is the export that can. It takes the host value the
+    // handler was called with, which is the whole difference from `kite_poll`.
+    let invoke_ty = types.find_fn(&[TyId::JS_VALUE], TyId::UNIT);
+    let invoke_trampoline = hosts.declared(host::JS_FUNC);
     let trampoline_index = fn_base
         + program.fns.len() as u32
         + dispatchers.len() as u32
         + eq_fns.len() as u32
         + envs.len() as u32;
+    let invoke_index = trampoline_index + if poll_trampoline { 1 } else { 0 };
     if poll_trampoline {
         extra_type_index.push(next_fn_type);
         next_fn_type += 1;
         type_section
             .ty()
             .function(vec![ANY_REF], vec![ValType::I32]);
+    }
+    if invoke_trampoline {
+        extra_type_index.push(next_fn_type);
+        next_fn_type += 1;
+        type_section
+            .ty()
+            .function(vec![ANY_REF, EXTERN_REF_NULL], Vec::new());
     }
     // Function types for the program's own host declarations, at the end of
     // the section: an import may name any type index, and appending here
@@ -1403,6 +1434,9 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
     if poll_trampoline {
         exports.export("kite_poll", ExportKind::Func, trampoline_index);
     }
+    if invoke_trampoline {
+        exports.export("kite_invoke", ExportKind::Func, invoke_index);
+    }
     module.section(&exports);
 
     // ---- elements ----------------------------------------------------------
@@ -1450,6 +1484,9 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
     }
     if poll_trampoline {
         code.function(&compile_poll_trampoline(poll_ty, &layout));
+    }
+    if invoke_trampoline {
+        code.function(&compile_invoke_trampoline(invoke_ty, &layout));
     }
     module.section(&code);
 
@@ -1683,6 +1720,43 @@ fn compile_poll_trampoline(poll_ty: Option<TyId>, layout: &TypeLayout) -> Functi
     f.instruction(&Instruction::LocalGet(1));
     f.instruction(&Instruction::StructGet { struct_type_index: record, field_index: 1 });
     f.instruction(&Instruction::LocalGet(1));
+    f.instruction(&Instruction::StructGet { struct_type_index: record, field_index: 0 });
+    f.instruction(&Instruction::CallRef(sig));
+    f.instruction(&Instruction::End);
+    f
+}
+
+/// `kite_invoke(handler, value)`: call a Kite closure the host is holding.
+///
+/// The mirror of [`compile_poll_trampoline`], and it exists for the same reason:
+/// a closure is a GC struct, JavaScript cannot enter one, and the module has to
+/// export the one function that can. What is different is the argument — a
+/// listener is given the event that caused it — so the host value is pushed
+/// between the environment and the code, which is where `call_ref` expects a
+/// parameter to be.
+fn compile_invoke_trampoline(invoke_ty: Option<TyId>, layout: &TypeLayout) -> Function {
+    let Some((record, sig)) = invoke_ty.and_then(|ty| {
+        Some((layout.closure_type(ty)?, layout.closure_sig.get(&ty).copied()?))
+    }) else {
+        // No `fn(JsValue)` closure exists, so nothing could have been handed
+        // over. Unreachable rather than a fallback.
+        let mut f = Function::new(Vec::new());
+        f.instruction(&Instruction::Unreachable);
+        f.instruction(&Instruction::End);
+        return f;
+    };
+    let mut f = Function::new(vec![(
+        1,
+        ValType::Ref(RefType { nullable: true, heap_type: HeapType::Concrete(record) }),
+    )]);
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(record)));
+    f.instruction(&Instruction::LocalSet(2));
+    // Environment, the argument, then the code: the order `call_ref` reads.
+    f.instruction(&Instruction::LocalGet(2));
+    f.instruction(&Instruction::StructGet { struct_type_index: record, field_index: 1 });
+    f.instruction(&Instruction::LocalGet(1));
+    f.instruction(&Instruction::LocalGet(2));
     f.instruction(&Instruction::StructGet { struct_type_index: record, field_index: 0 });
     f.instruction(&Instruction::CallRef(sig));
     f.instruction(&Instruction::End);
@@ -2269,6 +2343,12 @@ impl<'a> Emitter<'a> {
                         | Builtin::IoReadLine
                         | Builtin::TimeNow
                         | Builtin::PtrSame
+                        // …and handing a closure over returns the function the
+                        // host wrapped it in. Left off this list once already,
+                        // with exactly the symptom the note above describes:
+                        // the handler arrived as `null` and the listener never
+                        // fired, with nothing failing anywhere.
+                        | Builtin::JsFunc
                 );
             }
 
@@ -2809,6 +2889,16 @@ impl<'a> Emitter<'a> {
                     self.operand(func, a);
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::TASK_SPAWN)));
+            }
+            // The closure goes over as a reference and the host hands back the
+            // function it wrapped it in. Nothing is unpacked here: entering a
+            // closure is `kite_invoke`'s job, and it is the only thing that
+            // can.
+            Builtin::JsFunc => {
+                for a in args {
+                    self.operand(func, a);
+                }
+                func.instruction(&Instruction::Call(self.hosts.at(host::JS_FUNC)));
             }
             Builtin::TaskWakeAt => {
                 for a in args {

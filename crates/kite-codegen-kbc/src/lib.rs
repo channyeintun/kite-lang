@@ -77,6 +77,9 @@ impl Native {
             Builtin::DrawClip => Native::DrawClip,
             Builtin::DrawUnclip => Native::DrawUnclip,
             Builtin::TaskSpawn => Native::TaskSpawn,
+            // The bytecode target has no host to hand a closure to. `JsValue`
+            // is refused before lowering ever reaches here.
+            Builtin::JsFunc => Native::TaskSpawn,
             Builtin::TaskWakeAt => Native::TaskWakeAt,
             Builtin::TaskPark => Native::TaskPark,
             Builtin::TaskWaitHost => Native::TaskWaitHost,

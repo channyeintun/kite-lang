@@ -3307,6 +3307,42 @@ impl<'a> Checker<'a> {
                 }
             }
 
+            // `js.func(handler) -> JsValue`.
+            //
+            // The expected type is supplied to the argument rather than
+            // inferred from it, so `js.func(|e| …)` needs no annotation on `e`
+            // — which matters because every listener a program writes goes
+            // through here and annotating each one would be noise.
+            BuiltinFn::JsFunc => {
+                if args.len() != 1 {
+                    self.arity_error("js.func", args.len(), 1, span, None);
+                    return hir::Expr { kind: ExprKind::Error, ty: TyId::ERROR, span };
+                }
+                let wanted = self.types.fn_of(vec![TyId::JS_VALUE], TyId::UNIT);
+                let handler = self.expr(&args[0], Some(wanted));
+                if handler.ty != wanted && !self.types.is_poisoned(handler.ty) {
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0200,
+                            format!(
+                                "`js.func` takes a `{}`, and this is {}",
+                                self.types.name(wanted),
+                                self.types.with_article(handler.ty)
+                            ),
+                        )
+                        .with_primary(handler.span, "not a handler")
+                        .with_note(
+                            "a handler is given the host value that caused it — an event,                              a message, whatever the thing calling it passes — and returns                              nothing",
+                        ),
+                    );
+                }
+                hir::Expr {
+                    kind: ExprKind::CallBuiltin { builtin: Builtin::JsFunc, args: vec![handler] },
+                    ty: TyId::JS_VALUE,
+                    span,
+                }
+            }
+
             BuiltinFn::TimeNow => {
                 if !args.is_empty() {
                     self.arity_error("time.now", args.len(), 0, span, None);

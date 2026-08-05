@@ -1650,6 +1650,9 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 let r = self.call_rt("kite_rt_text_from_code", &[v]).unwrap();
                 self.def(dst, r);
             }
+            // Unreachable: a program mentioning `JsValue` is refused for this
+            // target before codegen, so nothing can have built a handler to pass.
+            Builtin::JsFunc => unreachable!("js.func on a target with no host"),
             Builtin::TaskSpawn => {
                 let v = self.operand(&args[0]);
                 self.call_rt("kite_rt_task_spawn", &[v]);

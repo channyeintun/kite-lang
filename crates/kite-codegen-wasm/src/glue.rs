@@ -1179,6 +1179,20 @@ function imports() {{
         hostWaitRequest = true;
       }},
       time_now: () => BigInt(now()),
+      // A Kite closure, wrapped in something JavaScript can call.
+      //
+      // The reference is held by the wrapper and by nothing else here — no
+      // registry, no numbered handle, no table. That is the whole lifetime
+      // story: the closure lives as long as the wrapper, the wrapper lives as
+      // long as whatever the page attached it to, and the one collector traces
+      // the chain. A registry would pin every listener a page ever installed.
+      js_func: (handler) => (value) => {{
+        // Synchronous, because a listener that wanted to call
+        // `preventDefault` could not if this were deferred.
+        invoke(handler, value === undefined ? null : value);
+        // The handler may have made a sleeping task runnable, or started one.
+        wake();
+      }},
     }},
   }};
 }}
@@ -1215,6 +1229,7 @@ const millis = () =>
 const now = () => (realClock ? Math.round(millis()) : clock);
 
 export async function drive(exports) {{
+  useExports(exports);
   while (TASKS.length > 0) {{
     let polled = false;
     let completed = false;
@@ -1407,7 +1422,30 @@ export function wake() {{
 ///
 /// After this the program is alive: it has no more work to do until something
 /// happens, and when something does, `wake` brings it back.
+/// Call a Kite closure the host is holding.
+///
+/// `kite_invoke` is the module's own export and the only thing that can enter a
+/// closure. It is looked up on whichever module was handed to a driver, which
+/// is why a program using `js.func` has to be run rather than merely
+/// instantiated.
+let invokeExports = null;
+
+function invoke(handler, value) {{
+  if (invokeExports === null || typeof invokeExports.kite_invoke !== "function") {{
+    throw new Error(
+      "a handler fired before the module was given to a driver: call `run` or `resident`",
+    );
+  }}
+  invokeExports.kite_invoke(handler, value);
+}}
+
+/// Make a module's exports reachable to handlers. Both drivers call it.
+export function useExports(exports) {{
+  invokeExports = exports;
+}}
+
 export function resident(exports) {{
+  useExports(exports);
   realClock = true;
   residentExports = exports;
   pump();

@@ -1987,7 +1987,7 @@ none.
 | 23 — Size gate | ⬜ not started |
 | — View layer | ⬜ deferred past 1.0, deliberately |
 
-748 tests: unit tests per crate, an annotated compile-fail corpus, a
+751 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the host boundary and a real
 socket under Node, both string

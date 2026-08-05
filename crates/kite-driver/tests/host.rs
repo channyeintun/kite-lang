@@ -1015,3 +1015,96 @@ fn an_idle_resident_program_schedules_nothing() {
         "an idle program must not schedule anything"
     );
 }
+
+// ---- handlers --------------------------------------------------------------
+
+/// A runner with something to attach a handler to, and a way to fire it.
+const HANDLER_RUNNER: &str = "import { readFile } from \"node:fs/promises\";\n\
+     import { instantiate, resident, setWriter } from \"./app.js\";\n\
+     globalThis.bus = { onthing: null };\n\
+     const out = [];\n\
+     setWriter((l) => out.push(l));\n\
+     const exports = await instantiate(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+     exports.main();\n\
+     resident(exports);\n\
+     globalThis.bus.onthing({ tag: \"alpha\" });\n\
+     globalThis.bus.onthing({ tag: \"beta\" });\n\
+     process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+
+/// The host calls a Kite closure, with an argument, and the closure changes
+/// state that outlives it.
+///
+/// Three things at once, because they are one mechanism. The closure crosses as
+/// a reference the host cannot enter; `kite_invoke` is the export that can; and
+/// the state it updates is reached the only way this language allows — a `let`
+/// handle captured by value, mutated through a function taking `var`. A closure
+/// may not capture a `var`, and that rule is not weakened for events.
+#[test]
+fn the_host_calls_a_kite_closure_that_changes_state() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/js\n\n\
+        struct Counter {\n  var seen: int\n}\n\
+        fn bump(var c: Counter, e: JsValue) {\n\
+        \x20 c.seen = c.seen + 1\n\
+        \x20 io.print(\"saw \\(js.str_or(e, \"tag\", \"?\")) — \\(c.seen) so far\")\n\
+        }\n\
+        fn main() {\n\
+        \x20 let state = Counter{ seen: 0 }\n\
+        \x20 let handler = js.func(|e: JsValue| { bump(state, e) })\n\
+        \x20 let err = js.set(js.global(\"bus\"), \"onthing\", handler)\n\
+        \x20 if err != nil {\n    io.print(\"failed: \\(err.message())\")\n    return\n  }\n\
+        \x20 io.print(\"attached\")\n\
+        }\n";
+    let out = run_runner_under_node("handler", src, HANDLER_RUNNER, &[]);
+    assert_eq!(out, "attached\nsaw alpha — 1 so far\nsaw beta — 2 so far\n");
+}
+
+/// `js.func` produces a real function, not a null.
+///
+/// Its own test because of how it failed the first time. A builtin whose result
+/// is not on the backend's returns-a-value list has that result silently
+/// dropped — so the handler arrived as `null`, the listener never fired, and
+/// nothing anywhere reported a problem. A test that only fires the handler
+/// cannot tell that apart from a trampoline that does not work.
+#[test]
+fn js_func_returns_a_callable_function() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/js\n\n\
+        fn main() {\n\
+        \x20 let handler = js.func(|e: JsValue| { io.print(\"fired\") })\n\
+        \x20 io.print(js.kind_of(handler))\n\
+        }\n";
+    // Its own runner: this program attaches nothing, so a runner that fires
+    // `bus.onthing` would fail on the null it is here to detect.
+    let runner = "import { readFile } from \"node:fs/promises\";\n\
+         import { instantiate, resident, setWriter } from \"./app.js\";\n\
+         const out = [];\n\
+         setWriter((l) => out.push(l));\n\
+         const exports = await instantiate(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         exports.main();\n\
+         resident(exports);\n\
+         process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+    let out = run_runner_under_node("jsfunckind", src, runner, &[]);
+    assert_eq!(out, "function\n");
+}
+
+/// A handler that is not `fn(JsValue)` is refused, and the message says what a
+/// handler is rather than printing two type names at the reader.
+#[test]
+fn a_handler_of_the_wrong_shape_is_refused() {
+    let src = "use std/js\n\n\
+        fn main() {\n\
+        \x20 let handler = js.func(|n: int| { io.print(n) })\n\
+        \x20 io.print(js.kind_of(handler))\n\
+        }\n";
+    let c = compile(Path::new("badhandler.kite"), src, Emit::Check);
+    assert!(c.failed(), "a handler taking an `int` must not compile");
+    let text = c.render_diagnostics();
+    assert!(text.contains("not a handler"), "{}", text);
+}
