@@ -339,6 +339,78 @@ pub fn dialog<Msg>(
     )
 }
 
+/// A full-screen dialog: the one that covers the window instead of floating
+/// over it.
+///
+/// Material's answer for a compact window and a task with more in it than a
+/// question — composing a message, editing a contact. It is a different
+/// component from [`dialog`] rather than a size of it, and the difference is
+/// visible in the shape: it has a bar with a close control and a confirming
+/// action instead of a row of text buttons, because on a full screen the
+/// actions are at the top where a thumb is not.
+///
+/// No scrim and no corners. There is nothing behind it to darken and no edge to
+/// round — it is the screen.
+pub fn full_screen_dialog<Msg>(
+    name: str,
+    s: Scheme,
+    title: str,
+    leading: [ui.Node<Msg>],
+    actions: [ui.Node<Msg>],
+    children: [ui.Node<Msg>],
+    size: ui.Size,
+) -> ui.Node<Msg> {
+    let role = title_large()
+    var top: [ui.Node<Msg>] = []
+    for one in leading {
+        top.push(one)
+    }
+    top.push(
+        ui.decorated(
+            ui.text_of(
+                "\(name)-title",
+                ui.grown(ui.in_font(ui.style(), role.size, role.weight), 1.0),
+                title,
+            ),
+            ui.vertically_centered(ui.ink(s.on_surface)),
+        ),
+    )
+    for one in actions {
+        top.push(one)
+    }
+    let bar: ui.Node<Msg> = ui.box_of(
+        "\(name)-bar",
+        ui.spaced(
+            ui.padded(
+                tall(ui.Style{..ui.row(), align: ui.Align.Center }, 56.0),
+                space(4),
+            ),
+            space(3),
+        ),
+        top,
+    )
+    var rows: [ui.Node<Msg>] = [bar, divider("\(name)-rule", s)]
+    for one in children {
+        rows.push(one)
+    }
+    return ui.decorated(
+        ui.box_of(
+            name,
+            ui.spaced(
+                ui.Style {
+                    ..ui.column(),
+                    align: ui.Align.Stretch,
+                    width: size.width,
+                    height: size.height,
+                },
+                space(2),
+            ),
+            rows,
+        ),
+        ui.filled(s.surface),
+    )
+}
+
 /// A dialog and its scrim, arranged over a window of a given size.
 ///
 /// `amount` is how far the dialog has come in, from 0 to 1, which the

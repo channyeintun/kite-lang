@@ -167,6 +167,178 @@ pub fn paint_circular_indeterminate(frames: [ui.Frame], name: str, s: Scheme, ph
     arc(box.rect, -math.pi() / 2.0 + turn, math.tau() * sweep, s.primary)
 }
 
+// ---- loading indicator ----------------------------------------------------------------
+//
+// Material 3 Expressive's third indicator, and the one that is neither of the
+// other two: a shape that turns and *changes shape* while it turns. It says
+// "working" without claiming to know how much is left, which is what a spinner
+// has always been for, and Material's answer is a sequence of seven soft
+// polygons — a cookie, a clover, a burst — morphing into one another.
+//
+// ---- what a shape is at this boundary ---------------------------------------------
+//
+// There are no paths. `draw.rrect` draws an axis-aligned rounded rectangle and
+// there is no transform to turn one with, so a seven-lobed clover cannot be
+// drawn as a shape and cannot be rotated if it were.
+//
+// It can be *filled*. The shapes are all star-convex about their centre, so
+// each is a radius as a function of angle, and a run of horizontal bars from
+// the left edge of the shape to the right edge at each height fills it exactly.
+// That is scanline rasterisation, which is what a GPU does underneath, done at
+// forty-eight rows instead of at the pixel — coarse enough to see if you look
+// for it on a large one, and honest about being a fill rather than a path.
+//
+// The morph is likewise continuous rather than a sequence of seven. A polygon's
+// radius formula takes the side count as a number, and nothing stops that
+// number being 5.4: what comes out is a smooth blend between a pentagon and a
+// hexagon. Material's seven shapes are a designer's choice of seven points
+// along that continuum, and the continuum is what this package can draw.
+
+/// Material's contained loading indicator is 48dp; the shape inside it is 38.
+pub fn LOADING_SIDE() -> float {
+    return 48.0
+}
+
+fn LOADING_SHAPE() -> float {
+    return 38.0
+}
+
+/// How many bars a filled shape is drawn out of.
+///
+/// Fixed rather than proportional to the size, for the reason the arc's step
+/// count is fixed: the renderer keeps a retained scene indexed by draw call,
+/// and a frame whose call count differs from the last cannot be patched. An
+/// indicator is the one thing on a screen that redraws every frame, so it is
+/// the last thing that should force a full repaint while it does.
+fn LOADING_ROWS() -> int {
+    return 48
+}
+
+/// The space a loading indicator occupies. It draws nothing — see the note
+/// above — so it is a square of the right size and no more.
+pub fn loading_indicator<Msg>(name: str, side: float) -> ui.Node<Msg> {
+    return ui.box_of(name, ui.sized(ui.style(), side, side), [])
+}
+
+/// The distance from the centre to the edge of a rounded regular polygon, as a
+/// fraction of the circle it fits in.
+///
+/// `sides` need not be a whole number, and that is the point of it: 5.4 is a
+/// real shape part-way between a pentagon and a hexagon, which is how one
+/// Material shape becomes the next without either of them being drawn twice.
+/// `rounding` blends toward the circle — 0 is the polygon exactly, 1 is a
+/// circle, and Material's shapes live near the middle.
+///
+/// Public because it is the part of a morphing blob with a right answer: at a
+/// vertex it is 1, at the middle of a face it is the apothem, and it is the
+/// same at every equivalent angle however far the shape has turned.
+///
+/// Angle zero is a *vertex*, not a face — the shape points east before it is
+/// spun. Which of the two is at zero is arbitrary and has to be written down,
+/// because the difference is half a face and a caller checking one against the
+/// other would find every answer wrong by exactly that.
+pub fn polygon_radius(sides: float, rounding: float, angle: float) -> float {
+    if sides < 3.0 {
+        return 1.0
+    }
+    let step = math.tau() / sides
+    // Folded into one wedge and measured from that wedge's middle, so the
+    // formula below is the same for every face.
+    let within = angle - math.floor(angle / step) * step - step / 2.0
+    let apothem = math.cos(math.pi() / sides)
+    let sharp = apothem / math.cos(within)
+    return math.lerp(sharp, 1.0, clampf(rounding, 0.0, 1.0))
+}
+
+/// How many sides the shape has at a given point in its cycle.
+///
+/// Four to seven and back, on a cosine so the loop closes on itself: a sequence
+/// that ran four to seven and jumped back would show the jump once a cycle,
+/// which is the one frame an indicator must not have.
+pub fn loading_sides(phase: float) -> float {
+    let t = phase - math.floor(phase)
+    return math.lerp(4.0, 7.0, (1.0 - math.cos(math.tau() * t)) / 2.0)
+}
+
+/// The uncontained loading indicator: the shape alone, in the accent.
+pub fn paint_loading(frames: [ui.Frame], name: str, s: Scheme, phase: float) {
+    paint_loading_shape(frames, name, s.primary, phase)
+}
+
+/// The contained one: the same shape on a filled circle, for a loading
+/// indicator that has to stay visible over content rather than over a surface.
+pub fn paint_contained_loading(frames: [ui.Frame], name: str, s: Scheme, phase: float) {
+    let box = ui.frame_of(frames, name)
+    if box == nil {
+        return
+    }
+    let rect = box.rect
+    let side = minf(rect.width, rect.height)
+    if side <= 0.0 {
+        return
+    }
+    let cx = rect.x + rect.width / 2.0
+    let cy = rect.y + rect.height / 2.0
+    draw.rrect(cx - side / 2.0, cy - side / 2.0, side, side, side / 2.0, s.secondary_container)
+    paint_loading_shape(frames, name, s.primary, phase)
+}
+
+fn paint_loading_shape(frames: [ui.Frame], name: str, colour: int, phase: float) {
+    let box = ui.frame_of(frames, name)
+    if box == nil {
+        return
+    }
+    let rect = box.rect
+    let side = minf(rect.width, rect.height)
+    if side <= 0.0 {
+        return
+    }
+    let t = phase - math.floor(phase)
+    // The shape occupies the same fraction of its box as Material's 38 in 48,
+    // so an indicator asked for at any size keeps its proportions.
+    let radius = side / 2.0 * (LOADING_SHAPE() / LOADING_SIDE())
+    let cx = rect.x + rect.width / 2.0
+    let cy = rect.y + rect.height / 2.0
+    // Two turns per cycle, which is the rate Material's own indeterminate
+    // circular indicator spins at — the two are meant to look related.
+    blob(cx, cy, radius, loading_sides(t), 0.4, math.tau() * 2.0 * t, colour)
+}
+
+/// A star-convex shape, filled as a stack of horizontal bars.
+///
+/// The boundary is sampled at a fixed number of angles and each sample widens
+/// the row it lands in. The sampling is dense enough that no row is skipped —
+/// consecutive samples are never a whole row apart in height, which is what
+/// would leave a gap across the middle where the shape is steepest.
+fn blob(cx: float, cy: float, radius: float, sides: float, rounding: float, spin: float, colour: int) {
+    let rows = LOADING_ROWS()
+    let height = radius * 2.0 / (rows as float)
+    var left: [float] = []
+    var right: [float] = []
+    for i in 0..rows {
+        // An empty row is one whose left edge is past its right: nothing is
+        // drawn for it and the call is still made, which is what keeps the
+        // count the same from frame to frame.
+        left.push(radius * 2.0)
+        right.push(-radius * 2.0)
+    }
+    let samples = 240
+    for k in 0..samples {
+        let angle = math.tau() * ((k as float) / (samples as float))
+        let r = radius * polygon_radius(sides, rounding, angle - spin)
+        let x = cx + r * math.cos(angle)
+        let y = cy + r * math.sin(angle)
+        var row = math.trunc_to((y - (cy - radius)) / height)
+        row = clamp(row, 0, rows - 1)
+        left[row] = minf(left[row], x - cx)
+        right[row] = maxf(right[row], x - cx)
+    }
+    for i in 0..rows {
+        let width = maxf(0.0, right[i] - left[i])
+        draw.rrect(cx + left[i], cy - radius + (i as float) * height, width, height, 0.0, colour)
+    }
+}
+
 /// One arc, as the run of overlapping circles a stroked arc is once it has been
 /// flattened.
 ///

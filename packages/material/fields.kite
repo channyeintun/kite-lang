@@ -138,6 +138,157 @@ pub fn search_field<Msg>(
     return whole
 }
 
+// ---- search ------------------------------------------------------------------------
+//
+// Material's search is two components rather than one, and the pair is the
+// point: a **search bar** is the resting state — a pill somewhere on the screen
+// with a hint in it — and a **search view** is what replaces it while somebody
+// is typing, covering what was behind with the suggestions. One of them is a
+// control and the other is a surface, and an application shows exactly one at a
+// time.
+//
+// [`search_field`] above is the bar with nothing either side of it. This is the
+// real one, which has a menu button at the leading edge and an avatar at the
+// trailing edge, because that is what a search bar is on every screen that has
+// one.
+
+pub fn SEARCH_HEIGHT() -> float {
+    return 56.0
+}
+
+/// A search bar: the pill, with room either side of the query.
+///
+/// The editable node is the text *inside* the row rather than the row itself,
+/// which is what lets the leading and trailing controls be real controls. A
+/// renderer that makes an element for the field makes it exactly the size of
+/// the text, so the menu button beside it stays pressable — declaring the whole
+/// row editable would have put an input over both of them.
+pub fn search_bar<Msg>(
+    s: Scheme,
+    id: str,
+    value: str,
+    placeholder: str,
+    leading: [ui.Node<Msg>],
+    trailing: [ui.Node<Msg>],
+    width: float,
+    state: State,
+) -> ui.Node<Msg> {
+    let role = body_large()
+    let container = layered(s.surface_container_high, s.on_surface, state)
+    var decor = ui.rounded(container, SHAPE_FULL())
+    if state.focus > 0.0 {
+        decor = ui.bordered(decor, s.primary, math.lerp(0.0, 2.0, state.focus))
+    }
+    let ink = if value.len() == 0 { s.on_surface_variant } else { s.on_surface }
+    let shown = if value.len() == 0 { placeholder } else { value }
+    var children: [ui.Node<Msg>] = []
+    for one in leading {
+        children.push(one)
+    }
+    children.push(
+        ui.editable(
+            ui.decorated(
+                ui.text_of(
+                    id,
+                    ui.grown(ui.in_font(ui.style(), role.size, role.weight), 1.0),
+                    shown,
+                ),
+                ui.vertically_centered(ui.ink(ink)),
+            ),
+            id,
+            value,
+            placeholder,
+        ),
+    )
+    for one in trailing {
+        children.push(one)
+    }
+    let style = ui.spaced(
+        ui.padded(
+            ui.Style {
+                ..ui.row(),
+                align: ui.Align.Center,
+                width: width,
+                height: SEARCH_HEIGHT(),
+            },
+            space(2),
+        ),
+        space(2),
+    )
+    let whole: ui.Node<Msg> = ui.decorated(
+        ui.box_of("\(id)-bar", style, children),
+        ui.inked(decor, ink),
+    )
+    if state.disabled {
+        return ui.disabled(whole)
+    }
+    return whole
+}
+
+/// A search view: the surface that replaces a bar while somebody is searching.
+///
+/// Full-screen, square-cornered and on a container tone, which is Material's
+/// arrangement for a compact window: the view *is* the screen while it is open,
+/// so a corner radius would show the screen it replaced through the gap.
+///
+/// The header is a node — usually a [`search_bar`] with a back arrow leading —
+/// for the reason every container in this package takes its controls rather
+/// than building them: what the back arrow means is the application's.
+pub fn search_view<Msg>(
+    name: str,
+    s: Scheme,
+    header: ui.Node<Msg>,
+    results: [ui.Node<Msg>],
+    size: ui.Size,
+) -> ui.Node<Msg> {
+    var children: [ui.Node<Msg>] = [header, divider("\(name)-rule", s)]
+    for one in results {
+        children.push(one)
+    }
+    return ui.decorated(
+        ui.box_of(
+            name,
+            ui.Style {
+                ..ui.column(),
+                align: ui.Align.Stretch,
+                width: size.width,
+                height: size.height,
+            },
+            children,
+        ),
+        ui.filled(surface_at(s, LEVEL_3())),
+    )
+}
+
+/// The same on a window with room to spare: a rounded card of suggestions that
+/// hangs under the bar rather than replacing the screen.
+///
+/// It is a portal, and has to be — a docked view opens *over* the form under it
+/// and pushes nothing down, which is the whole difference between this and a
+/// list that appeared in the layout.
+pub fn docked_search_view<Msg>(
+    name: str,
+    s: Scheme,
+    results: [ui.Node<Msg>],
+    width: float,
+) -> ui.Node<Msg> {
+    return ui.portal(
+        ui.decorated(
+            ui.box_of(
+                name,
+                ui.Style {
+                    ..ui.column(),
+                    align: ui.Align.Stretch,
+                    width: width,
+                    padding: ui.insets_xy(0.0, space(2)),
+                },
+                results,
+            ),
+            ui.rounded(surface_at(s, LEVEL_3()), SHAPE_EXTRA_LARGE()),
+        ),
+    )
+}
+
 /// What a search field shows when nobody can draw it a real caret.
 ///
 /// No `|` anywhere. This field's control node *is* its text node, so

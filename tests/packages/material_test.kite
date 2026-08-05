@@ -591,6 +591,496 @@ fn one_of_everything(s: material.Scheme, inter: material.Interaction) -> ui.Node
     )
 }
 
+// ---- the expressive set -----------------------------------------------------------
+//
+// The components Material 3 Expressive added, and the ones the first pass of
+// this package left out. Checked the same way as the rest: they lay out, they
+// are real rectangles, and the arithmetic under the ones that have any is right.
+
+fn expressive_checks() -> [error] {
+    var out: [error] = []
+    let s = material.light()
+    let r = material.rest()
+    let size = ui.Size{ width: 1200.0, height: 4000.0 }
+
+    // A button group's squeeze keeps the row exactly as wide as it was. That is
+    // the property: the pressed button grows, its neighbours give up the same
+    // width between them, and nothing after the group moves.
+    let resting = [100.0, 80.0, 60.0]
+    let idle = material.squeezed_widths(resting, [0.0, 0.0, 0.0])
+    out.push(near(idle[0], 100.0, "nothing pressed, nothing moves"))
+    out.push(near(idle[1], 80.0, "nor the second"))
+    out.push(near(idle[2], 60.0, "nor the third"))
+    let held = material.squeezed_widths(resting, [0.0, 1.0, 0.0])
+    out.push(near(held[0] + held[1] + held[2], 240.0, "a squeezed group is the same width"))
+    out.push(test.is_true(held[1] > 80.0, "the pressed one is wider"))
+    out.push(test.is_true(held[0] < 100.0, "and its neighbours narrower"))
+    out.push(test.is_true(held[2] < 60.0, "both of them"))
+    // Half-pressed is half-way, which is what makes the squeeze an animation
+    // rather than two pictures.
+    let halfway = material.squeezed_widths(resting, [0.0, 0.5, 0.0])
+    out.push(test.is_true(halfway[1] > 80.0, "half a press is still wider"))
+    out.push(test.is_true(halfway[1] < held[1], "but not as wide as a whole one"))
+    out.push(near(halfway[0] + halfway[1] + halfway[2], 240.0, "and the width is still conserved"))
+    // Every member pressed at once cannot happen with one pointer and can be
+    // built by hand, so it is a branch rather than an assumption.
+    let all_held = material.squeezed_widths(resting, [1.0, 1.0, 1.0])
+    out.push(test.is_true(all_held[0] > 100.0, "with nobody to take from, everyone keeps their gain"))
+
+    // A FAB menu's items arrive in sequence, and the sequence is closed at both
+    // ends: nothing has started at 0 and everything has finished at 1.
+    out.push(near(material.stagger(0.0, 0, 4), 0.0, "closed, the first item is closed"))
+    out.push(near(material.stagger(1.0, 3, 4), 1.0, "open, the last item is open"))
+    out.push(near(material.stagger(1.0, 0, 4), 1.0, "and so is the first"))
+    out.push(
+        test.is_true(
+            material.stagger(0.5, 0, 4) > material.stagger(0.5, 3, 4),
+            "the item nearest the trigger leads",
+        ),
+    )
+    out.push(near(material.stagger(0.5, 0, 1), 0.5, "a lone item is the whole animation"))
+
+    // A range slider's two handles do not share a mapping, and the mappings are
+    // each other's inverse of what the layout draws.
+    let track = ui.Rect{ x: 0.0, y: 0.0, width: 216.0, height: 40.0 }
+    out.push(near(material.range_low_at(track, 0.0), 0.0, "the far left is zero"))
+    out.push(near(material.range_high_at(track, 216.0), 1.0, "and the far right is one"))
+    out.push(
+        test.is_true(
+            material.range_low_at(track, 100.0) > material.range_high_at(track, 100.0),
+            "the same point names a lower value for the trailing handle",
+        ),
+    )
+    out.push(
+        test.equal_bool(
+            material.grabbing_low(track, 0.2, 0.8, 20.0),
+            true,
+            "a press near the low handle takes the low handle",
+        ),
+    )
+    out.push(
+        test.equal_bool(
+            material.grabbing_low(track, 0.2, 0.8, 200.0),
+            false,
+            "and one near the high handle takes the high one",
+        ),
+    )
+    out.push(
+        test.equal_bool(
+            material.grabbing_low(track, 0.5, 0.5, 108.0),
+            true,
+            "a closed range hands the tie to the low handle",
+        ),
+    )
+
+    // A centred slider is zero in the middle and signed either side of it.
+    out.push(near(material.centred_value_at(track, 0.0), -1.0, "the far left is minus one"))
+    out.push(near(material.centred_value_at(track, 216.0), 1.0, "the far right is one"))
+    out.push(near(material.centred_value_at(track, 108.0), 0.0, "and the middle is nought"))
+
+    // A vertical slider counts up, which is the inverse of the y axis and the
+    // one thing about it that can be got backwards.
+    let column = ui.Rect{ x: 0.0, y: 0.0, width: 40.0, height: 216.0 }
+    out.push(near(material.vertical_value_at(column, 0.0), 1.0, "the top is one"))
+    out.push(near(material.vertical_value_at(column, 216.0), 0.0, "and the bottom is nought"))
+
+    // The loading indicator's shape: a polygon's radius is one at a vertex and
+    // its apothem at the middle of a face, and rounding blends the two toward
+    // the circle they are inscribed in.
+    let square = 4.0
+    // Angle zero is a vertex, and the middle of a face is half a step further.
+    let mid_face = math.tau() / square / 2.0
+    out.push(near(material.polygon_radius(square, 0.0, 0.0), 1.0, "a vertex is on the circle"))
+    out.push(
+        near(
+            material.polygon_radius(square, 0.0, mid_face),
+            math.cos(math.pi() / square),
+            "and a face's middle is the apothem",
+        ),
+    )
+    out.push(near(material.polygon_radius(square, 1.0, 0.0), 1.0, "fully rounded is a circle"))
+    out.push(near(material.polygon_radius(square, 1.0, mid_face), 1.0, "at every angle"))
+    // A shape rotated by a whole face is the same shape, which is what makes
+    // the spin continuous rather than a jitter.
+    let step = math.tau() / 5.0
+    out.push(
+        near(
+            material.polygon_radius(5.0, 0.4, 0.3),
+            material.polygon_radius(5.0, 0.4, 0.3 + step),
+            "a face further round is the same shape",
+        ),
+    )
+    // The side count is four at the start of a cycle, back to four at the end,
+    // and seven in the middle — a loop with no seam in it.
+    out.push(near(material.loading_sides(0.0), 4.0, "a cycle starts at four sides"))
+    out.push(near(material.loading_sides(0.5), 7.0, "swells to seven"))
+    out.push(near(material.loading_sides(1.0), 4.0, "and closes where it opened"))
+
+    // The icon button's size scale, which is the common buttons' scale applied
+    // to a square: the target is the size and the glyph scales with it.
+    out.push(near(material.icon_button_xsmall().height, 32.0, "an extra-small icon button is 32"))
+    out.push(near(material.icon_button_small().height, 40.0, "a small one is 40"))
+    out.push(near(material.icon_button_medium().height, 56.0, "a medium one is 56"))
+    out.push(near(material.icon_button_large().height, 96.0, "a large one is 96"))
+    out.push(near(material.icon_button_xlarge().height, 136.0, "and an extra-large one is 136"))
+    out.push(
+        test.is_true(
+            material.icon_button_xlarge().icon > material.icon_button_xsmall().icon,
+            "and the glyph grows with the target",
+        ),
+    )
+    for sizing in [
+        material.icon_button_xsmall(),
+        material.icon_button_small(),
+        material.icon_button_medium(),
+        material.icon_button_large(),
+        material.icon_button_xlarge(),
+    ] {
+        let want = sizing.height
+        let node: ui.Node<Msg> = material.icon_button_of(
+            s,
+            "sized",
+            Msg.Pressed("sized"),
+            "★",
+            sizing,
+            r,
+        )
+        let box = ui.frame_of(ui.layout(node, size), "sized")
+        if box == nil {
+            out.push(test.fail("an icon button at \(want) lays out"))
+        } else {
+            out.push(near(box.rect.width, want, "an icon button is as wide as its size"))
+            out.push(near(box.rect.height, want, "and as tall"))
+        }
+    }
+
+    // And the lot of them lay out.
+    let gallery = ui.layout(expressive_gallery(s), size)
+    out.push(test.is_true(gallery.len() > 100, "the expressive gallery lays out"))
+    var empty = 0
+    for frame in gallery {
+        if frame.is_control {
+            if frame.rect.width <= 0.0 || frame.rect.height <= 0.0 {
+                empty += 1
+            }
+        }
+    }
+    out.push(test.equal_int(empty, 0, "no expressive control lays out to nothing"))
+
+    // A date cell is a 48dp square, which is Material's touch target and the
+    // reason a calendar is 360 wide.
+    let when = material.calendar(
+        material.date(2026, 8, 1),
+        material.date(2026, 8, 4),
+        material.date(2026, 8, 5),
+    )
+    let picker: ui.Node<Msg> = material.docked_date_picker(
+        s,
+        "when",
+        when,
+        material.month_nav("when-back", Msg.Pressed("back"), "when-next", Msg.Pressed("next")),
+        |day: int| Msg.Pressed("day"),
+        |day: int| material.rest(),
+    )
+    let laid = ui.layout(picker, size)
+    let cell = ui.frame_of(laid, material.day_id("when", 4))
+    if cell == nil {
+        out.push(test.fail("a day cell lays out"))
+        return out
+    }
+    out.push(near(cell.rect.width, 48.0, "a day is a forty-eight-dp square"))
+    out.push(near(cell.rect.height, 48.0, "on both axes"))
+    let whole = ui.frame_of(laid, "when")
+    if whole != nil {
+        out.push(near(whole.rect.width, material.PICKER_WIDTH(), "and the calendar is seven of them wide"))
+    }
+    // Every day of the month is reachable, and no day outside it is.
+    out.push(test.is_true(ui.frame_of(laid, material.day_id("when", 31)) != nil, "the thirty-first is there"))
+    out.push(test.is_true(ui.frame_of(laid, material.day_id("when", 32)) == nil, "and the thirty-second is not"))
+
+    // A day outside a range paints no band at all. Filling it with the surface
+    // colour would be right only if the picker were sitting on `surface`, and a
+    // picker never is — so every cell would have shown as a lighter square.
+    let plain_band = ui.frame_of(laid, "\(material.day_id("when", 20))-band-a")
+    if plain_band == nil {
+        out.push(test.fail("a day's band lays out"))
+        return out
+    }
+    out.push(test.is_true(plain_band.decor.fill == nil, "an ordinary day paints no band"))
+
+    // Inside a range it does, and the ends carry it on one side only — which is
+    // what makes the band appear to start under the first day's circle.
+    let range = material.Calendar{
+        ..when,
+        from: material.date(2026, 8, 4),
+        to: material.date(2026, 8, 9),
+    }
+    let banded: ui.Node<Msg> = material.docked_date_picker(
+        s,
+        "range",
+        range,
+        material.month_nav("r-back", Msg.Pressed("back"), "r-next", Msg.Pressed("next")),
+        |day: int| Msg.Pressed("day"),
+        |day: int| material.rest(),
+    )
+    let spread = ui.layout(banded, size)
+    let middle = ui.frame_of(spread, "\(material.day_id("range", 6))-band-a")
+    let start_lead = ui.frame_of(spread, "\(material.day_id("range", 4))-band-a")
+    let start_tail = ui.frame_of(spread, "\(material.day_id("range", 4))-band-b")
+    let past_end = ui.frame_of(spread, "\(material.day_id("range", 10))-band-a")
+    // Narrowing takes one local and one `if` each, not a disjunction of four.
+    if middle == nil {
+        out.push(test.fail("a banded day lays out"))
+        return out
+    }
+    if start_lead == nil {
+        out.push(test.fail("a range's first day lays out"))
+        return out
+    }
+    if start_tail == nil {
+        out.push(test.fail("and its trailing half"))
+        return out
+    }
+    if past_end == nil {
+        out.push(test.fail("a day past the end lays out"))
+        return out
+    }
+    out.push(test.is_true(middle.decor.fill != nil, "a day inside the range is banded"))
+    out.push(test.is_true(start_lead.decor.fill == nil, "the first day has nothing before it"))
+    out.push(test.is_true(start_tail.decor.fill != nil, "and the band running on after it"))
+    out.push(test.is_true(past_end.decor.fill == nil, "a day past the end is not banded"))
+
+    // A clock face reserves its square even though it draws nothing until
+    // `paint_time_dial` is called, which is the arrangement the circular
+    // progress indicator already uses.
+    let dial_node: ui.Node<Msg> = material.time_dial("face")
+    let dial = ui.layout(dial_node, size)
+    let face = ui.frame_of(dial, "face")
+    if face != nil {
+        out.push(near(face.rect.width, material.TIME_DIAL_SIDE(), "a dial is 256 across"))
+        out.push(near(face.rect.height, material.TIME_DIAL_SIDE(), "and 256 down"))
+    }
+    return out
+}
+
+/// One of each of the components this pass added, in a column.
+fn expressive_gallery(s: material.Scheme) -> ui.Node<Msg> {
+    let r = material.rest()
+    let on = material.when_selected(true, false)
+    let held = material.State{..material.rest(), press: 1.0, pressed: true }
+    let when = material.calendar(
+        material.date(2026, 8, 1),
+        material.date(2026, 8, 4),
+        material.date(2026, 8, 5),
+    )
+    let range = material.Calendar{
+        ..when,
+        from: material.date(2026, 8, 4),
+        to: material.date(2026, 8, 9),
+    }
+    let nav = material.month_nav("x-back", Msg.Pressed("back"), "x-next", Msg.Pressed("next"))
+    let hands = material.clock(
+        10,
+        47,
+        "x-hour",
+        Msg.Pressed("hour"),
+        "x-minute",
+        Msg.Pressed("minute"),
+        "x-am",
+        Msg.Pressed("am"),
+        "x-pm",
+        Msg.Pressed("pm"),
+    )
+    let group = [
+        material.segment("x-g1", Msg.Pressed("x-g1"), "Day", true),
+        material.segment("x-g2", Msg.Pressed("x-g2"), "Week", false),
+        material.segment("x-g3", Msg.Pressed("x-g3"), "Month", false),
+    ]
+    return ui.box_of(
+        "expressive",
+        ui.spaced(ui.Style{..ui.column(), align: ui.Align.Start }, 8.0),
+        [
+            material.button_group(
+                "x-group",
+                [
+                    material.filled_button(s, "x-b1", Msg.Pressed("x-b1"), "One", r),
+                    material.outlined_button(s, "x-b2", Msg.Pressed("x-b2"), "Two", r),
+                ],
+            ),
+            material.connected_button_group(s, "x-connected", group, [on, r, held]),
+            material.split_button(
+                s,
+                "x-split",
+                material.split_action("x-lead", Msg.Pressed("x-lead"), "Send", "x-more", Msg.Pressed("x-more")),
+                r,
+                r,
+            ),
+            material.fab_menu(
+                "x-fabmenu",
+                [
+                    material.fab_menu_item(s, "x-fm1", Msg.Pressed("x-fm1"), "✉", "Message", 1.0, r),
+                    material.fab_menu_item(s, "x-fm2", Msg.Pressed("x-fm2"), "☎", "Call", 1.0, r),
+                ],
+                material.fab_menu_toggle(s, "x-fabtoggle", Msg.Pressed("x-fabtoggle"), true, on),
+            ),
+            material.docked_toolbar(
+                "x-docked",
+                s,
+                [
+                    material.icon_button(s, "x-t1", Msg.Pressed("x-t1"), "★", r),
+                    material.icon_button(s, "x-t2", Msg.Pressed("x-t2"), "✎", r),
+                ],
+                600.0,
+            ),
+            material.floating_toolbar(
+                "x-float",
+                s,
+                [material.icon_button(s, "x-t3", Msg.Pressed("x-t3"), "★", r)],
+            ),
+            material.vibrant_floating_toolbar(
+                "x-vibrant",
+                s,
+                [material.icon_button(s, "x-t4", Msg.Pressed("x-t4"), "★", r)],
+            ),
+            material.vertical_floating_toolbar(
+                "x-upright",
+                s,
+                [material.icon_button(s, "x-t5", Msg.Pressed("x-t5"), "★", r)],
+            ),
+            material.navigation_rail_expanded(
+                "x-rail",
+                s,
+                [],
+                [
+                    material.expanded_rail_item(s, "x-r1", Msg.Pressed("x-r1"), "♫", "Library", true, 1.0, on),
+                    material.expanded_rail_item(s, "x-r2", Msg.Pressed("x-r2"), "☰", "Browse", false, 1.0, r),
+                ],
+                400.0,
+                1.0,
+            ),
+            material.carousel(
+                "x-carousel",
+                s,
+                material.multi_browse(180.0),
+                [empty(), empty(), empty(), empty()],
+                600.0,
+            ),
+            material.docked_date_picker(
+                s,
+                "x-docked-date",
+                when,
+                nav,
+                |day: int| Msg.Pressed("day"),
+                |day: int| material.rest(),
+            ),
+            material.modal_date_picker(
+                s,
+                "x-modal-date",
+                when,
+                material.month_nav("y-back", Msg.Pressed("back"), "y-next", Msg.Pressed("next")),
+                |day: int| Msg.Pressed("day"),
+                |day: int| material.rest(),
+                [material.text_button(s, "x-ok", Msg.Pressed("x-ok"), "OK", r)],
+            ),
+            material.date_input(s, "x-date-input", "x-date-field", "04/08/2026", "DD/MM/YYYY", "", r, []),
+            material.date_range_picker(
+                s,
+                "x-range-date",
+                range,
+                material.month_nav("z-back", Msg.Pressed("back"), "z-next", Msg.Pressed("next")),
+                |day: int| Msg.Pressed("day"),
+                |day: int| material.rest(),
+                [material.icon_button(s, "x-close", Msg.Pressed("x-close"), "✕", r)],
+                [material.text_button(s, "x-save", Msg.Pressed("x-save"), "Save", r)],
+                ui.Size { width: 600.0, height: 700.0 },
+            ),
+            material.time_picker(s, "x-time", hands, []),
+            material.time_input(
+                s,
+                "x-time-input",
+                material.Clock {
+                    ..hands,
+                    hour_id: "w-hour",
+                    minute_id: "w-minute",
+                    am_id: "w-am",
+                    pm_id: "w-pm",
+                },
+                [],
+            ),
+            material.loading_indicator("x-loading", material.LOADING_SIDE()),
+            material.search_bar(
+                s,
+                "x-search",
+                "",
+                "Search",
+                [material.icon_button(s, "x-menu", Msg.Pressed("x-menu"), "☰", r)],
+                [material.icon_button(s, "x-mic", Msg.Pressed("x-mic"), "🎤", r)],
+                360.0,
+                r,
+            ),
+            material.search_view(
+                "x-view",
+                s,
+                material.search_bar(s, "x-search2", "cat", "Search", [], [], 360.0, r),
+                [material.list_item(s, "x-hit", Msg.Pressed("x-hit"), "Cats", [], r)],
+                ui.Size { width: 360.0, height: 400.0 },
+            ),
+            material.docked_search_view(
+                "x-docked-view",
+                s,
+                [material.list_item(s, "x-hit2", Msg.Pressed("x-hit2"), "Kittens", [], r)],
+                360.0,
+            ),
+            material.full_screen_dialog(
+                "x-full",
+                s,
+                "New message",
+                [material.icon_button(s, "x-x", Msg.Pressed("x-x"), "✕", r)],
+                [material.text_button(s, "x-send", Msg.Pressed("x-send"), "Send", r)],
+                empty(),
+                ui.Size { width: 600.0, height: 500.0 },
+            ),
+            material.tonal_icon_toggle(s, "x-tonal-toggle", Msg.Pressed("x-tonal-toggle"), "★", true, on),
+            material.outlined_icon_toggle(s, "x-out-toggle", Msg.Pressed("x-out-toggle"), "★", true, on),
+            material.icon_button_of(
+                s,
+                "x-icon-large",
+                Msg.Pressed("x-icon-large"),
+                "★",
+                material.icon_button_large(),
+                r,
+            ),
+            material.filled_icon_button_of(
+                s,
+                "x-icon-filled-xl",
+                Msg.Pressed("x-icon-filled-xl"),
+                "★",
+                material.icon_button_xlarge(),
+                r,
+            ),
+            material.tonal_icon_button_of(
+                s,
+                "x-icon-tonal-xs",
+                Msg.Pressed("x-icon-tonal-xs"),
+                "★",
+                material.icon_button_xsmall(),
+                r,
+            ),
+            material.outlined_icon_button_of(
+                s,
+                "x-icon-out-md",
+                Msg.Pressed("x-icon-out-md"),
+                "★",
+                material.icon_button_medium(),
+                r,
+            ),
+            material.range_slider(s, "x-range", 0.25, 0.75, "Price", 240.0, r),
+            material.centred_slider(s, "x-centred", -0.4, "Balance", 240.0, r),
+            material.vertical_slider(s, "x-upright-slider", 0.6, "Volume", 200.0, r),
+        ],
+    )
+}
+
 // ---- colour -----------------------------------------------------------------------
 
 fn colour_checks() -> [error] {
@@ -671,6 +1161,188 @@ fn colour_checks() -> [error] {
     return out
 }
 
+// ---- carousel -------------------------------------------------------------------------
+//
+// The arrangement is the part of a carousel with a right answer, so it is the
+// part tested: the visible items and the gaps between them are exactly a window
+// wide, whatever the layout and however many items there are.
+
+fn carousel_checks() -> [error] {
+    var out: [error] = []
+    let gap = material.space(2)
+
+    // Hero: one large item and a small one peeking past it.
+    let one = material.hero(300.0)
+    let hero3 = material.item_widths(one, 400.0, 3)
+    out.push(test.equal_int(hero3.len(), 3, "every item is given a width"))
+    out.push(near(hero3[0] + gap + hero3[1], 400.0, "a hero's two visible items fill the window"))
+    out.push(near(hero3[1], hero3[2], "and the ones behind are small too"))
+    out.push(near(material.item_widths(one, 400.0, 1)[0], 400.0, "alone, it takes the window"))
+
+    // Multi-browse: large, medium, small.
+    let many = material.multi_browse(300.0)
+    let mb = material.item_widths(many, 400.0, 5)
+    out.push(near(mb[0] + mb[1] + mb[2] + gap * 2.0, 400.0, "three visible items fill the window"))
+    out.push(test.is_true(mb[0] > mb[1], "the large one is larger"))
+    out.push(test.is_true(mb[1] > mb[2], "and the medium one is medium"))
+    out.push(near(mb[3], mb[2], "what is off the edge is small"))
+    let mb2 = material.item_widths(many, 400.0, 2)
+    out.push(near(mb2[0] + gap + mb2[1], 400.0, "two of them fill it as well"))
+
+    // Uncontained and full-screen resize nothing.
+    let flat = material.uncontained(120.0, 200.0)
+    let u = material.item_widths(flat, 400.0, 4)
+    out.push(near(u[0], 120.0, "an uncontained item is the width it was given"))
+    out.push(near(u[3], 120.0, "and so is the last one"))
+    out.push(near(material.carousel_extent(flat, 400.0, 4), 120.0 * 4.0 + gap * 3.0, "the row is as long as its items"))
+    let full = material.full_screen(600.0)
+    out.push(near(material.item_widths(full, 400.0, 3)[2], 400.0, "a full-screen item is the window"))
+
+    // A carousel of nothing arranges nothing rather than dividing by a count of
+    // zero, which is the one input a caller does not choose: a list is empty
+    // while it is loading.
+    out.push(test.equal_int(material.item_widths(one, 400.0, 0).len(), 0, "no items, no widths"))
+    out.push(near(material.carousel_extent(one, 400.0, 0), 0.0, "and no extent"))
+    return out
+}
+
+// ---- pickers ---------------------------------------------------------------------------
+//
+// A date picker is mostly arithmetic, and arithmetic is the part of a design
+// system that can be wrong in a way nobody notices until February. Checked
+// against the civil calendar rather than against last month.
+
+fn calendar_checks() -> [error] {
+    var out: [error] = []
+
+    // All three clauses of the Gregorian leap rule. The century exception is
+    // the one that gets left out.
+    out.push(test.equal_bool(material.is_leap_year(2024), true, "2024 is a leap year"))
+    out.push(test.equal_bool(material.is_leap_year(2023), false, "2023 is not"))
+    out.push(test.equal_bool(material.is_leap_year(1900), false, "1900 is not, being a century"))
+    out.push(test.equal_bool(material.is_leap_year(2000), true, "2000 is, being a fourth one"))
+    out.push(test.equal_bool(material.is_leap_year(2100), false, "and 2100 is not"))
+
+    out.push(test.equal_int(material.days_in_month(2024, 2), 29, "February 2024 has twenty-nine"))
+    out.push(test.equal_int(material.days_in_month(2023, 2), 28, "February 2023 has twenty-eight"))
+    out.push(test.equal_int(material.days_in_month(2026, 4), 30, "April has thirty"))
+    out.push(test.equal_int(material.days_in_month(2026, 12), 31, "December has thirty-one"))
+
+    // Sunday is 0. Checked against the civil calendar for a date this century,
+    // one in the last, and one past the century that is not a leap year.
+    out.push(test.equal_int(material.weekday_of(1970, 1, 1), 4, "the epoch was a Thursday"))
+    out.push(test.equal_int(material.weekday_of(2026, 8, 5), 3, "2026-08-05 is a Wednesday"))
+    out.push(test.equal_int(material.weekday_of(2026, 8, 1), 6, "and the first was a Saturday"))
+    out.push(test.equal_int(material.weekday_of(2000, 3, 1), 3, "2000-03-01 was a Wednesday"))
+    out.push(test.equal_int(material.weekday_of(2100, 3, 1), 1, "2100-03-01 is a Monday"))
+
+    // Days since the epoch, which is what a range comparison rests on.
+    out.push(test.equal_int(material.ordinal(material.date(1970, 1, 1)), 0, "the epoch is day zero"))
+    out.push(test.equal_int(material.ordinal(material.date(2000, 3, 1)), 11017, "and 2000-03-01 is 11017"))
+    out.push(test.equal_int(material.ordinal(material.date(2026, 8, 5)), 20670, "and today is 20670"))
+    out.push(test.equal_int(material.ordinal(material.date(2024, 2, 29)), 19782, "a leap day counts once"))
+    out.push(test.equal_int(material.ordinal(material.date(1900, 2, 28)), -25509, "before it, the count goes negative"))
+
+    // Consecutive days differ by one, across a month end, a year end and a leap
+    // day — which is the property the whole thing exists to have.
+    for pair in [
+        [2026, 1, 31, 2026, 2, 1],
+        [2026, 12, 31, 2027, 1, 1],
+        [2024, 2, 28, 2024, 2, 29],
+        [2024, 2, 29, 2024, 3, 1],
+        [2023, 2, 28, 2023, 3, 1],
+    ] {
+        let before = material.ordinal(material.date(pair[0], pair[1], pair[2]))
+        let after = material.ordinal(material.date(pair[3], pair[4], pair[5]))
+        out.push(test.equal_int(after - before, 1, "\(pair[1])/\(pair[2]) is the day before the next"))
+    }
+
+    // A month's grid is always six rows of seven, so nothing under it moves
+    // when the month changes.
+    let august = material.month_cells(2026, 8, 0)
+    out.push(test.equal_int(august.len(), 42, "a grid is forty-two cells"))
+    // August 2026 begins on a Saturday, so a Sunday-first grid has six blanks.
+    out.push(test.equal_int(august[0], 0, "the first cell is blank"))
+    out.push(test.equal_int(august[5], 0, "and so is the sixth"))
+    out.push(test.equal_int(august[6], 1, "the first falls on the Saturday"))
+    out.push(test.equal_int(august[36], 31, "and the thirty-first is where it lands"))
+    out.push(test.equal_int(august[37], 0, "with blanks after it"))
+    // The same month, weeks starting on Monday: the first moves one column left.
+    let monday = material.month_cells(2026, 8, 1)
+    out.push(test.equal_int(monday[5], 1, "a Monday-first grid puts the first a column earlier"))
+    // February 2026 begins on a Sunday, so a Sunday-first grid has no blanks.
+    let february = material.month_cells(2026, 2, 0)
+    out.push(test.equal_int(february[0], 1, "February 2026 starts in the first cell"))
+    out.push(test.equal_int(february[27], 28, "and ends on the twenty-eighth"))
+    out.push(test.equal_int(february[28], 0, "with nothing after it"))
+    var days_seen = 0
+    for cell in august {
+        if cell > 0 {
+            days_seen += 1
+        }
+    }
+    out.push(test.equal_int(days_seen, 31, "every day of the month appears exactly once"))
+
+    // Stepping months wraps the year and clamps the day, which is the bug every
+    // calendar has: the 31st of March, stepped back, is not the 3rd of March.
+    let march31 = material.date(2026, 3, 31)
+    let back = material.month_before(march31)
+    out.push(test.equal_int(back.month, 2, "March steps back to February"))
+    out.push(test.equal_int(back.day, 28, "and the thirty-first clamps to the twenty-eighth"))
+    let january = material.month_before(material.date(2026, 1, 15))
+    out.push(test.equal_int(january.year, 2025, "January steps back a year"))
+    out.push(test.equal_int(january.month, 12, "into December"))
+    let december = material.month_after(material.date(2026, 12, 15))
+    out.push(test.equal_int(december.year, 2027, "and December steps forward a year"))
+    out.push(test.equal_int(december.month, 1, "into January"))
+
+    // A range contains its ends and nothing else, and an unfinished one
+    // contains nothing at all.
+    let from = material.date(2026, 8, 4)
+    let to = material.date(2026, 8, 9)
+    out.push(test.equal_bool(material.within(from, from, to), true, "a range contains its start"))
+    out.push(test.equal_bool(material.within(to, from, to), true, "and its end"))
+    out.push(test.equal_bool(material.within(material.date(2026, 8, 6), from, to), true, "and what is between"))
+    out.push(test.equal_bool(material.within(material.date(2026, 8, 3), from, to), false, "and not what is before"))
+    out.push(test.equal_bool(material.within(material.date(2026, 8, 10), from, to), false, "nor after"))
+    out.push(
+        test.equal_bool(
+            material.within(material.date(2026, 8, 6), from, material.no_date()),
+            false,
+            "a half-made range contains nothing",
+        ),
+    )
+    out.push(test.equal_bool(material.has_date(material.no_date()), false, "no date is no date"))
+    return out
+}
+
+fn dial_checks() -> [error] {
+    var out: [error] = []
+    // A 256dp face at the origin, so the centre is (128, 128).
+    let face = ui.Rect{ x: 0.0, y: 0.0, width: 256.0, height: 256.0 }
+    out.push(test.equal_int(material.dial_value_at(face, 128.0, 8.0, false), 12, "straight up is twelve"))
+    out.push(test.equal_int(material.dial_value_at(face, 248.0, 128.0, false), 3, "due right is three"))
+    out.push(test.equal_int(material.dial_value_at(face, 128.0, 248.0, false), 6, "straight down is six"))
+    out.push(test.equal_int(material.dial_value_at(face, 8.0, 128.0, false), 9, "due left is nine"))
+    // The same four on the minute face.
+    out.push(test.equal_int(material.dial_value_at(face, 128.0, 8.0, true), 0, "straight up is o'clock"))
+    out.push(test.equal_int(material.dial_value_at(face, 248.0, 128.0, true), 15, "due right is a quarter past"))
+    out.push(test.equal_int(material.dial_value_at(face, 128.0, 248.0, true), 30, "straight down is half past"))
+    out.push(test.equal_int(material.dial_value_at(face, 8.0, 128.0, true), 45, "due left is a quarter to"))
+    // Distance from the centre is ignored, which is what lets a finger drag
+    // inward without the hand letting go.
+    out.push(
+        test.equal_int(
+            material.dial_value_at(face, 140.0, 116.0, false),
+            material.dial_value_at(face, 200.0, 56.0, false),
+            "near and far on the same bearing agree",
+        ),
+    )
+    out.push(test.equal_str(material.two_digits(7), "07", "a single digit is padded"))
+    out.push(test.equal_str(material.two_digits(47), "47", "and two are not"))
+    return out
+}
+
 // ---- window size classes ------------------------------------------------------------
 
 fn window_checks() -> [error] {
@@ -720,6 +1392,18 @@ fn checks() -> [error] {
         out.push(e)
     }
     for e in colour_checks() {
+        out.push(e)
+    }
+    for e in carousel_checks() {
+        out.push(e)
+    }
+    for e in calendar_checks() {
+        out.push(e)
+    }
+    for e in dial_checks() {
+        out.push(e)
+    }
+    for e in expressive_checks() {
         out.push(e)
     }
     for e in window_checks() {

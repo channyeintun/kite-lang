@@ -368,6 +368,53 @@ fn labelled_control<Msg>(
     return whole
 }
 
+/// A glyph and a label in one control, at a width the caller has already
+/// worked out.
+///
+/// The width is a parameter rather than a measurement because the two places
+/// that want this — a split button's leading half and [`icon_label_button`] —
+/// have each already measured it, and a second measurement is a second chance
+/// to disagree with the container that was drawn at the first one.
+fn glyph_and_label<Msg>(
+    id: str,
+    msg: Msg,
+    caption: str,
+    glyph: str,
+    sizing: Sizing,
+    width: float,
+    ink: int,
+    decor: ui.Decor,
+    state: State,
+) -> ui.Node<Msg> {
+    let role = sizing.label
+    let inner = ui.Style{
+        ..ui.row(),
+        align: ui.Align.Center,
+        justify: ui.Justify.Center,
+        width: width,
+        height: sizing.height,
+        gap: space(2),
+    }
+    let box: ui.Node<Msg> = ui.box_of(
+        id,
+        inner,
+        [
+            inked_text("\(id)-glyph", ui.in_font(ui.style(), sizing.icon, REGULAR()), glyph, ink),
+            inked_text(
+                "\(id)-label",
+                ui.in_font(ui.style(), role.size, role.weight),
+                caption,
+                ink,
+            ),
+        ],
+    )
+    let whole = ui.means(ui.decorated(box, decor), id, msg, caption)
+    if state.disabled {
+        return ui.disabled(whole)
+    }
+    return whole
+}
+
 fn bar<Msg>(name: str, width: float, height: float, colour: int) -> ui.Node<Msg> {
     return ui.decorated(
         ui.box_of(name, ui.sized(ui.style(), width, height), []),
@@ -668,32 +715,309 @@ pub fn icon_label_button<Msg>(
     let measured = ui.text_size_in(caption, sizing.label.size, sizing.label.weight).width
     let w = measured + sizing.icon + space(2) + sizing.padding * 2.0
     let radius = morphed(sizing.shape, w, sizing.height, state.press)
-    let inner = ui.Style{
-        ..ui.row(),
-        align: ui.Align.Center,
-        justify: ui.Justify.Center,
-        width: w,
-        height: sizing.height,
-        gap: space(2),
-    }
-    let box: ui.Node<Msg> = ui.box_of(
+    return glyph_and_label(
         id,
-        inner,
-        [
-            inked_text("\(id)-glyph", ui.in_font(ui.style(), sizing.icon, REGULAR()), glyph, ink),
-            inked_text(
-                "\(id)-label",
-                ui.in_font(ui.style(), sizing.label.size, sizing.label.weight),
-                caption,
-                ink,
-            ),
-        ],
+        msg,
+        caption,
+        glyph,
+        sizing,
+        w,
+        ink,
+        ui.inked(ui.rounded(fill, radius), ink),
+        state,
     )
-    let whole = ui.means(ui.decorated(box, ui.inked(ui.rounded(fill, radius), ink)), id, msg, caption)
-    if state.disabled {
-        return ui.disabled(whole)
+}
+
+// ---- button groups ---------------------------------------------------------------
+//
+// Material 3 Expressive's answer to a row of related actions. There are two,
+// and the difference is not spacing: a *standard* group is several buttons that
+// happen to sit together, each still its own control with its own emphasis; a
+// *connected* group is one control with several positions, which is what a
+// choice between three things looks like when only one of them can be true.
+//
+// The behaviour that makes both of them Expressive rather than a row is the
+// squeeze. Pressing a button in a group widens it and narrows its neighbours,
+// keeping the group's total width fixed — so the row does not reflow around the
+// finger, and the button under it is unmistakably the one that grew.
+
+/// How much wider a button gets while it is held, as a fraction of its own
+/// resting width.
+fn GROUP_SQUEEZE() -> float {
+    return 0.15
+}
+
+/// The 2dp Material leaves between the members of a connected group — enough
+/// for the containers to read as separate, not enough for them to read as
+/// separate controls.
+fn CONNECTED_GAP() -> float {
+    return 2.0
+}
+
+/// A standard button group: buttons in a row, 8dp apart.
+///
+/// It takes nodes rather than captions because the members of a standard group
+/// are *ordinary buttons* and may each be a different one — a filled button
+/// beside two outlined ones is the common case, and a group that built its own
+/// members could not express it.
+pub fn button_group<Msg>(name: str, children: [ui.Node<Msg>]) -> ui.Node<Msg> {
+    return button_group_of(name, children, space(2))
+}
+
+pub fn button_group_of<Msg>(name: str, children: [ui.Node<Msg>], gap: float) -> ui.Node<Msg> {
+    return ui.box_of(
+        name,
+        ui.spaced(ui.Style{..ui.row(), align: ui.Align.Center }, gap),
+        children,
+    )
+}
+
+/// The widths of a connected group's members, after the squeeze.
+///
+/// Separate from the drawing, and public, because it is the part with an answer
+/// that can be checked: the group's total width is the same whatever is being
+/// pressed, and that is a property rather than an appearance. What a button
+/// gains, its neighbours give up in proportion to how wide they are and how far
+/// they are from being pressed themselves.
+pub fn squeezed_widths(resting: [float], presses: [float]) -> [float] {
+    let count = resting.len()
+    var gained = 0.0
+    var shares = 0.0
+    for i in 0..count {
+        let press = clampf(if i < presses.len() { presses[i] } else { 0.0 }, 0.0, 1.0)
+        gained = gained + resting[i] * GROUP_SQUEEZE() * press
+        shares = shares + resting[i] * (1.0 - press)
     }
-    return whole
+    var out: [float] = []
+    for i in 0..count {
+        let press = clampf(if i < presses.len() { presses[i] } else { 0.0 }, 0.0, 1.0)
+        let gain = resting[i] * GROUP_SQUEEZE() * press
+        // With every member fully pressed there is nobody to take the width
+        // from, so nobody gives any up. That is a state a pointer cannot reach
+        // and a `State` built by hand can, which is why it is a branch rather
+        // than an assumption.
+        var give = 0.0
+        if shares > 0.0 {
+            give = gained * (resting[i] * (1.0 - press)) / shares
+        }
+        out.push(maxf(0.0, resting[i] + gain - give))
+    }
+    return out
+}
+
+/// A corner that *rounds* under the finger rather than squaring off.
+///
+/// The opposite of [`morphed`], and deliberately: a connected group's members
+/// rest as small-cornered rectangles so the row reads as one control, and
+/// Material rounds the pressed one out of the row to say which it is. Squaring
+/// it further would say nothing, there being nothing left to square.
+fn rounded_under_press(resting: float, w: float, h: float, press: float) -> float {
+    return math.lerp(
+        resolved_shape(resting, w, h),
+        resolved_shape(SHAPE_FULL(), w, h),
+        clampf(press, 0.0, 1.0),
+    )
+}
+
+/// A connected button group: one control with two to five positions.
+///
+/// Material draws the group's outer corners full and its inner ones small, so
+/// the row reads as a single pill cut into pieces. `Decor` has one radius for
+/// all four corners, so each member here is small-cornered and the group's ends
+/// are square rather than round — the same limit `segmented_button` documents,
+/// and the reason the two exist side by side. This one is the *toggle*: it
+/// squeezes, it has no shared outline, and its members carry the selected
+/// container rather than a tick.
+pub fn connected_button_group<Msg>(
+    s: Scheme,
+    name: str,
+    items: [Segment2<Msg>],
+    states: [State],
+) -> ui.Node<Msg> {
+    return connected_button_group_of(s, name, items, button_small(), states)
+}
+
+pub fn connected_button_group_of<Msg>(
+    s: Scheme,
+    name: str,
+    items: [Segment2<Msg>],
+    sizing: Sizing,
+    states: [State],
+) -> ui.Node<Msg> {
+    let role = sizing.label
+    var resting: [float] = []
+    var presses: [float] = []
+    for i in 0..items.len() {
+        let state = if i < states.len() { states[i] } else { rest() }
+        resting.push(
+            ui.text_size_in(items[i].caption, role.size, role.weight).width + sizing.padding * 2.0,
+        )
+        presses.push(state.press)
+    }
+    let widths = squeezed_widths(resting, presses)
+    var children: [ui.Node<Msg>] = []
+    for i in 0..items.len() {
+        let item = items[i]
+        let state = if i < states.len() { states[i] } else { rest() }
+        let amount = chosen_amount(item.selected, state)
+        let width = widths[i]
+        let container = mix(s.surface_container, s.secondary_container, amount)
+        let ink = mix(s.on_surface_variant, s.on_secondary_container, amount)
+        let radius = rounded_under_press(SHAPE_SMALL(), width, sizing.height, state.press)
+        let fill = if state.disabled {
+            disabled_container(s, s.surface)
+        } else {
+            layered(container, ink, state)
+        }
+        let label_ink = if state.disabled { disabled_ink(s, s.surface) } else { ink }
+        children.push(
+            centred_body(
+                item.id,
+                item.msg,
+                !state.disabled,
+                item.caption,
+                role.size,
+                role.weight,
+                width,
+                sizing.height,
+                ui.inked(ui.rounded(fill, radius), label_ink),
+            ),
+        )
+    }
+    return ui.box_of(
+        name,
+        ui.spaced(ui.Style{..ui.row(), align: ui.Align.Center }, CONNECTED_GAP()),
+        children,
+    )
+}
+
+// ---- split button ----------------------------------------------------------------
+
+/// A split button: one action, and a menu of the others beside it.
+///
+/// Two controls in one container, and they are genuinely two — the label runs
+/// the default action and the chevron opens the menu, which is the whole reason
+/// the component exists. So it takes two ids, two messages and two states, and
+/// nothing about it guesses which half the pointer is over.
+pub struct Split<Msg> {
+    pub id: str
+    pub msg: Msg
+    pub caption: str
+    /// A glyph before the label, or "" for none.
+    pub glyph: str
+    pub menu_id: str
+    pub menu_msg: Msg
+    /// Whether the menu is open, which is what turns the chevron over.
+    pub open: bool
+}
+
+/// Not `split`: the prelude already has one, and it cuts up strings.
+pub fn split_action<Msg>(
+    id: str,
+    msg: Msg,
+    caption: str,
+    menu_id: str,
+    menu_msg: Msg,
+) -> Split<Msg> {
+    return Split{
+        id: id,
+        msg: msg,
+        caption: caption,
+        glyph: "",
+        menu_id: menu_id,
+        menu_msg: menu_msg,
+        open: false,
+    }
+}
+
+/// The trailing half is a square of the button's own height, which is what
+/// keeps the chevron centred in it at every size on the scale.
+pub fn split_button<Msg>(
+    s: Scheme,
+    name: str,
+    spec: Split<Msg>,
+    lead_state: State,
+    menu_state: State,
+) -> ui.Node<Msg> {
+    return split_button_of(s, name, spec, button_small(), lead_state, menu_state)
+}
+
+pub fn split_button_of<Msg>(
+    s: Scheme,
+    name: str,
+    spec: Split<Msg>,
+    sizing: Sizing,
+    lead_state: State,
+    menu_state: State,
+) -> ui.Node<Msg> {
+    let role = sizing.label
+    let measured = ui.text_size_in(spec.caption, role.size, role.weight).width
+    var lead_width = measured + sizing.padding * 2.0
+    if spec.glyph.len() > 0 {
+        lead_width = lead_width + sizing.icon + space(2)
+    }
+    let trail_width = sizing.height
+    // The two halves squeeze against each other exactly as a group's members
+    // do, which is what makes a split button read as one thing being pressed in
+    // two places rather than as two buttons that happen to touch.
+    let widths = squeezed_widths([lead_width, trail_width], [lead_state.press, menu_state.press])
+
+    let lead_fill = if lead_state.disabled {
+        disabled_container(s, s.surface)
+    } else {
+        layered(s.primary, s.on_primary, lead_state)
+    }
+    let lead_ink = if lead_state.disabled { disabled_ink(s, s.surface) } else { s.on_primary }
+    let lead_radius = rounded_under_press(SHAPE_LARGE(), widths[0], sizing.height, lead_state.press)
+
+    let lead_decor = ui.inked(ui.rounded(lead_fill, lead_radius), lead_ink)
+    let lead: ui.Node<Msg> = if spec.glyph.len() > 0 {
+        glyph_and_label(spec.id, spec.msg, spec.caption, spec.glyph, sizing, widths[0], lead_ink, lead_decor, lead_state)
+    } else {
+        centred_body(
+            spec.id,
+            spec.msg,
+            !lead_state.disabled,
+            spec.caption,
+            role.size,
+            role.weight,
+            widths[0],
+            sizing.height,
+            lead_decor,
+        )
+    }
+
+    let menu_fill = if menu_state.disabled {
+        disabled_container(s, s.surface)
+    } else {
+        layered(s.primary, s.on_primary, menu_state)
+    }
+    let menu_ink = if menu_state.disabled { disabled_ink(s, s.surface) } else { s.on_primary }
+    // The chevron turns over when the menu is open, which is the only thing on
+    // a split button that says whether pressing it will open or close.
+    let chevron = if spec.open { "▴" } else { "▾" }
+    let menu_radius = rounded_under_press(
+        SHAPE_LARGE(),
+        widths[1],
+        sizing.height,
+        maxf(menu_state.press, if spec.open { 1.0 } else { 0.0 }),
+    )
+    let trail: ui.Node<Msg> = centred_body(
+        spec.menu_id,
+        spec.menu_msg,
+        !menu_state.disabled,
+        chevron,
+        sizing.icon,
+        REGULAR(),
+        widths[1],
+        sizing.height,
+        ui.inked(ui.rounded(menu_fill, menu_radius), menu_ink),
+    )
+    return ui.box_of(
+        name,
+        ui.spaced(ui.Style{..ui.row(), align: ui.Align.Center }, CONNECTED_GAP()),
+        [lead, trail],
+    )
 }
 
 // ---- icon buttons -------------------------------------------------------------
@@ -704,12 +1028,46 @@ pub fn icon_label_button<Msg>(
 // toggle is not simply an icon button with a flag — the standard toggle changes
 // its glyph's colour, and the filled one swaps its container entirely.
 
-fn ICON_BUTTON_SIDE() -> float {
-    return 40.0
+// Material 3 Expressive gave these a size scale too, and it is the same five
+// names the common buttons use — so an icon button beside a medium button is
+// the same height as it without either of them saying a number.
+
+fn icon_side(sizing: Sizing) -> float {
+    return sizing.height
 }
 
-fn ICON_GLYPH() -> float {
-    return 20.0
+/// A square of `side` with a glyph in the middle. Icon buttons have no label,
+/// so the type role and the horizontal padding a `Sizing` also carries are
+/// unused here, and the height is the whole of the size.
+fn icon_sizing(side: float, glyph: float) -> Sizing {
+    return Sizing{
+        height: side,
+        padding: 0.0,
+        label: label_large(),
+        shape: SHAPE_FULL(),
+        icon: glyph,
+    }
+}
+
+pub fn icon_button_xsmall() -> Sizing {
+    return icon_sizing(32.0, 20.0)
+}
+
+/// The default: a 40dp target around a 24dp glyph.
+pub fn icon_button_small() -> Sizing {
+    return icon_sizing(40.0, 24.0)
+}
+
+pub fn icon_button_medium() -> Sizing {
+    return icon_sizing(56.0, 24.0)
+}
+
+pub fn icon_button_large() -> Sizing {
+    return icon_sizing(96.0, 32.0)
+}
+
+pub fn icon_button_xlarge() -> Sizing {
+    return icon_sizing(136.0, 40.0)
 }
 
 fn icon_button_body<Msg>(
@@ -717,53 +1075,81 @@ fn icon_button_body<Msg>(
     msg: Msg,
     enabled: bool,
     glyph: str,
+    sizing: Sizing,
     decor: ui.Decor,
 ) -> ui.Node<Msg> {
-    return centred_body(
-        id,
-        msg,
-        enabled,
-        glyph,
-        ICON_GLYPH(),
-        REGULAR(),
-        ICON_BUTTON_SIDE(),
-        ICON_BUTTON_SIDE(),
-        decor,
-    )
+    let side = icon_side(sizing)
+    return centred_body(id, msg, enabled, glyph, sizing.icon, REGULAR(), side, side, decor)
 }
 
-fn icon_radius(state: State) -> float {
-    return morphed(SHAPE_FULL(), ICON_BUTTON_SIDE(), ICON_BUTTON_SIDE(), state.press)
+fn icon_radius(sizing: Sizing, state: State) -> float {
+    let side = icon_side(sizing)
+    return morphed(sizing.shape, side, side, state.press)
 }
 
-/// A 40dp target around a 20dp glyph, with no container of its own.
+/// A 40dp target around a glyph, with no container of its own.
 pub fn icon_button<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, state: State) -> ui.Node<Msg> {
+    return icon_button_of(s, id, msg, glyph, icon_button_small(), state)
+}
+
+pub fn icon_button_of<Msg>(
+    s: Scheme,
+    id: str,
+    msg: Msg,
+    glyph: str,
+    sizing: Sizing,
+    state: State,
+) -> ui.Node<Msg> {
     let ink = if state.disabled {
         disabled_ink(s, s.surface)
     } else {
         s.on_surface_variant
     }
-    let decor = layer_decor(s.on_surface_variant, state, icon_radius(state))
-    return icon_button_body(id, msg, !state.disabled, glyph, ui.inked(decor, ink))
+    let decor = layer_decor(s.on_surface_variant, state, icon_radius(sizing, state))
+    return icon_button_body(id, msg, !state.disabled, glyph, sizing, ui.inked(decor, ink))
 }
 
 /// The same, on or off. Selected takes the accent; unselected does not.
 pub fn icon_toggle<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, on: bool, state: State) -> ui.Node<Msg> {
-    let role = mix(s.on_surface_variant, s.primary, if on { 1.0 } else { state.select })
-    let decor = layer_decor(role, state, icon_radius(state))
-    return icon_button_body(id, msg, !state.disabled, glyph, ui.inked(decor, role))
+    return icon_toggle_of(s, id, msg, glyph, on, icon_button_small(), state)
+}
+
+pub fn icon_toggle_of<Msg>(
+    s: Scheme,
+    id: str,
+    msg: Msg,
+    glyph: str,
+    on: bool,
+    sizing: Sizing,
+    state: State,
+) -> ui.Node<Msg> {
+    let role = mix(s.on_surface_variant, s.primary, chosen_amount(on, state))
+    let decor = layer_decor(role, state, icon_radius(sizing, state))
+    return icon_button_body(id, msg, !state.disabled, glyph, sizing, ui.inked(decor, role))
 }
 
 /// The highest-emphasis icon button: a filled primary container.
 pub fn filled_icon_button<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, state: State) -> ui.Node<Msg> {
+    return filled_icon_button_of(s, id, msg, glyph, icon_button_small(), state)
+}
+
+pub fn filled_icon_button_of<Msg>(
+    s: Scheme,
+    id: str,
+    msg: Msg,
+    glyph: str,
+    sizing: Sizing,
+    state: State,
+) -> ui.Node<Msg> {
     if state.disabled {
         return icon_button_body(
             id,
             msg,
             !state.disabled,
             glyph,
+            sizing,
             ui.inked(
-                ui.rounded(disabled_container(s, s.surface), icon_radius(state)),
+                ui.rounded(disabled_container(s, s.surface), icon_radius(sizing, state)),
                 disabled_ink(s, s.surface),
             ),
         )
@@ -774,33 +1160,114 @@ pub fn filled_icon_button<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, state: 
         msg,
         !state.disabled,
         glyph,
-        ui.inked(ui.rounded(container, icon_radius(state)), s.on_primary),
+        sizing,
+        ui.inked(ui.rounded(container, icon_radius(sizing, state)), s.on_primary),
     )
 }
 
 /// A filled icon *toggle*: the container itself crosses from the unselected
 /// surface to the accent, which is the strongest way Material says "on".
 pub fn filled_icon_toggle<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, on: bool, state: State) -> ui.Node<Msg> {
-    let amount = if on { 1.0 } else { state.select }
+    return filled_icon_toggle_of(s, id, msg, glyph, on, icon_button_small(), state)
+}
+
+pub fn filled_icon_toggle_of<Msg>(
+    s: Scheme,
+    id: str,
+    msg: Msg,
+    glyph: str,
+    on: bool,
+    sizing: Sizing,
+    state: State,
+) -> ui.Node<Msg> {
+    let amount = chosen_amount(on, state)
     let resting = mix(s.surface_container_highest, s.primary, amount)
     let ink = mix(s.primary, s.on_primary, amount)
     let container = layered(resting, ink, state)
-    return icon_button_body(id, msg, !state.disabled, glyph, ui.inked(ui.rounded(container, icon_radius(state)), ink))
+    return icon_button_body(
+        id,
+        msg,
+        !state.disabled,
+        glyph,
+        sizing,
+        ui.inked(ui.rounded(container, icon_radius(sizing, state)), ink),
+    )
 }
 
 pub fn tonal_icon_button<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, state: State) -> ui.Node<Msg> {
+    return tonal_icon_button_of(s, id, msg, glyph, icon_button_small(), state)
+}
+
+pub fn tonal_icon_button_of<Msg>(
+    s: Scheme,
+    id: str,
+    msg: Msg,
+    glyph: str,
+    sizing: Sizing,
+    state: State,
+) -> ui.Node<Msg> {
     let container = layered(s.secondary_container, s.on_secondary_container, state)
     return icon_button_body(
         id,
         msg,
         !state.disabled,
         glyph,
-        ui.inked(ui.rounded(container, icon_radius(state)), s.on_secondary_container),
+        sizing,
+        ui.inked(ui.rounded(container, icon_radius(sizing, state)), s.on_secondary_container),
+    )
+}
+
+/// A tonal icon toggle: the secondary container when off, the *primary* one
+/// when on. The container is there in both states, so what says "on" is which
+/// container it is — the same distinction the tonal button makes against the
+/// filled one, a step down in emphasis.
+pub fn tonal_icon_toggle<Msg>(
+    s: Scheme,
+    id: str,
+    msg: Msg,
+    glyph: str,
+    on: bool,
+    state: State,
+) -> ui.Node<Msg> {
+    return tonal_icon_toggle_of(s, id, msg, glyph, on, icon_button_small(), state)
+}
+
+pub fn tonal_icon_toggle_of<Msg>(
+    s: Scheme,
+    id: str,
+    msg: Msg,
+    glyph: str,
+    on: bool,
+    sizing: Sizing,
+    state: State,
+) -> ui.Node<Msg> {
+    let amount = chosen_amount(on, state)
+    let resting = mix(s.surface_container_highest, s.secondary_container, amount)
+    let ink = mix(s.on_surface_variant, s.on_secondary_container, amount)
+    let container = layered(resting, ink, state)
+    return icon_button_body(
+        id,
+        msg,
+        !state.disabled,
+        glyph,
+        sizing,
+        ui.inked(ui.rounded(container, icon_radius(sizing, state)), ink),
     )
 }
 
 pub fn outlined_icon_button<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, state: State) -> ui.Node<Msg> {
-    let radius = icon_radius(state)
+    return outlined_icon_button_of(s, id, msg, glyph, icon_button_small(), state)
+}
+
+pub fn outlined_icon_button_of<Msg>(
+    s: Scheme,
+    id: str,
+    msg: Msg,
+    glyph: str,
+    sizing: Sizing,
+    state: State,
+) -> ui.Node<Msg> {
+    let radius = icon_radius(sizing, state)
     let edge = mix(s.outline, s.primary, state.focus)
     let base = layer_decor(s.on_surface_variant, state, radius)
     return icon_button_body(
@@ -808,11 +1275,57 @@ pub fn outlined_icon_button<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, state
         msg,
         !state.disabled,
         glyph,
+        sizing,
         ui.bordered(
             ui.inked(base, s.on_surface_variant),
             edge,
             math.lerp(1.0, 2.0, state.focus),
         ),
+    )
+}
+
+/// An outlined icon *toggle*: the outline stays and the container arrives.
+///
+/// Selected, Material fills it with `inverse_surface` — the one place a control
+/// goes to the opposite scheme to say it is on. It reads at a glance in a row
+/// of unselected ones, which is what a toggle in a toolbar has to do.
+pub fn outlined_icon_toggle<Msg>(
+    s: Scheme,
+    id: str,
+    msg: Msg,
+    glyph: str,
+    on: bool,
+    state: State,
+) -> ui.Node<Msg> {
+    return outlined_icon_toggle_of(s, id, msg, glyph, on, icon_button_small(), state)
+}
+
+pub fn outlined_icon_toggle_of<Msg>(
+    s: Scheme,
+    id: str,
+    msg: Msg,
+    glyph: str,
+    on: bool,
+    sizing: Sizing,
+    state: State,
+) -> ui.Node<Msg> {
+    let amount = chosen_amount(on, state)
+    let radius = icon_radius(sizing, state)
+    let ink = mix(s.on_surface_variant, s.inverse_on_surface, amount)
+    // The outline fades out as the fill arrives: an outline around a filled
+    // inverse container is a hairline nobody asked for.
+    let edge = mix(mix(s.outline, s.primary, state.focus), s.inverse_surface, amount)
+    var base = layer_decor(ink, state, radius)
+    if amount > 0.0 {
+        base = ui.rounded(layered(mix(s.surface, s.inverse_surface, amount), ink, state), radius)
+    }
+    return icon_button_body(
+        id,
+        msg,
+        !state.disabled,
+        glyph,
+        sizing,
+        ui.bordered(ui.inked(base, ink), edge, math.lerp(1.0, 2.0, state.focus)),
     )
 }
 
@@ -962,6 +1475,154 @@ pub fn extended_fab<Msg>(s: Scheme, id: str, msg: Msg, glyph: str, caption: str,
 /// elevation overlay uses at level 4.
 fn surface_tinted(s: Scheme, container: int) -> int {
     return mix(container, s.surface_tint, 0.12)
+}
+
+// ---- floating action button menus --------------------------------------------------
+//
+// A FAB that opens into the two to six actions behind it, which is Material 3
+// Expressive's replacement for the speed dial.
+//
+// The items arrive one after another rather than together, and that is the
+// component: a column that appeared all at once would be a menu drawn in FAB
+// colours. [`stagger`] is the sequence, and it is a function rather than a
+// schedule so the caller keeps the single `amount` a `Track` gives it — one
+// number animated once, read six different ways.
+
+/// How far the item at `index` has come when the menu as a whole is `amount`
+/// open.
+///
+/// Each item takes sixty per cent of the menu's own time, and the starts are
+/// spread across the remaining forty. The one nearest the trigger leads, which
+/// is the direction the eye is already travelling: it left the FAB.
+pub fn stagger(amount: float, index: int, count: int) -> float {
+    let overall = clampf(amount, 0.0, 1.0)
+    if count <= 1 {
+        return overall
+    }
+    let span = 0.6
+    let lead = (1.0 - span) / ((count - 1) as float)
+    let start = lead * (index as float)
+    return clampf((overall - start) / span, 0.0, 1.0)
+}
+
+/// One action in a FAB menu: a pill with its label before its glyph.
+///
+/// The label comes first because the menu hangs off a FAB in the trailing
+/// corner, so the glyphs line up under the trigger and the labels run away from
+/// it — which is Material's own arrangement and the reason the item is not just
+/// an extended FAB lying on its side.
+///
+/// `amount` reveals it by *width*, the way a drawer and a sheet are revealed
+/// here: nothing in this layout can scale a subtree, and a width that grows
+/// from nothing is the reveal the boundary can draw honestly.
+pub fn fab_menu_item<Msg>(
+    s: Scheme,
+    id: str,
+    msg: Msg,
+    glyph: str,
+    caption: str,
+    amount: float,
+    state: State,
+) -> ui.Node<Msg> {
+    let role = label_large()
+    let shown = clampf(amount, 0.0, 1.0)
+    let height = 56.0
+    let measured = ui.text_size_in(caption, role.size, role.weight).width
+    let full = measured + 24.0 + space(2) + space(4) * 2.0
+    let width = full * shown
+    let container = layered(s.primary_container, s.on_primary_container, state)
+    let ink = s.on_primary_container
+    let inner = ui.Style{
+        ..ui.row(),
+        align: ui.Align.Center,
+        justify: ui.Justify.Center,
+        width: width,
+        height: height,
+        padding: ui.insets_xy(space(4), 0.0),
+        gap: space(2),
+    }
+    let box: ui.Node<Msg> = ui.box_of(
+        id,
+        inner,
+        [
+            inked_text(
+                "\(id)-label",
+                ui.in_font(ui.style(), role.size, role.weight),
+                caption,
+                ink,
+            ),
+            inked_text("\(id)-glyph", ui.in_font(ui.style(), 24.0, REGULAR()), glyph, ink),
+        ],
+    )
+    let decor = ui.inked(
+        ui.rounded(container, morphed(SHAPE_FULL(), width, height, state.press)),
+        ink,
+    )
+    let whole = ui.means(ui.decorated(box, decor), id, msg, caption)
+    if state.disabled {
+        return ui.disabled(whole)
+    }
+    return whole
+}
+
+/// The FAB a menu hangs from: a plus that becomes a close.
+///
+/// The two glyphs are swapped rather than turned. Material rotates the one into
+/// the other, and a rotation is a transform the drawing boundary does not have;
+/// swapping at the halfway point is what is left of it, and it happens under
+/// the container's own colour change so the moment is covered.
+pub fn fab_menu_toggle<Msg>(s: Scheme, id: str, msg: Msg, open: bool, state: State) -> ui.Node<Msg> {
+    let amount = chosen_amount(open, state)
+    let container = layered(
+        mix(s.primary_container, s.secondary_container, amount),
+        s.on_primary_container,
+        state,
+    )
+    let side = FAB_REGULAR()
+    let radius = morphed(fab_shape(side), side, side, state.press)
+    let glyph = if amount >= 0.5 { "✕" } else { "＋" }
+    return centred_body(
+        id,
+        msg,
+        !state.disabled,
+        glyph,
+        fab_glyph(side),
+        REGULAR(),
+        side,
+        side,
+        ui.inked(ui.rounded(container, radius), s.on_primary_container),
+    )
+}
+
+/// The menu itself: the items in a column above their trigger, all of them
+/// aligned to the trailing edge the FAB sits on.
+///
+/// The trigger is a node the caller built — usually [`fab_menu_toggle`] — for
+/// the reason a standard button group takes nodes: which FAB opens the menu is
+/// the application's decision, and a menu that built its own could not be
+/// opened by the one already on the screen.
+///
+/// There is no `amount` here and there should not be: the items carry their own
+/// share of it through [`stagger`], and a menu that also took one would have two
+/// places to disagree about whether it was open.
+pub fn fab_menu<Msg>(
+    name: str,
+    items: [ui.Node<Msg>],
+    trigger: ui.Node<Msg>,
+) -> ui.Node<Msg> {
+    var children: [ui.Node<Msg>] = []
+    for one in items {
+        children.push(one)
+    }
+    children.push(trigger)
+    return ui.box_of(
+        name,
+        ui.spaced(
+            ui.Style {..ui.column(), align: ui.Align.End, justify: ui.Justify.End },
+            space(2),
+        ),
+        children,
+    )
 }
 
 // ---- chips -------------------------------------------------------------------

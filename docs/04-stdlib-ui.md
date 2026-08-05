@@ -216,8 +216,11 @@ The split is: `std/ui` owns the tree, the layout, the paint and the primitives
 nothing else can supply — `box_of`, `text_of`, `image_of`, `canvas_of`,
 `stack`, `portal`, `control`, `editable`, `editable_lines`, `decorated` — and
 the interactive widgets are functions in design-system packages
-([packages/material](../packages/material) ships the Material 3 set: buttons,
-fields, selection, navigation, progress). The table above is the set `std/ui`
+([packages/material](../packages/material) ships the Material 3 set — every
+component on <https://m3.material.io/components>: buttons and button groups,
+chips, cards, fields and search, selection and sliders, navigation, toolbars,
+carousels, date and time pickers, progress and loading, and the overlays).
+The table above is the set `std/ui`
 itself grows as the renderers land, because the middle rows cannot stay a
 package's problem: `Input`, `TextArea`, and `Select` are the widgets a
 canvas-only design would force you to reimplement. Under `DomRenderer` they
