@@ -2078,10 +2078,10 @@ none.
 | 20 — `std/dom` | ✅ complete — no externs, `Option` for absence, events with cancel, and a real page in `examples/page` |
 | 21 — Rejections as errors | ✅ complete, and the phase was rescoped: promises never needed language support. The straight-line `await` form is open, and marked as comfort |
 | 22 — Interop backwards | ✅ `api.js` and `api.d.ts` from `kitec build`, verified with real `tsc`. `@export` proved unnecessary. ❌ the Vite plugin |
-| 23 — Size gate | ⬜ not started |
+| 23 — Size gate | ✅ complete — four budgets in CI; 388 B for hello world, 2 KB for a DOM change, 5.7 KB for the island |
 | — View layer | ⬜ deferred past 1.0, deliberately |
 
-761 tests: unit tests per crate, an annotated compile-fail corpus, a
+765 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the host boundary and a real
 socket under Node, both string
