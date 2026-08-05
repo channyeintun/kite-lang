@@ -182,12 +182,13 @@ kitec build examples/hello.kite --emit wasm --out dist
 # wrote dist/app.wasm (500 bytes), dist/app.js and dist/index.html
 ```
 
-**A Kite program goes in a page.** `examples/page` is an ordinary HTML file
-with an ordinary stylesheet, complete before any WebAssembly arrives, with a
-**5,697-byte** module doing the part that needs logic. The count turns red below
-zero because `style.css` says so and the program only sets a class; hover and
-focus never reach Kite at all. Finding an element and setting a class costs
-2 KB, and there is a budget in CI that fails the build if any of it grows.
+**A Kite program goes in a page.** `examples/page` is a table of five thousand
+rows. Every keystroke in the filter walks all of them, sorts what survives and
+redraws — in about **3 ms**, from a **12 KB** module. The markup is HTML, the
+hover and the alignment and the colour of a status are CSS, and Kite holds the
+rows, does the work and writes text and class names. Finding an element and
+setting a class costs 2 KB, and there is a budget in CI that fails the build if
+any of it grows.
 
 That replaced a UI layer that computed its own layout and painted absolutely
 positioned elements through two interchangeable renderers. It worked, and it

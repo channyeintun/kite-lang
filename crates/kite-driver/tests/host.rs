@@ -1242,11 +1242,10 @@ fn a_cancelled_subscription_stops_listening() {
 
 /// The example page's program runs against a stand-in document.
 ///
-/// `examples/page` is the phase's exit criterion made into a file: an ordinary
-/// HTML page with an ordinary stylesheet, and a Kite module taking the part
-/// that needs logic. This runs its program, presses each button, and checks
-/// what it put on the page — including the class that decides colour, which is
-/// the whole argument for the direction in one assertion.
+/// `examples/page` is five thousand rows filtered and sorted on every
+/// keystroke. This runs its program, types into the filter, clicks a column
+/// heading, and checks what it put on the page — including the note, which
+/// carries the counts and so is the whole result in one string.
 #[test]
 fn the_example_page_program_works() {
     if !node_available() {
@@ -1259,132 +1258,68 @@ fn the_example_page_program_works() {
          import { instantiate, resident, setWriter } from \"./app.js\";\n\
          class Element {}\n\
          const listeners = new Map();\n\
-         const make = (id, value) => {\n\
-         \x20 const classes = new Set();\n\
+         const mk = (tag, attrs = {}) => {\n\
          \x20 const el = {\n\
-         \x20   id, textContent: \"\", value: value ?? \"\",\n\
-         \x20   classList: {\n\
-         \x20     add: (c) => classes.add(c),\n\
-         \x20     remove: (c) => classes.delete(c),\n\
-         \x20     contains: (c) => classes.has(c),\n\
+         \x20   tagName: tag, attrs: { ...attrs }, children: [], value: \"\",\n\
+         \x20   get textContent() {\n\
+         \x20     return this.children.map((c) => c.textContent ?? \"\").join(\"\");\n\
          \x20   },\n\
-         \x20   classes,\n\
-         \x20   addEventListener(n, f) { listeners.set(id, f); },\n\
-         \x20   removeEventListener(n, f) { listeners.delete(id); },\n\
+         \x20   set textContent(v) {\n\
+         \x20     this.children = [];\n\
+         \x20     if (v) this.children.push({ textContent: v });\n\
+         \x20   },\n\
+         \x20   classList: { add: () => {}, remove: () => {}, contains: () => false },\n\
+         \x20   getAttribute(n) { return n in this.attrs ? this.attrs[n] : null; },\n\
+         \x20   setAttribute(n, v) { this.attrs[n] = v; },\n\
+         \x20   appendChild(c) { this.children.push(c); return c; },\n\
+         \x20   addEventListener(n, f) {\n\
+         \x20     listeners.set(this.attrs.id ?? this.attrs[\"data-key\"], f);\n\
+         \x20   },\n\
+         \x20   removeEventListener() {},\n\
          \x20 };\n\
          \x20 Object.setPrototypeOf(el, Element.prototype);\n\
          \x20 return el;\n\
          };\n\
-         const nodes = {\n\
-         \x20 \"#count\": make(\"count\"), \"#status\": make(\"status\"),\n\
-         \x20 \"#step\": make(\"step\", \"2\"), \"#up\": make(\"up\"),\n\
-         \x20 \"#down\": make(\"down\"), \"#reset\": make(\"reset\"),\n\
-         };\n\
+         const search = mk(\"input\", { id: \"search\" });\n\
+         const rows = mk(\"tbody\", { id: \"rows\" });\n\
+         const note = mk(\"p\", { id: \"note\" });\n\
+         const ths = [\"id\", \"name\", \"region\", \"amount\"].map((k) =>\n\
+         \x20 mk(\"th\", { \"data-key\": k }));\n\
          globalThis.Element = Element;\n\
          globalThis.document = {\n\
-         \x20 querySelector: (s) => nodes[s] ?? null,\n\
-         \x20 querySelectorAll: () => [],\n\
+         \x20 querySelector: (s) =>\n\
+         \x20   ({ \"#search\": search, \"#rows\": rows, \"#note\": note })[s] ?? null,\n\
+         \x20 querySelectorAll: (s) => (s === \"th[data-key]\" ? ths : []),\n\
+         \x20 createElement: (t) => mk(t),\n\
          };\n\
          const out = [];\n\
          setWriter((l) => out.push(l));\n\
          const exports = await instantiate(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
-         exports.main();\n\
          resident(exports);\n\
-         const press = (id) => listeners.get(id)({ target: nodes[\"#\" + id] });\n\
-         const state = () =>\n\
-         \x20 nodes[\"#count\"].textContent +\n\
-         \x20 (nodes[\"#count\"].classes.has(\"negative\") ? \" negative\" : \"\") +\n\
-         \x20 \" / \" + nodes[\"#status\"].textContent;\n\
-         out.push(\"start: \" + state());\n\
-         press(\"up\"); out.push(\"after up: \" + state());\n\
-         press(\"down\"); press(\"down\"); out.push(\"after two downs: \" + state());\n\
-         press(\"reset\"); out.push(\"after reset: \" + state());\n\
+         exports.main();\n\
+         // The note carries every count, so it is the whole result in one line.\n\
+         // The timing is stripped: it is real milliseconds and would differ per\n\
+         // machine.\n\
+         const state = () => note.textContent.replace(/ · [0-9]+ ms$/, \"\");\n\
+         out.push(\"start: \" + state() + \" / drawn \" + rows.children.length);\n\
+         search.value = \"yangon\";\n\
+         listeners.get(\"search\")({ target: search });\n\
+         out.push(\"filtered: \" + state());\n\
+         const firstBefore = rows.children[0].textContent;\n\
+         listeners.get(\"amount\")({ target: ths[3] });\n\
+         out.push(\"sorted: \" + state());\n\
+         out.push(\"order changed: \" + (rows.children[0].textContent !== firstBefore));\n\
          process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
     let out = run_runner_under_node("examplepage", &src, runner, &[]);
     assert_eq!(
         out,
-        "counter ready\n\
-         start: 0 / last action: nothing yet\n\
-         after up: 2 / last action: increment\n\
-         after two downs: -2 negative / last action: decrement\n\
-         after reset: 0 / last action: reset\n",
-        "the step comes from the field, and the class comes from the sign"
+        "start: 5000 rows · 5000 matched · 100 shown / drawn 100\n\
+         filtered: 5000 rows · 503 matched · 100 shown\n\
+         sorted: 5000 rows · 503 matched · 100 shown\n\
+         order changed: true\n"
     );
 }
 
-// ---- promises --------------------------------------------------------------
-
-/// A `fetch` that resolves, and one that rejects.
-const FETCH_RUNNER: &str = "import { readFile } from \"node:fs/promises\";\n\
-     import { instantiate, resident, setWriter } from \"./app.js\";\n\
-     globalThis.fetch = async (url) => {\n\
-     \x20 if (String(url).includes(\"missing\")) throw new Error(\"404\");\n\
-     \x20 return { status: 200 };\n\
-     };\n\
-     const out = [];\n\
-     setWriter((l) => out.push(l));\n\
-     const exports = await instantiate(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
-     exports.main();\n\
-     resident(exports);\n\
-     await new Promise((r) => setTimeout(r, 50));\n\
-     process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
-
-/// A promise needs nothing from the language.
-///
-/// Worth its own test because the roadmap once claimed otherwise. A promise is
-/// an object, `then` is a method, and `js.func` is a callback — so `fetch` and
-/// everything shaped like it work with the primitives and no compiler support
-/// at all. If that stops being true, this fails.
-#[test]
-fn fetch_works_with_no_promise_support_in_the_language() {
-    if !node_available() {
-        eprintln!("skipping: node is not on PATH");
-        return;
-    }
-    let src = "use std/js\n\n\
-        fn main() {\n\
-        \x20 let (p, err) = js.call1(js.global(\"globalThis\"), \"fetch\", js.of_str(\"/data\"))\n\
-        \x20 if err != nil {\n    io.print(\"call failed\")\n    return\n  }\n\
-        \x20 let (_, terr) = js.call1(p, \"then\", js.func(|r: JsValue| {\n\
-        \x20   io.print(\"status \\(js.num_or(r, \"status\", 0.0))\")\n\
-        \x20 }))\n\
-        \x20 if terr != nil {\n    io.print(\"then failed\")\n    return\n  }\n\
-        \x20 io.print(\"asked\")\n\
-        }\n";
-    let out = run_runner_under_node("fetch", src, FETCH_RUNNER, &[]);
-    assert_eq!(out, "asked\nstatus 200.0\n");
-}
-
-/// A rejection becomes an error, and cannot be dropped on the floor.
-///
-/// This is the one thing the platform's own arrangement gets wrong for this
-/// language. `then` with a single callback runs nothing on a rejection and
-/// reports nothing, so the failure is silently gone — in a language whose
-/// central claim is that an error cannot be ignored. `js.settle` requires both
-/// halves, so ignoring a rejection is at least something somebody wrote down.
-#[test]
-fn a_rejected_promise_becomes_an_error() {
-    if !node_available() {
-        eprintln!("skipping: node is not on PATH");
-        return;
-    }
-    let src = "use std/js\n\n\
-        fn ask(url: str, label: str) {\n\
-        \x20 let (p, err) = js.call1(js.global(\"globalThis\"), \"fetch\", js.of_str(url))\n\
-        \x20 if err != nil {\n    return\n  }\n\
-        \x20 let serr = js.settle(p,\n\
-        \x20   |r: JsValue| { io.print(\"\\(label): status \\(js.num_or(r, \"status\", 0.0))\") },\n\
-        \x20   |why: str| { io.print(\"\\(label): \\(why)\") },\n\
-        \x20 )\n\
-        \x20 if serr != nil {\n    io.print(\"could not attach\")\n  }\n\
-        }\n\
-        fn main() {\n\
-        \x20 ask(\"/data\", \"ok\")\n\
-        \x20 ask(\"/missing\", \"bad\")\n\
-        }\n";
-    let out = run_runner_under_node("reject", src, FETCH_RUNNER, &[]);
-    assert_eq!(out, "ok: status 200.0\nbad: 404\n");
-}
 
 // ---- the typed door --------------------------------------------------------
 

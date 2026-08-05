@@ -102,10 +102,21 @@ const STRINGS = [
 {table}
 ];
 
+// A map from string to index, beside the table.
+//
+// This was an `indexOf` over the table, which is a walk of every string interned
+// so far. That is quadratic in the number of distinct strings a program makes,
+// and it is invisible until something makes a lot of them: a page building five
+// thousand rows spent two and a half seconds here, nearly all of it comparing
+// strings it had already seen.
+const INDEX = new Map(STRINGS.map((s, i) => [s, i]));
+
 function intern(s) {{
-  const existing = STRINGS.indexOf(s);
-  if (existing !== -1) return existing;
-  return STRINGS.push(s) - 1;
+  const existing = INDEX.get(s);
+  if (existing !== undefined) return existing;
+  const at = STRINGS.push(s) - 1;
+  INDEX.set(s, at);
+  return at;
 }}
 
 // The string a `str` value stands for.

@@ -1,25 +1,16 @@
-/* Ordinary CSS. Nothing here knows that Kite exists, and nothing in the Kite
-   program knows what any of this looks like — which is the whole arrangement.
-   Swap this file for Tailwind, for Bootstrap, for a design system you already
-   own, and the program does not change. */
-
 :root {
   --bg: #0b0d10;
   --panel: #14171c;
   --ink: #e6e9ef;
-  --muted: #8b93a1;
-  --line: #262b33;
-  --accent: #3b82f6;
-  --radius: 10px;
+  --muted: #838d9c;
+  --line: #242930;
+  --accent: #5b9cf8;
 }
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #f6f7f9;
-    --panel: #ffffff;
-    --ink: #14171c;
-    --muted: #5b6472;
-    --line: #e3e6ea;
+    --bg: #f4f6f8; --panel: #fff; --ink: #14171c;
+    --muted: #5d6674; --line: #e4e8ec;
   }
 }
 
@@ -29,71 +20,78 @@ body {
   margin: 0;
   min-height: 100dvh;
   display: grid;
-  place-items: center;
+  place-items: start center;
+  padding: 32px 16px;
   background: var(--bg);
   color: var(--ink);
-  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
-.card {
+.panel {
+  width: min(720px, 100%);
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 28px 32px;
-  min-width: 300px;
-  display: grid;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+header {
+  display: flex;
   gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line);
 }
 
-h1 { margin: 0; font-size: 20px; font-weight: 600; }
+h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
 
-.count {
-  margin: 0;
-  font-size: 56px;
-  font-weight: 300;
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
-}
-
-/* The count turns red below zero. The class is set by Kite; what the class
-   means is decided here, and changing that is a CSS edit and not a rebuild. */
-.count.negative { color: #f87171; }
-
-.row { display: flex; gap: 8px; }
-
-.btn {
+.search {
   font: inherit;
   color: inherit;
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 6px 16px;
-  cursor: pointer;
-  transition: background-color 120ms ease, border-color 120ms ease;
-}
-
-/* Hover and focus never reach Kite. Under the old design every one of these
-   was model state that had to be tracked and repainted. */
-.btn:hover { border-color: var(--muted); }
-.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.btn:active { transform: translateY(1px); }
-
-.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.btn-primary:hover { filter: brightness(1.08); }
-.btn-quiet { color: var(--muted); }
-
-.field { display: grid; gap: 6px; font-size: 13px; color: var(--muted); }
-
-.input {
-  font: inherit;
-  color: var(--ink);
   background: var(--bg);
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 6px 10px;
-  width: 100%;
+  padding: 7px 12px;
+  width: 280px;
+  max-width: 55%;
+}
+.search:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+table { width: 100%; border-collapse: collapse; }
+
+th {
+  text-align: left;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--line);
+  user-select: none;
 }
 
-.input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+th[data-key] { cursor: pointer; }
+th[data-key]:hover { color: var(--ink); }
 
-.status { margin: 0; font-size: 13px; color: var(--muted); min-height: 1.5em; }
+td { padding: 9px 20px; border-bottom: 1px solid var(--line); }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* The status class is set by Kite; what it looks like is decided here. */
+.tag { font-size: 12px; }
+.tag.active { color: #4ade80; }
+.tag.pending { color: #fbbf24; }
+.tag.closed { color: var(--muted); }
+
+.note {
+  margin: 0;
+  padding: 12px 20px;
+  font-size: 12px;
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+}

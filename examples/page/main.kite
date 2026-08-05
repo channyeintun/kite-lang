@@ -1,152 +1,176 @@
-// An island.
-//
-// The page beside this file is complete without it: real headings, real
-// buttons, a real stylesheet, and something readable on screen before any
-// WebAssembly has arrived. This program takes the one part that needs logic.
-//
-// Nothing here decides what anything looks like. The count turns red below zero
-// because `style.css` says `.count.negative { color: … }`, and this program's
-// entire contribution to that is putting the class on or taking it off. Hover
-// and focus never reach Kite at all.
+// Five thousand rows, filtered and sorted on every keystroke.
 //
 //     kitec build examples/page/main.kite --emit wasm --out examples/page
 //     python3 -m http.server -d examples/page 8000
 
 use std/dom
+use std/time
 
-// State lives in a struct the handlers share.
-//
-// A closure may not capture a `var`, because captures are by value and the
-// write would be invisible. So the handlers capture a `let` handle to this and
-// change it through a function taking `var` — which is the ordinary idiom for
-// every event handler a Kite program writes, and is why mutation is spelled out
-// in a signature rather than implied by a capture list.
-struct Model {
-    var count: int
-    var last: str
+struct Row {
+    id: int
+    name: str
+    region: str
+    amount: int
+    status: str
+    /// Everything searchable, folded once here rather than on every keystroke.
+    haystack: str
 }
 
-fn apply(var m: Model, delta: int, what: str) {
-    m.count = m.count + delta
-    m.last = what
+struct View {
+    var query: str
+    var key: str
+    var descending: bool
 }
 
-fn reset(var m: Model) {
-    m.count = 0
-    m.last = "reset"
+fn word(table: [str], n: int) -> str {
+    return table[n % table.len()]
 }
 
-/// How much a press is worth, read from the field on every press.
-///
-/// The input is the truth about itself. Mirroring its value into `Model` would
-/// mean writing it back on every keystroke, and writing a value back into a
-/// field while somebody is typing is how a program breaks Chinese, Japanese and
-/// Korean input — the composition buffer is cleared mid-word. The browser owns
-/// the field; this asks it.
-fn step_of(field: dom.Element) -> int {
-    let text = dom.value(field)
-    if text.len() == 0 {
-        return 1
+/// Deterministic data, so the page is the same on every machine.
+fn rows() -> [Row] {
+    let firsts = ["Ada", "Grace", "Alan", "Barbara", "Edsger", "Katherine",
+                  "Donald", "Margaret", "Tony", "Radia", "John", "Frances"]
+    let lasts = ["Lovelace", "Hopper", "Turing", "Liskov", "Dijkstra", "Johnson",
+                 "Knuth", "Hamilton", "Hoare", "Perlman", "McCarthy", "Allen"]
+    let regions = ["Yangon", "Reykjavík", "São Paulo", "Kraków", "Nairobi",
+                   "Osaka", "Toronto", "Lisboa", "Chennai", "Auckland"]
+    let states = ["active", "pending", "closed"]
+
+    var out: [Row] = []
+    var seed = 20260805
+    for i in 0..5000 {
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        let a = seed / 65536
+        let name = "\(word(firsts, a)) \(word(lasts, a / 7 + i))"
+        let region = word(regions, a / 3 + i * 2)
+        let status = word(states, a / 11 + i)
+        out.push(Row{
+            id: 1000 + i,
+            name: name,
+            region: region,
+            amount: 40 + (a % 9960),
+            status: status,
+            haystack: lower("\(name) \(region) \(status)"),
+        })
     }
-    var total = 0
-    for i in 0..text.len() {
-        let digit = text.code_at(i) - 0x30
-        if digit < 0 || digit > 9 {
-            return 1
+    return out
+}
+
+fn matches(r: Row, needle: str) -> bool {
+    return needle.len() == 0 || contains(r.haystack, needle)
+}
+
+fn ordered(items: [Row], key: str, descending: bool) -> [Row] {
+    let up = if key == "amount" {
+        sorted(items, |a: Row, b: Row| a.amount < b.amount)
+    } else if key == "region" {
+        sorted(items, |a: Row, b: Row| a.region < b.region)
+    } else if key == "name" {
+        sorted(items, |a: Row, b: Row| a.name < b.name)
+    } else {
+        sorted(items, |a: Row, b: Row| a.id < b.id)
+    }
+    return if descending { reversed(up) } else { up }
+}
+
+fn cell(row: dom.Element, body: str, class: str) {
+    let (td, err) = dom.create("td")
+    if err != nil {
+        return
+    }
+    dom.set_text(td, body)
+    if class.len() > 0 {
+        dom.add_class(td, class)
+    }
+    dom.append(row, td)
+}
+
+fn money(amount: int) -> str {
+    return "$\(amount / 100).\(pad_start("\(amount % 100)", 2, "0"))"
+}
+
+fn draw(body: dom.Element, shown: [Row]) {
+    dom.set_text(body, "")
+    for r in shown {
+        let (tr, err) = dom.create("tr")
+        if err != nil {
+            return
         }
-        total = total * 10 + digit
+        cell(tr, "\(r.id)", "num")
+        cell(tr, r.name, "")
+        cell(tr, r.region, "")
+        cell(tr, money(r.amount), "num")
+        cell(tr, r.status, "tag \(r.status)")
+        dom.append(body, tr)
     }
-    if total < 1 {
-        return 1
-    }
-    return total
 }
 
-/// Put the model on the screen.
-///
-/// Three writes, and one of them is a class name. That last one is the whole
-/// argument for this direction: the program says *what is true*, and the
-/// stylesheet decides what true looks like.
-fn show(m: Model, count: dom.Element, status: dom.Element) {
-    dom.set_text(count, "\(m.count)")
-    dom.set_class(count, "negative", m.count < 0)
-    dom.set_text(status, "last action: \(m.last)")
+fn refresh(all: [Row], v: View, body: dom.Element, note: dom.Element) {
+    let started = time.now()
+    let needle = lower(v.query)
+    let found = filter(all, |r: Row| matches(r, needle))
+    let shown = take(ordered(found, v.key, v.descending), 100)
+    draw(body, shown)
+    let took = time.now() - started
+    dom.set_text(note, "\(all.len()) rows · \(found.len()) matched · \(shown.len()) shown · \(took) ms")
+}
+
+fn set_key(var v: View, key: str) {
+    if v.key == key {
+        v.descending = !v.descending
+    } else {
+        v.key = key
+        v.descending = false
+    }
+}
+
+fn set_query(var v: View, q: str) {
+    v.query = q
 }
 
 fn main() {
-    let count = dom.find("#count")
-    let status = dom.find("#status")
-    let step = dom.find("#step")
-    let up = dom.find("#up")
-    let down = dom.find("#down")
-    let reset_button = dom.find("#reset")
-
-    // Every one of these is an `Option`, and a missing element is nothing to
-    // work with. The old design answered a failed lookup with a handle that
-    // every call tolerated, so a typo in a selector produced a program that ran
-    // perfectly and did nothing.
-    //
-    // **One guard each, not one guard with `||` in it.** Testing three
-    // optionals in a single condition narrows none of them on the way out —
-    // which is correct, because passing the test says only that *some* of them
-    // were present. The compiler is right and the shorter version was wrong.
-    if count == nil {
-        io.error("the page has no #count")
+    let search = dom.find("#search")
+    let body = dom.find("#rows")
+    let note = dom.find("#note")
+    if search == nil {
+        io.error("no #search")
         return
     }
-    if status == nil {
-        io.error("the page has no #status")
+    if body == nil {
+        io.error("no #rows")
         return
     }
-    if step == nil {
-        io.error("the page has no #step")
-        return
-    }
-    if up == nil {
-        io.error("the page has no #up")
-        return
-    }
-    if down == nil {
-        io.error("the page has no #down")
-        return
-    }
-    if reset_button == nil {
-        io.error("the page has no #reset")
+    if note == nil {
+        io.error("no #note")
         return
     }
 
-    let model = Model{ count: 0, last: "nothing yet" }
-    show(model, count, status)
+    let all = rows()
+    let view = View{ query: "", key: "id", descending: false }
+    refresh(all, view, body, note)
 
-    let (up_sub, up_err) = dom.on(up, "click", |e: dom.Event| {
-        apply(model, step_of(step), "increment")
-        show(model, count, status)
+    let (typed, terr) = dom.on(search, "input", |e: dom.Event| {
+        set_query(view, dom.event_value(e))
+        refresh(all, view, body, note)
     })
-    if up_err != nil {
-        io.error("could not listen: \(up_err.message())")
+    if terr != nil {
+        io.error("could not listen: \(terr.message())")
         return
     }
 
-    let (down_sub, down_err) = dom.on(down, "click", |e: dom.Event| {
-        apply(model, 0 - step_of(step), "decrement")
-        show(model, count, status)
-    })
-    if down_err != nil {
-        io.error("could not listen: \(down_err.message())")
-        return
+    for th in dom.find_all("th[data-key]") {
+        let key = dom.attribute(th, "data-key")
+        if key == nil {
+            continue
+        }
+        let column = key
+        let (sub, err) = dom.on(th, "click", |e: dom.Event| {
+            set_key(view, column)
+            refresh(all, view, body, note)
+        })
+        if err != nil {
+            io.error("could not listen: \(err.message())")
+            return
+        }
     }
-
-    let (reset_sub, reset_err) = dom.on(reset_button, "click", |e: dom.Event| {
-        reset(model)
-        show(model, count, status)
-    })
-    if reset_err != nil {
-        io.error("could not listen: \(reset_err.message())")
-        return
-    }
-
-    // The subscriptions are held rather than discarded. Nothing needs to cancel
-    // them here — the page outlives the program — but they are what a component
-    // that can be taken off a page would keep.
-    io.print("counter ready")
 }
