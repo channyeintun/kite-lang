@@ -14,6 +14,9 @@
 use kite_driver::{compile, Emit};
 use std::process::Command;
 
+mod common;
+use common::Workspace;
+
 fn node_available() -> bool {
     Command::new("node")
         .arg("--version")
@@ -24,9 +27,10 @@ fn node_available() -> bool {
 /// Compile a program that listens, and run it under Node with a client script
 /// that talks to it.
 fn serve_under_node(name: &str, src: &str, client: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("kite-serve-{}-{}", name, std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("work directory");
+    // Removed when it drops, so a failing assertion below does not leave the
+    // directory — nor the Node server the runner starts inside it.
+    let work = Workspace::new(&format!("serve-{}", name));
+    let dir = work.path();
 
     let c = compile(format!("{}.kite", name), src, Emit::Wasm);
     assert!(
@@ -65,7 +69,6 @@ fn serve_under_node(name: &str, src: &str, client: &str) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let _ = std::fs::remove_dir_all(&dir);
     String::from_utf8(output.stdout).expect("utf-8")
 }
 

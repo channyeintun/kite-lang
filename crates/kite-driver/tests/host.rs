@@ -10,6 +10,9 @@ use kite_driver::{compile, Emit};
 use std::path::Path;
 use std::process::Command;
 
+mod common;
+use common::Workspace;
+
 fn node_available() -> bool {
     Command::new("node")
         .arg("--version")
@@ -36,8 +39,8 @@ fn run_under_node(name: &str, src: &str) -> String {
 /// server along in the runner rather than reaching for a network that may or
 /// may not be there.
 fn run_runner_under_node(name: &str, src: &str, runner: &str, args: &[&str]) -> String {
-    let dir = std::env::temp_dir().join(format!("kite-host-{}-{}", name, std::process::id()));
-    std::fs::create_dir_all(&dir).expect("work directory");
+    let work = Workspace::new(&format!("host-{}", name));
+    let dir = work.path();
     let c = compile(format!("{}.kite", name), src, Emit::Wasm);
     assert!(
         !c.failed(),
@@ -65,7 +68,6 @@ fn run_runner_under_node(name: &str, src: &str, runner: &str, args: &[&str]) -> 
         name,
         String::from_utf8_lossy(&output.stderr)
     );
-    let _ = std::fs::remove_dir_all(&dir);
     String::from_utf8(output.stdout).expect("utf-8")
 }
 
@@ -564,8 +566,8 @@ fn a_program_may_declare_its_own_host() {
         eprintln!("skipping: node is not on PATH");
         return;
     }
-    let dir = std::env::temp_dir().join(format!("kite-own-host-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("work directory");
+    let work = Workspace::new("own-host");
+    let dir = work.path();
     let src = "@host(\"paint\")\nextern fn brush(size: int) -> str\n\
         fn main() {\n  io.print(brush(3))\n}\n";
     let c = compile("own.kite", src, Emit::Wasm);
@@ -597,7 +599,6 @@ fn a_program_may_declare_its_own_host() {
         "failed under node:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(String::from_utf8_lossy(&output.stdout), "brush of 3\n");
 }
 
@@ -1334,11 +1335,13 @@ fn tsc_available() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-/// Build a library and return its output directory.
-fn build_library(name: &str, src: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("kite-api-{}-{}", name, std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("work directory");
+/// Build a library and return the directory holding it.
+///
+/// The `Workspace` rather than its path, so the caller holds the thing that
+/// cleans up and an assertion that fails midway still leaves nothing behind.
+fn build_library(name: &str, src: &str) -> Workspace {
+    let work = Workspace::new(&format!("api-{}", name));
+    let dir = work.path();
     let c = compile(format!("{}.kite", name), src, Emit::Wasm);
     assert!(!c.failed(), "{}", c.render_diagnostics());
     let module = c.wasm.as_ref().expect("a module");
@@ -1351,7 +1354,7 @@ fn build_library(name: &str, src: &str) -> std::path::PathBuf {
     let (api_js, api_dts) = kite_driver::generate_api(&module.api, "app.wasm");
     std::fs::write(dir.join("api.js"), api_js).expect("write api.js");
     std::fs::write(dir.join("api.d.ts"), api_dts).expect("write api.d.ts");
-    dir
+    work
 }
 
 const LIBRARY: &str = "pub fn add(a: int, b: int) -> int {\n  return a + b\n}\n\
@@ -1374,7 +1377,8 @@ fn javascript_calls_a_kite_module_through_the_wrapper() {
         eprintln!("skipping: node is not on PATH");
         return;
     }
-    let dir = build_library("lib", LIBRARY);
+    let work = build_library("lib", LIBRARY);
+    let dir = work.path();
     std::fs::write(
         dir.join("run.mjs"),
         "import { readFile } from \"node:fs/promises\";\n\
@@ -1396,13 +1400,13 @@ fn javascript_calls_a_kite_module_through_the_wrapper() {
         String::from_utf8_lossy(&output.stdout),
         "5\nhello, world\n0.25\nfalse\n"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The declaration file describes what is there, by its own names.
 #[test]
 fn the_declaration_file_names_the_parameters() {
-    let dir = build_library("named", LIBRARY);
+    let work = build_library("named", LIBRARY);
+    let dir = work.path();
     let dts = std::fs::read_to_string(dir.join("api.d.ts")).expect("api.d.ts");
     // `int` is 64-bit. A `number` would hold it to 2^53 and lose the rest in
     // silence, which is the sort of edge that reaches production.
@@ -1412,7 +1416,6 @@ fn the_declaration_file_names_the_parameters() {
     assert!(dts.contains("export declare function positive(n: bigint): boolean;"), "{}", dts);
     // `main` is the program's entry, not part of its interface.
     assert!(!dts.contains(" main("), "{}", dts);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A signature JavaScript has no representation for is left out of both files
@@ -1423,14 +1426,14 @@ fn an_undescribable_signature_is_omitted_and_said_so() {
         pub fn origin() -> Point {\n  return Point{ x: 0, y: 0 }\n}\n\
         pub fn twice(n: int) -> int {\n  return n * 2\n}\n\
         fn main() {\n}\n";
-    let dir = build_library("undescribable", src);
+    let work = build_library("undescribable", src);
+    let dir = work.path();
     let dts = std::fs::read_to_string(dir.join("api.d.ts")).expect("api.d.ts");
     assert!(dts.contains("twice(n: bigint): bigint"), "{}", dts);
     assert!(!dts.contains("declare function origin"), "{}", dts);
     // Said, not silently dropped: a caller wondering where their function went
     // should find the answer in the file rather than in a changelog.
     assert!(dts.contains("origin"), "the omission must be explained: {}", dts);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TypeScript accepts correct use and rejects incorrect use.
@@ -1444,7 +1447,8 @@ fn typescript_type_checks_against_the_declarations() {
         eprintln!("skipping: tsc is not on PATH");
         return;
     }
-    let dir = build_library("typed", LIBRARY);
+    let work = build_library("typed", LIBRARY);
+    let dir = work.path();
     std::fs::write(
         dir.join("good.ts"),
         "import { load, add, greet, ratio } from \"./api.js\";\n\
@@ -1485,7 +1489,7 @@ fn typescript_type_checks_against_the_declarations() {
 
     let check = |file: &str| {
         Command::new("tsc")
-            .current_dir(&dir)
+            .current_dir(dir)
             .args([
                 "--noEmit", "--strict", "--target", "es2020", "--module", module,
                 "--moduleResolution", resolution, file,
@@ -1509,7 +1513,6 @@ fn typescript_type_checks_against_the_declarations() {
         "{}",
         text
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---- std/html --------------------------------------------------------------
