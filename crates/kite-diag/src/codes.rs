@@ -4,6 +4,11 @@
 //! `kite --explain`, and in test annotations. Codes are never reused for a
 //! different meaning, even if a rule is removed.
 //!
+//! Every code here is one the compiler actually emits. One that no longer is —
+//! or never was — comes out rather than staying to be explained: `--explain`
+//! answering for a diagnostic nobody can provoke is a worse kind of wrong than
+//! not answering, because it reads as documentation of a rule.
+//!
 //! Ranges:
 //!   E0000–E0099  lexical
 //!   E0100–E0199  syntax and bindings
@@ -74,10 +79,6 @@ codes! {
     E0101 = "E0101", "unclosed delimiter",
         "A bracket, brace, or parenthesis was opened and never closed.";
 
-    E0102 = "E0102", "expected a statement",
-        "This position requires a statement. Statements are newline-terminated \
-         in Kite; semicolons are never written.";
-
     E0110 = "E0110", "use of possibly-uninitialised binding",
         "A `let` binding may be assigned after declaration, but only if the \
          compiler can prove exactly one assignment happens on every path \
@@ -131,8 +132,15 @@ codes! {
     E0204 = "E0204", "unknown type",
         "This type name does not resolve.";
 
-    E0205 = "E0205", "not callable",
-        "This expression is not a function.";
+    E0205 = "E0205", "no such method, function, or callable value",
+        "A name was called and there is nothing of that name to call here: a \
+         method a type does not have, an associated function that is not one, \
+         or an expression that is not a function at all.\n\n\
+         Kite has no extension methods, so a type's methods are all declared in \
+         the module that declares the type — which is what makes `x.foo()` \
+         answerable by looking in one place. A `dyn Trait` is narrower still: it \
+         exposes its trait's methods and no others, because the concrete type is \
+         not known where the call is written.";
 
     E0206 = "E0206", "trait cannot be a trait object",
         "A `dyn Trait` dispatches by looking at the value it holds, so every \
@@ -162,6 +170,11 @@ codes! {
          Kite has no turbofish. If a parameter cannot be inferred, take a \
          value of that type, or return a concrete type instead.";
 
+    E0210 = "E0210", "non-exhaustive match",
+        "A `match` must cover every possible value. Exhaustiveness is what \
+         makes adding an enum variant safe: the compiler shows you every place \
+         that must change.";
+
     E0211 = "E0211", "invalid closure",
         "A closure's parameter types come from where it is used. Where that is \
          not known, they must be annotated.\n\n\
@@ -176,11 +189,6 @@ codes! {
          Kite performs no implicit numeric conversion, so a conversion is \
          always written — which means every place precision can be lost is a \
          place someone chose.";
-
-    E0210 = "E0210", "non-exhaustive match",
-        "A `match` must cover every possible value. Exhaustiveness is what \
-         makes adding an enum variant safe: the compiler shows you every place \
-         that must change.";
 
     E0213 = "E0213", "type has no identity",
         "`ptr.same` asks whether two names refer to one heap cell. Structs, \
@@ -204,7 +212,8 @@ codes! {
          This is the flaw Kite fixes in Go's error convention. In Go the value \
          on a failure path is the zero value, which flows onward looking \
          valid. In Kite there is no value on that path at all.\n\n\
-         Write `check err` to propagate, or test `err != nil` explicitly — in the          branch where the error is nil, the value becomes readable.";
+         Write `check err` to propagate, or test `err != nil` explicitly — in \
+         the branch where the error is nil, the value becomes readable.";
 
     E0302 = "E0302", "error is never checked",
         "An `error` binding went out of scope without being inspected. Silently \
@@ -242,6 +251,14 @@ codes! {
         "`await` suspends the enclosing function, so that function must be \
          declared `async`.";
 
+    // ---- cryptography -----------------------------------------------------
+    E0600 = "E0600", "comparing a secret with `==`",
+        "Structural equality short-circuits at the first difference, so how \
+         long a comparison takes says how much of a guess was right. That is a \
+         timing oracle, and it is how tokens and signatures are guessed one \
+         character at a time.\n\n\
+         `crypto.equal` compares in time that does not depend on the values.";
+
     // ---- derivation -------------------------------------------------------
     E0700 = "E0700", "malformed `@derive`",
         "`@derive(…)` names traits to write bodies for, and goes in front of a \
@@ -266,14 +283,6 @@ codes! {
          trait.\n\n\
          Where it does not, write the implementation by hand — the derive is a \
          convenience, not the only way in.";
-
-    // ---- cryptography -----------------------------------------------------
-    E0600 = "E0600", "comparing a secret with `==`",
-        "Structural equality short-circuits at the first difference, so how \
-         long a comparison takes says how much of a guess was right. That is a \
-         timing oracle, and it is how tokens and signatures are guessed one \
-         character at a time.\n\n\
-         `crypto.equal` compares in time that does not depend on the values.";
 
     // ---- exclusivity ------------------------------------------------------
     E0800 = "E0800", "one object under two argument names",

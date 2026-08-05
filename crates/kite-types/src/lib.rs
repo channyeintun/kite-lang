@@ -3782,7 +3782,9 @@ impl<'a> Checker<'a> {
                         )
                         .with_primary(name.span, "no such method")
                         .with_note(
-                            "a map has: len, keys, values; read with `m[key]`, which yields                              an optional, and write with `m[key] = value`",
+                            "a map has: len, keys, values; read with `m[key]`, \
+                             which yields an optional, and write with \
+                             `m[key] = value`",
                         ),
                     );
                     return self.lit(ExprKind::Error, TyId::ERROR, span);
