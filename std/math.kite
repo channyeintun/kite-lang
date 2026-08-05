@@ -161,8 +161,9 @@ pub fn ln2() -> float {
 // Written out here for the same reason `sqrt` is: a host call is a boundary two
 // runtimes have to agree about, and `Math.sin` in a browser is not required to
 // give the same bits as libm on a laptop. Everything below converges to one
-// answer everywhere, which is what makes a layout computed from it identical
-// across backends — the property the whole two-renderer design rests on.
+// answer everywhere, so a number a program computes is the same number on the
+// web, under the VM and under the JIT — which is what the differential corpus
+// compares, and what a `<canvas>` drawn from these coordinates depends on.
 //
 // Each is the textbook arrangement: reduce the argument to a range where a
 // series converges quickly, sum the series, then undo the reduction. The
