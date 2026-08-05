@@ -1,8 +1,13 @@
 # Concurrency: one concept, many threads
 
-How Kite gives you `async`/`await` on a genuinely multi-threaded runtime, without
-goroutines, channels, mutexes, or data races — and how the same source becomes
-parallel on the web the day the platform allows it.
+How Kite gives you `async`/`await` without goroutines, channels, mutexes, or
+data races — and how the same source becomes parallel, on every target
+including the web, the day the platform and the runtime allow it.
+
+**The scheduler is a cooperative loop today and nothing here runs on two cores
+yet.** What is finished is the part that has to be finished first: the surface,
+and the type system rule about what may cross a thread boundary. Adding threads
+later is a runtime change; adding the rule later would be a breaking one.
 
 ---
 
@@ -90,15 +95,21 @@ deadlock by mismatching send and receive counts.
 
 ## 3. The scheduler is a target property
 
-| Target | Scheduler | Real parallelism today |
+| Target | Scheduler today | Real parallelism today |
 |---|---|---|
-| `native-*` | Work-stealing pool, one worker thread per core | **Yes** |
-| `kbc` (bytecode VM) | Work-stealing pool | **Yes** |
-| `wasm32-gc` (web, now) | Cooperative loop on main thread; `task.parallel` fans out to a Web Worker isolate pool | **CPU-bound work only** |
-| `wasm32-gc` (web, later) | Same work-stealing pool as native | **Yes, when shared-everything-threads ships** |
+| `wasm32-gc` (web) | Cooperative loop on the main thread | **No** |
+| `kbc` (bytecode VM) | Cooperative loop; the VM's values are `Rc`-based | **No** |
+| `native-*` | Cooperative loop | **No** |
+| any, later | Work-stealing pool, one worker thread per core | **When the runtime has one** |
 
-Nothing above is visible in Kite source. `fetch_user` compiles unchanged for all
-four rows.
+**Nothing runs on two cores yet, on any target.** This table used to say
+`native-*` and `kbc` did, which was the intended runtime written up as the
+existing one: there is no thread spawned anywhere in the compiler or the
+runtime today.
+
+Nothing above is visible in Kite source, and that is the whole point of the
+section — `fetch_user` compiles unchanged for every row, including the one that
+has not been built.
 
 ### Why the web row is restricted
 
@@ -204,34 +215,31 @@ until you actually create the hazard.
 
 ## 5. CPU-bound work on the web, today
 
-`task.parallel` is the fan-out primitive. Its input and output must be `Share`,
-which — because `Share` values are deeply immutable — means they serialise safely
-across `postMessage` **and** will share directly by reference once shared-heap
-threads exist.
+`task.parallel` is the fan-out primitive, and **today it does not fan out** —
+it applies the function to each item in turn, yielding between them, on every
+target. What is finished about it is the *rule*: its input and its output must
+be `Share`.
 
 ```kite
-pub async fn process_images(images: [ImageData]) -> ([ImageData], error) {
-    let results = await task.parallel(images, |img| {
-        return filters.gaussian_blur(img, radius: 4.0)
-    })
-    return results, nil
+pub async fn blur_all(images: [Picture]) -> [Picture] {
+    return await task.parallel(images, |img: Picture| blurred(img, 4.0))
 }
 ```
 
-| Today | After shared-everything-threads |
+That rule is what makes the shape forward-compatible, because `Share` values
+are deeply immutable and so are safe under either mechanism a real runtime
+could use:
+
+| If the runtime copies | If the runtime shares |
 |---|---|
-| Worker isolate pool, `Share` values structured-cloned in and out | Same work-stealing pool as native, `Share` values passed by reference |
+| Serialised in and out — safe, because nothing else can write to a `Share` value | Passed by reference — safe, for the same reason |
 | Copy cost proportional to payload | Zero copy |
 | **Source unchanged** | **Source unchanged** |
 
-The runtime picks the strategy. `task.parallel` is the only place a Kite program
-can observe that more than one thread might exist, and even there it observes
-only the constraint (`Share`), never the mechanism.
-
-For the web target, `task.parallel` requires COOP/COEP headers to use
-`SharedArrayBuffer` for zero-copy transfer of `buffer.*` payloads; without them it
-falls back to structured clone. `kite build --target web` warns when a program
-uses `task.parallel` and prints the two header lines needed.
+The runtime picks. `task.parallel` is the only place a Kite program can observe
+that more than one thread might exist, and even there it observes only the
+constraint, never the mechanism — which is why the constraint is the half worth
+shipping first.
 
 ---
 
@@ -239,25 +247,32 @@ uses `task.parallel` and prints the two header lines needed.
 
 Structured, and tied to scope:
 
+**There is no cancellation, and that is the current answer rather than a gap
+waiting to be filled.** `task.scope(tasks)` waits for every task in a group
+before continuing, so a task cannot outlive the code that started it by
+accident — which is the half of structured concurrency that needs no new
+concept:
+
 ```kite
-pub async fn search(query: str) -> ([Result], error) {
-    let scope = task.scope()
-    defer scope.cancel()          // every task started in this scope stops here
-
-    let fast = scope.start(cache.lookup(query))
-    let slow = scope.start(db.search(query))
-
-    return await task.race([fast, slow])   // loser is cancelled by the defer
+pub async fn search(query: str) -> [Answer] {
+    let fast = cache_lookup(query)
+    let slow = db_search(query)
+    return await task.scope([fast, slow])
 }
 ```
 
-A cancelled task stops at its next `await` point. Cancellation is cooperative —
-there is no preemptive kill, because a preempted task cannot maintain
-invariants. `defer` blocks still run, so resources are released.
+`task.race` returns the first result and **does not stop the losers**. That is
+deliberate: a task the program started is the program's work, and ending it
+silently from somewhere else is exactly the hidden control flow this language
+spends its omissions avoiding. A loser runs to completion and its result is
+dropped.
 
-A task started inside a `task.scope()` cannot outlive it. This makes task leaks
-structurally impossible, the same guarantee structured concurrency provides in
-Kotlin and Swift.
+What a cancellation design would have to settle, whenever it is attempted:
+where the stop happens (the next `await`, since a preempted task cannot
+maintain its invariants), what a stopped task's `defer` blocks do, and how a
+caller learns which of the two it got. None of that is decided here, and
+inventing it in a document ahead of the code is how this section came to
+describe a `scope.cancel()` that never existed.
 
 ---
 
@@ -314,18 +329,16 @@ safe.
 
 ### Scheduler
 
-```
-kite-rt/
-  scheduler/
-    native.rs      work-stealing deque per worker, one worker per core
-    wasm_web.rs    microtask-queue-driven cooperative loop + isolate pool
-    shared.rs      future: work-stealing over shared-everything-threads
-  task.rs          Task<T>, scopes, cancellation tokens
-  waker.rs         wake-up plumbing, uniform across schedulers
-```
+Today the scheduler is a cooperative loop, and it is small enough to live
+beside the collector in `kite-rt/src/lib.rs` rather than in a directory of its
+own. A task is resumed when its deadline arrives or when the host answers; when
+every task is waiting on a deadline the clock jumps to the earliest, which is
+what makes a program that sleeps cost no real time under test.
 
-The scheduler is selected at link time by target. `Task<T>` and the combinators
-are identical across all of them.
+The shape a threaded runtime would take — a work-stealing deque per worker,
+one worker per core, chosen at link time by target — is what the rest of this
+document is written against. `Task<T>` and the combinators do not change when
+it arrives, which is the claim `Share` exists to keep true.
 
 ---
 
@@ -334,9 +347,9 @@ are identical across all of them.
 | Question | Answer |
 |---|---|
 | Is the surface single-threaded? | **No.** `async`/`await` says nothing about threads. |
-| Is the runtime multi-threaded? | **Yes on native and bytecode, today.** Partially on web, fully when the platform allows. |
+| Is the runtime multi-threaded? | **Not yet, on any target.** The surface and the type system are ready for one; the scheduler is a cooperative loop. |
 | Why is the web limited? | WasmGC references cannot cross threads. The fix is a draft proposal, not a Kite decision. |
 | Will web programs need rewriting later? | **No.** `Share` enforces the future invariant now. |
 | How many concepts must a beginner learn? | **One:** some things take time; `await` them. |
 | Can a Kite program have a data race? | **No**, on any target, by construction. |
-| Can a Kite program deadlock? | Not by channel mismatch — there are no channels. A cycle of `await`s can still stall, and the runtime detects and reports it in debug builds. |
+| Can a Kite program deadlock? | Not by channel mismatch — there are no channels. A cycle of `await`s can still stall, and nothing detects that today. |
