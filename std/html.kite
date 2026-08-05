@@ -244,8 +244,11 @@ fn patch(old: Live, next: Node) -> (Live, error) {
 /// exactly the new one.
 ///
 /// Keyed children are matched by key wherever they moved to; unkeyed ones by
-/// position. A reused element is only moved when its position actually changed,
-/// so a list that did not reorder costs no DOM writes at all.
+/// position. A list that did not reorder costs no DOM writes at all: while the
+/// new children are still coming out in the order the old ones are already in,
+/// nothing is written. From the first child that is built, moved, or skipped
+/// past, the rest of the list is appended in order — because once the tail is
+/// being rebuilt, a child's own two indices no longer say where it sits.
 fn reconcile(parent: dom.Element, olds: [Live], nexts: [Node]) -> ([Live], error) {
     var by_key: { str: int } = { }
     for i in 0..olds.len() {
@@ -260,6 +263,15 @@ fn reconcile(parent: dom.Element, olds: [Live], nexts: [Node]) -> ([Live], error
     }
 
     var out: [Live] = []
+    // Whether the children placed so far are still exactly the old ones, in
+    // the order they were already in. While that holds, a child whose old and
+    // new positions agree is already where it belongs and needs no write.
+    //
+    // Comparing those two positions on its own is not enough, and that was a
+    // bug: one child built in front of another leaves the second's indices
+    // equal while its place has moved down by one. Two old children and one
+    // new one before them rendered backwards.
+    var settled = true
     for i in 0..nexts.len() {
         let want = nexts[i]
         var from = -1
@@ -285,6 +297,7 @@ fn reconcile(parent: dom.Element, olds: [Live], nexts: [Node]) -> ([Live], error
             if perr != nil {
                 return _, perr
             }
+            settled = false
             out.push(made)
         } else {
             taken[from] = true
@@ -292,14 +305,15 @@ fn reconcile(parent: dom.Element, olds: [Live], nexts: [Node]) -> ([Live], error
             if err != nil {
                 return _, err
             }
-            // Only when it actually moved. `append` on an element already in
-            // the tree relocates it, so doing this unconditionally would be a
-            // write per child on every update.
-            if from != i {
+            // `append` on an element already in the tree relocates it, so this
+            // is the move as well as the placement — and skipping it is the
+            // whole of the optimisation.
+            if !settled || from != i {
                 let perr = dom.append(parent, live.el)
                 if perr != nil {
                     return _, perr
                 }
+                settled = false
             }
             out.push(live)
         }

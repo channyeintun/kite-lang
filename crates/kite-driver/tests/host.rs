@@ -1597,3 +1597,105 @@ fn a_described_tree_becomes_elements() {
          td[{\"class\":\"num\"}]=1000,td[{}]=Ada Lovelace)))\n"
     );
 }
+
+/// A keyed list survives an insertion at the front.
+///
+/// The bug this pins down: `reconcile` skipped the DOM move whenever a reused
+/// child's old and new indices agreed. One child built in front of the list and
+/// one dropped from it leaves those two numbers equal for everything after,
+/// while every one of them has in fact moved — so `[a, b, c]` becoming
+/// `[n, b, c]` rendered as `b, c, n`, and stayed wrong.
+///
+/// The order is read **between** updates rather than at the end, because a
+/// later update can arrive at the right answer from a corrupted one and hide
+/// it: the printed marker is what the runner uses as the moment to look.
+#[test]
+fn a_keyed_list_survives_insertion_at_the_front() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/dom\nuse std/html\n\n\
+        fn item(key: str) -> html.Node {\n\
+        \x20 return html.keyed(key, html.txt(\"li\", [], key))\n\
+        }\n\
+        fn show(var view: html.Mounted, keys: [str], mark: str) {\n\
+        \x20 let err = html.update(view, map(keys, item))\n\
+        \x20 if err != nil {\n    io.print(\"failed: \\(err.message())\")\n    return\n  }\n\
+        \x20 io.print(mark)\n\
+        }\n\
+        fn main() {\n\
+        \x20 let root = dom.find(\"#root\")\n\
+        \x20 if root == nil {\n    return\n  }\n\
+        \x20 let (view, err) = html.mount(root, map([\"a\", \"b\", \"c\"], item))\n\
+        \x20 if err != nil {\n    io.print(\"failed: \\(err.message())\")\n    return\n  }\n\
+        \x20 io.print(\"mounted\")\n\
+        \x20 // `a` goes, `n` arrives in front, and `b` and `c` keep the indices\n\
+        \x20 // they had — while both have to move.\n\
+        \x20 show(view, [\"n\", \"b\", \"c\"], \"inserted\")\n\
+        \x20 // A plain reorder of the same three.\n\
+        \x20 show(view, [\"c\", \"n\", \"b\"], \"reordered\")\n\
+        \x20 // Nothing moves: this one must cost no writes at all.\n\
+        \x20 show(view, [\"c\", \"n\", \"b\"], \"unchanged\")\n\
+        \x20 // And one taken off the end.\n\
+        \x20 show(view, [\"c\", \"n\"], \"shortened\")\n\
+        }\n";
+    let runner = "import { readFile } from \"node:fs/promises\";\n\
+         import { instantiate, resident, setWriter } from \"./app.js\";\n\
+         class Element {}\n\
+         let writes = 0;\n\
+         const mk = (tag) => {\n\
+         \x20 const el = {\n\
+         \x20   tag, attrs: {}, children: [], _text: \"\",\n\
+         \x20   get textContent() {\n\
+         \x20     return this._text + this.children.map((c) => c.textContent).join(\"\");\n\
+         \x20   },\n\
+         \x20   set textContent(v) { this.children = []; this._text = v; },\n\
+         \x20   setAttribute(n, v) { this.attrs[n] = v; },\n\
+         \x20   getAttribute(n) { return n in this.attrs ? this.attrs[n] : null; },\n\
+         \x20   appendChild(c) {\n\
+         \x20     writes += 1;\n\
+         \x20     const at = this.children.indexOf(c);\n\
+         \x20     if (at !== -1) this.children.splice(at, 1);\n\
+         \x20     this.children.push(c); c.parent = this; return c;\n\
+         \x20   },\n\
+         \x20   remove() {\n\
+         \x20     writes += 1;\n\
+         \x20     const p = this.parent; if (!p) return;\n\
+         \x20     const at = p.children.indexOf(this);\n\
+         \x20     if (at !== -1) p.children.splice(at, 1);\n\
+         \x20   },\n\
+         \x20   addEventListener() {}, removeEventListener() {},\n\
+         \x20 };\n\
+         \x20 Object.setPrototypeOf(el, Element.prototype);\n\
+         \x20 return el;\n\
+         };\n\
+         const root = mk(\"ul\");\n\
+         globalThis.Element = Element;\n\
+         globalThis.document = {\n\
+         \x20 querySelector: (s) => (s === \"#root\" ? root : null),\n\
+         \x20 querySelectorAll: () => [],\n\
+         \x20 createElement: (t) => mk(t),\n\
+         };\n\
+         const out = [];\n\
+         const order = () => root.children.map((c) => c._text).join(\"\");\n\
+         // The marker is printed after the update it names, so the tree is\n\
+         // read at that moment rather than once at the end — where a later\n\
+         // update could have corrected a wrong one.\n\
+         setWriter((l) => { out.push(l + \" \" + order() + \" \" + writes); writes = 0; });\n\
+         const exports = await instantiate(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         resident(exports);\n\
+         exports.main();\n\
+         process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+    let out = run_runner_under_node("htmlkeys", src, runner, &[]);
+    assert_eq!(
+        out,
+        // The last number on each line is how many DOM writes the update cost.
+        // `unchanged` costing zero is the optimisation this rule replaced, kept.
+        "mounted abc 3\n\
+         inserted nbc 4\n\
+         reordered cnb 3\n\
+         unchanged cnb 0\n\
+         shortened cn 1\n"
+    );
+}
