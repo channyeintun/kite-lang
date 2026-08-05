@@ -1471,6 +1471,12 @@ impl<'a> Checker<'a> {
                 let v = self.expr(value, Some(inner));
                 self.expect_ty(v.ty, inner, v.span, Some(sig.name_span));
                 let e = self.expr(error, Some(TyId::ERR));
+                // A type implementing `Error` becomes one here. `expect_ty`
+                // deliberately does *not* wave it through on its own: a site
+                // that accepted the value without converting it would hand a
+                // raw struct to `err.message()` and trap at run time, which is
+                // exactly what happened the first time this was written.
+                let e = self.coerce(e, Some(TyId::ERR));
                 self.expect_ty(e.ty, TyId::ERR, e.span, None);
                 let ret = hir::Stmt::Return {
                     value: Some(hir::Expr {
@@ -1498,6 +1504,7 @@ impl<'a> Checker<'a> {
                     return None;
                 }
                 let e = self.expr(error, Some(TyId::ERR));
+                let e = self.coerce(e, Some(TyId::ERR));
                 self.expect_ty(e.ty, TyId::ERR, e.span, None);
                 self.mark_checked(error);
                 let ret = hir::Stmt::Return {
@@ -6952,6 +6959,25 @@ impl<'a> Checker<'a> {
         self.resolved.trait_method(type_index, trait_index, "show")
     }
 
+    /// The `message` method a type gets from implementing `Error`, if it does.
+    ///
+    /// Found by name in the prelude, exactly as `Display` is, so the compiler
+    /// holds no opinion about what a failure is beyond the one the standard
+    /// library wrote down.
+    fn error_method(&self, ty: TyId) -> Option<u32> {
+        let trait_index = self.resolved.type_by_name("Error")?;
+        if !matches!(self.type_ids.get(trait_index as usize)?, Some(TypeTarget::Trait(_))) {
+            return None;
+        }
+        let type_index = self.type_index_of(ty)?;
+        self.resolved.trait_method(type_index, trait_index, "message")
+    }
+
+    /// Whether a value of this type may stand where an `error` is wanted.
+    fn coerces_to_error(&self, found: TyId) -> bool {
+        found != TyId::ERR && self.error_method(found).is_some()
+    }
+
     /// A value as text. Primitives render themselves; anything else needs
     /// `Display`.
     fn render(&mut self, v: hir::Expr) -> hir::Expr {
@@ -7087,6 +7113,33 @@ impl<'a> Checker<'a> {
                 kind: ExprKind::ToDyn { value: Box::new(e), trait_id: tr },
                 ty: want,
             },
+            // A value implementing `Error`, standing where an `error` is
+            // wanted. The `message` call is inserted **here**, at the point of
+            // conversion, so it is an ordinary call in the IR that every
+            // backend already knows how to lower — nothing about the error
+            // representation changes, and there is no new instruction for three
+            // backends to agree about.
+            //
+            // It also means the message is rendered where the failure happened,
+            // which is where its context is freshest. What it does not yet do
+            // is keep the value: `errors.as<T>` needs the payload carried
+            // alongside, and that is a change to the representation rather than
+            // to this conversion.
+            TyKind::Err if self.coerces_to_error(e.ty) => {
+                let span = e.span;
+                let message = self.error_method(e.ty).expect("checked");
+                let targs = self.receiver_args(e.ty);
+                let rendered = hir::Expr {
+                    kind: ExprKind::Call { callee: hir::FnId(message), args: vec![e], targs },
+                    ty: TyId::STR,
+                    span,
+                };
+                hir::Expr {
+                    kind: ExprKind::ErrorNew { message: Box::new(rendered) },
+                    ty: TyId::ERR,
+                    span,
+                }
+            }
             _ => e,
         }
     }
@@ -7113,6 +7166,18 @@ impl<'a> Checker<'a> {
                     fname, tn, tn, fname
                 ));
             }
+        }
+        // The same courtesy the `dyn` case gets: a nominal type in an error
+        // slot is almost always a type that meant to be an error and has not
+        // said so yet.
+        if expected == TyId::ERR && self.type_index_of(found).is_some() {
+            let name = self.types.name(found);
+            d = d.with_note(format!(
+                "a type may stand here once it implements `Error`: write \
+                 `impl Error for {} {{ fn message(self) -> str {{ … }} }}`",
+                name
+            ));
+            d = d.with_note("or build one from text with `errors.new(\"…\")`");
         }
         if self.types.is_numeric(found) && self.types.is_numeric(expected) {
             d = d.with_note(format!(

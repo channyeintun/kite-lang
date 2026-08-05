@@ -2071,6 +2071,41 @@ The order that keeps each step runnable:
 **Exit criterion:** Appendix A gets its `LoadError` back. The test that compiles
 it will say whether that worked, which is the point of having added it.
 
+**Steps 1 and 2 are done, and the exit criterion is met.** `impl Error for
+MyType` compiles, a value of such a type may be returned wherever an `error` is
+expected, and Appendix A has its `LoadError` — checked on every run, on the
+checker and the web target, and in the differential corpus so all three backends
+are compared on it.
+
+The conversion turned out to need no change to the error representation at all.
+`coerce` inserts a call to `message` at the point of conversion, so what reaches
+MIR is an ordinary call followed by the `ErrorNew` that already existed — three
+backends lowered it without knowing the trait is there.
+
+One thing was got wrong and is worth recording, because the wrong version
+compiled and ran. The first attempt made `expect_ty` *accept* a type
+implementing `Error` without inserting the conversion. Every check passed, and a
+raw struct reached `err.message()` and trapped at run time. **A type rule that
+permits something the lowering does not perform is worse than no rule**: the
+acceptance was removed, the conversion is applied at the two return sites, and
+any site that still needs it fails to compile rather than trapping.
+
+### What is left of this phase
+
+**The error still carries only its message.** The conversion renders the text
+where the failure happened — which is where its context is freshest — and drops
+the value. So:
+
+- `cause`, the trait's second method, has nowhere to live yet.
+- `errors.chain`, `errors.is<T>` and `errors.as<T>` need the original value
+  alongside the message.
+
+That is a change to `error_record` — one field today, in the Wasm backend, the
+bytecode VM and Cranelift alike — to carry the value and its type tag beside the
+text. Steps 3, 4 and 5 of the plan above, and they are one indivisible change to
+the type the taint analysis is built on, so they want a clear run rather than
+the end of one.
+
 ---
 
 ## Deferred: the view layer
@@ -2131,7 +2166,7 @@ none.
 | 21 — Rejections as errors | ✅ complete, and the phase was rescoped: promises never needed language support. The straight-line `await` form is open, and marked as comfort |
 | 22 — Interop backwards | ✅ `api.js` and `api.d.ts` from `kitec build`, verified with real `tsc`. `@export` proved unnecessary. ❌ the Vite plugin |
 | 23 — Size gate | ✅ complete — four budgets in CI; 388 B for hello world, 2 KB for a DOM change, 5.7 KB for the island |
-| 24 — Concrete error types | ⬜ not started — the largest gap between the specification and the compiler, in the feature the language leads with |
+| 24 — Concrete error types | 🟡 `impl Error for MyType` works on all three backends and Appendix A compiles with its `LoadError`. ❌ the error carries only its message, so `cause`, `chain`, `is<T>` and `as<T>` wait on the representation |
 | — View layer | ⬜ deferred past 1.0, deliberately |
 
 768 tests: unit tests per crate, an annotated compile-fail corpus, a

@@ -32,6 +32,37 @@ pub trait Debug {
     fn debug(self) -> str
 }
 
+/// What a failure says about itself.
+///
+/// Declared here rather than in the compiler, for the same reason `Display` is:
+/// the language has no opinion about how a failure reads, and a program is free
+/// to declare its own trait if this one does not suit.
+///
+/// A type implementing this may be returned wherever an `error` is expected.
+/// The conversion happens at that point and is visible in the IR — nothing is
+/// implicit about it beyond not having to write the call.
+///
+/// ```kite
+/// pub enum LoadError {
+///     Missing(path: str)
+/// }
+///
+/// impl Error for LoadError {
+///     fn message(self) -> str {
+///         return match self {
+///             Missing(path) => "no task file at \(path)",
+///         }
+///     }
+/// }
+///
+/// fn load(path: str) -> ([Task], error) {
+///     return _, LoadError.Missing(path: path)
+/// }
+/// ```
+pub trait Error {
+    fn message(self) -> str
+}
+
 /// One integer standing for a value, for indexing and for deduplication.
 ///
 /// Two values that are `==` must hash alike; two that are not may. The derived

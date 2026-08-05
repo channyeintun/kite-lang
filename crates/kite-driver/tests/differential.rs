@@ -155,6 +155,40 @@ fn main() {
          \x20 io.print(p.show() == \"(3, 4)\")\n}\n",
     ),
     (
+        "error-types",
+        "// A concrete type saying what its own failure means. Returning one\n\
+         // where an `error` is expected converts it at that point, which is an\n\
+         // ordinary call to `message` in the IR — so all three backends lower\n\
+         // it without knowing the trait exists.\n\
+         enum LoadError {\n  Absent(path: str)\n  Malformed(path: str, detail: str)\n}\n\
+         impl Error for LoadError {\n  fn message(self) -> str {\n\
+         \x20   return match self {\n\
+         \x20     Absent(path)            => \"no file at \\(path)\",\n\
+         \x20     Malformed(path, detail) => \"\\(path): \\(detail)\",\n    }\n  }\n}\n\
+         struct Refused {\n  who: str\n}\n\
+         impl Error for Refused {\n  fn message(self) -> str {\n\
+         \x20   return \"\\(self.who) said no\"\n  }\n}\n\
+         fn load(path: str) -> (int, error) {\n\
+         \x20 if path == \"\" {\n    return _, LoadError.Absent(path: \"<none>\")\n  }\n\
+         \x20 if path == \"bad\" {\n\
+         \x20   return _, LoadError.Malformed(path: path, detail: \"not JSON\")\n  }\n\
+         \x20 return 7, nil\n}\n\
+         fn ask(who: str) -> (int, error) {\n\
+         \x20 if who == \"nobody\" {\n    return _, Refused{ who: who }\n  }\n\
+         \x20 return 1, nil\n}\n\
+         fn main() {\n\
+         \x20 let (a, aerr) = load(\"\")\n\
+         \x20 if aerr != nil {\n    io.print(aerr.message())\n  }\n\
+         \x20 let (b, berr) = load(\"bad\")\n\
+         \x20 if berr != nil {\n    io.print(berr.message())\n  }\n\
+         \x20 let (c, cerr) = load(\"good\")\n\
+         \x20 if cerr == nil {\n    io.print(\"ok \\(c)\")\n  }\n\
+         \x20 let (d, derr) = ask(\"nobody\")\n\
+         \x20 if derr != nil {\n    io.print(derr.message())\n  }\n\
+         \x20 let (e, eerr) = ask(\"somebody\")\n\
+         \x20 if eerr == nil {\n    io.print(\"allowed \\(e)\")\n  }\n}\n",
+    ),
+    (
         "events",
         "// Every event comes through one door: a click fills the position, a\n\
          // key press fills the key.\n\
@@ -250,6 +284,40 @@ fn main() {
          \x20 io.print(\"\\(S.Dot) and \\(P{x: 0, y: 0})\")\n\
          \x20 io.print(join(map([p, P{x: 1, y: 1}], |q: P| q.show()), \" \"))\n\
          \x20 io.print(p.show() == \"(3, 4)\")\n}\n",
+    ),
+    (
+        "error-types",
+        "// A concrete type saying what its own failure means. Returning one\n\
+         // where an `error` is expected converts it at that point, which is an\n\
+         // ordinary call to `message` in the IR — so all three backends lower\n\
+         // it without knowing the trait exists.\n\
+         enum LoadError {\n  Absent(path: str)\n  Malformed(path: str, detail: str)\n}\n\
+         impl Error for LoadError {\n  fn message(self) -> str {\n\
+         \x20   return match self {\n\
+         \x20     Absent(path)            => \"no file at \\(path)\",\n\
+         \x20     Malformed(path, detail) => \"\\(path): \\(detail)\",\n    }\n  }\n}\n\
+         struct Refused {\n  who: str\n}\n\
+         impl Error for Refused {\n  fn message(self) -> str {\n\
+         \x20   return \"\\(self.who) said no\"\n  }\n}\n\
+         fn load(path: str) -> (int, error) {\n\
+         \x20 if path == \"\" {\n    return _, LoadError.Absent(path: \"<none>\")\n  }\n\
+         \x20 if path == \"bad\" {\n\
+         \x20   return _, LoadError.Malformed(path: path, detail: \"not JSON\")\n  }\n\
+         \x20 return 7, nil\n}\n\
+         fn ask(who: str) -> (int, error) {\n\
+         \x20 if who == \"nobody\" {\n    return _, Refused{ who: who }\n  }\n\
+         \x20 return 1, nil\n}\n\
+         fn main() {\n\
+         \x20 let (a, aerr) = load(\"\")\n\
+         \x20 if aerr != nil {\n    io.print(aerr.message())\n  }\n\
+         \x20 let (b, berr) = load(\"bad\")\n\
+         \x20 if berr != nil {\n    io.print(berr.message())\n  }\n\
+         \x20 let (c, cerr) = load(\"good\")\n\
+         \x20 if cerr == nil {\n    io.print(\"ok \\(c)\")\n  }\n\
+         \x20 let (d, derr) = ask(\"nobody\")\n\
+         \x20 if derr != nil {\n    io.print(derr.message())\n  }\n\
+         \x20 let (e, eerr) = ask(\"somebody\")\n\
+         \x20 if eerr == nil {\n    io.print(\"allowed \\(e)\")\n  }\n}\n",
     ),
     (
         "events",

@@ -652,18 +652,20 @@ pub trait Error {
 `error` is a built-in nil-able type — either nil, or a value describing a
 failure.
 
-> **Not built yet, and this is the largest gap between this document and the
-> compiler.** An `error` today carries a message and nothing else: `errors.new`
-> makes one, `err.message()` reads it, and `impl Error for MyType` does not
-> compile because there is no `Error` trait. Trait objects have landed, so the
-> condition this section used to put on it — *once trait objects land* — is met,
-> and what remains is the work rather than a dependency. Until then
-> `errors.wrap` carries context by putting it in the message, which is what
-> [§7.6](#76-adding-context) shows, and `errors.chain`, `errors.is<T>` and
-> `errors.as<T>` are absent along with the types they would inspect.
+`Error` is declared in the prelude, beside `Display` and `Debug`, and **any type
+may implement it**. A value whose type does is accepted wherever an `error` is
+expected; the conversion happens at that point and is an ordinary call in the
+IR, so nothing about it is hidden from a reader of the generated code.
 
-Once it is built, `error` becomes an alias for `Option<dyn Error>`: either
-`nil`, or some value implementing `Error`. Any type can implement it.
+> **What is built and what is not.** `impl Error for MyType` compiles, and
+> returning one in an error slot works on all three backends. What an `error`
+> *carries* is still the message: the conversion renders it where the failure
+> happened, and the original value is not kept. So `errors.chain`,
+> `errors.is<T>` and `errors.as<T>` in [§7.6](#76-adding-context) are still
+> absent — they need the value alongside the message, which is a change to the
+> representation rather than to the conversion, and it is
+> [Phase 24's remaining half](../docs/06-roadmap.md#phase-24--concrete-error-types).
+> `cause` is absent for the same reason.
 
 ```kite
 pub struct NotFound {
@@ -1710,14 +1712,13 @@ being re-litigated, and makes it clear when a decision should be revisited.
 document and checks it on every run, which is the only way a specification stops
 being able to lie about the language it describes. It could, until recently: the
 program that stood here used `use std/io`, `impl Error for LoadError` and
-`json.decode<[Task]>` — three things that do not exist — and nothing noticed,
+`json.decode<[Task]>` — three things that did not exist — and nothing noticed,
 because nothing was checking.
 
-Two of those were the appendix being wrong. The third is the language being
-unfinished, and it is marked where it belongs:
-[§7.2](#72-the-error-type) says concrete error types are not built yet, so the
-failures below are `errors.new` strings. When that lands, this appendix gets its
-`LoadError` back, and the test will say if it does not.
+Two were the appendix being wrong about the language and were corrected. The
+third was the language being unfinished, and it was built rather than explained
+away: `LoadError` below is a real concrete error type, and the test is what says
+so.
 
 ```kite
 use std/fs
@@ -1738,16 +1739,35 @@ impl Display for Task {
     }
 }
 
+// `Absent` rather than `Missing`: a pattern names a variant without its enum,
+// so two enums in scope may not share a variant name — and `std/fs` already has
+// a `Missing`. The rule is in §9.3, and this is what it looks like in practice.
+pub enum LoadError {
+    Absent(path: str)
+    Malformed(path: str, detail: str)
+}
+
+impl Error for LoadError {
+    fn message(self) -> str {
+        return match self {
+            Absent(path)            => "no task file at \(path)",
+            Malformed(path, detail) => "\(path) is not valid task JSON: \(detail)",
+        }
+    }
+}
+
 pub fn load(path: str) -> ([Task], error) {
     if !fs.exists(path) {
-        return _, errors.new("no task file at \(path)")
+        return _, LoadError.Absent(path: path)
     }
 
     let (bytes, err) = fs.read(path)
     check errors.wrap(err, "reading \(path)")
 
     let (doc, perr) = json.parse(bytes)
-    check errors.wrap(perr, "\(path) is not valid JSON")
+    if perr != nil {
+        return _, LoadError.Malformed(path: path, detail: perr.message())
+    }
 
     var tasks: [Task] = []
     for item in json.items(doc) {

@@ -1,0 +1,126 @@
+// The `Error` trait, and types that implement it.
+//
+// The half of the error design that was specified from the start and built
+// last. §7.2 declared it, Appendix A used it, and until now neither compiled —
+// a concrete type could not say what its failure meant, so every failure in the
+// standard library was an `errors.new` string.
+//
+// A type implementing `Error` may be returned wherever an `error` is expected.
+// The conversion happens at that point, and is an ordinary call to `message` in
+// the IR rather than anything a backend had to learn.
+
+use std/test
+use std/errors
+
+pub enum LoadError {
+    Absent(path: str)
+    Malformed(path: str, detail: str)
+}
+
+impl Error for LoadError {
+    fn message(self) -> str {
+        return match self {
+            Absent(path)            => "no task file at \(path)",
+            Malformed(path, detail) => "\(path) is not valid: \(detail)",
+        }
+    }
+}
+
+pub struct Refused {
+    pub who: str
+}
+
+impl Error for Refused {
+    fn message(self) -> str {
+        return "\(self.who) said no"
+    }
+}
+
+fn load(path: str) -> (int, error) {
+    if path == "" {
+        return _, LoadError.Absent(path: "<none>")
+    }
+    if path == "bad" {
+        return _, LoadError.Malformed(path: path, detail: "not JSON")
+    }
+    return 7, nil
+}
+
+fn ask(who: str) -> (int, error) {
+    if who == "nobody" {
+        return _, Refused{ who: who }
+    }
+    return 1, nil
+}
+
+/// An enum implementing `Error`, through the `return _, err` form.
+fn enum_checks() -> [error] {
+    var out: [error] = []
+
+    let (a, aerr) = load("")
+    out.push(test.is_true(aerr != nil, "an absent file fails"))
+    if aerr != nil {
+        out.push(test.equal_str(aerr.message(), "no task file at <none>", "a variant's message"))
+    }
+
+    let (b, berr) = load("bad")
+    if berr != nil {
+        out.push(test.equal_str(berr.message(), "bad is not valid: not JSON", "a payload of two"))
+    }
+
+    let (c, cerr) = load("good")
+    out.push(test.is_true(cerr == nil, "success returns nil"))
+    if cerr == nil {
+        out.push(test.equal_int(c, 7, "and the value is readable"))
+    }
+    return out
+}
+
+/// A struct implementing `Error`, through the `return v, err` pair form.
+fn struct_checks() -> [error] {
+    var out: [error] = []
+    let (n, err) = ask("nobody")
+    out.push(test.is_true(err != nil, "a refusal fails"))
+    if err != nil {
+        out.push(test.equal_str(err.message(), "nobody said no", "a struct's message"))
+    }
+    let (m, oerr) = ask("somebody")
+    out.push(test.is_true(oerr == nil, "and success is still nil"))
+    return out
+}
+
+/// A concrete error composes with everything built for the string kind.
+fn wrapping_checks() -> [error] {
+    var out: [error] = []
+    let (n, err) = load("")
+    // Tested rather than propagated: this function collects failures instead of
+    // leaving on the first one, so the taint has to be cleared here.
+    out.push(test.is_true(err != nil, "the failure to wrap is a failure"))
+    let wrapped = errors.wrap(err, "starting up")
+    out.push(test.is_true(wrapped != nil, "wrapping a failure keeps it a failure"))
+    if wrapped != nil {
+        out.push(test.equal_str(
+            wrapped.message(),
+            "starting up: no task file at <none>",
+            "context goes in front of a concrete error",
+        ))
+    }
+    out.push(test.is_true(errors.wrap(nil, "x") == nil, "wrapping nil is still nil"))
+    out.push(test.is_true(errors.mentions(err, "no task file"), "and the text is searchable"))
+    return out
+}
+
+fn main() {
+    var results: [error] = []
+    results = concat(results, enum_checks())
+    results = concat(results, struct_checks())
+    results = concat(results, wrapping_checks())
+    var failed = 0
+    for e in results {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("error types: \(results.len() - failed) passed, \(failed) failed")
+}

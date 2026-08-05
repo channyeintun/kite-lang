@@ -90,6 +90,28 @@ let b = fetch("beta", 50)
 let (first, second) = await task.both(a, b)   // 100ms, not 150
 ```
 
+**Errors that are types.** `impl Error for MyType` makes a concrete type
+usable wherever an `error` is expected — the conversion happens at that point
+and is an ordinary call in the IR, so nothing about it is hidden.
+
+```kite
+pub enum LoadError {
+    Absent(path: str)
+}
+
+impl Error for LoadError {
+    fn message(self) -> str {
+        return match self {
+            Absent(path) => "no task file at \(path)",
+        }
+    }
+}
+
+fn load(path: str) -> ([Task], error) {
+    return _, LoadError.Absent(path: path)
+}
+```
+
 **A standard library, in Kite.** `math`, `time`, `errors`, `fmt`, `json`,
 `toml`, `text`, `test`, `buffer`, `task`, `sync`, `fs`, `http`, `socket`,
 `crypto`, `canvas`, `js`, `dom`. Its own tests are ordinary Kite programs that run on *both*
@@ -182,11 +204,12 @@ python3 -m http.server -d site 8000
 
 Recorded here rather than left to be discovered:
 
-- **No concrete error types.** The specification's §7.2 declares an `Error`
-  trait and §7.6 promises `errors.is<T>` / `errors.as<T>`; neither exists. An
-  `error` carries a message and nothing else. This is the largest gap between
-  the document and the compiler, it is in the feature the language leads with,
-  and it is [Phase 24](docs/06-roadmap.md#phase-24--concrete-error-types).
+- **An error carries its message, not its value.** `impl Error for MyType` now
+  works and a concrete type may be returned in an error slot — but the
+  conversion renders the message and drops the value, so `cause`,
+  `errors.chain`, `errors.is<T>` and `errors.as<T>` are still absent. Carrying
+  the value needs a change to the error representation in all three backends:
+  [Phase 24's remaining half](docs/06-roadmap.md#phase-24--concrete-error-types).
 - **No user interface layer at all, on purpose, for now.** `std/ui` and the
   Material package were removed rather than deprecated, because two ways to
   build a screen is exactly what the change was meant to end. `std/dom` is

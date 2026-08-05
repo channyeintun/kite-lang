@@ -1,0 +1,20 @@
+// A type in an error slot that has not said it is an error.
+//
+// The diagnostic names the missing `impl` rather than only the mismatch,
+// because a type returned in an error slot is almost always a type that meant
+// to be an error and has not declared it yet.
+
+struct Plain {
+    x: int
+}
+
+fn f() -> (int, error) {
+    return _, Plain{ x: 1 } //~ ERROR E0200
+}
+
+fn main() {
+    let (a, e) = f()
+    if e != nil {
+        io.print(e.message())
+    }
+}
