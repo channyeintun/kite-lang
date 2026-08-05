@@ -189,6 +189,7 @@ prefix-`[` expression statements.
 | `f32` `f64` | Sized floats | `f32` / `f64` |
 | `char` | One Unicode scalar value | `i32` |
 | `str` | Immutable UTF-8 string | `externref` (JS string) or `array i8` |
+| `JsValue` | An opaque host object; web only ([§15.1](#151-jsvalue)) | `externref` |
 
 **There are no implicit numeric conversions.** `let x: i64 = my_i32` is a
 compile error; write `my_i32 as i64`. Integer overflow traps in debug builds and
@@ -400,10 +401,47 @@ let double = |x| x * 2                       // types inferred, expression body
 let total = items.fold(0, |acc, item| acc + item.price)
 ```
 
-Closures capture by reference to the GC-managed binding. Because `let` bindings
-are immutable, the vast majority of captures are trivially safe. Capturing a
-`var` binding in a closure that outlives its scope is permitted — the binding is
-promoted to a heap cell — but such a closure is not `Share`
+**Closures capture by value, taken when the closure is made.** Because `let`
+bindings are immutable, the vast majority of captures are trivially safe: the
+value cannot change afterwards, so by-value and by-reference cannot be told
+apart.
+
+**Capturing a `var` is a compile error** ([E0211](#16-diagnostics)). A by-value
+capture of a mutable binding would not see later writes, and code that reads one
+expecting it to is a bug that no diagnostic could find afterwards. Promoting the
+binding to a heap cell would make the write visible, and was specified here
+before the compiler was built — but it buys shared mutable state through a
+capture list, which is the thing this language spends most of its omissions
+avoiding.
+
+```kite
+var total = 0
+let add = |n: int| { total = total + n }    // error[E0211]
+```
+
+To let a closure change something, **capture a `let` handle to a struct and pass
+it to a function that takes it as `var`.** Structs are references
+([§14](#14-memory-model)), so the write lands where the holder can see it, and
+it happens through a named function rather than through a capture:
+
+```kite
+struct Counter {
+    var count: int
+}
+
+let state = Counter{ count: 0 }
+let bump = || { increment(state) }          // captures a `let`, by value
+
+fn increment(var c: Counter) {
+    c.count = c.count + 1
+}
+```
+
+This is the idiom for every event handler, timer and observer callback a program
+writes, and it is deliberate that mutation is spelled out in a signature rather
+than implied by a capture.
+
+A closure that captures a host reference is not `Share`
 ([§12.4](#124-the-share-marker)).
 
 ---
@@ -1219,8 +1257,10 @@ A type is `Share` when:
 - it is explicitly wrapped: `sync.Mutex<T>`, `sync.Atomic<T>`, `sync.Channel<T>`.
 
 A type is **not** `Share` when it has a `var` field anywhere in its transitive
-structure, or when it holds a host reference (a DOM node, a canvas context, a
-file handle).
+structure, or when it holds a `JsValue` — a DOM node, a canvas context, a file
+handle ([§15.1](#151-jsvalue)). A host reference belongs to the isolate that
+created it, and an integer standing in for one would carry none of that: it
+would satisfy every rule above and mean nothing on the other side.
 
 Because struct fields are immutable by default, **most user types are `Share`
 without the author doing anything or knowing the trait exists.** The marker only
@@ -1418,29 +1458,155 @@ copied, so a push inside is not something the caller can observe.
 
 The web target has no direct DOM access — no Wasm proposal for calling Web IDL
 without JavaScript glue has been standardised, and none is imminent. Kite
-therefore defines a narrow, generated host boundary rather than pretending it
-does not exist.
+therefore defines the boundary explicitly rather than pretending it is not
+there.
+
+### 15.1 `JsValue`
 
 ```kite
-@host("dom")
-extern fn create_element(tag: str) -> HostRef
-
-@host("dom")
-extern fn set_attribute(node: HostRef, name: str, value: str)
+pub struct Element {
+    raw: JsValue        // unmarked: opaque outside this module
+}
 ```
 
-`HostRef` is an opaque handle (`externref` on the web). It is not `Share`, cannot
-be forged, and cannot be dereferenced from Kite code.
+`JsValue` is a host reference. On the web it lowers to `externref`; on every
+other target it names a diagnostic rather than a value, because there is nothing
+for it to refer to.
 
-The compiler generates the JavaScript glue module from the `extern` declarations,
-so the boundary is declared once, in Kite, and the glue cannot drift from it.
-Because `str` is already a JavaScript string via JS String Builtins, string
-arguments cross with no marshalling.
+| Property | Reason |
+|---|---|
+| Opaque | Kite cannot read inside it. It is the host's object, not a Kite one. |
+| Not `Share` | It belongs to one isolate ([§12.4](#124-the-share-marker)). |
+| Not comparable with `==` | `externref` is outside Wasm's `eq` hierarchy, so there is no structural answer to give. Identity is `js.same(a, b)`, which is `===`. Writing `==` on one is a compile error rather than a quiet wrong answer. |
+| Cannot be forged | There is no literal for it. |
 
-Application code does not use `extern` directly. It is the mechanism by which
-`std/fs`, `std/dom`, `std/http` and `std/socket` are built — and, on the web,
-the escape hatches beneath them. Drawing does not go through it: the renderers
-sit on compiler builtins, so a program that paints needs no `extern` at all.
+**Lifetime needs no rule.** On the web the Wasm heap *is* the JavaScript heap, so
+a Kite struct holding an element — whose listener holds a Kite closure, which
+holds the struct — is a cycle across the boundary that the one collector
+collects. There is no ownership protocol, no release call, and no table of
+integers to keep in step. This is the whole argument for a reference over a
+handle, and it is not recoverable by any amount of care with integers: nothing
+can tell the host that Kite dropped a number, and WasmGC has no finalizers.
+
+### 15.2 Two mechanisms, and which is which
+
+**`extern` declares one named function.**
+
+```kite
+@host("net")
+extern fn connect(host: str, port: int) -> JsValue
+```
+
+Direct, monomorphic, and checked at the call. It is how `std/fs`, `std/http`,
+`std/socket` and `std/crypto` are built, and how the standard library reaches
+anything it calls often enough for a name lookup to matter. Drawing does not use
+it at all: the drawing calls are compiler builtins, so a program that paints
+needs no `extern`.
+
+**`std/js` declares nothing.** It is a fixed set of about fifteen primitives
+through which any host object can be reached:
+
+| | |
+|---|---|
+| `js.global(name)` | the root — `window`, `document`, a constructor |
+| `js.get(v, name)` / `js.set(v, name, x)` | properties |
+| `js.call0(v, name)` … `js.call4(v, name, a, b, c, d)` | methods, by arity |
+| `js.new(name, args)` | construction |
+| `js.func(f)` | a Kite closure the host can call |
+| `js.await(p)` | a promise, as a `Task` |
+| `js.same(a, b)` / `js.is_nil(v)` / `js.instance_of(v, name)` | identity and kind |
+| `of_str` `of_num` `of_bool` / `as_str` `as_num` `as_bool` | conversion, both ways |
+
+Everything else — `std/dom`, and any browser API a program needs — is ordinary
+Kite written over these.
+
+**Why the general mechanism is the primary one.** The browser has thousands of
+interfaces. With `extern` alone, the first one the standard library never
+covered forces a user to hand-write a JavaScript host object and register it
+with `provide`. That user is now writing and shipping JavaScript, which is the
+thing Kite exists to replace. **A language whose extension mechanism is "go and
+write the other language" has conceded its own argument on the first day of real
+use.** The primitives close that: they are the last JavaScript anyone writes,
+and the generated glue is a fixed size no matter how much of the platform a
+program touches.
+
+The cost is a name looked up when the program runs rather than fixed when it
+compiles, and it is paid twice: a small amount of speed, and a mistyped name
+that compiles. §15.4 is what makes the second one survivable.
+
+### 15.3 Everything catches
+
+A host exception must never cross the boundary raw. Every primitive that can
+fail returns a value and an error:
+
+```kite
+let (node, err) = js.call1(document, "querySelector", js.of_str("#form"))
+check err
+```
+
+The taint analysis ([§7.3](#73-correlated-results-and-taint-analysis)) then makes
+the check mandatory. This is not defensive style; it is the difference between a
+mistyped method name failing one call and a thrown exception unwinding through
+the Wasm frames and taking every running task with it.
+
+It also removes JavaScript's most common class of bug by construction. Reading a
+property that is not there yields `undefined`, and `undefined` becoming `0` or
+`NaN` somewhere later is untraceable. `as_num` returns an error, and the error
+must be tested before the number can be used.
+
+**Numbers cross as `f64`.** JavaScript numbers *are* `f64`, and an `int` is an
+i64, so every crossing would otherwise allocate a BigInt. The safe-integer check
+happens on the Kite side, where the failure is a value.
+
+**Absence is `Option`.** A host call that may find nothing returns `?T`. There is
+no tolerated zero handle and no null object anywhere in the boundary — a
+convention that returns something usable-looking for "not found" is the zero
+value this specification rejects in [§17](#17-deliberate-omissions), wearing a
+different hat.
+
+### 15.4 The hygiene boundary
+
+`JsValue` is untyped. If it reaches application code, the type system has stopped
+helping and Kite is JavaScript with more syntax. Two rules keep it in:
+
+**Wrap it in an opaque struct.** A `pub struct` with unmarked fields
+([§4.2](#42-visibility)) can be held and passed but not read, built or
+destructured. So `Element` outside `std/dom` is a real closed type, and no
+ordinary code can reach the value inside it.
+
+**Provide exactly one door out.** `dom.raw(e)` and `dom.wrap(v)`, greppable and
+documented. Sealing a wrapper completely sounds safer and is not: the user who
+needs one method the library never wrapped cannot reach their own element, and
+what they do instead is rebuild a parallel untyped world beside the typed one.
+One marked escape is a boundary that holds; a wall is a boundary that gets
+climbed.
+
+`std/js` is a separate module so that importing it is visible in a file's first
+three lines. It is the floor below the typed world, and it carries the same
+cultural marking Rust gives `unsafe` — normal inside a module whose job is
+wrapping, a smell in an application's public interface.
+
+### 15.5 What is admitted
+
+Two things are true about this design and are recorded rather than defended.
+
+**A mistyped name compiles.** `extern` did not have this problem. Three things
+reduce it: the typed layer is written once and covered by tests, so a typo lives
+in one place; users call the typed function and never write the string; and the
+long tail can be **generated** from the browser's own interface definitions,
+where the names come from the specification and cannot be mistyped at all. That
+generator is a build step, which is where [§17](#17-deliberate-omissions) already
+says code generation belongs. It is not the first step: the definitions carry
+overloads, which Kite has no way to express, and unions, which each need a
+decision.
+
+**This is reflection over the host.** Not over Kite — no Kite metadata is
+retained, so dead-code elimination stays sound and the reason §17 rejects
+reflection is untouched. But the spirit of "no second language inside the
+language" is genuinely strained at the raw layer, where a typo is a runtime
+mystery rather than a diagnostic. The honest resolution is the one above: a
+bounded dynamic floor, marked, fenced at public boundaries, with generation as
+the long-term exit.
 
 ---
 
@@ -1513,6 +1679,12 @@ being re-litigated, and makes it clear when a decision should be revisited.
 | Block comments | Nesting bugs, no benefit over line comments. |
 | `while` | `for cond {}` covers it. |
 | Ternary `?:` | `if` is an expression, and it reads as English. |
+| Closures capturing `var` | Captures are by value, so the write would be invisible. A heap cell would make it visible and buy shared mutable state through a capture list. Capture a `let` handle and mutate through a `var` parameter ([§4.4](#44-closures)). |
+| A styling language inside Kite | CSS *is* the styling language, and being able to use somebody else's stylesheet is worth more than anything a second one could offer. A Kite application is real elements with real class names, so Tailwind, Bootstrap or a company's own tokens work on it unchanged. |
+| A template language, and JSX | A template is a second language in the toolchain; JSX is a change to the grammar. Element trees are built with ordinary functions. Generated wrappers over the host are the one exception, and they are a build step. |
+| Layout computed in Kite for the web | It was built, in `std/ui`, so that two renderers would agree exactly. What it cost was the browser: positioned elements cannot be styled from outside, cannot reflow, and are not a document. The browser lays out. Layout in Kite survives only where a program paints its own pixels. |
+| Fine-grained reactivity | Signals win the benchmarks. Reading a value silently registering a dependency, and an effect re-running because of a read three calls away, is hidden control flow in a much larger dose than the sigils above. Trees are compared instead. |
+| A view layer in the standard library | Deferred past 1.0, not rejected. The most contested design space in front-end software is the worst thing to freeze into a standard library. JavaScript shipping none is why React, Vue, Svelte and Solid could all happen. |
 
 ---
 

@@ -153,7 +153,7 @@ fn an_unknown_standard_module_lists_the_ones_there_are() {
     let c = compile("t.kite", "use std/nope\n\nfn main() {\n}\n", Emit::Check);
     let err = c.render_diagnostics();
     assert!(err.contains("E0400"), "{}", err);
-    assert!(err.contains("std/ui"), "{}", err);
+    assert!(err.contains("std/dom"), "{}", err);
 }
 
 /// A module reaching another one is ordinary; only a cycle is not.
@@ -178,12 +178,15 @@ fn a_module_may_import_another_module() {
 fn an_unimported_module_contributes_nothing() {
     let c = compile("t.kite", "fn main() {\n  io.print(1)\n}\n", Emit::Check);
     assert!(!c.failed(), "{}", c.render_diagnostics());
-    let with_ui = compile(
+    let with_dom = compile(
         "t.kite",
-        "fn main() {\n  io.print(ui.line_height())\n}\n",
+        "fn main() {\n  io.print(dom.title())\n}\n",
         Emit::Check,
     );
-    assert!(with_ui.failed(), "`ui` must not be in scope without `use std/ui`");
+    assert!(
+        with_dom.failed(),
+        "`dom` must not be in scope without `use std/dom`"
+    );
 }
 
 // ---- packages -------------------------------------------------------------

@@ -31,14 +31,14 @@ root="$(cd "$here/../.." && pwd)"
 out="$linguist/samples/Kite"
 mkdir -p "$out"
 
-# Chosen for breadth rather than length: a parser, a layout engine, an
-# application, a module with a declared host boundary, and a program that uses
-# the type system hard. Between them they reach most of the grammar.
+# Chosen for breadth rather than length: a parser, a text algorithm, a module
+# with a declared host boundary, and programs that use the type system hard.
+# Between them they reach most of the grammar.
 samples=(
   "std/json.kite"        # recursion, enums, matching, error propagation
-  "std/ui.kite"          # structs, slices, the largest thing here
+  "std/text.kite"        # structs, slices, tables — the largest thing here
   "std/http.kite"        # async, a declared host boundary, generics
-  "examples/todo.kite"   # an application: init, view, update, widgets
+  "examples/inventory/stock.kite" # a module of a multi-module program
   "examples/derive.kite" # attributes, traits, generics, interpolation
   "examples/traits.kite" # traits and dynamic dispatch on their own
 )

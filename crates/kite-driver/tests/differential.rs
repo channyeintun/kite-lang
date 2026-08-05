@@ -155,29 +155,6 @@ fn main() {
          \x20 io.print(p.show() == \"(3, 4)\")\n}\n",
     ),
     (
-        "clipping-and-scrolling",
-        "use std/ui\n\
-         fn rows() -> ui.Node<ui.Silent> {\n  var out: [ui.Node<ui.Silent>] = []\n\
-         \x20 for i in 0..8 {\n\
-         \x20   out.push(ui.decorated(ui.text_of(\"r\\(i)\", ui.Style{..ui.style(), width: 100.0}, \"row \\(i)\"), ui.inked(ui.filled(0x111111), 0xeeeeee)))\n  }\n\
-         \x20 return ui.box_of(\"list\", ui.Style{..ui.column(), align: ui.Align.Stretch}, out)\n}\n\
-         fn main() {\n\
-         \x20 let v = ui.Rect{x: 0.0, y: 0.0, width: 100.0, height: 50.0}\n\
-         \x20 let box = ui.Size{width: 100.0, height: 50.0}\n\
-         \x20 let f = ui.layout(rows(), box)\n\
-         \x20 io.print(\"extent \\(ui.scroll_extent(f, box))\")\n\
-         \x20 io.print(ui.clamp_scroll(-10.0, f, box))\n\
-         \x20 io.print(ui.clamp_scroll(9999.0, f, box))\n\
-         \x20 ui.paint_scrolled(f, v, 0.0)\n\
-         \x20 ui.paint_scrolled(f, v, 40.0)\n\
-         \x20 let a = ui.hit_scrolled(f, v, 0.0, 10.0, 10.0)\n\
-         \x20 io.print(if a == nil { \"none\" } else { a.name })\n\
-         \x20 let b = ui.hit_scrolled(f, v, 40.0, 10.0, 10.0)\n\
-         \x20 io.print(if b == nil { \"none\" } else { b.name })\n\
-         \x20 let c = ui.hit_scrolled(f, v, 0.0, 500.0, 500.0)\n\
-         \x20 io.print(if c == nil { \"none\" } else { c.name })\n}\n",
-    ),
-    (
         "events",
         "// Every event comes through one door: a click fills the position, a\n\
          // key press fills the key.\n\
@@ -194,19 +171,6 @@ fn main() {
          \x20 m = step(m, 1, 0.0, 0.0, \"ArrowUp\")\n  io.print(\"\\(m.n) \\(m.from)\")\n\
          \x20 m = step(m, 1, 0.0, 0.0, \"r\")\n  io.print(\"\\(m.n) \\(m.from)\")\n\
          \x20 m = step(m, 9, 0.0, 0.0, \"\")\n  io.print(\"\\(m.n) \\(m.from)\")\n}\n",
-    ),
-    (
-        "wrapping",
-        "use std/ui\n\
-         fn main() {\n\
-         \x20 let body = \"The quick brown fox jumps over the lazy dog\"\n\
-         \x20 for w in [100.0, 200.0, 400.0, 1000.0] {\n\
-         \x20   let lines = ui.wrap(body, w)\n\
-         \x20   io.print(\"\\(w): \\(lines.len()) lines, \\(ui.wrapped_size(body, w).width)\")\n\
-         \x20   for line in lines {\n      io.print(\"|\\(line)|\")\n    }\n  }\n\
-         \x20 io.print(ui.wrap(\"\", 100.0).len())\n\
-         \x20 io.print(ui.wrap(\"supercalifragilistic\", 20.0).len())\n\
-         \x20 io.print(ui.wrap(\"  ui.spaced   out  \", 1000.0)[0])\n}\n",
     ),
     (
         "strings",
@@ -288,29 +252,6 @@ fn main() {
          \x20 io.print(p.show() == \"(3, 4)\")\n}\n",
     ),
     (
-        "clipping-and-scrolling",
-        "use std/ui\n\
-         fn rows() -> ui.Node<ui.Silent> {\n  var out: [ui.Node<ui.Silent>] = []\n\
-         \x20 for i in 0..8 {\n\
-         \x20   out.push(ui.decorated(ui.text_of(\"r\\(i)\", ui.Style{..ui.style(), width: 100.0}, \"row \\(i)\"), ui.inked(ui.filled(0x111111), 0xeeeeee)))\n  }\n\
-         \x20 return ui.box_of(\"list\", ui.Style{..ui.column(), align: ui.Align.Stretch}, out)\n}\n\
-         fn main() {\n\
-         \x20 let v = ui.Rect{x: 0.0, y: 0.0, width: 100.0, height: 50.0}\n\
-         \x20 let box = ui.Size{width: 100.0, height: 50.0}\n\
-         \x20 let f = ui.layout(rows(), box)\n\
-         \x20 io.print(\"extent \\(ui.scroll_extent(f, box))\")\n\
-         \x20 io.print(ui.clamp_scroll(-10.0, f, box))\n\
-         \x20 io.print(ui.clamp_scroll(9999.0, f, box))\n\
-         \x20 ui.paint_scrolled(f, v, 0.0)\n\
-         \x20 ui.paint_scrolled(f, v, 40.0)\n\
-         \x20 let a = ui.hit_scrolled(f, v, 0.0, 10.0, 10.0)\n\
-         \x20 io.print(if a == nil { \"none\" } else { a.name })\n\
-         \x20 let b = ui.hit_scrolled(f, v, 40.0, 10.0, 10.0)\n\
-         \x20 io.print(if b == nil { \"none\" } else { b.name })\n\
-         \x20 let c = ui.hit_scrolled(f, v, 0.0, 500.0, 500.0)\n\
-         \x20 io.print(if c == nil { \"none\" } else { c.name })\n}\n",
-    ),
-    (
         "events",
         "// Every event comes through one door: a click fills the position, a\n\
          // key press fills the key.\n\
@@ -327,19 +268,6 @@ fn main() {
          \x20 m = step(m, 1, 0.0, 0.0, \"ArrowUp\")\n  io.print(\"\\(m.n) \\(m.from)\")\n\
          \x20 m = step(m, 1, 0.0, 0.0, \"r\")\n  io.print(\"\\(m.n) \\(m.from)\")\n\
          \x20 m = step(m, 9, 0.0, 0.0, \"\")\n  io.print(\"\\(m.n) \\(m.from)\")\n}\n",
-    ),
-    (
-        "wrapping",
-        "use std/ui\n\
-         fn main() {\n\
-         \x20 let body = \"The quick brown fox jumps over the lazy dog\"\n\
-         \x20 for w in [100.0, 200.0, 400.0, 1000.0] {\n\
-         \x20   let lines = ui.wrap(body, w)\n\
-         \x20   io.print(\"\\(w): \\(lines.len()) lines, \\(ui.wrapped_size(body, w).width)\")\n\
-         \x20   for line in lines {\n      io.print(\"|\\(line)|\")\n    }\n  }\n\
-         \x20 io.print(ui.wrap(\"\", 100.0).len())\n\
-         \x20 io.print(ui.wrap(\"supercalifragilistic\", 20.0).len())\n\
-         \x20 io.print(ui.wrap(\"  ui.spaced   out  \", 1000.0)[0])\n}\n",
     ),
     (
         "strings",

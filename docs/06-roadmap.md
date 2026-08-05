@@ -21,6 +21,70 @@ implementations that must agree finds them almost for free.
 
 ---
 
+## The direction changed at Phase 16
+
+Read this before Phases 7 and 8, because those two describe a design that is no
+longer the plan.
+
+Phases 1–15 built a language and a UI layer. The UI layer computed its own
+flexbox in Kite and handed both renderers the same rectangles, so a program
+looked identical on the DOM and on a canvas. That property was real, it was
+expensive, and it turned out to be the wrong thing to buy.
+
+**What it cost was the web.** The DOM renderer drew absolutely-positioned
+`div`s, styled inline, under names it generated itself, with every box
+`aria-hidden` and the document's structure carried by a parallel semantics tree
+rather than by real elements. Nothing in a Kite application was a `<button>`.
+Which means **no stylesheet written by anyone else could address any part of
+it** — not Tailwind, not Bootstrap, not a company's own tokens. A Kite
+application could only be styled by Kite.
+
+That put the project in Flutter Web's position: a competitor to Flutter Web,
+not an alternative to JavaScript. It is not the position this language wants.
+
+The new direction is the web's own division of labour:
+
+> **HTML is the document. CSS styles it. Kite replaces JavaScript, and nothing
+> else.**
+
+Four decisions follow from it, and they are decisions rather than guesses
+because each one is what interoperating with somebody else's CSS actually
+requires:
+
+1. **Real tags.** A stylesheet targets `<button>`, `<input>`, `<table>`. A tree
+   of `div`s takes none of it.
+2. **Class names pass through unchanged.** No hashing, no scoping, no rewriting.
+3. **Light DOM only.** Blocking outside stylesheets is what a shadow root is
+   *for*.
+4. **State lives in attributes.** `:hover`, `:focus-visible`, `:checked`,
+   `[data-state]`. Hover stops being something the model tracks and the program
+   repaints; it stops crossing into Wasm at all.
+
+And one decision about where a Kite program sits: **inside a page, owning parts
+of it**, rather than owning the whole page as a single-page application. The
+general case contains the special one — attaching to `<body>` is the SPA — and
+it makes the cost of downloading and starting a Wasm module optional rather
+than unavoidable. A page can be served complete and have Kite enhance the three
+parts that need real logic.
+
+What this deletes: `std/ui`, the Material package, the canvas renderer's
+parallel-tree machinery, and the frame recording and damage tracking that
+existed to make painted output comparable. Roughly 14,000 lines. What it keeps:
+the language, all three backends, the standard library, the tooling, and canvas
+— as a real `<canvas>` element a program draws into, which is what a canvas is
+on the web.
+
+**Layout in Kite is not deleted; it is descoped.** It was written for a renderer
+that had to agree with a second renderer. Where a program still paints its own
+pixels — a chart, a game, a native window — that problem is unchanged and the
+answer is still the one Phase 7 built.
+
+Phases 7 and 8 are left standing below as the record of what was built and why.
+They are marked superseded rather than rewritten, because a roadmap that
+quietly edits its own past is not a roadmap.
+
+---
+
 ## Phase 0 — Specification review
 
 **Deliverable:** the documents in this repository, critiqued.
@@ -716,7 +780,14 @@ two agree on `"héllo日本"` the way they already did for `len`.
 
 ---
 
-## Phase 7 — Layout engine and DOM renderer ✅ **the application runs, and the diff with it**
+## Phase 7 — Layout engine and DOM renderer ⬛ **superseded at Phase 16**
+
+> **Superseded.** This phase was completed as described and then removed. The
+> DOM renderer it built painted absolutely-positioned elements, which is what
+> made a Kite application impossible for anyone else's CSS to style — see
+> [the direction change](#the-direction-changed-at-phase-16). `std/ui` is
+> deleted. The layout engine's problem still exists wherever a program paints
+> its own pixels, and this remains the answer to it.
 
 Done: the flexbox subset in `std/ui.kite`, the Elm-shaped update loop, the DOM
 renderer, events — click, key, wheel, pointer move, down, up, and resize, all
@@ -812,7 +883,16 @@ shape `buffer.F64` exists to change and has not yet.
 
 ---
 
-## Phase 8 — Canvas renderer 🟡 **a peer, not a successor; pixels are not compared**
+## Phase 8 — Canvas renderer ⬛ **partly superseded at Phase 16**
+
+> **Partly superseded.** Canvas survives; canvas as a *whole-application
+> renderer* does not. A `<canvas>` is an element in a page that a program draws
+> into — a chart, a game, a visualisation — which is what a canvas is on the
+> web. The parallel accessibility tree, the hidden-overlay text input and the
+> per-frame damage tracking existed to make a canvas pretend to be a document,
+> and a document is what the document is for. They are deleted. The drawing
+> calls, the glyph atlas and `std/text`'s line breaking remain, because a
+> program painting its own pixels still has to break its own lines.
 
 The renderers are **peers, and the DOM is the default** — Kite targets web
 applications, and the DOM is how the web draws. This phase is not the one where
@@ -1475,6 +1555,318 @@ garbage collector and links no LLVM, so there is no reason it should not.
 
 ---
 
+## Phase 16 — Demolition
+
+**Goal:** the repository stops containing the old answer.
+
+Deleting is a phase because it has an exit criterion and because doing it
+half-way is worse than not starting: a deprecated `std/ui` left beside a new
+`std/dom` is two ways to build a screen, and the whole argument for the change
+was that there should be one.
+
+Out: `std/ui.kite`, `packages/material`, the examples written against them, the
+tests that assert their behaviour, and — in `crates/kite-codegen-wasm/src/glue.rs`
+— the canvas renderer, the glyph atlas, the semantics layer, the frame
+recording and replay, the frame diff and the damage tracking.
+
+Staying: the drawing builtins, `std/canvas`, and `std/text`. A program painting
+its own pixels still needs all three.
+
+**Exit criterion:** the build is green, the test suite passes, and nothing in
+the repository renders a user interface. That last clause is the uncomfortable
+one and it is the point — the next four phases are built on an empty floor
+rather than around furniture nobody wants.
+
+**Done.** 19,700 lines out across 60 files; 738 tests pass. Three things came
+out differently from the plan, recorded because each one is a thing the next
+person doing a demolition would get wrong the same way:
+
+- **Two pieces of the transcript machinery are not UI, and nearly went.**
+  `textRenderer` writes the drawing calls as text and `setWriter` redirects
+  where they go — both look like part of the renderer set, and both are how the
+  differential suite captures a program's output and compares three backends.
+  The lesson is general: in a codebase where the test oracle is *also* a
+  renderer, the deletion boundary does not follow the module boundary.
+- **The golden transcripts went with the layout engine.** Eight scripts —
+  Latin, Cyrillic, Arabic, Hebrew, Devanagari, Thai, CJK, Burmese — were
+  compared through `examples/scripts.kite`, which laid text out with `std/ui`
+  before painting it. Keeping the test would have meant resurrecting a layout
+  engine to feed it. The algorithms it exercised keep their direct unit tests
+  in `tests/std/text_test.kite` and `tests/std/linebreak_test.kite`, which is
+  the half worth having; the integration path is genuinely gone.
+- **Nothing wraps text any more.** `ui.wrap` was the only line breaker in the
+  standard library, and `std/canvas` draws text without one. `std/text` has the
+  UAX #14 opportunities and `canvas.width_of` has the measurement, so this is a
+  small function that has not been written rather than a missing capability —
+  but it is a gap, and it belongs to canvas rather than to the document.
+
+---
+
+## Phase 17 — `JsValue`, the reference §15 promised
+
+**Goal:** a Kite program can hold a browser object without a table of integers
+underneath it.
+
+Today it cannot. `std/dom` holds an `int` indexing `const NODES = [null]` on the
+JavaScript side, and the spec describes a `HostRef` that was never built. Three
+things are wrong with the integer, and none of them is fixable later:
+
+- **It is `Share`.** An `int` crosses into a worker where the table does not
+  exist, which is exactly what `Share` exists to prevent.
+- **The table cannot shrink.** Nothing can tell JavaScript that Kite dropped a
+  number, and WasmGC has no finalizers. The alternatives are a `release()` call
+  in application code — manual memory management in a collected language — or
+  unbounded growth.
+- **Identity is broken.** `handle()` pushes unconditionally, so finding the same
+  element twice yields two different numbers. Every event handler ever written
+  asks "is this my element?", and the integer answers wrongly.
+
+`JsValue` is a compiler-known opaque type lowered to `externref`. Not `Share`,
+not comparable with `==` — `externref` is outside the `eq` hierarchy, so
+identity is a primitive (`js.same`) and `==` on one is a compile error rather
+than a quiet wrong answer. Unimplemented off the web, where it names a diagnostic
+instead of a value.
+
+This also settles lifetime, and settles it completely: on the web the Wasm heap
+*is* the JavaScript heap. A Kite struct holding an element, whose listener holds
+a Kite closure, is a cycle across the boundary that one collector collects. No
+protocol, no ownership rules, no release calls.
+
+The plumbing exists twice already — `str` lowers to `externref` under
+`--js-strings`, and `task_spawn` passes a Kite closure to the host as a
+reference and receives it back through `kite_poll`.
+
+**Exit criterion:** a Kite program holds an element across an await point, drops
+it, and the browser collects it.
+
+---
+
+## Phase 18 — `std/js`, the primitives
+
+**Goal:** the last JavaScript anybody writes.
+
+The choice this phase settles is how a Kite program reaches a browser API. One
+`extern` per feature is direct and fast, and it fails on contact with reality:
+the browser has thousands of them, so the first API the standard library never
+covered forces a user to hand-write a JavaScript host object and register it.
+**A language whose extension mechanism is "go and write the other language" has
+conceded its own argument.**
+
+So instead: about fifteen primitives that never grow.
+
+```
+js.global(name)              js.get(v, name)          js.set(v, name, x)
+js.call0(v, name) … call4    js.new(name, args)       js.func(f)
+js.await(p)                  js.same(a, b)            js.is_nil(v)
+js.instance_of(v, name)      of_str/of_num/of_bool    as_str/as_num/as_bool
+```
+
+Everything else — `std/dom`, and any browser API a user needs — is then ordinary
+Kite code written over these. Adding an API is writing Kite, not touching the
+compiler, and the generated JavaScript stays a fixed size forever.
+
+**Every primitive catches.** A JavaScript exception must never cross the
+boundary raw: today one throws straight through the Wasm frames and takes the
+scheduler with it, so a single mistyped method name does not fail a call, it
+kills every running task in the program. `js.call` returns `(JsValue, error)`
+and the taint analysis makes the check mandatory — which turns the one real
+weakness of this design, that names are strings, from fatal into survivable.
+
+Numbers cross as `f64`, not BigInt. JavaScript numbers *are* `f64`; an `int` is
+an i64 and every crossing would otherwise allocate. The safe-integer check
+happens on the Kite side, where an error is a value.
+
+`std/js` is its own module so that importing it is visible. It is the floor
+below the typed world, and a file that reaches for it should say so in its
+first three lines — the marking Rust gets from `unsafe`, for the same reason.
+
+**Exit criterion:** `std/dom`'s entire current surface is reimplemented over the
+primitives, in Kite, with no `extern` declarations left in it.
+
+---
+
+## Phase 19 — A runtime that can live in a page
+
+**Goal:** a Kite program that is idle, and then is not.
+
+Everything before this assumed a program that starts, does its work and ends.
+An island in a page is idle almost always, which the current runtime cannot
+express. Three separate faults, all of them fatal to it:
+
+- **`drive()` returns when the last task finishes.** After that a click has
+  nothing left to run it.
+- **It busy-waits.** While anything waits on the host it spins on
+  `setTimeout(0)`, burning a core for as long as the page is open.
+- **The clock is virtual.** When every task is waiting it jumps to the earliest
+  deadline, so `task.sleep(500)` returns immediately and `time.now()` is not
+  wall time.
+
+The virtual clock is not a bug and must not be deleted. It is what makes three
+backends differentially testable — a scheduler racing real timers could not be
+compared against anything — and it stays as the mode the test suite runs in. The
+browser needs the other mode: `performance.now`, real `setTimeout`, a pump woken
+by callbacks and asleep otherwise. **A `sleep` that lies about time is hidden
+control flow by this language's own definition**, and that is the argument for
+splitting the two rather than picking one.
+
+The pump also needs a reentrancy guard. A `js.call(el, "focus")` can fire a Kite
+handler synchronously in the middle of a Kite call, and the current loop mutates
+its task list by index while iterating it.
+
+**Exit criterion:** a page open for an hour with a Kite island on it uses no CPU
+until something happens, and `task.sleep(500)` takes half a second.
+
+---
+
+## Phase 20 — `std/dom`
+
+**Goal:** the typed layer, and the first page that works.
+
+Ordinary Kite over `std/js`. An opaque `Element` wrapping a `JsValue`, so the
+dynamic layer cannot spread into application code by accident — and
+`dom.raw(e)` / `dom.wrap(v)` as the one blessed door, because the alternative is
+worse than it looks. Seal it completely and the user who needs a single method
+the library never wrapped cannot reach their own element; what they do next is
+rebuild a whole parallel untyped world beside yours. One greppable escape is a
+hygiene boundary that holds. A wall is a hygiene boundary that gets climbed.
+
+Absence is `?Element`. The current design returns handle 0 and documents that
+every call tolerates it — a null object, in a language whose specification calls
+the tolerated zero value Go's most common production bug and taints every
+unchecked result. Silent no-op on absence is worse than a null dereference,
+because it does not even fail where the mistake is.
+
+Events are closures crossing as references, the `task_spawn` pattern
+generalised: `js.func(f)` hands JavaScript something it can call, and the
+closure's lifetime is the listener's lifetime, traced by the one collector. A
+registry of numbered handlers would pin every listener forever. Registration
+returns a `Subscription` with an explicit `cancel`, because nothing else can
+cancel it for you, and explicit teardown is squarely inside "verbosity is
+acceptable".
+
+The rule that a closure may not capture a `var` is not an obstacle here and must
+not be weakened for this. Capturing a `let` struct handle and passing it to a
+function taking `var` is exactly how a handler should change state, and this
+phase is where that stops being a workaround and becomes the documented idiom.
+
+Two admissions to write down rather than discover:
+
+- **`innerHTML` is reachable again.** `std/dom` today refuses `set_html` and
+  says it never will, on the grounds that building markup from strings is the
+  commonest way to grow an injection bug. With an escape hatch, anyone can set
+  it. The comment has to be rewritten to what stays true: the typed layer does
+  not hand you the loaded gun, and the escape hatch is not the typed layer.
+- **The string table is a linear scan.** `intern` is an `indexOf` over an
+  append-only array, so every string read from the page costs a walk of every
+  string read before it, forever. A resident program reading a field on each
+  keystroke is quadratic. Real JavaScript strings by default on the web target,
+  or a map — but not neither.
+
+**Exit criterion:** a plain HTML page with a real stylesheet, a `<script
+type="module">`, and Kite making a form work. No canvas, no framework, nothing
+generated. That page is the whole thesis in one file.
+
+---
+
+## Phase 21 — Effects across the boundary
+
+**Goal:** `fetch` works, and so does everything shaped like it.
+
+Every modern browser API returns a promise. `js.await(p)` bridges one into a
+`Task`, with a rejection arriving as an `error`.
+
+Kite gets a simplification here that Elm structurally cannot have. Elm needs a
+command algebra because it has no way to *do* anything — an effect must be
+described as data for a runtime to perform. Kite has `async`/`await` and a
+runtime managing real tasks, so an effect is a function that does the work and
+sends a message back. No `Cmd`, no `Sub`, no interpreter.
+
+`update` stays pure. Effects get their own door, for the same reason everything
+else in this language does.
+
+One hazard to close rather than find later: a handler that starts an `async fn`
+returning `(T, error)` and drops the `Task` has dropped an error, and the taint
+analysis cannot see inside a `Task`. Either handlers return nothing, or an
+unawaited failing task is reported by the runtime. Silence is not an option in a
+language whose main argument is that errors cannot be ignored.
+
+---
+
+## Phase 22 — Interop backwards
+
+**Goal:** somebody adopts Kite without rewriting anything.
+
+This is the phase that decides whether the language gets used, and it has
+nothing to do with UI.
+
+**TypeScript won by being adoptable one file at a time.** Not by being better in
+the abstract — by letting a team rename one file and leave four hundred alone.
+Kite can have exactly that shape: `@export` makes a function a real ES module
+export, and the compiler emits a `.d.ts` beside it so a TypeScript project can
+call it and still type-check. The type information already exists; writing the
+declaration file is cheap, and it is what makes "an alternative to TypeScript" a
+claim rather than a slogan.
+
+A team replaces one module — a parser, a validator, a decimal-money layer, a
+hot loop — sees it get faster and stop having a class of bug, and comes back for
+the next one. That is a far easier thing to ask than "adopt a language with no
+ecosystem".
+
+`kitec` therefore emits **a module a bundler can import**, not a generated HTML
+page. And the highest-value tooling here is a Vite plugin, not a Kite bundler:
+meet the ecosystem where it is.
+
+**Exit criterion:** an existing TypeScript project imports a Kite function,
+type-checks against it, and builds with no configuration beyond the plugin.
+
+---
+
+## Phase 23 — The size gate
+
+**Goal:** a number, in CI, that fails the build when it grows.
+
+Under the old design a large module was an annoyance. Under this one it is
+fatal: an island that makes a form work competes with a four-kilobyte
+JavaScript file, and nobody ships three hundred kilobytes for that.
+
+WasmGC is the reason this is winnable. A linear-memory module ships its own
+allocator and a chunk of runtime; a WasmGC module ships neither, because the
+collector belongs to the browser. The existing dead-code elimination and
+identical-code-folding do the rest.
+
+But it only stays winnable if it is measured from the start, which is why this
+is numbered here and not last. A budget adopted after the fact is a budget that
+is already blown.
+
+---
+
+## Deferred: the view layer
+
+`std/html` — a description of elements built with functions, compared against
+the last one, applied to the document — is **not in version 1**, and the
+deferral is a decision rather than a shortfall.
+
+View layers are the most actively contested design space in front-end software,
+and anything in a standard library is frozen at 1.0 and regretted by 2.0.
+JavaScript ships no view layer, which is precisely why React, Vue, Svelte and
+Solid could all happen. Kite reaching version 1 as a fast, safe alternative to
+JavaScript — with the DOM, the platform, and interop in both directions — is a
+complete product. A view layer can then be a package, written by anyone, over
+primitives that were public the whole time.
+
+Two things are settled about it in advance, so that deferring it does not mean
+deciding nothing:
+
+- **No template language and no JSX.** A template is a second language in the
+  toolchain and JSX is a grammar change; the tree is built with ordinary
+  functions.
+- **Comparing trees, not a reactive graph.** Fine-grained reactivity wins the
+  benchmarks and loses this language's own argument: reading a value silently
+  registering a dependency is hidden control flow, in much larger a dose than
+  the sigils §17 already refuses.
+
+---
+
 ## Where the implementation actually stands
 
 Recorded honestly, because a roadmap that overstates progress is worse than
@@ -1489,8 +1881,8 @@ none.
 | 4 — WebAssembly backend | ✅ every construct the language has, and `--js-strings` lowers a `str` to a real JavaScript string with `concat` and `equals` as intrinsics |
 | 5 — Concurrency | ✅ `async`/`await`, the state machine, `Task<T>`, the combinators, `Share`. ❌ real parallelism on any target — the platform forbids it today |
 | 6 — Standard library | ✅ thirteen modules written in Kite, tested on both backends, and `@derive(Debug, Hash, Encode, Decode)` as a source-to-source expansion |
-| 7 — Layout and DOM renderer | ✅ layout, events, the update loop, a widget set with focus, a keyboard-driven task list, and a retained scene graph whose diff patches elements in place. ❌ Taffy's fixtures, a real screen-reader pass |
-| 8 — Canvas renderer | 🟡 UAX #9 bidi and Arabic joining in Kite, a glyph atlas, per-rectangle damage, and golden transcripts across eight scripts. ❌ OpenType shaping, golden *images*, WebGPU |
+| 7 — Layout and DOM renderer | ⬛ built, then removed at Phase 16. The renderer painted positioned elements, which is what made a Kite application unstylable by anyone else's CSS |
+| 8 — Canvas renderer | ⬛ partly removed at Phase 16. Drawing, the glyph atlas and `std/text` stay; canvas as a whole-application renderer, with its parallel accessibility tree and damage tracking, does not |
 | 9 — Native backend | ✅ Cranelift AOT and JIT on macOS and Linux, with a precise generational collector over Cranelift's stack maps; three backends compared. ❌ Windows, which the collector's frame walk cannot read yet and which is refused rather than left to corrupt |
 | 10 — Tooling | ✅ fmt, doc, fix, test, bundle, `--explain`, the language server, and a package manager that resolves semver across the whole graph |
 | 11 — Networking | 🟡 the client, and a server that listens on a real socket through a generated Node adapter. ❌ `wasi:http/incoming-handler`, which needs the component model |
@@ -1498,11 +1890,20 @@ none.
 | 13 — Documentation site | ✅ four pages, the reference generated from the library, and a playground that is the compiler |
 | 14 — Editor support | ✅ the language server and a VS Code extension over it, with rename, references, and inlay hints for solved generic arguments |
 | 15 — Distribution | 🟡 CI, cross-compiled builds, Sigstore signing, Homebrew/Scoop/AUR manifests rendered from the release's own checksums, `kitec.wasm` as an artefact. ❌ nothing published: no tag has been pushed |
+| 16 — Demolition | ✅ complete — 19,700 lines out; build and tests green with nothing rendering |
+| 17 — `JsValue` / `externref` | ⬜ not started |
+| 18 — `std/js` primitives | ⬜ not started |
+| 19 — Resident runtime, real clock | ⬜ not started |
+| 20 — `std/dom` | ⬜ not started |
+| 21 — Effects across the boundary | ⬜ not started |
+| 22 — Interop backwards | ⬜ not started |
+| 23 — Size gate | ⬜ not started |
+| — View layer | ⬜ deferred past 1.0, deliberately |
 
-683 tests: unit tests per crate, an annotated compile-fail corpus, a
+738 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the host boundary and a real
-socket under Node, golden text transcripts across eight scripts, both string
+socket under Node, both string
 representations compared against each other and against the VM, and every
 example on the site.
 
@@ -1540,6 +1941,14 @@ where the decision was made:
 This assumes one focused person. It is not a two-month project, and treating it
 as one is the other common way language projects die.
 
+The estimates above were for the original plan and held roughly. Phases 16–23
+are not estimated, for a reason worth stating: the two lines that cost the most
+in the first fifteen — layout and the canvas renderer, around five months
+between them — are the two being removed. **A schedule is not the thing this
+roadmap got wrong. What it got wrong was building a UI layer before asking
+whether anyone else's stylesheet could touch it**, and no amount of estimating
+would have caught that.
+
 ---
 
 ## Where to be willing to cut
@@ -1552,8 +1961,11 @@ still uncut is the one that was third.
    execution adequately for a long time, and Cranelift was a performance
    upgrade rather than a capability — which is exactly why it could wait until
    everything a language actually needs was there.
-2. ~~**Canvas renderer (Phase 8).**~~ Built, and the ordering advice was right:
-   DOM rendering shipped first and is still the accessible one.
+2. ~~**Canvas renderer (Phase 8).**~~ Built, then mostly cut at Phase 16 — and
+   the ordering advice was righter than it knew. DOM rendering shipped first
+   and stayed the accessible one; what the list failed to ask was whether a
+   canvas renderer should be a *peer* of the document at all. It should not.
+   The thing worth cutting was one level up from the thing this line named.
 3. **WebGPU path.** Still cut, still deliberately. Canvas2D is a complete
    product; WebGPU is an optimisation on top of one.
 4. ~~**Generics.**~~ Built, in Phase 2. The note that error handling could not

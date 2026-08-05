@@ -1,22 +1,25 @@
 // std/dom — low-level DOM access. **Web only.**
 //
-// The escape hatch, and it is meant to be used as one. Everything a Kite
-// application draws goes through `std/ui`, which is what keeps the same program
-// running under the canvas renderer, the transcript, and whatever a third
-// backend turns out to be. Reaching for this module gives that up for whatever
-// it touches: a program that positions its own `<div>` has stopped being a
-// program that runs anywhere but a browser.
+// **This module is between designs, and what is below is the old one.** It was
+// written as an escape hatch beneath `std/ui`, for the few things a layout
+// engine had no opinion about — a `<video>`, an embed, the page title. `std/ui`
+// is gone, the document is the product now, and this becomes the main way a
+// Kite program reaches a page rather than the exception. It is being rewritten
+// over `std/js`, in ordinary Kite, with no `extern` declarations in it at all.
+// See `docs/04-the-web.md`.
 //
-// It exists because the alternative is worse. Without it, the first thing a
-// real application needs that `std/ui` has no opinion about — a `<video>`, a
-// third-party embed, the page title, a file picker — is a reason to abandon
-// Kite for that screen. One documented door is better than a wall people climb.
+// Three things below are wrong and are named here rather than left to be
+// discovered, because until the rewrite lands they are what this module does:
 //
-// **Nodes are handles, not references.** A `str`, an `int` and a `float` are
-// what cross the boundary, so an element arrives as a number indexing a table
-// the host keeps. A handle of 0 means nothing was found: every call takes one
-// and every call tolerates it, so a chain of lookups on a missing element does
-// nothing rather than trapping halfway through.
+// - **A node is a number, not a reference.** The host keeps a table and Kite
+//   holds an index into it. The table never shrinks, because nothing can tell
+//   the host that Kite dropped a number. Worse, the same element found twice
+//   gets two different numbers, so two handles cannot be compared for identity.
+// - **A handle of 0 means "not found", and every call tolerates it.** That is a
+//   null object. A chain of lookups on a missing element does nothing at all,
+//   which hides the mistake instead of reporting it — and `Option<T>` exists to
+//   make exactly this unspellable.
+// - **There are no events.** Nothing here can listen for a click.
 
 /// The host's side. Anything not on the web leaves this group unimplemented,
 /// and a call fails saying which function had no host — which is the honest

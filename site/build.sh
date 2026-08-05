@@ -29,14 +29,15 @@ for module in "$root"/std/*.kite; do
   echo "  reference/$name.md"
 done
 
-echo "building the demo…"
-# `kitec build` writes the page as well as the module, and what the site serves
-# is exactly that page — the compiler's own output, not a hand-written copy of
-# it. A demonstration of what `kitec build` produces should *be* what `kitec
-# build` produces, or it is a demonstration of something else.
-mkdir -p "$out/demo"
-"$root/target/release/kitec" build "$root/examples/boids.kite" --emit wasm --out "$out/demo"
-echo "  demo/index.html"
+# The demo is gone with the layer that produced it.
+#
+# It was `kitec build examples/boids.kite`, served unaltered — the compiler's
+# own output rather than a hand-written copy of it, which was the right idea
+# and stays the right idea. What it demonstrated was `std/ui`: layout computed
+# in Kite, painted through interchangeable renderers. That is what the change
+# of direction removed. A demonstration comes back when there is something
+# honest to demonstrate — see docs/04-the-web.md.
+rm -rf "$out/demo"
 
 echo "copying the documents…"
 mkdir -p "$out/docs"

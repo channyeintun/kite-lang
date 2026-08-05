@@ -1,3 +1,0 @@
-text 0.0 0.0 The quick brown fox 1056816
-text 0.0 16.0 jumps over the lazy 1056816
-text 0.0 32.0 dog. 1056816

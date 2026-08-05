@@ -84,31 +84,31 @@
 <section class="band-paper">
   <div class="container">
     <header>
-      <h2>See it run</h2>
+      <h2>The UI layer is being rebuilt</h2>
       <div class="highlight"></div>
     </header>
 
-    <div class="demo-row">
-      <iframe class="demo" src="demo/" title="A flock of six hundred birds, written in Kite"
-              loading="lazy"></iframe>
-      <div>
-        <h3>Six hundred birds</h3>
-        <p>
-          Every bird considers every other one: 360,000 distance tests a frame,
-          about 6&nbsp;ms of them against a 16.7&nbsp;ms budget for sixty
-          frames a second. The naive O(n²) algorithm on purpose — a spatial
-          index would measure the index rather than the language.
-          <strong>Move the pointer over it; it is a hawk.</strong> The three
-          buttons swap a DOM renderer, a canvas renderer and a text renderer
-          against the same compiled module.
-        </p>
-        <p class="muted">
-          That frame is not a video and not a special case: it is what
-          <code>kitec build examples/boids.kite --emit wasm</code> writes,
-          served unaltered. The source is
-          <a href="https://github.com/channyeintun/kite-lang/blob/main/examples/boids.kite">examples/boids.kite</a>.
-        </p>
-      </div>
+    <div>
+      <p class="measure">
+        There was a demonstration here: six hundred birds, drawn by the same
+        compiled module against three interchangeable renderers. It has been
+        taken down, along with the layer that produced it.
+      </p>
+      <p class="measure">
+        That layer computed its own layout and painted absolutely positioned
+        elements. It worked, and it meant <strong>no stylesheet written by
+        anyone else could address any part of a Kite application</strong> —
+        which made this a competitor to Flutter Web rather than an alternative
+        to JavaScript. HTML and CSS keep their jobs now. Kite replaces
+        JavaScript, and nothing else.
+      </p>
+      <p class="muted">
+        The design is <a href="docs.html?doc=docs/04-the-web.md">the web
+        model</a>; the reasoning and the order of work are in
+        <a href="docs.html?doc=docs/06-roadmap.md">the roadmap</a>. Everything
+        else on this page — the language, the compiler, three backends, the
+        playground below — is unaffected.
+      </p>
     </div>
   </div>
 </section>
@@ -347,7 +347,7 @@ kitec --explain E0301            why a rule exists
           <li><a href="docs.html?doc=docs/01-platform-research.md">Platform research</a></li>
           <li><a href="docs.html?doc=docs/02-concurrency.md">Concurrency</a></li>
           <li><a href="docs.html?doc=docs/03-compiler-architecture.md">Compiler architecture</a></li>
-          <li><a href="docs.html?doc=docs/04-stdlib-ui.md">The UI layer</a></li>
+          <li><a href="docs.html?doc=docs/04-the-web.md">The web model</a></li>
         </ul>
       </div>
       <div>

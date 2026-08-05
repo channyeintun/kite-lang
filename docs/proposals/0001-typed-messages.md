@@ -1,6 +1,18 @@
 # Proposal 0001 — typed messages, and the loop that delivers them
 
-**Status:** Draft — §§2, 5 and 9 implemented; see *Implementation status* below
+> **Superseded, and kept as a record.** Everything this proposal touches —
+> `std/ui`, `packages/material`, the two example applications, `docs/04` in its
+> old form — was removed when the UI direction changed. See
+> [the roadmap](../06-roadmap.md#the-direction-changed-at-phase-16) and
+> [docs/04](../04-the-web.md). The links below point at a document that no
+> longer exists; they are left as written because a superseded proposal that
+> has been quietly edited is no longer a record of anything.
+>
+> One conclusion outlived the design it was written for: **an event should
+> carry a value the program defined, matched exhaustively, rather than a string
+> recovered later.** That survives into whatever view layer eventually lands.
+
+**Status:** Superseded — was Draft, §§2, 5 and 9 implemented
 **Date:** August 2026
 **Resolves:** [docs/04 §10 question 4](../04-stdlib-ui.md#10-open-questions) (event wiring), and delivers the effect shape [docs/04 §6](../04-stdlib-ui.md#6-events-and-state) forward-references
 **Unblocks:** question 2 (incremental view diffing)

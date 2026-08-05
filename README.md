@@ -10,7 +10,7 @@ fn main() {
     let (cfg, err) = config.load("app.toml")
     check err
 
-    ui.run(App{ title: cfg.title })
+    io.print("listening on \(cfg.port)")
 }
 ```
 
@@ -47,7 +47,8 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 | **No pointers, no references, no lifetimes** | Structs are GC-managed reference types. There is no `*T`, no `&T`, and no value/pointer receiver distinction. |
 | **One concurrency concept, not two** | `async`/`await`. No goroutines, no channels, no mutex-by-default. Calling an `async fn` starts it; `await` is how the value comes out. |
 | **Wasm is the reference target** | The semantics are chosen so that lowering to WasmGC is direct. |
-| **The DOM is the default, and canvas is its peer** | Kite targets web applications, so it uses the platform rather than rebuilding it: a field is a real `<input>`, a picture a real `<img>`, a control a real ARIA role. Canvas is the equal alternative for charts, games and dense animated surfaces — one API, chosen per screen. |
+| **HTML and CSS keep their jobs** | Kite replaces JavaScript, and nothing else. A program creates real elements with real class names, so somebody else's stylesheet — Tailwind, Bootstrap, a design system you already own — works on it unchanged. The browser lays out. Canvas is a `<canvas>` you draw into. |
+| **It lives inside a page, not instead of one** | A Kite program owns the parts of a page that need real logic, rather than owning the page. Attaching to `<body>` is still available; making it the only option is what puts a Wasm download in front of the first paint of everything. |
 
 ## What runs today
 
@@ -89,8 +90,9 @@ let (first, second) = await task.both(a, b)   // 100ms, not 150
 ```
 
 **A standard library, in Kite.** `math`, `time`, `errors`, `fmt`, `json`,
-`test`, `buffer`, `task`, `http`, `socket`, `crypto`, `ui`. Its own tests are
-ordinary Kite programs that run on *both* backends and must agree.
+`toml`, `text`, `test`, `buffer`, `task`, `sync`, `fs`, `http`, `socket`,
+`crypto`, `canvas`. Its own tests are ordinary Kite programs that run on *both*
+backends and must agree.
 
 **Bodies the compiler writes.** `@derive(Debug, Hash, Encode, Decode)` in front
 of a struct or an enum writes them from the fields — as ordinary Kite, expanded
@@ -137,23 +139,19 @@ kitec build examples/hello.kite --emit wasm --out dist
 # wrote dist/app.wasm (500 bytes), dist/app.js and dist/index.html
 ```
 
-`examples/boids.kite` is six hundred birds, each one considering every other —
-360,000 distance tests a frame, about 6 ms of them, against a 16.7 ms budget
-for sixty frames a second. It is the naive O(n²) algorithm on purpose: a
-spatial index would measure the index rather than the language.
+**The UI layer is being rebuilt, and the old one is gone.** Until recently a
+Kite program computed its own layout and painted absolutely positioned elements
+through two interchangeable renderers. That worked, and it meant no stylesheet
+written by anyone else could address a single part of a Kite application —
+which made the language a competitor to Flutter Web rather than an alternative
+to JavaScript. `std/ui` and the Material package are removed. What replaces
+them is HTML, CSS, and a `std/dom` written in Kite over about fifteen host
+primitives: [docs/04-the-web.md](docs/04-the-web.md) is the design, and
+[the roadmap](docs/06-roadmap.md#the-direction-changed-at-phase-16) is the
+reasoning and the order of work.
 
-`examples/todo.kite` is a task list with a text field, buttons and checkboxes,
-navigable with the keyboard alone. A program with a user interface writes its
-layout with `std/ui.kite` and draws through eleven host calls. The generated page
-runs the same module against a DOM renderer, a canvas renderer, and a text
-renderer, switched live — the program cannot tell which is running.
-
-The DOM one is what a web application ships. It makes real elements: an
-`<input>` or `<textarea>` for a field, so the caret, selection, IME, autofill
-and the mobile keyboard are the browser's; an `<img>` for a picture; and an ARIA
-role and label on every control. The canvas one is the peer you pick for a
-screen that wants pixels, and it carries a parallel semantics tree so it is
-reachable too.
+Drawing is unaffected. `examples/boids.kite` paints into a `<canvas>`, which is
+what a canvas is for.
 
 ## The playground is the compiler
 
@@ -174,7 +172,7 @@ python3 -m http.server -d site 8000
 | [docs/01-platform-research.md](docs/01-platform-research.md) | What Wasm can and cannot do in 2026, with sources. Every constraint that shaped the design. |
 | [docs/02-concurrency.md](docs/02-concurrency.md) | The async model, the `Share` marker, and how single-source code becomes parallel when the platform allows. |
 | [docs/03-compiler-architecture.md](docs/03-compiler-architecture.md) | Crate layout, IR pipeline, WasmGC lowering, diagnostics. |
-| [docs/04-stdlib-ui.md](docs/04-stdlib-ui.md) | The UI layer: layout engine, retained scene graph, and the two peer renderers — DOM by default, canvas by choice. |
+| [docs/04-the-web.md](docs/04-the-web.md) | The web model: HTML and CSS keep their jobs, Kite replaces JavaScript, and how a Kite program reaches the browser. |
 | [docs/05-grammar.ebnf](docs/05-grammar.ebnf) | Complete formal grammar. |
 | [docs/06-roadmap.md](docs/06-roadmap.md) | Implementation phases, and exactly how far each one got. |
 | [site/brand.html](site/brand.html) | The mark: geometry, clear space, colourways, lockups. Open it in a browser. |
@@ -183,6 +181,12 @@ python3 -m http.server -d site 8000
 
 Recorded here rather than left to be discovered:
 
+- **No user interface layer at all, on purpose, for now.** `std/ui` and the
+  Material package were removed rather than deprecated, because two ways to
+  build a screen is exactly what the change was meant to end. `std/dom` is
+  being rewritten over host primitives, and a view layer is deliberately
+  deferred past 1.0 — the reasoning is in
+  [the roadmap](docs/06-roadmap.md#deferred-the-view-layer).
 - **No real parallelism, on any target.** A WasmGC reference cannot cross a
   thread boundary until shared-everything-threads ships, and the VM's values
   are `Rc`-based. `Share` is enforced now so that the day either changes, no
@@ -205,10 +209,10 @@ Recorded here rather than left to be discovered:
   Scoop and the AUR, and has never run: no tag has been pushed.
 - **No Argon2.** It is not in WebCrypto, so it waits on a runtime that has it.
 
-683 tests: unit tests per crate, an annotated compile-fail corpus, a
+738 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the host boundary and a real
-socket under Node, golden text transcripts across eight scripts, both string
+socket under Node, both string
 representations compared against each other and against the VM, every example
 on the site, and the brand assets, which are checked for drift because the mark
 is drawn once and copied three times.

@@ -1,8 +1,9 @@
-//! Low-level drawing, for the `Canvas` widget.
+//! Low-level drawing, into a `<canvas>`.
 //!
-//! `std/ui` draws boxes and text because that is what a layout produces. This
-//! is the other door: a chart, a game or a visualisation knows where its own
-//! marks go, and needs to put them there without describing a tree first.
+//! HTML and CSS describe a document, and a document is described rather than
+//! drawn. This is the other door: a chart, a game or a visualisation knows
+//! where its own marks go, and needs to put them there without describing
+//! anything first.
 //!
 //! It is a **named surface over the drawing calls**, not a graphics library.
 //! Every function here is one of the calls a renderer implements, or something
@@ -12,18 +13,22 @@
 //! would produce something that looked wrong on every backend in a different
 //! way. What is here is exact everywhere.
 //!
-//! Coordinates are floats in layout units, with the origin at the top left —
-//! the same space `ui.Frame` reports. Colours are `0xRRGGBB`.
+//! Coordinates are floats, with the origin at the top left of the surface.
+//! Colours are `0xRRGGBB`.
 //!
 //! ```kite
-//! use std/ui
 //! use std/canvas
 //!
-//! ui.paint_into(frames, "chart", |r: ui.Rect| {
-//!     canvas.fill(r.x, r.y, r.width, r.height, 0x101216)
-//!     canvas.circle(r.x + r.width / 2.0, r.y + r.height / 2.0, 40.0, 0x3b82f6)
-//! })
+//! fn chart(x: float, y: float, w: float, h: float) {
+//!     canvas.fill(x, y, w, h, 0x101216)
+//!     canvas.circle(x + w / 2.0, y + h / 2.0, 40.0, 0x3b82f6)
+//! }
 //! ```
+//!
+//! **Where the surface comes from is not settled yet.** A canvas is an element,
+//! so a program gets one the way it gets any element — which is `std/dom`, and
+//! `std/dom` is being rewritten. Until then the host supplies one surface and
+//! these calls go to it.
 
 // ---- shapes ---------------------------------------------------------------
 

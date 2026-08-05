@@ -198,26 +198,38 @@ None of them is a reason to render a settings page that way. What does not
 follow from any of it is that the *standard library* should be able to target
 only canvas.
 
-Kite therefore specifies **one UI API with two renderers**
-([docs/04](04-stdlib-ui.md)): the same `Box`/`Flex`/`Text` program emits either a
-real DOM tree or canvas draw commands, chosen at build time. Layout is computed
-in Kite so both paths agree exactly, and nothing in the language bets on a
-Chrome-only origin trial.
+Kite therefore does not bet on a Chrome-only origin trial, and does not put
+canvas on the critical path of an ordinary page.
 
-**The two are peers, and the DOM is the default.** An earlier draft of this
-document called canvas first-class; that was the wrong conclusion to draw from
-the evidence above, and it is corrected here. Everything this section catalogues
-— the parallel semantics tree, the reimplemented text input, IME, autofill,
-selection, the Lighthouse score that lies — is the cost of *not* using the
-platform. Kite's target is web applications, and a web application that renders
-to a canvas is one that has to rebuild HTML and CSS badly before it can start.
+> **Amended.** This section originally concluded that Kite should specify *one
+> UI API with two renderers* — the same program emitting either a real DOM tree
+> or canvas draw commands, with layout computed in Kite so both paths agreed
+> exactly. That was built and then removed. The evidence above is right and the
+> conclusion drawn from it was half a step short: computing layout in Kite in
+> order to make the two agree meant the DOM path emitted positioned elements,
+> which **no stylesheet written by anyone else can address**. The corrected
+> conclusion is [docs/04](04-the-web.md) — the browser lays out, HTML and CSS
+> keep their jobs, and Kite replaces JavaScript only. Canvas remains, as an
+> element a program draws into.
 
-So the DOM renderer uses the platform rather than working around it: a field is a
-real `<input>` or `<textarea>`, a picture is a real `<img>`, a control carries a
-real ARIA role and label. Canvas is the equal alternative for the work it is
-actually better at — dense, animated, GPU-composited surfaces; charts; games;
-anything where a thousand elements would be a thousand elements. Choosing it is a
-decision about *that screen*, not a decision about the language.
+**The document is the product, and canvas is a surface inside it.** An earlier
+draft of this document called canvas first-class; a later one called the two
+renderers peers. Both were wrong, in the same direction and by different
+amounts. Everything this section catalogues — the parallel semantics tree, the
+reimplemented text input, IME, autofill, selection, the Lighthouse score that
+lies — is the cost of *not* using the platform. A web application that renders
+to a canvas has to rebuild HTML and CSS badly before it can start.
+
+So a Kite program uses the platform rather than working around it: a field is a
+real `<input>`, a picture a real `<img>`, a heading a real `<h1>` — because they
+are the elements the program creates, not shapes a renderer chose to draw. And
+because they are real elements with real class names, somebody else's stylesheet
+works on them, which is the thing neither earlier draft asked for.
+
+Canvas remains for the work it is actually better at — dense, animated,
+GPU-composited surfaces; charts; games; anything where a thousand elements would
+be a thousand elements. It is a `<canvas>` in the page, drawn into by the
+program. Choosing it is a decision about *that surface*, not about the language.
 
 Sources: [HTML-in-Canvas browser support](https://html-in-canvas.dev/docs/browser-support/) ·
 [WICG HTML-in-Canvas explainer](https://wicg.github.io/html-in-canvas/) ·
