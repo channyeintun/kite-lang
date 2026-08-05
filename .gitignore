@@ -22,6 +22,9 @@ packaging/out/
 
 # Built by `kitec build` into the example page's own directory, because that is
 # where a page needs them. The page, the stylesheet and the program are source;
-# these three are output.
+# these four are output — including the two `api.*`, which the same one command
+# writes and which were tracked while their siblings were not.
 examples/page/app.js
 examples/page/app.wasm
+examples/page/api.js
+examples/page/api.d.ts
