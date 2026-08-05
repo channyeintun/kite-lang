@@ -84,31 +84,37 @@
 <section class="band-paper">
   <div class="container">
     <header>
-      <h2>The UI layer is being rebuilt</h2>
+      <h2>See it run</h2>
       <div class="highlight"></div>
     </header>
 
-    <div>
-      <p class="measure">
-        There was a demonstration here: six hundred birds, drawn by the same
-        compiled module against three interchangeable renderers. It has been
-        taken down, along with the layer that produced it.
-      </p>
-      <p class="measure">
-        That layer computed its own layout and painted absolutely positioned
-        elements. It worked, and it meant <strong>no stylesheet written by
-        anyone else could address any part of a Kite application</strong> —
-        which made this a competitor to Flutter Web rather than an alternative
-        to JavaScript. HTML and CSS keep their jobs now. Kite replaces
-        JavaScript, and nothing else.
-      </p>
-      <p class="muted">
-        The design is <a href="docs.html?doc=docs/04-the-web.md">the web
-        model</a>; the reasoning and the order of work are in
-        <a href="docs.html?doc=docs/06-roadmap.md">the roadmap</a>. Everything
-        else on this page — the language, the compiler, three backends, the
-        playground below — is unaffected.
-      </p>
+    <div class="demo-row">
+      <iframe class="demo" src="demo/" title="A counter, with Kite doing the logic"
+              loading="lazy"></iframe>
+      <div>
+        <h3>An island</h3>
+        <p>
+          The page in that frame is an ordinary HTML file with an ordinary
+          stylesheet, and it is complete before any WebAssembly arrives: real
+          headings, real buttons, already styled. Kite takes the one part that
+          needs logic.
+        </p>
+        <p>
+          <strong>The count turns red below zero because the stylesheet says
+          so.</strong> The program's entire contribution to that is putting a
+          class on and taking it off. Hover and focus never reach Kite at all —
+          they are <code>:hover</code> and <code>:focus-visible</code>, and a
+          program that tracked them would be doing the browser's work twice.
+        </p>
+        <p class="muted">
+          <strong>5,697 bytes</strong> of WebAssembly, and there is a budget in
+          CI that fails the build if it grows. The page, the stylesheet and the
+          program are
+          <a href="https://github.com/channyeintun/kite-lang/tree/main/examples/page">examples/page</a>;
+          what the site serves is what <code>kitec build</code> produced against
+          that page, unaltered.
+        </p>
+      </div>
     </div>
   </div>
 </section>

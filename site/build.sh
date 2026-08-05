@@ -29,15 +29,19 @@ for module in "$root"/std/*.kite; do
   echo "  reference/$name.md"
 done
 
-# The demo is gone with the layer that produced it.
+echo "building the demo…"
+# The page, the stylesheet and the program are copied; the module is compiled
+# beside them. What the site serves is exactly what `kitec build` produces
+# against a page nobody generated — which is the whole claim, so demonstrating
+# it any other way would be demonstrating something else.
 #
-# It was `kitec build examples/boids.kite`, served unaltered — the compiler's
-# own output rather than a hand-written copy of it, which was the right idea
-# and stays the right idea. What it demonstrated was `std/ui`: layout computed
-# in Kite, painted through interchangeable renderers. That is what the change
-# of direction removed. A demonstration comes back when there is something
-# honest to demonstrate — see docs/04-the-web.md.
-rm -rf "$out/demo"
+# `kitec build` leaves `index.html` alone when one is already there, so the
+# order here matters: copy the page first.
+mkdir -p "$out/demo"
+cp "$root/examples/page/index.html" "$out/demo/index.html"
+cp "$root/examples/page/style.css" "$out/demo/style.css"
+"$root/target/release/kitec" build "$root/examples/page/main.kite" --emit wasm --out "$out/demo"
+echo "  demo/index.html ($(wc -c < "$out/demo/app.wasm" | tr -d " ") bytes of WebAssembly)"
 
 echo "copying the documents…"
 mkdir -p "$out/docs"

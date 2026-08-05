@@ -570,10 +570,15 @@ iframe.demo {
   display: block;
   width: 100%;
   max-width: 664px;
-  height: 460px;
+  /* Shorter than the old one, which framed a whole application. What is in
+     there now is a card in the middle of its own page, and 460px left it
+     swimming. */
+  height: 340px;
   border: 1px solid var(--brand-rule);
   border-radius: 6px;
-  background: #11131f;
+  /* The demo brings its own ground and honours the reader's colour scheme, so
+     nothing is set here: a background chosen out here would show through in one
+     scheme and fight the card in the other. */
 }
 
 /* ---- document pages ----
