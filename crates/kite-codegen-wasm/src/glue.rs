@@ -2297,6 +2297,21 @@ export const EVENT_FRAME = 7n;
 /// holds focus, and focus is in the model, so the program already knows which
 /// field this is. That is what lets an edit cross a door with one string on it.
 export const EVENT_EDIT = 8n;
+/// The page was hidden or shown: `x` is 1 when it came back and 0 when it went
+/// away.
+///
+/// A hidden tab gets no frames — `requestAnimationFrame` is suspended there —
+/// so a program that measures anything against the frame clock stops measuring
+/// while the user is elsewhere, and the world it was tracking does not stop
+/// with it. Sound already handed to the host keeps sounding, a download keeps
+/// arriving, a countdown keeps being due. What the program cannot do is
+/// *notice*, because the only clock it had has stopped.
+///
+/// So the absence is told rather than inferred. A program that has nothing
+/// outside its own model to reconcile ignores this event and loses nothing;
+/// one that does — anything scheduled ahead, on a clock that is not the frame
+/// clock — gets the two moments where it can put itself right.
+export const EVENT_VISIBLE = 9n;
 
 export function isApplication(exports) {{
   return ["init", "view", "update"].every((n) => typeof exports[n] === "function");
@@ -2994,7 +3009,8 @@ pub fn generate_page(title: &str) -> String {
   import {{ instantiate, setRenderer, setWriter, isApplication, setMeasure,
             setLineHeight, fontMeasure, fontLineHeight, FONT, setAnnouncer,
             EVENT_CLICK, EVENT_KEY, EVENT_WHEEL, EVENT_MOVE, EVENT_DOWN,
-            EVENT_UP, EVENT_RESIZE, EVENT_FRAME, EVENT_EDIT, setFieldEdit, setFieldFocus,
+            EVENT_UP, EVENT_RESIZE, EVENT_FRAME, EVENT_EDIT, EVENT_VISIBLE,
+            setFieldEdit, setFieldFocus,
             setFieldKey, hideFields, setImageLoad, setSemanticsLayer, watchFonts, str,
             recordingRenderer, replay, diffFrames,
             damageOf, domRenderer, canvasRenderer, textRenderer }} from "./app.js";
@@ -3136,6 +3152,10 @@ pub fn generate_page(title: &str) -> String {
   // it was given *is* the statement that nothing is moving.
   let ticking = false;
   let lastTick = 0;
+  // The longest step that is still a measurement of a frame. Two frames at the
+  // slowest rate a browser animates at are under this; everything above it is
+  // the machine having been elsewhere.
+  const MAX_STEP = 100;
 
   function tick(now) {{
     if (!interactive) {{
@@ -3144,7 +3164,22 @@ pub fn generate_page(title: &str) -> String {
     }}
     // The first frame of a run has no previous one to measure from, and
     // handing a program a huge first step would make every simulation jump.
-    const elapsed = lastTick === 0 ? 0 : now - lastTick;
+    //
+    // A frame can also arrive long after the one before it without the run
+    // having ended: `requestAnimationFrame` is suspended in a hidden tab and
+    // the callback already queued simply waits, so the step measured across a
+    // trip to another tab is the length of the trip. A debugger, a long task
+    // and a sleeping machine all do the same thing. None of them is a frame,
+    // and a program handed one as a frame advances by however long it was
+    // away — which is how a music player that was paused mid-track comes back
+    // believing the track finished while nobody was listening.
+    //
+    // Past a tenth of a second it is a gap rather than a measurement, and the
+    // honest step across a gap is zero: no time passed that this program was
+    // in a position to account for. Programs that need to know the gap
+    // happened get `EVENT_VISIBLE`, which says so directly.
+    const step = lastTick === 0 ? 0 : now - lastTick;
+    const elapsed = step > MAX_STEP ? 0 : step;
     lastTick = now;
     const next = exports.update(model, EVENT_FRAME, elapsed, 0, str(""));
     if (next === model) {{
@@ -3356,6 +3391,20 @@ pub fn generate_page(title: &str) -> String {
     send(EVENT_WHEEL, e.deltaX, e.deltaY, "");
     if (model !== before) e.preventDefault();
   }}, {{ passive: false }});
+
+  // Leaving the tab and coming back. Both directions are sent, because they
+  // are different questions: going away is the last moment a program can put
+  // down anything that would go on without it, and coming back is the first
+  // moment it can find out what happened while it was not being asked.
+  document.addEventListener("visibilitychange", () => {{
+    const shown = !document.hidden;
+    // The frame clock restarts here rather than resuming. `wake()` only resets
+    // it for a loop that had stopped, and a loop suspended by the tab going
+    // away never stopped — its callback is still queued, holding a timestamp
+    // from before the trip.
+    if (shown) lastTick = 0;
+    send(EVENT_VISIBLE, shown ? 1 : 0, 0, "");
+  }});
 
   for (const [name, button] of Object.entries(buttons)) {{
     button.addEventListener("click", () => show(name));

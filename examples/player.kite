@@ -246,8 +246,18 @@ fn composed_duration(track: int) -> int {
 }
 
 /// Send every note that begins inside the window `from`..`to`, measured in
-/// seconds from the start of the track.
-fn schedule(model: Model, from: float, to: float) {
+/// seconds from the start of the track, to a host that will sound them
+/// relative to `now` — where the playhead is when the call is made.
+///
+/// `now` is not always `from`, and keeping them apart is the whole of it. A
+/// note crosses the boundary as a *delay*: the host adds it to the audio
+/// clock's reading at the moment it is told, so what has to be sent is the
+/// distance from the playhead to the note, `at - now`. Filling the schedule
+/// ahead sends a window that starts where the last one ended, up to `HORIZON`
+/// in front of the playhead, so measuring the delay from `from` instead lands
+/// every note that far early — on top of the window still sounding, which is
+/// the same melody a second time and two seconds out of step with itself.
+fn schedule(model: Model, from: float, to: float, now: float) {
     let notes = line(model.playing)
     if notes.len() == 0 {
         return
@@ -264,7 +274,7 @@ fn schedule(model: Model, from: float, to: float) {
                     // two of the same pitch in a row are heard as two.
                     let held = (b.steps as float) * STEP() * 0.9
                     let gain = if step % 4 == 0 { 0.20 } else { 0.13 }
-                    note(pitch(b.midi), at - from, held, gain)
+                    note(pitch(b.midi), at - now, held, gain)
                 }
             }
         }
@@ -1132,6 +1142,18 @@ fn EVENT_EDIT() -> int {
     return 8
 }
 
+/// The tab was left, or returned to. `x` is 1 coming back and 0 going away.
+///
+/// This program has to be told, because it keeps something outside its own
+/// model: notes already handed to the host, which sound on the audio clock
+/// rather than the frame clock. A hidden tab gets no frames, so the schedule
+/// runs dry a few seconds in and the music stops — while `sent` goes on
+/// claiming those seconds were sent, which by then is a statement about a
+/// sound nobody heard.
+fn EVENT_VISIBLE() -> int {
+    return 9
+}
+
 pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
     if event == EVENT_CLICK() {
         return clicked(model, x, y)
@@ -1170,6 +1192,9 @@ pub fn update(model: Model, event: int, x: float, y: float, key: str) -> Model {
     }
     if event == EVENT_FRAME() {
         return ticked(model, x)
+    }
+    if event == EVENT_VISIBLE() {
+        return looked(model, x > 0.5)
     }
     if event == EVENT_WHEEL() {
         return scrolled(model, y)
@@ -1215,10 +1240,42 @@ fn ticked(model: Model, elapsed: float) -> Model {
     // twice.
     if model.sent - next < HORIZON() / 2.0 {
         let to = next + HORIZON()
-        schedule(model, model.sent, to)
+        schedule(model, model.sent, to, next)
         return Model{..model, elapsed: next, sent: to }
     }
     return Model{..model, elapsed: next }
+}
+
+/// The tab was left, or returned to.
+///
+/// Which of the two clocks the track runs on decides whether there is anything
+/// to do, and the answer is opposite for each. A **recording** is played by the
+/// host and timed by it: a hidden tab does not stop an `<audio>` element, so it
+/// went on playing correctly and `at()` will say where it got to on the very
+/// next frame. Touching it here is the one way to break it — `started` would
+/// seek it back to a position that stopped being true when the frames stopped.
+///
+/// A **composed** track is the other way round. It sounds only as far ahead as
+/// notes were sent, which is `HORIZON` at the most, so it fell silent a few
+/// seconds into the trip; and `sent` — the mark saying how much music the host
+/// is already holding — describes a schedule that has since been played out to
+/// nobody. Believing it on return is what leaves a silence the length of the
+/// horizon before anything is heard again.
+fn looked(model: Model, shown: bool) -> Model {
+    if recorded(model, model.playing) {
+        return model
+    }
+    if shown {
+        // `started` is exactly the reconciliation wanted: silence, then fill
+        // the schedule from the playhead, which is where the progress bar has
+        // been sitting all along.
+        return started(model)
+    }
+    // Going away. The notes still queued would sound into a tab nobody is
+    // listening to — and, worse, would still be sounding on return, underneath
+    // the schedule laid down from the playhead.
+    silence()
+    return Model{..model, sent: model.elapsed }
 }
 
 /// Begin, or begin again: silence whatever is still ringing and fill the
@@ -1241,7 +1298,7 @@ fn started(model: Model) -> Model {
         return Model{..model, sent: model.elapsed }
     }
     let to = model.elapsed + HORIZON()
-    schedule(model, model.elapsed, to)
+    schedule(model, model.elapsed, to, model.elapsed)
     return Model{..model, sent: to }
 }
 
