@@ -2,10 +2,12 @@
 //
 // The algorithms that decide what order text is drawn in and which glyph a
 // letter becomes — the parts of text that are decisions rather than pixels.
-// They live here, beside the layout engine and away from the renderers,
-// because a renderer that made these decisions could disagree with the one
-// next to it, and the point of computing everything in Kite is that neither
-// renderer decides anything.
+//
+// They exist for `std/canvas`, and only for it. A browser laying out a document
+// does all of this itself, so a Kite program writing into the DOM never reaches
+// here; a program painting into a `<canvas>` places every glyph itself and has
+// nobody to ask. Computing it in Kite rather than at the boundary is what makes
+// the answer the same wherever the program runs.
 //
 // Everything in this module is a **named subset** of a Unicode algorithm: what
 // is implemented is stated, what is not is stated, and nothing is implied.
@@ -34,8 +36,8 @@
 //   clusters for Devanagari, position Thai marks above and below their base,
 //   and reorder Burmese medial consonants; none of that happens here, and a
 //   program drawing those scripts is relying on the host's font stack to do
-//   it, which the browser-backed renderers can and a glyph-at-a-time
-//   renderer cannot.
+//   it — which a browser drawing into a `<canvas>` largely does, and a
+//   glyph-at-a-time renderer does not.
 
 // ---- the Bidi_Class table --------------------------------------------------
 
@@ -1722,8 +1724,9 @@ fn is_lam_alef(code: int) -> bool {
 /// This is the Joining_Type algorithm over the table above, and it is **not
 /// shaping**: a font's own GSUB rules choose better glyphs than the
 /// presentation-forms block offers, kern them, and position their marks. The
-/// browser-backed renderers get all of that from `fillText` and never need
-/// this function; what needs it is anything that draws one glyph at a time —
+/// a canvas asked to draw a whole run through `fillText` gets all of that from
+/// the host and never needs this function. What needs it is anything drawing
+/// one glyph at a time —
 /// a glyph atlas cannot cache a letter whose shape depends on its
 /// neighbours, and can cache a presentation form, whose shape is the point
 /// of it.
@@ -1772,7 +1775,9 @@ pub fn join_arabic(run: str) -> str {
 //
 // Where a line *may* break, as opposed to where it *must* fit. The two are
 // different questions and only the second needs a font: this decides the
-// opportunities, and `ui.wrap` decides which of them to take.
+// opportunities, and a caller with `canvas.width_of` decides which of them to
+// take. Nothing in the standard library does that second half — see the
+// README's list of what is not done.
 //
 // **The subset, named.** The Line_Break property is a table of every assigned
 // code point, and what is here covers the classes that occur in the scripts the
@@ -2093,7 +2098,7 @@ fn is_mandatory(c: LineBreak) -> bool {
 ///
 /// Answers one flag per character: whether a break is allowed **before** it.
 /// Position 0 is always false — UAX #14 rule LB2, never break at the start —
-/// and a mandatory break is reported as an allowed one, because `ui.wrap`
+/// and a mandatory break is reported as an allowed one, because a caller
 /// already knows a `\n` ends a line and needs to be told the rest.
 ///
 /// The classes are resolved first, then the pairs. Doing it in two passes is

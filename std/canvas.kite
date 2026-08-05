@@ -25,10 +25,11 @@
 //! }
 //! ```
 //!
-//! **Where the surface comes from is not settled yet.** A canvas is an element,
-//! so a program gets one the way it gets any element — which is `std/dom`, and
-//! `std/dom` is being rewritten. Until then the host supplies one surface and
-//! these calls go to it.
+//! **The surface is the host's, and there is one.** These calls are compiler
+//! builtins that go to whatever surface the runtime supplies, so a program
+//! cannot yet say *which* `<canvas>` it is drawing into. Choosing one means
+//! passing a `dom.Element` through to the drawing builtins, which is a change
+//! to the boundary rather than to this file.
 
 // ---- shapes ---------------------------------------------------------------
 
@@ -76,7 +77,9 @@ pub fn circle_ring(cx: float, cy: float, radius: float, width: float, colour: in
 /// A run of text, with `(x, y)` at the top left of its line box.
 ///
 /// One run on one line: this draws what it is given and does not wrap. Wrapping
-/// is a measurement, and `ui.wrap` is where it lives.
+/// is a measurement rather than a drawing decision, and nothing here does it:
+/// [`width_of`] and `text.break_opportunities` are the two halves it would be
+/// written from.
 pub fn text(x: float, y: float, body: str, colour: int) {
     draw.text(x, y, body, colour)
 }
@@ -116,9 +119,9 @@ pub fn image(x: float, y: float, w: float, h: float, src: str) {
 
 /// Confine everything drawn until [`unclip`] to a rectangle.
 ///
-/// Clips nest, and every one has to be closed. `ui.paint_into` opens and closes
-/// one around a canvas node for you, so a chart is already confined to its own
-/// box before it draws anything.
+/// Clips nest, and every one has to be closed. Nothing closes one for you: a
+/// caller that clips and returns leaves everything drawn afterwards confined to
+/// a box it has forgotten about.
 pub fn clip(x: float, y: float, w: float, h: float) {
     draw.clip(x, y, w, h)
 }
