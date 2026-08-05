@@ -136,6 +136,26 @@ let (user, uerr) = User.decode(doc)
 and a group in the generated glue, so the boundary is written once, in Kite,
 and the glue cannot drift from it.
 
+**The browser, without writing JavaScript.** `std/js` is about twenty
+primitives — `get`, `set`, `call`, `new`, `func`, conversions — and its host
+block is a fixed ninety lines that does not grow however much of the platform a
+program reaches. `std/dom` is written over it in ordinary Kite with no `extern`
+in it at all, which is what makes the primitives a real answer to *the standard
+library never wrapped the thing I need* rather than a promise. A host object is
+an `externref`, so it is traced by the same collector as everything else, and a
+thrown exception comes back as an error the compiler makes you check rather than
+unwinding through the Wasm frames.
+
+```kite
+use std/dom
+
+let button = dom.find("#save")
+if button == nil {
+    return
+}
+let (sub, err) = dom.on(button, "click", |e: dom.Event| { save() })
+```
+
 **Tools.** A formatter that preserves comments, a documentation generator, a
 fixer, a test runner, a package manager that resolves versions across the whole
 dependency graph, and a language server with diagnostics, hover, go to
@@ -162,19 +182,29 @@ kitec build examples/hello.kite --emit wasm --out dist
 # wrote dist/app.wasm (500 bytes), dist/app.js and dist/index.html
 ```
 
-**The UI layer is being rebuilt, and the old one is gone.** Until recently a
-Kite program computed its own layout and painted absolutely positioned elements
-through two interchangeable renderers. That worked, and it meant no stylesheet
-written by anyone else could address a single part of a Kite application —
-which made the language a competitor to Flutter Web rather than an alternative
-to JavaScript. `std/ui` and the Material package are removed. What replaces
-them is HTML, CSS, and a `std/dom` written in Kite over about fifteen host
-primitives: [docs/04-the-web.md](docs/04-the-web.md) is the design, and
-[the roadmap](docs/06-roadmap.md#the-direction-changed-at-phase-16) is the
-reasoning and the order of work.
+**A Kite program goes in a page.** `examples/page` is an ordinary HTML file
+with an ordinary stylesheet, complete before any WebAssembly arrives, with a
+**5,697-byte** module doing the part that needs logic. The count turns red below
+zero because `style.css` says so and the program only sets a class; hover and
+focus never reach Kite at all. Finding an element and setting a class costs
+2 KB, and there is a budget in CI that fails the build if any of it grows.
 
-Drawing is unaffected. `examples/boids.kite` paints into a `<canvas>`, which is
-what a canvas is for.
+That replaced a UI layer that computed its own layout and painted absolutely
+positioned elements through two interchangeable renderers. It worked, and it
+meant no stylesheet written by anyone else could address a single part of a
+Kite application — which made the language a competitor to Flutter Web rather
+than an alternative to JavaScript. `std/ui` and the Material package are gone;
+`std/dom` is ordinary Kite over `std/js`, with no `extern` declaration in it.
+[docs/04-the-web.md](docs/04-the-web.md) is the design, and
+[the roadmap](docs/06-roadmap.md#the-direction-changed-at-phase-16) is the
+reasoning.
+
+Drawing survives the change and is narrowed by it. `std/canvas` and the drawing
+builtins are untouched; what went is canvas as a *whole-application renderer*,
+with the parallel accessibility tree and damage tracking that existed to make a
+canvas pretend to be a document. A `<canvas>` is an element in a page that a
+program draws into — a chart, a game, a visualisation — which is what a canvas
+is on the web.
 
 ## The playground is the compiler
 
@@ -210,12 +240,17 @@ Recorded here rather than left to be discovered:
   `errors.chain`, `errors.is<T>` and `errors.as<T>` are still absent. Carrying
   the value needs a change to the error representation in all three backends:
   [Phase 24's remaining half](docs/06-roadmap.md#phase-24--concrete-error-types).
-- **No user interface layer at all, on purpose, for now.** `std/ui` and the
-  Material package were removed rather than deprecated, because two ways to
-  build a screen is exactly what the change was meant to end. `std/dom` is
-  being rewritten over host primitives, and a view layer is deliberately
-  deferred past 1.0 — the reasoning is in
+- **No view layer, deliberately.** `std/dom` finds elements, changes them and
+  listens to them; what is absent is the layer above — a description of
+  elements built with functions, compared against the last one and applied to
+  the document. It is deferred past 1.0 because the most contested design space
+  in front-end software is the worst thing to freeze into a standard library:
   [the roadmap](docs/06-roadmap.md#deferred-the-view-layer).
+- **No line breaking outside the browser.** `ui.wrap` was the only one, and it
+  went with `std/ui`. The browser wraps its own text, so this only matters to a
+  program painting into a `<canvas>` — `std/text` has the UAX #14 break
+  opportunities and `canvas.width_of` has the measurement, so it is a small
+  function nobody has written rather than a missing capability.
 - **No real parallelism, on any target.** A WasmGC reference cannot cross a
   thread boundary until shared-everything-threads ships, and the VM's values
   are `Rc`-based. `Share` is enforced now so that the day either changes, no
@@ -224,9 +259,11 @@ Recorded here rather than left to be discovered:
   HarfBuzz-quality shaping is OpenType GSUB/GPOS and cannot be written against
   a boundary that only measures. Indic reordering, Thai mark placement and
   Burmese clusters come from the host's font stack or not at all.
-- **Golden transcripts, not golden images.** The eight scripts are compared by
-  the drawing calls they produce, on both backends. A rasterisation difference
-  needs a browser and pixels, and would need a dependency this does not have.
+- **No golden images, and no golden transcripts either.** The transcripts that
+  compared eight scripts by the drawing calls they produced went with the
+  layout engine that fed them. `std/text`'s bidi, joining and line breaking keep
+  their direct tests; the end-to-end comparison does not exist, and pixels never
+  did — that needs a browser and a dependency this does not have.
 - **No native backend on Windows.** The collector finds roots by walking frame
   pointers, and Cranelift's Win64 prologue puts the frame record where that
   walk does not expect it. `--native` refuses there rather than corrupting the
@@ -241,7 +278,9 @@ Recorded here rather than left to be discovered:
 768 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the host boundary and a real
-socket under Node, both string
-representations compared against each other and against the VM, every example
-on the site, and the brand assets, which are checked for drift because the mark
-is drawn once and copied three times.
+socket under Node, the DOM layer and the typed door driven under Node — with
+real `tsc` type-checking the generated declarations where it is installed — both
+string representations compared against each other and against the VM, size
+budgets that fail the build when a module grows, every example on the site, the
+specification's own Appendix A, and the brand assets, which are checked for
+drift because the mark is drawn once and copied three times.
