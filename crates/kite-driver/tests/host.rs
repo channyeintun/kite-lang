@@ -778,11 +778,6 @@ const JS_RUNNER: &str = "import { readFile } from \"node:fs/promises\";\n\
      await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
      process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
 
-fn run_js_program(name: &str, body: &str) -> String {
-    let src = format!("use std/js\n\nfn main() {{\n{}}}\n", body);
-    run_runner_under_node(name, &src, JS_RUNNER, &[])
-}
-
 /// Reading properties, converting, indexing and calling.
 #[test]
 fn std_js_reads_and_calls() {
@@ -1472,12 +1467,28 @@ fn typescript_type_checks_against_the_declarations() {
     )
     .expect("write bad.ts");
 
+    // `moduleResolution=node` was removed in TypeScript 5, and `bundler` did
+    // not exist before it — so the flag has to follow whichever compiler is
+    // installed. Passing the wrong one is an options error rather than a type
+    // error, which would fail this test for a reason that has nothing to do
+    // with the declarations it is checking.
+    let version = Command::new("tsc").arg("--version").output().expect("tsc --version");
+    let version = String::from_utf8_lossy(&version.stdout);
+    let major: u32 = version
+        .split_whitespace()
+        .last()
+        .and_then(|v| v.split('.').next())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+    let (module, resolution) =
+        if major >= 5 { ("esnext", "bundler") } else { ("es2020", "node") };
+
     let check = |file: &str| {
         Command::new("tsc")
             .current_dir(&dir)
             .args([
-                "--noEmit", "--strict", "--target", "es2020", "--module", "es2020",
-                "--moduleResolution", "node", file,
+                "--noEmit", "--strict", "--target", "es2020", "--module", module,
+                "--moduleResolution", resolution, file,
             ])
             .output()
             .expect("tsc runs")

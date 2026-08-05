@@ -16,9 +16,17 @@
 use kite_driver::{compile, Emit};
 use std::path::Path;
 
+/// The document, with its line endings settled.
+///
+/// Git hands Windows a checkout with CRLF endings, and the reader below matches
+/// on `` ```kite\n `` — so on Windows the block is never found and the test
+/// fails claiming the specification has no program in it. `site_examples.rs`
+/// already had this exact fix and this file did not copy it.
 fn specification() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../SPECIFICATION.md");
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e))
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    text.replace("\r\n", "\n")
 }
 
 /// The first fenced `kite` block after a heading.

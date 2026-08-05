@@ -2308,36 +2308,6 @@ fn json_string(s: &str) -> String {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strings_are_escaped_for_javascript() {
-        assert_eq!(json_string("a\"b"), r#""a\"b""#);
-        assert_eq!(json_string("a\nb"), r#""a\nb""#);
-        assert_eq!(json_string("a\\b"), r#""a\\b""#);
-        assert_eq!(json_string("tab\there"), r#""tab\there""#);
-    }
-
-    /// U+2028 and U+2029 are valid JSON but terminate a JavaScript string
-    /// literal, which is a classic way to generate broken glue.
-    #[test]
-    fn line_separators_are_escaped() {
-        assert_eq!(json_string("a\u{2028}b"), "\"a\\u2028b\"");
-        assert_eq!(json_string("a\u{2029}b"), "\"a\\u2029b\"");
-    }
-
-    #[test]
-    fn the_glue_embeds_every_string_constant() {
-        let g = generate_glue(&["hello".into(), "world".into()], "app.wasm");
-        assert!(g.contains(r#""hello""#));
-        assert!(g.contains(r#""world""#));
-        assert!(g.contains(r#""app.wasm""#));
-        assert!(g.contains("export async function run"));
-    }
-}
-
 /// The typed door for JavaScript and TypeScript: `api.js` and `api.d.ts`.
 ///
 /// **This is the phase's whole point, and it is small because most of it was
@@ -2495,4 +2465,34 @@ fn ts_type(kite: &str) -> Option<&'static str> {
         "str" => "string",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strings_are_escaped_for_javascript() {
+        assert_eq!(json_string("a\"b"), r#""a\"b""#);
+        assert_eq!(json_string("a\nb"), r#""a\nb""#);
+        assert_eq!(json_string("a\\b"), r#""a\\b""#);
+        assert_eq!(json_string("tab\there"), r#""tab\there""#);
+    }
+
+    /// U+2028 and U+2029 are valid JSON but terminate a JavaScript string
+    /// literal, which is a classic way to generate broken glue.
+    #[test]
+    fn line_separators_are_escaped() {
+        assert_eq!(json_string("a\u{2028}b"), "\"a\\u2028b\"");
+        assert_eq!(json_string("a\u{2029}b"), "\"a\\u2029b\"");
+    }
+
+    #[test]
+    fn the_glue_embeds_every_string_constant() {
+        let g = generate_glue(&["hello".into(), "world".into()], "app.wasm");
+        assert!(g.contains(r#""hello""#));
+        assert!(g.contains(r#""world""#));
+        assert!(g.contains(r#""app.wasm""#));
+        assert!(g.contains("export async function run"));
+    }
 }
