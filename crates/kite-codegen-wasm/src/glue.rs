@@ -230,6 +230,7 @@ export function text(s) {
             CRYPTO_HOST,
             AUDIO_HOST,
             DOM_HOST,
+            JS_HOST,
             "",
             "function missing(group, name) {",
             "  return () => {",
@@ -1296,6 +1297,114 @@ export async function run(source) {{
 /// permanently empty, so a handle of 0 is "nothing found" and every function
 /// tolerates it — a chain of lookups on a missing element does nothing rather
 /// than throwing halfway along.
+/// The `js` group: the whole of `std/js`, and the last JavaScript in the
+/// project that anybody has to write.
+///
+/// **This block does not grow.** That is its point. One `extern` per browser
+/// feature is faster and better typed, and the browser has thousands of them —
+/// so the first API the standard library missed would send a user off to write
+/// a host object of their own, in the language Kite exists to replace. What is
+/// here is general enough that `std/dom`, and anything else a program needs,
+/// is ordinary Kite written on top of it.
+///
+/// **Nothing throws across the boundary.** A JavaScript exception unwinding
+/// through the Wasm frames aborts the scheduler and takes every running task
+/// with it, so one mistyped method name would stop the program rather than fail
+/// one call. Every entry that can throw is wrapped, and returns a marker object
+/// the Kite side turns into an ordinary error.
+///
+/// The marker is made fresh each time rather than kept in a slot. A slot would
+/// be an `errno`, and an `errno` is wrong here for a specific reason: a host
+/// call can fire a Kite event handler synchronously in the middle of itself,
+/// and that handler's own failures would overwrite the one being reported.
+const JS_HOST: &str = r#"
+if (HOSTS.js) {
+  // What a throw becomes. `THREW` is a symbol so that no object a program
+  // legitimately holds can be mistaken for one.
+  const THREW = Symbol("kite.threw");
+  const failure = (e) => ({
+    [THREW]: e instanceof Error ? e.message : String(e),
+  });
+  const guard = (f) => {
+    try {
+      return f();
+    } catch (e) {
+      return failure(e);
+    }
+  };
+  // `null` and `undefined` cannot be asked for a property, and `in` refuses a
+  // primitive, so both are ruled out before the marker is looked for.
+  const threw = (v) =>
+    v !== null && typeof v === "object" && THREW in v;
+  const root = () => (typeof globalThis === "undefined" ? {} : globalThis);
+  // A constructor named on the global object. Kept to one place because
+  // `js_new*` and `js_instance_of` must agree about what a name means.
+  const ctor = (name) => {
+    const c = root()[S(name)];
+    if (typeof c !== "function") {
+      throw new TypeError("`" + S(name) + "` is not a constructor");
+    }
+    return c;
+  };
+
+  HOSTS.js = {
+    js_global: (name) => root()[S(name)],
+    js_nothing: () => null,
+    js_get: (target, name) => guard(() => target[S(name)]),
+    // The value is returned so that a write has something to carry a failure
+    // in. A strict-mode assignment to a read-only property throws, and so does
+    // a setter of the page's own.
+    js_set: (target, name, value) =>
+      guard(() => {
+        target[S(name)] = value;
+        return null;
+      }),
+    js_at: (target, index) => guard(() => target[Number(index)]),
+
+    js_call0: (t, name) => guard(() => t[S(name)]()),
+    js_call1: (t, name, a) => guard(() => t[S(name)](a)),
+    js_call2: (t, name, a, b) => guard(() => t[S(name)](a, b)),
+    js_call3: (t, name, a, b, c) => guard(() => t[S(name)](a, b, c)),
+    js_call4: (t, name, a, b, c, d) => guard(() => t[S(name)](a, b, c, d)),
+
+    js_new0: (name) => guard(() => new (ctor(name))()),
+    js_new1: (name, a) => guard(() => new (ctor(name))(a)),
+    js_new2: (name, a, b) => guard(() => new (ctor(name))(a, b)),
+    js_new3: (name, a, b, c) => guard(() => new (ctor(name))(a, b, c)),
+
+    js_same: (a, b) => (a === b ? 1 : 0),
+    // One question, not two. Which of `null` and `undefined` a property is
+    // absent as is a JavaScript distinction with no Kite meaning.
+    js_is_nothing: (v) => (v === null || v === undefined ? 1 : 0),
+    js_instance_of: (v, name) => guard(() => v instanceof ctor(name)),
+    // `typeof null` is `"object"`, which is a forty-year-old mistake and not
+    // one to pass on: a caller asking what this is wants "nothing".
+    js_kind_of: (v) => intern(v === null ? "null" : typeof v),
+
+    js_of_str: (value) => S(value),
+    js_of_num: (value) => value,
+    js_of_bool: (value) => value !== 0,
+    // Guarded by `js_kind_of` on the Kite side, so these are only reached when
+    // the value is already known to be of the right kind.
+    js_as_str: (v) => intern(v),
+    js_as_num: (v) => v,
+    js_as_bool: (v) => (v ? 1 : 0),
+    // An `int` is an i64 and reaches here as a BigInt; a JavaScript number is
+    // an f64. The conversion happens on this side because doing it in Kite
+    // means a lossy cast, and the loss is the thing `of_int` refuses.
+    // `js_is_safe_int` is asked first, so `BigInt` is only reached for a value
+    // it can hold.
+    js_of_int: (value) => Number(value),
+    js_as_int: (v) => BigInt(v),
+    js_is_safe_int: (v) =>
+      typeof v === "number" && Number.isSafeInteger(v) ? 1 : 0,
+
+    js_threw: (v) => (threw(v) ? 1 : 0),
+    js_detail: (v) => intern(threw(v) ? v[THREW] : ""),
+  };
+}
+"#;
+
 const DOM_HOST: &str = r#"
 if (HOSTS.dom) {
   // Index 0 is the empty slot that means "not found", so the table starts with

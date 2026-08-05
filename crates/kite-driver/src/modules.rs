@@ -39,6 +39,7 @@ pub const STD_MODULES: &[(&str, &str)] = &[
     ("json", include_str!("../../../std/json.kite")),
     ("toml", include_str!("../../../std/toml.kite")),
     ("fs", include_str!("../../../std/fs.kite")),
+    ("js", include_str!("../../../std/js.kite")),
     ("dom", include_str!("../../../std/dom.kite")),
     ("test", include_str!("../../../std/test.kite")),
     ("buffer", include_str!("../../../std/buffer.kite")),

@@ -755,3 +755,147 @@ fn a_host_object_is_refused_off_the_web() {
     assert!(text.contains("E0204"), "{}", text);
     assert!(text.contains("has no host"), "{}", text);
 }
+
+// ---- std/js ----------------------------------------------------------------
+
+/// `std/js` needs no host of its own: the `js` group is supplied by the
+/// generated glue, which is the whole claim being tested. The runner builds a
+/// small world on `globalThis` for the program to reach.
+const JS_RUNNER: &str = "import { readFile } from \"node:fs/promises\";\n\
+     import { run, setWriter } from \"./app.js\";\n\
+     globalThis.probe = {\n\
+     \x20 name: \"kite\",\n\
+     \x20 count: 7,\n\
+     \x20 ratio: 1.5,\n\
+     \x20 on: true,\n\
+     \x20 missing: undefined,\n\
+     \x20 items: [10, 20, 30],\n\
+     \x20 twice: function (n) { return n * 2; },\n\
+     \x20 boom: function () { throw new Error(\"no\"); },\n\
+     };\n\
+     const out = [];\n\
+     setWriter((l) => out.push(l));\n\
+     await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+     process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+
+fn run_js_program(name: &str, body: &str) -> String {
+    let src = format!("use std/js\n\nfn main() {{\n{}}}\n", body);
+    run_runner_under_node(name, &src, JS_RUNNER, &[])
+}
+
+/// Reading properties, converting, indexing and calling.
+#[test]
+fn std_js_reads_and_calls() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/js\n\n\
+        fn report() -> (str, error) {\n\
+        \x20 let probe = js.global(\"probe\")\n\
+        \x20 let (count, err) = js.get(probe, \"count\")\n\
+        \x20 check err\n\
+        \x20 let (n, nerr) = js.as_int(count)\n\
+        \x20 check nerr\n\
+        \x20 let (items, ierr) = js.get(probe, \"items\")\n\
+        \x20 check ierr\n\
+        \x20 let (len, lerr) = js.length(items)\n\
+        \x20 check lerr\n\
+        \x20 let (second, serr) = js.at(items, 1)\n\
+        \x20 check serr\n\
+        \x20 let (twenty, terr) = js.as_int(second)\n\
+        \x20 check terr\n\
+        \x20 let (doubled, derr) = js.call1(probe, \"twice\", js.of_num(21.0))\n\
+        \x20 check derr\n\
+        \x20 let (forty_two, ferr) = js.as_num(doubled)\n\
+        \x20 check ferr\n\
+        \x20 return \"\\(n) \\(len) \\(twenty) \\(forty_two)\", nil\n\
+        }\n\
+        fn main() {\n\
+        \x20 let (line, err) = report()\n\
+        \x20 if err != nil {\n    io.print(\"failed: \\(err.message())\")\n    return\n  }\n\
+        \x20 io.print(line)\n\
+        }\n";
+    let out = run_runner_under_node("jsread", src, JS_RUNNER, &[]);
+    assert_eq!(out, "7 3 20 42.0\n");
+}
+
+/// A host exception becomes an ordinary error, and the program carries on.
+///
+/// This is the property that makes the whole design survivable. Without it a
+/// throw unwinds through the Wasm frames and aborts the scheduler, so one
+/// mistyped method name stops every running task rather than failing one call.
+#[test]
+fn a_host_exception_becomes_an_error() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/js\n\n\
+        fn main() {\n\
+        \x20 let probe = js.global(\"probe\")\n\
+        \x20 let (v, err) = js.call0(probe, \"boom\")\n\
+        \x20 if err != nil {\n    io.print(err.message())\n  }\n\
+        \x20 let (w, werr) = js.call0(probe, \"nosuchmethod\")\n\
+        \x20 if werr != nil {\n    io.print(\"second failed too\")\n  }\n\
+        \x20 io.print(js.str_or(probe, \"name\", \"?\"))\n\
+        }\n";
+    let out = run_runner_under_node("jsthrow", src, JS_RUNNER, &[]);
+    assert_eq!(
+        out,
+        "the host threw: no\nsecond failed too\nkite\n",
+        "a throw must not stop the program"
+    );
+}
+
+/// `undefined` cannot become a number by accident.
+///
+/// JavaScript's commonest bug is a missing property arriving as `undefined` and
+/// turning into `NaN` or `0` somewhere else entirely. Here it is a value the
+/// taint analysis will not let a caller read until the error is tested.
+#[test]
+fn a_missing_property_is_an_error_and_not_a_zero() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/js\n\n\
+        fn main() {\n\
+        \x20 let probe = js.global(\"probe\")\n\
+        \x20 let (v, err) = js.get(probe, \"missing\")\n\
+        \x20 if err != nil {\n    io.print(\"unexpected\")\n    return\n  }\n\
+        \x20 io.print(js.is_nothing(v))\n\
+        \x20 let (n, nerr) = js.as_num(v)\n\
+        \x20 if nerr != nil {\n    io.print(nerr.message())\n  }\n\
+        \x20 io.print(js.num_or(probe, \"missing\", -1.0))\n\
+        }\n";
+    let out = run_runner_under_node("jsmissing", src, JS_RUNNER, &[]);
+    assert_eq!(
+        out,
+        "true\nexpected a number, and the value is undefined\n-1.0\n"
+    );
+}
+
+/// Numbers cross as `f64`, and the limit that implies is refused rather than
+/// discovered as a value that came back different from the one that went out.
+#[test]
+fn an_integer_too_large_for_a_javascript_number_is_refused() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/js\n\n\
+        fn main() {\n\
+        \x20 let (ok, err) = js.of_int(9007199254740991)\n\
+        \x20 io.print(err == nil)\n\
+        \x20 let (bad, berr) = js.of_int(9007199254740993)\n\
+        \x20 if berr != nil {\n    io.print(\"refused\")\n  }\n\
+        \x20 let probe = js.global(\"probe\")\n\
+        \x20 let (ratio, rerr) = js.get(probe, \"ratio\")\n\
+        \x20 if rerr != nil {\n    return\n  }\n\
+        \x20 let (whole, werr) = js.as_int(ratio)\n\
+        \x20 if werr != nil {\n    io.print(werr.message())\n  }\n\
+        }\n";
+    let out = run_runner_under_node("jsnumbers", src, JS_RUNNER, &[]);
+    assert_eq!(out, "true\nrefused\n1.5 is not a whole number\n");
+}

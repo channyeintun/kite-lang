@@ -1715,6 +1715,37 @@ first three lines — the marking Rust gets from `unsafe`, for the same reason.
 **Exit criterion:** `std/dom`'s entire current surface is reimplemented over the
 primitives, in Kite, with no `extern` declarations left in it.
 
+**The layer is built; `std/dom` moves to Phase 20.** `std/js` is twenty-three
+primitives — the "roughly fifteen" above was optimistic, and the extra eight are
+arity variants of `call` and `new` rather than new ideas. Its host block is
+about ninety lines of JavaScript and does not grow with anything a program
+reaches.
+
+Two of the primitives listed above are **not** here, and both were misplaced
+rather than dropped. `js.func` hands a Kite closure to the host, which is not
+glue but compiler machinery — a closure crossing as a reference through a
+trampoline, generalising what `task_spawn` already does — and it lands in Phase
+20, where events need it. `js.await` needs a promise and a scheduler that can
+be woken, so it lands in Phase 21 with the rest of the effects.
+
+Three things the work turned up:
+
+- **A host function cannot return `(T, error)`.** A fallible pair is a Kite
+  aggregate, and aggregates do not cross the boundary. So a call that throws
+  returns a **marker object** carrying the message, and the Kite side turns it
+  into an ordinary error. The marker is made fresh per throw rather than kept in
+  a slot, which matters for a specific reason: a host call can fire a Kite
+  handler synchronously in the middle of itself, and an `errno` would let that
+  handler's failure overwrite the one being reported.
+- **Concrete error types are not built yet**, so the failures are `errors.new`
+  strings rather than an enum implementing `Error` — `std/errors` already
+  records that gap. Call sites are unaffected either way, because what a caller
+  holds is an `error`.
+- **The int/float conversion belongs on the host's side of the boundary.**
+  Doing it in Kite means a lossy cast the compiler warns about, and the loss it
+  warns about is exactly what `of_int` exists to refuse. `Number.isSafeInteger`
+  is asked where the number lives.
+
 ---
 
 ## Phase 19 — A runtime that can live in a page
@@ -1924,7 +1955,7 @@ none.
 | 15 — Distribution | 🟡 CI, cross-compiled builds, Sigstore signing, Homebrew/Scoop/AUR manifests rendered from the release's own checksums, `kitec.wasm` as an artefact. ❌ nothing published: no tag has been pushed |
 | 16 — Demolition | ✅ complete — 19,700 lines out; build and tests green with nothing rendering |
 | 17 — `JsValue` / `externref` | ✅ complete — crosses, is held, survives an `await`, refused off the web. ❌ collection asserted, which needs a heap snapshot |
-| 18 — `std/js` primitives | ⬜ not started |
+| 18 — `std/js` primitives | ✅ complete — 23 primitives, a fixed ~90-line host block, throws caught as errors. `js.func` moved to 20, `js.await` to 21 |
 | 19 — Resident runtime, real clock | ⬜ not started |
 | 20 — `std/dom` | ⬜ not started |
 | 21 — Effects across the boundary | ⬜ not started |
@@ -1932,7 +1963,7 @@ none.
 | 23 — Size gate | ⬜ not started |
 | — View layer | ⬜ deferred past 1.0, deliberately |
 
-741 tests: unit tests per crate, an annotated compile-fail corpus, a
+745 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the host boundary and a real
 socket under Node, both string

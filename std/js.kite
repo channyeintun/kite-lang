@@ -1,0 +1,448 @@
+//! The host, reached generally. **Web only.**
+//!
+//! This is the floor below the typed world, and importing it should be visible
+//! in a file's first three lines. Everything here is untyped, every call can
+//! fail, and nothing here knows what a DOM is. `std/dom` is written over it, in
+//! ordinary Kite, and so is anything else a program needs that the standard
+//! library never covered.
+//!
+//! **Why a general mechanism rather than one `extern` per browser feature.**
+//! The direct way is faster and better typed, and the browser has thousands of
+//! interfaces. With only `extern`, the first one the standard library missed
+//! would send a user off to hand-write a JavaScript host object and register it
+//! — and a language whose way to extend it is "go and write the other
+//! language" has conceded its own argument on the first day of real use. These
+//! fifteen or so functions are the last JavaScript anybody writes, and the
+//! generated glue is a fixed size no matter how much of the platform a program
+//! reaches.
+//!
+//! What it costs is a name looked up when the program runs instead of fixed
+//! when it compiles: a little speed, and a mistyped name that compiles. The
+//! second is why every call here returns an error rather than throwing.
+//!
+//! ```kite
+//! use std/js
+//!
+//! fn title() -> (str, error) {
+//!     let document = js.global("document")
+//!     let (value, err) = js.get(document, "title")
+//!     check err
+//!     return js.as_str(value)
+//! }
+//! ```
+//!
+//! **Keep `JsValue` out of your own public interface.** Wrap it in a struct
+//! whose field is not `pub` — outside the declaring module such a struct can be
+//! held and passed but not read or built ([spec §4.2]), which is the whole of
+//! how the untyped layer is stopped from spreading. `std/dom` is the worked
+//! example.
+
+// ---- the boundary ---------------------------------------------------------
+//
+// Every one of these is `@host("js")`, and the group is supplied by the
+// generated glue rather than by the program. They are module-private on
+// purpose: what a caller reaches is the wrapper below, which turns a thrown
+// exception into an error the taint analysis makes them check.
+//
+// A host function cannot return `(T, error)` — a fallible pair is a Kite
+// aggregate and aggregates do not cross the boundary. So a call that throws
+// returns a **marker object** carrying the message, and `threw` asks whether a
+// value is one. The marker is made fresh per throw rather than stored in a
+// slot, which is what keeps this correct when a handler fires re-entrantly in
+// the middle of a call.
+
+@host("js")
+extern fn js_global(name: str) -> JsValue
+
+@host("js")
+extern fn js_nothing() -> JsValue
+
+@host("js")
+extern fn js_get(target: JsValue, name: str) -> JsValue
+
+@host("js")
+extern fn js_set(target: JsValue, name: str, value: JsValue) -> JsValue
+
+@host("js")
+extern fn js_at(target: JsValue, index: int) -> JsValue
+
+@host("js")
+extern fn js_call0(target: JsValue, name: str) -> JsValue
+
+@host("js")
+extern fn js_call1(target: JsValue, name: str, a: JsValue) -> JsValue
+
+@host("js")
+extern fn js_call2(target: JsValue, name: str, a: JsValue, b: JsValue) -> JsValue
+
+@host("js")
+extern fn js_call3(target: JsValue, name: str, a: JsValue, b: JsValue, c: JsValue) -> JsValue
+
+@host("js")
+extern fn js_call4(
+    target: JsValue,
+    name: str,
+    a: JsValue,
+    b: JsValue,
+    c: JsValue,
+    d: JsValue,
+) -> JsValue
+
+@host("js")
+extern fn js_new0(name: str) -> JsValue
+
+@host("js")
+extern fn js_new1(name: str, a: JsValue) -> JsValue
+
+@host("js")
+extern fn js_new2(name: str, a: JsValue, b: JsValue) -> JsValue
+
+@host("js")
+extern fn js_new3(name: str, a: JsValue, b: JsValue, c: JsValue) -> JsValue
+
+@host("js")
+extern fn js_same(a: JsValue, b: JsValue) -> bool
+
+@host("js")
+extern fn js_is_nothing(v: JsValue) -> bool
+
+@host("js")
+extern fn js_instance_of(v: JsValue, constructor: str) -> JsValue
+
+@host("js")
+extern fn js_kind_of(v: JsValue) -> str
+
+@host("js")
+extern fn js_of_str(value: str) -> JsValue
+
+@host("js")
+extern fn js_of_num(value: float) -> JsValue
+
+@host("js")
+extern fn js_of_bool(value: bool) -> JsValue
+
+@host("js")
+extern fn js_as_str(v: JsValue) -> str
+
+@host("js")
+extern fn js_as_num(v: JsValue) -> float
+
+@host("js")
+extern fn js_as_bool(v: JsValue) -> bool
+
+@host("js")
+extern fn js_of_int(value: int) -> JsValue
+
+@host("js")
+extern fn js_as_int(v: JsValue) -> int
+
+@host("js")
+extern fn js_is_safe_int(v: JsValue) -> bool
+
+@host("js")
+extern fn js_threw(v: JsValue) -> bool
+
+@host("js")
+extern fn js_detail(v: JsValue) -> str
+
+// ---- failures --------------------------------------------------------------
+
+/// The largest whole number a JavaScript number holds exactly.
+///
+/// Numbers cross as `f64`, because that is what a JavaScript number *is* and an
+/// `int` is an i64 — every crossing would otherwise allocate a BigInt. The cost
+/// is this limit, and it is checked here rather than discovered as a value that
+/// came back different from the one that went out.
+pub fn SAFE_INTEGER() -> int {
+    return 9007199254740991
+}
+
+/// The failures this layer reports.
+///
+/// Built with `errors.new` rather than declared as a type implementing `Error`,
+/// because concrete error types carrying their own data are the half of the
+/// error design that is not built yet — `std/errors` says so itself. When they
+/// arrive these become variants and every call site keeps working, because what
+/// a caller holds is an `error` either way.
+fn threw_error(detail: str) -> error {
+    return errors.new("the host threw: \(detail)")
+}
+
+fn not_a(wanted: str, saw: str) -> error {
+    return errors.new("expected \(wanted), and the value is \(saw)")
+}
+
+fn fractional(value: float) -> error {
+    return errors.new("\(value) is not a whole number")
+}
+
+fn too_large(value: int) -> error {
+    return errors.new("\(value) is too large for a JavaScript number to hold exactly")
+}
+
+/// A result, or the failure it is standing in for.
+///
+/// Every call that can throw comes through here, which is what makes a mistyped
+/// method name a value the caller has to check rather than an exception
+/// unwinding through the Wasm frames and taking every running task with it.
+fn checked(v: JsValue) -> (JsValue, error) {
+    if js_threw(v) {
+        return _, threw_error(js_detail(v))
+    }
+    return v, nil
+}
+
+// ---- reaching things -------------------------------------------------------
+
+/// A property of the global object: `document`, `window`, `Math`, a
+/// constructor. The root everything else is reached from.
+///
+/// Not fallible: reading a property that is not there is not an error in
+/// JavaScript, it is `undefined`. Ask [`is_nothing`] if that matters.
+pub fn global(name: str) -> JsValue {
+    return js_global(name)
+}
+
+/// `null`, for passing to something that wants one.
+pub fn nothing() -> JsValue {
+    return js_nothing()
+}
+
+/// One property.
+pub fn get(target: JsValue, name: str) -> (JsValue, error) {
+    return checked(js_get(target, name))
+}
+
+/// Write one property.
+///
+/// Returns only an error, because there is no value to return and a `(unit,
+/// error)` pair would make every call site destructure something meaningless.
+pub fn set(target: JsValue, name: str, value: JsValue) -> error {
+    let out = js_set(target, name, value)
+    if js_threw(out) {
+        return threw_error(js_detail(out))
+    }
+    return nil
+}
+
+/// One element of an array-like thing.
+pub fn at(target: JsValue, index: int) -> (JsValue, error) {
+    return checked(js_at(target, index))
+}
+
+/// How many elements an array-like thing has.
+pub fn length(target: JsValue) -> (int, error) {
+    let (value, err) = get(target, "length")
+    check err
+    return as_int(value)
+}
+
+// ---- calling ---------------------------------------------------------------
+//
+// One function per arity rather than one taking a slice. A slice is a Kite
+// aggregate and does not cross the boundary — and even where it could, every
+// property write would allocate an array to carry nothing.
+
+pub fn call0(target: JsValue, name: str) -> (JsValue, error) {
+    return checked(js_call0(target, name))
+}
+
+pub fn call1(target: JsValue, name: str, a: JsValue) -> (JsValue, error) {
+    return checked(js_call1(target, name, a))
+}
+
+pub fn call2(target: JsValue, name: str, a: JsValue, b: JsValue) -> (JsValue, error) {
+    return checked(js_call2(target, name, a, b))
+}
+
+pub fn call3(
+    target: JsValue,
+    name: str,
+    a: JsValue,
+    b: JsValue,
+    c: JsValue,
+) -> (JsValue, error) {
+    return checked(js_call3(target, name, a, b, c))
+}
+
+pub fn call4(
+    target: JsValue,
+    name: str,
+    a: JsValue,
+    b: JsValue,
+    c: JsValue,
+    d: JsValue,
+) -> (JsValue, error) {
+    return checked(js_call4(target, name, a, b, c, d))
+}
+
+/// `new Thing(…)`, by the constructor's name on the global object.
+pub fn new0(constructor: str) -> (JsValue, error) {
+    return checked(js_new0(constructor))
+}
+
+pub fn new1(constructor: str, a: JsValue) -> (JsValue, error) {
+    return checked(js_new1(constructor, a))
+}
+
+pub fn new2(constructor: str, a: JsValue, b: JsValue) -> (JsValue, error) {
+    return checked(js_new2(constructor, a, b))
+}
+
+pub fn new3(constructor: str, a: JsValue, b: JsValue, c: JsValue) -> (JsValue, error) {
+    return checked(js_new3(constructor, a, b, c))
+}
+
+// ---- asking ----------------------------------------------------------------
+
+/// Whether two references are the same object — the host's `===`.
+///
+/// This is what `==` would have been, and cannot be: an `externref` is outside
+/// Wasm's `eq` hierarchy, so there is no comparison to lower it to. Writing
+/// `==` on a `JsValue` is a compile error that points here.
+pub fn same(a: JsValue, b: JsValue) -> bool {
+    return js_same(a, b)
+}
+
+/// Whether the value is `null` or `undefined`.
+///
+/// One question rather than two. The difference between them is a JavaScript
+/// distinction with no Kite meaning, and a program that acted on it would be
+/// acting on which of two ways a property failed to be there.
+pub fn is_nothing(v: JsValue) -> bool {
+    return js_is_nothing(v)
+}
+
+/// The host's own answer to what this is: `"string"`, `"number"`, `"object"`,
+/// `"function"`, `"undefined"`.
+pub fn kind_of(v: JsValue) -> str {
+    return js_kind_of(v)
+}
+
+/// Whether the value came from this constructor.
+///
+/// Needed the moment an event target has to become something typed: a target
+/// may be an element, a text node or the window, and only one of those is worth
+/// wrapping.
+pub fn instance_of(v: JsValue, constructor: str) -> (bool, error) {
+    let (answer, err) = checked(js_instance_of(v, constructor))
+    check err
+    return as_bool(answer)
+}
+
+// ---- converting ------------------------------------------------------------
+
+pub fn of_str(value: str) -> JsValue {
+    return js_of_str(value)
+}
+
+pub fn of_num(value: float) -> JsValue {
+    return js_of_num(value)
+}
+
+pub fn of_bool(value: bool) -> JsValue {
+    return js_of_bool(value)
+}
+
+/// An `int` as a JavaScript number, refusing rather than rounding.
+///
+/// The check is on this side and the conversion is on the other. Doing the
+/// arithmetic here would mean an `int` becoming a `float` in Kite, which is a
+/// lossy cast the compiler rightly warns about — and the loss it warns about is
+/// exactly the one this refuses.
+pub fn of_int(value: int) -> (JsValue, error) {
+    if value > SAFE_INTEGER() || value < 0 - SAFE_INTEGER() {
+        return _, too_large(value)
+    }
+    return js_of_int(value), nil
+}
+
+/// The value as text — and an error when it is not text.
+///
+/// **This is where JavaScript's commonest bug is removed.** Reading a property
+/// that is not there yields `undefined`, and `undefined` silently becoming `0`
+/// or `""` is a mistake that surfaces somewhere else entirely. Here it is a
+/// value the taint analysis will not let the caller use unchecked.
+pub fn as_str(v: JsValue) -> (str, error) {
+    let kind = js_kind_of(v)
+    if kind != "string" {
+        return _, not_a("a string", kind)
+    }
+    return js_as_str(v), nil
+}
+
+pub fn as_num(v: JsValue) -> (float, error) {
+    let kind = js_kind_of(v)
+    if kind != "number" {
+        return _, not_a("a number", kind)
+    }
+    return js_as_num(v), nil
+}
+
+pub fn as_bool(v: JsValue) -> (bool, error) {
+    let kind = js_kind_of(v)
+    if kind != "boolean" {
+        return _, not_a("a boolean", kind)
+    }
+    return js_as_bool(v), nil
+}
+
+/// A whole number, or the reason it is not one.
+///
+/// "Is this number a whole one that survives the crossing" is JavaScript's own
+/// question — `Number.isSafeInteger` — and it is asked where the number lives
+/// rather than reconstructed here out of a truncation and a float comparison.
+/// The value only becomes an `int` once the answer is yes.
+pub fn as_int(v: JsValue) -> (int, error) {
+    let (value, err) = as_num(v)
+    check err
+    if !js_is_safe_int(v) {
+        return _, fractional(value)
+    }
+    return js_as_int(v), nil
+}
+
+// ---- shorthands ------------------------------------------------------------
+//
+// Three lines of ceremony to read one property is right for a call that must
+// not guess and wrong for a library wrapping two hundred of them. These take a
+// value to fall back on, and the long form stays for everything else.
+
+/// A string property, or `fallback` when it is missing or is not a string.
+pub fn str_or(target: JsValue, name: str, fallback: str) -> str {
+    let (value, err) = get(target, name)
+    if err != nil {
+        return fallback
+    }
+    let (text, terr) = as_str(value)
+    if terr != nil {
+        return fallback
+    }
+    return text
+}
+
+/// A numeric property, or `fallback`.
+pub fn num_or(target: JsValue, name: str, fallback: float) -> float {
+    let (value, err) = get(target, name)
+    if err != nil {
+        return fallback
+    }
+    let (number, nerr) = as_num(value)
+    if nerr != nil {
+        return fallback
+    }
+    return number
+}
+
+/// A boolean property, or `fallback`.
+pub fn bool_or(target: JsValue, name: str, fallback: bool) -> bool {
+    let (value, err) = get(target, name)
+    if err != nil {
+        return fallback
+    }
+    let (answer, berr) = as_bool(value)
+    if berr != nil {
+        return fallback
+    }
+    return answer
+}
