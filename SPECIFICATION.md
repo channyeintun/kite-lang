@@ -1391,7 +1391,8 @@ viable before WasmGC reached cross-browser baseline in Safari 18.2.
 - **No unboxed aggregates inside arrays.** `[Point]` is an array of references to
   `Point` objects, not a flat buffer of `(f64, f64)`. For numeric work where the
   layout matters, `buffer.F64` provides a flat typed buffer over linear memory,
-  which is the escape hatch used by the layout engine and the canvas renderer.
+  which is the escape hatch for anything holding a great many numbers — a
+  simulation, a signal, a mesh.
 - **No weak references or finalizers.** A `Cache` that must not retain its
   entries uses an explicit eviction policy rather than weak keys.
 

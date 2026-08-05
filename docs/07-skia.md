@@ -3,6 +3,16 @@
 Kite's drawing boundary was designed before anyone read Skia. This note is the
 reading, and the argument for the two calls it added and the four it did not.
 
+> **Written for a design that is gone, and kept for the part that is not.**
+> Every reference below to `std/ui`, `packages/material` and *two renderers*
+> describes the UI layer removed at
+> [Phase 16](06-roadmap.md#the-direction-changed-at-phase-16). The document is
+> not rewritten, because what it actually argues about — which drawing calls a
+> boundary should have, and why a rounded rectangle earns its place while a
+> path does not — is about **drawing**, and drawing is still what `std/canvas`
+> does into a `<canvas>`. Read `Decor` and `Style` as what a program that paints
+> its own pixels decides for itself.
+
 The reading is of Skia's public headers on `main`: `SkColor.h`, `SkPaint.h`,
 `SkCanvas.h`. Where this quotes Skia, it quotes those.
 
