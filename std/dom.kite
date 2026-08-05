@@ -26,10 +26,8 @@
 //! }
 //! ```
 //!
-//! **What is not here is as deliberate as what is.** There is no layout, no
-//! widget, no theme and no component. The browser lays out, CSS styles, and a
-//! design system is a stylesheet. What this module does is find elements, make
-//! them, change them, and listen to them.
+//! This module finds elements, makes them, changes them, and listens to them.
+//! The browser lays out, CSS styles, and a design system is a stylesheet.
 
 use std/js
 
@@ -97,12 +95,9 @@ fn document() -> JsValue {
 
 /// The first element matching a CSS selector, or nothing.
 ///
-/// **`?Element`, never a usable-looking stand-in.** The previous version of this
-/// module returned a handle of 0 for "not found" and documented that every call
-/// tolerated it, so a chain of lookups on a missing element did nothing at all.
-/// That is a null object, and it is worse than a null dereference because it
-/// does not even fail where the mistake is — in a language whose specification
-/// calls the tolerated zero value Go's commonest production bug.
+/// An `Option<Element>`, so a selector that matched nothing is a value the
+/// caller has to open before using. Testing it narrows the binding to an
+/// `Element` for the rest of the branch.
 pub fn find(selector: str) -> Option<Element> {
     let (found, err) = js.call1(document(), "querySelector", js.of_str(selector))
     if err != nil {
@@ -167,15 +162,10 @@ pub fn text(e: Element) -> str {
 
 /// Replace the element's text content.
 ///
-/// Text, never markup. There is no `set_html` here — building markup from
-/// strings is the commonest way to grow an injection bug, and a standard
-/// library should not ship the loaded gun beside the safe call.
-///
-/// **What that claim no longer covers.** It used to be absolute, because there
-/// was no other way through. There is now: [`raw`] hands over the host object,
-/// and anyone holding one can set `innerHTML`. The guarantee is narrower and
-/// stated narrowly — the typed layer does not hand you the gun, and the escape
-/// hatch is not the typed layer.
+/// Text, never markup: whatever is passed becomes the element's text, and a
+/// string that looks like a tag stays a string. Building markup out of strings
+/// is the commonest way to grow an injection bug, so the typed layer sets text
+/// and nothing else. [`raw`] is where a program goes when it means otherwise.
 pub fn set_text(e: Element, body: str) -> error {
     return js.set(e.raw, "textContent", js.of_str(body))
 }

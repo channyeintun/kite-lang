@@ -2,7 +2,7 @@
 
 # Kite
 
-A small, explicit programming language for building application software.
+A small, explicit programming language for the web.
 WebAssembly is the primary target, not an afterthought.
 
 ```kite

@@ -26,7 +26,6 @@ right and the disagreement is a bug in this file.
 14. [Memory model](#14-memory-model)
 15. [Foreign function interface](#15-foreign-function-interface)
 16. [Diagnostics](#16-diagnostics)
-17. [Deliberate omissions](#17-deliberate-omissions)
 
 ---
 
@@ -69,10 +68,10 @@ costs invert:
   destructor with side effects: each forces the reader to consult code that is
   not on screen.
 
-Kite therefore has **no** exceptions, **no** operator overloading, **no**
-implicit numeric conversion, **no** destructors, **no** macros, and **no**
-function overloading. Every call is visible. Every failure path is visible.
-Every allocation site is an expression you can point at.
+So the language is built on what a reader can see. **Every call is a call you
+can point at.** Every failure path is written on the line where it happens.
+Every allocation is an expression. A name resolves to one declaration, an
+operator does one thing, and a value changes only where a `var` says so.
 
 ### 1.3 Why immutable by default
 
@@ -86,7 +85,7 @@ This decision, made once, pays three times:
    flag *per field*. Kite's `var` marker on a field is the same bit. Immutable
    fields let the engine hoist and constant-fold loads without alias analysis.
 3. **It makes most types thread-shareable for free.** See
-   [§12.4](#124-the-share-marker). A deeply immutable value is safe to share by
+   [§12.3](#123-the-share-marker). A deeply immutable value is safe to share by
    construction. Because immutability is the default, the overwhelming majority
    of user types qualify without the user ever thinking about it.
 
@@ -113,11 +112,6 @@ pub      return   self     struct   trait    true
 type     use      var
 ```
 
-Notably absent, and deliberately: `class`, `new`, `delete`, `null`, `void`,
-`throw`, `try`, `catch`, `finally`, `switch`, `case`, `default`, `while`, `do`,
-`goto`, `static`, `const`, `volatile`, `interface`, `extends`, `implements`,
-`super`, `this`, `go`, `chan`, `select`, `defer`-with-panic, `unsafe`, `macro`.
-
 ### 2.3 Comments
 
 ```kite
@@ -126,9 +120,6 @@ Notably absent, and deliberately: `class`, `new`, `delete`, `null`, `void`,
 /// Documentation comment. Attaches to the following declaration.
 /// Markdown is permitted. Code fences are extracted and compiled as tests.
 ```
-
-There are no block comments. Nested block comments are a recurring source of
-lexer bugs and editors have made line-commenting a single keystroke since 1998.
 
 ### 2.4 Literals
 
@@ -157,22 +148,20 @@ let name = "world"
 io.print("hello, \(name), you are \(age) years old")
 ```
 
-Interpolation calls `Display.show` on the operand. It is not `printf`; there is
-no format-string language to learn and no format-string injection surface.
+Interpolation calls `Display.show` on the operand: a hole is an ordinary
+expression, evaluated where it stands.
 
-`int`, `float`, `bool` and `str` render themselves. Every other type needs a
-`Display` implementation — deliberately not derived, because how a type presents
-itself to a human is a design decision rather than a mechanical one. A hole is
-an ordinary expression, so `"\(if n > 1 { "s" } else { "" })"` is a pluraliser
-and needs no special support.
+`int`, `float`, `bool` and `str` render themselves; every other type renders
+through its own `Display`. Because a hole is an expression,
+`"\(if n > 1 { "s" } else { "" })"` is a pluraliser and needs nothing added to
+the language.
 
 ### 2.5 Semicolon insertion
 
 Statements are newline-terminated. Semicolons are never written. A statement
 continues onto the next line when the line ends in an operator, an open
-delimiter, or a comma. This is the same rule as Swift and Kotlin, and unlike
-JavaScript's it has no hazardous cases because Kite has no prefix-`(` or
-prefix-`[` expression statements.
+delimiter, or a comma. The same rule as Swift and Kotlin, and unambiguous here
+because a statement never begins with `(` or `[`.
 
 ---
 
@@ -259,10 +248,8 @@ about and removes an entire class of nondeterministic test failure.
 `Config`; an `Option<Config>` might be nil, and the compiler will not let you use
 it as a `Config` until you have handled that.
 
-**There is no `?` in Kite.** No optional chaining, no coalescing operator, no
-ternary. Each of those is a sigil that hides a branch, and hidden control flow is
-the thing this language exists to remove. An `if` expression does the same work
-in the open:
+**An optional is opened by testing it**, and an `if` expression does that in one
+line:
 
 ```kite
 let maybe: Option<User> = users.find(id)
@@ -347,9 +334,9 @@ pub struct Connection {
 }
 ```
 
-There is no `protected`, no `internal`, no friend declarations, and no
-crate/package distinction layered on top. Two levels have proven sufficient in
-Go for fifteen years.
+Two levels, and they compose with the module system rather than with a second
+hierarchy: what a module exports is what `pub` marks, and what it keeps is
+everything else.
 
 ### 4.3 Functions
 
@@ -444,7 +431,7 @@ writes, and it is deliberate that mutation is spelled out in a signature rather
 than implied by a capture.
 
 A closure that captures a host reference is not `Share`
-([§12.4](#124-the-share-marker)).
+([§12.3](#123-the-share-marker)).
 
 ---
 
@@ -583,7 +570,8 @@ for {
 }
 ```
 
-There is no C-style three-clause `for`, no `while`, and no `do…while`. Labelled
+The three headers above are the whole of iteration: over a sequence, while a
+condition holds, and forever. Labelled
 `break` and `continue` are supported for nested loops:
 
 ```kite
@@ -645,7 +633,6 @@ the shape is worth keeping and the enforcement is worth adding.
 ```kite
 pub trait Error {
     fn message(self) -> str
-    fn cause(self) -> Option<error> { return nil }
 }
 ```
 
@@ -806,9 +793,8 @@ let (port, err) = config.get_int("port")
 let port = if err != nil { 8080 } else { port }
 ```
 
-There is deliberately no defaulting operator. A `??` would hide the branch, and
-the whole point of the taint analysis is that every failure path is visible on
-the line where it happens.
+The branch is written out, on the line where the failure happens, which is what
+makes every failure path visible in the source.
 
 ### 7.6 Adding context
 
@@ -817,9 +803,9 @@ let (bytes, err) = fs.read(path)
 check errors.wrap(err, "loading config from \(path)")
 ```
 
-`errors.wrap` returns nil when given nil, so this composes with `check` directly.
-`errors.chain(err)` walks the `cause` chain, and `errors.is<T>(err)` /
-`errors.as<T>(err)` test and extract concrete error types.
+`errors.wrap` returns nil when given nil, so this composes with `check`
+directly. The context goes in front of the message, so a failure that crosses
+four layers reads as the four sentences that produced it.
 
 ### 7.7 Unrecoverable failures
 
@@ -1048,7 +1034,7 @@ is the *right* answer.
 | Trait | Meaning | How it arrives |
 |---|---|---|
 | `Eq` | `==` and `!=` | Structural, on every type, always |
-| `Share` | Safe to move across tasks | Inferred structurally — see [§12.4](#124-the-share-marker) |
+| `Share` | Safe to move across tasks | Inferred structurally — see [§12.3](#123-the-share-marker) |
 | `Display` | String interpolation, `io.print` | Written by hand, never derived |
 | `Debug` | A rendering for a programmer | `@derive(Debug)` |
 | `Hash` | One integer standing for a value | `@derive(Hash)` |
@@ -1163,28 +1149,16 @@ function. Where folding is not possible and the instantiation count is large, th
 compiler emits a size warning naming the function, and `dyn` is the suggested
 remedy.
 
-There are no associated types, no higher-kinded types, no const generics, no
-variance annotations, and no specialisation in version 1.0. Each of these buys
-expressiveness at a real cost in error-message quality; none is required for
-application software.
+Bounds are trait names, and a parameter satisfies one by implementing it. That
+is the whole of the system: a generic function is a function whose parameter
+types are named rather than fixed, and monomorphisation makes each use an
+ordinary call.
 
 ---
 
 ## 12. Concurrency
 
-### 12.1 What is being rejected, and why
-
-Kite has **no goroutines, no channels, and no `select`**. These are the parts of
-Go that most reliably confuse newcomers: a channel is simultaneously a queue, a
-synchronisation primitive, and a control-flow construct, and getting its
-buffering and closing semantics wrong produces deadlocks that are invisible in
-the source.
-
-Kite has **no threads in the user-facing language either**. It has one concept:
-
-> Some operations take time. Mark them `async`, and `await` them.
-
-### 12.2 The model
+### 12.1 The model
 
 ```kite
 pub async fn fetch_user(id: UserId) -> (User, error) {
@@ -1221,7 +1195,7 @@ check eb
 remaining combinators. There is no channel type; a `Task<T>` *is* the
 one-shot result channel, and it is awaited rather than received from.
 
-### 12.3 Parallelism: the surface is thread-agnostic
+### 12.2 Parallelism: the surface is thread-agnostic
 
 **`async` says nothing about how many threads exist.** That is a property of the
 runtime, and Kite's runtime is multi-threaded wherever the platform permits:
@@ -1259,7 +1233,7 @@ let results = await task.parallel(chunks, |chunk| {
 })
 ```
 
-### 12.4 The `Share` marker
+### 12.3 The `Share` marker
 
 `Share` is an auto-derived marker trait meaning *"a value of this type may be
 moved to another thread or isolate."*
@@ -1305,7 +1279,7 @@ annotation burden in the common case. This is the same insight as Rust's `Send`
 and Swift 6's `Sendable`, made nearly invisible by choosing immutability as the
 default.
 
-### 12.5 Implementation
+### 12.4 Implementation
 
 `async fn` compiles to a state machine: the function body is split at each
 `await` into a resumable coroutine object, with locals that live across a
@@ -1494,7 +1468,7 @@ for it to refer to.
 | Property | Reason |
 |---|---|
 | Opaque | Kite cannot read inside it. It is the host's object, not a Kite one. |
-| Not `Share` | It belongs to one isolate ([§12.4](#124-the-share-marker)). |
+| Not `Share` | It belongs to one isolate ([§12.3](#123-the-share-marker)). |
 | Not comparable with `==` | `externref` is outside Wasm's `eq` hierarchy, so there is no structural answer to give. Identity is `js.same(a, b)`, which is `===`. Writing `==` on one is a compile error rather than a quiet wrong answer. |
 | Cannot be forged | There is no literal for it. |
 
@@ -1579,8 +1553,8 @@ happens on the Kite side, where the failure is a value.
 **Absence is `Option`.** A host call that may find nothing returns `?T`. There is
 no tolerated zero handle and no null object anywhere in the boundary — a
 convention that returns something usable-looking for "not found" is the zero
-value this specification rejects in [§17](#17-deliberate-omissions), wearing a
-different hat.
+zero value [§5.3](#53-struct-literals) exists to prevent, wearing a different
+hat.
 
 ### 15.4 The hygiene boundary
 
@@ -1613,8 +1587,8 @@ reduce it: the typed layer is written once and covered by tests, so a typo lives
 in one place; users call the typed function and never write the string; and the
 long tail can be **generated** from the browser's own interface definitions,
 where the names come from the specification and cannot be mistyped at all. That
-generator is a build step, which is where [§17](#17-deliberate-omissions) already
-says code generation belongs. It is not the first step: the definitions carry
+generator is a build step, and a build step is where code generation belongs.
+It is not the first step: the definitions carry
 overloads, which Kite has no way to express, and unions, which each need a
 decision.
 
@@ -1665,44 +1639,6 @@ Requirements on the implementation:
 - **`kite fix`** applies every machine-applicable suggestion.
 - **Source maps** are emitted for the Wasm target so browser stack traces name
   `.kite` files and lines.
-
----
-
-## 17. Deliberate omissions
-
-Each of these was considered and rejected. Recording the reasoning prevents them
-being re-litigated, and makes it clear when a decision should be revisited.
-
-| Omitted | Reasoning |
-|---|---|
-| `?` in any form | No optional chaining, no coalescing, no ternary. Every one hides a branch behind a sigil. An `if` expression, with narrowing, does the same work in the open. |
-| Exceptions | A second, invisible control-flow graph. Errors are values. |
-| `panic` / `recover` | Same reason. Unrecoverable failures trap. |
-| Inheritance | Composition plus traits covers the cases; inheritance adds a mutable, non-local type hierarchy. |
-| Operator overloading | `a + b` must be a machine addition or a string concatenation, never a database call. |
-| Function overloading | One name, one signature. Makes go-to-definition exact and error messages precise. |
-| Implicit conversions | Every numeric conversion is a lossy decision that should be visible. |
-| Macros | An unbounded second language inside the language. Code generation is a build step. |
-| `null` | Replaced by `?T`. |
-| Zero values | Replaced by mandatory struct literal fields. Removes Go's most common production bug. |
-| Pointers and references | GC references only. Eliminates the value/pointer receiver distinction. |
-| Lifetimes and borrowing | The cost that stops Rust being a mainstream application language. A collector removes the reason for them; [§14.1](#141-exclusivity) keeps the one rule that reference semantics still need, and it needs no annotation. |
-| Goroutines and channels | Replaced by `async`/`await` and `Task<T>`. |
-| Structural interfaces | Nominal `impl` produces better errors and prevents accidental satisfaction. |
-| Associated / higher-kinded types | Expressiveness that application code does not need, at real cost to error quality. |
-| Reflection | Compile-time derivation instead. Keeps dead-code elimination sound, which matters for binary size. |
-| `unsafe` | Would break the trap-on-bug guarantee. Host access goes through `extern`. |
-| Global mutable state | Module-level bindings are immutable. State is passed explicitly or held by the runtime. |
-| Postfix `?` for errors | Permits failure to hide mid-expression. `check` occupies its own line. |
-| Block comments | Nesting bugs, no benefit over line comments. |
-| `while` | `for cond {}` covers it. |
-| Ternary `?:` | `if` is an expression, and it reads as English. |
-| Closures capturing `var` | Captures are by value, so the write would be invisible. A heap cell would make it visible and buy shared mutable state through a capture list. Capture a `let` handle and mutate through a `var` parameter ([§4.4](#44-closures)). |
-| A styling language inside Kite | CSS *is* the styling language, and being able to use somebody else's stylesheet is worth more than anything a second one could offer. A Kite application is real elements with real class names, so Tailwind, Bootstrap or a company's own tokens work on it unchanged. |
-| A template language, and JSX | A template is a second language in the toolchain; JSX is a change to the grammar. Element trees are built with ordinary functions. Generated wrappers over the host are the one exception, and they are a build step. |
-| Layout computed in Kite for the web | It was built, in `std/ui`, so that two renderers would agree exactly. What it cost was the browser: positioned elements cannot be styled from outside, cannot reflow, and are not a document. The browser lays out. Layout in Kite survives only where a program paints its own pixels. |
-| Fine-grained reactivity | Signals win the benchmarks. Reading a value silently registering a dependency, and an effect re-running because of a read three calls away, is hidden control flow in a much larger dose than the sigils above. Trees are compared instead. |
-| A view layer in the standard library | Deferred past 1.0, not rejected. The most contested design space in front-end software is the worst thing to freeze into a standard library. JavaScript shipping none is why React, Vue, Svelte and Solid could all happen. |
 
 ---
 

@@ -6,19 +6,16 @@
 //! ordinary Kite, and so is anything else a program needs that the standard
 //! library never covered.
 //!
-//! **Why a general mechanism rather than one `extern` per browser feature.**
-//! The direct way is faster and better typed, and the browser has thousands of
-//! interfaces. With only `extern`, the first one the standard library missed
-//! would send a user off to hand-write a JavaScript host object and register it
-//! — and a language whose way to extend it is "go and write the other
-//! language" has conceded its own argument on the first day of real use. These
-//! fifteen or so functions are the last JavaScript anybody writes, and the
-//! generated glue is a fixed size no matter how much of the platform a program
-//! reaches.
+//! **About twenty primitives, and they are general enough to reach anything the
+//! host has.** `std/dom` is written over them, and so is whatever a program
+//! needs that nobody wrapped — in Kite, without touching the compiler, and with
+//! the generated glue staying a fixed size however much of the platform a
+//! program uses.
 //!
-//! What it costs is a name looked up when the program runs instead of fixed
-//! when it compiles: a little speed, and a mistyped name that compiles. The
-//! second is why every call here returns an error rather than throwing.
+//! The name is looked up when the program runs rather than fixed when it
+//! compiles. That costs a little speed, and it means a mistyped name is found
+//! at run time — which is why every call here answers with an error rather than
+//! throwing.
 //!
 //! ```kite
 //! use std/js
