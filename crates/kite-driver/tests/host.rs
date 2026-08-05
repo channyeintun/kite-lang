@@ -899,3 +899,119 @@ fn an_integer_too_large_for_a_javascript_number_is_refused() {
     let out = run_runner_under_node("jsnumbers", src, JS_RUNNER, &[]);
     assert_eq!(out, "true\nrefused\n1.5 is not a whole number\n");
 }
+
+// ---- the resident driver ---------------------------------------------------
+
+/// A runner that hands the module to `resident` rather than running it to
+/// completion, and waits long enough for a real timer to fire.
+///
+/// `run` is the batch driver: it returns when the last task finishes, on a
+/// virtual clock that jumps to the next deadline. That is right for a test and
+/// wrong for a page, and the difference is what these assert.
+const RESIDENT_RUNNER: &str = "import { readFile } from \"node:fs/promises\";\n\
+     import { instantiate, resident, setWriter } from \"./app.js\";\n\
+     const out = [];\n\
+     setWriter((l) => out.push(l));\n\
+     const started = Date.now();\n\
+     const exports = await instantiate(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+     exports.main();\n\
+     resident(exports);\n\
+     await new Promise((r) => setTimeout(r, 400));\n\
+     out.push(\"elapsed at least 150: \" + (Date.now() - started >= 150));\n\
+     process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+
+/// A program outlives `main`, and its sleep takes real time.
+///
+/// Two things at once, because they are the same fault seen from two sides. The
+/// batch driver returns when the last task finishes, so a click arriving later
+/// would have nothing to run it; and its clock jumps to the next deadline, so
+/// `task.sleep(150)` returns immediately. In a page both are wrong.
+#[test]
+fn a_resident_program_outlives_main_and_sleeps_for_real() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/task\n\n\
+        async fn later() {\n\
+        \x20 await task.sleep(150)\n\
+        \x20 io.print(\"woke\")\n\
+        }\n\
+        fn main() {\n\
+        \x20 io.print(\"started\")\n\
+        \x20 later()\n\
+        }\n";
+    let out = run_runner_under_node("resident", src, RESIDENT_RUNNER, &[]);
+    assert_eq!(
+        out, "started\nwoke\nelapsed at least 150: true\n",
+        "the task must run after main returned, and the sleep must be real"
+    );
+}
+
+/// The batch driver is unchanged, and its clock still jumps.
+///
+/// The virtual clock is not a bug to be fixed: it is what lets three backends
+/// be compared, because a scheduler racing real timers produces a different
+/// interleaving every run. This asserts the two modes stayed different.
+#[test]
+fn the_batch_driver_still_runs_on_a_virtual_clock() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let runner = "import { readFile } from \"node:fs/promises\";\n\
+         import { run, setWriter } from \"./app.js\";\n\
+         const out = [];\n\
+         setWriter((l) => out.push(l));\n\
+         const started = Date.now();\n\
+         await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         out.push(\"under 400ms: \" + (Date.now() - started < 400));\n\
+         process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+    let src = "use std/task\n\n\
+        async fn main() {\n\
+        \x20 await task.sleep(5000)\n\
+        \x20 io.print(\"slept\")\n\
+        }\n";
+    let out = run_runner_under_node("virtualclock", src, runner, &[]);
+    assert_eq!(
+        out, "slept\nunder 400ms: true\n",
+        "a five-second sleep must cost no real time in the test mode"
+    );
+}
+
+/// An idle resident program schedules nothing.
+///
+/// This is the third fault the phase set out to fix, and the one that decides
+/// whether a Kite island is something you would put on a page you care about.
+/// The old driver spun on a zero-delay timeout for as long as anything waited
+/// on the host — a core burned for the lifetime of the tab. Counting timers is
+/// a direct measurement of it: once there is no work, there must be no timer,
+/// and the program must cost exactly nothing until something wakes it.
+#[test]
+fn an_idle_resident_program_schedules_nothing() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let runner = "import { readFile } from \"node:fs/promises\";\n\
+         import { instantiate, resident, setWriter } from \"./app.js\";\n\
+         const out = [];\n\
+         setWriter((l) => out.push(l));\n\
+         const realSetTimeout = globalThis.setTimeout;\n\
+         let timers = 0;\n\
+         globalThis.setTimeout = (fn, ms) => { timers += 1; return realSetTimeout(fn, ms); };\n\
+         const exports = await instantiate(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         exports.main();\n\
+         resident(exports);\n\
+         await new Promise((r) => realSetTimeout(r, 50));\n\
+         const settled = timers;\n\
+         await new Promise((r) => realSetTimeout(r, 300));\n\
+         out.push(\"idle timers: \" + (timers - settled));\n\
+         process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+    let src = "fn main() {\n  io.print(\"done\")\n}\n";
+    let out = run_runner_under_node("residentidle", src, runner, &[]);
+    assert_eq!(
+        out, "done\nidle timers: 0\n",
+        "an idle program must not schedule anything"
+    );
+}

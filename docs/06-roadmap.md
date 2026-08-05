@@ -1779,6 +1779,30 @@ its task list by index while iterating it.
 **Exit criterion:** a page open for an hour with a Kite island on it uses no CPU
 until something happens, and `task.sleep(500)` takes half a second.
 
+**Done, as a second driver rather than a change to the first.** `drive` is
+untouched and still runs a program to completion on the virtual clock, because
+that is what makes three backends comparable and every existing test depends on
+it. `resident` sits beside it: one pass over the task list, then a timer set to
+the earliest deadline — or no timer at all when every task is waiting on the
+host, since a callback will `wake` it and until then the program costs nothing.
+
+The two share `step`'s polling order deliberately. If they did not, a program
+would interleave differently depending on which driver ran it, and the test mode
+would stop predicting the real one — which is the property the virtual clock
+exists to provide in the first place.
+
+Three assertions, one per fault: a task runs after `main` returned; a 150 ms
+sleep takes at least 150 ms of wall time while a 5-second sleep in the batch
+driver costs none; and an idle program schedules **zero** timers over 300 ms,
+counted by wrapping `setTimeout`. That last one is the difference between an
+island you would put on a page and one you would not.
+
+The reentrancy guard is in and not yet exercised, because nothing can re-enter
+until Phase 20 gives the host a way to call a Kite closure. A wake-up during a
+pump sets a flag and the pump goes round again rather than recursing, which is
+what keeps a handler that spawns a task from mutating the list underneath the
+loop walking it.
+
 ---
 
 ## Phase 20 — `std/dom`
@@ -1956,14 +1980,14 @@ none.
 | 16 — Demolition | ✅ complete — 19,700 lines out; build and tests green with nothing rendering |
 | 17 — `JsValue` / `externref` | ✅ complete — crosses, is held, survives an `await`, refused off the web. ❌ collection asserted, which needs a heap snapshot |
 | 18 — `std/js` primitives | ✅ complete — 23 primitives, a fixed ~90-line host block, throws caught as errors. `js.func` moved to 20, `js.await` to 21 |
-| 19 — Resident runtime, real clock | ⬜ not started |
+| 19 — Resident runtime, real clock | ✅ complete — `resident` beside `drive`, real clock, zero timers when idle |
 | 20 — `std/dom` | ⬜ not started |
 | 21 — Effects across the boundary | ⬜ not started |
 | 22 — Interop backwards | ⬜ not started |
 | 23 — Size gate | ⬜ not started |
 | — View layer | ⬜ deferred past 1.0, deliberately |
 
-745 tests: unit tests per crate, an annotated compile-fail corpus, a
+748 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the host boundary and a real
 socket under Node, both string

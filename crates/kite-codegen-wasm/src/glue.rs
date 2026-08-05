@@ -1165,6 +1165,9 @@ function imports() {{
       // own `kite_poll` export, which is the only thing that can enter it.
       task_spawn: (poll) => {{
         TASKS.push({{ poll, wakeAt: null, parked: false, waitingOnHost: false }});
+        // A task started from inside an event handler has nothing else to
+        // notice it. Does nothing in the batch driver, which is already looping.
+        wake();
       }},
       task_wake_at: (ms) => {{
         wakeRequest = Number(ms);
@@ -1175,7 +1178,7 @@ function imports() {{
       task_wait_host: () => {{
         hostWaitRequest = true;
       }},
-      time_now: () => BigInt(clock),
+      time_now: () => BigInt(now()),
     }},
   }};
 }}
@@ -1185,17 +1188,31 @@ function imports() {{
 // Round-robin, in spawn order — the same order the bytecode VM polls in, which
 // is what lets the two backends be compared at all.
 //
-// The clock is **virtual**. When every task is waiting on a deadline it jumps
-// to the earliest one rather than waiting for it, so a program that sleeps
-// costs no real time and two backends running the same program produce the
-// same interleaving. A scheduler that raced real timers could not be
-// differentially tested, and a UI event loop does not need one: events arrive
-// from the host, not from the clock.
+// **There are two clocks, and which one is running is the difference between
+// the two modes below.**
+//
+// Virtual: when every task is waiting on a deadline, the clock jumps to the
+// earliest one rather than waiting for it. A program that sleeps costs no real
+// time, and two backends running the same program produce the same
+// interleaving — which is the only reason three backends can be compared at
+// all. This is the mode a test runs in, and `drive` is its driver.
+//
+// Real: `performance.now()`, and a sleeping task waits for a real timer. A
+// program living in a page needs this, and the original note here — that a UI
+// event loop does not need a real clock because events arrive from the host —
+// was true of the old design and is not true of a resident program. A `sleep`
+// that returns immediately is hidden control flow by this language's own
+// definition.
 const TASKS = [];
 let clock = 0;
 let wakeRequest = null;
 let parkRequest = false;
 let hostWaitRequest = false;
+
+let realClock = false;
+const millis = () =>
+  typeof performance !== "undefined" ? performance.now() : Date.now();
+const now = () => (realClock ? Math.round(millis()) : clock);
 
 export async function drive(exports) {{
   while (TASKS.length > 0) {{
@@ -1253,6 +1270,147 @@ export async function drive(exports) {{
       clock = next;
     }}
   }}
+}}
+
+// ---- living in a page -----------------------------------------------------
+//
+// `drive` above runs a program to completion: it returns when the last task
+// finishes, and while anything waits on the host it spins on a zero-delay
+// timeout. Both are right for a program that starts, does its work and ends,
+// and both are fatal to one that sits in a page.
+//
+// An island is idle almost all of the time. After its last task finishes there
+// must still be something to run the next click, and while nothing is happening
+// it must cost nothing at all. So this driver does not loop: it makes one pass,
+// works out when it could next have something to do, and sleeps until then or
+// until something wakes it.
+
+let residentExports = null;
+let pumping = false;
+let pumpAgain = false;
+let timer = null;
+
+/// One pass over the task list.
+///
+/// Shares its shape with `drive`'s inner loop deliberately: the two must poll
+/// in the same order, or a program would interleave differently depending on
+/// which driver ran it and the test mode would stop predicting the real one.
+function step(exports) {{
+  const at = now();
+  let completed = false;
+  for (let i = 0; i < TASKS.length; ) {{
+    const task = TASKS[i];
+    if (task.parked || task.waitingOnHost || (task.wakeAt !== null && task.wakeAt > at)) {{
+      i += 1;
+      continue;
+    }}
+    task.wakeAt = null;
+    wakeRequest = null;
+    parkRequest = false;
+    hostWaitRequest = false;
+    const done = exports.kite_poll(task.poll) !== 0;
+    // A handler firing during the poll can splice this task out from under us,
+    // which is why the slot is checked before it is written back.
+    if (TASKS[i] === task) {{
+      task.wakeAt = wakeRequest;
+      task.parked = parkRequest;
+      task.waitingOnHost = hostWaitRequest;
+    }}
+    if (done) {{
+      TASKS.splice(i, 1);
+      completed = true;
+    }} else {{
+      i += 1;
+    }}
+  }}
+  // A task finishing is what a parked task is waiting for, and may be what a
+  // sleeping one wanted too.
+  if (completed) {{
+    for (const t of TASKS) {{
+      t.parked = false;
+      t.wakeAt = null;
+    }}
+  }}
+}}
+
+/// When to come back, and nothing sooner.
+///
+/// A task with no deadline is runnable now. A sleeping task sets the timer to
+/// its own deadline. If every task is waiting on the host there is no timer at
+/// all — a callback will call `wake`, and until it does this program costs
+/// exactly nothing.
+function schedule() {{
+  if (timer !== null) {{
+    clearTimeout(timer);
+    timer = null;
+  }}
+  let soonest = null;
+  for (const t of TASKS) {{
+    if (t.parked || t.waitingOnHost) continue;
+    if (t.wakeAt === null) {{
+      soonest = 0;
+      break;
+    }}
+    if (soonest === null || t.wakeAt < soonest) soonest = t.wakeAt;
+  }}
+  if (soonest === null) return;
+  const delay = soonest === 0 ? 0 : Math.max(0, soonest - now());
+  timer = setTimeout(() => {{
+    timer = null;
+    pump();
+  }}, delay);
+}}
+
+/// Run the tasks, then decide when to run them again.
+///
+/// **Guarded against re-entry.** A host call can fire a Kite handler
+/// synchronously in the middle of a poll — `focus()` is the ordinary example —
+/// and that handler may spawn a task, which calls `wake`. Draining recursively
+/// would mutate the task list underneath the loop that is walking it, so a
+/// wake-up during a pump sets a flag and the pump goes round again.
+function pump() {{
+  if (residentExports === null || pumping) {{
+    if (pumping) pumpAgain = true;
+    return;
+  }}
+  pumping = true;
+  try {{
+    do {{
+      pumpAgain = false;
+      step(residentExports);
+    }} while (pumpAgain);
+  }} finally {{
+    pumping = false;
+  }}
+  schedule();
+}}
+
+/// Something changed: run the tasks soon.
+///
+/// Anything that can make a waiting task runnable calls this — an event
+/// listener, a settled promise, a host callback. Cheap and idempotent, so a
+/// handler need not know whether the pump is already awake.
+export function wake() {{
+  if (residentExports === null) return;
+  if (pumping) {{
+    pumpAgain = true;
+    return;
+  }}
+  if (timer !== null) clearTimeout(timer);
+  timer = setTimeout(() => {{
+    timer = null;
+    pump();
+  }}, 0);
+}}
+
+/// Hand a module to the resident driver, and switch to the real clock.
+///
+/// After this the program is alive: it has no more work to do until something
+/// happens, and when something does, `wake` brings it back.
+export function resident(exports) {{
+  realClock = true;
+  residentExports = exports;
+  pump();
 }}
 
 export async function instantiate(source = {wasm}) {{
@@ -2044,7 +2202,7 @@ pub fn generate_page(title: &str) -> String {
 
 <script type="module">
   import {{ instantiate, setRenderer, setMeasure, setLineHeight, fontMeasure,
-            fontLineHeight, canvasRenderer, drive }} from "./app.js";
+            fontLineHeight, canvasRenderer, resident }} from "./app.js";
 
   const out = document.getElementById("out");
   const stage = document.getElementById("stage");
@@ -2067,9 +2225,10 @@ pub fn generate_page(title: &str) -> String {
     out.textContent = "this module has no `main`";
   }} else {{
     exports.main();
-    // `main` returning is not the program ending: a task it started is still
-    // the program's work.
-    if (typeof exports.kite_poll === "function") await drive(exports);
+    // `main` returning is not the program ending, and in a page the program
+    // does not end at all: `resident` keeps the tasks alive on a real clock,
+    // costing nothing while there is nothing to do.
+    if (typeof exports.kite_poll === "function") resident(exports);
   }}
 </script>
 "#,
