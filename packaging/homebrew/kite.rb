@@ -9,7 +9,7 @@
 # `packaging/render.sh <version>` writes the real ones from that release's own
 # `SHA256SUMS`, which is the only place they should ever come from.
 class Kite < Formula
-  desc "Small, explicit programming language for application software, with WebAssembly as its primary target"
+  desc "Small, explicit programming language for the web, with WebAssembly as its primary target"
   homepage "https://github.com/channyeintun/kite-lang"
   version "0.0.0"
   license "MIT"

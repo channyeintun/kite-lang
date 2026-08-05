@@ -386,8 +386,9 @@ arithmetic, and no FFI that hands out raw addresses, every reference is known to
 the collector — conservative scanning is never required.
 
 Cranelift's tradeoff is accepted deliberately: roughly 20% faster code generation
-than LLVM, less optimised output. For application software this is the right side
-of the trade. An LLVM backend for release builds stays possible but off the v1
+than LLVM, less optimised output. For the programs Kite is for — where a build
+runs many times a day and the hot path is usually the browser's work rather than
+the module's — that is the right side of the trade. An LLVM backend for release builds stays possible but off the v1
 path.
 
 ---

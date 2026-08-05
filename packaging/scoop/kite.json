@@ -13,7 +13,7 @@
         "computing one from a download it cannot vouch for."
     ],
     "version": "0.0.0",
-    "description": "A small, explicit programming language for application software, with WebAssembly as its primary target",
+    "description": "A small, explicit programming language for the web, with WebAssembly as its primary target",
     "homepage": "https://github.com/channyeintun/kite-lang",
     "license": "MIT",
     "architecture": {
