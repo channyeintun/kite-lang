@@ -526,3 +526,52 @@ prints, that a function named in a table exists, or that a module's doc comment
 names a module that is still here. The nine "four"s, the three `js.` primitives,
 the `?T`, the isolate pool — none of them could survive a test, and all of them
 survived the suite.
+
+---
+
+## Resolution
+
+Every finding above was fixed, one commit each, in the order they are numbered
+here. What changed in the language, as opposed to in the prose:
+
+- **A1** added rule **R6** to [§7.3](SPECIFICATION.md#73-correlated-results-and-taint-analysis):
+  an expression statement whose type is `error` or `(T, error)` is `E0302`, and
+  `_ = expr` is the deliberate discard. That is a new statement form and a new
+  rejection — the only change here that makes a previously-compiling program
+  fail, which is exactly why it had to happen before a tag exists.
+- **A2** changed no syntax, but it changed what `std/html` puts on a page.
+- **B6** and **C8** turned out larger than the review said. The specification
+  claimed real parallelism on `native-*` and `kbc`, not merely partial
+  parallelism on the web; there is no thread spawned anywhere in the
+  repository. `docs/02` described a Worker pool, COOP/COEP headers,
+  `SharedArrayBuffer`, a `kite-rt/scheduler/` of three files and a
+  `task.scope()` with `.cancel()` and `.start()`, none of which exist — and its
+  cancellation section contradicted a decision `std/task` had made on purpose.
+- **C2** had one instance the first pass missed, in `std/math`.
+
+Two things are recorded as decided-not-to-do rather than done:
+
+- The audio file is out of the tree and **still in git history**. Removing it
+  from there means rewriting a published branch, which is the author's call.
+- `math.wrapping_add` and `math.checked_add` (**B7**) are now recorded as absent
+  instead of promised. Writing them is a small job; deciding whether the
+  language wants them at v1 is not, and it is a decision, not a correction.
+
+The suite is 769 passing, 0 failing, and a full run now leaves nothing in the
+temp directory.
+
+### What would have caught these
+
+Nothing here was found by a test, and most of it could not be. But three of the
+patterns are mechanical enough to be worth automating before the next drift:
+
+1. **A number in prose beside a number a tool prints.** `size.rs` already keeps
+   its measurements in a doc comment; the two that drifted drifted because
+   nothing compares the comment to the assertion. The test could print both.
+2. **A name in a table beside a name in a module.** §15.2's `std/js` table, the
+   `STD_MODULES` list, and `site/reference.html`'s `MODULES` array are three
+   hand-maintained copies of what the standard library contains. Two of them
+   have been wrong this month.
+3. **A doc comment naming a module.** `ui.wrap` survived in three files across a
+   deletion of fourteen thousand lines. A grep for module names that no longer
+   exist is four lines of shell.

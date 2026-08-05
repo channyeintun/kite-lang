@@ -2193,7 +2193,7 @@ none.
 | 24 — Concrete error types | 🟡 `impl Error for MyType` works on all three backends and Appendix A compiles with its `LoadError`. ❌ the error carries only its message, so `cause`, `chain`, `is<T>` and `as<T>` wait on the representation |
 | 25 — `std/html` | ✅ complete — descriptions, a keyed diff that writes only what changed, and `examples/page` written against it |
 
-768 tests: unit tests per crate, an annotated compile-fail corpus, a
+769 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the host boundary and a real
 socket under Node, both string
