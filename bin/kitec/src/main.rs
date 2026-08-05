@@ -255,13 +255,23 @@ fn main() -> ExitCode {
         }
         // A page to open, so a compiled program is something to look at rather
         // than three files and instructions.
+        //
+        // **An existing page is never overwritten.** The generated one is a
+        // starting point, and the point of this target is that a Kite program
+        // goes into a page somebody else wrote — served by anything, styled by
+        // whatever stylesheet it already has. Replacing that page with a
+        // scaffold on every build would destroy the actual work, quietly, and
+        // it would do it most often to the person furthest along.
         let html_path = format!("{}/index.html", dir);
         let name = std::path::Path::new(&path)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("kite");
-        if let Err(e) = std::fs::write(&html_path, kite_driver::generate_page(name)) {
-            return fail(&format!("cannot write `{}`: {}", html_path, e));
+        let page_kept = std::path::Path::new(&html_path).exists();
+        if !page_kept {
+            if let Err(e) = std::fs::write(&html_path, kite_driver::generate_page(name)) {
+                return fail(&format!("cannot write `{}`: {}", html_path, e));
+            }
         }
         // A program that listens gets an adapter that can listen for it. A page
         // cannot open a socket, so this is a second entry point rather than
@@ -284,13 +294,24 @@ fn main() -> ExitCode {
             );
             return ExitCode::SUCCESS;
         }
-        eprintln!(
-            "wrote {} ({} bytes), {} and {}",
-            wasm_path,
-            module.bytes.len(),
-            js_path,
-            html_path
-        );
+        if page_kept {
+            eprintln!(
+                "wrote {} ({} bytes) and {}\n\
+                 note: {} was already there and was left alone",
+                wasm_path,
+                module.bytes.len(),
+                js_path,
+                html_path
+            );
+        } else {
+            eprintln!(
+                "wrote {} ({} bytes), {} and {}",
+                wasm_path,
+                module.bytes.len(),
+                js_path,
+                html_path
+            );
+        }
         return ExitCode::SUCCESS;
     }
 

@@ -1,0 +1,40 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Kite island</title>
+<link rel="stylesheet" href="style.css">
+
+<!--
+  An ordinary page. It is complete before any WebAssembly arrives: the heading
+  is a heading, the buttons are buttons, the stylesheet has already styled all
+  of it, and a reader whose module never loads still gets a page.
+
+  Kite takes the one part that needs logic.
+-->
+<main class="card">
+  <h1>Counter</h1>
+
+  <p class="count" id="count">0</p>
+
+  <div class="row">
+    <button id="down" class="btn" type="button">−</button>
+    <button id="up" class="btn btn-primary" type="button">+</button>
+    <button id="reset" class="btn btn-quiet" type="button">Reset</button>
+  </div>
+
+  <label class="field">
+    <span>Step</span>
+    <input id="step" class="input" type="number" value="1" min="1">
+  </label>
+
+  <p class="status" id="status">nothing yet</p>
+</main>
+
+<script type="module">
+  import { instantiate, resident } from "./app.js";
+  const exports = await instantiate("./app.wasm");
+  exports.main();
+  // The program lives in the page now: idle, costing nothing, until a button
+  // is pressed.
+  resident(exports);
+</script>

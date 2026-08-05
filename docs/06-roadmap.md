@@ -1853,6 +1853,38 @@ Two admissions to write down rather than discover:
 type="module">`, and Kite making a form work. No canvas, no framework, nothing
 generated. That page is the whole thesis in one file.
 
+**Done.** `examples/page` is that file — `index.html`, `style.css`, `main.kite`
+— and the module is 5,697 bytes. The page is complete before the module
+arrives; the count turns red below zero because the stylesheet says so and the
+program's entire contribution is `set_class(count, "negative", …)`; hover and
+focus never reach Kite at all.
+
+`std/dom` is ordinary Kite with **no `extern` declarations in it**, which is
+what makes the primitives underneath a real answer rather than a promise.
+
+Four things the work turned up, three of them the language refusing to let
+something sloppy through:
+
+- **`kitec build` was overwriting the page.** It wrote `index.html` on every
+  build, which for this target destroys the actual work — and does it most
+  often to whoever is furthest along. An existing page is now left alone and
+  the build says so.
+- **Narrowing does not reach inside a closure**, and should not: the closure
+  runs later, and what was known at the point it was made is not known when it
+  fires. Handlers capture a narrowed element rather than an optional that
+  happened to be present.
+- **One guard each, not one guard with `||` in it.** Testing three optionals in
+  a single condition narrows none of them, because passing says only that
+  *some* were present.
+- **`check` needs a fallible return.** A function answering with a bare `error`
+  writes the test out. Worth keeping in mind for the shape of the rest of the
+  module.
+
+And one bug in the compiler, recorded because the comment predicting it was
+already in the file: a builtin missing from the backend's returns-a-value list
+has its result silently dropped. `js.func` was missing, so every handler arrived
+as `null` and nothing failed anywhere.
+
 ---
 
 ## Phase 21 — Effects across the boundary
@@ -1981,13 +2013,13 @@ none.
 | 17 — `JsValue` / `externref` | ✅ complete — crosses, is held, survives an `await`, refused off the web. ❌ collection asserted, which needs a heap snapshot |
 | 18 — `std/js` primitives | ✅ complete — 23 primitives, a fixed ~90-line host block, throws caught as errors. `js.func` moved to 20, `js.await` to 21 |
 | 19 — Resident runtime, real clock | ✅ complete — `resident` beside `drive`, real clock, zero timers when idle |
-| 20 — `std/dom` | ⬜ not started |
+| 20 — `std/dom` | ✅ complete — no externs, `Option` for absence, events with cancel, and a real page in `examples/page` |
 | 21 — Effects across the boundary | ⬜ not started |
 | 22 — Interop backwards | ⬜ not started |
 | 23 — Size gate | ⬜ not started |
 | — View layer | ⬜ deferred past 1.0, deliberately |
 
-751 tests: unit tests per crate, an annotated compile-fail corpus, a
+755 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the host boundary and a real
 socket under Node, both string

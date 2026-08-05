@@ -1,0 +1,152 @@
+// An island.
+//
+// The page beside this file is complete without it: real headings, real
+// buttons, a real stylesheet, and something readable on screen before any
+// WebAssembly has arrived. This program takes the one part that needs logic.
+//
+// Nothing here decides what anything looks like. The count turns red below zero
+// because `style.css` says `.count.negative { color: … }`, and this program's
+// entire contribution to that is putting the class on or taking it off. Hover
+// and focus never reach Kite at all.
+//
+//     kitec build examples/page/main.kite --emit wasm --out examples/page
+//     python3 -m http.server -d examples/page 8000
+
+use std/dom
+
+// State lives in a struct the handlers share.
+//
+// A closure may not capture a `var`, because captures are by value and the
+// write would be invisible. So the handlers capture a `let` handle to this and
+// change it through a function taking `var` — which is the ordinary idiom for
+// every event handler a Kite program writes, and is why mutation is spelled out
+// in a signature rather than implied by a capture list.
+struct Model {
+    var count: int
+    var last: str
+}
+
+fn apply(var m: Model, delta: int, what: str) {
+    m.count = m.count + delta
+    m.last = what
+}
+
+fn reset(var m: Model) {
+    m.count = 0
+    m.last = "reset"
+}
+
+/// How much a press is worth, read from the field on every press.
+///
+/// The input is the truth about itself. Mirroring its value into `Model` would
+/// mean writing it back on every keystroke, and writing a value back into a
+/// field while somebody is typing is how a program breaks Chinese, Japanese and
+/// Korean input — the composition buffer is cleared mid-word. The browser owns
+/// the field; this asks it.
+fn step_of(field: dom.Element) -> int {
+    let text = dom.value(field)
+    if text.len() == 0 {
+        return 1
+    }
+    var total = 0
+    for i in 0..text.len() {
+        let digit = text.code_at(i) - 0x30
+        if digit < 0 || digit > 9 {
+            return 1
+        }
+        total = total * 10 + digit
+    }
+    if total < 1 {
+        return 1
+    }
+    return total
+}
+
+/// Put the model on the screen.
+///
+/// Three writes, and one of them is a class name. That last one is the whole
+/// argument for this direction: the program says *what is true*, and the
+/// stylesheet decides what true looks like.
+fn show(m: Model, count: dom.Element, status: dom.Element) {
+    dom.set_text(count, "\(m.count)")
+    dom.set_class(count, "negative", m.count < 0)
+    dom.set_text(status, "last action: \(m.last)")
+}
+
+fn main() {
+    let count = dom.find("#count")
+    let status = dom.find("#status")
+    let step = dom.find("#step")
+    let up = dom.find("#up")
+    let down = dom.find("#down")
+    let reset_button = dom.find("#reset")
+
+    // Every one of these is an `Option`, and a missing element is nothing to
+    // work with. The old design answered a failed lookup with a handle that
+    // every call tolerated, so a typo in a selector produced a program that ran
+    // perfectly and did nothing.
+    //
+    // **One guard each, not one guard with `||` in it.** Testing three
+    // optionals in a single condition narrows none of them on the way out —
+    // which is correct, because passing the test says only that *some* of them
+    // were present. The compiler is right and the shorter version was wrong.
+    if count == nil {
+        io.error("the page has no #count")
+        return
+    }
+    if status == nil {
+        io.error("the page has no #status")
+        return
+    }
+    if step == nil {
+        io.error("the page has no #step")
+        return
+    }
+    if up == nil {
+        io.error("the page has no #up")
+        return
+    }
+    if down == nil {
+        io.error("the page has no #down")
+        return
+    }
+    if reset_button == nil {
+        io.error("the page has no #reset")
+        return
+    }
+
+    let model = Model{ count: 0, last: "nothing yet" }
+    show(model, count, status)
+
+    let (up_sub, up_err) = dom.on(up, "click", |e: dom.Event| {
+        apply(model, step_of(step), "increment")
+        show(model, count, status)
+    })
+    if up_err != nil {
+        io.error("could not listen: \(up_err.message())")
+        return
+    }
+
+    let (down_sub, down_err) = dom.on(down, "click", |e: dom.Event| {
+        apply(model, 0 - step_of(step), "decrement")
+        show(model, count, status)
+    })
+    if down_err != nil {
+        io.error("could not listen: \(down_err.message())")
+        return
+    }
+
+    let (reset_sub, reset_err) = dom.on(reset_button, "click", |e: dom.Event| {
+        reset(model)
+        show(model, count, status)
+    })
+    if reset_err != nil {
+        io.error("could not listen: \(reset_err.message())")
+        return
+    }
+
+    // The subscriptions are held rather than discarded. Nothing needs to cancel
+    // them here — the page outlives the program — but they are what a component
+    // that can be taken off a page would keep.
+    io.print("counter ready")
+}

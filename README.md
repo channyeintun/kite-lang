@@ -91,7 +91,7 @@ let (first, second) = await task.both(a, b)   // 100ms, not 150
 
 **A standard library, in Kite.** `math`, `time`, `errors`, `fmt`, `json`,
 `toml`, `text`, `test`, `buffer`, `task`, `sync`, `fs`, `http`, `socket`,
-`crypto`, `canvas`, `js`. Its own tests are ordinary Kite programs that run on *both*
+`crypto`, `canvas`, `js`, `dom`. Its own tests are ordinary Kite programs that run on *both*
 backends and must agree.
 
 **Bodies the compiler writes.** `@derive(Debug, Hash, Encode, Decode)` in front
@@ -209,7 +209,7 @@ Recorded here rather than left to be discovered:
   Scoop and the AUR, and has never run: no tag has been pushed.
 - **No Argon2.** It is not in WebCrypto, so it waits on a runtime that has it.
 
-751 tests: unit tests per crate, an annotated compile-fail corpus, a
+755 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the host boundary and a real
 socket under Node, both string

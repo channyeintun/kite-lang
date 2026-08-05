@@ -18,3 +18,9 @@ packaging/out/
 
 # Wrangler's local state, not the site.
 .wrangler/
+
+# Built by `kitec build` into the example page's own directory, because that is
+# where a page needs them. The page, the stylesheet and the program are source;
+# these three are output.
+examples/page/app.js
+examples/page/app.wasm

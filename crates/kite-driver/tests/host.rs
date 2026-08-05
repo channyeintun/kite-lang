@@ -1108,3 +1108,206 @@ fn a_handler_of_the_wrong_shape_is_refused() {
     let text = c.render_diagnostics();
     assert!(text.contains("not a handler"), "{}", text);
 }
+
+// ---- std/dom ---------------------------------------------------------------
+
+/// A page, without a browser.
+///
+/// Enough of a DOM for the program under test to be a real one: elements with
+/// text, an input with a `value` *property* distinct from its attribute, a
+/// selector that answers, and listeners that can be fired. Node has no DOM and
+/// this project takes no dependency to fake one, so the stand-in is written out
+/// — and being written out is why the `value` distinction below can be tested
+/// at all, since a real browser would hide the difference behind doing the
+/// right thing.
+const PAGE_RUNNER: &str = "import { readFile } from \"node:fs/promises\";\n\
+     import { instantiate, resident, setWriter } from \"./app.js\";\n\
+     class Element {}\n\
+     const listeners = new Map();\n\
+     const make = (tag, attrs = {}, text = \"\") => {\n\
+     \x20 const el = {\n\
+     \x20   tagName: tag.toUpperCase(), textContent: text, value: attrs.value ?? \"\",\n\
+     \x20   attrs: { ...attrs },\n\
+     \x20   getAttribute(n) { return n in this.attrs ? this.attrs[n] : null; },\n\
+     \x20   setAttribute(n, v) { this.attrs[n] = v; },\n\
+     \x20   addEventListener(n, f) { listeners.set(n, f); },\n\
+     \x20   removeEventListener(n, f) { listeners.delete(n); },\n\
+     \x20 };\n\
+     \x20 Object.setPrototypeOf(el, Element.prototype);\n\
+     \x20 return el;\n\
+     };\n\
+     const h1 = make(\"h1\", {}, \"Kite\");\n\
+     const name = make(\"input\", { id: \"name\", value: \"ada\" });\n\
+     const save = make(\"button\", { id: \"save\" }, \"Save\");\n\
+     globalThis.Element = Element;\n\
+     globalThis.document = {\n\
+     \x20 title: \"test page\",\n\
+     \x20 querySelector: (s) =>\n\
+     \x20   s === \"h1\" ? h1 : s === \"#name\" ? name : s === \"#save\" ? save : null,\n\
+     \x20 querySelectorAll: (s) => (s === \"button\" ? [save] : []),\n\
+     };\n\
+     const out = [];\n\
+     setWriter((l) => out.push(l));\n\
+     const exports = await instantiate(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+     exports.main();\n\
+     resident(exports);\n\
+     // The page changes under the program, the way a page does.\n\
+     name.value = \"grace\";\n\
+     if (listeners.has(\"click\")) listeners.get(\"click\")({ target: save });\n\
+     process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+
+/// A Kite program reads a page, attaches a listener, and the listener fires.
+///
+/// The whole thesis in one test. Nothing here computes a layout, paints a
+/// rectangle or describes a widget: the page exists, CSS styles it, and Kite is
+/// the part that has to think.
+#[test]
+fn a_program_reads_a_page_and_listens_to_it() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/dom\n\n\
+        fn main() {\n\
+        \x20 let heading = dom.find(\"h1\")\n\
+        \x20 if heading == nil {\n    io.print(\"no heading\")\n    return\n  }\n\
+        \x20 io.print(\"heading: \\(dom.text(heading))\")\n\
+        \x20 io.print(\"missing is nil: \\(dom.find(\"#nothing\") == nil)\")\n\
+        \x20 let field = dom.find(\"#name\")\n\
+        \x20 if field == nil {\n    return\n  }\n\
+        \x20 io.print(\"value: \\(dom.value(field))\")\n\
+        \x20 let button = dom.find(\"#save\")\n\
+        \x20 if button == nil {\n    return\n  }\n\
+        \x20 let (sub, err) = dom.on(button, \"click\", |e: dom.Event| {\n\
+        \x20   io.print(\"clicked, value now: \\(dom.value(field))\")\n\
+        \x20 })\n\
+        \x20 if err != nil {\n    io.print(\"attach failed\")\n    return\n  }\n\
+        \x20 io.print(\"buttons: \\(dom.find_all(\"button\").len())\")\n\
+        }\n";
+    let out = run_runner_under_node("page", src, PAGE_RUNNER, &[]);
+    assert_eq!(
+        out,
+        "heading: Kite\nmissing is nil: true\nvalue: ada\nbuttons: 1\n\
+         clicked, value now: grace\n"
+    );
+}
+
+/// `value` reads the property, and the attribute is the other thing.
+///
+/// The classic footgun, asserted rather than commented. `getAttribute("value")`
+/// answers with the default the markup gave, which stops being true the moment
+/// somebody types — and reading it is how a form submits what it was born with
+/// instead of what is in it.
+#[test]
+fn value_is_a_property_and_not_an_attribute() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/dom\n\n\
+        fn main() {\n\
+        \x20 let field = dom.find(\"#name\")\n\
+        \x20 if field == nil {\n    return\n  }\n\
+        \x20 let err = dom.set_value(field, \"typed\")\n\
+        \x20 if err != nil {\n    return\n  }\n\
+        \x20 io.print(\"property: \\(dom.value(field))\")\n\
+        \x20 let attr = dom.attribute(field, \"value\")\n\
+        \x20 io.print(\"attribute: \\(if attr == nil { \"absent\" } else { attr })\")\n\
+        }\n";
+    let out = run_runner_under_node("property", src, PAGE_RUNNER, &[]);
+    assert_eq!(out, "property: typed\nattribute: ada\n");
+}
+
+/// A cancelled subscription stops firing.
+#[test]
+fn a_cancelled_subscription_stops_listening() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/dom\n\n\
+        fn main() {\n\
+        \x20 let button = dom.find(\"#save\")\n\
+        \x20 if button == nil {\n    return\n  }\n\
+        \x20 let (sub, err) = dom.on(button, \"click\", |e: dom.Event| {\n\
+        \x20   io.print(\"fired\")\n\
+        \x20 })\n\
+        \x20 if err != nil {\n    return\n  }\n\
+        \x20 let cerr = sub.cancel()\n\
+        \x20 io.print(\"cancelled: \\(cerr == nil)\")\n\
+        }\n";
+    let out = run_runner_under_node("cancel", src, PAGE_RUNNER, &[]);
+    assert_eq!(out, "cancelled: true\n", "the handler must not have fired");
+}
+
+/// The example page's program runs against a stand-in document.
+///
+/// `examples/page` is the phase's exit criterion made into a file: an ordinary
+/// HTML page with an ordinary stylesheet, and a Kite module taking the part
+/// that needs logic. This runs its program, presses each button, and checks
+/// what it put on the page — including the class that decides colour, which is
+/// the whole argument for the direction in one assertion.
+#[test]
+fn the_example_page_program_works() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/page/main.kite");
+    let src = std::fs::read_to_string(&path).expect("read examples/page/main.kite");
+    let runner = "import { readFile } from \"node:fs/promises\";\n\
+         import { instantiate, resident, setWriter } from \"./app.js\";\n\
+         class Element {}\n\
+         const listeners = new Map();\n\
+         const make = (id, value) => {\n\
+         \x20 const classes = new Set();\n\
+         \x20 const el = {\n\
+         \x20   id, textContent: \"\", value: value ?? \"\",\n\
+         \x20   classList: {\n\
+         \x20     add: (c) => classes.add(c),\n\
+         \x20     remove: (c) => classes.delete(c),\n\
+         \x20     contains: (c) => classes.has(c),\n\
+         \x20   },\n\
+         \x20   classes,\n\
+         \x20   addEventListener(n, f) { listeners.set(id, f); },\n\
+         \x20   removeEventListener(n, f) { listeners.delete(id); },\n\
+         \x20 };\n\
+         \x20 Object.setPrototypeOf(el, Element.prototype);\n\
+         \x20 return el;\n\
+         };\n\
+         const nodes = {\n\
+         \x20 \"#count\": make(\"count\"), \"#status\": make(\"status\"),\n\
+         \x20 \"#step\": make(\"step\", \"2\"), \"#up\": make(\"up\"),\n\
+         \x20 \"#down\": make(\"down\"), \"#reset\": make(\"reset\"),\n\
+         };\n\
+         globalThis.Element = Element;\n\
+         globalThis.document = {\n\
+         \x20 querySelector: (s) => nodes[s] ?? null,\n\
+         \x20 querySelectorAll: () => [],\n\
+         };\n\
+         const out = [];\n\
+         setWriter((l) => out.push(l));\n\
+         const exports = await instantiate(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         exports.main();\n\
+         resident(exports);\n\
+         const press = (id) => listeners.get(id)({ target: nodes[\"#\" + id] });\n\
+         const state = () =>\n\
+         \x20 nodes[\"#count\"].textContent +\n\
+         \x20 (nodes[\"#count\"].classes.has(\"negative\") ? \" negative\" : \"\") +\n\
+         \x20 \" / \" + nodes[\"#status\"].textContent;\n\
+         out.push(\"start: \" + state());\n\
+         press(\"up\"); out.push(\"after up: \" + state());\n\
+         press(\"down\"); press(\"down\"); out.push(\"after two downs: \" + state());\n\
+         press(\"reset\"); out.push(\"after reset: \" + state());\n\
+         process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+    let out = run_runner_under_node("examplepage", &src, runner, &[]);
+    assert_eq!(
+        out,
+        "counter ready\n\
+         start: 0 / last action: nothing yet\n\
+         after up: 2 / last action: increment\n\
+         after two downs: -2 negative / last action: decrement\n\
+         after reset: 0 / last action: reset\n",
+        "the step comes from the field, and the class comes from the sign"
+    );
+}

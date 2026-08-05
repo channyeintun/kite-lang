@@ -1,196 +1,438 @@
-// std/dom — low-level DOM access. **Web only.**
-//
-// **This module is between designs, and what is below is the old one.** It was
-// written as an escape hatch beneath `std/ui`, for the few things a layout
-// engine had no opinion about — a `<video>`, an embed, the page title. `std/ui`
-// is gone, the document is the product now, and this becomes the main way a
-// Kite program reaches a page rather than the exception. It is being rewritten
-// over `std/js`, in ordinary Kite, with no `extern` declarations in it at all.
-// See `docs/04-the-web.md`.
-//
-// Three things below are wrong and are named here rather than left to be
-// discovered, because until the rewrite lands they are what this module does:
-//
-// - **A node is a number, not a reference.** The host keeps a table and Kite
-//   holds an index into it. The table never shrinks, because nothing can tell
-//   the host that Kite dropped a number. Worse, the same element found twice
-//   gets two different numbers, so two handles cannot be compared for identity.
-// - **A handle of 0 means "not found", and every call tolerates it.** That is a
-//   null object. A chain of lookups on a missing element does nothing at all,
-//   which hides the mistake instead of reporting it — and `Option<T>` exists to
-//   make exactly this unspellable.
-// - **There are no events.** Nothing here can listen for a click.
+//! The document. **Web only.**
+//!
+//! Ordinary Kite over [`std/js`](js.html) — there is not one `extern`
+//! declaration in this file, and that is the point. Everything here could have
+//! been written by a user, which is what makes the primitives underneath a real
+//! answer to "what if the standard library never wrapped the thing I need"
+//! rather than a promise.
+//!
+//! A Kite program **lives inside a page and owns parts of it**. The page is
+//! served by whatever serves it, styled by whatever stylesheet it already has,
+//! and Kite takes the parts that need real logic. Attaching to `<body>` is
+//! available and is not the point.
+//!
+//! ```kite
+//! use std/dom
+//!
+//! fn main() {
+//!     let button = dom.find("#save")
+//!     if button == nil {
+//!         return
+//!     }
+//!     let (sub, err) = dom.on(button, "click", |e: dom.Event| { save() })
+//!     if err != nil {
+//!         io.print("could not attach: \(err.message())")
+//!     }
+//! }
+//! ```
+//!
+//! **What is not here is as deliberate as what is.** There is no layout, no
+//! widget, no theme and no component. The browser lays out, CSS styles, and a
+//! design system is a stylesheet. What this module does is find elements, make
+//! them, change them, and listen to them.
 
-/// The host's side. Anything not on the web leaves this group unimplemented,
-/// and a call fails saying which function had no host — which is the honest
-/// answer to asking a terminal for a DOM.
-@host("dom")
-extern fn query(selector: str) -> int
+use std/js
 
-@host("dom")
-extern fn query_all(selector: str) -> str
+// ---- what a program holds --------------------------------------------------
 
-@host("dom")
-extern fn create(tag: str) -> int
-
-@host("dom")
-extern fn append(parent: int, child: int)
-
-@host("dom")
-extern fn detach(node: int)
-
-@host("dom")
-extern fn get_text(node: int) -> str
-
-@host("dom")
-extern fn set_text(node: int, body: str)
-
-@host("dom")
-extern fn get_attr(node: int, name: str) -> str
-
-@host("dom")
-extern fn set_attr(node: int, name: str, value: str)
-
-@host("dom")
-extern fn drop_attr(node: int, name: str)
-
-@host("dom")
-extern fn set_style(node: int, property: str, value: str)
-
-@host("dom")
-extern fn set_class(node: int, name: str, on: bool)
-
-@host("dom")
-extern fn has_class(node: int, name: str) -> bool
-
-@host("dom")
-extern fn get_title() -> str
-
-@host("dom")
-extern fn set_title(body: str)
-
-/// A handle on an element.
+/// One element.
 ///
-/// A struct rather than a bare `int` so that a node cannot be added to a
-/// number by accident, and so the nothing-found case has a name.
-pub struct Node {
-    pub handle: int
+/// Opaque: outside this module an `Element` can be held and passed but not read
+/// or built, because its field is unmarked ([spec §4.2]). That is the whole of
+/// how the untyped layer underneath is stopped from spreading into application
+/// code — and it is ordinary visibility, not a special rule.
+pub struct Element {
+    raw: JsValue
 }
 
-/// The handle that means nothing was found.
-pub fn none() -> Node {
-    return Node{ handle: 0 }
+/// Something that happened.
+pub struct Event {
+    raw: JsValue
 }
 
-/// Whether a handle refers to anything.
-pub fn found(node: Node) -> bool {
-    return node.handle != 0
+/// A listener that has been attached, and can be taken off again.
+///
+/// Returned rather than discarded because **nothing else can cancel it**. The
+/// closure is alive as long as the listener is, the listener is alive as long
+/// as the element is, and an element a program keeps a handle on is alive as
+/// long as the program. Explicit teardown is squarely inside this language's
+/// tolerance for verbosity.
+pub struct Subscription {
+    target: JsValue
+    event: str
+    handler: JsValue
 }
 
-/// The first element matching a CSS selector, or [`none`].
-pub fn find(selector: str) -> Node {
-    return Node{ handle: query(selector) }
+// ---- the door out ----------------------------------------------------------
+
+/// The host object inside an element.
+///
+/// **The escape hatch, and it is meant to be used as one.** Sealing `Element`
+/// completely sounds safer and is not: the first person who needs a method this
+/// module never wrapped would be unable to reach their own element, and what
+/// they would do instead is rebuild a parallel untyped world beside this one.
+/// One marked door is a boundary that holds; a wall is a boundary that gets
+/// climbed.
+///
+/// It is greppable on purpose. `dom.raw(` in a diff is a thing to look at.
+pub fn raw(e: Element) -> JsValue {
+    return e.raw
 }
 
-/// Every element matching a CSS selector, in document order.
-pub fn find_all(selector: str) -> [Node] {
-    let handles = query_all(selector)
-    var out: [Node] = []
-    var current = ""
-    for i in 0..handles.len() {
-        let c = handles.slice(i, i + 1)
-        if c == "," {
-            out.push(Node{ handle: int_of(current) })
-            current = ""
-        } else {
-            current = current + c
-        }
+/// The other direction, for a host object a program obtained itself.
+pub fn wrap(v: JsValue) -> Element {
+    return Element{ raw: v }
+}
+
+/// The host object inside an event, for the same reason.
+pub fn raw_event(e: Event) -> JsValue {
+    return e.raw
+}
+
+fn document() -> JsValue {
+    return js.global("document")
+}
+
+// ---- finding ---------------------------------------------------------------
+
+/// The first element matching a CSS selector, or nothing.
+///
+/// **`?Element`, never a usable-looking stand-in.** The previous version of this
+/// module returned a handle of 0 for "not found" and documented that every call
+/// tolerated it, so a chain of lookups on a missing element did nothing at all.
+/// That is a null object, and it is worse than a null dereference because it
+/// does not even fail where the mistake is — in a language whose specification
+/// calls the tolerated zero value Go's commonest production bug.
+pub fn find(selector: str) -> Option<Element> {
+    let (found, err) = js.call1(document(), "querySelector", js.of_str(selector))
+    if err != nil {
+        return nil
     }
-    if current.len() > 0 {
-        out.push(Node{ handle: int_of(current) })
+    if js.is_nothing(found) {
+        return nil
+    }
+    return Element{ raw: found }
+}
+
+/// The first element inside `parent` matching a selector.
+pub fn find_in(parent: Element, selector: str) -> Option<Element> {
+    let (found, err) = js.call1(parent.raw, "querySelector", js.of_str(selector))
+    if err != nil {
+        return nil
+    }
+    if js.is_nothing(found) {
+        return nil
+    }
+    return Element{ raw: found }
+}
+
+/// Every element matching a selector, in document order.
+///
+/// The empty slice when nothing matches or the selector is malformed. A
+/// malformed selector throws in the browser; here it is the same answer as no
+/// matches, because a caller looping over the result cannot act on the
+/// difference. Use [`find`] when the distinction matters.
+pub fn find_all(selector: str) -> [Element] {
+    var out: [Element] = []
+    let (list, err) = js.call1(document(), "querySelectorAll", js.of_str(selector))
+    if err != nil {
+        return out
+    }
+    let (count, cerr) = js.length(list)
+    if cerr != nil {
+        return out
+    }
+    for i in 0..count {
+        let (item, ierr) = js.at(list, i)
+        if ierr == nil {
+            out.push(Element{ raw: item })
+        }
     }
     return out
 }
 
 /// A new element, not yet in the document.
-pub fn element(tag: str) -> Node {
-    return Node{ handle: create(tag) }
+pub fn create(tag: str) -> (Element, error) {
+    let (made, err) = js.call1(document(), "createElement", js.of_str(tag))
+    check err
+    return Element{ raw: made }, nil
 }
 
-/// Put `child` at the end of `parent`.
-pub fn add(parent: Node, child: Node) {
-    append(parent.handle, child.handle)
-}
-
-/// Take an element out of the document. Its handle stops referring to
-/// anything the page can see.
-pub fn remove(node: Node) {
-    detach(node.handle)
-}
+// ---- reading and changing --------------------------------------------------
 
 /// The element's text content.
-pub fn text(node: Node) -> str {
-    return get_text(node.handle)
+pub fn text(e: Element) -> str {
+    return js.str_or(e.raw, "textContent", "")
 }
 
 /// Replace the element's text content.
 ///
-/// Text, never markup. There is no `set_html` here and there is not going to
-/// be one: it is the single most common way a program built out of strings
-/// grows a script-injection bug, and a standard library should not ship the
-/// loaded gun beside the safe call.
-pub fn set(node: Node, body: str) {
-    set_text(node.handle, body)
+/// Text, never markup. There is no `set_html` here — building markup from
+/// strings is the commonest way to grow an injection bug, and a standard
+/// library should not ship the loaded gun beside the safe call.
+///
+/// **What that claim no longer covers.** It used to be absolute, because there
+/// was no other way through. There is now: [`raw`] hands over the host object,
+/// and anyone holding one can set `innerHTML`. The guarantee is narrower and
+/// stated narrowly — the typed layer does not hand you the gun, and the escape
+/// hatch is not the typed layer.
+pub fn set_text(e: Element, body: str) -> error {
+    return js.set(e.raw, "textContent", js.of_str(body))
 }
 
-pub fn attribute(node: Node, name: str) -> str {
-    return get_attr(node.handle, name)
+/// One attribute, or nothing when it is absent.
+pub fn attribute(e: Element, name: str) -> Option<str> {
+    let (value, err) = js.call1(e.raw, "getAttribute", js.of_str(name))
+    if err != nil {
+        return nil
+    }
+    if js.is_nothing(value) {
+        return nil
+    }
+    let (body, berr) = js.as_str(value)
+    if berr != nil {
+        return nil
+    }
+    return body
 }
 
-pub fn set_attribute(node: Node, name: str, value: str) {
-    set_attr(node.handle, name, value)
+pub fn set_attribute(e: Element, name: str, value: str) -> error {
+    let (_, err) = js.call2(e.raw, "setAttribute", js.of_str(name), js.of_str(value))
+    return err
 }
 
-pub fn remove_attribute(node: Node, name: str) {
-    drop_attr(node.handle, name)
+pub fn remove_attribute(e: Element, name: str) -> error {
+    let (_, err) = js.call1(e.raw, "removeAttribute", js.of_str(name))
+    return err
+}
+
+/// The value of an input, a textarea or a select.
+///
+/// **A property, not an attribute, and the difference is not pedantry.**
+/// `getAttribute("value")` answers with the *default* the markup gave, which
+/// stops being the truth the moment somebody types. Reading the attribute is
+/// how a form ends up submitting what it was born with. The same holds for
+/// `checked`, `selected` and `indeterminate`, which is why each of those has a
+/// call here rather than being left to [`attribute`].
+pub fn value(e: Element) -> str {
+    return js.str_or(e.raw, "value", "")
+}
+
+pub fn set_value(e: Element, body: str) -> error {
+    return js.set(e.raw, "value", js.of_str(body))
+}
+
+pub fn checked(e: Element) -> bool {
+    return js.bool_or(e.raw, "checked", false)
+}
+
+pub fn set_checked(e: Element, on: bool) -> error {
+    return js.set(e.raw, "checked", js.of_bool(on))
 }
 
 /// One CSS property, by its CSS name — `background-color`, not
-/// `backgroundColor`. The host translates; a caller writes what it would write
-/// in a stylesheet.
-pub fn style(node: Node, property: str, value: str) {
-    set_style(node.handle, property, value)
-}
-
-pub fn add_class(node: Node, name: str) {
-    set_class(node.handle, name, true)
-}
-
-pub fn remove_class(node: Node, name: str) {
-    set_class(node.handle, name, false)
-}
-
-pub fn in_class(node: Node, name: str) -> bool {
-    return has_class(node.handle, name)
-}
-
-/// The document's title.
-pub fn title() -> str {
-    return get_title()
-}
-
-pub fn retitle(body: str) {
-    set_title(body)
-}
-
-fn int_of(body: str) -> int {
-    var value = 0
-    for i in 0..body.len() {
-        let digit = body.code_at(i) - 0x30
-        if digit < 0 || digit > 9 {
-            return 0
-        }
-        value = value * 10 + digit
+/// `backgroundColor`.
+///
+/// For values a stylesheet cannot know: a computed position, a progress width,
+/// a custom property the CSS then reads. Everything static belongs in the
+/// stylesheet, where the cascade can reach it.
+pub fn set_style(e: Element, property: str, value: str) -> error {
+    let (style, err) = js.get(e.raw, "style")
+    if err != nil {
+        return err
     }
-    return value
+    let (_, serr) = js.call2(style, "setProperty", js.of_str(property), js.of_str(value))
+    return serr
+}
+
+// ---- classes ---------------------------------------------------------------
+//
+// A class name is how a Kite program reaches a stylesheet somebody else wrote,
+// which makes these the most load-bearing four functions in the module. The
+// names pass through exactly as written: no hashing, no scoping, no rewriting.
+
+pub fn add_class(e: Element, name: str) -> error {
+    let (list, err) = js.get(e.raw, "classList")
+    if err != nil {
+        return err
+    }
+    let (_, aerr) = js.call1(list, "add", js.of_str(name))
+    return aerr
+}
+
+pub fn remove_class(e: Element, name: str) -> error {
+    let (list, err) = js.get(e.raw, "classList")
+    if err != nil {
+        return err
+    }
+    let (_, rerr) = js.call1(list, "remove", js.of_str(name))
+    return rerr
+}
+
+pub fn has_class(e: Element, name: str) -> bool {
+    let (list, err) = js.get(e.raw, "classList")
+    if err != nil {
+        return false
+    }
+    let (answer, aerr) = js.call1(list, "contains", js.of_str(name))
+    if aerr != nil {
+        return false
+    }
+    let (on, oerr) = js.as_bool(answer)
+    if oerr != nil {
+        return false
+    }
+    return on
+}
+
+/// Add the class when `on`, remove it otherwise.
+///
+/// The shape state usually wants. A program that keeps its state in the model
+/// and its appearance in CSS spends most of its time here — and `:hover`,
+/// `:focus-visible` and `:checked` it does not touch at all, because those
+/// never reach Kite.
+pub fn set_class(e: Element, name: str, on: bool) -> error {
+    if on {
+        return add_class(e, name)
+    }
+    return remove_class(e, name)
+}
+
+// ---- the tree --------------------------------------------------------------
+
+pub fn append(parent: Element, child: Element) -> error {
+    let (_, err) = js.call1(parent.raw, "appendChild", child.raw)
+    return err
+}
+
+pub fn insert_before(parent: Element, child: Element, before: Element) -> error {
+    let (_, err) = js.call2(parent.raw, "insertBefore", child.raw, before.raw)
+    return err
+}
+
+/// Take an element out of the document.
+pub fn remove(e: Element) -> error {
+    let (_, err) = js.call0(e.raw, "remove")
+    return err
+}
+
+/// Whether two handles are the same element.
+///
+/// The question every listener asks about `event.target`, and the reason a host
+/// object is a reference rather than a number: the old handle table pushed a
+/// new entry on every lookup, so finding one element twice gave two handles
+/// that compared unequal. `==` on an `Element` is a compile error that points
+/// here.
+pub fn same(a: Element, b: Element) -> bool {
+    return js.same(a.raw, b.raw)
+}
+
+// ---- events ----------------------------------------------------------------
+
+/// Listen, and get back something that can stop listening.
+///
+/// The handler is given an [`Event`], never a raw host value — which is what
+/// keeps `std/js` out of an application's vocabulary even though everything
+/// here is built on it.
+pub fn on(target: Element, name: str, handler: fn(Event)) -> (Subscription, error) {
+    // The user's handler takes an `Event`; the host calls with whatever it
+    // calls with. This closure is the join, and it captures `handler` — a `let`
+    // parameter, immutable, so capturing it by value is exactly right.
+    let wrapped = js.func(|raw: JsValue| { handler(Event{ raw: raw }) })
+    let (_, err) = js.call2(
+        target.raw,
+        "addEventListener",
+        js.of_str(name),
+        wrapped,
+    )
+    check err
+    return Subscription{ target: target.raw, event: name, handler: wrapped }, nil
+}
+
+impl Subscription {
+    /// Stop listening.
+    ///
+    /// After this the wrapper is unreachable from the page, the closure is
+    /// unreachable from the wrapper, and the collector takes both. There is no
+    /// bookkeeping to do because there was never a registry to remove from.
+    pub fn cancel(self) -> error {
+        let (_, err) = js.call2(
+            self.target,
+            "removeEventListener",
+            js.of_str(self.event),
+            self.handler,
+        )
+        return err
+    }
+}
+
+/// What the event happened to.
+///
+/// Optional because a target is not always an element: it may be the document,
+/// the window, or a text node. A call that assumed otherwise would be wrong on
+/// exactly the events that are hardest to debug.
+pub fn target(e: Event) -> Option<Element> {
+    let (found, err) = js.get(e.raw, "target")
+    if err != nil {
+        return nil
+    }
+    if js.is_nothing(found) {
+        return nil
+    }
+    let (is_element, ierr) = js.instance_of(found, "Element")
+    if ierr != nil {
+        return nil
+    }
+    if !is_element {
+        return nil
+    }
+    return Element{ raw: found }
+}
+
+/// The value of whatever the event happened to, for an input event.
+pub fn event_value(e: Event) -> str {
+    let (found, err) = js.get(e.raw, "target")
+    if err != nil {
+        return ""
+    }
+    return js.str_or(found, "value", "")
+}
+
+/// Which key, for a keyboard event: `"Enter"`, `"a"`, `"ArrowUp"`.
+pub fn key(e: Event) -> str {
+    return js.str_or(e.raw, "key", "")
+}
+
+/// Do not do the default thing — submit the form, follow the link.
+pub fn prevent_default(e: Event) -> error {
+    let (_, err) = js.call0(e.raw, "preventDefault")
+    return err
+}
+
+/// Do not let the event carry on up the tree.
+pub fn stop_propagation(e: Event) -> error {
+    let (_, err) = js.call0(e.raw, "stopPropagation")
+    return err
+}
+
+// ---- the page --------------------------------------------------------------
+
+pub fn title() -> str {
+    return js.str_or(document(), "title", "")
+}
+
+pub fn set_title(body: str) -> error {
+    return js.set(document(), "title", js.of_str(body))
+}
+
+/// The `<body>`, for a program that owns the whole page after all.
+pub fn body() -> Option<Element> {
+    let (found, err) = js.get(document(), "body")
+    if err != nil {
+        return nil
+    }
+    if js.is_nothing(found) {
+        return nil
+    }
+    return Element{ raw: found }
 }
