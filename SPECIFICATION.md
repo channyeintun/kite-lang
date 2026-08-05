@@ -2,7 +2,9 @@
 
 **Version:** 0.1 (draft)
 **Date:** August 2026
-**Status:** Design document. Not yet implemented.
+**Status:** Implemented, on three backends, except where a section says
+otherwise. Where this document and the compiler disagree, the compiler is
+right and the disagreement is a bug in this file.
 
 ---
 
@@ -647,8 +649,21 @@ pub trait Error {
 }
 ```
 
-`error` is a built-in nil-able type — either nil, or a value describing a failure. Once trait objects land it becomes an alias for `Option<dyn Error>`: either `nil`, or some value
-implementing `Error`. Any type can implement `Error`.
+`error` is a built-in nil-able type — either nil, or a value describing a
+failure.
+
+> **Not built yet, and this is the largest gap between this document and the
+> compiler.** An `error` today carries a message and nothing else: `errors.new`
+> makes one, `err.message()` reads it, and `impl Error for MyType` does not
+> compile because there is no `Error` trait. Trait objects have landed, so the
+> condition this section used to put on it — *once trait objects land* — is met,
+> and what remains is the work rather than a dependency. Until then
+> `errors.wrap` carries context by putting it in the message, which is what
+> [§7.6](#76-adding-context) shows, and `errors.chain`, `errors.is<T>` and
+> `errors.as<T>` are absent along with the types they would inspect.
+
+Once it is built, `error` becomes an alias for `Option<dyn Error>`: either
+`nil`, or some value implementing `Error`. Any type can implement it.
 
 ```kite
 pub struct NotFound {
@@ -1691,12 +1706,25 @@ being re-litigated, and makes it clear when a decision should be revisited.
 
 ## Appendix A — A complete program
 
+**This compiles.** `crates/kite-driver/tests/spec.rs` extracts it from this
+document and checks it on every run, which is the only way a specification stops
+being able to lie about the language it describes. It could, until recently: the
+program that stood here used `use std/io`, `impl Error for LoadError` and
+`json.decode<[Task]>` — three things that do not exist — and nothing noticed,
+because nothing was checking.
+
+Two of those were the appendix being wrong. The third is the language being
+unfinished, and it is marked where it belongs:
+[§7.2](#72-the-error-type) says concrete error types are not built yet, so the
+failures below are `errors.new` strings. When that lands, this appendix gets its
+`LoadError` back, and the test will say if it does not.
+
 ```kite
-use std/io
 use std/fs
 use std/json
 use std/http
 
+@derive(Decode)
 pub struct Task {
     pub id:    int
     pub title: str
@@ -1710,48 +1738,38 @@ impl Display for Task {
     }
 }
 
-pub enum LoadError {
-    Missing(path: str)
-    Malformed(path: str, detail: str)
-}
-
-impl Error for LoadError {
-    fn message(self) -> str {
-        return match self {
-            Missing(path)           => "no task file at \(path)",
-            Malformed(path, detail) => "\(path) is not valid task JSON: \(detail)",
-        }
-    }
-}
-
 pub fn load(path: str) -> ([Task], error) {
     if !fs.exists(path) {
-        return _, LoadError.Missing(path: path)
+        return _, errors.new("no task file at \(path)")
     }
 
     let (bytes, err) = fs.read(path)
     check errors.wrap(err, "reading \(path)")
 
-    let (tasks, err) = json.decode<[Task]>(bytes)
-    if err != nil {
-        return _, LoadError.Malformed(path: path, detail: err.message())
-    }
+    let (doc, perr) = json.parse(bytes)
+    check errors.wrap(perr, "\(path) is not valid JSON")
 
+    var tasks: [Task] = []
+    for item in json.items(doc) {
+        let (task, derr) = Task.decode(item)
+        check errors.wrap(derr, "\(path) has a task that is not one")
+        tasks.push(task)
+    }
     return tasks, nil
 }
 
 pub async fn sync(tasks: [Task], endpoint: str) -> (int, error) {
     var uploaded = 0
+    let pending = filter(tasks, |t: Task| !t.done)
 
-    let pending = tasks.filter(|t| !t.done)
-    for chunk in pending.chunks(20) {
-        let (res, err) = await http.post(endpoint, json.encode(chunk))
-        check errors.wrap(err, "uploading \(chunk.len()) tasks")
+    for task in pending {
+        let (res, err) = await http.post(endpoint, "\(task.id)")
+        check errors.wrap(err, "uploading task \(task.id)")
 
         if res.status != 200 {
             return _, errors.new("server returned \(res.status)")
         }
-        uploaded = uploaded + chunk.len()
+        uploaded = uploaded + 1
     }
 
     return uploaded, nil
@@ -1768,16 +1786,14 @@ pub async fn main() {
         io.print(task.show())
     }
 
-    let (count, err) = await sync(tasks, "https://api.example.com/tasks")
-    if err != nil {
-        io.error("sync failed: \(err.message())")
+    let (count, serr) = await sync(tasks, "https://api.example.com/tasks")
+    if serr != nil {
+        io.error("sync failed: \(serr.message())")
         return
     }
     io.print("synced \(count) tasks")
 }
 ```
-
----
 
 ## Appendix B — Keyword census
 

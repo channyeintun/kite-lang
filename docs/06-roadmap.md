@@ -2021,6 +2021,58 @@ is already blown.
 
 ---
 
+## Phase 24 — Concrete error types
+
+**Goal:** `impl Error for MyType` compiles, and the specification stops
+describing a language that is not there.
+
+This is **the largest gap between the specification and the compiler**, and it
+is in the feature the language leads with. §7.2 declares an `Error` trait with
+`message` and `cause`. §7.6 promises `errors.chain`, `errors.is<T>` and
+`errors.as<T>`. §7.5 shows a `LoadError` enum being returned in an error slot.
+None of it exists: an `error` today is a struct with one string field in all
+three backends, `errors.new` makes one, `err.message()` reads it, and there is
+no `Error` trait to implement.
+
+The section used to make this conditional — *once trait objects land it becomes
+an alias for `Option<dyn Error>`*. Trait objects landed in Phase 2. What is left
+is the work, not a dependency, and the conditional was doing the job of hiding
+that.
+
+`std/errors` has been honest about it the whole time, in a comment on a function
+that exists because the real one does not:
+
+> A stand-in for `errors.is<T>`, which needs concrete error types carrying their
+> own data — the trait-object half of the error design. Matching on text is
+> weaker and says so.
+
+**What it touches.** An `error` value is `error_record`, a one-field GC struct,
+in the Wasm backend, the bytecode VM and Cranelift alike, with dedicated
+`ErrorNew` and `ErrorMessage` operations in MIR. Making it hold any value
+implementing `Error` means changing that representation in three places that
+must agree, with `message()` becoming dynamic dispatch through the vtable
+machinery that already exists for `dyn Trait`.
+
+The order that keeps each step runnable:
+
+1. **`Error` in the prelude**, beside `Display` and `Debug`. It is an ordinary
+   trait declaration; nothing else changes yet.
+2. **Coercion into the error slot.** A value whose type implements `Error`,
+   returned where an `error` is expected, is accepted. This is where the taint
+   analysis and `check` have to keep working unchanged.
+3. **`message()` becomes dispatch.** `errors.new` keeps working by producing a
+   built-in type that implements the trait, so every existing call site and
+   every test that reads a message is unaffected.
+4. **`cause`, and `errors.chain`.** The trait's second method, with the default
+   the specification already gives it.
+5. **`errors.is<T>` and `errors.as<T>`.** Downcasting, over the type tags that
+   dynamic dispatch already carries.
+
+**Exit criterion:** Appendix A gets its `LoadError` back. The test that compiles
+it will say whether that worked, which is the point of having added it.
+
+---
+
 ## Deferred: the view layer
 
 `std/html` — a description of elements built with functions, compared against
@@ -2079,14 +2131,15 @@ none.
 | 21 — Rejections as errors | ✅ complete, and the phase was rescoped: promises never needed language support. The straight-line `await` form is open, and marked as comfort |
 | 22 — Interop backwards | ✅ `api.js` and `api.d.ts` from `kitec build`, verified with real `tsc`. `@export` proved unnecessary. ❌ the Vite plugin |
 | 23 — Size gate | ✅ complete — four budgets in CI; 388 B for hello world, 2 KB for a DOM change, 5.7 KB for the island |
+| 24 — Concrete error types | ⬜ not started — the largest gap between the specification and the compiler, in the feature the language leads with |
 | — View layer | ⬜ deferred past 1.0, deliberately |
 
-765 tests: unit tests per crate, an annotated compile-fail corpus, a
+768 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the host boundary and a real
 socket under Node, both string
-representations compared against each other and against the VM, and every
-example on the site.
+representations compared against each other and against the VM, every example on
+the site, size budgets, and the specification's own Appendix A.
 
 ### What is deliberately not done
 

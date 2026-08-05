@@ -182,6 +182,11 @@ python3 -m http.server -d site 8000
 
 Recorded here rather than left to be discovered:
 
+- **No concrete error types.** The specification's §7.2 declares an `Error`
+  trait and §7.6 promises `errors.is<T>` / `errors.as<T>`; neither exists. An
+  `error` carries a message and nothing else. This is the largest gap between
+  the document and the compiler, it is in the feature the language leads with,
+  and it is [Phase 24](docs/06-roadmap.md#phase-24--concrete-error-types).
 - **No user interface layer at all, on purpose, for now.** `std/ui` and the
   Material package were removed rather than deprecated, because two ways to
   build a screen is exactly what the change was meant to end. `std/dom` is
@@ -210,7 +215,7 @@ Recorded here rather than left to be discovered:
   Scoop and the AUR, and has never run: no tag has been pushed.
 - **No Argon2.** It is not in WebCrypto, so it waits on a runtime that has it.
 
-765 tests: unit tests per crate, an annotated compile-fail corpus, a
+768 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the host boundary and a real
 socket under Node, both string
