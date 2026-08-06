@@ -75,7 +75,7 @@ handed to the module, and the only question is how those functions are written.
           │
           ▼
     ┌───────────────┐
-    │  std/dom      │   typed, opaque Element, ?T for absence
+    │  std/dom      │   typed, opaque Element, Option<T> for absence
     └───────┬───────┘   ordinary Kite — no extern declarations
             ▼
     ┌───────────────┐
@@ -151,7 +151,7 @@ commonest bug by construction: a missing property yields `undefined`, and
 `undefined` silently becoming `0` is untraceable. `as_num` returns an error
 instead.
 
-**Absence is `?Element`.** Never a zero handle. The old `std/dom` returned
+**Absence is `Option<Element>`.** Never a zero handle. The old `std/dom` returned
 handle 0 and documented that every call tolerated it — a null object, in a
 language whose specification calls the tolerated zero value Go's commonest
 production bug.

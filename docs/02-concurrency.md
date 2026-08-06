@@ -51,8 +51,11 @@ pub async fn fetch_user(id: UserId) -> (User, error) {
     let (res, err) = await http.get("/api/users/\(id)")
     check err
 
-    let (user, err) = await json.decode<User>(res.body)
+    let (doc, err) = json.parse(res.body)
     check err
+
+    let (user, uerr) = User.decode(doc)
+    check uerr
 
     return user, nil
 }

@@ -1689,7 +1689,7 @@ Requirements on the implementation:
 - **Type errors name the source of the expectation**, not just the mismatch —
   the parameter or return type that created the constraint gets a secondary span.
 - **`--explain E0301`** prints the full rationale for the rule.
-- **`kite fix`** applies every machine-applicable suggestion.
+- **`kitec fix`** applies every machine-applicable suggestion.
 - **Source maps** are emitted for the Wasm target so browser stack traces name
   `.kite` files and lines.
 

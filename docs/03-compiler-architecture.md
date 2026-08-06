@@ -138,7 +138,7 @@ brace depth — and inserts an `Error` node. A missing closing brace produces **
 diagnostic.
 
 The AST is a lossless concrete syntax tree: every byte of source is recoverable,
-which is what lets `kite fmt` and `kite fix` operate on it directly.
+which is what lets `kitec fmt` and `kitec fix` operate on it directly.
 
 ### 3.3 Resolve
 
@@ -293,18 +293,25 @@ every MIR function is concrete.
 ### Size budget
 
 Binary size is a first-class metric on the web target. `kitec` reports it on
-every build and CI can fail on regression:
+every build:
 
 ```
-$ kite build --target web --release
-  compiled 42 modules in 0.8s
-  app.wasm      18.4 KB   (gzip 7.1 KB)
-  app.js         1.2 KB   glue, generated from 14 extern declarations
-  ─ largest contributors ────────────────
-    ui.layout.flex          3.1 KB
-    json.decode<Task>       1.8 KB   ← 6 instantiations, 2 folded
-    std.str                 1.4 KB
+$ kitec build examples/page/main.kite --emit wasm --release --out dist
+  and dist/api.js with dist/api.d.ts
+wrote dist/app.wasm (18487 bytes), dist/app.js and dist/index.html
 ```
+
+**There is no per-symbol breakdown**, and this section used to show one — a
+mock-up naming `ui.layout.flex` and `json.decode<Task>`, neither of which
+exists. What is real is one number per build, and a gate that fires when it
+moves: `crates/kite-driver/tests/size.rs` compiles four programs and asserts a
+budget for each, recording what they cost today in a comment beside it. A
+budget is generous on purpose — it catches a regression of a different order, a
+runtime creeping in or a pass that stopped pruning — and the recorded number is
+what catches an ordinary change.
+
+Attributing bytes to the declaration they came from would be worth having and
+is not written.
 
 ---
 
@@ -324,7 +331,7 @@ The reference backend. Assumes all of WebAssembly 3.0.
 | immutable field | `(field $x f64)` |
 | `var` field | `(field $x (mut f64))` |
 | `enum E` | `(struct (field $tag i32) …)` + one subtype per variant, dispatched by `br_on_cast` |
-| `?T` | `(ref null $T)` |
+| `Option<T>` | `(ref null $T)` |
 | `[T]` | `(struct (field (mut (ref $arr_T))) (field (mut i32)))` — buffer + length |
 | `[N]T` | `(array $T)` |
 | `{K: V}` | GC struct wrapping index and entry arrays |
@@ -400,7 +407,7 @@ machines execute fewer dispatches per operation and map more directly from SSA.
 
 Purpose:
 
-- **Fast dev loop** — `kite run` with no codegen wait
+- **Fast dev loop** — `kitec run` with no codegen wait
 - **REPL and scripting**
 - **Embedding** — Kite as a configuration or plugin language inside a Rust host
 - **Compiler test oracle** — differential testing against the Wasm and native
@@ -435,7 +442,7 @@ Rules enforced by the test suite:
   expectation — the parameter or return type that created the constraint.
 - **`--explain E0301`** prints the full rationale, including *why* the rule
   exists. The specification is the source text for these.
-- **`kite fix`** applies every machine-applicable suggestion.
+- **`kitec fix`** applies every machine-applicable suggestion.
 - **Source maps** are emitted for the Wasm target so browser stack traces name
   `.kite` files and lines.
 
@@ -473,7 +480,7 @@ Non-negotiable, because they are the reason for skipping LLVM:
 | Full build, 10k lines | < 1s |
 | Incremental, single function edited | < 50ms |
 | LSP completion response | < 30ms |
-| `kite run` (bytecode) startup | < 20ms |
+| `kitec run` (bytecode) startup | < 20ms |
 
 `salsa` makes the incremental number achievable, and the LSP number is the same
 query path. If these regress, the architecture has gone wrong somewhere and it is
