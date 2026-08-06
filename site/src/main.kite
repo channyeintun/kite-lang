@@ -1,0 +1,342 @@
+//! The site, in Kite.
+//!
+//! Every page on kite-lang.dev that renders a document renders it through
+//! this: the Markdown, the syntax colouring, the navigation and the fetching
+//! are all Kite compiled to WebAssembly. What is left in JavaScript is the
+//! four lines that instantiate the module, which is the generated glue and is
+//! meant to be the last JavaScript anyone writes.
+//!
+//! A page says which it is with `data-page` on its `<body>`, rather than this
+//! guessing from what elements happen to exist. A guess would be a rule nobody
+//! wrote down, and the first page that grew a `#content` would take the wrong
+//! branch.
+
+use std/dom
+use std/js
+use std/math
+use markdown
+use highlight
+
+// ---- the one door out -------------------------------------------------------
+
+/// Put rendered markup into an element.
+///
+/// `dom.set_text` writes text and nothing else, on purpose — building markup
+/// out of strings is how an injection bug grows. This is the marked exception
+/// [`dom.raw`] exists for, and it is the only place in the site that takes it:
+/// the markup here was produced by [`markdown.render`], which escaped every
+/// character of the document before any tag was added.
+fn set_markup(into: dom.Element, html: str) -> error {
+    return js.set(dom.raw(into), "innerHTML", js.of_str(html))
+}
+
+fn report(into: dom.Element, message: str) {
+    let err = set_markup(into, "<p>\(highlight.escape(message))</p>")
+    if err != nil {
+        io.error(err.message())
+    }
+}
+
+// ---- fetching ---------------------------------------------------------------
+
+/// Fetch a document and hand its text to `done`, or its failure to `failed`.
+///
+/// Two promises deep, because `fetch` answers with a response and the body is
+/// a second await. Both halves of both are handled: [`js.settle`] will not let
+/// a rejection be dropped, which is the reason it takes two callbacks rather
+/// than one.
+fn fetch_text(url: str, done: fn(str), failed: fn(str)) -> error {
+    let (promise, err) = js.call1(js.global("globalThis"), "fetch", js.of_str(url))
+    // Not `check`: that expands to `return _, err`, which needs a two-part
+    // return, and this answers with an `error` alone.
+    if err != nil {
+        return err
+    }
+    return js.settle(promise, |response: JsValue| {
+            let ok = js.bool_or(response, "ok", false)
+            if !ok {
+                failed("\(math.trunc_to(js.num_or(response, "status", 0.0)))")
+                return
+            }
+            let (body, berr) = js.call0(response, "text")
+            if berr != nil {
+                failed(berr.message())
+                return
+            }
+            let serr = js.settle(body, |text: JsValue| {
+                    let (out, terr) = js.as_str(text)
+                    if terr != nil {
+                        failed(terr.message())
+                        return
+                    }
+                    done(out)
+                }, failed)
+            if serr != nil {
+                failed(serr.message())
+            }
+        }, failed)
+}
+
+// ---- the query string -------------------------------------------------------
+
+/// One parameter of the page's own query string, or nil.
+///
+/// Read here rather than through `URLSearchParams`, because the whole of what
+/// is needed is "the value after `name=`", and a host object crossing the
+/// boundary to answer it would be three calls where this is one.
+fn query(name: str) -> Option<str> {
+    let search = js.str_or(js.global("location"), "search", "")
+    if search.len() < 2 {
+        return nil
+    }
+    for pair in split(search.slice(1, search.len()), "&") {
+        let at = pair.index_of("=")
+        if at > 0 && pair.slice(0, at) == name {
+            return decode_component(pair.slice(at + 1, pair.len()))
+        }
+    }
+    return nil
+}
+
+fn hex_value(c: int) -> int {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return -1
+}
+
+/// `%2F` back to `/`, and `+` back to a space.
+///
+/// Only the single-byte escapes, which is all a document path in this site
+/// produces. A multi-byte sequence would need the bytes reassembled before
+/// they were a character, and no path here has one.
+fn decode_component(text: str) -> str {
+    var out = ""
+    var i = 0
+    for i < text.len() {
+        let c = text.code_at(i)
+        if c == 37 && i + 2 < text.len() {
+            let hi = hex_value(text.code_at(i + 1))
+            let lo = hex_value(text.code_at(i + 2))
+            if hi >= 0 && lo >= 0 && hi * 16 + lo < 128 {
+                out = out + ascii(hi * 16 + lo)
+                i += 3
+                continue
+            }
+        }
+        if c == 43 {
+            out = out + " "
+        } else {
+            out = out + text.slice(i, i + 1)
+        }
+        i += 1
+    }
+    return out
+}
+
+/// One ASCII character, by its code.
+///
+/// A table rather than a conversion, because Kite has no `char`-from-`int`
+/// that reaches a `str` — and the printable range is the only one a percent
+/// escape in a document path can name.
+fn ascii(code: int) -> str {
+    let printable = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    if code < 32 || code > 126 {
+        return ""
+    }
+    return printable.slice(code - 32, code - 31)
+}
+
+// ---- the pages --------------------------------------------------------------
+
+/// The documents this site will render.
+///
+/// A page that fetched whatever path a query string named would be a page that
+/// reads whatever it is pointed at, so the list is closed — with the reference
+/// as the one prefix, because it is generated and its members are not known
+/// here.
+fn allowed() -> [str] {
+    return ["SPECIFICATION.md", "README.md", "docs/01-platform-research.md",
+        "docs/02-concurrency.md", "docs/03-compiler-architecture.md",
+        "docs/04-the-web.md", "docs/06-roadmap.md"]
+}
+
+fn is_allowed(doc: str) -> bool {
+    return includes(allowed(), doc) || starts_with(doc, "reference/")
+}
+
+/// Colour every `kite` block a page wrote in its own markup.
+fn colour_code_blocks() {
+    for block in dom.find_all("pre > code.kite, pre > code.sketch") {
+        let err = set_markup(block, highlight.highlight(dom.text(block)))
+        if err != nil {
+            io.error(err.message())
+        }
+    }
+}
+
+/// Render a document into `#content`, and title the page after its heading.
+fn show_document(content: dom.Element, doc: str) {
+    if !is_allowed(doc) {
+        report(content, "No such document.")
+        return
+    }
+    let err = fetch_text(doc, |text: str| {
+            let werr = set_markup(content, markdown.render(text))
+            if werr != nil {
+                io.error(werr.message())
+                return
+            }
+            title_from(content)
+            scroll_to_hash()
+        }, |why: str| {
+            report(content, "Could not load \(doc) (\(why)).")
+        })
+    if err != nil {
+        report(content, "Could not load \(doc) (\(err.message())).")
+    }
+}
+
+/// The page's title, taken from the document's own first heading.
+fn title_from(content: dom.Element) {
+    let heading = dom.find_in(content, "h1")
+    let name = if heading == nil { "Kite" } else { dom.text(heading) }
+    let err = dom.set_title("\(name) — Kite")
+    if err != nil {
+        io.error(err.message())
+    }
+}
+
+/// A `#section` in the address bar scrolls to that section, which only works
+/// once the document it names has been rendered.
+fn scroll_to_hash() {
+    let hash = js.str_or(js.global("location"), "hash", "")
+    if hash.len() < 2 {
+        return
+    }
+    let target = dom.find(hash)
+    if target == nil {
+        return
+    }
+    let (_, err) = js.call0(dom.raw(target), "scrollIntoView")
+    if err != nil {
+        io.error(err.message())
+    }
+}
+
+fn modules() -> [str] {
+    return ["prelude", "js", "dom", "html", "canvas", "text", "task", "sync",
+        "math", "time", "errors", "fmt", "json", "toml", "test", "buffer",
+        "fs", "http", "socket", "crypto"]
+}
+
+/// The reference: a button per module, and the one it is showing marked.
+fn show_reference(nav: dom.Element, content: dom.Element, wanted: str) {
+    for button in dom.find_all("#modules button") {
+        let here = dom.text(button) == wanted
+        let err = dom.set_attribute(button, "aria-current", if here { "true" } else { "false" })
+        if err != nil {
+            io.error(err.message())
+        }
+    }
+    // The address bar follows the choice, so a reference page can be linked
+    // and reloaded. `replaceState` rather than `pushState`: picking a module
+    // is not a place in history to go back to.
+    let (_, herr) = js.call3(
+        js.global("history"),
+        "replaceState",
+        js.nothing(),
+        js.of_str(""),
+        js.of_str("?module=\(wanted)"),
+    )
+    if herr != nil {
+        io.error(herr.message())
+    }
+    show_document(content, "reference/\(wanted).md")
+}
+
+fn build_reference_nav(nav: dom.Element, content: dom.Element) {
+    for name in modules() {
+        let (button, err) = dom.create("button")
+        if err != nil {
+            io.error(err.message())
+            return
+        }
+        let terr = dom.set_text(button, name)
+        if terr != nil {
+            io.error(terr.message())
+            return
+        }
+        let module = name
+        let (sub, oerr) = dom.on(button, "click", |e: dom.Event| {
+                show_reference(nav, content, module)
+            })
+        if oerr != nil {
+            io.error(oerr.message())
+            return
+        }
+        let aerr = dom.append(nav, button)
+        if aerr != nil {
+            io.error(aerr.message())
+            return
+        }
+    }
+}
+
+// ---- the door for the playground --------------------------------------------
+
+/// Colour a run of Kite, for a caller in JavaScript.
+///
+/// The playground's editor paints a layer under its textarea on every
+/// keystroke, and it is the one part of that page that is not about loading
+/// another Wasm module. Exposing it here rather than keeping a second
+/// implementation in JavaScript is the point of the exercise: there is one
+/// highlighter and it is the one this file uses.
+pub fn colour(src: str) -> str {
+    return highlight.highlight(src)
+}
+
+// ---- the entry --------------------------------------------------------------
+
+pub fn main() {
+    let body = dom.body()
+    if body == nil {
+        return
+    }
+    let page = or_else(dom.attribute(body, "data-page"), "home")
+
+    if page == "home" {
+        colour_code_blocks()
+        return
+    }
+
+    let content = dom.find("#content")
+    if content == nil {
+        io.error("\(page): no #content to render into")
+        return
+    }
+
+    if page == "docs" {
+        show_document(content, or_else(query("doc"), "SPECIFICATION.md"))
+        return
+    }
+
+    if page == "reference" {
+        let nav = dom.find("#modules")
+        if nav == nil {
+            io.error("reference: no #modules")
+            return
+        }
+        build_reference_nav(nav, content)
+        show_reference(nav, content, or_else(query("module"), "prelude"))
+        return
+    }
+
+    io.error("unknown page: \(page)")
+}

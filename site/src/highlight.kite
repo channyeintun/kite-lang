@@ -1,0 +1,185 @@
+//! Colouring a run of Kite, in Kite.
+//!
+//! A lexer rather than a set of patterns over the whole text, for the reason
+//! the JavaScript this replaces gave: a keyword inside a string is not a
+//! keyword, and only reading left to right knows that.
+//!
+//! `str` has five methods and none of them is a regular expression, so every
+//! decision here is a code point compared against a number. That is more lines
+//! than the JavaScript and it is the same algorithm — which is the claim being
+//! tested by putting it here at all.
+
+/// The twenty-seven, in the order Appendix B lists them.
+///
+/// A slice searched linearly rather than a map: it is twenty-seven entries
+/// looked at once per word, and a map would cost a hash of the word to save
+/// comparisons that are already cheap.
+fn keywords() -> [str] {
+    return ["async", "await", "as", "break", "check", "continue", "defer",
+        "else", "enum", "false", "fn", "for", "if", "impl", "in", "let",
+        "match", "nil", "pub", "return", "self", "struct", "trait", "true",
+        "type", "use", "var"]
+}
+
+fn is_keyword(word: str) -> bool {
+    return includes(keywords(), word)
+}
+
+// ---- characters -------------------------------------------------------------
+//
+// `code_at` is the one string primitive that is not a string operation, and
+// this is what it is for: without a way to see a character as a number, every
+// one of these would have to be a search through a string of the characters
+// that qualify.
+
+fn is_digit(c: int) -> bool {
+    return c >= 48 && c <= 57
+}
+
+fn is_lower(c: int) -> bool {
+    return c >= 97 && c <= 122
+}
+
+fn is_upper(c: int) -> bool {
+    return c >= 65 && c <= 90
+}
+
+/// What JavaScript's `\w` covers, plus `$`: the characters a Kite identifier
+/// may hold, and the ones the highlighter must not split a word on.
+fn is_word(c: int) -> bool {
+    return is_digit(c) || is_lower(c) || is_upper(c) || c == 95 || c == 36
+}
+
+/// The characters a number literal may contain after its first digit: the
+/// digits, `_`, `.`, the hex letters, and the `x`/`o`/`b` that introduce a
+/// base. Deliberately loose — this decides a colour, not a value.
+fn is_number_body(c: int) -> bool {
+    if is_digit(c) || c == 95 || c == 46 {
+        return true
+    }
+    if c >= 97 && c <= 102 {
+        return true
+    }
+    if c >= 65 && c <= 70 {
+        return true
+    }
+    return c == 120 || c == 88 || c == 111 || c == 79 || c == 98 || c == 66
+}
+
+// ---- escaping ---------------------------------------------------------------
+
+/// Text as HTML text.
+///
+/// Three characters, and they are not optional: this output goes into
+/// `innerHTML`, so a `<` that arrived from a document and left as a `<` is the
+/// whole of how markup injection works.
+pub fn escape(text: str) -> str {
+    var out = ""
+    for i in 0..text.len() {
+        let c = text.slice(i, i + 1)
+        if c == "&" {
+            out = out + "&amp;"
+        } else if c == "<" {
+            out = out + "&lt;"
+        } else if c == ">" {
+            out = out + "&gt;"
+        } else {
+            out = out + c
+        }
+    }
+    return out
+}
+
+fn wrap(class_name: str, body: str) -> str {
+    return "<span class=\"\(class_name)\">\(body)</span>"
+}
+
+// ---- the lexer --------------------------------------------------------------
+
+/// Where a `//` comment ends: the newline, or the end of the source.
+fn comment_end(src: str, from: int) -> int {
+    var i = from
+    for i < src.len() {
+        if src.code_at(i) == 10 {
+            return i
+        }
+        i += 1
+    }
+    return src.len()
+}
+
+/// Where a string literal ends, counting the closing quote.
+///
+/// A backslash takes the next character with it, so `"a\"b"` is one string and
+/// not two. An unterminated one runs to the end rather than trapping — this is
+/// a highlighter, and half-typed source is its ordinary input.
+fn string_end(src: str, from: int) -> int {
+    var i = from + 1
+    for i < src.len() {
+        let c = src.code_at(i)
+        if c == 92 {
+            i += 2
+        } else if c == 34 {
+            return i + 1
+        } else {
+            i += 1
+        }
+    }
+    return src.len()
+}
+
+fn run_end(src: str, from: int, kind: int) -> int {
+    var i = from
+    for i < src.len() {
+        let c = src.code_at(i)
+        if kind == 0 && !is_number_body(c) {
+            return i
+        }
+        if kind == 1 && !is_word(c) {
+            return i
+        }
+        i += 1
+    }
+    return src.len()
+}
+
+/// Kite source as HTML, with a span around every comment, string, number and
+/// keyword.
+///
+/// Anything else arrives as the text it was — which is the right failure for a
+/// highlighter, and the reason this can be pointed at a half-written program.
+pub fn highlight(src: str) -> str {
+    var out = ""
+    var i = 0
+    for i < src.len() {
+        let c = src.code_at(i)
+
+        // `//` — to the end of the line.
+        if c == 47 && i + 1 < src.len() && src.code_at(i + 1) == 47 {
+            let stop = comment_end(src, i)
+            out = out + wrap("c", escape(src.slice(i, stop)))
+            i = stop
+        } else if c == 34 {
+            let stop = string_end(src, i)
+            out = out + wrap("s", escape(src.slice(i, stop)))
+            i = stop
+        } else if is_digit(c) {
+            let stop = run_end(src, i, 0)
+            out = out + wrap("n", escape(src.slice(i, stop)))
+            i = stop
+        } else if is_word(c) {
+            let stop = run_end(src, i, 1)
+            let word = src.slice(i, stop)
+            if is_keyword(word) {
+                out = out + wrap("k", word)
+            } else {
+                out = out + escape(word)
+            }
+            i = stop
+        } else {
+            out = out + escape(src.slice(i, i + 1))
+            i += 1
+        }
+    }
+    return out
+}

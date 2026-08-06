@@ -4,6 +4,12 @@ Cargo.lock.bak
 .DS_Store
 
 # The site's generated files: built by site/build.sh from the sources above.
+# `app.*` and `api.*` are `kitec build site/src/main.kite` — the site's own
+# program, whose source is `site/src/` and is not generated.
+site/app.wasm
+site/app.js
+site/api.js
+site/api.d.ts
 site/kite_playground.wasm
 site/reference/
 site/docs/

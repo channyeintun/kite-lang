@@ -139,3 +139,35 @@ fn every_playground_sample_runs() {
         );
     }
 }
+
+/// The site's own program compiles.
+///
+/// `site/src/` is the site: the Markdown rendering, the syntax colouring, the
+/// navigation and the fetching, compiled to the `app.wasm` every page
+/// instantiates. It is the largest Kite program in the repository that is not
+/// the standard library, and it is written against the same `std/dom` and
+/// `std/js` a user has — which is the claim it exists to test.
+///
+/// Checked for the **web** target rather than with `Emit::Check`, because
+/// `std/js` is web-only and a checker that never lowered it would not have
+/// said whether the thing a browser runs is the thing that compiles.
+#[test]
+fn the_sites_own_program_compiles_for_the_web() {
+    let entry = site().join("src/main.kite");
+    let src = std::fs::read_to_string(&entry)
+        .unwrap_or_else(|e| panic!("read {}: {}", entry.display(), e));
+    let compiled = kite_driver::compile(&entry, &src, Emit::Wasm);
+    assert!(
+        !compiled.failed(),
+        "the site does not compile:\n{}",
+        compiled.render_diagnostics()
+    );
+    let module = compiled.wasm.as_ref().expect("a module");
+    // The budget the pages are held to. Every document on the site goes
+    // through this module, so it is downloaded before anything is read.
+    assert!(
+        module.bytes.len() < 49152,
+        "the site's program is {} bytes, budget 49152",
+        module.bytes.len()
+    );
+}

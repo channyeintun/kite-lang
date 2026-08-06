@@ -8,7 +8,7 @@
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="kite.css">
 </head>
-<body>
+<body data-page="home">
 <header class="topbar">
   <a class="brand" href="index.html">
     <img class="mark" src="kite-mark.svg" alt="" width="28" height="28">
@@ -373,8 +373,13 @@ kitec --explain E0301            why a rule exists
 </footer>
 
 <script type="module">
-import { colourCodeBlocks } from "./kite.js";
-colourCodeBlocks();
+// The last JavaScript on this page. Everything below `main()` — the Markdown,
+// the syntax colouring, the fetching and the navigation — is Kite compiled to
+// WebAssembly, in `site/src/`.
+import { instantiate, resident } from "./app.js";
+const exports = await instantiate("app.wasm");
+resident(exports);
+exports.main();
 </script>
 </body>
 </html>

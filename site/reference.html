@@ -7,7 +7,7 @@
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="kite.css">
 </head>
-<body>
+<body data-page="reference">
 <header class="topbar">
   <a class="brand" href="index.html">
     <img class="mark" src="kite-mark.svg" alt="" width="28" height="28">
@@ -76,34 +76,13 @@
 </footer>
 
 <script type="module">
-import { markdown } from "./kite.js";
-
-const MODULES = ["prelude", "js", "dom", "html", "canvas", "text", "task", "sync", "math", "time", "errors", "fmt", "json", "toml", "test", "buffer", "fs", "http", "socket", "crypto"];
-const nav = document.getElementById("modules");
-const content = document.getElementById("content");
-
-const show = (name) => {
-  history.replaceState(null, "", `?module=${name}`);
-  for (const button of nav.children) {
-    button.setAttribute("aria-current", button.textContent === name ? "true" : "false");
-  }
-  fetch(`reference/${name}.md`)
-    .then((r) => (r.ok ? r.text() : Promise.reject(new Error(`${r.status}`))))
-    .then((text) => {
-      content.innerHTML = markdown(text);
-    })
-    .catch((e) => {
-      content.innerHTML = `<p>Could not load <code>${name}</code> (${e.message}). Run <code>site/build.sh</code> to generate the reference.</p>`;
-    });
-};
-
-for (const name of MODULES) {
-  const button = document.createElement("button");
-  button.textContent = name;
-  button.onclick = () => show(name);
-  nav.appendChild(button);
-}
-show(new URLSearchParams(location.search).get("module") ?? "prelude");
+// The last JavaScript on this page. Everything below `main()` — the Markdown,
+// the syntax colouring, the fetching and the navigation — is Kite compiled to
+// WebAssembly, in `site/src/`.
+import { instantiate, resident } from "./app.js";
+const exports = await instantiate("app.wasm");
+resident(exports);
+exports.main();
 </script>
 </body>
 </html>

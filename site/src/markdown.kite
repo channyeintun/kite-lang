@@ -1,0 +1,465 @@
+//! Markdown, in the subset the documentation uses.
+//!
+//! Headings, fenced code, lists, tables, block quotes, links, inline code and
+//! emphasis. Anything else arrives as the text it was, which is the right
+//! failure for a renderer of prose — and the reason a document that uses
+//! something absent still reads.
+//!
+//! Written without patterns, because Kite has none. The JavaScript this
+//! replaces leaned on regular expressions for every one of these decisions and
+//! this leans on reading a line left to right, which is longer and is also the
+//! version that can say why it stopped.
+
+use highlight
+
+// ---- lines ------------------------------------------------------------------
+
+fn lines_of(text: str) -> [str] {
+    return split(replace(text, "\r\n", "\n"), "\n")
+}
+
+/// How many spaces or tabs a line opens with.
+fn indent_of(line: str) -> int {
+    var i = 0
+    for i < line.len() {
+        let c = line.code_at(i)
+        if c != 32 && c != 9 {
+            return i
+        }
+        i += 1
+    }
+    return line.len()
+}
+
+fn without_indent(line: str) -> str {
+    return line.slice(indent_of(line), line.len())
+}
+
+fn is_blank(line: str) -> bool {
+    return line.trim().len() == 0
+}
+
+// ---- inline -----------------------------------------------------------------
+
+/// A URL-safe rendering of a document path.
+///
+/// `encodeURIComponent`, for the characters a path in this repository actually
+/// holds. Anything outside the unreserved set is percent-encoded rather than
+/// passed through, because the alternative is a query string that means
+/// something else.
+fn encode_component(text: str) -> str {
+    var out = ""
+    for i in 0..text.len() {
+        let c = text.code_at(i)
+        let ch = text.slice(i, i + 1)
+        let unreserved = (c >= 48 && c <= 57) ||
+        (c >= 65 && c <= 90) ||
+        (c >= 97 && c <= 122) ||
+        c == 45 || c == 46 || c == 95 || c == 126
+        if unreserved {
+            out = out + ch
+        } else {
+            out = out + "%" + upper(hex_byte(c))
+        }
+    }
+    return out
+}
+
+fn hex_byte(c: int) -> str {
+    let digits = "0123456789abcdef"
+    return digits.slice(c / 16, c / 16 + 1) + digits.slice(c % 16, c % 16 + 1)
+}
+
+/// Where a link inside the site should point.
+///
+/// A `.md` target is a document this site renders rather than a file to
+/// download, so it goes through the viewer. Everything else is left exactly as
+/// written — an external link is not this renderer's business.
+fn link_target(href: str) -> str {
+    if ends_with(href, ".md") {
+        return "docs.html?doc=\(encode_component(href))"
+    }
+    return href
+}
+
+/// The index of `needle` in `text` at or after `from`, or -1.
+fn index_from(text: str, needle: str, from: int) -> int {
+    if from >= text.len() {
+        return -1
+    }
+    let at = text.slice(from, text.len()).index_of(needle)
+    if at < 0 {
+        return -1
+    }
+    return from + at
+}
+
+/// Inline markup, over text that has already been escaped.
+///
+/// One left-to-right pass rather than a sequence of replacements. The
+/// replacement form has an ordering problem it can only lose: a `**` handled
+/// after `*` has already had its halves taken, and code spans have to be
+/// protected from both. Reading once and deciding at each marker has neither
+/// question.
+///
+/// Escaping happens first, so a `<` from the document is `&lt;` before any of
+/// this looks at it — and none of the markers can appear inside an entity.
+fn inline(raw: str) -> str {
+    return spans(highlight.escape(raw))
+}
+
+/// The marker scan, over text that is already escaped.
+///
+/// Separate from [`inline`] so that the inside of a `**…**` can go through it
+/// again without being escaped twice — `**a `b` c**` has a code span in it and
+/// the strong is not what ends the question. A code span's content does *not*
+/// recurse: what is between backticks is text, and a `*` in it is a `*`.
+fn spans(text: str) -> str {
+    var out = ""
+    var i = 0
+    for i < text.len() {
+        let c = text.code_at(i)
+
+        // `code` — with something between the backticks. An empty pair is
+        // two literal backticks, which is what a ``` fence flattened into a
+        // paragraph looks like, and treating it as a span swallows the fence.
+        if c == 96 {
+            let close = index_from(text, "`", i + 1)
+            if close > i + 1 {
+                out = out + "<code>\(text.slice(i + 1, close))</code>"
+                i = close + 1
+                continue
+            }
+        }
+
+        // **strong**
+        if c == 42 && i + 1 < text.len() && text.code_at(i + 1) == 42 {
+            let close = index_from(text, "**", i + 2)
+            if close > 0 {
+                out = out + "<strong>\(spans(text.slice(i + 2, close)))</strong>"
+                i = close + 2
+                continue
+            }
+        }
+
+        // *emphasis*, but only where a word could start — otherwise `a * b`
+        // and a footnote marker both become italics that never close.
+        if c == 42 && opens_emphasis(text, i) {
+            let close = index_from(text, "*", i + 1)
+            if close > 0 && close > i + 1 {
+                out = out + "<em>\(spans(text.slice(i + 1, close)))</em>"
+                i = close + 1
+                continue
+            }
+        }
+
+        // [label](href)
+        if c == 91 {
+            let shut = index_from(text, "]", i + 1)
+            if shut > 0 && shut + 1 < text.len() && text.code_at(shut + 1) == 40 {
+                let close = index_from(text, ")", shut + 2)
+                if close > 0 {
+                    let label = text.slice(i + 1, shut)
+                    let href = text.slice(shut + 2, close)
+                    out = out + "<a href=\"\(link_target(href))\">\(spans(label))</a>"
+                    i = close + 1
+                    continue
+                }
+            }
+        }
+
+        out = out + text.slice(i, i + 1)
+        i += 1
+    }
+    return out
+}
+
+/// Whether a `*` here opens emphasis rather than being multiplication or a
+/// bullet. It does when it starts the run or follows a space or an open
+/// bracket, and when what follows it is not a space.
+fn opens_emphasis(text: str, at: int) -> bool {
+    if at + 1 >= text.len() || text.code_at(at + 1) == 32 {
+        return false
+    }
+    if at == 0 {
+        return true
+    }
+    let before = text.code_at(at - 1)
+    return before == 32 || before == 40 || before == 9
+}
+
+// ---- headings ---------------------------------------------------------------
+
+/// A heading's anchor: lowercase, punctuation dropped, spaces to hyphens.
+///
+/// A **run** of whitespace becomes one hyphen, not one each. That is the whole
+/// of the difference between `appendix-a-a-complete-program` and a version
+/// with a double hyphen in it: the em-dash is dropped as punctuation and
+/// leaves the spaces either side of it touching, and they collapse together.
+/// Every `#…` cross-reference in these documents was written against the
+/// collapsing version.
+fn slug(title: str) -> str {
+    let low = lower(title)
+    var out = ""
+    var in_space = false
+    for i in 0..low.len() {
+        let c = low.code_at(i)
+        let kept = (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95 || c == 45
+        if c == 32 || c == 9 {
+            in_space = true
+        } else if kept {
+            if in_space && out.len() > 0 {
+                out = out + "-"
+            }
+            in_space = false
+            out = out + low.slice(i, i + 1)
+        }
+    }
+    return out
+}
+
+/// The `#` count opening a heading, or 0.
+fn heading_level(line: str) -> int {
+    var n = 0
+    for n < line.len() && n < 7 {
+        if line.code_at(n) != 35 {
+            break
+        }
+        n += 1
+    }
+    if n == 0 || n > 6 || n >= line.len() {
+        return 0
+    }
+    if line.code_at(n) != 32 {
+        return 0
+    }
+    return n
+}
+
+// ---- tables -----------------------------------------------------------------
+
+fn is_row(line: str) -> bool {
+    return starts_with(without_indent(line), "|")
+}
+
+/// Whether a line is a table's `|---|:--|` rule, which is what tells a run of
+/// pipes from a paragraph that happens to contain one.
+fn is_rule(line: str) -> bool {
+    let body = without_indent(line).trim()
+    if !starts_with(body, "|") {
+        return false
+    }
+    var seen_dash = false
+    for i in 0..body.len() {
+        let c = body.code_at(i)
+        if c == 45 {
+            seen_dash = true
+        } else if c != 124 && c != 58 && c != 32 && c != 9 {
+            return false
+        }
+    }
+    return seen_dash
+}
+
+fn cells_of(line: str) -> [str] {
+    var body = without_indent(line).trim()
+    if starts_with(body, "|") {
+        body = body.slice(1, body.len())
+    }
+    if ends_with(body, "|") {
+        body = body.slice(0, body.len() - 1)
+    }
+    var out: [str] = []
+    for cell in split(body, "|") {
+        out.push(cell.trim())
+    }
+    return out
+}
+
+fn cells_html(cells: [str], tag: str) -> str {
+    var out = ""
+    for cell in cells {
+        out = out + "<\(tag)>\(inline(cell))</\(tag)>"
+    }
+    return out
+}
+
+// ---- lists ------------------------------------------------------------------
+
+/// The length of a `- ` or `* ` bullet, or 0.
+fn bullet_width(line: str) -> int {
+    let body = without_indent(line)
+    if body.len() < 2 {
+        return 0
+    }
+    let c = body.code_at(0)
+    if c != 45 && c != 42 {
+        return 0
+    }
+    if body.code_at(1) != 32 {
+        return 0
+    }
+    return indent_of(line) + 2
+}
+
+/// The length of a `12. ` marker, or 0.
+fn number_width(line: str) -> int {
+    let body = without_indent(line)
+    var i = 0
+    for i < body.len() && is_digit_at(body, i) {
+        i += 1
+    }
+    if i == 0 || i + 1 >= body.len() {
+        return 0
+    }
+    if body.code_at(i) != 46 || body.code_at(i + 1) != 32 {
+        return 0
+    }
+    return indent_of(line) + i + 2
+}
+
+fn is_digit_at(text: str, i: int) -> bool {
+    let c = text.code_at(i)
+    return c >= 48 && c <= 57
+}
+
+fn items_html(items: [str]) -> str {
+    var out = ""
+    for item in items {
+        out = out + "<li>\(inline(item))</li>"
+    }
+    return out
+}
+
+// ---- the block loop ---------------------------------------------------------
+
+/// Whether a line opens a block of its own, and so ends a paragraph.
+fn starts_block(line: str) -> bool {
+    return heading_level(line) > 0 ||
+    starts_with(line, "```") ||
+    starts_with(line, ">") ||
+    bullet_width(line) > 0 ||
+    number_width(line) > 0 ||
+    is_row(line)
+}
+
+/// A document as HTML.
+pub fn render(text: str) -> str {
+    let lines = lines_of(text)
+    var out: [str] = []
+    var i = 0
+
+    for i < lines.len() {
+        let line = lines[i]
+
+        if starts_with(line, "```") {
+            let language = line.slice(3, line.len()).trim()
+            var body: [str] = []
+            i += 1
+            for i < lines.len() && !starts_with(lines[i], "```") {
+                body.push(lines[i])
+                i += 1
+            }
+            i += 1
+            let code = join(body, "\n")
+            let shown = if language == "kite" {
+                highlight.highlight(code)
+            } else {
+                highlight.escape(code)
+            }
+            out.push("<pre><code>\(shown)</code></pre>")
+            continue
+        }
+
+        let level = heading_level(line)
+        if level > 0 {
+            let title = line.slice(level + 1, line.len())
+            out.push("<h\(level) id=\"\(slug(title))\">\(inline(title))</h\(level)>")
+            i += 1
+            continue
+        }
+
+        if is_row(line) && i + 1 < lines.len() && is_rule(lines[i + 1]) {
+            let head = cells_of(line)
+            i += 2
+            var body = ""
+            for i < lines.len() && is_row(lines[i]) {
+                body = body + "<tr>\(cells_html(cells_of(lines[i]), "td"))</tr>"
+                i += 1
+            }
+            out.push("<table><thead><tr>\(cells_html(head, "th"))</tr></thead><tbody>\(body)</tbody></table>")
+            continue
+        }
+
+        if bullet_width(line) > 0 {
+            var items: [str] = []
+            for i < lines.len() && bullet_width(lines[i]) > 0 {
+                items.push(lines[i].slice(bullet_width(lines[i]), lines[i].len()))
+                i += 1
+            }
+            out.push("<ul>\(items_html(items))</ul>")
+            continue
+        }
+
+        if number_width(line) > 0 {
+            var items: [str] = []
+            for i < lines.len() && number_width(lines[i]) > 0 {
+                items.push(lines[i].slice(number_width(lines[i]), lines[i].len()))
+                i += 1
+            }
+            out.push("<ol>\(items_html(items))</ol>")
+            continue
+        }
+
+        if starts_with(line, ">") {
+            var body: [str] = []
+            for i < lines.len() && starts_with(lines[i], ">") {
+                body.push(quoted_body(lines[i]))
+                i += 1
+            }
+            out.push("<blockquote>\(inline(join(body, " ")))</blockquote>")
+            continue
+        }
+
+        if is_rule_line(line) {
+            out.push("<hr>")
+            i += 1
+            continue
+        }
+
+        if is_blank(line) {
+            i += 1
+            continue
+        }
+
+        var paragraph: [str] = []
+        for i < lines.len() && !is_blank(lines[i]) && !starts_block(lines[i]) {
+            paragraph.push(lines[i])
+            i += 1
+        }
+        out.push("<p>\(inline(join(paragraph, " ")))</p>")
+    }
+    return join(out, "\n")
+}
+
+fn quoted_body(line: str) -> str {
+    var body = line.slice(1, line.len())
+    if starts_with(body, " ") {
+        body = body.slice(1, body.len())
+    }
+    return body
+}
+
+/// A `---` rule: three or more hyphens and nothing else.
+fn is_rule_line(line: str) -> bool {
+    let body = line.trim()
+    if body.len() < 3 {
+        return false
+    }
+    for i in 0..body.len() {
+        if body.code_at(i) != 45 {
+            return false
+        }
+    }
+    return true
+}

@@ -29,6 +29,14 @@ for module in "$root"/std/*.kite; do
   echo "  reference/$name.md"
 done
 
+echo "building the site's own program…"
+# The site is a Kite program. The Markdown rendering, the syntax colouring, the
+# navigation and the fetching are all in `site/src/`, compiled here to the
+# `app.wasm` every page instantiates. What is left in JavaScript on those pages
+# is the four lines that do the instantiating.
+"$root/target/release/kitec" build "$here/src/main.kite" --emit wasm --out "$out"
+echo "  app.wasm ($(wc -c < "$out/app.wasm" | tr -d " ") bytes)"
+
 echo "building the demo…"
 # The page, the stylesheet and the program are copied; the module is compiled
 # beside them. What the site serves is exactly what `kitec build` produces
