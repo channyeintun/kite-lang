@@ -12,25 +12,91 @@
 // and Kite deliberately has no relationship with that ecosystem.
 
 const { spawn } = require("child_process");
+const { existsSync } = require("fs");
+const { join } = require("path");
 const vscode = require("vscode");
 
 let server;
 let nextId = 1;
 const pending = new Map();
+/// Set while the extension is shutting down, so a kill is not read as a crash.
+let stopping = false;
 let diagnostics;
+
+/// Where the language server is.
+///
+/// A project that installed the compiler has it already: `@kite-lang/cli`
+/// puts `kite-lsp` in `node_modules/.bin` beside `kitec`. Looking there first
+/// means a checkout with `npm install` run in it needs nothing else — and it
+/// means the editor uses the *same* version the project builds with, rather
+/// than whichever one happens to be on `PATH`.
+function serverPath() {
+  const configured = vscode.workspace.getConfiguration("kite").get("server.path", "");
+  if (configured) return configured;
+
+  const name = process.platform === "win32" ? "kite-lsp.cmd" : "kite-lsp";
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    const local = join(folder.uri.fsPath, "node_modules", ".bin", name);
+    if (existsSync(local)) return local;
+  }
+  return "kite-lsp";
+}
+
+/// Start the server, and notice when it stops.
+///
+/// A server that dies took every diagnostic in the window with it, and the
+/// extension carried on as though nothing had happened — the editor simply
+/// stopped saying anything about Kite, which reads as *no problems* rather
+/// than as *no answers*. It restarts once, and says so if that fails too.
+function start(path, context, retried = false) {
+  server = spawn(path, [], { stdio: ["pipe", "pipe", "pipe"] });
+
+  server.on("error", (e) => {
+    vscode.window.showErrorMessage(
+      `Kite: cannot start \`${path}\` (${e.message}). Install the compiler — ` +
+        "`npm install --save-dev @kite-lang/cli` — or set `kite.server.path`.",
+    );
+  });
+
+  server.on("exit", (code, signal) => {
+    if (stopping) return;
+    diagnostics.clear();
+    if (retried) {
+      vscode.window.showErrorMessage(
+        `Kite: the language server stopped again (${signal ?? code}). ` +
+          "Diagnostics are off until the window is reloaded.",
+      );
+      return;
+    }
+    vscode.window.showWarningMessage(
+      `Kite: the language server stopped (${signal ?? code}). Restarting.`,
+    );
+    start(path, context, true);
+    request("initialize", { processId: process.pid, rootUri: null, capabilities: {} });
+    notify("initialized", {});
+    for (const open of vscode.workspace.textDocuments) {
+      if (open.languageId === "kite") {
+        notify("textDocument/didOpen", {
+          textDocument: {
+            uri: open.uri.toString(),
+            languageId: "kite",
+            version: open.version,
+            text: open.getText(),
+          },
+        });
+      }
+    }
+  });
+
+  read(server.stdout);
+}
 
 function activate(context) {
   diagnostics = vscode.languages.createDiagnosticCollection("kite");
   context.subscriptions.push(diagnostics);
 
-  const path = vscode.workspace.getConfiguration("kite").get("server.path", "kite-lsp");
-  server = spawn(path, [], { stdio: ["pipe", "pipe", "pipe"] });
-  server.on("error", (e) => {
-    vscode.window.showErrorMessage(
-      `Kite: cannot start \`${path}\` (${e.message}). Build it with \`cargo build --release -p kite-lsp\`.`,
-    );
-  });
-  read(server.stdout);
+  const path = serverPath();
+  start(path, context);
 
   request("initialize", { processId: process.pid, rootUri: null, capabilities: {} });
   notify("initialized", {});
@@ -193,6 +259,7 @@ function handle(message) {
 }
 
 function deactivate() {
+  stopping = true;
   if (server) server.kill();
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "vite-plugin-kite",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Import .kite files from a Vite project. Runs kitec as part of the build.",
   "type": "module",
   "main": "./index.js",
