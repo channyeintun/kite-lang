@@ -2330,9 +2330,17 @@ fn json_string(s: &str) -> String {
 /// no representation JavaScript can hold yet, and a `.d.ts` that promised
 /// otherwise would type-check code that cannot work.
 pub fn generate_api(api: &[crate::Export], wasm_path: &str) -> (String, String) {
+    // A module-qualified name is not a JavaScript identifier, and `export
+    // function prelude.contains(…)` is a syntax error that takes the whole
+    // file with it — so a page importing this got nothing, not a missing
+    // function. Those names come from a `use`d module rather than from the
+    // program, and a program's public interface is its own `pub fn`s: the
+    // standard library is not part of the door this file opens.
+    let own = |e: &&crate::Export| !e.name.contains('.');
     let describable: Vec<&crate::Export> = api
         .iter()
         .filter(|e| e.name != "main")
+        .filter(own)
         .filter(|e| {
             e.params.iter().all(|(_, t)| ts_type(t).is_some())
                 && e.ret.as_deref().map(|r| ts_type(r).is_some()).unwrap_or(true)
@@ -2426,6 +2434,7 @@ pub fn generate_api(api: &[crate::Export], wasm_path: &str) -> (String, String) 
     let skipped: Vec<&str> = api
         .iter()
         .filter(|e| e.name != "main")
+        .filter(own)
         .filter(|e| !describable.iter().any(|d| d.name == e.name))
         .map(|e| e.name.as_str())
         .collect();

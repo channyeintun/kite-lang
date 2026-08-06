@@ -1702,3 +1702,43 @@ fn a_keyed_list_survives_insertion_at_the_front() {
          shortened cn 1\n"
     );
 }
+
+/// The wrapper is valid JavaScript even when the module re-exports a library.
+///
+/// It was not. A `pub fn` reached through a `use`d module keeps its qualified
+/// name — `prelude.contains` — and `export function prelude.contains(…)` is a
+/// syntax error, which takes the whole file with it: a page importing `api.js`
+/// got a parse failure rather than a missing function. `examples/page` shipped
+/// one, and so did the site's demo.
+///
+/// A program's public interface is its own `pub fn`s. The standard library is
+/// not part of the door this file opens, so a qualified name is left out.
+#[test]
+fn the_wrapper_leaves_out_names_javascript_cannot_spell() {
+    let src = "use std/dom\n\n\
+        pub fn twice(n: int) -> int {\n  return n * 2\n}\n\
+        fn main() {\n  let e = dom.find(\"#a\")\n  if e == nil {\n    return\n  }\n}\n";
+    let c = compile("wrapped.kite", src, Emit::Wasm);
+    assert!(!c.failed(), "{}", c.render_diagnostics());
+    let module = c.wasm.as_ref().expect("a module");
+    let (api_js, api_dts) = kite_driver::generate_api(&module.api, "app.wasm");
+
+    for text in [&api_js, &api_dts] {
+        for line in text.lines() {
+            if !line.starts_with("export") {
+                continue;
+            }
+            assert!(
+                !line.contains('.') || line.contains("(source"),
+                "a qualified name reached an export: {}",
+                line
+            );
+        }
+    }
+    assert!(api_js.contains("export function twice("), "{}", api_js);
+    assert!(
+        api_dts.contains("export declare function twice(n: bigint): bigint;"),
+        "{}",
+        api_dts
+    );
+}
