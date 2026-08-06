@@ -57,23 +57,20 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 curl -fsSL https://kite-lang.dev/install.sh | sh
 ```
 
-One archive, checked against the release's own checksums, and two binaries out
-of it — `kitec` and `kite-lsp`. Nothing is compiled and nothing is run from the
-archive. With `cosign` present the Sigstore signature is checked as well; the
-installer will not fetch a verifier, because one fetched by the thing it
-verifies proves nothing. `brew install kite`, `scoop install kite` and
-`yay -S kite-bin` are the package-manager routes.
-
-**No release is tagged yet**, so all four have nothing to fetch and say so.
-Kite is pre-1.0 and the language is still allowed to move. Building from source
-works today and needs Rust 1.85 and nothing else — Kite links no LLVM and ships
-no collector:
+**No release is tagged yet**, so that has nothing to fetch and says so. Kite is
+pre-1.0 and the language is still allowed to move. Building from source works
+today and needs Rust 1.85 and nothing else — Kite links no LLVM and ships no
+collector:
 
 ```bash
 git clone https://github.com/channyeintun/kite-lang
 cd kite-lang && cargo build --release
 ./target/release/kitec run examples/hello.kite
 ```
+
+[kite-lang.dev/install](https://kite-lang.dev/install.html) has the rest:
+package managers, what the installer checks and what it deliberately does not,
+the platform table, and how to remove it.
 
 ## What runs today
 

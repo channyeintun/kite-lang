@@ -14,6 +14,7 @@ site/kite_playground.wasm
 # The finished pages: rendered by `site/src/build.kite` from the documents.
 site/read/
 site/reference/
+site/install.html
 site/docs/
 site/SPECIFICATION.md
 site/README.md

@@ -38,6 +38,16 @@ fn documents() -> [Document] {
     ]
 }
 
+/// Pages that live at the site root rather than under `read/`.
+///
+/// The install page is one: it is the first thing in the navigation and the
+/// shortest URL on the site, and `kite-lang.dev/install` is what someone types
+/// from memory. Its links are written relative to the root, so it needs the
+/// empty prefix rather than `../`.
+fn root_documents() -> [Document] {
+    return [Document{ source: "site/install.md", page: "install" }]
+}
+
 fn modules() -> [str] {
     return ["prelude", "js", "dom", "html", "canvas", "text", "task", "sync",
         "math", "time", "errors", "fmt", "json", "toml", "test", "buffer",
@@ -125,6 +135,22 @@ fn write_page(path: str, body: str) -> error {
     return nil
 }
 
+fn build_root_documents(template: str, out_dir: str) -> error {
+    for doc in root_documents() {
+        let (text, err) = fs.read(doc.source)
+        if err != nil {
+            return err
+        }
+        let body = markdown.render(text)
+        let page = page_of(template, "", title_of(body, doc.page), body)
+        let werr = write_page("\(out_dir)/\(doc.page).html", page)
+        if werr != nil {
+            return werr
+        }
+    }
+    return nil
+}
+
 fn build_documents(template: str, out_dir: str) -> error {
     for doc in documents() {
         let (text, err) = fs.read(doc.source)
@@ -173,6 +199,11 @@ pub fn main() {
     }
 
     io.print("rendering the documents…")
+    let rderr = build_root_documents(template, out_dir)
+    if rderr != nil {
+        io.error(rderr.message())
+        return
+    }
     let derr = build_documents(template, out_dir)
     if derr != nil {
         io.error(derr.message())
