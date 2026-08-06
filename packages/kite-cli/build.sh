@@ -35,7 +35,9 @@ JSON
 }
 
 mkdir -p "$out"
-if [ $# -ge 1 ]; then
+if [ "${1:-}" = "--cross" ] || [ "${CROSS:-}" = "1" ]; then
+  CROSS_MODE=1
+elif [ $# -ge 1 ]; then
   echo "packaging from $1…"
   for archive in "$1"/*.tar.gz "$1"/*.zip; do
     [ -e "$archive" ] || continue
@@ -54,7 +56,31 @@ if [ $# -ge 1 ]; then
     esac
     rm -rf "$work"
   done
-else
+fi
+if [ "${CROSS_MODE:-}" = "1" ]; then
+  # Every target from this machine. Rust cross-compiles and this build has no C
+  # dependency, so the only thing needed per target is a linker: Apple's own for
+  # both macOS arches, and zig for musl and mingw.
+  #
+  #   rustup target add x86_64-apple-darwin x86_64-unknown-linux-musl \
+  #                     aarch64-unknown-linux-musl x86_64-pc-windows-gnu
+  #   cargo install cargo-zigbuild
+  #
+  # **These are not what a release ships.** CI builds each on its own runner and
+  # signs the checksums, and only that build is reproducible and verifiable.
+  # This is for trying the packaging without waiting for a tag.
+  echo "cross-building every target…"
+  ( cd "$root" && cargo build --release -p kitec -p kite-lsp )
+  ( cd "$root" && cargo build --release -p kitec -p kite-lsp --target x86_64-apple-darwin )
+  for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu; do
+    ( cd "$root" && cargo zigbuild --release -p kitec -p kite-lsp --target "$t" )
+  done
+  emit darwin-arm64 darwin arm64 "$root/target/release"
+  emit darwin-x64 darwin x64 "$root/target/x86_64-apple-darwin/release"
+  emit linux-x64 linux x64 "$root/target/x86_64-unknown-linux-musl/release"
+  emit linux-arm64 linux arm64 "$root/target/aarch64-unknown-linux-musl/release"
+  emit win32-x64 win32 x64 "$root/target/x86_64-pc-windows-gnu/release" .exe
+elif [ $# -eq 0 ]; then
   echo "packaging the platform you are on, from target/release…"
   cargo build --release -p kitec -p kite-lsp --manifest-path "$root/Cargo.toml" >/dev/null
   case "$(uname -s) $(uname -m)" in
