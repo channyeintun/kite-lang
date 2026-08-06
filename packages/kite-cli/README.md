@@ -1,9 +1,9 @@
-# kite-cli
+# @kite-lang/cli
 
 The Kite compiler, as an npm dependency.
 
 ```bash
-npm install --save-dev kite-cli
+npm install --save-dev @kite-lang/cli
 ```
 
 ```json
@@ -47,6 +47,18 @@ way.
 ./build.sh path/to/release/   # every archive of a tagged release
 ```
 
-**Nothing is published yet.** The packages build and install correctly — a
-packed tarball resolves and runs — and pushing them to npm waits on a tagged
-release, since a version here has to name binaries that exist.
+**Nothing is published yet**, and the order matters:
+
+1. `git push` and tag a release, so CI builds all five targets reproducibly and
+   signs the checksums. A compiler published from a laptop, built from source
+   nobody can check out, is the *trusting trust* problem this project's release
+   workflow goes to trouble to avoid.
+2. `./build.sh path/to/release/` to make the platform packages from those
+   artefacts.
+3. `npm login`, then publish each platform package **before** this one — npm
+   resolves `optionalDependencies` at install time, and a meta-package whose
+   platform packages do not exist installs cleanly and then cannot find a
+   compiler.
+
+The name `kite-cli` was taken on npm by an unrelated project, which is why this
+is scoped.

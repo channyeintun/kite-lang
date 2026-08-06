@@ -1,19 +1,36 @@
 {
-  "name": "kite-cli",
+  "name": "@kite-lang/cli",
   "version": "0.1.0",
   "description": "The Kite compiler, as an npm dependency. `kitec` itself, not a copy of it.",
   "type": "module",
-  "bin": { "kitec": "./kitec.js", "kite-lsp": "./kite-lsp.js" },
-  "files": ["kitec.js", "kite-lsp.js", "resolve.js", "README.md"],
+  "bin": {
+    "kitec": "./kitec.js",
+    "kite-lsp": "./kite-lsp.js"
+  },
+  "files": [
+    "kitec.js",
+    "kite-lsp.js",
+    "resolve.js",
+    "README.md"
+  ],
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/channyeintun/kite-lang", "directory": "packages/kite-cli" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/channyeintun/kite-lang",
+    "directory": "packages/kite-cli"
+  },
   "homepage": "https://kite-lang.dev",
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "optionalDependencies": {
     "@kite-lang/cli-darwin-arm64": "0.1.0",
     "@kite-lang/cli-darwin-x64": "0.1.0",
     "@kite-lang/cli-linux-arm64": "0.1.0",
     "@kite-lang/cli-linux-x64": "0.1.0",
     "@kite-lang/cli-win32-x64": "0.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

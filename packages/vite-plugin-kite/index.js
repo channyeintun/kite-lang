@@ -28,7 +28,7 @@ const run = promisify(execFile);
 
 /// The compiler `kitec` resolves to.
 ///
-/// `node_modules/.bin` first, because `kite-cli` puts the real binary there
+/// `node_modules/.bin` first, because `@kite-lang/cli` puts the real binary there
 /// and a project that has it should not also have to install one globally.
 /// Then `PATH`. Nothing is bundled and nothing is reimplemented — it is the
 /// same program a terminal runs, so a build and a terminal cannot disagree.
@@ -109,7 +109,7 @@ export default function kite(options = {}) {
       if (e.code === "ENOENT") {
         throw new Error(
           `vite-plugin-kite: cannot run \`${bin}\`.\n` +
-            "Add the compiler to the project — `npm install kite-cli` — or install it\n" +
+            "Add the compiler to the project — `npm install @kite-lang/cli` — or install it\n" +
             "yourself: https://kite-lang.dev/install",
         );
       }

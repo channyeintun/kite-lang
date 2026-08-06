@@ -8,11 +8,11 @@ npm install
 npm run dev
 ```
 
-`npm install` brings the compiler with it. `kite-cli` is a dependency like any
+`npm install` brings the compiler with it. `@kite-lang/cli` is a dependency like any
 other, and it holds the real `kitec` — the same binary a terminal runs, so
 `npm run fmt` and `kitec fmt` cannot answer differently.
 
-**`kite-cli` is not published yet.** Until it is, put `kitec` on your `PATH`:
+**`@kite-lang/cli` is not published yet.** Until it is, put `kitec` on your `PATH`:
 [kite-lang.dev/install](https://kite-lang.dev/install). The plugin looks in
 `node_modules/.bin` first and falls back to `PATH`, so both work.
 
