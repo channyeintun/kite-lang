@@ -40,14 +40,19 @@ is faster.
 
 | | |
 |---|---|
+| `src/main.kite` | The program: reads the inputs, listens, draws the rows. Owns this part of the page. |
 | `src/checkout.kite` | Line totals, tax, discounts, money formatting, a Luhn check. No DOM in it. |
-| `src/main.js` | Reads the page, hands values to Kite, puts answers back. |
+| `src/boot.js` | Two lines, which instantiate the program. The only JavaScript here. |
 | `index.html` | The markup, which keeps its job. |
 | `vite.config.js` | Three lines. |
 
-The split is the point: everything that could be wrong about money is on the
-Kite side, with a type checker over it, and nothing there knows it is on a web
-page.
+**There is no JavaScript in this project but the two lines that start it.**
+Every event listener, every DOM write and all the arithmetic is Kite, over
+`std/dom` and `std/html`. That is the claim the language makes, so it is the
+one a starter should be.
+
+The split inside the Kite is worth a look too: `checkout.kite` knows nothing
+about a web page, and `main.kite` is what puts its answers on one.
 
 ## Things worth looking at
 

@@ -1,0 +1,190 @@
+//! A checkout, in Kite.
+//!
+//! Not "Kite doing the arithmetic while JavaScript drives the page" — the
+//! program owns this part of the page and there is no JavaScript in the
+//! project but the two lines that instantiate it. Reading the inputs,
+//! listening for events, writing the rows: all of it is here, over `std/dom`.
+//!
+//! HTML and CSS keep their jobs. The markup in `index.html` is real markup and
+//! the class names pass through exactly as written, so a stylesheet somebody
+//! else wrote — this one, or Tailwind, or a design system you already own —
+//! works on it unchanged.
+
+use std/dom
+use std/html
+use checkout
+
+/// What the page is showing. A struct rather than loose bindings, because a
+/// closure may not capture a `var` — it captures a `let` handle to this, and
+/// the functions that change it take it as `var`.
+struct View {
+    var lines: [Line]
+    var percent: int
+}
+
+struct Line {
+    what: str
+    price: int
+    quantity: int
+}
+
+fn starting_lines() -> [Line] {
+    return [
+        Line { what: "Keyboard", price: 8999, quantity: 1 },
+        Line { what: "Cable", price: 450, quantity: 3 },
+        Line { what: "Stand", price: 2075, quantity: 1 },
+    ]
+}
+
+// ---- drawing ----------------------------------------------------------------
+
+/// The rows, rebuilt from the model.
+///
+/// `std/html` compares a description against the last one and writes only what
+/// differs, so a row that did not change is not touched — and the element
+/// keeps its focus and its scroll position.
+fn rows(lines: [Line]) -> [html.Node] {
+    var out: [html.Node] = []
+    for line in lines {
+        out.push(html.keyed(line.what, html.el("li", [], [
+                        html.txt("span", [], "\(line.what) × \(line.quantity)"),
+                        html.txt("output", [], checkout.money(
+                                checkout.line_total(line.price, line.quantity))),
+                    ])))
+    }
+    return out
+}
+
+fn subtotal_of(lines: [Line]) -> int {
+    var total = 0
+    for line in lines {
+        total = total + checkout.line_total(line.price, line.quantity)
+    }
+    return total
+}
+
+fn write(id: str, body: str) {
+    let target = dom.find(id)
+    if target == nil {
+        return
+    }
+    let err = dom.set_text(target, body)
+    if err != nil {
+        io.error("\(id): \(err.message())")
+    }
+}
+
+/// Everything on the page that depends on the model.
+fn refresh(var view: html.Mounted, model: View) {
+    let err = html.update(view, rows(model.lines))
+    if err != nil {
+        io.error("could not draw: \(err.message())")
+        return
+    }
+
+    let subtotal = subtotal_of(model.lines)
+    let off = checkout.discount(subtotal, model.percent)
+    let net = subtotal - off
+    let vat = checkout.tax(net, 2000)
+
+    write("#subtotal", checkout.money(subtotal))
+    write("#discount", "−\(checkout.money(off))")
+    write("#vat", checkout.money(vat))
+    write("#total", checkout.money(net + vat))
+}
+
+// ---- changing ---------------------------------------------------------------
+
+fn set_percent(var model: View, text: str) {
+    let typed = parse_int(text.trim())
+    model.percent = if typed == nil { 0 } else { clamp(typed, 0, 100) }
+}
+
+fn add_line(var model: View, what: str, price: int) {
+    var lines = model.lines
+    lines.push(Line{ what: what, price: price, quantity: 1 })
+    model.lines = lines
+}
+
+fn note(id: str, body: str, bad: bool) {
+    let target = dom.find(id)
+    if target == nil {
+        return
+    }
+    let terr = dom.set_text(target, body)
+    if terr != nil {
+        io.error(terr.message())
+    }
+    let cerr = dom.set_class(target, "failed", bad)
+    if cerr != nil {
+        io.error(cerr.message())
+    }
+}
+
+fn value_of(id: str) -> str {
+    let field = dom.find(id)
+    if field == nil {
+        return ""
+    }
+    return dom.value(field)
+}
+
+// ---- wiring -----------------------------------------------------------------
+
+fn listen(id: str, event: str, handler: fn(dom.Event)) {
+    let target = dom.find(id)
+    if target == nil {
+        io.error("no \(id) to listen to")
+        return
+    }
+    let (sub, err) = dom.on(target, event, handler)
+    if err != nil {
+        io.error("\(id): \(err.message())")
+    }
+}
+
+pub fn main() {
+    let list = dom.find("#items")
+    if list == nil {
+        io.error("no #items to mount into")
+        return
+    }
+    let (mounted, merr) = html.mount(list, [])
+    if merr != nil {
+        io.error("could not mount: \(merr.message())")
+        return
+    }
+
+    // A `let` handle to a struct, which is what a closure may capture. The
+    // functions that change it take it as `var`, so every mutation is spelled
+    // out in a signature rather than implied by the capture.
+    let model = View{ lines: starting_lines(), percent: 10 }
+    refresh(mounted, model)
+
+    listen("#percent", "input", |e: dom.Event| {
+            set_percent(model, dom.event_value(e))
+            refresh(mounted, model)
+        })
+
+    listen("#add", "click", |e: dom.Event| {
+            let price = checkout.parse_price(value_of("#price"))
+            if price < 0 {
+                note("#price-note", "that is not a price", true)
+                return
+            }
+            note("#price-note", "", false)
+            let what = value_of("#what")
+            add_line(model, if what.len() == 0 { "Something" } else { what }, price)
+            refresh(mounted, model)
+        })
+
+    listen("#card", "input", |e: dom.Event| {
+            let typed = dom.event_value(e)
+            if typed.trim().len() == 0 {
+                note("#card-note", "", false)
+                return
+            }
+            let ok = checkout.card_looks_valid(typed)
+            note("#card-note", if ok { "passes the Luhn check" } else { "does not check out" }, !ok)
+        })
+}

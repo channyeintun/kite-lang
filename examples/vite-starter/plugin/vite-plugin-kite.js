@@ -279,12 +279,31 @@ export default function kite(options = {}) {
       //   * the module is imported with `?url`, so Vite serves it in dev and
       //     emits it hashed and fingerprinted in a build. Nothing here has to
       //     know which of the two is happening.
+      //   * `start()` is added, for the shape where the Kite program owns its
+      //     own part of the page rather than being called into. That program
+      //     uses `std/dom` and never crosses the typed wrapper at all, so what
+      //     it needs is what the site's own pages do: instantiate, register as
+      //     resident so listeners and tasks keep running after `main` returns,
+      //     and call `main`.
       return (
         `import __wasm from ${JSON.stringify(wasm + "?url")};\n` +
+        `import { resident as __resident } from ${JSON.stringify(GLUE + out)};\n` +
         api
           .replace(/from "\.\/app\.js"/, `from ${JSON.stringify(GLUE + out)}`)
           .replace(/export async function load\(source = "app\.wasm"\)/,
-                   "export async function load(source = __wasm)")
+                   "export async function load(source = __wasm)") +
+        `
+/// Instantiate and run \`main\`, for a program that owns its own page.
+///
+/// \`resident\` is what keeps a program alive after \`main\` returns — an event
+/// listener or a task has nothing holding it up otherwise.
+export async function start(source = __wasm) {
+  const exports = await load(source);
+  __resident(exports);
+  if (typeof exports.main === "function") exports.main();
+  return exports;
+}
+`
       );
     },
 

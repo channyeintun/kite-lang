@@ -215,6 +215,19 @@ fn the_vite_starter_compiles_and_every_export_crosses() {
             wanted
         );
     }
+
+    // And the entry, which is the program that owns the page: `std/dom`,
+    // `std/html`, listeners, the lot. Checked for the **web** target, because
+    // `std/dom` is web-only and a checker that never lowered it would not have
+    // said whether a browser can run this.
+    let main = entry.with_file_name("main.kite");
+    let src = std::fs::read_to_string(&main).expect("the starter's entry");
+    let compiled = kite_driver::compile(&main, &src, Emit::Wasm);
+    assert!(
+        !compiled.failed(),
+        "the starter's program does not compile:\n{}",
+        compiled.render_diagnostics()
+    );
 }
 
 /// The starter's copy of the Vite plugin matches the package.
