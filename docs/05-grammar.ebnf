@@ -269,21 +269,21 @@ MatchExpr    = "match" Expr "{" { MatchArm } "}" ;
    Literals and lexical elements
    ------------------------------------------------------------------ *)
 
-Literal      = IntLit | FloatLit | StringLit | CharLit
+(* One integer type, one float, and no `char` — so no numeric type suffix and
+   no char literal. A suffix used to be parsed and thrown away, which made
+   `300i8` a width nothing checked; it is E0004 now. *)
+Literal      = IntLit | FloatLit | StringLit
              | "true" | "false" | "nil" ;
 
 IntLit       = DecInt | HexInt | OctInt | BinInt ;
-DecInt       = Digit { Digit | "_" } [ IntSuffix ] ;
-HexInt       = "0x" HexDigit { HexDigit | "_" } [ IntSuffix ] ;
-OctInt       = "0o" OctDigit { OctDigit | "_" } [ IntSuffix ] ;
-BinInt       = "0b" BinDigit { BinDigit | "_" } [ IntSuffix ] ;
-IntSuffix    = "i8" | "i16" | "i32" | "i64"
-             | "u8" | "u16" | "u32" | "u64" ;
+DecInt       = Digit { Digit | "_" } ;
+HexInt       = "0x" HexDigit { HexDigit | "_" } ;
+OctInt       = "0o" OctDigit { OctDigit | "_" } ;
+BinInt       = "0b" BinDigit { BinDigit | "_" } ;
 
-FloatLit     = Digit { Digit | "_" } "." Digit { Digit | "_" }
-               [ Exponent ] [ FloatSuffix ] ;
+FloatLit     = Digit { Digit | "_" } "." Digit { Digit | "_" } [ Exponent ]
+             | Digit { Digit | "_" } Exponent ;
 Exponent     = ( "e" | "E" ) [ "+" | "-" ] Digit { Digit } ;
-FloatSuffix  = "f32" | "f64" ;
 
 StringLit    = SimpleString | MultiString ;
 SimpleString = '"' { StringElem } '"' ;
@@ -295,8 +295,6 @@ Interpolation
              = "\" "(" Expr ")" ;
 Escape       = "\" ( "n" | "t" | "r" | "0" | "\" | '"' | "'"
                    | "u" "{" HexDigit { HexDigit } "}" ) ;
-
-CharLit      = "'" ( Char | Escape ) "'" ;
 
 Ident        = XIDStart { XIDContinue } ;   (* Unicode; NFC-normalised *)
 

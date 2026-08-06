@@ -380,11 +380,17 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Consume a trailing type suffix such as `i32` or `f64`.
+    /// Reject a trailing type suffix such as `i32` or `f64`.
+    ///
+    /// Kite has one integer type and one float, so none of these name anything.
+    /// They were once consumed and thrown away, which made `300i8` read as a
+    /// width the compiler was checking — when there was no `i8` for the value
+    /// to overflow, and 300 came out as 300.
     fn eat_suffix(&mut self) {
         const SUFFIXES: [&str; 10] = [
             "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64",
         ];
+        let start = self.pos;
         let rest = &self.src[self.pos..self.limit];
         for s in SUFFIXES {
             if rest.starts_with(s) {
@@ -392,6 +398,13 @@ impl<'a> Lexer<'a> {
                 // Do not eat the start of a longer identifier.
                 if !is_ident_continue(self.char_at(after)) {
                     self.pos = after;
+                    self.error_here(
+                        codes::E0004,
+                        start,
+                        &format!("`{}` is not a Kite type", s),
+                        "Kite has one integer, `int`, and one float, `float`; write the number \
+                         on its own",
+                    );
                     return;
                 }
             }

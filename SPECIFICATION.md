@@ -125,13 +125,11 @@ type     use      var
 
 ```kite
 42            // int
-42i32         // typed integer literal
 1_000_000     // underscores permitted as separators
 0xFF  0o755  0b1010_1101
-3.14          // float (f64)
-2.5f32
-'a'  '\n'  '\u{1F600}'      // char — one Unicode scalar value
-"hello"                      // str
+3.14          // float
+1e10  1.5e-3
+"hello"       // str
 "line\nbreak"
 """
 multi-line string, leading indentation stripped
@@ -187,23 +185,23 @@ rejected as `E0117` rather than allowed to be quietly wrong.
 | Type | Description | Wasm representation |
 |---|---|---|
 | `bool` | `true` / `false` | `i32` |
-| `int` | 64-bit signed; the default integer | `i64` |
-| `i8` `i16` `i32` `i64` | Sized signed integers | `i32` / `i64` |
-| `u8` `u16` `u32` `u64` | Sized unsigned integers | `i32` / `i64` |
-| `byte` | Alias for `u8` | `i32` |
-| `float` | 64-bit IEEE-754; the default float | `f64` |
-| `f32` `f64` | Sized floats | `f32` / `f64` |
-| `char` | One Unicode scalar value | `i32` |
+| `int` | 64-bit signed | `i64` |
+| `float` | 64-bit IEEE-754 | `f64` |
 | `str` | Immutable UTF-8 string | `externref` (JS string) or `array i8` |
+| `error` | A failure, and what it says ([§7](#7-error-handling)) | GC reference |
 | `JsValue` | An opaque host object; web only ([§15.1](#151-jsvalue)) | `externref` |
 
-**There are no implicit numeric conversions.** `let x: i64 = my_i32` is a
-compile error; write `my_i32 as i64`. Integer overflow traps in debug builds and
-wraps in release builds, matching the default most users expect while keeping
-release performance predictable. `math.wrapping_add` wraps in both, and
-`math.checked_add` answers `Option<int>` in both, for the code that has to mean
-one of the two regardless of how it was built. Both are ordinary Kite over
-`math.max_int()` and `math.min_int()`, and neither may overflow while deciding
+**There are one integer type and one float, and nothing converts between them
+implicitly.** `let x: float = count` is a compile error; write `count as float`.
+Sized numerics (`i32`, `u8`, `f32`) and `char` are *not* part of the language,
+and a numeric literal may not carry a type suffix: `42i32` is `E0004`.
+
+Integer overflow traps in debug builds and wraps in release builds, matching
+the default most users expect while keeping release performance predictable.
+`math.wrapping_add` wraps in both, and `math.checked_add` answers `Option<int>`
+in both, for the code that has to mean one of the two regardless of how it was
+built. Both are ordinary Kite over `math.max_int()` and `math.min_int()`, and
+neither may overflow while deciding
 whether an overflow would happen — which is why they subtract to ask rather
 than adding and looking.
 

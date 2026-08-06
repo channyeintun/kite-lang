@@ -65,7 +65,12 @@ codes! {
     E0004 = "E0004", "invalid number literal",
         "A numeric literal is malformed. Digit separators may appear between \
          digits but not at either end, and a float must have digits on both \
-         sides of the point.";
+         sides of the point.\n\n\
+         A type suffix — `42i32`, `2.5f32` — is also refused. Kite has one \
+         integer type and one float, so a suffix names nothing. It used to be \
+         consumed and thrown away, which made `300i8` read as a width the \
+         compiler was checking when there was no `i8` for the value to \
+         overflow.";
 
     E0005 = "E0005", "block comments are not supported",
         "Kite has line comments (//) and doc comments (///) only. Nested block \

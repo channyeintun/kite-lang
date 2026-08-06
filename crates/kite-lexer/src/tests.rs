@@ -73,11 +73,27 @@ fn integer_and_float_forms() {
     assert_eq!(bare("0xFF"), vec![T::Int]);
     assert_eq!(bare("0o755"), vec![T::Int]);
     assert_eq!(bare("0b1010_1101"), vec![T::Int]);
-    assert_eq!(bare("42i32"), vec![T::Int]);
     assert_eq!(bare("3.14"), vec![T::Float]);
-    assert_eq!(bare("2.5f32"), vec![T::Float]);
     assert_eq!(bare("1e10"), vec![T::Float]);
     assert_eq!(bare("1.5e-3"), vec![T::Float]);
+}
+
+/// A type suffix names a type Kite does not have, and is refused rather than
+/// discarded.
+///
+/// This test asserted the opposite until it was noticed that `300i8` compiled
+/// and evaluated to 300: the suffix was eaten and dropped, so it read as a
+/// width the compiler was checking and was not.
+#[test]
+fn a_numeric_type_suffix_is_rejected() {
+    for src in ["42i32", "300i8", "999u8", "2.5f32", "1_000u64"] {
+        let (_, diags) = lex(src);
+        assert!(diags.has_errors(), "{} was accepted", src);
+    }
+
+    // Not a suffix: the start of a longer identifier, and a field access.
+    assert_eq!(bare("42i32x"), vec![T::Int, T::Ident]);
+    assert!(!lex("1.0f64x").1.has_errors());
 }
 
 /// The reason `scan_number` refuses to eat `.` unless a digit follows.
