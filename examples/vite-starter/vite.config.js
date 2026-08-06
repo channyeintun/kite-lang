@@ -1,18 +1,17 @@
-// The plugin is imported from `plugin/` rather than from `node_modules`,
-// because it is not published to npm yet and a starter has to work when it is
-// copied out of this repository — which is the only thing a starter is for.
-//
-// `plugin/vite-plugin-kite.js` is a byte-for-byte copy of
-// `packages/vite-plugin-kite/index.js`, and a test in the compiler's suite
-// fails if the two ever stop matching. When the package is published this
-// becomes:
-//
-//     import kite from "vite-plugin-kite";
-//
-// with `"vite-plugin-kite": "^0.1.0"` in `devDependencies`, and `plugin/`
-// goes away.
+import { resolve } from "node:path";
 import kite from "./plugin/vite-plugin-kite.js";
 
+// Two pages, each running its own program. Nothing about `index.html` or
+// `main.kite` is special: the plugin wires whatever a `<script type="module">`
+// points at, in whatever HTML Vite is given.
 export default {
   plugins: [kite()],
+  build: {
+    rollupOptions: {
+      input: {
+        index: resolve(import.meta.dirname, "index.html"),
+        about: resolve(import.meta.dirname, "about.html"),
+      },
+    },
+  },
 };

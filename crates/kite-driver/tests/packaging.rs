@@ -306,3 +306,81 @@ fn the_languages_entry_matches_the_grammar() {
         "`language_id` is Linguist's to allocate with `script/update-ids`"
     );
 }
+
+/// Every version in the tree is `0.1.N`, and stays there.
+///
+/// Kite's numbering does not climb: there is no 0.2, no 1.0, and no plan for
+/// one. The patch number goes up — 0.1.1, 0.1.2, … 0.1.26 — and the first two
+/// components never move.
+///
+/// The reason is the promise the language makes rather than modesty about it.
+/// A major number is a licence to break things and an invitation to be asked
+/// when the next one lands; a minor number implies a feature line that will be
+/// superseded. Kite intends neither. A version here says only *which build*,
+/// which is the only question a version has to answer once the language has
+/// stopped moving.
+///
+/// The VS Code extension had drifted to 0.2.0 on its own, which is exactly the
+/// drift a rule nobody checks invites.
+#[test]
+fn every_version_stays_on_the_one_line() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let read = |path: &str| {
+        std::fs::read_to_string(root.join(path))
+            .unwrap_or_else(|e| panic!("read {}: {}", path, e))
+    };
+
+    // `version = "0.1.N"` in the workspace manifest, and `"version": "0.1.N"`
+    // in each package.
+    let mut found: Vec<(&str, String)> = Vec::new();
+    let cargo = read("Cargo.toml");
+    let line = cargo
+        .lines()
+        .find(|l| l.trim_start().starts_with("version = \""))
+        .expect("the workspace declares a version");
+    found.push(("Cargo.toml", line.split('"').nth(1).unwrap().to_string()));
+
+    for path in [
+        "packages/kite-cli/package.json",
+        "packages/vite-plugin-kite/package.json",
+        "editors/vscode/package.json",
+    ] {
+        let text = read(path);
+        let at = text.find("\"version\"").expect("a version");
+        let value: String = text[at..]
+            .split('"')
+            .nth(3)
+            .expect("a version string")
+            .to_string();
+        found.push((path, value));
+    }
+
+    for (path, version) in &found {
+        let parts: Vec<&str> = version.split('.').collect();
+        assert_eq!(
+            (parts.first().copied(), parts.get(1).copied()),
+            (Some("0"), Some("1")),
+            "{} is {} — every version in this repository is 0.1.N, and the \
+             first two components do not move",
+            path,
+            version
+        );
+        assert!(
+            parts.len() == 3 && parts[2].chars().all(|c| c.is_ascii_digit()),
+            "{} is {} — the patch component is a number and nothing else",
+            path,
+            version
+        );
+    }
+
+    // And they agree with each other, because four numbers that drift apart
+    // are four numbers nobody can use to say what they are running.
+    let first = &found[0].1;
+    for (path, version) in &found {
+        assert_eq!(
+            version, first,
+            "{} is {} and Cargo.toml is {} — they name one build",
+            path, version, first
+        );
+    }
+}

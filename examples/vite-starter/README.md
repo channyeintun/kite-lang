@@ -45,12 +45,19 @@ that could answer differently.
 |---|---|
 | `src/main.kite` | The program: reads the inputs, listens, draws the rows. Owns this part of the page. |
 | `src/checkout.kite` | Line totals, tax, discounts, money formatting, a Luhn check. No DOM in it. |
-| `index.html` | The markup, which keeps its job. |
+| `index.html`, `about.html` | The markup, which keeps its job. |
+| `src/about.kite` | A second page's program, to show nothing is special-cased. |
 | `vite.config.js` | Three lines. |
 
-**There is no JavaScript in this project at all.** `index.html` points a
-`<script type="module">` straight at `src/main.kite`, and the plugin wires it
-up — which is what a build tool is for. Every event listener, every DOM write
+**There is no JavaScript in this project at all.** A page points a
+`<script type="module">` straight at a `.kite` file and the plugin wires it up,
+which is what a build tool is for.
+
+**Nothing is special about `index.html` or `main.kite`.** `about.html` runs
+`src/about.kite`, and each page gets its own module — the second one is 2.4 kB
+and the first is 16 kB, and neither page downloads the other's. Any HTML, any
+Kite, as many pages as you like; `vite.config.js` lists them the way Vite lists
+any multi-page input. Every event listener, every DOM write
 and all the arithmetic is Kite, over `std/dom` and `std/html`.
 
 The split inside the Kite is worth a look too: `checkout.kite` knows nothing

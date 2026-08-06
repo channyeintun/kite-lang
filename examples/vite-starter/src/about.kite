@@ -1,0 +1,19 @@
+//! A second page's program, to show that nothing here is special-cased.
+//!
+//! Neither the page nor the program is named `index` or `main`. The plugin
+//! wires whatever a `<script type="module">` points at, in whatever HTML file
+//! Vite is given.
+
+use std/dom
+use checkout
+
+pub fn main() {
+    let target = dom.find("#pence")
+    if target == nil {
+        return
+    }
+    let err = dom.set_text(target, checkout.money(1205))
+    if err != nil {
+        io.error(err.message())
+    }
+}

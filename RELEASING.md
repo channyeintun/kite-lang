@@ -20,7 +20,7 @@ the same mechanism:
 ## 1. Before anything
 
 ```bash
-cargo test --workspace --all-targets     # 775, and all of them
+cargo test --workspace --all-targets     # 776, and all of them
 cargo clippy --workspace --all-targets -- -D warnings
 for f in $(git ls-files '*.kite'); do ./target/release/kitec fmt --check "$f"; done
 ```
@@ -37,6 +37,18 @@ cargo test -p kite-driver --test size -- --nocapture
 ```
 
 ## 2. The version
+
+**It is always `0.1.N`.** There is no 0.2, no 1.0, and no plan for one. The
+patch number goes up — 0.1.1, 0.1.2, … 0.1.26 — and the first two components
+never move. `every_version_stays_on_the_one_line` in
+`crates/kite-driver/tests/packaging.rs` fails the build if one of them does, and
+if the four numbers stop agreeing with each other.
+
+That is about the promise rather than modesty about it. A major number is a
+licence to break things and an invitation to be asked when the next one lands;
+a minor number implies a feature line that something later supersedes. Kite
+intends neither. Once the language has stopped moving, the only question a
+version has to answer is *which build*, and one climbing number answers it.
 
 One number, in four places:
 
