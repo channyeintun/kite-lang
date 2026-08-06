@@ -174,12 +174,34 @@ unsafe fn with_source(ptr: *const u8, len: usize, f: impl FnOnce(&str) -> String
 /// As [`kite_run`].
 #[no_mangle]
 pub unsafe extern "C" fn kite_build(ptr: *const u8, len: usize, release: u32) -> *mut u8 {
+    // The input is framed the same way the answer is, so a caller can hand
+    // over a whole module rather than one file. The first entry is the program
+    // and the rest are its siblings, by module name — because a Kite module is
+    // a directory and this side has no directory to read.
     let bytes = std::slice::from_raw_parts(ptr, len);
-    let Ok(src) = std::str::from_utf8(bytes) else {
+    let Some(files) = unframe(bytes) else {
+        return frame(&[("diagnostics", b"error: the input is malformed\n".to_vec())]);
+    };
+    let Some((_, entry)) = files.first() else {
+        return frame(&[("diagnostics", b"error: no program was given\n".to_vec())]);
+    };
+    let Ok(src) = std::str::from_utf8(entry) else {
         return frame(&[("diagnostics", b"error: the source is not valid UTF-8\n".to_vec())]);
     };
-    let compiled =
-        kite_driver::compile_with("main.kite", src, kite_driver::Emit::Wasm, release != 0);
+    let mut provided = std::collections::HashMap::new();
+    for (name, body) in files.iter().skip(1) {
+        if let Ok(text) = std::str::from_utf8(body) {
+            provided.insert(name.clone(), text.to_string());
+        }
+    }
+    let compiled = kite_driver::compile_provided(
+        "main.kite",
+        src,
+        kite_driver::Emit::Wasm,
+        release != 0,
+        kite_driver::Strings::Table,
+        provided,
+    );
     if compiled.failed() {
         return frame(&[("diagnostics", compiled.render_diagnostics().into_bytes())]);
     }
@@ -194,6 +216,28 @@ pub unsafe extern "C" fn kite_build(ptr: *const u8, len: usize, release: u32) ->
         ("api.js", api_js.into_bytes()),
         ("api.d.ts", api_dts.into_bytes()),
     ])
+}
+
+/// The framing described on [`kite_build`], read back.
+fn unframe(bytes: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
+    let u32_at = |at: usize| -> Option<usize> {
+        let slice = bytes.get(at..at + 4)?;
+        Some(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as usize)
+    };
+    let count = u32_at(0)?;
+    let mut out = Vec::with_capacity(count);
+    let mut at = 4;
+    for _ in 0..count {
+        let name_len = u32_at(at)?;
+        at += 4;
+        let name = String::from_utf8(bytes.get(at..at + name_len)?.to_vec()).ok()?;
+        at += name_len;
+        let body_len = u32_at(at)?;
+        at += 4;
+        out.push((name, bytes.get(at..at + body_len)?.to_vec()));
+        at += body_len;
+    }
+    Some(out)
 }
 
 /// The framing described on [`kite_build`].

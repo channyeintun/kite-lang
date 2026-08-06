@@ -278,6 +278,23 @@ pub fn compile_strings(
     release: bool,
     strings: Strings,
 ) -> Compilation {
+    compile_provided(path, src, emit, release, strings, std::collections::HashMap::new())
+}
+
+/// Compile with some modules handed over rather than read from disk.
+///
+/// For a caller that already holds the sources and has no filesystem to point
+/// at: the compiler built for WebAssembly, a bundler that has read the files,
+/// an editor with unsaved buffers. A name given here is used before any
+/// directory is searched.
+pub fn compile_provided(
+    path: impl AsRef<Path>,
+    src: &str,
+    emit: Emit,
+    release: bool,
+    strings: Strings,
+    provided: std::collections::HashMap<String, String>,
+) -> Compilation {
     let mut sources = SourceMap::new();
     // The prelude is added first, so its spans and the user's never collide and
     // a diagnostic inside it says which file it came from.
@@ -285,8 +302,9 @@ pub fn compile_strings(
     let path = path.as_ref().to_path_buf();
     let file = sources.add(&path, src);
     let mut diags = DiagBag::new();
-    let (output, chunk, wasm, native, index) =
-        run_passes(prelude, file, &path, &mut sources, emit, release, strings, &mut diags);
+    let (output, chunk, wasm, native, index) = run_passes(
+        prelude, file, &path, &mut sources, emit, release, strings, provided, &mut diags,
+    );
 
     let mut c = Compilation { sources, diags, output, chunk, wasm, native, index };
     // The standard library's own advice is not the user's to act on.
@@ -310,6 +328,7 @@ fn run_passes(
     emit: Emit,
     release: bool,
     strings: Strings,
+    provided: std::collections::HashMap<String, String>,
     diags: &mut DiagBag,
 ) -> (
     String,
@@ -330,7 +349,7 @@ fn run_passes(
     // nothing asked for, which is what keeps a `hello world` from carrying the
     // standard library.
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
-    let loader = modules::Loader::load(&ast, dir, sources, diags);
+    let loader = modules::Loader::load_with(&ast, dir, provided, sources, diags);
 
     // Every item's module, aligned with the merged item list. The program's own
     // items and the prelude's are the root module.

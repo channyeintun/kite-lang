@@ -42,14 +42,13 @@ is faster.
 |---|---|
 | `src/main.kite` | The program: reads the inputs, listens, draws the rows. Owns this part of the page. |
 | `src/checkout.kite` | Line totals, tax, discounts, money formatting, a Luhn check. No DOM in it. |
-| `src/boot.js` | Two lines, which instantiate the program. The only JavaScript here. |
 | `index.html` | The markup, which keeps its job. |
 | `vite.config.js` | Three lines. |
 
-**There is no JavaScript in this project but the two lines that start it.**
-Every event listener, every DOM write and all the arithmetic is Kite, over
-`std/dom` and `std/html`. That is the claim the language makes, so it is the
-one a starter should be.
+**There is no JavaScript in this project at all.** `index.html` points a
+`<script type="module">` straight at `src/main.kite`, and the plugin wires it
+up — which is what a build tool is for. Every event listener, every DOM write
+and all the arithmetic is Kite, over `std/dom` and `std/html`.
 
 The split inside the Kite is worth a look too: `checkout.kite` knows nothing
 about a web page, and `main.kite` is what puts its answers on one.

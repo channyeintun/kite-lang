@@ -19,7 +19,7 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -71,10 +71,33 @@ export class WasmCompiler {
     return out;
   }
 
-  async build(source, release) {
+  /// `files` is the program first, then its siblings by module name.
+  ///
+  /// A Kite module is a directory, so a program that says `use checkout` needs
+  /// `checkout.kite` as well — and this side of the boundary has no directory
+  /// to read. They are framed the same way the answer is.
+  async build(module, release) {
     const w = await this.load();
     const memory = () => new Uint8Array(w.memory.buffer);
-    const input = new TextEncoder().encode(source);
+    const encoder = new TextEncoder();
+
+    const parts = module.map(([name, body]) => [encoder.encode(name), encoder.encode(body)]);
+    const size = 4 + parts.reduce((n, [name, body]) => n + 8 + name.length + body.length, 0);
+    const input = new Uint8Array(size);
+    const writer = new DataView(input.buffer);
+    writer.setUint32(0, parts.length, true);
+    let wrote = 4;
+    for (const [name, body] of parts) {
+      writer.setUint32(wrote, name.length, true);
+      wrote += 4;
+      input.set(name, wrote);
+      wrote += name.length;
+      writer.setUint32(wrote, body.length, true);
+      wrote += 4;
+      input.set(body, wrote);
+      wrote += body.length;
+    }
+
     const at = w.kite_alloc(input.length);
     memory().set(input, at);
 
@@ -104,8 +127,16 @@ export class WasmCompiler {
   }
 }
 
-/// A `.kite` import, absolute, with any Vite suffix (`?url`, `?raw`) removed.
+/// A `.kite` import.
 const KITE = /\.kite$/;
+
+/// A `.kite` named as a page's entry, rather than imported by something.
+///
+/// `<script type="module" src="/src/main.kite">` is the whole wiring: the
+/// plugin adds this marker in the HTML, and the module it loads for it starts
+/// the program. A project using Vite should not have to keep a JavaScript file
+/// whose only job is to call the thing it just compiled.
+const ENTRY = "?kite-entry";
 
 /// The glue is a second module rather than being concatenated onto the first.
 ///
@@ -189,15 +220,39 @@ export default function kite(options = {}) {
       }
     }
 
-    const files = await wasm.build(await readFile(file, "utf8"), release);
-    const diagnostics = files.get("diagnostics");
+    // The program first, then every `.kite` beside it under its module name —
+    // which is the file's basename, because that is what `use` writes.
+    const module = [["main", await readFile(file, "utf8")]];
+    for (const path of await siblings(file)) {
+      if (path === file) continue;
+      module.push([basename(path, ".kite"), await readFile(path, "utf8")]);
+    }
+    const built = await wasm.build(module, release);
+    const diagnostics = built.get("diagnostics");
     if (diagnostics) {
       throw new Error(`${file} did not compile:\n\n${new TextDecoder().decode(diagnostics).trim()}`);
     }
     await Promise.all(
-      [...files].map(([name, body]) => writeFile(join(out, name), body)),
+      [...built].map(([name, body]) => writeFile(join(out, name), body)),
     );
     return out;
+  }
+
+  /// Where an import actually is on disk.
+  ///
+  /// A path from HTML is **root-relative** — `<script src="/src/main.kite">`
+  /// means `<root>/src/main.kite`, not a file at the top of the filesystem —
+  /// and a path from another module is relative to that module. Resolving the
+  /// first as though it were absolute is how the entry came back as
+  /// `cannot read /src/main.kite`.
+  async function locate(source, importer) {
+    const candidates = source.startsWith("/")
+      ? [join(root, source), source]
+      : [importer ? resolve(dirname(importer), source) : resolve(root, source)];
+    for (const path of candidates) {
+      if (await stat(path).then(() => true, () => false)) return path;
+    }
+    return candidates[0];
   }
 
   /// Every `.kite` file beside this one.
@@ -250,16 +305,50 @@ export default function kite(options = {}) {
       cacheDir = join(config.cacheDir ?? join(root, "node_modules/.vite"), "kite");
     },
 
+    /// `<script type="module" src="…​.kite">` becomes the program's entry.
+    ///
+    /// Marked rather than rewritten to a generated file, so what a reader sees
+    /// in the HTML is the file that actually runs. Only a `type="module"`
+    /// script is touched, and only its `src`.
+    ///
+    /// **`order: "pre"`**, and it is not a preference. Vite reads the HTML for
+    /// its entry points before the default transforms run, so a rewrite that
+    /// happened afterwards changed the markup and not the build: the original
+    /// module became the entry, `start` was exported and never called, and the
+    /// page loaded a program that did nothing. There was no error — the module
+    /// was there, and nothing asked it to run.
+    transformIndexHtml: {
+      order: "pre",
+      handler(html) {
+        return html.replace(
+          /<script\b[^>]*>/g,
+          (tag) =>
+            tag.includes('type="module"')
+              ? tag.replace(/(\bsrc=")([^"]+\.kite)(")/, `$1$2${ENTRY}$3`)
+              : tag,
+        );
+      },
+    },
+
     async resolveId(source, importer) {
       if (source.startsWith(GLUE)) return source;
-      if (!KITE.test(source)) return null;
-      const file = importer ? resolve(dirname(importer), source) : resolve(root, source);
-      return file;
+      const entry = source.endsWith(ENTRY);
+      const bare = entry ? source.slice(0, -ENTRY.length) : source;
+      if (!KITE.test(bare)) return null;
+      const file = await locate(bare, importer);
+      if (!file) return null;
+      return entry ? file + ENTRY : file;
     },
 
     async load(id) {
       if (id.startsWith(GLUE)) {
         return readFile(join(id.slice(GLUE.length), "app.js"), "utf8");
+      }
+      // The entry module is two lines and they are generated, which is the
+      // point: a `.kite` page has no JavaScript in its source at all.
+      if (id.endsWith(ENTRY)) {
+        const file = id.slice(0, -ENTRY.length);
+        return `import { start } from ${JSON.stringify(file)};\nawait start();\n`;
       }
       if (!KITE.test(id)) return null;
 

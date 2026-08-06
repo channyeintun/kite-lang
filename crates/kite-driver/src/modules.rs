@@ -72,6 +72,14 @@ pub struct Loader {
     /// which is what makes a package's dependencies its own rather than
     /// whatever happens to sit next to the entry file.
     dependencies: HashMap<String, PathBuf>,
+    /// Modules handed over rather than found: module name to source.
+    ///
+    /// A host without a filesystem still has the files — a bundler read them,
+    /// an editor holds them unsaved — and until this existed such a host could
+    /// only compile a program that imported nothing. The WebAssembly build of
+    /// the compiler was exactly that: it managed a single self-contained file
+    /// and failed on the first `use` of a sibling.
+    provided: HashMap<String, String>,
     seen: Vec<String>,
 }
 
@@ -118,8 +126,24 @@ impl Loader {
         sources: &mut SourceMap,
         diags: &mut DiagBag,
     ) -> Loader {
+        Loader::load_with(entry, dir, HashMap::new(), sources, diags)
+    }
+
+    /// The same, with some modules given rather than looked for.
+    ///
+    /// A name in `provided` is used before the filesystem is consulted, so a
+    /// caller that already holds the sources — a bundler, an editor, the
+    /// compiler running as WebAssembly — needs no disk at all.
+    pub fn load_with(
+        entry: &SourceFile,
+        dir: Option<&Path>,
+        provided: HashMap<String, String>,
+        sources: &mut SourceMap,
+        diags: &mut DiagBag,
+    ) -> Loader {
         let mut loader = Loader {
             dependencies: dir.map(dependencies_near).unwrap_or_default(),
+            provided,
             ..Loader::default()
         };
         let mut stack: Vec<String> = Vec::new();
@@ -196,6 +220,9 @@ impl Loader {
                 return;
             };
             files.push(sources.add(format!("<std/{}>", name), src));
+            own_dir = None;
+        } else if let Some(text) = self.provided.get(name).cloned() {
+            files.push(sources.add(format!("{}.kite", name), &text));
             own_dir = None;
         } else {
             let Some(base) = dir else {

@@ -9,6 +9,15 @@ import kite from "vite-plugin-kite";
 export default { plugins: [kite()] };
 ```
 
+A page whose program is Kite points at it directly, and needs no JavaScript of
+its own:
+
+```html
+<script type="module" src="/src/main.kite"></script>
+```
+
+Or import one as a library, if JavaScript is driving:
+
 ```js
 import { load, money } from "./checkout.kite";
 
