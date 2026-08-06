@@ -173,34 +173,27 @@ unsafe fn with_source(ptr: *const u8, len: usize, f: impl FnOnce(&str) -> String
 /// # Safety
 /// As [`kite_run`].
 #[no_mangle]
-pub unsafe extern "C" fn kite_build(ptr: *const u8, len: usize, release: u32) -> *mut u8 {
-    // The input is framed the same way the answer is, so a caller can hand
-    // over a whole module rather than one file. The first entry is the program
-    // and the rest are its siblings, by module name — because a Kite module is
-    // a directory and this side has no directory to read.
-    let bytes = std::slice::from_raw_parts(ptr, len);
-    let Some(files) = unframe(bytes) else {
-        return frame(&[("diagnostics", b"error: the input is malformed\n".to_vec())]);
+pub unsafe extern "C" fn kite_build(
+    ptr: *const u8,
+    len: usize,
+    release: u32,
+    js_strings: u32,
+) -> *mut u8 {
+    let module = match module_input(ptr, len) {
+        Ok(module) => module,
+        Err(message) => return frame(&[("diagnostics", message.into_bytes())]),
     };
-    let Some((_, entry)) = files.first() else {
-        return frame(&[("diagnostics", b"error: no program was given\n".to_vec())]);
-    };
-    let Ok(src) = std::str::from_utf8(entry) else {
-        return frame(&[("diagnostics", b"error: the source is not valid UTF-8\n".to_vec())]);
-    };
-    let mut provided = std::collections::HashMap::new();
-    for (name, body) in files.iter().skip(1) {
-        if let Ok(text) = std::str::from_utf8(body) {
-            provided.insert(name.clone(), text.to_string());
-        }
-    }
     let compiled = kite_driver::compile_provided(
         "main.kite",
-        src,
+        &module.entry,
         kite_driver::Emit::Wasm,
         release != 0,
-        kite_driver::Strings::Table,
-        provided,
+        if js_strings != 0 {
+            kite_driver::Strings::Builtins
+        } else {
+            kite_driver::Strings::Table
+        },
+        module.siblings,
     );
     if compiled.failed() {
         return frame(&[("diagnostics", compiled.render_diagnostics().into_bytes())]);
@@ -216,6 +209,69 @@ pub unsafe extern "C" fn kite_build(ptr: *const u8, len: usize, release: u32) ->
         ("api.js", api_js.into_bytes()),
         ("api.d.ts", api_dts.into_bytes()),
     ])
+}
+
+/// Check a whole module, the way [`kite_build`] compiles one.
+///
+/// [`kite_check`] takes a single file, which is right for a playground and
+/// wrong for a project: a Kite module is a *directory*, so a program that says
+/// `use checkout` has a sibling the checker must be able to see. Without this
+/// a build tool could compile a project it could not check.
+///
+/// Answers with the diagnostics, rendered as a terminal renders them, or with
+/// nothing at all when the module is clean.
+///
+/// # Safety
+/// As [`kite_run`].
+#[no_mangle]
+pub unsafe extern "C" fn kite_check_module(ptr: *const u8, len: usize) -> *mut u8 {
+    let module = match module_input(ptr, len) {
+        Ok(module) => module,
+        Err(message) => return answer(message),
+    };
+    let compiled = kite_driver::compile_provided(
+        "main.kite",
+        &module.entry,
+        kite_driver::Emit::Check,
+        false,
+        kite_driver::Strings::Table,
+        module.siblings,
+    );
+    answer(compiled.render_diagnostics())
+}
+
+/// A framed module: the program, and its siblings by module name.
+struct ModuleInput {
+    entry: String,
+    siblings: std::collections::HashMap<String, String>,
+}
+
+/// Read the framed input both [`kite_build`] and [`kite_check_module`] take.
+///
+/// The first entry is the program and the rest are its siblings, by module
+/// name — because a Kite module is a directory and this side has no directory
+/// to read.
+///
+/// # Safety
+/// `ptr` and `len` must describe a buffer the caller owns.
+unsafe fn module_input(ptr: *const u8, len: usize) -> Result<ModuleInput, String> {
+    let bytes = std::slice::from_raw_parts(ptr, len);
+    let Some(files) = unframe(bytes) else {
+        return Err("error: the input is malformed\n".to_string());
+    };
+    let Some((_, entry)) = files.first() else {
+        return Err("error: no program was given\n".to_string());
+    };
+    let Ok(src) = std::str::from_utf8(entry) else {
+        return Err("error: the source is not valid UTF-8\n".to_string());
+    };
+    let mut siblings = std::collections::HashMap::new();
+    for (name, body) in files.iter().skip(1) {
+        if let Ok(text) = std::str::from_utf8(body) {
+            siblings.insert(name.clone(), text.to_string());
+        }
+    }
+    Ok(ModuleInput { entry: src.to_string(), siblings })
 }
 
 /// The framing described on [`kite_build`], read back.

@@ -8,13 +8,16 @@ npm install
 npm run dev
 ```
 
-`npm install` brings the compiler with it. `@kite-lang/cli` is a dependency like any
-other, and it holds the real `kitec` — the same binary a terminal runs, so
-`npm run fmt` and `kitec fmt` cannot answer differently.
+**Nothing is installed and nothing is downloaded.** `npm install` brings the
+compiler with it: `@kite-lang/compiler-wasm` is the Kite compiler built for
+WebAssembly, so there is no binary to fetch, no platform matrix, and no
+postinstall step. It is the same crate `kitec` is built from, and a test in
+this repository asserts the two produce byte-identical output — so a build here
+and a terminal elsewhere cannot disagree about what a program means.
 
-**`@kite-lang/cli` is not published yet.** Until it is, put `kitec` on your `PATH`:
-[kite-lang.dev/install](https://kite-lang.dev/install). The plugin looks in
-`node_modules/.bin` first and falls back to `PATH`, so both work.
+That is also why this project runs unchanged in
+[StackBlitz](https://stackblitz.com) and other WebContainer environments, where
+native machine code cannot execute at all.
 
 **Copy this directory anywhere and it works.** The plugin is not published to
 npm yet, so it is vendored in `plugin/` and imported by path rather than by
@@ -35,9 +38,15 @@ npm run fmt          # lay the Kite out the one way
 npm run fmt:check    # say which files would change, and fail if any would
 ```
 
-`check` and `fmt` are `kitec` itself. There is one compiler and one formatter,
-and a script here is a shorter way of typing them rather than a second tool
-that could answer differently.
+`check` and `fmt` are the compiler itself, reached through WebAssembly rather
+than a spawned binary. There is one compiler and one formatter, and a script
+here is a shorter way of typing them rather than a second tool that could
+answer differently.
+
+The native `kitec` is the fuller tool — `bundle`, `pkg`, native execution and
+the language server live there, and it is what
+[kite-lang.dev/install](https://kite-lang.dev/install) puts on your `PATH`.
+Nothing in this project needs it.
 
 ## What is where
 

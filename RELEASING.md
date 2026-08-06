@@ -4,7 +4,7 @@ Everything that has to happen for a version to exist, in the order it has to
 happen in. Each step says what breaks if it is skipped, because most of these
 fail quietly rather than loudly.
 
-There are **five** things that carry a version, and they are not published by
+There are **six** things that carry a version, and they are not published by
 the same mechanism:
 
 | What | Where it goes | By |
@@ -12,6 +12,7 @@ the same mechanism:
 | `kitec`, `kite-lsp` | GitHub release, signed | CI, on a tag |
 | `@kite-lang/cli-*` | npm, one per platform | by hand, from the release's binaries |
 | `@kite-lang/cli` | npm, the meta-package | by hand, **after** the platform ones |
+| `@kite-lang/compiler-wasm` | npm, one for every platform | by hand, after `build.sh` |
 | The site | kite-lang.dev | `wrangler deploy` |
 | The VS Code extension | Marketplace | `vsce publish` |
 
@@ -50,14 +51,19 @@ a minor number implies a feature line that something later supersedes. Kite
 intends neither. Once the language has stopped moving, the only question a
 version has to answer is *which build*, and one climbing number answers it.
 
-One number, in four places:
+One number, in five places:
 
 ```
-Cargo.toml                              [workspace.package] version
-packages/kite-cli/package.json          version, and every optionalDependency
-packages/vite-plugin-kite/package.json  version
-editors/vscode/package.json             version
+Cargo.toml                               [workspace.package] version
+packages/kite-cli/package.json           version, and every optionalDependency
+packages/kite-wasm/package.json          version
+packages/vite-plugin-kite/package.json   version, and its compiler-wasm dependency
+editors/vscode/package.json              version
 ```
+
+`vite-plugin-kite` depends on `@kite-lang/compiler-wasm`, so the two move
+together. A plugin resolving to an older compiler than the one it was tested
+against is the same hazard the pinned `optionalDependencies` below avoid.
 
 The `optionalDependencies` in `@kite-lang/cli` pin **exact** versions of the
 platform packages — not a range. A range would let a meta-package resolve to a
@@ -93,6 +99,12 @@ Wait for it. Then download the release's artefacts into a directory.
 ./packages/kite-cli/build.sh path/to/downloaded/release/
 for d in packages/kite-cli/platforms/*/; do (cd "$d" && npm publish); done
 npm publish packages/kite-cli
+
+# The compiler as WebAssembly: one module, no platform matrix. `build.sh`
+# writes the `.wasm`, which is a build artefact and not in the tree — publish
+# without running it and the package ships without a compiler in it.
+./packages/kite-wasm/build.sh
+npm publish packages/kite-wasm
 ```
 
 Three things here have each cost an attempt:
@@ -114,6 +126,17 @@ path, and with no `kitec` on the `PATH`:
 ```bash
 cd $(mktemp -d) && npm init -y && npm install --save-dev @kite-lang/cli
 ./node_modules/.bin/kitec --version
+```
+
+And the WebAssembly compiler the same way, which is the one a bundler resolves.
+Check it *builds* rather than that it exists: the `.wasm` is added by
+`build.sh`, so a package published without running it installs cleanly and
+then fails at the first `.kite` import.
+
+```bash
+cd $(mktemp -d) && npm init -y && npm install --save-dev @kite-lang/compiler-wasm
+printf 'pub fn add(a: int, b: int) -> int {\n    return a + b\n}\n' > add.kite
+./node_modules/.bin/kitec build add.kite --out out && ls out
 ```
 
 A freshly published package takes a minute or two to become fetchable. A 404

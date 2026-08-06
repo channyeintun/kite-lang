@@ -17,31 +17,25 @@
 // here, nothing injected into your app, and no opinion about how you structure
 // it. What you import is what `kitec` produced.
 
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, basename } from "node:path";
-import { promisify } from "node:util";
 
-const run = promisify(execFile);
+import { compiler, BuildFailed } from "@kite-lang/compiler-wasm";
 
-/// The compiler `kitec` resolves to.
-///
-/// `node_modules/.bin` first, because `@kite-lang/cli` puts the real binary there
-/// and a project that has it should not also have to install one globally.
-/// Then `PATH`. Nothing is bundled and nothing is reimplemented — it is the
-/// same program a terminal runs, so a build and a terminal cannot disagree.
-function compilerIn(root) {
-  const local = join(root, "node_modules", ".bin", process.platform === "win32" ? "kitec.cmd" : "kitec");
-  return existsSync(local) ? local : "kitec";
-}
-
-// The compiler is `kitec`. This finds it and runs it.
+// The compiler is WebAssembly, so there is nothing to install and nothing to
+// spawn.
 //
-// Not a copy of it bundled here: one compiler, invoked the way it is invoked
-// everywhere else, so what a build does and what a terminal does cannot come
-// apart.
+// `@kite-lang/compiler-wasm` is the compiler itself — the same crate `kitec`
+// is built from, targeting Wasm instead of the machine — and its output is
+// byte-for-byte what the native compiler writes. So this is not "a second
+// compiler for the bundler": there is one compiler, reached two ways, and a
+// test in this repository holds them to identical bytes.
+//
+// What it buys over spawning a binary: one artefact for every platform with no
+// `os`/`cpu` matrix, nothing fetched at install time, and a build that works
+// in a browser-based Node such as WebContainer — which is what StackBlitz and
+// Bolt run, and where native machine code cannot execute at all.
 
 /// A `.kite` import.
 const KITE = /\.kite$/;
@@ -63,7 +57,6 @@ const GLUE = "\0kite-glue:";
 
 /**
  * @param {object} [options]
- * @param {string} [options.bin] The compiler. `kitec` on `PATH` by default.
  * @param {boolean} [options.release] Build with `--release`: `assert` is
  *   dropped and `require` is not. Follows Vite's mode when not given.
  * @param {boolean} [options.jsStrings] Build with `--js-strings`, so a `str`
@@ -72,7 +65,6 @@ const GLUE = "\0kite-glue:";
  *   is why it is off unless asked for.
  */
 export default function kite(options = {}) {
-  let bin = options.bin ?? "kitec";
   let root = process.cwd();
   let release = options.release;
   let cacheDir;
@@ -93,30 +85,37 @@ export default function kite(options = {}) {
   async function compile(file) {
     const out = outputFor(file);
     await mkdir(out, { recursive: true });
-    const args = [
-      "build",
-      file,
-      "--emit",
-      "wasm",
-      "--out",
-      out,
-      ...(release ? ["--release"] : []),
-      ...(options.jsStrings ? ["--js-strings"] : []),
-    ];
-    try {
-      await run(bin, args, { cwd: root });
-    } catch (e) {
-      if (e.code === "ENOENT") {
-        throw new Error(
-          `vite-plugin-kite: cannot run \`${bin}\`.\n` +
-            "Add the compiler to the project — `npm install @kite-lang/cli` — or install it\n" +
-            "yourself: https://kite-lang.dev/install",
-        );
-      }
-      // `kitec` writes diagnostics to stderr and they are the useful part; the
-      // exit status is not.
-      throw new Error(`${file} did not compile:\n\n${(e.stderr || e.stdout || e.message).trim()}`);
+
+    // A Kite module is a directory, and the compiler has no directory to read
+    // from here — so its siblings are handed over by module name, which is the
+    // filename without its extension, because that is what `use checkout`
+    // names.
+    const sources = {};
+    for (const path of await siblings(file)) {
+      if (path === file) continue;
+      sources[basename(path, ".kite")] = await readFile(path, "utf8");
     }
+
+    let artefacts;
+    try {
+      artefacts = (await compiler()).build({
+        entry: await readFile(file, "utf8"),
+        siblings: sources,
+        release,
+        jsStrings: options.jsStrings,
+      });
+    } catch (e) {
+      // The diagnostics are the useful part, and they are already rendered the
+      // way a terminal renders them.
+      if (e instanceof BuildFailed) {
+        throw new Error(`${file} did not compile:\n\n${e.diagnostics.trim()}`);
+      }
+      throw e;
+    }
+
+    await Promise.all(
+      Object.entries(artefacts).map(([name, body]) => writeFile(join(out, name), body)),
+    );
     return out;
   }
 
@@ -183,7 +182,6 @@ export default function kite(options = {}) {
 
     configResolved(config) {
       root = config.root;
-      if (!options.bin) bin = compilerIn(root);
       release ??= config.command === "build";
       cacheDir = join(config.cacheDir ?? join(root, "node_modules/.vite"), "kite");
     },

@@ -46,3 +46,6 @@ examples/vite-starter/package-lock.json
 # Built by packages/kite-cli/build.sh from a release, or from target/release.
 packages/kite-cli/platforms/
 packages/*/*.tgz
+
+# Built by packages/kite-wasm/build.sh: one module, every platform.
+packages/kite-wasm/kite-compiler.wasm

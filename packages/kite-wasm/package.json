@@ -1,0 +1,33 @@
+{
+  "name": "@kite-lang/compiler-wasm",
+  "version": "0.1.1",
+  "description": "The Kite compiler, as WebAssembly. One artefact for every platform, and it runs wherever WebAssembly does.",
+  "type": "module",
+  "main": "compiler.js",
+  "exports": {
+    ".": "./compiler.js",
+    "./kite-compiler.wasm": "./kite-compiler.wasm"
+  },
+  "bin": {
+    "kitec": "kitec.js"
+  },
+  "files": [
+    "compiler.js",
+    "kitec.js",
+    "kite-compiler.wasm",
+    "README.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/channyeintun/kite-lang.git",
+    "directory": "packages/kite-wasm"
+  },
+  "homepage": "https://kite-lang.dev",
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

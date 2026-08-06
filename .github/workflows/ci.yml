@@ -41,6 +41,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       # The Wasm half of the differential suite runs the compiled module.
       # Without Node it is skipped, and skipping it is exactly what must not
@@ -48,6 +50,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+      # The compiler as WebAssembly, which a bundler depends on instead of a
+      # binary. It is a build artefact and not checked in, and the test that
+      # holds it to identical output *skips* when it is absent — so building it
+      # here is what makes that test mean anything.
+      - run: ./packages/kite-wasm/build.sh
+        shell: bash
       - run: cargo test --workspace --all-targets
 
   # No `cargo fmt --check`: the Rust here is laid out by hand, and the promise
