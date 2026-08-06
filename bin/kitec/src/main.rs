@@ -163,6 +163,18 @@ fn main() -> ExitCode {
         return fail("expected a source file\n\nUSAGE:\n    kitec run <file.kite>");
     };
 
+    // A bare filename has no parent directory — `Path::new("main.kite")`
+    // yields `Some("")` — and the module loader reads that as "this program
+    // has no directory", which is right for the compiler running as
+    // WebAssembly and wrong here. Left alone, `kitec check main.kite` from
+    // inside a source directory cannot see its own siblings, while
+    // `kitec check src/main.kite` from the parent can. Naming the directory
+    // makes the two agree.
+    let path = match std::path::Path::new(&path).parent() {
+        Some(dir) if dir.as_os_str().is_empty() => format!("./{}", path),
+        _ => path,
+    };
+
     let src = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) => return fail(&format!("cannot read `{}`: {}", path, e)),
