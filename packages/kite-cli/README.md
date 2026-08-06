@@ -40,6 +40,15 @@ package itself.
 `kite-lsp` comes with it, so an editor can find the language server the same
 way.
 
+npm enforces the pairing rather than trusting it. Installing the macOS package
+on Linux is refused before anything is unpacked:
+
+```
+npm error code EBADPLATFORM
+npm error notsup Unsupported platform for @kite-lang/cli-darwin-arm64@0.1.0:
+  wanted {"os":"darwin","cpu":"arm64"} (current: {"os":"linux","cpu":"x64"})
+```
+
 ## Building the platform packages
 
 ```bash
