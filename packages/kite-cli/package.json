@@ -4,8 +4,8 @@
   "description": "The Kite compiler, as an npm dependency. `kitec` itself, not a copy of it.",
   "type": "module",
   "bin": {
-    "kitec": "./kitec.js",
-    "kite-lsp": "./kite-lsp.js"
+    "kitec": "kitec.js",
+    "kite-lsp": "kite-lsp.js"
   },
   "files": [
     "kitec.js",
@@ -16,7 +16,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/channyeintun/kite-lang",
+    "url": "git+https://github.com/channyeintun/kite-lang.git",
     "directory": "packages/kite-cli"
   },
   "homepage": "https://kite-lang.dev",

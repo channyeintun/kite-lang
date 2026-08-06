@@ -25,10 +25,11 @@ emit() {
   "version": "$version",
   "description": "The Kite compiler for $os $cpu.",
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/channyeintun/kite-lang" },
+  "repository": { "type": "git", "url": "git+https://github.com/channyeintun/kite-lang.git" },
   "os": ["$os"],
   "cpu": ["$cpu"],
-  "files": ["bin"]
+  "files": ["bin"],
+  "publishConfig": { "access": "public" }
 }
 JSON
   echo "  @kite-lang/cli-$name ($(du -h "$dir/bin/kitec$ext" | cut -f1))"
@@ -92,4 +93,10 @@ elif [ $# -eq 0 ]; then
   esac
 fi
 echo
-echo "publish with: for d in $out/*/; do (cd \"\$d\" && npm publish --access public); done"
+echo "publish the platform packages first, then the meta-package:"
+echo "  for d in $out/*/; do (cd \"\$d\" && npm publish); done"
+echo "  npm publish $here"
+echo
+echo "Each manifest carries \`publishConfig.access = public\`. A scoped package"
+echo "defaults to private, and npm answers that with 402 Payment Required —"
+echo "which reads as a billing problem and is a missing flag."

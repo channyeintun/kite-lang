@@ -20,7 +20,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/channyeintun/kite-lang",
+    "url": "git+https://github.com/channyeintun/kite-lang.git",
     "directory": "packages/vite-plugin-kite"
   },
   "homepage": "https://kite-lang.dev",
