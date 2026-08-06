@@ -218,6 +218,19 @@ codes! {
          identity to report — which is the same reason `==` is not defined on \
          them.";
 
+    E0214 = "E0214", "invalid type alias",
+        "`type Name = T` gives `T` a second spelling. The two are \
+         interchangeable everywhere, because the alias is replaced by what it \
+         names before anything else is checked.\n\n\
+         That replacement is the whole feature, and it is what the two \
+         rejected forms cannot survive.\n\n\
+         A circular alias names nothing: `type A = B` with `type B = A` has no \
+         underlying type to be replaced by, only another alias.\n\n\
+         A generic alias would need arguments substituted through it at every \
+         use, which is a second instantiation path alongside the one structs \
+         and enums already have. Kite has one. Write the generic type itself, \
+         or a struct that wraps it.";
+
     // ---- error handling ---------------------------------------------------
     E0301 = "E0301", "value used before its error was checked",
         "A function returning `(T, error)` returns a correlated pair. The \

@@ -293,6 +293,7 @@ The same narrowing applies in a `match` arm once an earlier arm has covered
 ```kite
 type UserId = int                   // alias — interchangeable with int
 type Celsius = float                // alias
+type Prices = {str: int}            // any type, not just a primitive
 
 pub struct Point {
     x: float
@@ -305,6 +306,18 @@ pub enum Status {
     Deleted(at: Timestamp, by: UserId)
 }
 ```
+
+An alias is *replaced* by the type it names before anything else is checked, so
+the two are the same type everywhere — a `UserId` adds no safety over an `int`,
+and is not a way to get one. Aliases may name each other and may be declared in
+any order.
+
+Two forms are rejected, both because the replacement is the whole feature. A
+circular alias (`type A = B` with `type B = A`) names nothing to be replaced
+by. A generic alias (`type Pair<T> = (T, T)`) would need its arguments
+substituted through the alias at every use, which is a second instantiation
+path alongside the one structs and enums have; Kite has one. Both are
+[`E0214`](#16-diagnostics).
 
 ---
 

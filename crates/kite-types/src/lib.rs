@@ -102,6 +102,25 @@ pub fn check_recording(
         type_ids.push(target);
     }
 
+    // An alias is interchangeable with the type it names (§3.4), so it is
+    // expanded to that type here — before any field, variant or signature is
+    // resolved, because all of those may name one. Arity comes first: an alias
+    // may name a generic type, and the check for that reads a count which the
+    // fill pass below would not have set yet.
+    for (i, decl) in resolved.types.iter().enumerate() {
+        let count = match &file.items[decl.decl_index] {
+            ast::Item::Struct(s) => s.generics.len(),
+            ast::Item::Enum(e) => e.generics.len(),
+            _ => continue,
+        };
+        match type_ids[i] {
+            Some(TypeTarget::Struct(sid)) => types.set_struct_generics(sid, count),
+            Some(TypeTarget::Enum(eid)) => types.set_enum_generics(eid, count),
+            _ => {}
+        }
+    }
+    expand_aliases(file, resolved, &mut type_ids, &mut types, diags);
+
     // Now fill in fields and variants, resolving their types against the
     // arena, which already knows every name.
     for (i, decl) in resolved.types.iter().enumerate() {
@@ -619,6 +638,10 @@ enum TypeTarget {
     Struct(kite_hir::StructId),
     Enum(kite_hir::EnumId),
     Trait(kite_hir::TraitId),
+    /// A `type` alias, already expanded to what it names. An alias is
+    /// interchangeable with its underlying type rather than distinct from it,
+    /// so what this carries *is* the expansion.
+    Alias(TyId),
 }
 
 struct Signature {
@@ -7595,7 +7618,150 @@ fn named_ty(target: Option<TypeTarget>, types: &mut Types) -> TyId {
         Some(TypeTarget::Struct(s)) => types.struct_ty(s),
         Some(TypeTarget::Enum(e)) => types.enum_ty(e),
         Some(TypeTarget::Trait(t)) => types.dyn_ty(t),
+        Some(TypeTarget::Alias(ty)) => ty,
         None => TyId::ERROR,
+    }
+}
+
+/// Expand every `type` alias to the type it names.
+///
+/// One alias may name another, so this walks the alias graph depth-first. A
+/// cycle has no underlying type to expand to and would otherwise recurse
+/// forever, so it is reported and the alias becomes the error type. An alias
+/// still being visited when it is reached again *is* the cycle, which is what
+/// `Visit::Visiting` records.
+///
+/// Generic aliases parse but are not expanded: substituting arguments through
+/// an alias is a second instantiation path, and the language has one. Saying
+/// so beats leaving a program that compiles to the wrong thing.
+fn expand_aliases(
+    file: &ast::SourceFile,
+    resolved: &ResolveMap,
+    type_ids: &mut [Option<TypeTarget>],
+    types: &mut Types,
+    diags: &mut DiagBag,
+) {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Visit {
+        No,
+        Visiting,
+        Done,
+    }
+
+    let alias_at = |i: usize| match &file.items[resolved.types[i].decl_index] {
+        ast::Item::TypeAlias(a) => Some(a),
+        _ => None,
+    };
+
+    let mut state = vec![Visit::No; resolved.types.len()];
+    // An explicit stack rather than recursion: the graph is user-written, and
+    // a long chain of aliases should not be able to overflow the compiler.
+    for start in 0..resolved.types.len() {
+        if alias_at(start).is_none() || state[start] != Visit::No {
+            continue;
+        }
+        let mut stack = vec![start];
+        while let Some(&i) = stack.last() {
+            let Some(alias) = alias_at(i) else {
+                stack.pop();
+                continue;
+            };
+            if state[i] == Visit::Done {
+                stack.pop();
+                continue;
+            }
+            let module = resolved.module_of_item(resolved.types[i].decl_index);
+            if state[i] == Visit::No {
+                state[i] = Visit::Visiting;
+                if !alias.generics.is_empty() {
+                    diags.push(
+                        Diagnostic::error(codes::E0214, "a type alias cannot be generic")
+                            .with_primary(alias.span, "type parameters are not accepted here")
+                            .with_note(
+                                "an alias is another spelling for one type; write the generic \
+                                 type itself, or a struct that wraps it",
+                            ),
+                    );
+                    type_ids[i] = Some(TypeTarget::Alias(TyId::ERROR));
+                    state[i] = Visit::Done;
+                    stack.pop();
+                    continue;
+                }
+                // Expand the aliases this one names first, so `type A = B`
+                // sees B's expansion rather than B's absence.
+                let mut pending = false;
+                for j in aliases_named_by(&alias.ty, resolved, module) {
+                    match state[j] {
+                        Visit::No => {
+                            stack.push(j);
+                            pending = true;
+                        }
+                        Visit::Visiting => {
+                            diags.push(
+                                Diagnostic::error(codes::E0214, "a type alias cannot be circular")
+                                    .with_primary(alias.span, "this alias is defined as itself")
+                                    .with_note(
+                                        "an alias is replaced by what it names, so a cycle names \
+                                         nothing",
+                                    ),
+                            );
+                            type_ids[j] = Some(TypeTarget::Alias(TyId::ERROR));
+                            state[j] = Visit::Done;
+                        }
+                        Visit::Done => {}
+                    }
+                }
+                if pending {
+                    continue;
+                }
+            }
+            // Every alias this one names is expanded, so this one can be.
+            let ty = resolve_named_ty(&alias.ty, resolved, module, type_ids, &[], types, diags);
+            type_ids[i] = Some(TypeTarget::Alias(ty));
+            state[i] = Visit::Done;
+            stack.pop();
+        }
+    }
+}
+
+/// The declared-type indices of every alias named anywhere inside a written type.
+fn aliases_named_by(t: &ast::Type, resolved: &ResolveMap, module: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    walk_named_types(t, &mut |p: &ast::TypePath| {
+        if let Some(i) = resolved.type_by_name_in(module, &p.text()) {
+            out.push(i as usize);
+        }
+    });
+    out
+}
+
+/// Every path written inside a type, including those nested in slices, maps,
+/// optionals, tuples, functions and type arguments.
+fn walk_named_types(t: &ast::Type, f: &mut impl FnMut(&ast::TypePath)) {
+    match t {
+        ast::Type::Path(p) => {
+            f(p);
+            for a in &p.args {
+                walk_named_types(a, f);
+            }
+        }
+        ast::Type::Slice { elem, .. } => walk_named_types(elem, f),
+        ast::Type::Map { key, value, .. } => {
+            walk_named_types(key, f);
+            walk_named_types(value, f);
+        }
+        ast::Type::Optional { inner, .. } => walk_named_types(inner, f),
+        ast::Type::Tuple { elems, .. } => elems.iter().for_each(|e| walk_named_types(e, f)),
+        ast::Type::Fn { params, ret, .. } => {
+            params.iter().for_each(|p| walk_named_types(p, f));
+            if let Some(r) = ret {
+                walk_named_types(r, f);
+            }
+        }
+        // `dyn Trait` names a trait, never an alias, but it is walked so that
+        // adding a variant to `ast::Type` cannot silently skip this pass.
+        ast::Type::Dyn { path, .. } => f(path),
+        ast::Type::Error(_) => {}
     }
 }
 

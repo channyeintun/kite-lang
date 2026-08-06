@@ -1541,3 +1541,72 @@ fn a_virtual_call_is_checked_through_the_vtable() {
     );
     assert!(c.has("E0800"), "{}", c.render());
 }
+
+// ---- type aliases ---------------------------------------------------------
+
+/// An alias is interchangeable with what it names, so a local annotated with
+/// one has the underlying type — not a distinct type, and not the error type.
+/// Until this was fixed an alias resolved to `TyId::ERROR`, which suppressed
+/// every later check and let the program compile to a unit value instead.
+#[test]
+fn an_alias_is_the_type_it_names() {
+    let c = ok("type Id = int\ntype Name = str\nfn main() {\n  let a: Id = 1\n  let b: Name = \"x\"\n}\n");
+    let locals = &c.program.fns[0].locals;
+    assert_eq!(locals[0].ty, TyId::INT);
+    assert_eq!(locals[1].ty, TyId::STR);
+}
+
+/// The aggregates are where the old bug showed as wrong output rather than a
+/// missing diagnostic: indexing an aliased map answered `()`.
+#[test]
+fn an_alias_of_an_aggregate_keeps_its_operations() {
+    let c = ok(
+        "type Prices = {str: int}\n\
+         type Names = [str]\n\
+         fn main() {\n\
+         \x20 let p: Prices = { \"kite\": 40 }\n\
+         \x20 let n: Names = [\"a\"]\n\
+         \x20 let plain: {str: int} = { \"kite\": 40 }\n\
+         \x20 let flat: [str] = [\"a\"]\n\
+         \x20 let first = n[0]\n}\n",
+    );
+    let locals = &c.program.fns[0].locals;
+    assert_eq!(locals[0].ty, locals[2].ty, "an aliased map is not the map it names");
+    assert_eq!(locals[1].ty, locals[3].ty, "an aliased slice is not the slice it names");
+    assert_eq!(locals[4].ty, TyId::STR, "indexing through an alias lost the element type");
+}
+
+/// One alias may name another, and either may be written first.
+#[test]
+fn aliases_chain_and_may_be_declared_out_of_order() {
+    let c = ok(
+        "type Key = Id\n\
+         type Id = int\n\
+         struct Row {\n  id: Key\n}\n\
+         fn main() {\n\
+         \x20 let r = Row{ id: 1 }\n\
+         \x20 let n: Id = r.id + 1\n}\n",
+    );
+    assert_eq!(c.program.fns[0].locals[1].ty, TyId::INT);
+}
+
+/// A cycle has no underlying type, and following it would not terminate.
+#[test]
+fn a_circular_alias_is_rejected() {
+    let c = run("type A = B\ntype B = A\nfn main() {\n  let x: A = 1\n}\n");
+    assert!(c.has("E0214"), "{}", c.render());
+}
+
+#[test]
+fn an_alias_naming_itself_is_rejected() {
+    let c = run("type A = A\nfn main() {\n  let x: A = 1\n}\n");
+    assert!(c.has("E0214"), "{}", c.render());
+}
+
+/// Substituting arguments through an alias is a second instantiation path,
+/// and the language has one. Rejecting it beats compiling it wrongly.
+#[test]
+fn a_generic_alias_is_rejected() {
+    let c = run("type Pair<T> = (T, T)\nfn main() {\n  io.print(1)\n}\n");
+    assert!(c.has("E0214"), "{}", c.render());
+}
