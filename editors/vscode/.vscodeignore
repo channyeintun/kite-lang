@@ -1,0 +1,8 @@
+# What a user gets is the extension, not the workshop that made it.
+#
+# `icon.svg` is the drawing and `render-icon.sh` turns it into the `icon.png`
+# the Marketplace shows. Both belong in the repository and neither belongs in
+# somebody's editor.
+icon.svg
+render-icon.sh
+.vscodeignore

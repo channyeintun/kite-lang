@@ -5,6 +5,8 @@
   "version": "0.2.0",
   "publisher": "kite-lang",
   "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/channyeintun/kite-lang" },
+  "homepage": "https://kite-lang.dev",
   "engines": { "vscode": "^1.75.0" },
   "categories": ["Programming Languages"],
   "icon": "icon.png",
