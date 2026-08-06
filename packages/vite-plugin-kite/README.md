@@ -26,6 +26,10 @@ is what `kitec` wrote.
 
 ## Install
 
+**Not published to npm yet.** `examples/vite-starter` vendors this file and
+imports it by path, which is why that starter works when it is copied out of
+the repository. A test fails if the copy drifts.
+
 The plugin needs the compiler. [kite-lang.dev/install](https://kite-lang.dev/install)
 — or point at it directly:
 

@@ -216,3 +216,40 @@ fn the_vite_starter_compiles_and_every_export_crosses() {
         );
     }
 }
+
+/// The starter's copy of the Vite plugin matches the package.
+///
+/// The starter vendors the plugin instead of depending on it, because the
+/// package is not published and a starter has to work when it is copied out of
+/// this repository — which is the only thing a starter is for. Depending on it
+/// by `file:` looked fine and was not: npm makes a symlink, `npm install`
+/// succeeds and reports no problems, and the failure arrives later as
+/// `ERR_MODULE_NOT_FOUND` pointing at a generated temp file. Silent at the
+/// step that should catch it, cryptic at the step that does.
+///
+/// A copy needs a check, which is what this is — the same arrangement the
+/// brand mark has, for the same reason.
+#[test]
+fn the_starters_copy_of_the_plugin_has_not_drifted() {
+    let root = site().join("..");
+    let package = std::fs::read_to_string(root.join("packages/vite-plugin-kite/index.js"))
+        .expect("the plugin package");
+    let vendored = std::fs::read_to_string(
+        root.join("examples/vite-starter/plugin/vite-plugin-kite.js"),
+    )
+    .expect("the starter's copy");
+    assert_eq!(
+        package, vendored,
+        "examples/vite-starter/plugin/vite-plugin-kite.js has drifted from \
+         packages/vite-plugin-kite/index.js — copy it across"
+    );
+
+    // And the starter must not reach for the unpublished package by name.
+    let config = std::fs::read_to_string(root.join("examples/vite-starter/vite.config.js"))
+        .expect("the starter's config");
+    assert!(
+        config.contains("./plugin/vite-plugin-kite.js"),
+        "the starter imports the plugin by package name, which does not resolve \
+         once it is copied out of this repository"
+    );
+}

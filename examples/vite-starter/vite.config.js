@@ -1,9 +1,18 @@
-import kite from "vite-plugin-kite";
+// The plugin is imported from `plugin/` rather than from `node_modules`,
+// because it is not published to npm yet and a starter has to work when it is
+// copied out of this repository — which is the only thing a starter is for.
+//
+// `plugin/vite-plugin-kite.js` is a byte-for-byte copy of
+// `packages/vite-plugin-kite/index.js`, and a test in the compiler's suite
+// fails if the two ever stop matching. When the package is published this
+// becomes:
+//
+//     import kite from "vite-plugin-kite";
+//
+// with `"vite-plugin-kite": "^0.1.0"` in `devDependencies`, and `plugin/`
+// goes away.
+import kite from "./plugin/vite-plugin-kite.js";
 
-// That is the whole configuration. The plugin runs `kitec` when a `.kite`
-// file is imported and hands Vite the module it produced — there is no
-// runtime, nothing injected into the page, and no opinion about how the rest
-// of the project is arranged.
 export default {
   plugins: [kite()],
 };
