@@ -72,14 +72,36 @@ fn hex_byte(c: int) -> str {
 
 /// Where a link inside the site should point.
 ///
-/// A `.md` target is a document this site renders rather than a file to
-/// download, so it goes through the viewer. Everything else is left exactly as
-/// written — an external link is not this renderer's business.
+/// A `.md` target is a document this site renders, and every rendered document
+/// is a page beside this one — so the directory comes off and the extension
+/// changes. `docs/06-roadmap.md` and `06-roadmap.md` both land on
+/// `06-roadmap.html`, which is what makes a link written for GitHub work here
+/// without being written twice.
+///
+/// Everything else is left exactly as written. An external link, and a link
+/// already pointing at a page, are not this renderer's business.
 fn link_target(href: str) -> str {
-    if ends_with(href, ".md") {
-        return "docs.html?doc=\(encode_component(href))"
+    // The anchor comes off first. `…/06-roadmap.md#phase-24` does not *end*
+    // in `.md`, and testing that before splitting is how every cross-reference
+    // carrying a section survived as a link to a raw file.
+    let hash = href.index_of("#")
+    let path = if hash < 0 { href } else { href.slice(0, hash) }
+    let anchor = if hash < 0 { "" } else { href.slice(hash, href.len()) }
+    if !ends_with(path, ".md") {
+        return href
     }
-    return href
+    return "\(lower(base_name(path))).html\(anchor)"
+}
+
+/// The last segment of a path, without its `.md`.
+fn base_name(path: str) -> str {
+    var name = path
+    for i in 0..path.len() {
+        if path.code_at(i) == 47 {
+            name = path.slice(i + 1, path.len())
+        }
+    }
+    return name.slice(0, name.len() - 3)
 }
 
 /// The index of `needle` in `text` at or after `from`, or -1.

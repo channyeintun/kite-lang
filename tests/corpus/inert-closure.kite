@@ -1,0 +1,22 @@
+// A statement continues onto the next line when it *ends* in an operator, so
+// an `||` opening a line is not the tail of the expression above it — it is a
+// closure with no parameters, because that is what `||` means where a value is
+// expected.
+//
+// Nobody writes this on purpose. It is what a line continuation looks like in
+// most other languages, and here the first line is simply a complete statement
+// and the rest is inert. After a `return` it was already caught as unreachable
+// code; after a `let` nothing noticed, and a percent-encoder in this
+// repository's own site quietly encoded the letters as well as the slashes.
+
+fn classify(c: int) -> bool {
+    let unreserved = (c >= 48 && c <= 57)
+    || (c >= 65 && c <= 90) //~ ERROR E0117
+    || (c >= 97 && c <= 122) //~ ERROR E0117
+    return unreserved
+}
+
+fn main() {
+    // `false`, before this rule existed, and nothing said so.
+    io.print(classify(65))
+}

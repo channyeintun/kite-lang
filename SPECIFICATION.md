@@ -163,6 +163,21 @@ continues onto the next line when the line ends in an operator, an open
 delimiter, or a comma. The same rule as Swift and Kotlin, and unambiguous here
 because a statement never begins with `(` or `[`.
 
+**The operator ends the line it continues, and `||` is why that is a rule and
+not a style.** A line opening with `||` is not the tail of the expression
+above it: `||` where a value is expected is a closure with no parameters, so
+the line parses, means nothing, and is discarded.
+
+```kite
+let ok = (c >= 48 && c <= 57)
+    || (c >= 65 && c <= 90)     // error[E0117] — a closure, thrown away
+```
+
+The first line is already a complete statement. `&&` cannot do this, because it
+may not begin an expression and so is a syntax error; `||` can, and it is the
+one continuation a reader coming from another language writes by habit. It is
+rejected as `E0117` rather than allowed to be quietly wrong.
+
 ---
 
 ## 3. Types

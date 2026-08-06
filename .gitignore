@@ -11,6 +11,8 @@ site/app.js
 site/api.js
 site/api.d.ts
 site/kite_playground.wasm
+# The finished pages: rendered by `site/src/build.kite` from the documents.
+site/read/
 site/reference/
 site/docs/
 site/SPECIFICATION.md

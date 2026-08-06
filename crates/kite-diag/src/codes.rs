@@ -111,6 +111,20 @@ codes! {
     E0116 = "E0116", "unreachable code",
         "This statement follows one that always diverges, so it can never run.";
 
+    E0117 = "E0117", "statement has no effect",
+        "A closure written as a statement is built and thrown away. Nothing \
+         calls it, so nothing it says can happen.\n\n\
+         Almost always this is a line continuation that did not continue. A \
+         statement carries on to the next line when it *ends* in an operator, \
+         so an `||` at the start of a line is not the tail of the expression \
+         above it — it is a closure with no parameters, which is what `||` \
+         means where a value is expected:\n\n\
+         \x20   let ok = (c >= 48 && c <= 57)\n\
+         \x20       || (c >= 65 && c <= 90)     // a closure, discarded\n\n\
+         The first line is a complete statement and the answer is wrong with \
+         nothing said about it. Put the operator at the end of the line it \
+         continues.";
+
     // ---- types ------------------------------------------------------------
     E0200 = "E0200", "type mismatch",
         "An expression's type does not match what this position requires. Kite \

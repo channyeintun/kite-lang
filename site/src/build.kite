@@ -1,0 +1,188 @@
+//! The site, rendered once, at build time.
+//!
+//! Every document this site serves is known before anyone visits it, so it is
+//! HTML on disk rather than Markdown fetched and rendered in the browser. That
+//! was the old arrangement and it cost a `Loading…` on every page — a
+//! WebAssembly download, then a fetch, then a render, before the first word
+//! appeared. For a page whose entire content is fixed, that is work done in the
+//! worst possible place.
+//!
+//! This is the same renderer, run here instead: `markdown.kite` and
+//! `highlight.kite` compiled and executed by `kitec run`, reading the documents
+//! and writing finished pages. The pages it writes need no JavaScript at all.
+//!
+//! It is also the more honest demonstration. A static site generator is what a
+//! language is *actually* asked to do here, and doing it in Kite exercises
+//! `std/fs`, the string primitives and the same library the browser would have
+//! used — with nothing shipped to the reader.
+
+use std/fs
+use markdown
+use highlight
+
+/// A document, and the page it becomes.
+struct Document {
+    source: str
+    page: str
+}
+
+fn documents() -> [Document] {
+    return [
+        Document { source: "SPECIFICATION.md", page: "specification" },
+        Document { source: "README.md", page: "readme" },
+        Document { source: "docs/01-platform-research.md", page: "01-platform-research" },
+        Document { source: "docs/02-concurrency.md", page: "02-concurrency" },
+        Document { source: "docs/03-compiler-architecture.md", page: "03-compiler-architecture" },
+        Document { source: "docs/04-the-web.md", page: "04-the-web" },
+        Document { source: "docs/06-roadmap.md", page: "06-roadmap" },
+    ]
+}
+
+fn modules() -> [str] {
+    return ["prelude", "js", "dom", "html", "canvas", "text", "task", "sync",
+        "math", "time", "errors", "fmt", "json", "toml", "test", "buffer",
+        "fs", "http", "socket", "crypto"]
+}
+
+// ---- the shell --------------------------------------------------------------
+
+/// The text between two markers, or the empty string.
+fn between(text: str, open: str, shut: str) -> str {
+    let from = text.index_of(open)
+    if from < 0 {
+        return ""
+    }
+    let rest = text.slice(from + open.len(), text.len())
+    let to = rest.index_of(shut)
+    if to < 0 {
+        return ""
+    }
+    return rest.slice(0, to)
+}
+
+/// A page's title: its own first heading, or the file it came from.
+fn title_of(html: str, fallback: str) -> str {
+    let opened = html.index_of("<h1")
+    if opened < 0 {
+        return fallback
+    }
+    let inside = between(html.slice(opened, html.len()), ">", "</h1>")
+    if inside.len() == 0 {
+        return fallback
+    }
+    return strip_tags(inside)
+}
+
+/// A heading may hold `<code>` and the `<title>` may not, so the tags come out.
+fn strip_tags(html: str) -> str {
+    var out = ""
+    var depth = 0
+    for i in 0..html.len() {
+        let c = html.code_at(i)
+        if c == 60 {
+            depth += 1
+        } else if c == 62 {
+            if depth > 0 {
+                depth -= 1
+            }
+        } else if depth == 0 {
+            out = out + html.slice(i, i + 1)
+        }
+    }
+    return out
+}
+
+/// The shell with its two holes filled and its asset paths pointed at `root`.
+fn page_of(template: str, root: str, title: str, body: str) -> str {
+    var out = replace(template, "{{root}}", root)
+    out = replace(out, "<!--TITLE-->", highlight.escape(title))
+    return replace(out, "<!--CONTENT-->", body)
+}
+
+// ---- the reference ----------------------------------------------------------
+
+/// The module list, as links rather than as buttons a script has to build.
+///
+/// The page a reader is on is marked with `aria-current`, which is what the
+/// stylesheet was already colouring when a script set it.
+fn module_nav(current: str) -> str {
+    var out = "<nav id=\"modules\" class=\"modules\">"
+    for name in modules() {
+        let here = if name == current { "true" } else { "false" }
+        out = out + "<a href=\"\(name).html\" aria-current=\"\(here)\">\(name)</a>"
+    }
+    return out + "</nav>"
+}
+
+// ---- writing ----------------------------------------------------------------
+
+fn write_page(path: str, body: str) -> error {
+    let err = fs.write(path, body)
+    if err != nil {
+        return err
+    }
+    io.print("  \(path)")
+    return nil
+}
+
+fn build_documents(template: str, out_dir: str) -> error {
+    for doc in documents() {
+        let (text, err) = fs.read(doc.source)
+        if err != nil {
+            return err
+        }
+        let body = markdown.render(text)
+        let page = page_of(template, "../", title_of(body, doc.page), body)
+        let werr = write_page("\(out_dir)/read/\(doc.page).html", page)
+        if werr != nil {
+            return werr
+        }
+    }
+    return nil
+}
+
+fn build_reference(template: str, out_dir: str) -> error {
+    for name in modules() {
+        let (text, err) = fs.read("\(out_dir)/reference/\(name).md")
+        if err != nil {
+            return err
+        }
+        let body = "\(module_nav(name))\(markdown.render(text))"
+        let page = page_of(template, "../", "std/\(name)", body)
+        let werr = write_page("\(out_dir)/reference/\(name).html", page)
+        if werr != nil {
+            return werr
+        }
+    }
+    return nil
+}
+
+// ---- the entry --------------------------------------------------------------
+
+/// `kitec run site/src/build.kite` from the repository root.
+///
+/// Paths are relative to where it is run, which is what `site/build.sh` does —
+/// a build step that has to be run from one directory is a build step, and one
+/// that guesses is a bug waiting for somebody's checkout.
+pub fn main() {
+    let out_dir = "site"
+    let (template, err) = fs.read("\(out_dir)/template.html")
+    if err != nil {
+        io.error("no page template: \(err.message())")
+        return
+    }
+
+    io.print("rendering the documents…")
+    let derr = build_documents(template, out_dir)
+    if derr != nil {
+        io.error(derr.message())
+        return
+    }
+
+    io.print("rendering the reference…")
+    let rerr = build_reference(template, out_dir)
+    if rerr != nil {
+        io.error(rerr.message())
+        return
+    }
+}

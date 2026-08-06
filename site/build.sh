@@ -29,6 +29,13 @@ for module in "$root"/std/*.kite; do
   echo "  reference/$name.md"
 done
 
+echo "rendering the pages…"
+# Every document this site serves is known now, so it is rendered now — by the
+# same Kite renderer a browser would have run, executed here instead. The pages
+# it writes need no JavaScript and show no `Loading…`.
+mkdir -p "$out/read"
+(cd "$root" && "$root/target/release/kitec" run site/src/build.kite)
+
 echo "building the site's own program…"
 # The site is a Kite program. The Markdown rendering, the syntax colouring, the
 # navigation and the fetching are all in `site/src/`, compiled here to the

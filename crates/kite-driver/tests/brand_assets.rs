@@ -134,27 +134,55 @@ fn no_brand_asset_has_a_double_hyphen_in_a_comment() {
     }
 }
 
-/// Every page of the site wears the same header, carries the favicon, and
-/// reaches the same places. A page that quietly keeps an older one is the
+/// Every page a reader lands on wears the same header, carries the favicon,
+/// and reaches the same places. A page that quietly keeps an older one is the
 /// failure this catches — it is invisible until someone lands on that page.
+///
+/// The documents are rendered at build time from `site/template.html`, so the
+/// template is checked rather than its output: it is what every generated page
+/// wears, it is the file in the repository, and the generated pages are not.
 #[test]
 fn every_page_wears_the_same_header() {
-    let pages = ["index.html", "docs.html", "playground.html", "reference.html", "brand.html"];
+    let pages = ["index.html", "playground.html", "brand.html", "template.html"];
     for page in pages {
         let html = read(&format!("site/{}", page));
         assert!(
-            html.contains("<link rel=\"icon\" href=\"favicon.svg\""),
+            html.contains("<link rel=\"icon\" href=\"") && html.contains("favicon.svg\""),
             "{} has no favicon",
             page
         );
         for needed in [
-            "src=\"kite-mark.svg\"",
+            "kite-mark.svg\"",
             "class=\"name\">Kite<",
             "class=\"chip\">draft<",
-            "docs.html?doc=docs/06-roadmap.md",
+            "read/06-roadmap.html",
             "class=\"gh\"",
         ] {
             assert!(html.contains(needed), "{} is missing `{}`", page, needed);
         }
+    }
+}
+
+/// The two old entry points still answer.
+///
+/// `docs.html?doc=…` and `reference.html?module=…` are in links people already
+/// have, and in every deployed copy of these documents. They are redirects now
+/// rather than pages, and a redirect that stopped translating the query string
+/// would send every one of those links to the front page — which looks like
+/// working and is not.
+#[test]
+fn the_old_document_urls_still_go_somewhere() {
+    for (page, fallback) in [
+        ("docs.html", "read/specification.html"),
+        ("reference.html", "reference/prelude.html"),
+    ] {
+        let html = read(&format!("site/{}", page));
+        assert!(html.contains("location.replace"), "{} does not redirect", page);
+        assert!(html.contains(fallback), "{} has no default target", page);
+        assert!(
+            html.contains("doc") && html.contains("module"),
+            "{} drops the query string it exists to translate",
+            page
+        );
     }
 }

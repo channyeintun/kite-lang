@@ -1069,6 +1069,7 @@ impl<'a> Checker<'a> {
             )),
 
             ast::Stmt::Expr(e) => {
+                self.inert_closure(e);
                 let expr = self.expr(e, None);
                 self.dropped_error(&expr);
                 let flow = if expr.ty == TyId::NEVER { Flow::Diverges } else { Flow::Falls };
@@ -4474,6 +4475,46 @@ impl<'a> Checker<'a> {
             hir::Stmt::Block(hir::Block { stmts }),
             Flow::Falls,
         ))
+    }
+
+    /// A closure written as a statement, which can do nothing at all.
+    ///
+    /// Nobody writes this on purpose. What writes it is a line continuation
+    /// that did not continue: a statement carries on to the next line when it
+    /// *ends* in an operator ([§2.5]), so an `||` opening a line is not the
+    /// tail of the expression above — it is a closure with no parameters,
+    /// because `||` where a value is expected is exactly that.
+    ///
+    /// ```text
+    /// let ok = (c >= 48 && c <= 57)
+    ///     || (c >= 65 && c <= 90)     // a closure, built and discarded
+    /// ```
+    ///
+    /// The first line is a complete statement, the rest is inert, and the
+    /// answer is quietly wrong. After a `return` the same mistake is caught as
+    /// unreachable code; after a `let` nothing noticed it at all until a
+    /// percent-encoder in this repository's own site encoded the letters.
+    ///
+    /// `&&` cannot do this — it may not begin an expression, so it is a parse
+    /// error — which is why this is about `||` alone.
+    ///
+    /// [§2.5]: ../../../SPECIFICATION.md#25-semicolon-insertion
+    fn inert_closure(&mut self, e: &ast::Expr) {
+        let ast::Expr::Closure { span, .. } = e else {
+            return;
+        };
+        self.diags.push(
+            Diagnostic::error(codes::E0117, "this closure is built and thrown away")
+                .with_primary(*span, "nothing calls it, so nothing in it happens")
+                .with_note(
+                    "an `||` opening a line is a closure with no parameters, not the \
+                     continuation of the line above",
+                )
+                .with_note(
+                    "a statement continues onto the next line when it *ends* in an \
+                     operator — put the `||` at the end of the line it continues",
+                ),
+        );
     }
 
     /// An error thrown away by leaving a call as a bare statement.
