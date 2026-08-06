@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kite + Vite</title>
+<link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+  <main>
+    <h1>Kite + Vite</h1>
+    <p class="lede">
+      Every number below is computed by WebAssembly, compiled from
+      <code>src/checkout.kite</code> by <code>kitec</code> as part of the Vite
+      build. The markup is HTML and the styling is CSS, which keep their jobs.
+    </p>
+
+    <section>
+      <h2>An order</h2>
+      <ul id="items"></ul>
+      <p class="row"><label>Discount <input id="percent" type="number" value="10" min="0" max="100"> %</label></p>
+      <dl class="totals">
+        <dt>Subtotal</dt><dd><output id="subtotal">—</output></dd>
+        <dt>Discount</dt><dd><output id="discount">—</output></dd>
+        <dt>VAT at 20%</dt><dd><output id="vat">—</output></dd>
+        <dt class="grand">Total</dt><dd class="grand"><output id="total">—</output></dd>
+      </dl>
+      <p class="row">
+        <input id="what" type="text" placeholder="Something" aria-label="Item">
+        <input id="price" type="text" placeholder="12.99" aria-label="Price">
+        <button id="add" type="button">Add</button>
+      </p>
+      <p id="price-note" class="note"></p>
+    </section>
+
+    <section>
+      <h2>A card number</h2>
+      <p>
+        The Luhn check catches a mistyped digit and a transposed pair. It is
+        nine lines of Kite, and the kind of thing worth having a compiler over.
+      </p>
+      <p class="row"><input id="card" type="text" inputmode="numeric" placeholder="4242 4242 4242 4242" aria-label="Card number"></p>
+      <p id="card-note" class="note"></p>
+    </section>
+  </main>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

@@ -171,3 +171,48 @@ fn the_sites_own_program_compiles_for_the_web() {
         module.bytes.len()
     );
 }
+
+/// The Vite starter's Kite compiles, and every export crosses the boundary.
+///
+/// The starter is the adoption story made concrete: a normal web project that
+/// imports a `.kite` file. It only holds up if two things are true — the Kite
+/// compiles for the web, and the generated wrapper can actually *describe*
+/// every `pub fn` in it.
+///
+/// The second is the one that bites. Only `int`, `float`, `bool` and `str`
+/// cross; a slice, an `Option<T>` or a `(T, error)` pair is exported by the
+/// module and left out of `api.js`. My first draft of this starter took a
+/// `[int]` and returned a `(int, error)`, and the build failed with
+/// `"total" is not exported` — after the plugin had done everything right.
+/// A starter whose functions are invisible to its own caller teaches the
+/// wrong lesson twice.
+#[test]
+fn the_vite_starter_compiles_and_every_export_crosses() {
+    let entry = site()
+        .join("../examples/vite-starter/src/checkout.kite")
+        .canonicalize()
+        .expect("the starter's Kite exists");
+    let src = std::fs::read_to_string(&entry).expect("read the starter");
+    let compiled = kite_driver::compile(&entry, &src, Emit::Wasm);
+    assert!(
+        !compiled.failed(),
+        "the Vite starter does not compile:\n{}",
+        compiled.render_diagnostics()
+    );
+
+    let module = compiled.wasm.as_ref().expect("a module");
+    let (api_js, _) = kite_driver::generate_api(&module.api, "app.wasm");
+    assert!(
+        !api_js.contains("Left out"),
+        "the starter has a `pub fn` the wrapper cannot describe, so a caller \
+         cannot reach it:\n{}",
+        api_js.lines().filter(|l| l.starts_with("//")).collect::<Vec<_>>().join("\n")
+    );
+    for wanted in ["line_total", "tax", "discount", "money", "card_looks_valid", "parse_price"] {
+        assert!(
+            api_js.contains(&format!("export function {}(", wanted)),
+            "`{}` is missing from the wrapper",
+            wanted
+        );
+    }
+}

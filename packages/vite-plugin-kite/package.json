@@ -1,0 +1,15 @@
+{
+  "name": "vite-plugin-kite",
+  "version": "0.1.0",
+  "description": "Import .kite files from a Vite project. Kite compiles to WebAssembly; this makes that a build step rather than a chore.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": { ".": "./index.js" },
+  "files": ["index.js", "README.md"],
+  "keywords": ["vite-plugin", "kite", "webassembly", "wasm"],
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/channyeintun/kite-lang", "directory": "packages/vite-plugin-kite" },
+  "homepage": "https://kite-lang.dev",
+  "peerDependencies": { "vite": ">=5" },
+  "engines": { "node": ">=18" }
+}

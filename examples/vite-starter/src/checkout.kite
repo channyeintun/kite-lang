@@ -1,0 +1,130 @@
+// The arithmetic a checkout must not get wrong, in Kite.
+//
+// Nothing here knows it is on a web page: no DOM, no `std/js`. It takes values
+// and answers with values, and `src/main.js` puts the answers on the screen.
+// That is the split worth having — this is the half where being wrong costs
+// money, and it is the half with a type checker over it.
+//
+// **Everything here takes and answers with `int`, `float`, `bool` or `str`,
+// and that is a real limit rather than a style.** Those four are what the
+// generated wrapper knows how to convert. A slice, an `Option<T>` or a
+// `(T, error)` pair is still exported by the module, but `api.js` will not
+// describe it — so the list of prices lives in JavaScript and each price
+// crosses on its own.
+
+/// One line of the order, in pence.
+///
+/// Multiplication in integers, never in floats. `0.1 + 0.2` is the oldest
+/// money bug there is, and the way not to have it is to never hold money in a
+/// float — the pennies are the unit.
+pub fn line_total(pence: int, quantity: int) -> int {
+    if quantity <= 0 {
+        return 0
+    }
+    return pence * quantity
+}
+
+/// Tax on an amount, rounded half up, in pence.
+///
+/// The rounding is written out rather than left to a cast: `as int` truncates
+/// towards zero, which quietly loses a penny per line and is discovered by an
+/// accountant rather than by a test.
+pub fn tax(pence: int, rate_basis_points: int) -> int {
+    let raw = pence * rate_basis_points
+    return (raw + 5000) / 10000
+}
+
+/// A discount of `percent`, floored, so a rounding error can never *add*
+/// money to somebody's order.
+pub fn discount(pence: int, percent: int) -> int {
+    let capped = clamp(percent, 0, 100)
+    return pence * capped / 100
+}
+
+/// Money, from pence.
+///
+/// The pence are padded, so 1205 is `£12.05` and not `£12.5` — which is the
+/// bug this function exists in order not to have.
+pub fn money(pence: int) -> str {
+    let sign = if pence < 0 { "-" } else { "" }
+    let n = abs(pence)
+    return "\(sign)£\(n / 100).\(pad_start("\(n % 100)", 2, "0"))"
+}
+
+/// Whether a card number passes the Luhn check.
+///
+/// Not a validity check — it catches a mistyped digit and a transposed pair,
+/// which is all it has ever been for. A number that passes may still belong to
+/// nobody.
+///
+/// Spaces and hyphens are ignored, because that is how people type a card
+/// number. Anything else makes it false rather than being skipped: a letter in
+/// a card number is a wrong card number, not a character to step over.
+pub fn card_looks_valid(digits: str) -> bool {
+    var sum = 0
+    var count = 0
+    var i = digits.len() - 1
+    for i >= 0 {
+        let c = digits.code_at(i)
+        if c == 32 || c == 45 {
+            i -= 1
+            continue
+        }
+        if c < 48 || c > 57 {
+            return false
+        }
+        var d = c - 48
+        if count % 2 == 1 {
+            d = d * 2
+            if d > 9 {
+                d = d - 9
+            }
+        }
+        sum = sum + d
+        count += 1
+        i -= 1
+    }
+    if count < 12 {
+        return false
+    }
+    return sum % 10 == 0
+}
+
+/// A price typed by a person, as pence, or -1 when it is not a price.
+///
+/// -1 rather than an `Option<int>`, and it is the limit above showing through:
+/// an optional does not cross the wrapper yet. Inside Kite this would answer
+/// `Option<int>` and the caller could not forget to open it.
+pub fn parse_price(text: str) -> int {
+    let body = text.trim()
+    if body.len() == 0 {
+        return -1
+    }
+    let point = body.index_of(".")
+    if point < 0 {
+        let whole = parse_int(body)
+        if whole == nil {
+            return -1
+        }
+        return whole * 100
+    }
+    let rest = body.slice(point + 1, body.len())
+    if rest.len() != 2 {
+        return -1
+    }
+    // One test per optional, and each on its own. Testing two things with
+    // `||` does not narrow either of them — on the branch where the whole
+    // condition was false, the compiler cannot say which half made it so.
+    let pounds = parse_int(body.slice(0, point))
+    if pounds == nil {
+        return -1
+    }
+    let pence = parse_int(rest)
+    if pence == nil {
+        return -1
+    }
+    return pounds * 100 + pence
+}
+
+fn main() {
+}

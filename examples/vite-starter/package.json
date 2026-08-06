@@ -1,0 +1,14 @@
+{
+  "name": "kite-vite-starter",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^7.0.0",
+    "vite-plugin-kite": "file:../../packages/vite-plugin-kite"
+  }
+}

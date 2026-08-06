@@ -37,3 +37,8 @@ examples/page/app.js
 examples/page/app.wasm
 examples/page/api.js
 examples/page/api.d.ts
+
+# The starter's own build output and dependencies.
+examples/vite-starter/dist/
+examples/vite-starter/node_modules/
+examples/vite-starter/package-lock.json
