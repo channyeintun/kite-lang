@@ -19,14 +19,8 @@ That is also why this project runs unchanged in
 [StackBlitz](https://stackblitz.com) and other WebContainer environments, where
 native machine code cannot execute at all.
 
-**Copy this directory anywhere and it works.** The plugin is not published to
-npm yet, so it is vendored in `plugin/` and imported by path rather than by
-name. Depending on it with `file:` looked fine and was not: npm makes a
-symlink, `npm install` succeeds and says nothing is wrong, and the failure
-turns up later as `ERR_MODULE_NOT_FOUND` against a generated temp file. When
-the package is published, `vite.config.js` becomes
-`import kite from "vite-plugin-kite"`, the dependency goes in `package.json`,
-and `plugin/` goes away.
+**Copy this directory anywhere and it works.** Both packages are on npm, so
+there is nothing here to resolve by path and nothing vendored to drift.
 
 ## Scripts
 

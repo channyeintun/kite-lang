@@ -230,39 +230,49 @@ fn the_vite_starter_compiles_and_every_export_crosses() {
     );
 }
 
-/// The starter's copy of the Vite plugin matches the package.
+/// The starter depends on the plugin rather than carrying a copy of it.
 ///
-/// The starter vendors the plugin instead of depending on it, because the
-/// package is not published and a starter has to work when it is copied out of
-/// this repository — which is the only thing a starter is for. Depending on it
-/// by `file:` looked fine and was not: npm makes a symlink, `npm install`
-/// succeeds and reports no problems, and the failure arrives later as
-/// `ERR_MODULE_NOT_FOUND` pointing at a generated temp file. Silent at the
-/// step that should catch it, cryptic at the step that does.
+/// It used to vendor `plugin/vite-plugin-kite.js`, because the package was not
+/// published and a starter has to work when it is copied out of this
+/// repository — which is the only thing a starter is for. Both packages are
+/// published now, so the copy is gone and this checks it stays gone: a
+/// vendored copy is a second source of truth that a reader has no reason to
+/// suspect, and the version it pins is invisible.
 ///
-/// A copy needs a check, which is what this is — the same arrangement the
-/// brand mark has, for the same reason.
+/// Depending by `file:` is the other tempting shortcut and is worse. npm makes
+/// a symlink, `npm install` succeeds and reports no problems, and the failure
+/// arrives later as `ERR_MODULE_NOT_FOUND` pointing at a generated temp file.
 #[test]
-fn the_starters_copy_of_the_plugin_has_not_drifted() {
+fn the_starter_depends_on_the_published_plugin() {
     let root = site().join("..");
-    let package = std::fs::read_to_string(root.join("packages/vite-plugin-kite/index.js"))
-        .expect("the plugin package");
-    let vendored = std::fs::read_to_string(
-        root.join("examples/vite-starter/plugin/vite-plugin-kite.js"),
-    )
-    .expect("the starter's copy");
-    assert_eq!(
-        package, vendored,
-        "examples/vite-starter/plugin/vite-plugin-kite.js has drifted from \
-         packages/vite-plugin-kite/index.js — copy it across"
+    let starter = root.join("examples/vite-starter");
+
+    assert!(
+        !starter.join("plugin").exists(),
+        "examples/vite-starter/plugin/ is back; the plugin is published, so the \
+         starter should depend on it"
     );
 
-    // And the starter must not reach for the unpublished package by name.
-    let config = std::fs::read_to_string(root.join("examples/vite-starter/vite.config.js"))
-        .expect("the starter's config");
+    let config =
+        std::fs::read_to_string(starter.join("vite.config.js")).expect("the starter's config");
     assert!(
-        config.contains("./plugin/vite-plugin-kite.js"),
-        "the starter imports the plugin by package name, which does not resolve \
-         once it is copied out of this repository"
+        config.contains(r#"from "vite-plugin-kite""#),
+        "the starter should import the plugin by package name"
     );
+
+    let manifest =
+        std::fs::read_to_string(starter.join("package.json")).expect("the starter's manifest");
+    for package in ["vite-plugin-kite", "@kite-lang/compiler-wasm"] {
+        assert!(
+            manifest.contains(&format!("\"{}\"", package)),
+            "the starter must depend on `{}`; without it `npm install` leaves no \
+             compiler and the first `.kite` import fails",
+            package
+        );
+        assert!(
+            !manifest.contains(&format!("file:../../packages/{}", package)),
+            "`file:` dependencies install as symlinks that break once the starter \
+             is copied out of this repository"
+        );
+    }
 }

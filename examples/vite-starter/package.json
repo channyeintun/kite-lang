@@ -12,6 +12,7 @@
   },
   "devDependencies": {
     "@kite-lang/compiler-wasm": "^0.1.1",
-    "vite": "^7.0.0"
+    "vite": "^7.0.0",
+    "vite-plugin-kite": "^0.1.1"
   }
 }
