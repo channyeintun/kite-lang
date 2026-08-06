@@ -10,15 +10,19 @@ curl -fsSL https://kite-lang.dev/install.sh | sh
 ```
 
 Read [the script](install.sh) first if you would rather — piping anything into
-a shell deserves that, and it is 120 lines.
+a shell deserves that, and it is short enough to read in a minute.
 
-## There is no release yet
+## Versions
 
-**Kite is pre-1.0 and nothing has been tagged**, so the command above has
-nothing to fetch and will tell you so. The language is still allowed to move;
-[the roadmap](read/06-roadmap.html) is what is settled and what is not.
+The current release is **v0.1.1**, and the version is always `0.1.N`. There is
+no 0.2, no 1.0, and no plan for one: the patch number climbs and the first two
+never move. A major number is a licence to break things and an invitation to be
+asked when the next one lands, and Kite intends neither — once the language has
+stopped moving, the only question a version has to answer is *which build*.
 
-Building from source works today. It needs Rust 1.85 and nothing else — Kite
+## From source
+
+If you would rather build it, that needs Rust 1.85 and nothing else — Kite
 links no LLVM and ships no garbage collector, so there is no third-party
 toolchain to install first.
 
@@ -32,16 +36,45 @@ cargo build --release
 That leaves `kitec` and `kite-lsp` in `target/release/`. Put them somewhere on
 your `PATH` and the rest of this page applies.
 
+## For a web project, nothing
+
+A Vite project needs no compiler installed at all. `vite-plugin-kite` depends
+on `@kite-lang/compiler-wasm`, which *is* the compiler — the same crate, built
+for WebAssembly — so `npm install` brings it with the project:
+
+```
+npm install --save-dev vite-plugin-kite @kite-lang/compiler-wasm
+```
+
+Its output is byte-for-byte what the binary above writes, and a test in the
+repository holds the two to that, so a build and a terminal cannot disagree
+about what a program means. It also runs where a native binary cannot, which
+is why a Kite project works unchanged in StackBlitz and other WebContainer
+environments.
+
+Install `kitec` when you want the rest of it: `bundle`, `pkg`, native
+execution, and the language server.
+
 ## From a package manager
 
+**Not yet — use the installer above.** None of these works today:
+
 ```
-brew install kite          # macOS and Linux
-scoop install kite         # Windows
-yay -S kite-bin            # Arch
+brew install kite          # macOS and Linux — not published
+scoop install kite         # Windows — not published
+yay -S kite-bin            # Arch — not published
 ```
 
-Each of these downloads the same archive the installer does and checks the same
-checksum. They wait on the same first tag.
+The three manifests exist and are real: `render.sh` builds the Homebrew
+formula, the Scoop manifest and the PKGBUILD from a release's own `SHA256SUMS`,
+and the release workflow attaches them, so you can read `kite.rb`, `kite.json`
+and `PKGBUILD` on any release. What is missing is publishing them, and that is
+not code — Homebrew and Scoop each want a separate repository (a tap and a
+bucket) and the AUR wants an account and a git push. Three decisions about
+identity and hosting.
+
+When they land, each will download the same archive the installer does and
+check the same checksum.
 
 ## What the installer does
 
