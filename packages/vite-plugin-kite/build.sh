@@ -18,5 +18,9 @@ if command -v wasm-opt >/dev/null 2>&1; then
 fi
 
 cp "$here/index.js" "$root/examples/vite-starter/plugin/vite-plugin-kite.js"
+# One line changes: the CLI imports its sibling, which is named differently
+# where it is vendored.
+sed 's|from "./index.js"|from "./vite-plugin-kite.js"|' \
+  "$here/cli.js" > "$root/examples/vite-starter/plugin/cli.js"
 cp "$here/kitec.wasm" "$root/examples/vite-starter/plugin/kitec.wasm"
 echo "kitec.wasm: $(wc -c < "$here/kitec.wasm" | tr -d ' ') bytes, copied to the starter"

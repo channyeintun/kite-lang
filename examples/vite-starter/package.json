@@ -5,7 +5,10 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "fmt": "node plugin/cli.js fmt src",
+    "fmt:check": "node plugin/cli.js fmt --check src",
+    "check": "node plugin/cli.js check src"
   },
   "devDependencies": {
     "vite": "^7.0.0"

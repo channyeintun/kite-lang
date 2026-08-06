@@ -45,7 +45,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 ///     u32 count, then for each: u32 name length, name, u32 body length, body
 ///
 /// or with a single `diagnostics` entry when the program did not compile.
-class WasmCompiler {
+export class WasmCompiler {
   #exports = null;
 
   async load() {
@@ -54,6 +54,21 @@ class WasmCompiler {
     const { instance } = await WebAssembly.instantiate(bytes, {});
     this.#exports = instance.exports;
     return this.#exports;
+  }
+
+  /// One of the exports that answers with text: `kite_check`, `kite_format`.
+  async text(name, source) {
+    const w = await this.load();
+    const memory = () => new Uint8Array(w.memory.buffer);
+    const input = new TextEncoder().encode(source);
+    const at = w.kite_alloc(input.length);
+    memory().set(input, at);
+    const answer = w[name](at, input.length);
+    const length = w.kite_answer_length();
+    const out = new TextDecoder().decode(memory().slice(answer, answer + length));
+    w.kite_free(answer, length);
+    w.kite_free(at, input.length);
+    return out;
   }
 
   async build(source, release) {

@@ -9,6 +9,7 @@
   },
   "files": [
     "index.js",
+    "cli.js",
     "kitec.wasm",
     "README.md"
   ],
@@ -30,5 +31,8 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "bin": {
+    "kite": "./cli.js"
   }
 }

@@ -244,6 +244,20 @@ fn the_starters_copy_of_the_plugin_has_not_drifted() {
          packages/vite-plugin-kite/index.js — copy it across"
     );
 
+    // The CLI travels with it too, with one line changed: it imports its
+    // sibling, and the sibling has a different name in the starter.
+    let cli = std::fs::read_to_string(root.join("packages/vite-plugin-kite/cli.js"))
+        .expect("the package's CLI");
+    let cli_vendored =
+        std::fs::read_to_string(root.join("examples/vite-starter/plugin/cli.js"))
+            .expect("the starter's CLI");
+    assert_eq!(
+        cli.replace("from \"./index.js\"", "from \"./vite-plugin-kite.js\""),
+        cli_vendored,
+        "examples/vite-starter/plugin/cli.js has drifted from \
+         packages/vite-plugin-kite/cli.js — copy it across"
+    );
+
     // The compiler travels with it, which is what makes a copied starter need
     // nothing installed. A stale one would compile the starter with whatever
     // the language looked like when it was last copied.

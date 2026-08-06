@@ -22,6 +22,20 @@ the package is published, `vite.config.js` becomes
 `import kite from "vite-plugin-kite"`, the dependency goes in `package.json`,
 and `plugin/` goes away.
 
+## Scripts
+
+```bash
+npm run dev          # the site, rebuilt as you edit
+npm run build        # a production build
+npm run check        # Kite diagnostics, without running anything
+npm run fmt          # lay the Kite out the one way
+npm run fmt:check    # say which files would change, and fail if any would
+```
+
+The last three need no compiler either — `plugin/cli.js` runs the same
+WebAssembly build. A native `kitec` is used when one is on `PATH`, because it
+is faster.
+
 ## What is where
 
 | | |

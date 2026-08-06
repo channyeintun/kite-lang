@@ -42,6 +42,23 @@ kite({ bin: "./target/release/kitec" })
 both files and imports the plugin by path, which is why that starter works when
 it is copied out of the repository. A test fails if either copy drifts.
 
+## `fmt` and `check`, without a compiler
+
+The package carries a small CLI over the same WebAssembly build, so a project
+can format and check its own source with nothing installed:
+
+```json
+{
+  "scripts": {
+    "check": "kite check src",
+    "fmt": "kite fmt src",
+    "fmt:check": "kite fmt --check src"
+  }
+}
+```
+
+`fmt --check` exits 1 when a file would change, which is what CI wants.
+
 ## What crosses the boundary
 
 **`int`, `float`, `bool` and `str`, and nothing else yet.** An `int` is 64-bit,
