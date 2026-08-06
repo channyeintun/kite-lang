@@ -56,7 +56,22 @@ trap 'rm -rf "$work"' EXIT
 # checksum file lists every archive in the release, so it is the thing to read
 # first.
 say "reading the release's checksums…"
-fetch "$base/SHA256SUMS" "$work/SHA256SUMS" || die "cannot reach $base"
+# A 404 here almost always means there is no release yet rather than a network
+# problem, and "cannot reach" sent people to check their connection. `curl`'s
+# own message is hidden because it is the exit code that is interesting, not
+# the transfer.
+if ! fetch "$base/SHA256SUMS" "$work/SHA256SUMS" 2>/dev/null; then
+  if [ "$VERSION" = "latest" ]; then
+    die "$REPO has published no release yet, so there is nothing to install.
+
+  Kite is pre-1.0. Build it from source instead — it needs Rust 1.85 and
+  nothing else:
+
+      git clone https://github.com/$REPO
+      cd ${REPO#*/} && cargo build --release"
+  fi
+  die "no release \`$VERSION\` in $REPO"
+fi
 
 # The checksum file is signed with Sigstore, and the signature is checked when
 # `cosign` is already installed. It is deliberately *not* installed here: a

@@ -408,9 +408,14 @@ section p:last-child { margin-bottom: 0; }
    blocks that sit under a column of prose and measure it, not pills tucked
    against the left margin. */
 .button {
-  display: inline-block;
+  /* 48px, the same figure `kitec check --a11y` holds a Kite program's controls
+     to. These were 38px, which is under it everywhere the padding did not make
+     up the difference — and eight buttons on this page landed at 41. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 100%;
-  min-height: 38px;
+  min-height: 48px;
   padding: 8px 30px;
   text-align: center;
   font-family: var(--sans);

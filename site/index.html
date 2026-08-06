@@ -35,6 +35,7 @@
       </div>
       <div>
         <a class="button button-primary" href="playground.html">Try it in your browser</a>
+        <a class="button button-secondary" href="#install">Install</a>
         <p class="version">
           <a href="read/06-roadmap.html">v0.1.0-dev — see the roadmap</a>
         </p>
@@ -42,6 +43,50 @@
     </div>
   </div>
 </header>
+
+<section class="band-paper" id="install">
+  <div class="container">
+    <header>
+      <h2>Install</h2>
+      <div class="highlight"></div>
+    </header>
+    <p>
+      One archive, checked against the release&rsquo;s own checksums, and two
+      binaries out of it: <code>kitec</code> and <code>kite-lsp</code>. Nothing
+      is compiled, nothing is run from the archive, and a checksum that does
+      not match stops the install rather than warning about it.
+    </p>
+<pre><code>curl -fsSL https://kite-lang.dev/install.sh | sh</code></pre>
+    <p class="muted">
+      Reads the script before it runs it, if you would rather:
+      <a href="install.sh">install.sh</a>. Set <code>KITE_PREFIX</code> to
+      choose where the binaries go &mdash; it is
+      <code>~/.local/bin</code> otherwise. With <code>cosign</code> already on
+      your machine the release&rsquo;s Sigstore signature is verified too; the
+      installer will not fetch a verifier, because one fetched by the thing it
+      verifies proves nothing.
+    </p>
+
+    <h3>Or from a package manager</h3>
+<pre><code>brew install kite          # macOS and Linux
+scoop install kite         # Windows
+yay -S kite-bin            # Arch</code></pre>
+
+    <h3>Or from source, which works today</h3>
+    <p>
+      <strong>No release is tagged yet</strong>, so the three above have
+      nothing to fetch and will say so. Kite is pre-1.0 and the language is
+      still allowed to move; see
+      <a href="read/06-roadmap.html">the roadmap</a> for what is settled.
+      Building it needs Rust 1.85 and nothing else &mdash; Kite links no LLVM
+      and ships no garbage collector.
+    </p>
+<pre><code>git clone https://github.com/channyeintun/kite-lang
+cd kite-lang
+cargo build --release
+./target/release/kitec run examples/hello.kite</code></pre>
+  </div>
+</section>
 
 <section class="band-violet">
   <div class="container">

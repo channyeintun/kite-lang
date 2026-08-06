@@ -51,6 +51,30 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 | **Adoptable one file at a time** | Every `pub fn` is a real export, and `kitec build` writes `api.js` and `api.d.ts` beside the module. A TypeScript project imports it and type-checks against it, with none of the calling convention visible. That is how TypeScript itself spread. |
 | **It lives inside a page, not instead of one** | A Kite program owns the parts of a page that need real logic, rather than owning the page. Attaching to `<body>` is still available; making it the only option is what puts a Wasm download in front of the first paint of everything. |
 
+## Install
+
+```bash
+curl -fsSL https://kite-lang.dev/install.sh | sh
+```
+
+One archive, checked against the release's own checksums, and two binaries out
+of it — `kitec` and `kite-lsp`. Nothing is compiled and nothing is run from the
+archive. With `cosign` present the Sigstore signature is checked as well; the
+installer will not fetch a verifier, because one fetched by the thing it
+verifies proves nothing. `brew install kite`, `scoop install kite` and
+`yay -S kite-bin` are the package-manager routes.
+
+**No release is tagged yet**, so all four have nothing to fetch and say so.
+Kite is pre-1.0 and the language is still allowed to move. Building from source
+works today and needs Rust 1.85 and nothing else — Kite links no LLVM and ships
+no collector:
+
+```bash
+git clone https://github.com/channyeintun/kite-lang
+cd kite-lang && cargo build --release
+./target/release/kitec run examples/hello.kite
+```
+
 ## What runs today
 
 ```bash
