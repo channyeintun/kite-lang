@@ -9,8 +9,13 @@
     not survive it — and crates/kite-driver/tests/brand_assets.rs fails if the
     copy ever stops matching the original.
 
-    The Marketplace also wants a 128 px PNG. That is a rasterisation of this
-    file at packaging time, not a second drawing.
+    The Marketplace wants a PNG and will not take an SVG, so `icon.png` sits
+    beside this file and `package.json` points at that. It is a rasterisation
+    of this drawing rather than a second one — `./render-icon.sh` makes it, and
+    brand_assets.rs fails if it goes missing or stops being square.
+
+    256 rather than the 128 the Marketplace asks for: the listing draws it at
+    several sizes, and on a hidpi screen 128 is the one that looks soft.
   -->
   <rect width="112" height="112" rx="24" fill="#1d1f2d"/>
   <g transform="translate(20 20) scale(0.72)" fill="#e9a63c" stroke="#e9a63c">

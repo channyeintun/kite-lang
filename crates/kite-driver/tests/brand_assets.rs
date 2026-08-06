@@ -186,3 +186,43 @@ fn the_old_document_urls_still_go_somewhere() {
         );
     }
 }
+
+/// The extension ships an icon, and `package.json` points at it.
+///
+/// It did not. `icon.svg` had been drawn and its own comment said a PNG was
+/// wanted — and no PNG existed, and `package.json` had no `icon` field at all,
+/// so the Marketplace listing would have shown the default grey square. The
+/// Marketplace will not take an SVG, which is why the rendering has to exist
+/// as a file rather than being referenced.
+///
+/// The tile's *geometry* is checked against `site/kite-mark.svg` above; this
+/// checks the rendering of it is present, square, and pointed at.
+#[test]
+fn the_extension_ships_a_marketplace_icon() {
+    let manifest = read("editors/vscode/package.json");
+    assert!(
+        manifest.contains("\"icon\": \"icon.png\""),
+        "package.json does not name an icon, so the listing would show a blank tile"
+    );
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../editors/vscode/icon.png");
+    let bytes = std::fs::read(&path)
+        .unwrap_or_else(|e| panic!("no icon.png ({}) — run editors/vscode/render-icon.sh: {}", path.display(), e));
+
+    assert_eq!(
+        &bytes[..8],
+        b"\x89PNG\r\n\x1a\n",
+        "icon.png is not a PNG"
+    );
+    // The IHDR is the first chunk, and its width and height are the eight
+    // bytes after the chunk header.
+    let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+    assert_eq!(width, height, "the tile is {}x{} and has to be square", width, height);
+    assert!(
+        width >= 128,
+        "the Marketplace asks for at least 128px and this is {}px",
+        width
+    );
+}
