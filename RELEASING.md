@@ -1,0 +1,154 @@
+# Releasing Kite
+
+Everything that has to happen for a version to exist, in the order it has to
+happen in. Each step says what breaks if it is skipped, because most of these
+fail quietly rather than loudly.
+
+There are **five** things that carry a version, and they are not published by
+the same mechanism:
+
+| What | Where it goes | By |
+|---|---|---|
+| `kitec`, `kite-lsp` | GitHub release, signed | CI, on a tag |
+| `@kite-lang/cli-*` | npm, one per platform | by hand, from the release's binaries |
+| `@kite-lang/cli` | npm, the meta-package | by hand, **after** the platform ones |
+| The site | kite-lang.dev | `wrangler deploy` |
+| The VS Code extension | Marketplace | `vsce publish` |
+
+---
+
+## 1. Before anything
+
+```bash
+cargo test --workspace --all-targets     # 775, and all of them
+cargo clippy --workspace --all-targets -- -D warnings
+for f in $(git ls-files '*.kite'); do ./target/release/kitec fmt --check "$f"; done
+```
+
+CI runs all three, and the last one is the reason a formatter exists.
+
+**Check the numbers in the prose.** The README states a test count, and
+`crates/kite-driver/tests/size.rs` records what each program costs *today* in a
+comment beside its budget. Both drift silently, because nothing compares a
+sentence to a measurement:
+
+```bash
+cargo test -p kite-driver --test size -- --nocapture
+```
+
+## 2. The version
+
+One number, in four places:
+
+```
+Cargo.toml                              [workspace.package] version
+packages/kite-cli/package.json          version, and every optionalDependency
+packages/vite-plugin-kite/package.json  version
+editors/vscode/package.json             version
+```
+
+The `optionalDependencies` in `@kite-lang/cli` pin **exact** versions of the
+platform packages — not a range. A range would let a meta-package resolve to a
+compiler it was never tested against.
+
+Commit it, then:
+
+```bash
+git push origin main
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+**Push before tagging.** A tag whose commits are not on the remote makes CI
+build something nobody can check out.
+
+## 3. The binaries, from CI
+
+The tag starts `.github/workflows/release.yml`, which builds five targets on
+their own runners, checksums them, and signs `SHA256SUMS` with Sigstore —
+keyless, so the workflow's own identity is the signature and there is no key to
+lose.
+
+Wait for it. Then download the release's artefacts into a directory.
+
+> **Do not publish binaries built on your machine.** `build.sh --cross` makes
+> all five and is for trying the packaging, not for shipping: those builds are
+> not reproducible, not signed, and the Windows one is `-gnu` where the release
+> is `-msvc`.
+
+## 4. npm
+
+```bash
+./packages/kite-cli/build.sh path/to/downloaded/release/
+for d in packages/kite-cli/platforms/*/; do (cd "$d" && npm publish); done
+npm publish packages/kite-cli
+```
+
+Three things here have each cost an attempt:
+
+**The platform packages go first.** npm resolves `optionalDependencies` at
+install time and *skips a missing one without a word*. A meta-package published
+first installs perfectly cleanly and then cannot find a compiler.
+
+**A scoped package is private by default**, and npm reports that as
+`402 Payment Required`, which reads as a billing problem. Every manifest here
+carries `publishConfig.access = public` so the flag cannot be forgotten.
+
+**The scope has to exist.** `@kite-lang` is an npm organisation; publishing into
+one that does not exist gives `404 Scope not found`.
+
+Then check it the way a stranger would — from the registry, not from a local
+path, and with no `kitec` on the `PATH`:
+
+```bash
+cd $(mktemp -d) && npm init -y && npm install --save-dev @kite-lang/cli
+./node_modules/.bin/kitec --version
+```
+
+A freshly published package takes a minute or two to become fetchable. A 404
+straight after publishing is propagation, not failure.
+
+## 5. The site
+
+```bash
+./site/build.sh          # the reference, the pages, the demo, the playground
+npx wrangler deploy      # from the repository root, never from inside site/
+```
+
+`site/build.sh` regenerates the reference from the library's own doc comments
+and renders every document to HTML, so **a change to a `///` comment is not on
+the site until this runs**. Deploying from inside `site/` publishes wrangler's
+own state directory; `.assetsignore` is the second line of defence.
+
+Verify against the deployed bytes rather than the browser, which caches:
+
+```bash
+curl -s "https://kite-lang.dev/SPECIFICATION.md?v=$RANDOM" | diff - SPECIFICATION.md
+```
+
+## 6. The VS Code extension
+
+```bash
+./editors/vscode/render-icon.sh                 # only if the mark changed
+cd editors/vscode && npx @vscode/vsce publish
+```
+
+The Marketplace will not take an SVG, so `icon.png` is a rendering that has to
+exist as a file; `brand_assets.rs` fails if it is missing or has drifted from
+`site/kite-mark.svg`.
+
+## 7. Afterwards
+
+- `install.sh` needs no change: it reads `releases/latest` and the release's own
+  `SHA256SUMS`.
+- Homebrew, Scoop and the AUR manifests keep placeholder checksums in the tree
+  so they stay reviewable. `packaging/render.sh <version>` fills them in from
+  the release's own `SHA256SUMS`, which is the only place they should come
+  from.
+
+---
+
+## What a patch release skips
+
+A fix that touches neither the compiler nor the library — a page, a document, a
+README — needs only step 5. It does not need a tag, and it should not get one:
+a version that names no binary change is a version somebody will try to install.

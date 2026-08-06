@@ -269,6 +269,7 @@ python3 -m http.server -d site 8000
 | [docs/05-grammar.ebnf](docs/05-grammar.ebnf) | Complete formal grammar. |
 | [docs/06-roadmap.md](docs/06-roadmap.md) | Implementation phases, and exactly how far each one got. |
 | [site/brand.html](site/brand.html) | The mark: geometry, clear space, colourways, lockups. Open it in a browser. |
+| [RELEASING.md](RELEASING.md) | Everything that carries a version, and the order it has to happen in. |
 
 ## What is not done
 
