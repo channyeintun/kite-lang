@@ -466,6 +466,24 @@ section p:last-child { margin-bottom: 0; }
 }
 .band-gold .button-secondary:hover { border-color: #fff; }
 
+/* The hero is not a band, so none of the rules below reach it. A secondary
+   button there fell through to the bare `.button` and rendered as a default
+   link — blue text and a blue border on the dark ground. It is the outline
+   beside the solid gold primary. */
+.hero .button-secondary {
+  background: transparent;
+  border-color: var(--gold);
+  color: var(--gold);
+  margin-top: 8px;
+}
+.hero .button-secondary:hover,
+.hero .button-secondary:focus-visible {
+  background: var(--gold);
+  border-color: var(--gold);
+  color: var(--gold-knockout);
+  filter: none;
+}
+
 .band-paper .button-secondary,
 .band-page .button-secondary {
   background: var(--brand-violet);
