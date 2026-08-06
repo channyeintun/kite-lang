@@ -106,7 +106,7 @@ fn page_of(template: str, root: str, title: str, body: str) -> str {
 /// The page a reader is on is marked with `aria-current`, which is what the
 /// stylesheet was already colouring when a script set it.
 fn module_nav(current: str) -> str {
-    var out = "<nav id=\"modules\" class=\"modules\">"
+    var out = "<nav id=\"modules\" class=\"samples\">"
     for name in modules() {
         let here = if name == current { "true" } else { "false" }
         out = out + "<a href=\"\(name).html\" aria-current=\"\(here)\">\(name)</a>"

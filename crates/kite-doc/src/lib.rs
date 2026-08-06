@@ -72,9 +72,26 @@ struct Reader<'a> {
 impl Reader<'_> {
     /// The comment block at the top of the file: everything before the first
     /// declaration that is not attached to it.
+    /// The file's own header: the run of comments it opens with.
+    ///
+    /// **The run**, and not everything before the first declaration. A file
+    /// separates its sections with a comment —
+    ///
+    /// ```text
+    /// // ---- display ----------------------------------------------------
+    /// ```
+    ///
+    /// — and one of those sitting above the first declaration is not about the
+    /// module. It used to be collected anyway, so `std/prelude`'s reference
+    /// page ended its overview with a row of hyphens and the word `display`
+    /// run into the sentence before it. Four modules did that.
+    ///
+    /// A blank line ends the header. Inside one, a paragraph break is an empty
+    /// `//` line, which is a comment and keeps the run going.
     fn overview(&self, first_item: u32) -> String {
         let attached = self.block_before(first_item);
         let mut lines = Vec::new();
+        let mut previous_end: Option<u32> = None;
         for c in self.comments {
             if c.span.start >= first_item {
                 break;
@@ -82,7 +99,14 @@ impl Reader<'_> {
             if attached.contains(&c.span.start) {
                 continue;
             }
+            if let Some(end) = previous_end {
+                let between = &self.src[end as usize..c.span.start as usize];
+                if between.matches('\n').count() > 1 {
+                    break;
+                }
+            }
             lines.push(strip(self.text(c.span)));
+            previous_end = Some(c.span.end);
         }
         trim_block(&lines)
     }

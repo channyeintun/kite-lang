@@ -194,6 +194,11 @@ body > main { flex: 1; }
   text-decoration: underline;
   text-decoration-thickness: 1px;
   text-underline-offset: 4px;
+  /* The hit area is the whole 48px, not the height of the word. The padding
+     is vertical only, so nothing about the header moves. */
+  display: inline-flex;
+  align-items: center;
+  min-height: 48px;
 }
 .topbar nav a:hover { text-decoration-color: var(--gold-deep); color: var(--gold-deep); }
 .topbar nav a[aria-current="page"] {
@@ -691,8 +696,31 @@ button:disabled { opacity: 0.45; cursor: default; }
 button:disabled:hover { border-color: var(--rule); }
 
 .samples { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0 32px; }
-.samples button { font-size: 1.2rem; padding: 5px 14px; border-radius: 999px; }
-.samples button[aria-current="true"] {
+/* The reference's module list is links now — a page per module, rendered at
+   build time — where it used to be buttons a script created. It wears the same
+   shape either way, so the rules name both rather than the markup changing to
+   suit the stylesheet. */
+.samples button,
+.samples a {
+  font-size: 1.2rem;
+  border-radius: 999px;
+  /* 48px, which is what `kitec check --a11y` holds a Kite program's controls
+     to — Material's figure, WCAG 2.2's target-size rule and Apple's. A site
+     that fails the rule its own compiler enforces has no business shipping
+     the rule. These were 35px and awkward to hit. */
+  min-height: 48px;
+  padding: 0 18px;
+  display: inline-flex;
+  align-items: center;
+}
+.samples a {
+  border: 1px solid var(--rule);
+  color: var(--ink);
+  text-decoration: none;
+}
+.samples a:hover { border-color: var(--gold); color: var(--gold-deep); }
+.samples button[aria-current="true"],
+.samples a[aria-current="true"] {
   background: var(--gold);
   border-color: var(--gold);
   color: var(--gold-knockout);
