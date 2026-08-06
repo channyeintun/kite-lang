@@ -269,10 +269,13 @@ MatchExpr    = "match" Expr "{" { MatchArm } "}" ;
    Literals and lexical elements
    ------------------------------------------------------------------ *)
 
-(* One integer type, one float, and no `char` — so no numeric type suffix and
-   no char literal. A suffix used to be parsed and thrown away, which made
-   `300i8` a width nothing checked; it is E0004 now. *)
-Literal      = IntLit | FloatLit | StringLit
+(* One integer type and one float, so a numeric type suffix names nothing. It
+   used to be parsed and thrown away, which made `300i8` a width the compiler
+   never checked; it is E0004 now.
+
+   A char literal still lexes, so it is written here — but there is no `char`
+   type, and using one is E0200 saying exactly that. *)
+Literal      = IntLit | FloatLit | StringLit | CharLit
              | "true" | "false" | "nil" ;
 
 IntLit       = DecInt | HexInt | OctInt | BinInt ;
@@ -295,6 +298,8 @@ Interpolation
              = "\" "(" Expr ")" ;
 Escape       = "\" ( "n" | "t" | "r" | "0" | "\" | '"' | "'"
                    | "u" "{" HexDigit { HexDigit } "}" ) ;
+
+CharLit      = "'" ( Char | Escape ) "'" ;  (* lexes; no `char` type yet *)
 
 Ident        = XIDStart { XIDContinue } ;   (* Unicode; NFC-normalised *)
 
