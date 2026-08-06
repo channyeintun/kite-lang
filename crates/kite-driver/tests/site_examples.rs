@@ -244,6 +244,20 @@ fn the_starters_copy_of_the_plugin_has_not_drifted() {
          packages/vite-plugin-kite/index.js — copy it across"
     );
 
+    // The compiler travels with it, which is what makes a copied starter need
+    // nothing installed. A stale one would compile the starter with whatever
+    // the language looked like when it was last copied.
+    let shipped = std::fs::metadata(root.join("packages/vite-plugin-kite/kitec.wasm"))
+        .expect("the package ships the compiler")
+        .len();
+    let carried = std::fs::metadata(root.join("examples/vite-starter/plugin/kitec.wasm"))
+        .expect("the starter carries the compiler")
+        .len();
+    assert_eq!(
+        shipped, carried,
+        "the starter's copy of kitec.wasm has drifted from the package's —          rebuild both with packages/vite-plugin-kite/build.sh"
+    );
+
     // And the starter must not reach for the unpublished package by name.
     let config = std::fs::read_to_string(root.join("examples/vite-starter/vite.config.js"))
         .expect("the starter's config");

@@ -24,18 +24,23 @@ is emitted hashed beside your other assets.
 app, and it has no opinion about how the project is arranged. What you import
 is what `kitec` wrote.
 
-## Install
+## Nothing to install
 
-**Not published to npm yet.** `examples/vite-starter` vendors this file and
-imports it by path, which is why that starter works when it is copied out of
-the repository. A test fails if the copy drifts.
+`kitec.wasm` ships in this package — the same Rust as the `kitec` binary, built
+for WebAssembly — so `npm install` is the whole setup, on every platform, with
+no native binary and no download.
 
-The plugin needs the compiler. [kite-lang.dev/install](https://kite-lang.dev/install)
-— or point at it directly:
+A native `kitec` is used when one is on `PATH`, because it is faster. That is an
+optimisation: the two produce byte-identical modules, so the only difference is
+how long the build takes. Point at a particular one with:
 
 ```js
 kite({ bin: "./target/release/kitec" })
 ```
+
+**This package is not published to npm yet.** `examples/vite-starter` vendors
+both files and imports the plugin by path, which is why that starter works when
+it is copied out of the repository. A test fails if either copy drifts.
 
 ## What crosses the boundary
 

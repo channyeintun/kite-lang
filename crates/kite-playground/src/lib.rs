@@ -149,6 +149,70 @@ unsafe fn with_source(ptr: *const u8, len: usize, f: impl FnOnce(&str) -> String
     }
 }
 
+/// Compile a program the way `kitec build --emit wasm` does, and hand back
+/// every file it would have written.
+///
+/// **This is what makes a build tool need no compiler installed.** A bundler
+/// plugin can depend on this module through npm and be done — no native
+/// binary, no download at install time, no platform matrix, and the same
+/// compiler on every operating system because it *is* the same compiler.
+///
+/// The artefacts are framed rather than returned one at a time, because
+/// `app.wasm` is bytes and the rest is text and a caller wants all of them
+/// from one compile:
+///
+/// ```text
+/// u32  count
+/// for each:  u32 name length, name, u32 body length, body
+/// ```
+///
+/// Little-endian, which is what Wasm's memory is. A failed compile answers
+/// with a count of zero and the diagnostics as the only entry, named
+/// `diagnostics` — so a caller reads the same frame either way.
+///
+/// # Safety
+/// As [`kite_run`].
+#[no_mangle]
+pub unsafe extern "C" fn kite_build(ptr: *const u8, len: usize, release: u32) -> *mut u8 {
+    let bytes = std::slice::from_raw_parts(ptr, len);
+    let Ok(src) = std::str::from_utf8(bytes) else {
+        return frame(&[("diagnostics", b"error: the source is not valid UTF-8\n".to_vec())]);
+    };
+    let compiled =
+        kite_driver::compile_with("main.kite", src, kite_driver::Emit::Wasm, release != 0);
+    if compiled.failed() {
+        return frame(&[("diagnostics", compiled.render_diagnostics().into_bytes())]);
+    }
+    let Some(module) = compiled.wasm.as_ref() else {
+        return frame(&[("diagnostics", b"error: no module was produced\n".to_vec())]);
+    };
+    let glue = kite_driver::generate_glue_with_hosts(&module.strings, "app.wasm", &module.hosts);
+    let (api_js, api_dts) = kite_driver::generate_api(&module.api, "app.wasm");
+    frame(&[
+        ("app.wasm", module.bytes.clone()),
+        ("app.js", glue.into_bytes()),
+        ("api.js", api_js.into_bytes()),
+        ("api.d.ts", api_dts.into_bytes()),
+    ])
+}
+
+/// The framing described on [`kite_build`].
+fn frame(entries: &[(&str, Vec<u8>)]) -> *mut u8 {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for (name, body) in entries {
+        out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(body);
+    }
+    out.shrink_to_fit();
+    let ptr = out.as_mut_ptr();
+    unsafe { LENGTH = out.len() };
+    std::mem::forget(out);
+    ptr
+}
+
 /// Hand a string back as a buffer the caller reads and frees.
 fn answer(text: String) -> *mut u8 {
     let mut bytes = text.into_bytes();

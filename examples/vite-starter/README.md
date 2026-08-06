@@ -8,7 +8,10 @@ npm install
 npm run dev
 ```
 
-Needs `kitec` on your `PATH` — [kite-lang.dev/install](https://kite-lang.dev/install).
+**Nothing to install but Node.** The compiler travels with the plugin, in
+`plugin/kitec.wasm` — the same Rust as the `kitec` binary, built for
+WebAssembly. If you happen to have `kitec` on your `PATH` it is used instead,
+because it is faster; the two produce byte-identical modules.
 
 **Copy this directory anywhere and it works.** The plugin is not published to
 npm yet, so it is vendored in `plugin/` and imported by path rather than by

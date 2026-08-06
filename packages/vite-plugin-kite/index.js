@@ -19,11 +19,75 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, basename } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
+const here = dirname(fileURLToPath(import.meta.url));
+
+// ---- the compiler ----------------------------------------------------------
+//
+// **Nothing has to be installed.** `kitec.wasm` beside this file is the
+// compiler — the same Rust, built for WebAssembly — so `npm install` is the
+// whole setup, on every platform, with no native binary and no download.
+//
+// A native `kitec` is used when one is there, because it is faster. That is an
+// optimisation and not a requirement, and the difference is invisible except
+// in the time a build takes.
+
+/// Compile with the WebAssembly build of the compiler.
+///
+/// The boundary is a pointer and a length each way. `kite_build` answers with
+/// every file `kitec build --emit wasm` would have written, framed as
+///
+///     u32 count, then for each: u32 name length, name, u32 body length, body
+///
+/// or with a single `diagnostics` entry when the program did not compile.
+class WasmCompiler {
+  #exports = null;
+
+  async load() {
+    if (this.#exports) return this.#exports;
+    const bytes = await readFile(join(here, "kitec.wasm"));
+    const { instance } = await WebAssembly.instantiate(bytes, {});
+    this.#exports = instance.exports;
+    return this.#exports;
+  }
+
+  async build(source, release) {
+    const w = await this.load();
+    const memory = () => new Uint8Array(w.memory.buffer);
+    const input = new TextEncoder().encode(source);
+    const at = w.kite_alloc(input.length);
+    memory().set(input, at);
+
+    const answer = w.kite_build(at, input.length, release ? 1 : 0);
+    const length = w.kite_answer_length();
+    // Copied out before anything else runs: a later allocation can grow the
+    // module's memory, and growing it detaches every view onto the old buffer.
+    const framed = memory().slice(answer, answer + length);
+    w.kite_free(answer, length);
+    w.kite_free(at, input.length);
+
+    const view = new DataView(framed.buffer, framed.byteOffset, framed.byteLength);
+    const decoder = new TextDecoder();
+    const files = new Map();
+    let cursor = 4;
+    for (let i = 0; i < view.getUint32(0, true); i += 1) {
+      const nameLength = view.getUint32(cursor, true);
+      cursor += 4;
+      const name = decoder.decode(framed.subarray(cursor, cursor + nameLength));
+      cursor += nameLength;
+      const bodyLength = view.getUint32(cursor, true);
+      cursor += 4;
+      files.set(name, framed.subarray(cursor, cursor + bodyLength));
+      cursor += bodyLength;
+    }
+    return files;
+  }
+}
 
 /// A `.kite` import, absolute, with any Vite suffix (`?url`, `?raw`) removed.
 const KITE = /\.kite$/;
@@ -37,7 +101,9 @@ const GLUE = "\0kite-glue:";
 
 /**
  * @param {object} [options]
- * @param {string} [options.bin] The compiler. `kitec` on `PATH` by default.
+ * @param {string} [options.bin] A native compiler to use instead of looking
+ *   for `kitec` on `PATH`. Neither is required: the compiler ships with this
+ *   package as WebAssembly and is used when no native one is found.
  * @param {boolean} [options.release] Build with `--release`: `assert` is
  *   dropped and `require` is not. Follows Vite's mode when not given.
  * @param {boolean} [options.jsStrings] Build with `--js-strings`, so a `str`
@@ -47,6 +113,9 @@ const GLUE = "\0kite-glue:";
  */
 export default function kite(options = {}) {
   const bin = options.bin ?? "kitec";
+  const wasm = new WasmCompiler();
+  /// Whether a native `kitec` answered. Decided once, on the first build.
+  let native = options.bin ? true : null;
   let root = process.cwd();
   let release = options.release;
   let cacheDir;
@@ -67,29 +136,52 @@ export default function kite(options = {}) {
   async function compile(file) {
     const out = outputFor(file);
     await mkdir(out, { recursive: true });
-    const args = [
-      "build",
-      file,
-      "--emit",
-      "wasm",
-      "--out",
-      out,
-      ...(release ? ["--release"] : []),
-      ...(options.jsStrings ? ["--js-strings"] : []),
-    ];
-    try {
-      await run(bin, args, { cwd: root });
-    } catch (e) {
-      if (e.code === "ENOENT") {
-        throw new Error(
-          `vite-plugin-kite: cannot run \`${bin}\`.\n` +
-            "Install Kite — https://kite-lang.dev/install — or set `bin` to the compiler's path.",
-        );
+
+    if (native !== false) {
+      const args = [
+        "build",
+        file,
+        "--emit",
+        "wasm",
+        "--out",
+        out,
+        ...(release ? ["--release"] : []),
+        ...(options.jsStrings ? ["--js-strings"] : []),
+      ];
+      try {
+        await run(bin, args, { cwd: root });
+        native = true;
+        return out;
+      } catch (e) {
+        if (e.code !== "ENOENT") {
+          // `kitec` writes diagnostics to stderr and they are the useful part;
+          // the exit status is not.
+          throw new Error(
+            `${file} did not compile:\n\n${(e.stderr || e.stdout || e.message).trim()}`,
+          );
+        }
+        if (options.bin) {
+          throw new Error(
+            `vite-plugin-kite: cannot run \`${bin}\`.\n` +
+              "That is the `bin` this plugin was given. Remove it to use the " +
+              "WebAssembly compiler that ships with this package.",
+          );
+        }
+        // No `kitec` on `PATH`, which is the ordinary case and not a problem:
+        // the compiler ships with this package. Decided once rather than on
+        // every file.
+        native = false;
       }
-      // `kitec` writes diagnostics to stderr and they are the useful part; the
-      // exit status is not.
-      throw new Error(`${file} did not compile:\n\n${(e.stderr || e.stdout || e.message).trim()}`);
     }
+
+    const files = await wasm.build(await readFile(file, "utf8"), release);
+    const diagnostics = files.get("diagnostics");
+    if (diagnostics) {
+      throw new Error(`${file} did not compile:\n\n${new TextDecoder().decode(diagnostics).trim()}`);
+    }
+    await Promise.all(
+      [...files].map(([name, body]) => writeFile(join(out, name), body)),
+    );
     return out;
   }
 
