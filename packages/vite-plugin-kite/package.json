@@ -1,7 +1,7 @@
 {
   "name": "vite-plugin-kite",
   "version": "0.1.0",
-  "description": "Import .kite files from a Vite project. The compiler ships with the plugin, so nothing has to be installed.",
+  "description": "Import .kite files from a Vite project. Runs kitec as part of the build.",
   "type": "module",
   "main": "./index.js",
   "exports": {
@@ -9,8 +9,6 @@
   },
   "files": [
     "index.js",
-    "cli.js",
-    "kitec.wasm",
     "README.md"
   ],
   "keywords": [
@@ -31,8 +29,5 @@
   },
   "engines": {
     "node": ">=18"
-  },
-  "bin": {
-    "kite": "./cli.js"
   }
 }

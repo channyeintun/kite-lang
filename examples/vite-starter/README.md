@@ -8,10 +8,13 @@ npm install
 npm run dev
 ```
 
-**Nothing to install but Node.** The compiler travels with the plugin, in
-`plugin/kitec.wasm` — the same Rust as the `kitec` binary, built for
-WebAssembly. If you happen to have `kitec` on your `PATH` it is used instead,
-because it is faster; the two produce byte-identical modules.
+`npm install` brings the compiler with it. `kite-cli` is a dependency like any
+other, and it holds the real `kitec` — the same binary a terminal runs, so
+`npm run fmt` and `kitec fmt` cannot answer differently.
+
+**`kite-cli` is not published yet.** Until it is, put `kitec` on your `PATH`:
+[kite-lang.dev/install](https://kite-lang.dev/install). The plugin looks in
+`node_modules/.bin` first and falls back to `PATH`, so both work.
 
 **Copy this directory anywhere and it works.** The plugin is not published to
 npm yet, so it is vendored in `plugin/` and imported by path rather than by
@@ -32,9 +35,9 @@ npm run fmt          # lay the Kite out the one way
 npm run fmt:check    # say which files would change, and fail if any would
 ```
 
-The last three need no compiler either — `plugin/cli.js` runs the same
-WebAssembly build. A native `kitec` is used when one is on `PATH`, because it
-is faster.
+`check` and `fmt` are `kitec` itself. There is one compiler and one formatter,
+and a script here is a shorter way of typing them rather than a second tool
+that could answer differently.
 
 ## What is where
 

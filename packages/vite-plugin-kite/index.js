@@ -19,113 +19,29 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, readFile, readdir, stat } from "node:fs/promises";
 import { dirname, join, resolve, basename } from "node:path";
-import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
-const here = dirname(fileURLToPath(import.meta.url));
 
-// ---- the compiler ----------------------------------------------------------
-//
-// **Nothing has to be installed.** `kitec.wasm` beside this file is the
-// compiler — the same Rust, built for WebAssembly — so `npm install` is the
-// whole setup, on every platform, with no native binary and no download.
-//
-// A native `kitec` is used when one is there, because it is faster. That is an
-// optimisation and not a requirement, and the difference is invisible except
-// in the time a build takes.
-
-/// Compile with the WebAssembly build of the compiler.
+/// The compiler `kitec` resolves to.
 ///
-/// The boundary is a pointer and a length each way. `kite_build` answers with
-/// every file `kitec build --emit wasm` would have written, framed as
-///
-///     u32 count, then for each: u32 name length, name, u32 body length, body
-///
-/// or with a single `diagnostics` entry when the program did not compile.
-export class WasmCompiler {
-  #exports = null;
-
-  async load() {
-    if (this.#exports) return this.#exports;
-    const bytes = await readFile(join(here, "kitec.wasm"));
-    const { instance } = await WebAssembly.instantiate(bytes, {});
-    this.#exports = instance.exports;
-    return this.#exports;
-  }
-
-  /// One of the exports that answers with text: `kite_check`, `kite_format`.
-  async text(name, source) {
-    const w = await this.load();
-    const memory = () => new Uint8Array(w.memory.buffer);
-    const input = new TextEncoder().encode(source);
-    const at = w.kite_alloc(input.length);
-    memory().set(input, at);
-    const answer = w[name](at, input.length);
-    const length = w.kite_answer_length();
-    const out = new TextDecoder().decode(memory().slice(answer, answer + length));
-    w.kite_free(answer, length);
-    w.kite_free(at, input.length);
-    return out;
-  }
-
-  /// `files` is the program first, then its siblings by module name.
-  ///
-  /// A Kite module is a directory, so a program that says `use checkout` needs
-  /// `checkout.kite` as well — and this side of the boundary has no directory
-  /// to read. They are framed the same way the answer is.
-  async build(module, release) {
-    const w = await this.load();
-    const memory = () => new Uint8Array(w.memory.buffer);
-    const encoder = new TextEncoder();
-
-    const parts = module.map(([name, body]) => [encoder.encode(name), encoder.encode(body)]);
-    const size = 4 + parts.reduce((n, [name, body]) => n + 8 + name.length + body.length, 0);
-    const input = new Uint8Array(size);
-    const writer = new DataView(input.buffer);
-    writer.setUint32(0, parts.length, true);
-    let wrote = 4;
-    for (const [name, body] of parts) {
-      writer.setUint32(wrote, name.length, true);
-      wrote += 4;
-      input.set(name, wrote);
-      wrote += name.length;
-      writer.setUint32(wrote, body.length, true);
-      wrote += 4;
-      input.set(body, wrote);
-      wrote += body.length;
-    }
-
-    const at = w.kite_alloc(input.length);
-    memory().set(input, at);
-
-    const answer = w.kite_build(at, input.length, release ? 1 : 0);
-    const length = w.kite_answer_length();
-    // Copied out before anything else runs: a later allocation can grow the
-    // module's memory, and growing it detaches every view onto the old buffer.
-    const framed = memory().slice(answer, answer + length);
-    w.kite_free(answer, length);
-    w.kite_free(at, input.length);
-
-    const view = new DataView(framed.buffer, framed.byteOffset, framed.byteLength);
-    const decoder = new TextDecoder();
-    const files = new Map();
-    let cursor = 4;
-    for (let i = 0; i < view.getUint32(0, true); i += 1) {
-      const nameLength = view.getUint32(cursor, true);
-      cursor += 4;
-      const name = decoder.decode(framed.subarray(cursor, cursor + nameLength));
-      cursor += nameLength;
-      const bodyLength = view.getUint32(cursor, true);
-      cursor += 4;
-      files.set(name, framed.subarray(cursor, cursor + bodyLength));
-      cursor += bodyLength;
-    }
-    return files;
-  }
+/// `node_modules/.bin` first, because `kite-cli` puts the real binary there
+/// and a project that has it should not also have to install one globally.
+/// Then `PATH`. Nothing is bundled and nothing is reimplemented — it is the
+/// same program a terminal runs, so a build and a terminal cannot disagree.
+function compilerIn(root) {
+  const local = join(root, "node_modules", ".bin", process.platform === "win32" ? "kitec.cmd" : "kitec");
+  return existsSync(local) ? local : "kitec";
 }
+
+// The compiler is `kitec`. This finds it and runs it.
+//
+// Not a copy of it bundled here: one compiler, invoked the way it is invoked
+// everywhere else, so what a build does and what a terminal does cannot come
+// apart.
 
 /// A `.kite` import.
 const KITE = /\.kite$/;
@@ -147,9 +63,7 @@ const GLUE = "\0kite-glue:";
 
 /**
  * @param {object} [options]
- * @param {string} [options.bin] A native compiler to use instead of looking
- *   for `kitec` on `PATH`. Neither is required: the compiler ships with this
- *   package as WebAssembly and is used when no native one is found.
+ * @param {string} [options.bin] The compiler. `kitec` on `PATH` by default.
  * @param {boolean} [options.release] Build with `--release`: `assert` is
  *   dropped and `require` is not. Follows Vite's mode when not given.
  * @param {boolean} [options.jsStrings] Build with `--js-strings`, so a `str`
@@ -158,10 +72,7 @@ const GLUE = "\0kite-glue:";
  *   is why it is off unless asked for.
  */
 export default function kite(options = {}) {
-  const bin = options.bin ?? "kitec";
-  const wasm = new WasmCompiler();
-  /// Whether a native `kitec` answered. Decided once, on the first build.
-  let native = options.bin ? true : null;
+  let bin = options.bin ?? "kitec";
   let root = process.cwd();
   let release = options.release;
   let cacheDir;
@@ -182,59 +93,30 @@ export default function kite(options = {}) {
   async function compile(file) {
     const out = outputFor(file);
     await mkdir(out, { recursive: true });
-
-    if (native !== false) {
-      const args = [
-        "build",
-        file,
-        "--emit",
-        "wasm",
-        "--out",
-        out,
-        ...(release ? ["--release"] : []),
-        ...(options.jsStrings ? ["--js-strings"] : []),
-      ];
-      try {
-        await run(bin, args, { cwd: root });
-        native = true;
-        return out;
-      } catch (e) {
-        if (e.code !== "ENOENT") {
-          // `kitec` writes diagnostics to stderr and they are the useful part;
-          // the exit status is not.
-          throw new Error(
-            `${file} did not compile:\n\n${(e.stderr || e.stdout || e.message).trim()}`,
-          );
-        }
-        if (options.bin) {
-          throw new Error(
-            `vite-plugin-kite: cannot run \`${bin}\`.\n` +
-              "That is the `bin` this plugin was given. Remove it to use the " +
-              "WebAssembly compiler that ships with this package.",
-          );
-        }
-        // No `kitec` on `PATH`, which is the ordinary case and not a problem:
-        // the compiler ships with this package. Decided once rather than on
-        // every file.
-        native = false;
+    const args = [
+      "build",
+      file,
+      "--emit",
+      "wasm",
+      "--out",
+      out,
+      ...(release ? ["--release"] : []),
+      ...(options.jsStrings ? ["--js-strings"] : []),
+    ];
+    try {
+      await run(bin, args, { cwd: root });
+    } catch (e) {
+      if (e.code === "ENOENT") {
+        throw new Error(
+          `vite-plugin-kite: cannot run \`${bin}\`.\n` +
+            "Add the compiler to the project — `npm install kite-cli` — or install it\n" +
+            "yourself: https://kite-lang.dev/install",
+        );
       }
+      // `kitec` writes diagnostics to stderr and they are the useful part; the
+      // exit status is not.
+      throw new Error(`${file} did not compile:\n\n${(e.stderr || e.stdout || e.message).trim()}`);
     }
-
-    // The program first, then every `.kite` beside it under its module name —
-    // which is the file's basename, because that is what `use` writes.
-    const module = [["main", await readFile(file, "utf8")]];
-    for (const path of await siblings(file)) {
-      if (path === file) continue;
-      module.push([basename(path, ".kite"), await readFile(path, "utf8")]);
-    }
-    const built = await wasm.build(module, release);
-    const diagnostics = built.get("diagnostics");
-    if (diagnostics) {
-      throw new Error(`${file} did not compile:\n\n${new TextDecoder().decode(diagnostics).trim()}`);
-    }
-    await Promise.all(
-      [...built].map(([name, body]) => writeFile(join(out, name), body)),
-    );
     return out;
   }
 
@@ -301,6 +183,7 @@ export default function kite(options = {}) {
 
     configResolved(config) {
       root = config.root;
+      if (!options.bin) bin = compilerIn(root);
       release ??= config.command === "build";
       cacheDir = join(config.cacheDir ?? join(root, "node_modules/.vite"), "kite");
     },

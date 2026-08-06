@@ -42,3 +42,7 @@ examples/page/api.d.ts
 examples/vite-starter/dist/
 examples/vite-starter/node_modules/
 examples/vite-starter/package-lock.json
+
+# Built by packages/kite-cli/build.sh from a release, or from target/release.
+packages/kite-cli/platforms/
+packages/*/*.tgz

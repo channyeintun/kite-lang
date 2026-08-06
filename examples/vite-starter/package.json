@@ -6,11 +6,12 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "fmt": "node plugin/cli.js fmt src",
-    "fmt:check": "node plugin/cli.js fmt --check src",
-    "check": "node plugin/cli.js check src"
+    "check": "kitec check src/main.kite",
+    "fmt": "kitec fmt src/main.kite && kitec fmt src/checkout.kite",
+    "fmt:check": "kitec fmt --check src/main.kite && kitec fmt --check src/checkout.kite"
   },
   "devDependencies": {
+    "kite-cli": "^0.1.0",
     "vite": "^7.0.0"
   }
 }

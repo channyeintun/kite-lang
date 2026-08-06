@@ -33,40 +33,21 @@ is emitted hashed beside your other assets.
 app, and it has no opinion about how the project is arranged. What you import
 is what `kitec` wrote.
 
-## Nothing to install
+## Install
 
-`kitec.wasm` ships in this package — the same Rust as the `kitec` binary, built
-for WebAssembly — so `npm install` is the whole setup, on every platform, with
-no native binary and no download.
-
-A native `kitec` is used when one is on `PATH`, because it is faster. That is an
-optimisation: the two produce byte-identical modules, so the only difference is
-how long the build takes. Point at a particular one with:
+Needs `kitec` on your `PATH` — [kite-lang.dev/install](https://kite-lang.dev/install)
+— or point at a particular one:
 
 ```js
 kite({ bin: "./target/release/kitec" })
 ```
 
+The plugin runs that compiler. It does not carry a copy of one, so what a build
+produces and what a terminal produces cannot come apart.
+
 **This package is not published to npm yet.** `examples/vite-starter` vendors
-both files and imports the plugin by path, which is why that starter works when
-it is copied out of the repository. A test fails if either copy drifts.
-
-## `fmt` and `check`, without a compiler
-
-The package carries a small CLI over the same WebAssembly build, so a project
-can format and check its own source with nothing installed:
-
-```json
-{
-  "scripts": {
-    "check": "kite check src",
-    "fmt": "kite fmt src",
-    "fmt:check": "kite fmt --check src"
-  }
-}
-```
-
-`fmt --check` exits 1 when a file would change, which is what CI wants.
+this file and imports it by path, which is why that starter works when it is
+copied out of the repository. A test fails if the copy drifts.
 
 ## What crosses the boundary
 
