@@ -88,7 +88,44 @@ pub struct Loader {
     /// the compiler was exactly that: it managed a single self-contained file
     /// and failed on the first `use` of a sibling.
     provided: HashMap<String, String>,
-    seen: Vec<String>,
+    /// Every module loaded so far, and where its source came from.
+    ///
+    /// The origin is kept because the name alone is not an identity: two
+    /// directories may each hold a `utils`, and the loader would take the
+    /// first and silently drop the second. See [`Origin`].
+    seen: HashMap<String, Origin>,
+}
+
+/// Where a module's source came from, for telling two of the same name apart.
+///
+/// A module is identified by the last segment of its `use` path, so `dep/utils`
+/// and `utils` are both a module called `utils`. That is what makes them
+/// collide; this is what makes the collision visible.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Origin {
+    /// The standard library's own copy.
+    Std,
+    /// Handed over by the host rather than found on a filesystem — a bundler,
+    /// or an editor holding an unsaved buffer.
+    Provided,
+    /// A directory, or a single file.
+    Path(PathBuf),
+    /// Nothing was found. Recorded so that a `use` which failed to resolve is
+    /// never reported as colliding with anything: it has no source to differ
+    /// from, and E0400 has already said so.
+    Missing,
+}
+
+impl Origin {
+    /// How to name this in a diagnostic.
+    fn describe(&self) -> String {
+        match self {
+            Origin::Std => "the standard library".to_string(),
+            Origin::Provided => "the host, which supplied its source directly".to_string(),
+            Origin::Path(p) => format!("`{}`", p.display()),
+            Origin::Missing => "nowhere".to_string(),
+        }
+    }
 }
 
 /// The dependencies a package declares, if the file being compiled is in one.
@@ -192,11 +229,74 @@ impl Loader {
                 );
                 continue;
             }
-            if self.seen.contains(&name) {
+            if let Some(first) = self.seen.get(&name).cloned() {
+                // The name is taken. Whether that is the *same* module being
+                // imported twice — ordinary, and the whole point of the check —
+                // or a second, different module quietly losing, depends on
+                // where each came from.
+                let found = self.origin_of(&name, &segments, dir);
+                if first != found && first != Origin::Missing && found != Origin::Missing {
+                    diags.push(
+                        Diagnostic::error(
+                            codes::E0404,
+                            format!("`{}` is already the name of another module", name),
+                        )
+                        .with_primary(u.span, "this module never loads")
+                        .with_note(format!(
+                            "`{}` was already loaded from {}, and a module is known by the \
+                             last segment of its path — so every `{}.…` in this program \
+                             reaches that one",
+                            name,
+                            first.describe(),
+                            name
+                        ))
+                        .with_note(
+                            "which of the two wins is decided by the order of the `use` \
+                             lines that reached them; rename one",
+                        ),
+                    );
+                }
                 continue;
             }
             self.load_one(&name, &segments, u.span, dir, stack, sources, diags);
         }
+    }
+
+    /// Where a `use` of this name would find its source.
+    ///
+    /// The same order of preference [`Self::load_one`] applies, and it is a
+    /// function so that the two cannot drift: what gets recorded and what gets
+    /// compared against are the same answer.
+    ///
+    /// Paths are canonicalised where the filesystem will do it, so a module
+    /// reached as `../lib/utils` from one importer and `utils` from another is
+    /// one module rather than a reported collision. Where it will not — a
+    /// wasm host has no filesystem — the path stands for itself, and the worst
+    /// that costs is a collision going unreported on a host that had no two
+    /// directories to confuse in the first place.
+    fn origin_of(&self, name: &str, segments: &[&str], dir: Option<&Path>) -> Origin {
+        if segments.first() == Some(&"std") {
+            return Origin::Std;
+        }
+        if self.provided.contains_key(name) {
+            return Origin::Provided;
+        }
+        let Some(base) = dir else {
+            return Origin::Missing;
+        };
+        let settle = |p: PathBuf| Origin::Path(std::fs::canonicalize(&p).unwrap_or(p));
+        let as_dir = match self.dependencies.get(name) {
+            Some(path) => path.clone(),
+            None => base.join(name),
+        };
+        if as_dir.is_dir() {
+            return settle(as_dir);
+        }
+        let as_file = base.join(format!("{}.kite", name));
+        if as_file.is_file() {
+            return settle(as_file);
+        }
+        Origin::Missing
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -321,7 +421,9 @@ impl Loader {
             }
         }
 
-        self.seen.push(name.to_string());
+        // Recorded through the same resolver the collision check reads, so the
+        // two cannot answer differently about where a module came from.
+        self.seen.insert(name.to_string(), self.origin_of(name, segments, dir));
         stack.push(name.to_string());
         // A module's own imports are loaded before it is recorded, so a
         // dependency is always earlier in the list than its dependent.

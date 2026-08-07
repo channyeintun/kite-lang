@@ -104,6 +104,26 @@ pub enum Strings {
     Object,
 }
 
+impl Strings {
+    /// Whether comparing two `str` values is a call to the host's `equals`
+    /// rather than a comparison of the values themselves.
+    ///
+    /// Only [`Strings::Table`] can compare directly: interning makes equal
+    /// strings share one index, so an `i32` compare is exact. In the other two
+    /// a `str` is the string, or a record around it, and two equal strings are
+    /// two distinct values — so the host decides.
+    ///
+    /// This is one fact that two places need, and it lives here because they
+    /// were written separately and drifted. [`used_imports`] declares the
+    /// import and `Emitter::key_equality` emits the call; when `Object` was
+    /// added, only the second learned about it, and a program with a `str`-keyed
+    /// map and no other reason to want `str_eq` emitted a call to an import the
+    /// module never declared.
+    fn str_eq_is_a_host_call(self) -> bool {
+        self != Strings::Table
+    }
+}
+
 /// A non-null external reference: what the JS String Builtins return.
 const EXTERN_REF: ValType = ValType::Ref(RefType {
     nullable: false,
@@ -507,11 +527,11 @@ fn used_imports(
         mark(host::STR_EQ);
     }
 
-    // A map with `str` keys compares them on every lookup. With the table
-    // representation that is an integer compare, because interning makes equal
-    // strings share an index; with the builtins the values are the strings
-    // themselves and there is no index to compare, so `equals` is called.
-    if strings == Strings::Builtins {
+    // A map with `str` keys compares them on every lookup, and outside the
+    // table representation that comparison is a host call — see
+    // [`Strings::str_eq_is_a_host_call`], which the emitter reads too so the
+    // two cannot disagree about it again.
+    if strings.str_eq_is_a_host_call() {
         let str_keyed = program.fns.iter().flat_map(|f| f.locals.iter()).any(|l| {
             matches!(types.kind(l.ty), TyKind::Map(k, _) if *k == TyId::STR)
         });
@@ -3538,8 +3558,14 @@ impl<'a> Emitter<'a> {
     fn key_equality(&mut self, func: &mut Function, key_ty: TyId) {
         // The object representation has no index either, and two records
         // holding the same string are two records — so comparing them as
-        // references would answer "different" for keys that are equal.
-        if self.layout.strings != Strings::Table && matches!(self.types.kind(key_ty), TyKind::Str) {
+        // references would answer "different" for keys that are equal. The
+        // condition is [`Strings::str_eq_is_a_host_call`] because the import
+        // scan has to reach the same answer; when this read `== Builtins` and
+        // the scan did too, adding `Object` to one and not the other emitted a
+        // call to an undeclared import.
+        if self.layout.strings.str_eq_is_a_host_call()
+            && matches!(self.types.kind(key_ty), TyKind::Str)
+        {
             // Both sides were unwrapped as they were pushed — only the top of
             // the stack is reachable from here, so it cannot be done for them
             // both at this point. See `unwrap_key` at the two callers.

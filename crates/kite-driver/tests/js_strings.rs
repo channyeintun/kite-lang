@@ -154,6 +154,48 @@ const PROGRAMS: &[(&str, &str)] = &[
          \x20 io.print(join(m.keys(), \"|\"))\n\
          \x20 io.print(sorted([\"c\", \"a\", \"b\"], |x: str, y: str| x < y)[0])\n}\n",
     ),
+    // A `str`-keyed map and *nothing else that compares an aggregate*.
+    //
+    // Separate from `strings-inside-things` on purpose, and it has to stay
+    // that way. Outside the table representation a map key is compared by the
+    // host, so the module must declare `str_eq` — but the import scan also
+    // marks it for any generated deep-equality function at all, so a single
+    // `==` on a struct anywhere in the program declares it for free and hides
+    // a scan that forgot the map. That is exactly what happened: the map case
+    // was written for the builtins and not extended to the object
+    // representation, and every program here that has a map also had a struct
+    // comparison, so nothing failed.
+    (
+        "a-map-keyed-by-strings-alone",
+        "fn main() {\n\
+         \x20 var m: { str: int } = {}\n\
+         \x20 m[\"one\"] = 1\n\
+         \x20 m[\"two\"] = 2\n\
+         \x20 m[\"one\"] = 3\n\
+         \x20 io.print(m.len())\n\
+         \x20 io.print(join(m.keys(), \"|\"))\n}\n",
+    ),
+    // `str?`, compared bare and as a field.
+    //
+    // An optional's payload has to come out of its record like any other
+    // `str`, and `optional_eq` was the one comparison that did not do it —
+    // `compare_fields`, `slice_eq` and `error_eq` all did. Both spellings are
+    // here because the field case reaches it indirectly, through the struct's
+    // own comparison, which is how a real program meets this.
+    (
+        "optional-strings-compared",
+        "struct User {\n  id: int\n  nickname: Option<str>\n}\n\
+         fn main() {\n\
+         \x20 let a = User{ id: 1, nickname: \"ada\" }\n\
+         \x20 let b = User{ id: 1, nickname: \"ada\" }\n\
+         \x20 let c = User{ id: 1, nickname: nil }\n\
+         \x20 io.print(a == b)\n\
+         \x20 io.print(a == c)\n\
+         \x20 let n: Option<str> = \"ada\"\n\
+         \x20 let o: Option<str> = nil\n\
+         \x20 io.print(n == o)\n\
+         \x20 io.print(n == n)\n}\n",
+    ),
     // The prelude, which is where most string work in a Kite program actually
     // happens.
     (

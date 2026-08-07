@@ -44,10 +44,18 @@ pub fn render(d: &Diagnostic, sources: &SourceMap) -> String {
 /// overwrite what is already on screen. Everything else in C0, DEL and C1
 /// becomes a visible escape — the same treatment the language server's JSON
 /// writer has always applied on its side of the wire.
+///
+/// The bidirectional formatting characters go too, and they are the reason
+/// this is not simply `char::is_control`. That predicate is the Unicode `Cc`
+/// category, so `U+202E RIGHT-TO-LEFT OVERRIDE` is not a control character by
+/// it and was written out verbatim. It does not move the cursor; it reorders
+/// what is already there, which reaches the same end by a quieter route — an
+/// identifier quoted back in a diagnostic can be made to read as a different
+/// identifier, and the reader has no way to see it. Escaping only what can
+/// reorder, rather than every invisible character, keeps ordinary text
+/// ordinary: a zero-width space is unhelpful but it cannot rewrite a line.
 fn tame(text: &str) -> String {
-    let needs = text
-        .chars()
-        .any(|c| c != '\n' && c != '\t' && (c.is_control() || ('\u{80}'..='\u{9f}').contains(&c)));
+    let needs = text.chars().any(|c| c != '\n' && c != '\t' && suspicious(c));
     if !needs {
         return text.to_string();
     }
@@ -55,13 +63,28 @@ fn tame(text: &str) -> String {
     for c in text.chars() {
         if c == '\n' || c == '\t' {
             out.push(c);
-        } else if c.is_control() || ('\u{80}'..='\u{9f}').contains(&c) {
+        } else if suspicious(c) {
             let _ = write!(out, "\\u{{{:02x}}}", c as u32);
         } else {
             out.push(c);
         }
     }
     out
+}
+
+/// Whether a character decides what the terminal shows rather than being shown.
+fn suspicious(c: char) -> bool {
+    c.is_control()
+        // C1, which a terminal reads as escape sequences of its own.
+        || ('\u{80}'..='\u{9f}').contains(&c)
+        // Bidirectional embeddings and overrides, and the pop that ends them.
+        || ('\u{202a}'..='\u{202e}').contains(&c)
+        // Bidirectional isolates, and their pop.
+        || ('\u{2066}'..='\u{2069}').contains(&c)
+        // The marks, which set direction without an explicit scope.
+        || c == '\u{200e}'
+        || c == '\u{200f}'
+        || c == '\u{061c}'
 }
 
 fn render_raw(d: &Diagnostic, sources: &SourceMap) -> String {

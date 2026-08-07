@@ -371,8 +371,16 @@ impl EqBuilder<'_> {
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
 
+        // The payload of a `str?` is a `str`, so it unwraps like every other
+        // one — each side as it is pushed, because the deeper one is out of
+        // reach afterwards. This is the fourth place that has to do it and the
+        // one that was missed: `compare_fields`, `slice_eq` and `error_eq` all
+        // did, so `str?` was the only shape whose comparison handed the host's
+        // `equals` a record instead of a string.
         struct_get(&mut f, 0, boxed, 0);
+        self.unwrap_str(&mut f, inner);
         struct_get(&mut f, 1, boxed, 0);
+        self.unwrap_str(&mut f, inner);
         self.compare_values(&mut f, inner);
         f.instruction(&Instruction::End);
         f

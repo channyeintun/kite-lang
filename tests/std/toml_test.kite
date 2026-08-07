@@ -241,6 +241,25 @@ fn refusal_checks() -> [error] {
     let (_, huge_exponent) = toml.parse("x = 1e999999999999\n")
     out.push(test.ok(huge_exponent, "an enormous exponent parses instead of hanging"))
 
+    // The bound is the `int`'s, and the `int`'s range is not symmetric.
+    //
+    // The overflow guard first built the magnitude and negated it, so the one
+    // value with no positive counterpart was refused as too large — a document
+    // holding a perfectly ordinary `int` was told it did not fit. Both ends
+    // belong here because a guard that gets one right by accident gets the
+    // other wrong.
+    let (_, lowest) = toml.parse("n = -9223372036854775808\n")
+    out.push(test.ok(lowest, "the smallest `int` is an `int`"))
+
+    let (_, highest) = toml.parse("n = 9223372036854775807\n")
+    out.push(test.ok(highest, "and so is the largest"))
+
+    let (_, under) = toml.parse("n = -9223372036854775809\n")
+    out.push(test.failed(under, "one below the smallest does not fit"))
+
+    let (_, over) = toml.parse("n = 9223372036854775808\n")
+    out.push(test.failed(over, "one above the largest does not fit"))
+
     return out
 }
 

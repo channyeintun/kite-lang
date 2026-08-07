@@ -147,6 +147,69 @@ fn a_hash_covers_every_kite_file_and_its_contents() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The digest is SHA-256, held to the vectors rather than to itself.
+///
+/// A hand-written hash that is self-consistent but not the algorithm it claims
+/// would pass every other test in this file — they only ask whether the answer
+/// changes when the input does, which a great many wrong functions also do.
+/// These are from FIPS 180-4, and they are the only thing here that could catch
+/// a transcription error in the round constants.
+#[test]
+fn the_digest_is_really_sha256() {
+    let hex = |bytes: &[u8]| {
+        let mut h = Sha256::new();
+        h.update(bytes);
+        h.finish().iter().map(|b| format!("{:02x}", b)).collect::<String>()
+    };
+
+    assert_eq!(hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    assert_eq!(hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    assert_eq!(
+        hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+    );
+    // A megabyte of one letter: more than one block, and enough of them to
+    // catch a length counter that wraps or a buffer that is refilled wrongly.
+    assert_eq!(
+        hex(&vec![b'a'; 1_000_000]),
+        "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+    );
+
+    // Streaming in pieces is the same as all at once, which is the property
+    // `hash_directory` relies on when it feeds a file at a time.
+    let mut split = Sha256::new();
+    split.update(b"ab");
+    split.update(b"");
+    split.update(b"c");
+    let joined = split.finish().iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    assert_eq!(joined, hex(b"abc"));
+}
+
+/// A name and a body are length-prefixed, so moving a byte between them is a
+/// different digest. Without that, a dependency could rename a file to absorb
+/// a change to another one's contents.
+#[test]
+fn a_filename_cannot_be_traded_against_its_contents() {
+    let root = std::env::temp_dir().join(format!("kite-hash-split-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    let one = root.join("one");
+    std::fs::create_dir_all(&one).expect("create");
+    std::fs::write(one.join("ab.kite"), "c").expect("write");
+
+    let two = root.join("two");
+    std::fs::create_dir_all(&two).expect("create");
+    std::fs::write(two.join("a.kite"), "bc").expect("write");
+
+    assert_ne!(
+        hash_directory(&one).expect("hashes"),
+        hash_directory(&two).expect("hashes"),
+        "`ab` holding `c` and `a` holding `bc` present the same bytes without a length prefix"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn a_lockfile_is_written_to_be_read_by_a_person() {
     let text = lockfile(&[Locked {

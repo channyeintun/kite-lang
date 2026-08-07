@@ -129,11 +129,17 @@ const SURROGATE = new RegExp(
 );
 const narrow = (s) => !SURROGATE.test(s);
 
-/// A `str` for an exported function to take.
+/// A `str` as the host holds one, which here is the string itself.
 ///
-/// The module exports `__str_wrap`, because building the record is something
-/// only the module can do: a WasmGC struct is opaque to JavaScript in both
-/// directions. `text` is the same in reverse, through `__str_unwrap`.
+/// These are what a declared `@host` function takes and answers with, and in
+/// this mode they are the identity — the module unwraps on the way out and
+/// wraps on the way back, so nothing on this side ever sees the record.
+///
+/// They are **not** yet enough to call an *exported* Kite function that takes
+/// or returns a `str`. That signature is the record, which JavaScript can
+/// neither build nor read, and the module exports no wrapper to do it. Until
+/// it does, an export with a `str` in its signature is unreachable from the JS
+/// API in this mode.
 export function str(s) {{
   return String(s);
 }}
@@ -266,8 +272,19 @@ export function text(s) {
         ),
         Strings::Builtins => String::from(
             "  // An engine without the builtins ignores the options and then cannot\n\
-            \x20 // find `wasm:js-string`, which is a link error nobody could place. The\n\
-            \x20 // failure is caught and named rather than left as one.\n\
+            \x20 // find `wasm:js-string`, which is a link error nobody could place. That\n\
+            \x20 // one failure is caught and named.\n\
+            \x20 //\n\
+            \x20 // Only that one. This used to re-label *every* failure here as a missing\n\
+            \x20 // proposal, so a module this compiler had built wrong was reported as an\n\
+            \x20 // engine too old to run it — on engines that have the builtins — and the\n\
+            \x20 // one message that would have named the bug was the one thrown away. A\n\
+            \x20 // feature probe is no better: an engine that does not know the `builtins`\n\
+            \x20 // option ignores it rather than refusing it, so a probe answers yes\n\
+            \x20 // everywhere. What actually distinguishes the two is whether the engine\n\
+            \x20 // is complaining about the namespace or about the module, so that is what\n\
+            \x20 // is tested — and anything unrecognised is rethrown untouched, which\n\
+            \x20 // fails towards the honest message rather than the flattering one.\n\
             \x20 let instance;\n\
             \x20 try {\n\
             \x20   const module = await WebAssembly.compile(bytes, {\n\
@@ -278,6 +295,7 @@ export function text(s) {
             \x20   // itself — there is no `{ instance, module }` pair to take apart.\n\
             \x20   instance = await WebAssembly.instantiate(module, imports());\n\
             \x20 } catch (e) {\n\
+            \x20   if (!/wasm:js-string|js-string/.test(String(e && e.message))) throw e;\n\
             \x20   throw new Error(\n\
             \x20     'this module was built with --js-strings and needs the JS String ' +\n\
             \x20       'Builtins, which this engine does not have: ' + e.message + '. ' +\n\

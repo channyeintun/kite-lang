@@ -1171,6 +1171,21 @@ fn int_of(body: str) -> (int, error) {
     if i >= body.len() {
         return _, errors.new("toml: `\(body)` is not a number")
     }
+    // Accumulated as a *negative* number, which is the wider half.
+    //
+    // Two's complement reaches one further down than up, so `min_int()` has no
+    // positive counterpart: building the magnitude and negating it at the end
+    // cannot represent `-9223372036854775808`, and rejected the one value that
+    // only exists on this side. Counting downwards makes the range the `int`'s
+    // rather than the `int`'s minus one.
+    //
+    // The digits are the document's, and so is how many there are. An `int`
+    // multiply that overflows is a trap, and a trap is not catchable — so
+    // without the guard the function that exists to *return* a parse error
+    // would instead end the process. It is rearranged to stay in range:
+    // computing the product to find out would be the trap. Integer division
+    // truncates toward zero, so for a negative numerator this is the ceiling,
+    // which is exactly the bound `value * 10 - digit >= min_int()` needs.
     var value = 0
     for {
         if i >= body.len() {
@@ -1180,19 +1195,18 @@ fn int_of(body: str) -> (int, error) {
         if digit < 0 || digit > 9 {
             return _, errors.new("toml: `\(body)` is not a number")
         }
-        // The digits are the document's, and so is how many there are. An
-        // `int` multiply that overflows is a trap, and a trap is not
-        // catchable — so without this the function that exists to *return* a
-        // parse error would instead end the process. Rearranged to stay in
-        // range: computing the product to find out would be the trap.
-        if value > (math.max_int() - digit) / 10 {
+        if value < (math.min_int() + digit) / 10 {
             return _, errors.new("toml: `\(body)` does not fit in an int")
         }
-        value = value * 10 + digit
+        value = value * 10 - digit
         i = i + 1
     }
     if negative {
-        return 0 - value, nil
+        return value, nil
     }
-    return value, nil
+    // The only magnitude that fits going down and not coming back up.
+    if value == math.min_int() {
+        return _, errors.new("toml: `\(body)` does not fit in an int")
+    }
+    return 0 - value, nil
 }

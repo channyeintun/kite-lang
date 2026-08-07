@@ -429,17 +429,17 @@ Applied to the working tree at `9028c68` and verified: `cargo test --workspace`,
 | F6 parser recursion | fixed | 50k nested parens exit 1 (E0102), previously exit 134 SIGABRT |
 | F7 / F10 interpolation span | fixed | one defect; closing delimiter no longer assumed, `span_text` clamped |
 | F8 server body / request leak | fixed | 20 MB POST answered 413; `REQUESTS` released on answer |
-| F9 lockfile not verified | fixed | a changed lockfile is now a non-zero exit, `--update` to accept |
+| F9 lockfile not verified | partly fixed | a changed lockfile is now a non-zero exit, `--update` to accept; digest is SHA-256 as of the follow-up. The build still does not read the lock — see below |
 | F11 quadratic json | fixed | 200x200 KB echo: >300 s to 3.3 s |
 | F12 toml int overflow | fixed | returns a parse error; regression test |
 | F13 toml exponent loop | fixed | clamped; regression test |
 | F14 kitec doc panic | fixed | `u32::MAX` sentinel replaced; comment-only files document cleanly |
 | F15 release frame pointers | fixed | flag restored, and `kite-rt/build.rs` now refuses to build without it |
 | F16 json nesting depth | fixed | ceiling of 128; regression tests either side |
-| F17 std namespace squat | fixed | E0403; a user module may not take a std name |
+| F17 std namespace squat | fixed | E0403; a user module may not take a std name. The general case — two non-`std` modules of the same name — is E0404 as of the follow-up |
 | F18 a11y native host | fixed | audited program runs with no host; `fs.write` refused, no file created |
 | F19 cleartext transports | fixed | `http://` and `git://` refused and no longer force-enabled in git |
-| F21 ANSI injection | fixed | control characters escaped at the render boundary |
+| F21 ANSI injection | fixed | control characters escaped at the render boundary; the bidirectional overrides joined them in the follow-up, having been missed because `char::is_control` is the `Cc` category alone |
 | markdown href escaping | fixed | scheme allowlist and attribute escaping (found by the Fable 5 consult) |
 | **F20 unbounded interning** | **not fixed** | see below |
 
@@ -450,3 +450,20 @@ The append-only `STRINGS` table in `kite-codegen-wasm/src/glue.rs` is not reclai
 It is not fixable in that file. A `str` crosses to WebAssembly as an integer index, so the JS collector cannot know when the module has dropped one — which is exactly why the table only grows. A `FinalizationRegistry` does not help, because nothing on the wasm side holds a JS object to finalise.
 
 The real fix already exists: `Strings::Builtins`, where a `str` *is* a JavaScript string and is collected normally. Making it the web target's default would close this. That is a compatibility decision rather than a security one — it does not instantiate on an engine without the JS String Builtins proposal — so it is left for the maintainer to make.
+
+**Update, 38d750d.** `Strings::Object` closes it without the proposal: a `str` becomes a WasmGC record holding the JS string, which the collector traces. Measured on the same load — 200 POSTs of 200 KB at `examples/server.kite` — the table dies at 1.26 GB in 1.8 s and the object representation finishes all 200 with correct bodies at 210 MB peak. It is reachable only through `KITE_STRINGS_OBJECT=1`; `Table` is still the default and still leaks, and deleting it is the remaining work.
+
+---
+
+## What a re-review of the fixes found — follow-up
+
+The fixes above were reviewed adversarially and re-derived by running. Two defects in the `Strings::Object` boundary and four smaller ones were found and are fixed in the same follow-up; the notes in the table point at them. What is worth recording here is *why the tests did not catch the two big ones*, since that is the reusable part:
+
+- The import scan marks `str_eq` used for any generated deep-equality function at all, so a single `==` on a struct anywhere in a program declares the import for free. Every test program with a `str`-keyed map also compared a struct, which hid a scan that had not learned about the new representation. There is now a program with a map and no aggregate comparison, deliberately separate.
+- No test compared two `Option<str>` values, which was the one shape whose comparison did not unwrap the record.
+
+Still open after the follow-up, and known:
+
+- `kitec build`, `run` and `test` do not read `kite.lock`. `kitec pkg` is the only enforcement point (F9).
+- A module is still identified by the last segment of its path. E0403 and E0404 make the collisions *loud* rather than removing them.
+- `Strings::Table` remains the default and remains a leak (F20).

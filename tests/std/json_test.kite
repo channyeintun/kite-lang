@@ -67,11 +67,24 @@ fn checks() -> [error] {
     // stack ran out. That every one of them returns at all is the assertion.
     out.push(test.equal_str(roundtrip("1e-999999999999"), "0", "an exponent past the float range underflows to zero"))
 
+    // Both of these return promptly rather than hanging or trapping, which is
+    // what the bound was for — and both are *refused*, which is the second
+    // half. An exponent past the float range used to parse to an infinity, and
+    // `stringify` then emitted the bare token `inf`: a document that went in as
+    // JSON and came out as something no JSON parser reads.
     let (huge, huge_err) = json.parse("1e999999999999")
-    out.push(test.ok(huge_err, "an enormous exponent parses instead of hanging"))
+    out.push(test.failed(huge_err, "an enormous exponent is refused, not turned into an infinity"))
 
     let (wide, wide_err) = json.parse("1e99999999999999999999")
-    out.push(test.ok(wide_err, "more exponent digits than an int holds does not overflow"))
+    out.push(test.failed(wide_err, "more exponent digits than an int holds is refused, not overflowed"))
+
+    // The edge is the float's, not a guessed threshold: the largest power of
+    // ten a `float` holds still parses, and one more does not.
+    let (big, big_err) = json.parse("1e308")
+    out.push(test.ok(big_err, "the largest power of ten a float holds still parses"))
+
+    let (over, over_err) = json.parse("1e309")
+    out.push(test.failed(over_err, "one past it does not"))
 
     let (too_deep, too_deep_err) = json.parse(nested(max_nesting() + 20))
     out.push(test.failed(too_deep_err, "nesting past the ceiling is an error, not a crash"))

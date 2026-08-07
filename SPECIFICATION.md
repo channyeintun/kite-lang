@@ -1408,11 +1408,25 @@ program-wide table, so `use leak as crypto` written anywhere — including insid
 a dependency — rewrote every `crypto.…` call in every other module, silently
 and with no diagnostic. An alias is a convenience for the file that writes it.
 
-**The standard library's module names belong to it.** A module is known by the
-last segment of its path, so `use crypto` and `use std/crypto` would both name
-a module called `crypto` and whichever loaded first would win for the whole
-program — which made the standard library replaceable by any dependency that
-got there first. A non-`std` module may not take one of its names (`E0403`).
+**A module is known by the last segment of its path.** `use dep/utils` and
+`use utils` therefore both name a module called `utils`, and only one of them
+can have the name.
+
+Two consequences follow, and both are errors rather than a silent choice:
+
+- **The standard library's names are its own.** A non-`std` module may not take
+  one (`E0403`). The reserved names are `buffer`, `canvas`, `crypto`, `dom`,
+  `errors`, `fmt`, `fs`, `html`, `http`, `js`, `json`, `math`, `prelude`,
+  `socket`, `sync`, `task`, `test`, `text`, `time` and `toml`. Without this the
+  standard library was replaceable by any dependency that got there first.
+- **Two other modules may not share a name either** (`E0404`). Which one won
+  used to depend on the order of the `use` lines that reached them, with
+  nothing reported — so a dependency shipping a `utils` directory could answer
+  every `utils.…` call in the source of the program that imported it.
+
+Identifying a module by its full path, so that `dep/utils` and `utils` are two
+modules rather than a collision, is the better answer and is not yet what the
+compiler does.
 
 ### 13.2 Manifest
 
@@ -1429,11 +1443,20 @@ native = { entry = "src/main.kite" }
 markdown = { git = "https://github.com/example/kite-markdown", tag = "v1.2.0" }
 ```
 
-Dependencies are resolved to a lockfile with content hashes, and the lockfile is
-**checked, not just written**: a dependency whose contents changed under the
-same version — a moved tag, a re-pushed repository — makes `kitec pkg` fail
-rather than quietly recording the new bytes. `--update` accepts a change, which
-is a decision someone makes rather than something a build does on its way past.
+Dependencies are resolved to a lockfile of **SHA-256** content hashes, and the
+lockfile is **checked, not just written**: a dependency whose contents changed
+under the same version — a moved tag, a re-pushed repository — makes `kitec pkg`
+fail rather than quietly recording the new bytes. `--update` accepts a change,
+which is a decision someone makes rather than something a build does on its way
+past.
+
+The digest is cryptographic because the party it is checked against is the one
+who chooses the bytes. It was FNV-1a, which is invertible, so a dependency's
+author could have made any change land on the recorded hash.
+
+`kitec pkg` is where that check happens, and it is the only place: `kitec build`,
+`run` and `test` compile whatever is in `.kite/vendor` without consulting
+`kite.lock`. A pipeline that wants the guarantee has to run `kitec pkg` in it.
 
 Dependency URLs are fetched over `https://` or `ssh://` only. `http://` and
 `git://` authenticate neither the host nor the bytes, and what is fetched is

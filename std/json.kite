@@ -256,7 +256,33 @@ fn parse_number(input: str, at: int) -> (Step, error) {
     if negative {
         value = 0.0 - value
     }
+    // A number JSON cannot express is a parse error, not a value.
+    //
+    // Bounding the exponent loop stopped the document choosing how long the
+    // parser ran, but it left `1e999999999999` *succeeding*, with an infinity
+    // in the tree — and `stringify` then wrote the bare token `inf`, which no
+    // JSON parser reads back. A document that cannot survive a round trip
+    // through this module has not been parsed, so it says so here.
+    //
+    // `std/toml` already takes this position for a literal `inf` ("has no
+    // value in Kite"); this is the same rule for the spelling that reaches one
+    // by arithmetic. Underflow is untouched: `1e-999999999999` is zero, which
+    // is what IEEE says and a number JSON can hold.
+    if infinite(value) {
+        return _, errors.new("json: the number at \(at) is out of range for a float")
+    }
     return Step{ value: Json.Number(value), next: i }, nil
+}
+
+/// Whether a float is an infinity.
+///
+/// Kite has no literal for one and no `is_infinite`, so this tests the
+/// property itself: doubling a finite number changes it and doubling an
+/// infinity does not. Zero is the other fixed point of that, which is why it
+/// is excluded rather than handled apart. A NaN fails the equality and is not
+/// reported here, which is correct — this parser cannot produce one.
+fn infinite(v: float) -> bool {
+    return v != 0.0 && v == v * 2.0
 }
 
 /// The multiplier an exponent stands for, and where it ended.

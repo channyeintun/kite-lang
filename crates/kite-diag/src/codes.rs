@@ -298,6 +298,22 @@ codes! {
          two apart.\n\n\
          So the standard library's names belong to it. Rename the module.";
 
+    E0404 = "E0404", "two modules of the same name",
+        "A module is known by the last segment of its `use` path, so two \
+         modules in different directories with the same final name are one \
+         module as far as the rest of the compiler is concerned — and the one \
+         loaded first won, for the whole program.\n\n\
+         Which one that is depends on the order of the `use` lines in the \
+         entry file, and nothing was reported either way. A dependency \
+         shipping a `utils` directory could therefore answer every \
+         `utils.…` call in the importing program's own source, with no \
+         diagnostic and nothing changed in that program. `E0403` reserves the \
+         standard library's names for the same reason; this is the general \
+         case.\n\n\
+         Rename one of them. Full paths as identities — so `dep/utils` and \
+         `utils` are two modules rather than a collision — is the better \
+         answer and is not what this compiler does yet.";
+
     E0402 = "E0402", "module cycle",
         "Modules may not depend on each other cyclically. Extract the shared \
          part into a third module.";
