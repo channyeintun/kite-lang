@@ -98,16 +98,27 @@ Wait for it. Then download the release's artefacts into a directory.
 ```bash
 ./packages/kite-cli/build.sh path/to/downloaded/release/
 for d in packages/kite-cli/platforms/*/; do (cd "$d" && npm publish); done
-npm publish packages/kite-cli
+npm publish ./packages/kite-cli
 
 # The compiler as WebAssembly: one module, no platform matrix. `build.sh`
 # writes the `.wasm`, which is a build artefact and not in the tree — publish
 # without running it and the package ships without a compiler in it.
 ./packages/kite-wasm/build.sh
-npm publish packages/kite-wasm
+npm publish ./packages/kite-wasm
+
+# The plugin is unscoped and published under the user rather than the org, so
+# it is easy to forget — and a plugin left behind resolves a compiler it was
+# never tested against, which is what the pinned dependency exists to prevent.
+npm publish ./packages/vite-plugin-kite
 ```
 
-Three things here have each cost an attempt:
+Four things here have each cost an attempt:
+
+**The path needs a `./`.** `npm publish packages/kite-cli` does not publish that
+directory: npm reads a bare `owner/name` as a GitHub shorthand and goes looking
+for `github.com/packages/kite-cli`, which fails with `code 128` and
+`Repository not found` — an error that says nothing about the real mistake. A
+leading `./` makes it a path again.
 
 **The platform packages go first.** npm resolves `optionalDependencies` at
 install time and *skips a missing one without a word*. A meta-package published
