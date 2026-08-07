@@ -1418,6 +1418,16 @@ function pump() {{
 /// handler need not know whether the pump is already awake.
 export function wake() {{
   if (residentExports === null) return;
+  // Something happened on the host, which is precisely what a task waiting on
+  // the host asked to be told about. This is `drive`'s "yield to the event
+  // loop, then clear the flag", written for a driver that does not own the
+  // loop and so cannot yield to it — the callback that woke us *is* the yield.
+  //
+  // Without this line a `wait_host` task is not merely slow, it is finished:
+  // `step` skips a task carrying the flag and `schedule` gives it no deadline,
+  // so nothing ever polls it again. The request completes, the response is
+  // sitting in `REQUESTS`, and the program never looks.
+  for (const t of TASKS) t.waitingOnHost = false;
   if (pumping) {{
     pumpAgain = true;
     return;
@@ -1699,16 +1709,22 @@ if (HOSTS.net) {
       const id = REQUESTS.push(request) - 1;
       const init = { method: S(method), headers: parseHeaders(S(headers)) };
       if (S(body) !== "") init.body = S(body);
+      // Every one of these settles a state a Kite task is waiting on, so every
+      // one of them ends in `wake`. A host that changes what a program is
+      // blocked on and does not say so leaves the program blocked on it
+      // forever — the scheduler has no other way to find out.
       fetch(S(url), init)
         .then(async (response) => {
           request.status = response.status;
           request.headers = response.headers;
           request.body = await response.text();
           request.state = 1;
+          wake();
         })
         .catch((e) => {
           request.error = String(e && e.message ? e.message : e);
           request.state = 2;
+          wake();
         });
       return BigInt(id);
     },
@@ -1737,15 +1753,16 @@ if (HOSTS.net) {
       s.source = source;
       s.take = (e) => {
         s.queue.push({ name: e.type || "message", id: e.lastEventId || "", data: e.data ?? "" });
+        wake();
       };
-      source.onopen = () => { s.state = 1; };
+      source.onopen = () => { s.state = 1; wake(); };
       source.onmessage = s.take;
       // Registered before anything can arrive, which is the whole reason the
       // names are given at open.
       for (const name of S(names).split("\n")) {
         if (name !== "") source.addEventListener(name, s.take);
       }
-      source.onerror = () => { if (source.readyState === 2) s.state = 2; };
+      source.onerror = () => { if (source.readyState === 2) { s.state = 2; wake(); } };
       return BigInt(id);
     },
     sse_state: (id) => BigInt(STREAMS[Number(id)].state),
@@ -1796,15 +1813,22 @@ if (HOSTS.net) {
         return BigInt(id);
       }
       s.socket = socket;
-      socket.onopen = () => { s.state = 1; };
-      socket.onmessage = (e) => { if (typeof e.data === "string") s.queue.push(e.data); };
+      socket.onopen = () => { s.state = 1; wake(); };
+      socket.onmessage = (e) => {
+        if (typeof e.data === "string") s.queue.push(e.data);
+        wake();
+      };
       socket.onerror = () => {
         if (s.state !== 3) {
           s.state = 2;
           if (s.error === "") s.error = "the connection failed";
         }
+        wake();
       };
-      socket.onclose = () => { if (s.state !== 2) s.state = 3; };
+      socket.onclose = () => {
+        if (s.state !== 2) s.state = 3;
+        wake();
+      };
       return BigInt(id);
     },
     socket_state: (id) => BigInt(STREAMS[Number(id)].state),
@@ -2040,10 +2064,12 @@ if (HOSTS.crypto) {
       .then((value) => {
         work.result = value;
         work.state = 1;
+        wake();
       })
       .catch((e) => {
         work.error = String(e && e.message ? e.message : e);
         work.state = 2;
+        wake();
       });
     return BigInt(id);
   };
