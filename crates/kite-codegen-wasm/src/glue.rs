@@ -95,6 +95,54 @@ pub fn generate_glue_for(
         .collect::<Vec<_>>()
         .join("\n");
     let strings_section = match mode {
+        // A `str` is a record the *module* owns, holding the JS string. The
+        // glue never sees the record — JavaScript cannot read a WasmGC struct,
+        // and cannot build one either — so everything here works in real
+        // strings and the module wraps and unwraps at its own boundary.
+        //
+        // There is no table and no `intern`. That is the whole point: what the
+        // module drops, the engine collects, and nothing accumulates for the
+        // life of the process.
+        Strings::Object => format!(
+            r#"// The program's string literals, handed to the module as imported globals.
+//
+// Fixed at compile time — these are the literals in the source and nothing
+// else — so this array does not grow and is not the table this representation
+// exists to remove.
+const CONSTANTS = [
+{table}
+];
+
+/// A `str` is the string itself on this side of the boundary.
+const intern = (s) => s;
+const S = (s) => s;
+
+// Whether code-point indices and UTF-16 indices agree.
+//
+// Only a surrogate pair makes them differ, so the question is whether the
+// string holds a leading surrogate — a native scan with nothing allocated,
+// rather than spreading the string into an array of one-character strings to
+// count them. The range is built with `fromCharCode` because a `\uD800`
+// escape cannot be written in the Rust literal this file is generated from.
+const SURROGATE = new RegExp(
+  "[" + String.fromCharCode(0xd800) + "-" + String.fromCharCode(0xdbff) + "]",
+);
+const narrow = (s) => !SURROGATE.test(s);
+
+/// A `str` for an exported function to take.
+///
+/// The module exports `__str_wrap`, because building the record is something
+/// only the module can do: a WasmGC struct is opaque to JavaScript in both
+/// directions. `text` is the same in reverse, through `__str_unwrap`.
+export function str(s) {{
+  return String(s);
+}}
+
+export function text(s) {{
+  return s;
+}}
+"#
+        ),
         Strings::Table => format!(
             r#"// String constants. A `str` is an index into this table, which is why the
 // module needs no linear memory. Concatenation appends, so the table grows.
@@ -211,7 +259,9 @@ export function text(s) {
     // option ignores it and then fails to find `wasm:js-string`, which is a
     // link error nobody could place — so it is checked for and named.
     let compile_step = match mode {
-        Strings::Table => String::from(
+        // `Object` instantiates like `Table`: the representation is the
+        // module's own business and asks the engine for nothing extra.
+        Strings::Table | Strings::Object => String::from(
             "  const { instance } = await WebAssembly.instantiate(bytes, imports());",
         ),
         Strings::Builtins => String::from(
@@ -1118,7 +1168,7 @@ export function setWriter(fn) {{
 
 function imports() {{
   return {{
-{host_spread}    kite: {{
+{host_spread}{constants_import}    kite: {{
       print_int: (v) => write(showInt(v)),
       print_float: (v) => write(showFloat(v)),
       print_bool: (v) => write(showBool(v)),
@@ -1548,6 +1598,14 @@ export async function run(source) {{
         compile_step = compile_step,
         hosts = host_section,
         host_spread = if hosts.is_empty() { "" } else { "    ...HOSTS,\n" },
+        // The literals, by position. Under the builtins the engine synthesises
+        // these from their own names and nothing is passed; here they are
+        // ordinary imported globals and the glue hands them over.
+        constants_import = if mode == Strings::Object {
+            "    \"kite:strings\": Object.fromEntries(CONSTANTS.map((s, i) => [String(i), s])),\n"
+        } else {
+            ""
+        },
         wasm = json_string(wasm_path),
     ))
 }

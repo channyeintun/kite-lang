@@ -76,6 +76,32 @@ pub enum Strings {
     /// up, because the value already *is* the string. The rest of the string
     /// operations stay host calls on purpose — see [`js_string_imports`].
     Builtins,
+    /// A WasmGC object holding the JS string, plus what the glue has learned
+    /// about it.
+    ///
+    /// [`Strings::Table`] leaks, and cannot be made not to. A `str` there is an
+    /// `i32` index into an array the glue holds, and an integer is not a
+    /// reference — so the collector can see neither that a string is live nor
+    /// that it is dead, and the array only grows. Interning hides it until the
+    /// strings are *distinct*, which is exactly what a request body is.
+    ///
+    /// Wrapping the string in an object the module owns fixes that by
+    /// construction: the object is traced, and when the last Kite reference to
+    /// it goes, the engine collects it and the JS string with it. There is no
+    /// table left to grow.
+    ///
+    /// The second field is why this is an object rather than a bare
+    /// `externref`. Kite indexes a `str` by code point and JavaScript indexes
+    /// by UTF-16 code unit, so every indexed operation has to know whether the
+    /// two agree — and answering that costs a scan of the string. `Table`
+    /// could cache the answer against the index; a bare `externref` has
+    /// nowhere to put it, because a JS string is a primitive and cannot be a
+    /// `WeakMap` key. The object can, so the scan happens once per string and
+    /// the answer rides along with it.
+    ///
+    /// Needs WasmGC and reference types, both of which Kite already requires.
+    /// Notably it does *not* need the JS String Builtins proposal.
+    Object,
 }
 
 /// A non-null external reference: what the JS String Builtins return.
@@ -357,7 +383,12 @@ type ImportRow = (&'static str, &'static [ValType], &'static [ValType]);
 fn imports_for(strings: Strings) -> &'static [ImportRow] {
     match strings {
         Strings::Table => &IMPORTS,
-        Strings::Builtins => &JS_STRING_IMPORTS,
+        // The same signatures as the builtins mode: every string crosses to
+        // the host as the JS string itself. What differs is where they come
+        // from — all of these are the glue's, because `Object` asks nothing of
+        // the engine beyond WasmGC — and that the module wraps what comes back
+        // rather than using it directly.
+        Strings::Builtins | Strings::Object => &JS_STRING_IMPORTS,
     }
 }
 
@@ -681,6 +712,13 @@ struct TypeLayout {
     /// The error record: a message index. `nil` is a null reference, which is
     /// what makes `return value, nil` read the way it does.
     error_record: u32,
+    /// The string record, under [`Strings::Object`] only: the JS string, and
+    /// whether its code-point indices are its UTF-16 indices.
+    ///
+    /// Allocated only in that mode, so the other two keep the type index space
+    /// they had — a representation nobody selected should not move a single
+    /// byte of what everyone else emits.
+    str_record: u32,
     /// One record per distinct fallible value type. The pair is a single GC
     /// object so a function can return both slots at once.
     pair_record: std::collections::HashMap<TyId, u32>,
@@ -975,6 +1013,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
         option_box: std::collections::HashMap::new(),
         slice_array: std::collections::HashMap::new(),
         error_record: 0,
+        str_record: 0,
         pair_record: std::collections::HashMap::new(),
         tuple_record: std::collections::HashMap::new(),
         map_record: std::collections::HashMap::new(),
@@ -991,6 +1030,10 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
     }
     layout.error_record = next;
     next += 1;
+    if layout.strings == Strings::Object {
+        layout.str_record = next;
+        next += 1;
+    }
     let pairs = pair_values(program, types);
     for v in &pairs {
         layout.pair_record.insert(*v, next);
@@ -1134,15 +1177,42 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
             });
         }
 
-        // The error record holds a message index. `nil` is a null reference.
+        // The error record holds its message. That is an index under the table
+        // representation and the string's own record under the object one, so
+        // the field is whatever a `str` is here rather than a hardcoded `i32`.
         group.push(struct_subtype(
             vec![FieldType {
-                element_type: StorageType::Val(ValType::I32),
+                element_type: StorageType::Val(val_type_with(TyId::STR, types, &layout)),
                 mutable: false,
             }],
             None,
             true,
         ));
+
+        // The string record: the JS string, and what has been learned about
+        // how to index it.
+        //
+        // `narrow` is -1 until asked, then 0 or 1. It answers "do code-point
+        // indices and UTF-16 indices agree here", which every indexed
+        // operation needs and which costs a scan to determine. Mutable because
+        // it is filled in on first use rather than computed for strings nobody
+        // indexes; the string itself is immutable, as a `str` is.
+        if layout.strings == Strings::Object {
+            group.push(struct_subtype(
+                vec![
+                    FieldType {
+                        element_type: StorageType::Val(EXTERN_REF_NULL),
+                        mutable: false,
+                    },
+                    FieldType {
+                        element_type: StorageType::Val(ValType::I32),
+                        mutable: true,
+                    },
+                ],
+                None,
+                true,
+            ));
+        }
 
         // A fallible result is one GC object holding both slots, so a function
         // can return the pair without multi-value plumbing.
@@ -1372,12 +1442,18 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
         if !hosts.extern_used(i) {
             continue;
         }
+        // A declared `@host` function is JavaScript, so a `str` crosses to it
+        // as the string. The record is the module's own bookkeeping and the
+        // host can neither read one nor build one.
         let params: Vec<ValType> = def
             .params
             .iter()
-            .map(|p| val_type_with(*p, types, &layout))
+            .map(|p| boundary_val_type(*p, types, &layout))
             .collect();
-        let results: Vec<ValType> = wasm_result_with(def.ret, types, &layout).into_iter().collect();
+        let results: Vec<ValType> = wasm_result_with(def.ret, types, &layout)
+            .map(|_| boundary_val_type(def.ret, types, &layout))
+            .into_iter()
+            .collect();
         extern_types[i] = Some(next_fn_type);
         next_fn_type += 1;
         type_section.ty().function(params, results);
@@ -1406,6 +1482,24 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
             imports.import(
                 STRING_CONSTANTS,
                 constant,
+                EntityType::Global(wasm_encoder::GlobalType {
+                    val_type: EXTERN_REF_NULL,
+                    mutable: false,
+                    shared: false,
+                }),
+            );
+        }
+    }
+    // The same idea without the proposal: the glue hands the constants over,
+    // named by position rather than by content, because nothing is
+    // synthesising them from their own names here. The array holding them is
+    // the program's literals and no more — it is fixed at compile time, so it
+    // is not the table this representation exists to remove.
+    if strings == Strings::Object {
+        for i in 0..program.strings.len() {
+            imports.import(
+                STRING_CONSTANTS,
+                &i.to_string(),
                 EntityType::Global(wasm_encoder::GlobalType {
                     val_type: EXTERN_REF_NULL,
                     mutable: false,
@@ -1593,6 +1687,18 @@ fn struct_subtype(
 }
 
 /// The Wasm value type for a Kite type.
+/// The type a value has where it crosses to the host.
+///
+/// Identical to [`val_type_with`] except for a `str` under
+/// [`Strings::Object`]: inside the module that is a record, and on the way out
+/// it is the string the record holds.
+fn boundary_val_type(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
+    if layout.strings == Strings::Object && matches!(types.kind(ty), TyKind::Str) {
+        return EXTERN_REF_NULL;
+    }
+    val_type_with(ty, types, layout)
+}
+
 fn val_type_with(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
     match types.kind(ty) {
         TyKind::Float => ValType::F64,
@@ -1675,6 +1781,11 @@ fn val_type_with(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
         // itself. Everything else that reaches here — `bool`, `unit`, the
         // error placeholder — is an `i32` either way.
         TyKind::Str if layout.strings == Strings::Builtins => EXTERN_REF_NULL,
+        // The record the module owns, so the collector can see it.
+        TyKind::Str if layout.strings == Strings::Object => ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Concrete(layout.str_record),
+        }),
         _ => ValType::I32,
     }
 }
@@ -2177,13 +2288,33 @@ impl<'a> Emitter<'a> {
             }
 
             mir::Rvalue::Binary { op, lhs, rhs } => {
+                // Both sides of a string comparison or concatenation cross out
+                // as strings, so the record comes off each before the call.
+                let on_strs = matches!(
+                    op,
+                    BinOp::ConcatStr
+                        | BinOp::EqStr
+                        | BinOp::NeStr
+                        | BinOp::LtStr
+                        | BinOp::LeStr
+                        | BinOp::GtStr
+                        | BinOp::GeStr
+                );
                 self.operand(func, lhs);
+                if on_strs {
+                    self.unwrap_str(func);
+                }
                 self.operand(func, rhs);
-                // A `str` is a table index, so its operations are host calls
-                // rather than instructions.
+                if on_strs {
+                    self.unwrap_str(func);
+                }
+                // A `str` is not an immediate value in any representation, so
+                // its operations are host calls rather than instructions.
                 match op {
                     BinOp::ConcatStr => {
                         func.instruction(&Instruction::Call(self.hosts.at(host::STR_CONCAT)));
+                        // Concatenation is the one that answers with a string.
+                        self.wrap_str(func);
                     }
                     BinOp::EqStr => {
                         func.instruction(&Instruction::Call(self.hosts.at(host::STR_EQ)));
@@ -2236,6 +2367,8 @@ impl<'a> Emitter<'a> {
                 }
             },
 
+            // A Kite function takes a `str` as a `str`. Only a call leaving the
+            // module unwraps, because only the host wants the string inside.
             mir::Rvalue::Call { callee, args } => {
                 for a in args {
                     self.operand(func, a);
@@ -2305,6 +2438,7 @@ impl<'a> Emitter<'a> {
                     struct_type_index: record,
                     field_index: 1,
                 });
+                // A closure is Kite code and takes a `str` as a `str`.
                 for a in args {
                     self.operand(func, a);
                 }
@@ -2337,8 +2471,14 @@ impl<'a> Emitter<'a> {
             }
 
             mir::Rvalue::StrOp { op, args } => {
+                // Every `str` among the arguments crosses out as its string;
+                // `slice`'s and `code_at`'s offsets are ordinary ints and are
+                // pushed as they are.
                 for a in args {
                     self.operand(func, a);
+                    if self.is_str(a) {
+                        self.unwrap_str(func);
+                    }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(match op {
                     kite_hir::StrKind::Len => host::STR_LEN,
@@ -2347,6 +2487,11 @@ impl<'a> Emitter<'a> {
                     kite_hir::StrKind::Trim => host::STR_TRIM,
                     kite_hir::StrKind::CodeAt => host::STR_CODE_AT,
                 })));
+                // `slice` and `trim` answer with a string; the rest answer
+                // with a number, which needs no record around it.
+                if matches!(op, kite_hir::StrKind::Slice | kite_hir::StrKind::Trim) {
+                    self.wrap_str(func);
+                }
                 return true;
             }
 
@@ -2364,6 +2509,7 @@ impl<'a> Emitter<'a> {
                     }
                 };
                 func.instruction(&Instruction::Call(self.hosts.at(call)));
+                self.wrap_str(func);
                 return true;
             }
 
@@ -2461,6 +2607,9 @@ impl<'a> Emitter<'a> {
             mir::Rvalue::CallExtern { index, args } => {
                 for a in args {
                     self.operand(func, a);
+                    if self.is_str(a) {
+                        self.unwrap_str(func);
+                    }
                 }
                 let Some(slot) = self.hosts.extern_at(*index) else {
                     func.instruction(&Instruction::Unreachable);
@@ -2468,6 +2617,11 @@ impl<'a> Emitter<'a> {
                 };
                 func.instruction(&Instruction::Call(slot));
                 let def = &self.program.externs[*index as usize];
+                // A host answering with a string answers with the string; the
+                // record goes back on here.
+                if matches!(self.types.kind(def.ret), TyKind::Str) {
+                    self.wrap_str(func);
+                }
                 return def.ret != TyId::UNIT;
             }
 
@@ -2808,7 +2962,12 @@ impl<'a> Emitter<'a> {
                 // by the time it reaches here for anything but a primitive,
                 // and a diagnostic has no formatting the printer does not.
                 self.operand(func, arg);
-                if !self.is_str(arg) {
+                if self.is_str(arg) {
+                    self.unwrap_str(func);
+                } else {
+                    // Rendering a primitive answers with the string itself,
+                    // which is already what the printer takes — no record is
+                    // built here only to be taken apart again.
                     let render = match self.operand_type(arg) {
                         ValType::I64 => host::STR_OF_INT,
                         ValType::F64 => host::STR_OF_FLOAT,
@@ -2820,6 +2979,7 @@ impl<'a> Emitter<'a> {
             }
             Builtin::IoReadLine => {
                 func.instruction(&Instruction::Call(self.hosts.at(host::READ_LINE)));
+                self.wrap_str(func);
             }
             Builtin::IoPrint => {
                 let Some(arg) = args.first() else {
@@ -2838,6 +2998,9 @@ impl<'a> Emitter<'a> {
                     }
                 };
                 self.operand(func, arg);
+                if self.is_str(arg) {
+                    self.unwrap_str(func);
+                }
                 func.instruction(&Instruction::Call(self.hosts.at(import)));
             }
 
@@ -2846,60 +3009,90 @@ impl<'a> Emitter<'a> {
             Builtin::DrawRect => {
                 for a in args {
                     self.operand(func, a);
+                    if self.is_str(a) {
+                        self.unwrap_str(func);
+                    }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_RECT)));
             }
             Builtin::DrawRRect => {
                 for a in args {
                     self.operand(func, a);
+                    if self.is_str(a) {
+                        self.unwrap_str(func);
+                    }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_RRECT)));
             }
             Builtin::DrawText => {
                 for a in args {
                     self.operand(func, a);
+                    if self.is_str(a) {
+                        self.unwrap_str(func);
+                    }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_TEXT)));
             }
             Builtin::DrawFont => {
                 for a in args {
                     self.operand(func, a);
+                    if self.is_str(a) {
+                        self.unwrap_str(func);
+                    }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_FONT)));
             }
             Builtin::DrawDRRect => {
                 for a in args {
                     self.operand(func, a);
+                    if self.is_str(a) {
+                        self.unwrap_str(func);
+                    }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_DRRECT)));
             }
             Builtin::DrawAlpha => {
                 for a in args {
                     self.operand(func, a);
+                    if self.is_str(a) {
+                        self.unwrap_str(func);
+                    }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_ALPHA)));
             }
             Builtin::DrawField => {
                 for a in args {
                     self.operand(func, a);
+                    if self.is_str(a) {
+                        self.unwrap_str(func);
+                    }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_FIELD)));
             }
             Builtin::DrawImage => {
                 for a in args {
                     self.operand(func, a);
+                    if self.is_str(a) {
+                        self.unwrap_str(func);
+                    }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_IMAGE)));
             }
             Builtin::DrawSemantics => {
                 for a in args {
                     self.operand(func, a);
+                    if self.is_str(a) {
+                        self.unwrap_str(func);
+                    }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_SEMANTICS)));
             }
             Builtin::TextWidth => {
                 for a in args {
                     self.operand(func, a);
+                    if self.is_str(a) {
+                        self.unwrap_str(func);
+                    }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::MEASURE_TEXT)));
             }
@@ -2909,8 +3102,13 @@ impl<'a> Emitter<'a> {
             Builtin::TextFromCode => {
                 for a in args {
                     self.operand(func, a);
+                    if self.is_str(a) {
+                        self.unwrap_str(func);
+                    }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::STR_FROM_CODE)));
+                // A code point becomes a string, which becomes a `str`.
+                self.wrap_str(func);
             }
             // Structs, enums and maps are all WasmGC structs, and every one of
             // them is a subtype of `eq` — so the comparison the checker has
@@ -2918,18 +3116,27 @@ impl<'a> Emitter<'a> {
             Builtin::PtrSame => {
                 for a in args {
                     self.operand(func, a);
+                    if self.is_str(a) {
+                        self.unwrap_str(func);
+                    }
                 }
                 func.instruction(&Instruction::RefEq);
             }
             Builtin::DrawClip => {
                 for a in args {
                     self.operand(func, a);
+                    if self.is_str(a) {
+                        self.unwrap_str(func);
+                    }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_CLIP)));
             }
             Builtin::TaskSpawn => {
                 for a in args {
                     self.operand(func, a);
+                    if self.is_str(a) {
+                        self.unwrap_str(func);
+                    }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::TASK_SPAWN)));
             }
@@ -2940,12 +3147,18 @@ impl<'a> Emitter<'a> {
             Builtin::JsFunc => {
                 for a in args {
                     self.operand(func, a);
+                    if self.is_str(a) {
+                        self.unwrap_str(func);
+                    }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::JS_FUNC)));
             }
             Builtin::TaskWakeAt => {
                 for a in args {
                     self.operand(func, a);
+                    if self.is_str(a) {
+                        self.unwrap_str(func);
+                    }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::TASK_WAKE_AT)));
             }
@@ -2970,6 +3183,7 @@ impl<'a> Emitter<'a> {
                 func.instruction(&Instruction::If(BlockType::Empty));
                 if let Some(message) = args.get(1) {
                     self.operand(func, message);
+                    self.unwrap_str(func);
                     func.instruction(&Instruction::Call(self.hosts.at(host::PRINT_STR)));
                 }
                 func.instruction(&Instruction::Unreachable);
@@ -3004,6 +3218,16 @@ impl<'a> Emitter<'a> {
                 }
                 Strings::Builtins => {
                     func.instruction(&Instruction::GlobalGet(s.0));
+                }
+                // The constant is an imported string; the `str` is the record
+                // around it. Built at the use site rather than once into a
+                // global, which costs an allocation per mention — the simplest
+                // thing that is correct, and the obvious place to come back to
+                // if a constant in a hot loop ever shows up in a profile.
+                Strings::Object => {
+                    func.instruction(&Instruction::GlobalGet(s.0));
+                    func.instruction(&Instruction::I32Const(-1));
+                    func.instruction(&Instruction::StructNew(self.layout.str_record));
                 }
             },
             mir::Operand::Unit => {
@@ -3136,7 +3360,9 @@ impl<'a> Emitter<'a> {
         self.map_field(func, ml, base, 0);
         func.instruction(&Instruction::LocalGet(pos));
         func.instruction(&Instruction::ArrayGet(ml.keys));
+        self.unwrap_key(func, ml.key_ty);
         self.operand(func, key);
+        self.unwrap_key(func, ml.key_ty);
         self.key_equality(func, ml.key_ty);
         func.instruction(&Instruction::BrIf(1));
         func.instruction(&Instruction::LocalGet(pos));
@@ -3254,7 +3480,9 @@ impl<'a> Emitter<'a> {
         self.map_field(func, ml, base, 0);
         func.instruction(&Instruction::LocalGet(i));
         func.instruction(&Instruction::ArrayGet(ml.keys));
+        self.unwrap_key(func, ml.key_ty);
         self.operand(func, key);
+        self.unwrap_key(func, ml.key_ty);
         self.key_equality(func, ml.key_ty);
 
         func.instruction(&Instruction::If(BlockType::Empty));
@@ -3296,9 +3524,25 @@ impl<'a> Emitter<'a> {
     /// equal strings share one and an integer compare is exact. With the
     /// builtins the value *is* the string and there is no index, so equality
     /// is the engine's own `equals`.
+    /// Take a map key on top of the stack down to what its comparison wants.
+    ///
+    /// A `str` key is compared by the host, which takes the string rather than
+    /// the record around it. Both sides need this, and each gets it as it is
+    /// pushed, because the deeper one is out of reach afterwards.
+    fn unwrap_key(&self, func: &mut Function, key_ty: TyId) {
+        if matches!(self.types.kind(key_ty), TyKind::Str) {
+            self.unwrap_str(func);
+        }
+    }
+
     fn key_equality(&mut self, func: &mut Function, key_ty: TyId) {
-        if self.layout.strings == Strings::Builtins && matches!(self.types.kind(key_ty), TyKind::Str)
-        {
+        // The object representation has no index either, and two records
+        // holding the same string are two records — so comparing them as
+        // references would answer "different" for keys that are equal.
+        if self.layout.strings != Strings::Table && matches!(self.types.kind(key_ty), TyKind::Str) {
+            // Both sides were unwrapped as they were pushed — only the top of
+            // the stack is reachable from here, so it cannot be done for them
+            // both at this point. See `unwrap_key` at the two callers.
             func.instruction(&Instruction::Call(self.hosts.at(host::STR_EQ)));
             return;
         }
@@ -3456,6 +3700,33 @@ impl<'a> Emitter<'a> {
             mir::Operand::Str(_) => true,
             mir::Operand::Local(l) => self.f.locals[l.index()].ty == TyId::STR,
             _ => false,
+        }
+    }
+
+    /// Take the JS string out of the `str` on top of the stack.
+    ///
+    /// Under [`Strings::Object`] a `str` is a record and every host function
+    /// wants the string inside it, so this runs at each place one crosses out.
+    /// A no-op in the other representations, where the value on the stack is
+    /// already what the host takes.
+    fn unwrap_str(&self, func: &mut Function) {
+        if self.layout.strings == Strings::Object {
+            func.instruction(&Instruction::StructGet {
+                struct_type_index: self.layout.str_record,
+                field_index: 0,
+            });
+        }
+    }
+
+    /// Put the JS string on top of the stack into a fresh `str` record.
+    ///
+    /// The counterpart of [`Self::unwrap_str`], for a host answer coming back
+    /// in. `narrow` starts unknown: whether code-point and UTF-16 indices
+    /// agree costs a scan, and a string nobody indexes should not pay it.
+    fn wrap_str(&self, func: &mut Function) {
+        if self.layout.strings == Strings::Object {
+            func.instruction(&Instruction::I32Const(-1));
+            func.instruction(&Instruction::StructNew(self.layout.str_record));
         }
     }
 

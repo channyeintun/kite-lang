@@ -228,6 +228,11 @@ fn main() -> ExitCode {
     // is asked for rather than assumed.
     let strings = if js_strings {
         kite_driver::Strings::Builtins
+    } else if std::env::var_os("KITE_STRINGS_OBJECT").is_some() {
+        // Temporary, while the object representation is brought up: it is the
+        // one that does not leak, and this is how it gets measured against the
+        // one that does before it becomes the default.
+        kite_driver::Strings::Object
     } else {
         kite_driver::Strings::Table
     };

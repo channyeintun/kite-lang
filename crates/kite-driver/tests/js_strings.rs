@@ -43,7 +43,11 @@ const RUNNER: &str = "import { readFile } from \"node:fs/promises\";\n\
 /// own answer is read. A probe that is subtly wrong would turn this whole file
 /// into a test that passes by not running, which is worse than a failure.
 fn try_under_node(name: &str, src: &str, mode: Strings) -> Option<String> {
-    let tag = if mode == Strings::Builtins { "builtins" } else { "table" };
+    let tag = match mode {
+        Strings::Builtins => "builtins",
+        Strings::Object => "object",
+        Strings::Table => "table",
+    };
     let dir = std::env::temp_dir().join(format!("kite-str-{}-{}-{}", name, tag, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("work directory");
@@ -174,17 +178,26 @@ fn a_program_cannot_tell_which_representation_it_got() {
     for (name, src) in PROGRAMS {
         let vm = run_on_vm(name, src);
         let table = run_under_node(name, src, Strings::Table);
+        let object = run_under_node(name, src, Strings::Object);
         let Some(builtins) = try_under_node(name, src, Strings::Builtins) else {
             eprintln!(
                 "skipping the builtins half: this engine has no JS String Builtins \
                  (Node 23+, or a current browser)"
             );
-            return;
+            // The object representation asks nothing of the engine, so it is
+            // still held to the VM where the builtins are missing.
+            if vm != table || vm != object {
+                mismatches.push(format!(
+                    "{}:\n  vm:     {:?}\n  table:  {:?}\n  object: {:?}",
+                    name, vm, table, object
+                ));
+            }
+            continue;
         };
-        if vm != table || vm != builtins {
+        if vm != table || vm != builtins || vm != object {
             mismatches.push(format!(
-                "{}:\n  vm:       {:?}\n  table:    {:?}\n  builtins: {:?}",
-                name, vm, table, builtins
+                "{}:\n  vm:       {:?}\n  table:    {:?}\n  builtins: {:?}\n  object:   {:?}",
+                name, vm, table, builtins, object
             ));
         }
     }
@@ -224,9 +237,32 @@ fn the_two_import_tables_agree_about_what_exists() {
     // Compiling both ways is what actually exercises the tables; a mismatch in
     // arity or order shows up as a module that does not validate, which the
     // backend's own tests check on every build.
-    for mode in [Strings::Table, Strings::Builtins] {
+    for mode in [Strings::Table, Strings::Builtins, Strings::Object] {
         let c = compile_strings("m.kite", src, Emit::Wasm, false, mode);
         assert!(!c.failed(), "{}", c.render_diagnostics());
         assert!(c.wasm.is_some());
     }
+}
+
+/// The object representation, run for real.
+///
+/// A `str` there is a WasmGC record holding the JS string, so the module is
+/// wrapping and unwrapping at every boundary — and a mistake in that shows up
+/// as a module the engine refuses to validate rather than as a wrong answer.
+/// Running it is the only check worth having.
+#[test]
+fn the_object_representation_runs() {
+    let src = "fn main() {\n  \
+               let a = \"one\"\n  \
+               let b = a + \" two\"\n  \
+               let same = b == \"one two\"\n  \
+               io.print(b)\n  \
+               io.print(\"\\(b.len())\")\n  \
+               io.print(b.slice(0, 3))\n  \
+               io.print(\"\\(same)\")\n\
+               }\n";
+    let Some(got) = try_under_node("object-runs", src, Strings::Object) else {
+        return;
+    };
+    assert_eq!(got, "one two\n7\none\ntrue\n");
 }

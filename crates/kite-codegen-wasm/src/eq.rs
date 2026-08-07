@@ -153,13 +153,30 @@ impl EqBuilder<'_> {
     ) {
         for (ty, record, field) in pairs {
             load(f, 0, *record, *field);
+            self.unwrap_str(f, *ty);
             load(f, 1, *record, *field);
+            self.unwrap_str(f, *ty);
             self.compare_values(f, *ty);
             f.instruction(&Instruction::I32Eqz);
             f.instruction(&Instruction::If(BlockType::Empty));
             f.instruction(&Instruction::I32Const(0));
             f.instruction(&Instruction::Return);
             f.instruction(&Instruction::End);
+        }
+    }
+
+    /// Take the JS string out of a `str` on top of the stack.
+    ///
+    /// Under [`Strings::Object`] a `str` is a record and the host's `equals`
+    /// takes the string inside it. Both sides need this and each gets it as it
+    /// is pushed, because once the second is on the stack the first is out of
+    /// reach.
+    fn unwrap_str(&self, f: &mut Function, ty: TyId) {
+        if self.layout.strings == Strings::Object && matches!(self.types.kind(ty), TyKind::Str) {
+            f.instruction(&Instruction::StructGet {
+                struct_type_index: self.layout.str_record,
+                field_index: 0,
+            });
         }
     }
 
@@ -301,9 +318,11 @@ impl EqBuilder<'_> {
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::LocalGet(i));
         f.instruction(&Instruction::ArrayGet(array));
+        self.unwrap_str(&mut f, elem);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(i));
         f.instruction(&Instruction::ArrayGet(array));
+        self.unwrap_str(&mut f, elem);
         self.compare_values(&mut f, elem);
         f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Empty));
@@ -382,7 +401,9 @@ impl EqBuilder<'_> {
         f.instruction(&Instruction::End);
 
         struct_get(&mut f, 0, record, 0);
+        self.unwrap_str(&mut f, TyId::STR);
         struct_get(&mut f, 1, record, 0);
+        self.unwrap_str(&mut f, TyId::STR);
         f.instruction(&Instruction::Call(self.hosts.at(host::STR_EQ)));
         f.instruction(&Instruction::End);
         f
