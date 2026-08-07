@@ -112,7 +112,7 @@ fn the_standard_librarys_tests_pass_on_wasm_too() {
             // With the program's own host groups, which `kitec build` passes
             // and this did not: a module declaring `@host("…")` imports it,
             // and glue built without it cannot be instantiated at all.
-            kite_driver::generate_glue_with_hosts(&module.strings, "app.wasm", &module.hosts),
+            kite_driver::generate_glue_with_hosts("app.wasm", &module.hosts),
         )
         .expect("write glue");
         std::fs::write(

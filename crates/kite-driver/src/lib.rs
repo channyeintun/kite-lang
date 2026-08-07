@@ -17,9 +17,8 @@ pub mod semver;
 pub mod solve;
 
 pub use kite_codegen_wasm::{
-    generate_api, generate_glue, generate_glue_for, generate_glue_with_hosts, generate_page,
-    generate_server,
-    listens, Strings,
+    generate_api, generate_glue, generate_glue_with_hosts, generate_page, generate_server,
+    listens,
 };
 pub use kite_vm::Trap;
 
@@ -285,22 +284,7 @@ pub fn compile_with(
     emit: Emit,
     release: bool,
 ) -> Compilation {
-    compile_strings(path, src, emit, release, Strings::Table)
-}
-
-/// Compile, choosing how a `str` is represented in a WebAssembly module.
-///
-/// The choice reaches no other target and no other pass: a `str` is a `str` in
-/// the source, in HIR and in MIR, and only the Wasm backend has two answers to
-/// what one *is*.
-pub fn compile_strings(
-    path: impl AsRef<Path>,
-    src: &str,
-    emit: Emit,
-    release: bool,
-    strings: Strings,
-) -> Compilation {
-    compile_provided(path, src, emit, release, strings, std::collections::HashMap::new())
+    compile_provided(path, src, emit, release, std::collections::HashMap::new())
 }
 
 /// Compile with some modules handed over rather than read from disk.
@@ -314,7 +298,6 @@ pub fn compile_provided(
     src: &str,
     emit: Emit,
     release: bool,
-    strings: Strings,
     provided: std::collections::HashMap<String, String>,
 ) -> Compilation {
     let mut sources = SourceMap::new();
@@ -325,7 +308,7 @@ pub fn compile_provided(
     let file = sources.add(&path, src);
     let mut diags = DiagBag::new();
     let (output, chunk, wasm, native, index) = run_passes(
-        prelude, file, &path, &mut sources, emit, release, strings, provided, &mut diags,
+        prelude, file, &path, &mut sources, emit, release, provided, &mut diags,
     );
 
     let mut c = Compilation { sources, diags, output, chunk, wasm, native, index };
@@ -349,7 +332,6 @@ fn run_passes(
     sources: &mut SourceMap,
     emit: Emit,
     release: bool,
-    strings: Strings,
     provided: std::collections::HashMap<String, String>,
     diags: &mut DiagBag,
 ) -> (
@@ -534,7 +516,7 @@ fn run_passes(
             }
             return (String::new(), None, None, None, index);
         }
-        let module = kite_codegen_wasm::compile_with(&mir, &hir.types, strings);
+        let module = kite_codegen_wasm::compile(&mir, &hir.types);
         return (String::new(), None, Some(module), None, index);
     }
 

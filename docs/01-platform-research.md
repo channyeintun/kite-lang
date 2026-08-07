@@ -75,17 +75,20 @@ Sources: [V8: bringing GC languages to Wasm](https://v8.dev/blog/wasm-gc-porting
 
 ---
 
-## 4. Strings are solved; the DOM is not
+## 4. Strings are language-owned; the DOM is still not
 
-### JS String Builtins — shipped everywhere
+### JS String Builtins — useful, but not Kite's representation
 
 Landed in **Safari 26.2** in 2025, completing browser coverage. Wasm modules can
 operate on JavaScript string primitives directly — `concat`, `compare`, `length`
 — with **no glue code and no copying**.
 
-**Consequence:** Kite's `str` is a JavaScript string reference on the web target.
-Passing a string to a DOM API is free. This removes what was historically the
-single largest per-call cost in Wasm UI work.
+Kite deliberately does not make another language's primitive its string model.
+Its web representation is a traced WasmGC array with one Unicode scalar value
+per `i32`, which gives the same indexing semantics as the bytecode and native
+targets and works in every engine Kite already requires. Language operations
+stay in Wasm. A JavaScript or DOM boundary performs one linear conversion
+through fixed scratch storage and retains no host-side string state.
 
 ### Direct DOM access — does not exist
 
@@ -331,7 +334,8 @@ Sources: [Component Model](https://component-model.bytecodealliance.org/) ·
    `async` surface plus a `Share` marker enforced from v1.
 3. **No direct DOM access, and none imminent** → explicit `extern` boundary with
    generated glue.
-4. **JS String Builtins are baseline** → `str` is a JS string; DOM calls are free.
+4. **JS strings are host values, not Kite values** → `str` stays a traced
+   Unicode-scalar array and converts only at an explicit host boundary.
 5. **No interior pointers, no flat aggregates** → no `&` operator; a typed-buffer
    escape hatch where layout matters.
 6. **HTML-in-Canvas is Chrome-only and points the other way** → one UI API, two

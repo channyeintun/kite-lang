@@ -32,7 +32,10 @@ pub fn collect(program: &mir::Program, types: &Types) -> Vec<EqFn> {
     for f in &program.fns {
         for block in &f.blocks {
             for stmt in &block.stmts {
-                let mir::Inst::Assign { value: mir::Rvalue::Binary { op, lhs, .. }, .. } = stmt
+                let mir::Inst::Assign {
+                    value: mir::Rvalue::Binary { op, lhs, .. },
+                    ..
+                } = stmt
                 else {
                     continue;
                 };
@@ -104,9 +107,8 @@ pub fn signature(ty: TyId, types: &Types, layout: &TypeLayout) -> (Vec<ValType>,
 pub struct EqBuilder<'a> {
     pub types: &'a Types,
     pub layout: &'a TypeLayout,
-    /// Where each host function ended up, since a string comparison reaches
-    /// for one and the import list is only as long as a module needs.
-    pub hosts: &'a Hosts,
+    /// String equality is part of the language runtime, not a host call.
+    pub strings: strings::StringRuntime,
     /// Where the generated comparisons start in the function index space.
     pub base: u32,
     pub fns: &'a [EqFn],
@@ -153,9 +155,7 @@ impl EqBuilder<'_> {
     ) {
         for (ty, record, field) in pairs {
             load(f, 0, *record, *field);
-            self.unwrap_str(f, *ty);
             load(f, 1, *record, *field);
-            self.unwrap_str(f, *ty);
             self.compare_values(f, *ty);
             f.instruction(&Instruction::I32Eqz);
             f.instruction(&Instruction::If(BlockType::Empty));
@@ -165,31 +165,13 @@ impl EqBuilder<'_> {
         }
     }
 
-    /// Take the JS string out of a `str` on top of the stack.
-    ///
-    /// Under [`Strings::Object`] a `str` is a record and the host's `equals`
-    /// takes the string inside it. Both sides need this and each gets it as it
-    /// is pushed, because once the second is on the stack the first is out of
-    /// reach.
-    fn unwrap_str(&self, f: &mut Function, ty: TyId) {
-        if self.layout.strings == Strings::Object && matches!(self.types.kind(ty), TyKind::Str) {
-            f.instruction(&Instruction::StructGet {
-                struct_type_index: self.layout.str_record,
-                field_index: 0,
-            });
-        }
-    }
-
     /// Compare two values of `ty` already on the stack, leaving an `i32`.
     fn compare_values(&self, f: &mut Function, ty: TyId) {
         match self.types.kind(ty) {
             TyKind::Int => f.instruction(&Instruction::I64Eq),
             TyKind::Float => f.instruction(&Instruction::F64Eq),
             TyKind::Bool => f.instruction(&Instruction::I32Eq),
-            // A `str` is an index into the host's table, and two different
-            // indices may name the same text, so this is a host call rather
-            // than an integer comparison.
-            TyKind::Str => f.instruction(&Instruction::Call(self.hosts.at(host::STR_EQ))),
+            TyKind::Str => f.instruction(&Instruction::Call(self.strings.eq())),
             _ => match self.index_of(ty) {
                 Some(i) => f.instruction(&Instruction::Call(i)),
                 // Unreachable: `collect` closed over every component.
@@ -246,9 +228,15 @@ impl EqBuilder<'_> {
         let shift = self.layout.enum_shift(e);
 
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::StructGet { struct_type_index: base, field_index: shift });
+        f.instruction(&Instruction::StructGet {
+            struct_type_index: base,
+            field_index: shift,
+        });
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::StructGet { struct_type_index: base, field_index: shift });
+        f.instruction(&Instruction::StructGet {
+            struct_type_index: base,
+            field_index: shift,
+        });
         f.instruction(&Instruction::I32Ne);
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::I32Const(0));
@@ -262,7 +250,10 @@ impl EqBuilder<'_> {
             }
             let record = self.layout.variant_type(e, v as u32);
             f.instruction(&Instruction::LocalGet(0));
-            f.instruction(&Instruction::StructGet { struct_type_index: base, field_index: shift });
+            f.instruction(&Instruction::StructGet {
+                struct_type_index: base,
+                field_index: shift,
+            });
             f.instruction(&Instruction::I32Const(v as i32));
             f.instruction(&Instruction::I32Eq);
             f.instruction(&Instruction::If(BlockType::Empty));
@@ -318,11 +309,9 @@ impl EqBuilder<'_> {
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::LocalGet(i));
         f.instruction(&Instruction::ArrayGet(array));
-        self.unwrap_str(&mut f, elem);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(i));
         f.instruction(&Instruction::ArrayGet(array));
-        self.unwrap_str(&mut f, elem);
         self.compare_values(&mut f, elem);
         f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Empty));
@@ -371,16 +360,8 @@ impl EqBuilder<'_> {
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
 
-        // The payload of a `str?` is a `str`, so it unwraps like every other
-        // one — each side as it is pushed, because the deeper one is out of
-        // reach afterwards. This is the fourth place that has to do it and the
-        // one that was missed: `compare_fields`, `slice_eq` and `error_eq` all
-        // did, so `str?` was the only shape whose comparison handed the host's
-        // `equals` a record instead of a string.
         struct_get(&mut f, 0, boxed, 0);
-        self.unwrap_str(&mut f, inner);
         struct_get(&mut f, 1, boxed, 0);
-        self.unwrap_str(&mut f, inner);
         self.compare_values(&mut f, inner);
         f.instruction(&Instruction::End);
         f
@@ -409,10 +390,8 @@ impl EqBuilder<'_> {
         f.instruction(&Instruction::End);
 
         struct_get(&mut f, 0, record, 0);
-        self.unwrap_str(&mut f, TyId::STR);
         struct_get(&mut f, 1, record, 0);
-        self.unwrap_str(&mut f, TyId::STR);
-        f.instruction(&Instruction::Call(self.hosts.at(host::STR_EQ)));
+        f.instruction(&Instruction::Call(self.strings.eq()));
         f.instruction(&Instruction::End);
         f
     }

@@ -173,7 +173,7 @@ Post-typecheck, desugared, fully typed. Desugarings applied:
 | `0..10` | `Range.new(0, 10)` |
 | `"a \(b) c"` | `str.concat(["a ", Display.show(b), " c"])` |
 | `Point{ ..p, y: 5.0 }` | explicit per-field construction |
-| String literal | interned constant reference |
+| String literal | compile-time string constant ID |
 
 `match` remains in HIR — it is lowered to a decision tree in MIR, after the
 exhaustiveness check has run against the source-level shape so diagnostics can
@@ -326,7 +326,7 @@ The reference backend. Assumes all of WebAssembly 3.0.
 | `int`, `i64`, `u64` | `i64` |
 | `i32`, `u32`, `i8`, `i16`, `u8`, `u16`, `bool`, `char` | `i32` |
 | `f32` / `f64` | `f32` / `f64` |
-| `str` | `externref` (JS string, via JS String Builtins) |
+| `str` | `(array (mut i32))`, one Unicode scalar per element |
 | `struct S` | `(type $S (struct (field …)))` |
 | immutable field | `(field $x f64)` |
 | `var` field | `(field $x (mut f64))` |

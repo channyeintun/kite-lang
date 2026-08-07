@@ -105,18 +105,16 @@ class Compiler {
    *   entry: string,
    *   siblings?: Record<string, string>,
    *   release?: boolean,
-   *   jsStrings?: boolean,
    * }} module
    * @returns {Record<string, Uint8Array>} `app.wasm`, `app.js`, `api.js` and
    *   `api.d.ts`, exactly as the native compiler writes them.
    * @throws {BuildFailed} with the diagnostics a terminal would have shown.
    */
-  build({ entry, siblings = {}, release = false, jsStrings = false }) {
+  build({ entry, siblings = {}, release = false }) {
     const answer = this.#call(
       "kite_build",
       this.#frame(entry, siblings),
       release ? 1 : 0,
-      jsStrings ? 1 : 0,
     );
     const artefacts = unframe(answer);
     // A failed compile answers with one entry named `diagnostics`, so the

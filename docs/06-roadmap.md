@@ -419,11 +419,10 @@ leaves the position at zero. One signature rather than one export per kind
 means a new kind of event is a new constant, and a program that ignores a kind
 simply never matches on it.
 
-A `str` crossing into an export has to be interned first. It is an index into
-the module's string table, not a pointer and not a JavaScript string — and
-handing an export a JavaScript string does not fail, it runs `ToNumber`, gets
-`NaN`, and reads index 0. The glue exports `str()` and `text()` so nothing has
-to know that.
+A `str` crossing an export is converted by two private module exports. The
+public glue functions `str()` and `text()` call those helpers, so JavaScript
+sees ordinary strings while Kite keeps its WasmGC scalar array internally.
+Conversion uses the same fixed scratch page as declared host calls.
 
 ### Scrolling
 
@@ -497,7 +496,7 @@ valid. `?.` and the `?T` type sigil went with it; the optional type is spelled
 
 ---
 
-## Phase 4 — WebAssembly backend ✅ **complete, JS String Builtins included**
+## Phase 4 — WebAssembly backend ✅ **complete, language-owned strings included**
 
 `kite-codegen-wasm` emits WebAssembly directly via `wasm-encoder` — no LLVM.
 
@@ -540,32 +539,17 @@ way.
 
 2. ~~GC structs and arrays~~ ✅
 3. ~~Enums via subtyped variant records~~ ✅
-4. ~~`str` as `externref` with JS String Builtins~~ ✅ — `--js-strings`. A `str`
-   becomes the JavaScript string itself: constants arrive as **imported
-   globals whose names are the literals**, which the engine synthesises under
-   the imported-string-constants option, and `+` and `==` are compiled to
-   intrinsics rather than to calls into the glue. There is then no table, no
-   interning, and nothing to look up when a string crosses to a DOM API.
+4. ~~Language-owned `str` storage~~ ✅ — one WasmGC `array i32`, with one
+   Unicode scalar value per element. Every language operation is emitted in
+   Wasm, including concatenation, comparison, slicing, searching and indexed
+   access. Literals are scalar arrays in the module, and dynamic strings are
+   ordinary traced GC values.
 
-   **Two builtins are taken and the rest deliberately are not.** `length`,
-   `charCodeAt` and `substring` index by **UTF-16 code unit**, and Kite counts
-   **characters** — so a program holding an emoji would get one answer from
-   this backend and another from the bytecode VM, which is the single thing
-   the differential suite exists to prevent. `concat` and `equals` are exact at
-   any code point, so those two are intrinsics and `len`, `slice`, `index_of`,
-   `trim` and `code_at` stay host calls that count code points.
-
-   It is a **flag rather than the default**, because the builtins are not in
-   every engine that runs WasmGC, and a module that will not instantiate is a
-   worse failure than one that makes a call. An engine without them gets a
-   diagnostic that names the flag rather than a link error nobody could place.
-
-   The import table is written out twice — once per representation — rather
-   than transformed, because no transform could tell a boolean `i32` from a
-   string `i32`. `crates/kite-driver/tests/js_strings.rs` compiles five
-   programs both ways, runs each on the bytecode VM as well, and requires all
-   three outputs to be identical: a representation change that a program could
-   observe would not be a representation change.
+   JavaScript is a boundary format, not the representation. A fixed one-page
+   memory import moves at most 4,096 scalars per synchronous bridge call; no
+   table, cache, high-water arena or converted value survives the call.
+   `crates/kite-driver/tests/strings.rs` compares the result with the bytecode
+   VM and tests Unicode export and host-boundary round trips.
 5. ~~Trait objects with typed function-reference vtables~~ ✅ — a tag and a
    dispatcher per method, because WasmGC compares types structurally and
    `ref.test` cannot separate two structs of the same shape.
@@ -574,8 +558,7 @@ way.
    supplies it. The compiler's own builtins are still a fixed list, which is
    the honest shape of it: those are the language's, not the program's.
 
-String concatenation and comparison lower as host calls, since a `str` is an
-index into a table the glue holds and the glue grows it.
+String concatenation and comparison operate directly on WasmGC scalar arrays.
 
 Optionals lower as a nullable reference to a one-field box, so `nil` is a null
 reference and the payload keeps its own type. Narrowing became an explicit
@@ -1634,9 +1617,9 @@ This also settles lifetime, and settles it completely: on the web the Wasm heap
 a Kite closure, is a cycle across the boundary that one collector collects. No
 protocol, no ownership rules, no release calls.
 
-The plumbing exists twice already — `str` lowers to `externref` under
-`--js-strings`, and `task_spawn` passes a Kite closure to the host as a
-reference and receives it back through `kite_poll`.
+The plumbing exists already: `JsValue` is an `externref`, and `task_spawn`
+passes a Kite closure to the host as a reference and receives it back through
+`kite_poll`.
 
 **Exit criterion:** a Kite program holds an element across an await point, drops
 it, and the browser collects it.
@@ -1845,11 +1828,10 @@ Two admissions to write down rather than discover:
   commonest way to grow an injection bug. With an escape hatch, anyone can set
   it. The comment has to be rewritten to what stays true: the typed layer does
   not hand you the loaded gun, and the escape hatch is not the typed layer.
-- **The string table is a linear scan.** `intern` is an `indexOf` over an
-  append-only array, so every string read from the page costs a walk of every
-  string read before it, forever. A resident program reading a field on each
-  keystroke is quadratic. Real JavaScript strings by default on the web target,
-  or a map — but not neither.
+- **String conversion is an explicit boundary cost.** DOM calls receive plain
+  JavaScript strings, but Kite stores scalar arrays. The generated bridge pays
+  one linear conversion through fixed scratch storage and retains nothing
+  afterwards; resident programs do not accumulate host-side string state.
 
 **Exit criterion:** a plain HTML page with a real stylesheet, a `<script
 type="module">`, and Kite making a form work. No canvas, no framework, nothing
@@ -2170,7 +2152,7 @@ none.
 | 1 — Vertical slice | ✅ complete |
 | 2 — Type system | ✅ complete — structs, enums, match, exhaustiveness, traits, trait objects, slices, optionals, tuples, maps, interpolation, closures, generics on functions and types |
 | 3 — Error handling | ✅ complete |
-| 4 — WebAssembly backend | ✅ every construct the language has, and `--js-strings` lowers a `str` to a real JavaScript string with `concat` and `equals` as intrinsics |
+| 4 — WebAssembly backend | ✅ every construct the language has; `str` is a language-owned WasmGC Unicode-scalar array with bounded JavaScript boundary conversion |
 | 5 — Concurrency | ✅ `async`/`await`, the state machine, `Task<T>`, the combinators, `Share`. ❌ real parallelism on any target — the platform forbids it today |
 | 6 — Standard library | ✅ thirteen modules written in Kite, tested on both backends, and `@derive(Debug, Hash, Encode, Decode)` as a source-to-source expansion |
 | 7 — Layout and DOM renderer | ⬛ built, then removed at Phase 16. The renderer painted positioned elements, which is what made a Kite application unstylable by anyone else's CSS |

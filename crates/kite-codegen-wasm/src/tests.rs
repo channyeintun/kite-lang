@@ -45,7 +45,9 @@ fn build(src: &str) -> Built {
     );
     kite_hir::mono::monomorphise(&mut hir);
     let mir = kite_mir::lower(&hir);
-    Built { module: compile(&mir, &hir.types) }
+    Built {
+        module: compile(&mir, &hir.types),
+    }
 }
 
 /// Validate, which is the assertion that matters for every one of these.
@@ -60,9 +62,7 @@ fn valid(src: &str) -> Built {
 /// standing between a stack mistake and a browser.
 #[test]
 fn checked_integer_arithmetic_validates() {
-    valid(
-        "fn main() {\n  var x = 2\n  x = x + 3\n  x = x - 1\n  x = x * 4\n  io.print(x)\n}\n",
-    );
+    valid("fn main() {\n  var x = 2\n  x = x + 3\n  x = x - 1\n  x = x * 4\n  io.print(x)\n}\n");
 }
 
 /// The same arithmetic reached through every operand shape the emitter has to
@@ -155,7 +155,9 @@ fn if_else_chains_validate() {
 
 #[test]
 fn short_circuit_operators_validate() {
-    valid("fn main() {\n  let a = true\n  let b = false\n  io.print(a && b)\n  io.print(a || b)\n}\n");
+    valid(
+        "fn main() {\n  let a = true\n  let b = false\n  io.print(a && b)\n  io.print(a || b)\n}\n",
+    );
 }
 
 #[test]
@@ -213,20 +215,173 @@ fn host_functions_are_imported_not_defined() {
     }
 }
 
-/// String constants live in the glue, so the module needs no linear memory.
+/// String conversion uses one fixed imported page and can never grow it.
 #[test]
-fn the_module_has_no_linear_memory() {
+fn the_module_has_only_fixed_scratch_memory() {
     let b = valid(HELLO);
     let printed = wasmprinter::print_bytes(&b.module.bytes).unwrap();
-    assert!(!printed.contains("(memory"), "{}", printed);
+    assert!(
+        printed.contains(r#"(import "kite" "scratch" (memory (;0;) 1 1))"#),
+        "{}",
+        printed
+    );
 }
 
 #[test]
-fn string_constants_reach_the_glue() {
+fn string_constants_are_language_owned_arrays() {
     let b = valid(HELLO);
-    assert_eq!(b.module.strings, vec!["big".to_string()]);
-    let g = generate_glue(&b.module.strings, "app.wasm");
-    assert!(g.contains(r#""big""#));
+    let printed = wasmprinter::print_bytes(&b.module.bytes).unwrap();
+    for scalar in ['b' as u32, 'i' as u32, 'g' as u32] {
+        assert!(
+            printed.contains(&format!("i32.const {}", scalar)),
+            "literal scalar missing:\n{}",
+            printed
+        );
+    }
+    assert!(printed.contains("array.new_fixed"), "{}", printed);
+    let g = generate_glue("app.wasm");
+    assert!(!g.contains(r#""big""#));
+}
+
+#[test]
+fn strings_run_as_unicode_scalar_arrays_under_node() {
+    if std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let src = "fn main() {\n\
+               \x20 let s = \"hé😀日\"\n\
+               \x20 io.print(s.len())\n\
+               \x20 io.print(s.code_at(2))\n\
+               \x20 io.print(s.slice(1, 3))\n\
+               \x20 io.print(s.index_of(\"😀\"))\n\
+               \x20 io.print(\"x\" + s == \"xhé😀日\")\n\
+               \x20 io.print(\" \\u{2003}trim\\u{3000} \".trim())\n\
+               \x20 io.print(text.from_code(0x1F680))\n\
+               \x20 io.print(text.from_code(0xD800))\n\
+               }\n";
+    let built = valid(src);
+    let dir = std::env::temp_dir().join(format!("kite-scalar-strings-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("work directory");
+    std::fs::write(dir.join("app.wasm"), &built.module.bytes).expect("write wasm");
+    std::fs::write(dir.join("app.js"), generate_glue("app.wasm")).expect("write glue");
+    std::fs::write(
+        dir.join("run.mjs"),
+        "import { readFile } from \"node:fs/promises\";\n\
+         import { run, setWriter } from \"./app.js\";\n\
+         const out = [];\n\
+         setWriter((line) => out.push(line));\n\
+         await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         process.stdout.write(out.map((line) => line + \"\\n\").join(\"\"));\n",
+    )
+    .expect("write runner");
+    let output = std::process::Command::new("node")
+        .arg(dir.join("run.mjs"))
+        .output()
+        .expect("node runs");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "node failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("utf-8"),
+        "4\n128512\né😀\n2\ntrue\ntrim\n🚀\n\n"
+    );
+}
+
+#[test]
+fn exported_strings_cross_the_boundary_in_bounded_chunks() {
+    if std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let built = valid("pub fn echo(body: str) -> str {\n  return body + \"!\"\n}\n");
+    let dir = std::env::temp_dir().join(format!("kite-string-boundary-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("work directory");
+    std::fs::write(dir.join("app.wasm"), &built.module.bytes).expect("write wasm");
+    std::fs::write(dir.join("app.js"), generate_glue("app.wasm")).expect("write glue");
+    std::fs::write(
+        dir.join("run.mjs"),
+        "import { readFile } from \"node:fs/promises\";\n\
+         import { instantiate, str, text } from \"./app.js\";\n\
+         const bytes = new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url)));\n\
+         const kite = await instantiate(bytes);\n\
+         const input = \"😀\".repeat(5000);\n\
+         const output = text(kite.echo(str(input)));\n\
+         process.stdout.write(String([...output].length) + \":\" + String(output === input + \"!\"));\n",
+    )
+    .expect("write runner");
+    let output = std::process::Command::new("node")
+        .arg(dir.join("run.mjs"))
+        .output()
+        .expect("node runs");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "node failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("utf-8"),
+        "5001:true"
+    );
+}
+
+#[test]
+fn declared_hosts_receive_and_return_plain_javascript_strings() {
+    if std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let built = valid(
+        "@host(\"paint\")\nextern fn surround(body: str) -> str\n\
+         fn main() {\n  io.print(surround(\"hé😀\"))\n}\n",
+    );
+    let dir = std::env::temp_dir().join(format!("kite-string-host-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("work directory");
+    std::fs::write(dir.join("app.wasm"), &built.module.bytes).expect("write wasm");
+    std::fs::write(
+        dir.join("app.js"),
+        generate_glue_with_hosts("app.wasm", &built.module.hosts),
+    )
+    .expect("write glue");
+    std::fs::write(
+        dir.join("run.mjs"),
+        "import { readFile } from \"node:fs/promises\";\n\
+         import { provide, run, setWriter } from \"./app.js\";\n\
+         provide(\"paint\", { surround: (body) => \"[\" + body + \"]\" });\n\
+         setWriter((line) => process.stdout.write(line));\n\
+         await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n",
+    )
+    .expect("write runner");
+    let output = std::process::Command::new("node")
+        .arg(dir.join("run.mjs"))
+        .output()
+        .expect("node runs");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "node failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).expect("utf-8"), "[hé😀]");
 }
 
 // ---- WasmGC structs -------------------------------------------------------
@@ -306,8 +461,16 @@ fn field_mutability_reaches_the_emitted_type() {
     let b = valid(&format!("{}\nfn main() {{\n  io.print(1)\n}}\n", RECT));
     let printed = wasmprinter::print_bytes(&b.module.bytes).unwrap();
     // `width` and `height` are immutable; `scale` is `var`.
-    assert!(printed.contains("(mut i64)"), "no mutable field emitted:\n{}", printed);
-    assert!(printed.contains("(struct"), "no struct type emitted:\n{}", printed);
+    assert!(
+        printed.contains("(mut i64)"),
+        "no mutable field emitted:\n{}",
+        printed
+    );
+    assert!(
+        printed.contains("(struct"),
+        "no struct type emitted:\n{}",
+        printed
+    );
 }
 
 #[test]
@@ -372,7 +535,11 @@ fn a_recursive_enum_validates() {
 fn variants_are_subtypes_of_the_enum_base() {
     let b = valid(&format!("{}\nfn main() {{\n  io.print(1)\n}}\n", SHAPE));
     let printed = wasmprinter::print_bytes(&b.module.bytes).unwrap();
-    assert!(printed.contains("(sub "), "variants are not subtypes:\n{}", printed);
+    assert!(
+        printed.contains("(sub "),
+        "variants are not subtypes:\n{}",
+        printed
+    );
 }
 
 // ---- honest about what is not lowered -------------------------------------
@@ -444,7 +611,11 @@ fn main() {
 }
 ";
     valid(everything);
-    assert!(gaps(everything).is_empty(), "unexpected gaps: {:?}", gaps(everything));
+    assert!(
+        gaps(everything).is_empty(),
+        "unexpected gaps: {:?}",
+        gaps(everything)
+    );
 }
 
 const SHAPES: &str = "\

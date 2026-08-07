@@ -29,7 +29,7 @@ fn under_node(name: &str, script: &str) -> String {
     std::fs::create_dir_all(&dir).expect("work directory");
     std::fs::write(
         dir.join("app.js"),
-        kite_driver::generate_glue(&["x".to_string()], "app.wasm"),
+        kite_driver::generate_glue("app.wasm"),
     )
     .expect("write glue");
     std::fs::write(dir.join("run.mjs"), script).expect("write script");

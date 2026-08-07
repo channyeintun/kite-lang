@@ -30,147 +30,76 @@
 //!
 //! # Strings
 //!
-//! String constants are passed to the host as indices into a table the
-//! generated glue holds, so the module needs no linear memory at all. When JS
-//! String Builtins are wired up this becomes an `externref` carrying the JS
-//! string itself, with no copy at the boundary.
+//! A Kite `str` is a WasmGC array of Unicode scalar values. The representation
+//! belongs to the language rather than to JavaScript: length and indexing are
+//! code-point operations in every backend, and dropping the last reference
+//! lets the engine collect the storage. JavaScript strings exist only while a
+//! value is crossing the host boundary, through one fixed scratch page.
 
 use kite_hir::{BinOp, Builtin, TyId, TyKind, Types, UnOp};
 use kite_mir as mir;
 use wasm_encoder::{
-    BlockType, CodeSection, CompositeInnerType, CompositeType, EntityType, ExportKind,
-    ElementSection, Elements, ExportSection, FieldType, Function, FunctionSection, HeapType,
-    ImportSection, Instruction,
-    Module, RefType, StorageType, SubType, TypeSection, ValType,
+    BlockType, CodeSection, CompositeInnerType, CompositeType, ElementSection, Elements,
+    EntityType, ExportKind, ExportSection, FieldType, Function, FunctionSection, HeapType,
+    ImportSection, Instruction, MemArg, MemoryType, Module, RefType, StorageType, SubType,
+    TypeSection, ValType,
 };
 
 mod eq;
 mod glue;
 mod serve;
+mod strings;
 mod support;
-pub use glue::{
-    generate_api, generate_glue, generate_glue_for, generate_glue_with_hosts, generate_page,
-};
+pub use glue::{generate_api, generate_glue, generate_glue_with_hosts, generate_page};
 pub use serve::{generate_server, listens};
 pub use support::{unsupported, Unsupported};
 
-/// How a `str` is represented in the emitted module.
-///
-/// The two are observationally identical — the same program prints the same
-/// thing — and a Kite source file cannot tell them apart. What differs is what
-/// the engine has to do.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Strings {
-    /// An `i32` index into a table the glue holds.
-    ///
-    /// Needs no linear memory and no proposal beyond WasmGC, so it runs in
-    /// every engine that runs Kite at all. It costs one call into JavaScript
-    /// per string operation, including `+` and `==`.
-    #[default]
-    Table,
-    /// A real JavaScript string, as an `externref`, with the **JS String
-    /// Builtins** supplying `concat` and `equals` as engine intrinsics rather
-    /// than as calls.
-    ///
-    /// A `str` crossing to a DOM API is then free: there is nothing to look
-    /// up, because the value already *is* the string. The rest of the string
-    /// operations stay host calls on purpose — see [`js_string_imports`].
-    Builtins,
-    /// A WasmGC object holding the JS string, plus what the glue has learned
-    /// about it.
-    ///
-    /// [`Strings::Table`] leaks, and cannot be made not to. A `str` there is an
-    /// `i32` index into an array the glue holds, and an integer is not a
-    /// reference — so the collector can see neither that a string is live nor
-    /// that it is dead, and the array only grows. Interning hides it until the
-    /// strings are *distinct*, which is exactly what a request body is.
-    ///
-    /// Wrapping the string in an object the module owns fixes that by
-    /// construction: the object is traced, and when the last Kite reference to
-    /// it goes, the engine collects it and the JS string with it. There is no
-    /// table left to grow.
-    ///
-    /// The second field is why this is an object rather than a bare
-    /// `externref`. Kite indexes a `str` by code point and JavaScript indexes
-    /// by UTF-16 code unit, so every indexed operation has to know whether the
-    /// two agree — and answering that costs a scan of the string. `Table`
-    /// could cache the answer against the index; a bare `externref` has
-    /// nowhere to put it, because a JS string is a primitive and cannot be a
-    /// `WeakMap` key. The object can, so the scan happens once per string and
-    /// the answer rides along with it.
-    ///
-    /// Needs WasmGC and reference types, both of which Kite already requires.
-    /// Notably it does *not* need the JS String Builtins proposal.
-    Object,
-}
-
-impl Strings {
-    /// Whether comparing two `str` values is a call to the host's `equals`
-    /// rather than a comparison of the values themselves.
-    ///
-    /// Only [`Strings::Table`] can compare directly: interning makes equal
-    /// strings share one index, so an `i32` compare is exact. In the other two
-    /// a `str` is the string, or a record around it, and two equal strings are
-    /// two distinct values — so the host decides.
-    ///
-    /// This is one fact that two places need, and it lives here because they
-    /// were written separately and drifted. [`used_imports`] declares the
-    /// import and `Emitter::key_equality` emits the call; when `Object` was
-    /// added, only the second learned about it, and a program with a `str`-keyed
-    /// map and no other reason to want `str_eq` emitted a call to an import the
-    /// module never declared.
-    fn str_eq_is_a_host_call(self) -> bool {
-        self != Strings::Table
-    }
-}
-
-/// A non-null external reference: what the JS String Builtins return.
-const EXTERN_REF: ValType = ValType::Ref(RefType {
-    nullable: false,
-    heap_type: HeapType::Abstract { shared: false, ty: wasm_encoder::AbstractHeapType::Extern },
-});
-
-/// A nullable external reference: how a `str` is held.
+/// A nullable external reference at the JavaScript boundary.
 const EXTERN_REF_NULL: ValType = ValType::Ref(RefType {
     nullable: true,
-    heap_type: HeapType::Abstract { shared: false, ty: wasm_encoder::AbstractHeapType::Extern },
+    heap_type: HeapType::Abstract {
+        shared: false,
+        ty: wasm_encoder::AbstractHeapType::Extern,
+    },
 });
 
 /// Host functions the module imports, as (name, params, results).
 ///
-/// Deliberately small: the standard library replaces them from Phase 6. String
-/// operations live here because a `str` is an index into a table the host
-/// holds — which is also why the module needs no linear memory.
-const IMPORTS: [(&str, &[ValType], &[ValType]); 37] = [
+/// String operations do not live here: they operate directly on Kite's GC
+/// arrays. Only formatting, I/O, drawing, and the bounded conversion bridge
+/// cross into JavaScript.
+const IMPORTS: [(&str, &[ValType], &[ValType]); 31] = [
     ("print_int", &[ValType::I64], &[]),
     ("print_float", &[ValType::F64], &[]),
     ("print_bool", &[ValType::I32], &[]),
-    ("print_str", &[ValType::I32], &[]),
-    ("str_concat", &[ValType::I32, ValType::I32], &[ValType::I32]),
-    ("str_eq", &[ValType::I32, ValType::I32], &[ValType::I32]),
-    // -1, 0 or 1, by code point. One import serves all four comparisons.
-    ("str_compare", &[ValType::I32, ValType::I32], &[ValType::I64]),
+    ("print_str", &[EXTERN_REF_NULL], &[]),
     // Rendering for `\(expr)`. These share their formatting with the `print_*`
     // imports, so a value looks the same however it reaches the host.
-    ("str_of_int", &[ValType::I64], &[ValType::I32]),
-    ("str_of_float", &[ValType::F64], &[ValType::I32]),
-    ("str_of_bool", &[ValType::I32], &[ValType::I32]),
-    ("str_len", &[ValType::I32], &[ValType::I64]),
+    ("str_of_int", &[ValType::I64], &[EXTERN_REF_NULL]),
+    ("str_of_float", &[ValType::F64], &[EXTERN_REF_NULL]),
+    ("str_of_bool", &[ValType::I32], &[EXTERN_REF_NULL]),
     // The drawing boundary: a filled rectangle and a run of text. Everything a
     // layout produces is one of the two, which is what lets a DOM renderer and
     // a canvas renderer meet the same interface.
     (
         "draw_rect",
-        &[ValType::F64, ValType::F64, ValType::F64, ValType::F64, ValType::I64],
+        &[
+            ValType::F64,
+            ValType::F64,
+            ValType::F64,
+            ValType::F64,
+            ValType::I64,
+        ],
         &[],
     ),
-    ("draw_text", &[ValType::F64, ValType::F64, ValType::I32, ValType::I64], &[]),
+    (
+        "draw_text",
+        &[ValType::F64, ValType::F64, EXTERN_REF_NULL, ValType::I64],
+        &[],
+    ),
     // A text input. Four numbers and the value it currently shows.
-    ("measure_text", &[ValType::I32], &[ValType::F64]),
+    ("measure_text", &[EXTERN_REF_NULL], &[ValType::F64]),
     ("line_height", &[], &[ValType::F64]),
-    ("str_slice", &[ValType::I32, ValType::I64, ValType::I64], &[ValType::I32]),
-    ("str_index_of", &[ValType::I32, ValType::I32], &[ValType::I64]),
-    ("str_trim", &[ValType::I32], &[ValType::I32]),
     (
         "draw_clip",
         &[ValType::F64, ValType::F64, ValType::F64, ValType::F64],
@@ -186,14 +115,18 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 37] = [
     ("task_park", &[], &[]),
     ("task_wait_host", &[], &[]),
     ("time_now", &[], &[ValType::I64]),
-    // A character as a number. The one string operation nothing else can be
-    // written on top of, which is why it is here and `split` is not.
-    ("str_code_at", &[ValType::I32, ValType::I64], &[ValType::I64]),
     // A rounded rectangle: the same five numbers as `draw_rect` with a corner
     // radius between the size and the colour.
     (
         "draw_rrect",
-        &[ValType::F64, ValType::F64, ValType::F64, ValType::F64, ValType::F64, ValType::I64],
+        &[
+            ValType::F64,
+            ValType::F64,
+            ValType::F64,
+            ValType::F64,
+            ValType::F64,
+            ValType::I64,
+        ],
         &[],
     ),
     // The font everything after it is drawn *and measured* in.
@@ -224,10 +157,10 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 37] = [
             ValType::F64,
             ValType::F64,
             ValType::F64,
-            ValType::I32,
-            ValType::I32,
+            EXTERN_REF_NULL,
+            EXTERN_REF_NULL,
             ValType::I64,
-            ValType::I32,
+            EXTERN_REF_NULL,
             ValType::I32,
         ],
         &[],
@@ -238,7 +171,13 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 37] = [
     // backend that draws at all can honour this one.
     (
         "draw_image",
-        &[ValType::F64, ValType::F64, ValType::F64, ValType::F64, ValType::I32],
+        &[
+            ValType::F64,
+            ValType::F64,
+            ValType::F64,
+            ValType::F64,
+            EXTERN_REF_NULL,
+        ],
         &[],
     ),
     // What a region *is*. The only import that paints nothing.
@@ -250,141 +189,15 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 37] = [
             ValType::F64,
             ValType::F64,
             ValType::I64,
-            ValType::I32,
+            EXTERN_REF_NULL,
             ValType::I64,
-            ValType::I32,
+            EXTERN_REF_NULL,
         ],
         &[],
     ),
-    // A character from a code point. A host call because a `str` is the host's
-    // — the module holds an index into a table it keeps.
-    ("str_from_code", &[ValType::I64], &[ValType::I32]),
     // Standard input and standard error. A page has neither; the glue answers
     // with the empty string and with `console.error`, which is the nearest
     // honest equivalent of each.
-    ("read_line", &[], &[ValType::I32]),
-    ("error_str", &[ValType::I32], &[]),
-    // A Kite closure the host can call.
-    //
-    // The mirror of `task_spawn`: what crosses is a reference the host cannot
-    // enter, and it comes back through the module's own `kite_invoke`
-    // trampoline. What is different is the argument — a handler is given the
-    // host value that caused it, so the trampoline takes two references rather
-    // than one.
-    ("js_func", &[ANY_REF], &[EXTERN_REF_NULL]),
-];
-
-/// The same imports again, with `str` as an `externref`.
-///
-/// Written out rather than derived, because there is no rule that maps the
-/// first table onto the second: `print_bool` takes an `i32` that is a boolean
-/// and `print_str` takes an `i32` that is a string, and a transform could not
-/// tell them apart. A test asserts the two tables name the same functions in
-/// the same order with the same arities, which is the drift this could
-/// otherwise have.
-///
-/// Two entries come from the engine rather than from the glue. `concat` and
-/// `equals` are **JS String Builtins**, compiled to intrinsics; their
-/// signatures are fixed by that proposal and are not ours to choose — `concat`
-/// answers a *non-null* reference, which is why [`EXTERN_REF`] exists.
-///
-/// The rest stay ordinary host calls, and that is a semantic decision rather
-/// than an oversight. The builtins index strings by **UTF-16 code unit** and
-/// Kite counts **characters**: `length`, `charCodeAt` and `substring` would
-/// therefore answer differently from the bytecode VM the moment a program held
-/// an astral character, and two backends that disagree is the one thing this
-/// project spends its testing budget preventing. `concat` and `equals` are
-/// exact at any code point, so those two are taken and the others are not.
-const JS_STRING_IMPORTS: [(&str, &[ValType], &[ValType]); 37] = [
-    ("print_int", &[ValType::I64], &[]),
-    ("print_float", &[ValType::F64], &[]),
-    ("print_bool", &[ValType::I32], &[]),
-    ("print_str", &[EXTERN_REF_NULL], &[]),
-    ("str_concat", &[EXTERN_REF_NULL, EXTERN_REF_NULL], &[EXTERN_REF]),
-    ("str_eq", &[EXTERN_REF_NULL, EXTERN_REF_NULL], &[ValType::I32]),
-    ("str_compare", &[EXTERN_REF_NULL, EXTERN_REF_NULL], &[ValType::I64]),
-    ("str_of_int", &[ValType::I64], &[EXTERN_REF_NULL]),
-    ("str_of_float", &[ValType::F64], &[EXTERN_REF_NULL]),
-    ("str_of_bool", &[ValType::I32], &[EXTERN_REF_NULL]),
-    ("str_len", &[EXTERN_REF_NULL], &[ValType::I64]),
-    (
-        "draw_rect",
-        &[ValType::F64, ValType::F64, ValType::F64, ValType::F64, ValType::I64],
-        &[],
-    ),
-    ("draw_text", &[ValType::F64, ValType::F64, EXTERN_REF_NULL, ValType::I64], &[]),
-    ("measure_text", &[EXTERN_REF_NULL], &[ValType::F64]),
-    ("line_height", &[], &[ValType::F64]),
-    ("str_slice", &[EXTERN_REF_NULL, ValType::I64, ValType::I64], &[EXTERN_REF_NULL]),
-    ("str_index_of", &[EXTERN_REF_NULL, EXTERN_REF_NULL], &[ValType::I64]),
-    ("str_trim", &[EXTERN_REF_NULL], &[EXTERN_REF_NULL]),
-    (
-        "draw_clip",
-        &[ValType::F64, ValType::F64, ValType::F64, ValType::F64],
-        &[],
-    ),
-    ("draw_unclip", &[], &[]),
-    ("task_spawn", &[ANY_REF], &[]),
-    ("task_wake_at", &[ValType::I64], &[]),
-    ("task_park", &[], &[]),
-    ("task_wait_host", &[], &[]),
-    ("time_now", &[], &[ValType::I64]),
-    ("str_code_at", &[EXTERN_REF_NULL, ValType::I64], &[ValType::I64]),
-    (
-        "draw_rrect",
-        &[ValType::F64, ValType::F64, ValType::F64, ValType::F64, ValType::F64, ValType::I64],
-        &[],
-    ),
-    ("draw_font", &[ValType::F64, ValType::I64], &[]),
-    (
-        "draw_drrect",
-        &[
-            ValType::F64,
-            ValType::F64,
-            ValType::F64,
-            ValType::F64,
-            ValType::F64,
-            ValType::F64,
-            ValType::I64,
-        ],
-        &[],
-    ),
-    ("draw_alpha", &[ValType::F64], &[]),
-    (
-        "draw_field",
-        &[
-            ValType::F64,
-            ValType::F64,
-            ValType::F64,
-            ValType::F64,
-            EXTERN_REF_NULL,
-            EXTERN_REF_NULL,
-            ValType::I64,
-            EXTERN_REF_NULL,
-            ValType::I32,
-        ],
-        &[],
-    ),
-    (
-        "draw_image",
-        &[ValType::F64, ValType::F64, ValType::F64, ValType::F64, EXTERN_REF_NULL],
-        &[],
-    ),
-    (
-        "draw_semantics",
-        &[
-            ValType::F64,
-            ValType::F64,
-            ValType::F64,
-            ValType::F64,
-            ValType::I64,
-            EXTERN_REF_NULL,
-            ValType::I64,
-            EXTERN_REF_NULL,
-        ],
-        &[],
-    ),
-    ("str_from_code", &[ValType::I64], &[EXTERN_REF_NULL]),
     ("read_line", &[], &[EXTERN_REF_NULL]),
     ("error_str", &[EXTERN_REF_NULL], &[]),
     // A Kite closure the host can call.
@@ -395,46 +208,18 @@ const JS_STRING_IMPORTS: [(&str, &[ValType], &[ValType]); 37] = [
     // host value that caused it, so the trampoline takes two references rather
     // than one.
     ("js_func", &[ANY_REF], &[EXTERN_REF_NULL]),
+    // A bounded bridge between JavaScript's UTF-16 strings and Kite's Unicode
+    // scalar arrays. `text_len` starts an input conversion, `text_fill` writes
+    // its next chunk into the scratch page, and `text_push` consumes one output
+    // chunk. No converted value remains rooted after the synchronous call.
+    ("text_len", &[EXTERN_REF_NULL], &[ValType::I32]),
+    ("text_fill", &[ValType::I32], &[ValType::I32]),
+    (
+        "text_push",
+        &[ValType::I32, ValType::I32, ValType::I32],
+        &[EXTERN_REF_NULL],
+    ),
 ];
-
-/// The import table in force.
-type ImportRow = (&'static str, &'static [ValType], &'static [ValType]);
-
-fn imports_for(strings: Strings) -> &'static [ImportRow] {
-    match strings {
-        Strings::Table => &IMPORTS,
-        // The same signatures as the builtins mode: every string crosses to
-        // the host as the JS string itself. What differs is where they come
-        // from — all of these are the glue's, because `Object` asks nothing of
-        // the engine beyond WasmGC — and that the module wraps what comes back
-        // rather than using it directly.
-        Strings::Builtins | Strings::Object => &JS_STRING_IMPORTS,
-    }
-}
-
-/// Where an import comes from, and what the host calls it.
-///
-/// Everything is the glue's `kite` module except the two the engine supplies
-/// itself. A builtin is named by the proposal, not by us.
-fn import_origin(index: usize, strings: Strings) -> (&'static str, &'static str) {
-    if strings == Strings::Builtins {
-        if index as u32 == host::STR_CONCAT {
-            return ("wasm:js-string", "concat");
-        }
-        if index as u32 == host::STR_EQ {
-            return ("wasm:js-string", "equals");
-        }
-    }
-    ("kite", IMPORTS[index].0)
-}
-
-/// The import namespace string constants arrive through.
-///
-/// With the imported-string-constants option, the *name* of an import is the
-/// string itself and the engine synthesises the global — so a module carries
-/// its constants without a table, without linear memory, and without the glue
-/// having to hand them over one by one.
-const STRING_CONSTANTS: &str = "kite:strings";
 
 const IMPORT_COUNT: u32 = IMPORTS.len() as u32;
 
@@ -476,7 +261,12 @@ impl Hosts {
                 externs.push(None);
             }
         }
-        Hosts { declared, index, externs, base: n }
+        Hosts {
+            declared,
+            index,
+            externs,
+            base: n,
+        }
     }
 
     /// The function index of a declared host call.
@@ -512,38 +302,23 @@ impl Hosts {
 /// of its argument, so printing anything marks all four — and exact elsewhere.
 /// Over-declaring costs bytes; under-declaring produces a module that will not
 /// instantiate, which is why the lookup asserts rather than defaulting.
-fn used_imports(
-    program: &mir::Program,
-    types: &Types,
-    eq_fns: &[eq::EqFn],
-    strings: Strings,
-) -> Hosts {
+fn used_imports(program: &mir::Program, types: &Types) -> Hosts {
     let mut used = vec![false; IMPORTS.len()];
     let mut mark = |i: u32| used[i as usize] = true;
 
-    // A generated comparison calls out for string equality, and reaches it
-    // through any aggregate holding a `str`.
-    if !eq_fns.is_empty() {
-        mark(host::STR_EQ);
-    }
-
-    // A map with `str` keys compares them on every lookup, and outside the
-    // table representation that comparison is a host call — see
-    // [`Strings::str_eq_is_a_host_call`], which the emitter reads too so the
-    // two cannot disagree about it again.
-    if strings.str_eq_is_a_host_call() {
-        let str_keyed = program.fns.iter().flat_map(|f| f.locals.iter()).any(|l| {
-            matches!(types.kind(l.ty), TyKind::Map(k, _) if *k == TyId::STR)
-        });
-        if str_keyed {
-            mark(host::STR_EQ);
-        }
-    }
+    // The module exports conversion helpers for its typed JavaScript API, so
+    // the fixed scratch bridge is present even when source code itself never
+    // crosses a string boundary.
+    mark(host::TEXT_LEN);
+    mark(host::TEXT_FILL);
+    mark(host::TEXT_PUSH);
 
     for f in &program.fns {
         for b in &f.blocks {
             for s in &b.stmts {
-                let mir::Inst::Assign { value, .. } = s else { continue };
+                let mir::Inst::Assign { value, .. } = s else {
+                    continue;
+                };
                 match value {
                     mir::Rvalue::CallBuiltin { builtin, .. } => match builtin {
                         Builtin::IoPrint => {
@@ -570,7 +345,7 @@ fn used_imports(
                         Builtin::DrawSemantics => mark(host::DRAW_SEMANTICS),
                         Builtin::TextWidth => mark(host::MEASURE_TEXT),
                         Builtin::TextHeight => mark(host::LINE_HEIGHT),
-                        Builtin::TextFromCode => mark(host::STR_FROM_CODE),
+                        Builtin::TextFromCode => {}
                         Builtin::DrawClip => mark(host::DRAW_CLIP),
                         Builtin::DrawUnclip => mark(host::DRAW_UNCLIP),
                         Builtin::TaskSpawn => mark(host::TASK_SPAWN),
@@ -584,21 +359,6 @@ fn used_imports(
                         Builtin::PtrSame => {}
                         // A failed claim prints what was claimed and traps.
                         Builtin::Require => mark(host::PRINT_STR),
-                    },
-                    mir::Rvalue::StrOp { op, .. } => mark(match op {
-                        kite_hir::StrKind::Len => host::STR_LEN,
-                        kite_hir::StrKind::Slice => host::STR_SLICE,
-                        kite_hir::StrKind::IndexOf => host::STR_INDEX_OF,
-                        kite_hir::StrKind::Trim => host::STR_TRIM,
-                        kite_hir::StrKind::CodeAt => host::STR_CODE_AT,
-                    }),
-                    mir::Rvalue::Binary { op, .. } => match op {
-                        BinOp::ConcatStr => mark(host::STR_CONCAT),
-                        BinOp::EqStr | BinOp::NeStr => mark(host::STR_EQ),
-                        BinOp::LtStr | BinOp::LeStr | BinOp::GtStr | BinOp::GeStr => {
-                            mark(host::STR_COMPARE)
-                        }
-                        _ => {}
                     },
                     mir::Rvalue::ToStr { from, .. } => match types.kind(*from) {
                         TyKind::Int => mark(host::STR_OF_INT),
@@ -618,7 +378,8 @@ fn used_imports(
         for b in &f.blocks {
             for s in &b.stmts {
                 if let mir::Inst::Assign {
-                    value: mir::Rvalue::CallExtern { index, .. }, ..
+                    value: mir::Rvalue::CallExtern { index, .. },
+                    ..
                 } = s
                 {
                     used_externs[*index as usize] = true;
@@ -634,7 +395,10 @@ fn used_imports(
 /// opaque at the call site and each thunk casts it back to its own record.
 const ANY_REF: ValType = ValType::Ref(RefType {
     nullable: true,
-    heap_type: HeapType::Abstract { shared: false, ty: wasm_encoder::AbstractHeapType::Any },
+    heap_type: HeapType::Abstract {
+        shared: false,
+        ty: wasm_encoder::AbstractHeapType::Any,
+    },
 });
 
 /// Import indices, by position in [`IMPORTS`].
@@ -643,39 +407,33 @@ mod host {
     pub const PRINT_FLOAT: u32 = 1;
     pub const PRINT_BOOL: u32 = 2;
     pub const PRINT_STR: u32 = 3;
-    pub const STR_CONCAT: u32 = 4;
-    pub const STR_EQ: u32 = 5;
-    pub const STR_COMPARE: u32 = 6;
-    pub const STR_OF_INT: u32 = 7;
-    pub const STR_OF_FLOAT: u32 = 8;
-    pub const STR_OF_BOOL: u32 = 9;
-    pub const STR_LEN: u32 = 10;
-    pub const DRAW_RECT: u32 = 11;
-    pub const DRAW_TEXT: u32 = 12;
-    pub const MEASURE_TEXT: u32 = 13;
-    pub const LINE_HEIGHT: u32 = 14;
-    pub const STR_SLICE: u32 = 15;
-    pub const STR_INDEX_OF: u32 = 16;
-    pub const STR_TRIM: u32 = 17;
-    pub const DRAW_CLIP: u32 = 18;
-    pub const DRAW_UNCLIP: u32 = 19;
-    pub const TASK_SPAWN: u32 = 20;
-    pub const TASK_WAKE_AT: u32 = 21;
-    pub const TASK_PARK: u32 = 22;
-    pub const TASK_WAIT_HOST: u32 = 23;
-    pub const TIME_NOW: u32 = 24;
-    pub const STR_CODE_AT: u32 = 25;
-    pub const DRAW_RRECT: u32 = 26;
-    pub const DRAW_FONT: u32 = 27;
-    pub const DRAW_DRRECT: u32 = 28;
-    pub const DRAW_ALPHA: u32 = 29;
-    pub const DRAW_FIELD: u32 = 30;
-    pub const DRAW_IMAGE: u32 = 31;
-    pub const DRAW_SEMANTICS: u32 = 32;
-    pub const STR_FROM_CODE: u32 = 33;
-    pub const READ_LINE: u32 = 34;
-    pub const ERROR_STR: u32 = 35;
-    pub const JS_FUNC: u32 = 36;
+    pub const STR_OF_INT: u32 = 4;
+    pub const STR_OF_FLOAT: u32 = 5;
+    pub const STR_OF_BOOL: u32 = 6;
+    pub const DRAW_RECT: u32 = 7;
+    pub const DRAW_TEXT: u32 = 8;
+    pub const MEASURE_TEXT: u32 = 9;
+    pub const LINE_HEIGHT: u32 = 10;
+    pub const DRAW_CLIP: u32 = 11;
+    pub const DRAW_UNCLIP: u32 = 12;
+    pub const TASK_SPAWN: u32 = 13;
+    pub const TASK_WAKE_AT: u32 = 14;
+    pub const TASK_PARK: u32 = 15;
+    pub const TASK_WAIT_HOST: u32 = 16;
+    pub const TIME_NOW: u32 = 17;
+    pub const DRAW_RRECT: u32 = 18;
+    pub const DRAW_FONT: u32 = 19;
+    pub const DRAW_DRRECT: u32 = 20;
+    pub const DRAW_ALPHA: u32 = 21;
+    pub const DRAW_FIELD: u32 = 22;
+    pub const DRAW_IMAGE: u32 = 23;
+    pub const DRAW_SEMANTICS: u32 = 24;
+    pub const READ_LINE: u32 = 25;
+    pub const ERROR_STR: u32 = 26;
+    pub const JS_FUNC: u32 = 27;
+    pub const TEXT_LEN: u32 = 28;
+    pub const TEXT_FILL: u32 = 29;
+    pub const TEXT_PUSH: u32 = 30;
 }
 
 pub struct WasmModule {
@@ -684,9 +442,6 @@ pub struct WasmModule {
     /// with. Collected here because this is where the export list is decided,
     /// and a typed wrapper generated from anywhere else could disagree with it.
     pub api: Vec<Export>,
-    /// String constants, in index order. The glue turns these into real
-    /// strings; the module only refers to them by index.
-    pub strings: Vec<String>,
     /// The host functions this module imports, as `(group, name, arity)`.
     /// The glue is generated from these, so a declaration and the stub that
     /// answers it cannot drift apart.
@@ -732,13 +487,11 @@ struct TypeLayout {
     /// The error record: a message index. `nil` is a null reference, which is
     /// what makes `return value, nil` read the way it does.
     error_record: u32,
-    /// The string record, under [`Strings::Object`] only: the JS string, and
-    /// whether its code-point indices are its UTF-16 indices.
+    /// The canonical `str`: a mutable WasmGC array of Unicode scalar values.
     ///
-    /// Allocated only in that mode, so the other two keep the type index space
-    /// they had — a representation nobody selected should not move a single
-    /// byte of what everyone else emits.
-    str_record: u32,
+    /// Mutability is an implementation detail needed while constructing and
+    /// copying arrays. No Kite operation exposes a way to mutate a string.
+    str_array: u32,
     /// One record per distinct fallible value type. The pair is a single GC
     /// object so a function can return both slots at once.
     pair_record: std::collections::HashMap<TyId, u32>,
@@ -772,9 +525,6 @@ struct TypeLayout {
     /// Per lifted function reached by a `ClosureNew`: the record holding its
     /// captures, and how many of its leading parameters they are.
     env_record: std::collections::HashMap<u32, (u32, usize)>,
-    /// How a `str` is represented. The layout is where every value type is
-    /// decided, so this is where the question has to be answerable.
-    strings: Strings,
 }
 
 #[derive(Clone, Copy)]
@@ -959,14 +709,8 @@ fn option_payloads(program: &mir::Program, types: &Types) -> Vec<TyId> {
     seen
 }
 
-/// Compile a MIR program to a WebAssembly module, with `str` as an index into
-/// a table the glue holds.
+/// Compile a MIR program to a WebAssembly module.
 pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
-    compile_with(program, types, Strings::Table)
-}
-
-/// Compile, choosing how a `str` is represented.
-pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> WasmModule {
     let mut module = Module::new();
 
     // Type index space: import signatures, then structs, then each enum's base
@@ -993,7 +737,8 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
         for b in &f.blocks {
             for s in &b.stmts {
                 if let mir::Inst::Assign {
-                    value: mir::Rvalue::ClosureNew { func, captures }, ..
+                    value: mir::Rvalue::ClosureNew { func, captures },
+                    ..
                 } = s
                 {
                     if !envs.iter().any(|(g, _)| *g == func.0) {
@@ -1018,7 +763,6 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
     // Optional boxes need the layout to describe their payload, so build a
     // provisional one first and fill the table in.
     let mut layout = TypeLayout {
-        strings,
         object_record,
         tagged,
         closure_sig: fn_types
@@ -1033,7 +777,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
         option_box: std::collections::HashMap::new(),
         slice_array: std::collections::HashMap::new(),
         error_record: 0,
-        str_record: 0,
+        str_array: 0,
         pair_record: std::collections::HashMap::new(),
         tuple_record: std::collections::HashMap::new(),
         map_record: std::collections::HashMap::new(),
@@ -1050,10 +794,8 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
     }
     layout.error_record = next;
     next += 1;
-    if layout.strings == Strings::Object {
-        layout.str_record = next;
-        next += 1;
-    }
+    layout.str_array = next;
+    next += 1;
     let pairs = pair_values(program, types);
     for v in &pairs {
         layout.pair_record.insert(*v, next);
@@ -1067,10 +809,18 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
     // A map needs three types: the record, and one array for each side.
     let maps = map_shapes(program, types);
     for m in &maps {
-        let TyKind::Map(k, v) = *types.kind(*m) else { continue };
+        let TyKind::Map(k, v) = *types.kind(*m) else {
+            continue;
+        };
         layout.map_record.insert(
             *m,
-            MapLayout { record: next, keys: next + 1, values: next + 2, key_ty: k, value_ty: v },
+            MapLayout {
+                record: next,
+                keys: next + 1,
+                values: next + 2,
+                key_ty: k,
+                value_ty: v,
+            },
         );
         next += 3;
     }
@@ -1086,7 +836,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
 
     // ---- types -------------------------------------------------------------
     let mut type_section = TypeSection::new();
-    for (_, params, results) in imports_for(strings).iter() {
+    for (_, params, results) in &IMPORTS {
         type_section
             .ty()
             .function(params.iter().copied(), results.iter().copied());
@@ -1197,9 +947,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
             });
         }
 
-        // The error record holds its message. That is an index under the table
-        // representation and the string's own record under the object one, so
-        // the field is whatever a `str` is here rather than a hardcoded `i32`.
+        // The error record holds its message in the canonical string type.
         group.push(struct_subtype(
             vec![FieldType {
                 element_type: StorageType::Val(val_type_with(TyId::STR, types, &layout)),
@@ -1209,30 +957,22 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
             true,
         ));
 
-        // The string record: the JS string, and what has been learned about
-        // how to index it.
-        //
-        // `narrow` is -1 until asked, then 0 or 1. It answers "do code-point
-        // indices and UTF-16 indices agree here", which every indexed
-        // operation needs and which costs a scan to determine. Mutable because
-        // it is filled in on first use rather than computed for strings nobody
-        // indexes; the string itself is immutable, as a `str` is.
-        if layout.strings == Strings::Object {
-            group.push(struct_subtype(
-                vec![
-                    FieldType {
-                        element_type: StorageType::Val(EXTERN_REF_NULL),
-                        mutable: false,
-                    },
-                    FieldType {
-                        element_type: StorageType::Val(ValType::I32),
-                        mutable: true,
-                    },
-                ],
-                None,
-                true,
-            ));
-        }
+        // A string is one Unicode scalar per element. The array is mutable so
+        // constructors can fill and copy it, but Kite exposes strings only as
+        // immutable values.
+        group.push(SubType {
+            is_final: true,
+            supertype_idx: None,
+            composite_type: CompositeType {
+                inner: CompositeInnerType::Array(wasm_encoder::ArrayType(FieldType {
+                    element_type: StorageType::Val(ValType::I32),
+                    mutable: true,
+                })),
+                shared: false,
+                descriptor: None,
+                describes: None,
+            },
+        });
 
         // A fallible result is one GC object holding both slots, so a function
         // can return the pair without multi-value plumbing.
@@ -1247,7 +987,10 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
                         element_type: StorageType::Val(val_type_with(*v, types, &layout)),
                         mutable: false,
                     },
-                    FieldType { element_type: StorageType::Val(err_ref), mutable: false },
+                    FieldType {
+                        element_type: StorageType::Val(err_ref),
+                        mutable: false,
+                    },
                 ],
                 None,
                 true,
@@ -1272,7 +1015,9 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
         }
 
         for m in &maps {
-            let Some(ml) = layout.map_layout(*m) else { continue };
+            let Some(ml) = layout.map_layout(*m) else {
+                continue;
+            };
             let karr = ValType::Ref(RefType {
                 nullable: true,
                 heap_type: HeapType::Concrete(ml.keys),
@@ -1283,8 +1028,14 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
             });
             group.push(struct_subtype(
                 vec![
-                    FieldType { element_type: StorageType::Val(karr), mutable: false },
-                    FieldType { element_type: StorageType::Val(varr), mutable: false },
+                    FieldType {
+                        element_type: StorageType::Val(karr),
+                        mutable: false,
+                    },
+                    FieldType {
+                        element_type: StorageType::Val(varr),
+                        mutable: false,
+                    },
                 ],
                 None,
                 true,
@@ -1320,7 +1071,10 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
                         })),
                         mutable: false,
                     },
-                    FieldType { element_type: StorageType::Val(ANY_REF), mutable: false },
+                    FieldType {
+                        element_type: StorageType::Val(ANY_REF),
+                        mutable: false,
+                    },
                 ],
                 None,
                 true,
@@ -1346,9 +1100,11 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
     // Indices are computed rather than read back: `TypeSection::len` counts a
     // `rec` group as one entry, not as the types inside it, so trusting it here
     // would collide function types with every struct after the first.
-    // Signature types come between the imports and the aggregate group, so a
-    // function type index is past both.
-    let fn_type_base = IMPORT_COUNT + aggregate_count;
+    // Runtime signatures follow the aggregate group; source-level functions
+    // follow those.
+    let runtime_type_base = IMPORT_COUNT + aggregate_count;
+    let runtime_type_index = strings::add_types(&mut type_section, runtime_type_base, &layout);
+    let fn_type_base = runtime_type_base + strings::FUNCTION_COUNT;
     // Dispatchers: one per trait method, taking the receiver as a reference to
     // the tagged root. They live above the user functions in the index space.
     let mut dispatchers: Vec<Dispatcher> = Vec::new();
@@ -1359,25 +1115,27 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
                 nullable: true,
                 heap_type: HeapType::Concrete(object_record),
             })];
-            params.extend(method.params.iter().map(|p| val_type_with(*p, types, &layout)));
+            params.extend(
+                method
+                    .params
+                    .iter()
+                    .map(|p| val_type_with(*p, types, &layout)),
+            );
             dispatchers.push(Dispatcher {
                 trait_id: v.trait_id,
                 method: m as u32,
                 params,
                 ret: method.ret,
-                arms: v
-                    .entries
-                    .iter()
-                    .map(|e| (e.tag, e.methods[m]))
-                    .collect(),
+                arms: v.entries.iter().map(|e| (e.tag, e.methods[m])).collect(),
             });
         }
     }
     // Which host functions the module declares decides where its own functions
     // start, so this has to be settled before any index is handed out.
     let eq_fns = eq::collect(program, types);
-    let hosts = used_imports(program, types, &eq_fns, strings);
-    let fn_base = hosts.base;
+    let hosts = used_imports(program, types);
+    let string_runtime = strings::StringRuntime { base: hosts.base };
+    let fn_base = string_runtime.base + strings::FUNCTION_COUNT;
     let dispatch_base = fn_base + program.fns.len() as u32;
 
     // Structural equality: one generated function per aggregate type a program
@@ -1398,7 +1156,9 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
         let params: Vec<ValType> = (0..f.param_count)
             .map(|j| val_type_with(f.locals[j].ty, types, &layout))
             .collect();
-        let results: Vec<ValType> = wasm_result_with(f.ret, types, &layout).into_iter().collect();
+        let results: Vec<ValType> = wasm_result_with(f.ret, types, &layout)
+            .into_iter()
+            .collect();
         fn_type_index.push(fn_type_base + i as u32);
         type_section.ty().function(params, results);
     }
@@ -1407,8 +1167,12 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
     for d in &dispatchers {
         extra_type_index.push(next_fn_type);
         next_fn_type += 1;
-        let results: Vec<ValType> = wasm_result_with(d.ret, types, &layout).into_iter().collect();
-        type_section.ty().function(d.params.iter().copied(), results);
+        let results: Vec<ValType> = wasm_result_with(d.ret, types, &layout)
+            .into_iter()
+            .collect();
+        type_section
+            .ty()
+            .function(d.params.iter().copied(), results);
     }
     for e in &eq_fns {
         extra_type_index.push(next_fn_type);
@@ -1462,9 +1226,9 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
         if !hosts.extern_used(i) {
             continue;
         }
-        // A declared `@host` function is JavaScript, so a `str` crosses to it
-        // as the string. The record is the module's own bookkeeping and the
-        // host can neither read one nor build one.
+        // A declared `@host` function is JavaScript, so a `str` crosses as a
+        // JavaScript string. The scalar array remains the module's own value,
+        // which the host can neither read nor construct.
         let params: Vec<ValType> = def
             .params
             .iter()
@@ -1489,45 +1253,22 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
     let mut imports = ImportSection::new();
     for i in 0..IMPORTS.len() {
         if hosts.declared(i as u32) {
-            let (module_name, name) = import_origin(i, strings);
-            imports.import(module_name, name, EntityType::Function(i as u32));
+            imports.import("kite", IMPORTS[i].0, EntityType::Function(i as u32));
         }
     }
-    // String constants arrive as imported globals whose *names are the strings
-    // themselves*, which the engine synthesises under the
-    // imported-string-constants option. There is then no table, no interning,
-    // and nothing for the glue to hand over.
-    if strings == Strings::Builtins {
-        for constant in &program.strings {
-            imports.import(
-                STRING_CONSTANTS,
-                constant,
-                EntityType::Global(wasm_encoder::GlobalType {
-                    val_type: EXTERN_REF_NULL,
-                    mutable: false,
-                    shared: false,
-                }),
-            );
-        }
-    }
-    // The same idea without the proposal: the glue hands the constants over,
-    // named by position rather than by content, because nothing is
-    // synthesising them from their own names here. The array holding them is
-    // the program's literals and no more — it is fixed at compile time, so it
-    // is not the table this representation exists to remove.
-    if strings == Strings::Object {
-        for i in 0..program.strings.len() {
-            imports.import(
-                STRING_CONSTANTS,
-                &i.to_string(),
-                EntityType::Global(wasm_encoder::GlobalType {
-                    val_type: EXTERN_REF_NULL,
-                    mutable: false,
-                    shared: false,
-                }),
-            );
-        }
-    }
+    // One fixed page is used only while a string crosses the JavaScript
+    // boundary. It never grows and holds no live Kite value between calls.
+    imports.import(
+        "kite",
+        "scratch",
+        EntityType::Memory(MemoryType {
+            minimum: 1,
+            maximum: Some(1),
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        }),
+    );
     // Then the program's own declared boundary, one import per `extern` it
     // reaches, in its `@host("group")`. The glue is generated from the same
     // declarations, so the two cannot drift.
@@ -1540,7 +1281,11 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
 
     // ---- functions ---------------------------------------------------------
     let mut functions = FunctionSection::new();
-    for idx in fn_type_index.iter().chain(&extra_type_index) {
+    for idx in runtime_type_index
+        .iter()
+        .chain(&fn_type_index)
+        .chain(&extra_type_index)
+    {
         functions.function(*idx);
     }
     module.section(&functions);
@@ -1567,6 +1312,19 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
     if invoke_trampoline {
         exports.export("kite_invoke", ExportKind::Func, invoke_index);
     }
+    // Arbitrary export names avoid colliding with source identifiers. The glue
+    // uses these to give JavaScript callers ordinary strings while the public
+    // Wasm functions keep the language-owned representation.
+    exports.export(
+        "$kite.str.from_host",
+        ExportKind::Func,
+        string_runtime.from_host(),
+    );
+    exports.export(
+        "$kite.str.to_host",
+        ExportKind::Func,
+        string_runtime.to_host(),
+    );
     module.section(&exports);
 
     // ---- elements ----------------------------------------------------------
@@ -1585,8 +1343,14 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
     // whole table is needed before any body is emitted.
     let fn_returns: Vec<TyId> = program.fns.iter().map(|f| f.ret).collect();
     let mut code = CodeSection::new();
-    let eq_builder =
-        eq::EqBuilder { types, layout: &layout, base: eq_base, fns: &eq_fns, hosts: &hosts };
+    strings::emit(&mut code, string_runtime, &layout, &hosts);
+    let eq_builder = eq::EqBuilder {
+        types,
+        layout: &layout,
+        base: eq_base,
+        fns: &eq_fns,
+        strings: string_runtime,
+    };
     for f in &program.fns {
         code.function(&compile_fn(
             f,
@@ -1601,6 +1365,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
             thunk_base,
             fn_base,
             &hosts,
+            string_runtime,
         ));
     }
     for d in &dispatchers {
@@ -1610,7 +1375,9 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
         code.function(&eq_builder.build(e.ty));
     }
     for (func, count) in &envs {
-        code.function(&compile_thunk(*func, *count, program, types, &layout, fn_base));
+        code.function(&compile_thunk(
+            *func, *count, program, types, &layout, fn_base,
+        ));
     }
     if poll_trampoline {
         code.function(&compile_poll_trampoline(poll_ty, &layout));
@@ -1639,17 +1406,23 @@ pub fn compile_with(program: &mir::Program, types: &Types, strings: Strings) -> 
                 .iter()
                 .enumerate()
                 .map(|(i, l)| {
-                    (l.name.clone().unwrap_or_else(|| format!("a{}", i)), types.name(l.ty))
+                    (
+                        l.name.clone().unwrap_or_else(|| format!("a{}", i)),
+                        types.name(l.ty),
+                    )
                 })
                 .collect(),
-            ret: if f.ret == TyId::UNIT { None } else { Some(types.name(f.ret)) },
+            ret: if f.ret == TyId::UNIT {
+                None
+            } else {
+                Some(types.name(f.ret))
+            },
         });
     }
 
     WasmModule {
         bytes: module.finish(),
         api,
-        strings: program.strings.clone(),
         hosts: program
             .externs
             .iter()
@@ -1687,11 +1460,7 @@ fn tag_field() -> FieldType {
     }
 }
 
-fn struct_subtype(
-    fields: Vec<FieldType>,
-    supertype: Option<u32>,
-    is_final: bool,
-) -> SubType {
+fn struct_subtype(fields: Vec<FieldType>, supertype: Option<u32>, is_final: bool) -> SubType {
     SubType {
         is_final,
         supertype_idx: supertype,
@@ -1706,19 +1475,18 @@ fn struct_subtype(
     }
 }
 
-/// The Wasm value type for a Kite type.
 /// The type a value has where it crosses to the host.
 ///
-/// Identical to [`val_type_with`] except for a `str` under
-/// [`Strings::Object`]: inside the module that is a record, and on the way out
-/// it is the string the record holds.
+/// A `str` is language-owned inside the module and a JavaScript string only at
+/// this declared boundary.
 fn boundary_val_type(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
-    if layout.strings == Strings::Object && matches!(types.kind(ty), TyKind::Str) {
+    if matches!(types.kind(ty), TyKind::Str) {
         return EXTERN_REF_NULL;
     }
     val_type_with(ty, types, layout)
 }
 
+/// The Wasm value type for a Kite type.
 fn val_type_with(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
     match types.kind(ty) {
         TyKind::Float => ValType::F64,
@@ -1791,20 +1559,12 @@ fn val_type_with(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
             // Only reachable while the layout is still being built.
             None => ValType::I32,
         },
-        // A host object *is* the host's object. There is no table it could be
-        // an index into and no representation Kite could give it, so it is an
-        // `externref` whatever the string mode happens to be — which is also
-        // what makes the engine trace it, and what makes a cycle between a Kite
-        // struct and a DOM node something one collector can collect.
+        // A host object *is* the host's object. There is no language-side
+        // representation Kite could give it, so it remains an `externref`.
         TyKind::JsValue => EXTERN_REF_NULL,
-        // A `str` is either an index into the glue's table or the JS string
-        // itself. Everything else that reaches here — `bool`, `unit`, the
-        // error placeholder — is an `i32` either way.
-        TyKind::Str if layout.strings == Strings::Builtins => EXTERN_REF_NULL,
-        // The record the module owns, so the collector can see it.
-        TyKind::Str if layout.strings == Strings::Object => ValType::Ref(RefType {
+        TyKind::Str => ValType::Ref(RefType {
             nullable: true,
-            heap_type: HeapType::Concrete(layout.str_record),
+            heap_type: HeapType::Concrete(layout.str_array),
         }),
         _ => ValType::I32,
     }
@@ -1820,15 +1580,17 @@ fn closure_ty_of(func: u32, program: &mir::Program, types: &Types) -> TyId {
         .flat_map(|f| f.blocks.iter())
         .flat_map(|b| b.stmts.iter())
         .find_map(|s| match s {
-            mir::Inst::Assign { value: mir::Rvalue::ClosureNew { func: g, captures }, .. }
-                if g.0 == func =>
-            {
-                Some(captures.len())
-            }
+            mir::Inst::Assign {
+                value: mir::Rvalue::ClosureNew { func: g, captures },
+                ..
+            } if g.0 == func => Some(captures.len()),
             _ => None,
         })
         .unwrap_or(0);
-    let params: Vec<TyId> = lifted.locals[count..lifted.param_count].iter().map(|l| l.ty).collect();
+    let params: Vec<TyId> = lifted.locals[count..lifted.param_count]
+        .iter()
+        .map(|l| l.ty)
+        .collect();
     // `types` is shared and immutable here, so the type must already exist —
     // and it does: the local holding the closure has it.
     types.find_fn(&params, lifted.ret).unwrap_or(TyId::ERROR)
@@ -1874,7 +1636,10 @@ fn compile_thunk(
 /// `CallClosure` compiles to, written once for the host to reach.
 fn compile_poll_trampoline(poll_ty: Option<TyId>, layout: &TypeLayout) -> Function {
     let Some((record, sig)) = poll_ty.and_then(|ty| {
-        Some((layout.closure_type(ty)?, layout.closure_sig.get(&ty).copied()?))
+        Some((
+            layout.closure_type(ty)?,
+            layout.closure_sig.get(&ty).copied()?,
+        ))
     }) else {
         // No `fn() -> bool` closure exists, so nothing could have been
         // spawned. A trap here is unreachable rather than a fallback.
@@ -1885,16 +1650,25 @@ fn compile_poll_trampoline(poll_ty: Option<TyId>, layout: &TypeLayout) -> Functi
     };
     let mut f = Function::new(vec![(
         1,
-        ValType::Ref(RefType { nullable: true, heap_type: HeapType::Concrete(record) }),
+        ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Concrete(record),
+        }),
     )]);
     f.instruction(&Instruction::LocalGet(0));
     f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(record)));
     f.instruction(&Instruction::LocalSet(1));
     // Environment, then the code to run: the order `call_ref` reads them in.
     f.instruction(&Instruction::LocalGet(1));
-    f.instruction(&Instruction::StructGet { struct_type_index: record, field_index: 1 });
+    f.instruction(&Instruction::StructGet {
+        struct_type_index: record,
+        field_index: 1,
+    });
     f.instruction(&Instruction::LocalGet(1));
-    f.instruction(&Instruction::StructGet { struct_type_index: record, field_index: 0 });
+    f.instruction(&Instruction::StructGet {
+        struct_type_index: record,
+        field_index: 0,
+    });
     f.instruction(&Instruction::CallRef(sig));
     f.instruction(&Instruction::End);
     f
@@ -1910,7 +1684,10 @@ fn compile_poll_trampoline(poll_ty: Option<TyId>, layout: &TypeLayout) -> Functi
 /// parameter to be.
 fn compile_invoke_trampoline(invoke_ty: Option<TyId>, layout: &TypeLayout) -> Function {
     let Some((record, sig)) = invoke_ty.and_then(|ty| {
-        Some((layout.closure_type(ty)?, layout.closure_sig.get(&ty).copied()?))
+        Some((
+            layout.closure_type(ty)?,
+            layout.closure_sig.get(&ty).copied()?,
+        ))
     }) else {
         // No `fn(JsValue)` closure exists, so nothing could have been handed
         // over. Unreachable rather than a fallback.
@@ -1921,17 +1698,26 @@ fn compile_invoke_trampoline(invoke_ty: Option<TyId>, layout: &TypeLayout) -> Fu
     };
     let mut f = Function::new(vec![(
         1,
-        ValType::Ref(RefType { nullable: true, heap_type: HeapType::Concrete(record) }),
+        ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Concrete(record),
+        }),
     )]);
     f.instruction(&Instruction::LocalGet(0));
     f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(record)));
     f.instruction(&Instruction::LocalSet(2));
     // Environment, the argument, then the code: the order `call_ref` reads.
     f.instruction(&Instruction::LocalGet(2));
-    f.instruction(&Instruction::StructGet { struct_type_index: record, field_index: 1 });
+    f.instruction(&Instruction::StructGet {
+        struct_type_index: record,
+        field_index: 1,
+    });
     f.instruction(&Instruction::LocalGet(1));
     f.instruction(&Instruction::LocalGet(2));
-    f.instruction(&Instruction::StructGet { struct_type_index: record, field_index: 0 });
+    f.instruction(&Instruction::StructGet {
+        struct_type_index: record,
+        field_index: 0,
+    });
     f.instruction(&Instruction::CallRef(sig));
     f.instruction(&Instruction::End);
     f
@@ -2005,6 +1791,7 @@ fn compile_fn(
     thunk_base: u32,
     fn_base: u32,
     hosts: &Hosts,
+    strings: strings::StringRuntime,
 ) -> Function {
     // Locals beyond the parameters, plus one synthetic program counter.
     let mut locals: Vec<(u32, ValType)> = Vec::new();
@@ -2035,8 +1822,7 @@ fn compile_fn(
         std::collections::HashMap::new();
     let mut next_local = index_scratch + 2;
 
-    let mut slice_scratch: std::collections::HashMap<TyId, u32> =
-        std::collections::HashMap::new();
+    let mut slice_scratch: std::collections::HashMap<TyId, u32> = std::collections::HashMap::new();
     let mut slice_shapes: Vec<TyId> = Vec::new();
     for l in &f.locals {
         if matches!(types.kind(l.ty), TyKind::Slice(_)) && !slice_shapes.contains(&l.ty) {
@@ -2045,7 +1831,9 @@ fn compile_fn(
     }
     for shape in &slice_shapes {
         push_local(&mut locals, val_type_with(*shape, types, layout));
-        let TyKind::Slice(elem) = *types.kind(*shape) else { continue };
+        let TyKind::Slice(elem) = *types.kind(*shape) else {
+            continue;
+        };
         if let Some(idx) = layout.slice_type(elem) {
             slice_scratch.insert(TyId(idx), next_local);
         }
@@ -2059,14 +1847,22 @@ fn compile_fn(
         }
     }
     for shape in &shapes {
-        let Some(ml) = layout.map_layout(*shape) else { continue };
+        let Some(ml) = layout.map_layout(*shape) else {
+            continue;
+        };
         push_local(
             &mut locals,
-            ValType::Ref(RefType { nullable: true, heap_type: HeapType::Concrete(ml.keys) }),
+            ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(ml.keys),
+            }),
         );
         push_local(
             &mut locals,
-            ValType::Ref(RefType { nullable: true, heap_type: HeapType::Concrete(ml.values) }),
+            ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(ml.values),
+            }),
         );
         map_scratch.insert(*shape, (next_local, next_local + 1));
         next_local += 2;
@@ -2134,6 +1930,7 @@ fn compile_fn(
             thunk_base,
             fn_base,
             hosts,
+            strings,
             layout,
             current_dst: None,
             pc,
@@ -2179,6 +1976,7 @@ struct Emitter<'a> {
     /// Where the module's own functions start, past its imports.
     fn_base: u32,
     hosts: &'a Hosts,
+    strings: strings::StringRuntime,
     layout: &'a TypeLayout,
     /// The local a rvalue is being assigned into, when there is one. A slice
     /// construction takes its element type from there.
@@ -2308,45 +2106,23 @@ impl<'a> Emitter<'a> {
             }
 
             mir::Rvalue::Binary { op, lhs, rhs } => {
-                // Both sides of a string comparison or concatenation cross out
-                // as strings, so the record comes off each before the call.
-                let on_strs = matches!(
-                    op,
-                    BinOp::ConcatStr
-                        | BinOp::EqStr
-                        | BinOp::NeStr
-                        | BinOp::LtStr
-                        | BinOp::LeStr
-                        | BinOp::GtStr
-                        | BinOp::GeStr
-                );
                 self.operand(func, lhs);
-                if on_strs {
-                    self.unwrap_str(func);
-                }
                 self.operand(func, rhs);
-                if on_strs {
-                    self.unwrap_str(func);
-                }
-                // A `str` is not an immediate value in any representation, so
-                // its operations are host calls rather than instructions.
                 match op {
                     BinOp::ConcatStr => {
-                        func.instruction(&Instruction::Call(self.hosts.at(host::STR_CONCAT)));
-                        // Concatenation is the one that answers with a string.
-                        self.wrap_str(func);
+                        func.instruction(&Instruction::Call(self.strings.concat()));
                     }
                     BinOp::EqStr => {
-                        func.instruction(&Instruction::Call(self.hosts.at(host::STR_EQ)));
+                        func.instruction(&Instruction::Call(self.strings.eq()));
                     }
                     BinOp::NeStr => {
-                        func.instruction(&Instruction::Call(self.hosts.at(host::STR_EQ)));
+                        func.instruction(&Instruction::Call(self.strings.eq()));
                         func.instruction(&Instruction::I32Eqz);
                     }
-                    // One host call answers all four: it returns -1, 0 or 1,
-                    // and the comparison is then an integer one.
+                    // One internal comparison answers all four: it returns -1,
+                    // 0 or 1 by Unicode scalar value.
                     BinOp::LtStr | BinOp::LeStr | BinOp::GtStr | BinOp::GeStr => {
-                        func.instruction(&Instruction::Call(self.hosts.at(host::STR_COMPARE)));
+                        func.instruction(&Instruction::Call(self.strings.compare()));
                         func.instruction(&Instruction::I64Const(0));
                         func.instruction(&match op {
                             BinOp::LtStr => Instruction::I64LtS,
@@ -2397,7 +2173,11 @@ impl<'a> Emitter<'a> {
                 return self.fn_returns[callee.index()] != TyId::UNIT;
             }
 
-            mir::Rvalue::CallVirtual { trait_id, method, args } => {
+            mir::Rvalue::CallVirtual {
+                trait_id,
+                method,
+                args,
+            } => {
                 for a in args {
                     self.operand(func, a);
                 }
@@ -2419,7 +2199,10 @@ impl<'a> Emitter<'a> {
                 }
             }
 
-            mir::Rvalue::ClosureNew { func: callee, captures } => {
+            mir::Rvalue::ClosureNew {
+                func: callee,
+                captures,
+            } => {
                 let record = self
                     .closure_record_for(callee.0)
                     .unwrap_or(self.layout.object_record);
@@ -2445,9 +2228,10 @@ impl<'a> Emitter<'a> {
                     func.instruction(&Instruction::Unreachable);
                     return true;
                 };
-                let (Some(record), Some(sig)) =
-                    (self.layout.closure_type(ty), self.layout.closure_sig.get(&ty).copied())
-                else {
+                let (Some(record), Some(sig)) = (
+                    self.layout.closure_type(ty),
+                    self.layout.closure_sig.get(&ty).copied(),
+                ) else {
                     func.instruction(&Instruction::Unreachable);
                     return true;
                 };
@@ -2491,27 +2275,16 @@ impl<'a> Emitter<'a> {
             }
 
             mir::Rvalue::StrOp { op, args } => {
-                // Every `str` among the arguments crosses out as its string;
-                // `slice`'s and `code_at`'s offsets are ordinary ints and are
-                // pushed as they are.
                 for a in args {
                     self.operand(func, a);
-                    if self.is_str(a) {
-                        self.unwrap_str(func);
-                    }
                 }
-                func.instruction(&Instruction::Call(self.hosts.at(match op {
-                    kite_hir::StrKind::Len => host::STR_LEN,
-                    kite_hir::StrKind::Slice => host::STR_SLICE,
-                    kite_hir::StrKind::IndexOf => host::STR_INDEX_OF,
-                    kite_hir::StrKind::Trim => host::STR_TRIM,
-                    kite_hir::StrKind::CodeAt => host::STR_CODE_AT,
-                })));
-                // `slice` and `trim` answer with a string; the rest answer
-                // with a number, which needs no record around it.
-                if matches!(op, kite_hir::StrKind::Slice | kite_hir::StrKind::Trim) {
-                    self.wrap_str(func);
-                }
+                func.instruction(&Instruction::Call(match op {
+                    kite_hir::StrKind::Len => self.strings.len(),
+                    kite_hir::StrKind::Slice => self.strings.slice(),
+                    kite_hir::StrKind::IndexOf => self.strings.index_of(),
+                    kite_hir::StrKind::Trim => self.strings.trim(),
+                    kite_hir::StrKind::CodeAt => self.strings.code_at(),
+                }));
                 return true;
             }
 
@@ -2529,7 +2302,7 @@ impl<'a> Emitter<'a> {
                     }
                 };
                 func.instruction(&Instruction::Call(self.hosts.at(call)));
-                self.wrap_str(func);
+                self.from_host_str(func);
                 return true;
             }
 
@@ -2541,9 +2314,7 @@ impl<'a> Emitter<'a> {
                 //
                 // A builtin missing from this list does not fail to compile:
                 // its result is silently dropped and the destination keeps
-                // whatever it held, which for a `str` is index 0 — the first
-                // string in the table. `text.from_code` was returning `"["`,
-                // the first literal in the program that called it.
+                // whatever default value it held.
                 return matches!(
                     builtin,
                     Builtin::TextWidth
@@ -2628,7 +2399,7 @@ impl<'a> Emitter<'a> {
                 for a in args {
                     self.operand(func, a);
                     if self.is_str(a) {
-                        self.unwrap_str(func);
+                        self.to_host_str(func);
                     }
                 }
                 let Some(slot) = self.hosts.extern_at(*index) else {
@@ -2637,10 +2408,10 @@ impl<'a> Emitter<'a> {
                 };
                 func.instruction(&Instruction::Call(slot));
                 let def = &self.program.externs[*index as usize];
-                // A host answering with a string answers with the string; the
-                // record goes back on here.
+                // A host answers with a JavaScript string; convert it back to
+                // the language-owned scalar array here.
                 if matches!(self.types.kind(def.ret), TyKind::Str) {
-                    self.wrap_str(func);
+                    self.from_host_str(func);
                 }
                 return def.ret != TyId::UNIT;
             }
@@ -2912,7 +2683,11 @@ impl<'a> Emitter<'a> {
                 return true;
             }
 
-            mir::Rvalue::EnumNew { enum_id, variant, fields } => {
+            mir::Rvalue::EnumNew {
+                enum_id,
+                variant,
+                fields,
+            } => {
                 // The variant tag, then the payload — behind the identity tag
                 // when this enum is reachable through a trait object.
                 let tag = kite_hir::TypeTag::Enum(*enum_id);
@@ -2945,7 +2720,12 @@ impl<'a> Emitter<'a> {
             }
 
             // The tag has already been tested, so the cast cannot fail.
-            mir::Rvalue::VariantGet { base, enum_id, variant, index } => {
+            mir::Rvalue::VariantGet {
+                base,
+                enum_id,
+                variant,
+                index,
+            } => {
                 self.operand(func, base);
                 func.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(
                     self.layout.variant_type(*enum_id, *variant),
@@ -2962,11 +2742,9 @@ impl<'a> Emitter<'a> {
             // backend saw the program.
             mir::Rvalue::Await { .. } | mir::Rvalue::Yield => {
                 unreachable!("`await` survived the state-machine transform")
-            }
-
-            // Every MIR rvalue is handled: there is deliberately no catch-all
-            // here, so adding one to MIR fails to compile rather than silently
-            // producing a module that traps.
+            } // Every MIR rvalue is handled: there is deliberately no catch-all
+              // here, so adding one to MIR fails to compile rather than silently
+              // producing a module that traps.
         }
         true
     }
@@ -2983,7 +2761,7 @@ impl<'a> Emitter<'a> {
                 // and a diagnostic has no formatting the printer does not.
                 self.operand(func, arg);
                 if self.is_str(arg) {
-                    self.unwrap_str(func);
+                    self.to_host_str(func);
                 } else {
                     // Rendering a primitive answers with the string itself,
                     // which is already what the printer takes — no record is
@@ -2999,7 +2777,7 @@ impl<'a> Emitter<'a> {
             }
             Builtin::IoReadLine => {
                 func.instruction(&Instruction::Call(self.hosts.at(host::READ_LINE)));
-                self.wrap_str(func);
+                self.from_host_str(func);
             }
             Builtin::IoPrint => {
                 let Some(arg) = args.first() else {
@@ -3019,7 +2797,7 @@ impl<'a> Emitter<'a> {
                 };
                 self.operand(func, arg);
                 if self.is_str(arg) {
-                    self.unwrap_str(func);
+                    self.to_host_str(func);
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(import)));
             }
@@ -3030,7 +2808,7 @@ impl<'a> Emitter<'a> {
                 for a in args {
                     self.operand(func, a);
                     if self.is_str(a) {
-                        self.unwrap_str(func);
+                        self.to_host_str(func);
                     }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_RECT)));
@@ -3039,7 +2817,7 @@ impl<'a> Emitter<'a> {
                 for a in args {
                     self.operand(func, a);
                     if self.is_str(a) {
-                        self.unwrap_str(func);
+                        self.to_host_str(func);
                     }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_RRECT)));
@@ -3048,7 +2826,7 @@ impl<'a> Emitter<'a> {
                 for a in args {
                     self.operand(func, a);
                     if self.is_str(a) {
-                        self.unwrap_str(func);
+                        self.to_host_str(func);
                     }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_TEXT)));
@@ -3057,7 +2835,7 @@ impl<'a> Emitter<'a> {
                 for a in args {
                     self.operand(func, a);
                     if self.is_str(a) {
-                        self.unwrap_str(func);
+                        self.to_host_str(func);
                     }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_FONT)));
@@ -3066,7 +2844,7 @@ impl<'a> Emitter<'a> {
                 for a in args {
                     self.operand(func, a);
                     if self.is_str(a) {
-                        self.unwrap_str(func);
+                        self.to_host_str(func);
                     }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_DRRECT)));
@@ -3075,7 +2853,7 @@ impl<'a> Emitter<'a> {
                 for a in args {
                     self.operand(func, a);
                     if self.is_str(a) {
-                        self.unwrap_str(func);
+                        self.to_host_str(func);
                     }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_ALPHA)));
@@ -3084,7 +2862,7 @@ impl<'a> Emitter<'a> {
                 for a in args {
                     self.operand(func, a);
                     if self.is_str(a) {
-                        self.unwrap_str(func);
+                        self.to_host_str(func);
                     }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_FIELD)));
@@ -3093,7 +2871,7 @@ impl<'a> Emitter<'a> {
                 for a in args {
                     self.operand(func, a);
                     if self.is_str(a) {
-                        self.unwrap_str(func);
+                        self.to_host_str(func);
                     }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_IMAGE)));
@@ -3102,7 +2880,7 @@ impl<'a> Emitter<'a> {
                 for a in args {
                     self.operand(func, a);
                     if self.is_str(a) {
-                        self.unwrap_str(func);
+                        self.to_host_str(func);
                     }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_SEMANTICS)));
@@ -3111,7 +2889,7 @@ impl<'a> Emitter<'a> {
                 for a in args {
                     self.operand(func, a);
                     if self.is_str(a) {
-                        self.unwrap_str(func);
+                        self.to_host_str(func);
                     }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::MEASURE_TEXT)));
@@ -3122,13 +2900,8 @@ impl<'a> Emitter<'a> {
             Builtin::TextFromCode => {
                 for a in args {
                     self.operand(func, a);
-                    if self.is_str(a) {
-                        self.unwrap_str(func);
-                    }
                 }
-                func.instruction(&Instruction::Call(self.hosts.at(host::STR_FROM_CODE)));
-                // A code point becomes a string, which becomes a `str`.
-                self.wrap_str(func);
+                func.instruction(&Instruction::Call(self.strings.from_code()));
             }
             // Structs, enums and maps are all WasmGC structs, and every one of
             // them is a subtype of `eq` — so the comparison the checker has
@@ -3137,7 +2910,7 @@ impl<'a> Emitter<'a> {
                 for a in args {
                     self.operand(func, a);
                     if self.is_str(a) {
-                        self.unwrap_str(func);
+                        self.to_host_str(func);
                     }
                 }
                 func.instruction(&Instruction::RefEq);
@@ -3146,7 +2919,7 @@ impl<'a> Emitter<'a> {
                 for a in args {
                     self.operand(func, a);
                     if self.is_str(a) {
-                        self.unwrap_str(func);
+                        self.to_host_str(func);
                     }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::DRAW_CLIP)));
@@ -3155,7 +2928,7 @@ impl<'a> Emitter<'a> {
                 for a in args {
                     self.operand(func, a);
                     if self.is_str(a) {
-                        self.unwrap_str(func);
+                        self.to_host_str(func);
                     }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::TASK_SPAWN)));
@@ -3168,7 +2941,7 @@ impl<'a> Emitter<'a> {
                 for a in args {
                     self.operand(func, a);
                     if self.is_str(a) {
-                        self.unwrap_str(func);
+                        self.to_host_str(func);
                     }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::JS_FUNC)));
@@ -3177,7 +2950,7 @@ impl<'a> Emitter<'a> {
                 for a in args {
                     self.operand(func, a);
                     if self.is_str(a) {
-                        self.unwrap_str(func);
+                        self.to_host_str(func);
                     }
                 }
                 func.instruction(&Instruction::Call(self.hosts.at(host::TASK_WAKE_AT)));
@@ -3203,7 +2976,7 @@ impl<'a> Emitter<'a> {
                 func.instruction(&Instruction::If(BlockType::Empty));
                 if let Some(message) = args.get(1) {
                     self.operand(func, message);
-                    self.unwrap_str(func);
+                    self.to_host_str(func);
                     func.instruction(&Instruction::Call(self.hosts.at(host::PRINT_STR)));
                 }
                 func.instruction(&Instruction::Unreachable);
@@ -3229,27 +3002,20 @@ impl<'a> Emitter<'a> {
             mir::Operand::Bool(v) => {
                 func.instruction(&Instruction::I32Const(i32::from(*v)));
             }
-            // A string is its index into the constant table the glue holds,
-            // or — with the builtins — the imported global the engine made
-            // from the literal itself.
-            mir::Operand::Str(s) => match self.layout.strings {
-                Strings::Table => {
-                    func.instruction(&Instruction::I32Const(s.0 as i32));
+            // Literals are encoded directly as Unicode scalar arrays. They do
+            // not enter JavaScript and do not need a permanent runtime table.
+            mir::Operand::Str(s) => {
+                let literal = &self.program.strings[s.0 as usize];
+                let mut count = 0;
+                for scalar in literal.chars() {
+                    func.instruction(&Instruction::I32Const(scalar as i32));
+                    count += 1;
                 }
-                Strings::Builtins => {
-                    func.instruction(&Instruction::GlobalGet(s.0));
-                }
-                // The constant is an imported string; the `str` is the record
-                // around it. Built at the use site rather than once into a
-                // global, which costs an allocation per mention — the simplest
-                // thing that is correct, and the obvious place to come back to
-                // if a constant in a hot loop ever shows up in a profile.
-                Strings::Object => {
-                    func.instruction(&Instruction::GlobalGet(s.0));
-                    func.instruction(&Instruction::I32Const(-1));
-                    func.instruction(&Instruction::StructNew(self.layout.str_record));
-                }
-            },
+                func.instruction(&Instruction::ArrayNewFixed {
+                    array_type_index: self.layout.str_array,
+                    array_size: count,
+                });
+            }
             mir::Operand::Unit => {
                 func.instruction(&Instruction::I32Const(0));
             }
@@ -3283,7 +3049,11 @@ impl<'a> Emitter<'a> {
         // array.copy takes dest, dest_offset, src, src_offset, len — and the
         // destination has to survive the call, so it is held in a register of
         // its own array type rather than duplicated on the stack.
-        let hold = self.slice_scratch.get(&TyId(idx)).copied().unwrap_or(self.scratch);
+        let hold = self
+            .slice_scratch
+            .get(&TyId(idx))
+            .copied()
+            .unwrap_or(self.scratch);
         func.instruction(&Instruction::LocalSet(hold));
         func.instruction(&Instruction::LocalGet(hold));
         func.instruction(&Instruction::I32Const(0));
@@ -3332,7 +3102,10 @@ impl<'a> Emitter<'a> {
             // version of getting it wrong.
             ValType::Ref(RefType {
                 heap_type:
-                    HeapType::Abstract { ty: wasm_encoder::AbstractHeapType::Extern, .. },
+                    HeapType::Abstract {
+                        ty: wasm_encoder::AbstractHeapType::Extern,
+                        ..
+                    },
                 ..
             }) => func.instruction(&Instruction::RefNull(HeapType::Abstract {
                 shared: false,
@@ -3380,9 +3153,7 @@ impl<'a> Emitter<'a> {
         self.map_field(func, ml, base, 0);
         func.instruction(&Instruction::LocalGet(pos));
         func.instruction(&Instruction::ArrayGet(ml.keys));
-        self.unwrap_key(func, ml.key_ty);
         self.operand(func, key);
-        self.unwrap_key(func, ml.key_ty);
         self.key_equality(func, ml.key_ty);
         func.instruction(&Instruction::BrIf(1));
         func.instruction(&Instruction::LocalGet(pos));
@@ -3500,9 +3271,7 @@ impl<'a> Emitter<'a> {
         self.map_field(func, ml, base, 0);
         func.instruction(&Instruction::LocalGet(i));
         func.instruction(&Instruction::ArrayGet(ml.keys));
-        self.unwrap_key(func, ml.key_ty);
         self.operand(func, key);
-        self.unwrap_key(func, ml.key_ty);
         self.key_equality(func, ml.key_ty);
 
         func.instruction(&Instruction::If(BlockType::Empty));
@@ -3538,38 +3307,9 @@ impl<'a> Emitter<'a> {
         });
     }
 
-    /// Compare two keys.
-    ///
-    /// With the table representation a `str` is an index the glue interns, so
-    /// equal strings share one and an integer compare is exact. With the
-    /// builtins the value *is* the string and there is no index, so equality
-    /// is the engine's own `equals`.
-    /// Take a map key on top of the stack down to what its comparison wants.
-    ///
-    /// A `str` key is compared by the host, which takes the string rather than
-    /// the record around it. Both sides need this, and each gets it as it is
-    /// pushed, because the deeper one is out of reach afterwards.
-    fn unwrap_key(&self, func: &mut Function, key_ty: TyId) {
-        if matches!(self.types.kind(key_ty), TyKind::Str) {
-            self.unwrap_str(func);
-        }
-    }
-
     fn key_equality(&mut self, func: &mut Function, key_ty: TyId) {
-        // The object representation has no index either, and two records
-        // holding the same string are two records — so comparing them as
-        // references would answer "different" for keys that are equal. The
-        // condition is [`Strings::str_eq_is_a_host_call`] because the import
-        // scan has to reach the same answer; when this read `== Builtins` and
-        // the scan did too, adding `Object` to one and not the other emitted a
-        // call to an undeclared import.
-        if self.layout.strings.str_eq_is_a_host_call()
-            && matches!(self.types.kind(key_ty), TyKind::Str)
-        {
-            // Both sides were unwrapped as they were pushed — only the top of
-            // the stack is reachable from here, so it cannot be done for them
-            // both at this point. See `unwrap_key` at the two callers.
-            func.instruction(&Instruction::Call(self.hosts.at(host::STR_EQ)));
+        if matches!(self.types.kind(key_ty), TyKind::Str) {
+            func.instruction(&Instruction::Call(self.strings.eq()));
             return;
         }
         let inst = match val_type_with(key_ty, self.types, self.layout) {
@@ -3581,7 +3321,9 @@ impl<'a> Emitter<'a> {
     }
 
     fn map_of(&self, o: &mir::Operand) -> Option<MapLayout> {
-        let mir::Operand::Local(l) = o else { return None };
+        let mir::Operand::Local(l) = o else {
+            return None;
+        };
         self.layout.map_layout(self.f.locals[l.index()].ty)
     }
 
@@ -3591,11 +3333,15 @@ impl<'a> Emitter<'a> {
     /// thunk. Both are keyed by the lifted function, because its captures fix
     /// the environment's shape.
     fn closure_record_for(&self, func: u32) -> Option<u32> {
-        self.layout.closure_type(closure_ty_of(func, self.program, self.types))
+        self.layout
+            .closure_type(closure_ty_of(func, self.program, self.types))
     }
 
     fn thunk_of(&self, func: u32) -> Option<u32> {
-        self.thunks.iter().position(|f| *f == func).map(|i| self.thunk_base + i as u32)
+        self.thunks
+            .iter()
+            .position(|f| *f == func)
+            .map(|i| self.thunk_base + i as u32)
     }
 
     /// The type an operand holds, when it is a local. A literal never has an
@@ -3610,7 +3356,9 @@ impl<'a> Emitter<'a> {
     /// The record an operand holds, and how far its fields are shifted by an
     /// identity tag. Tuples never dispatch, so they are never shifted.
     fn record_of(&self, o: &mir::Operand) -> Option<(u32, u32)> {
-        let mir::Operand::Local(l) = o else { return None };
+        let mir::Operand::Local(l) = o else {
+            return None;
+        };
         let ty = self.f.locals[l.index()].ty;
         match self.types.kind(ty) {
             TyKind::Struct(s) => Some((self.layout.struct_type(*s), self.layout.struct_shift(*s))),
@@ -3621,7 +3369,9 @@ impl<'a> Emitter<'a> {
 
     /// The pair record an operand holds.
     fn pair_of(&self, o: &mir::Operand) -> Option<u32> {
-        let mir::Operand::Local(l) = o else { return None };
+        let mir::Operand::Local(l) = o else {
+            return None;
+        };
         let TyKind::Fallible(v) = *self.types.kind(self.f.locals[l.index()].ty) else {
             return None;
         };
@@ -3643,7 +3393,9 @@ impl<'a> Emitter<'a> {
 
     /// The array type and element type of an operand holding a slice.
     fn slice_of(&self, o: &mir::Operand) -> Option<(u32, TyId)> {
-        let mir::Operand::Local(l) = o else { return None };
+        let mir::Operand::Local(l) = o else {
+            return None;
+        };
         let TyKind::Slice(elem) = *self.types.kind(self.f.locals[l.index()].ty) else {
             return None;
         };
@@ -3685,7 +3437,9 @@ impl<'a> Emitter<'a> {
 
     /// The box type and payload type of an operand holding an optional.
     fn optional_of(&self, o: &mir::Operand) -> Option<(u32, TyId)> {
-        let mir::Operand::Local(l) = o else { return None };
+        let mir::Operand::Local(l) = o else {
+            return None;
+        };
         let TyKind::Optional(inner) = *self.types.kind(self.f.locals[l.index()].ty) else {
             return None;
         };
@@ -3694,7 +3448,9 @@ impl<'a> Emitter<'a> {
 
     /// The enum an operand holds, if it holds one.
     fn enum_of(&self, o: &mir::Operand) -> Option<kite_hir::EnumId> {
-        let mir::Operand::Local(l) = o else { return None };
+        let mir::Operand::Local(l) = o else {
+            return None;
+        };
         match self.types.kind(self.f.locals[l.index()].ty) {
             TyKind::Enum(e) => Some(*e),
             _ => None,
@@ -3703,7 +3459,9 @@ impl<'a> Emitter<'a> {
 
     /// The struct an operand holds, if it holds one.
     fn struct_of(&self, o: &mir::Operand) -> Option<kite_hir::StructId> {
-        let mir::Operand::Local(l) = o else { return None };
+        let mir::Operand::Local(l) = o else {
+            return None;
+        };
         match self.types.kind(self.f.locals[l.index()].ty) {
             TyKind::Struct(s) => Some(*s),
             _ => None,
@@ -3729,31 +3487,14 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Take the JS string out of the `str` on top of the stack.
-    ///
-    /// Under [`Strings::Object`] a `str` is a record and every host function
-    /// wants the string inside it, so this runs at each place one crosses out.
-    /// A no-op in the other representations, where the value on the stack is
-    /// already what the host takes.
-    fn unwrap_str(&self, func: &mut Function) {
-        if self.layout.strings == Strings::Object {
-            func.instruction(&Instruction::StructGet {
-                struct_type_index: self.layout.str_record,
-                field_index: 0,
-            });
-        }
+    /// Convert the scalar array on top of the stack for a host call.
+    fn to_host_str(&self, func: &mut Function) {
+        func.instruction(&Instruction::Call(self.strings.to_host()));
     }
 
-    /// Put the JS string on top of the stack into a fresh `str` record.
-    ///
-    /// The counterpart of [`Self::unwrap_str`], for a host answer coming back
-    /// in. `narrow` starts unknown: whether code-point and UTF-16 indices
-    /// agree costs a scan, and a string nobody indexes should not pay it.
-    fn wrap_str(&self, func: &mut Function) {
-        if self.layout.strings == Strings::Object {
-            func.instruction(&Instruction::I32Const(-1));
-            func.instruction(&Instruction::StructNew(self.layout.str_record));
-        }
+    /// Convert a JavaScript string answer into Kite's scalar array.
+    fn from_host_str(&self, func: &mut Function) {
+        func.instruction(&Instruction::Call(self.strings.from_host()));
     }
 
     /// A debug-build `+`, `-` or `*` on integers: wrap, then trap if the sign
@@ -3763,7 +3504,9 @@ impl<'a> Emitter<'a> {
     /// The alternative — leaving Wasm to wrap while the VM and the native
     /// backend trap — is the same program deciding differently by target.
     fn checked_int(&mut self, func: &mut Function, op: BinOp) -> bool {
-        let Some((a, b, r)) = self.arith_scratch else { return false };
+        let Some((a, b, r)) = self.arith_scratch else {
+            return false;
+        };
         // Operands are on the stack, left then right.
         func.instruction(&Instruction::LocalSet(b));
         func.instruction(&Instruction::LocalTee(a));

@@ -52,7 +52,7 @@ fn run_runner_under_node(name: &str, src: &str, runner: &str, args: &[&str]) -> 
     std::fs::write(dir.join("app.wasm"), &module.bytes).expect("write wasm");
     std::fs::write(
         dir.join("app.js"),
-        kite_driver::generate_glue_with_hosts(&module.strings, "app.wasm", &module.hosts),
+        kite_driver::generate_glue_with_hosts("app.wasm", &module.hosts),
     )
     .expect("write glue");
     std::fs::write(dir.join("run.mjs"), runner).expect("write runner");
@@ -578,15 +578,15 @@ fn a_program_may_declare_its_own_host() {
     std::fs::write(dir.join("app.wasm"), &module.bytes).expect("write");
     std::fs::write(
         dir.join("app.js"),
-        kite_driver::generate_glue_with_hosts(&module.strings, "app.wasm", &module.hosts),
+        kite_driver::generate_glue_with_hosts("app.wasm", &module.hosts),
     )
     .expect("write");
     std::fs::write(
         dir.join("run.mjs"),
         "import { readFile } from \"node:fs/promises\";\n\
-         import { run, setWriter, provide, str } from \"./app.js\";\n\
+         import { run, setWriter, provide } from \"./app.js\";\n\
          setWriter((l) => process.stdout.write(l + \"\\n\"));\n\
-         provide(\"paint\", { brush: (size) => str(\"brush of \" + size) });\n\
+         provide(\"paint\", { brush: (size) => \"brush of \" + size });\n\
          await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n",
     )
     .expect("write");
@@ -663,15 +663,14 @@ fn comparing_a_secret_with_equals_warns() {
 /// field and taken out again. A plain object proves that as well as a node
 /// would, and needs no browser.
 const HOST_OBJECT_RUNNER: &str = "import { readFile } from \"node:fs/promises\";\n\
-     import { run, provide, setWriter, str, text } from \"./app.js\";\n\
+     import { run, provide, setWriter } from \"./app.js\";\n\
      const WORLD = { document: { tag: \"doc\" }, window: { tag: \"win\" } };\n\
-     // A `str` crosses as an index into the glue's table unless the module was\n\
-     // built with --js-strings, so a host reads one with `text` and returns one\n\
-     // with `str`. A `JsValue` needs neither: it is already the object.\n\
+     // Strings cross a declared host boundary as JavaScript strings. A\n\
+     // `JsValue` needs no conversion either: it is already the object.\n\
      provide(\"js\", {\n\
-     \x20 global: (name) => WORLD[text(name)],\n\
+     \x20 global: (name) => WORLD[name],\n\
      \x20 same: (a, b) => a === b,\n\
-     \x20 tag_of: (v) => str(v.tag),\n\
+     \x20 tag_of: (v) => v.tag,\n\
      });\n\
      const out = [];\n\
      setWriter((l) => out.push(l));\n\
@@ -1348,7 +1347,7 @@ fn build_library(name: &str, src: &str) -> Workspace {
     std::fs::write(dir.join("app.wasm"), &module.bytes).expect("write wasm");
     std::fs::write(
         dir.join("app.js"),
-        kite_driver::generate_glue_with_hosts(&module.strings, "app.wasm", &module.hosts),
+        kite_driver::generate_glue_with_hosts("app.wasm", &module.hosts),
     )
     .expect("write glue");
     let (api_js, api_dts) = kite_driver::generate_api(&module.api, "app.wasm");

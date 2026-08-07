@@ -48,7 +48,7 @@ fn serve_under_node(name: &str, src: &str, client: &str) -> String {
     std::fs::write(dir.join("app.wasm"), &module.bytes).expect("write wasm");
     std::fs::write(
         dir.join("app.js"),
-        kite_driver::generate_glue_with_hosts(&module.strings, "app.wasm", &module.hosts),
+        kite_driver::generate_glue_with_hosts("app.wasm", &module.hosts),
     )
     .expect("write glue");
     std::fs::write(

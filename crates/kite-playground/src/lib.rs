@@ -177,7 +177,6 @@ pub unsafe extern "C" fn kite_build(
     ptr: *const u8,
     len: usize,
     release: u32,
-    js_strings: u32,
 ) -> *mut u8 {
     let module = match module_input(ptr, len) {
         Ok(module) => module,
@@ -188,11 +187,6 @@ pub unsafe extern "C" fn kite_build(
         &module.entry,
         kite_driver::Emit::Wasm,
         release != 0,
-        if js_strings != 0 {
-            kite_driver::Strings::Builtins
-        } else {
-            kite_driver::Strings::Table
-        },
         module.siblings,
     );
     if compiled.failed() {
@@ -201,7 +195,7 @@ pub unsafe extern "C" fn kite_build(
     let Some(module) = compiled.wasm.as_ref() else {
         return frame(&[("diagnostics", b"error: no module was produced\n".to_vec())]);
     };
-    let glue = kite_driver::generate_glue_with_hosts(&module.strings, "app.wasm", &module.hosts);
+    let glue = kite_driver::generate_glue_with_hosts("app.wasm", &module.hosts);
     let (api_js, api_dts) = kite_driver::generate_api(&module.api, "app.wasm");
     frame(&[
         ("app.wasm", module.bytes.clone()),
@@ -234,7 +228,6 @@ pub unsafe extern "C" fn kite_check_module(ptr: *const u8, len: usize) -> *mut u
         &module.entry,
         kite_driver::Emit::Check,
         false,
-        kite_driver::Strings::Table,
         module.siblings,
     );
     answer(compiled.render_diagnostics())

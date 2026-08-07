@@ -30,7 +30,6 @@ OPTIONS:
     --check           with `fmt`, report rather than rewrite
     --all             with `doc`, include what is not `pub`
     --native          with `run`, execute machine code under the JIT — no linker
-    --js-strings      with `--emit wasm`, a `str` is a real JavaScript string
     --a11y            with `check`, audit what the program draws for labels,
                       touch target sizes and contrast — this one runs the
                       program, with no filesystem access
@@ -80,7 +79,6 @@ fn main() -> ExitCode {
     let mut offline = false;
     let mut update = false;
     let mut native = false;
-    let mut js_strings = false;
     let mut a11y = false;
     let mut i = 0;
 
@@ -125,10 +123,6 @@ fn main() -> ExitCode {
             }
             "--native" => {
                 native = true;
-                i += 1;
-            }
-            "--js-strings" => {
-                js_strings = true;
                 i += 1;
             }
             "--a11y" => {
@@ -222,23 +216,6 @@ fn main() -> ExitCode {
         emit = Some(Emit::Native);
     }
     let emit = emit.unwrap_or(Emit::Check);
-    // A `str` is either an index into a table the glue holds or the JavaScript
-    // string itself. The second needs the JS String Builtins, which every
-    // current browser and Node 23 upwards have — but not every engine — so it
-    // is asked for rather than assumed.
-    let strings = if js_strings {
-        kite_driver::Strings::Builtins
-    } else if std::env::var_os("KITE_STRINGS_OBJECT").is_some() {
-        // Temporary, while the object representation is brought up: it is the
-        // one that does not leak, and this is how it gets measured against the
-        // one that does before it becomes the default.
-        kite_driver::Strings::Object
-    } else {
-        kite_driver::Strings::Table
-    };
-    if js_strings && emit != Emit::Wasm {
-        return fail("`--js-strings` only means anything with `--emit wasm`");
-    }
     // The native backend refuses some hosts, and it is better to hear that
     // before a compilation than after one.
     if emit == Emit::Native {
@@ -246,7 +223,7 @@ fn main() -> ExitCode {
             return fail(&why);
         }
     }
-    let result = kite_driver::compile_strings(&path, &src, emit, release, strings);
+    let result = kite_driver::compile_with(&path, &src, emit, release);
 
     if !result.diags.is_empty() {
         eprint!("{}", result.render_diagnostics());
@@ -270,12 +247,7 @@ fn main() -> ExitCode {
         if let Err(e) = std::fs::write(&wasm_path, &module.bytes) {
             return fail(&format!("cannot write `{}`: {}", wasm_path, e));
         }
-        let glue = kite_driver::generate_glue_for(
-            &module.strings,
-            "app.wasm",
-            &module.hosts,
-            strings,
-        );
+        let glue = kite_driver::generate_glue_with_hosts("app.wasm", &module.hosts);
         if let Err(e) = std::fs::write(&js_path, glue) {
             return fail(&format!("cannot write `{}`: {}", js_path, e));
         }

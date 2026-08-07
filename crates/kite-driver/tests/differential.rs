@@ -904,7 +904,7 @@ fn run_on_wasm_at(path: &str, name: &str, src: &str, dir: &std::path::Path) -> S
     std::fs::write(dir.join("app.wasm"), &module.bytes).expect("write wasm");
     std::fs::write(
         dir.join("app.js"),
-        kite_driver::generate_glue(&module.strings, "app.wasm"),
+        kite_driver::generate_glue("app.wasm"),
     )
     .expect("write glue");
     std::fs::write(

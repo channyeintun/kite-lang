@@ -29,7 +29,6 @@ USAGE:
 
 OPTIONS:
     --release         build for release: \`assert\` is dropped, \`require\` is not
-    --js-strings      with \`build\`, a \`str\` is a real JavaScript string
     --out <dir>       with \`build\`, where to write (default: alongside the file)
     --check           with \`fmt\`, report rather than rewrite
 
@@ -136,7 +135,6 @@ switch (command) {
         entry: await readFile(file, "utf8"),
         siblings: await siblingsOf(file),
         release: flags.has("--release"),
-        jsStrings: flags.has("--js-strings"),
       });
     } catch (error) {
       if (error instanceof BuildFailed) fail(error.diagnostics);

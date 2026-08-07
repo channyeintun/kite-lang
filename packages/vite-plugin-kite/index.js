@@ -59,10 +59,6 @@ const GLUE = "\0kite-glue:";
  * @param {object} [options]
  * @param {boolean} [options.release] Build with `--release`: `assert` is
  *   dropped and `require` is not. Follows Vite's mode when not given.
- * @param {boolean} [options.jsStrings] Build with `--js-strings`, so a `str`
- *   is a real JavaScript string. Faster across the boundary, and it will not
- *   instantiate in an engine without the JS String Builtins proposal — which
- *   is why it is off unless asked for.
  */
 export default function kite(options = {}) {
   let root = process.cwd();
@@ -124,7 +120,6 @@ export default function kite(options = {}) {
         entry: await readFile(file, "utf8"),
         siblings: sources,
         release,
-        jsStrings: options.jsStrings,
       });
     } catch (e) {
       // The diagnostics are the useful part, and they are already rendered the

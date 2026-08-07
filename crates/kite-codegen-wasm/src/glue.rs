@@ -7,8 +7,6 @@
 //!
 //! The generated module is deliberately tiny and has no dependencies.
 
-use crate::Strings;
-
 /// The JavaScript module that instantiates a compiled Kite program.
 /// Strip the commentary from generated output.
 ///
@@ -58,8 +56,8 @@ fn strip_comments(source: &str) -> String {
     out
 }
 
-pub fn generate_glue(strings: &[String], wasm_path: &str) -> String {
-    generate_glue_with_hosts(strings, wasm_path, &[])
+pub fn generate_glue(wasm_path: &str) -> String {
+    generate_glue_with_hosts(wasm_path, &[])
 }
 
 /// The glue, including the host groups a program declared.
@@ -69,241 +67,86 @@ pub fn generate_glue(strings: &[String], wasm_path: &str) -> String {
 /// with `provide("group", { … })` before running — and a call to something
 /// nobody supplied fails saying which declaration it was, rather than doing
 /// nothing.
-pub fn generate_glue_with_hosts(
-    strings: &[String],
-    wasm_path: &str,
-    hosts: &[crate::HostImport],
-) -> String {
-    generate_glue_for(strings, wasm_path, hosts, Strings::Table)
+pub fn generate_glue_with_hosts(wasm_path: &str, hosts: &[crate::HostImport]) -> String {
+    let strings_section = String::from(
+        r#"// Kite owns strings as WasmGC arrays of Unicode scalar values. This page is
+// only a synchronous conversion window at the JavaScript boundary.
+const SCRATCH = new WebAssembly.Memory({ initial: 1, maximum: 1 });
+const SCRATCH_VIEW = new DataView(SCRATCH.buffer);
+const SCALAR_CHUNK = 4096;
+
+// Host declarations already receive and return JavaScript strings: the module
+// converts immediately around each call.
+const textOf = (value) => value;
+const hostText = (value) => String(value);
+
+let inputIterator = null;
+let inputRemaining = 0;
+let outputChunks = [];
+
+function textLength(value) {
+  const body = String(value);
+  let length = 0;
+  for (const _ of body) length += 1;
+  inputRemaining = length;
+  inputIterator = length === 0 ? null : body[Symbol.iterator]();
+  return length;
 }
 
-/// The glue for a module compiled with a chosen string representation.
-///
-/// The two differ in one place and nowhere else: what a `str` value *is*.
-/// Every read of one goes through `S`, and every JavaScript string that
-/// becomes one goes through `intern` — so the thirty-odd host functions below
-/// are written once and do not know which module they are answering.
-pub fn generate_glue_for(
-    strings: &[String],
-    wasm_path: &str,
-    hosts: &[crate::HostImport],
-    mode: Strings,
-) -> String {
-    let table = strings
-        .iter()
-        .map(|s| format!("  {},", json_string(s)))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let strings_section = match mode {
-        // A `str` is a record the *module* owns, holding the JS string. The
-        // glue never sees the record — JavaScript cannot read a WasmGC struct,
-        // and cannot build one either — so everything here works in real
-        // strings and the module wraps and unwraps at its own boundary.
-        //
-        // There is no table and no `intern`. That is the whole point: what the
-        // module drops, the engine collects, and nothing accumulates for the
-        // life of the process.
-        Strings::Object => format!(
-            r#"// The program's string literals, handed to the module as imported globals.
-//
-// Fixed at compile time — these are the literals in the source and nothing
-// else — so this array does not grow and is not the table this representation
-// exists to remove.
-const CONSTANTS = [
-{table}
-];
-
-/// A `str` is the string itself on this side of the boundary.
-const intern = (s) => s;
-const S = (s) => s;
-
-// Whether code-point indices and UTF-16 indices agree.
-//
-// Only a surrogate pair makes them differ, so the question is whether the
-// string holds a leading surrogate — a native scan with nothing allocated,
-// rather than spreading the string into an array of one-character strings to
-// count them. The range is built with `fromCharCode` because a `\uD800`
-// escape cannot be written in the Rust literal this file is generated from.
-const SURROGATE = new RegExp(
-  "[" + String.fromCharCode(0xd800) + "-" + String.fromCharCode(0xdbff) + "]",
-);
-const narrow = (s) => !SURROGATE.test(s);
-
-/// A `str` as the host holds one, which here is the string itself.
-///
-/// These are what a declared `@host` function takes and answers with, and in
-/// this mode they are the identity — the module unwraps on the way out and
-/// wraps on the way back, so nothing on this side ever sees the record.
-///
-/// They are **not** yet enough to call an *exported* Kite function that takes
-/// or returns a `str`. That signature is the record, which JavaScript can
-/// neither build nor read, and the module exports no wrapper to do it. Until
-/// it does, an export with a `str` in its signature is unreachable from the JS
-/// API in this mode.
-export function str(s) {{
-  return String(s);
-}}
-
-export function text(s) {{
-  return s;
-}}
-"#
-        ),
-        Strings::Table => format!(
-            r#"// String constants. A `str` is an index into this table, which is why the
-// module needs no linear memory. Concatenation appends, so the table grows.
-const STRINGS = [
-{table}
-];
-
-// A map from string to index, beside the table.
-//
-// This was an `indexOf` over the table, which is a walk of every string interned
-// so far. That is quadratic in the number of distinct strings a program makes,
-// and it is invisible until something makes a lot of them: a page building five
-// thousand rows spent two and a half seconds here, nearly all of it comparing
-// strings it had already seen.
-const INDEX = new Map(STRINGS.map((s, i) => [s, i]));
-
-function intern(s) {{
-  const existing = INDEX.get(s);
-  if (existing !== undefined) return existing;
-  const at = STRINGS.push(s) - 1;
-  INDEX.set(s, at);
-  return at;
-}}
-
-// The string a `str` value stands for.
-const S = (i) => STRINGS[i];
-
-// Whether a string's code-point indices are its UTF-16 indices.
-//
-// A Kite `str` is indexed by code point, so every operation taking an index
-// spread the whole string — `[...s]` — to find one character. That is O(n) per
-// call whatever the range, which made scanning a document character by
-// character quadratic in its length before anything was even built.
-//
-// A string is "narrow" when it has one UTF-16 code unit per code point, which
-// is exactly when the two index spaces agree: only a surrogate pair makes them
-// differ, and comparing the two lengths is precisely that question. So the
-// fast paths below are not an approximation of the spread, they equal it.
-//
-// Spread once per string and cached, because a `str` is immutable and its
-// index identifies it. What is kept is one boolean per string, not a second
-// copy of the text.
-const NARROW = new Map();
-const narrow = (i) => {{
-  let known = NARROW.get(i);
-  if (known === undefined) {{
-    const s = STRINGS[i];
-    known = s.length === [...s].length;
-    NARROW.set(i, known);
-  }}
-  return known;
-}};
-
-/// A `str` for an exported function to take.
-///
-/// A `str` is an index into the table above, not a pointer and not a JavaScript
-/// string. Passing a JavaScript string to an export does not fail — the Wasm
-/// JS API runs `ToNumber` on it, which gives `NaN`, which becomes index 0 —
-/// so the program reads whichever string happens to be first. Anything calling
-/// an export with text has to come through here.
-export function str(s) {{
-  return intern(String(s));
-}}
-
-/// The text a `str` stands for, for a value an export returned.
-export function text(i) {{
-  return S(i);
-}}
-"#
-        ),
-        Strings::Builtins => String::from(
-            r#"// A `str` *is* a JavaScript string here.
-//
-// The module holds an `externref`; its constants are imported globals the
-// engine synthesised from the literals themselves; `+` and `==` on strings are
-// the JS String Builtins, compiled to intrinsics rather than to calls into
-// this file. There is no table, nothing to intern, and nothing to look up when
-// a string crosses to a DOM API — the value already is the string.
-//
-// What is *not* a builtin is deliberate. `length`, `charCodeAt` and
-// `substring` index by UTF-16 code unit and Kite counts characters, so using
-// them would make this backend disagree with the bytecode VM the moment a
-// program held an astral character. Those stay host calls below, where they
-// can count code points.
-const intern = (s) => s;
-const S = (s) => s;
-
-// Whether a string's code-point indices are its UTF-16 indices — true unless
-// it holds a surrogate pair. The index-keyed cache the table representation
-// uses has no counterpart here, because there are no indices: a `str` is the
-// string, and a `Map` keyed by it would hold every string the program ever
-// touched, which is the one thing this representation exists to avoid.
-//
-// So the spread happens per call, exactly as it did before there was a fast
-// path — this decides which of two equal answers to compute, and never costs
-// more than the one it replaces.
-const narrow = (s) => s.length === [...s].length;
-
-/// A `str` for an exported function to take. Here that is the string itself,
-/// and this exists so a caller need not know which representation it got.
-export function str(s) {
-  return String(s);
+function textFill(requested) {
+  if (inputIterator === null) return 0;
+  const count = Math.min(Number(requested), inputRemaining, SCALAR_CHUNK);
+  let written = 0;
+  while (written < count) {
+    const next = inputIterator.next();
+    if (next.done) break;
+    SCRATCH_VIEW.setUint32(written * 4, next.value.codePointAt(0), true);
+    written += 1;
+  }
+  inputRemaining -= written;
+  if (inputRemaining === 0 || written !== count) {
+    inputIterator = null;
+    inputRemaining = 0;
+  }
+  return written;
 }
 
-/// The text a `str` stands for, for a value an export returned.
-export function text(s) {
-  return s;
+function textPush(count, first, last) {
+  if (first) outputChunks = [];
+  const length = Math.min(Number(count), SCALAR_CHUNK);
+  const points = new Array(length);
+  for (let i = 0; i < length; i += 1) {
+    points[i] = SCRATCH_VIEW.getUint32(i * 4, true);
+  }
+  outputChunks.push(String.fromCodePoint(...points));
+  if (!last) return null;
+  const answer = outputChunks.join("");
+  outputChunks = [];
+  return answer;
+}
+
+let stringExports = null;
+
+function stringRuntime() {
+  if (stringExports === null) {
+    throw new Error("instantiate the Kite module before converting strings");
+  }
+  return stringExports;
+}
+
+export function str(value) {
+  return stringRuntime()["$kite.str.from_host"](String(value));
+}
+
+export function text(value) {
+  return stringRuntime()["$kite.str.to_host"](value);
 }
 "#,
-        ),
-    };
-    // The builtins are a *compile* option, not an instantiate one, so the two
-    // steps have to be taken separately here. An engine that does not know the
-    // option ignores it and then fails to find `wasm:js-string`, which is a
-    // link error nobody could place — so it is checked for and named.
-    let compile_step = match mode {
-        // `Object` instantiates like `Table`: the representation is the
-        // module's own business and asks the engine for nothing extra.
-        Strings::Table | Strings::Object => String::from(
-            "  const { instance } = await WebAssembly.instantiate(bytes, imports());",
-        ),
-        Strings::Builtins => String::from(
-            "  // An engine without the builtins ignores the options and then cannot\n\
-            \x20 // find `wasm:js-string`, which is a link error nobody could place. That\n\
-            \x20 // one failure is caught and named.\n\
-            \x20 //\n\
-            \x20 // Only that one. This used to re-label *every* failure here as a missing\n\
-            \x20 // proposal, so a module this compiler had built wrong was reported as an\n\
-            \x20 // engine too old to run it — on engines that have the builtins — and the\n\
-            \x20 // one message that would have named the bug was the one thrown away. A\n\
-            \x20 // feature probe is no better: an engine that does not know the `builtins`\n\
-            \x20 // option ignores it rather than refusing it, so a probe answers yes\n\
-            \x20 // everywhere. What actually distinguishes the two is whether the engine\n\
-            \x20 // is complaining about the namespace or about the module, so that is what\n\
-            \x20 // is tested — and anything unrecognised is rethrown untouched, which\n\
-            \x20 // fails towards the honest message rather than the flattering one.\n\
-            \x20 let instance;\n\
-            \x20 try {\n\
-            \x20   const module = await WebAssembly.compile(bytes, {\n\
-            \x20     builtins: ['js-string'],\n\
-            \x20     importedStringConstants: 'kite:strings',\n\
-            \x20   });\n\
-            \x20   // Given a Module rather than bytes, this answers with the Instance\n\
-            \x20   // itself — there is no `{ instance, module }` pair to take apart.\n\
-            \x20   instance = await WebAssembly.instantiate(module, imports());\n\
-            \x20 } catch (e) {\n\
-            \x20   if (!/wasm:js-string|js-string/.test(String(e && e.message))) throw e;\n\
-            \x20   throw new Error(\n\
-            \x20     'this module was built with --js-strings and needs the JS String ' +\n\
-            \x20       'Builtins, which this engine does not have: ' + e.message + '. ' +\n\
-            \x20       'Use a current browser or Node 23+, or build without the flag.',\n\
-            \x20   );\n\
-            \x20 }",
-        ),
-    };
+    );
+    let compile_step = String::from(
+        "  const { instance } = await WebAssembly.instantiate(bytes, imports());\n\
+         \x20 stringExports = instance.exports;",
+    );
     let mut groups: Vec<&str> = Vec::new();
     for h in hosts {
         if !groups.contains(&h.group.as_str()) {
@@ -1186,19 +1029,15 @@ export function setWriter(fn) {{
 
 function imports() {{
   return {{
-{host_spread}{constants_import}    kite: {{
+{host_spread}    kite: {{
+      scratch: SCRATCH,
+      text_len: textLength,
+      text_fill: textFill,
+      text_push: textPush,
       print_int: (v) => write(showInt(v)),
       print_float: (v) => write(showFloat(v)),
       print_bool: (v) => write(showBool(v)),
-      print_str: (i) => write(S(i)),
-      str_concat: (a, b) => intern(S(a) + S(b)),
-      str_eq: (a, b) => (S(a) === S(b) ? 1 : 0),
-      // By code point, which is what `<` on JavaScript strings compares and
-      // what Rust's `str` ordering compares — so the two backends sort the
-      // same way. It is *not* alphabetical order in every language; collation
-      // is a table and a locale, and neither belongs in an operator.
-      str_compare: (a, b) =>
-        S(a) < S(b) ? -1n : S(a) > S(b) ? 1n : 0n,
+      print_str: (body) => write(body),
       draw_rect: (x, y, w, h, colour) => renderer.rect(x, y, w, h, Number(colour)),
       draw_rrect: (x, y, w, h, r, colour) => renderer.rrect(x, y, w, h, r, Number(colour)),
       draw_drrect: (x, y, w, h, r, width, colour) =>
@@ -1207,83 +1046,40 @@ function imports() {{
         setAlpha(a);
         if (renderer.alpha) renderer.alpha(a);
       }},
-      draw_text: (x, y, i, colour) => renderer.text(x, y, S(i), Number(colour)),
+      draw_text: (x, y, body, colour) => renderer.text(x, y, body, Number(colour)),
       draw_field: (x, y, w, h, v, hint, colour, id, multiline) =>
         renderer.field(
-          x, y, w, h, S(v), S(hint), Number(colour), S(id), multiline !== 0,
+          x, y, w, h, v, hint, Number(colour), id, multiline !== 0,
         ),
-      draw_image: (x, y, w, h, src) => renderer.image(x, y, w, h, S(src)),
+      draw_image: (x, y, w, h, src) => renderer.image(x, y, w, h, src),
       draw_semantics: (x, y, w, h, role, label, flags, id) => {{
         if (renderer.semantics) {{
           renderer.semantics(
-            x, y, w, h, Number(role), S(label), Number(flags), S(id),
+            x, y, w, h, Number(role), label, Number(flags), id,
           );
         }}
       }},
       draw_clip: (x, y, w, h) => renderer.clip(x, y, w, h),
       draw_unclip: () => renderer.unclip(),
-      measure_text: (i) => measure(S(i)),
+      measure_text: (body) => measure(body),
       line_height: () => lineHeight(),
       draw_font: (size, weight) => {{
         setFont(size, Number(weight));
         if (renderer.font) renderer.font(size, Number(weight));
       }},
-      // Kite counts characters, JavaScript counts UTF-16 code units, so each
-      // of these goes through `[...s]` rather than indexing the string.
-      str_slice: (i, from, to) => {{
-        if (narrow(i)) {{
-          const s = S(i);
-          const a = Math.min(Math.max(Number(from), 0), s.length);
-          const b = Math.min(Math.max(Number(to), a), s.length);
-          return intern(s.slice(a, b));
-        }}
-        const cs = [...S(i)];
-        const a = Math.min(Math.max(Number(from), 0), cs.length);
-        const b = Math.min(Math.max(Number(to), a), cs.length);
-        return intern(cs.slice(a, b).join(''));
-      }},
-      str_index_of: (i, n) => {{
-        const at = S(i).indexOf(S(n));
-        return at < 0 ? -1n : BigInt([...S(i).slice(0, at)].length);
-      }},
-      str_trim: (i) => intern(S(i).trim()),
-      // A code point, not a UTF-16 code unit — `codePointAt` on a surrogate
-      // pair would answer with half of one, and the bytecode VM answers with
-      // the whole character.
-      str_code_at: (i, at) => {{
-        if (narrow(i)) {{
-          const s = S(i);
-          const n = Number(at);
-          return n < 0 || n >= s.length ? -1n : BigInt(s.charCodeAt(n));
-        }}
-        const c = [...S(i)][Number(at)];
-        return c === undefined ? -1n : BigInt(c.codePointAt(0));
-      }},
       // Interpolation shares its formatting with printing, so a value cannot
       // look one way in `io.print(x)` and another in `"\(x)"`.
-      str_of_int: (v) => intern(showInt(v)),
+      str_of_int: (v) => hostText(showInt(v)),
       // A page has no standard input and no standard error. `console.error` is
       // the nearest honest equivalent of the second; there is no equivalent of
       // the first, so a read answers with the empty string — which is what a
       // program reading until it runs out already tests for.
-      read_line: () => intern(""),
-      error_str: (i) => {{
-        if (typeof console !== "undefined") console.error(S(i));
+      read_line: () => hostText(""),
+      error_str: (body) => {{
+        if (typeof console !== "undefined") console.error(body);
       }},
-      // A code point that is not a character — a surrogate, or past the end of
-      // Unicode — is the empty string. `String.fromCodePoint` throws on those,
-      // so the range is tested rather than the exception caught.
-      str_from_code: (code) => {{
-        const n = Number(code);
-        const real =
-          Number.isInteger(n) && n >= 0 && n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff);
-        return intern(real ? String.fromCodePoint(n) : "");
-      }},
-      str_of_float: (v) => intern(showFloat(v)),
-      str_of_bool: (v) => intern(showBool(v)),
-      // Characters, not UTF-16 code units: `[...s]` iterates code points, so
-      // an emoji counts once rather than twice.
-      str_len: (i) => BigInt([...S(i)].length),
+      str_of_float: (v) => hostText(showFloat(v)),
+      str_of_bool: (v) => hostText(showBool(v)),
       // ---- the scheduler ---------------------------------------------------
       //
       // A queue of live tasks is mutable state, and Kite has none, so the
@@ -1615,14 +1411,10 @@ export async function run(source) {{
         strings_section = strings_section,
         compile_step = compile_step,
         hosts = host_section,
-        host_spread = if hosts.is_empty() { "" } else { "    ...HOSTS,\n" },
-        // The literals, by position. Under the builtins the engine synthesises
-        // these from their own names and nothing is passed; here they are
-        // ordinary imported globals and the glue hands them over.
-        constants_import = if mode == Strings::Object {
-            "    \"kite:strings\": Object.fromEntries(CONSTANTS.map((s, i) => [String(i), s])),\n"
-        } else {
+        host_spread = if hosts.is_empty() {
             ""
+        } else {
+            "    ...HOSTS,\n"
         },
         wasm = json_string(wasm_path),
     ))
@@ -1681,32 +1473,32 @@ if (HOSTS.js) {
   // A constructor named on the global object. Kept to one place because
   // `js_new*` and `js_instance_of` must agree about what a name means.
   const ctor = (name) => {
-    const c = root()[S(name)];
+    const c = root()[textOf(name)];
     if (typeof c !== "function") {
-      throw new TypeError("`" + S(name) + "` is not a constructor");
+      throw new TypeError("`" + textOf(name) + "` is not a constructor");
     }
     return c;
   };
 
   HOSTS.js = {
-    js_global: (name) => root()[S(name)],
+    js_global: (name) => root()[textOf(name)],
     js_nothing: () => null,
-    js_get: (target, name) => guard(() => target[S(name)]),
+    js_get: (target, name) => guard(() => target[textOf(name)]),
     // The value is returned so that a write has something to carry a failure
     // in. A strict-mode assignment to a read-only property throws, and so does
     // a setter of the page's own.
     js_set: (target, name, value) =>
       guard(() => {
-        target[S(name)] = value;
+        target[textOf(name)] = value;
         return null;
       }),
     js_at: (target, index) => guard(() => target[Number(index)]),
 
-    js_call0: (t, name) => guard(() => t[S(name)]()),
-    js_call1: (t, name, a) => guard(() => t[S(name)](a)),
-    js_call2: (t, name, a, b) => guard(() => t[S(name)](a, b)),
-    js_call3: (t, name, a, b, c) => guard(() => t[S(name)](a, b, c)),
-    js_call4: (t, name, a, b, c, d) => guard(() => t[S(name)](a, b, c, d)),
+    js_call0: (t, name) => guard(() => t[textOf(name)]()),
+    js_call1: (t, name, a) => guard(() => t[textOf(name)](a)),
+    js_call2: (t, name, a, b) => guard(() => t[textOf(name)](a, b)),
+    js_call3: (t, name, a, b, c) => guard(() => t[textOf(name)](a, b, c)),
+    js_call4: (t, name, a, b, c, d) => guard(() => t[textOf(name)](a, b, c, d)),
 
     js_new0: (name) => guard(() => new (ctor(name))()),
     js_new1: (name, a) => guard(() => new (ctor(name))(a)),
@@ -1720,14 +1512,14 @@ if (HOSTS.js) {
     js_instance_of: (v, name) => guard(() => v instanceof ctor(name)),
     // `typeof null` is `"object"`, which is a forty-year-old mistake and not
     // one to pass on: a caller asking what this is wants "nothing".
-    js_kind_of: (v) => intern(v === null ? "null" : typeof v),
+    js_kind_of: (v) => hostText(v === null ? "null" : typeof v),
 
-    js_of_str: (value) => S(value),
+    js_of_str: (value) => textOf(value),
     js_of_num: (value) => value,
     js_of_bool: (value) => value !== 0,
     // Guarded by `js_kind_of` on the Kite side, so these are only reached when
     // the value is already known to be of the right kind.
-    js_as_str: (v) => intern(v),
+    js_as_str: (v) => hostText(v),
     js_as_num: (v) => v,
     js_as_bool: (v) => (v ? 1 : 0),
     // An `int` is an i64 and reaches here as a BigInt; a JavaScript number is
@@ -1741,7 +1533,7 @@ if (HOSTS.js) {
       typeof v === "number" && Number.isSafeInteger(v) ? 1 : 0,
 
     js_threw: (v) => (threw(v) ? 1 : 0),
-    js_detail: (v) => intern(threw(v) ? v[THREW] : ""),
+    js_detail: (v) => hostText(threw(v) ? v[THREW] : ""),
   };
 }
 "#;
@@ -1754,10 +1546,12 @@ if (HOSTS.dom) {
   const at = (id) => NODES[Number(id)] ?? null;
   const handle = (el) => (el ? BigInt(NODES.push(el) - 1) : 0n);
   HOSTS.dom = {
-    query: (selector) => handle(document.querySelector(S(selector))),
+    query: (selector) => handle(document.querySelector(textOf(selector))),
     query_all: (selector) =>
-      str([...document.querySelectorAll(S(selector))].map((el) => handle(el)).join(",")),
-    create: (tag) => handle(document.createElement(S(tag))),
+      hostText(
+        [...document.querySelectorAll(textOf(selector))].map((el) => handle(el)).join(","),
+      ),
+    create: (tag) => handle(document.createElement(textOf(tag))),
     append: (parent, child) => {
       const p = at(parent);
       const c = at(child);
@@ -1767,36 +1561,36 @@ if (HOSTS.dom) {
       const el = at(node);
       if (el) el.remove();
     },
-    get_text: (node) => str(at(node)?.textContent ?? ""),
+    get_text: (node) => hostText(at(node)?.textContent ?? ""),
     set_text: (node, body) => {
       const el = at(node);
       // `textContent`, never `innerHTML`. `std/dom` deliberately offers no way
       // to set markup, and the host must not quietly provide one.
-      if (el) el.textContent = S(body);
+      if (el) el.textContent = textOf(body);
     },
-    get_attr: (node, name) => str(at(node)?.getAttribute(S(name)) ?? ""),
+    get_attr: (node, name) => hostText(at(node)?.getAttribute(textOf(name)) ?? ""),
     set_attr: (node, name, value) => {
       const el = at(node);
-      if (el) el.setAttribute(S(name), S(value));
+      if (el) el.setAttribute(textOf(name), textOf(value));
     },
     drop_attr: (node, name) => {
       const el = at(node);
-      if (el) el.removeAttribute(S(name));
+      if (el) el.removeAttribute(textOf(name));
     },
     set_style: (node, property, value) => {
       const el = at(node);
       // `setProperty` takes the CSS spelling — `background-color` — which is
       // what a caller writes in a stylesheet and what `std/dom` documents.
-      if (el) el.style.setProperty(S(property), S(value));
+      if (el) el.style.setProperty(textOf(property), textOf(value));
     },
     set_class: (node, name, on) => {
       const el = at(node);
-      if (el) el.classList.toggle(S(name), on !== 0);
+      if (el) el.classList.toggle(textOf(name), on !== 0);
     },
-    has_class: (node, name) => (at(node)?.classList.contains(S(name)) ? 1 : 0),
-    get_title: () => str(document.title),
+    has_class: (node, name) => (at(node)?.classList.contains(textOf(name)) ? 1 : 0),
+    get_title: () => hostText(document.title),
     set_title: (body) => {
-      document.title = S(body);
+      document.title = textOf(body);
     },
   };
 }
@@ -1831,13 +1625,13 @@ if (HOSTS.net) {
     fetch_start: (method, url, body, headers) => {
       const request = { state: 0, status: 0, body: "", error: "", headers: null };
       const id = REQUESTS.push(request) - 1;
-      const init = { method: S(method), headers: parseHeaders(S(headers)) };
-      if (S(body) !== "") init.body = S(body);
+      const init = { method: textOf(method), headers: parseHeaders(textOf(headers)) };
+      if (textOf(body) !== "") init.body = textOf(body);
       // Every one of these settles a state a Kite task is waiting on, so every
       // one of them ends in `wake`. A host that changes what a program is
       // blocked on and does not say so leaves the program blocked on it
       // forever — the scheduler has no other way to find out.
-      fetch(S(url), init)
+      fetch(textOf(url), init)
         .then(async (response) => {
           request.status = response.status;
           request.headers = response.headers;
@@ -1854,12 +1648,12 @@ if (HOSTS.net) {
     },
     fetch_state: (id) => BigInt(REQUESTS[Number(id)].state),
     fetch_status: (id) => BigInt(REQUESTS[Number(id)].status),
-    fetch_body: (id) => intern(REQUESTS[Number(id)].body),
+    fetch_body: (id) => hostText(REQUESTS[Number(id)].body),
     fetch_header: (id, name) => {
       const headers = REQUESTS[Number(id)].headers;
-      return intern(headers ? headers.get(S(name)) ?? "" : "");
+      return hostText(headers ? headers.get(textOf(name)) ?? "" : "");
     },
-    fetch_error: (id) => intern(REQUESTS[Number(id)].error),
+    fetch_error: (id) => hostText(REQUESTS[Number(id)].error),
 
     // ---- server-sent events, which are EventSource ----
     //
@@ -1873,7 +1667,7 @@ if (HOSTS.net) {
         s.state = 2;
         return BigInt(id);
       }
-      const source = new EventSource(S(url));
+      const source = new EventSource(textOf(url));
       s.source = source;
       s.take = (e) => {
         s.queue.push({ name: e.type || "message", id: e.lastEventId || "", data: e.data ?? "" });
@@ -1883,7 +1677,7 @@ if (HOSTS.net) {
       source.onmessage = s.take;
       // Registered before anything can arrive, which is the whole reason the
       // names are given at open.
-      for (const name of S(names).split("\n")) {
+      for (const name of textOf(names).split("\n")) {
         if (name !== "") source.addEventListener(name, s.take);
       }
       source.onerror = () => { if (source.readyState === 2) { s.state = 2; wake(); } };
@@ -1896,16 +1690,16 @@ if (HOSTS.net) {
       const e = s.queue.shift();
       if (e === undefined) {
         s.taken = { name: "", id: "" };
-        return intern("");
+        return hostText("");
       }
       s.taken = { name: e.name, id: e.id };
-      return intern(e.data);
+      return hostText(e.data);
     },
-    sse_event_name: (id) => intern(STREAMS[Number(id)].taken.name),
-    sse_event_id: (id) => intern(STREAMS[Number(id)].taken.id),
+    sse_event_name: (id) => hostText(STREAMS[Number(id)].taken.name),
+    sse_event_id: (id) => hostText(STREAMS[Number(id)].taken.id),
     sse_listen: (id, name) => {
       const s = STREAMS[Number(id)];
-      if (s.source) s.source.addEventListener(S(name), s.take);
+      if (s.source) s.source.addEventListener(textOf(name), s.take);
       return 1n;
     },
     sse_close: (id) => {
@@ -1930,7 +1724,7 @@ if (HOSTS.net) {
       }
       let socket;
       try {
-        socket = new WebSocket(S(url));
+        socket = new WebSocket(textOf(url));
       } catch (e) {
         s.state = 2;
         s.error = String(e && e.message ? e.message : e);
@@ -1960,15 +1754,15 @@ if (HOSTS.net) {
     socket_next: (id) => {
       const s = STREAMS[Number(id)];
       const message = s.queue.shift();
-      return intern(message === undefined ? "" : message);
+      return hostText(message === undefined ? "" : message);
     },
     socket_send: (id, message) => {
       const s = STREAMS[Number(id)];
       if (s.state !== 1 || !s.socket) return 0n;
-      s.socket.send(S(message));
+      s.socket.send(textOf(message));
       return 1n;
     },
-    socket_error: (id) => intern(STREAMS[Number(id)].error),
+    socket_error: (id) => hostText(STREAMS[Number(id)].error),
     socket_close: (id) => {
       const s = STREAMS[Number(id)];
       if (s.socket) s.socket.close();
@@ -2074,7 +1868,7 @@ if (HOSTS.audio) {
     // clock, and `at()` is how a program reads that clock rather than guessing
     // at it.
     load: (url) => {
-      const next = S(url);
+      const next = textOf(url);
       if (element !== null && element.dataset.src === next) return;
       if (element !== null) element.pause();
       const el = new Audio();
@@ -2212,28 +2006,34 @@ if (HOSTS.crypto) {
     random_hex: (count) => {
       const out = new Uint8Array(Number(count));
       globalThis.crypto.getRandomValues(out);
-      return intern(hex(out.buffer));
+      return hostText(hex(out.buffer));
     },
     digest_start: (algorithm, text) =>
-      start(subtle.digest(S(algorithm), bytes(S(text))).then(hex)),
+      start(subtle.digest(textOf(algorithm), bytes(textOf(text))).then(hex)),
     hmac_start: (algorithm, key, text) =>
       start(
         subtle
-          .importKey("raw", bytes(S(key)), { name: "HMAC", hash: S(algorithm) }, false, [
+          .importKey(
+            "raw",
+            bytes(textOf(key)),
+            { name: "HMAC", hash: textOf(algorithm) },
+            false,
+            [
             "sign",
-          ])
-          .then((k) => subtle.sign("HMAC", k, bytes(S(text))))
+            ],
+          )
+          .then((k) => subtle.sign("HMAC", k, bytes(textOf(text))))
           .then(hex),
       ),
     derive_start: (password, salt, iterations) =>
       start(
         subtle
-          .importKey("raw", bytes(S(password)), "PBKDF2", false, ["deriveBits"])
+          .importKey("raw", bytes(textOf(password)), "PBKDF2", false, ["deriveBits"])
           .then((k) =>
             subtle.deriveBits(
               {
                 name: "PBKDF2",
-                salt: unhex(S(salt)),
+                salt: unhex(textOf(salt)),
                 iterations: Number(iterations),
                 hash: "SHA-256",
               },
@@ -2244,7 +2044,7 @@ if (HOSTS.crypto) {
           .then(hex),
       ),
     key_generate_start: (kind) => {
-      const name = S(kind);
+      const name = textOf(kind);
       if (name === "AES-GCM") {
         return start(
           subtle.generateKey({ name, length: 256 }, false, ["encrypt", "decrypt"]).then(keep),
@@ -2254,7 +2054,7 @@ if (HOSTS.crypto) {
       return start(subtle.generateKey(name, false, usages).catch(unsupported(name)).then(keep));
     },
     key_import_start: (material) => {
-      const text = S(material);
+      const text = textOf(material);
       if (!/^[0-9a-f]{64}$/i.test(text)) {
         return start(Promise.reject(new Error("a key is 32 bytes — 64 hex characters")));
       }
@@ -2272,9 +2072,9 @@ if (HOSTS.crypto) {
       start(
         subtle
           .encrypt(
-            { name: "AES-GCM", iv: unhex(S(nonce)) },
+            { name: "AES-GCM", iv: unhex(textOf(nonce)) },
             KEYS[Number(key)],
-            bytes(S(plaintext)),
+            bytes(textOf(plaintext)),
           )
           .then(hex),
       ),
@@ -2282,9 +2082,9 @@ if (HOSTS.crypto) {
       start(
         subtle
           .decrypt(
-            { name: "AES-GCM", iv: unhex(S(nonce)) },
+            { name: "AES-GCM", iv: unhex(textOf(nonce)) },
             KEYS[Number(key)],
-            unhex(S(cipher)),
+            unhex(textOf(cipher)),
           )
           .then((clear) => new TextDecoder().decode(clear))
           .catch(() => {
@@ -2295,13 +2095,22 @@ if (HOSTS.crypto) {
           }),
       ),
     sign_start: (key, text) =>
-      start(subtle.sign("Ed25519", KEYS[Number(key)].privateKey, bytes(S(text))).then(hex)),
+      start(
+        subtle.sign("Ed25519", KEYS[Number(key)].privateKey, bytes(textOf(text))).then(hex),
+      ),
     verify_start: (pub, text, signature) =>
       start(
         subtle
-          .importKey("raw", unhex(S(pub)), "Ed25519", false, ["verify"])
+          .importKey("raw", unhex(textOf(pub)), "Ed25519", false, ["verify"])
           .catch(unsupported("Ed25519"))
-          .then((k) => subtle.verify("Ed25519", k, unhex(S(signature)), bytes(S(text))))
+          .then((k) =>
+            subtle.verify(
+              "Ed25519",
+              k,
+              unhex(textOf(signature)),
+              bytes(textOf(text)),
+            ),
+          )
           .then((ok) => (ok ? "true" : "false")),
       ),
     // Agreement and derivation in one step, so the raw X25519 output exists
@@ -2310,7 +2119,7 @@ if (HOSTS.crypto) {
     agree_start: (key, pub) =>
       start(
         subtle
-          .importKey("raw", unhex(S(pub)), "X25519", false, [])
+          .importKey("raw", unhex(textOf(pub)), "X25519", false, [])
           .catch(unsupported("X25519"))
           .then((theirs) =>
             subtle.deriveBits({ name: "X25519", public: theirs }, KEYS[Number(key)].privateKey, 256),
@@ -2328,13 +2137,13 @@ if (HOSTS.crypto) {
           .then(keep),
       ),
     work_state: (id) => BigInt(WORK[Number(id)].state),
-    work_result: (id) => intern(WORK[Number(id)].result),
-    work_error: (id) => intern(WORK[Number(id)].error),
+    work_result: (id) => hostText(WORK[Number(id)].result),
+    work_error: (id) => hostText(WORK[Number(id)].error),
     // Same time whichever way it goes: every byte is compared, and the length
     // is folded in rather than returned early on.
     constant_time_equal: (a, b) => {
-      const x = S(a);
-      const y = S(b);
+      const x = textOf(a);
+      const y = textOf(b);
       let diff = x.length ^ y.length;
       for (let i = 0; i < Math.max(x.length, y.length); i += 1) {
         diff |= (x.charCodeAt(i % x.length) || 0) ^ (y.charCodeAt(i % y.length) || 0);
@@ -2463,9 +2272,9 @@ fn json_string(s: &str) -> String {
 /// **This is the phase's whole point, and it is small because most of it was
 /// already there.** A `pub fn` has been a real Wasm export all along, so
 /// JavaScript could always call one — it just had to know that an `int` arrives
-/// as a `BigInt` and that a `str` is an index into a table it must intern into
-/// and read back out of. That is a calling convention, and a calling convention
-/// nobody wrote down is a reason not to adopt something.
+/// as a `BigInt` and that a `str` crosses through the module's scalar-array
+/// conversion functions. That is a calling convention, and a calling
+/// convention nobody wrote down is a reason not to adopt something.
 ///
 /// So the compiler writes the wrapper instead. A TypeScript project imports
 /// `api.js`, type-checks against `api.d.ts`, and never learns any of it.
@@ -2493,7 +2302,10 @@ pub fn generate_api(api: &[crate::Export], wasm_path: &str) -> (String, String) 
         .filter(own)
         .filter(|e| {
             e.params.iter().all(|(_, t)| ts_type(t).is_some())
-                && e.ret.as_deref().map(|r| ts_type(r).is_some()).unwrap_or(true)
+                && e.ret
+                    .as_deref()
+                    .map(|r| ts_type(r).is_some())
+                    .unwrap_or(true)
         })
         .collect();
 
@@ -2502,8 +2314,8 @@ pub fn generate_api(api: &[crate::Export], wasm_path: &str) -> (String, String) 
          //\n\
          // The typed door into a Kite module. Every `pub fn` is here with its\n\
          // conversions already applied: an `int` is a BigInt on the wire, and a\n\
-         // `str` may be an index into a table this file interns into and reads\n\
-         // back out of. A caller sees ordinary JavaScript values.\n\n\
+         // `str` crosses through the module's Unicode-scalar conversion helpers.\n\
+         // A caller sees ordinary JavaScript values.\n\n\
          import { instantiate, str, text } from \"./app.js\";\n\n\
          let module = null;\n\n\
          /// Load the module. Call this once before anything else here.\n\
@@ -2536,11 +2348,17 @@ pub fn generate_api(api: &[crate::Export], wasm_path: &str) -> (String, String) 
             .params
             .iter()
             .enumerate()
-            .map(|(i, (n, _))| if reserved(n) { format!("{}_{}", n, i) } else { n.clone() })
+            .map(|(i, (n, _))| {
+                if reserved(n) {
+                    format!("{}_{}", n, i)
+                } else {
+                    n.clone()
+                }
+            })
             .collect();
         // Two conversions, and both were found by a test rather than by
-        // reasoning. A `str` is an index into a table unless the module was
-        // built with --js-strings. A `bool` crosses as an i32, so a JavaScript
+        // reasoning. A `str` crosses through the module's scalar-array
+        // conversion helpers. A `bool` crosses as an i32, so a JavaScript
         // caller passing `true` would send `undefined` and a returned `false`
         // would arrive as `0` — which the `.d.ts` says is a `boolean`, and a
         // wrapper whose types are a lie is worse than no wrapper.
@@ -2607,9 +2425,28 @@ pub fn generate_api(api: &[crate::Export], wasm_path: &str) -> (String, String) 
 fn reserved(name: &str) -> bool {
     matches!(
         name,
-        "new" | "class" | "function" | "var" | "let" | "const" | "return" | "typeof"
-            | "await" | "yield" | "this" | "null" | "true" | "false" | "default"
-            | "import" | "export" | "delete" | "void" | "in" | "of" | "with"
+        "new"
+            | "class"
+            | "function"
+            | "var"
+            | "let"
+            | "const"
+            | "return"
+            | "typeof"
+            | "await"
+            | "yield"
+            | "this"
+            | "null"
+            | "true"
+            | "false"
+            | "default"
+            | "import"
+            | "export"
+            | "delete"
+            | "void"
+            | "in"
+            | "of"
+            | "with"
     )
 }
 
@@ -2647,10 +2484,11 @@ mod tests {
     }
 
     #[test]
-    fn the_glue_embeds_every_string_constant() {
-        let g = generate_glue(&["hello".into(), "world".into()], "app.wasm");
-        assert!(g.contains(r#""hello""#));
-        assert!(g.contains(r#""world""#));
+    fn the_glue_has_the_bounded_string_bridge() {
+        let g = generate_glue("app.wasm");
+        assert!(g.contains("new WebAssembly.Memory({ initial: 1, maximum: 1 })"));
+        assert!(g.contains("text_len: textLength"));
+        assert!(g.contains(r#"stringRuntime()["$kite.str.from_host"]"#));
         assert!(g.contains(r#""app.wasm""#));
         assert!(g.contains("export async function run"));
     }

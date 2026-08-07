@@ -70,7 +70,6 @@ call and scalars cross, which is what the starter does.
 |---|---|
 | `bin` | The compiler. `kitec` on `PATH` by default. |
 | `release` | `--release`: `assert` is dropped, `require` is not. Follows Vite's mode when not given. |
-| `jsStrings` | `--js-strings`, so a `str` is a real JavaScript string. Faster across the boundary; will not instantiate in an engine without the JS String Builtins proposal, which is why it is off unless asked for. |
 
 ## What it does about `.wasm`
 

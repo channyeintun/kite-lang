@@ -187,7 +187,7 @@ rejected as `E0117` rather than allowed to be quietly wrong.
 | `bool` | `true` / `false` | `i32` |
 | `int` | 64-bit signed | `i64` |
 | `float` | 64-bit IEEE-754 | `f64` |
-| `str` | Immutable UTF-8 string | `externref` (JS string) or `array i8` |
+| `str` | Immutable sequence of Unicode scalar values | GC `array i32` |
 | `error` | A failure, and what it says ([§7](#7-error-handling)) | GC reference |
 | `JsValue` | An opaque host object; web only ([§15.1](#151-jsvalue)) | `externref` |
 
@@ -205,22 +205,19 @@ neither may overflow while deciding
 whether an overflow would happen — which is why they subtract to ask rather
 than adding and looking.
 
-**On `str`:** the web target has two representations and a program cannot tell
-them apart. By default a `str` is an index into a table the generated glue
-holds, which needs no linear memory and runs in any engine with WasmGC. With
-`--js-strings` it is an `externref` carrying the JavaScript string itself,
-through the **JS String Builtins** proposal: constants arrive as imported
-globals the engine synthesises from the literals, `+` and `==` compile to
-intrinsics, and passing a string to a DOM API costs nothing — no copy, no
-encoding pass, no lookup. It is a flag rather than the default because the
-builtins are not in every engine, and a module that will not instantiate is a
-worse failure than one that makes a call.
+**On `str`:** the Wasm target has one language-owned representation: a WasmGC
+array containing one Unicode scalar value per `i32` element. Literals,
+concatenation, equality, ordering, length, slicing, searching, trimming and
+`code_at` all operate inside the module. The array is traced by the engine and
+is reclaimed when its last Kite reference disappears; no permanent host table
+or JavaScript-string root exists.
 
-On native and bytecode targets, `str` is a GC-managed UTF-8 string. Kite
-programs cannot observe any of this: `str` is indexed by character, never by
-byte offset and never by UTF-16 code unit — which is why `len`, `slice`,
-`index_of` and `code_at` remain host calls even where the builtins offer
-something with the same name and a different meaning.
+JavaScript strings appear only at a declared host or export boundary. The
+generated glue converts synchronously through one fixed 64 KiB scratch page in
+4,096-scalar chunks, and retains no converted value after the call. On native
+and bytecode targets the storage is GC-managed UTF-8. Kite programs observe
+the same rule everywhere: indexing and length count Unicode scalar values,
+never bytes or UTF-16 code units.
 
 **What a `str` can do**, and it is deliberately little:
 

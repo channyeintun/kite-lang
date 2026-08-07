@@ -441,29 +441,44 @@ Applied to the working tree at `9028c68` and verified: `cargo test --workspace`,
 | F19 cleartext transports | fixed | `http://` and `git://` refused and no longer force-enabled in git |
 | F21 ANSI injection | fixed | control characters escaped at the render boundary; the bidirectional overrides joined them in the follow-up, having been missed because `char::is_control` is the `Cc` category alone |
 | markdown href escaping | fixed | scheme allowlist and attribute escaping (found by the Fable 5 consult) |
-| **F20 unbounded interning** | **not fixed** | see below |
+| F20 unbounded interning | fixed | one traced WasmGC Unicode-scalar array representation; no permanent host registry; Node boundary and multi-chunk regressions |
 
-## F20 is still open, deliberately
+## F20 resolution
 
-The append-only `STRINGS` table in `kite-codegen-wasm/src/glue.rs` is not reclaimable, and it is the remaining reason a long-running server dies: after F8 and F11 were fixed, 200 requests of 200 KB still drove Node to `FATAL ERROR: Reached heap limit` at ~1.9 GB, now in 3.7 s rather than 360 s.
+The original integer-handle ABI could not be made reclaimable: the JavaScript
+collector had no reference whose lifetime matched a Kite string. The interim
+GC wrapper proved that tracing fixed the lifetime, but still made JavaScript's
+UTF-16 primitive the language representation and left multiple selectable
+ABIs.
 
-It is not fixable in that file. A `str` crosses to WebAssembly as an integer index, so the JS collector cannot know when the module has dropped one — which is exactly why the table only grows. A `FinalizationRegistry` does not help, because nothing on the wasm side holds a JS object to finalise.
+The final fix removes both designs. A Wasm `str` is now one traced WasmGC array
+of Unicode scalar values. Literals and every language operation stay inside
+the module. JavaScript conversion happens only at declared host/export
+boundaries through an imported memory fixed at one 64 KiB page, in
+4,096-scalar chunks. Temporary iterators and output chunks are cleared when
+the synchronous conversion completes.
 
-The real fix already exists: `Strings::Builtins`, where a `str` *is* a JavaScript string and is collected normally. Making it the web target's default would close this. That is a compatibility decision rather than a security one — it does not instantiate on an engine without the JS String Builtins proposal — so it is left for the maintainer to make.
-
-**Update, 38d750d.** `Strings::Object` closes it without the proposal: a `str` becomes a WasmGC record holding the JS string, which the collector traces. Measured on the same load — 200 POSTs of 200 KB at `examples/server.kite` — the table dies at 1.26 GB in 1.8 s and the object representation finishes all 200 with correct bodies at 210 MB peak. It is reachable only through `KITE_STRINGS_OBJECT=1`; `Table` is still the default and still leaks, and deleting it is the remaining work.
+There is no representation selector in the compiler, CLI, playground,
+compiler package, or Vite plugin. Tests execute Unicode operations, aggregate
+and map equality, a declared host round trip, and a 5,000-emoji export in both
+directions under Node.
 
 ---
 
 ## What a re-review of the fixes found — follow-up
 
-The fixes above were reviewed adversarially and re-derived by running. Two defects in the `Strings::Object` boundary and four smaller ones were found and are fixed in the same follow-up; the notes in the table point at them. What is worth recording here is *why the tests did not catch the two big ones*, since that is the reusable part:
+The fixes above were reviewed adversarially and re-derived by running. The
+interim string boundary exposed two useful test gaps:
 
-- The import scan marks `str_eq` used for any generated deep-equality function at all, so a single `==` on a struct anywhere in a program declares the import for free. Every test program with a `str`-keyed map also compared a struct, which hid a scan that had not learned about the new representation. There is now a program with a map and no aggregate comparison, deliberately separate.
-- No test compared two `Option<str>` values, which was the one shape whose comparison did not unwrap the record.
+- A map-key test must not depend on an unrelated aggregate comparison to make
+  its equality machinery available.
+- Optional strings need their own structural-equality regression rather than
+  being inferred from struct and slice coverage.
+
+Both cases now call the same internal scalar-array equality function, with no
+host import to declare or boundary wrapper to unwrap.
 
 Still open after the follow-up, and known:
 
 - `kitec build`, `run` and `test` do not read `kite.lock`. `kitec pkg` is the only enforcement point (F9).
 - A module is still identified by the last segment of its path. E0403 and E0404 make the collisions *loud* rather than removing them.
-- `Strings::Table` remains the default and remains a leak (F20).
