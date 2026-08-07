@@ -117,6 +117,42 @@
         </p>
       </div>
     </div>
+
+    <div class="cta-row">
+      <div>
+        <h3>A Mastodon client</h3>
+        <p>
+          <a href="https://kite-feeds.pages.dev">Kite&nbsp;Feeds</a> is a real
+          client for a real network, and there is <strong>no JavaScript in the
+          project</strong> — the page points a <code>&lt;script
+          type="module"&gt;</code> at a <code>.kite</code> file and
+          <a href="https://www.npmjs.com/package/vite-plugin-kite">vite-plugin-kite</a>
+          wires up what <code>kitec</code> produced. Sign in with any Mastodon
+          server: it registers itself, sends you there to approve it, and
+          exchanges the code you come back with. There is no backend.
+        </p>
+        <p>
+          Three things in it are worth reading the source for. The timeline is
+          <strong>virtualized against the window</strong>, and the arithmetic
+          that decides which rows exist is a file with no document in it at all.
+          Timelines are lists of ids, so returning to a route you have already
+          visited costs no request and puts your scroll position back — right
+          down to the measured row heights, which is what makes the offset land
+          rather than approximate. And pressing the heart writes to one map
+          entry before any request exists, so the home feed, the post's own page
+          and its author's profile all change at once: not because they were
+          told to, but because none of them ever held a copy.
+        </p>
+        <p class="muted">
+          <strong>129&nbsp;KB</strong> of WebAssembly for the whole application.
+          The source is
+          <a href="https://github.com/channyeintun/kite-feeds">channyeintun/kite-feeds</a>,
+          and its README is candid about the two files that exist because of the
+          target rather than the design.
+        </p>
+      </div>
+      <a class="button button-secondary" href="https://kite-feeds.pages.dev">Open Kite&nbsp;Feeds</a>
+    </div>
   </div>
 </section>
 
@@ -345,6 +381,7 @@ kitec --explain E0301            why a rule exists
           <li><a href="read/specification.html">Specification</a></li>
           <li><a href="reference/prelude.html">Standard library reference</a></li>
           <li><a href="playground.html">Playground</a></li>
+          <li><a href="https://kite-feeds.pages.dev">Kite Feeds, a Mastodon client</a></li>
           <li><a href="read/readme.html">README</a></li>
         </ul>
       </div>
