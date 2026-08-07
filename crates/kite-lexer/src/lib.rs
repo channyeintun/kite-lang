@@ -57,6 +57,8 @@ pub fn tokenize_with_comments(
         comments: Vec::new(),
         delims: Vec::new(),
         pending_newline: false,
+        nesting: 0,
+        nesting_reported: false,
         diags,
     }
     .run_with_comments()
@@ -85,6 +87,8 @@ pub fn tokenize_range(
         comments: Vec::new(),
         delims: Vec::new(),
         pending_newline: false,
+        nesting: 0,
+        nesting_reported: false,
         diags,
     }
     .run()
@@ -104,8 +108,27 @@ struct Lexer<'a> {
     /// significant, so multi-line argument lists work without trailing commas.
     delims: Vec<TokenKind>,
     pending_newline: bool,
+    /// How many `"…\(…"` layers deep the scanner currently is.
+    ///
+    /// `scan_string` and `skip_interpolation` call each other, so the nesting
+    /// in the *file* is native stack depth in this process — and three bytes
+    /// of source buy a frame pair. Running out of stack is an abort, not a
+    /// diagnostic, which means a file could kill the language server just by
+    /// being opened.
+    nesting: u32,
+    /// Whether the ceiling has already been reported. One diagnostic answers
+    /// the question; a file built to hit the limit would otherwise hit it on
+    /// every quote for the rest of the line.
+    nesting_reported: bool,
     diags: &'a mut DiagBag,
 }
+
+/// How deeply a string may nest interpolations holding further strings.
+///
+/// Far past anything written on purpose — the deepest in the standard library
+/// is one — and far short of the stack. The parser carries its own ceiling for
+/// the same reason; this is the lexer's.
+const MAX_STRING_NESTING: u32 = 64;
 
 impl<'a> Lexer<'a> {
     fn run(self) -> Vec<Token> {
@@ -482,11 +505,39 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 Some(b'"') => {
-                    self.scan_string();
+                    // At the ceiling, stop recursing and read the quote as an
+                    // ordinary byte. The file is already malformed by any
+                    // reasonable measure; the alternative is not a better
+                    // parse but an aborted process.
+                    if self.nesting >= MAX_STRING_NESTING {
+                        self.string_too_deep();
+                        self.pos += 1;
+                    } else {
+                        self.nesting += 1;
+                        self.scan_string();
+                        self.nesting -= 1;
+                    }
                 }
                 _ => self.pos += 1,
             }
         }
+    }
+
+    /// Report the nesting ceiling, once.
+    fn string_too_deep(&mut self) {
+        if self.nesting_reported {
+            return;
+        }
+        self.nesting_reported = true;
+        let at = self.pos.min(self.limit);
+        let span = Span::new(self.file, at as u32, (at + 1).min(self.limit) as u32);
+        self.diags.push(
+            Diagnostic::error(codes::E0006, "string interpolation nested too deeply")
+                .with_primary(span, "this string opens another interpolation")
+                .with_note(&format!(
+                    "at most {MAX_STRING_NESTING} levels of `\\(\"…\")` may nest"
+                )),
+        );
     }
 
     fn unterminated_string(&mut self, start: usize) {

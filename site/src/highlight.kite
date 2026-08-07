@@ -73,6 +73,11 @@ fn is_number_body(c: int) -> bool {
 /// Three characters, and they are not optional: this output goes into
 /// `innerHTML`, so a `<` that arrived from a document and left as a `<` is the
 /// whole of how markup injection works.
+///
+/// A *text node* is what this covers. An attribute value needs the quote
+/// escaped as well, or the value ends early and the rest is markup —
+/// `markdown.escape_attr` is that one. Reaching for this at an attribute
+/// boundary is the mistake it exists to prevent.
 pub fn escape(text: str) -> str {
     var out = ""
     for i in 0..text.len() {

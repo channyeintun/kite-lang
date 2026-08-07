@@ -19,7 +19,7 @@
 
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { dirname, join, resolve, basename } from "node:path";
+import { dirname, join, resolve, basename, sep } from "node:path";
 
 import { compiler, BuildFailed } from "@kite-lang/compiler-wasm";
 
@@ -80,6 +80,28 @@ export default function kite(options = {}) {
   const outputFor = (file) => {
     const key = createHash("sha256").update(file).digest("hex").slice(0, 12);
     return join(cacheDir, `${basename(file, ".kite")}-${key}`);
+  };
+
+  /// Whether a glue id names output this plugin actually produced.
+  ///
+  /// The path in a `\0kite-glue:` id is not this plugin's word — in a dev
+  /// server it can come from the browser. Vite's transform middleware turns a
+  /// request for `/@id/__x00__kite-glue:/anywhere` back into exactly this id
+  /// before any plugin sees it, so an id is untrusted input wearing a
+  /// trusted-looking prefix. Reading whatever path it names handed out any
+  /// `app.js` on the machine — a common name for a Node entrypoint, and one
+  /// that tends to hold credentials — from outside the Vite root and outside
+  /// `server.fs.allow`, which are the two boundaries meant to make that
+  /// impossible.
+  ///
+  /// Checked against the cache directory rather than against a list of what
+  /// has been built, because a warm dev server can serve a cached transform
+  /// whose glue import is requested before the `.kite` module is loaded again.
+  const producedHere = (dir) => {
+    if (!cacheDir) return false;
+    const root = resolve(cacheDir);
+    const target = resolve(dir);
+    return target === root || target.startsWith(root + sep);
   };
 
   async function compile(file) {
@@ -212,7 +234,9 @@ export default function kite(options = {}) {
     },
 
     async resolveId(source, importer) {
-      if (source.startsWith(GLUE)) return source;
+      if (source.startsWith(GLUE)) {
+        return producedHere(source.slice(GLUE.length)) ? source : null;
+      }
       const entry = source.endsWith(ENTRY);
       const bare = entry ? source.slice(0, -ENTRY.length) : source;
       if (!KITE.test(bare)) return null;
@@ -223,7 +247,9 @@ export default function kite(options = {}) {
 
     async load(id) {
       if (id.startsWith(GLUE)) {
-        return readFile(join(id.slice(GLUE.length), "app.js"), "utf8");
+        const dir = id.slice(GLUE.length);
+        if (!producedHere(dir)) return null;
+        return readFile(join(dir, "app.js"), "utf8");
       }
       // The entry module is two lines and they are generated, which is the
       // point: a `.kite` page has no JavaScript in its source at all.

@@ -28,7 +28,7 @@ use std::process::{Command, ExitCode};
 /// Where dependencies are put, relative to the manifest.
 const VENDOR: &str = ".kite/vendor";
 
-pub fn run(dir: &Path, offline: bool) -> ExitCode {
+pub fn run(dir: &Path, offline: bool, update: bool) -> ExitCode {
     let manifest_path = dir.join("kite.toml");
     let Ok(text) = std::fs::read_to_string(&manifest_path) else {
         eprintln!(
@@ -62,6 +62,34 @@ pub fn run(dir: &Path, offline: bool) -> ExitCode {
     // A lockfile that changed is worth saying out loud: it is the difference
     // between a build from the same bytes and a build from different ones.
     let previous = std::fs::read_to_string(&lock_path).unwrap_or_default();
+
+    // A lockfile that changed is an *error*, not a notice.
+    //
+    // The point of recording a hash is that the same version resolves to the
+    // same bytes twice. What used to happen when it did not was that the new
+    // hash was written over the old one, a line was printed to stderr, and the
+    // command exited 0 — so a moved tag, a re-pushed repository, or a network
+    // that answered differently was indistinguishable from a clean build to
+    // anything reading the exit code, which is what CI reads. The control was
+    // recorded but never enforced.
+    //
+    // `--update` is how a change gets accepted, because accepting one is a
+    // decision somebody makes rather than something a build does on its way
+    // past.
+    if !previous.is_empty() && previous != text && !update {
+        eprintln!(
+            "error: `{}` does not match what resolution produced\n\n\
+             note: a dependency's contents changed under the same version — a moved tag, a \
+             re-pushed repository, or something answering for one\n\
+             note: run `kitec pkg --update` to accept the new bytes and rewrite the lockfile",
+            lock_path.display()
+        );
+        // Deliberately not written: the committed lockfile is the record of
+        // what was agreed to, and overwriting it here is what destroyed the
+        // evidence that anything moved.
+        return ExitCode::FAILURE;
+    }
+
     if let Err(e) = std::fs::write(&lock_path, &text) {
         eprintln!("error: cannot write `{}`: {}", lock_path.display(), e);
         return ExitCode::FAILURE;
@@ -621,9 +649,30 @@ fn check_url(url: &str) -> Result<(), String> {
             url
         ));
     }
-    const SCHEMES: [&str; 4] = ["https://", "http://", "ssh://", "git://"];
+    // `http://` and `git://` are gone, and their absence is the point.
+    //
+    // Neither authenticates the far end or protects what comes back, so
+    // anyone on the path answers instead of the host and decides what gets
+    // compiled — and what a `kitec pkg` fetches is *run* by the next `kitec
+    // run` or `kitec test`. The lockfile does not stand in the way of that: it
+    // records a digest of whatever arrived.
+    //
+    // This is not a choice the project's author gets to weigh, either, which
+    // is what settles it. As the comment above says, the URL comes from a
+    // manifest "a dependency's dependency wrote" — so a transitive package
+    // could opt its dependents into cleartext, and they had no way to refuse.
+    const SCHEMES: [&str; 2] = ["https://", "ssh://"];
     if SCHEMES.iter().any(|s| url.starts_with(s)) {
         return Ok(());
+    }
+    if url.starts_with("http://") || url.starts_with("git://") {
+        return Err(format!(
+            "`{}` is fetched over a transport with no authentication\n  `http://` and `git://` \
+             carry no proof the answer came from that host and no check that it arrived \
+             unaltered, and a dependency's source is compiled and run — use `https://` or \
+             `ssh://`",
+            url
+        ));
     }
     // `user@host:path`, which is the other spelling everyone writes. It has no
     // scheme, so it is recognised by shape: something, an `@`, then a `:`.
@@ -634,7 +683,7 @@ fn check_url(url: &str) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "`{}` is not a git URL this will fetch\n  it takes https://, http://, ssh://, git:// \
+        "`{}` is not a git URL this will fetch\n  it takes https://, ssh:// \
          and user@host:path — a local path or a transport such as `ext::` is refused, because \
          a dependency's dependency chose this string",
         url
@@ -666,9 +715,7 @@ fn hardened(command: &mut Command) -> &mut Command {
         .env("GIT_PROTOCOL_FROM_USER", "0")
         .args(["-c", "protocol.allow=never"])
         .args(["-c", "protocol.https.allow=always"])
-        .args(["-c", "protocol.http.allow=always"])
         .args(["-c", "protocol.ssh.allow=always"])
-        .args(["-c", "protocol.git.allow=always"])
 }
 
 /// Clone a dependency at one tag, without its history.
@@ -744,14 +791,31 @@ mod tests {
     fn the_urls_people_actually_write_are_allowed() {
         for url in [
             "https://github.com/example/kite-markdown",
-            "http://internal.example/repo.git",
             "ssh://git@github.com/example/repo.git",
-            "git://example.com/repo.git",
             "git@github.com:example/repo.git",
         ] {
             check_url(url).unwrap_or_else(|e| panic!("`{}` should be allowed: {}", url, e));
         }
         check_tag("v1.2.0").expect("an ordinary tag");
+    }
+
+    /// `http://` and `git://` used to be on the list above.
+    ///
+    /// Neither authenticates the host or protects the bytes, and what is
+    /// fetched is compiled and run — so anyone on the network path chose what
+    /// the build ran. A transitive manifest could name one, which meant the
+    /// project being built never agreed to it and could not refuse.
+    #[test]
+    fn transports_that_authenticate_nothing_are_refused() {
+        for url in ["http://internal.example/repo.git", "git://example.com/repo.git"] {
+            let error = check_url(url).expect_err("should be refused");
+            assert!(
+                error.contains("no authentication"),
+                "`{}` should be refused for its transport, said: {}",
+                url,
+                error
+            );
+        }
     }
 
     #[test]

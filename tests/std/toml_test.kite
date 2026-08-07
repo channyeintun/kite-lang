@@ -230,6 +230,17 @@ fn refusal_checks() -> [error] {
 
     let (_, no_eq) = toml.parse("k 1\n")
     out.push(test.failed(no_eq, "a missing `=` is an error"))
+
+    // A document does not get to choose how long the parser runs or how big an
+    // int it accumulates. Both of these used to end the process rather than
+    // the parse: the first overflowed an int, which traps uncatchably, and the
+    // second sized a loop the parser then ran to completion.
+    let (_, too_many_digits) = toml.parse("n = 99999999999999999999\n")
+    out.push(test.failed(too_many_digits, "an int too long to hold is an error, not a trap"))
+
+    let (_, huge_exponent) = toml.parse("x = 1e999999999999\n")
+    out.push(test.ok(huge_exponent, "an enormous exponent parses instead of hanging"))
+
     return out
 }
 

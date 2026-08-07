@@ -63,8 +63,16 @@ pub struct Loaded {
 #[derive(Default)]
 pub struct Loader {
     pub loaded: Vec<Loaded>,
-    /// Use-site spellings that are not the module's own name.
-    pub aliases: HashMap<String, String>,
+    /// Use-site spellings that are not the module's own name, keyed by the
+    /// module that wrote them.
+    ///
+    /// The key is `(declaring module, alias)`. It used to be just the alias,
+    /// in one flat table shared by the whole program — so `use leak as crypto`
+    /// written anywhere, including inside a dependency, rewrote `crypto.hash`
+    /// everywhere, including in the source of the program that trusted it. An
+    /// alias is a convenience for the file that writes it and has no business
+    /// being visible outside the module that does.
+    pub aliases: HashMap<(String, String), String>,
     /// Where a user module's files live, for resolving its own imports.
     roots: HashMap<String, PathBuf>,
     /// Dependencies from the package's `kite.toml`, by name. A `use` that
@@ -159,12 +167,15 @@ impl Loader {
         sources: &mut SourceMap,
         diags: &mut DiagBag,
     ) {
+        // Which module's files these `use` lines are in. The entry file is
+        // `""`, matching how its items are recorded.
+        let owner = stack.last().cloned().unwrap_or_default();
         for u in &file.uses {
             let segments: Vec<&str> = u.path.iter().map(|s| s.name.as_str()).collect();
             let name = (*segments.last().expect("a use path is never empty")).to_string();
             if let Some(alias) = &u.alias {
                 if alias.name != name {
-                    self.aliases.insert(alias.name.clone(), name.clone());
+                    self.aliases.insert((owner.clone(), alias.name.clone()), name.clone());
                 }
             }
             if stack.contains(&name) {
@@ -200,6 +211,33 @@ impl Loader {
         diags: &mut DiagBag,
     ) {
         let is_std = segments.first() == Some(&"std");
+
+        // A module is identified by the last segment of its path, so `use
+        // crypto` and `use std/crypto` both produce a module called `crypto`
+        // and the `seen` check above keeps whichever arrived first. A
+        // dependency shipping its own `crypto` directory, reached before the
+        // entry file's `use std/crypto` in depth-first order, therefore became
+        // the program's `crypto` — every `crypto.hash` in the trusting
+        // program's own source bound to it, with nothing reported.
+        //
+        // Rather than make `std` part of every module's identity, which is the
+        // qualification prefix threaded through the whole compiler, the
+        // standard library's names are simply its own.
+        if !is_std && std_module(name).is_some() {
+            diags.push(
+                Diagnostic::error(
+                    codes::E0403,
+                    format!("`{}` is the name of a standard library module", name),
+                )
+                .with_primary(span, "this name belongs to the standard library")
+                .with_note(format!(
+                    "`use std/{}` is that module; rename this one so the two cannot be confused",
+                    name
+                )),
+            );
+            return;
+        }
+
         let mut files = Vec::new();
         let mut own_dir: Option<PathBuf> = dir.map(|d| d.to_path_buf());
 

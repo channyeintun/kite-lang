@@ -37,9 +37,21 @@ struct Text {
 
 // ---- parsing ---------------------------------------------------------------
 
+/// How deeply one document may nest.
+///
+/// A JSON document says how deep it is, and the parser recurses once per
+/// level, so without a ceiling the document chooses how much native stack to
+/// consume — and running out of it is a trap, which takes the whole module
+/// down rather than failing the one parse. RFC 8259 leaves the limit to the
+/// implementation; this is deeper than real documents go and shallower than
+/// anything that threatens the stack.
+fn max_depth() -> int {
+    return 128
+}
+
 /// The value a document holds, or an error saying where it went wrong.
 pub fn parse(input: str) -> (Json, error) {
-    let (step, err) = parse_value(input, skip_space(input, 0))
+    let (step, err) = parse_value(input, skip_space(input, 0), 0)
     check err
     let end = skip_space(input, step.next)
     if end < input.len() {
@@ -48,16 +60,22 @@ pub fn parse(input: str) -> (Json, error) {
     return step.value, nil
 }
 
-fn parse_value(input: str, at: int) -> (Step, error) {
+fn parse_value(input: str, at: int, depth: int) -> (Step, error) {
     if at >= input.len() {
         return _, errors.new("json: unexpected end of input")
     }
     let c = input.slice(at, at + 1)
     if c == "{" {
-        return parse_object(input, at)
+        if depth >= max_depth() {
+            return _, errors.new("json: nested deeper than \(max_depth()) at \(at)")
+        }
+        return parse_object(input, at, depth + 1)
     }
     if c == "[" {
-        return parse_array(input, at)
+        if depth >= max_depth() {
+            return _, errors.new("json: nested deeper than \(max_depth()) at \(at)")
+        }
+        return parse_array(input, at, depth + 1)
     }
     if c == "\"" {
         let (text, err) = parse_string(input, at)
@@ -87,7 +105,7 @@ fn keyword(input: str, at: int, word: str, value: Json) -> (Step, error) {
     return Step{ value: value, next: end }, nil
 }
 
-fn parse_object(input: str, at: int) -> (Step, error) {
+fn parse_object(input: str, at: int, depth: int) -> (Step, error) {
     var entries: { str: Json } = { }
     var i = skip_space(input, at + 1)
     if peek(input, i) == "}" {
@@ -100,7 +118,7 @@ fn parse_object(input: str, at: int) -> (Step, error) {
         if peek(input, i) != ":" {
             return _, errors.new("json: expected `:` at \(i)")
         }
-        let (value, verr) = parse_value(input, skip_space(input, i + 1))
+        let (value, verr) = parse_value(input, skip_space(input, i + 1), depth)
         check verr
         entries[key.text] = value.value
         i = skip_space(input, value.next)
@@ -116,14 +134,14 @@ fn parse_object(input: str, at: int) -> (Step, error) {
     }
 }
 
-fn parse_array(input: str, at: int) -> (Step, error) {
+fn parse_array(input: str, at: int, depth: int) -> (Step, error) {
     var items: [Json] = []
     var i = skip_space(input, at + 1)
     if peek(input, i) == "]" {
         return Step{ value: Json.Array(items), next: i + 1 }, nil
     }
     for {
-        let (step, err) = parse_value(input, i)
+        let (step, err) = parse_value(input, i, depth)
         check err
         items.push(step.value)
         i = skip_space(input, step.next)
@@ -145,12 +163,25 @@ fn parse_string(input: str, at: int) -> (Text, error) {
     }
     var out = ""
     var i = at + 1
+    // Where the current run of ordinary characters began.
+    //
+    // A run is copied with one `slice` rather than a character at a time.
+    // Appending each character in turn built every prefix of the answer as a
+    // separate string — and on the wasm target every string a program derives
+    // is interned into a table that is never reclaimed, so decoding an
+    // n-character value retained n strings totalling n²/2 characters, for the
+    // life of the process. A few hundred KB of JSON was enough to exhaust the
+    // heap of a server that was otherwise idle.
+    var run = i
     for i < input.len() {
-        let c = input.slice(i, i + 1)
-        if c == "\"" {
-            return Text{ text: out, next: i + 1 }, nil
+        let c = input.code_at(i)
+        // `"` ends the string.
+        if c == 34 {
+            return Text{ text: out + input.slice(run, i), next: i + 1 }, nil
         }
-        if c == "\\" {
+        // `\` ends the run: what follows is not itself.
+        if c == 92 {
+            out = out + input.slice(run, i)
             let e = peek(input, i + 1)
             if e == "n" {
                 out = out + "\n"
@@ -170,8 +201,8 @@ fn parse_string(input: str, at: int) -> (Text, error) {
                 }
             }
             i = i + 2
+            run = i
         } else {
-            out = out + c
             i = i + 1
         }
     }
@@ -240,17 +271,33 @@ fn exponent(input: str, at: int) -> (float, int) {
     if sign == "+" {
         i = i + 1
     }
+    // The digits are the document's, and so is their count. Accumulating them
+    // unchecked overflows the int and traps — which is not catchable, so a
+    // handful of bytes would end the process rather than the parse. Stop
+    // accumulating once the value is already past anything a float can mean,
+    // but keep consuming digits so `i` still lands after the exponent.
     var power = 0
     for i < input.len() {
         let d = digit(peek(input, i))
         if d < 0 {
             break
         }
-        power = power * 10 + d
+        if power <= 9999 {
+            power = power * 10 + d
+        }
         i = i + 1
     }
+    // A float reaches infinity a little past 1e308 and zero a little past
+    // 1e-324, and stays there. Beyond that the trip count changes nothing
+    // about the answer, so bounding it costs no accuracy — and leaving it
+    // unbounded let a twelve-byte document spin the scheduler forever, since
+    // this loop has no `task.yield()` in it.
+    var steps = power
+    if steps > 400 {
+        steps = 400
+    }
     var scale = 1.0
-    for n in 0..power {
+    for n in 0..steps {
         if negative {
             scale = scale / 10.0
         } else {

@@ -1088,7 +1088,7 @@ free when the platform allows it.
 | `kitec doc` | ✅ the reference, from `///` comments, with signatures read from the parse |
 | `kitec bundle` | ✅ one executable that needs nothing installed |
 | `--explain` | ✅ |
-| `kitec pkg` | ✅ manifest, path and git dependencies, semver resolution across the graph, and a lockfile of content hashes |
+| `kitec pkg` | ✅ manifest, path and git dependencies over `https`/`ssh`, semver resolution across the graph, and a lockfile of content hashes that is verified rather than merely written — a dependency whose bytes moved fails the command unless `--update` says otherwise |
 
 The formatter works on **tokens**, not the tree: a tree has dropped the
 comments and the blank lines a formatter must keep. It decides indentation,

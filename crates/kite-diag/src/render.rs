@@ -19,7 +19,52 @@ struct Placed<'a> {
     message: &'a str,
 }
 
+/// Render a diagnostic for a terminal.
+///
+/// The whole result goes through [`tame`] on the way out, rather than each
+/// place that quotes source doing it individually — a diagnostic quotes the
+/// line it is about, names the character it choked on, and echoes identifiers,
+/// and every one of those came from a file. Sanitising at the one boundary is
+/// what makes that exhaustive instead of a list to keep up to date.
 pub fn render(d: &Diagnostic, sources: &SourceMap) -> String {
+    tame(&render_raw(d, sources))
+}
+
+/// Control characters, made visible.
+///
+/// The bytes of a source line are chosen by whoever wrote the file — a
+/// vendored dependency, an attached repro, a contributor's branch — and this
+/// output goes to a terminal. Written verbatim, `ESC [` is not text: it moves
+/// the cursor, erases what was already printed and repaints it, so the author
+/// of a file decides what the developer compiling it sees. A build that failed
+/// can be made to look like one that passed. On terminals honouring OSC 52 the
+/// same bytes reach the clipboard.
+///
+/// Newline and tab are kept: the layout is built from them, and neither can
+/// overwrite what is already on screen. Everything else in C0, DEL and C1
+/// becomes a visible escape — the same treatment the language server's JSON
+/// writer has always applied on its side of the wire.
+fn tame(text: &str) -> String {
+    let needs = text
+        .chars()
+        .any(|c| c != '\n' && c != '\t' && (c.is_control() || ('\u{80}'..='\u{9f}').contains(&c)));
+    if !needs {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c == '\n' || c == '\t' {
+            out.push(c);
+        } else if c.is_control() || ('\u{80}'..='\u{9f}').contains(&c) {
+            let _ = write!(out, "\\u{{{:02x}}}", c as u32);
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn render_raw(d: &Diagnostic, sources: &SourceMap) -> String {
     let mut out = String::new();
 
     // ---- header -----------------------------------------------------------

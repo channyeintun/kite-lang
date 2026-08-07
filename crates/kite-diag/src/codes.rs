@@ -72,6 +72,16 @@ codes! {
          compiler was checking when there was no `i8` for the value to \
          overflow.";
 
+    E0006 = "E0006", "string interpolation nested too deeply",
+        "A string may hold an interpolation, which may hold a string, which \
+         may hold another interpolation. The scanner follows that by calling \
+         itself, so the nesting in the file is stack depth in the compiler, \
+         and three bytes of source buy a level.\n\n\
+         Running out of stack aborts the process rather than reporting \
+         anything — which would mean a file that kills the language server the \
+         moment it is opened — so there is a ceiling instead. No program \
+         written on purpose comes near it.";
+
     E0005 = "E0005", "block comments are not supported",
         "Kite has line comments (//) and doc comments (///) only. Nested block \
          comments are a recurring source of lexer bugs and every editor has \
@@ -83,6 +93,16 @@ codes! {
 
     E0101 = "E0101", "unclosed delimiter",
         "A bracket, brace, or parenthesis was opened and never closed.";
+
+    E0102 = "E0102", "expression nested too deeply",
+        "The parser is recursive descent, so how deeply an expression, type, \
+         pattern or block nests in the file is how deep the native stack goes \
+         in the compiler.\n\n\
+         Source is untrusted input — the language server compiles a document \
+         the moment it is opened — and exhausting the stack is a guard-page \
+         abort, not a panic, so nothing can catch it. A ceiling turns that \
+         into this diagnostic. The bytecode VM has bounded call depth for the \
+         same reason; this is the same rule applied to the front end.";
 
     E0110 = "E0110", "use of possibly-uninitialised binding",
         "A `let` binding may be assigned after declaration, but only if the \
@@ -265,6 +285,18 @@ codes! {
     E0401 = "E0401", "private item",
         "This item is not marked `pub`, so it is visible only within its own \
          module.";
+
+    E0403 = "E0403", "module name is reserved by the standard library",
+        "A module is known by the last segment of its `use` path, so `use \
+         std/crypto` and `use crypto` both name a module called `crypto` — and \
+         whichever was loaded first won, silently, for the whole program.\n\n\
+         That made the standard library replaceable by any module that got \
+         there first: a dependency shipping a `crypto` directory, imported \
+         anywhere before the first `use std/crypto`, took over every \
+         `crypto.hash` call in the program with no diagnostic. Since `std` is \
+         not part of a module's identity, nothing afterwards could tell the \
+         two apart.\n\n\
+         So the standard library's names belong to it. Rename the module.";
 
     E0402 = "E0402", "module cycle",
         "Modules may not depend on each other cyclically. Extract the shared \

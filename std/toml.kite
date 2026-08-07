@@ -32,6 +32,7 @@
 // stated here so nobody discovers it from a wrong answer.
 
 use std/errors
+use std/math
 
 /// A TOML value.
 ///
@@ -1129,14 +1130,26 @@ fn float_of(body: str) -> (float, error) {
 }
 
 fn power_of_ten(exp: int) -> float {
+    // A float reaches infinity a little past 1e308 and zero a little past
+    // 1e-324, and stays there, so beyond that the trip count changes nothing
+    // about the answer — clamping it costs no accuracy. Left unclamped, the
+    // document chose how long this ran, and the scheduler is cooperative:
+    // `x = 1e2000000000` never handed the loop back.
+    var steps = exp
+    if steps < 0 {
+        steps = 0 - steps
+    }
+    if steps > 400 {
+        steps = 400
+    }
     var out = 1.0
     if exp >= 0 {
-        for i in 0..exp {
+        for i in 0..steps {
             out = out * 10.0
         }
         return out
     }
-    for i in 0..(0 - exp) {
+    for i in 0..steps {
         out = out / 10.0
     }
     return out
@@ -1166,6 +1179,14 @@ fn int_of(body: str) -> (int, error) {
         let digit = body.code_at(i) - 0x30
         if digit < 0 || digit > 9 {
             return _, errors.new("toml: `\(body)` is not a number")
+        }
+        // The digits are the document's, and so is how many there are. An
+        // `int` multiply that overflows is a trap, and a trap is not
+        // catchable — so without this the function that exists to *return* a
+        // parse error would instead end the process. Rearranged to stay in
+        // range: computing the product to find out would be the trap.
+        if value > (math.max_int() - digit) / 10 {
+            return _, errors.new("toml: `\(body)` does not fit in an int")
         }
         value = value * 10 + digit
         i = i + 1

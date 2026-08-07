@@ -1402,6 +1402,18 @@ Imports are always qualified by module name at the use site. There is no
 wildcard import and no way to bring a bare name into scope. `config.load` always
 tells you where `load` came from.
 
+**An alias belongs to the module that writes it.** `use std/json as j` makes
+`j` mean `json` in that module and nowhere else. Aliases used to share one
+program-wide table, so `use leak as crypto` written anywhere — including inside
+a dependency — rewrote every `crypto.…` call in every other module, silently
+and with no diagnostic. An alias is a convenience for the file that writes it.
+
+**The standard library's module names belong to it.** A module is known by the
+last segment of its path, so `use crypto` and `use std/crypto` would both name
+a module called `crypto` and whichever loaded first would win for the whole
+program — which made the standard library replaceable by any dependency that
+got there first. A non-`std` module may not take one of its names (`E0403`).
+
 ### 13.2 Manifest
 
 ```toml
@@ -1417,10 +1429,21 @@ native = { entry = "src/main.kite" }
 markdown = { git = "https://github.com/example/kite-markdown", tag = "v1.2.0" }
 ```
 
-Dependencies are resolved to a lockfile with content hashes. There is no
-post-install script mechanism, no transitive-dependency hoisting, and no way for
-a dependency to execute code at build time — the supply-chain attack surface that
-has repeatedly compromised npm is absent by construction rather than by policy.
+Dependencies are resolved to a lockfile with content hashes, and the lockfile is
+**checked, not just written**: a dependency whose contents changed under the
+same version — a moved tag, a re-pushed repository — makes `kitec pkg` fail
+rather than quietly recording the new bytes. `--update` accepts a change, which
+is a decision someone makes rather than something a build does on its way past.
+
+Dependency URLs are fetched over `https://` or `ssh://` only. `http://` and
+`git://` authenticate neither the host nor the bytes, and what is fetched is
+compiled and run — and because a *transitive* manifest can name a URL, a
+project could otherwise be opted into cleartext by a dependency it never chose.
+
+There is no post-install script mechanism, no transitive-dependency hoisting,
+and no way for a dependency to execute code at build time — the supply-chain
+attack surface that has repeatedly compromised npm is absent by construction
+rather than by policy.
 
 ### 13.3 Cycles
 

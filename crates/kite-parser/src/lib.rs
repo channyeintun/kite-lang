@@ -105,6 +105,8 @@ pub fn parse(file: FileId, src: &str, tokens: &[Token], diags: &mut DiagBag) -> 
         no_struct_literal: 0,
         in_hole: false,
         split_gt: false,
+        depth: 0,
+        depth_reported: false,
     };
     p.parse_source_file()
 }
@@ -130,9 +132,72 @@ struct Parser<'a> {
     /// Half of a `>>` has been consumed as the `>` closing a type argument
     /// list; the other half is still to come.
     split_gt: bool,
+    /// How many levels of recursive descent are currently on the stack.
+    ///
+    /// Descent recursion means the nesting depth of the *file* is the native
+    /// stack depth of this process, and a file is untrusted input: the
+    /// language server compiles whatever a document holds the moment it is
+    /// opened. Running out of stack is a guard-page abort — not a panic, so
+    /// nothing could catch it even if anything tried — which takes the server
+    /// down for the whole editor session.
+    ///
+    /// The VM has had the same protection since it was written
+    /// (`kite_vm::MAX_FRAMES`); this is the front end catching up.
+    depth: u32,
+    /// Whether the ceiling has already been reported, so one pathological file
+    /// yields one diagnostic rather than one per level on the way out.
+    depth_reported: bool,
 }
 
+/// How deep recursive descent may go before it gives up.
+///
+/// One level of source nesting costs several native frames — `parse_expr_bp`,
+/// `parse_prefix`, `parse_primary`, `parse_expr` — and an unoptimised build's
+/// frames are several times an optimised one's. The ceiling has to hold for
+/// the *debug* build, since that is what `cargo test` and a locally built
+/// language server run: a limit that only fits in release is not a limit.
+///
+/// Measured rather than guessed: at 8 MiB of main-thread stack, a debug
+/// `kitec` survives well past this and dies somewhere under a thousand. This
+/// leaves most of the stack unused, which is the point — the passes that walk
+/// the AST afterwards recurse over the same nesting.
+///
+/// Still far past any program written on purpose. The standard library's
+/// deepest expression is nowhere near it.
+const MAX_DEPTH: u32 = 256;
+
 impl<'a> Parser<'a> {
+    // ---- recursion ---------------------------------------------------------
+
+    /// Take one level of descent, or `None` if that would be too deep.
+    ///
+    /// Every caller of this already propagates `None` as "this did not parse",
+    /// so the ceiling arrives at the user as an ordinary syntax error rather
+    /// than as a dead process. Each guarded function pairs this with a
+    /// `self.depth -= 1` on the way out.
+    fn deeper(&mut self) -> Option<()> {
+        if self.depth >= MAX_DEPTH {
+            self.too_deep();
+            return None;
+        }
+        self.depth += 1;
+        Some(())
+    }
+
+    /// Report the depth ceiling, once.
+    fn too_deep(&mut self) {
+        if self.depth_reported {
+            return;
+        }
+        self.depth_reported = true;
+        let span = self.tokens[self.pos.min(self.tokens.len() - 1)].span;
+        self.diags.push(
+            Diagnostic::error(codes::E0102, "expression nested too deeply")
+                .with_primary(span, "the nesting here is deeper than the parser will go")
+                .with_note(&format!("at most {MAX_DEPTH} levels may nest")),
+        );
+    }
+
     // ---- cursor -----------------------------------------------------------
 
     fn peek(&self) -> T {
@@ -896,6 +961,13 @@ impl<'a> Parser<'a> {
     // ---- types ------------------------------------------------------------
 
     fn parse_type(&mut self) -> Option<Type> {
+        self.deeper()?;
+        let out = self.parse_type_inner();
+        self.depth -= 1;
+        out
+    }
+
+    fn parse_type_inner(&mut self) -> Option<Type> {
         let start = self.span();
         match self.peek() {
             T::LBracket => {
@@ -995,6 +1067,13 @@ impl<'a> Parser<'a> {
     // ---- blocks and statements -------------------------------------------
 
     fn parse_block(&mut self) -> Option<Block> {
+        self.deeper()?;
+        let out = self.parse_block_inner();
+        self.depth -= 1;
+        out
+    }
+
+    fn parse_block_inner(&mut self) -> Option<Block> {
         let start = self.span();
         if !self.at(T::LBrace) {
             self.error_expected("`{`");
@@ -1337,6 +1416,13 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_pattern(&mut self) -> Option<Pattern> {
+        self.deeper()?;
+        let out = self.parse_pattern_inner();
+        self.depth -= 1;
+        out
+    }
+
+    fn parse_pattern_inner(&mut self) -> Option<Pattern> {
         let start = self.span();
         let first = self.parse_single_pattern()?;
         if !self.at(T::Pipe) {
@@ -1535,6 +1621,13 @@ impl<'a> Parser<'a> {
     /// Pratt loop. `min_bp` is the binding power the caller has already
     /// committed to; an operator binds here only if its left power exceeds it.
     fn parse_expr_bp(&mut self, min_bp: u8) -> Option<Expr> {
+        self.deeper()?;
+        let out = self.parse_expr_bp_inner(min_bp);
+        self.depth -= 1;
+        out
+    }
+
+    fn parse_expr_bp_inner(&mut self, min_bp: u8) -> Option<Expr> {
         let mut lhs = self.parse_prefix()?;
 
         #[allow(clippy::while_let_loop)]
@@ -1885,7 +1978,23 @@ impl<'a> Parser<'a> {
         if parts.is_empty() {
             return None;
         }
-        let text_end = bytes.len().saturating_sub(open);
+        // The closing delimiter comes off only when it is actually there.
+        //
+        // The lexer emits a `Str` token for an *unterminated* literal too — it
+        // reports E0001 and carries on, and type checking still runs, because
+        // the driver does not bail until after it. For one of those, taking
+        // the delimiter's width off the end lands wherever it lands: inside
+        // the final character, when that character is multi-byte. The span
+        // then reached `span_text`, which sliced a `str` at a non-boundary
+        // index and panicked — killing the language server for the whole
+        // editor session over one malformed line.
+        let closed = raw.len() > open && raw.ends_with(&raw[..open]);
+        let mut text_end = if closed { bytes.len() - open } else { bytes.len() };
+        // Independently of the above: a span that is not on a character
+        // boundary is never correct, whatever produced it.
+        while text_end > run && !raw.is_char_boundary(text_end) {
+            text_end -= 1;
+        }
         if run < text_end {
             parts.push(StrPart::Text(Span::new(
                 self.file,
@@ -1909,6 +2018,11 @@ impl<'a> Parser<'a> {
             no_struct_literal: 0,
             in_hole: true,
             split_gt: false,
+            // A hole holding a string holding a hole is still this process's
+            // stack, so the sub-parser continues the count rather than
+            // starting a fresh one.
+            depth: self.depth,
+            depth_reported: self.depth_reported,
         };
         let span = Span::new(self.file, start as u32, end as u32);
         match sub.parse_expr() {

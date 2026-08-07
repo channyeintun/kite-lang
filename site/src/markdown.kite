@@ -70,6 +70,67 @@ fn hex_byte(c: int) -> str {
     return digits.slice(c / 16, c / 16 + 1) + digits.slice(c % 16, c % 16 + 1)
 }
 
+/// Text as an HTML *attribute* value.
+///
+/// `highlight.escape` handles a text node, where `&`, `<` and `>` are the
+/// whole story. Inside quotes they are not: a `"` ends the attribute, and
+/// everything after it is read as markup rather than as a value. That is the
+/// entire mechanism by which an `href` grows an `onmouseover`, so an attribute
+/// gets its own escape rather than borrowing the one next door.
+fn escape_attr(text: str) -> str {
+    var out = ""
+    for i in 0..text.len() {
+        let c = text.slice(i, i + 1)
+        if c == "&" {
+            out = out + "&amp;"
+        } else if c == "<" {
+            out = out + "&lt;"
+        } else if c == ">" {
+            out = out + "&gt;"
+        } else if c == "\"" {
+            out = out + "&quot;"
+        } else if c == "'" {
+            out = out + "&#39;"
+        } else {
+            out = out + c
+        }
+    }
+    return out
+}
+
+/// Whether this site will link to a URL's scheme.
+///
+/// `javascript:` in an `href` runs when the link is clicked, and no document
+/// this renderer is given has any business asking for that. The common cases
+/// carry no scheme at all — a relative path, an absolute path, a bare `#`
+/// fragment — and those are what the loop below is really recognising.
+fn allowed_scheme(href: str) -> bool {
+    // A scheme runs to the first `:` and may not contain `/`, `?` or `#`, so
+    // `docs/a:b` is a path with a colon in it and `mailto:x` is a scheme.
+    for i in 0..href.len() {
+        let c = href.code_at(i)
+        if c == 58 {
+            let scheme = lower(href.slice(0, i))
+            return scheme == "http" || scheme == "https" || scheme == "mailto"
+        }
+        if c == 47 || c == 63 || c == 35 {
+            return true
+        }
+    }
+    return true
+}
+
+/// A link target, ready to sit inside `href="…"`.
+///
+/// Two things have to be true of it and neither was: that it cannot leave the
+/// attribute, and that clicking it cannot run anything.
+fn link_href(href: str) -> str {
+    if !allowed_scheme(href) {
+        return "#"
+    }
+    return escape_attr(link_target(href))
+}
+
 /// Where a link inside the site should point.
 ///
 /// A `.md` target is a document this site renders, and every rendered document
@@ -183,7 +244,7 @@ fn spans(text: str) -> str {
                 if close > 0 {
                     let label = text.slice(i + 1, shut)
                     let href = text.slice(shut + 2, close)
-                    out = out + "<a href=\"\(link_target(href))\">\(spans(label))</a>"
+                    out = out + "<a href=\"\(link_href(href))\">\(spans(label))</a>"
                     i = close + 1
                     continue
                 }

@@ -210,6 +210,28 @@ impl Compilation {
         }
     }
 
+    /// Run the compiled program with **no host**, writing its output to `out`.
+    ///
+    /// For running a program in order to look at what it did, rather than to
+    /// let it do it. `@host("fs")` traps here instead of resolving, naming the
+    /// function it wanted — so a program that reads a file says so and stops,
+    /// rather than reading it.
+    ///
+    /// That distinction is the whole reason this exists next to [`run`]. The
+    /// accessibility audit compiles a file the user is *reviewing* and runs it
+    /// to capture what it draws; drawing goes to `out`, so nothing it audits
+    /// needs a host. Running it with one meant `kitec check --a11y`, a
+    /// subcommand under `check`, would write any file the reviewed program
+    /// named, with the reviewer's authority.
+    ///
+    /// [`run`]: Compilation::run
+    pub fn run_without_host(&self, out: &mut dyn Write) -> Result<bool, Trap> {
+        match &self.chunk {
+            None => Ok(false),
+            Some(c) => kite_vm::run_with_host(c, out, None).map(|_| true),
+        }
+    }
+
     /// The tests this program declares, in source order.
     ///
     /// A test is a function whose name starts with `test_`. There is no

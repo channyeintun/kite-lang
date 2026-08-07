@@ -49,7 +49,13 @@ jobs:
           # compiler is exactly the artefact where "trusting trust" is not a
           # hypothetical.
           SOURCE_DATE_EPOCH: "0"
-          RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/kite -C debuginfo=0"
+          # `-C force-frame-pointers=yes` is repeated from `.cargo/config.toml`
+          # and is not optional here. `RUSTFLAGS` in the environment *replaces*
+          # `[build] rustflags` rather than adding to it, so setting this
+          # variable at all drops the flag the collector's stack walk needs —
+          # and the released binaries were the only build that set it, which is
+          # why `cargo test` never saw the difference.
+          RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/kite -C debuginfo=0 -C force-frame-pointers=yes"
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --locked -p kitec -p kite-lsp --target ${{ matrix.target }}
       - name: package

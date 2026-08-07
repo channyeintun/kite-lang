@@ -122,6 +122,32 @@ function intern(s) {{
 // The string a `str` value stands for.
 const S = (i) => STRINGS[i];
 
+// Whether a string's code-point indices are its UTF-16 indices.
+//
+// A Kite `str` is indexed by code point, so every operation taking an index
+// spread the whole string — `[...s]` — to find one character. That is O(n) per
+// call whatever the range, which made scanning a document character by
+// character quadratic in its length before anything was even built.
+//
+// A string is "narrow" when it has one UTF-16 code unit per code point, which
+// is exactly when the two index spaces agree: only a surrogate pair makes them
+// differ, and comparing the two lengths is precisely that question. So the
+// fast paths below are not an approximation of the spread, they equal it.
+//
+// Spread once per string and cached, because a `str` is immutable and its
+// index identifies it. What is kept is one boolean per string, not a second
+// copy of the text.
+const NARROW = new Map();
+const narrow = (i) => {{
+  let known = NARROW.get(i);
+  if (known === undefined) {{
+    const s = STRINGS[i];
+    known = s.length === [...s].length;
+    NARROW.set(i, known);
+  }}
+  return known;
+}};
+
 /// A `str` for an exported function to take.
 ///
 /// A `str` is an index into the table above, not a pointer and not a JavaScript
@@ -155,6 +181,17 @@ export function text(i) {{
 // can count code points.
 const intern = (s) => s;
 const S = (s) => s;
+
+// Whether a string's code-point indices are its UTF-16 indices — true unless
+// it holds a surrogate pair. The index-keyed cache the table representation
+// uses has no counterpart here, because there are no indices: a `str` is the
+// string, and a `Map` keyed by it would hold every string the program ever
+// touched, which is the one thing this representation exists to avoid.
+//
+// So the spread happens per call, exactly as it did before there was a fast
+// path — this decides which of two equal answers to compute, and never costs
+// more than the one it replaces.
+const narrow = (s) => s.length === [...s].length;
 
 /// A `str` for an exported function to take. Here that is the string itself,
 /// and this exists so a caller need not know which representation it got.
@@ -1126,6 +1163,12 @@ function imports() {{
       // Kite counts characters, JavaScript counts UTF-16 code units, so each
       // of these goes through `[...s]` rather than indexing the string.
       str_slice: (i, from, to) => {{
+        if (narrow(i)) {{
+          const s = S(i);
+          const a = Math.min(Math.max(Number(from), 0), s.length);
+          const b = Math.min(Math.max(Number(to), a), s.length);
+          return intern(s.slice(a, b));
+        }}
         const cs = [...S(i)];
         const a = Math.min(Math.max(Number(from), 0), cs.length);
         const b = Math.min(Math.max(Number(to), a), cs.length);
@@ -1140,6 +1183,11 @@ function imports() {{
       // pair would answer with half of one, and the bytecode VM answers with
       // the whole character.
       str_code_at: (i, at) => {{
+        if (narrow(i)) {{
+          const s = S(i);
+          const n = Number(at);
+          return n < 0 || n >= s.length ? -1n : BigInt(s.charCodeAt(n));
+        }}
         const c = [...S(i)][Number(at)];
         return c === undefined ? -1n : BigInt(c.codePointAt(0));
       }},

@@ -21,5 +21,10 @@
 # walk is bounded and validated so a broken chain loses a root rather than
 # scribbling on the heap — but a lost root is a use-after-free, so this is a
 # requirement rather than an optimisation.
+#
+# Which is why `crates/kite-rt/build.rs` refuses to build without it on the
+# targets where it is not implied by the ABI. This file is not the guarantee —
+# a `RUSTFLAGS` in the environment replaces these flags rather than adding to
+# them, and that is how the release workflow shipped binaries without it.
 [build]
 rustflags = ["-C", "force-frame-pointers=yes"]

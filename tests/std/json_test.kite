@@ -60,7 +60,43 @@ fn checks() -> [error] {
 
     out.push(test.equal_str(json.pretty(parsed("{\"a\":[1]}")), "{\n  \"a\": [\n    1\n  ]\n}", "pretty"))
 
+    // A document does not get to choose how long the parser runs, how big an
+    // int it accumulates, or how much stack it uses. Each of these three used
+    // to be attacker-chosen: the first spun a loop the document sized, the
+    // second overflowed an int and trapped, and the third recursed until the
+    // stack ran out. That every one of them returns at all is the assertion.
+    out.push(test.equal_str(roundtrip("1e-999999999999"), "0", "an exponent past the float range underflows to zero"))
+
+    let (huge, huge_err) = json.parse("1e999999999999")
+    out.push(test.ok(huge_err, "an enormous exponent parses instead of hanging"))
+
+    let (wide, wide_err) = json.parse("1e99999999999999999999")
+    out.push(test.ok(wide_err, "more exponent digits than an int holds does not overflow"))
+
+    let (too_deep, too_deep_err) = json.parse(nested(max_nesting() + 20))
+    out.push(test.failed(too_deep_err, "nesting past the ceiling is an error, not a crash"))
+
+    let (shallow, shallow_err) = json.parse(nested(max_nesting() - 1))
+    out.push(test.ok(shallow_err, "nesting just under the ceiling still parses"))
+
     return out
+}
+
+/// The ceiling `std/json` enforces, repeated here so the two tests below sit
+/// either side of it.
+fn max_nesting() -> int {
+    return 128
+}
+
+/// `[[[…]]]`, nested `depth` deep.
+fn nested(depth: int) -> str {
+    var open = ""
+    var close = ""
+    for n in 0..depth {
+        open = open + "["
+        close = close + "]"
+    }
+    return open + close
 }
 
 fn main() {

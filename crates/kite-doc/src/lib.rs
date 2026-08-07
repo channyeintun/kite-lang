@@ -52,7 +52,19 @@ pub fn extract(module: &str, src: &str) -> Docs {
     let ast = kite_parser::parse(file, src, &tokens, &mut diags);
 
     let reader = Reader { src, comments: &comments };
-    let first_item = ast.items.iter().map(|i| i.span().start).min().unwrap_or(u32::MAX);
+    // With no items, everything in the file is above the first one — so the
+    // edge is the end of the source, not `u32::MAX`. The sentinel was used as
+    // a slice bound further down, so a file holding comments and no
+    // declarations (a stub, or a header plus `use` lines, which parse into
+    // `file.uses` rather than `file.items`) indexed the source at 4 GiB and
+    // panicked. That is an abort in the wasm build and across the `extern "C"`
+    // boundary the playground calls through.
+    let first_item = ast
+        .items
+        .iter()
+        .map(|i| i.span().start)
+        .min()
+        .unwrap_or(src.len() as u32);
     let overview = reader.overview(first_item);
 
     let mut entries = Vec::new();
@@ -100,7 +112,7 @@ impl Reader<'_> {
                 continue;
             }
             if let Some(end) = previous_end {
-                let between = &self.src[end as usize..c.span.start as usize];
+                let between = self.between(end, c.span.start);
                 if between.matches('\n').count() > 1 {
                     break;
                 }
@@ -109,6 +121,22 @@ impl Reader<'_> {
             previous_end = Some(c.span.end);
         }
         trim_block(&lines)
+    }
+
+    /// The source between two offsets, or `""` if they do not describe a range
+    /// inside it.
+    ///
+    /// Slicing a `str` by unvalidated `u32` offsets panics twice over — out of
+    /// bounds, and on an index that is not a character boundary — and this
+    /// runs inside a language server and a wasm module, where a panic is not a
+    /// diagnostic but the end of the process.
+    fn between(&self, lo: u32, hi: u32) -> &str {
+        let lo = lo as usize;
+        let hi = (hi as usize).min(self.src.len());
+        if lo > hi {
+            return "";
+        }
+        self.src.get(lo..hi).unwrap_or("")
     }
 
     /// The run of comment lines immediately above `at`, with nothing but
@@ -120,7 +148,10 @@ impl Reader<'_> {
             if c.span.end > at {
                 continue;
             }
-            let between = &self.src[c.span.end as usize..edge as usize];
+            // Clamped rather than indexed directly: a span is a `u32` pair and
+            // this is the boundary where a bad one stops being a wrong answer
+            // and becomes a dead process.
+            let between = self.between(c.span.end, edge);
             // One line break separates a comment from what it documents; two
             // mean it was about something else.
             if between.matches('\n').count() > 1 || !between.trim().is_empty() {
@@ -224,7 +255,7 @@ impl Reader<'_> {
     }
 
     fn text(&self, span: Span) -> &str {
-        &self.src[span.start as usize..span.end as usize]
+        self.between(span.start, span.end)
     }
 }
 

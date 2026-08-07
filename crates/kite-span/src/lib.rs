@@ -161,24 +161,50 @@ impl SourceMap {
 
     /// The source text a span covers.
     pub fn snippet(&self, span: Span) -> &str {
-        &self.file(span.file).text[span.start as usize..span.end as usize]
+        clamped(&self.file(span.file).text, span.start, span.end)
     }
 
     /// The source text a span covers, from whichever file it belongs to.
     pub fn span_text(&self, span: Span) -> &str {
-        let text = self.text(span.file);
-        &text[span.start as usize..span.end as usize]
+        clamped(self.text(span.file), span.start, span.end)
     }
 
     /// The text of a file up to an offset. Used where a diagnostic needs to
     /// look backwards from a span, such as for the `pub` before a name.
     pub fn text_before(&self, span: Span) -> &str {
-        &self.text(span.file)[..span.start as usize]
+        clamped(self.text(span.file), 0, span.start)
     }
 
     pub fn line_col(&self, span: Span) -> LineCol {
         self.file(span.file).line_col(span.start)
     }
+}
+
+/// The `lo..hi` slice of `text`, clamped until it is one.
+///
+/// A `Span` is a pair of `u32`s that some earlier pass computed, and slicing a
+/// `str` panics two different ways when they are wrong: out of range, and — the
+/// one that actually happened — an index that falls inside a multi-byte
+/// character. These accessors are called from the type checker and the
+/// diagnostic renderer, which run inside `kite-lsp`, where a panic is not a
+/// failed request but the end of the session; and inside the playground's wasm
+/// module, where it traps the instance.
+///
+/// So a bad span costs a wrong-looking snippet rather than a dead process.
+/// Producing one is still a bug where it is produced.
+fn clamped(text: &str, lo: u32, hi: u32) -> &str {
+    let mut lo = (lo as usize).min(text.len());
+    let mut hi = (hi as usize).min(text.len());
+    if lo > hi {
+        return "";
+    }
+    while lo > 0 && !text.is_char_boundary(lo) {
+        lo -= 1;
+    }
+    while hi > lo && !text.is_char_boundary(hi) {
+        hi -= 1;
+    }
+    &text[lo..hi]
 }
 
 #[cfg(test)]

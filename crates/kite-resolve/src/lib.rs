@@ -423,7 +423,8 @@ pub struct Modules {
     pub of_item: Vec<String>,
     /// `use std/json as j` — the spelling at the use site, and the module it
     /// names.
-    pub aliases: HashMap<String, String>,
+    /// Keyed by `(declaring module, alias)`; see `Loader::aliases`.
+    pub aliases: HashMap<(String, String), String>,
 }
 
 impl Modules {
@@ -433,11 +434,19 @@ impl Modules {
 
     /// Rewrite an alias at the head of a dotted name: `j.decode` becomes
     /// `json.decode` when the file wrote `use std/json as j`.
-    pub fn canonical(&self, name: &str) -> String {
+    ///
+    /// `asking` is the module the name was *written* in, and only that
+    /// module's own aliases apply. Without it the table was global: an alias
+    /// in any loaded module — a dependency, or a dependency of a dependency —
+    /// rewrote the same spelling everywhere else. `use leak as crypto` in a
+    /// vendored package silently rebound the importing program's own
+    /// `crypto.hash(password)` to the package's function, with no diagnostic
+    /// and nothing changed in the program's source.
+    pub fn canonical(&self, asking: &str, name: &str) -> String {
         let Some((head, rest)) = name.split_once('.') else {
             return name.to_string();
         };
-        match self.aliases.get(head) {
+        match self.aliases.get(&(asking.to_string(), head.to_string())) {
             Some(module) => format!("{}.{}", module, rest),
             None => name.to_string(),
         }
@@ -549,7 +558,7 @@ impl ResolveMap {
     /// that the name is looked up as written, which is how the prelude and a
     /// qualified `task.all` both resolve.
     pub fn fn_by_name_in(&self, module: &str, name: &str) -> Option<u32> {
-        let name = self.modules.canonical(name);
+        let name = self.modules.canonical(module, name);
         self.find_fn(&qualify(module, &name))
             .or_else(|| self.find_fn(&name))
             // The prelude is last, so a program's own `take` wins — and the
@@ -567,7 +576,7 @@ impl ResolveMap {
     }
 
     pub fn type_by_name_in(&self, module: &str, name: &str) -> Option<u32> {
-        let name = self.modules.canonical(name);
+        let name = self.modules.canonical(module, name);
         self.find_type(&qualify(module, &name))
             .or_else(|| self.find_type(&name))
             .or_else(|| self.find_type(&qualify(PRELUDE, &name)))

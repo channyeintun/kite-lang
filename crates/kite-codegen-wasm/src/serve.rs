@@ -55,7 +55,28 @@ const SERVERS = [];
 // One entry per request that arrived and has not been answered. Kept apart
 // from the queue so that answering a request the program took, and taking the
 // next one, are two independent things.
-const REQUESTS = [];
+//
+// A `Map` rather than an array, because entries have to *leave*. An answered
+// request holds its body, its headers and the live `res`, and an array index
+// is never reclaimed — so a server that had served a million requests was
+// still holding all million of them. Deleting on answer is what makes the
+// memory proportional to what is in flight rather than to uptime.
+const REQUESTS = new Map();
+let NEXT_REQUEST = 0;
+
+// The largest body this adapter will accumulate before refusing, in bytes.
+//
+// The body arrives in chunks and was concatenated with no ceiling, so an
+// unauthenticated client streaming `Transfer-Encoding: chunked` chose how much
+// memory the process used, and the answer was "all of it". A limit belongs
+// here rather than in the program, because the program does not see the
+// request until the body is already whole.
+const MAX_BODY = 8 * 1024 * 1024;
+
+// A missing handle is a bug in the program, not a reason to end the process:
+// indexing `undefined` throws, and an uncaught throw unwinds through the Wasm
+// frame and takes the server with it.
+const requestOf = (handle) => REQUESTS.get(Number(handle));
 
 const headerLines = (headers) =>
   Object.entries(headers)
@@ -100,18 +121,34 @@ provide("net", {{
     try {{
       state.server = createServer((req, res) => {{
         let body = "";
-        req.on("data", (chunk) => {{ body += chunk; }});
+        let refused = false;
+        req.on("data", (chunk) => {{
+          if (refused) return;
+          body += chunk;
+          if (body.length > MAX_BODY) {{
+            // Refused here rather than handed on: the program is never told
+            // about this request, so there is nothing for it to answer, and
+            // the memory goes back now rather than when it gets around to it.
+            refused = true;
+            body = "";
+            res.writeHead(413, {{ "content-type": "text/plain; charset=utf-8" }});
+            res.end("request body too large\n");
+            req.destroy();
+          }}
+        }});
         req.on("end", () => {{
+          if (refused) return;
           // The socket is held open until the program answers. A server that
           // replied before its handler ran would be a different program.
-          const handle = REQUESTS.push({{
+          const handle = NEXT_REQUEST++;
+          REQUESTS.set(handle, {{
             method: req.method,
             path: req.url,
             body,
             headers: headerLines(req.headers),
             res,
             answered: false,
-          }}) - 1;
+          }});
           state.queue.push(handle);
         }});
       }});
@@ -147,13 +184,13 @@ provide("net", {{
     return handle === undefined ? -1n : BigInt(handle);
   }},
 
-  serve_method: (handle) => str(REQUESTS[Number(handle)].method),
-  serve_path: (handle) => str(REQUESTS[Number(handle)].path),
-  serve_body: (handle) => str(REQUESTS[Number(handle)].body),
-  serve_headers: (handle) => str(REQUESTS[Number(handle)].headers),
+  serve_method: (handle) => str(requestOf(handle) ? requestOf(handle).method : ""),
+  serve_path: (handle) => str(requestOf(handle) ? requestOf(handle).path : ""),
+  serve_body: (handle) => str(requestOf(handle) ? requestOf(handle).body : ""),
+  serve_headers: (handle) => str(requestOf(handle) ? requestOf(handle).headers : ""),
 
   serve_respond: (handle, status, body, headers) => {{
-    const request = REQUESTS[Number(handle)];
+    const request = requestOf(handle);
     // Answering twice is a bug in the program, not a thing to do quietly: the
     // second answer goes nowhere and this says so.
     if (!request || request.answered) return 0n;
@@ -170,9 +207,14 @@ provide("net", {{
     }} catch (e) {{
       request.res.writeHead(500, {{ "content-type": "text/plain; charset=utf-8" }});
       request.res.end("the handler produced a header this host will not send\n");
+      REQUESTS.delete(Number(handle));
       return 0n;
     }}
     request.res.end(text(body));
+    // Answered, so the body, the headers and the socket can go. Holding them
+    // for the life of the process is what made an ordinary stream of requests
+    // a memory leak.
+    REQUESTS.delete(Number(handle));
     return 1n;
   }},
 

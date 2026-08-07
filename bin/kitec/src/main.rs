@@ -32,9 +32,13 @@ OPTIONS:
     --native          with `run`, execute machine code under the JIT — no linker
     --js-strings      with `--emit wasm`, a `str` is a real JavaScript string
     --a11y            with `check`, audit what the program draws for labels,
-                      touch target sizes and contrast
+                      touch target sizes and contrast — this one runs the
+                      program, with no filesystem access
     --emit <stage>    check, ast, hir, mir, kbc, wasm, native
     --out <dir>       where `--emit wasm` and `--emit native` write artefacts
+    --update          with `pkg`, allow `kite.lock` to change; without it, a
+                      dependency whose bytes moved is an error rather than a
+                      new lockfile
     --explain <CODE>  explain a diagnostic code, e.g. --explain E0301
     --version
     --help
@@ -74,6 +78,7 @@ fn main() -> ExitCode {
     let mut include_private = false;
     let mut release = false;
     let mut offline = false;
+    let mut update = false;
     let mut native = false;
     let mut js_strings = false;
     let mut a11y = false;
@@ -134,6 +139,10 @@ fn main() -> ExitCode {
                 offline = true;
                 i += 1;
             }
+            "--update" => {
+                update = true;
+                i += 1;
+            }
             "run" | "check" | "build" | "test" | "fmt" | "doc" | "fix" | "bundle" | "pkg"
                 if command.is_none() =>
             {
@@ -156,7 +165,7 @@ fn main() -> ExitCode {
     // `pkg` takes a directory rather than a file, and defaults to this one.
     if command == "pkg" {
         let dir = path.unwrap_or_else(|| ".".to_string());
-        return pkg::run(std::path::Path::new(&dir), offline);
+        return pkg::run(std::path::Path::new(&dir), offline, update);
     }
 
     let Some(path) = path else {
@@ -437,8 +446,13 @@ fn audit_a11y(result: &kite_driver::Compilation, path: &str) -> ExitCode {
             path
         ));
     }
+    // Without a host, deliberately. The file being audited is one the reviewer
+    // did not write — that is what an accessibility review *is* — and the
+    // drawing calls this reads back arrive on `out`, not through `@host`. So
+    // there is nothing to grant, and granting it meant a subcommand under
+    // `check` could write the reviewer's dotfiles.
     let mut transcript: Vec<u8> = Vec::new();
-    if let Err(trap) = result.run(&mut transcript) {
+    if let Err(trap) = result.run_without_host(&mut transcript) {
         eprintln!("error: {}", trap);
         return ExitCode::FAILURE;
     }
