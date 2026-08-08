@@ -2331,7 +2331,7 @@ none.
 | 25 — `std/html` | ✅ complete — descriptions, a keyed diff that writes only what changed, and `examples/page` written against it |
 | 26 — Specification gaps | ✅ subslices, `enumerate` and pair-destructuring over a slice, doc-comment tests, a name section and source map, `js.func` at any shape, `check` in a bare-`error` function, a calling convention for any function-typed value, errors that carry their value, modules identified by their whole path; `[N]T` struck from the specification and `--a11y` removed |
 
-798 tests: unit tests per crate, an annotated compile-fail corpus, a
+815 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the standard library's own
 documentation examples, the host boundary and a real socket under Node, both
