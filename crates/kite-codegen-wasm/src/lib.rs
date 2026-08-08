@@ -41,12 +41,13 @@ use kite_mir as mir;
 use wasm_encoder::{
     BlockType, CodeSection, CompositeInnerType, CompositeType, ElementSection, Elements,
     EntityType, ExportKind, ExportSection, FieldType, Function, FunctionSection, HeapType,
-    ImportSection, Instruction, MemArg, MemoryType, Module, RefType, StorageType, SubType,
-    TypeSection, ValType,
+    ImportSection, Instruction, MemArg, MemoryType, Module, NameMap, NameSection, RefType,
+    StorageType, SubType, TypeSection, ValType,
 };
 
 mod eq;
 mod glue;
+pub mod sourcemap;
 mod serve;
 mod strings;
 mod support;
@@ -207,7 +208,7 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 31] = [
     // trampoline. What is different is the argument — a handler is given the
     // host value that caused it, so the trampoline takes two references rather
     // than one.
-    ("js_func", &[ANY_REF], &[EXTERN_REF_NULL]),
+    ("js_func", &[ANY_REF, ValType::I32], &[EXTERN_REF_NULL]),
     // A bounded bridge between JavaScript's UTF-16 strings and Kite's Unicode
     // scalar arrays. `text_len` starts an input conversion, `text_fill` writes
     // its next chunk into the scratch page, and `text_push` consumes one output
@@ -453,6 +454,39 @@ pub struct WasmModule {
     /// The glue is generated from these, so a declaration and the stub that
     /// answers it cannot drift apart.
     pub hosts: Vec<HostImport>,
+    /// Where each function's body sits in `bytes`, and the span it was
+    /// declared at. The driver turns these into a source map, because it is
+    /// what holds the `SourceMap` a span is resolved through.
+    pub source_spans: Vec<(usize, kite_span::Span)>,
+}
+
+/// What the module's `sourceMappingURL` section names, and what the driver
+/// must write beside it.
+pub const SOURCE_MAP_NAME: &str = "app.wasm.map";
+
+/// How many bytes a LEB128 unsigned integer takes.
+fn uleb_len(mut value: u64) -> usize {
+    let mut n = 1;
+    while value >= 0x80 {
+        value >>= 7;
+        n += 1;
+    }
+    n
+}
+
+/// Append a LEB128 unsigned integer.
+fn leb128_u32(out: &mut Vec<u8>, mut value: u32) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if value == 0 {
+            return;
+        }
+    }
 }
 
 /// One exported function, described well enough to write a wrapper for.
@@ -491,8 +525,9 @@ struct TypeLayout {
     option_box: std::collections::HashMap<TyId, u32>,
     /// One array type per distinct slice element type.
     slice_array: std::collections::HashMap<TyId, u32>,
-    /// The error record: a message index. `nil` is a null reference, which is
-    /// what makes `return value, nil` read the way it does.
+    /// The error record: message, carried value, that value's type tag, and
+    /// the error it wrapped. `nil` is a null reference, which is what makes
+    /// `return value, nil` read the way it does.
     error_record: u32,
     /// The canonical `str`: a mutable WasmGC array of Unicode scalar values.
     ///
@@ -717,7 +752,22 @@ fn option_payloads(program: &mir::Program, types: &Types) -> Vec<TyId> {
 }
 
 /// Compile a MIR program to a WebAssembly module.
+///
+/// `debug_info` decides whether the name section and the source map go in.
+/// See [`compile_with`].
 pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
+    compile_with(program, types, true)
+}
+
+/// Compile, saying whether to carry debug information.
+///
+/// **A release build drops the name section and the source map.** They are
+/// what makes a trap name a `.kite` function and line, and on a hello world
+/// they are more than half the module — 823 bytes with them, 388 without. §23
+/// of the roadmap exists because an island competing with a four-kilobyte
+/// JavaScript file cannot afford that, and debug information is not semantics,
+/// so dropping it changes nothing a program can observe about itself.
+pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> WasmModule {
     let mut module = Module::new();
 
     // Type index space: import signatures, then structs, then each enum's base
@@ -954,12 +1004,36 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
             });
         }
 
-        // The error record holds its message in the canonical string type.
+        // What an error carries: what it says, the value it was rendered
+        // from, that value's type tag, and the error it wrapped.
+        //
+        // The value is an `anyref` because it may be any type implementing
+        // `Error` — the tag beside it is what a downcast checks before the
+        // reference is cast back, so an unchecked read is not reachable. The
+        // cause is a reference to this same record, which is what makes a
+        // chain a chain.
         group.push(struct_subtype(
-            vec![FieldType {
-                element_type: StorageType::Val(val_type_with(TyId::STR, types, &layout)),
-                mutable: false,
-            }],
+            vec![
+                FieldType {
+                    element_type: StorageType::Val(val_type_with(TyId::STR, types, &layout)),
+                    mutable: false,
+                },
+                FieldType {
+                    element_type: StorageType::Val(ANY_REF),
+                    mutable: false,
+                },
+                FieldType {
+                    element_type: StorageType::Val(ValType::I32),
+                    mutable: false,
+                },
+                FieldType {
+                    element_type: StorageType::Val(ValType::Ref(RefType {
+                        nullable: true,
+                        heap_type: HeapType::Concrete(layout.error_record),
+                    })),
+                    mutable: false,
+                },
+            ],
             None,
             true,
         ));
@@ -1210,8 +1284,14 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     // The same arrangement for a handler: the host holds a closure it cannot
     // enter, and this is the export that can. It takes the host value the
     // handler was called with, which is the whole difference from `kite_poll`.
-    let invoke_ty = types.find_fn(&[TyId::JS_VALUE], TyId::UNIT);
-    let invoke_trampoline = hosts.declared(host::JS_FUNC);
+    // One trampoline per distinct handler shape `js.func` is given, because
+    // `call_ref` needs the closure's exact type index and a two-argument
+    // handler is not the same type as a one-argument one. The host is told
+    // which by an index it passes back, so the glue can build a wrapper of the
+    // right arity that returns a value only when the Kite side answers with
+    // one.
+    let invoke_shapes = handler_shapes(program, types);
+    let invoke_trampoline = hosts.declared(host::JS_FUNC) && !invoke_shapes.is_empty();
     let trampoline_index = fn_base
         + program.fns.len() as u32
         + dispatchers.len() as u32
@@ -1226,11 +1306,18 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
             .function(vec![ANY_REF], vec![ValType::I32]);
     }
     if invoke_trampoline {
-        extra_type_index.push(next_fn_type);
-        next_fn_type += 1;
-        type_section
-            .ty()
-            .function(vec![ANY_REF, EXTERN_REF_NULL], Vec::new());
+        for shape in &invoke_shapes {
+            let (arity, _) = handler_shape_of(*shape, types);
+            extra_type_index.push(next_fn_type);
+            next_fn_type += 1;
+            let mut params = vec![ANY_REF];
+            params.extend(std::iter::repeat_n(EXTERN_REF_NULL, arity));
+            // Always a result, null when the handler answers with nothing, so
+            // the host has one convention rather than one per shape.
+            type_section
+                .ty()
+                .function(params, vec![EXTERN_REF_NULL]);
+        }
     }
     // Function types for the program's own host declarations, at the end of
     // the section: an import may name any type index, and appending here
@@ -1324,7 +1411,16 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
         exports.export("kite_poll", ExportKind::Func, trampoline_index);
     }
     if invoke_trampoline {
-        exports.export("kite_invoke", ExportKind::Func, invoke_index);
+        // One export per shape, named by its index. The glue's table is
+        // generated from the same list in the same order, so a wrapper cannot
+        // reach for a trampoline the module does not have.
+        for (i, _) in invoke_shapes.iter().enumerate() {
+            exports.export(
+                &format!("kite_invoke_{}", i),
+                ExportKind::Func,
+                invoke_index + i as u32,
+            );
+        }
     }
     // Arbitrary export names avoid colliding with source identifiers. The glue
     // uses these to give JavaScript callers ordinary strings while the public
@@ -1365,7 +1461,13 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
         fns: &eq_fns,
         strings: string_runtime,
     };
+    // Where each body lands inside the code section's payload, recorded as it
+    // is written. The absolute offset a source map needs is this plus where
+    // the payload itself ends up, which is not known until the section is
+    // added to the module below.
+    let mut body_offsets: Vec<usize> = Vec::with_capacity(program.fns.len());
     for f in &program.fns {
+        body_offsets.push(code.byte_len());
         code.function(&compile_fn(
             f,
             types,
@@ -1380,6 +1482,7 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
             fn_base,
             &hosts,
             string_runtime,
+            &invoke_shapes,
         ));
     }
     for d in &dispatchers {
@@ -1397,9 +1500,88 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
         code.function(&compile_poll_trampoline(poll_ty, &layout));
     }
     if invoke_trampoline {
-        code.function(&compile_invoke_trampoline(invoke_ty, &layout));
+        for shape in &invoke_shapes {
+            let (arity, returns) = handler_shape_of(*shape, types);
+            code.function(&compile_invoke_trampoline(
+                Some(*shape),
+                arity,
+                returns,
+                &layout,
+            ));
+        }
     }
+    // Where the first body lands in the module. A section is `id` (one byte),
+    // then its payload length as a LEB128; the code section's payload then
+    // opens with the function *count*, also a LEB128, and only then the
+    // bodies. Both prefixes count, and leaving the second one out puts every
+    // mapping one byte before the body it names — close enough to look right
+    // and wrong at every entry.
+    let count_len = uleb_len(code.len() as u64);
+    let payload_len = count_len + code.byte_len();
+    let payload_start =
+        module.as_slice().len() + 1 + uleb_len(payload_len as u64) + count_len;
     module.section(&code);
+
+    // ---- the name section --------------------------------------------------
+    // What gives a stack frame a name. Without it a trap inside a Kite island
+    // reaches DevTools as `wasm-function[37]`, which nothing in the source can
+    // be matched to.
+    if debug_info {
+        let mut names = NameSection::new();
+        names.module("kite");
+        let mut fn_names = NameMap::new();
+        for (i, def) in program.externs.iter().enumerate() {
+            if hosts.extern_used(i) {
+                fn_names.append(i as u32, &format!("{}.{}", def.host, def.name));
+            }
+        }
+        for (i, f) in program.fns.iter().enumerate() {
+            fn_names.append(fn_base + i as u32, &f.name);
+        }
+        names.functions(&fn_names);
+        module.section(&names);
+    }
+
+    // ---- the source map ----------------------------------------------------
+    // Where each function's code sits, paired with where it was written. The
+    // *rendering* belongs to the driver, which is what holds the `SourceMap`
+    // that turns a span into a file and a line — a code generator that had to
+    // resolve source locations would need one too, and two of them is one too
+    // many.
+    //
+    // One entry per function, which is the granularity the information exists
+    // at: a MIR function carries its declaration span and a MIR instruction
+    // carries nothing. A frame resolves to where the function was declared
+    // rather than to the line that trapped.
+    let source_spans: Vec<(usize, kite_span::Span)> = if debug_info {
+        program
+            .fns
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (payload_start + body_offsets[i], f.span))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // The URL is a bare name rather than a path: the map sits beside the
+    // module, and a path here would be this machine's rather than the
+    // reader's.
+    //
+    // The payload is a length-prefixed string, not raw bytes. A custom
+    // section's *name* is length-prefixed by the encoder; what follows is
+    // opaque to it, and this section's convention is that the URL is a `name`
+    // too. Written raw, a browser reads the first byte as the length and asks
+    // for a file whose name is missing its first character.
+    if debug_info {
+        let mut url = Vec::new();
+        leb128_u32(&mut url, SOURCE_MAP_NAME.len() as u32);
+        url.extend_from_slice(SOURCE_MAP_NAME.as_bytes());
+        module.section(&wasm_encoder::CustomSection {
+            name: "sourceMappingURL".into(),
+            data: std::borrow::Cow::Owned(url),
+        });
+    }
 
     // The same list the export section was built from, and built from it in
     // the same pass, so a wrapper cannot describe a function the module does
@@ -1436,6 +1618,7 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
 
     WasmModule {
         bytes: module.finish(),
+        source_spans,
         api,
         hosts: program
             .externs
@@ -1688,6 +1871,45 @@ fn compile_poll_trampoline(poll_ty: Option<TyId>, layout: &TypeLayout) -> Functi
     f
 }
 
+/// Every distinct closure type handed to `js.func`, in a stable order.
+///
+/// The order is the order of first appearance in the program, which is what
+/// makes the index the module hands the host reproducible: two builds of the
+/// same source have to agree, because the glue's table is generated from this
+/// list and the call sites are generated from it too.
+fn handler_shapes(program: &mir::Program, types: &Types) -> Vec<TyId> {
+    let mut out: Vec<TyId> = Vec::new();
+    for f in &program.fns {
+        for b in &f.blocks {
+            for s in &b.stmts {
+                let mir::Inst::Assign {
+                    value: mir::Rvalue::CallBuiltin { builtin: Builtin::JsFunc, args },
+                    ..
+                } = s
+                else {
+                    continue;
+                };
+                let Some(mir::Operand::Local(l)) = args.first() else {
+                    continue;
+                };
+                let ty = f.locals[l.index()].ty;
+                if matches!(types.kind(ty), TyKind::Fn { .. }) && !out.contains(&ty) {
+                    out.push(ty);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A handler's arity and whether it answers with a value, for the glue.
+fn handler_shape_of(ty: TyId, types: &Types) -> (usize, bool) {
+    match types.kind(ty) {
+        TyKind::Fn { params, ret } => (params.len(), *ret != TyId::UNIT),
+        _ => (0, false),
+    }
+}
+
 /// `kite_invoke(handler, value)`: call a Kite closure the host is holding.
 ///
 /// The mirror of [`compile_poll_trampoline`], and it exists for the same reason:
@@ -1696,20 +1918,32 @@ fn compile_poll_trampoline(poll_ty: Option<TyId>, layout: &TypeLayout) -> Functi
 /// listener is given the event that caused it — so the host value is pushed
 /// between the environment and the code, which is where `call_ref` expects a
 /// parameter to be.
-fn compile_invoke_trampoline(invoke_ty: Option<TyId>, layout: &TypeLayout) -> Function {
+/// `arity` is how many `JsValue` parameters the handler takes, so the
+/// trampoline's own parameters are the handler reference followed by that many
+/// host references. A handler that answers with nothing still returns a null
+/// reference, so the glue has one calling convention rather than two.
+fn compile_invoke_trampoline(
+    invoke_ty: Option<TyId>,
+    arity: usize,
+    returns: bool,
+    layout: &TypeLayout,
+) -> Function {
     let Some((record, sig)) = invoke_ty.and_then(|ty| {
         Some((
             layout.closure_type(ty)?,
             layout.closure_sig.get(&ty).copied()?,
         ))
     }) else {
-        // No `fn(JsValue)` closure exists, so nothing could have been handed
+        // No closure of this shape exists, so nothing could have been handed
         // over. Unreachable rather than a fallback.
         let mut f = Function::new(Vec::new());
         f.instruction(&Instruction::Unreachable);
         f.instruction(&Instruction::End);
         return f;
     };
+    // Parameters are 0 (the handler) and 1..=arity (the host values); the cast
+    // handler lives one past them.
+    let held = arity as u32 + 1;
     let mut f = Function::new(vec![(
         1,
         ValType::Ref(RefType {
@@ -1719,20 +1953,30 @@ fn compile_invoke_trampoline(invoke_ty: Option<TyId>, layout: &TypeLayout) -> Fu
     )]);
     f.instruction(&Instruction::LocalGet(0));
     f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(record)));
-    f.instruction(&Instruction::LocalSet(2));
-    // Environment, the argument, then the code: the order `call_ref` reads.
-    f.instruction(&Instruction::LocalGet(2));
+    f.instruction(&Instruction::LocalSet(held));
+    // Environment, the arguments, then the code: the order `call_ref` reads.
+    f.instruction(&Instruction::LocalGet(held));
     f.instruction(&Instruction::StructGet {
         struct_type_index: record,
         field_index: 1,
     });
-    f.instruction(&Instruction::LocalGet(1));
-    f.instruction(&Instruction::LocalGet(2));
+    for i in 0..arity as u32 {
+        f.instruction(&Instruction::LocalGet(i + 1));
+    }
+    f.instruction(&Instruction::LocalGet(held));
     f.instruction(&Instruction::StructGet {
         struct_type_index: record,
         field_index: 0,
     });
     f.instruction(&Instruction::CallRef(sig));
+    if !returns {
+        // One convention for the host: a handler with nothing to say says
+        // null, rather than the glue having to know which kind it holds.
+        f.instruction(&Instruction::RefNull(HeapType::Abstract {
+            shared: false,
+            ty: wasm_encoder::AbstractHeapType::Extern,
+        }));
+    }
     f.instruction(&Instruction::End);
     f
 }
@@ -1806,6 +2050,7 @@ fn compile_fn(
     fn_base: u32,
     hosts: &Hosts,
     strings: strings::StringRuntime,
+    invoke_shapes: &[TyId],
 ) -> Function {
     // Locals beyond the parameters, plus one synthetic program counter.
     let mut locals: Vec<(u32, ValType)> = Vec::new();
@@ -1907,6 +2152,24 @@ fn compile_fn(
         next_local += 3;
         (base, base + 1, base + 2)
     });
+
+    // Two registers for `xs[a..b]`, again only for a function that has one.
+    // The bounds are clamped as 64-bit values before they are narrowed to the
+    // i32 an array index is, which is what makes a bound past `i32::MAX` clamp
+    // to the length rather than wrap round to a small one.
+    let has_range = f.blocks.iter().any(|b| {
+        b.stmts.iter().any(|i| {
+            matches!(i, mir::Inst::Assign { value: mir::Rvalue::SliceRange { .. }, .. })
+        })
+    });
+    let range_scratch = has_range.then(|| {
+        for _ in 0..2 {
+            push_local(&mut locals, ValType::I64);
+        }
+        let base = next_local;
+        next_local += 2;
+        (base, base + 1)
+    });
     let _ = next_local;
 
     let mut func = Function::new(locals);
@@ -1953,6 +2216,8 @@ fn compile_fn(
             map_scratch: &map_scratch,
             slice_scratch: &slice_scratch,
             arith_scratch,
+            range_scratch,
+            invoke_shapes,
             block_index: i,
             total: n as usize,
         };
@@ -2010,6 +2275,11 @@ struct Emitter<'a> {
     /// Three i64 registers for the debug-build overflow checks, when the
     /// function has arithmetic that needs them.
     arith_scratch: Option<(u32, u32, u32)>,
+    /// Two i64 registers holding the clamped bounds of `xs[a..b]`.
+    range_scratch: Option<(u32, u32)>,
+    /// Handler shapes given to `js.func`, in the order the trampolines and the
+    /// glue's table are built from. A call site sends the host this index.
+    invoke_shapes: &'a [TyId],
     block_index: usize,
     total: usize,
 }
@@ -2525,21 +2795,99 @@ impl<'a> Emitter<'a> {
                 return true;
             }
 
-            mir::Rvalue::ErrorNew { message } => {
+            mir::Rvalue::ErrorNew { message, value, tag, cause } => {
                 self.operand(func, message);
+                // The value crosses as `anyref`. A `Nil` operand is the
+                // "carries nothing" case and has to become a null reference of
+                // that type rather than of whatever `default_of` would pick.
+                match value {
+                    mir::Operand::Nil | mir::Operand::Unit => {
+                        func.instruction(&Instruction::RefNull(HeapType::Abstract {
+                            shared: false,
+                            ty: wasm_encoder::AbstractHeapType::Any,
+                        }));
+                    }
+                    other => self.operand(func, other),
+                }
+                // The tag is an i32 in the record and an `int` in the IR.
+                match tag {
+                    mir::Operand::Int(v) => {
+                        func.instruction(&Instruction::I32Const(*v as i32));
+                    }
+                    other => {
+                        self.operand(func, other);
+                        func.instruction(&Instruction::I32WrapI64);
+                    }
+                }
+                match cause {
+                    mir::Operand::Nil | mir::Operand::Unit => {
+                        func.instruction(&Instruction::RefNull(HeapType::Concrete(
+                            self.layout.error_record,
+                        )));
+                    }
+                    other => self.operand(func, other),
+                }
                 func.instruction(&Instruction::StructNew(self.layout.error_record));
                 return true;
             }
 
             mir::Rvalue::ErrorMessage { base } => {
-                self.operand(func, base);
-                func.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(
-                    self.layout.error_record,
-                )));
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: self.layout.error_record,
-                    field_index: 0,
+                self.error_field(func, base, 0);
+                return true;
+            }
+
+            // A nil error answers nil rather than trapping, the same way
+            // `message` answers `""` — which is what lets this be written
+            // without a nil test in front of it. No box: `cause` answers an
+            // `error`, which is already the nil-able type.
+            mir::Rvalue::ErrorCause { base } => {
+                self.error_field(func, base, 3);
+                return true;
+            }
+
+            // `T.as(err)` — the carried value where the tag agrees, nil where
+            // it does not. The operand is read twice here, but it is a MIR
+            // operand: a local or a constant, with nothing to re-run.
+            mir::Rvalue::ErrorAs { base, tag } => {
+                let Some((box_idx, payload)) = self
+                    .current_dst
+                    .map(|d| self.f.locals[d as usize].ty)
+                    .and_then(|ty| match *self.types.kind(ty) {
+                        TyKind::Optional(p) => self.layout.option_type(p).map(|b| (b, p)),
+                        _ => None,
+                    })
+                else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+
+                self.error_field(func, base, 2);
+                func.instruction(&Instruction::I32Const(*tag as i32));
+                func.instruction(&Instruction::I32Eq);
+
+                let result = ValType::Ref(RefType {
+                    nullable: true,
+                    heap_type: HeapType::Concrete(box_idx),
                 });
+                func.instruction(&Instruction::If(BlockType::Result(result)));
+                self.error_field(func, base, 1);
+                // The tag has just been checked, so the cast cannot fail.
+                if let Some(concrete) = self.concrete_heap_type(payload) {
+                    func.instruction(&Instruction::RefCastNonNull(concrete));
+                }
+                func.instruction(&Instruction::StructNew(box_idx));
+                func.instruction(&Instruction::Else);
+                func.instruction(&Instruction::RefNull(HeapType::Abstract {
+                    shared: false,
+                    ty: wasm_encoder::AbstractHeapType::None,
+                }));
+                func.instruction(&Instruction::End);
+                return true;
+            }
+
+            mir::Rvalue::ErrorTag { base } => {
+                self.error_field(func, base, 2);
+                func.instruction(&Instruction::I64ExtendI32U);
                 return true;
             }
 
@@ -2662,6 +3010,65 @@ impl<'a> Emitter<'a> {
                 self.operand(func, base);
                 func.instruction(&Instruction::ArrayLen);
                 func.instruction(&Instruction::I64ExtendI32U);
+                return true;
+            }
+
+            // `xs[a..b]` — allocate the window and `array.copy` into it.
+            //
+            // The bounds are clamped as i64 against the length *before* being
+            // narrowed, because narrowing first would turn a bound past
+            // `i32::MAX` into a small one of the wrong sign — an empty slice
+            // where the whole tail was asked for. The bytecode VM defines the
+            // answer; this reproduces it.
+            mir::Rvalue::SliceRange { base, start, end } => {
+                let (Some((idx, _elem)), Some((lo, hi))) =
+                    (self.slice_of(base), self.range_scratch)
+                else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+
+                // lo = clamp(start, 0, len)
+                self.operand(func, start);
+                func.instruction(&Instruction::LocalSet(lo));
+                self.clamp_i64(func, lo, 0, base);
+
+                // hi = clamp(end, lo, len). Clamping the low end at `lo`
+                // rather than at 0 is what makes a backwards range empty
+                // instead of a negative length the allocator would reject.
+                self.operand(func, end);
+                func.instruction(&Instruction::LocalSet(hi));
+                self.clamp_i64_local(func, hi, lo, base);
+
+                // The destination, sized hi - lo.
+                func.instruction(&Instruction::LocalGet(hi));
+                func.instruction(&Instruction::LocalGet(lo));
+                func.instruction(&Instruction::I64Sub);
+                func.instruction(&Instruction::I32WrapI64);
+                func.instruction(&Instruction::ArrayNewDefault(idx));
+
+                // array.copy consumes its operands, so the destination is held
+                // in the register for this array shape while they are built.
+                let hold = self
+                    .slice_scratch
+                    .get(&TyId(idx))
+                    .copied()
+                    .unwrap_or(self.scratch);
+                func.instruction(&Instruction::LocalSet(hold));
+                func.instruction(&Instruction::LocalGet(hold));
+                func.instruction(&Instruction::I32Const(0));
+                self.operand(func, base);
+                func.instruction(&Instruction::LocalGet(lo));
+                func.instruction(&Instruction::I32WrapI64);
+                func.instruction(&Instruction::LocalGet(hi));
+                func.instruction(&Instruction::LocalGet(lo));
+                func.instruction(&Instruction::I64Sub);
+                func.instruction(&Instruction::I32WrapI64);
+                func.instruction(&Instruction::ArrayCopy {
+                    array_type_index_dst: idx,
+                    array_type_index_src: idx,
+                });
+                func.instruction(&Instruction::LocalGet(hold));
                 return true;
             }
 
@@ -2957,8 +3364,14 @@ impl<'a> Emitter<'a> {
             }
             // The closure goes over as a reference and the host hands back the
             // function it wrapped it in. Nothing is unpacked here: entering a
-            // closure is `kite_invoke`'s job, and it is the only thing that
-            // can.
+            // closure is a `kite_invoke_…` trampoline's job, and one of those
+            // is the only thing that can.
+            //
+            // The shape index goes with it, because the host has to build a
+            // wrapper of the handler's own arity — a two-argument observer
+            // callback given a one-argument wrapper silently loses its second
+            // argument, which is the class of bug this boundary exists to
+            // refuse.
             Builtin::JsFunc => {
                 for a in args {
                     self.operand(func, a);
@@ -2966,6 +3379,13 @@ impl<'a> Emitter<'a> {
                         self.to_host_str(func);
                     }
                 }
+                let shape = args
+                    .first()
+                    .and_then(|a| self.local_of(a))
+                    .map(|l| self.f.locals[l as usize].ty)
+                    .and_then(|ty| self.invoke_shapes.iter().position(|s| *s == ty))
+                    .unwrap_or(0);
+                func.instruction(&Instruction::I32Const(shape as i32));
                 func.instruction(&Instruction::Call(self.hosts.at(host::JS_FUNC)));
             }
             Builtin::TaskWakeAt => {
@@ -3081,6 +3501,72 @@ impl<'a> Emitter<'a> {
             // nil for all of them; here every type needs its own zero.
             mir::Operand::Default(ty) => self.default_of(func, *ty),
         }
+    }
+
+    /// Read one field out of an error record.
+    ///
+    /// The cast is non-null because every reader here is reached with an error
+    /// the program has already tested — `err != nil` or a `check` — and a null
+    /// one would be a lowering bug rather than a program's mistake.
+    fn error_field(&mut self, func: &mut Function, base: &mir::Operand, field: u32) {
+        self.operand(func, base);
+        func.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(
+            self.layout.error_record,
+        )));
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: self.layout.error_record,
+            field_index: field,
+        });
+    }
+
+    /// The heap type a reference of this Kite type points at, for casting an
+    /// `anyref` back to it.
+    fn concrete_heap_type(&self, ty: TyId) -> Option<HeapType> {
+        let idx = match *self.types.kind(ty) {
+            TyKind::Struct(s) => self.layout.struct_type(s),
+            TyKind::Enum(e) => self.layout.enum_base_type(e),
+            _ => return None,
+        };
+        Some(HeapType::Concrete(idx))
+    }
+
+    /// Clamp the i64 in `slot` to `low ..= base.len()`, in place.
+    fn clamp_i64(&mut self, func: &mut Function, slot: u32, low: i64, base: &mir::Operand) {
+        func.instruction(&Instruction::LocalGet(slot));
+        func.instruction(&Instruction::I64Const(low));
+        func.instruction(&Instruction::LocalGet(slot));
+        func.instruction(&Instruction::I64Const(low));
+        func.instruction(&Instruction::I64GeS);
+        func.instruction(&Instruction::Select);
+        func.instruction(&Instruction::LocalSet(slot));
+        self.clamp_to_len(func, slot, base);
+    }
+
+    /// The same, with the lower bound taken from another register.
+    fn clamp_i64_local(&mut self, func: &mut Function, slot: u32, low: u32, base: &mir::Operand) {
+        func.instruction(&Instruction::LocalGet(slot));
+        func.instruction(&Instruction::LocalGet(low));
+        func.instruction(&Instruction::LocalGet(slot));
+        func.instruction(&Instruction::LocalGet(low));
+        func.instruction(&Instruction::I64GeS);
+        func.instruction(&Instruction::Select);
+        func.instruction(&Instruction::LocalSet(slot));
+        self.clamp_to_len(func, slot, base);
+    }
+
+    /// Cap the i64 in `slot` at `base`'s length.
+    fn clamp_to_len(&mut self, func: &mut Function, slot: u32, base: &mir::Operand) {
+        func.instruction(&Instruction::LocalGet(slot));
+        self.operand(func, base);
+        func.instruction(&Instruction::ArrayLen);
+        func.instruction(&Instruction::I64ExtendI32U);
+        func.instruction(&Instruction::LocalGet(slot));
+        self.operand(func, base);
+        func.instruction(&Instruction::ArrayLen);
+        func.instruction(&Instruction::I64ExtendI32U);
+        func.instruction(&Instruction::I64LeS);
+        func.instruction(&Instruction::Select);
+        func.instruction(&Instruction::LocalSet(slot));
     }
 
     /// Leave a fresh array on the stack holding `base`'s contents, `extra`

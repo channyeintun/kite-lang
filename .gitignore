@@ -3,10 +3,15 @@
 Cargo.lock.bak
 .DS_Store
 
+# `kitec build` writes a source map beside every debug-build module, named by
+# the module's own `sourceMappingURL` section. It is output, like the module.
+**/app.wasm.map
+
 # The site's generated files: built by site/build.sh from the sources above.
 # `app.*` and `api.*` are `kitec build site/src/main.kite` — the site's own
 # program, whose source is `site/src/` and is not generated.
 site/app.wasm
+site/app.wasm.map
 site/app.js
 site/api.js
 site/api.d.ts
@@ -35,6 +40,7 @@ packaging/out/
 # writes and which were tracked while their siblings were not.
 examples/page/app.js
 examples/page/app.wasm
+examples/page/app.wasm.map
 examples/page/api.js
 examples/page/api.d.ts
 

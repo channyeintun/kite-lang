@@ -246,6 +246,72 @@ fn main() {
          \x20 io.print(if a == nil { -1 } else { a })\n\
          \x20 io.print(if b == nil { -1 } else { b })\n}\n",
     ),
+    // Every edge of `xs[a..b]` in one program, because the whole question
+    // about a range is what it does past the ends and the three backends
+    // clamp in three different pieces of code.
+    (
+        "slice-range",
+        "fn show(xs: [int]) -> str {\n  var out = \"\"\n  for x in xs {\n\
+         \x20   out = out + \"\\(x),\"\n  }\n  return \"[\" + out + \"]\"\n}\n\
+         fn main() {\n  let xs = [1, 2, 3, 4, 5]\n\
+         \x20 io.print(show(xs[1..3]))\n\
+         \x20 io.print(show(xs[0..xs.len()]))\n\
+         \x20 io.print(show(xs[2..100]))\n\
+         \x20 io.print(show(xs[-5..2]))\n\
+         \x20 io.print(show(xs[4..1]))\n\
+         \x20 io.print(show(xs[1..=3]))\n\
+         \x20 io.print(show(xs[0..0]))\n\
+         \x20 io.print(show(xs[9..9]))\n}\n",
+    ),
+    // An error carrying its value and its cause: the type recovered by name
+    // through three layers of wrapping, which is the whole point of the
+    // representation. Every backend keeps the tag in a different place.
+    (
+        "error-carries-its-value",
+        "use std/errors\n\
+         pub struct NotFound {\n  pub path: str\n}\n\
+         impl Error for NotFound {\n         \x20 fn message(self) -> str {\n    return \"no such file: \\(self.path)\"\n  }\n         }\n\
+         pub struct Denied {\n  pub who: str\n}\n\
+         impl Error for Denied {\n         \x20 fn message(self) -> str {\n    return \"\\(self.who) may not\"\n  }\n         }\n\
+         fn read() -> (int, error) {\n         \x20 return _, NotFound{ path: \"app.toml\" }\n         }\n\
+         fn load() -> (int, error) {\n         \x20 let (v, err) = read()\n  check errors.wrap(err, \"loading config\")\n         \x20 return v, nil\n         }\n\
+         fn start() -> (int, error) {\n         \x20 let (v, err) = load()\n  check errors.wrap(err, \"starting up\")\n         \x20 return v, nil\n         }\n\
+         fn main() {\n         \x20 let (v, err) = start()\n         \x20 if err == nil {\n    io.print(\"ok\")\n    return\n  }\n         \x20 io.print(err.message())\n         \x20 io.print(join(errors.chain(err), \" <- \"))\n         \x20 let r = errors.root(err)\n         \x20 io.print(errors.message_or(r, \"none\"))\n         \x20 io.print(\"\\(NotFound.is(r))\")\n         \x20 io.print(\"\\(Denied.is(r))\")\n         \x20 io.print(\"\\(NotFound.is(err))\")\n         \x20 let nf = NotFound.as(r)\n         \x20 io.print(if nf == nil { \"none\" } else { nf.path })\n         \x20 let d = Denied.as(r)\n         \x20 io.print(if d == nil { \"none\" } else { d.who })\n         }\n",
+    ),
+    // `check` in a function that answers with a bare `error` — no value slot
+    // to fill, so the propagation is the error rather than a pair.
+    (
+        "check-bare-error-return",
+        "fn might(n: int) -> (int, error) {\n\
+         \x20 if n < 0 {\n    return _, errors.new(\"negative\")\n  }\n  return n * 2, nil\n}\n\
+         fn only(n: int) -> error {\n  let (v, err) = might(n)\n  check err\n\
+         \x20 io.print(\"got \\(v)\")\n  return nil\n}\n\
+         fn main() {\n  let a = only(3)\n\
+         \x20 io.print(if a == nil { \"ok\" } else { a.message() })\n\
+         \x20 let b = only(-1)\n\
+         \x20 io.print(if b == nil { \"ok\" } else { b.message() })\n}\n",
+    ),
+    // `for (a, b) in …` over a slice of pairs, which is what `enumerate` and
+    // `zip` both answer with.
+    (
+        "for-pairs-over-slice",
+        "fn main() {\n  for (i, name) in enumerate([\"ay\", \"bee\"]) {\n\
+         \x20   io.print(\"\\(i). \\(name)\")\n  }\n\
+         \x20 for (a, b) in zip([1, 2, 3], [\"x\", \"y\"]) {\n\
+         \x20   io.print(\"\\(a)\\(b)\")\n  }\n\
+         \x20 for (_, s) in enumerate([\"only\"]) {\n    io.print(s)\n  }\n}\n",
+    ),
+    // A range over references, where the copy has to keep the element kind in
+    // the header or the collector cannot trace what it just made.
+    (
+        "slice-range-refs",
+        "fn main() {\n  let names = [\"ay\", \"bee\", \"cee\", \"dee\"]\n\
+         \x20 io.print(join(names[1..3], \"-\"))\n\
+         \x20 io.print(join(names[2..99], \"-\"))\n\
+         \x20 io.print(join(names[0..1], \"-\"))\n\
+         \x20 let s = \"hello world\"\n\
+         \x20 io.print(s[0..5])\n  io.print(s[6..100])\n  io.print(s[0..=4])\n}\n",
+    ),
     (
         "error-handling",
         "fn divide(a: int, b: int) -> (int, error) {\n  if b == 0 {\n\

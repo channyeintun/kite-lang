@@ -320,13 +320,28 @@ impl<'a> Emitter<'a> {
                 let obj = self.operand_reg(base, 0);
                 self.code.push(Op::PairError { dst, obj });
             }
-            mir::Rvalue::ErrorNew { message } => {
+            mir::Rvalue::ErrorNew { message, value, tag, cause } => {
                 let m = self.operand_reg(message, 0);
-                self.code.push(Op::NewError { dst, message: m });
+                let v = self.operand_reg(value, 1);
+                let t = self.operand_reg(tag, 2);
+                let c = self.operand_reg(cause, 3);
+                self.code.push(Op::NewError { dst, message: m, value: v, tag: t, cause: c });
             }
             mir::Rvalue::ErrorMessage { base } => {
                 let obj = self.operand_reg(base, 0);
                 self.code.push(Op::ErrorMessage { dst, obj });
+            }
+            mir::Rvalue::ErrorCause { base } => {
+                let obj = self.operand_reg(base, 0);
+                self.code.push(Op::ErrorCause { dst, obj });
+            }
+            mir::Rvalue::ErrorTag { base } => {
+                let obj = self.operand_reg(base, 0);
+                self.code.push(Op::ErrorTag { dst, obj });
+            }
+            mir::Rvalue::ErrorAs { base, tag } => {
+                let obj = self.operand_reg(base, 0);
+                self.code.push(Op::ErrorAs { dst, obj, tag: *tag });
             }
             // The VM's values carry their own type, so an optional needs no
             // box: wrapping and unwrapping are moves. Only Wasm, whose locals
@@ -404,6 +419,12 @@ impl<'a> Emitter<'a> {
                 let obj = self.operand_reg(base, 0);
                 let idx = self.operand_reg(index, 1);
                 self.code.push(Op::SliceGet { dst, obj, index: idx });
+            }
+            mir::Rvalue::SliceRange { base, start, end } => {
+                let obj = self.operand_reg(base, 0);
+                let s = self.operand_reg(start, 1);
+                let e = self.operand_reg(end, 2);
+                self.code.push(Op::SliceRange { dst, obj, start: s, end: e });
             }
         }
     }

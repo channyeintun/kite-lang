@@ -577,12 +577,25 @@ impl Builder<'_> {
                 }
                 Rvalue::PairValue { base } => Rvalue::PairValue { base: shift(base) },
                 Rvalue::PairError { base } => Rvalue::PairError { base: shift(base) },
-                Rvalue::ErrorNew { message } => Rvalue::ErrorNew { message: shift(message) },
+                Rvalue::ErrorNew { message, value, tag, cause } => Rvalue::ErrorNew {
+                    message: shift(message),
+                    value: shift(value),
+                    tag: shift(tag),
+                    cause: shift(cause),
+                },
+                Rvalue::ErrorCause { base } => Rvalue::ErrorCause { base: shift(base) },
+                Rvalue::ErrorTag { base } => Rvalue::ErrorTag { base: shift(base) },
+                Rvalue::ErrorAs { base, tag } => Rvalue::ErrorAs { base: shift(base), tag },
                 Rvalue::ErrorMessage { base } => Rvalue::ErrorMessage { base: shift(base) },
                 Rvalue::IndexGet { base, index } => {
                     Rvalue::IndexGet { base: shift(base), index: shift(index) }
                 }
                 Rvalue::SliceLen { base } => Rvalue::SliceLen { base: shift(base) },
+                Rvalue::SliceRange { base, start, end } => Rvalue::SliceRange {
+                    base: shift(base),
+                    start: shift(start),
+                    end: shift(end),
+                },
                 Rvalue::SliceGet { base, index } => {
                     Rvalue::SliceGet { base: shift(base), index: shift(index) }
                 }

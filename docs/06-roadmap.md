@@ -1986,9 +1986,13 @@ so a caller passing `true` was sending `undefined` and a returned `false`
 arrived as `0` — which the declaration file called a `boolean`. A wrapper whose
 types are a lie is worse than no wrapper.
 
-**Still open:** the Vite plugin. Nothing depends on it — the generated files are
-ordinary ES modules a bundler already understands — so it is convenience rather
-than capability, and it is marked as such.
+**The Vite plugin is built.** `packages/vite-plugin-kite` compiles a `.kite`
+import through `@kite-lang/compiler-wasm` — the same crate `kitec` is built
+from, targeting Wasm, held to identical bytes by a test — so a project installs
+no binary and gets no platform matrix. It handles a `.kite` named directly as a
+page's entry, so a Vite project keeps no JavaScript file whose only job is to
+start the thing it just compiled, and it rebuilds one module per edit through
+`handleHotUpdate`. `examples/vite-starter` is two pages built on it.
 
 ---
 
@@ -2147,6 +2151,151 @@ The diff costs about 4.5 KB, which is why the island budget moved from 16 KB to
 
 ---
 
+## Phase 26 — The gaps between the specification and the compiler
+
+**Goal:** the specification stops describing things that are not there.
+
+An audit read §1 to §16 against the compiler by compiling what each section
+claims rather than by reading the status table. Five things the specification
+asserted without qualification did not exist, and one advertised command was
+worse than absent.
+
+**Five claims, and what happened to each.**
+
+- **`xs[1..3]`, the subslice §5.4 shows.** Built. A `SliceRange` operation in
+  MIR and in all three backends, plus `s[a..b]` lowering to the `str.slice`
+  that already existed. **Clamped rather than trapping**, which is the opposite
+  of `xs[i]` one line up: an index names an element the program believes is
+  there, and a range names a *window*, which on a last page is legitimately
+  wider than the data. The two spellings had to agree about their edges, and
+  the bytecode VM defines the answer the other two reproduce.
+
+- **`items.enumerate()`, which §6.2 wrote as a method.** Built as a *function*,
+  and the specification corrected to `enumerate(items)`. A slice takes methods
+  only from the compiler — §8.2 has no extension methods — and the three it has
+  are the three nothing else can be built from, so a fourth would have been the
+  compiler growing to hold what the prelude can express. What it needed
+  underneath was real and is the better half of this: **`for (a, b) in …` now
+  walks a slice of two-element tuples**, not only a map. That is what `zip` has
+  always answered with, and it could not be taken apart in the loop that
+  consumed it.
+
+- **Doc-comment fences compiled as tests, promised by §2.3.** Built. A fence is
+  appended to the module it was written in and run by name, so everything the
+  comment documents is in scope with no import to get wrong, and a fence that
+  declares a type lands at file scope where a declaration goes. ` ```kite
+  ignore ` marks an illustration — most module headers are one, and inventing a
+  `Row` and a `body` to make `html.mount(body, map(rows, row))` compile would
+  make it a worse explanation of the thing it exists to explain.
+
+- **Source maps for the Wasm target, promised by §16.** Built, as two things:
+  a **name section**, which is what gives a stack frame a name rather than
+  `wasm-function[37]`, and a **source map** beside the module, which gives it a
+  file and a line. The granularity is one entry per function, because that is
+  the granularity the compiler's information exists at — a MIR function carries
+  its declaration span and a MIR instruction carries nothing. Both are dropped
+  by `--release`: they were more than half of a hello world, and debug
+  information is not semantics.
+
+- **`[N]T`, the fixed-length array §3.2 listed.** Struck from the
+  specification rather than built, because the document already said twice that
+  it should not be there. §1.1 lists the composite types a reader must hold and
+  calls the list complete, and an array is not on it; §14 records that WasmGC
+  gives `[Point]` an array of *references*, so a fixed length buys no layout,
+  and names `buffer.F64` for the code where layout is the point. What was left
+  was a compile-time length check, which is not worth an eleventh concept.
+
+**And one command that was worse than missing.** `kitec check --a11y` printed
+`ok — no unlabelled controls, undersized targets or low-contrast text` for
+every program, including one that drew nothing at all: it read the `ui.paint`
+semantics records that went out with `std/ui` at Phase 16, and nothing has
+emitted one since. Advertised assurance that cannot fail is worse than no
+assurance, so the flag and its auditor are gone.
+
+### Two limits the compiler had that the specification never mentioned
+
+Neither was a decision. Both were found by writing the code a user would write.
+
+- **`js.func` took `fn(JsValue)` and nothing else** — one argument, no result.
+  Every host API that reads a value back out of a callback was therefore out of
+  reach from Kite: `sort`, `map`, `filter`, a `Promise` executor. The way round
+  it was to write that part in JavaScript, which is the one thing this layer
+  exists to make unnecessary. A handler now takes up to four `JsValue`
+  parameters and may answer with one, and the compiler emits a trampoline per
+  shape and a wrapper of the handler's own arity. A fifth parameter is a
+  compile error rather than an argument that quietly disappears.
+
+- **`check` needed a `(T, error)` return.** A function that can only fail —
+  every wrapper in `std/dom` is one — had to write out `if err != nil { return
+  err }` at each step. That is the boilerplate `check` exists to remove,
+  refused at exactly the functions with the least else in them. A bare `->
+  error` return now counts as fallible.
+
+### An error carries what it was made from
+
+Phase 24's remaining half, and the largest single gap the specification
+admitted to. `error_record` was one string field in the Wasm backend, the
+bytecode VM and Cranelift alike; it is now four — the message, the value the
+message was rendered from, that value's type tag, and the error it wrapped.
+
+**The spelling was the hard part, not the representation.** §7.6 promised
+`errors.is<T>` and `errors.as<T>`, and §11 has no turbofish, so neither could
+be written. The shape that fits is the one `Decode` already uses for the same
+reason: a type names itself. `NotFound.is(err)` and `NotFound.as(err)`, as
+`User.decode(doc)` is. `as` is a keyword, and it is admitted as a member name
+after a `.` — the one position where nothing else can appear — rather than by
+opening that position to all twenty-seven.
+
+Four decisions worth recording:
+
+- **One constructor, not three.** `ErrorNew` takes all four operands and
+  `errors.new` passes nothing for three of them. Three constructors would have
+  been three things for three backends to agree about.
+- **The downcast is one operation.** `T.as(err)` is a single `ErrorAs` rather
+  than a tag test and a separate read, because the two must see the same error
+  and an expression cannot introduce the local that would guarantee it.
+  `T.is(err)` needs no operation at all: it is the tag compared against a
+  constant.
+- **`cause` answers an `error`, not an `Option<error>`.** An `error` is already
+  the nil-able type, and two ways to say absent is one too many. This also
+  removed the boxing the optional form needed on two backends.
+- **A tag of zero means "carries nothing", and no type's tag is zero.** So a
+  downcast on a nil error is false rather than a trap, and needs no nil test in
+  front of it.
+
+`errors.wrap` now keeps what it wrapped instead of flattening it into text, so
+`errors.chain` reads a failure as the sentences that produced it and
+`errors.root` reaches the one that actually happened. Which is what makes the
+downcast useful four layers up — the case the whole design exists for.
+
+### A module is its whole path
+
+§13.1 recorded that identifying a module by its full path was the better
+answer. It is now what the compiler does, and the change was larger than a
+keying change for the reason the note predicted: two modules both called
+`utils` are genuinely ambiguous at a use site.
+
+What resolves it is that **a use site writes a spelling, not an identity**. A
+spelling belongs to the file that writes it — machinery that already existed,
+because aliases were made per-importer after a global table let `use leak as
+crypto` in a dependency rewrite the importing program's own calls. Every
+import now records its spelling, aliased or not, so two files may spell
+different modules alike and one file may not spell two modules alike.
+
+One bug fell out of it that the old design hid: **the leading segments of a
+`use` path were dropped**. `use dep/utils` looked for `utils` beside the
+importing file, found the sibling, and answered with it — so the path said
+something the loader did not honour. Every segment counts now, and a first
+segment naming a declared dependency roots there.
+
+### What this phase did not close
+
+- **A slice in a struct field still cannot be pushed to in place.** Copy to a
+  `var` local, push, assign back — which is what the compiler would have to
+  generate anyway, and the diagnostic says so.
+
+---
+
 ## Where the implementation actually stands
 
 Recorded honestly, because a roadmap that overstates progress is worse than
@@ -2176,21 +2325,23 @@ none.
 | 19 — Resident runtime, real clock | ✅ complete — `resident` beside `drive`, real clock, zero timers when idle |
 | 20 — `std/dom` | ✅ complete — no externs, `Option` for absence, events with cancel, and a real page in `examples/page` |
 | 21 — Rejections as errors | ✅ complete, and the phase was rescoped: promises never needed language support. The straight-line `await` form is open, and marked as comfort |
-| 22 — Interop backwards | ✅ `api.js` and `api.d.ts` from `kitec build`, verified with real `tsc`. `@export` proved unnecessary. ❌ the Vite plugin |
+| 22 — Interop backwards | ✅ `api.js` and `api.d.ts` from `kitec build`, verified with real `tsc`, and a Vite plugin that compiles a `.kite` import through the compiler-as-Wasm. `@export` proved unnecessary |
 | 23 — Size gate | ✅ complete — four budgets in CI; 388 B for hello world, 2 KB for a DOM change, 5.7 KB for the island |
-| 24 — Concrete error types | 🟡 `impl Error for MyType` works on all three backends and Appendix A compiles with its `LoadError`. ❌ the error carries only its message, so `cause`, `chain`, `is<T>` and `as<T>` wait on the representation |
+| 24 — Concrete error types | ✅ complete — an error carries the value it was made from, its type tag and the error it wrapped, on all three backends. `err.cause()`, `errors.chain`, `errors.root`, and `NotFound.is(err)` / `NotFound.as(err)` — the type names itself, because §11 has no turbofish |
 | 25 — `std/html` | ✅ complete — descriptions, a keyed diff that writes only what changed, and `examples/page` written against it |
+| 26 — Specification gaps | ✅ subslices, `enumerate` and pair-destructuring over a slice, doc-comment tests, a name section and source map, `js.func` at any shape, `check` in a bare-`error` function, a calling convention for any function-typed value, errors that carry their value, modules identified by their whole path; `[N]T` struck from the specification and `--a11y` removed |
 
-769 tests: unit tests per crate, an annotated compile-fail corpus, a
+798 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
-the standard library's own suite on two of them, the host boundary and a real
-socket under Node, both string
-representations compared against each other and against the VM, every example on
-the site, size budgets, and the specification's own Appendix A.
+the standard library's own suite on two of them, the standard library's own
+documentation examples, the host boundary and a real socket under Node, both
+string representations compared against each other and against the VM, the
+source map's offsets checked against the module's real function bodies, every
+example on the site, size budgets, and the specification's own Appendix A.
 
 ### What is deliberately not done
 
-Four things are absent on purpose rather than pending, and each is recorded
+Five things are absent on purpose rather than pending, and each is recorded
 where the decision was made:
 
 - **Real parallelism.** WasmGC references cannot cross a thread boundary, and
@@ -2206,6 +2357,12 @@ where the decision was made:
 - **WebGPU.** The list below puts it third among things to cut, and it is still
   right: Canvas2D is a complete product, and WebGPU is an optimisation on top
   of one.
+- **A fixed-length array.** §3.2 listed `[N]T` for a long time and no compiler
+  ever had one. It was struck rather than built at Phase 26: §1.1 calls its
+  list of composite types complete and an array is not on it, and §14 already
+  names `buffer.F64` for the code where layout is the point — on WasmGC a
+  `[Point]` is an array of references either way, so a fixed length buys no
+  layout and what was left was a compile-time length check.
 
 ## Realistic timeline
 

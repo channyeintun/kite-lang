@@ -286,10 +286,37 @@ pub enum ExprKind {
     PairValue { base: Box<Expr> },
     /// The error slot of a correlated pair.
     PairError { base: Box<Expr> },
-    /// `errors.new("...")`
-    ErrorNew { message: Box<Expr> },
+    /// An error value: what it says, what it was, and what caused it.
+    ///
+    /// One constructor rather than three, because three would be three things
+    /// for three backends to agree about. `errors.new` supplies a message and
+    /// nothing else; a value implementing `Error` supplies itself and its type
+    /// tag; `errors.because` supplies the error it is wrapping.
+    ///
+    /// `value` is [`ExprKind::Nil`] and `tag` is zero when nothing is carried
+    /// — a plain `errors.new` — and `cause` is `Nil` when nothing was wrapped.
+    ErrorNew {
+        message: Box<Expr>,
+        value: Box<Expr>,
+        tag: Box<Expr>,
+        cause: Box<Expr>,
+    },
     /// `err.message()`
     ErrorMessage { base: Box<Expr> },
+    /// `err.cause()` — the error this one wrapped, or nil.
+    ErrorCause { base: Box<Expr> },
+    /// The type tag of the value an error carries, or zero for one that
+    /// carries none. `T.is(err)` is this compared against `T`'s own tag, which
+    /// is why downcasting needs no operation of its own.
+    ErrorTag { base: Box<Expr> },
+    /// The value an error carries, as `Option<T>`: present when the error's
+    /// tag is `tag`, absent when it is not.
+    ///
+    /// One operation rather than a tag test and a separate read, because the
+    /// two must see the *same* error and an expression cannot introduce the
+    /// local that would guarantee it. Reading the operand once is the property
+    /// this exists for.
+    ErrorAs { base: Box<Expr>, tag: u32 },
     /// The absent optional. Only ever produced where the type is `?T`; Kite
     /// has no null anywhere else.
     Nil,
@@ -326,6 +353,19 @@ pub enum ExprKind {
     /// `xs.get(i)` — yields `?T` for the case where the index genuinely is a
     /// runtime condition.
     SliceGet { base: Box<Expr>, index: Box<Expr> },
+    /// `xs[a..b]` — a new slice of the elements `a` through `b`, half-open.
+    ///
+    /// **Clamped rather than trapping**, which is the opposite of what
+    /// [`Index`] does one line up, and the difference is the question each one
+    /// asks. `xs[i]` names an element the program believes is there, so a
+    /// missing one is a bug. `xs[a..b]` names a *window*, and a window wider
+    /// than the data is what paging code produces on its last page. Trapping
+    /// there would make every caller write the clamp that this writes once.
+    ///
+    /// It is also what `s[a..b]` does, because that lowers to
+    /// [`StrKind::Slice`] — and two spellings of one syntax must not disagree
+    /// about the edges.
+    SliceRange { base: Box<Expr>, start: Box<Expr>, end: Box<Expr> },
     /// `await t` — the value of a task, once it has one.
     ///
     /// This never reaches a backend. The state-machine transform in MIR
@@ -833,14 +873,29 @@ impl Program {
             ExprKind::Index { base, index } => {
                 format!("{}[{}]", self.expr(base), self.expr(index))
             }
+            ExprKind::SliceRange { base, start, end } => format!(
+                "{}[{}..{}]",
+                self.expr(base),
+                self.expr(start),
+                self.expr(end)
+            ),
             ExprKind::Nil => "nil".to_string(),
             ExprKind::PairNew { value, error } => {
                 format!("({}, {})", self.expr(value), self.expr(error))
             }
             ExprKind::PairValue { base } => format!("{}.0", self.expr(base)),
             ExprKind::PairError { base } => format!("{}.1", self.expr(base)),
-            ExprKind::ErrorNew { message } => format!("errors.new({})", self.expr(message)),
+            ExprKind::ErrorNew { message, value, tag, cause } => format!(
+                "error({}, {}, {}, {})",
+                self.expr(message),
+                self.expr(value),
+                self.expr(tag),
+                self.expr(cause)
+            ),
             ExprKind::ErrorMessage { base } => format!("{}.message()", self.expr(base)),
+            ExprKind::ErrorCause { base } => format!("{}.cause()", self.expr(base)),
+            ExprKind::ErrorTag { base } => format!("{}.tag", self.expr(base)),
+            ExprKind::ErrorAs { base, tag } => format!("{}.as({})", self.expr(base), tag),
             ExprKind::IsNil { value } => format!("(is-nil {})", self.expr(value)),
             ExprKind::Wrap { value } => format!("(wrap {})", self.expr(value)),
             ExprKind::Unwrap { value } => format!("(unwrap {})", self.expr(value)),

@@ -1740,6 +1740,16 @@ impl<'a> Parser<'a> {
                         let span = self.span();
                         self.bump();
                         Ident::new(self.text(span), span)
+                    } else if self.at(T::As) {
+                        // `NotFound.as(err)`. A keyword after a dot is in
+                        // member position, where nothing else can appear, so
+                        // it is a name here and not the conversion operator.
+                        // `as` is the only one a member wants today, and it is
+                        // admitted one at a time rather than by opening the
+                        // position to all twenty-seven.
+                        let span = self.span();
+                        self.bump();
+                        Ident::new(self.text(span), span)
                     } else {
                         self.ident()?
                     };

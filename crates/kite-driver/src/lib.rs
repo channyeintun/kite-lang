@@ -8,8 +8,8 @@ use kite_span::{FileId, SourceMap, Span};
 use std::io::Write;
 use std::path::Path;
 
-pub mod a11y;
 pub mod derive;
+pub mod doctest;
 pub mod host;
 pub mod manifest;
 pub mod modules;
@@ -18,7 +18,7 @@ pub mod solve;
 
 pub use kite_codegen_wasm::{
     generate_api, generate_glue, generate_glue_with_hosts, generate_page, generate_server,
-    listens,
+    listens, SOURCE_MAP_NAME,
 };
 pub use kite_vm::Trap;
 
@@ -209,28 +209,6 @@ impl Compilation {
         }
     }
 
-    /// Run the compiled program with **no host**, writing its output to `out`.
-    ///
-    /// For running a program in order to look at what it did, rather than to
-    /// let it do it. `@host("fs")` traps here instead of resolving, naming the
-    /// function it wanted — so a program that reads a file says so and stops,
-    /// rather than reading it.
-    ///
-    /// That distinction is the whole reason this exists next to [`run`]. The
-    /// accessibility audit compiles a file the user is *reviewing* and runs it
-    /// to capture what it draws; drawing goes to `out`, so nothing it audits
-    /// needs a host. Running it with one meant `kitec check --a11y`, a
-    /// subcommand under `check`, would write any file the reviewed program
-    /// named, with the reviewer's authority.
-    ///
-    /// [`run`]: Compilation::run
-    pub fn run_without_host(&self, out: &mut dyn Write) -> Result<bool, Trap> {
-        match &self.chunk {
-            None => Ok(false),
-            Some(c) => kite_vm::run_with_host(c, out, None).map(|_| true),
-        }
-    }
-
     /// The tests this program declares, in source order.
     ///
     /// A test is a function whose name starts with `test_`. There is no
@@ -244,6 +222,48 @@ impl Compilation {
             .filter(|f| f.name.starts_with("test_"))
             .map(|f| f.name.clone())
             .collect()
+    }
+
+    /// The source map for the compiled WebAssembly module, if there is one.
+    ///
+    /// Rendered here rather than in the code generator because this is what
+    /// holds the [`SourceMap`] a span is resolved through. §16 requires the
+    /// map "so browser stack traces name `.kite` files and lines"; what it
+    /// carries is one entry per function, pointing at the line the function
+    /// was declared on. A MIR instruction has no span to do better with.
+    pub fn wasm_source_map(&self) -> Option<String> {
+        let module = self.wasm.as_ref()?;
+        // A release build carries no debug information, and a map with no
+        // entries is a file that exists only to be fetched and found useless.
+        if module.source_spans.is_empty() {
+            return None;
+        }
+        let mut sources: Vec<String> = Vec::new();
+        let mut spans = Vec::with_capacity(module.source_spans.len());
+        for (offset, span) in &module.source_spans {
+            let file = self.sources.file(span.file).name.display().to_string();
+            let at = self.sources.line_col(*span);
+            if !sources.contains(&file) {
+                sources.push(file.clone());
+            }
+            spans.push(kite_codegen_wasm::sourcemap::FunctionSpan {
+                offset: *offset,
+                file,
+                line: at.line,
+                column: at.col,
+            });
+        }
+        Some(kite_codegen_wasm::sourcemap::render(&spans, &sources))
+    }
+
+    /// Run one named function that takes nothing and answers with nothing.
+    ///
+    /// For a documentation example, which is a fence of statements rather than
+    /// a `test_…` returning `(int, error)`: it fails by trapping — an `assert`
+    /// that did not hold — and there is no failure *value* to read back.
+    pub fn run_named(&self, name: &str, out: &mut dyn Write) -> Result<(), Trap> {
+        let Some(chunk) = &self.chunk else { return Ok(()) };
+        kite_vm::run_function(chunk, name, out).map(|_| ())
     }
 
     /// Run one test, and report what it said went wrong.
@@ -276,8 +296,12 @@ pub fn compile(path: impl AsRef<Path>, src: &str, emit: Emit) -> Compilation {
 
 /// Compile, in a named build mode.
 ///
-/// The only thing `release` changes is that `assert` is dropped: a build mode
-/// that changed anything else would make testing the debug build meaningless.
+/// `release` changes two things, and neither is a semantic one: `assert` is
+/// dropped, and the Wasm target's debug information — its name section and its
+/// source map — goes with it. A build mode that changed what a program *means*
+/// would make testing the debug build meaningless, which is why the list is
+/// this short and why arithmetic overflow, which does differ, lives in the MIR
+/// operation rather than in a backend's idea of the mode.
 pub fn compile_with(
     path: impl AsRef<Path>,
     src: &str,
@@ -516,7 +540,7 @@ fn run_passes(
             }
             return (String::new(), None, None, None, index);
         }
-        let module = kite_codegen_wasm::compile(&mir, &hir.types);
+        let module = kite_codegen_wasm::compile_with(&mir, &hir.types, !release);
         return (String::new(), None, Some(module), None, index);
     }
 

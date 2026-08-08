@@ -572,9 +572,24 @@ impl<'a> FnLowerer<'a> {
                 let b = self.operand(base);
                 Rvalue::PairError { base: b }
             }
-            hir::ExprKind::ErrorNew { message } => {
+            hir::ExprKind::ErrorCause { base } => {
+                let b = self.operand(base);
+                Rvalue::ErrorCause { base: b }
+            }
+            hir::ExprKind::ErrorTag { base } => {
+                let b = self.operand(base);
+                Rvalue::ErrorTag { base: b }
+            }
+            hir::ExprKind::ErrorAs { base, tag } => {
+                let b = self.operand(base);
+                Rvalue::ErrorAs { base: b, tag: *tag }
+            }
+            hir::ExprKind::ErrorNew { message, value, tag, cause } => {
                 let m = self.operand(message);
-                Rvalue::ErrorNew { message: m }
+                let v = self.operand(value);
+                let t = self.operand(tag);
+                let c = self.operand(cause);
+                Rvalue::ErrorNew { message: m, value: v, tag: t, cause: c }
             }
             hir::ExprKind::ErrorMessage { base } => {
                 let b = self.operand(base);
@@ -643,6 +658,12 @@ impl<'a> FnLowerer<'a> {
                 let b = self.operand(base);
                 let i = self.operand(index);
                 Rvalue::SliceGet { base: b, index: i }
+            }
+            hir::ExprKind::SliceRange { base, start, end } => {
+                let b = self.operand(base);
+                let s = self.operand(start);
+                let e2 = self.operand(end);
+                Rvalue::SliceRange { base: b, start: s, end: e2 }
             }
             hir::ExprKind::EnumNew { enum_id, variant, fields } => {
                 let fields = fields.iter().map(|a| self.operand(a)).collect();

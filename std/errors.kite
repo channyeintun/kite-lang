@@ -8,7 +8,7 @@
 ///
 /// Returning nil for nil is what lets this compose with `check` directly:
 ///
-/// ```kite
+/// ```kite ignore
 /// let (bytes, err) = fs.read(path)
 /// check errors.wrap(err, "loading config from \(path)")
 /// ```
@@ -16,7 +16,10 @@ pub fn wrap(err: error, context: str) -> error {
     if err == nil {
         return nil
     }
-    return errors.new("\(context): \(err.message())")
+    // `because` rather than `new`: the wrapped error is kept, so a caller can
+    // still ask what the original failure was. Flattening it into text is what
+    // makes "was this a missing file?" unanswerable four layers up.
+    return errors.because("\(context): \(err.message())", err)
 }
 
 /// An error whose message is built from parts, for a caller that would
@@ -25,12 +28,62 @@ pub fn of(subject: str, problem: str) -> error {
     return errors.new("\(subject): \(problem)")
 }
 
+/// Every message in the chain, outermost first.
+///
+/// `wrap` keeps what it wrapped, so a failure that crossed four layers reads
+/// as the four sentences that produced it rather than one run-on line.
+///
+/// ```kite
+/// // Unqualified because this example is compiled inside this module, where
+/// // its siblings are in scope by name. A caller writes `errors.chain(…)`.
+/// let outer = wrap(errors.new("no such file"), "loading config")
+/// io.print(join(chain(outer), " <- "))
+/// ```
+pub fn chain(err: error) -> [str] {
+    var out: [str] = []
+    if err == nil {
+        return out
+    }
+    out.push(err.message())
+    var next = err.cause()
+    // Bounded rather than unconditional: a cause chain is built by wrapping
+    // and cannot be cyclic, but a bound costs nothing and a runaway costs
+    // everything.
+    for i in 0..64 {
+        if next == nil {
+            return out
+        }
+        out.push(next.message())
+        next = next.cause()
+    }
+    return out
+}
+
+/// The innermost failure — what actually went wrong, under the context.
+pub fn root(err: error) -> error {
+    if err == nil {
+        return nil
+    }
+    // `here` is only ever assigned and returned, never read for a message:
+    // narrowing proves a `let` non-nil, not a `var` it was copied into, and
+    // the walk is over `next`, which is tested on every turn.
+    var here = err
+    var next = err.cause()
+    for i in 0..64 {
+        if next == nil {
+            return here
+        }
+        here = next
+        next = next.cause()
+    }
+    return here
+}
+
 /// Whether an error's message mentions `needle`.
 ///
-/// A stand-in for `errors.is<T>`, which needs concrete error types carrying
-/// their own data — the trait-object half of the error design. Matching on
-/// text is weaker and says so: it is here because "did this fail because the
-/// file was missing" is a real question, not because it is the right answer.
+/// Weaker than naming a type — `NotFound.is(err)` asks the question this
+/// approximates — and still here for the errors that carry no type of their
+/// own, which is every one built by `errors.new`.
 pub fn mentions(err: error, needle: str) -> bool {
     if err == nil {
         return false

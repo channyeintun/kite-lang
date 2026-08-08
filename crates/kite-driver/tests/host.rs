@@ -1089,8 +1089,8 @@ fn js_func_returns_a_callable_function() {
     assert_eq!(out, "function\n");
 }
 
-/// A handler that is not `fn(JsValue)` is refused, and the message says what a
-/// handler is rather than printing two type names at the reader.
+/// A handler that is not `fn(JsValue…)` is refused, and the message says what
+/// a handler is rather than printing two type names at the reader.
 #[test]
 fn a_handler_of_the_wrong_shape_is_refused() {
     let src = "use std/js\n\n\
@@ -1102,6 +1102,123 @@ fn a_handler_of_the_wrong_shape_is_refused() {
     assert!(c.failed(), "a handler taking an `int` must not compile");
     let text = c.render_diagnostics();
     assert!(text.contains("not a handler"), "{}", text);
+}
+
+/// A handler taking more than the boundary allows is refused too, rather than
+/// silently losing the arguments past the fourth.
+#[test]
+fn a_handler_with_too_many_parameters_is_refused() {
+    let src = "use std/js\n\n\
+        fn main() {\n\
+        \x20 let handler = js.func(|a: JsValue, b: JsValue, c: JsValue, d: JsValue, e: JsValue| {\n\
+        \x20   io.print(\"too many\")\n\
+        \x20 })\n\
+        \x20 io.print(js.kind_of(handler))\n\
+        }\n";
+    let c = compile(Path::new("widehandler.kite"), src, Emit::Check);
+    assert!(c.failed(), "a five-parameter handler must not compile");
+    let text = c.render_diagnostics();
+    assert!(text.contains("not a handler"), "{}", text);
+}
+
+/// The shapes past `fn(JsValue)`: a value read back out of a handler, and a
+/// handler given more than one argument.
+///
+/// The comparator is the assertion that matters. `[30, 4, 200].sort()` with no
+/// comparator is `[200, 30, 4]` — JavaScript sorts numbers as strings — so an
+/// answer of `4,30,200` can only come from the Kite closure's *return value*
+/// having reached the host. A trampoline that dropped it would still run, and
+/// would still produce a plausible-looking array.
+#[test]
+fn a_handler_can_take_several_arguments_and_answer_with_one() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/js\n\n\
+        fn compare(a: JsValue, b: JsValue) -> JsValue {\n\
+        \x20 let (x, xe) = js.as_num(a)\n\
+        \x20 if xe != nil {\n    return js.of_num(0.0)\n  }\n\
+        \x20 let (y, ye) = js.as_num(b)\n\
+        \x20 if ye != nil {\n    return js.of_num(0.0)\n  }\n\
+        \x20 return js.of_num(x - y)\n\
+        }\n\n\
+        fn work() -> error {\n\
+        \x20 let (arr, err) = js.new0(\"Array\")\n\
+        \x20 check err\n\
+        \x20 let (_, p1) = js.call1(arr, \"push\", js.of_num(30.0))\n\
+        \x20 check p1\n\
+        \x20 let (_, p2) = js.call1(arr, \"push\", js.of_num(4.0))\n\
+        \x20 check p2\n\
+        \x20 let (_, p3) = js.call1(arr, \"push\", js.of_num(200.0))\n\
+        \x20 check p3\n\
+        \x20 let (ordered, serr) = js.call1(arr, \"sort\", js.func(compare))\n\
+        \x20 check serr\n\
+        \x20 let (text, jerr) = js.call0(ordered, \"join\")\n\
+        \x20 check jerr\n\
+        \x20 let (s, aerr) = js.as_str(text)\n\
+        \x20 check aerr\n\
+        \x20 io.print(s)\n\n\
+        \x20 let tag = js.func(|v: JsValue, i: JsValue| -> JsValue {\n\
+        \x20     let (val, ve) = js.as_num(v)\n\
+        \x20     if ve != nil {\n      return js.of_str(\"?\")\n    }\n\
+        \x20     let (n, ne) = js.as_num(i)\n\
+        \x20     if ne != nil {\n      return js.of_str(\"?\")\n    }\n\
+        \x20     return js.of_str(\"\\(val as int)#\\(n as int)\")\n\
+        \x20   })\n\
+        \x20 let (mapped, merr) = js.call1(arr, \"map\", tag)\n\
+        \x20 check merr\n\
+        \x20 let (joined, jerr2) = js.call0(mapped, \"join\")\n\
+        \x20 check jerr2\n\
+        \x20 let (js2, aerr2) = js.as_str(joined)\n\
+        \x20 check aerr2\n\
+        \x20 io.print(js2)\n\
+        \x20 return nil\n\
+        }\n\n\
+        fn main() {\n\
+        \x20 let e = work()\n\
+        \x20 if e != nil {\n    io.error(e.message())\n  }\n\
+        }\n";
+    let runner = "import { readFile } from \"node:fs/promises\";\n\
+         import { instantiate, resident, setWriter } from \"./app.js\";\n\
+         const out = [];\n\
+         setWriter((l) => out.push(l));\n\
+         const exports = await instantiate(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         exports.main();\n\
+         resident(exports);\n\
+         process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+    // The second line is the index half: `map` passes the item *and* where it
+    // was, so `200#2` is the assertion that the handler's second parameter
+    // arrived rather than being dropped by a one-argument wrapper.
+    let out = run_runner_under_node("jsfuncshapes", src, runner, &[]);
+    assert_eq!(out, "4,30,200\n4#0,30#1,200#2\n");
+}
+
+/// A handler taking nothing at all, which is what a timer and a microtask are
+/// given.
+#[test]
+fn a_handler_can_take_no_arguments() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/js\n\n\
+        fn main() {\n\
+        \x20 let zero = js.func(|| { io.print(\"ran\") })\n\
+        \x20 let (_, err) = js.call1(js.global(\"globalThis\"), \"queueMicrotask\", zero)\n\
+        \x20 if err != nil {\n    io.error(err.message())\n  }\n\
+        }\n";
+    let runner = "import { readFile } from \"node:fs/promises\";\n\
+         import { instantiate, resident, setWriter } from \"./app.js\";\n\
+         const out = [];\n\
+         setWriter((l) => out.push(l));\n\
+         const exports = await instantiate(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         exports.main();\n\
+         resident(exports);\n\
+         await new Promise((r) => setTimeout(r, 20));\n\
+         process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n";
+    let out = run_runner_under_node("jsfunczero", src, runner, &[]);
+    assert_eq!(out, "ran\n");
 }
 
 // ---- std/dom ---------------------------------------------------------------

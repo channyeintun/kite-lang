@@ -16,7 +16,7 @@
 //! Coordinates are floats, with the origin at the top left of the surface.
 //! Colours are `0xRRGGBB`.
 //!
-//! ```kite
+//! ```kite ignore
 //! use std/canvas
 //!
 //! fn chart(x: float, y: float, w: float, h: float) {

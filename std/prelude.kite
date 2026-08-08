@@ -42,7 +42,7 @@ pub trait Debug {
 /// The conversion happens at that point and is visible in the IR — nothing is
 /// implicit about it beyond not having to write the call.
 ///
-/// ```kite
+/// ```kite ignore
 /// pub enum LoadError {
 ///     Missing(path: str)
 /// }
@@ -606,6 +606,28 @@ pub fn zip<A, B>(left: [A], right: [B]) -> [(A, B)] {
     var out: [(A, B)] = []
     for i in 0..min(left.len(), right.len()) {
         out.push((left[i], right[i]))
+    }
+    return out
+}
+
+/// Each item with the position it was at.
+///
+/// ```kite
+/// let names = ["ada", "grace"]
+/// for (i, name) in enumerate(names) {
+///     io.print("\(i). \(name)")
+/// }
+/// ```
+///
+/// A function rather than a method on `[T]`, which is what §6.2 used to write.
+/// A slice can only take methods from the compiler — §8.2 has no extension
+/// methods, so that a receiver's methods are always found where its type is
+/// declared — and the three the compiler gives it are the three nothing else
+/// can be built from. This one can, so it is here, where it can be read.
+pub fn enumerate<T>(items: [T]) -> [(int, T)] {
+    var out: [(int, T)] = []
+    for i in 0..items.len() {
+        out.push((i, items[i]))
     }
     return out
 }

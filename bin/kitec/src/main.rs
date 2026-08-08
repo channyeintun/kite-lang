@@ -17,7 +17,7 @@ USAGE:
     kitec run   <file.kite>          compile and run
     kitec check <file.kite>          check without running
     kitec build <file.kite>          compile and report what was produced
-    kitec test  <file.kite>          run every `test_` function in the file
+    kitec test  <file.kite>          run every `test_` function and doc example
     kitec fmt   <file.kite>          lay the file out the one way
     kitec doc   <file.kite>          the reference, from the doc comments
     kitec fix   <file.kite>          apply every machine-applicable suggestion
@@ -30,9 +30,6 @@ OPTIONS:
     --check           with `fmt`, report rather than rewrite
     --all             with `doc`, include what is not `pub`
     --native          with `run`, execute machine code under the JIT — no linker
-    --a11y            with `check`, audit what the program draws for labels,
-                      touch target sizes and contrast — this one runs the
-                      program, with no filesystem access
     --emit <stage>    check, ast, hir, mir, kbc, wasm, native
     --out <dir>       where `--emit wasm` and `--emit native` write artefacts
     --update          with `pkg`, allow `kite.lock` to change; without it, a
@@ -79,7 +76,6 @@ fn main() -> ExitCode {
     let mut offline = false;
     let mut update = false;
     let mut native = false;
-    let mut a11y = false;
     let mut i = 0;
 
     while i < args.len() {
@@ -123,10 +119,6 @@ fn main() -> ExitCode {
             }
             "--native" => {
                 native = true;
-                i += 1;
-            }
-            "--a11y" => {
-                a11y = true;
                 i += 1;
             }
             "--offline" => {
@@ -251,6 +243,16 @@ fn main() -> ExitCode {
         if let Err(e) = std::fs::write(&js_path, glue) {
             return fail(&format!("cannot write `{}`: {}", js_path, e));
         }
+        // The module names this file in a `sourceMappingURL` section, so it
+        // has to be beside it or a browser asks for something that is not
+        // there. §16 is what requires it: a trap in a Kite island should name
+        // a `.kite` file rather than `wasm-function[37]`.
+        if let Some(map) = result.wasm_source_map() {
+            let map_path = format!("{}/{}", dir, kite_driver::SOURCE_MAP_NAME);
+            if let Err(e) = std::fs::write(&map_path, map) {
+                return fail(&format!("cannot write `{}`: {}", map_path, e));
+            }
+        }
         // A page to open, so a compiled program is something to look at rather
         // than three files and instructions.
         //
@@ -359,9 +361,6 @@ fn main() -> ExitCode {
 
     match command.as_str() {
         "check" => {
-            if a11y {
-                return audit_a11y(&result, &path);
-            }
             if result.output.is_empty() {
                 eprintln!("ok");
             }
@@ -371,7 +370,7 @@ fn main() -> ExitCode {
             eprintln!("compiled `{}` to bytecode", path);
             ExitCode::SUCCESS
         }
-        "test" => run_tests(&result, &path),
+        "test" => run_tests(&result, &path, &src, release),
 
         "run" => {
             if !result.is_runnable() {
@@ -405,59 +404,18 @@ fn main() -> ExitCode {
 /// A failure is an error *value* with a message, not a trap, so one failing
 /// test does not stop the rest — which is the whole reason `std/test`'s
 /// assertions return errors rather than asserting.
-/// `kite check --a11y` — audit what the program draws.
-///
-/// It runs the program. That is the whole idea and it is why this is not a
-/// lint: the tree a lint could read is built by `view`, from a model, and
-/// nothing about it is knowable until something has run. So the program is run
-/// under the bytecode VM, its drawing calls are captured as a transcript, and
-/// the transcript is audited — labels, touch targets, contrast.
-///
-/// A Lighthouse score on a canvas application is a score for a page with one
-/// element in it. This looks at the picture instead.
-fn audit_a11y(result: &kite_driver::Compilation, path: &str) -> ExitCode {
-    if !result.is_runnable() {
-        return fail(&format!(
-            "`{}` has no `main` function\n\nnote: `--a11y` audits what a program draws, so it \
-             has to run it — give the file a `fn main()` that paints a frame",
-            path
-        ));
-    }
-    // Without a host, deliberately. The file being audited is one the reviewer
-    // did not write — that is what an accessibility review *is* — and the
-    // drawing calls this reads back arrive on `out`, not through `@host`. So
-    // there is nothing to grant, and granting it meant a subcommand under
-    // `check` could write the reviewer's dotfiles.
-    let mut transcript: Vec<u8> = Vec::new();
-    if let Err(trap) = result.run_without_host(&mut transcript) {
-        eprintln!("error: {}", trap);
-        return ExitCode::FAILURE;
-    }
-    let text = String::from_utf8_lossy(&transcript);
-    let findings = kite_driver::a11y::audit(&text);
-    if findings.is_empty() {
-        // Said plainly, and said honestly: this is what was checked, not a
-        // claim that the program is accessible.
-        eprintln!("ok — no unlabelled controls, undersized targets or low-contrast text");
-        return ExitCode::SUCCESS;
-    }
-    for finding in &findings {
-        eprintln!("a11y: {}\n", finding);
-    }
-    eprintln!(
-        "{} finding{} in `{}`",
-        findings.len(),
-        if findings.len() == 1 { "" } else { "s" },
-        path
-    );
-    ExitCode::FAILURE
-}
-
-fn run_tests(result: &kite_driver::Compilation, path: &str) -> ExitCode {
+fn run_tests(
+    result: &kite_driver::Compilation,
+    path: &str,
+    src: &str,
+    release: bool,
+) -> ExitCode {
     let tests = result.tests();
-    if tests.is_empty() {
+    let docs = kite_driver::doctest::extract(src, path);
+    if tests.is_empty() && docs.is_empty() {
         eprintln!(
-            "no tests in `{}`\n\nnote: a test is a `pub fn test_…() -> (int, error)`",
+            "no tests in `{}`\n\nnote: a test is a `pub fn test_…() -> (int, error)`, or a \
+             ```kite fence in a doc comment",
             path
         );
         return ExitCode::SUCCESS;
@@ -490,18 +448,78 @@ fn run_tests(result: &kite_driver::Compilation, path: &str) -> ExitCode {
         }
     }
 
-    let _ = writeln!(
-        out,
-        "\n{} passed, {} failed",
-        tests.len() - failed,
-        failed
-    );
+    let mut ran = tests.len();
+    if !docs.is_empty() {
+        let (doc_failed, doc_ran) = run_doc_tests(&mut out, path, src, &docs, release);
+        failed += doc_failed;
+        ran += doc_ran;
+    }
+
+    let _ = writeln!(out, "\n{} passed, {} failed", ran - failed, failed);
     let _ = out.flush();
     if failed > 0 {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Compile and run the `kite` fences in this file's doc comments.
+///
+/// Every fence in the file goes into **one** compilation, appended to the
+/// module they were written in. That is what puts the documented function in
+/// scope with no `use` line for an example to get wrong, and it is why a fence
+/// that declares a type can be compiled at all: it lands at file scope, where
+/// a declaration goes.
+///
+/// One compilation for all of them also means one failure names them all,
+/// which is right — an example that does not compile is a broken file, not a
+/// broken example.
+fn run_doc_tests(
+    out: &mut dyn Write,
+    path: &str,
+    src: &str,
+    docs: &[kite_driver::doctest::DocTest],
+    release: bool,
+) -> (usize, usize) {
+    let (augmented, names) = kite_driver::doctest::augment(src, docs);
+    let compiled = kite_driver::compile_with(path, &augmented, Emit::Kbc, release);
+    if compiled.failed() {
+        // The diagnostics point into the augmented source, whose line numbers
+        // are not the file's past the first fence. So the fences are named by
+        // where they opened and the diagnostics are printed under them, rather
+        // than pretending to a location the reader could click.
+        for d in docs {
+            let _ = writeln!(out, "FAILED   {}:{} (doc example)", path, d.line);
+        }
+        let _ = write!(out, "{}", compiled.render_diagnostics());
+        return (docs.len(), docs.len());
+    }
+
+    let mut failed = 0;
+    // A declaring fence contributes no name: compiling was the whole test.
+    for d in docs.iter().filter(|d| d.declares) {
+        let _ = writeln!(out, "ok       {}:{} (doc example, compiled)", path, d.line);
+    }
+    let runnable: Vec<&kite_driver::doctest::DocTest> =
+        docs.iter().filter(|d| !d.declares).collect();
+    for (name, d) in names.iter().zip(runnable) {
+        let mut captured = Vec::new();
+        let label = format!("{}:{} (doc example)", path, d.line);
+        match compiled.run_named(name, &mut captured) {
+            Ok(()) => {
+                let _ = writeln!(out, "ok       {}", label);
+            }
+            Err(trap) => {
+                failed += 1;
+                let _ = writeln!(out, "TRAPPED  {}\n         {}", label, trap);
+            }
+        }
+        for line in String::from_utf8_lossy(&captured).lines() {
+            let _ = writeln!(out, "         | {}", line);
+        }
+    }
+    (failed, docs.len())
 }
 
 /// `kitec fix` — apply what the compiler already knows how to do.

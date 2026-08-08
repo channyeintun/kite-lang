@@ -641,7 +641,7 @@ unsafe fn object_size_of(p: *const u8, shapes: &Shapes) -> usize {
         obj::SLICE => 8 * obj_word1(p) as usize,
         obj::MAP => 16 * obj_word1(p) as usize,
         obj::PAIR => 16,
-        obj::ERR => 8,
+        obj::ERR => 32,
         obj::CLOSURE => 8 + 8 * obj_word1(p) as usize,
         obj::BOX => 8,
         other => unreachable!("sizing an object of kind {}", other),
@@ -699,7 +699,13 @@ unsafe fn for_each_ref_slot(p: *mut u8, f: &mut dyn FnMut(*mut u64)) {
             }
             f(slot(p, 1));
         }
-        obj::ERR => f(slot(p, 0)),
+        // Message, carried value and cause are references; the tag at slot 2
+        // is a plain integer and must not be handed to the collector.
+        obj::ERR => {
+            f(slot(p, 0));
+            f(slot(p, 1));
+            f(slot(p, 3));
+        }
         // Slot 0 is the thunk's code address, which is not a heap object.
         obj::CLOSURE => shaped(rt().shapes.closures[aux].1.clone(), 1, f),
         obj::BOX => {
@@ -1120,18 +1126,74 @@ pub extern "C" fn kite_rt_pair_new(value: u64, value_kind: u64, error: u64) -> u
     p as u64
 }
 
+/// An error: what it says, the value it was rendered from, that value's type
+/// tag, and the error it wrapped.
+///
+/// The last three are how `cause`, `T.is` and `T.as` are answered. A plain
+/// `errors.new` passes zero for all of them, and no type's tag is zero, so a
+/// downcast against one is false without a test in front of it.
 #[no_mangle]
-pub extern "C" fn kite_rt_error_new(message: u64) -> u64 {
+pub extern "C" fn kite_rt_error_new(message: u64, value: u64, tag: i64, cause: u64) -> u64 {
     let mut message = message;
+    let mut value = value;
+    let mut cause = cause;
     root(&mut message);
-    let p = alloc(HEADER + 8);
-    unroot(1);
+    root(&mut value);
+    root(&mut cause);
+    let p = alloc(HEADER + 32);
+    unroot(3);
     unsafe {
         *(p as *mut u64) = word0(obj::ERR, 0);
         *(p as *mut u64).add(1) = 0;
         *slot(p, 0) = message;
+        *slot(p, 1) = value;
+        *slot(p, 2) = tag as u64;
+        *slot(p, 3) = cause;
     }
     p as u64
+}
+
+/// The error this one wrapped, or nil. Nil for a nil error too, so this needs
+/// no nil test in front of it — the same courtesy `message` extends.
+///
+/// No boxing: `cause` answers an `error`, which is already the nil-able type.
+#[no_mangle]
+pub extern "C" fn kite_rt_error_cause(e: u64) -> u64 {
+    if e == 0 {
+        return 0;
+    }
+    unsafe { *slot(e as *const u8, 3) }
+}
+
+/// The type tag of the carried value, or zero.
+#[no_mangle]
+pub extern "C" fn kite_rt_error_tag(e: u64) -> i64 {
+    if e == 0 {
+        return 0;
+    }
+    unsafe { *slot(e as *const u8, 2) as i64 }
+}
+
+/// The carried value when the error's tag is `tag`, and nil when it is not. A
+/// nil error answers nil, since no type's tag is zero.
+///
+/// `wrap_kind` boxes the result, because an optional is a box here.
+#[no_mangle]
+pub extern "C" fn kite_rt_error_as(e: u64, tag: i64, wrap_kind: i64) -> u64 {
+    if e == 0 {
+        return 0;
+    }
+    let value = unsafe {
+        if *slot(e as *const u8, 2) as i64 == tag {
+            *slot(e as *const u8, 1)
+        } else {
+            return 0;
+        }
+    };
+    if wrap_kind < 0 {
+        return value;
+    }
+    kite_rt_box_new(value, wrap_kind as u64)
 }
 
 /// The message of an error — or `""` for `nil`, which is what the VM answers
@@ -1233,6 +1295,41 @@ pub extern "C" fn kite_rt_slice_push(s: u64, value: u64) -> u64 {
 #[no_mangle]
 pub extern "C" fn kite_rt_slice_len(s: u64) -> i64 {
     unsafe { obj_word1(s as *const u8) as i64 }
+}
+
+/// `xs[a..b]` — a fresh slice of the half-open window.
+///
+/// **Clamped rather than trapping**, which is the opposite of
+/// [`kite_rt_index_get`] two functions up. An index names an element the
+/// program believes is there; a range names a window, and a window wider than
+/// the data is what a last page looks like. The bytecode VM defines this
+/// answer and the other two backends reproduce it.
+#[no_mangle]
+pub extern "C" fn kite_rt_slice_range(s: u64, start: i64, end: i64) -> u64 {
+    let mut s = s;
+    unsafe {
+        let (_, len) = slice_parts(s);
+        let len = len as i64;
+        let lo = start.clamp(0, len);
+        // Clamped up to `lo`, so a backwards range is empty rather than a
+        // negative length handed to the allocator.
+        let hi = end.clamp(lo, len);
+        let count = (hi - lo) as usize;
+
+        root(&mut s);
+        let p = alloc(HEADER + 8 * count);
+        unroot(1);
+        // The header carries the element kind, which the copy must preserve
+        // for the collector to trace the new slice at all.
+        *(p as *mut u64) = *(s as *const u64);
+        *(p as *mut u64).add(1) = count as u64;
+        std::ptr::copy_nonoverlapping(
+            slot(s as *const u8, lo as usize) as *const u8,
+            slot(p, 0) as *mut u8,
+            8 * count,
+        );
+        p as u64
+    }
 }
 
 /// `.get()` — an optional rather than a trap. `wrap_kind` is the element's
@@ -1925,7 +2022,9 @@ pub extern "C" fn kite_rt_draw_image(x: f64, y: f64, w: f64, h: f64, src: u64) {
 }
 
 /// The parallel tree, written down. Nothing here paints; the point is that a
-/// transcript can be audited, which is what `kite check --a11y` does.
+/// transcript can be audited. Nothing in the toolchain audits it now — the
+/// reader went with `std/ui` — so this is what a canvas program has to say
+/// what it drew.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn kite_rt_draw_semantics(
@@ -2251,12 +2350,16 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         kite_rt_pair_new,
         kite_rt_error_new,
         kite_rt_error_message,
+        kite_rt_error_cause,
+        kite_rt_error_tag,
+        kite_rt_error_as,
         kite_rt_set_field,
         kite_rt_index_get,
         kite_rt_set_index,
         kite_rt_slice_push,
         kite_rt_slice_len,
         kite_rt_slice_get,
+        kite_rt_slice_range,
         kite_rt_map_len,
         kite_rt_map_get,
         kite_rt_map_set,

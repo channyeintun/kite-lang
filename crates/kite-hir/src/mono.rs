@@ -416,15 +416,19 @@ fn expr_children(k: &mut ExprKind) -> Vec<&mut Expr> {
         | ExprKind::PairValue { base }
         | ExprKind::PairError { base }
         | ExprKind::ErrorMessage { base }
+        | ExprKind::ErrorCause { base }
+        | ExprKind::ErrorTag { base }
+        | ExprKind::ErrorAs { base, .. }
         | ExprKind::MapLen { base }
         | ExprKind::MapKeys { base }
         | ExprKind::MapValues { base }
         | ExprKind::SliceLen { base } => vec![base],
-        ExprKind::ErrorNew { message } => vec![message],
+        ExprKind::ErrorNew { message, value, tag, cause } => vec![message, value, tag, cause],
         ExprKind::Binary { lhs, rhs, .. } => vec![lhs, rhs],
         ExprKind::PairNew { value, error } => vec![value, error],
         ExprKind::MapGet { base, key } => vec![base, key],
         ExprKind::Index { base, index } | ExprKind::SliceGet { base, index } => vec![base, index],
+        ExprKind::SliceRange { base, start, end } => vec![base, start, end],
         ExprKind::If { cond, then, else_ } => vec![cond, then, else_],
         ExprKind::Match { scrutinee, arms } => {
             let mut v = vec![&mut **scrutinee];

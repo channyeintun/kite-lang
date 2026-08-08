@@ -132,8 +132,14 @@ pub enum Op {
     NewPair { dst: Reg, value: Reg, error: Reg },
     PairValue { dst: Reg, obj: Reg },
     PairError { dst: Reg, obj: Reg },
-    NewError { dst: Reg, message: Reg },
+    NewError { dst: Reg, message: Reg, value: Reg, tag: Reg, cause: Reg },
     ErrorMessage { dst: Reg, obj: Reg },
+    /// The error this one wrapped, or nil.
+    ErrorCause { dst: Reg, obj: Reg },
+    /// The type tag of the carried value, or zero.
+    ErrorTag { dst: Reg, obj: Reg },
+    /// The carried value as an optional: present when the tag matches.
+    ErrorAs { dst: Reg, obj: Reg, tag: u32 },
     Move { dst: Reg, src: Reg },
 
     // ---- arithmetic -------------------------------------------------------
@@ -221,6 +227,9 @@ pub enum Op {
     SliceLen { dst: Reg, obj: Reg },
     /// Yields an optional rather than trapping.
     SliceGet { dst: Reg, obj: Reg, index: Reg },
+    /// `xs[a..b]` — a fresh slice of the half-open window, clamped rather than
+    /// trapping.
+    SliceRange { dst: Reg, obj: Reg, start: Reg, end: Reg },
     /// Appends in place, copy-on-write.
     SlicePush { obj: Reg, src: Reg },
     SetField { obj: Reg, index: u16, src: Reg },
@@ -415,8 +424,17 @@ impl fmt::Display for Op {
             MapValues { dst, obj } => un(f, "map.values", dst, obj),
             PairValue { dst, obj } => write!(f, "{:<12} r{}, r{}", "pair.value", dst, obj),
             PairError { dst, obj } => write!(f, "{:<12} r{}, r{}", "pair.error", dst, obj),
-            NewError { dst, message } => write!(f, "{:<12} r{}, r{}", "new.error", dst, message),
+            NewError { dst, message, value, tag, cause } => write!(
+                f,
+                "{:<12} r{}, r{}, r{}, r{}, r{}",
+                "new.error", dst, message, value, tag, cause
+            ),
             ErrorMessage { dst, obj } => write!(f, "{:<12} r{}, r{}", "err.message", dst, obj),
+            ErrorCause { dst, obj } => write!(f, "{:<12} r{}, r{}", "err.cause", dst, obj),
+            ErrorTag { dst, obj } => write!(f, "{:<12} r{}, r{}", "err.tag", dst, obj),
+            ErrorAs { dst, obj, tag } => {
+                write!(f, "{:<12} r{}, r{}, {}", "err.as", dst, obj, tag)
+            }
             Move { dst, src } => write!(f, "{:<12} r{}, r{}", "move", dst, src),
 
             AddInt { dst, a, b } => bin(f, "add.int", dst, a, b),
@@ -500,6 +518,9 @@ impl fmt::Display for Op {
             SliceLen { dst, obj } => write!(f, "{:<12} r{}, r{}", "len", dst, obj),
             SliceGet { dst, obj, index } => {
                 write!(f, "{:<12} r{}, r{}, r{}", "slice.get", dst, obj, index)
+            }
+            SliceRange { dst, obj, start, end } => {
+                write!(f, "{:<12} r{}, r{}, r{}, r{}", "slice.range", dst, obj, start, end)
             }
             SlicePush { obj, src } => write!(f, "{:<12} r{}, r{}", "push", obj, src),
             SetField { obj, index, src } => {

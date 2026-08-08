@@ -127,8 +127,11 @@ const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_map_new", &[I64, I64, I64], Some(I64)),
     ("kite_rt_box_new", &[I64, I64], Some(I64)),
     ("kite_rt_pair_new", &[I64, I64, I64], Some(I64)),
-    ("kite_rt_error_new", &[I64], Some(I64)),
+    ("kite_rt_error_new", &[I64, I64, I64, I64], Some(I64)),
     ("kite_rt_error_message", &[I64], Some(I64)),
+    ("kite_rt_error_cause", &[I64], Some(I64)),
+    ("kite_rt_error_tag", &[I64], Some(I64)),
+    ("kite_rt_error_as", &[I64, I64, I64], Some(I64)),
     ("kite_rt_set_field", &[I64, I64, I64, I64], None),
     ("kite_rt_index_get", &[I64, I64], Some(I64)),
     ("kite_rt_set_index", &[I64, I64, I64], Some(I64)),
@@ -176,6 +179,7 @@ const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_draw_text", &[F64, F64, I64, I64], None),
     ("kite_rt_draw_field", &[F64, F64, F64, F64, I64, I64, I64, I64, I8], None),
     ("kite_rt_draw_image", &[F64, F64, F64, F64, I64], None),
+    ("kite_rt_slice_range", &[I64, I64, I64], Some(I64)),
     ("kite_rt_draw_semantics", &[F64, F64, F64, F64, I64, I64, I64, I64], None),
     ("kite_rt_draw_clip", &[F64, F64, F64, F64], None),
     ("kite_rt_draw_unclip", &[], None),
@@ -1287,14 +1291,37 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 let v = self.b.ins().load(I64, MemFlagsData::trusted(), obj, 24);
                 self.def(dst, v);
             }
-            mir::Rvalue::ErrorNew { message } => {
+            mir::Rvalue::ErrorNew { message, value, tag, cause } => {
                 let m = self.operand(message);
-                let v = self.call_rt("kite_rt_error_new", &[m]).unwrap();
+                let val = self.operand(value);
+                let t = self.operand(tag);
+                let c = self.operand(cause);
+                let v = self.call_rt("kite_rt_error_new", &[m, val, t, c]).unwrap();
                 self.def(dst, v);
             }
             mir::Rvalue::ErrorMessage { base } => {
                 let e = self.operand(base);
                 let v = self.call_rt("kite_rt_error_message", &[e]).unwrap();
+                self.def(dst, v);
+            }
+            // Every value is a word here, so a downcast needs no cast: what
+            // the tag proved is what the slot holds.
+            mir::Rvalue::ErrorCause { base } => {
+                let e = self.operand(base);
+                let v = self.call_rt("kite_rt_error_cause", &[e]).unwrap();
+                self.def(dst, v);
+            }
+            mir::Rvalue::ErrorTag { base } => {
+                let e = self.operand(base);
+                let v = self.call_rt("kite_rt_error_tag", &[e]).unwrap();
+                self.def(dst, v);
+            }
+            mir::Rvalue::ErrorAs { base, tag } => {
+                let e = self.operand(base);
+                let t = self.iconst(*tag as i64);
+                let wrap = self.optional_wrap_kind(dst);
+                let w = self.iconst(wrap);
+                let v = self.call_rt("kite_rt_error_as", &[e, t, w]).unwrap();
                 self.def(dst, v);
             }
             mir::Rvalue::IsNil { value } => {
@@ -1365,6 +1392,13 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 let v = self.call_rt("kite_rt_slice_get", &a).unwrap();
                 self.def(dst, v);
             }
+            mir::Rvalue::SliceRange { base, start, end } => {
+                let s = self.operand(base);
+                let lo = self.operand(start);
+                let hi = self.operand(end);
+                let v = self.call_rt("kite_rt_slice_range", &[s, lo, hi]).unwrap();
+                self.def(dst, v);
+            }
             mir::Rvalue::MapLen { base } => {
                 let m = self.operand(base);
                 let v = self.b.ins().load(I64, MemFlagsData::trusted(), m, 8);
@@ -1399,6 +1433,15 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
     /// How a `.get()`-style optional result is built: boxed with the
     /// element's kind, or passed through when the element is itself optional
     /// — `?T` flattens, so the stored reference already is the answer.
+    /// The boxing kind for a local whose type is an optional. An optional is
+    /// a box here, so anything answering with one has to make it.
+    fn optional_wrap_kind(&self, dst: mir::Local) -> i64 {
+        match self.cx.types.kind(self.local_ty(dst)) {
+            TyKind::Optional(p) => self.wrap_kind(*p),
+            _ => -1,
+        }
+    }
+
     fn wrap_kind(&self, elem: TyId) -> i64 {
         if matches!(self.cx.types.kind(elem), TyKind::Optional(_)) {
             -1

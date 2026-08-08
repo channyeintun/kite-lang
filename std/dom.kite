@@ -11,7 +11,7 @@
 //! and Kite takes the parts that need real logic. Attaching to `<body>` is
 //! available and is not the point.
 //!
-//! ```kite
+//! ```kite ignore
 //! use std/dom
 //!
 //! fn main() {

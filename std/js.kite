@@ -17,7 +17,7 @@
 //! at run time — which is why every call here answers with an error rather than
 //! throwing.
 //!
-//! ```kite
+//! ```kite ignore
 //! use std/js
 //!
 //! fn title() -> (str, error) {
@@ -398,10 +398,38 @@ pub fn as_int(v: JsValue) -> (int, error) {
     return js_as_int(v), nil
 }
 
+// ---- handing a closure to the host -----------------------------------------
+//
+// `js.func(f)` is a compiler builtin rather than a function in this module,
+// because what crosses is a closure — a GC struct the host cannot enter — and
+// the module has to export a trampoline that can.
+//
+// **The handler's shape is the handler's own.** It takes up to four `JsValue`
+// parameters and answers with a `JsValue` or with nothing, and the compiler
+// builds a wrapper of that exact arity:
+//
+// ```kite
+// js.func(|| { … })                                   // a timer, a microtask
+// js.func(|e: JsValue| { … })                         // a listener
+// js.func(|entries: JsValue, obs: JsValue| { … })      // an observer
+// js.func(|a: JsValue, b: JsValue| -> JsValue { … })   // a comparator
+// ```
+//
+// The return value is what makes `sort`, `map`, `filter` and a `Promise`
+// executor reachable at all. It used to be `fn(JsValue)` and nothing else,
+// which meant any host API that read a value back out of a callback could not
+// be called from Kite — and the workaround was to write that part in
+// JavaScript, which is the one thing this layer exists to make unnecessary.
+//
+// Four parameters is the ceiling, the same one `call0 … call4` has and for the
+// same reason: a slice is a Kite aggregate and does not cross, so the arities
+// are spelled out rather than taken as a list. A fifth is a compile error
+// rather than an argument that silently disappears.
+
 // ---- promises --------------------------------------------------------------
 //
 // **There is nothing here that makes promises work.** They already do. A
-// promise is an object, `then` is a method on it, and [`func`] supplies the
+// promise is an object, `then` is a method on it, and `js.func` supplies the
 // callback — so `fetch` and everything shaped like it can be called today with
 // the primitives above and nothing else:
 //
@@ -449,7 +477,7 @@ fn rejection(reason: JsValue) -> str {
 /// nil should not be typed as though it can. Anything wanting an `error` to
 /// propagate writes `errors.new(why)`, which is all this layer would have done.
 ///
-/// ```kite
+/// ```kite ignore
 /// let (p, err) = js.call1(js.global("globalThis"), "fetch", js.of_str(url))
 /// check err
 /// check js.settle(p,

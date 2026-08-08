@@ -998,7 +998,9 @@ export const textRenderer = {{
     ),
   // A transcript is the one backend where the parallel tree and the picture
   // are the same kind of thing, which is what makes it the thing an audit
-  // reads. `kite check --a11y` parses these lines.
+  // could read. Nothing in the toolchain reads it today: the auditor that did
+  // was removed with `std/ui`, and a canvas program that wants to declare its
+  // own semantics is what the call is left for.
   // Label last: it is the only field that may contain a space, so everything
   // before it is fixed and the rest of the line is the label.
   semantics: (x, y, w, h, role, label, flags, id) =>
@@ -1118,12 +1120,38 @@ function imports() {{
       // story: the closure lives as long as the wrapper, the wrapper lives as
       // long as whatever the page attached it to, and the one collector traces
       // the chain. A registry would pin every listener a page ever installed.
-      js_func: (handler) => (value) => {{
+      js_func: (handler, shape) => {{
         // Synchronous, because a listener that wanted to call
-        // `preventDefault` could not if this were deferred.
-        invoke(handler, value === undefined ? null : value);
-        // The handler may have made a sleeping task runnable, or started one.
-        wake();
+        // `preventDefault` could not if this were deferred — and because a
+        // comparator handed to `sort` is asked for its answer now.
+        const run = (...args) => {{
+          const result = invoke(
+            shape,
+            handler,
+            args.map((a) => (a === undefined ? null : a)),
+          );
+          // The handler may have made a sleeping task runnable, or started
+          // one. This happens after the call so that the value is already in
+          // hand: a pump that ran first could re-enter and the answer would be
+          // whatever the re-entry left behind.
+          wake();
+          return result;
+        }};
+        // A wrapper of the handler's own arity, so anything that inspects
+        // `fn.length` — and the platform does, for `Array.prototype.sort` and
+        // for a `Proxy` trap — sees what the Kite side actually declared.
+        switch (handlerArity(shape)) {{
+          case 0:
+            return () => run();
+          case 1:
+            return (a) => run(a);
+          case 2:
+            return (a, b) => run(a, b);
+          case 3:
+            return (a, b, c) => run(a, b, c);
+          default:
+            return (a, b, c, d) => run(a, b, c, d);
+        }}
       }},
     }},
   }};
@@ -1372,13 +1400,41 @@ export function wake() {{
 /// instantiated.
 let invokeExports = null;
 
-function invoke(handler, value) {{
-  if (invokeExports === null || typeof invokeExports.kite_invoke !== "function") {{
+/// Enter a Kite closure the host is holding.
+///
+/// One trampoline per handler shape, because `call_ref` needs the closure's
+/// exact type and a two-argument handler is not the same type as a
+/// one-argument one. `shape` is the index the module sent over with the
+/// closure.
+///
+/// Every trampoline returns a reference — null when the Kite side answers with
+/// nothing — so there is one calling convention here rather than one per
+/// shape, and a comparator and a listener are wrapped by the same code.
+function invoke(shape, handler, args) {{
+  const trampoline = trampolineFor(shape);
+  return trampoline(handler, ...args);
+}}
+
+function trampolineFor(shape) {{
+  const trampoline =
+    invokeExports === null ? null : invokeExports["kite_invoke_" + shape];
+  if (typeof trampoline !== "function") {{
     throw new Error(
       "a handler fired before the module was given to a driver: call `run` or `resident`",
     );
   }}
-  invokeExports.kite_invoke(handler, value);
+  return trampoline;
+}}
+
+/// How many host values this shape's handler takes.
+///
+/// Read from the export's own arity rather than from a table generated beside
+/// it: an exported Wasm function is a JavaScript function whose `length` is
+/// the number of parameters it declares, and the first of those is the closure
+/// itself. A table would be a second description of the same fact, free to
+/// disagree with the module it describes.
+function handlerArity(shape) {{
+  return Math.max(0, trampolineFor(shape).length - 1);
 }}
 
 /// Make a module's exports reachable to handlers. Both drivers call it.
@@ -1399,6 +1455,12 @@ export async function instantiate(source = {wasm}) {{
       ? source
       : new Uint8Array(await (await fetch(source)).arrayBuffer());
 {compile_step}
+  // Before anything in the module can run. A driver sets this too, and used to
+  // be the only thing that did — which was enough while a handler could only
+  // be *entered* after one had started. It is not enough now: `js.func` reads
+  // the trampoline's arity when it wraps the closure, and `main` may wrap one
+  // long before a driver exists.
+  useExports(instance.exports);
   return instance.exports;
 }}
 

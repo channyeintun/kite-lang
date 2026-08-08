@@ -53,8 +53,12 @@ pub enum Value {
     /// error path — but the taint analysis has already proved no program can
     /// read it there, so it is never observed.
     Pair(Rc<(Value, Value)>),
-    /// An error value: a message. Kite errors are ordinary values.
-    Err(Rc<str>),
+    /// An error value. Kite errors are ordinary values.
+    ///
+    /// It carries what it says, the value it was made from and that value's
+    /// type tag, and the error it wrapped. The last three are how `cause`,
+    /// `T.is` and `T.as` are answered; a plain `errors.new` leaves them empty.
+    Err(Rc<ErrorValue>),
     /// `nil`, or a present optional. Only ever produced where the type is
     /// `?T`; Kite has no null anywhere else.
     Nil,
@@ -70,6 +74,22 @@ pub struct ClosureValue {
 pub struct StructValue {
     pub struct_id: u32,
     pub fields: RefCell<Vec<Value>>,
+}
+
+/// What an error carries.
+///
+/// The message is rendered where the failure happened, which is where its
+/// context is freshest, and `value` keeps the thing it was rendered *from* so
+/// that a caller can ask which failure this was rather than matching on text.
+#[derive(Debug)]
+pub struct ErrorValue {
+    pub message: Rc<str>,
+    /// The value an `impl Error` type was converted from, or `Nil`.
+    pub value: Value,
+    /// That value's `TypeTag`, or zero when nothing is carried.
+    pub tag: i64,
+    /// The error this one wraps, or `Nil`.
+    pub cause: Value,
 }
 
 #[derive(Debug)]
@@ -99,7 +119,11 @@ impl PartialEq for Value {
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Map(a), Value::Map(b)) => a == b,
             (Value::Pair(a), Value::Pair(b)) => a == b,
-            (Value::Err(a), Value::Err(b)) => a == b,
+            // Two errors are equal when they say the same thing. What they
+            // carry is provenance rather than identity: a caller comparing
+            // errors is comparing failures, and two failures that read alike
+            // are alike.
+            (Value::Err(a), Value::Err(b)) => a.message == b.message,
             (Value::Nil, Value::Nil) => true,
             _ => false,
         }
@@ -249,7 +273,7 @@ impl fmt::Display for Value {
                 write!(f, "]")
             }
             Value::Pair(p) => write!(f, "({}, {})", p.0, p.1),
-            Value::Err(m) => write!(f, "{}", m),
+            Value::Err(e) => write!(f, "{}", e.message),
             Value::Tuple(items) => {
                 write!(f, "(")?;
                 for (i, v) in items.iter().enumerate() {
@@ -389,7 +413,7 @@ pub fn run_with_host<'a>(
 pub fn failure_message(value: &Value) -> Option<String> {
     match value {
         Value::Pair(p) => failure_message(&p.1),
-        Value::Err(message) => Some(message.to_string()),
+        Value::Err(e) => Some(e.message.to_string()),
         _ => None,
     }
 }
@@ -583,7 +607,7 @@ impl<'a> Vm<'a> {
                         })
                     }
                 },
-                Op::NewError { dst, message } => {
+                Op::NewError { dst, message, value, tag, cause } => {
                     let m = match self.get(base, message) {
                         Value::Str(s) => s,
                         other => {
@@ -593,14 +617,69 @@ impl<'a> Vm<'a> {
                             })
                         }
                     };
-                    self.set(base, dst, Value::Err(m));
+                    let carried = self.get(base, value);
+                    let t = match self.get(base, tag) {
+                        Value::Int(i) => i,
+                        _ => 0,
+                    };
+                    let c = self.get(base, cause);
+                    self.set(
+                        base,
+                        dst,
+                        Value::Err(Rc::new(ErrorValue { message: m, value: carried, tag: t, cause: c })),
+                    );
                 }
+                // A nil error answers `""` rather than trapping, which is what
+                // lets `err.message()` be written without a nil test. The three
+                // readers below answer the same way for the same reason.
                 Op::ErrorMessage { dst, obj } => match self.get(base, obj) {
-                    Value::Err(m) => self.set(base, dst, Value::Str(m)),
+                    Value::Err(e) => {
+                        let m = e.message.clone();
+                        self.set(base, dst, Value::Str(m));
+                    }
                     Value::Nil => self.set(base, dst, Value::Str(Rc::from(""))),
                     other => {
                         return Err(Trap::TypeConfusion {
                             op: "message",
+                            found: other.type_name(),
+                        })
+                    }
+                },
+                Op::ErrorCause { dst, obj } => match self.get(base, obj) {
+                    Value::Err(e) => {
+                        let c = e.cause.clone();
+                        self.set(base, dst, c);
+                    }
+                    Value::Nil => self.set(base, dst, Value::Nil),
+                    other => {
+                        return Err(Trap::TypeConfusion {
+                            op: "cause",
+                            found: other.type_name(),
+                        })
+                    }
+                },
+                // Zero for an error carrying nothing, and zero for `nil`. No
+                // type's tag is zero, so a comparison against one is false
+                // without a nil test in front of it.
+                Op::ErrorTag { dst, obj } => match self.get(base, obj) {
+                    Value::Err(e) => self.set(base, dst, Value::Int(e.tag)),
+                    Value::Nil => self.set(base, dst, Value::Int(0)),
+                    other => {
+                        return Err(Trap::TypeConfusion {
+                            op: "tag",
+                            found: other.type_name(),
+                        })
+                    }
+                },
+                Op::ErrorAs { dst, obj, tag } => match self.get(base, obj) {
+                    Value::Err(e) if e.tag == tag as i64 => {
+                        let v = e.value.clone();
+                        self.set(base, dst, v);
+                    }
+                    Value::Err(_) | Value::Nil => self.set(base, dst, Value::Nil),
+                    other => {
+                        return Err(Trap::TypeConfusion {
+                            op: "as",
                             found: other.type_name(),
                         })
                     }
@@ -1081,6 +1160,23 @@ impl<'a> Vm<'a> {
                     self.set(base, dst, v);
                 }
 
+                // Clamped, not trapping: a window wider than the data is what
+                // paging code produces on its last page, and the three
+                // backends have to agree on that edge exactly. This is where
+                // the answer is defined; the other two follow it.
+                Op::SliceRange { dst, obj, start, end } => {
+                    let seq = self.get(base, obj);
+                    let (lo, hi) = (self.get(base, start), self.get(base, end));
+                    let items = Self::as_slice(&seq)?;
+                    let len = items.len() as i64;
+                    let lo = Self::as_index(&lo)?.clamp(0, len);
+                    // `hi` is clamped up to `lo` as well, so a backwards range
+                    // is empty rather than a panic on a reversed slice bound.
+                    let hi = Self::as_index(&hi)?.clamp(lo, len);
+                    let window = items[lo as usize..hi as usize].to_vec();
+                    self.set(base, dst, Value::Slice(Rc::new(window)));
+                }
+
                 Op::SlicePush { obj, src } => {
                     let value = self.get(base, src);
                     let slot = base + obj as usize;
@@ -1507,8 +1603,10 @@ impl<'a> Vm<'a> {
 
             // The parallel tree, written down. A transcript is the one backend
             // for which semantics and pixels are the same kind of thing —
-            // both are lines — which is what makes it the natural place to
-            // audit them from. `kite check --a11y` reads exactly this.
+            // both are lines — which is what made it the natural place to
+            // audit them from. Nothing in the toolchain audits it now: the
+            // reader was removed with `std/ui`, and what is left is a canvas
+            // program's own way of saying what it drew.
             Native::DrawSemantics => {
                 let a = |i: usize| self.regs[base + arg_base as usize + i].clone();
                 let show = |i: usize| {

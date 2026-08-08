@@ -4,7 +4,10 @@
 **Date:** August 2026
 **Status:** Implemented, on three backends, except where a section says
 otherwise. Where this document and the compiler disagree, the compiler is
-right and the disagreement is a bug in this file.
+right and the disagreement is a bug in this file — and five of them were,
+found by an audit that compiled what each section claimed rather than reading
+a status table. Four were built and one was struck, which is recorded in
+[Phase 26](../docs/06-roadmap.md#phase-26--the-gaps-between-the-specification-and-the-compiler).
 
 ---
 
@@ -120,6 +123,14 @@ type     use      var
 /// Documentation comment. Attaches to the following declaration.
 /// Markdown is permitted. Code fences are extracted and compiled as tests.
 ```
+
+A ` ```kite ` fence is compiled and run by `kitec test`, alongside the file's
+`test_…` functions. It is appended to the module it was written in, so
+everything the comment documents is in scope with no import to get wrong; a
+fence that declares a type or a function lands at file scope and is checked by
+compiling. ` ```kite ignore ` marks an illustration instead — a fence naming
+types the reader supplies, which most module headers do — and is not compiled.
+A fence tagged anything else is prose.
 
 ### 2.4 Literals
 
@@ -244,7 +255,6 @@ special ones.
 
 ```kite
 [T]           // slice — a copy-on-write sequence
-[N]T          // array — fixed length N, known at compile time
 {K: V}        // map — hash map with deterministic iteration order
 (A, B, C)     // tuple
 Option<T>     // optional — either a T or nil
@@ -254,6 +264,16 @@ fn(A, B) -> C // function type
 Maps iterate in **insertion order**. Go randomises map iteration to prevent
 reliance on order; Kite instead guarantees an order, which is cheaper to reason
 about and removes an entire class of nondeterministic test failure.
+
+**There is no fixed-length array.** A `[N]T` was listed here for a long time
+and never existed in the compiler, and the resolution was to strike it rather
+than build it — because this document already said twice that it should not be
+here. [§1.1](#11-the-concept-budget) lists the composite types a reader must
+hold and calls the list complete, and an array is not on it;
+[§14](#14-memory-model) records that WasmGC gives `[Point]` an array of
+*references*, so a fixed length buys no layout, and names `buffer.F64` as the
+answer for code where the layout is the point. What was left was a compile-time
+length check, which is not worth an eleventh concept.
 
 ### 3.3 Optionals
 
@@ -541,7 +561,8 @@ let m = {"a": 1, "b": 2}
 
 xs[0]                 // int — bounds-checked, traps on failure
 xs.get(0)             // Option<int> — bounds-checked, nil on failure
-xs[1..3]              // [int] — subslice, half-open
+xs[1..3]              // [int] — subslice, half-open, clamped
+xs[1..=2]             // [int] — the same subslice, inclusive
 xs.len()              // int
 m["a"]                // Option<int> — map indexing always yields an optional
 ```
@@ -549,6 +570,20 @@ m["a"]                // Option<int> — map indexing always yields an optional
 Map indexing returns `Option<V>`, never a zero value. Slice indexing with `[]` traps on
 out-of-bounds because that is a program bug, not a runtime condition; `.get()` is
 provided for the case where it genuinely is a runtime condition.
+
+**A range index clamps where a single index traps**, and the difference is the
+question each one asks. `xs[i]` names an element the program believes is there,
+so a missing one is a bug. `xs[a..b]` names a *window*, and a window wider than
+the data is what paging code produces on its last page — trapping there would
+make every caller write the clamp. So `xs[2..100]` is the tail, `xs[4..1]` is
+empty rather than an error, and a negative start is the beginning. This is the
+same rule `s.slice(from, to)` has had all along ([§3.1](#31-primitives)), and
+`s[a..b]` is that call written as an index: one syntax with two answers about
+its edges is precisely the drift this language spends its omissions avoiding.
+
+A slice is the only sequence a range indexes other than a `str`. A map has no
+order over its keys for a range to name, so `m[a..b]` is an error rather than a
+guess.
 
 ---
 
@@ -591,7 +626,8 @@ for i in 0..10 { }          // range, half-open: 0 through 9
 for i in 0..=10 { }         // inclusive range
 
 for (key, value) in m { }   // maps yield tuples
-for (i, item) in items.enumerate() { }
+for (i, item) in enumerate(items) { }       // and so does a slice of pairs
+for (a, b) in zip(xs, ys) { }
 
 // 2. Conditional
 for count < 10 {
@@ -678,15 +714,28 @@ may implement it**. A value whose type does is accepted wherever an `error` is
 expected; the conversion happens at that point and is an ordinary call in the
 IR, so nothing about it is hidden from a reader of the generated code.
 
-> **What is built and what is not.** `impl Error for MyType` compiles, and
-> returning one in an error slot works on all three backends. What an `error`
-> *carries* is still the message: the conversion renders it where the failure
-> happened, and the original value is not kept. So `errors.chain`,
-> `errors.is<T>` and `errors.as<T>` in [§7.6](#76-adding-context) are still
-> absent — they need the value alongside the message, which is a change to the
-> representation rather than to the conversion, and it is
-> [Phase 24's remaining half](../docs/06-roadmap.md#phase-24--concrete-error-types).
-> `cause` is absent for the same reason.
+An `error` **carries what it was made from**. The conversion renders the
+message where the failure happened — which is where its context is freshest —
+and keeps the value beside it, with its type, so a caller four layers up can
+ask which failure this was instead of matching on text:
+
+```kite
+let (cfg, err) = load("app.toml")
+if NotFound.is(err) {
+    return defaults(), nil
+}
+let missing = NotFound.as(err)      // Option<NotFound>
+```
+
+**The type names itself.** [§11](#11-generics) has no turbofish, so
+`errors.is<T>(err)` — which this document used to promise — has nowhere to
+write its type argument. `NotFound.is(err)` says the same thing in a place the
+language can spell, and it is the shape `Decode` already uses for the same
+reason ([§10.4](#104-built-in-traits)): `User.decode(doc)` names the type at
+the front because a call site cannot name it anywhere else. `as` is a keyword,
+and after a `.` it is a member name — the only position where that is true, and
+admitted one keyword at a time rather than by opening the position to all
+twenty-seven.
 
 ```kite
 pub struct NotFound {
@@ -862,6 +911,23 @@ check errors.wrap(err, "loading config from \(path)")
 `errors.wrap` returns nil when given nil, so this composes with `check`
 directly. The context goes in front of the message, so a failure that crosses
 four layers reads as the four sentences that produced it.
+
+**It keeps what it wrapped**, rather than flattening it into text. `err.cause()`
+is the error underneath — an `error`, not an `Option<error>`, because `error`
+is already the nil-able type and two ways to say absent is one too many.
+`errors.chain(err)` is every message outermost first, and `errors.root(err)` is
+the innermost: the failure that actually happened, under the context. Which is
+what makes the downcast in [§7.2](#72-the-error-type) useful four layers up:
+
+```kite
+let (cfg, err) = start()
+if err != nil {
+    io.print(join(errors.chain(err), " <- "))
+    if NotFound.is(errors.root(err)) {
+        io.print("nothing was there to load")
+    }
+}
+```
 
 ### 7.7 Unrecoverable failures
 
@@ -1405,25 +1471,34 @@ program-wide table, so `use leak as crypto` written anywhere — including insid
 a dependency — rewrote every `crypto.…` call in every other module, silently
 and with no diagnostic. An alias is a convenience for the file that writes it.
 
-**A module is known by the last segment of its path.** `use dep/utils` and
-`use utils` therefore both name a module called `utils`, and only one of them
-can have the name.
+**A module is its whole path.** `use dep/utils` and `use utils` are two
+different modules, and every segment is honoured when the files are found:
+`dep/utils` is that directory, not whichever `utils` was reached first. A first
+segment naming a declared dependency roots there instead, so
+`use markdown/render` reaches inside the package.
 
-Two consequences follow, and both are errors rather than a silent choice:
+What a use site writes is a **spelling**, and by default it is the last
+segment. A spelling belongs to the module that writes it, so two files may
+spell different modules the same way; what one file may not do is spell two
+modules the same way:
+
+```kite
+use utils                   // `utils.…` is this one
+use dep/utils as theirs     // `theirs.…` is that one
+```
+
+Two rules, both errors rather than a silent choice:
 
 - **The standard library's names are its own.** A non-`std` module may not take
   one (`E0403`). The reserved names are `buffer`, `canvas`, `crypto`, `dom`,
   `errors`, `fmt`, `fs`, `html`, `http`, `js`, `json`, `math`, `prelude`,
-  `socket`, `sync`, `task`, `test`, `text`, `time` and `toml`. Without this the
-  standard library was replaceable by any dependency that got there first.
-- **Two other modules may not share a name either** (`E0404`). Which one won
-  used to depend on the order of the `use` lines that reached them, with
-  nothing reported — so a dependency shipping a `utils` directory could answer
-  every `utils.…` call in the source of the program that imported it.
-
-Identifying a module by its full path, so that `dep/utils` and `utils` are two
-modules rather than a collision, is the better answer and is not yet what the
-compiler does.
+  `socket`, `sync`, `task`, `test`, `text`, `time` and `toml`. Full paths keep
+  `dep/crypto` and `std/crypto` apart on their own, but a *sibling* `crypto`
+  would still be spelled `crypto` in the file that imported it and shadow the
+  standard library there.
+- **One file may not spell two modules alike** (`E0404`). `use utils` followed
+  by `use dep/utils` is refused, because every `utils.…` above the second line
+  would quietly change meaning. Give one of them an alias.
 
 ### 13.2 Manifest
 
@@ -1618,7 +1693,7 @@ through which any host object can be reached:
 | `js.at(v, i)` / `js.length(v)` | an array-like thing |
 | `js.call0(v, name)` … `js.call4(v, name, a, b, c, d)` | methods, by arity |
 | `js.new0(name)` … `js.new3(name, a, b, c)` | construction, by arity |
-| `js.func(f)` | a Kite closure the host can call |
+| `js.func(f)` | a Kite closure the host can call — up to four `JsValue` parameters, answering with a `JsValue` or with nothing |
 | `js.settle(p, done, failed)` | both halves of a promise |
 | `js.same(a, b)` / `js.is_nothing(v)` / `js.kind_of(v)` / `js.instance_of(v, name)` | identity and kind |
 | `of_str` `of_num` `of_bool` `of_int` / `as_str` `as_num` `as_bool` `as_int` | conversion, both ways |
@@ -1633,6 +1708,24 @@ taking an argument list. And a promise arrives through `js.settle`, which
 requires a handler for the rejection as well as the result: `then` with one
 callback compiles, runs, and throws a rejection away, which is the failure this
 language spends its error design preventing everywhere else.
+
+**A handler keeps its own shape.** `js.func` takes a closure of up to four
+`JsValue` parameters answering with a `JsValue` or with nothing, and the
+compiler emits a wrapper of that exact arity:
+
+```kite
+js.func(|| { … })                                    // a timer, a microtask
+js.func(|e: JsValue| { … })                          // a listener
+js.func(|entries: JsValue, obs: JsValue| { … })      // an observer
+js.func(|a: JsValue, b: JsValue| -> JsValue { … })   // a comparator
+```
+
+The result is what makes `sort`, `map`, `filter` and a `Promise` executor
+reachable. Without it, every host API that reads a value back out of a callback
+was out of reach, and the way round it was to write that part in JavaScript —
+the one thing this layer exists to make unnecessary. The same four-argument
+ceiling applies and for the same reason, and a fifth parameter is a compile
+error rather than an argument that quietly disappears.
 
 **Why the general mechanism is the primary one.** The browser has thousands of
 interfaces. With `extern` alone, the first one the standard library never
@@ -1759,8 +1852,15 @@ Requirements on the implementation:
   the parameter or return type that created the constraint gets a secondary span.
 - **`--explain E0301`** prints the full rationale for the rule.
 - **`kitec fix`** applies every machine-applicable suggestion.
-- **Source maps** are emitted for the Wasm target so browser stack traces name
-  `.kite` files and lines.
+- **A name section and source map** are emitted for the Wasm target so browser
+  stack traces name `.kite` files and lines. The name section is what gives a
+  frame its *name*; the map, written beside the module as `app.wasm.map` and
+  named by a `sourceMappingURL` section, is what gives it a file and a line.
+  **The granularity is one entry per function** — a frame resolves to the line
+  the function was declared on, not the line that trapped, because that is the
+  granularity the compiler's own information exists at. Both are **dropped by
+  `--release`**: they are more than half of a hello world, and debug
+  information is not semantics.
 
 ---
 

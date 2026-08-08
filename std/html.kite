@@ -5,7 +5,7 @@
 //! compares a new description against the remembered one and touches only the
 //! parts that differ.
 //!
-//! ```kite
+//! ```kite ignore
 //! use std/html
 //!
 //! fn row(r: Row) -> html.Node {

@@ -96,11 +96,50 @@ pub struct Loader {
     seen: HashMap<String, Origin>,
 }
 
-/// Where a module's source came from, for telling two of the same name apart.
+/// Where a `use` path looks for its files.
 ///
-/// A module is identified by the last segment of its `use` path, so `dep/utils`
-/// and `utils` are both a module called `utils`. That is what makes them
-/// collide; this is what makes the collision visible.
+/// **Every segment counts.** `use dep/utils` is `dep/utils` relative to the
+/// importing module, not `utils` — the leading segments used to be dropped, so
+/// `dep/utils` and `utils` found the same directory and the path said
+/// something the loader did not honour.
+///
+/// A first segment naming a declared dependency roots there instead, so
+/// `use markdown/render` reaches inside the package rather than beside the
+/// entry file.
+fn module_dir(base: &Path, segments: &[&str], dependencies: &HashMap<String, PathBuf>) -> PathBuf {
+    let mut parts = segments;
+    let mut path = match segments.first().and_then(|first| dependencies.get(*first)) {
+        Some(root) => {
+            parts = &segments[1..];
+            root.clone()
+        }
+        None => base.to_path_buf(),
+    };
+    for p in parts {
+        path = path.join(p);
+    }
+    path
+}
+
+/// A module's identity: its whole `use` path.
+///
+/// `dep/utils` and `utils` are therefore two modules rather than one, which is
+/// what §13.1 says is the right answer. A `/` cannot appear in an identifier,
+/// so an identity is unforgeable in the same way a qualified item name is —
+/// and it is never written by a user, who writes the spelling instead.
+///
+/// The standard library is the exception: `use std/json` is `json`, because
+/// that is how every program spells it and `E0403` reserves the name.
+fn identity(segments: &[&str]) -> String {
+    if segments.first() == Some(&"std") {
+        return segments.last().expect("a use path is never empty").to_string();
+    }
+    segments.join("/")
+}
+
+/// Where a module's source came from, for telling two of the same identity
+/// apart — which now means one path resolving two ways rather than two paths
+/// sharing a last segment.
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Origin {
     /// The standard library's own copy.
@@ -209,12 +248,45 @@ impl Loader {
         let owner = stack.last().cloned().unwrap_or_default();
         for u in &file.uses {
             let segments: Vec<&str> = u.path.iter().map(|s| s.name.as_str()).collect();
-            let name = (*segments.last().expect("a use path is never empty")).to_string();
-            if let Some(alias) = &u.alias {
-                if alias.name != name {
-                    self.aliases.insert((owner.clone(), alias.name.clone()), name.clone());
-                }
+            let last = (*segments.last().expect("a use path is never empty")).to_string();
+            // **A module is its whole path.** `dep/utils` and `utils` are two
+            // modules, not one, and the last segment is only how a use site
+            // *spells* whichever of them that file imported.
+            //
+            // The standard library keeps its bare name, because `json.parse`
+            // is how every program writes it and `E0403` already stops a user
+            // module from taking one.
+            let name = identity(&segments);
+            // Every import records its spelling, aliased or not. That is what
+            // makes two modules with the same last segment coexist: the
+            // rewrite is per importing module, so `utils.foo` means whichever
+            // `utils` *this* file imported.
+            let spelling = u.alias.as_ref().map(|a| a.name.clone()).unwrap_or(last);
+            // Recorded whether or not it differs from the identity. A plain
+            // `use utils` claims the spelling `utils` in this module, and it
+            // has to, or a later `use dep/utils` would take the spelling from
+            // under it and every `utils.…` above would quietly change meaning.
+            if let Some(first) = self
+                .aliases
+                .get(&(owner.clone(), spelling.clone()))
+                .filter(|first| **first != name)
+                .cloned()
+            {
+                diags.push(
+                    Diagnostic::error(
+                        codes::E0404,
+                        format!("`{}` already names another module here", spelling),
+                    )
+                    .with_primary(u.span, "this module cannot be spelled")
+                    .with_note(format!(
+                        "`{}` is `{}` in this module, so every `{}.…` reaches that one",
+                        spelling, first, spelling
+                    ))
+                    .with_note("give one of them a name of its own: `use … as …`"),
+                );
+                continue;
             }
+            self.aliases.insert((owner.clone(), spelling.clone()), name.clone());
             if stack.contains(&name) {
                 diags.push(
                     Diagnostic::error(
@@ -230,10 +302,10 @@ impl Loader {
                 continue;
             }
             if let Some(first) = self.seen.get(&name).cloned() {
-                // The name is taken. Whether that is the *same* module being
-                // imported twice — ordinary, and the whole point of the check —
-                // or a second, different module quietly losing, depends on
-                // where each came from.
+                // The same identity reached twice is the ordinary case — two
+                // files importing one module — and needs nothing. Two
+                // *different* sources answering to one identity is still worth
+                // reporting: it means a path resolved somewhere unexpected.
                 let found = self.origin_of(&name, &segments, dir);
                 if first != found && first != Origin::Missing && found != Origin::Missing {
                     diags.push(
@@ -243,17 +315,13 @@ impl Loader {
                         )
                         .with_primary(u.span, "this module never loads")
                         .with_note(format!(
-                            "`{}` was already loaded from {}, and a module is known by the \
-                             last segment of its path — so every `{}.…` in this program \
-                             reaches that one",
+                            "`{}` was already loaded from {}, so every `{}.…` reaches that \
+                             one",
                             name,
                             first.describe(),
                             name
                         ))
-                        .with_note(
-                            "which of the two wins is decided by the order of the `use` \
-                             lines that reached them; rename one",
-                        ),
+                        .with_note("rename one, or import it by a path that tells them apart"),
                     );
                 }
                 continue;
@@ -274,10 +342,16 @@ impl Loader {
     /// wasm host has no filesystem — the path stands for itself, and the worst
     /// that costs is a collision going unreported on a host that had no two
     /// directories to confuse in the first place.
+    /// Where a module's source came from.
+    ///
+    /// Keyed on the *last* segment rather than the identity, because that is
+    /// what names a directory or a dependency: the leading segments of a
+    /// `use` path say which module is meant, not where its files are.
     fn origin_of(&self, name: &str, segments: &[&str], dir: Option<&Path>) -> Origin {
         if segments.first() == Some(&"std") {
             return Origin::Std;
         }
+        let name = *segments.last().unwrap_or(&name);
         if self.provided.contains_key(name) {
             return Origin::Provided;
         }
@@ -285,14 +359,11 @@ impl Loader {
             return Origin::Missing;
         };
         let settle = |p: PathBuf| Origin::Path(std::fs::canonicalize(&p).unwrap_or(p));
-        let as_dir = match self.dependencies.get(name) {
-            Some(path) => path.clone(),
-            None => base.join(name),
-        };
+        let as_dir = module_dir(base, segments, &self.dependencies);
         if as_dir.is_dir() {
             return settle(as_dir);
         }
-        let as_file = base.join(format!("{}.kite", name));
+        let as_file = as_dir.with_extension("kite");
         if as_file.is_file() {
             return settle(as_file);
         }
@@ -311,19 +382,14 @@ impl Loader {
         diags: &mut DiagBag,
     ) {
         let is_std = segments.first() == Some(&"std");
+        let last = *segments.last().expect("a use path is never empty");
 
-        // A module is identified by the last segment of its path, so `use
-        // crypto` and `use std/crypto` both produce a module called `crypto`
-        // and the `seen` check above keeps whichever arrived first. A
-        // dependency shipping its own `crypto` directory, reached before the
-        // entry file's `use std/crypto` in depth-first order, therefore became
-        // the program's `crypto` — every `crypto.hash` in the trusting
-        // program's own source bound to it, with nothing reported.
-        //
-        // Rather than make `std` part of every module's identity, which is the
-        // qualification prefix threaded through the whole compiler, the
-        // standard library's names are simply its own.
-        if !is_std && std_module(name).is_some() {
+        // The standard library's names are its own. A module identified by its
+        // whole path already keeps `dep/crypto` and `std/crypto` apart, but a
+        // *sibling* `crypto` would still be spelled `crypto` in the file that
+        // imported it and shadow `std/crypto` there. Reserving the names is
+        // cheaper than making `std` a prefix threaded through the compiler.
+        if !is_std && std_module(last).is_some() {
             diags.push(
                 Diagnostic::error(
                     codes::E0403,
@@ -342,7 +408,7 @@ impl Loader {
         let mut own_dir: Option<PathBuf> = dir.map(|d| d.to_path_buf());
 
         if is_std {
-            let Some(src) = std_module(name) else {
+            let Some(src) = std_module(last) else {
                 diags.push(
                     Diagnostic::error(codes::E0400, format!("no standard module `{}`", name))
                         .with_primary(span, "not part of the standard library")
@@ -357,10 +423,10 @@ impl Loader {
                 );
                 return;
             };
-            files.push(sources.add(format!("<std/{}>", name), src));
+            files.push(sources.add(format!("<std/{}>", last), src));
             own_dir = None;
-        } else if let Some(text) = self.provided.get(name).cloned() {
-            files.push(sources.add(format!("{}.kite", name), &text));
+        } else if let Some(text) = self.provided.get(last).cloned() {
+            files.push(sources.add(format!("{}.kite", last), &text));
             own_dir = None;
         } else {
             let Some(base) = dir else {
@@ -376,11 +442,8 @@ impl Loader {
             // A dependency the manifest declares wins over a sibling of the
             // same name: what a package depends on is what it said, not what
             // happens to be lying next to it.
-            let as_dir = match self.dependencies.get(name) {
-                Some(path) => path.clone(),
-                None => base.join(name),
-            };
-            let as_file = base.join(format!("{}.kite", name));
+            let as_dir = module_dir(base, segments, &self.dependencies);
+            let as_file = as_dir.with_extension("kite");
             if as_dir.is_dir() {
                 let mut entries: Vec<PathBuf> = std::fs::read_dir(&as_dir)
                     .map(|rd| {

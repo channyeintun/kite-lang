@@ -146,3 +146,61 @@ fn the_standard_librarys_tests_pass_on_wasm_too() {
     let _ = std::fs::remove_dir_all(&root);
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n\n"));
 }
+
+/// Every `kite` fence in the standard library's own doc comments compiles and
+/// runs.
+///
+/// §2.3 says a doc comment's fences "are extracted and compiled as tests", and
+/// for a long time nothing did it — so the examples on the reference site were
+/// the one part of the library that could rot with nothing going red. This is
+/// what makes the sentence true.
+///
+/// A fence marked ` ```kite ignore ` is an illustration and is skipped. Most of
+/// the module headers are: one showing `html.mount(body, map(rows, row))` is
+/// teaching a shape, and inventing a `Row` and a `body` to make it compile
+/// would make it a worse explanation of the thing it exists to explain.
+#[test]
+fn the_standard_librarys_documentation_examples_run() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
+    let entries = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("no std directory at {}: {}", dir.display(), e));
+    let mut modules: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "kite"))
+        .collect();
+    modules.sort();
+    assert!(!modules.is_empty(), "no std modules found");
+
+    let mut failures = Vec::new();
+    let mut ran = 0;
+    for path in &modules {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let src = std::fs::read_to_string(path).expect("a std module");
+        let tests = kite_driver::doctest::extract(&src, &name);
+        if tests.is_empty() {
+            continue;
+        }
+        let (augmented, names) = kite_driver::doctest::augment(&src, &tests);
+        let compiled = compile(path, &augmented, Emit::Kbc);
+        if compiled.failed() {
+            failures.push(format!(
+                "{} has a documentation example that does not compile:\n{}",
+                name,
+                compiled.render_diagnostics()
+            ));
+            continue;
+        }
+        for f in &names {
+            let mut out = Vec::new();
+            ran += 1;
+            if let Err(trap) = compiled.run_named(f, &mut out) {
+                failures.push(format!("{}: a documentation example trapped: {}", name, trap));
+            }
+        }
+    }
+
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    // A guard against the extractor quietly finding nothing and the test
+    // passing on an empty set, which is how a check like this dies.
+    assert!(ran > 0, "no documentation examples ran");
+}

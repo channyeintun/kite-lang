@@ -868,3 +868,118 @@ fn map_writes_validate() {
     );
     assert!(gaps("fn main() {\n  var m = {\"a\": 1}\n  m[\"b\"] = 2\n}\n").is_empty());
 }
+
+/// Every source-map entry points at a real function body.
+///
+/// The offset arithmetic is the part of a source map that can be wrong while
+/// everything still parses: a map whose entries are all one byte early is a
+/// valid map, loads without complaint, and resolves every frame to the wrong
+/// place. The first version of this was exactly that — it left out the
+/// function-count LEB at the head of the code section's payload — so the test
+/// walks the module's own body offsets and checks membership rather than
+/// checking that a map was produced.
+#[test]
+fn every_source_map_entry_lands_on_a_function_body() {
+    let src = "\
+fn helper(n: int) -> int {
+    return n * 2
+}
+
+fn other(n: int) -> int {
+    return n + 1
+}
+
+fn main() {
+    io.print(\"\\(helper(21))\")
+    io.print(\"\\(other(1))\")
+}
+";
+    let built = build(src);
+    let bytes = &built.module.bytes;
+
+    // The code section's body offsets, read out of the module itself.
+    let mut bodies: Vec<usize> = Vec::new();
+    let mut p = 8usize; // magic and version
+    let leb = |bytes: &[u8], p: &mut usize| -> u64 {
+        let (mut result, mut shift) = (0u64, 0u32);
+        loop {
+            let byte = bytes[*p];
+            *p += 1;
+            result |= ((byte & 0x7f) as u64) << shift;
+            shift += 7;
+            if byte & 0x80 == 0 {
+                return result;
+            }
+        }
+    };
+    while p < bytes.len() {
+        let id = bytes[p];
+        p += 1;
+        let size = leb(bytes, &mut p) as usize;
+        let end = p + size;
+        if id == 10 {
+            let count = leb(bytes, &mut p);
+            for _ in 0..count {
+                bodies.push(p);
+                let body = leb(bytes, &mut p) as usize;
+                p += body;
+            }
+        }
+        p = end;
+    }
+    assert!(!bodies.is_empty(), "the module has no code section");
+
+    assert!(
+        !built.module.source_spans.is_empty(),
+        "no source spans were recorded"
+    );
+    for (offset, _) in &built.module.source_spans {
+        assert!(
+            bodies.contains(offset),
+            "source map offset {} is not the start of any function body; bodies are {:?}",
+            offset,
+            bodies
+        );
+    }
+}
+
+/// The module names its map, and names it in the shape a browser reads.
+#[test]
+fn the_module_carries_a_source_mapping_url() {
+    let built = build("fn main() {\n    io.print(1)\n}\n");
+    let bytes = &built.module.bytes;
+    let needle = b"sourceMappingURL";
+    let at = bytes
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .expect("a sourceMappingURL section");
+    // Name, then the URL as a length-prefixed string. Written raw instead, a
+    // browser reads the first character as the length and fetches a file whose
+    // name is missing its first letter.
+    let after = at + needle.len();
+    assert_eq!(
+        bytes[after] as usize,
+        SOURCE_MAP_NAME.len(),
+        "the URL must be length-prefixed"
+    );
+    assert_eq!(
+        &bytes[after + 1..after + 1 + SOURCE_MAP_NAME.len()],
+        SOURCE_MAP_NAME.as_bytes()
+    );
+}
+
+/// A stack frame gets a name, which is the half of §16 the map cannot do.
+#[test]
+fn the_module_carries_a_name_section() {
+    let built = build("fn helper() -> int {\n    return 1\n}\nfn main() {\n    io.print(helper())\n}\n");
+    let bytes = &built.module.bytes;
+    for wanted in ["helper", "main"] {
+        assert!(
+            bytes
+                .windows(wanted.len())
+                .any(|w| w == wanted.as_bytes()),
+            "`{}` is not named in the module",
+            wanted
+        );
+    }
+}

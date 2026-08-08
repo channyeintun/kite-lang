@@ -53,6 +53,9 @@ pub enum BuiltinFn {
     /// `errors.new(message)` — builds an error value. Errors are ordinary
     /// values in Kite, never exceptions.
     ErrorsNew,
+    /// `errors.because(message, cause)` — an error that keeps the one it
+    /// wraps, so a chain can be walked instead of being flattened into text.
+    ErrorsBecause,
     /// `draw.rect(x, y, w, h, colour)` — a filled rectangle in device pixels.
     ///
     /// The drawing boundary is two calls wide on purpose. Everything a layout
@@ -281,6 +284,7 @@ impl BuiltinFn {
             "io.error" => Some(BuiltinFn::IoError),
             "io.read_line" => Some(BuiltinFn::IoReadLine),
             "errors.new" => Some(BuiltinFn::ErrorsNew),
+            "errors.because" => Some(BuiltinFn::ErrorsBecause),
             "draw.rect" => Some(BuiltinFn::DrawRect),
             "draw.rrect" => Some(BuiltinFn::DrawRRect),
             "draw.text" => Some(BuiltinFn::DrawText),
@@ -316,6 +320,7 @@ impl BuiltinFn {
             BuiltinFn::IoError => "io.error",
             BuiltinFn::IoReadLine => "io.read_line",
             BuiltinFn::ErrorsNew => "errors.new",
+            BuiltinFn::ErrorsBecause => "errors.because",
             BuiltinFn::DrawRect => "draw.rect",
             BuiltinFn::DrawRRect => "draw.rrect",
             BuiltinFn::DrawText => "draw.text",
@@ -347,6 +352,7 @@ impl BuiltinFn {
     pub fn arity(self) -> usize {
         match self {
             BuiltinFn::IoPrint | BuiltinFn::IoError | BuiltinFn::ErrorsNew => 1,
+            BuiltinFn::ErrorsBecause => 2,
             BuiltinFn::IoReadLine => 0,
             BuiltinFn::DrawRect | BuiltinFn::DrawText => 5,
             BuiltinFn::DrawField => 9,

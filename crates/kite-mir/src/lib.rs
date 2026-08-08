@@ -163,13 +163,32 @@ pub enum Rvalue {
     PairNew { value: Operand, error: Operand },
     PairValue { base: Operand },
     PairError { base: Operand },
-    ErrorNew { message: Operand },
+    /// An error value: message, the value it carries, that value's type tag,
+    /// and the error it wrapped. `value` and `cause` are `Nil` and `tag` is
+    /// zero where there is nothing to carry.
+    ErrorNew {
+        message: Operand,
+        value: Operand,
+        tag: Operand,
+        cause: Operand,
+    },
     ErrorMessage { base: Operand },
+    /// The error this one wrapped, or nil.
+    ErrorCause { base: Operand },
+    /// The type tag of the carried value, or zero. Downcasting is this
+    /// compared against a constant, so it needs no operation of its own.
+    ErrorTag { base: Operand },
+    /// The carried value as an optional: present when the error's tag is
+    /// `tag`. One operation so the operand is read once.
+    ErrorAs { base: Operand, tag: u32 },
     /// Bounds-checked; traps on failure.
     IndexGet { base: Operand, index: Operand },
     SliceLen { base: Operand },
     /// Bounds-checked; yields an optional rather than trapping.
     SliceGet { base: Operand, index: Operand },
+    /// `xs[a..b]` — a fresh slice of the half-open window, clamped to what is
+    /// there rather than trapping. See [`kite_hir::ExprKind::SliceRange`].
+    SliceRange { base: Operand, start: Operand, end: Operand },
     /// `await t`. Never reaches a backend: the state-machine transform splits
     /// the block here into "the task is finished, take its value" and "it is
     /// not, save where we are and return to the scheduler".
@@ -388,10 +407,18 @@ impl fmt::Display for Rvalue {
             Rvalue::PairNew { value, error } => write!(f, "pair({}, {})", value, error),
             Rvalue::PairValue { base } => write!(f, "{}.0", base),
             Rvalue::PairError { base } => write!(f, "{}.1", base),
-            Rvalue::ErrorNew { message } => write!(f, "error({})", message),
+            Rvalue::ErrorNew { message, value, tag, cause } => {
+                write!(f, "error({}, {}, {}, {})", message, value, tag, cause)
+            }
             Rvalue::ErrorMessage { base } => write!(f, "{}.message()", base),
+            Rvalue::ErrorCause { base } => write!(f, "{}.cause()", base),
+            Rvalue::ErrorTag { base } => write!(f, "{}.tag", base),
+            Rvalue::ErrorAs { base, tag } => write!(f, "{}.as({})", base, tag),
             Rvalue::SliceLen { base } => write!(f, "len {}", base),
             Rvalue::SliceGet { base, index } => write!(f, "{}.get({})", base, index),
+            Rvalue::SliceRange { base, start, end } => {
+                write!(f, "{}[{}..{}]", base, start, end)
+            }
             Rvalue::Await { task } => write!(f, "await {}", task),
             Rvalue::Yield => write!(f, "yield"),
             Rvalue::CallExtern { index, args } => {

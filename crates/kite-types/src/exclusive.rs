@@ -295,12 +295,20 @@ impl Checker<'_> {
             | ExprKind::Await { value }
             | ExprKind::IsNil { value }
             | ExprKind::Wrap { value }
-            | ExprKind::Unwrap { value }
-            | ExprKind::ErrorNew { message: value } => self.expr(value),
+            | ExprKind::Unwrap { value } => self.expr(value),
+            ExprKind::ErrorNew { message, value, tag, cause } => {
+                self.expr(message);
+                self.expr(value);
+                self.expr(tag);
+                self.expr(cause);
+            }
             ExprKind::FieldGet { base, .. }
             | ExprKind::PairValue { base }
             | ExprKind::PairError { base }
             | ExprKind::ErrorMessage { base }
+            | ExprKind::ErrorCause { base }
+            | ExprKind::ErrorTag { base }
+            | ExprKind::ErrorAs { base, .. }
             | ExprKind::MapLen { base }
             | ExprKind::MapKeys { base }
             | ExprKind::MapValues { base }
@@ -308,6 +316,11 @@ impl Checker<'_> {
             ExprKind::Binary { lhs, rhs, .. } => {
                 self.expr(lhs);
                 self.expr(rhs);
+            }
+            ExprKind::SliceRange { base, start, end } => {
+                self.expr(base);
+                self.expr(start);
+                self.expr(end);
             }
             ExprKind::Unary { operand, .. } => self.expr(operand),
             ExprKind::If { cond, then, else_ } => {

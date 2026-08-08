@@ -659,6 +659,17 @@ struct Signature {
     generics: Vec<GenericDef>,
 }
 
+/// How many parameters a closure handed to the host through `js.func` may
+/// take.
+///
+/// Four, the same ceiling `js.call0 … js.call4` has, and for the same reason:
+/// the arities are spelled out one by one because a slice is a Kite aggregate
+/// and does not cross the boundary, so there is no variadic form to fall back
+/// on. Four covers what the platform actually hands a callback — an event, a
+/// value and an index, an entry list and its observer, a comparator's two
+/// sides — and every one costs a trampoline in the module.
+pub const JS_FUNC_MAX_ARITY: usize = 4;
+
 /// A registered `defer`: what to run, and the flag that says whether it was
 /// ever reached.
 #[derive(Clone)]
@@ -1212,10 +1223,14 @@ impl<'a> Checker<'a> {
             return self.assign_index(base, index, *span, a);
         }
         let ast::Expr::Path(p) = &a.target else {
-            self.not_yet(
-                a.target.span(),
-                "assignment to this expression",
-                "indexing arrives later in Phase 2",
+            self.diags.push(
+                Diagnostic::error(codes::E0200, "cannot assign to this expression")
+                    .with_primary(a.target.span(), "not something a value can be written to")
+                    .with_note(
+                        "a write names a binding, a field or an index — `x = …`, \
+                         `p.x = …`, `xs[i] = …`. Anything else is a value, and a value \
+                         has nowhere to put one",
+                    ),
             );
             return None;
         };
@@ -1804,13 +1819,29 @@ impl<'a> Checker<'a> {
             return None;
         };
         let map = self.expr(iter, None);
+
+        // A slice of two-element tuples destructures the same way a map does,
+        // and it has to: `zip` and `enumerate` both answer with one, and a
+        // pair the language can build but not take apart in the loop that
+        // consumes it would be a hole with no reason behind it.
+        if let Some(elem) = self.types.slice_elem(map.ty) {
+            if let TyKind::Tuple(parts) = self.types.kind(elem).clone() {
+                if parts.len() == 2 {
+                    return self.for_tuple_slice(f, elems, *span, map, elem, &parts, sig);
+                }
+            }
+        }
+
         let TyKind::Map(key_ty, value_ty) = *self.types.kind(map.ty) else {
             if !self.types.is_poisoned(map.ty) {
                 let found = self.types.with_article(map.ty);
                 self.diags.push(
                     Diagnostic::error(codes::E0200, format!("cannot iterate {} in pairs", found))
                         .with_primary(map.span, "not a map")
-                        .with_note("`for (k, v) in …` iterates a map; a slice yields one value"),
+                        .with_note(
+                            "`for (a, b) in …` iterates a map, or a slice whose element is a \
+                             two-element tuple; any other slice yields one value",
+                        ),
                 );
             }
             return None;
@@ -1895,6 +1926,78 @@ impl<'a> Checker<'a> {
                     loop_stmt,
                 ],
             }),
+            Flow::Falls,
+        ))
+    }
+
+    /// `for (a, b) in xs`, where `xs` is a slice of two-element tuples.
+    ///
+    /// Lowered to an ordinary slice loop over a synthetic local holding the
+    /// tuple, with the two names read out of it by position — the same shape
+    /// `let (a, b) = pair` produces, so nothing new reaches a backend.
+    #[allow(clippy::too_many_arguments)]
+    fn for_tuple_slice(
+        &mut self,
+        f: &ast::ForStmt,
+        elems: &[ast::BindElem],
+        span: Span,
+        seq: hir::Expr,
+        elem_ty: TyId,
+        parts: &[TyId],
+        sig: &Signature,
+    ) -> Option<(hir::Stmt, Flow)> {
+        if elems.len() != 2 {
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0200,
+                    format!("expected 2 bindings, found {}", elems.len()),
+                )
+                .with_primary(span, "this slice yields a pair")
+                .with_note("write `for (a, b) in xs`"),
+            );
+            return None;
+        }
+
+        let holder = self.synthetic_local("pair", elem_ty, span);
+        self.locals[holder as usize].ty = elem_ty;
+        self.init[holder as usize] = Init::Assigned;
+
+        let mut body_stmts = Vec::new();
+        for (i, e) in elems.iter().enumerate() {
+            let ast::BindElem::Name(name) = e else { continue };
+            let Some(local) = self.resolved.lookup_binding(name.span) else { continue };
+            self.locals[local as usize].ty = parts[i];
+            self.init[local as usize] = Init::Assigned;
+            self.taint[local as usize] = Taint::Clean;
+            body_stmts.push(hir::Stmt::Let {
+                local: hir::LocalId(local),
+                init: Some(hir::Expr {
+                    kind: ExprKind::FieldGet {
+                        base: Box::new(hir::Expr {
+                            kind: ExprKind::Local(hir::LocalId(holder)),
+                            ty: elem_ty,
+                            span,
+                        }),
+                        index: i as u32,
+                    },
+                    ty: parts[i],
+                    span: name.span,
+                }),
+                span: name.span,
+            });
+        }
+
+        let (body, _) = self.block(&f.body, sig);
+        body_stmts.extend(body.stmts);
+
+        Some((
+            hir::Stmt::ForSlice {
+                var: hir::LocalId(holder),
+                slice: seq,
+                body: hir::Block { stmts: body_stmts },
+                label: f.label.as_ref().map(|l| l.name.clone()),
+                span: f.span,
+            },
             Flow::Falls,
         ))
     }
@@ -2189,16 +2292,28 @@ impl<'a> Checker<'a> {
             ast::Expr::If { cond, then, else_, span } => self.if_expr(cond, then, else_, *span),
 
             ast::Expr::Range { span, .. } => {
-                self.not_yet(
-                    *span,
-                    "ranges outside a `for` header",
-                    "range values arrive with the Iterate trait in Phase 2",
+                self.diags.push(
+                    Diagnostic::error(codes::E0200, "a range is not a value here")
+                        .with_primary(*span, "a range cannot be held")
+                        .with_note(
+                            "`a..b` is syntax rather than a type: it says how to walk \
+                             a `for` header and what window to take out of a slice or a \
+                             `str`. There is no `Range` to bind, pass or return",
+                        )
+                        .with_note("to carry one, pass the two ends"),
                 );
                 self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
 
             ast::Expr::Char(span) => {
-                self.not_yet(*span, "`char`", "arrives in Phase 2");
+                self.diags.push(
+                    Diagnostic::error(codes::E0200, "there is no `char` type")
+                        .with_primary(*span, "not a type in this language")
+                        .with_note(
+                            "§3.1 has one integer type and no `char`: a character is \
+                             an `int` code point, which `s.code_at(i)` answers with",
+                        ),
+                );
                 self.lit(ExprKind::Error, TyId::ERROR, *span)
             }
             // `nil` has no type of its own; it takes one from context. Kite
@@ -2259,11 +2374,7 @@ impl<'a> Checker<'a> {
                 match self.resolved.lookup_use(*span) {
                     Some(Res::Fn(id)) => self.fn_value(id, *span),
                     Some(Res::Builtin(_)) => {
-                        self.not_yet(
-                            *span,
-                            "using a builtin as a value",
-                            "wrap it in a closure, which names the types it works on",
-                        );
+                        self.builtin_not_a_value(*span);
                         self.lit(ExprKind::Error, TyId::ERROR, *span)
                     }
                     Some(Res::Variant(ti, vi)) => {
@@ -2752,11 +2863,7 @@ impl<'a> Checker<'a> {
                 // A builtin is not a function value: it has no body of its
                 // own, and several of them choose what to do from the type of
                 // their argument.
-                self.not_yet(
-                    p.span,
-                    "using a builtin as a value",
-                    "wrap it in a closure, which names the types it works on",
-                );
+                self.builtin_not_a_value(p.span);
                 self.lit(ExprKind::Error, TyId::ERROR, p.span)
             }
             Some(Res::Type(ti)) => {
@@ -2993,9 +3100,46 @@ impl<'a> Checker<'a> {
             }
         }
 
+        // Anything else in callee position — `handlers[0](e)`, `pick()(3)` —
+        // is a value, and calling it is well-formed exactly when its type is a
+        // function. This used to be refused as unimplemented, which put a hole
+        // in the language at the point where closures stop being held in a
+        // plain binding and start being held in the data structure a program
+        // actually keeps them in.
         let ast::Expr::Path(p) = callee else {
-            self.not_yet(callee.span(), "calling an arbitrary expression", "Phase 2");
-            return self.lit(ExprKind::Error, TyId::ERROR, span);
+            let value = self.expr(callee, None);
+            if self.types.is_poisoned(value.ty) {
+                return self.lit(ExprKind::Error, TyId::ERROR, span);
+            }
+            let TyKind::Fn { params: sig_params, ret } = self.types.kind(value.ty).clone() else {
+                self.diags.push(
+                    Diagnostic::error(codes::E0205, "this is not a function")
+                        .with_primary(
+                            value.span,
+                            format!("this is {}", self.types.with_article(value.ty)),
+                        )
+                        .with_note("only a value whose type is a `fn(…)` can be called"),
+                );
+                return self.lit(ExprKind::Error, TyId::ERROR, span);
+            };
+            if args.len() != sig_params.len() {
+                self.arity_error("this function", args.len(), sig_params.len(), span, None);
+            }
+            let mut hargs = Vec::with_capacity(args.len());
+            for (i, a) in args.iter().enumerate() {
+                let want = sig_params.get(i).copied();
+                let e = self.expr(a, want);
+                let e = self.coerce(e, want);
+                if let Some(w) = want {
+                    self.expect_ty(e.ty, w, e.span, None);
+                }
+                hargs.push(e);
+            }
+            return hir::Expr {
+                kind: ExprKind::CallClosure { callee: Box::new(value), args: hargs },
+                ty: ret,
+                span,
+            };
         };
 
         match self.resolved.lookup_use(p.span) {
@@ -3359,21 +3503,51 @@ impl<'a> Checker<'a> {
                     self.arity_error("js.func", args.len(), 1, span, None);
                     return hir::Expr { kind: ExprKind::Error, ty: TyId::ERROR, span };
                 }
-                let wanted = self.types.fn_of(vec![TyId::JS_VALUE], TyId::UNIT);
-                let handler = self.expr(&args[0], Some(wanted));
-                if handler.ty != wanted && !self.types.is_poisoned(handler.ty) {
+
+                // The expected type is supplied to the argument rather than
+                // inferred from it, so `js.func(|e| …)` needs no annotation on
+                // `e` — which matters because every listener a program writes
+                // goes through here and annotating each one would be noise.
+                //
+                // Which shape to expect is read off the closure literal, so
+                // that a two-argument observer callback and a comparator that
+                // answers with a value are inferred just as a listener is. A
+                // handler that is not written inline — a named function, or one
+                // out of a variable — is checked without an expectation and
+                // validated after.
+                let wanted = match &args[0] {
+                    ast::Expr::Closure { params, ret, .. } => {
+                        let n = params.len();
+                        let returns = ret.is_some();
+                        (n <= JS_FUNC_MAX_ARITY).then(|| {
+                            self.types.fn_of(
+                                vec![TyId::JS_VALUE; n],
+                                if returns { TyId::JS_VALUE } else { TyId::UNIT },
+                            )
+                        })
+                    }
+                    _ => None,
+                };
+                let handler = self.expr(&args[0], wanted);
+                if !self.types.is_poisoned(handler.ty) && !self.is_js_handler(handler.ty) {
                     self.diags.push(
                         Diagnostic::error(
                             codes::E0200,
                             format!(
-                                "`js.func` takes a `{}`, and this is {}",
-                                self.types.name(wanted),
+                                "`js.func` cannot hand {} to the host",
                                 self.types.with_article(handler.ty)
                             ),
                         )
                         .with_primary(handler.span, "not a handler")
                         .with_note(
-                            "a handler is given the host value that caused it — an event,                              a message, whatever the thing calling it passes — and returns                              nothing",
+                            "a handler takes up to four `JsValue` parameters — whatever the \
+                             thing calling it passes — and answers with a `JsValue` or with \
+                             nothing",
+                        )
+                        .with_note(
+                            "a Kite aggregate does not cross the boundary, so a parameter or \
+                             a result that is a struct, slice, map or tuple has no host form \
+                             to take",
                         ),
                     );
                 }
@@ -3552,8 +3726,48 @@ impl<'a> Checker<'a> {
                 }
                 let m = self.expr(&args[0], Some(TyId::STR));
                 self.expect_ty(m.ty, TyId::STR, m.span, None);
+                let span_of = m.span;
                 hir::Expr {
-                    kind: ExprKind::ErrorNew { message: Box::new(m) },
+                    kind: ExprKind::ErrorNew {
+                        message: Box::new(m),
+                        value: Box::new(Self::nothing(span_of)),
+                        tag: Box::new(hir::Expr {
+                            kind: ExprKind::Int(0),
+                            ty: TyId::INT,
+                            span: span_of,
+                        }),
+                        cause: Box::new(Self::nothing(span_of)),
+                    },
+                    ty: TyId::ERR,
+                    span,
+                }
+            }
+
+            // `errors.because(message, cause)` — the constructor `wrap` is
+            // written over. A builtin rather than Kite for the same reason
+            // `errors.new` is: building an error is the one thing about them
+            // that cannot be written in the language.
+            BuiltinFn::ErrorsBecause => {
+                if args.len() != 2 {
+                    self.arity_error("errors.because", args.len(), 2, span, None);
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
+                }
+                let m = self.expr(&args[0], Some(TyId::STR));
+                self.expect_ty(m.ty, TyId::STR, m.span, None);
+                let c = self.expr(&args[1], Some(TyId::ERR));
+                self.expect_ty(c.ty, TyId::ERR, c.span, None);
+                let span_of = m.span;
+                hir::Expr {
+                    kind: ExprKind::ErrorNew {
+                        message: Box::new(m),
+                        value: Box::new(Self::nothing(span_of)),
+                        tag: Box::new(hir::Expr {
+                            kind: ExprKind::Int(0),
+                            ty: TyId::INT,
+                            span: span_of,
+                        }),
+                        cause: Box::new(c),
+                    },
                     ty: TyId::ERR,
                     span,
                 }
@@ -3755,26 +3969,37 @@ impl<'a> Checker<'a> {
         }
 
         if receiver.ty == TyId::ERR {
-            if name.name != "message" {
-                self.diags.push(
-                    Diagnostic::error(
-                        codes::E0205,
-                        format!("`error` has no method `{}`", name.name),
-                    )
-                    .with_primary(name.span, "no such method")
-                    .with_note("`error` has: message"),
-                );
-                return self.lit(ExprKind::Error, TyId::ERROR, span);
-            }
+            let (kind, ty) = match name.name.as_str() {
+                "message" => (
+                    ExprKind::ErrorMessage { base: Box::new(receiver) },
+                    TyId::STR,
+                ),
+                // An `error`, not an `Option<error>`: `error` is already the
+                // nil-able type — §7.2 — so wrapping it in an optional would
+                // be two ways to say absent, and callers would have to open
+                // both.
+                "cause" => (ExprKind::ErrorCause { base: Box::new(receiver) }, TyId::ERR),
+                _ => {
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0205,
+                            format!("`error` has no method `{}`", name.name),
+                        )
+                        .with_primary(name.span, "no such method")
+                        .with_note("`error` has: message, cause")
+                        .with_note(
+                            "to ask which failure it was, name the type: \
+                             `NotFound.is(err)` and `NotFound.as(err)`",
+                        ),
+                    );
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
+                }
+            };
             if !args.is_empty() {
-                self.arity_error("message", args.len(), 0, span, None);
+                self.arity_error(&name.name, args.len(), 0, span, None);
             }
             self.require_error_present(base, name.span);
-            return hir::Expr {
-                kind: ExprKind::ErrorMessage { base: Box::new(receiver) },
-                ty: TyId::STR,
-                span,
-            };
+            return hir::Expr { kind, ty, span };
         }
 
         if receiver.ty == TyId::STR {
@@ -4048,6 +4273,112 @@ impl<'a> Checker<'a> {
         self.associated_call_named(ti, &name, p.span, args, span, expected)
     }
 
+    /// `T.is(err)` and `T.as(err)`.
+    ///
+    /// Both read the tag the conversion into an `error` stored beside the
+    /// message. `is` compares it; `as` compares it and, where it matches,
+    /// hands back the value — so the cast is only ever reached on a path the
+    /// comparison has already proved.
+    fn error_downcast(
+        &mut self,
+        ti: u32,
+        type_name: &str,
+        method_name: &str,
+        args: &[ast::Expr],
+        p_span: Span,
+        span: Span,
+    ) -> hir::Expr {
+        let Some(target) = self.type_ids[ti as usize] else {
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0205,
+                    format!("`{}` has no associated function `{}`", type_name, method_name),
+                )
+                .with_primary(p_span, "no such function"),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        };
+        let ty = match target {
+            TypeTarget::Struct(s) => self.types.struct_ty(s),
+            TypeTarget::Enum(e) => self.types.enum_ty(e),
+            // A trait or an alias has no run-time identity of its own to
+            // compare a tag against; only a concrete type does.
+            _ => {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0205,
+                        format!("`{}` is not a concrete type", type_name),
+                    )
+                    .with_primary(p_span, "no run-time identity to test against")
+                    .with_note(
+                        "`is` and `as` ask which concrete type an error carries; name a \
+                         struct or an enum",
+                    ),
+                );
+                return self.lit(ExprKind::Error, TyId::ERROR, span);
+            }
+        };
+        let Some(tag) = self.type_tag_of(ty) else {
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        };
+
+        if args.len() != 1 {
+            let full = format!("{}.{}", type_name, method_name);
+            self.arity_error(&full, args.len(), 1, span, None);
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+        let err = self.expr(&args[0], Some(TyId::ERR));
+        if err.ty != TyId::ERR && !self.types.is_poisoned(err.ty) {
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0200,
+                    format!("`{}.{}` takes an `error`", type_name, method_name),
+                )
+                .with_primary(err.span, format!("this is {}", self.types.with_article(err.ty)))
+                .with_note("it asks which failure an error was"),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+
+        // A nil error carries tag zero and no type's tag is zero, so this is
+        // false rather than a trap — which is what lets it be written without
+        // a nil test in front of it.
+        let matches = |this: &Self, e: hir::Expr| hir::Expr {
+            kind: ExprKind::Binary {
+                op: hir::BinOp::EqInt,
+                lhs: Box::new(hir::Expr {
+                    kind: ExprKind::ErrorTag { base: Box::new(e) },
+                    ty: TyId::INT,
+                    span,
+                }),
+                rhs: Box::new(hir::Expr {
+                    kind: ExprKind::Int(tag as i64),
+                    ty: TyId::INT,
+                    span,
+                }),
+            },
+            ty: TyId::BOOL,
+            span: {
+                let _ = this;
+                span
+            },
+        };
+
+        if method_name == "is" {
+            return matches(self, err);
+        }
+
+        // `as`: one operation, so the tag test and the read see the same
+        // error. An expression cannot introduce the local that would otherwise
+        // guarantee it, and re-checking the argument would evaluate it twice.
+        let optional = self.types.optional_of(ty);
+        hir::Expr {
+            kind: ExprKind::ErrorAs { base: Box::new(err), tag },
+            ty: optional,
+            span,
+        }
+    }
+
     fn associated_call_named(
         &mut self,
         ti: u32,
@@ -4060,6 +4391,20 @@ impl<'a> Checker<'a> {
         let type_name = self.resolved.type_decl(ti).name.clone();
         let method_name = method_name.to_string();
         let p_span = path_span;
+
+        // `NotFound.is(err)` and `NotFound.as(err)` — asking an error which
+        // failure it was.
+        //
+        // **The type names itself**, which is how `Decode` already works
+        // (`User.decode(doc)`) and for the same reason: §11 has no turbofish,
+        // so `errors.is<T>(err)` — which §7.6 used to promise — has nowhere to
+        // write its type argument. Naming the type at the front says the same
+        // thing in a place the language can spell.
+        if method_name == "is" || method_name == "as" {
+            if self.resolved.method_on(ti, &method_name).is_none() {
+                return self.error_downcast(ti, &type_name, &method_name, args, p_span, span);
+            }
+        }
 
         let Some(fn_index) = self.resolved.method_on(ti, &method_name) else {
             self.diags.push(
@@ -4581,23 +4926,31 @@ impl<'a> Checker<'a> {
 
     /// `check err` — propagate if the error is not nil.
     ///
-    /// Defined as exactly `if err != nil { return _, err }`. It occupies its own
-    /// line and is greppable, which preserves Go's central virtue: you can scan
-    /// the left margin of a function and see every place it can fail.
+    /// Defined as exactly `if err != nil { return _, err }`, or `return err` in
+    /// a function that answers with a bare `error`. It occupies its own line
+    /// and is greppable, which preserves Go's central virtue: you can scan the
+    /// left margin of a function and see every place it can fail.
+    ///
+    /// **A bare `-> error` return counts as fallible here**, and used not to.
+    /// A function that can only fail — every wrapper in `std/dom` is one — had
+    /// to write out `if err != nil { return err }` at each step, which is the
+    /// boilerplate `check` exists to remove, refused at exactly the functions
+    /// with the least else in them.
     fn check_stmt(
         &mut self,
         expr: &ast::Expr,
         span: Span,
         sig: &Signature,
     ) -> Option<(hir::Stmt, Flow)> {
-        if !sig.fallible {
+        let bare_error = sig.ret == TyId::ERR;
+        if !sig.fallible && !bare_error {
             self.diags.push(
                 Diagnostic::error(codes::E0303, "`check` outside a fallible function")
                     .with_primary(span, "this would return an error")
                     .with_secondary(sig.name_span, "declared here")
                     .with_note(
                         "`check` returns the error to the caller, so the enclosing function \
-                         must declare `-> (T, error)`",
+                         must declare `-> (T, error)` or `-> error`",
                     ),
             );
         }
@@ -4615,6 +4968,21 @@ impl<'a> Checker<'a> {
         self.mark_checked(expr);
 
         let ret = if sig.fallible { sig.ret } else { TyId::ERROR };
+        // A function answering with a bare `error` has no value slot to fill,
+        // so the propagation is the error itself rather than a pair with a
+        // hole in it.
+        let propagated = if bare_error {
+            self.reread_error(expr, span)
+        } else {
+            hir::Expr {
+                kind: ExprKind::PairNew {
+                    value: Box::new(hir::Expr { kind: ExprKind::Nil, ty: TyId::ERROR, span }),
+                    error: Box::new(self.reread_error(expr, span)),
+                },
+                ty: ret,
+                span,
+            }
+        };
         Some((
             hir::Stmt::If {
                 cond: hir::Expr {
@@ -4630,27 +4998,27 @@ impl<'a> Checker<'a> {
                     span,
                 },
                 then: hir::Block {
-                    stmts: vec![hir::Stmt::Return {
-                        value: Some(hir::Expr {
-                            kind: ExprKind::PairNew {
-                                value: Box::new(hir::Expr {
-                                    kind: ExprKind::Nil,
-                                    ty: TyId::ERROR,
-                                    span,
-                                }),
-                                error: Box::new(self.reread_error(expr, span)),
-                            },
-                            ty: ret,
-                            span,
-                        }),
-                        span,
-                    }],
+                    stmts: vec![hir::Stmt::Return { value: Some(propagated), span }],
                 },
                 else_: None,
                 span,
             },
             Flow::Falls,
         ))
+    }
+
+    /// Whether a type is a closure the host can be handed.
+    ///
+    /// Every parameter a `JsValue`, at most [`JS_FUNC_MAX_ARITY`] of them, and
+    /// a result that is either a `JsValue` or nothing. Anything else has no
+    /// form on the other side of the boundary.
+    fn is_js_handler(&self, ty: TyId) -> bool {
+        let TyKind::Fn { params, ret } = self.types.kind(ty) else {
+            return false;
+        };
+        params.len() <= JS_FUNC_MAX_ARITY
+            && params.iter().all(|p| *p == TyId::JS_VALUE)
+            && (*ret == TyId::UNIT || *ret == TyId::JS_VALUE)
     }
 
     /// Re-read the error operand for the propagation branch.
@@ -4798,6 +5166,13 @@ impl<'a> Checker<'a> {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
 
+        // `xs[a..b]` — a window rather than an element. Handled before the
+        // element forms below because the index is not an `int` here and
+        // checking it as one would report the range as the mistake.
+        if let ast::Expr::Range { start, end, inclusive, span: range_span } = index {
+            return self.range_index(seq, start, end, *inclusive, *range_span, span);
+        }
+
         // Map indexing always yields an optional, never a zero value.
         if let TyKind::Map(key_ty, value_ty) = *self.types.kind(seq.ty) {
             let k = self.expr(index, Some(key_ty));
@@ -4831,6 +5206,84 @@ impl<'a> Checker<'a> {
             ty: elem,
             span,
         }
+    }
+
+    /// `xs[a..b]` and `s[a..b]` — a window over a sequence.
+    ///
+    /// A `str` reaches [`StrKind::Slice`], which already exists on every
+    /// backend; a slice reaches [`ExprKind::SliceRange`]. Both clamp, and they
+    /// have to agree about that: one syntax with two answers about its edges
+    /// would be the kind of drift this language spends its omissions avoiding.
+    fn range_index(
+        &mut self,
+        seq: hir::Expr,
+        start: &ast::Expr,
+        end: &ast::Expr,
+        inclusive: bool,
+        range_span: Span,
+        span: Span,
+    ) -> hir::Expr {
+        let start_e = self.expr(start, Some(TyId::INT));
+        self.expect_ty(start_e.ty, TyId::INT, start_e.span, None);
+        let end_e = self.expr(end, Some(TyId::INT));
+        self.expect_ty(end_e.ty, TyId::INT, end_e.span, None);
+
+        // `a..=b` is `a..b + 1`, written out here so that no backend has to
+        // know there are two kinds of range. The `+` is the one the user would
+        // have written: it traps on overflow in a debug build and wraps in a
+        // release one, exactly as §3.1 says every other `+` does. A `b` of
+        // `max_int` is the only input that can tell, and it is not a window
+        // anyone asks for.
+        let end_e = if inclusive {
+            let one = hir::Expr { kind: ExprKind::Int(1), ty: TyId::INT, span: range_span };
+            let op = if self.release { hir::BinOp::AddIntWrap } else { hir::BinOp::AddInt };
+            hir::Expr {
+                kind: ExprKind::Binary { op, lhs: Box::new(end_e), rhs: Box::new(one) },
+                ty: TyId::INT,
+                span: range_span,
+            }
+        } else {
+            end_e
+        };
+
+        if seq.ty == TyId::STR {
+            return hir::Expr {
+                kind: ExprKind::StrOp {
+                    op: kite_hir::StrKind::Slice,
+                    args: vec![seq, start_e, end_e],
+                },
+                ty: TyId::STR,
+                span,
+            };
+        }
+
+        if self.types.slice_elem(seq.ty).is_some() {
+            let ty = seq.ty;
+            return hir::Expr {
+                kind: ExprKind::SliceRange {
+                    base: Box::new(seq),
+                    start: Box::new(start_e),
+                    end: Box::new(end_e),
+                },
+                ty,
+                span,
+            };
+        }
+
+        let found = self.types.with_article(seq.ty);
+        self.diags.push(
+            Diagnostic::error(
+                codes::E0200,
+                format!("`{}` cannot be sliced by a range", self.types.name(seq.ty)),
+            )
+            .with_primary(seq.span, format!("this is {}", found))
+            .with_note("a range index applies to a slice or a `str`")
+            .with_note(
+                "a map is indexed by its key, and there is no order over keys for a range \
+                 to name",
+            ),
+        );
+        self.lit(ExprKind::Error, TyId::ERROR, span)
     }
 
     fn assign_index(
@@ -5145,7 +5598,13 @@ impl<'a> Checker<'a> {
                         format!("`{}` has no method `{}`", self.types.name(seq.ty), name.name),
                     )
                     .with_primary(name.span, "no such method")
-                    .with_note("a slice has: len, get, push"),
+                    .with_note("a slice has: len, get, push")
+                    .with_note(
+                        "everything else a slice can do is a prelude function taking one — \
+                         `enumerate(xs)`, `map(xs, f)`, `filter(xs, test)`, `sorted(xs, less)` \
+                         — because a slice takes methods only from the compiler and those \
+                         three are what nothing else can be built from",
+                    ),
                 );
                 Some(self.lit(ExprKind::Error, TyId::ERROR, span))
             }
@@ -5987,7 +6446,18 @@ impl<'a> Checker<'a> {
                         }
                     }
                     _ => {
-                        self.not_yet(*span, "non-integer range patterns", "Phase 2");
+                        self.diags.push(
+                            Diagnostic::error(
+                                codes::E0200,
+                                "a range pattern matches integers only",
+                            )
+                            .with_primary(*span, "not an integer range")
+                            .with_note(
+                                "a float range would have to decide what its ends do \
+                                 about rounding, and there is no answer right for every \
+                                 program — test the bounds in a guard instead",
+                            ),
+                        );
                         hir::Pattern::Wildcard
                     }
                 }
@@ -6000,7 +6470,18 @@ impl<'a> Checker<'a> {
                     }
                     Some(Res::Type(ti)) => match self.type_ids[ti as usize] {
                         Some(TypeTarget::Struct(_)) => {
-                            self.not_yet(*span, "struct call patterns", "use `Name{ … }`");
+                            self.diags.push(
+                                Diagnostic::error(
+                                    codes::E0200,
+                                    "a struct is not matched like a call",
+                                )
+                                .with_primary(*span, "not a pattern")
+                                .with_note(
+                                    "a struct pattern names its fields: write \
+                                     `Name{ … }`, which reads the same way the literal \
+                                     that built it does",
+                                ),
+                            );
                             hir::Pattern::Wildcard
                         }
                         _ => hir::Pattern::Wildcard,
@@ -7093,6 +7574,24 @@ impl<'a> Checker<'a> {
         found != TyId::ERR && self.error_method(found).is_some()
     }
 
+    /// The "carries nothing" operand, for an error slot with no value or no
+    /// cause. Typed `ERR` rather than a real optional because no Kite
+    /// expression reads it: it is a null reference the backends recognise.
+    fn nothing(span: Span) -> hir::Expr {
+        hir::Expr { kind: ExprKind::Nil, ty: TyId::ERR, span }
+    }
+
+    /// The run-time identity of a concrete type, as a vtable row would carry
+    /// it. Zero for anything with no tag, which is why zero can mean "carries
+    /// nothing" without colliding with a real type.
+    fn type_tag_of(&self, ty: TyId) -> Option<u32> {
+        Some(match *self.types.kind(ty) {
+            TyKind::Struct(s) => kite_hir::TypeTag::Struct(s).encode(),
+            TyKind::Enum(e) => kite_hir::TypeTag::Enum(e).encode(),
+            _ => return None,
+        })
+    }
+
     /// A value as text. Primitives render themselves; anything else needs
     /// `Display`.
     fn render(&mut self, v: hir::Expr) -> hir::Expr {
@@ -7235,22 +7734,36 @@ impl<'a> Checker<'a> {
             // representation changes, and there is no new instruction for three
             // backends to agree about.
             //
-            // It also means the message is rendered where the failure happened,
-            // which is where its context is freshest. What it does not yet do
-            // is keep the value: `errors.as<T>` needs the payload carried
-            // alongside, and that is a change to the representation rather than
-            // to this conversion.
+            // It also means the message is rendered where the failure
+            // happened, which is where its context is freshest — and the value
+            // it was rendered *from* is kept beside it, with its type tag, so
+            // that `NotFound.is(err)` can ask which failure this was rather
+            // than matching on the text.
             TyKind::Err if self.coerces_to_error(e.ty) => {
                 let span = e.span;
                 let message = self.error_method(e.ty).expect("checked");
                 let targs = self.receiver_args(e.ty);
+                let tag = self.type_tag_of(e.ty).unwrap_or(0);
+                // The value is read twice — once to render it, once to keep it
+                // — so it goes into a local first. Rendering may run arbitrary
+                // Kite, and evaluating the operand twice would run it twice.
+                let carried = e.clone();
                 let rendered = hir::Expr {
                     kind: ExprKind::Call { callee: hir::FnId(message), args: vec![e], targs },
                     ty: TyId::STR,
                     span,
                 };
                 hir::Expr {
-                    kind: ExprKind::ErrorNew { message: Box::new(rendered) },
+                    kind: ExprKind::ErrorNew {
+                        message: Box::new(rendered),
+                        value: Box::new(carried),
+                        tag: Box::new(hir::Expr {
+                            kind: ExprKind::Int(tag as i64),
+                            ty: TyId::INT,
+                            span,
+                        }),
+                        cause: Box::new(Self::nothing(span)),
+                    },
                     ty: TyId::ERR,
                     span,
                 }
@@ -7344,6 +7857,23 @@ impl<'a> Checker<'a> {
         } else {
             None
         }
+    }
+
+    /// A builtin named where a value is expected.
+    ///
+    /// Permanent rather than pending: a builtin has no body to take a
+    /// reference to, and several of them choose what to do from the type of
+    /// the argument they are given — so there is no one function to hand over.
+    fn builtin_not_a_value(&mut self, span: Span) {
+        self.diags.push(
+            Diagnostic::error(codes::E0200, "a builtin is not a value")
+                .with_primary(span, "this names a builtin rather than a function")
+                .with_note(
+                    "a builtin has no body to point at, and several choose what to do from \
+                     the type of their argument",
+                )
+                .with_note("wrap it in a closure, which names the types it works on"),
+        );
     }
 
     fn not_yet(&mut self, span: Span, what: &str, when: &str) {
