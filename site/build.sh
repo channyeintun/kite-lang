@@ -62,7 +62,16 @@ echo "copying the documents…"
 mkdir -p "$out/docs"
 cp "$root/SPECIFICATION.md" "$out/SPECIFICATION.md"
 cp "$root/README.md" "$out/README.md"
-cp "$root"/docs/*.md "$out/docs/"
+# Every document under `docs/` except the roadmap, which the site no longer
+# renders: it is a record of how the language was built, and the site is for
+# the language as it is. It stays in the repository, where that history
+# belongs.
+for doc in "$root"/docs/*.md; do
+  case "$(basename "$doc")" in
+    06-roadmap.md) continue ;;
+  esac
+  cp "$doc" "$out/docs/"
+done
 # The installer is served from the site, because that is the URL its own first
 # line tells people to pipe into a shell. It was not copied, so the documented
 # one-liner fetched a 404.

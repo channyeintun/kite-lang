@@ -151,7 +151,17 @@ fn link_target(href: str) -> str {
     if !ends_with(path, ".md") {
         return href
     }
-    return "\(lower(base_name(path))).html\(anchor)"
+    let page = lower(base_name(path))
+    // The roadmap is the one document other documents cite that this site does
+    // not render. It is a record of how the language was built, and the site is
+    // for the language as it is — but a citation is still worth following, so
+    // it goes where the document actually lives instead of to a page that would
+    // answer 404. The anchors are GitHub's already, because that is where every
+    // one of these links was written to work.
+    if page == "06-roadmap" {
+        return "https://github.com/channyeintun/kite-lang/blob/main/docs/06-roadmap.md\(anchor)"
+    }
+    return "\(page).html\(anchor)"
 }
 
 /// The last segment of a path, without its `.md`.

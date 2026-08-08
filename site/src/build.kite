@@ -34,7 +34,6 @@ fn documents() -> [Document] {
         Document { source: "docs/02-concurrency.md", page: "02-concurrency" },
         Document { source: "docs/03-compiler-architecture.md", page: "03-compiler-architecture" },
         Document { source: "docs/04-the-web.md", page: "04-the-web" },
-        Document { source: "docs/06-roadmap.md", page: "06-roadmap" },
     ]
 }
 
