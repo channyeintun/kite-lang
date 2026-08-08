@@ -1101,8 +1101,11 @@ impl<'a> Checker<'a> {
             ast::Stmt::If(i) => self.if_stmt(i, sig),
             ast::Stmt::For(f) => self.for_stmt(f, sig),
             ast::Stmt::Match(m) => {
-                let e = self.match_expr(m, None);
-                let flow = if e.ty == TyId::NEVER { Flow::Diverges } else { Flow::Falls };
+                // A match every arm of which returns is how a multi-statement
+                // arm is written, since a block in value position must be a
+                // single expression. Reading divergence off the arms is what
+                // lets the function containing it be seen to return.
+                let (e, flow) = self.match_expr_with_flow(m, None);
                 Some((hir::Stmt::Expr(e), flow))
             }
 
@@ -5863,6 +5866,19 @@ impl<'a> Checker<'a> {
     // ---- match ------------------------------------------------------------
 
     fn match_expr(&mut self, m: &ast::MatchExpr, expected: Option<TyId>) -> hir::Expr {
+        self.match_expr_with_flow(m, expected).0
+    }
+
+    /// The same check, also reporting whether control falls out of the match.
+    ///
+    /// Only a statement asks: an expression that needs a value gets one or a
+    /// diagnostic, and a match every arm of which leaves cannot supply one
+    /// either way.
+    fn match_expr_with_flow(
+        &mut self,
+        m: &ast::MatchExpr,
+        expected: Option<TyId>,
+    ) -> (hir::Expr, Flow) {
         let scrutinee = self.expr(&m.scrutinee, None);
         let scrut_ty = scrutinee.ty;
 
@@ -5872,7 +5888,7 @@ impl<'a> Checker<'a> {
                     .with_primary(m.span, "no arms")
                     .with_note("an empty match can never produce a value"),
             );
-            return self.lit(ExprKind::Error, TyId::ERROR, m.span);
+            return (self.lit(ExprKind::Error, TyId::ERROR, m.span), Flow::Falls);
         }
 
         let entry_init = self.init.clone();
@@ -5973,21 +5989,50 @@ impl<'a> Checker<'a> {
         let merged = exit_taint.unwrap_or_else(|| entry_taint.clone());
         self.restore_taint(merged);
 
-        self.check_exhaustive(m, &arms, scrut_ty);
+        let exhaustive = self.check_exhaustive(m, &arms, scrut_ty);
+
+        // Every arm left, and control had to enter one of them — that is what
+        // exhaustiveness proves — so nothing after the match runs. A guard does
+        // not weaken this: coverage is established by the unguarded arms alone,
+        // so a guard failing only moves control on to a later arm.
+        //
+        // This is reported as flow rather than written into the type. A match
+        // that produces no value is a `()` in an expression position whatever
+        // its arms do, and calling it `!` there would let it stand in for any
+        // type at all — `1 + match …`, a struct field, an argument — none of
+        // which the backends have a value to lower. Divergence is a statement
+        // property here, and the statement is where it is asked about.
+        let flow = if exhaustive && !arms.is_empty() && arms.iter().all(|a| a.body.ty == TyId::NEVER)
+        {
+            Flow::Diverges
+        } else {
+            Flow::Falls
+        };
 
         let ty = result_ty.unwrap_or(TyId::UNIT);
-        hir::Expr {
+        let expr = hir::Expr {
             kind: ExprKind::Match {
                 scrutinee: Box::new(scrutinee),
                 arms,
             },
             ty,
             span: m.span,
-        }
+        };
+        (expr, flow)
     }
 
-    /// A block arm. A block that ends in an expression yields it; otherwise the
-    /// arm produces unit.
+    /// A block arm.
+    ///
+    /// A block that *is* one expression yields it. Anything longer runs for its
+    /// effects and produces unit — there is no tail expression here, any more
+    /// than there is in an `if` used as a value, which says "expected a single
+    /// expression" for the same reason. A value that arrives by falling off the
+    /// end of a block is exactly the hidden control flow the language is spent
+    /// avoiding.
+    ///
+    /// So an arm wanting several statements *and* a result writes the match in
+    /// statement position and returns from every arm, which
+    /// [`Self::match_expr_with_flow`] recognises as diverging.
     fn match_block(&mut self, b: &ast::Block, expected: Option<TyId>) -> hir::Expr {
         match b.stmts.as_slice() {
             [ast::Stmt::Expr(e)] => self.expr(e, expected),
@@ -6827,9 +6872,16 @@ impl<'a> Checker<'a> {
         hir::Pattern::Variant { enum_id: eid, variant: vi, fields: sub }
     }
 
-    fn check_exhaustive(&mut self, m: &ast::MatchExpr, arms: &[hir::MatchArm], scrut: TyId) {
+    /// Reports whether the unguarded arms cover every value, so a caller can
+    /// tell whether control is obliged to enter one of them.
+    fn check_exhaustive(
+        &mut self,
+        m: &ast::MatchExpr,
+        arms: &[hir::MatchArm],
+        scrut: TyId,
+    ) -> bool {
         if self.types.is_poisoned(scrut) {
-            return;
+            return false;
         }
         // A guarded arm may fail at run time, so it cannot make a match
         // exhaustive and is excluded from the coverage set.
@@ -6841,7 +6893,7 @@ impl<'a> Checker<'a> {
 
         let missing = exhaustive::missing_patterns(scrut, &unguarded, self.types);
         if missing.is_empty() {
-            return;
+            return true;
         }
 
         let names: Vec<String> = missing.iter().map(|x| format!("`{}`", x.0)).collect();
@@ -6866,6 +6918,7 @@ impl<'a> Checker<'a> {
             );
         }
         self.diags.push(d);
+        false
     }
 
     // ---- structs ----------------------------------------------------------

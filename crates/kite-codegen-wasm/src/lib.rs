@@ -759,6 +759,23 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     compile_with(program, types, true)
 }
 
+/// Check an emitted module against the feature set the language targets,
+/// returning the validator's complaint when there is one.
+///
+/// **Codegen should never hand back a module that fails this**, so a failure is
+/// a compiler bug and nothing a program can do about itself. It is checked
+/// anyway, on every build, because of where the alternative surfaces: an
+/// invalid module is accepted by `build` and rejected by the engine, so the
+/// first sign of it is a blank page and a `CompileError` naming
+/// `wasm-function[37]`. Validating here costs microseconds and names the
+/// function while the compiler still knows what it was lowering.
+pub fn validate(module: &WasmModule) -> Result<(), String> {
+    let mut validator = wasmparser::Validator::new_with_features(
+        wasmparser::WasmFeatures::default() | wasmparser::WasmFeatures::GC,
+    );
+    validator.validate_all(&module.bytes).map(|_| ()).map_err(|e| e.to_string())
+}
+
 /// Compile, saying whether to carry debug information.
 ///
 /// **A release build drops the name section and the source map.** They are

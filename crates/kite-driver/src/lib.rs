@@ -573,6 +573,23 @@ fn run_passes(
             return (String::new(), None, None, None, index);
         }
         let module = kite_codegen_wasm::compile_with(&mir, &hir.types, !release);
+        // The last thing that can catch a bad lowering. Everything above this
+        // line checks the program; this checks the compiler, and it is the only
+        // check whose absence is invisible until a browser refuses the module.
+        if let Err(e) = kite_codegen_wasm::validate(&module) {
+            diags.push(
+                Diagnostic::error(
+                    kite_diag::codes::E0900,
+                    "the compiler emitted an invalid WebAssembly module",
+                )
+                .with_note(e)
+                .with_note(
+                    "this is a bug in Kite, not in this program — please report it, \
+                     with the program if it can be shared",
+                ),
+            );
+            return (String::new(), None, None, None, index);
+        }
         return (String::new(), None, Some(module), None, index);
     }
 

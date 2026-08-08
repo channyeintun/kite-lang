@@ -19,6 +19,7 @@
 //!   E0600–E0699  cryptography
 //!   E0700–E0799  derivation
 //!   E0800–E0899  exclusivity
+//!   E0900–E0999  the compiler failing, rather than the program
 
 use std::fmt;
 
@@ -381,4 +382,19 @@ codes! {
          holding one reference — is not detected, and needs no detection to be \
          memory-safe; Kite has no borrowing and no lifetimes, and this rule is \
          not the beginning of either.";
+
+    // ---- the compiler failing ---------------------------------------------
+    E0900 = "E0900", "the compiler emitted an invalid module",
+        "This is a bug in Kite, not in the program being compiled. Codegen \
+         produced a WebAssembly module that the engine would refuse to load, \
+         and the compiler checked its own output before handing it over.\n\n\
+         The check exists because the alternative is worse. An invalid module \
+         is not rejected when it is built; it is rejected when a browser tries \
+         to instantiate it, which is a blank page and a `CompileError` in a \
+         console, a long way from the function that caused it. Failing here \
+         names the offending function and costs microseconds.\n\n\
+         There is no source change that is the right fix. Please report it, \
+         with the program if it can be shared: the validator's message \
+         identifies the function, which is usually enough to find the bad \
+         lowering.";
 }

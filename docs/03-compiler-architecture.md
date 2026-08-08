@@ -63,7 +63,7 @@ kite/
 |---|---|---|
 | `salsa` | Incremental query engine | Compiler and LSP share one implementation |
 | `wasm-encoder` | Wasm binary emission | Bytecode Alliance, tracks the spec, GC types supported |
-| `wasmparser` | Validation of own output | Catch codegen bugs in CI, not in a browser |
+| `wasmparser` | Validation of own output | Catch codegen bugs in CI and at the build, not in a browser |
 | `cranelift-codegen`, `cranelift-module`, `cranelift-object` | Native backend | Rust-native, fast, designed for language backends |
 | *(none — hand-written)* | Diagnostic rendering | The renderer is ~200 lines and pins the output format exactly to the specification, under snapshot test. Revisit if it grows. |
 | `rustc-hash` | FxHashMap | Measurably faster than SipHash for compiler workloads |
@@ -374,8 +374,17 @@ The error path allocates only the error.
 
 ### Validation
 
-Every emitted module is run through `wasmparser` in the test suite. A codegen bug
-should fail in CI, never in a browser.
+Every emitted module is run through `wasmparser` — in the test suite, and again
+on every build before the module is handed back. A codegen bug should fail in
+CI; failing at the build is the backstop for the ones CI has no test for.
+
+The build-time check is not redundant with the tests, because of where the
+alternative surfaces. An invalid module is accepted by `build` and rejected by
+the engine, so the first sign of one is a blank page and a `CompileError` naming
+`wasm-function[37]` — a long way, in a real module, from the function that
+caused it. Validating costs microseconds and it is the last point at which the
+compiler still knows what it was lowering. A failure is `E0900`, which says it
+is a bug in Kite rather than in the program.
 
 ---
 

@@ -1048,6 +1048,35 @@ help: add the missing arms, or a catch-all `_ =>`
 Exhaustiveness is what makes adding an enum variant safe: the compiler shows you
 every place that must change.
 
+An arm is an expression or a block. A block arm **runs for its effects**: it
+produces a value only when it is a single expression, because there are no tail
+expressions in Kite — a value arriving by falling off the end of a block is the
+hidden control flow the language is spent avoiding, and an `if` used as a value
+says "expected a single expression" for the same reason.
+
+So an arm that needs several statements *and* a result returns from the function
+instead, with the `match` in statement position:
+
+```kite
+fn area(s: Shape) -> int {
+    match s {
+        Circle(r) => {
+            let d = r * 2
+            return 3 * d * d / 4
+        },
+        Rect(w, h) => {
+            return w * h
+        },
+        Point => {
+            return 0
+        },
+    }
+}
+```
+
+Every arm leaving means the `match` leaves, so this **is** a returning path and
+the function needs no `return` after it.
+
 ### 9.3 Patterns
 
 ```kite

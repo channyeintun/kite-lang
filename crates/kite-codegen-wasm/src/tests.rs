@@ -519,6 +519,85 @@ fn guards_and_literal_patterns_validate() {
     ));
 }
 
+/// An arm that `return`s never reaches the join, so nothing may be written to
+/// the match's result there.
+///
+/// Lowering used to write the arm's `()` into the result anyway, in a block
+/// nothing branches to. It cost nothing at run time and validated as nothing:
+/// the result local carries the match's type, so the dead store put an `i32`
+/// unit into an `i64`. `check` was clean, `build` succeeded, and the module
+/// failed in the engine — reported from an application whose page came up
+/// blank.
+#[test]
+fn an_arm_that_returns_validates() {
+    valid(
+        "enum E {\n  A\n  B\n}\n\
+         fn f(e: E) -> int {\n  return match e {\n    A => {\n      return 1\n    },\n    B => 2,\n  }\n}\n\
+         fn main() {\n  io.print(f(A))\n}\n",
+    );
+}
+
+/// The same lowering, with the match bound rather than returned.
+#[test]
+fn a_returning_arm_in_a_bound_match_validates() {
+    valid(
+        "enum E {\n  A\n  B\n}\n\
+         fn f(e: E) -> int {\n  let v = match e {\n    A => {\n      return 1\n    },\n    B => 2,\n  }\n  return v\n}\n\
+         fn main() {\n  io.print(f(B))\n}\n",
+    );
+}
+
+/// The mismatch the dead store caused followed the function's return type, so
+/// a reference type is a distinct shape from `i64` — this is where it read as
+/// `expected (ref null N), found i32`.
+#[test]
+fn a_returning_arm_validates_for_reference_results() {
+    valid(
+        "enum E {\n  A\n  B\n}\nstruct P {\n  x: int\n}\n\
+         fn p(e: E) -> P {\n  return match e {\n    A => {\n      return P{ x: 1 }\n    },\n    B => P{ x: 2 },\n  }\n}\n\
+         fn s(e: E) -> [int] {\n  return match e {\n    A => {\n      return [1]\n    },\n    B => [2],\n  }\n}\n\
+         fn t(e: E) -> str {\n  return match e {\n    A => {\n      return \"a\"\n    },\n    B => \"b\",\n  }\n}\n\
+         fn main() {\n  io.print(p(A).x)\n  io.print(s(B)[0])\n  io.print(t(A))\n}\n",
+    );
+}
+
+/// An arm that leaves through a nested `if`, where both branches return.
+///
+/// Whether the arm diverges cannot be read from the lowerer's own state here:
+/// lowering an `if` statement ends by switching to its join block, so the arm
+/// looks like ordinary reachable code even though no path arrives. The
+/// checker's `!` is the verdict that holds for every shape.
+#[test]
+fn an_arm_leaving_through_both_branches_of_an_if_validates() {
+    valid(
+        "enum E {\n  A\n  B\n}\n\
+         fn f(e: E, k: bool) -> int {\n  return match e {\n    A => {\n      if k {\n        return 1\n      } else {\n        return 2\n      }\n    },\n    B => 3,\n  }\n}\n\
+         fn main() {\n  io.print(f(A, true))\n}\n",
+    );
+}
+
+/// An arm that leaves the enclosing loop rather than the function.
+#[test]
+fn an_arm_that_breaks_validates() {
+    valid(
+        "enum E {\n  A\n  B\n}\n\
+         fn f(e: E) -> int {\n  var total = 0\n  for i in 0..3 {\n    total = total + match e {\n      A => {\n        break\n      },\n      B => 2,\n    }\n  }\n  return total\n}\n\
+         fn main() {\n  io.print(f(B))\n}\n",
+    );
+}
+
+/// Every arm a block that returns. A value block must be a single expression,
+/// so this is how a multi-statement arm is written, and it has to reach codegen
+/// rather than being turned back at the checker.
+#[test]
+fn a_match_whose_arms_all_return_validates() {
+    valid(
+        "enum E {\n  A\n  B\n}\n\
+         fn f(e: E) -> int {\n  match e {\n    A => {\n      let n = 1\n      return n\n    },\n    B => {\n      return 2\n    },\n  }\n}\n\
+         fn main() {\n  io.print(f(A))\n}\n",
+    );
+}
+
 /// A recursive enum needs no boxing annotation: every Kite aggregate is already
 /// a GC reference, and one `rec` group is what lets the emitted types say so.
 #[test]

@@ -12,6 +12,14 @@ kite-mir.workspace = true
 kite-hir.workspace = true
 kite-span.workspace = true
 wasm-encoder = "0.255.0"
+# Not only for the tests: every module the compiler emits is validated before
+# it is handed back, so a bad lowering is a diagnostic rather than a blank page.
+#
+# Default features off. The compiler is itself shipped as WebAssembly — the
+# module `vite-plugin-kite` loads — so anything linked here is downloaded by
+# everyone who builds a Kite project. The defaults add a component-model parser,
+# `serde`, and SIMD support, none of which validating a WasmGC module touches.
+wasmparser = { version = "0.255.0", default-features = false, features = ["std", "validate", "features"] }
 
 [dev-dependencies]
 kite-diag.workspace = true
@@ -19,5 +27,4 @@ kite-lexer.workspace = true
 kite-parser.workspace = true
 kite-resolve.workspace = true
 kite-types.workspace = true
-wasmparser = "0.255.0"
 wasmprinter = "0.255.0"

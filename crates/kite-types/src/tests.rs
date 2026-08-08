@@ -719,6 +719,95 @@ fn guarded_arms_do_not_count_towards_coverage() {
     assert!(c.render().contains("guard may fail at run time"), "{}", c.render());
 }
 
+/// A match whose arms all diverge diverges too, so the function is not falling
+/// off its end and there is nothing to report.
+///
+/// This is the shape a multi-statement arm has to take — a block in value
+/// position must be a single expression — and it used to be refused, which left
+/// "several statements, then a result" with no spelling short of extracting a
+/// function.
+#[test]
+fn a_match_whose_arms_all_return_is_a_returning_path() {
+    let c = run(
+        "enum E {\n  A\n  B\n}\n\
+         fn f(e: E) -> int {\n  match e {\n    A => {\n      let n = 1\n      return n\n    },\n    B => {\n      return 2\n    },\n  }\n}\n\
+         fn main() {\n  io.print(f(A))\n}\n",
+    );
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+/// Coverage is established by the unguarded arms alone, so a guard on one of
+/// them does not put a fall-through path back.
+#[test]
+fn a_guarded_arm_does_not_stop_an_all_returning_match_from_diverging() {
+    let c = run(
+        "enum E {\n  A\n  B\n}\n\
+         fn f(e: E, k: bool) -> int {\n  match e {\n    A if k => {\n      return 1\n    },\n    A => {\n      return 2\n    },\n    B => {\n      return 3\n    },\n  }\n}\n\
+         fn main() {\n  io.print(f(A, true))\n}\n",
+    );
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
+/// Divergence is claimed only where control has to enter an arm. Every arm
+/// guarded means none of them counts, so the match can be skipped entirely and
+/// the function really can fall off its end — the coverage error is the report,
+/// and the missing return must not be swallowed on the strength of it.
+#[test]
+fn an_all_guarded_match_does_not_pass_for_a_returning_path() {
+    let c = run(
+        "enum E {\n  A\n  B\n}\n\
+         fn f(e: E, k: bool) -> int {\n  match e {\n    A if k => {\n      return 1\n    },\n    B if k => {\n      return 2\n    },\n  }\n}\n\
+         fn main() {\n  io.print(f(A, true))\n}\n",
+    );
+    assert!(c.has("E0210"), "{}", c.render());
+    assert!(c.has("E0203"), "{}", c.render());
+}
+
+/// One arm falling out means the match falls out, and a function that owes a
+/// value still owes it.
+#[test]
+fn a_match_with_one_falling_arm_still_needs_a_return() {
+    let c = run(
+        "enum E {\n  A\n  B\n}\n\
+         fn f(e: E) -> int {\n  match e {\n    A => {\n      return 1\n    },\n    B => {\n    },\n  }\n}\n\
+         fn main() {\n  io.print(f(A))\n}\n",
+    );
+    assert!(c.has("E0203"), "{}", c.render());
+}
+
+/// Divergence is flow, not a type. A match that produces no value is still a
+/// `()` where a value is wanted, however its arms leave.
+///
+/// Calling it `!` instead would let it stand in for any type at all, and the
+/// backends have no value to lower for those positions — `1 + match …` compiled
+/// and then printed `()`.
+#[test]
+fn a_match_whose_arms_all_return_is_not_a_value() {
+    let all_return = "enum E {\n  A\n  B\n}\n\
+         fn f(e: E) -> int {\n  let v = match e {\n    A => {\n      return 1\n    },\n    B => {\n      return 2\n    },\n  }\n  return v\n}\n\
+         fn main() {\n  io.print(f(A))\n}\n";
+    let c = run(all_return);
+    assert!(c.has("E0200"), "{}", c.render());
+
+    let in_operator = "enum E {\n  A\n  B\n}\n\
+         fn f(e: E) -> int {\n  return 1 + match e {\n    A => {\n      return 1\n    },\n    B => {\n      return 2\n    },\n  }\n}\n\
+         fn main() {\n  io.print(f(A))\n}\n";
+    let c = run(in_operator);
+    assert!(c.has("E0201"), "{}", c.render());
+}
+
+/// A statement-position match that no arm returns from is still a statement,
+/// not a divergence — the code after it runs.
+#[test]
+fn a_match_used_for_effect_does_not_diverge() {
+    let c = run(
+        "enum E {\n  A\n  B\n}\n\
+         fn f(e: E) -> int {\n  match e {\n    A => {\n      io.print(\"a\")\n    },\n    B => {\n      io.print(\"b\")\n    },\n  }\n  return 0\n}\n\
+         fn main() {\n  io.print(f(A))\n}\n",
+    );
+    assert!(!c.diags.has_errors(), "{}", c.render());
+}
+
 #[test]
 fn an_int_match_needs_a_catch_all() {
     let c = run("fn main() {\n  let n = 1\n  let d = match n {\n    0 => \"a\",\n    1 => \"b\",\n  }\n}\n");

@@ -70,8 +70,8 @@ struct FnLowerer<'a> {
     locals: Vec<LocalDecl>,
     blocks: Vec<BasicBlock>,
     current: BlockId,
-    /// Set once the current block has a terminator. Further statements go to a
-    /// fresh unreachable block rather than after the terminator.
+    /// Set once the current block has a terminator. What follows cannot run, so
+    /// it is dropped rather than emitted after the terminator.
     sealed: bool,
     loops: Vec<LoopCtx>,
 }
@@ -139,10 +139,24 @@ impl<'a> FnLowerer<'a> {
 
     fn emit(&mut self, inst: Inst) {
         if self.sealed {
-            // Unreachable: give it a home so indices stay meaningful, and so a
-            // later pass can see and drop it.
-            let b = self.new_block();
-            self.switch_to(b);
+            // The block has already left — returned, jumped, or been proved
+            // unreachable — so this instruction cannot run. Drop it.
+            //
+            // It used to be given a fresh block instead, on the grounds that a
+            // later pass could see and drop it. No such pass arrived, and the
+            // backends emit what MIR hands them, so the block was not dead in
+            // the output: it was ordinary code that merely never ran. That
+            // matters because dead code is where ill-typed instructions
+            // survive. Nothing type-checks `result = ()` against a result local
+            // the checker gave the type `int`, because control never reaches it
+            // — and then WasmGC, which types its locals, rejects the module the
+            // instruction sits in. Never emitting it is what makes the emitted
+            // code trustworthy.
+            //
+            // Dropping is sound because these blocks are anonymous: they are
+            // created here and nothing can name them, so nothing can branch
+            // into the region being discarded.
+            return;
         }
         self.blocks[self.current.index()].stmts.push(inst);
     }
@@ -163,6 +177,51 @@ impl<'a> FnLowerer<'a> {
 
     fn assign(&mut self, dst: Local, value: Rvalue) {
         self.emit(Inst::Assign { dst, value });
+    }
+
+    /// Lower one arm of an `if`/`match`/`&&`, writing what it produced into the
+    /// result local and joining with the other arms.
+    ///
+    /// **An arm that diverges writes nothing.** A body that ends in `return`,
+    /// `break`, or `continue` has no value to contribute, and `operand` reports
+    /// unit for it because there is nothing else to report. Writing that unit
+    /// into the result anyway puts `result = ()` in a block control cannot
+    /// reach, with the unit standing in for a value of the arm's declared type
+    /// — and the backends type their locals, so a dead `i32` unit landing in an
+    /// `i64` result is rejected when the module is validated. Nothing catches it
+    /// before that: the store is unreachable, so no test of what the program
+    /// computes can see it.
+    ///
+    /// Divergence is read from the checker's type rather than from `sealed`
+    /// alone. The two disagree: an arm whose body is `if c { return 1 } else {
+    /// return 2 }` leaves the lowerer on the `if`'s join block, unsealed,
+    /// because `if_stmt` switches there unconditionally — yet no path arrives.
+    /// `NEVER` is the checker's verdict on the same question and it is the one
+    /// that holds for every shape.
+    ///
+    /// Returns whether control actually reaches `join` from this arm, so the
+    /// caller can tell whether the join is a live block or a dead one.
+    fn join_arm(&mut self, result: Local, body: &hir::Expr, join: BlockId) -> bool {
+        let value = self.operand(body);
+        if self.sealed || body.ty == TyId::NEVER {
+            return false;
+        }
+        self.assign(result, Rvalue::Use(value));
+        self.terminate(Terminator::Goto(join));
+        true
+    }
+
+    /// Continue after an `if`/`match` whose arms have been lowered.
+    ///
+    /// When no arm reached the join, the whole construct diverges: every path
+    /// through it returned, broke, or continued. Sealing says so, and what
+    /// follows is dropped rather than emitted into a block that looks live and
+    /// would be type-checked against a result the construct never produced.
+    fn resume_after(&mut self, join: BlockId, join_reached: bool) {
+        self.switch_to(join);
+        if !join_reached {
+            self.terminate(Terminator::Unreachable);
+        }
     }
 
     // ---- statements -------------------------------------------------------
@@ -739,6 +798,7 @@ impl<'a> FnLowerer<'a> {
         let subject = self.operand(scrutinee);
         let result = self.temp(result_ty);
         let join = self.new_block();
+        let mut join_reached = false;
 
         // The checker proved the arms cover every value, so falling past the
         // last one cannot happen.
@@ -770,9 +830,7 @@ impl<'a> FnLowerer<'a> {
                 self.switch_to(guarded);
             }
 
-            let v = self.operand(&arm.body);
-            self.assign(result, Rvalue::Use(v));
-            self.terminate(Terminator::Goto(join));
+            join_reached |= self.join_arm(result, &arm.body, join);
 
             if next != fail {
                 self.switch_to(next);
@@ -782,7 +840,7 @@ impl<'a> FnLowerer<'a> {
         self.switch_to(fail);
         self.terminate(Terminator::Unreachable);
 
-        self.switch_to(join);
+        self.resume_after(join, join_reached);
         result
     }
 
@@ -1105,9 +1163,9 @@ impl<'a> FnLowerer<'a> {
         self.terminate(Terminator::Branch { cond: l, then, else_ });
 
         self.switch_to(rhs_bb);
-        let r = self.operand(rhs);
-        self.assign(result, Rvalue::Use(r));
-        self.terminate(Terminator::Goto(join));
+        // The join is reached whatever the right side does: the branch above
+        // goes straight there when the left side already decided the answer.
+        let _ = self.join_arm(result, rhs, join);
 
         self.switch_to(join);
         result
@@ -1134,16 +1192,12 @@ impl<'a> FnLowerer<'a> {
         });
 
         self.switch_to(then_bb);
-        let t = self.operand(then);
-        self.assign(result, Rvalue::Use(t));
-        self.terminate(Terminator::Goto(join));
+        let then_joins = self.join_arm(result, then, join);
 
         self.switch_to(else_bb);
-        let e = self.operand(else_);
-        self.assign(result, Rvalue::Use(e));
-        self.terminate(Terminator::Goto(join));
+        let else_joins = self.join_arm(result, else_, join);
 
-        self.switch_to(join);
+        self.resume_after(join, then_joins || else_joins);
         result
     }
 }
