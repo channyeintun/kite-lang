@@ -88,10 +88,22 @@ lose.
 
 Wait for it. Then download the release's artefacts into a directory.
 
-> **Do not publish binaries built on your machine.** `build.sh --cross` makes
-> all five and is for trying the packaging, not for shipping: those builds are
-> not reproducible, not signed, and the Windows one is `-gnu` where the release
-> is `-msvc`.
+> **Do not publish binaries built on your machine.** `build.sh --cross` really
+> does make all five — `cargo zigbuild` supplies the linker for the musl and
+> Windows targets, so this is a working cross-build rather than an
+> approximation of one. It is for trying the packaging, not for shipping, and
+> for two reasons that have nothing to do with how well it builds.
+>
+> They are not signed. The Sigstore signature is the release workflow's own
+> identity, and a binary built here cannot have one.
+>
+> And the Windows target is not the same target. `cargo zigbuild` links through
+> `zig cc`, which implements the GNU ABI for Windows, so `build.sh --cross`
+> produces `x86_64-pc-windows-gnu` while the release builds
+> `x86_64-pc-windows-msvc` on a Windows runner. That is a property of the
+> toolchain rather than a setting to change: zig has no MSVC ABI to target.
+> The two differ in C runtime and in unwinding, so the one you can test here is
+> not the one users install.
 
 ## 4. npm
 
