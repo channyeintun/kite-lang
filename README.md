@@ -310,7 +310,7 @@ Recorded here rather than left to be discovered:
   Scoop and the AUR, and has never run: no tag has been pushed.
 - **No Argon2.** It is not in WebCrypto, so it waits on a runtime that has it.
 
-769 tests: unit tests per crate, an annotated compile-fail corpus, a
+795 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the host boundary and a real
 socket under Node, the DOM layer and the typed door driven under Node — with
