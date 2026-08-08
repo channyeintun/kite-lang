@@ -4400,10 +4400,12 @@ impl<'a> Checker<'a> {
         // so `errors.is<T>(err)` — which §7.6 used to promise — has nowhere to
         // write its type argument. Naming the type at the front says the same
         // thing in a place the language can spell.
-        if method_name == "is" || method_name == "as" {
-            if self.resolved.method_on(ti, &method_name).is_none() {
-                return self.error_downcast(ti, &type_name, &method_name, args, p_span, span);
-            }
+        // A type that declares its own `is` or `as` keeps it: the built-in
+        // downcast is what a type gets when it has said nothing.
+        if (method_name == "is" || method_name == "as")
+            && self.resolved.method_on(ti, &method_name).is_none()
+        {
+            return self.error_downcast(ti, &type_name, &method_name, args, p_span, span);
         }
 
         let Some(fn_index) = self.resolved.method_on(ti, &method_name) else {

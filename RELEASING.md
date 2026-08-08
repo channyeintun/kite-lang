@@ -21,7 +21,7 @@ the same mechanism:
 ## 1. Before anything
 
 ```bash
-cargo test --workspace --all-targets     # 795, and all of them
+cargo test --workspace --all-targets     # 798, and all of them
 cargo clippy --workspace --all-targets -- -D warnings
 for f in $(git ls-files '*.kite'); do ./target/release/kitec fmt --check "$f"; done
 ```
