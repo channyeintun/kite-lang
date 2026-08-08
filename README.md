@@ -57,10 +57,21 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 curl -fsSL https://kite-lang.dev/install.sh | sh
 ```
 
-**No release is tagged yet**, so that has nothing to fetch and says so. Kite is
-pre-1.0 and the language is still allowed to move. Building from source works
-today and needs Rust 1.85 and nothing else — Kite links no LLVM and ships no
-collector:
+The current release is **v0.1.3**, signed and built by CI for macOS, Linux and
+Windows; the installer reads `releases/latest` and checks the release's own
+`SHA256SUMS`. Kite is pre-1.0 and the language is still allowed to move, so
+the version is always `0.1.N` — the patch number climbs and the first two
+never do.
+
+It is also on npm, which is how a project that already has a `package.json`
+would take it:
+
+```bash
+npm install --save-dev @kite-lang/cli
+```
+
+Building from source works too, and needs Rust 1.85 and nothing else — Kite
+links no LLVM and ships no collector:
 
 ```bash
 git clone https://github.com/channyeintun/kite-lang
