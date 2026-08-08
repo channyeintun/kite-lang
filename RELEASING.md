@@ -4,46 +4,61 @@ Everything that has to happen for a version to exist, in the order it has to
 happen in. Each step says what breaks if it is skipped, because most of these
 fail quietly rather than loudly.
 
-There are **six** things that carry a version, and they are not published by
-the same mechanism:
+This is the runbook as it was actually walked for 0.1.4, corrected where the
+previous version of this document was wrong about its own process.
+
+**Ten artefacts carry a version**, published four different ways:
 
 | What | Where it goes | By |
 |---|---|---|
 | `kitec`, `kite-lsp` | GitHub release, signed | CI, on a tag |
-| `@kite-lang/cli-*` | npm, one per platform | by hand, from the release's binaries |
+| `@kite-lang/cli-*` — five of them | npm, one per platform | by hand, from the release's binaries |
 | `@kite-lang/cli` | npm, the meta-package | by hand, **after** the platform ones |
-| `@kite-lang/compiler-wasm` | npm, one for every platform | by hand, after `build.sh` |
+| `@kite-lang/compiler-wasm` | npm | by hand, after `build.sh` |
+| `vite-plugin-kite` | npm, unscoped | by hand, with the compiler |
+| The VS Code extension | Marketplace | a `.vsix`, uploaded |
 | The site | kite-lang.dev | `wrangler deploy` |
-| The VS Code extension | Marketplace | `vsce publish` |
 
 ---
 
 ## 1. Before anything
 
+Three gates, and CI runs all three:
+
 ```bash
-cargo test --workspace --all-targets     # 798, and all of them
+cargo test --workspace --all-targets
+```
+
+```bash
 cargo clippy --workspace --all-targets -- -D warnings
+```
+
+```bash
+cargo build --release -p kitec
 for f in $(git ls-files '*.kite'); do ./target/release/kitec fmt --check "$f"; done
 ```
 
-CI runs all three, and the last one is the reason a formatter exists.
+The third is the reason a formatter exists. The second is not a formality:
+0.1.4 was written, tested and reviewed before clippy found a collapsible `if`
+in it, and `-D warnings` means that is a red build rather than a note.
 
-**Check the numbers in the prose.** The README states a test count, and
+**Check the numbers in the prose.** The README states a test count and
 `crates/kite-driver/tests/size.rs` records what each program costs *today* in a
-comment beside its budget. Both drift silently, because nothing compares a
-sentence to a measurement:
+comment beside its budget. Nothing compares a sentence to a measurement, so
+both drift:
 
 ```bash
 cargo test -p kite-driver --test size -- --nocapture
 ```
 
+The count was 795 in two documents through two releases in which it was not
+795.
+
 ## 2. The version
 
 **It is always `0.1.N`.** There is no 0.2, no 1.0, and no plan for one. The
 patch number goes up — 0.1.1, 0.1.2, … 0.1.26 — and the first two components
-never move. `every_version_stays_on_the_one_line` in
-`crates/kite-driver/tests/packaging.rs` fails the build if one of them does, and
-if the four numbers stop agreeing with each other.
+never move.
 
 That is about the promise rather than modesty about it. A major number is a
 licence to break things and an invitation to be asked when the next one lands;
@@ -51,29 +66,44 @@ a minor number implies a feature line that something later supersedes. Kite
 intends neither. Once the language has stopped moving, the only question a
 version has to answer is *which build*, and one climbing number answers it.
 
-One number, in five places:
+One number, in **ten** files. This document said five for a long time and the
+other five drifted behind — the release before 0.1.4 needed a commit of its own
+to catch the starter and the install page up, which is what a rule nobody
+checks looks like:
 
 ```
 Cargo.toml                               [workspace.package] version
-packages/kite-cli/package.json           version, and every optionalDependency
+packages/kite-cli/package.json           version, and all five optionalDependencies
 packages/kite-wasm/package.json          version
 packages/vite-plugin-kite/package.json   version, and its compiler-wasm dependency
 editors/vscode/package.json              version
+examples/vite-starter/package.json       both dependencies
+README.md                                "The current release is v0.1.N"
+site/install.md                          the same sentence
+site/index.html                          the release-notes link, twice
+site/brand.html                          the version beside the mark
 ```
 
-`vite-plugin-kite` depends on `@kite-lang/compiler-wasm`, so the two move
-together. A plugin resolving to an older compiler than the one it was tested
-against is the same hazard the pinned `optionalDependencies` below avoid.
+`every_version_stays_on_the_one_line` in `crates/kite-driver/tests/packaging.rs`
+now checks **all ten** and fails the build if any disagrees. For the five that
+are not manifests the rule is blunt: no version but the current one may appear
+in those files at all. None has a reason to name another, and a blunt rule is
+one nobody has to remember the shape of. This document is exempt, because the
+line above counts `0.1.1, 0.1.2, …` to explain the scheme and would fail its
+own rule.
 
-The `optionalDependencies` in `@kite-lang/cli` pin **exact** versions of the
-platform packages — not a range. A range would let a meta-package resolve to a
-compiler it was never tested against.
+The `optionalDependencies` in `@kite-lang/cli` pin **exact** versions, not a
+range, and `vite-plugin-kite` pins the compiler it was tested against. A range
+would let a package resolve to a build nobody tried it with.
 
 Commit it, then:
 
 ```bash
 git push origin main
-git tag v0.1.0 && git push origin v0.1.0
+```
+
+```bash
+git tag v0.1.4 && git push origin v0.1.4
 ```
 
 **Push before tagging.** A tag whose commits are not on the remote makes CI
@@ -86,7 +116,14 @@ their own runners, checksums them, and signs `SHA256SUMS` with Sigstore —
 keyless, so the workflow's own identity is the signature and there is no key to
 lose.
 
-Wait for it. Then download the release's artefacts into a directory.
+```bash
+gh run watch $(gh run list --workflow=Release --limit 1 --json databaseId --jq '.[0].databaseId')
+```
+
+```bash
+mkdir -p /tmp/kite-0.1.4
+gh release download v0.1.4 --dir /tmp/kite-0.1.4 --pattern '*.tar.gz' --pattern '*.zip'
+```
 
 > **Do not publish binaries built on your machine.** `build.sh --cross` really
 > does make all five — `cargo zigbuild` supplies the linker for the musl and
@@ -105,46 +142,100 @@ Wait for it. Then download the release's artefacts into a directory.
 > The two differ in C runtime and in unwinding, so the one you can test here is
 > not the one users install.
 
-## 4. npm
+## 4. npm, all eight
+
+### The five platform packages
 
 ```bash
-./packages/kite-cli/build.sh path/to/downloaded/release/
-for d in packages/kite-cli/platforms/*/; do (cd "$d" && npm publish); done
-npm publish ./packages/kite-cli
-
-# The compiler as WebAssembly: one module, no platform matrix. `build.sh`
-# writes the `.wasm`, which is a build artefact and not in the tree — publish
-# without running it and the package ships without a compiler in it.
-./packages/kite-wasm/build.sh
-npm publish ./packages/kite-wasm
-
-# The plugin is unscoped and published under the user rather than the org, so
-# it is easy to forget — and a plugin left behind resolves a compiler it was
-# never tested against, which is what the pinned dependency exists to prevent.
-npm publish ./packages/vite-plugin-kite
+rm -rf packages/kite-cli/platforms
+./packages/kite-cli/build.sh /tmp/kite-0.1.4/
 ```
 
-Four things here have each cost an attempt:
+**The `rm -rf` is not tidiness.** `platforms/` is a build artefact and is
+gitignored, so it survives from whatever was last run there — a `build.sh` with
+no arguments leaves one directory for *this* machine, at the *old* version, and
+the next run rewrites the ones it has and silently leaves that one alone.
+Deleting first is what makes the output the release rather than the release
+plus a souvenir.
 
-**The path needs a `./`.** `npm publish packages/kite-cli` does not publish that
-directory: npm reads a bare `owner/name` as a GitHub shorthand and goes looking
-for `github.com/packages/kite-cli`, which fails with `code 128` and
-`Repository not found` — an error that says nothing about the real mistake. A
-leading `./` makes it a path again.
+Then look at it before publishing, because everything below this point is
+irreversible:
 
-**The platform packages go first.** npm resolves `optionalDependencies` at
+```bash
+ls packages/kite-cli/platforms/
+grep -h '"version"' packages/kite-cli/platforms/*/package.json
+for d in packages/kite-cli/platforms/*/; do echo "$d: $(ls $d/bin | tr '\n' ' ')"; done
+```
+
+Five directories, five identical versions matching `Cargo.toml`, and `kitec`
+plus `kite-lsp` in each — `.exe` on the Windows one. A `skipped … (no binary)`
+line during the build means an archive was missing from the download, and the
+package it belonged to will simply not exist.
+
+```bash
+for d in packages/kite-cli/platforms/*/; do (cd "$d" && npm publish); done
+```
+
+Re-running that loop is safe: a version already published fails loudly with
+`403` rather than overwriting.
+
+### The meta-package, after them
+
+```bash
+npm publish ./packages/kite-cli
+```
+
+**The order is the whole point.** npm resolves `optionalDependencies` at
 install time and *skips a missing one without a word*. A meta-package published
 first installs perfectly cleanly and then cannot find a compiler.
 
-**A scoped package is private by default**, and npm reports that as
-`402 Payment Required`, which reads as a billing problem. Every manifest here
-carries `publishConfig.access = public` so the flag cannot be forgotten.
+### The compiler as WebAssembly
 
-**The scope has to exist.** `@kite-lang` is an npm organisation; publishing into
-one that does not exist gives `404 Scope not found`.
+```bash
+./packages/kite-wasm/build.sh && npm publish ./packages/kite-wasm
+```
 
-Then check it the way a stranger would — from the registry, not from a local
-path, and with no `kitec` on the `PATH`:
+The `.wasm` is a build artefact and is not in the tree. Publish without running
+`build.sh` and the package installs cleanly and then fails at the first `.kite`
+import. The tell is in npm's own output — the tarball listing should show
+`kite-compiler.wasm` at about 1.8 MB, and five files in total.
+
+### The Vite plugin, with it
+
+```bash
+npm publish ./packages/vite-plugin-kite
+```
+
+Unscoped and published under the user rather than the org, so it is the easy
+one to forget — and a plugin left behind resolves a compiler it was never
+tested against, which is what the pinned dependency exists to prevent. When a
+release changes the compiler, these two move together or not at all.
+
+### What each failure actually means
+
+Four things have each cost an attempt:
+
+**`code 128` / `Repository not found`.** The path needs a `./`. `npm publish
+packages/kite-cli` does not publish that directory: npm reads a bare
+`owner/name` as a GitHub shorthand and goes looking for
+`github.com/packages/kite-cli`. A leading `./` makes it a path again.
+
+**`402 Payment Required`.** A scoped package is private by default, and npm
+reports that as a billing problem. Every manifest here carries
+`publishConfig.access = public` — including the generated platform ones — so
+the flag cannot be forgotten.
+
+**`404 Scope not found`.** `@kite-lang` is an npm organisation and publishing
+into one that does not exist says so. It has to be created in the browser
+first.
+
+**`403 cannot publish over previously published version`.** Expected when
+re-running a loop that partly succeeded. Not expected otherwise: npm never lets
+a version be replaced, so a genuine one means the number did not move.
+
+### Verify as a stranger would
+
+From the registry, not a local path, and with no `kitec` on the `PATH`:
 
 ```bash
 cd $(mktemp -d) && npm init -y && npm install --save-dev @kite-lang/cli
@@ -152,9 +243,7 @@ cd $(mktemp -d) && npm init -y && npm install --save-dev @kite-lang/cli
 ```
 
 And the WebAssembly compiler the same way, which is the one a bundler resolves.
-Check it *builds* rather than that it exists: the `.wasm` is added by
-`build.sh`, so a package published without running it installs cleanly and
-then fails at the first `.kite` import.
+Check it *builds* rather than that it exists:
 
 ```bash
 cd $(mktemp -d) && npm init -y && npm install --save-dev @kite-lang/compiler-wasm
@@ -165,17 +254,62 @@ printf 'pub fn add(a: int, b: int) -> int {\n    return a + b\n}\n' > add.kite
 A freshly published package takes a minute or two to become fetchable. A 404
 straight after publishing is propagation, not failure.
 
-## 5. The site
+## 5. The VS Code extension
+
+**Build a `.vsix` and upload it.** Not `vsce publish` — that is the token
+route, and it is the wrong one to reach for:
 
 ```bash
-./site/build.sh          # the reference, the pages, the demo, the playground
-npx wrangler deploy      # from the repository root, never from inside site/
+cd editors/vscode && npx @vscode/vsce package
+```
+
+Then *Publisher → New extension → Visual Studio Code* on the Marketplace, and
+drop the file in. That is the whole of it, and it needs no Personal Access
+Token at all.
+
+The token route exists and `editors/vscode/PUBLISHING.md` documents it, but the
+web route is better here for a reason worth stating: the Marketplace runs on
+Azure DevOps identity, so `vsce` answers a mis-scoped token with `TF400813` — an
+Azure error code, in a tool that never mentions Azure, that reads like a
+problem with your account rather than a dropdown chosen wrong. Publisher
+problems surface in the interface instead.
+
+Two things that are already handled, so do not go looking for them:
+
+- **The version.** Step 2 moved it, and the test enforces it. Never bump it in
+  this directory alone.
+- **The icon.** `render-icon.sh` is needed only when the mark itself changes,
+  and `brand_assets.rs` fails the suite if `icon.png` is missing or has drifted
+  from `site/kite-mark.svg` — so a green step 1 means the icon is current.
+
+The publisher must exist first, with ID exactly `kite-lang`, and **its ID
+cannot be changed afterwards**. It is created in the browser; there is no CLI.
+`PUBLISHING.md` has the long version, including that the create form fails
+silently — clicking *Create* with an invalid field does nothing at all, and the
+error sits beside the field several screens up.
+
+```bash
+npx @vscode/vsce show kite-lang.kite-lang
+```
+
+`not found` in the first few minutes is propagation. The same message an hour
+later is not.
+
+## 6. The site
+
+```bash
+./site/build.sh
+```
+
+```bash
+npx wrangler deploy
 ```
 
 `site/build.sh` regenerates the reference from the library's own doc comments
 and renders every document to HTML, so **a change to a `///` comment is not on
-the site until this runs**. Deploying from inside `site/` publishes wrangler's
-own state directory; `.assetsignore` is the second line of defence.
+the site until this runs**. Deploy from the repository root, never from inside
+`site/` — that publishes wrangler's own state directory, and `.assetsignore` is
+the second line of defence.
 
 Verify against the deployed bytes rather than the browser, which caches:
 
@@ -183,37 +317,41 @@ Verify against the deployed bytes rather than the browser, which caches:
 curl -s "https://kite-lang.dev/SPECIFICATION.md?v=$RANDOM" | diff - SPECIFICATION.md
 ```
 
-## 6. The VS Code extension
-
-```bash
-./editors/vscode/render-icon.sh                 # only if the mark changed
-cd editors/vscode && npx @vscode/vsce publish
-```
-
-The Marketplace will not take an SVG, so `icon.png` is a rendering that has to
-exist as a file; `brand_assets.rs` fails if it is missing or has drifted from
-`site/kite-mark.svg`.
-
-`editors/vscode/PUBLISHING.md` is the long version, and it is worth reading
-before the first publish rather than after: the Marketplace runs on Azure
-DevOps identity, so `vsce` answers a mis-scoped token with an error code that
-names neither, and the publisher — whose ID is permanent and must match
-`package.json` — can only be created in a browser. There is also a web upload
-route that needs no token at all.
-
 ## 7. Afterwards
 
-- `install.sh` needs no change: it reads `releases/latest` and the release's own
-  `SHA256SUMS`.
-- Homebrew, Scoop and the AUR manifests keep placeholder checksums in the tree
-  so they stay reviewable. `packaging/render.sh <version>` fills them in from
-  the release's own `SHA256SUMS`, which is the only place they should come
-  from.
+```bash
+./packaging/render.sh 0.1.4
+```
+
+Homebrew, Scoop and the AUR manifests keep placeholder checksums in the tree so
+they stay reviewable; this fills them in from the release's own `SHA256SUMS`,
+which is the only place they should come from. `install.sh` needs no change —
+it reads `releases/latest`.
 
 ---
+
+## The three copies of the compiler
+
+Changing the compiler leaves three checked-in WebAssembly builds of it behind,
+and one of them fails the suite until it is rebuilt:
+
+- `packages/kite-wasm/kite-compiler.wasm` — what `vite-plugin-kite` depends on.
+  `crates/kite-driver/tests/wasm_compiler.rs` builds `examples/vite-starter`
+  with the native `kitec` *and* with this module and compares the artefacts byte
+  for byte. Any compiler change fails that test until
+  `./packages/kite-wasm/build.sh` is rerun. That is the intended behaviour: the
+  plugin's whole claim is that it is not a second compiler.
+- `site/kite_playground.wasm` — rebuilt by `site/build.sh`.
+- `~/Documents/next-editor` — a separate repository holding its own copy.
+
+A practical note that costs a confusing half hour: **do not run `cargo build`
+while `cargo test --workspace` is running.** It invalidates artefacts mid-run
+and the suite dies with `E0460: found possibly newer version of crate …`, which
+reads exactly like a real failure and is not one.
 
 ## What a patch release skips
 
 A fix that touches neither the compiler nor the library — a page, a document, a
-README — needs only step 5. It does not need a tag, and it should not get one:
-a version that names no binary change is a version somebody will try to install.
+README — needs only step 6. It does not need a tag, and it should not get one:
+a version that names no binary change is a version somebody will try to
+install.

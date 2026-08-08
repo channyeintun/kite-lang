@@ -342,6 +342,7 @@ fn every_version_stays_on_the_one_line() {
 
     for path in [
         "packages/kite-cli/package.json",
+        "packages/kite-wasm/package.json",
         "packages/vite-plugin-kite/package.json",
         "editors/vscode/package.json",
     ] {
@@ -355,32 +356,65 @@ fn every_version_stays_on_the_one_line() {
         found.push((path, value));
     }
 
+    // And they agree with each other, because numbers that drift apart are
+    // numbers nobody can use to say what they are running.
+    let first = found[0].1.clone();
     for (path, version) in &found {
-        let parts: Vec<&str> = version.split('.').collect();
         assert_eq!(
-            (parts.first().copied(), parts.get(1).copied()),
-            (Some("0"), Some("1")),
-            "{} is {} — every version in this repository is 0.1.N, and the \
-             first two components do not move",
-            path,
-            version
-        );
-        assert!(
-            parts.len() == 3 && parts[2].chars().all(|c| c.is_ascii_digit()),
-            "{} is {} — the patch component is a number and nothing else",
-            path,
-            version
+            *version, first,
+            "{} is {} and Cargo.toml is {} — they name one build",
+            path, version, first
         );
     }
 
-    // And they agree with each other, because four numbers that drift apart
-    // are four numbers nobody can use to say what they are running.
-    let first = &found[0].1;
-    for (path, version) in &found {
-        assert_eq!(
-            version, first,
-            "{} is {} and Cargo.toml is {} — they name one build",
-            path, version, first
+    // Everywhere *else* the number is written down.
+    //
+    // The five above are the manifests, and they were the whole of this test
+    // for a while — so the pins inside them and every mention in the prose
+    // drifted with nothing watching. The release before this one needed a
+    // commit of its own to catch up (`release: point the starter and the
+    // install page at 0.1.3`), which is the shape of a rule nobody checks.
+    //
+    // The rule for these files is blunt on purpose: **no version but the
+    // current one may appear in them at all**. None has any reason to name
+    // another, and a blunt rule is one nobody has to remember the shape of.
+    // `RELEASING.md` is deliberately not here — it shows `git tag v0.1.0` as
+    // an example, which is the one place naming an old version is right.
+    for path in [
+        // The pins, which must not resolve to a build they were never tested
+        // against — the reason they are exact rather than a range.
+        "packages/kite-cli/package.json",
+        "packages/vite-plugin-kite/package.json",
+        "examples/vite-starter/package.json",
+        // The prose, which says what the current release is.
+        "README.md",
+        "site/install.md",
+        "site/index.html",
+        "site/brand.html",
+    ] {
+        let text = read(path);
+        let mut seen = 0;
+        for (at, _) in text.match_indices("0.1.") {
+            let rest = &text[at + 4..];
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if digits.is_empty() {
+                continue;
+            }
+            seen += 1;
+            let named = format!("0.1.{}", digits);
+            assert_eq!(
+                named, first,
+                "{} names {} and Cargo.toml is {} — a release moves every one of \
+                 these together, and the ones nothing checks are the ones that \
+                 get left behind",
+                path, named, first
+            );
+        }
+        assert!(
+            seen > 0,
+            "{} names no version at all — it used to, so either the reference \
+             moved or this list is stale",
+            path
         );
     }
 }
