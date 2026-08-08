@@ -430,3 +430,110 @@ fn inlay_hints_show_the_inferred_type_and_the_solved_arguments() {
     assert_eq!(items[0].path("position.character").and_then(|c| c.as_u32()), Some(9));
     assert_eq!(items[1].path("position.character").and_then(|c| c.as_u32()), Some(16));
 }
+
+/// Hovering a variable says what it is.
+///
+/// It used to answer nothing at all. `Res::Local` was skipped when the index
+/// was built, under a comment claiming the editor still "gets the name and
+/// where it was used" — which is what *rename* gets. Hover reads `uses`, found
+/// no entry, and returned null.
+#[test]
+fn hovering_a_variable_shows_its_type() {
+    let mut s = Server::new();
+    let text = "fn main() {\n    let total = 41\n    io.print(total + 1)\n}\n";
+    open(&mut s, "file:///t.kite", text);
+    // `total` on the last line, inside the call.
+    let reply = s.handle("textDocument/hover", &at("file:///t.kite", 2, 13));
+    let value = reply
+        .result
+        .expect("an answer")
+        .path("contents.value")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(value.contains("total"), "{}", value);
+    assert!(value.contains("int"), "{}", value);
+}
+
+/// And a parameter, which is a local the function's own signature declared.
+#[test]
+fn hovering_a_parameter_shows_its_type() {
+    let mut s = Server::new();
+    let text = "fn twice(n: int) -> int {\n    return n * 2\n}\n";
+    open(&mut s, "file:///t.kite", text);
+    // `n` in the body.
+    let reply = s.handle("textDocument/hover", &at("file:///t.kite", 1, 11));
+    let value = reply
+        .result
+        .expect("an answer")
+        .path("contents.value")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(value.contains("int"), "{}", value);
+}
+
+/// Hovering a method says what it is.
+///
+/// A method call is resolved by the *checker* rather than the resolver — it
+/// needs the receiver's type — so it never reached the index at all, which is
+/// the same reason rename refuses to touch one.
+#[test]
+fn hovering_a_method_shows_its_signature() {
+    let mut s = Server::new();
+    let text = "struct Rect {\n    w: float\n    h: float\n}\n\
+                impl Rect {\n    pub fn area(self) -> float {\n        return self.w * self.h\n    }\n}\n\
+                fn main() {\n    let r = Rect{ w: 2.0, h: 3.0 }\n    io.print(r.area())\n}\n";
+    open(&mut s, "file:///t.kite", text);
+    // `area` in `r.area()`.
+    let reply = s.handle("textDocument/hover", &at("file:///t.kite", 11, 16));
+    let value = reply
+        .result
+        .expect("an answer")
+        .path("contents.value")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(value.contains("area"), "{}", value);
+}
+
+/// And a field, which is found the same way a method is.
+#[test]
+fn hovering_a_field_shows_its_type() {
+    let mut s = Server::new();
+    let text = "struct Rect {\n    w: float\n    h: float\n}\n\
+                impl Rect {\n    pub fn area(self) -> float {\n        return self.w * self.h\n    }\n}\n";
+    open(&mut s, "file:///t.kite", text);
+    // `w` in `self.w`.
+    let reply = s.handle("textDocument/hover", &at("file:///t.kite", 6, 20));
+    let value = reply
+        .result
+        .expect("an answer")
+        .path("contents.value")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(value.contains("float"), "{}", value);
+}
+
+/// And the declaration itself, which is the most likely place to hover.
+///
+/// The inlay hint sits beside it, but a hint is not an answer for someone who
+/// has them switched off.
+#[test]
+fn hovering_a_declaration_shows_its_type() {
+    let mut s = Server::new();
+    let text = "fn main() {\n    let names = [\"x\", \"y\"]\n    io.print(names.len())\n}\n";
+    open(&mut s, "file:///t.kite", text);
+    // `names` where it is declared.
+    let reply = s.handle("textDocument/hover", &at("file:///t.kite", 1, 8));
+    let value = reply
+        .result
+        .expect("an answer")
+        .path("contents.value")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(value.contains("names"), "{}", value);
+    assert!(value.contains("[str]"), "{}", value);
+}

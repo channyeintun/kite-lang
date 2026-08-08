@@ -452,12 +452,44 @@ fn run_passes(
     // re-derivation here, for the same reason everything else in the index
     // does: one compiler, one opinion.
     for (at, text) in solved.bindings {
+        // A declaration is also worth hovering — it is the most likely place
+        // to, and the inlay hint beside it is not an answer for someone whose
+        // hints are off.
+        index.uses.push(Use {
+            at,
+            declared_at: at,
+            label: format!("{}: {}", sources.span_text(at), text),
+            kind: "variable",
+        });
         index.hints.push(Hint { after: at, text, kind: "binding" });
     }
     for (at, text) in solved.calls {
         index.hints.push(Hint { after: at, text, kind: "generics" });
     }
     index.hints.sort_by_key(|h| (h.after.file.0, h.after.start));
+
+    // Locals and methods, which only the checker knows.
+    //
+    // `build_index` reads the resolver's table, and the resolver knows which
+    // *slot* a local use names without knowing what is in it, and cannot find
+    // a method at all — finding one needs the receiver's type. So both used to
+    // be skipped, and hovering a variable or a method answered nothing. That
+    // is most of what anybody hovers.
+    for (at, name, ty) in solved.locals {
+        index.uses.push(Use {
+            at,
+            // A local's declaration lives in the function's own table rather
+            // than in the resolver's, so there is nothing here to jump to.
+            // Pointing at the use itself keeps "go to definition" on a
+            // variable a no-op rather than a jump somewhere wrong.
+            declared_at: at,
+            label: format!("{}: {}", name, ty),
+            kind: "variable",
+        });
+    }
+    for (at, signature) in solved.methods {
+        index.uses.push(Use { at, declared_at: at, label: signature, kind: "method" });
+    }
 
     if emit == Emit::Hir {
         return (hir.to_string(), None, None, None, index);

@@ -51,6 +51,19 @@ pub struct Solved {
     /// The span of a generic callee as written, and the arguments the call
     /// solved, comma-joined: `int, str`.
     pub calls: Vec<(Span, String)>,
+    /// Every *use* of a local, with the name as written and its type.
+    ///
+    /// The resolver knows which slot a use names and not what is in it; the
+    /// type is decided here. Without this an editor has nothing to say about
+    /// a variable, which is most of what anybody hovers.
+    pub locals: Vec<(Span, String, String)>,
+    /// Every method call, with the receiver's type and the method's signature.
+    ///
+    /// A method is resolved *here* rather than in the resolver, because
+    /// finding one needs the receiver's type — which is why methods reach the
+    /// index this way and why rename, which reads the resolver's table, still
+    /// refuses to touch one.
+    pub methods: Vec<(Span, String)>,
 }
 
 /// Check, in a named build mode. `release` drops `assert`.
@@ -2849,7 +2862,16 @@ impl<'a> Checker<'a> {
                     ty: declared,
                     span: p.span,
                 };
-                match self.narrowed.get(&id).copied() {
+                let narrowed = self.narrowed.get(&id).copied();
+                // What an editor says when this is hovered. The *narrowed*
+                // type where there is one: inside `if x != nil`, `x` is a
+                // `User` and saying `Option<User>` there would be telling the
+                // reader the opposite of what the compiler just proved.
+                let shown = narrowed.unwrap_or(declared);
+                let name = self.locals[id as usize].name.clone();
+                let text = self.types.name(shown);
+                self.solved.locals.push((p.span, name, text));
+                match narrowed {
                     Some(inner) => hir::Expr {
                         kind: ExprKind::Unwrap { value: Box::new(read) },
                         ty: inner,
@@ -4223,6 +4245,33 @@ impl<'a> Checker<'a> {
         let raw_ret = self.sigs[fn_index as usize].ret;
         let ret = self.apply_subst(raw_ret, &subst);
         let decl_span = self.sigs[fn_index as usize].name_span;
+
+        // What an editor says when the method name is hovered. Recorded here
+        // because this is the only place that knows: finding a method needs
+        // the receiver's type, so the resolver never had one to record.
+        //
+        // The *specialised* signature, so a `Cache<str, int>` says `str` where
+        // the source says `K` — which is what the receiver in hand actually
+        // has.
+        let shown_params: Vec<String> =
+            sig_params.iter().map(|p| self.types.name(*p)).collect();
+        let shown = if ret == TyId::UNIT {
+            format!(
+                "fn {}.{}({})",
+                self.types.name(receiver.ty),
+                name.name,
+                shown_params.join(", ")
+            )
+        } else {
+            format!(
+                "fn {}.{}({}) -> {}",
+                self.types.name(receiver.ty),
+                name.name,
+                shown_params.join(", "),
+                self.types.name(ret)
+            )
+        };
+        self.solved.methods.push((name.span, shown));
 
         if args.len() != sig_params.len() {
             self.arity_error(&name.name, args.len(), sig_params.len(), span, Some(decl_span));
@@ -7043,11 +7092,21 @@ impl<'a> Checker<'a> {
         };
 
         match self.types.struct_def(sid).field(&name.name).map(|(i, f)| (i, f.ty)) {
-            Some((index, ty)) => hir::Expr {
-                kind: ExprKind::FieldGet { base: Box::new(obj), index: index as u32 },
-                ty,
-                span,
-            },
+            Some((index, ty)) => {
+                // The third of the family the editor could not describe, and
+                // for the same reason: a field is found through the receiver's
+                // type, which only the checker has.
+                let owner = self.types.name(obj.ty);
+                let shown = self.types.name(ty);
+                self.solved
+                    .locals
+                    .push((name.span, format!("{}.{}", owner, name.name), shown));
+                hir::Expr {
+                    kind: ExprKind::FieldGet { base: Box::new(obj), index: index as u32 },
+                    ty,
+                    span,
+                }
+            }
             None => {
                 let sname = self.types.struct_def(sid).name.clone();
                 let known: Vec<String> = self
