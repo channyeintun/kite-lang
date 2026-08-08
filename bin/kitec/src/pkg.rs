@@ -46,19 +46,19 @@ pub fn run(dir: &Path, offline: bool, update: bool) -> ExitCode {
     };
 
     eprintln!("{} {}", manifest.name, manifest.version);
-    let locked = match lock_dependencies(&manifest, dir, offline) {
-        Ok(locked) => locked,
+    let resolution = match lock_dependencies(&manifest, dir, offline) {
+        Ok(resolution) => resolution,
         Err(message) => {
             eprintln!("error: {}", message);
             return ExitCode::FAILURE;
         }
     };
-    for entry in &locked {
+    for entry in &resolution.locked {
         eprintln!("  {} {} {}", entry.name, entry.version, entry.hash);
     }
 
     let lock_path = dir.join("kite.lock");
-    let text = manifest::lockfile(&locked);
+    let text = manifest::lockfile(&resolution.locked);
     // A lockfile that changed is worth saying out loud: it is the difference
     // between a build from the same bytes and a build from different ones.
     let previous = std::fs::read_to_string(&lock_path).unwrap_or_default();
@@ -87,6 +87,20 @@ pub fn run(dir: &Path, offline: bool, update: bool) -> ExitCode {
         // Deliberately not written: the committed lockfile is the record of
         // what was agreed to, and overwriting it here is what destroyed the
         // evidence that anything moved.
+        //
+        // Deliberately not installed either — `install` has not been called,
+        // so `.kite/vendor/<name>` still holds the bytes that were agreed to
+        // rather than the ones that turned up. Refusing while leaving the new
+        // bytes where the next build reads them was a refusal in the exit
+        // code only.
+        return ExitCode::FAILURE;
+    }
+
+    // Past the gate: the lockfile agrees with what resolution found, or
+    // `--update` accepted that it does not. Only now do the resolved bytes go
+    // where a build will read them.
+    if let Err(message) = resolution.install() {
+        eprintln!("error: {}", message);
         return ExitCode::FAILURE;
     }
 
@@ -120,20 +134,48 @@ fn check_entries(manifest: &Manifest, dir: &Path) -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// What resolution decided, before any of it is installed.
+///
+/// Kept apart so that the lockfile can be compared against a resolution that
+/// has not yet touched `.kite/vendor/<name>`: [`Resolution::install`] is the
+/// only thing that writes there, and `run` does not call it until the
+/// comparison has passed.
+#[derive(Debug)]
+struct Resolution {
+    locked: Vec<Locked>,
+    vendor: Vendor,
+    chosen: Vec<solve::Resolved>,
+}
+
+impl Resolution {
+    /// Place every resolved git dependency where a build will read it. Called
+    /// only once the lockfile agrees with what was resolved.
+    fn install(&self) -> Result<(), String> {
+        for resolved in &self.chosen {
+            self.vendor.place(&resolved.name, &resolved.version)?;
+        }
+        Ok(())
+    }
+}
+
 /// Resolve every dependency, direct and transitive, and hash what resolution
 /// chose. The returned entries are what the lockfile records.
-fn lock_dependencies(root: &Manifest, dir: &Path, offline: bool) -> Result<Vec<Locked>, String> {
+///
+/// Hashing reads the checkout a candidate was cloned into rather than the
+/// directory a build reads, so resolving and hashing are answers about the
+/// world rather than changes to it.
+fn lock_dependencies(root: &Manifest, dir: &Path, offline: bool) -> Result<Resolution, String> {
     let mut vendor = Vendor::new(dir, offline);
     for dep in &root.dependencies {
         vendor.register(&dep.name, Origin::of(&vendor.root, &dep.source))?;
     }
-    let resolution = solve::resolve(root, &mut vendor)?;
+    let chosen = solve::resolve(root, &mut vendor)?;
 
     let mut locked = Vec::new();
-    for resolved in &resolution {
-        let build_dir = vendor.build_dir(&resolved.name, &resolved.version)?;
-        let hash = manifest::hash_directory(&build_dir)
-            .map_err(|e| format!("cannot read `{}`: {}", build_dir.display(), e))?;
+    for resolved in &chosen {
+        let source = vendor.source_dir(&resolved.name, &resolved.version)?;
+        let hash = manifest::hash_directory(&source)
+            .map_err(|e| format!("cannot read `{}`: {}", source.display(), e))?;
         locked.push(Locked {
             name: resolved.name.clone(),
             version: resolved.version.to_string(),
@@ -141,7 +183,7 @@ fn lock_dependencies(root: &Manifest, dir: &Path, offline: bool) -> Result<Vec<L
             hash,
         });
     }
-    Ok(locked)
+    Ok(Resolution { locked, vendor, chosen })
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +224,7 @@ impl std::fmt::Display for Origin {
 }
 
 /// The real [`Registry`]: what exists on disk and at the ends of git URLs.
+#[derive(Debug)]
 struct Vendor {
     /// The root package's directory, canonicalised so vendored paths display
     /// relative to it.
@@ -342,36 +385,55 @@ impl Vendor {
         found
     }
 
-    /// The directory a build will read, which is what gets hashed. A path
-    /// dependency is used where it is; a git one is placed at
-    /// `.kite/vendor/<name>` — refreshed only when it is not already the
-    /// chosen version, so an unchanged resolution touches nothing.
-    fn build_dir(&mut self, name: &str, version: &Version) -> Result<PathBuf, String> {
+    /// Where a resolved dependency's bytes are *now*: a path dependency where
+    /// it lies, a git one in the `name@version` checkout it was cloned into.
+    /// This is what gets hashed, and asking changes nothing on disk.
+    fn source_dir(&self, name: &str, version: &Version) -> Result<PathBuf, String> {
         match self.origin(name)? {
             Origin::Path(dir) => Ok(dir),
             Origin::Git { .. } => {
                 let key = (name.to_string(), version.to_string());
-                let candidate = self
+                Ok(self
                     .checkouts
                     .get(&key)
                     .cloned()
-                    .unwrap_or_else(|| self.candidate_dir(name, &version.to_string()));
-                let placed = self.root.join(VENDOR).join(vendor_name(name));
-                if is_version(&placed, version)
-                    && manifest::hash_directory(&placed).ok()
-                        == manifest::hash_directory(&candidate).ok()
-                {
-                    return Ok(placed);
-                }
-                if placed.exists() {
-                    std::fs::remove_dir_all(&placed)
-                        .map_err(|e| format!("cannot clear `{}`: {}", placed.display(), e))?;
-                }
-                copy_dir(&candidate, &placed)
-                    .map_err(|e| format!("cannot place `{}`: {}", placed.display(), e))?;
-                Ok(placed)
+                    .unwrap_or_else(|| self.candidate_dir(name, &version.to_string())))
             }
         }
+    }
+
+    /// Put a resolved git dependency at `.kite/vendor/<name>`, the one
+    /// directory per name a build reads. Refreshed only when it is not
+    /// already the chosen version, so an unchanged resolution touches
+    /// nothing.
+    ///
+    /// This is the destructive half, and it is deliberately not part of
+    /// resolution. It used to be: hashing asked for the build directory, and
+    /// asking for it removed the previous one and copied the new candidate
+    /// over it — before `kite.lock` had been read, let alone agreed with. So
+    /// a dependency whose bytes had moved under its version was installed,
+    /// and *then* the mismatch was reported and the command exited non-zero.
+    /// The exit code was the only thing that refused; the bytes were already
+    /// in the directory the next `kitec run` compiles, and nothing on the
+    /// build path reads the lockfile to notice. `--update` exists so that
+    /// accepting changed bytes is a decision somebody makes, and installing
+    /// them first is how that decision was made for them.
+    fn place(&self, name: &str, version: &Version) -> Result<(), String> {
+        let Origin::Git { .. } = self.origin(name)? else { return Ok(()) };
+        let candidate = self.source_dir(name, version)?;
+        let placed = self.root.join(VENDOR).join(vendor_name(name));
+        if is_version(&placed, version)
+            && manifest::hash_directory(&placed).ok() == manifest::hash_directory(&candidate).ok()
+        {
+            return Ok(());
+        }
+        if placed.exists() {
+            std::fs::remove_dir_all(&placed)
+                .map_err(|e| format!("cannot clear `{}`: {}", placed.display(), e))?;
+        }
+        copy_dir(&candidate, &placed)
+            .map_err(|e| format!("cannot place `{}`: {}", placed.display(), e))?;
+        Ok(())
     }
 
     /// The `source` line the lockfile shows for a resolved package.
@@ -587,6 +649,14 @@ fn is_version(dir: &Path, version: &Version) -> bool {
 
 /// Copy a checkout into place, leaving `.git` behind: the build wants the
 /// files, and the history is the candidate directory's to keep.
+///
+/// Symbolic links are refused rather than followed. `Path::is_dir` and
+/// `fs::copy` both answer about what a link points at, and what is being
+/// copied here was just fetched from a URL: a directory link aimed at `.`
+/// recurses until the stack ends, and a file link aimed anywhere on the
+/// machine copies that file into the tree the next build reads. The same
+/// refusal runs in `hash_directory`, so what is copied and what is hashed
+/// agree about what a tree is allowed to contain.
 fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -595,9 +665,16 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
         if name == ".git" {
             continue;
         }
+        let kind = entry.file_type()?;
         let from = entry.path();
         let to = dst.join(&name);
-        if from.is_dir() {
+        if kind.is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("`{}` is a symbolic link", from.display()),
+            ));
+        }
+        if kind.is_dir() {
             copy_dir(&from, &to)?;
         } else {
             std::fs::copy(&from, &to)?;
@@ -881,8 +958,9 @@ mod tests {
         let text = std::fs::read_to_string(root_dir.join("kite.toml")).expect("read");
         let root = manifest::parse(&text).expect("parses");
         // Paths never fetch, so `--offline` resolves them too.
-        let locked = lock_dependencies(&root, &root_dir, true).expect("resolves");
+        let resolved = lock_dependencies(&root, &root_dir, true).expect("resolves");
 
+        let locked = &resolved.locked;
         let summary: Vec<(String, String)> =
             locked.iter().map(|l| (l.name.clone(), l.version.clone())).collect();
         assert_eq!(
@@ -893,7 +971,7 @@ mod tests {
                 ("shared".to_string(), "1.4.0".to_string()),
             ]
         );
-        let lock = manifest::lockfile(&locked);
+        let lock = manifest::lockfile(locked);
         assert!(lock.contains("version = \"1.4.0\""), "{}", lock);
         // A committed file must read the same on every machine: paths are
         // written relative to the root package, not absolute.

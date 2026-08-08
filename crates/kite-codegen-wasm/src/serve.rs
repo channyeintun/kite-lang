@@ -47,7 +47,7 @@ pub fn generate_server(wasm_path: &str) -> String {
 
 import {{ readFile }} from "node:fs/promises";
 import {{ createServer }} from "node:http";
-import {{ run, provide, setWriter, str, text }} from "./app.js";
+import {{ run, provide, setWriter }} from "./app.js";
 
 // One entry per listening socket. A handle is an index, as everywhere else on
 // this boundary: nothing but numbers and text crosses it.
@@ -120,24 +120,43 @@ provide("net", {{
     const id = SERVERS.push(state) - 1;
     try {{
       state.server = createServer((req, res) => {{
-        let body = "";
+        // The chunks are kept as `Buffer`s and decoded once at the end, which
+        // is two fixes in one shape.
+        //
+        // `body += chunk` decoded each chunk on its own, and a chunk boundary
+        // is a position in a byte stream, not in a text: a character whose
+        // UTF-8 bytes straddled two `data` events became two replacement
+        // characters. That needed no attacker — any non-ASCII body large
+        // enough to arrive in two pieces was quietly corrupted before the
+        // program ever saw it.
+        //
+        // And `body.length` on the decoded string counts UTF-16 code units,
+        // which is not what `MAX_BODY` says it counts. Three-byte characters
+        // count one apiece, so the 8 MiB ceiling admitted about 24 MiB off
+        // the wire. `chunk.length` on a `Buffer` is bytes, which is the unit
+        // the limit is written in.
+        let chunks = [];
+        let received = 0;
         let refused = false;
         req.on("data", (chunk) => {{
           if (refused) return;
-          body += chunk;
-          if (body.length > MAX_BODY) {{
+          received += chunk.length;
+          if (received > MAX_BODY) {{
             // Refused here rather than handed on: the program is never told
             // about this request, so there is nothing for it to answer, and
             // the memory goes back now rather than when it gets around to it.
             refused = true;
-            body = "";
+            chunks = [];
             res.writeHead(413, {{ "content-type": "text/plain; charset=utf-8" }});
             res.end("request body too large\n");
             req.destroy();
+            return;
           }}
+          chunks.push(chunk);
         }});
         req.on("end", () => {{
           if (refused) return;
+          const body = Buffer.concat(chunks).toString("utf8");
           // The socket is held open until the program answers. A server that
           // replied before its handler ran would be a different program.
           const handle = NEXT_REQUEST++;
@@ -184,10 +203,15 @@ provide("net", {{
     return handle === undefined ? -1n : BigInt(handle);
   }},
 
-  serve_method: (handle) => str(requestOf(handle) ? requestOf(handle).method : ""),
-  serve_path: (handle) => str(requestOf(handle) ? requestOf(handle).path : ""),
-  serve_body: (handle) => str(requestOf(handle) ? requestOf(handle).body : ""),
-  serve_headers: (handle) => str(requestOf(handle) ? requestOf(handle).headers : ""),
+  // Plain JavaScript strings in both directions. A declared host is called
+  // with strings the module has already converted, and what it returns is
+  // converted on the way back — `str` and `text` are the *public* API's
+  // helpers, for callers outside the module, and wrapping a host value in
+  // them hands the conversion an object it cannot read.
+  serve_method: (handle) => (requestOf(handle) ? requestOf(handle).method : ""),
+  serve_path: (handle) => (requestOf(handle) ? requestOf(handle).path : ""),
+  serve_body: (handle) => (requestOf(handle) ? requestOf(handle).body : ""),
+  serve_headers: (handle) => (requestOf(handle) ? requestOf(handle).headers : ""),
 
   serve_respond: (handle, status, body, headers) => {{
     const request = requestOf(handle);
@@ -195,7 +219,7 @@ provide("net", {{
     // second answer goes nowhere and this says so.
     if (!request || request.answered) return 0n;
     request.answered = true;
-    const fields = parseHeaders(text(headers));
+    const fields = parseHeaders(headers);
     if (fields["content-type"] === undefined && fields["Content-Type"] === undefined) {{
       fields["content-type"] = "text/plain; charset=utf-8";
     }}
@@ -210,7 +234,7 @@ provide("net", {{
       REQUESTS.delete(Number(handle));
       return 0n;
     }}
-    request.res.end(text(body));
+    request.res.end(body);
     // Answered, so the body, the headers and the socket can go. Holding them
     // for the life of the process is what made an ordinary stream of requests
     // a memory leak.
@@ -220,7 +244,7 @@ provide("net", {{
 
   serve_error: (id) => {{
     const state = SERVERS[Number(id)];
-    return str(state ? state.error : "no such server");
+    return state ? state.error : "no such server";
   }},
 
   serve_close: (id) => {{

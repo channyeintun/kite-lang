@@ -103,14 +103,34 @@ fn number_checks() -> [error] {
     out.push(test.equal_float(toml.float_at(nums, "f", 0.0), 3.25, 0.0001, "a float"))
     out.push(test.equal_float(toml.float_at(nums, "e", 0.0), 2000.0, 0.0001, "an exponent"))
 
+    // Every exponent tested here was positive, and the negative ones were not
+    // parsing at all: the `-` made the value look like a date, so `1e-5` came
+    // back as the *text* `1e-5` and `float_at` answered with its fallback. A
+    // number silently ceasing to be one is the kind of thing a test suite is
+    // for, and this suite did not ask.
+    let (small, small_err) = toml.parse("a = 1e-5\nb = -1.5e-3\nc = 1E-5\n")
+    out.push(test.ok(small_err, "a negative exponent parses"))
+    if small_err != nil {
+        return out
+    }
+    out.push(test.equal_float(toml.float_at(small, "a", 0.0), 0.00001, 0.0000001, "and scales down"))
+    out.push(test.equal_float(toml.float_at(small, "b", 0.0), -0.0015, 0.0000001, "sign and all"))
+    out.push(test.equal_float(toml.float_at(small, "c", 0.0), 0.00001, 0.0000001, "in either case"))
+
     // A date is not an integer, and reading `1979-05-27` as `1979` is the
-    // quiet wrong answer this guards against.
-    let (dated, dated_err) = toml.parse("when = 1979-05-27\n")
+    // quiet wrong answer this guards against. The exponent above is why the
+    // offset is here too: the `-` in `-07:00` must still read as a date's.
+    let (dated, dated_err) = toml.parse("when = 1979-05-27\noffset = 1979-05-27T00:32:00-07:00\n")
     out.push(test.ok(dated_err, "a date parses"))
     if dated_err != nil {
         return out
     }
     out.push(test.equal_str(text_of(dated, "when"), "1979-05-27", "and is kept verbatim"))
+    out.push(test.equal_str(
+        text_of(dated, "offset"),
+        "1979-05-27T00:32:00-07:00",
+        "and so is one carrying an offset",
+    ))
     return out
 }
 
@@ -240,6 +260,14 @@ fn refusal_checks() -> [error] {
 
     let (_, huge_exponent) = toml.parse("x = 1e999999999999\n")
     out.push(test.ok(huge_exponent, "an enormous exponent parses instead of hanging"))
+
+    // The trip count was clamped after being made positive rather than
+    // before, and the one exponent with no positive counterpart is the one
+    // that mattered: `0 - min_int()` is a trap. It was unreachable only
+    // because negative exponents were being read as dates, so fixing that
+    // would have made this live.
+    let (_, lowest_exponent) = toml.parse("x = 1e-9223372036854775808\n")
+    out.push(test.ok(lowest_exponent, "the smallest exponent underflows instead of trapping"))
 
     // The bound is the `int`'s, and the `int`'s range is not symmetric.
     //

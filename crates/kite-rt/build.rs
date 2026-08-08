@@ -73,8 +73,23 @@ fn forced() -> bool {
 
 /// `-C force-frame-pointers` accepts several spellings, and `-Cfoo` may be
 /// written joined or separated, so match on the option rather than the string.
+///
+/// Every occurrence is read, and any one of them asking for frame pointers
+/// decides it. That is rustc's own rule rather than a lenient reading of it:
+/// `parse_frame_pointer` *ratchets*, so a later `no` cannot lower an earlier
+/// `yes`, and the flags `yes no` compile with frame pointers just as `no yes`
+/// does. Returning on the first occurrence agreed with rustc only by luck —
+/// it answered `no` to `no yes`, which is a build refused for flags that are
+/// in fact safe, and it made this file's own advice unfollowable: the panic
+/// says to append `-C force-frame-pointers=yes` to `RUSTFLAGS`, and an
+/// appended flag is by definition not the first one.
+///
+/// `always` and `non-leaf` are accepted because they are the stronger
+/// spellings, not unrecognised ones; `non-leaf` suffices because every frame
+/// the collector walks has made a call and so is not a leaf.
 fn says_yes<'a>(flags: impl Iterator<Item = &'a str>) -> bool {
     let mut expecting_value = false;
+    let mut forced = false;
     for flag in flags {
         let opt = if expecting_value {
             expecting_value = false;
@@ -93,10 +108,9 @@ fn says_yes<'a>(flags: impl Iterator<Item = &'a str>) -> bool {
         };
         // Bare `-C force-frame-pointers` means yes; otherwise read the value.
         match rest {
-            "" => return true,
-            "=yes" | "=y" | "=on" | "=true" => return true,
-            _ => return false,
+            "" | "=yes" | "=y" | "=on" | "=true" | "=always" | "=non-leaf" => forced = true,
+            _ => {}
         }
     }
-    false
+    forced
 }

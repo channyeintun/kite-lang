@@ -93,6 +93,15 @@ function textLength(value) {
   return length;
 }
 
+// A JavaScript string is UTF-16 and may hold a lone surrogate; a Kite `str` is
+// an array of Unicode scalar values, and a surrogate is not one. Substituting
+// U+FFFD is what every other decoder on this boundary does, and it is the only
+// point a surrogate could enter: literals come from Rust `char`s and
+// `from_code` already refuses the range. Left through, `str("\uD800")` gave a
+// value the VM and native backends cannot represent, so the same program
+// compared and hashed differently depending on where it ran.
+const SCALAR = (code) => (code >= 0xd800 && code <= 0xdfff ? 0xfffd : code);
+
 function textFill(requested) {
   if (inputIterator === null) return 0;
   const count = Math.min(Number(requested), inputRemaining, SCALAR_CHUNK);
@@ -100,7 +109,7 @@ function textFill(requested) {
   while (written < count) {
     const next = inputIterator.next();
     if (next.done) break;
-    SCRATCH_VIEW.setUint32(written * 4, next.value.codePointAt(0), true);
+    SCRATCH_VIEW.setUint32(written * 4, SCALAR(next.value.codePointAt(0)), true);
     written += 1;
   }
   inputRemaining -= written;

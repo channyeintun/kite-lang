@@ -740,8 +740,17 @@ fn bad_new_name(new: &str, binding: &Binding, compiled: &Compilation) -> Option<
 }
 
 /// The `{line, character}` a byte offset lands on.
+///
+/// Clamped to the end of the text and then walked back to a character
+/// boundary. Clamping alone left the second way a `str` index panics: an
+/// offset inside a multi-byte character is in range and still not a place the
+/// text can be cut. A panic here is not a failed request but the end of the
+/// session.
 fn position_at(text: &str, offset: u32) -> Json {
-    let offset = (offset as usize).min(text.len());
+    let mut offset = (offset as usize).min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
     let before = &text[..offset];
     let line = before.matches('\n').count();
     let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);

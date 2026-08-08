@@ -19,105 +19,133 @@ operations stay in Wasm, and a fixed one-page bridge handles JavaScript
 boundaries. Executable regressions cover Unicode operations, large
 multi-chunk exports, declared hosts, maps and aggregate equality.
 
-The following findings were review suggestions outside that string migration.
-They remain useful follow-up work unless a later commit addresses them.
+The six findings below were review suggestions outside that string migration.
+Each was re-checked against the tree, and each is now addressed. Two of them
+were not what the review thought they were, and saying how is the point of
+keeping this file rather than deleting it.
 
 ## Findings
 
 ### High — the TOML overflow fix creates a `min_int` exponent trap
 
-The follow-up correctly changed `int_of` to accept
-`-9223372036854775808` (`std/toml.kite:1158-1211`). That same value is also
-accepted for a float exponent. `power_of_ten` then computes:
+**Fixed, and the reason it could not fire was a worse bug.**
 
-```kite
-var steps = exp
-if steps < 0 {
-    steps = 0 - steps
-}
-```
+The mechanism was real: `int_of` accepts `-9223372036854775808`, `float_of`
+parses an exponent with it, and `power_of_ten` negated its argument before
+clamping — and `min_int` has no negation. But the reproducer
+`x = 1e-9223372036854775808` never reached that code, because
+`looks_like_date` claimed any `-` past the first character, so **every
+negative exponent was being returned as text**. `1e-5` parsed to the string
+`1e-5`, `float_at` answered with its fallback, and a number in a
+configuration file silently stopped being one. Nothing caught it because
+every exponent in the test suite was positive.
 
-at `std/toml.kite:1138-1141`. Negating `min_int` cannot be represented, so a
-document containing `x = 1e-9223372036854775808` traps in a checked build
-instead of returning a parse error. In a release build it wraps and produces a
-wrong scale.
-
-Clamp by sign before taking an absolute value—for example, handle
-`exp < -400` directly—and add this exact edge beside the integer-boundary
-tests.
+Both are fixed together, because fixing the date check alone would have made
+the trap live: `looks_like_date` now exempts a `-` preceded by `e` or `E`,
+and `power_of_ten` clamps into `[-400, 400]` before it negates. Tests cover
+`1e-5`, `-1.5e-3`, `1E-5`, the `min_int` exponent, and a date carrying a
+`-07:00` offset, which must still read as a date.
 
 ### High — lock verification happens after unverified bytes are installed
 
-`pkg::run` does not read and compare `kite.lock` until after
-`lock_dependencies` returns (`bin/kitec/src/pkg.rs:49-79`). During that call,
-`Vendor::build_dir` removes `.kite/vendor/<name>` and copies the newly resolved
-candidate into its place (`:345-372`). If the digest disagrees with the lock,
-`pkg` exits unsuccessfully, but the rejected bytes remain in the directory
-used by later builds.
+**Fixed.** Confirmed, and the build path made it worse than described:
+nothing outside `pkg.rs` reads `kite.lock` at all, so the non-zero exit was
+the only thing that refused while the rejected bytes sat in the directory the
+next `kitec run` compiles. `--update` exists so that accepting changed bytes
+is a decision somebody makes, and installing them first made that decision
+for them.
 
-Resolve, copy, and hash into a staging directory first. Compare the prospective
-lock, and only after it matches—or `--update` accepts it—atomically replace
-the build directories. Builds should also verify the installed tree against
-`kite.lock`, or refuse to claim locked operation.
+Resolution no longer installs anything. `lock_dependencies` hashes the
+checkout a candidate was cloned into and returns a `Resolution`;
+`Resolution::install` is the only thing that writes `.kite/vendor/<name>`,
+and `run` does not call it until the lockfile has agreed or `--update` has
+accepted that it has not.
+
+Still open, and worth doing: a build verifies nothing. Either `kitec build`
+should hash the installed tree against `kite.lock` or the toolchain should
+stop describing itself as locked.
 
 ### Medium — vendoring and hashing follow attacker-controlled symlinks
 
-`copy_dir` uses `Path::is_dir` and `std::fs::copy`
-(`bin/kitec/src/pkg.rs:588-606`), both of which follow symlinks. A Git
-dependency can contain a directory symlink forming a cycle or leaving its
-checkout, causing recursion, local-file copying, or disk exhaustion.
-`collect_kite_files` follows directory symlinks similarly while computing the
-trusted digest (`crates/kite-driver/src/manifest.rs:513-522`).
+**Fixed.** Both walkers followed links — `copy_dir` via `Path::is_dir` and
+`fs::copy`, `collect_kite_files` via `Path::is_dir` — so a directory link
+aimed at `.` recursed until the stack ended and a file link aimed anywhere on
+the machine was copied into the vendor tree and fed to the digest that is
+supposed to identify that tree.
 
-Use `symlink_metadata`, reject symlinks in fetched dependency trees, and ensure
-every traversed canonical path remains below the checkout root. Use the same
-walker for copying and hashing.
+Both now read `file_type` from the directory entry, which answers about the
+link rather than its target, and refuse a symlink rather than skipping it: a
+digest whose meaning depends on a path outside the directory it names is not a
+digest of that directory, and silently omitting the file would let a
+dependency change what it contains without changing what it hashes to.
 
 ### Medium — the frame-pointer guard reads the first flag, not the effective flag
 
-`crates/kite-rt/build.rs:76-99` returns on the first
-`force-frame-pointers` option. Rust codegen options are order-sensitive; the
-last occurrence is effective. Therefore `yes, no` can pass while compiling
-without the required frame chain, and `no, yes` can be rejected despite being
-safe.
+**Fixed, but the premise was wrong and the severity was lower than stated.**
+rustc does not take the last occurrence: `parse_frame_pointer` *ratchets*, so
+a later `no` cannot lower an earlier `yes`, and `-C force-frame-pointers=yes
+-C force-frame-pointers=no` compiles *with* frame pointers. The dangerous
+case the review describes — a false pass — therefore does not exist on any
+toolchain this workspace supports.
 
-Retain the last recognized value and decide after every flag has been read.
-Test joined and split spellings, both duplicate orders, and explicit negative
-values.
+What did exist was the opposite, all fail-safe: `no yes` was rejected though
+it is safe, the stable spelling `=always` was rejected, and the panic's own
+advice ("append `-C force-frame-pointers=yes`") could not work, because an
+appended flag is not the first one. `says_yes` now reads every occurrence and
+accepts `always` and `non-leaf` alongside the boolean spellings.
 
 ### Low — `SourceMap` still has an unchecked span-to-string path
 
-`snippet`, `span_text`, and `text_before` clamp invalid offsets, but
-`SourceMap::line_col` forwards the raw `span.start`
-(`crates/kite-span/src/lib.rs:178-180`). `SourceFile::line_col` then slices at
-that offset (`:93-97`), so an out-of-range or mid-code-point start can still
-panic in diagnostic rendering.
+**Fixed.** Confirmed as a hardening gap rather than a live panic: no pass
+currently produces an out-of-range or mid-code-point span start, and the one
+that used to — an unterminated literal ending in a multi-byte character — was
+fixed at its source in `b0c9fac`. But `clamped`'s guarantee was overstated,
+because the renderer asks for a *position* for every label before it asks for
+any text, so `line_col` would have died before the clamping was reached.
 
-Normalize the offset once and use it for both line selection and column
-counting.
+`SourceFile::line_col` now clamps to the end of the text and walks back to a
+character boundary, the same normalisation `clamped` performs. The LSP's
+`position_at` had the identical residual gap — it clamped the range but still
+sliced at a possibly non-boundary offset — and got the same two lines.
 
 ### Low — the server body ceiling is not measured in bytes
 
-The generated adapter calls `MAX_BODY` a byte limit, but concatenates each
-`Buffer` into a JavaScript string and checks `body.length`
-(`crates/kite-codegen-wasm/src/serve.rs:67-74`, `:123-136`). That is a UTF-16
-code-unit count, and decoding chunks independently can replace a multibyte
-UTF-8 character split across chunk boundaries.
+**Fixed, and the corruption half mattered more than the ceiling half.**
 
-Track `chunk.length`, retain bounded buffers, and decode once with
-`Buffer.concat` at end-of-stream.
+`body += chunk` decoded each `data` event on its own, so a character whose
+UTF-8 bytes straddled two events became two replacement characters. That
+needed no attacker: any non-ASCII body large enough to arrive in two pieces
+was corrupted before the handler saw it, undetectably from the program's
+side. The accounting error was the milder one — `body.length` counts UTF-16
+code units, so a body of three-byte characters could reach about 24 MiB
+against an "8 MiB" ceiling, permissive but bounded.
+
+The adapter now keeps `Buffer` chunks, counts `chunk.length` (which is
+bytes), and decodes once with `Buffer.concat` at end of stream. A test posts
+a character split across two writes with a pause between them, so the split
+is the test's rather than the kernel's.
 
 ## Additional suggestions
 
-- The JSON and TOML exponent loops still do up to 400 operations per number.
-  Reject or underflow out-of-range powers directly, or use exponentiation by
-  squaring.
-- Normalize dependency-relative path components to `/` before hashing so
-  identical nested trees produce identical lock hashes on Windows and Unix.
+- **The 400-operation exponent loops: not worth a change.** Both loops are
+  capped at 400 float operations, which is sub-microsecond; an attacker
+  spends six bytes of exponent to buy 400 trivial operations, worse
+  amplification than simply writing 400 short numbers. The real problem — a
+  document sizing an unbounded loop — was already fixed by the cap.
+- **Path components are now normalised to `/` before hashing.** Confirmed:
+  `to_string_lossy` on the stripped path rendered nested names with the
+  platform separator, so `src\a.kite` and `src/a.kite` were one file hashing
+  two ways and a committed `kite.lock` matched only on the machine that wrote
+  it. The digest itself is unambiguous where it matters — names and bodies
+  are length-prefixed — though `to_string_lossy` still folds invalid UTF-8 to
+  U+FFFD, which is unreachable as an attack because the contents must already
+  be identical to collide.
 
 ## Areas that held up
 
 No new correctness issue was found in the scoped alias map, E0403/E0404
 collision diagnostics, Vite cache-directory confinement, no-host
 accessibility execution, JSON infinity refusal, diagnostic control/bidi
-escaping, or the SHA-256 compression implementation.
+escaping, or the SHA-256 compression implementation. JSON's exponent handling
+was checked for the same `min_int` bug as TOML's and does not have it: it
+keeps the sign as a flag and never negates a parsed value.

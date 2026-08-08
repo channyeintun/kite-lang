@@ -92,5 +92,60 @@ Regression coverage includes:
   and invalid scalar construction;
 - dynamic concatenation and formatting;
 - strings in maps, slices, optionals, structs, and generated deep equality;
-- declared hosts receiving and returning JavaScript strings; and
-- an exported 5,000-emoji value crossing both directions in multiple chunks.
+- declared hosts receiving and returning JavaScript strings;
+- an exported 5,000-emoji value crossing both directions in multiple chunks;
+- a literal longer than one `array.new_fixed` chunk; and
+- a lone surrogate arriving from JavaScript.
+
+## What the review of the implementation found
+
+The design held up. The bridge cannot interleave two conversions — every
+emitted host call converts each argument to completion before invoking the
+host and converts the return afterwards, so conversions nest rather than
+overlap — and every `array.get`/`set`/`copy` the compiler emits is preceded
+by an exact clamp. Equality, ordering and map keys compare contents
+everywhere; no reference-identity comparison survived from the handle era.
+
+Four things did not hold up, and all four are fixed.
+
+**The generated server adapter was never migrated.** `serve.rs` still wrapped
+its host returns in `str(...)` and its parameters in `text(...)`. Those are
+the *public* API's helpers, for callers outside the module; a declared host
+exchanges plain JavaScript strings, because the module converts around each
+call. Every request died in `textLength` with "Cannot convert object to
+primitive value" — so the commit shipped with the four tests in
+`crates/kite-driver/tests/strings.rs`' sibling `serve.rs` red, and they pass
+at the parent commit. The lesson is narrower than "test more": the adapter's
+only coverage was those integration tests, and everything else asserting
+about generated JavaScript asserts that a substring is present, which no
+behavioural break can fail.
+
+**A literal over 10,000 scalars produced a module no engine would take.**
+`array.new_fixed` draws its elements from the operand stack and V8 caps it at
+10,000 — and past the cap the module is refused at *instantiation*, not at
+validation, so `wasmparser` called it well-formed and every validity
+assertion passed. Long literals are now built a chunk at a time and joined
+with the runtime's own `concat`, balanced rather than left-to-right.
+
+**Lone surrogates could enter the array.** A JavaScript string is UTF-16 and
+may hold half a pair; a Unicode scalar value cannot be one. `from_code`
+already refused the range, so the host bridge was the only ingress — and it
+copied the code unit straight through, giving a `str` the VM and native
+backends cannot represent, which made the same program compare and hash
+differently depending on where it ran. The bridge now substitutes U+FFFD.
+
+**The size floor quadrupled and the budget test was left red.** A module that
+prints went from 399 to 1,625 bytes; a program containing no strings at all
+is 1,619, so the cost is the runtime's presence rather than any program's use
+of it. All twelve runtime functions and the three bridge imports are emitted
+unconditionally, because the module exports `str` and `text` for its
+JavaScript API whether the program handles text or not. That is a real
+consequence of the design, not a bug — but emitting only what a program can
+reach would give most of it back, and has not been done. The budget is raised
+to 2,048 with that written down beside it.
+
+Left alone, and worth knowing: locally built artifacts still embed the old
+ABI until they are rebuilt — `packages/kite-wasm/kite-compiler.wasm`, the
+site's modules, and `examples/page/app.wasm`. None are tracked, so the
+repository is clean, but an npm package or a page built from a stale copy
+compiles with the representation this document replaced.

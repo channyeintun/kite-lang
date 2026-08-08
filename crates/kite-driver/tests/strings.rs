@@ -112,7 +112,8 @@ const PROGRAMS: &[(&str, &str)] = &[
          \x20 io.print(s.slice(6, 7))\n\
          \x20 io.print(s.index_of(\"\\u{65E5}\"))\n\
          \x20 io.print(text.from_code(0x1F680))\n\
-         \x20 io.print(text.from_code(0xD800))\n}\n",
+         \x20 io.print(text.from_code(0xD800))\n\
+         \x20 io.print(hash_str(s))\n}\n",
     ),
     (
         "strings-inside-values",
@@ -126,7 +127,32 @@ const PROGRAMS: &[(&str, &str)] = &[
          \x20 m[\"two\"] = 2\n\
          \x20 m[\"one\"] = 3\n\
          \x20 io.print(m.len())\n\
-         \x20 io.print(join(m.keys(), \"|\"))\n}\n",
+         \x20 io.print(join(m.keys(), \"|\"))\n\
+         \x20 io.print(sorted([\"c\", \"a\", \"b\"], |x: str, y: str| x < y)[0])\n}\n",
+    ),
+    // A `str`-keyed map and *nothing else that compares an aggregate*.
+    //
+    // Kept separate from `strings-inside-values` on purpose. A map key is
+    // compared by whatever the backend decided string equality is, and when a
+    // program also compares structs the generated deep-equality functions
+    // drag the right comparison in whether or not the map path asked for it —
+    // so the two together can pass while a map on its own is wrong. The
+    // original reason for the isolation was an import scan that no longer
+    // applies, now that string equality is a Wasm function rather than a host
+    // call; the isolation is worth keeping for its own sake.
+    (
+        "map-keys-alone",
+        "fn main() {\n\
+         \x20 var m: { str: int } = {}\n\
+         \x20 m[\"h\\u{e9}llo\"] = 1\n\
+         \x20 m[\"h\\u{e9}llo\"] = 2\n\
+         \x20 m[\"hello\"] = 3\n\
+         \x20 io.print(m.len())\n\
+         \x20 let hit = m[\"h\\u{e9}llo\"]\n\
+         \x20 if hit == nil {\n    io.print(\"missing\")\n    return\n  }\n\
+         \x20 io.print(hit)\n\
+         \x20 let miss = m[\"h\\u{e9}llo!\"]\n\
+         \x20 io.print(miss == nil)\n}\n",
     ),
     (
         "optional-strings",
@@ -182,6 +208,78 @@ fn exported_strings_round_trip_through_the_boundary() {
         return;
     };
     assert_eq!(output, "[hé😀日]");
+}
+
+/// A lone surrogate is not a scalar value, and does not become one.
+///
+/// A JavaScript string is UTF-16 and may hold half a pair; a Kite `str` is an
+/// array of Unicode scalar values. The bridge used to copy the code unit
+/// through, so `str("\uD800")` produced a `str` holding 0xD800 — a value the
+/// VM and native backends cannot represent at all, since theirs are Rust
+/// `String`s. The same program then compared, ordered and hashed differently
+/// depending on which backend ran it.
+///
+/// The pair in the same string is the control: substituting scalars must not
+/// damage an astral character, which is also written as two code units.
+#[test]
+fn a_lone_surrogate_does_not_cross_the_boundary() {
+    let src = "pub fn codes(body: str) -> str {\n\
+         \x20 var out = \"\"\n\
+         \x20 for i in 0..body.len() {\n\
+         \x20   out = out + \"\\(body.code_at(i)) \"\n\
+         \x20 }\n\
+         \x20 return out\n}\n";
+    let runner = "import { readFile } from \"node:fs/promises\";\n\
+         import { instantiate, str, text } from \"./app.js\";\n\
+         const bytes = new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url)));\n\
+         const kite = await instantiate(bytes);\n\
+         process.stdout.write(text(kite.codes(str(\"a\\uD800\\u{1F600}\"))));\n";
+    let Some(output) = build_in("lone-surrogate", src, runner) else {
+        return;
+    };
+    // 97 is `a`, 65533 is U+FFFD, 128512 is the emoji — one scalar, not the
+    // two code units it is written with.
+    assert_eq!(output, "97 65533 128512 ");
+}
+
+/// A literal longer than one `array.new_fixed` still instantiates.
+///
+/// The elements of an `array.new_fixed` come off the operand stack and an
+/// engine caps how many it will take — V8 stops at 10,000. Past that the
+/// module is refused when it is *instantiated*, not when it is validated, so
+/// `wasmparser` called it well-formed, every validity assertion in the suite
+/// passed, and the browser was the first thing to say no. An embedded
+/// document or a base64 asset reaches that size without trying.
+///
+/// The literal here is 11,000 characters, and the assertions land either side
+/// of both 4,096-scalar chunk boundaries, because a chunked build that joined
+/// its pieces in the wrong order would still have the right length.
+#[test]
+fn a_literal_longer_than_one_chunk_survives() {
+    let alphabet: String = (0..11_000u32)
+        .map(|i| char::from(b'a' + (i % 26) as u8))
+        .collect();
+    let src = format!(
+        "fn main() {{\n  let s = \"{}\"\n\
+         \x20 io.print(s.len())\n\
+         \x20 io.print(s.slice(4094, 4099))\n\
+         \x20 io.print(s.slice(8190, 8195))\n\
+         \x20 io.print(s.slice(10995, 11000))\n}}\n",
+        alphabet
+    );
+    let expected = format!(
+        "11000\n{}\n{}\n{}\n",
+        &alphabet[4094..4099],
+        &alphabet[8190..8195],
+        &alphabet[10995..11000]
+    );
+    // The VM answers first, so a wrong expectation fails as a mismatch
+    // between the two backends rather than as a typo in this file.
+    assert_eq!(run_on_vm("long-literal", &src), expected);
+    let Some(output) = run_under_node("long-literal", &src) else {
+        return;
+    };
+    assert_eq!(output, expected);
 }
 
 #[test]

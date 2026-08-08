@@ -90,10 +90,27 @@ impl SourceFile {
         }
     }
 
+    /// The 1-indexed line and column an offset lands on.
+    ///
+    /// The offset is normalised the way [`clamped`] normalises a span's ends,
+    /// and for the same reason: this slices `text`, so an offset past the end
+    /// or inside a multi-byte character panics. `clamped` protects the
+    /// accessors that render a snippet, but the renderer asks for a position
+    /// *before* it asks for any text — `place` runs for every label of every
+    /// diagnostic — so this was the call that would die first, and the
+    /// hardening behind it would never be reached.
+    ///
+    /// No pass is known to produce such an offset today. That is what was
+    /// true of the parser's interpolation spans until an unterminated literal
+    /// ending in a multi-byte character ended an LSP session.
     pub fn line_col(&self, offset: u32) -> LineCol {
-        let li = self.line_index(offset);
+        let mut offset = (offset as usize).min(self.text.len());
+        while offset > 0 && !self.text.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        let li = self.line_index(offset as u32);
         let line_start = self.line_starts[li] as usize;
-        let col = self.text[line_start..offset as usize].chars().count() as u32 + 1;
+        let col = self.text[line_start..offset].chars().count() as u32 + 1;
         LineCol { line: li as u32 + 1, col }
     }
 
@@ -241,6 +258,28 @@ mod tests {
         let f = m.add("t.kite", "héllo");
         assert_eq!(m.file(f).line_col(5), LineCol { line: 1, col: 5 });
         assert_eq!(m.file(f).line_col(3), LineCol { line: 1, col: 3 });
+    }
+
+    #[test]
+    fn a_position_is_asked_for_before_any_text_is() {
+        // `line_col` slices, so it panics the two ways every `str` index
+        // does — and the diagnostic renderer calls it for each label before
+        // it calls any of the accessors `clamped` protects. A bad offset
+        // costs a wrong-looking position rather than the process.
+        let mut m = SourceMap::new();
+        let f = m.add("t.kite", "héllo\nworld");
+        let file = m.file(f);
+
+        // Past the end: the last position, not a panic.
+        assert_eq!(file.line_col(999), LineCol { line: 2, col: 6 });
+        // Exactly the end — `héllo` is six bytes, so the text is twelve — is
+        // a boundary already and stays where it is.
+        assert_eq!(file.line_col(12), LineCol { line: 2, col: 6 });
+        // Inside `é`, which occupies bytes 1..3 — walked back to where the
+        // character starts rather than cut through it.
+        assert_eq!(file.line_col(2), LineCol { line: 1, col: 2 });
+        // Through the `SourceMap`, which is what the renderer holds.
+        assert_eq!(m.line_col(Span::new(f, 2, 2)), LineCol { line: 1, col: 2 });
     }
 
     #[test]

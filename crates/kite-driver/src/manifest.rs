@@ -375,7 +375,7 @@ pub fn hash_directory(dir: &Path) -> std::io::Result<String> {
 
     let mut hash = Sha256::new();
     for file in &files {
-        let name = file.strip_prefix(dir).unwrap_or(file).to_string_lossy().to_string();
+        let name = relative_name(file.strip_prefix(dir).unwrap_or(file));
         hash.update(&(name.len() as u64).to_be_bytes());
         hash.update(name.as_bytes());
         let body = std::fs::read(file)?;
@@ -388,6 +388,19 @@ pub fn hash_directory(dir: &Path) -> std::io::Result<String> {
         out.push_str(&format!("{:02x}", byte));
     }
     Ok(out)
+}
+
+/// A file's path inside the tree, spelled the way a committed file is spelled.
+///
+/// Rendering the whole path hands the hash whatever separator the platform
+/// writes, so `src\a.kite` and `src/a.kite` are one file hashing two ways —
+/// and a `kite.lock` that only matches on the machine that wrote it locks
+/// nothing. Joining the components with `/` is what `kitec`'s `relative_to`
+/// already does for the lockfile's `source` line, and for the same reason.
+fn relative_name(path: &Path) -> String {
+    let parts: Vec<String> =
+        path.components().map(|part| part.as_os_str().to_string_lossy().to_string()).collect();
+    parts.join("/")
 }
 
 /// SHA-256, streaming, from FIPS 180-4.
@@ -510,10 +523,31 @@ impl Sha256 {
     }
 }
 
+/// Every `.kite` file under `dir`, refusing symbolic links.
+///
+/// `Path::is_dir` answers about what a link points at, and the tree being
+/// walked is the dependency's to shape. A directory link aimed at `.` is a
+/// walk that never ends, and a file link aimed at `/home/…/.ssh/id_rsa` is
+/// bytes that are not the tree's arriving in the digest that is supposed to
+/// identify the tree. `file_type` on a directory entry answers about the link
+/// itself, so the walk sees a link where there is one and stops.
+///
+/// Refused rather than skipped. A digest whose meaning depends on a path
+/// outside the directory it names is not a digest of that directory, and
+/// quietly leaving the file out would let a dependency change what it
+/// contains without changing what it hashes to.
 fn collect_kite_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let path = entry.path();
+        if kind.is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("`{}` is a symbolic link", path.display()),
+            ));
+        }
+        if kind.is_dir() {
             collect_kite_files(&path, out)?;
         } else if path.extension().is_some_and(|e| e == "kite") {
             out.push(path);

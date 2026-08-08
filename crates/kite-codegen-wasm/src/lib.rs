@@ -223,6 +223,13 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 31] = [
 
 const IMPORT_COUNT: u32 = IMPORTS.len() as u32;
 
+/// How many scalars one `array.new_fixed` in a string literal may carry.
+///
+/// Held well under V8's 10,000 so the ceiling is the compiler's rather than
+/// any one engine's, and matched to the glue's `SCALAR_CHUNK` so there is one
+/// number to think about when a string is cut into pieces.
+const STR_LITERAL_CHUNK: usize = 4096;
+
 /// Which host functions a module declares, and where each ended up.
 ///
 /// Imported functions occupy the bottom of the function index space, so
@@ -2906,12 +2913,20 @@ impl<'a> Emitter<'a> {
             // Structs, enums and maps are all WasmGC structs, and every one of
             // them is a subtype of `eq` — so the comparison the checker has
             // already restricted to those three is one instruction.
+            //
+            // No conversion for a `str` operand, which used to be sent to the
+            // host first. That was left over from the representation where a
+            // string *was* a host value, and it had become wrong twice over:
+            // `ref.eq` does not accept an `externref`, so the instruction pair
+            // was invalid Wasm rather than merely useless, and it would have
+            // been the validator that said so rather than this compiler. It
+            // never fired because the checker refuses `ptr.same` on a `str`
+            // (E0213 — a string has no identity to compare). A GC array is an
+            // `eq` subtype like the other three, so if that restriction is
+            // ever lifted this is already the right instruction.
             Builtin::PtrSame => {
                 for a in args {
                     self.operand(func, a);
-                    if self.is_str(a) {
-                        self.to_host_str(func);
-                    }
                 }
                 func.instruction(&Instruction::RefEq);
             }
@@ -2988,6 +3003,40 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Push a string literal as a Unicode scalar array.
+    ///
+    /// `array.new_fixed` takes its elements from the operand stack, and an
+    /// engine caps how many it will take: V8's limit is 10,000. Past it the
+    /// module is refused when it is *instantiated*, not when it is validated —
+    /// so `wasmparser` calls the module well-formed, every test that checks
+    /// validity passes, and the browser is the first thing to say no. An
+    /// 11,000-character literal is an ordinary thing to write: an embedded
+    /// document, a base64 asset, a table of names.
+    ///
+    /// So a long literal is built a chunk at a time and joined with the
+    /// runtime's own `concat`. The joining is balanced rather than
+    /// left-to-right — each half is emitted and one `concat` combines them —
+    /// which keeps the copying at O(n log n) rather than O(n²), and leaves at
+    /// most log₂(chunks) intermediates on the operand stack.
+    fn str_literal(&mut self, func: &mut Function, scalars: &[i32]) {
+        if scalars.len() <= STR_LITERAL_CHUNK {
+            for scalar in scalars {
+                func.instruction(&Instruction::I32Const(*scalar));
+            }
+            func.instruction(&Instruction::ArrayNewFixed {
+                array_type_index: self.layout.str_array,
+                array_size: scalars.len() as u32,
+            });
+            return;
+        }
+        // Split on a chunk boundary, so every leaf but the last is full.
+        let chunks = scalars.len().div_ceil(STR_LITERAL_CHUNK);
+        let mid = (chunks / 2) * STR_LITERAL_CHUNK;
+        self.str_literal(func, &scalars[..mid]);
+        self.str_literal(func, &scalars[mid..]);
+        func.instruction(&Instruction::Call(self.strings.concat()));
+    }
+
     fn operand(&mut self, func: &mut Function, o: &mir::Operand) {
         match o {
             mir::Operand::Local(l) => {
@@ -3006,15 +3055,8 @@ impl<'a> Emitter<'a> {
             // not enter JavaScript and do not need a permanent runtime table.
             mir::Operand::Str(s) => {
                 let literal = &self.program.strings[s.0 as usize];
-                let mut count = 0;
-                for scalar in literal.chars() {
-                    func.instruction(&Instruction::I32Const(scalar as i32));
-                    count += 1;
-                }
-                func.instruction(&Instruction::ArrayNewFixed {
-                    array_type_index: self.layout.str_array,
-                    array_size: count,
-                });
+                let scalars: Vec<i32> = literal.chars().map(|c| c as i32).collect();
+                self.str_literal(func, &scalars);
             }
             mir::Operand::Unit => {
                 func.instruction(&Instruction::I32Const(0));

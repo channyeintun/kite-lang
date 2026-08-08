@@ -176,6 +176,84 @@ fn a_route_that_matches_nothing_is_an_answer_and_not_a_failure() {
     assert!(!out.contains("error"), "{}", out);
 }
 
+/// A body arriving in pieces is one body, and a chunk boundary is not a
+/// character boundary.
+///
+/// The adapter used to decode each `data` event on its own and concatenate the
+/// results, so a character whose UTF-8 bytes straddled two events became two
+/// replacement characters. Nothing about that needed an attacker: any
+/// non-ASCII body big enough to arrive in two pieces was quietly corrupted
+/// before the handler saw it, and the handler had no way to tell.
+///
+/// The split here is written by hand — one byte of a two-byte `é` in each
+/// write, with a pause between them so they cannot share a packet — because
+/// the accidental version of this depends on how the kernel happens to
+/// fragment a large body.
+const SPLIT_BODY_CLIENT: &str = r#"import { spawn } from "node:child_process";
+import { request } from "node:http";
+import { fileURLToPath } from "node:url";
+
+const server = spawn(process.execPath, [fileURLToPath(new URL("./serve.mjs", import.meta.url))], {
+  stdio: ["ignore", "pipe", "inherit"],
+});
+const stop = () => { try { server.kill("SIGKILL"); } catch {} };
+process.on("exit", stop);
+
+try {
+  let buffered = "";
+  const port = await new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("the server never said it was listening:\n" + buffered)),
+      15000,
+    );
+    server.stdout.on("data", (chunk) => {
+      buffered += chunk;
+      const match = buffered.match(/listening (\d+)/);
+      if (match) {
+        clearTimeout(timer);
+        resolve(Number(match[1]));
+      }
+    });
+    server.on("exit", (code) =>
+      reject(new Error("the server exited with " + code + ":\n" + buffered)));
+  });
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const answer = await new Promise((resolve, reject) => {
+    const req = request(
+      { host: "127.0.0.1", port, path: "/echo", method: "POST", headers: { "transfer-encoding": "chunked" } },
+      (res) => {
+        let text = "";
+        res.setEncoding("utf8");
+        res.on("data", (c) => { text += c; });
+        res.on("end", () => resolve(res.statusCode + " " + text));
+      },
+    );
+    req.on("error", reject);
+    (async () => {
+      // `é` is 0xC3 0xA9. One byte now, one byte after a pause.
+      req.write(Buffer.from([0x63, 0x61, 0x66, 0xc3]));
+      await sleep(50);
+      req.write(Buffer.from([0xa9]));
+      req.end();
+    })();
+  });
+  console.log("split " + answer);
+} finally {
+  stop();
+}
+"#;
+
+#[test]
+fn a_character_split_across_two_chunks_survives() {
+    if !node_available() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let out = serve_under_node("split-body", ROUTED, SPLIT_BODY_CLIENT);
+    assert_eq!(out, "split 200 POST|café\n", "{}", out);
+}
+
 /// A program that only fetches must not be handed an adapter: it would import
 /// `node:http` in order never to use it.
 #[test]

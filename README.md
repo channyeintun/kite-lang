@@ -217,7 +217,7 @@ point of the project.
 
 ```bash
 kitec build examples/hello.kite --emit wasm --out dist
-# wrote dist/app.wasm (648 bytes), dist/app.js and dist/index.html
+# wrote dist/app.wasm (1867 bytes), dist/app.js and dist/index.html
 ```
 
 **A Kite program goes in a page.** `examples/page` is a table of five thousand

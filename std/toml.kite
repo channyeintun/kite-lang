@@ -1032,8 +1032,20 @@ fn without_underscores(body: str) -> str {
 
 /// Whether a bare word is a date or a time rather than a number.
 ///
-/// A `-` after the first character, or a `:` anywhere, is enough: no integer
-/// or float in TOML contains either.
+/// A `:` anywhere is enough: no integer or float in TOML contains one. A `-`
+/// after the first character usually means a date too — but not when what
+/// precedes it is `e` or `E`, because that is a float's exponent sign.
+///
+/// Without that exception this claimed every negative exponent: `1e-5` was
+/// returned as the *text* `1e-5`, so `float_at` handed back its fallback and
+/// a configuration file's number silently stopped being one. It went unseen
+/// because it fails quietly and because nothing tested it — every exponent in
+/// the suite was positive. It also hid a second bug behind it, since an
+/// exponent that never reached `power_of_ten` could not overflow there.
+///
+/// The exception cannot let a date through: a date is digits, `-`, `.`, `:`,
+/// `+`, and `T`/`Z` in either case, so no `-` in one is ever preceded by an
+/// `e`. `1979-05-27` is still a date; `1e-5` is a float.
 fn looks_like_date(body: str) -> bool {
     for i in 0..body.len() {
         let c = body.slice(i, i + 1)
@@ -1041,7 +1053,10 @@ fn looks_like_date(body: str) -> bool {
             return true
         }
         if c == "-" && i > 0 {
-            return true
+            let before = body.slice(i - 1, i)
+            if before != "e" && before != "E" {
+                return true
+            }
         }
     }
     return false
@@ -1135,12 +1150,22 @@ fn power_of_ten(exp: int) -> float {
     // about the answer — clamping it costs no accuracy. Left unclamped, the
     // document chose how long this ran, and the scheduler is cooperative:
     // `x = 1e2000000000` never handed the loop back.
+    //
+    // Clamped before the negation rather than after, because the exponent is
+    // the document's and `min_int()` is one of the values it may be — and
+    // `0 - min_int()` is the one negation an `int` cannot perform, so
+    // `x = 1e-9223372036854775808` would end the process in a checked build
+    // and quietly change scale in a release one. Bringing the value into
+    // range first means nothing is ever negated that has no negative.
     var steps = exp
-    if steps < 0 {
-        steps = 0 - steps
-    }
     if steps > 400 {
         steps = 400
+    }
+    if steps < -400 {
+        steps = -400
+    }
+    if steps < 0 {
+        steps = 0 - steps
     }
     var out = 1.0
     if exp >= 0 {

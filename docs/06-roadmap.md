@@ -505,12 +505,18 @@ WasmGC structs.**
 
 ```bash
 kitec build examples/hello.kite --emit wasm --out dist
-# wrote dist/app.wasm (346 bytes) and dist/app.js
+# wrote dist/app.wasm (1867 bytes) and dist/app.js
 ```
 
-**346 bytes**, against a 10 KB budget. Shipping no garbage collector is what
+**1,867 bytes**, against a 10 KB budget. Shipping no garbage collector is what
 makes that reachable, and it is the single reason this design was not viable
 before WasmGC reached cross-browser baseline.
+
+It was 346 bytes before `str` became a language-owned GC array. Every module
+now carries the string runtime and its conversion bridge, because the module
+exports `str` and `text` for its JavaScript API whether the program handles
+text or not. Emitting only the runtime a program can reach would give most of
+that back, and has not been done.
 
 Every emitted module is validated with `wasmparser` in the test suite, so a
 codegen bug fails in CI rather than in a browser.
