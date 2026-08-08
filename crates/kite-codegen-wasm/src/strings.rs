@@ -86,6 +86,11 @@ pub struct StringRuntime {
     slots: [u32; FUNCTION_COUNT],
 }
 
+// `from_host` and `from_code` are the names of the runtime functions they
+// return the index of, not conversions of a `StringRuntime` into something —
+// which is what the `from_*` convention is about. Renaming them to satisfy it
+// would put a second vocabulary in front of the one the emitted module uses.
+#[allow(clippy::wrong_self_convention)]
 impl StringRuntime {
     /// Lay the needed functions out consecutively from `base`.
     pub fn new(base: u32, needed: Needed) -> StringRuntime {
@@ -236,10 +241,10 @@ pub fn needed(program: &mir::Program, types: &Types, has_eq_fns: bool) -> Needed
                             needed.mark(EQ);
                         }
                     }
-                    mir::Rvalue::MapNew { entries } => {
-                        if entries.iter().step_by(2).any(|k| operand_is_str(f, k)) {
-                            needed.mark(EQ);
-                        }
+                    mir::Rvalue::MapNew { entries }
+                        if entries.iter().step_by(2).any(|k| operand_is_str(f, k)) =>
+                    {
+                        needed.mark(EQ);
                     }
                     _ => {}
                 }

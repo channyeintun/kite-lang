@@ -1265,9 +1265,9 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     // the language has — a `hello world` should not carry string slicing or a
     // font metric it never asks about.
     let mut imports = ImportSection::new();
-    for i in 0..IMPORTS.len() {
+    for (i, import) in IMPORTS.iter().enumerate() {
         if hosts.declared(i as u32) {
-            imports.import("kite", IMPORTS[i].0, EntityType::Function(i as u32));
+            imports.import("kite", import.0, EntityType::Function(i as u32));
         }
     }
     // One fixed page is used only while a string crosses the JavaScript
@@ -3542,6 +3542,10 @@ impl<'a> Emitter<'a> {
     }
 
     /// Convert a JavaScript string answer into Kite's scalar array.
+    ///
+    /// Named for the runtime function it emits a call to rather than for what
+    /// it does to `self`, which is what the `from_*` convention describes.
+    #[allow(clippy::wrong_self_convention)]
     fn from_host_str(&self, func: &mut Function) {
         func.instruction(&Instruction::Call(self.strings.from_host()));
     }

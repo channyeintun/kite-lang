@@ -194,7 +194,7 @@ impl<'a> Parser<'a> {
         self.diags.push(
             Diagnostic::error(codes::E0102, "expression nested too deeply")
                 .with_primary(span, "the nesting here is deeper than the parser will go")
-                .with_note(&format!("at most {MAX_DEPTH} levels may nest")),
+                .with_note(format!("at most {MAX_DEPTH} levels may nest")),
         );
     }
 

@@ -534,7 +534,7 @@ impl<'a> Lexer<'a> {
         self.diags.push(
             Diagnostic::error(codes::E0006, "string interpolation nested too deeply")
                 .with_primary(span, "this string opens another interpolation")
-                .with_note(&format!(
+                .with_note(format!(
                     "at most {MAX_STRING_NESTING} levels of `\\(\"…\")` may nest"
                 )),
         );

@@ -127,10 +127,10 @@ fn number_checks() -> [error] {
     }
     out.push(test.equal_str(text_of(dated, "when"), "1979-05-27", "and is kept verbatim"))
     out.push(test.equal_str(
-        text_of(dated, "offset"),
-        "1979-05-27T00:32:00-07:00",
-        "and so is one carrying an offset",
-    ))
+            text_of(dated, "offset"),
+            "1979-05-27T00:32:00-07:00",
+            "and so is one carrying an offset",
+        ))
     return out
 }
 
