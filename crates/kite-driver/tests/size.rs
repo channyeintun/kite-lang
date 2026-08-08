@@ -30,32 +30,31 @@ fn size_of(name: &str, src: &str) -> usize {
     c.wasm.as_ref().expect("a module").bytes.len()
 }
 
-/// A program that prints. Today: 1,625 bytes.
+/// A program that prints. Today: 767 bytes.
 ///
 /// The floor, and the number the whole premise rests on — a language that
 /// needed a garbage collector inside its own binary could not be near it.
 ///
-/// It was 399 bytes, and the budget was 1,024. Making `str` a language-owned
-/// GC array is what moved it: every module now carries the twelve-function
-/// string runtime and the three-import conversion bridge, because the module
-/// exports `str` and `text` for its JavaScript API whether or not the program
-/// itself ever handles text. A program with no strings in it at all is 1,619
-/// bytes, which is the shape of the cost — it is the runtime's presence, not
-/// this program's use of it.
+/// It was 399 bytes before `str` became a language-owned GC array, and 1,625
+/// immediately after, because every module carried the whole twelve-function
+/// string runtime whether or not the program handled text — a module
+/// containing no strings at all was 1,619, which is what a cost that is about
+/// presence rather than use looks like. Only the functions a program can
+/// reach are emitted now; `from_host` and `to_host` stay unconditional
+/// because the module exports `str` and `text` for its JavaScript API, and
+/// those two call them. A string-free program is 761 bytes.
 ///
-/// Written down rather than absorbed: this is a floor that quadrupled, and
-/// the answer to "what got bigger and why" is "a runtime, unconditionally".
-/// Emitting only the runtime functions a program can reach would recover most
-/// of it and is worth doing; the budget below is the honest number until
-/// somebody does. It is deliberately not slack — 2,048 leaves room for the
-/// bridge to be tuned but not for a second runtime to arrive unnoticed.
+/// So the floor is roughly twice what it was rather than four times, and the
+/// remainder is the conversion bridge the JavaScript API needs. Budget 1,024,
+/// which is the old one: tight enough that the runtime cannot quietly become
+/// unconditional again.
 #[test]
 fn hello_world_stays_small() {
     let size = size_of("hello", "fn main() {\n  io.print(\"hello\")\n}\n");
-    assert!(size < 2048, "hello world is {} bytes, budget 2048", size);
+    assert!(size < 1024, "hello world is {} bytes, budget 1024", size);
 }
 
-/// A module a JavaScript project would import. Today: 1,823 bytes.
+/// A module a JavaScript project would import. Today: 965 bytes.
 ///
 /// Four exported functions rather than one, and each `pub fn` is a real export
 /// with a wrapper — which is where the difference over `hello` goes.

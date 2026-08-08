@@ -136,13 +136,23 @@ differently depending on where it ran. The bridge now substitutes U+FFFD.
 
 **The size floor quadrupled and the budget test was left red.** A module that
 prints went from 399 to 1,625 bytes; a program containing no strings at all
-is 1,619, so the cost is the runtime's presence rather than any program's use
-of it. All twelve runtime functions and the three bridge imports are emitted
-unconditionally, because the module exports `str` and `text` for its
-JavaScript API whether the program handles text or not. That is a real
-consequence of the design, not a bug — but emitting only what a program can
-reach would give most of it back, and has not been done. The budget is raised
-to 2,048 with that written down beside it.
+was 1,619, so the cost was the runtime's presence rather than any program's
+use of it — all twelve functions went into every module.
+
+Fixed since: only the functions a program can reach are emitted. `from_host`
+and `to_host` stay unconditional, because the module exports `str` and `text`
+for its JavaScript API and those two call them; the other ten are marked from
+the MIR, with `trim` pulling in `is_space` as the runtime's one internal call.
+The analysis over-declares where it cannot be exact — any generated deep
+equality marks `eq` rather than walking the type graph for a `str` field — and
+`StringRuntime::at` asserts on a slot that was not emitted, so an
+under-declaration is a loud panic in the compiler's own tests rather than a
+module that will not instantiate.
+
+A printing program is now 767 bytes and a string-free one 761, so the floor is
+roughly twice the original rather than four times. What remains is the
+conversion bridge, which the JavaScript API needs whether the program handles
+text or not.
 
 Left alone, and worth knowing: locally built artifacts still embed the old
 ABI until they are rebuilt — `packages/kite-wasm/kite-compiler.wasm`, the

@@ -1110,8 +1110,15 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     // Runtime signatures follow the aggregate group; source-level functions
     // follow those.
     let runtime_type_base = IMPORT_COUNT + aggregate_count;
-    let runtime_type_index = strings::add_types(&mut type_section, runtime_type_base, &layout);
-    let fn_type_base = runtime_type_base + strings::FUNCTION_COUNT;
+    // Which string-runtime functions the module contains decides how many type
+    // indices it uses, so it has to be settled before any of them is handed
+    // out. `eq::collect` is consulted because a generated deep-equality
+    // function is one of the things that can reach `strings::eq`.
+    let string_needed = strings::needed(program, types, !eq::collect(program, types).is_empty());
+    let runtime_count = string_needed.count();
+    let runtime_type_index =
+        strings::add_types(&mut type_section, runtime_type_base, &layout, string_needed);
+    let fn_type_base = runtime_type_base + runtime_count;
     // Dispatchers: one per trait method, taking the receiver as a reference to
     // the tagged root. They live above the user functions in the index space.
     let mut dispatchers: Vec<Dispatcher> = Vec::new();
@@ -1141,8 +1148,8 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     // start, so this has to be settled before any index is handed out.
     let eq_fns = eq::collect(program, types);
     let hosts = used_imports(program, types);
-    let string_runtime = strings::StringRuntime { base: hosts.base };
-    let fn_base = string_runtime.base + strings::FUNCTION_COUNT;
+    let string_runtime = strings::StringRuntime::new(hosts.base, string_needed);
+    let fn_base = hosts.base + runtime_count;
     let dispatch_base = fn_base + program.fns.len() as u32;
 
     // Structural equality: one generated function per aggregate type a program
@@ -1350,7 +1357,7 @@ pub fn compile(program: &mir::Program, types: &Types) -> WasmModule {
     // whole table is needed before any body is emitted.
     let fn_returns: Vec<TyId> = program.fns.iter().map(|f| f.ret).collect();
     let mut code = CodeSection::new();
-    strings::emit(&mut code, string_runtime, &layout, &hosts);
+    strings::emit(&mut code, string_runtime, &layout, &hosts, string_needed);
     let eq_builder = eq::EqBuilder {
         types,
         layout: &layout,
