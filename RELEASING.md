@@ -194,6 +194,13 @@ The Marketplace will not take an SVG, so `icon.png` is a rendering that has to
 exist as a file; `brand_assets.rs` fails if it is missing or has drifted from
 `site/kite-mark.svg`.
 
+`editors/vscode/PUBLISHING.md` is the long version, and it is worth reading
+before the first publish rather than after: the Marketplace runs on Azure
+DevOps identity, so `vsce` answers a mis-scoped token with an error code that
+names neither, and the publisher — whose ID is permanent and must match
+`package.json` — can only be created in a browser. There is also a web upload
+route that needs no token at all.
+
 ## 7. Afterwards
 
 - `install.sh` needs no change: it reads `releases/latest` and the release's own

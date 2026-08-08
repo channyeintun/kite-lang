@@ -1,8 +1,10 @@
-# What a user gets is the extension, not the workshop that made it.
+# What not to put in the .vsix.
 #
-# `icon.svg` is the drawing and `render-icon.sh` turns it into the `icon.png`
-# the Marketplace shows. Both belong in the repository and neither belongs in
-# somebody's editor.
-icon.svg
-render-icon.sh
+# `vsce` ships the directory, so a file added here for maintainers is a file
+# downloaded by everyone who installs the extension. `PUBLISHING.md` is about
+# releasing this thing, which is nobody's business but ours; `README.md` stays,
+# because it is what the Marketplace renders as the extension's page.
+PUBLISHING.md
 .vscodeignore
+render-icon.sh
+icon.svg
