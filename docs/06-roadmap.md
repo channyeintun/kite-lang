@@ -2359,6 +2359,63 @@ being usable from a bundler today.
 
 ---
 
+## Phase 28 — A package a bundler can see
+
+**Goal:** `kitec pkg` stops being a feature only the terminal has.
+
+Everything a package needs was built at Phase 10 — the manifest, the semver
+solver, the content-hashed lockfile, `.kite/vendor` — and none of it reached a
+project built with Vite, which is how both real applications are built. The
+plugin handed the compiler the `.kite` files beside the entry and nothing else.
+So `kitec pkg` had, at this point, no consumer at all: `packages/material` was
+the only Kite package that ever existed and it went out with `std/ui`.
+
+The plugin now reads `kite.toml` from the first directory at or above the entry
+that has one — the same upward search `kitec` does, so a project means one
+thing however it is built — and hands over every declared dependency's modules
+under its own name. Nothing is fetched: a `path` dependency is read where it
+is, a `git` one out of `.kite/vendor`. A dependency's files are watched exactly
+as siblings are, and the unit of invalidation is now every directory a module
+reads rather than only its own.
+
+**Two defects had to be fixed underneath it, and both were the same shape: a
+dependency silently reading the program that depends on it.**
+
+- **A one-file module never recorded its own directory.** It resolved its
+  imports from wherever it had been imported *from*. For a sibling that is the
+  same directory and nothing ever showed; across a package boundary it meant a
+  dependency's `use helper` reached the application's `helper.kite`. Found by
+  writing the first package that had a module of its own to import.
+- **Provided modules were keyed by their last segment.** A host could hand over
+  an application's `doc` and a package's `doc` and only one of them existed —
+  silently, with every `use kitex/doc` reaching whichever was inserted. A
+  bundler that reads a manifest has two of everything by construction, so the
+  flat namespace was the thing standing between packages and any build that is
+  not a filesystem. The key is a whole `use` path now, and a module handed over
+  from inside a package resolves its own unqualified imports inside that
+  package — and **stops there**, rather than falling through to the
+  application's module of the same name.
+
+And one thing that was simply missing: `kitec run` on the WebAssembly compiler
+called the single-file entry point, so it reported `cannot find module` for
+every `use` in a program that compiles perfectly well — the tool being
+half-sighted, reported as the program being broken. There is a
+`kite_run_module` now, as there has been a `kite_check_module`.
+
+**Exit criterion:** a Vite project builds against a package it declares.
+**Met** — and checked the way that claim deserves: the application is given a
+`helper` module of its own whose function has the *wrong type*, and the build
+still succeeds and emits the same module, because the package never sees it.
+Renaming the package's own `helper` then fails the build. One test asserts each
+direction on the filesystem, one on a map of provided sources, and one that a
+package cannot reach the application by a bare name at all.
+
+What is still not met is Phase 27's exit criterion. The applications cannot
+import `std/window` until a compiler carrying it is published, and that is a
+release rather than a change.
+
+---
+
 ## Where the implementation actually stands
 
 Recorded honestly, because a roadmap that overstates progress is worse than
@@ -2393,9 +2450,10 @@ none.
 | 24 — Concrete error types | ✅ complete — an error carries the value it was made from, its type tag and the error it wrapped, on all three backends. `err.cause()`, `errors.chain`, `errors.root`, and `NotFound.is(err)` / `NotFound.as(err)` — the type names itself, because §11 has no turbofish |
 | 25 — `std/html` | ✅ complete — descriptions, a keyed diff that writes only what changed, and `examples/page` written against it |
 | 26 — Specification gaps | ✅ subslices, `enumerate` and pair-destructuring over a slice, doc-comment tests, a name section and source map, `js.func` at any shape, `check` in a bare-`error` function, a calling convention for any function-typed value, errors that carry their value, modules identified by their whole path; `[N]T` struck from the specification and `--a11y` removed |
-| 27 — `std/window` | 🟡 the module is built and tested — window events, timers, both storages, the address bar, history, the wall clock — and `std/time` gained a portable calendar under it. ❌ neither is reachable from a bundler until `vite-plugin-kite` reads `kite.toml` and a compiler ships |
+| 27 — `std/window` | 🟡 the module is built and tested — window events, timers, both storages, the address bar, history, the wall clock — and `std/time` gained a portable calendar under it. ❌ the two applications cannot import it until a compiler carrying it is published |
+| 28 — Packages from a bundler | ✅ `vite-plugin-kite` and the WebAssembly `kitec` read `kite.toml` and compile what it declares; provided modules are keyed by their whole path and a package resolves its own imports inside itself; a one-file module reads its imports from its own directory; `kitec run` sees modules |
 
-815 tests: unit tests per crate, an annotated compile-fail corpus, a
+819 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the standard library's own
 documentation examples, the host boundary and a real socket under Node, both

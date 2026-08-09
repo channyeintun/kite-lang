@@ -91,10 +91,25 @@ class Compiler {
    * a missing module for it.
    *
    * @param {{entry: string, siblings?: Record<string, string>}} module
-   *   `siblings` is keyed by module name — `checkout`, not `checkout.kite`.
+   *   `siblings` is keyed by module path — `checkout`, not `checkout.kite`,
+   *   and `markdown/render` for a module inside a declared dependency.
    */
   checkModule({ entry, siblings = {} }) {
     const answer = this.#call("kite_check_module", this.#frame(entry, siblings));
+    return decoder.decode(answer);
+  }
+
+  /**
+   * Compile and run a whole module; answers with what it printed.
+   *
+   * `run` takes one file, for the same reason `check` does and with the same
+   * consequence: a program with a `use` in it reports a missing module rather
+   * than running.
+   *
+   * @param {{entry: string, siblings?: Record<string, string>}} module
+   */
+  runModule({ entry, siblings = {} }) {
+    const answer = this.#call("kite_run_module", this.#frame(entry, siblings));
     return decoder.decode(answer);
   }
 

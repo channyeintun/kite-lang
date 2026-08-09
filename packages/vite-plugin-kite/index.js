@@ -64,7 +64,11 @@ export default function kite(options = {}) {
   let root = process.cwd();
   let release = options.release;
   let cacheDir;
-  /** Compiled output per source file, so one edit rebuilds one module. */
+  /**
+   * Per source file: where its output went, and every directory its meaning
+   * depends on — its own, and each declared dependency's. An edit anywhere in
+   * those has to rebuild it.
+   */
   const built = new Map();
 
   /// Where the compiler's output goes.
@@ -105,13 +109,21 @@ export default function kite(options = {}) {
     await mkdir(out, { recursive: true });
 
     // A Kite module is a directory, and the compiler has no directory to read
-    // from here — so its siblings are handed over by module name, which is the
-    // filename without its extension, because that is what `use checkout`
-    // names.
+    // from here — so its siblings are handed over by module path, which for a
+    // file beside the entry is the filename without its extension, because
+    // that is what `use checkout` names.
     const sources = {};
     for (const path of await siblings(file)) {
       if (path === file) continue;
       sources[basename(path, ".kite")] = await readFile(path, "utf8");
+    }
+    // And everything the manifest declares, under its own name, so
+    // `use markdown/render` reaches inside the package rather than beside the
+    // entry file. Nothing is fetched: this reads `.kite/vendor`, which
+    // `kitec pkg` filled, and a `path =` dependency where it already is.
+    const vendored = await dependencySources(file);
+    for (const [path, key] of vendored) {
+      sources[key] = await readFile(path, "utf8");
     }
 
     let artefacts;
@@ -133,7 +145,7 @@ export default function kite(options = {}) {
     await Promise.all(
       Object.entries(artefacts).map(([name, body]) => writeFile(join(out, name), body)),
     );
-    return out;
+    return { out, files: vendored.map(([path]) => path) };
   }
 
   /// Where an import actually is on disk.
@@ -166,6 +178,78 @@ export default function kite(options = {}) {
     } catch {
       return [file];
     }
+  }
+
+  /// The `kite.toml` governing a file, found by walking upwards.
+  ///
+  /// Upwards because a program is usually `src/main.kite` and the manifest is
+  /// beside `src/` — the same search `kitec` does, so a project means the same
+  /// thing built either way.
+  async function manifestNear(file) {
+    let dir = dirname(file);
+    for (;;) {
+      const path = join(dir, "kite.toml");
+      const text = await readFile(path, "utf8").catch(() => null);
+      if (text !== null) return { dir, text };
+      const up = dirname(dir);
+      if (up === dir) return null;
+      dir = up;
+    }
+  }
+
+  /// The dependencies a manifest declares, as name to directory.
+  ///
+  /// A deliberately small reader, for the deliberately small subset `kitec`
+  /// accepts: `[dependencies]`, one `name = { … }` per line. A manifest that
+  /// needs more than this is a manifest that has grown a programming language.
+  /// Anything it cannot read it ignores rather than guesses at — the compiler
+  /// is the authority on the file, and a build that stopped on a key this
+  /// parser had not heard of would make the bundler a second opinion.
+  function dependencyDirs(manifest) {
+    const dirs = new Map();
+    let table = "";
+    for (const raw of manifest.text.split("\n")) {
+      const line = raw.split("#")[0].trim();
+      if (line === "") continue;
+      const heading = /^\[(.+)\]$/.exec(line);
+      if (heading) {
+        table = heading[1].trim();
+        continue;
+      }
+      if (table !== "dependencies") continue;
+      const at = line.indexOf("=");
+      if (at < 0) continue;
+      const name = line.slice(0, at).trim();
+      const body = line.slice(at + 1);
+      const path = /\bpath\s*=\s*"([^"]*)"/.exec(body);
+      // A git dependency lives where `kitec pkg` cloned it. Nothing is
+      // fetched here, and a name that was never vendored simply has no files
+      // — which the compiler reports as the missing module it is.
+      dirs.set(name, path
+        ? resolve(manifest.dir, path[1])
+        : join(manifest.dir, ".kite", "vendor", name));
+    }
+    return dirs;
+  }
+
+  /// Every `.kite` file in every declared dependency, with the module path it
+  /// answers to: `[absolute file, "markdown/render"]`.
+  ///
+  /// One level deep, which is a package's own modules and not its
+  /// dependencies' — transitive packages need `kitec pkg` to have flattened
+  /// them into this project's vendor directory, which is what it does.
+  async function dependencySources(file) {
+    const manifest = await manifestNear(file);
+    if (manifest === null) return [];
+    const found = [];
+    for (const [name, dir] of dependencyDirs(manifest)) {
+      const names = await readdir(dir).catch(() => []);
+      for (const entry of names) {
+        if (!KITE.test(entry)) continue;
+        found.push([join(dir, entry), `${name}/${basename(entry, ".kite")}`]);
+      }
+    }
+    return found;
   }
 
   return {
@@ -254,10 +338,16 @@ export default function kite(options = {}) {
       }
       if (!KITE.test(id)) return null;
 
-      const out = await compile(id);
-      built.set(id, out);
+      const { out, files } = await compile(id);
+      const own = await siblings(id);
+      built.set(id, { out, dirs: new Set([...own, ...files].map(dirname)) });
 
-      for (const s of await siblings(id)) this.addWatchFile(s);
+      // A dependency's files are watched exactly as siblings are: they are as
+      // much a part of what this module means, and a package edited in place
+      // — which is what a `path =` dependency is for — should show up in the
+      // browser without restarting the server.
+      for (const s of own) this.addWatchFile(s);
+      for (const f of files) this.addWatchFile(f);
 
       const api = await readFile(join(out, "api.js"), "utf8");
       const wasm = join(out, "app.wasm");
@@ -298,17 +388,21 @@ export async function start(source = __wasm) {
       );
     },
 
-    /// An edit to any `.kite` file rebuilds every module in its directory.
+    /// An edit to any `.kite` file rebuilds every module that reads its
+    /// directory.
     ///
     /// Because a Kite module is a directory, changing one file can change what
     /// its siblings mean — so the unit of invalidation is the directory rather
     /// than the file, and a rename or a new file counts as well as an edit.
+    /// A dependency's directory counts the same way: a package edited in place
+    /// changes every program that declared it, and those are usually not in
+    /// the directory that changed.
     async handleHotUpdate({ file, server, modules }) {
       if (!KITE.test(file)) return;
       const dir = dirname(file);
       const affected = [];
-      for (const [source] of built) {
-        if (dirname(source) !== dir) continue;
+      for (const [source, { dirs }] of built) {
+        if (!dirs.has(dir)) continue;
         const mod = server.moduleGraph.getModuleById(source);
         if (mod) affected.push(mod);
       }

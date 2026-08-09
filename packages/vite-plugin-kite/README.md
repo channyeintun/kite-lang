@@ -33,21 +33,41 @@ is emitted hashed beside your other assets.
 app, and it has no opinion about how the project is arranged. What you import
 is what `kitec` wrote.
 
-## Install
+## Packages
 
-Needs `kitec` on your `PATH` — [kite-lang.dev/install](https://kite-lang.dev/install)
-— or point at a particular one:
+A module is a directory, and a project's own `.kite` files are the ones beside
+the entry. Anything else comes from `kite.toml`, which the plugin reads from
+the first directory at or above the entry that has one:
 
-```js
-kite({ bin: "./target/release/kitec" })
+```toml
+[dependencies]
+markdown = { git = "https://github.com/example/kite-markdown", tag = "v1.2.0" }
+shared   = { path = "../shared" }
 ```
 
-The plugin runs that compiler. It does not carry a copy of one, so what a build
-produces and what a terminal produces cannot come apart.
+```kite
+use markdown/render
+use shared/money
+```
 
-**This package is not published to npm yet.** `examples/vite-starter` vendors
-this file and imports it by path, which is why that starter works when it is
-copied out of the repository. A test fails if the copy drifts.
+**Nothing is fetched at build time.** A `path` dependency is read where it is;
+a `git` one is read out of `.kite/vendor`, which `kitec pkg` filled — run that
+once, on purpose, and commit `kite.lock`. A build that reached the network
+would be a build that could change without anyone deciding it should.
+
+A dependency's files are watched exactly as siblings are, so a package edited
+in place — which is what `path` is for — reloads the page that uses it.
+
+## Install
+
+```
+npm install -D vite-plugin-kite @kite-lang/compiler-wasm
+```
+
+The compiler is WebAssembly and comes with it, so there is nothing to put on
+your `PATH` and no `os`/`cpu` matrix. It is the same crate the native `kitec`
+is built from, and a test in the repository holds the two to identical bytes —
+so what a build produces and what a terminal produces cannot come apart.
 
 ## What crosses the boundary
 

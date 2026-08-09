@@ -274,3 +274,122 @@ fn a_derive_lands_in_the_module_of_the_type_it_is_for() {
          Editor(level: 2)\n"
     );
 }
+
+// ---- packages -----------------------------------------------------------------
+//
+// A dependency is a directory somewhere else, and the whole question is whether
+// a module inside it means what it would mean at home. Both halves are tested,
+// because a project is compiled two ways: from a filesystem by `kitec`, and
+// from a map of sources by a bundler that has already read them.
+
+/// A declared dependency's own imports resolve inside the dependency.
+///
+/// This did not hold. A one-file module never recorded its own directory, so
+/// it resolved its imports from wherever it had been imported *from* — for a
+/// sibling that is the same directory and nothing showed, but across a package
+/// boundary it meant a dependency's `use helper` reached the application's
+/// `helper.kite`. A dependency reading the program that depends on it, with no
+/// diagnostic.
+#[test]
+fn a_dependency_reaches_its_own_modules_and_not_the_programs() {
+    let p = Project::new("dep-siblings");
+    p.file("kitex/kite.toml", "[package]\nname = \"kitex\"\nversion = \"0.1.0\"\n");
+    p.file(
+        "kitex/greet.kite",
+        "use helper\n\npub fn hello() -> str {\n  return helper.who()\n}\n",
+    );
+    p.file("kitex/helper.kite", "pub fn who() -> str {\n  return \"the package\"\n}\n");
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nkitex = { path = \"../kitex\" }\n",
+    );
+    // The application has a `helper` of its own, never imported by `main`. The
+    // dependency must not see it.
+    p.file("app/src/helper.kite", "pub fn who() -> str {\n  return \"the application\"\n}\n");
+    let main = p.file(
+        "app/src/main.kite",
+        "use kitex/greet\n\nfn main() {\n  io.print(greet.hello())\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "the package\n");
+}
+
+/// Two modules of one name, reached two ways, are still two modules.
+#[test]
+fn a_dependencys_module_does_not_displace_the_programs_own() {
+    let p = Project::new("dep-distinct");
+    p.file("kitex/kite.toml", "[package]\nname = \"kitex\"\nversion = \"0.1.0\"\n");
+    p.file("kitex/doc.kite", "pub fn who() -> str {\n  return \"theirs\"\n}\n");
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nkitex = { path = \"../kitex\" }\n",
+    );
+    p.file("app/src/doc.kite", "pub fn who() -> str {\n  return \"ours\"\n}\n");
+    let main = p.file(
+        "app/src/main.kite",
+        "use doc\nuse kitex/doc as shared\n\n\
+         fn main() {\n  io.print(doc.who())\n  io.print(shared.who())\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "ours\ntheirs\n");
+}
+
+/// The same, for a host that hands the sources over instead — a bundler.
+///
+/// The keys are whole `use` paths. They were last segments, so an
+/// application's `doc` and a package's `doc` were one entry and only one of
+/// them existed: every `use kitex/doc` in the program silently reached
+/// whichever the host happened to insert. A bundler that reads a manifest has
+/// two of everything by construction, which is what made the flat namespace
+/// the thing standing between packages and any build that is not a filesystem.
+#[test]
+fn provided_modules_are_keyed_by_their_whole_path() {
+    let mut provided = std::collections::HashMap::new();
+    provided.insert("doc".to_string(), "pub fn who() -> str {\n  return \"ours\"\n}\n".to_string());
+    provided.insert(
+        "kitex/doc".to_string(),
+        "use helper\n\npub fn who() -> str {\n  return helper.who()\n}\n".to_string(),
+    );
+    // Both packages have a `helper`. The one inside `kitex` is the one
+    // `kitex/doc` must see.
+    provided.insert(
+        "helper".to_string(),
+        "pub fn who() -> str {\n  return \"the application\"\n}\n".to_string(),
+    );
+    provided.insert(
+        "kitex/helper".to_string(),
+        "pub fn who() -> str {\n  return \"the package\"\n}\n".to_string(),
+    );
+
+    let src = "use doc\nuse kitex/doc as shared\n\n\
+               fn main() {\n  io.print(doc.who())\n  io.print(shared.who())\n}\n";
+    let c = kite_driver::compile_provided("main.kite", src, Emit::Check, false, provided);
+    assert!(!c.failed(), "{}", c.render_diagnostics());
+    let mut out = Vec::new();
+    c.run(&mut out).expect("the program runs");
+    assert_eq!(String::from_utf8(out).expect("utf-8"), "ours\nthe package\n");
+}
+
+/// A package may not reach out to the program that depends on it.
+///
+/// An unqualified `use` inside a package names a sibling *of that package*.
+/// When there is none, the answer is that there is none — not the
+/// application's module of the same name, which is what a flat lookup would
+/// have found and what no filesystem would ever have produced.
+#[test]
+fn a_package_cannot_reach_the_application_by_a_bare_name() {
+    let mut provided = std::collections::HashMap::new();
+    provided.insert(
+        "kitex/doc".to_string(),
+        "use helper\n\npub fn who() -> str {\n  return helper.who()\n}\n".to_string(),
+    );
+    provided.insert(
+        "helper".to_string(),
+        "pub fn who() -> str {\n  return \"the application\"\n}\n".to_string(),
+    );
+    let src = "use kitex/doc as shared\n\nfn main() {\n  io.print(shared.who())\n}\n";
+    let c = kite_driver::compile_provided("main.kite", src, Emit::Check, false, provided);
+    assert!(c.failed(), "a package reached the application's `helper`");
+    let said = c.render_diagnostics();
+    assert!(said.contains("cannot find module `helper`"), "{}", said);
+}

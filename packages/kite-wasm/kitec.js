@@ -38,8 +38,14 @@ server and native execution live there. https://kite-lang.dev/install
 
 /**
  * A Kite module is a directory, so a program's siblings are the other `.kite`
- * files beside it — keyed by module name, which is the filename without its
- * extension, because that is what `use checkout` names.
+ * files beside it — keyed by module path, which for a file beside the entry is
+ * the filename without its extension, because that is what `use checkout`
+ * names.
+ *
+ * Everything the project's `kite.toml` declares comes too, under its own name,
+ * so `use markdown/render` reaches inside the package. Nothing is fetched:
+ * this reads a `path =` dependency where it is and a git one out of
+ * `.kite/vendor`, which `kitec pkg` filled.
  */
 async function siblingsOf(file) {
   const dir = dirname(resolve(file));
@@ -49,7 +55,60 @@ async function siblingsOf(file) {
     if (name === self || extname(name) !== ".kite") continue;
     siblings[basename(name, ".kite")] = await readFile(join(dir, name), "utf8");
   }
+  for (const [name, from] of await dependencyDirs(file)) {
+    for (const entry of await readdir(from).catch(() => [])) {
+      if (extname(entry) !== ".kite") continue;
+      siblings[`${name}/${basename(entry, ".kite")}`] =
+        await readFile(join(from, entry), "utf8");
+    }
+  }
   return siblings;
+}
+
+/**
+ * The dependencies declared by the nearest `kite.toml` above a file, as name
+ * to directory.
+ *
+ * The manifest is searched for upwards because a program is usually
+ * `src/main.kite` and the manifest is beside `src/` — the same search the
+ * native compiler does, so a project means one thing however it is built.
+ *
+ * A deliberately small reader for a deliberately small subset. What it cannot
+ * read it ignores: the compiler is the authority on the file, and a second
+ * opinion here would only ever disagree.
+ */
+async function dependencyDirs(file) {
+  let dir = dirname(resolve(file));
+  let text = null;
+  for (;;) {
+    text = await readFile(join(dir, "kite.toml"), "utf8").catch(() => null);
+    if (text !== null) break;
+    const up = dirname(dir);
+    if (up === dir) return [];
+    dir = up;
+  }
+
+  const found = [];
+  let table = "";
+  for (const raw of text.split("\n")) {
+    const line = raw.split("#")[0].trim();
+    if (line === "") continue;
+    const heading = /^\[(.+)\]$/.exec(line);
+    if (heading) {
+      table = heading[1].trim();
+      continue;
+    }
+    if (table !== "dependencies") continue;
+    const at = line.indexOf("=");
+    if (at < 0) continue;
+    const name = line.slice(0, at).trim();
+    const path = /\bpath\s*=\s*"([^"]*)"/.exec(line.slice(at + 1));
+    found.push([
+      name,
+      path ? resolve(dir, path[1]) : join(dir, ".kite", "vendor", name),
+    ]);
+  }
+  return found;
 }
 
 function fail(message) {
@@ -87,7 +146,10 @@ const kite = await compiler();
 
 switch (command) {
   case "run": {
-    const output = kite.run(await readFile(file, "utf8"));
+    const output = kite.runModule({
+      entry: await readFile(file, "utf8"),
+      siblings: await siblingsOf(file),
+    });
     process.stdout.write(output);
     // Diagnostics are rendered into the same answer, so a failed compile is
     // recognised by what it says rather than by a separate channel.

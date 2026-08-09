@@ -205,6 +205,48 @@ pub unsafe extern "C" fn kite_build(
     ])
 }
 
+/// Run a whole module, the way [`kite_build`] compiles one.
+///
+/// [`kite_run`] takes a single file, which is right for a playground — where
+/// there is only ever one — and wrong for a project. A `kitec run` built on it
+/// reported `cannot find module` for every `use` in a program that compiles
+/// perfectly well, which reads as the program being broken rather than the
+/// tool being half-sighted.
+///
+/// # Safety
+/// As [`kite_run`].
+#[no_mangle]
+pub unsafe extern "C" fn kite_run_module(ptr: *const u8, len: usize) -> *mut u8 {
+    let module = match module_input(ptr, len) {
+        Ok(module) => module,
+        Err(message) => return answer(message),
+    };
+    let compiled = kite_driver::compile_provided(
+        "main.kite",
+        &module.entry,
+        kite_driver::Emit::Check,
+        false,
+        module.siblings,
+    );
+    let mut out = compiled.render_diagnostics();
+    if compiled.failed() {
+        return answer(out);
+    }
+    let mut printed = Vec::new();
+    match compiled.run(&mut printed) {
+        Ok(true) => {}
+        Ok(false) => {
+            let _ = writeln!(printed, "note: this program has no `main` to run");
+        }
+        Err(trap) => {
+            let _ = writeln!(printed, "\nerror: {}", trap);
+            let _ = writeln!(printed, "note: traps are not catchable; Kite has no `recover`");
+        }
+    }
+    out.push_str(&String::from_utf8_lossy(&printed));
+    answer(out)
+}
+
 /// Check a whole module, the way [`kite_build`] compiles one.
 ///
 /// [`kite_check`] takes a single file, which is right for a playground and

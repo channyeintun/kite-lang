@@ -81,13 +81,22 @@ pub struct Loader {
     /// which is what makes a package's dependencies its own rather than
     /// whatever happens to sit next to the entry file.
     dependencies: HashMap<String, PathBuf>,
-    /// Modules handed over rather than found: module name to source.
+    /// Modules handed over rather than found: module path to source.
     ///
     /// A host without a filesystem still has the files — a bundler read them,
     /// an editor holds them unsaved — and until this existed such a host could
     /// only compile a program that imported nothing. The WebAssembly build of
     /// the compiler was exactly that: it managed a single self-contained file
     /// and failed on the first `use` of a sibling.
+    ///
+    /// **The key is a whole `use` path, not a last segment.** It was the last
+    /// segment, which meant a host could hand over an application's `doc` and
+    /// a package's `doc` and only one of them existed — silently, with every
+    /// `use kitex/doc` in the program reaching whichever was inserted. A
+    /// bundler that reads a manifest has two of everything by construction, so
+    /// the flat namespace was the thing standing between packages and any
+    /// build that is not a filesystem. Single-segment keys still work and mean
+    /// what they always did: a sibling of the entry file.
     provided: HashMap<String, String>,
     /// Every module loaded so far, and where its source came from.
     ///
@@ -146,8 +155,9 @@ enum Origin {
     /// The standard library's own copy.
     Std,
     /// Handed over by the host rather than found on a filesystem — a bundler,
-    /// or an editor holding an unsaved buffer.
-    Provided,
+    /// or an editor holding an unsaved buffer. The key is carried, because two
+    /// entries are two sources however alike their names look.
+    Provided(String),
     /// A directory, or a single file.
     Path(PathBuf),
     /// Nothing was found. Recorded so that a `use` which failed to resolve is
@@ -161,7 +171,9 @@ impl Origin {
     fn describe(&self) -> String {
         match self {
             Origin::Std => "the standard library".to_string(),
-            Origin::Provided => "the host, which supplied its source directly".to_string(),
+            Origin::Provided(key) => {
+                format!("the host, which supplied `{}` directly", key)
+            }
             Origin::Path(p) => format!("`{}`", p.display()),
             Origin::Missing => "nowhere".to_string(),
         }
@@ -232,14 +244,54 @@ impl Loader {
             ..Loader::default()
         };
         let mut stack: Vec<String> = Vec::new();
-        loader.visit_uses(entry, dir, &mut stack, sources, diags);
+        loader.visit_uses(entry, dir, "", &mut stack, sources, diags);
         loader
+    }
+
+    /// Which `provided` entry a `use` reaches, if any.
+    ///
+    /// `prefix` is the package the importing module itself came from — `""`
+    /// for the entry file and for anything beside it. It is what a directory
+    /// is on a filesystem: the thing that makes an unqualified `use` mean *my*
+    /// sibling rather than someone else's module of the same name.
+    ///
+    /// So inside `kitex/doc`, a `use browser` reaches `kitex/browser` and
+    /// **stops** if the package has no such module. It does not fall back to a
+    /// bare `browser`, because that is the application's, and a dependency
+    /// reaching into the program that depends on it is not a lookup rule any
+    /// filesystem would have produced. A path that names another package is
+    /// still absolute and still resolves.
+    fn provided_key(&self, prefix: &str, name: &str) -> Option<String> {
+        if prefix.is_empty() {
+            if self.provided.contains_key(name) {
+                return Some(name.to_string());
+            }
+            return None;
+        }
+        let sibling = format!("{}/{}", prefix, name);
+        if self.provided.contains_key(&sibling) {
+            return Some(sibling);
+        }
+        if name.contains('/') && self.provided.contains_key(name) {
+            return Some(name.to_string());
+        }
+        None
+    }
+
+    /// The package a module's own imports resolve under, given the key its
+    /// source came from: everything before the last segment.
+    fn package_of(key: &str) -> String {
+        match key.rfind('/') {
+            Some(at) => key[..at].to_string(),
+            None => String::new(),
+        }
     }
 
     fn visit_uses(
         &mut self,
         file: &SourceFile,
         dir: Option<&Path>,
+        prefix: &str,
         stack: &mut Vec<String>,
         sources: &mut SourceMap,
         diags: &mut DiagBag,
@@ -307,7 +359,7 @@ impl Loader {
                 // files importing one module — and needs nothing. Two
                 // *different* sources answering to one identity is still worth
                 // reporting: it means a path resolved somewhere unexpected.
-                let found = self.origin_of(&name, &segments, dir);
+                let found = self.origin_of(prefix, &name, &segments, dir);
                 if first != found && first != Origin::Missing && found != Origin::Missing {
                     diags.push(
                         Diagnostic::error(
@@ -327,7 +379,7 @@ impl Loader {
                 }
                 continue;
             }
-            self.load_one(&name, &segments, u.span, dir, stack, sources, diags);
+            self.load_one(prefix, &name, &segments, u.span, dir, stack, sources, diags);
         }
     }
 
@@ -345,16 +397,21 @@ impl Loader {
     /// directories to confuse in the first place.
     /// Where a module's source came from.
     ///
-    /// Keyed on the *last* segment rather than the identity, because that is
-    /// what names a directory or a dependency: the leading segments of a
-    /// `use` path say which module is meant, not where its files are.
-    fn origin_of(&self, name: &str, segments: &[&str], dir: Option<&Path>) -> Origin {
+    /// A provided module is identified by the key that answered, so two `use`
+    /// paths reaching two different entries are two different origins — which
+    /// is what the collision check below needs to be able to say.
+    fn origin_of(
+        &self,
+        prefix: &str,
+        name: &str,
+        segments: &[&str],
+        dir: Option<&Path>,
+    ) -> Origin {
         if segments.first() == Some(&"std") {
             return Origin::Std;
         }
-        let name = *segments.last().unwrap_or(&name);
-        if self.provided.contains_key(name) {
-            return Origin::Provided;
+        if let Some(key) = self.provided_key(prefix, name) {
+            return Origin::Provided(key);
         }
         let Some(base) = dir else {
             return Origin::Missing;
@@ -374,6 +431,7 @@ impl Loader {
     #[allow(clippy::too_many_arguments)]
     fn load_one(
         &mut self,
+        prefix: &str,
         name: &str,
         segments: &[&str],
         span: Span,
@@ -406,7 +464,13 @@ impl Loader {
         }
 
         let mut files = Vec::new();
-        let mut own_dir: Option<PathBuf> = dir.map(|d| d.to_path_buf());
+        // Where this module's *own* imports resolve from — its directory, or
+        // the package it was handed over inside. Every branch below sets both,
+        // and that is the point: leaving them at the importer's is how a
+        // one-file module used to read its imports out of somebody else's
+        // directory.
+        let own_dir: Option<PathBuf>;
+        let mut own_prefix = prefix.to_string();
 
         if is_std {
             let Some(src) = std_module(last) else {
@@ -426,9 +490,12 @@ impl Loader {
             };
             files.push(sources.add(format!("<std/{}>", last), src));
             own_dir = None;
-        } else if let Some(text) = self.provided.get(last).cloned() {
-            files.push(sources.add(format!("{}.kite", last), &text));
+            own_prefix = String::new();
+        } else if let Some(key) = self.provided_key(prefix, name) {
+            let text = self.provided.get(&key).cloned().expect("the key just matched");
+            files.push(sources.add(format!("{}.kite", key), &text));
             own_dir = None;
+            own_prefix = Loader::package_of(&key);
         } else {
             let Some(base) = dir else {
                 diags.push(
@@ -471,6 +538,15 @@ impl Loader {
                 own_dir = Some(as_dir);
             } else if let Ok(text) = std::fs::read_to_string(&as_file) {
                 files.push(sources.add(&as_file, &text));
+                // **Its own directory, not the importer's.** This used to be
+                // left alone, so a one-file module resolved its imports from
+                // wherever it happened to be imported *from*. For a sibling
+                // that is accidentally the same directory and nothing showed;
+                // across a package boundary it meant a dependency's `use
+                // helper` reached the application's `helper.kite` — a
+                // dependency reading the program that depends on it, silently
+                // and with no diagnostic.
+                own_dir = as_file.parent().map(|p| p.to_path_buf());
             } else {
                 diags.push(
                     Diagnostic::error(codes::E0400, format!("cannot find module `{}`", name))
@@ -487,7 +563,7 @@ impl Loader {
 
         // Recorded through the same resolver the collision check reads, so the
         // two cannot answer differently about where a module came from.
-        self.seen.insert(name.to_string(), self.origin_of(name, segments, dir));
+        self.seen.insert(name.to_string(), self.origin_of(prefix, name, segments, dir));
         stack.push(name.to_string());
         // A module's own imports are loaded before it is recorded, so a
         // dependency is always earlier in the list than its dependent.
@@ -495,7 +571,7 @@ impl Loader {
             let text = sources.text(id).to_string();
             let tokens = kite_lexer::tokenize(id, &text, diags);
             let parsed = kite_parser::parse(id, &text, &tokens, diags);
-            self.visit_uses(&parsed, own_dir.as_deref(), stack, sources, diags);
+            self.visit_uses(&parsed, own_dir.as_deref(), &own_prefix, stack, sources, diags);
         }
         stack.pop();
         if let Some(d) = own_dir {
