@@ -55,3 +55,6 @@ packages/*/*.tgz
 
 # Built by packages/kite-wasm/build.sh: one module, every platform.
 packages/kite-wasm/kite-compiler.wasm
+
+# Built by `vsce package` for a Marketplace upload or a local install.
+editors/vscode/*.vsix

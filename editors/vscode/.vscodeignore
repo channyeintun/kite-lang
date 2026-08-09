@@ -8,3 +8,14 @@ PUBLISHING.md
 .vscodeignore
 render-icon.sh
 icon.svg
+
+# **`.gitignore` does not apply here.** `vsce` packages the working directory,
+# so a file kept out of the repository is still shipped to everyone who
+# installs the extension unless it is named again in *this* file. `wrangler`
+# leaves an account id and name in `.wrangler/cache/` after a deploy from this
+# directory, and that went into a `.vsix` — the exact failure the note at the
+# top of this file describes, by a route it did not anticipate.
+.wrangler/
+
+# A package should not contain the last one.
+*.vsix
