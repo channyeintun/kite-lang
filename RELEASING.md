@@ -34,13 +34,24 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 ```bash
-cargo build --release -p kitec
+cargo build --release -p kitec -p kite-lsp
 for f in $(git ls-files '*.kite'); do ./target/release/kitec fmt --check "$f"; done
 ```
 
 The third is the reason a formatter exists. The second is not a formality:
 0.1.6 was written, tested and reviewed before clippy found a collapsible `if`
 in it, and `-D warnings` means that is a red build rather than a note.
+
+**`-p kite-lsp` is in that line for a reason that has nothing to do with
+releasing.** A development machine usually has `kite-lsp` on its `PATH` as a
+symlink into `target/release`, so the editor runs whatever was last built
+there — and building only `kitec` leaves the language server behind on every
+compiler change. It is not a quiet staleness either: a server that predates a
+new standard module reports `no standard module 'window'` for a correct `use`,
+which puts a confident red squiggle on the user's line and says nothing about
+the tooling. It cost an hour of `kitec check` passing while the editor
+insisted the same file was broken. Two words in the build line, and the two
+cannot drift.
 
 **Check the numbers in the prose.** The README states a test count and
 `crates/kite-driver/tests/size.rs` records what each program costs *today* in a

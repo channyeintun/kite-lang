@@ -72,7 +72,8 @@ function start(path, context, retried = false) {
       `Kite: the language server stopped (${signal ?? code}). Restarting.`,
     );
     start(path, context, true);
-    request("initialize", { processId: process.pid, rootUri: null, capabilities: {} });
+    request("initialize", { processId: process.pid, rootUri: null, capabilities: {} })
+      .then((result) => checkVersion(result, path));
     notify("initialized", {});
     for (const open of vscode.workspace.textDocuments) {
       if (open.languageId === "kite") {
@@ -98,7 +99,8 @@ function activate(context) {
   const path = serverPath();
   start(path, context);
 
-  request("initialize", { processId: process.pid, rootUri: null, capabilities: {} });
+  request("initialize", { processId: process.pid, rootUri: null, capabilities: {} })
+    .then((result) => checkVersion(result, path));
   notify("initialized", {});
 
   const send = (document, method) => {
@@ -210,6 +212,33 @@ function request(method, params) {
   const id = nextId++;
   write({ id, method, params });
   return new Promise((resolve) => pending.set(id, resolve));
+}
+
+/// Say so when the server is not the version this extension was built for.
+///
+/// **A stale server does not look stale, it looks like your code is wrong.**
+/// One three releases behind reports `no standard module 'window'` for a `use`
+/// that is perfectly correct, and there is nothing in the editor to suggest
+/// the tooling is the thing at fault — the squiggle is on your line. That is
+/// the worst kind of error message: confident, specific, and about the wrong
+/// thing.
+///
+/// The server has always sent `serverInfo.version` in its initialize result.
+/// Nothing read it.
+///
+/// A mismatch is a warning rather than a refusal, because the two are usually
+/// compatible and the person may well have picked that server on purpose with
+/// `kite.server.path`.
+function checkVersion(result, path) {
+  const theirs = result?.serverInfo?.version;
+  const ours = vscode.extensions.getExtension("kite-lang.kite-lang")?.packageJSON?.version;
+  if (!theirs || !ours || theirs === ours) return;
+  vscode.window.showWarningMessage(
+    `Kite: the language server at \`${path}\` is ${theirs}, and this extension ` +
+      `is ${ours}. Diagnostics come from the server, so anything added since ` +
+      `${theirs} will be reported as an error. Update the compiler — ` +
+      "`npm install --save-dev @kite-lang/cli` — or set `kite.server.path`.",
+  );
 }
 
 // Content-Length framing, in the one place it belongs.
