@@ -57,7 +57,7 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 curl -fsSL https://kite-lang.dev/install.sh | sh
 ```
 
-The current release is **v0.1.5**, signed and built by CI for macOS, Linux and
+The current release is **v0.1.6**, signed and built by CI for macOS, Linux and
 Windows; the installer reads `releases/latest` and checks the release's own
 `SHA256SUMS`. Kite is pre-1.0 and the language is still allowed to move, so
 the version is always `0.1.N` — the patch number climbs and the first two
@@ -146,7 +146,7 @@ fn load(path: str) -> ([Task], error) {
 
 **A standard library, in Kite.** `math`, `time`, `errors`, `fmt`, `json`,
 `toml`, `text`, `test`, `buffer`, `task`, `sync`, `fs`, `http`, `socket`,
-`crypto`, `canvas`, `js`, `dom`, `html`. Its own tests are ordinary Kite programs that run on *both*
+`crypto`, `canvas`, `js`, `dom`, `window`, `html`. Its own tests are ordinary Kite programs that run on *both*
 backends and must agree.
 
 **Bodies the compiler writes.** `@derive(Debug, Hash, Encode, Decode)` in front
@@ -321,7 +321,7 @@ Recorded here rather than left to be discovered:
   Scoop and the AUR, and has never run: no tag has been pushed.
 - **No Argon2.** It is not in WebCrypto, so it waits on a runtime that has it.
 
-815 tests: unit tests per crate, an annotated compile-fail corpus, a
+824 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the host boundary and a real
 socket under Node, the DOM layer and the typed door driven under Node — with

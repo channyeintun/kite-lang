@@ -30,7 +30,7 @@ fn size_of(name: &str, src: &str) -> usize {
     c.wasm.as_ref().expect("a module").bytes.len()
 }
 
-/// A program that prints. Today: 767 bytes.
+/// A program that prints. Today: 830 bytes.
 ///
 /// The floor, and the number the whole premise rests on — a language that
 /// needed a garbage collector inside its own binary could not be near it.
@@ -42,7 +42,7 @@ fn size_of(name: &str, src: &str) -> usize {
 /// presence rather than use looks like. Only the functions a program can
 /// reach are emitted now; `from_host` and `to_host` stay unconditional
 /// because the module exports `str` and `text` for its JavaScript API, and
-/// those two call them. A string-free program is 761 bytes.
+/// those two call them. A string-free program is 735 bytes.
 ///
 /// So the floor is roughly twice what it was rather than four times, and the
 /// remainder is the conversion bridge the JavaScript API needs. Budget 1,024,
@@ -54,7 +54,7 @@ fn hello_world_stays_small() {
     assert!(size < 1024, "hello world is {} bytes, budget 1024", size);
 }
 
-/// A module a JavaScript project would import. Today: 965 bytes.
+/// A module a JavaScript project would import. Today: 1,057 bytes.
 ///
 /// Four exported functions rather than one, and each `pub fn` is a real export
 /// with a wrapper — which is where the difference over `hello` goes.
