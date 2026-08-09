@@ -57,3 +57,220 @@ fn pad2(n: int) -> str {
     }
     return "\(n)"
 }
+
+// ---- the calendar -----------------------------------------------------------
+//
+// Everything above is a *duration* — a count of milliseconds, and what to call
+// it. Everything below names a *moment*, and the two are not the same
+// arithmetic: a duration has no idea how long February is.
+//
+// This is integer arithmetic rather than a call to the host's `Date`, and that
+// is the decision worth writing down. Asking the host means three crossings per
+// field and an answer that exists only in a browser; this gives the same answer
+// under the bytecode VM, under Cranelift, and in a page. The algorithm is
+// Howard Hinnant's `civil_from_days`, which is exact for every year a 64-bit
+// day count can hold and needs no lookup table — and Kite's `/` truncates
+// toward zero, which is the division it was written against.
+//
+// **A timezone is a parameter here, never an ambient fact.** Every function
+// below takes the minutes east of UTC to render in. A standard library that
+// read the device's own zone would make one program print two different days
+// depending on where it ran, and the day a receipt is filed under is the day
+// the shop was open. `window.timezone_offset()` is where a web program gets
+// the number; passing `0` renders UTC.
+
+/// A moment, split the way a person reads one.
+pub struct Civil {
+    pub year: int
+    /// 1 to 12.
+    pub month: int
+    /// 1 to 31.
+    pub day: int
+    /// 0 to 23.
+    pub hour: int
+    pub minute: int
+    pub second: int
+}
+
+/// Split an epoch reading into fields.
+///
+/// `ms` is milliseconds since 1970-01-01T00:00:00Z — what `window.epoch_ms()`
+/// answers, and *not* what `time.now()` answers, which is a monotonic reading
+/// with no zero point a calendar could use.
+///
+/// ```kite
+/// let at = civil_of(1_754_697_600_000, 0)
+/// assert(at.year == 2025 && at.month == 8 && at.day == 9, "2025-08-09")
+/// ```
+pub fn civil_of(ms: int, east_minutes: int) -> Civil {
+    let local = ms + east_minutes * 60000
+    // Floored, not truncated: an instant before 1970 still belongs to the day
+    // it fell in, and truncation would round it forward into the next one.
+    let days = floor_div(local, 86400000)
+    // Non-negative by construction, because `days` was floored — so the
+    // remainder arithmetic below needs no sign handling of its own.
+    let rest = local - days * 86400000
+    let date = date_of_days(days)
+    return Civil{
+        year: date.year,
+        month: date.month,
+        day: date.day,
+        hour: rest / 3600000,
+        minute: (rest % 3600000) / 60000,
+        second: (rest % 60000) / 1000,
+    }
+}
+
+/// Put one back together.
+///
+/// The inverse of [`civil_of`] under the same offset. Fields outside their
+/// range are carried rather than refused — month 13 is January of the next
+/// year, and day 0 is the last day of the month before — which is what makes
+/// `Civil{ year: y, month: m + 1, day: 1, … }` a correct way to ask for the
+/// start of the next month without knowing how long this one is.
+pub fn epoch_of(c: Civil, east_minutes: int) -> int {
+    let days = days_of_date(c.year, c.month, c.day)
+    let local = days * 86400000 +
+    c.hour * 3600000 +
+    c.minute * 60000 +
+    c.second * 1000
+    return local - east_minutes * 60000
+}
+
+/// `YYYY-MM-DD`, which is what a filename wants.
+///
+/// A folder of reports named "10 Jul 2026" sorts April before January. This
+/// one sorts in the only order that is unambiguous in every locale.
+///
+/// ```kite
+/// assert(iso_day(1_754_697_600_000, 0) == "2025-08-09", "a day, written out")
+/// ```
+pub fn iso_day(ms: int, east_minutes: int) -> str {
+    let c = civil_of(ms, east_minutes)
+    return "\(pad4(c.year))-\(pad2(c.month))-\(pad2(c.day))"
+}
+
+/// `hh:mm` from a moment, for a status bar with no room for a date.
+///
+/// Distinct from [`clock`] one section up, which reads a *duration* — the two
+/// print the same shape from different numbers, and giving them one name would
+/// make the difference invisible at the call site.
+pub fn hhmm(ms: int, east_minutes: int) -> str {
+    let c = civil_of(ms, east_minutes)
+    return "\(pad2(c.hour)):\(pad2(c.minute))"
+}
+
+/// `YYYY-MM-DDThh:mm:ss`, without an offset suffix.
+///
+/// The suffix is left off because this renders in whatever zone was asked for
+/// and appending `Z` to a local reading is a lie a log keeps forever. A caller
+/// who wants a true RFC 3339 timestamp passes `0` and adds the `Z` itself.
+pub fn stamp(ms: int, east_minutes: int) -> str {
+    let c = civil_of(ms, east_minutes)
+    return "\(iso_day(ms, east_minutes))T\(pad2(c.hour)):\(pad2(c.minute)):\(pad2(c.second))"
+}
+
+/// The day of the week: 0 is Sunday, 6 is Saturday.
+pub fn weekday(ms: int, east_minutes: int) -> int {
+    let days = floor_div(ms + east_minutes * 60000, 86400000)
+    // 1970-01-01 was a Thursday, which is 4.
+    return floor_mod(days + 4, 7)
+}
+
+/// Whether a year has a 29th of February.
+pub fn is_leap(year: int) -> bool {
+    if year % 4 != 0 {
+        return false
+    }
+    if year % 100 != 0 {
+        return true
+    }
+    return year % 400 == 0
+}
+
+/// How many days are in a month, `1` to `12`.
+///
+/// Counted as the distance between two firsts rather than read out of a table
+/// with a leap-year branch beside it. The table and the branch can disagree;
+/// two calls to the same function cannot.
+pub fn days_in_month(year: int, month: int) -> int {
+    return days_of_date(year, month + 1, 1) - days_of_date(year, month, 1)
+}
+
+/// The first millisecond of a month.
+///
+/// `month` outside 1 to 12 is carried, so `month_start(y, 13, e)` is January
+/// of the following year — which is how [`month_end`] finds the boundary
+/// without asking how long the month it is ending happens to be.
+pub fn month_start(year: int, month: int, east_minutes: int) -> int {
+    return epoch_of(
+        Civil { year: year, month: month, day: 1, hour: 0, minute: 0, second: 0 },
+        east_minutes,
+    )
+}
+
+/// The last millisecond that still belongs to a month.
+///
+/// Inclusive, so a query written `>= month_start(…)` and `<= month_end(…)`
+/// cannot let the midnight between two months fall into both or into neither.
+pub fn month_end(year: int, month: int, east_minutes: int) -> int {
+    return month_start(year, month + 1, east_minutes) - 1
+}
+
+// ---- the arithmetic underneath ----------------------------------------------
+
+/// Days since 1970-01-01 from a civil date.
+///
+/// Hinnant's `days_from_civil`, with its era arithmetic intact. March is
+/// treated as the first month of the year, which is what makes the leap day
+/// the *last* day of it and removes every special case from the rest.
+fn days_of_date(year: int, month: int, day: int) -> int {
+    // A month outside 1..12 is carried into the year rather than refused, so
+    // `month + 1` on December is January of the next year — see `epoch_of`.
+    let carry = floor_div(month - 1, 12)
+    let y_in = year + carry
+    let m = month - carry * 12
+    let y = if m <= 2 { y_in - 1 } else { y_in }
+    let era = if y >= 0 { y / 400 } else { (y - 399) / 400 }
+    let yoe = y - era * 400
+    let mp = if m > 2 { m - 3 } else { m + 9 }
+    let doy = (153 * mp + 2) / 5 + day - 1
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    return era * 146097 + doe - 719468
+}
+
+/// The other direction: `civil_from_days`. Hour, minute and second are left at
+/// zero — the caller has the remainder and fills them in.
+fn date_of_days(count: int) -> Civil {
+    let z = count + 719468
+    let era = if z >= 0 { z / 146097 } else { (z - 146096) / 146097 }
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }
+    let y = yoe + era * 400
+    let year = if m <= 2 { y + 1 } else { y }
+    return Civil{ year: year, month: m, day: d, hour: 0, minute: 0, second: 0 }
+}
+
+/// Division that rounds toward negative infinity.
+///
+/// Kite's `/` truncates toward zero, which for a day count means every instant
+/// before 1970 lands on the day after the one it happened in.
+fn floor_div(a: int, b: int) -> int {
+    let q = a / b
+    if a % b != 0 && (a < 0) != (b < 0) {
+        return q - 1
+    }
+    return q
+}
+
+fn floor_mod(a: int, b: int) -> int {
+    return a - floor_div(a, b) * b
+}
+
+fn pad4(n: int) -> str {
+    return pad_start("\(n)", 4, "0")
+}

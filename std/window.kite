@@ -1,0 +1,550 @@
+//! The window. **Web only.**
+//!
+//! [`std/dom`](dom.html) is the document; this is everything around it. The
+//! address bar, the two storages, the history entry, the scroll offset, the
+//! timers and the events that happen to the page rather than to an element —
+//! all of them are properties of `window`, and none of them is a document.
+//!
+//! Ordinary Kite over [`std/js`](js.html), with **no `extern` declaration in
+//! this file**, exactly as `std/dom` is written. `JsValue` does not appear in
+//! the interface either: the handles below have unmarked fields, so outside
+//! this module they can be held and passed but not read.
+//!
+//! ```kite ignore
+//! use std/window
+//!
+//! fn main() {
+//!     let token = window.kept("session")
+//!     if token == nil {
+//!         window.go_to("/sign-in")
+//!         return
+//!     }
+//!     let (sub, err) = window.on("hashchange", || { route() })
+//!     if err != nil {
+//!         io.error("no router: \(err.message())")
+//!     }
+//! }
+//! ```
+//!
+//! What is deliberately absent: anything that is a *recipe* rather than a
+//! platform fact. Saving a blob through a synthetic anchor, uploading a file,
+//! reading a `<meta>` tag — each is three calls a program can make for itself,
+//! and each encodes a decision (a byte-order mark, an auth header, a MIME
+//! type) that a standard library has no business making.
+
+use std/js
+
+// ---- the door out ------------------------------------------------------------
+
+/// The window itself.
+///
+/// **The escape hatch, and it is meant to be used as one.** The same bargain
+/// `dom.raw` makes: seal the module completely and the first person who needs
+/// a property it never wrapped builds a parallel untyped world beside it. One
+/// greppable door is a boundary that holds.
+pub fn raw() -> JsValue {
+    return js.global("window")
+}
+
+/// An `int` as a JavaScript number.
+///
+/// `js.of_int` refuses what a double cannot hold exactly and answers a pair
+/// for it. Everything crossing here is a pixel or a millisecond, so the float
+/// road is shorter and cannot fail.
+fn number(value: int) -> JsValue {
+    return js.of_num(value as float)
+}
+
+fn location() -> JsValue {
+    return js.global("location")
+}
+
+fn history() -> (JsValue, error) {
+    return js.get(raw(), "history")
+}
+
+// ---- what a program holds ------------------------------------------------------
+
+/// A listener on the window, and the way to take it off again.
+///
+/// Returned rather than discarded because **nothing else can cancel it**. A
+/// listener on an element dies with the element; the window outlives every
+/// view a program will ever build, so a handler attached and forgotten runs
+/// for the life of the page.
+pub struct Listener {
+    event: str
+    handler: JsValue
+}
+
+/// A pending timer.
+pub struct Timer {
+    id: JsValue
+    repeating: bool
+}
+
+// ---- listening ------------------------------------------------------------------
+
+/// Listen to something the window does — a hash change, a resize, going
+/// offline.
+///
+/// The handler takes nothing, and that is not a simplification: a window event
+/// carries no target worth having, and everything a handler needs is readable
+/// from the window it just heard from.
+pub fn on(name: str, handler: fn()) -> (Listener, error) {
+    let wrapped = js.func(|raw: JsValue| { handler() })
+    let (_, err) = js.call2(raw(), "addEventListener", js.of_str(name), wrapped)
+    check err
+    return Listener{ event: name, handler: wrapped }, nil
+}
+
+/// The same, promising the browser the handler will not cancel the event.
+///
+/// **Use this for `scroll` and for touch.** A scroll listener that is not
+/// marked passive blocks the compositor until it returns, on every frame of
+/// every scroll, because the browser must wait to find out whether the handler
+/// will call `preventDefault`. It is the most expensive single mistake a long
+/// list can make, and the fix is one property.
+pub fn on_passive(name: str, handler: fn()) -> (Listener, error) {
+    let wrapped = js.func(|raw: JsValue| { handler() })
+    let (options, oerr) = js.new0("Object")
+    check oerr
+    check js.set(options, "passive", js.of_bool(true))
+    let (_, err) = js.call3(
+        raw(),
+        "addEventListener",
+        js.of_str(name),
+        wrapped,
+        options,
+    )
+    check err
+    return Listener{ event: name, handler: wrapped }, nil
+}
+
+impl Listener {
+    /// Stop listening.
+    ///
+    /// After this the wrapper is unreachable from the page and the closure is
+    /// unreachable from the wrapper, so the collector takes both. There is no
+    /// registry to remove from because there was never one.
+    pub fn cancel(self) -> error {
+        let (_, err) = js.call2(
+            js.global("window"),
+            "removeEventListener",
+            js.of_str(self.event),
+            self.handler,
+        )
+        return err
+    }
+}
+
+// ---- timers ---------------------------------------------------------------------
+
+/// Run something after at least `ms` milliseconds.
+///
+/// **A timer and not `requestAnimationFrame`,** which is the choice worth
+/// explaining because the frame callback looks like the better one. A
+/// background tab does not run frame callbacks at all — so the common shape of
+/// "set a flag, book a frame, clear the flag inside it" stops the moment the
+/// reader switches tabs and stays stopped when they come back, with the flag
+/// still set and every later call dropped. A timer is throttled in a
+/// background tab; it still fires. A program that genuinely wants to paint in
+/// step with the display can reach `requestAnimationFrame` through [`raw`].
+pub fn after(ms: int, handler: fn()) -> (Timer, error) {
+    let wrapped = js.func(|raw: JsValue| { handler() })
+    let (id, err) = js.call2(raw(), "setTimeout", wrapped, number(ms))
+    check err
+    return Timer{ id: id, repeating: false }, nil
+}
+
+/// Run something every `ms` milliseconds, until it is cancelled.
+pub fn every(ms: int, handler: fn()) -> (Timer, error) {
+    let wrapped = js.func(|raw: JsValue| { handler() })
+    let (id, err) = js.call2(raw(), "setInterval", wrapped, number(ms))
+    check err
+    return Timer{ id: id, repeating: true }, nil
+}
+
+impl Timer {
+    /// Cancel it. Cancelling a timer that has already fired does nothing.
+    ///
+    /// Which of the two clearing functions to call is recorded on the timer
+    /// rather than asked of the caller. The two id spaces are separate in the
+    /// specification, and a program that clears an interval with
+    /// `clearTimeout` is relying on an engine that happens to share them.
+    pub fn cancel(self) -> error {
+        let name = if self.repeating { "clearInterval" } else { "clearTimeout" }
+        let (_, err) = js.call1(js.global("window"), name, self.id)
+        return err
+    }
+}
+
+// ---- the viewport -----------------------------------------------------------------
+
+/// A number property of the window, rounded to whole pixels.
+///
+/// Rounded rather than cast: `as int` truncates toward zero, and a layout off
+/// by a fraction of a pixel on each of a thousand rows drifts by most of a
+/// screen.
+fn pixels(name: str) -> int {
+    let value = js.num_or(raw(), name, 0.0)
+    let whole = value + 0.5
+    return whole as int
+}
+
+/// How far down the document the window is scrolled.
+pub fn scroll_y() -> int {
+    return pixels("scrollY")
+}
+
+pub fn scroll_x() -> int {
+    return pixels("scrollX")
+}
+
+/// How tall the visible part of the document is.
+pub fn height() -> int {
+    return pixels("innerHeight")
+}
+
+pub fn width() -> int {
+    return pixels("innerWidth")
+}
+
+/// Jump to an offset, without smoothing.
+///
+/// Smoothing is absent on purpose. This is what restores a position a reader
+/// already had, and animating back to it is the difference between returning
+/// to where they were and watching the page go looking for it. A program that
+/// wants the animation asks for it through [`raw`].
+pub fn scroll_to(x: int, y: int) -> error {
+    let (_, err) = js.call2(raw(), "scrollTo", number(x), number(y))
+    return err
+}
+
+// ---- the address bar ---------------------------------------------------------------
+
+pub fn origin() -> str {
+    return js.str_or(location(), "origin", "")
+}
+
+/// The path, with no query and no fragment. `/` when there is none.
+pub fn path() -> str {
+    return js.str_or(location(), "pathname", "/")
+}
+
+/// The query string, including its `?`, or "" when there is none.
+pub fn query() -> str {
+    return js.str_or(location(), "search", "")
+}
+
+/// The fragment, including its `#`, or "" when there is none.
+pub fn hash() -> str {
+    return js.str_or(location(), "hash", "")
+}
+
+/// Go to a fragment.
+///
+/// Writing the fragment rather than calling `push`, and the difference is a
+/// whole navigation model: assigning `location.hash` adds a history entry
+/// **and** raises `hashchange`, so a link forward and the Back button arrive
+/// at the same handler through the same door. `pushState` raises nothing, and
+/// a program built on it has to remember to do by hand what the browser was
+/// about to tell it anyway.
+pub fn set_hash(fragment: str) -> error {
+    return js.set(location(), "hash", js.of_str(fragment))
+}
+
+/// Leave for another address entirely.
+pub fn go_to(url: str) -> error {
+    let (_, err) = js.call1(location(), "assign", js.of_str(url))
+    return err
+}
+
+/// One parameter out of the query string, or nothing.
+///
+/// Absent and empty are different answers: `?code=` is a parameter that is
+/// there and says nothing, and an OAuth redirect that lost its code is not the
+/// same event as one that never carried a code at all.
+pub fn parameter(name: str) -> Option<str> {
+    var body = query()
+    if starts_with(body, "?") {
+        body = body.slice(1, body.len())
+    }
+    for pair in split(body, "&") {
+        let at = pair.index_of("=")
+        if at < 0 {
+            if pair == name {
+                return ""
+            }
+            continue
+        }
+        if pair.slice(0, at) == name {
+            return unescaped(pair.slice(at + 1, pair.len()))
+        }
+    }
+    return nil
+}
+
+/// A component of a URL, percent-encoded.
+pub fn escaped(text: str) -> str {
+    return through("encodeURIComponent", text)
+}
+
+/// The other direction, `+` read as a space the way a form encodes one.
+pub fn unescaped(text: str) -> str {
+    return through("decodeURIComponent", replace(text, "+", " "))
+}
+
+/// One of the global encoding functions, answering with its input unchanged if
+/// the host refuses it.
+///
+/// Returning the input is deliberate: `decodeURIComponent` throws on a stray
+/// `%` rather than on anything a caller can fix, and a query parameter that
+/// arrives slightly wrong is better read literally than turned into "".
+fn through(name: str, text: str) -> str {
+    let (value, err) = js.call1(js.global("globalThis"), name, js.of_str(text))
+    if err != nil {
+        return text
+    }
+    let (body, berr) = js.as_str(value)
+    if berr != nil {
+        return text
+    }
+    return body
+}
+
+// ---- history ----------------------------------------------------------------------
+
+/// Add a history entry. [`back`] returns to the one before it.
+pub fn push(url: str) -> error {
+    return step("pushState", url)
+}
+
+/// Rewrite the current entry, leaving no way back to it.
+///
+/// What an OAuth redirect wants: an authorization code is spent the moment it
+/// is exchanged, and a Back button that returns to it returns to a failure.
+///
+/// Named `rewrite` rather than `replace` because the prelude's `replace` is
+/// about text, and two things that are not the same thing do not get one name.
+pub fn rewrite(url: str) -> error {
+    return step("replaceState", url)
+}
+
+fn step(method: str, url: str) -> error {
+    let (entries, err) = history()
+    check err
+    let (_, serr) = js.call3(
+        entries,
+        method,
+        js.nothing(),
+        js.of_str(""),
+        js.of_str(url),
+    )
+    return serr
+}
+
+pub fn back() -> error {
+    let (entries, err) = history()
+    check err
+    let (_, berr) = js.call0(entries, "back")
+    return berr
+}
+
+/// Stop the browser restoring the scroll position on its own.
+///
+/// For a program that restores from its own record, keyed by route. The
+/// browser's heuristic cannot do that for a virtualized list — the elements it
+/// would measure against do not exist yet at the moment it looks.
+pub fn own_scroll_restoration() -> error {
+    let (entries, err) = history()
+    check err
+    return js.set(entries, "scrollRestoration", js.of_str("manual"))
+}
+
+// ---- what survives a reload ----------------------------------------------------------
+//
+// Two stores, because the two things a page keeps have different lifetimes. A
+// signed-in session should outlive the tab; a cached copy of a timeline should
+// not, and a week-old one restored into a fresh tab is worse than an empty
+// one. Choosing between them is the caller's decision and the reason both are
+// here rather than one behind a flag.
+
+fn store(name: str) -> Option<JsValue> {
+    let found = js.global(name)
+    if js.is_nothing(found) {
+        return nil
+    }
+    return found
+}
+
+fn read(store_name: str, key: str) -> Option<str> {
+    let holder = store(store_name)
+    if holder == nil {
+        return nil
+    }
+    let (value, err) = js.call1(holder, "getItem", js.of_str(key))
+    if err != nil {
+        return nil
+    }
+    if js.is_nothing(value) {
+        return nil
+    }
+    let (body, berr) = js.as_str(value)
+    if berr != nil {
+        return nil
+    }
+    return body
+}
+
+fn write(store_name: str, key: str, value: str) -> error {
+    let holder = store(store_name)
+    if holder == nil {
+        return errors.new("this browser has no \(store_name)")
+    }
+    let (_, err) = js.call2(holder, "setItem", js.of_str(key), js.of_str(value))
+    return err
+}
+
+fn erase(store_name: str, key: str) -> error {
+    let holder = store(store_name)
+    if holder == nil {
+        return nil
+    }
+    let (_, err) = js.call1(holder, "removeItem", js.of_str(key))
+    return err
+}
+
+/// Something kept across the browser closing — `localStorage`.
+pub fn kept(key: str) -> Option<str> {
+    return read("localStorage", key)
+}
+
+/// Keep it. **The error is worth handling**: a full store, and a browser
+/// configured to refuse storage entirely, both arrive here, and the second is
+/// a setting a real reader has switched on.
+pub fn keep(key: str, value: str) -> error {
+    return write("localStorage", key, value)
+}
+
+pub fn drop_kept(key: str) -> error {
+    return erase("localStorage", key)
+}
+
+/// Something kept only as long as the tab is open — `sessionStorage`.
+pub fn cached(key: str) -> Option<str> {
+    return read("sessionStorage", key)
+}
+
+pub fn cache(key: str, value: str) -> error {
+    return write("sessionStorage", key, value)
+}
+
+pub fn drop_cached(key: str) -> error {
+    return erase("sessionStorage", key)
+}
+
+// ---- the clock -----------------------------------------------------------------------
+
+/// Milliseconds since 1970-01-01T00:00:00Z, from the host's own clock.
+///
+/// **Not `time.now()`**, which is the runtime's clock: virtual under the
+/// bytecode VM and monotonic in a page, so it measures a gap correctly and
+/// names a moment not at all. This is the reading [`time.civil_of`] and its
+/// neighbours are written against.
+pub fn epoch_ms() -> int {
+    let (value, err) = js.call0(js.global("Date"), "now")
+    if err != nil {
+        return 0
+    }
+    let (ms, merr) = js.as_int(value)
+    if merr != nil {
+        return 0
+    }
+    return ms
+}
+
+/// How far east of UTC this device is, in minutes. Yangon answers 420.
+///
+/// **The sign is flipped from the platform's.** `getTimezoneOffset` answers
+/// the minutes to *add to local time to get UTC*, so a device east of
+/// Greenwich reports a negative number — which reads backwards at every call
+/// site and is a well-known source of dates off by a day. What comes out of
+/// here is what `std/time` asks for: minutes east, positive going east.
+pub fn timezone_offset() -> int {
+    let (date, err) = js.new0("Date")
+    if err != nil {
+        return 0
+    }
+    let (value, oerr) = js.call0(date, "getTimezoneOffset")
+    if oerr != nil {
+        return 0
+    }
+    let (minutes, merr) = js.as_int(value)
+    if merr != nil {
+        return 0
+    }
+    return -minutes
+}
+
+/// An ISO-8601 timestamp as milliseconds since the epoch, or nothing.
+///
+/// The host's parser, because it is already there and already correct about
+/// the parts of 8601 nobody remembers. `Date.parse` answers NaN for what it
+/// cannot read, and `js.as_int` is already the question "is this a whole
+/// number that survives the crossing" — NaN is not, so an unreadable stamp
+/// arrives as an error rather than as a number that has to be compared with
+/// itself to be caught.
+pub fn epoch_of(iso: str) -> Option<int> {
+    let (parsed, err) = js.call1(js.global("Date"), "parse", js.of_str(iso))
+    if err != nil {
+        return nil
+    }
+    let (ms, merr) = js.as_int(parsed)
+    if merr != nil {
+        return nil
+    }
+    return ms
+}
+
+// ---- the device ------------------------------------------------------------------------
+
+/// Whether the device believes it has a connection.
+///
+/// **Famously optimistic**: `navigator.onLine` says true for a laptop attached
+/// to a router with no internet behind it. It is the cheap signal and never
+/// the authority — what a status light should actually report is whether the
+/// last request succeeded.
+pub fn seems_online() -> bool {
+    let (value, err) = js.get(js.global("navigator"), "onLine")
+    if err != nil {
+        return true
+    }
+    let (online, berr) = js.as_bool(value)
+    if berr != nil {
+        return true
+    }
+    return online
+}
+
+/// The browser's own print dialog.
+///
+/// Printing a receipt is printing the page: `@media print` in the stylesheet
+/// decides what is on the paper, so there is nothing to build here.
+pub fn print_page() -> error {
+    let (_, err) = js.call0(raw(), "print")
+    return err
+}
+
+/// Ask the browser to install a service worker.
+///
+/// Registered from Kite rather than from a `<script>` in the page, so a
+/// program's offline story is in the same language as the rest of it.
+pub fn register_worker(path: str) -> error {
+    let (workers, err) = js.get(js.global("navigator"), "serviceWorker")
+    check err
+    if js.is_nothing(workers) {
+        return errors.new("this browser has no service workers")
+    }
+    let (_, rerr) = js.call1(workers, "register", js.of_str(path))
+    return rerr
+}

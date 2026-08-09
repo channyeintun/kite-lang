@@ -1,0 +1,178 @@
+// std/time's own tests.
+//
+// The calendar half is the part that can be wrong, and it is wrong in ways a
+// spot check misses: at a century that is not a leap year, before 1970 where
+// the day count goes negative, and at the two midnights a timezone offset
+// moves. Every expected value below was taken from an independent
+// implementation rather than from this one.
+
+use std/test
+use std/time
+
+/// One instant, named twice: as fields, and as milliseconds since the epoch.
+struct Known {
+    year: int
+    month: int
+    day: int
+    hour: int
+    minute: int
+    second: int
+    ms: int
+    weekday: int
+}
+
+fn known() -> [Known] {
+    return [
+        Known { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0,
+            ms: 0, weekday: 4 },
+        // One second before the epoch: the day count goes negative here, and
+        // truncating division would put this instant on the 1st of January.
+        Known { year: 1969, month: 12, day: 31, hour: 23, minute: 59,
+            second: 59, ms: -1000, weekday: 3 },
+        // A leap day under the ordinary rule.
+        Known { year: 2024, month: 2, day: 29, hour: 12, minute: 0, second: 0,
+            ms: 1709208000000, weekday: 4 },
+        // 1900 was *not* a leap year — divisible by 100 and not by 400 — so
+        // the 1st of March is one day earlier than a naive rule puts it.
+        Known { year: 1900, month: 3, day: 1, hour: 0, minute: 0, second: 0,
+            ms: -2203891200000, weekday: 4 },
+        // 2000 *was*, by the 400 rule.
+        Known { year: 2000, month: 2, day: 29, hour: 23, minute: 59,
+            second: 59, ms: 951868799000, weekday: 2 },
+        Known { year: 2026, month: 8, day: 9, hour: 14, minute: 5, second: 33,
+            ms: 1786284333000, weekday: 0 },
+        Known { year: 2100, month: 3, day: 1, hour: 0, minute: 0, second: 0,
+            ms: 4107542400000, weekday: 1 },
+        Known { year: 1901, month: 1, day: 1, hour: 0, minute: 0, second: 0,
+            ms: -2177452800000, weekday: 2 },
+        // The first day of the Gregorian calendar, and the year 1 — both far
+        // outside anything a program will see, and both exact.
+        Known { year: 1583, month: 10, day: 15, hour: 0, minute: 0, second: 0,
+            ms: -12187756800000, weekday: 6 },
+        Known { year: 1, month: 1, day: 1, hour: 0, minute: 0, second: 0,
+            ms: -62135596800000, weekday: 1 },
+    ]
+}
+
+fn checks() -> [error] {
+    var out: [error] = []
+
+    // ---- durations, which were here before the calendar was ----
+
+    out.push(test.equal_int(time.seconds(2), 2000, "seconds"))
+    out.push(test.equal_int(time.minutes(1), 60000, "minutes"))
+    out.push(test.equal_int(time.hours(1), 3600000, "hours"))
+    out.push(test.equal_str(time.show(999), "999ms", "show, under a second"))
+    out.push(test.equal_str(time.show(1500), "1.5s", "show, seconds"))
+    out.push(test.equal_str(time.show(90000), "1m 30s", "show, minutes"))
+    out.push(test.equal_str(time.clock(3723000), "01:02:03", "clock"))
+
+    // ---- the calendar, both directions ----
+
+    for k in known() {
+        let name = "\(k.year)-\(k.month)-\(k.day)"
+        let c = time.civil_of(k.ms, 0)
+        out.push(test.equal_int(c.year, k.year, "\(name): year"))
+        out.push(test.equal_int(c.month, k.month, "\(name): month"))
+        out.push(test.equal_int(c.day, k.day, "\(name): day"))
+        out.push(test.equal_int(c.hour, k.hour, "\(name): hour"))
+        out.push(test.equal_int(c.minute, k.minute, "\(name): minute"))
+        out.push(test.equal_int(c.second, k.second, "\(name): second"))
+        out.push(test.equal_int(
+                time.epoch_of(c, 0), k.ms, "\(name): back to the epoch"))
+        out.push(test.equal_int(
+                time.weekday(k.ms, 0), k.weekday, "\(name): weekday"))
+    }
+
+    // ---- a timezone is a parameter ----
+    //
+    // The same instant, rendered in Yangon and in UTC, is two different days.
+    // 2026-08-08T20:00:00Z is already the 9th at +06:30.
+
+    let evening = 1786219200000
+    out.push(test.equal_str(time.iso_day(evening, 0), "2026-08-08", "UTC day"))
+    out.push(test.equal_str(
+            time.iso_day(evening, 390), "2026-08-09", "the same instant at +06:30"))
+    out.push(test.equal_str(time.hhmm(evening, 0), "20:00", "UTC time"))
+    out.push(test.equal_str(time.hhmm(evening, 390), "02:30", "at +06:30"))
+    out.push(test.equal_str(
+            time.hhmm(evening, -300), "15:00", "and west of Greenwich"))
+
+    // A western offset that pushes an instant back into the previous day is
+    // the mirror of the case above, and is where a floored day count earns
+    // its keep.
+    out.push(test.equal_str(
+            time.iso_day(1786219200000 - 72000000, -300),
+            "2026-08-07",
+            "an offset west can move the day backwards"))
+
+    // ---- rendering ----
+
+    out.push(test.equal_str(time.iso_day(0, 0), "1970-01-01", "the epoch itself"))
+    out.push(test.equal_str(
+            time.stamp(1786284333000, 0), "2026-08-09T14:05:33", "a full stamp"))
+    out.push(test.equal_str(
+            time.iso_day(-62135596800000, 0), "0001-01-01", "a year is padded to four"))
+
+    // ---- the shape of a month ----
+
+    let long_year = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    let short_year = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    var leap: [int] = []
+    var plain: [int] = []
+    for m in 1..13 {
+        leap.push(time.days_in_month(2024, m))
+        plain.push(time.days_in_month(2023, m))
+    }
+    out.push(test.equal_ints(leap, long_year, "2024 is a leap year"))
+    out.push(test.equal_ints(plain, short_year, "2023 is not"))
+
+    out.push(test.is_true(time.is_leap(2024), "2024 is leap"))
+    out.push(test.is_false(time.is_leap(2023), "2023 is not"))
+    out.push(test.is_false(time.is_leap(1900), "1900 is not, by the century rule"))
+    out.push(test.is_true(time.is_leap(2000), "2000 is, by the 400 rule"))
+
+    // February 2026 in Yangon: the month opens at 00:00 local, which is
+    // 17:00 the previous day in UTC, and closes one millisecond before March.
+    out.push(test.equal_int(
+            time.month_start(2026, 2, 420), 1769878800000, "a month starts locally"))
+    out.push(test.equal_int(
+            time.month_end(2026, 2, 420), 1772297999999, "and ends one ms before the next"))
+    out.push(test.equal_int(
+            time.month_end(2026, 2, 420) - time.month_start(2026, 2, 420) + 1,
+            28 * 86400000,
+            "February 2026 is 28 days long, to the millisecond"))
+    out.push(test.equal_int(
+            time.month_start(2026, 13, 0),
+            time.month_start(2027, 1, 0),
+            "month 13 is January of the next year"))
+
+    // ---- the round trip, over a long stretch of days ----
+    //
+    // Every 37th day for a little over a century, out and back. A table of
+    // known values proves the algorithm right where it was checked; this
+    // proves it self-consistent everywhere in between, which is where an
+    // off-by-one in the era arithmetic would hide.
+    var drifted = 0
+    for step in 0..1000 {
+        let ms = (step * 37 - 18000) * 86400000 + 43200000
+        let c = time.civil_of(ms, 0)
+        if time.epoch_of(c, 0) != ms {
+            drifted += 1
+        }
+    }
+    out.push(test.equal_int(drifted, 0, "1000 days round-trip unchanged"))
+
+    return out
+}
+
+fn main() {
+    var failed = 0
+    for e in checks() {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("time: \(checks().len() - failed) passed, \(failed) failed")
+}

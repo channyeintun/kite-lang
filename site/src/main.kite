@@ -231,9 +231,9 @@ fn scroll_to_hash() {
 }
 
 fn modules() -> [str] {
-    return ["prelude", "js", "dom", "html", "canvas", "text", "task", "sync",
-        "math", "time", "errors", "fmt", "json", "toml", "test", "buffer",
-        "fs", "http", "socket", "crypto"]
+    return ["prelude", "js", "dom", "window", "html", "canvas", "text", "task",
+        "sync", "math", "time", "errors", "fmt", "json", "toml", "test",
+        "buffer", "fs", "http", "socket", "crypto"]
 }
 
 /// The reference: a button per module, and the one it is showing marked.

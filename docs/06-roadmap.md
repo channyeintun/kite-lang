@@ -2296,6 +2296,69 @@ segment naming a declared dependency roots there.
 
 ---
 
+## Phase 27 — `std/window`, and a calendar that is not the host's
+
+**Goal:** the parts of the browser that are not the document.
+
+Found the way Phase 20 said to find things — by writing applications. Two real
+ones (a Mastodon client and a shop's till) had each grown a hand-written
+`browser.kite`, and diffing them separated three piles: what `std` already had
+and they had rewritten, what neither had, and what was genuinely theirs.
+
+The first pile was small and embarrassing, and it is now deleted from both:
+`dom.checked`, `dom.set_value`, and `crypto.token` — the last of which one of
+them had reimplemented as four concatenated `Math.random()` fractions guarding
+an OAuth `state` parameter.
+
+The second pile is this phase. Eleven of the twelve functions the two
+applications had in common were things the standard library simply did not
+have: **the window** (listeners, timers), **storage**, **the address bar**,
+**history**, and **a wall-clock reading**. None of them is a document, which is
+why none of them belongs in `std/dom` and why the module is named for the
+platform object it wraps. `window.raw()` is the same greppable escape hatch
+`dom.raw` is, and there is no `extern` in the file — it is ordinary Kite over
+`std/js`, which keeps the primitives underneath honest.
+
+`std/web` was the obvious name and is the wrong one: everything in this
+language targets the web, so it distinguishes nothing.
+
+**The calendar went into `std/time` instead, as arithmetic.** This is the
+decision worth recording. Both applications formatted dates by calling the
+host's `Date` — three crossings per field, and an answer that exists only in a
+browser. What is there now is Hinnant's `civil_from_days`, integer-only, exact
+for every year a 64-bit day count holds, and identical under the VM, under
+Cranelift and in a page. It also forced the honest interface: **a timezone is a
+parameter, never an ambient fact.** A standard library that read the device's
+zone would make one program print two different days depending on where it ran,
+and the day a receipt is filed under is the day the shop was open.
+`window.timezone_offset()` supplies the number, with the sign flipped from
+`getTimezoneOffset`'s — minutes *east*, positive going east, because the
+platform's backwards sign is a well-known source of dates off by a day.
+
+Three things the work turned up:
+
+- **`(T, error)` is not a tuple return.** `month_bounds` was written to answer
+  a pair and refused, correctly: the correlated-results machinery is for
+  fallibility, not for two values. It is `month_start` and `month_end` now,
+  which is also two names instead of one that has to be destructured.
+- **A doc-comment fence is inside its own module.** `time.iso_day(…)` in a
+  fence in `std/time` does not resolve, because the fence is appended to the
+  module and the name is `iso_day`. That is Phase 26 working as designed, found
+  by writing the first new doc examples since.
+- **No leading-operator continuation.** A line ending in a complete expression
+  ends the statement, so a sum split across lines carries its `+` at the end of
+  each. Semicolon insertion, doing exactly what §2.5 says.
+
+**Exit criterion:** the two applications delete their `browser.kite` and import
+`std/window` instead. **Not met yet, and not by anything in this phase** —
+`vite-plugin-kite` hands the compiler only the `.kite` files beside the entry
+and never reads `kite.toml`, so both applications build against the published
+`@kite-lang/compiler-wasm` and will not see a new standard module until one
+ships. That is the next phase, and it is also what stops any Kite package from
+being usable from a bundler today.
+
+---
+
 ## Where the implementation actually stands
 
 Recorded honestly, because a roadmap that overstates progress is worse than
@@ -2330,6 +2393,7 @@ none.
 | 24 — Concrete error types | ✅ complete — an error carries the value it was made from, its type tag and the error it wrapped, on all three backends. `err.cause()`, `errors.chain`, `errors.root`, and `NotFound.is(err)` / `NotFound.as(err)` — the type names itself, because §11 has no turbofish |
 | 25 — `std/html` | ✅ complete — descriptions, a keyed diff that writes only what changed, and `examples/page` written against it |
 | 26 — Specification gaps | ✅ subslices, `enumerate` and pair-destructuring over a slice, doc-comment tests, a name section and source map, `js.func` at any shape, `check` in a bare-`error` function, a calling convention for any function-typed value, errors that carry their value, modules identified by their whole path; `[N]T` struck from the specification and `--a11y` removed |
+| 27 — `std/window` | 🟡 the module is built and tested — window events, timers, both storages, the address bar, history, the wall clock — and `std/time` gained a portable calendar under it. ❌ neither is reachable from a bundler until `vite-plugin-kite` reads `kite.toml` and a compiler ships |
 
 815 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
