@@ -2416,6 +2416,56 @@ release rather than a change.
 
 ---
 
+## Phase 29 — A `use` is what makes a module reachable
+
+**Goal:** the module boundary stops being advisory.
+
+Found while writing Phase 28's package tests, and it undercut them: a module's
+items were reachable from a file that never imported it, provided some *other*
+file in the program had. `two/y.kite` calling `one.thing()` with no `use one`
+anywhere in `two` resolved, because declarations are merged under their
+qualified names and `one.thing` was therefore an item in the program the moment
+anybody loaded `one`. Whether a name resolved in one file depended on a `use`
+line in a file that had nothing to do with it — and a dependency could reach
+the importing program's own modules by naming them, which is precisely the
+boundary Phase 28 had just spent two fixes establishing.
+
+The cause was one step of `fn_by_name_in`: after the asking module's own
+declarations are tried, the name is looked up **as written** in the merged
+list. That step is load-bearing — it is how every legitimate cross-module call
+lands — so it needed a gate rather than removal. Three things pass it: the
+asking module itself, whatever it imported, and anything that is not a module
+at all. The last is most of them, because `User.decode`, `Role.Editor` and
+`NotFound.is` all put a *type* at the head of a dotted name.
+
+The gate asks about the name **as written**, before `canonical` rewrites an
+alias away — `use one as uno` records the spelling `uno`, not `one`, so testing
+the canonical form would have refused every aliased call.
+
+The entry file is covered by the same rule from the other side. Its
+declarations are the only ones left unqualified, so a bare name found in the
+merged list could only be the entry's — and nothing can `use` the entry, so
+nothing but the entry may reach it.
+
+**No fallout, which is the interesting part.** The whole repository and both
+applications — 32 further files of real Kite — compile unchanged. Nothing was
+relying on it; it was a hole rather than a feature.
+
+**And one thing it exposed rather than caused.** A directory module can only
+import what is nested inside it or what the manifest declares: `use one` from
+inside `two/` looks for `two/one`, so two sibling *directory* modules cannot
+import each other at all. Before this change they could still reach each other
+through the hole; now they cannot reach each other by any spelling. Every real
+program is flat — where all modules share a directory and every import
+resolves — so nothing is affected today, but the gap is real and unspelled.
+Nesting or a declared dependency is the answer until there is a syntax for it.
+
+§13.1 was amended twice with this: it defined a module as a directory and never
+mentioned the single-file form that nearly every module actually is, and it did
+not say that a `use` is required to reach one.
+
+---
+
 ## Where the implementation actually stands
 
 Recorded honestly, because a roadmap that overstates progress is worse than
@@ -2452,8 +2502,9 @@ none.
 | 26 — Specification gaps | ✅ subslices, `enumerate` and pair-destructuring over a slice, doc-comment tests, a name section and source map, `js.func` at any shape, `check` in a bare-`error` function, a calling convention for any function-typed value, errors that carry their value, modules identified by their whole path; `[N]T` struck from the specification and `--a11y` removed |
 | 27 — `std/window` | 🟡 the module is built and tested — window events, timers, both storages, the address bar, history, the wall clock — and `std/time` gained a portable calendar under it. ❌ the two applications cannot import it until a compiler carrying it is published |
 | 28 — Packages from a bundler | ✅ `vite-plugin-kite` and the WebAssembly `kitec` read `kite.toml` and compile what it declares; provided modules are keyed by their whole path and a package resolves its own imports inside itself; a one-file module reads its imports from its own directory; `kitec run` sees modules |
+| 29 — Imports are the boundary | ✅ a qualified name resolves only in a module that imported it, and the entry file is reachable from nowhere. ❌ two sibling *directory* modules still cannot import each other by any spelling — exposed by this, not caused by it |
 
-819 tests: unit tests per crate, an annotated compile-fail corpus, a
+824 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the standard library's own
 documentation examples, the host boundary and a real socket under Node, both

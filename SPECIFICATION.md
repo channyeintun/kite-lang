@@ -1460,15 +1460,20 @@ lowering, so adopting it later is a compiler change with no language change.
 
 ### 13.1 Structure
 
-A **module** is a directory. Every `.kite` file in it contributes to the same
-namespace — there are no per-file imports of sibling files and no header/
-implementation split.
+A **module** is a directory, or a single `.kite` file. Every `.kite` file in a
+module directory contributes to the same namespace — within one there are no
+per-file imports of siblings and no header/implementation split.
+
+`use x` takes the directory `x/` when there is one and the file `x.kite`
+otherwise. The directory is the general form; a file is the one-file case, and
+is what most modules are and what nearly all of them start as.
 
 ```
 myapp/
   kite.toml
   src/
     main.kite
+    money.kite         // a module, one file
     config/
       load.kite
       schema.kite      // same module as load.kite
@@ -1479,6 +1484,7 @@ myapp/
 
 ```kite
 use config
+use money
 use ui
 use std/http
 use std/json as j
@@ -1490,9 +1496,22 @@ fn main() {
 }
 ```
 
+**Neither form is a module until a `use` names it.** A `.kite` file nothing
+imports is not compiled, and two files sharing a directory share nothing by
+virtue of sitting there: `main.kite` above cannot see what `money.kite`
+declares without the `use money`.
+
 Imports are always qualified by module name at the use site. There is no
 wildcard import and no way to bring a bare name into scope. `config.load` always
 tells you where `load` came from.
+
+**And a module reaches only what it imports.** Writing `config.load` in a file
+whose module has no `use config` is an error even when another module in the
+program does import it. Declarations are merged under their qualified names, so
+without this rule `config.load` would exist for the whole program the moment
+anybody loaded `config` — whether a name resolved in one file would depend on a
+`use` line in a file that had nothing to do with it, and a dependency could
+reach the importing program's own modules by naming them.
 
 **An alias belongs to the module that writes it.** `use std/json as j` makes
 `j` mean `json` in that module and nowhere else. Aliases used to share one

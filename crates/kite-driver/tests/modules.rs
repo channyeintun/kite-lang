@@ -393,3 +393,100 @@ fn a_package_cannot_reach_the_application_by_a_bare_name() {
     let said = c.render_diagnostics();
     assert!(said.contains("cannot find module `helper`"), "{}", said);
 }
+
+// ---- a module reaches only what it imports ------------------------------------
+
+/// A qualified name resolves only where it was imported.
+///
+/// It used to resolve everywhere. Declarations are merged under their
+/// qualified names, so `b.secret` was an item in the program the moment
+/// *anybody* loaded `b`, and the lookup of a name as written found it from any
+/// module. Whether a name resolved in one file depended on a `use` line in a
+/// file that had nothing to do with it.
+#[test]
+fn a_module_cannot_reach_another_it_did_not_import() {
+    let p = Project::new("unimported");
+    p.file("b.kite", "pub fn secret() -> str {\n  return \"b\"\n}\n");
+    // No `use b` in this file. `main` has one, which used to be enough.
+    p.file("a.kite", "pub fn go() -> str {\n  return b.secret()\n}\n");
+    let main = p.file(
+        "main.kite",
+        "use a\nuse b\n\nfn main() {\n  io.print(a.go())\n}\n",
+    );
+    let said = p.run(&main).expect_err("`b` is not imported in a.kite");
+    assert!(said.contains("cannot find `b`"), "{}", said);
+}
+
+/// The same across two directory modules, where there is no argument about
+/// what a module is.
+#[test]
+fn a_directory_module_cannot_reach_a_sibling_it_did_not_import() {
+    let p = Project::new("unimported-dirs");
+    p.file("one/x.kite", "pub fn thing() -> str {\n  return \"one\"\n}\n");
+    p.file("two/y.kite", "pub fn go() -> str {\n  return one.thing()\n}\n");
+    let main = p.file(
+        "main.kite",
+        "use one\nuse two\n\nfn main() {\n  io.print(two.go())\n}\n",
+    );
+    let said = p.run(&main).expect_err("`one` is not imported in two/y.kite");
+    assert!(said.contains("cannot find `one`"), "{}", said);
+}
+
+/// With the import, it resolves — under its own name and under an alias.
+#[test]
+fn an_imported_module_resolves_however_it_is_spelled() {
+    let p = Project::new("imported");
+    p.file("b.kite", "pub fn secret() -> str {\n  return \"b\"\n}\n");
+    p.file("a.kite", "use b\n\npub fn go() -> str {\n  return b.secret()\n}\n");
+    p.file(
+        "c.kite",
+        "use b as bee\n\npub fn go() -> str {\n  return bee.secret()\n}\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use a\nuse c\n\nfn main() {\n  io.print(a.go())\n  io.print(c.go())\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "b\nb\n");
+}
+
+/// The entry file is nobody's import either.
+///
+/// Its declarations are the only ones left unqualified, so a bare name looked
+/// up in the merged list reached them from any module — and there is no `use`
+/// that could have asked for it, because nothing can import the entry.
+#[test]
+fn a_module_cannot_reach_the_entry_file() {
+    let p = Project::new("entry-reach");
+    p.file("sub/y.kite", "pub fn go() -> str {\n  return top()\n}\n");
+    let main = p.file(
+        "main.kite",
+        "use sub\n\npub fn top() -> str {\n  return \"entry\"\n}\n\n\
+         fn main() {\n  io.print(sub.go())\n}\n",
+    );
+    let said = p.run(&main).expect_err("the entry is not importable");
+    assert!(said.contains("cannot find `top`"), "{}", said);
+}
+
+/// A type at the head of a dotted name is not a module and is not gated.
+///
+/// `User.decode`, `Role.Editor` and `NotFound.is` all look like a module
+/// access and none of them is one.
+#[test]
+fn a_type_at_the_head_of_a_name_is_not_gated() {
+    let p = Project::new("type-head");
+    p.file(
+        "models.kite",
+        "use std/json\n\n@derive(Debug, Encode, Decode)\n\
+         pub struct User {\n    pub name: str\n}\n",
+    );
+    p.file(
+        "sub.kite",
+        "use models\n\npub fn go() -> str {\n\
+         \x20 let u = models.User{ name: \"ada\" }\n  return u.debug()\n}\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use sub\n\nfn main() {\n  io.print(sub.go())\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "User{ name: \"ada\" }\n");
+}

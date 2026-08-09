@@ -438,6 +438,29 @@ impl Modules {
         self.of_item.get(item).map(|s| s.as_str()).unwrap_or("")
     }
 
+    /// Whether `head`, written in `asking`, names a module `asking` may reach.
+    ///
+    /// **A `use` is what makes a module reachable, and this is where that is
+    /// enforced.** Declarations are merged into one list under their qualified
+    /// names, so `one.thing` is literally an item the moment *anybody* loads
+    /// `one` — and a lookup of the name as written therefore found it from
+    /// every module in the program, imported there or not. Whether a name
+    /// resolved in one file depended on a `use` line in another file that had
+    /// nothing to do with it, and a dependency could reach the application's
+    /// modules by naming them.
+    ///
+    /// Three things are reachable: the asking module itself, whatever it
+    /// imported — under the spelling it imported them by, which is why this is
+    /// asked about the name *as written* rather than after `canonical` has
+    /// rewritten an alias away — and anything that is not a module at all. The
+    /// last is most of them: `User.decode`, `Role.Editor` and `NotFound.is`
+    /// all have a type at the head, and types are not gated here.
+    pub fn may_reach(&self, asking: &str, head: &str) -> bool {
+        head == asking
+            || self.aliases.contains_key(&(asking.to_string(), head.to_string()))
+            || !self.of_item.iter().any(|m| m == head)
+    }
+
     /// Rewrite an alias at the head of a dotted name: `j.decode` becomes
     /// `json.decode` when the file wrote `use std/json as j`.
     ///
@@ -564,14 +587,32 @@ impl ResolveMap {
     /// that the name is looked up as written, which is how the prelude and a
     /// qualified `task.all` both resolve.
     pub fn fn_by_name_in(&self, module: &str, name: &str) -> Option<u32> {
+        let written = name;
         let name = self.modules.canonical(module, name);
         self.find_fn(&qualify(module, &name))
-            .or_else(|| self.find_fn(&name))
+            .or_else(|| self.reachable(module, written).then(|| self.find_fn(&name)).flatten())
             // The prelude is last, so a program's own `take` wins — and the
             // prelude's own calls to `take` find the prelude's, because its
             // module is tried first. Shadowing a prelude name used to break
             // the prelude.
             .or_else(|| self.find_fn(&qualify(PRELUDE, &name)))
+    }
+
+    /// Whether a name written in `module` may be looked up as written.
+    ///
+    /// The middle step of the two lookups below searches the merged list under
+    /// the name exactly as the source spelled it, which is how every
+    /// cross-module call lands. It is also the only step that can reach
+    /// somewhere the file never asked for, so it is the one with a gate on it.
+    fn reachable(&self, module: &str, written: &str) -> bool {
+        match written.split_once('.') {
+            Some((head, _)) => self.modules.may_reach(module, head),
+            // An unqualified name found in the merged list can only belong to
+            // the root module — every other module's declarations were
+            // rewritten to their qualified form. The root is the entry file,
+            // which nothing can `use`, so nothing but the root may reach it.
+            None => module.is_empty(),
+        }
     }
 
     fn find_fn(&self, name: &str) -> Option<u32> {
@@ -582,9 +623,10 @@ impl ResolveMap {
     }
 
     pub fn type_by_name_in(&self, module: &str, name: &str) -> Option<u32> {
+        let written = name;
         let name = self.modules.canonical(module, name);
         self.find_type(&qualify(module, &name))
-            .or_else(|| self.find_type(&name))
+            .or_else(|| self.reachable(module, written).then(|| self.find_type(&name)).flatten())
             .or_else(|| self.find_type(&qualify(PRELUDE, &name)))
     }
 
