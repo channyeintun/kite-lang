@@ -608,15 +608,43 @@ li { margin-bottom: 0.6rem; }
    `COEP: require-corp` and `COOP: same-origin` for the lessons that use
    WebContainer; the Kite one does not need either, and in any case COEP
    governs what a document embeds rather than whether it may be embedded. A
-   page that sets no COEP — this one — can frame a page that does. */
-iframe.course {
-  display: block;
+   page that sets no COEP — this one — can frame a page that does.
+
+   A width alone is not enough. An iframe's box *is* the viewport the document
+   inside lays out against, so `width: 100%` hands an editor a ~1100px browser
+   and gets back the layout a ~1100px browser deserves — cramped panels, a
+   collapsed sidebar, controls stacked. next-editor's own hero iframe solves
+   this by pinning a desktop-sized frame and scaling the rendered result, and
+   this is the same treatment with the same numbers: the lesson believes it has
+   1440x900, and the reader sees it shrunk to fit the band. `fit_course_frame`
+   in site/src/main.kite writes the scale. */
+.course-frame {
+  position: relative;
   width: 100%;
+  /* Against the page's global `border-box`, the 16:10 would land on the border
+     box while the script measures the content box — 2px narrower, so the
+     height binds first and the scaled frame leaves a hairline of band showing
+     down one edge. Sized on the content box, the two agree exactly. */
+  box-sizing: content-box;
   aspect-ratio: 16 / 10;
+  overflow: hidden;
   border: 1px solid var(--rule);
   border-radius: 10px;
   background: var(--paper);
   margin: 2.4rem 0;
+}
+iframe.course {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: block;
+  width: 1440px;
+  height: 900px;
+  border: 0;
+  /* Top-left, so the scale multiplies out from the corner the offsets are
+     measured from and the two compose without fighting. */
+  transform-origin: top left;
+  transform: scale(var(--course-scale, 0.4514));
 }
 @media screen and (max-width: 48em) {
   /* **It stays on a phone.** Hiding an embed below a breakpoint is how a
@@ -628,10 +656,21 @@ iframe.course {
      worse failure of the two. A viewport-relative height gives it room to be
      used; `svh` rather than `vh` so it is not measured against a viewport the
      browser's own chrome is covering, and the cap stops it eating a page
-     somebody is still scrolling. */
-  iframe.course {
+     somebody is still scrolling.
+
+     The desktop scaling comes off here as well. 1440px shrunk into 390px is
+     0.27x — a faithful desktop layout rendered at a size nobody can read. A
+     phone is better served by letting the lesson lay out against the phone's
+     own width, which is what removing the transform does. */
+  .course-frame {
     aspect-ratio: auto;
     height: min(72svh, 34rem);
+  }
+  iframe.course {
+    position: static;
+    width: 100%;
+    height: 100%;
+    transform: none;
   }
 }
 

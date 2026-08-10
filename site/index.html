@@ -90,9 +90,12 @@
       <div class="highlight"></div>
     </header>
     <!-- embed=true drops the "Lessons >" breadcrumb, whose link would replace
-         the lesson with next-editor's gallery inside this frame. -->
-    <iframe class="course" src="https://nexteditor.dev/learn/kite-crash-course?embed=true"
-            title="Kite: a crash course" loading="lazy" allowfullscreen></iframe>
+         the lesson with next-editor's gallery inside this frame. The iframe is
+         a fixed 1440x900 scaled down to the band — see .course-frame. -->
+    <div class="course-frame">
+      <iframe class="course" src="https://nexteditor.dev/learn/kite-crash-course?embed=true"
+              title="Kite: a crash course" loading="lazy" allowfullscreen></iframe>
+    </div>
     <p class="measure">
       <a class="button button-secondary" href="https://nexteditor.dev/learn/kite-crash-course">Open it full screen</a>
     </p>

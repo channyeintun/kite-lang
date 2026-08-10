@@ -14,6 +14,7 @@
 use std/dom
 use std/js
 use std/math
+use std/window
 use markdown
 use highlight
 
@@ -289,6 +290,66 @@ fn build_reference_nav(nav: dom.Element, content: dom.Element) {
     }
 }
 
+// ---- the embedded crash course ----------------------------------------------
+
+/// The size the crash course believes it is being viewed at.
+///
+/// An iframe's box is the viewport the document inside lays out against, so a
+/// fluid-width frame hands an editor a phone-sized browser and gets a
+/// phone-sized layout back. The frame is pinned at a desktop instead and the
+/// rendered result is scaled down, which is what next-editor's own hero iframe
+/// does — these are its numbers.
+fn course_width() -> float {
+    return 1440.0
+}
+
+fn course_height() -> float {
+    return 900.0
+}
+
+/// Write the scale the stylesheet reads.
+///
+/// `.course-frame` is authored at the same 16:10 as the frame inside it, so
+/// this is the width ratio in every real case; the height is in the `min` so
+/// that a band which is ever made shorter crops nothing. Below 48em the
+/// stylesheet drops the transform entirely — a 1440px layout shrunk into a
+/// 390px phone is faithful and unreadable — and the variable is simply unused.
+fn fit_course_frame() {
+    let frame = dom.find(".course-frame")
+    if frame == nil {
+        return
+    }
+    let course = dom.find_in(frame, "iframe.course")
+    if course == nil {
+        return
+    }
+
+    let raw = dom.raw(frame)
+    let width = js.num_or(raw, "clientWidth", 0.0)
+    let height = js.num_or(raw, "clientHeight", 0.0)
+    if width <= 0.0 || height <= 0.0 {
+        return
+    }
+
+    let scale = math.min(width / course_width(), height / course_height())
+    let err = dom.set_style(course, "--course-scale", "\(scale)")
+    if err != nil {
+        io.error(err.message())
+    }
+}
+
+/// Fit the course now, and again whenever the band changes width.
+///
+/// A `resize` listener rather than a `ResizeObserver`: the band's width comes
+/// from the page, and nothing on this page resizes it except the window.
+fn watch_course_frame() {
+    fit_course_frame()
+    let (_, err) = window.on("resize", || { fit_course_frame() })
+    if err != nil {
+        io.error(err.message())
+    }
+}
+
 // ---- the door for the playground --------------------------------------------
 
 /// Colour a run of Kite, for a caller in JavaScript.
@@ -313,6 +374,7 @@ pub fn main() {
 
     if page == "home" {
         colour_code_blocks()
+        watch_course_frame()
         return
     }
 
