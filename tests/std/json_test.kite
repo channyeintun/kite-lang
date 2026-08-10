@@ -60,6 +60,49 @@ fn checks() -> [error] {
 
     out.push(test.equal_str(json.pretty(parsed("{\"a\":[1]}")), "{\n  \"a\": [\n    1\n  ]\n}", "pretty"))
 
+    // ---- escapes, RFC 8259 §7 ----
+    //
+    // `\uXXXX` used to arrive as its own digits: `caf\u00e9` decoded to
+    // `cafu00e9`, silently. The primitive that decodes it — `text.from_code`
+    // — was added for this and for `std/toml`, and only `std/toml` picked it
+    // up. The corruption was silent, which is why every one of these is here.
+
+    out.push(test.equal_str(
+            roundtrip("\"caf\\u00e9\""), "\"café\"", "\\u is decoded"))
+    out.push(test.equal_str(
+            roundtrip("\"\\u003cp\\u003e\""), "\"<p>\"", "an escaped tag is decoded"))
+    // Outside the BMP JSON has no other spelling: two escapes, one character.
+    out.push(test.equal_str(
+            roundtrip("\"\\ud83d\\ude00\""), "\"😀\"", "a surrogate pair is one character"))
+    // A half of a pair is not a character. U+FFFD rather than a dropped one.
+    out.push(test.equal_str(
+            roundtrip("\"\\ud83d\""), "\"\u{fffd}\"", "a lone high surrogate is replaced"))
+    out.push(test.equal_str(
+            roundtrip("\"\\udc00\""), "\"\u{fffd}\"", "a lone low surrogate is replaced"))
+    let (_, uerr) = json.parse("\"\\uzzzz\"")
+    out.push(test.failed(uerr, "a malformed \\u is refused, not guessed at"))
+    out.push(test.equal_str(
+            roundtrip("\"a\\bb\""), "\"a\\bb\"", "\\b round-trips"))
+    out.push(test.equal_str(
+            roundtrip("\"a\\fb\""), "\"a\\fb\"", "\\f round-trips"))
+
+    // Writing: a raw control character inside a string is invalid JSON, and a
+    // strict parser refuses the whole document over one — `JSON.parse` says
+    // `Bad control character in string literal`. A pasted note was enough.
+    out.push(test.equal_str(
+            json.stringify(json.Json.Text("a\rb")), "\"a\\rb\"", "a carriage return is escaped"))
+    out.push(test.equal_str(
+            json.stringify(json.Json.Text("a\u{1}b")), "\"a\\u0001b\"",
+            "an unnamed control character becomes \\u00XX"))
+    out.push(test.equal_str(
+            json.stringify(json.Json.Text("a\u{1f}b")), "\"a\\u001fb\"",
+            "and the last one below the space"))
+    // What it is all for: what this library writes, this library reads.
+    out.push(test.equal_str(
+            roundtrip(json.stringify(json.Json.Text("a\rb\u{7}c"))),
+            json.stringify(json.Json.Text("a\rb\u{7}c")),
+            "control characters survive a round trip"))
+
     // A document does not get to choose how long the parser runs, how big an
     // int it accumulates, or how much stack it uses. Each of these three used
     // to be attacker-chosen: the first spun a loop the document sized, the

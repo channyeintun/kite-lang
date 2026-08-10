@@ -1,9 +1,19 @@
 // std/json — reading and writing JSON.
 //
-// Written in Kite, on top of the five string primitives the language has. It
-// is the first substantial body of Kite code in the standard library, and a
-// parse returns `(Json, error)` like anything else that can fail: a malformed
-// document is a value to handle, not something thrown.
+// Written in Kite, on top of the five string primitives the language has and
+// `text.from_code`. It is the first substantial body of Kite code in the
+// standard library, and a parse returns `(Json, error)` like anything else
+// that can fail: a malformed document is a value to handle, not something
+// thrown.
+//
+// **Escapes are RFC 8259 §7, both ways.** `\uXXXX` is decoded, including a
+// surrogate pair as the one character it denotes, and every control character
+// is escaped on the way out. Neither used to be true: `caf\u00e9` decoded to
+// `cafu00e9` — silently, so a name simply came out wrong — and a carriage
+// return went out raw, which is not JSON and which `JSON.parse` refuses with
+// `Bad control character in string literal`. The decoding needed
+// `text.from_code`, which was added for this and for `std/toml`; only
+// `std/toml` picked it up.
 
 /// A JSON value.
 ///
@@ -27,6 +37,15 @@ pub enum Json {
 struct Step {
     value: Json
     next: int
+}
+
+/// A decoded `\u` escape, and how many characters of input it consumed.
+///
+/// A struct rather than a pair: `(str, int)` is refused, because a two-value
+/// return in Kite is `(T, error)` and means fallibility rather than a tuple.
+struct Escape {
+    text: str
+    width: int
 }
 
 /// A parsed string, and where it ended.
@@ -183,6 +202,7 @@ fn parse_string(input: str, at: int) -> (Text, error) {
         if c == 92 {
             out = out + input.slice(run, i)
             let e = peek(input, i + 1)
+            var width = 2
             if e == "n" {
                 out = out + "\n"
             } else {
@@ -192,21 +212,98 @@ fn parse_string(input: str, at: int) -> (Text, error) {
                     if e == "r" {
                         out = out + "\r"
                     } else {
-                        // `\"`, `\\`, `\/` — and, deliberately, `\uXXXX`,
-                        // whose digits arrive as themselves. Decoding it needs
-                        // a way to build a character from a code point, and
-                        // `str` has no such operation yet.
-                        out = out + e
+                        if e == "b" {
+                            out = out + "\u{8}"
+                        } else {
+                            if e == "f" {
+                                out = out + "\u{c}"
+                            } else {
+                                if e == "u" {
+                                    let (decoded, uerr) = unicode_at(input, i)
+                                    check uerr
+                                    out = out + decoded.text
+                                    width = decoded.width
+                                } else {
+                                    // `\"`, `\\`, `\/` — each is itself.
+                                    out = out + e
+                                }
+                            }
+                        }
                     }
                 }
             }
-            i = i + 2
+            i = i + width
             run = i
         } else {
             i = i + 1
         }
     }
     return _, errors.new("json: unterminated string from \(at)")
+}
+
+/// A `\uXXXX` escape, and how many characters of the input it took.
+///
+/// `at` is the index of the backslash, so the digits start at `at + 2`.
+///
+/// **The pair matters.** JSON has no way to write a character outside the BMP
+/// except as two escapes, `😀`, and reading them separately produces
+/// two lone surrogates — which are not characters, so `text.from_code` answers
+/// with "" for each and the character vanishes. They are combined here.
+///
+/// **A malformed escape is refused; a surrogate that stands alone is not.**
+/// The two are different failures. `\uzzzz` is not JSON at all — RFC 8259 §7
+/// requires four hex digits — and every other malformed thing in this file is
+/// an error, so this one is too. A well-formed escape that happens to name
+/// half of a pair is valid JSON denoting no character, and U+FFFD is what a
+/// decoder is expected to put there rather than nothing.
+fn unicode_at(input: str, at: int) -> (Escape, error) {
+    let first = hex4(input, at + 2)
+    if first < 0 {
+        return _, errors.new("json: `\\u` needs four hex digits, at \(at)")
+    }
+    // A high surrogate, and a low one behind it: one character between them.
+    if first >= 55296 && first <= 56319 {
+        if peek(input, at + 6) == "\\" && peek(input, at + 7) == "u" {
+            let second = hex4(input, at + 8)
+            if second >= 56320 && second <= 57343 {
+                let combined = 65536 + (first - 55296) * 1024 + (second - 56320)
+                return Escape{ text: text.from_code(combined), width: 12 }, nil
+            }
+        }
+        return Escape{ text: text.from_code(65533), width: 6 }, nil
+    }
+    // A low surrogate on its own is not a character either.
+    if first >= 56320 && first <= 57343 {
+        return Escape{ text: text.from_code(65533), width: 6 }, nil
+    }
+    return Escape{ text: text.from_code(first), width: 6 }, nil
+}
+
+/// Four hex digits as a number, or -1 when they are not four hex digits.
+fn hex4(input: str, at: int) -> int {
+    var value = 0
+    for k in 0..4 {
+        let d = hex_digit(peek(input, at + k))
+        if d < 0 {
+            return -1
+        }
+        value = value * 16 + d
+    }
+    return value
+}
+
+fn hex_digit(c: str) -> int {
+    let d = digit(c)
+    if d >= 0 {
+        return d
+    }
+    if c >= "a" && c <= "f" {
+        return c.code_at(0) - 87
+    }
+    if c >= "A" && c <= "F" {
+        return c.code_at(0) - 55
+    }
+    return -1
 }
 
 fn parse_number(input: str, at: int) -> (Step, error) {
@@ -419,13 +516,45 @@ fn quote(s: str) -> str {
                     if c == "\t" {
                         out = out + "\\t"
                     } else {
-                        out = out + c
+                        // **Every other control character has to be escaped
+                        // too.** RFC 8259 forbids a raw one inside a string,
+                        // and a strict parser refuses the whole document over
+                        // it — `JSON.parse` answers `Bad control character in
+                        // string literal`. A carriage return in a pasted note
+                        // was enough to produce JSON this library could read
+                        // back and nothing else could.
+                        let code = c.code_at(0)
+                        if code < 32 {
+                            if code == 13 {
+                                out = out + "\\r"
+                            } else {
+                                if code == 8 {
+                                    out = out + "\\b"
+                                } else {
+                                    if code == 12 {
+                                        out = out + "\\f"
+                                    } else {
+                                        out = out + "\\u00" + hex2(code)
+                                    }
+                                }
+                            }
+                        } else {
+                            out = out + c
+                        }
                     }
                 }
             }
         }
     }
     return out + "\""
+}
+
+/// Two lowercase hex digits, for a `\u00XX` escape.
+fn hex2(code: int) -> str {
+    let digits = "0123456789abcdef"
+    let hi = (code / 16) % 16
+    let lo = code % 16
+    return digits.slice(hi, hi + 1) + digits.slice(lo, lo + 1)
 }
 
 /// A value as indented JSON, for something a person will read.
