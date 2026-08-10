@@ -63,6 +63,8 @@ Windows; the installer reads `releases/latest` and checks the release's own
 the version is always `0.1.N` — the patch number climbs and the first two
 never do.
 
+**New to Kite?** [The crash course](https://nexteditor.dev/learn/kite-crash-course) tours the whole language in one narrated sitting, typing each program into an editor and running it — every one compiled by this compiler rather than transcribed.
+
 It is also on npm, which is how a project that already has a `package.json`
 would take it:
 

@@ -39,6 +39,7 @@ npx --yes @kite-lang/compiler-wasm kitec check program.kite
 
 ## Optional
 
+- [Crash course](https://nexteditor.dev/learn/kite-crash-course): the whole language narrated in one sitting, for a person rather than an agent — the thing to point someone at who has never seen Kite.
 - [Playground](https://kite-lang.dev/playground.html): the compiler itself, running in the page.
 - [Install](https://kite-lang.dev/install.md): the native toolchain, for a machine rather than an agent.
 - [Design notes](https://kite-lang.dev/docs/index.md): the research behind the platform, concurrency and compiler decisions.
