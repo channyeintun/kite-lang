@@ -8,6 +8,7 @@
     { "include": "#string" },
     { "include": "#char" },
     { "include": "#number" },
+    { "include": "#attribute" },
     { "include": "#declaration" },
     { "include": "#keyword" },
     { "include": "#type" },
@@ -87,6 +88,29 @@
         {
           "name": "constant.numeric.integer.kite",
           "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+
+    "attribute": {
+      "comment": "`@derive(...)` and `@host(\"group\")`. Both are syntax the parser accepts, and neither was coloured — a `@derive` in front of a struct read as ordinary text, which is the one line of a declaration a reader most wants to spot. Held to the parser by a test, as the keyword rule is held to the lexer.",
+      "patterns": [
+        {
+          "name": "meta.attribute.kite",
+          "begin": "(@)(derive|host)\\b",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.attribute.kite" },
+            "2": { "name": "entity.name.function.attribute.kite" }
+          },
+          "end": "(?<=\\))|$",
+          "patterns": [
+            { "include": "#string" },
+            {
+              "name": "support.class.kite",
+              "match": "\\b(Debug|Hash|Encode|Decode)\\b"
+            },
+            { "include": "#punctuation" }
+          ]
         }
       ]
     },

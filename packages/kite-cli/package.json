@@ -1,6 +1,6 @@
 {
   "name": "@kite-lang/cli",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "The Kite compiler, as an npm dependency. `kitec` itself, not a copy of it.",
   "type": "module",
   "bin": {
@@ -24,11 +24,11 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@kite-lang/cli-darwin-arm64": "0.1.7",
-    "@kite-lang/cli-darwin-x64": "0.1.7",
-    "@kite-lang/cli-linux-arm64": "0.1.7",
-    "@kite-lang/cli-linux-x64": "0.1.7",
-    "@kite-lang/cli-win32-x64": "0.1.7"
+    "@kite-lang/cli-darwin-arm64": "0.1.8",
+    "@kite-lang/cli-darwin-x64": "0.1.8",
+    "@kite-lang/cli-linux-arm64": "0.1.8",
+    "@kite-lang/cli-linux-x64": "0.1.8",
+    "@kite-lang/cli-win32-x64": "0.1.8"
   },
   "publishConfig": {
     "access": "public"

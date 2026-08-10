@@ -14,7 +14,7 @@ a shell deserves that, and it is short enough to read in a minute.
 
 ## Versions
 
-The current release is **v0.1.7**, and the version is always `0.1.N`. There is
+The current release is **v0.1.8**, and the version is always `0.1.N`. There is
 no 0.2, no 1.0, and no plan for one: the patch number climbs and the first two
 never move. A major number is a licence to break things and an invitation to be
 asked when the next one lands, and Kite intends neither — once the language has

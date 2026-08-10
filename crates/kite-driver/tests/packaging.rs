@@ -479,3 +479,46 @@ fn every_link_in_llms_txt_reaches_something_the_site_serves() {
         "llms.txt no longer tells an agent how to check its own work"
     );
 }
+
+/// Every attribute the parser accepts is coloured by the extension's grammar.
+///
+/// `@derive` and `@host` are syntax, not comments, and neither was in the
+/// grammar — a `@derive(Decode)` in front of a struct rendered as plain text,
+/// which is the one line of a declaration a reader most wants to pick out. The
+/// keyword rule beside this one is already held to the lexer's census; this is
+/// the same idea for the other half of the surface, so an attribute added to
+/// the language fails the build until it is coloured.
+#[test]
+fn every_attribute_is_coloured_by_the_grammar() {
+    let grammar = read("editors/vscode/syntaxes/kite.tmLanguage.json");
+
+    // What the parser will accept after an `@`.
+    let parser = read("crates/kite-parser/src/lib.rs");
+    let mut names: Vec<&str> = Vec::new();
+    for candidate in ["derive", "host"] {
+        if parser.contains(&format!("\"{}\"", candidate)) {
+            names.push(candidate);
+        }
+    }
+    assert!(!names.is_empty(), "no attribute names found in the parser");
+
+    for name in &names {
+        assert!(
+            grammar.contains(name),
+            "`@{}` is accepted by the parser and not coloured by the grammar",
+            name
+        );
+    }
+
+    // And the four things `@derive` can name, which the expansion writes.
+    let derive = read("crates/kite-driver/src/derive.rs");
+    for trait_name in ["Debug", "Hash", "Encode", "Decode"] {
+        if derive.contains(&format!("Derivable::{}", trait_name)) {
+            assert!(
+                grammar.contains(trait_name),
+                "`@derive({})` is derivable and the grammar does not colour it",
+                trait_name
+            );
+        }
+    }
+}

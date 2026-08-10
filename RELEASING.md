@@ -4,7 +4,7 @@ Everything that has to happen for a version to exist, in the order it has to
 happen in. Each step says what breaks if it is skipped, because most of these
 fail quietly rather than loudly.
 
-This is the runbook as it was actually walked for 0.1.7, corrected where the
+This is the runbook as it was actually walked for 0.1.8, corrected where the
 previous version of this document was wrong about its own process.
 
 **Ten artefacts carry a version**, published four different ways:
@@ -115,7 +115,7 @@ git push origin main
 ```
 
 ```bash
-git tag v0.1.7 && git push origin v0.1.7
+git tag v0.1.8 && git push origin v0.1.8
 ```
 
 **Push before tagging.** A tag whose commits are not on the remote makes CI
@@ -133,8 +133,8 @@ gh run watch $(gh run list --workflow=Release --limit 1 --json databaseId --jq '
 ```
 
 ```bash
-mkdir -p /tmp/kite-0.1.7
-gh release download v0.1.7 --dir /tmp/kite-0.1.7 --pattern '*.tar.gz' --pattern '*.zip'
+mkdir -p /tmp/kite-0.1.8
+gh release download v0.1.8 --dir /tmp/kite-0.1.8 --pattern '*.tar.gz' --pattern '*.zip'
 ```
 
 > **Do not publish binaries built on your machine.** `build.sh --cross` really
@@ -160,7 +160,7 @@ gh release download v0.1.7 --dir /tmp/kite-0.1.7 --pattern '*.tar.gz' --pattern 
 
 ```bash
 rm -rf packages/kite-cli/platforms
-./packages/kite-cli/build.sh /tmp/kite-0.1.7/
+./packages/kite-cli/build.sh /tmp/kite-0.1.8/
 ```
 
 **The `rm -rf` is not tidiness.** `platforms/` is a build artefact and is
@@ -332,7 +332,7 @@ curl -s "https://kite-lang.dev/SPECIFICATION.md?v=$RANDOM" | diff - SPECIFICATIO
 ## 7. Afterwards
 
 ```bash
-./packaging/render.sh 0.1.7
+./packaging/render.sh 0.1.8
 ```
 
 Homebrew, Scoop and the AUR manifests keep placeholder checksums in the tree so
