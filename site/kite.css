@@ -600,6 +600,30 @@ li { margin-bottom: 0.6rem; }
 }
 .demo-row:last-child { margin-bottom: 0; }
 
+/* The crash course, embedded. It is somebody else's application in here, so
+   it gets a full-width frame and a real aspect ratio rather than the demo's
+   fixed 664px — an editor with a video beside it does not fit in a card.
+
+   No headers are needed on this side. `nexteditor.dev` sends
+   `COEP: require-corp` and `COOP: same-origin` for the lessons that use
+   WebContainer; the Kite one does not need either, and in any case COEP
+   governs what a document embeds rather than whether it may be embedded. A
+   page that sets no COEP — this one — can frame a page that does. */
+iframe.course {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--paper);
+  margin: 2.4rem 0;
+}
+@media screen and (max-width: 48em) {
+  /* Taller than it is wide would be unreadable; on a phone the button below
+     is the honest route and the frame is just a preview. */
+  iframe.course { aspect-ratio: 4 / 3; }
+}
+
 iframe.demo {
   display: block;
   width: 100%;
