@@ -164,6 +164,20 @@ check err
 let (user, uerr) = User.decode(doc)
 ```
 
+`Decode` is the one worth dwelling on, because the usual alternative only
+looks like it does the same thing. `axios.get<User>(url)` is a claim:
+TypeScript writes the type in and never reads a field, so a server that stops
+sending `age` yields an `undefined` somewhere later, far from the request.
+`User.decode(doc)` reads the fields, and a body without `age` comes back as
+`User.age: expected a whole number` — at the request, naming what was wrong.
+The decoder comes from the struct, so unlike a validation schema kept beside
+the type there is no second copy to drift out of step.
+
+It is strict deliberately: a missing field fails the whole value. That suits a
+server whose columns cannot be null and does not suit one that may leave a
+field out, which wants a reader written by hand — a decision worth making
+rather than discovering.
+
 **Elements described, and only the difference written.** `std/html` holds a
 tree as a value; `update` compares it against the last one and touches what
 changed. Children are matched by key where there is one, so a thirty-five row

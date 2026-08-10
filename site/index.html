@@ -185,6 +185,41 @@ fn title_of(document: str) -&gt; (str, error) {
       <code>E0302</code>.
     </p>
 
+    <h3>A type that checks the answer, not one that assumes it</h3>
+    <p class="measure">
+      <code>axios.get&lt;Basket&gt;(url)</code> is a claim, not a check.
+      TypeScript writes the type in and never looks at a field, so a server
+      that stops sending <code>total</code> produces an
+      <code>undefined</code> somewhere later — far from the request that
+      caused it.
+    </p>
+<pre><code class="kite sketch">use std/json
+
+@derive(Decode)
+struct Basket {
+    sale_id: str
+    total: int
+}
+
+fn basket_of(body: str) -&gt; (Basket, error) {
+    let (answer, err) = json.parse(body)
+    check err
+    return Basket.decode(answer)
+}
+</code></pre>
+    <p class="measure">
+      A body without <code>total</code> comes back as
+      <code>Basket.total: expected a whole number</code> — at the request,
+      naming the field. The decoder is written from the struct, so unlike a
+      hand-kept validation schema there is no second copy to drift.
+    </p>
+    <p class="measure">
+      It is strict on purpose: a missing field fails the whole value. That is
+      right for a server whose columns cannot be null, and wrong for one that
+      may legitimately leave a field out — which wants a reader written by
+      hand. Worth deciding rather than discovering.
+    </p>
+
     <h3>Concurrency is one concept</h3>
     <p class="measure">
       Some operations take time: mark them <code>async</code> and
