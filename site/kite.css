@@ -619,9 +619,20 @@ iframe.course {
   margin: 2.4rem 0;
 }
 @media screen and (max-width: 48em) {
-  /* Taller than it is wide would be unreadable; on a phone the button below
-     is the honest route and the frame is just a preview. */
-  iframe.course { aspect-ratio: 4 / 3; }
+  /* **It stays on a phone.** Hiding an embed below a breakpoint is how a
+     lesson becomes something only desktop readers know exists, and this one is
+     the first thing a newcomer is pointed at.
+
+     What changes is the height, not the presence. 16:10 on a 390px screen is a
+     240px letterbox with an editor in it — visible and unusable, which is the
+     worse failure of the two. A viewport-relative height gives it room to be
+     used; `svh` rather than `vh` so it is not measured against a viewport the
+     browser's own chrome is covering, and the cap stops it eating a page
+     somebody is still scrolling. */
+  iframe.course {
+    aspect-ratio: auto;
+    height: min(72svh, 34rem);
+  }
 }
 
 iframe.demo {
