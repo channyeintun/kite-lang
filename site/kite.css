@@ -18,12 +18,18 @@
 /* The display face, self-hosted: the site still makes no request to anyone
    else. Latin subset, 11.5 KB, SIL Open Font License 1.1 — see fonts/OFL.md.
    One weight exists, so every rule that uses it asks for 400; asking for more
-   would get a synthesised bold, which on a slab this heavy is a smear. */
+   would get a synthesised bold, which on a slab this heavy is a smear.
+
+   `block` rather than `swap`: the headings this face sets are the largest
+   text on the page, and swapping one out from under the reader reflows the
+   whole band. The trade is a short spell of invisible heading instead of a
+   visible one in the wrong face — and it is short, because the file is a
+   11.5 KB subset served from the same origin as the page asking for it. */
 @font-face {
   font-family: "Alfa Slab One";
   font-style: normal;
   font-weight: 400;
-  font-display: swap;
+  font-display: block;
   src: url(fonts/alfa-slab-one-latin-400.woff2) format("woff2");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
                  U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC,
