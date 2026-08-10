@@ -1,6 +1,6 @@
 {
   "name": "vite-plugin-kite",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Import .kite files from a Vite project. The compiler is WebAssembly, so nothing is installed.",
   "type": "module",
   "main": "./index.js",
@@ -25,7 +25,7 @@
   },
   "homepage": "https://kite-lang.dev",
   "dependencies": {
-    "@kite-lang/compiler-wasm": "^0.1.6"
+    "@kite-lang/compiler-wasm": "^0.1.7"
   },
   "peerDependencies": {
     "vite": ">=5"

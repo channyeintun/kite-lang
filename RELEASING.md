@@ -4,7 +4,7 @@ Everything that has to happen for a version to exist, in the order it has to
 happen in. Each step says what breaks if it is skipped, because most of these
 fail quietly rather than loudly.
 
-This is the runbook as it was actually walked for 0.1.6, corrected where the
+This is the runbook as it was actually walked for 0.1.7, corrected where the
 previous version of this document was wrong about its own process.
 
 **Ten artefacts carry a version**, published four different ways:
@@ -40,7 +40,7 @@ for f in $(git ls-files '*.kite'); do ./target/release/kitec fmt --check "$f"; d
 ```
 
 The third is the reason a formatter exists. The second is not a formality:
-0.1.6 was written, tested and reviewed before clippy found a collapsible `if`
+0.1.4 was written, tested and reviewed before clippy found a collapsible `if`
 in it, and `-D warnings` means that is a red build rather than a note.
 
 **`-p kite-lsp` is in that line for a reason that has nothing to do with
@@ -79,7 +79,7 @@ intends neither. Once the language has stopped moving, the only question a
 version has to answer is *which build*, and one climbing number answers it.
 
 One number, in **ten** files. This document said five for a long time and the
-other five drifted behind — the release before 0.1.6 needed a commit of its own
+other five drifted behind — the release before 0.1.4 needed a commit of its own
 to catch the starter and the install page up, which is what a rule nobody
 checks looks like:
 
@@ -115,7 +115,7 @@ git push origin main
 ```
 
 ```bash
-git tag v0.1.6 && git push origin v0.1.6
+git tag v0.1.7 && git push origin v0.1.7
 ```
 
 **Push before tagging.** A tag whose commits are not on the remote makes CI
@@ -133,8 +133,8 @@ gh run watch $(gh run list --workflow=Release --limit 1 --json databaseId --jq '
 ```
 
 ```bash
-mkdir -p /tmp/kite-0.1.6
-gh release download v0.1.6 --dir /tmp/kite-0.1.6 --pattern '*.tar.gz' --pattern '*.zip'
+mkdir -p /tmp/kite-0.1.7
+gh release download v0.1.7 --dir /tmp/kite-0.1.7 --pattern '*.tar.gz' --pattern '*.zip'
 ```
 
 > **Do not publish binaries built on your machine.** `build.sh --cross` really
@@ -160,7 +160,7 @@ gh release download v0.1.6 --dir /tmp/kite-0.1.6 --pattern '*.tar.gz' --pattern 
 
 ```bash
 rm -rf packages/kite-cli/platforms
-./packages/kite-cli/build.sh /tmp/kite-0.1.6/
+./packages/kite-cli/build.sh /tmp/kite-0.1.7/
 ```
 
 **The `rm -rf` is not tidiness.** `platforms/` is a build artefact and is
@@ -332,7 +332,7 @@ curl -s "https://kite-lang.dev/SPECIFICATION.md?v=$RANDOM" | diff - SPECIFICATIO
 ## 7. Afterwards
 
 ```bash
-./packaging/render.sh 0.1.6
+./packaging/render.sh 0.1.7
 ```
 
 Homebrew, Scoop and the AUR manifests keep placeholder checksums in the tree so
