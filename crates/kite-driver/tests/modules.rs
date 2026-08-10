@@ -490,3 +490,41 @@ fn a_type_at_the_head_of_a_name_is_not_gated() {
     );
     assert_eq!(p.run(&main).expect("compiles"), "User{ name: \"ada\" }\n");
 }
+
+/// A value widened to an `Option` on the value side of a fallible return.
+///
+/// `return t, nil` where the function answers `(Option<Thing>, error)` checked
+/// clean and then emitted a module the engine refused: the checker waved the
+/// `Thing` through — which is right, a `T` may stand where an `Option<T>` is
+/// wanted — but never inserted the widening node, so the backend put a bare
+/// `Thing` into a slot typed `Option<Thing>`. `kitec check` said ok and
+/// `kitec build` said E0900, which is the worst pairing: the tool that runs
+/// in an editor was happy and the one that ships was not.
+///
+/// The error side of the same expression had always been coerced. This is the
+/// value side of it.
+#[test]
+fn a_value_widened_to_an_option_in_a_fallible_return_builds() {
+    let p = Project::new("widen-fallible");
+    let main = p.file(
+        "main.kite",
+        "struct Thing {\n  n: int\n}\n\n\
+         fn make() -> (Option<Thing>, error) {\n\
+         \x20 let t = Thing{ n: 7 }\n\
+         \x20 return t, nil\n\
+         }\n\n\
+         fn main() {\n\
+         \x20 let (t, err) = make()\n\
+         \x20 if err != nil {\n    return\n  }\n\
+         \x20 if t == nil {\n    return\n  }\n\
+         \x20 io.print(t.n)\n\
+         }\n",
+    );
+    // Runs, and — the half that was broken — compiles to a module that
+    // validates.
+    assert_eq!(p.run(&main).expect("compiles"), "7\n");
+
+    let src = std::fs::read_to_string(&main).expect("read");
+    let wasm = kite_driver::compile(&main, &src, Emit::Wasm);
+    assert!(!wasm.failed(), "{}", wasm.render_diagnostics());
+}

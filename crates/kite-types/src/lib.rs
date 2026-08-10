@@ -1534,6 +1534,16 @@ impl<'a> Checker<'a> {
                 }
                 let inner = self.types.fallible_value(sig.ret).unwrap_or(TyId::ERROR);
                 let v = self.expr(value, Some(inner));
+                // The value side needs the same conversion the error side gets
+                // below, and for the same reason. `expect_ty` waves a `T`
+                // through where an `Option<T>` is wanted — that much is
+                // correct — but without the `Wrap` the backend puts a bare `T`
+                // into a slot typed `Option<T>`, and the module it writes does
+                // not validate: `kitec check` passed and `kitec build` failed
+                // with E0900, on `return value, nil` in a function returning
+                // `(Option<Json>, error)`. Both applications carry a comment
+                // telling the next person to bind through a `let` first.
+                let v = self.coerce(v, Some(inner));
                 self.expect_ty(v.ty, inner, v.span, Some(sig.name_span));
                 let e = self.expr(error, Some(TyId::ERR));
                 // A type implementing `Error` becomes one here. `expect_ty`
