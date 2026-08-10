@@ -1,0 +1,44 @@
+# Kite
+
+> A small, explicit language for the web, compiled to WebAssembly. Kite is new
+> and is in no model's training data, so anything an LLM writes from memory is
+> a guess. The compiler is a 2 MB WebAssembly module on npm — check the guess
+> instead of shipping it.
+
+Run this before believing any Kite you read or write. No install, no toolchain,
+works in a sandbox:
+
+```
+npx --yes @kite-lang/compiler-wasm kitec check program.kite
+```
+
+`kitec --explain E0302` prints the reasoning behind any diagnostic code.
+
+## Start here
+
+- [Skill](https://kite-lang.dev/skill/SKILL.md): the whole language for an agent, in one file. Every example in it and in its references is compiled by the real compiler as a condition of being written down. Start here rather than with the specification — this is the delta from what a Rust or TypeScript programmer would assume, which is where the mistakes are.
+- [Everything, concatenated](https://kite-lang.dev/llms-full.txt): the skill and all six of its reference pages in one document, for a single fetch.
+
+## The language
+
+- [Specification](https://kite-lang.dev/SPECIFICATION.md): normative, sixteen sections. Types, error handling, traits, generics, concurrency, modules, the memory model and the host boundary.
+- [Grammar](https://kite-lang.dev/docs/05-grammar.ebnf): the complete EBNF.
+- [README](https://kite-lang.dev/README.md): what Kite is for and what it refuses to do.
+
+## Reference, generated from the library's own source
+
+- [Skill reference pages](https://kite-lang.dev/skill/references/index.md): lexical and types, declarations and control flow, errors, structs through generics, concurrency through the host boundary, and the standard library with the toolchain.
+- [Standard library](https://kite-lang.dev/reference.html): twenty modules, written in Kite. `dom`, `window`, `html` and `js` are web-only.
+
+## Things worth knowing before writing any
+
+- An error cannot be thrown away by a bare call, and `(T, error)` is fallibility rather than a tuple return.
+- A line ending a complete expression ends the statement; a continued expression carries its operator at the end of the line.
+- A module is a directory **or** a single `.kite` file, and neither is a module until a `use` names it. A module reaches only what it imports.
+- There is no overloading, no default argument, no variadic, no turbofish, no module-level `var`, and no command-line argument of any kind.
+
+## Optional
+
+- [Playground](https://kite-lang.dev/playground.html): the compiler itself, running in the page.
+- [Install](https://kite-lang.dev/install.md): the native toolchain, for a machine rather than an agent.
+- [Design notes](https://kite-lang.dev/docs/index.md): the research behind the platform, concurrency and compiler decisions.

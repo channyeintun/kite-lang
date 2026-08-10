@@ -76,6 +76,65 @@ done
 # line tells people to pipe into a shell. It was not copied, so the documented
 # one-liner fetched a 404.
 cp "$root/install.sh" "$out/install.sh"
+# The grammar is not a `.md`, and the loop above only takes those.
+cp "$root/docs/05-grammar.ebnf" "$out/docs/05-grammar.ebnf"
+
+echo "publishing the skill…"
+# `llms.txt` points agents at the skill, so the skill has to be reachable. It
+# is served as its own source rather than rendered: what wants it is a program,
+# and every example in it is compiled by `verify.sh` as a condition of being
+# written down.
+rm -rf "$out/skill"
+mkdir -p "$out/skill/references"
+cp "$root/skills/kite/SKILL.md" "$out/skill/SKILL.md"
+cp "$root"/skills/kite/references/*.md "$out/skill/references/"
+# A directory listing is not served by a static asset host, and `llms.txt`
+# links to `skill/references/`. One index, generated so it cannot go stale.
+{
+  echo "# Kite — skill reference pages"
+  echo
+  for page in "$root"/skills/kite/references/*.md; do
+    name="$(basename "$page")"
+    printf -- "- [%s](%s): %s\n" "$name" "$name" "$(sed -n 's/^# //p' "$page" | head -1)"
+  done
+} > "$out/skill/references/index.md"
+echo "  skill/SKILL.md and $(ls "$root"/skills/kite/references/*.md | wc -l | tr -d " ") reference pages"
+
+# The same for `docs/`, for the same reason: `llms.txt` cannot link a bare
+# directory, because the asset server has no listing to serve.
+{
+  echo "# Kite — design notes"
+  echo
+  echo "How the language was decided, rather than what it is."
+  echo
+  for doc in "$out"/docs/*.md; do
+    name="$(basename "$doc")"
+    case "$name" in index.md) continue ;; esac
+    printf -- "- [%s](%s): %s\n" "$name" "$name" "$(sed -n 's/^# //p' "$doc" | head -1)"
+  done
+  printf -- "- [05-grammar.ebnf](05-grammar.ebnf): the complete grammar\n"
+} > "$out/docs/index.md"
+
+echo "concatenating llms-full.txt…"
+# One fetch for an agent that would rather not make seven. Generated, so it is
+# the same bytes as the skill it was built from.
+{
+  echo "# Kite — the complete language reference for an agent"
+  echo
+  echo "Generated from skills/kite by site/build.sh. Every fenced \`kite\` example"
+  echo "below is compiled by the real compiler; a \`kite fails\` example is one the"
+  echo "compiler must reject, and the code it must be rejected with is on the"
+  echo "offending line."
+  echo
+  cat "$root/skills/kite/SKILL.md"
+  for page in "$root"/skills/kite/references/*.md; do
+    echo
+    echo "---"
+    echo
+    cat "$page"
+  done
+} > "$out/llms-full.txt"
+echo "  llms-full.txt ($(wc -c < "$out/llms-full.txt" | tr -d " ") bytes)"
 
 echo
 echo "done. serve it with any static server:"
