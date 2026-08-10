@@ -1,0 +1,10 @@
+// A qualified type whose module was never imported. This used to answer
+// `generic types are not available yet ... generics arrive later in Phase 2`,
+// which named a feature the language has had for a long time and sent the
+// reader to a roadmap to have it confirmed. The fault is the name.
+fn read(doc: Option<json.Json>) -> int { //~ ERROR E0204
+    return 1
+}
+
+fn main() {
+}

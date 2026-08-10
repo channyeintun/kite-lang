@@ -1326,9 +1326,15 @@ pub async fn fetch_user(id: UserId) -> (User, error) {
 }
 ```
 
-An `async fn` returns a `Task<T>`. `await` suspends until it completes. Calling
-an `async fn` without `await` starts it and yields the `Task` — this is how
-concurrency is expressed:
+An `async fn` returns a `Task<T>`. `await` suspends until it completes.
+
+**Calling an `async fn` does not run its body.** It yields the `Task` and
+returns; the body runs when something drives it, which is `await`. Two calls
+made and then awaited together overlap — that is how concurrency is expressed
+— but between the call and the await nothing has happened at all. A guard
+written at the top of an `async fn` has therefore *not* run when the next line
+of the caller executes, which matters for anything that must not be started
+twice:
 
 ```kite
 // Sequential — 200ms total

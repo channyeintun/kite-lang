@@ -1,0 +1,11 @@
+// A function answering with a bare `error`, bound to a name and never looked
+// at. `let (v, err) = f()` has always been caught and so has a bare `f()`;
+// this shape went through silently, and it is the one a caller writes by
+// habit against a library whose writes cannot fail usefully.
+fn note() -> error {
+    return errors.new("the log is full")
+}
+
+fn main() {
+    let dropped = note() //~ ERROR E0302
+}

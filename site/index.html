@@ -223,9 +223,10 @@ fn basket_of(body: str) -&gt; (Basket, error) {
     <h3>Concurrency is one concept</h3>
     <p class="measure">
       Some operations take time: mark them <code>async</code> and
-      <code>await</code> them. Calling an <code>async fn</code> starts it and
-      yields a <code>Task&lt;T&gt;</code>, which is how two things happen at
-      once. There are no channels, no goroutines and no <code>select</code>.
+      <code>await</code> them. Calling one yields a <code>Task&lt;T&gt;</code>
+      and <em>does not run its body</em> — <code>await</code> is what drives
+      it, and two tasks awaited together overlap. There are no channels, no
+      goroutines and no <code>select</code>.
     </p>
 <pre><code class="kite sketch">let a = fetch("alpha", 100)
 let b = fetch("beta", 50)

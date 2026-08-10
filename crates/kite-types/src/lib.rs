@@ -938,6 +938,19 @@ enum Flow {
     Diverges,
 }
 
+/// Whether an expression is a call — the only initialiser that can *produce*
+/// a failure, as opposed to naming one that already exists.
+fn is_call(kind: &ExprKind) -> bool {
+    matches!(
+        kind,
+        ExprKind::Call { .. }
+            | ExprKind::CallVirtual { .. }
+            | ExprKind::CallClosure { .. }
+            | ExprKind::CallBuiltin { .. }
+            | ExprKind::CallExtern { .. }
+    )
+}
+
 impl Flow {
     fn merge(self, other: Flow) -> Flow {
         if self == Flow::Diverges && other == Flow::Diverges {
@@ -1197,6 +1210,25 @@ impl<'a> Checker<'a> {
         // stays unassigned until a branch writes it.
         if init.is_some() {
             self.init[local_id as usize] = Init::Assigned;
+        }
+        // **A failure bound to a name is still a failure.** `let (v, err) = f()`
+        // has always marked `err`, and a bare `f()` on its own line is caught
+        // too — but a function returning `error` alone, bound and never looked
+        // at, went through silently. That is the shape a caller writes by
+        // habit against a library whose writes cannot fail usefully:
+        // `let e = dom.set_text(node, body)` and nothing after it. Worse,
+        // `--explain E0302` recommends exactly that spelling — "bind it and
+        // test it" — for the half of the rule that was enforced.
+        //
+        // Only a *call* is marked. `let e: error = nil` is a deliberate
+        // absence and there is nothing there to drop; reading the binding
+        // anywhere clears it, because reading an error is inspecting it.
+        if ty == TyId::ERR {
+            if let Some(i) = &init {
+                if is_call(&i.kind) {
+                    self.taint[local_id as usize] = Taint::Unchecked;
+                }
+            }
         }
         let _ = sig;
         Some((
@@ -8649,19 +8681,31 @@ fn resolve_ty(t: &ast::Type, types: &mut Types, diags: &mut DiagBag) -> TyId {
             types.fn_of(ps, r)
         }
 
+        // A name that did not resolve. This used to answer "generic types are
+        // not available yet … generics arrive later in Phase 2", which was
+        // true once and has not been for a long time — a program can be told
+        // the language lacks a feature it is using two lines further up, and
+        // sent to a roadmap to have that confirmed. The real fault is always
+        // the name.
         ast::Type::Path(p) => {
-            diags.push(
-                Diagnostic::error(codes::E0204, "generic types are not available yet")
-                    .with_primary(p.span, "type arguments need generics")
-                    .with_note("generics arrive later in Phase 2; see docs/06-roadmap.md"),
-            );
+            let mut d = Diagnostic::error(codes::E0204, format!("unknown type `{}`", p.text()))
+                .with_primary(p.span, "no type of this name is in scope");
+            if p.segments.len() > 1 {
+                // `json.Json` with no `use std/json` is the common way to
+                // arrive here, and the qualifier says which import is missing.
+                d = d.with_note(format!(
+                    "`{}` is qualified by `{}` — is that module imported?",
+                    p.text(),
+                    p.segments[0].name
+                ));
+            }
+            diags.push(d);
             TyId::ERROR
         }
-        ast::Type::Dyn { span, .. } => {
+        ast::Type::Dyn { path, span } => {
             diags.push(
-                Diagnostic::error(codes::E0204, "`dyn` is not available yet")
-                    .with_primary(*span, "trait objects need traits")
-                    .with_note("traits arrive later in Phase 2; see docs/06-roadmap.md"),
+                Diagnostic::error(codes::E0204, format!("unknown trait `{}`", path.text()))
+                    .with_primary(*span, "no trait of this name is in scope"),
             );
             TyId::ERROR
         }
