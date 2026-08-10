@@ -69,6 +69,12 @@ impl Emit {
 /// want different artefacts and neither wants the other's.
 pub struct NativeProgram {
     mir: kite_mir::Program,
+    /// Read only by the Cranelift methods below, which do not exist on wasm32
+    /// — and neither does the backend crate, which `Cargo.toml` gates on the
+    /// same condition. Carried there it would be a copy of the whole type
+    /// table that nothing can ever ask for, so it is gated too rather than
+    /// silenced.
+    #[cfg(not(target_arch = "wasm32"))]
     types: kite_hir::Types,
 }
 
@@ -618,7 +624,11 @@ fn run_passes(
                 return (String::new(), None, None, None, index);
             }
         }
-        let native = NativeProgram { mir, types: hir.types };
+        let native = NativeProgram {
+            mir,
+            #[cfg(not(target_arch = "wasm32"))]
+            types: hir.types,
+        };
         return (String::new(), None, None, Some(native), index);
     }
 

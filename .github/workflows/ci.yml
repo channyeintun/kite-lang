@@ -68,8 +68,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # And again for wasm32, because that target compiles different code: the
+      # native backend is gated out of `kite-driver` there, so a field only
+      # Cranelift reads becomes dead. The job above cannot see it, and the
+      # wasm32 job below only runs `cargo build`, which prints a warning and
+      # exits 0 — so `field `types` is never read` was on every playground
+      # build for as long as it took someone to ask about it.
+      - run: cargo clippy -p kite-playground --target wasm32-unknown-unknown -- -D warnings
 
   # Every `.kite` file in the tree is formatted, and formatting it again
   # changes nothing. A formatter nobody runs is a formatter that drifts.

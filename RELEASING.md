@@ -31,6 +31,7 @@ cargo test --workspace --all-targets
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p kite-playground --target wasm32-unknown-unknown -- -D warnings
 ```
 
 ```bash
