@@ -144,6 +144,44 @@
       </div>
       <a class="button button-secondary" href="https://kite-feeds.pages.dev">Open Kite&nbsp;Feeds</a>
     </div>
+
+    <div class="cta-row">
+      <div>
+        <h3>A point of sale</h3>
+        <p>
+          <a href="https://github.com/channyeintun/Kite-POS-Backoffice">Kite&nbsp;POS</a>
+          is two installable apps for one corner shop — a till for the counter,
+          a back office for whoever owns the place. A role decides which one a
+          sign-in opens and there is no navigation between them, so they are
+          separate pages, each pointing a <code>&lt;script type="module"&gt;</code>
+          straight at a <code>.kite</code> file. They still share every module
+          in <code>app/src/</code>: because <strong>a Kite module is a
+          directory</strong>, <code>api.kite</code>, <code>money.kite</code> and
+          <code>i18n.kite</code> are compiled into both without a line of either
+          duplicated.
+        </p>
+        <p>
+          It is the bigger of the two programs. Fourteen back-office screens off
+          one rail — stock, purchasing, double-entry books where no balance is
+          stored and every figure is summed from the journal — and a till that
+          merges a rescan into <code>×3</code> rather than three lines, splits a
+          payment four ways, and keeps a held basket in the database so a
+          refresh cannot lose it. Every amount is an integer count of the
+          currency's minor unit, and <code>money.kite</code> reads a typed price
+          as digits rather than as a float, because <code>1.005</code> is really
+          <code>1.00499999999999989</code> as a double and would round the wrong
+          way. Both apps run in English and Burmese&nbsp;(မြန်မာ).
+        </p>
+        <p class="muted">
+          <strong>220&nbsp;KB</strong> of WebAssembly for the till and
+          <strong>1.35&nbsp;MB</strong> for the back office — 72&nbsp;KB and
+          292&nbsp;KB over the wire. There is nothing to open: a shop's books are
+          its own, so this one is here to be read rather than clicked. The
+          Worker behind both apps is TypeScript, not Kite.
+        </p>
+      </div>
+      <a class="button button-secondary" href="https://github.com/channyeintun/Kite-POS-Backoffice">Read the source</a>
+    </div>
   </div>
 </section>
 

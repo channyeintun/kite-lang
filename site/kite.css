@@ -369,6 +369,9 @@ section p:last-child { margin-bottom: 0; }
   .cta-row > .button { flex: 0 0 320px; }
 }
 .cta-row h2 { margin-bottom: 1.4rem; }
+/* Two of these stack in "See it run", and a flex row brings no margin of its
+   own — without this the second application starts where the first one ends. */
+.cta-row + .cta-row { margin-top: 56px; }
 
 /* ---- the grounds ----
    Four, as the brand sheet approves them: the dark ground, the violet, the
