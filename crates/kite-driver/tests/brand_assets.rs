@@ -154,7 +154,6 @@ fn every_page_wears_the_same_header() {
         for needed in [
             "kite-mark.svg\"",
             "class=\"name\">Kite<",
-            "class=\"chip\">draft<",
             "class=\"gh\"",
         ] {
             assert!(html.contains(needed), "{} is missing `{}`", page, needed);

@@ -175,15 +175,6 @@ body > main { flex: 1; }
   color: var(--ink);
 }
 
-.topbar .chip {
-  font-family: var(--wordmark);
-  font-size: 1.05rem;
-  color: var(--muted);
-  border: 1px solid var(--rule);
-  border-radius: 4px;
-  padding: 2px 6px;
-}
-
 .topbar nav {
   display: flex;
   align-items: center;
