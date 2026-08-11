@@ -196,6 +196,44 @@ fn is_formatted_agrees_with_format() {
 /// Every Kite file in the tree formats to something that still compiles, and
 /// formatting it again changes nothing. This is the test that matters: a
 /// formatter is only useful if it can be trusted on a real file.
+/// The one declaration whose `=` does not begin a value. Both sides of an
+/// alias are types, and reading the right-hand one as a value spaced its
+/// brackets like arithmetic — `Option<json.Json>` came out as
+/// `Option < json.Json >`, and stayed there, because the mangled form was a
+/// fixed point of the same rule that produced it.
+#[test]
+fn a_type_alias_is_a_type_on_both_sides() {
+    same("pub type Doc = Option<json.Json>\n");
+    same("type Pair = Map<str, int>\n");
+    same("type Arr = [Option<int>]\n");
+    let out = idempotent("type Nested = Box<Box<int>>\n");
+    assert_eq!(out, "type Nested = Box<Box<int>>\n");
+    // And it repairs a file the old formatter already spaced out.
+    assert_eq!(
+        format("pub type Doc = Option < json.Json >\n"),
+        "pub type Doc = Option<json.Json>\n"
+    );
+}
+
+/// The other half of the same ambiguity. A struct literal's field separator
+/// reads exactly like a type annotation's, so the rule that looked for a `:`
+/// on the line tightened every comparison written in a field value —
+/// `tone: if low > 0` came out as `low> 0`, one-sided and wrong.
+#[test]
+fn a_comparison_in_a_field_value_is_not_a_type_argument() {
+    same("let x = Flag{ on: count > 0, n: 1 }\n");
+    same("let y = Flag{ on: a < b, n: 2 }\n");
+    same("let z = Flag{ on: sum(a, b) > 0, n: 3 }\n");
+    same("let t = Stat{ tone: if low > 0 { \"warn\" } else { \"\" } }\n");
+    // Still tight where it really is a type, on a line that also has a colon.
+    same("let m: Option<int> = nil\n");
+    same("fn f(a: Map<str, int>) -> Option<Box<int>> {\n}\n");
+    assert_eq!(
+        format("let t = Stat{ tone: if low> 0 { \"w\" } else { \"\" } }\n"),
+        "let t = Stat{ tone: if low > 0 { \"w\" } else { \"\" } }\n"
+    );
+}
+
 #[test]
 fn the_whole_tree_survives_formatting() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

@@ -33,7 +33,7 @@ pub enum Result<T, E> {
 // Methods on a generic type are written once, against the parameters, and
 // specialised per receiver — the type arguments come off the receiver's own
 // type, so there is nothing at a call site to infer.
-impl< T > Box < T > {
+impl<T> Box<T> {
     pub fn get(self) -> T {
         return self.value
     }

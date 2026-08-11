@@ -26,7 +26,9 @@
 //!
 //! Two tokens mean two things, and both are decided by what came immediately
 //! before: `-` after an operator or an open bracket is a negation, and `|`
-//! where a value is expected opens a closure.
+//! where a value is expected opens a closure. A third, `<`, cannot be settled
+//! that way — `Option<int>` and `count < n` are the same three tokens — so it
+//! is decided by reading forward instead, in `opens_type_arguments`.
 
 use kite_diag::DiagBag;
 use kite_lexer::{Comment, Token, TokenKind as T};
@@ -45,6 +47,7 @@ pub fn format(src: &str) -> String {
         depth: 0,
         line_started: false,
         closure_params: false,
+        type_depth: 0,
         prev: None,
         prev2: None,
         prev_end: 0,
@@ -67,6 +70,10 @@ struct Formatter<'a> {
     line_started: bool,
     /// Between the two `|` of a closure's parameter list.
     closure_params: bool,
+    /// Open type-argument lists at this point. Set by the forward scan at
+    /// the `<`, so the tokens inside and the `>` that closes them do not
+    /// each have to work it out again.
+    type_depth: usize,
     prev: Option<T>,
     /// The token before that. `{` needs it: `Point{` is a literal and
     /// `struct Point {` is a declaration, and only the token two back tells
@@ -75,9 +82,78 @@ struct Formatter<'a> {
     prev_end: u32,
 }
 
+/// Whether the `<` just reached opens a type argument list rather than
+/// beginning a comparison.
+///
+/// This is the one genuine ambiguity in the token stream, and nothing behind
+/// the `<` settles it: `Option<int>` and `count < n` are an identifier, a `<`
+/// and an identifier either way. What settles it is what comes after — a type
+/// argument list closes on a `>` with nothing between but more type — so this
+/// reads forward until it finds the closing bracket or something that could
+/// not be in a type.
+///
+/// It replaced a rule that guessed from the text of the line so far, which was
+/// wrong in both directions: it spaced out `type Doc = Option<json.Json>`
+/// because a value supposedly begins after `=`, and it tightened
+/// `tone: if low > 0` into `low> 0` because the line held a `:` and a struct
+/// literal's field separator looks exactly like a type annotation's.
+fn opens_type_arguments(ahead: &[Token]) -> bool {
+    // Long enough for any real type, short enough that a `<` with no `>` after
+    // it costs nothing. A comparison chain hits a disqualifying token within a
+    // few tokens anyway.
+    const LIMIT: usize = 96;
+    let mut depth = 1usize;
+    for token in ahead.iter().take(LIMIT) {
+        match token.kind {
+            // Nesting. `>>` closes two at once, which is how `Box<Box<int>>`
+            // reaches zero without a space in the middle.
+            T::Lt => depth += 1,
+            T::Gt => {
+                depth -= 1;
+                if depth == 0 {
+                    return true;
+                }
+            }
+            // `>>` is two closers. Either of them can be ours: at depth 1 the
+            // first one closes this list and the second belongs to whatever
+            // encloses it, and at depth 2 they close both. Only deeper than
+            // that does the scan carry on.
+            T::Shr => {
+                if depth <= 2 {
+                    return true;
+                }
+                depth -= 2;
+            }
+            // Everything a type is made of: names and paths, the brackets of
+            // `[T]`, `(A, B)` and `{K: V}`, the `,` between arguments, and the
+            // pieces of `fn(A) -> B`. `dyn` is in here too — the lexer hands
+            // it over as an identifier rather than a keyword of its own.
+            T::Ident
+            | T::Comma
+            | T::Dot
+            | T::Colon
+            | T::LBracket
+            | T::RBracket
+            | T::LParen
+            | T::RParen
+            | T::LBrace
+            | T::RBrace
+            | T::Arrow
+            | T::Fn
+            | T::SelfKw => {}
+            // A statement ended before the bracket did, so there was no
+            // bracket — the `<` was a comparison. Anything else (a literal, an
+            // operator, a keyword that starts an expression) cannot appear in
+            // a type and says the same thing.
+            _ => return false,
+        }
+    }
+    false
+}
+
 impl Formatter<'_> {
     fn run(&mut self, tokens: &[Token]) {
-        for token in tokens {
+        for (i, token) in tokens.iter().enumerate() {
             // The lexer emits a newline only where one separates statements.
             // The formatter wants every line break the author wrote — inside
             // an argument list too — so it reads them from the source gap
@@ -112,7 +188,10 @@ impl Formatter<'_> {
             }
 
             self.start_line();
-            if self.needs_space(token.kind) {
+            let opens_types = token.kind == T::Lt
+                && matches!(self.prev, Some(T::Ident) | Some(T::Impl))
+                && opens_type_arguments(&tokens[i + 1..]);
+            if self.needs_space(token.kind, opens_types) {
                 self.out.push(' ');
             }
             let text = &self.src[token.span.start as usize..token.span.end as usize];
@@ -120,6 +199,15 @@ impl Formatter<'_> {
 
             if matches!(token.kind, T::LBrace | T::LBracket | T::LParen) {
                 self.depth += 1;
+            }
+            if opens_types {
+                self.type_depth += 1;
+            } else if self.type_depth > 0 {
+                match token.kind {
+                    T::Gt => self.type_depth -= 1,
+                    T::Shr => self.type_depth = self.type_depth.saturating_sub(2),
+                    _ => {}
+                }
             }
             if token.kind == T::Pipe {
                 self.closure_params = !self.closure_params && self.is_value_position();
@@ -138,7 +226,7 @@ impl Formatter<'_> {
 
     // ---- spacing ------------------------------------------------------------
 
-    fn needs_space(&self, kind: T) -> bool {
+    fn needs_space(&self, kind: T, opens_types: bool) -> bool {
         let Some(prev) = self.prev else { return false };
         if !self.line_started {
             return false;
@@ -183,17 +271,14 @@ impl Formatter<'_> {
             return false;
         }
         // Type arguments are tight: `Option<int>`, `Box<Box<int>>`, and the
-        // parameter list of `impl<T>` or `fn f<T>`.
-        if kind == T::Lt && prev == T::Impl {
+        // parameter list of `impl<T>` or `fn f<T>`. Whether this `<` is one of
+        // those or the start of `a < b` was decided by `opens_type_arguments`,
+        // which read forward to find out; `type_depth` then carries the answer
+        // to the tokens inside and to the `>` that closes them.
+        if kind == T::Lt && opens_types {
             return false;
         }
-        if kind == T::Lt && prev == T::Ident && self.in_type_position() {
-            return false;
-        }
-        if matches!(prev, T::Lt) && self.in_type_position() {
-            return false;
-        }
-        if matches!(kind, T::Gt | T::Shr) && self.in_type_position() {
+        if self.type_depth > 0 && (prev == T::Lt || matches!(kind, T::Gt | T::Shr)) {
             return false;
         }
         // `Point{ … }` is a literal and `struct Point {` is a declaration. The
@@ -274,35 +359,6 @@ impl Formatter<'_> {
         ["=", "(", "[", ",", ":", "=>", "return", "check", "await"]
             .iter()
             .any(|token| head.ends_with(token))
-    }
-
-    /// Whether the tail of this line reads as a type rather than a value.
-    ///
-    /// Everything after a `:` or a `->` is a type until an `=` begins a value,
-    /// and so is the head of a declaration. Enough to keep `Option<int>` tight
-    /// while leaving `a < b` spaced.
-    fn in_type_position(&self) -> bool {
-        let line = self.current_line();
-        // A value begins after an `=`, and after the `|` that closes a
-        // closure's parameter list — `|a: int, b: int| a < b` has a colon in
-        // it, and without this the comparison in the body was read as a type
-        // argument list and lost its spaces.
-        let value_from = line
-            .rfind('=')
-            .into_iter()
-            .chain(line.rfind('|'))
-            .max()
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let tail = &line[value_from..];
-        if tail.contains(':') || tail.contains("->") {
-            return true;
-        }
-        let head = line.trim_start();
-        value_from == 0
-            && ["struct ", "enum ", "impl ", "trait ", "fn ", "pub ", "type ", "var ", "let "]
-                .iter()
-                .any(|k| head.starts_with(k))
     }
 
     fn current_line(&self) -> &str {
