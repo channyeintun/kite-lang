@@ -44,20 +44,6 @@ echo "building the site's own program…"
 "$root/target/release/kitec" build "$here/src/main.kite" --emit wasm --out "$out"
 echo "  app.wasm ($(wc -c < "$out/app.wasm" | tr -d " ") bytes)"
 
-echo "building the demo…"
-# The page, the stylesheet and the program are copied; the module is compiled
-# beside them. What the site serves is exactly what `kitec build` produces
-# against a page nobody generated — which is the whole claim, so demonstrating
-# it any other way would be demonstrating something else.
-#
-# `kitec build` leaves `index.html` alone when one is already there, so the
-# order here matters: copy the page first.
-mkdir -p "$out/demo"
-cp "$root/examples/page/index.html" "$out/demo/index.html"
-cp "$root/examples/page/style.css" "$out/demo/style.css"
-"$root/target/release/kitec" build "$root/examples/page/main.kite" --emit wasm --out "$out/demo"
-echo "  demo/index.html ($(wc -c < "$out/demo/app.wasm" | tr -d " ") bytes of WebAssembly)"
-
 echo "copying the documents…"
 mkdir -p "$out/docs"
 cp "$root/SPECIFICATION.md" "$out/SPECIFICATION.md"

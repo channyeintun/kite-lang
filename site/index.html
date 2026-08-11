@@ -109,34 +109,6 @@
       <div class="highlight"></div>
     </header>
 
-    <div class="demo-row">
-      <iframe class="demo" src="demo/" title="Five thousand rows, filtered and sorted in Kite"
-              loading="lazy"></iframe>
-      <div>
-        <h3>Five thousand rows</h3>
-        <p>
-          Type in the filter. Every keystroke walks all five thousand rows,
-          sorts what survives, and writes only the cells that changed — in about
-          <strong>3&nbsp;ms</strong>. Click a column heading to sort by it, and
-          again to reverse; the rows move, they are not rebuilt.
-        </p>
-        <p>
-          The page in that frame is an ordinary HTML file with an ordinary
-          stylesheet. The table markup, the hover, the column that right-aligns,
-          the colour a status is drawn in — all CSS. Kite holds the rows, does
-          the work, and writes text and class names.
-        </p>
-        <p class="muted">
-          <strong>18&nbsp;KB</strong> of WebAssembly, with a budget in CI that
-          fails the build if it grows. The page, the stylesheet and the program
-          are
-          <a href="https://github.com/channyeintun/kite-lang/tree/main/examples/page">examples/page</a>;
-          what the site serves is what <code>kitec build</code> produced against
-          that page, unaltered.
-        </p>
-      </div>
-    </div>
-
     <div class="cta-row">
       <div>
         <h3>A Mastodon client</h3>

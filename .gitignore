@@ -24,7 +24,6 @@ site/docs/
 site/SPECIFICATION.md
 site/README.md
 site/install.sh
-site/demo/
 
 # The rendered package manifests: written by packaging/render.sh from a
 # release's own checksums. The ones in the tree keep their placeholders so they

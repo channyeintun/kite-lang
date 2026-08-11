@@ -582,24 +582,6 @@ li { margin-bottom: 0.6rem; }
 
 .muted { color: var(--muted); }
 
-/* ---- the demos ----
-   The embedded page is the one `kitec build` writes, in a frame, so what the
-   site shows and what the compiler produces cannot drift apart. The stage
-   inside is 640x360 plus its own toolbar; the frame is sized to that rather
-   than stretched, because the program draws at a fixed size and scaling it
-   would be showing something the program did not say. */
-
-.demo-row {
-  display: grid;
-  gap: 28px;
-  align-items: start;
-  margin-bottom: 40px;
-}
-@media screen and (min-width: 68em) {
-  .demo-row { grid-template-columns: 664px 1fr; gap: 40px; }
-}
-.demo-row:last-child { margin-bottom: 0; }
-
 /* The crash course, embedded. It is somebody else's application in here, so
    it gets a full-width frame and a real aspect ratio rather than the demo's
    fixed 664px — an editor with a video beside it does not fit in a card.
@@ -672,21 +654,6 @@ iframe.course {
     height: 100%;
     transform: none;
   }
-}
-
-iframe.demo {
-  display: block;
-  width: 100%;
-  max-width: 664px;
-  /* Shorter than the old one, which framed a whole application. What is in
-     there now is a card in the middle of its own page, and 460px left it
-     swimming. */
-  height: 340px;
-  border: 1px solid var(--brand-rule);
-  border-radius: 6px;
-  /* The demo brings its own ground and honours the reader's colour scheme, so
-     nothing is set here: a background chosen out here would show through in one
-     scheme and fight the card in the other. */
 }
 
 /* ---- document pages ----
