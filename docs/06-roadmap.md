@@ -1434,8 +1434,8 @@ twice.
 GitHub highlights through [Linguist](https://github.com/github-linguist/linguist),
 and there are two ways in.
 
-**Now, in this repository:** `.gitattributes` can map an extension onto a
-language Linguist already knows.
+**One way in** is that `.gitattributes` can map an extension onto a language
+Linguist already knows.
 
 ```
 *.kite linguist-language=Rust
@@ -1455,6 +1455,15 @@ deliberately does not.
 
 `linguist-detectable` makes `.kite` files count towards the repository's
 language statistics.
+
+**This repository does not take that way in.** `.gitattributes` names `Kite`,
+which Linguist cannot resolve yet and therefore ignores, so `.kite` goes
+uncoloured on GitHub for now. Highlighting was not worth the assertion: the
+attributes file is where a repository states what its sources are, and the
+resemblance that makes the Rust mapping tempting is what makes the claim
+misread — `var`, `check` and `nil` are Kite, and a reader told the file is Rust
+reads them as mistakes. The line starts working the day the entry below lands,
+without an edit.
 
 **Properly, later:** the submission is written and waiting in
 [`packaging/linguist/`](../packaging/linguist/) — the `languages.yml` entry, the

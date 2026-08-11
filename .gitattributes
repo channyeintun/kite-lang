@@ -2,18 +2,23 @@
 #
 # GitHub highlights through Linguist, which only knows languages submitted to
 # it — and it asks for evidence of wide use before accepting one, which is a
-# consequence of adoption rather than a task. Until then this maps Kite onto
-# Rust, which is much the closest fit available.
+# consequence of adoption rather than a task. Kite is not in it yet: the
+# submission is written and waiting in `packaging/linguist/`.
 #
-# Shared outright: fn, let, match, struct, enum, trait, impl, pub, use, as,
-# type, self, dyn, async, await, true, false. The shapes line up too — `-> T`,
-# `Option<T>`, `[T]`, and `struct X { field: T }` all parse the way a reader
-# expects. What misses is small: `var` and `check` are not Rust keywords, `nil`
-# is spelled `None` there, and `\(x)` interpolation goes uncoloured.
+# This names Kite regardless. Linguist ignores an override it cannot resolve,
+# so until the entry lands the line does nothing and `.kite` goes uncoloured on
+# GitHub. That is the deliberate half of the trade. The alternative —
+# `linguist-language=Rust` — does colour them, by asserting in the one file a
+# repository keeps for stating what its sources are that these are Rust
+# sources. They are not, and the resemblance that makes the mapping tempting is
+# exactly what makes the claim misread: `var`, `check` and `nil` are Kite, and
+# a reader who has been told this is Rust reads them as mistakes. The day
+# Linguist accepts the entry this line starts working, with no change here.
 #
 # `linguist-detectable` makes `.kite` files count in the repository's language
-# statistics. See docs/06-roadmap.md, Phase 14.
-*.kite linguist-language=Rust
+# statistics — dormant until then, for the same reason. See docs/06-roadmap.md,
+# Phase 14.
+*.kite linguist-language=Kite
 *.kite linguist-detectable
 
 # Generated glue and pages are output, not source.
