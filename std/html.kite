@@ -141,6 +141,37 @@ fn set_attrs(on: dom.Element, attrs: [Attr]) -> error {
     return nil
 }
 
+/// Whether `name` is one of these.
+fn names_include(attrs: [Attr], name: str) -> bool {
+    for a in attrs {
+        if a.name == name {
+            return true
+        }
+    }
+    return false
+}
+
+/// Bring an element's attributes to exactly `now`, **including the ones that
+/// went away**.
+///
+/// Writing the new ones is not enough: a description says what an element *is*,
+/// so an attribute it no longer mentions has to leave the document. Without
+/// this a `<md-dialog open>` could never close, a `disabled` button could never
+/// become pressable again, and an `aria-current` would accumulate on every tab
+/// the reader ever visited — each of them a state the description had already
+/// stopped asking for.
+fn write_attrs(on: dom.Element, was: [Attr], now: [Attr]) -> error {
+    for a in was {
+        if !names_include(now, a.name) {
+            let err = dom.remove_attribute(on, a.name)
+            if err != nil {
+                return err
+            }
+        }
+    }
+    return set_attrs(on, now)
+}
+
 fn build(node: Node) -> (Live, error) {
     let tag = if node.tag.len() == 0 { "span" } else { node.tag }
     let (made, err) = dom.create(tag)
@@ -198,12 +229,31 @@ fn same_attrs(was: [Attr], now: [Attr]) -> bool {
 /// A tag change is a different element, so it is rebuilt. Everything else is
 /// reused: the element stays where it is, keeps its focus and its scroll
 /// position, and only what differs is written.
-fn patch(old: Live, next: Node) -> (Live, error) {
+fn patch(parent: dom.Element, old: Live, next: Node) -> (Live, error) {
     if old.tag != next.tag {
-        return build(next)
+        // A different tag is a different element, so it is built — and put
+        // where the old one stood, in the same statement. Leaving that to the
+        // caller was a bug: `reconcile` only writes a child's position when the
+        // list has shifted under it, so a node that changed tag *in place* was
+        // built, never inserted, and the old element stayed in the document
+        // with nothing reporting anything. A button could not change variant
+        // and a screen could not change shape.
+        let (made, err) = build(next)
+        if err != nil {
+            return _, err
+        }
+        let ierr = dom.insert_before(parent, made.el, old.el)
+        if ierr != nil {
+            return _, ierr
+        }
+        let rerr = dom.remove(old.el)
+        if rerr != nil {
+            return _, rerr
+        }
+        return made, nil
     }
     if !same_attrs(old.attrs, next.attrs) {
-        let err = set_attrs(old.el, next.attrs)
+        let err = write_attrs(old.el, old.attrs, next.attrs)
         if err != nil {
             return _, err
         }
@@ -301,7 +351,7 @@ fn reconcile(parent: dom.Element, olds: [Live], nexts: [Node]) -> ([Live], error
             out.push(made)
         } else {
             taken[from] = true
-            let (live, err) = patch(olds[from], want)
+            let (live, err) = patch(parent, olds[from], want)
             if err != nil {
                 return _, err
             }
