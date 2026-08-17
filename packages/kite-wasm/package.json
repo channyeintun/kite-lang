@@ -1,6 +1,6 @@
 {
   "name": "@kite-lang/compiler-wasm",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "The Kite compiler, as WebAssembly. One artefact for every platform, and it runs wherever WebAssembly does.",
   "type": "module",
   "main": "compiler.js",

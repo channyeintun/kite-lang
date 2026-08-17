@@ -304,14 +304,14 @@ dependencies = [
 
 [[package]]
 name = "kite-ast"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "kite-span",
 ]
 
 [[package]]
 name = "kite-codegen-clif"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -334,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "kite-codegen-kbc"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "kite-diag",
  "kite-hir",
@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "kite-codegen-wasm"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "kite-diag",
  "kite-hir",
@@ -365,14 +365,14 @@ dependencies = [
 
 [[package]]
 name = "kite-diag"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "kite-span",
 ]
 
 [[package]]
 name = "kite-doc"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "kite-ast",
  "kite-diag",
@@ -383,7 +383,7 @@ dependencies = [
 
 [[package]]
 name = "kite-driver"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "kite-ast",
  "kite-codegen-clif",
@@ -402,7 +402,7 @@ dependencies = [
 
 [[package]]
 name = "kite-fmt"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "kite-diag",
  "kite-lexer",
@@ -411,14 +411,14 @@ dependencies = [
 
 [[package]]
 name = "kite-hir"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "kite-span",
 ]
 
 [[package]]
 name = "kite-lexer"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "kite-diag",
  "kite-span",
@@ -427,7 +427,7 @@ dependencies = [
 
 [[package]]
 name = "kite-lsp"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "kite-diag",
  "kite-doc",
@@ -439,7 +439,7 @@ dependencies = [
 
 [[package]]
 name = "kite-mir"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "kite-diag",
  "kite-hir",
@@ -452,7 +452,7 @@ dependencies = [
 
 [[package]]
 name = "kite-parser"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "kite-ast",
  "kite-diag",
@@ -463,7 +463,7 @@ dependencies = [
 
 [[package]]
 name = "kite-playground"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "kite-doc",
  "kite-driver",
@@ -472,7 +472,7 @@ dependencies = [
 
 [[package]]
 name = "kite-resolve"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "kite-ast",
  "kite-diag",
@@ -483,15 +483,15 @@ dependencies = [
 
 [[package]]
 name = "kite-rt"
-version = "0.1.8"
+version = "0.1.9"
 
 [[package]]
 name = "kite-span"
-version = "0.1.8"
+version = "0.1.9"
 
 [[package]]
 name = "kite-types"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "kite-ast",
  "kite-diag",
@@ -504,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "kite-vm"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "kite-codegen-kbc",
  "kite-diag",
@@ -519,7 +519,7 @@ dependencies = [
 
 [[package]]
 name = "kitec"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "kite-diag",
  "kite-doc",

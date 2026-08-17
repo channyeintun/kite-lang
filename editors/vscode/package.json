@@ -2,7 +2,7 @@
   "name": "kite-lang",
   "displayName": "Kite",
   "description": "Language support for Kite: highlighting, diagnostics, hover, go to definition, and formatting.",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "publisher": "kite-lang",
   "license": "MIT",
   "repository": {

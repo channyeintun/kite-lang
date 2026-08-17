@@ -57,7 +57,7 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 curl -fsSL https://kite-lang.dev/install.sh | sh
 ```
 
-The current release is **v0.1.8**, signed and built by CI for macOS, Linux and
+The current release is **v0.1.9**, signed and built by CI for macOS, Linux and
 Windows; the installer reads `releases/latest` and checks the release's own
 `SHA256SUMS`. Kite is pre-1.0 and the language is still allowed to move, so
 the version is always `0.1.N` — the patch number climbs and the first two
