@@ -1693,10 +1693,18 @@ if (HOSTS.net) {
     return out;
   };
   HOSTS.net = {
-    fetch_start: (method, url, body, headers) => {
+    fetch_start: (method, url, body, headers, credentials, redirect) => {
       const request = { state: 0, status: 0, body: "", error: "", headers: null };
       const id = REQUESTS.push(request) - 1;
       const init = { method: textOf(method), headers: parseHeaders(textOf(headers)) };
+      // `std/http` builds these from enums, so they are always one of the
+      // words `fetch` knows. They are still only applied when non-empty, so a
+      // host supplied by hand — `provide("net", …)` — that calls this with
+      // four arguments behaves exactly as it did.
+      const creds = credentials === undefined ? "" : textOf(credentials);
+      if (creds !== "") init.credentials = creds;
+      const follow = redirect === undefined ? "" : textOf(redirect);
+      if (follow !== "") init.redirect = follow;
       if (textOf(body) !== "") init.body = textOf(body);
       // Every one of these settles a state a Kite task is waiting on, so every
       // one of them ends in `wake`. A host that changes what a program is

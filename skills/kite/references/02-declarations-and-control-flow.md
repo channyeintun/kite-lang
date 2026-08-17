@@ -4,10 +4,10 @@
 
 Everything below is checked against `target/release/kitec`, not against the prose.
 
-- **There are no module-level bindings at all.** Not `var`, and not `let` either. A file
-  is `use` lines — which must come first — then declarations (`fn`, `struct`, `enum`,
-  `trait`, `impl`, `type`, and `extern fn` under its `@host(…)` attribute). Every binding
-  lives inside a function body.
+- **A module-level `let` is a constant; a module-level `var` does not exist** (`E0118`).
+  A file is `use` lines — which must come first — then declarations (`fn`, `struct`,
+  `enum`, `trait`, `impl`, `type`, a constant `let`, and `extern fn` under its `@host(…)`
+  attribute). Every *mutable* binding lives inside a function body.
 - **A closure may not capture a `var`** (`E0211`). Captures are by value at closure-creation
   time, so a later write would be invisible. Mutation goes through a function that takes a
   `var` parameter.
@@ -118,14 +118,31 @@ fn main() {
 }
 ```
 
-There is no module-level binding of any kind. A shared constant is a `pub fn` that returns
-it, or a field of a struct the program builds in `main`.
+A shared constant is a module-level `let`. Every use of the name is replaced by the value,
+so nothing is looked up and nothing is allocated at run time.
+
+```kite
+let NAMESPACE = "payments:"
+pub let ACT_SETTLE = "\(NAMESPACE)settle"
+pub let MAX_BODY: int = 1 << 20
+```
+
+The right-hand side has to be one the compiler can work out: a literal, an operator applied
+to constants, an interpolation whose holes are all constants, or another constant —
+including an imported one, `limits.MAX_BODY`. A **call is not** (`E0118`), even one that
+would always return the same answer. The types are `bool`, `int`, `float` and `str`; a
+slice or map constant would be an allocation, so it stays an ordinary `let` inside the
+function that wants it. A `float` may not be interpolated *into* a constant (`E0118`) —
+the browser and the native runtime write one differently at the exponent boundary.
+
+There is no module-level `var`: a mutable binding every function can reach is state none
+of their signatures mentions. Put it in a struct and pass it to what changes it.
 
 ```kite fails
-var counter = 0 //~ E0100
+var counter = 0 //~ E0118
 
 fn main() {
-    counter = counter + 1
+    counter = counter + 1 //~ E0114
 }
 ```
 
@@ -189,12 +206,12 @@ fn main() {
 
 `E0401` is the diagnostic for reaching into another module for something unmarked.
 
-> **Compiler vs specification.** SPECIFICATION.md §4.2 says a `pub struct` with unmarked
+> **Compiler vs specification.** SPECIFICATION.md §4.3 says a `pub struct` with unmarked
 > fields is opaque — importers "cannot read, construct, or destructure it". The compiler
 > does not enforce this. `check_visible` in `crates/kite-resolve/src/lib.rs` runs only for
 > `Res::Fn`, `Res::Type` and `Res::Variant`; field-level `pub` is parsed and then ignored,
 > so an importer can read a private field and write a struct literal naming it. Treat field
-> `pub` as documentation until that gap closes. §4.2 lists enum variants as taking `pub`
+> `pub` as documentation until that gap closes. §4.3 lists enum variants as taking `pub`
 > too; there the parser rejects it outright (`E0100`) — a variant's visibility is its
 > enum's.
 

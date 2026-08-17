@@ -1,0 +1,15 @@
+// A module-level `let` is worked out while compiling, so its value has to be
+// something the compiler can work out.
+
+let CALLED = compute() //~ ERROR E0118
+let BUILT = ["a", "b"] //~ ERROR E0118
+let DIVIDED = 10 / 0 //~ ERROR E0118
+let MIXED = 1 + "two" //~ ERROR E0201
+
+fn compute() -> int {
+    return 7
+}
+
+fn main() {
+    io.print("\(CALLED)\(BUILT.len())\(DIVIDED)\(MIXED)")
+}

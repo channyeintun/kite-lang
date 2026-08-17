@@ -42,7 +42,8 @@ a beginner to understand goroutines, channels, `select`, value-versus-pointer
 receivers, nil interfaces versus nil pointers, and slice aliasing. Kite's budget
 is spent as follows, and this list is complete:
 
-1. `let` / `var` — immutable and mutable bindings
+1. `let` / `var` — immutable and mutable bindings, and at module level a `let`
+   alone, which names a value the compiler works out ([§4.2](#42-module-level-constants))
 2. Primitive types, slices, maps, tuples, optionals
 3. `fn` — functions, including closures
 4. `if` / `for` / `match` — control flow
@@ -362,7 +363,53 @@ main reason people reach for `var`.
 Shadowing within a nested scope is permitted. Shadowing within the *same* scope
 is an error — it is almost always a typo.
 
-### 4.2 Visibility
+### 4.2 Module-level constants
+
+A `let` at the top of a module names a value the compiler works out while
+compiling. Every use of the name **is** that value: the name is replaced by a
+literal, so nothing is looked up and nothing is allocated at run time.
+
+```kite
+let NAMESPACE = "payments:"
+pub let ACT_SETTLE = "\(NAMESPACE)settle"
+pub let MAX_BODY: int = 1 << 20
+```
+
+The right-hand side must be one the compiler can work out: a literal, an
+operator applied to constants, an interpolation whose holes are all constants,
+or another constant — including one from an imported module,
+`limits.MAX_BODY`. A call is not, even one that would always return the same
+answer. Running a program's own code during its compilation is a second
+evaluation order, and which functions were available to it would become a
+language rule nobody could predict.
+
+The type is optional and read from the value when it is left out. There is no
+implicit conversion here either: `let X: float = 3` is [E0200](#16-diagnostics).
+
+Four types are allowed — `bool`, `int`, `float`, `str`. A slice, map or struct
+constant would be an allocation, so it would have to be either a fresh value at
+every use, which is surprising for something spelled like a name, or one shared
+object, which is what the next paragraph refuses. A slice of constants is an
+ordinary `let` inside the function that wants one.
+
+**There is no module-level `var`** ([E0118](#16-diagnostics)). A mutable binding
+every function in a module can reach is state that none of their signatures
+mentions — the same thing the closure capture rule ([§4.5](#45-closures)) and
+the `Share` marker ([§12.3](#123-the-share-marker)) exist to prevent. Put it in
+a struct and pass it to what changes it.
+
+A constant shares the value name space with functions, so a module cannot
+declare both `fn limit` and `let limit`; a cycle among constants is
+[E0119](#16-diagnostics).
+
+One restriction is worth stating outright: **a `float` may not be interpolated
+into a constant**. The browser and the native runtime write a float differently
+at the exponent boundary — `1e21` against `1000000000000000000000` — so folding
+one at compile time would give the same program a different string depending on
+which backend built it. Interpolate it in a function, where the running host
+decides.
+
+### 4.3 Visibility
 
 `pub` is the only visibility modifier. There are exactly two levels:
 
@@ -385,7 +432,7 @@ Two levels, and they compose with the module system rather than with a second
 hierarchy: what a module exports is what `pub` marks, and what it keeps is
 everything else.
 
-### 4.3 Functions
+### 4.4 Functions
 
 ```kite
 pub fn add(a: int, b: int) -> int {
@@ -431,7 +478,7 @@ let (res, err) = http.request(url, RequestOptions{
 Struct literals require field names, so this reads as well as named arguments
 would, using machinery the language already has.
 
-### 4.4 Closures
+### 4.5 Closures
 
 ```kite
 let double = |x: int| -> int { return x * 2 }
@@ -565,9 +612,17 @@ xs[1..3]              // [int] — subslice, half-open, clamped
 xs[1..=2]             // [int] — the same subslice, inclusive
 xs.len()              // int
 m["a"]                // Option<int> — map indexing always yields an optional
+m.remove("a")         // takes the entry out; a key that is not there is not an error
 ```
 
-Map indexing returns `Option<V>`, never a zero value. Slice indexing with `[]` traps on
+Map indexing returns `Option<V>`, never a zero value.
+
+`remove` shifts the entries after it down, so insertion order keeps meaning what
+it says and `keys()` and `values()` still line up element for element. Its
+receiver must be a plain `var` binding, exactly as `xs.push(v)`'s must: both are
+copy-on-write values, so changing the contents changes the binding. Assigning
+`nil` is not the same thing — on a `{str: Option<int>}` it leaves the key in
+place with a `nil` value, and `len()` does not move. Slice indexing with `[]` traps on
 out-of-bounds because that is a program bug, not a runtime condition; `.get()` is
 provided for the case where it genuinely is a runtime condition.
 
@@ -1831,7 +1886,7 @@ hat.
 helping and Kite is JavaScript with more syntax. Two rules keep it in:
 
 **Wrap it in an opaque struct.** A `pub struct` with unmarked fields
-([§4.2](#42-visibility)) can be held and passed but not read, built or
+([§4.3](#43-visibility)) can be held and passed but not read, built or
 destructured. So `Element` outside `std/dom` is a real closed type, and no
 ordinary code can reach the value inside it.
 

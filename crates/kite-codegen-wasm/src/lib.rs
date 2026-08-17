@@ -2354,6 +2354,17 @@ impl<'a> Emitter<'a> {
                 };
                 self.map_write(func, ml, &base, key, value, local.0, kreg, vreg);
             }
+            mir::Inst::MapRemove { local, key } => {
+                let base = mir::Operand::Local(*local);
+                let map_ty = self.f.locals[local.index()].ty;
+                let (Some(ml), Some(&(kreg, vreg))) =
+                    (self.map_of(&base), self.map_scratch.get(&map_ty))
+                else {
+                    func.instruction(&Instruction::Unreachable);
+                    return;
+                };
+                self.map_drop(func, ml, &base, key, local.0, kreg, vreg);
+            }
 
             // Slices are copy-on-write *values*, so a mutation copies the
             // array first and rebinds the local. The bytecode VM does the same
@@ -3776,6 +3787,138 @@ impl<'a> Emitter<'a> {
     /// A second i32 register, for the new length.
     fn index_scratch2(&self, _func: &Function) -> u32 {
         self.index_scratch + 1
+    }
+
+    /// `m.remove(k)`: the same two arrays, one entry shorter.
+    ///
+    /// A key that is not there is not a mistake — dropping state for a row
+    /// that never had any is the ordinary case — so a miss leaves the local
+    /// holding the map it already had, and nothing is allocated.
+    ///
+    /// The entries after the removed one move down by one rather than a
+    /// tombstone being left, because insertion order is part of what a Kite
+    /// map is, and `keys()` walks the array directly.
+    ///
+    /// Eight parameters, matching `map_write` beside it: the layout, the two
+    /// scratch registers and the destination are all worked out by the caller,
+    /// which is the one that has the `MapLayout` and the scratch table.
+    #[allow(clippy::too_many_arguments)]
+    fn map_drop(
+        &mut self,
+        func: &mut Function,
+        ml: MapLayout,
+        base: &mir::Operand,
+        key: &mir::Operand,
+        dst: u32,
+        kreg: u32,
+        vreg: u32,
+    ) {
+        let pos = self.index_scratch;
+        let len = self.index_scratch2(func);
+
+        // Scan for the key, leaving `pos` at its index or at the length. The
+        // same walk `map_write` opens with.
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalSet(pos));
+        func.instruction(&Instruction::Block(BlockType::Empty));
+        func.instruction(&Instruction::Loop(BlockType::Empty));
+        func.instruction(&Instruction::LocalGet(pos));
+        self.map_field(func, ml, base, 0);
+        func.instruction(&Instruction::ArrayLen);
+        func.instruction(&Instruction::I32GeU);
+        func.instruction(&Instruction::BrIf(1));
+        self.map_field(func, ml, base, 0);
+        func.instruction(&Instruction::LocalGet(pos));
+        func.instruction(&Instruction::ArrayGet(ml.keys));
+        self.operand(func, key);
+        self.key_equality(func, ml.key_ty);
+        func.instruction(&Instruction::BrIf(1));
+        func.instruction(&Instruction::LocalGet(pos));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(pos));
+        func.instruction(&Instruction::Br(0));
+        func.instruction(&Instruction::End); // loop
+        func.instruction(&Instruction::End); // block
+
+        // Found only when the scan stopped short of the end.
+        self.map_field(func, ml, base, 0);
+        func.instruction(&Instruction::ArrayLen);
+        func.instruction(&Instruction::LocalGet(pos));
+        func.instruction(&Instruction::I32GtU);
+        func.instruction(&Instruction::If(BlockType::Empty));
+
+        // `len` becomes the *new* length, which is what both arrays are built
+        // at and what the tail copy is measured against.
+        self.map_field(func, ml, base, 0);
+        func.instruction(&Instruction::ArrayLen);
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Sub);
+        func.instruction(&Instruction::LocalSet(len));
+
+        // Keys: [0, pos) then [pos + 1, old length), landing at `pos`.
+        //
+        // Either copy may be empty — removing the first entry or the last —
+        // and a zero-length `array.copy` is a no-op rather than a trap, so
+        // neither end is a special case.
+        func.instruction(&Instruction::LocalGet(len));
+        func.instruction(&Instruction::ArrayNewDefault(ml.keys));
+        func.instruction(&Instruction::LocalSet(kreg));
+        self.copy_around(func, ml.keys, kreg, ml, base, 0, pos, len);
+
+        func.instruction(&Instruction::LocalGet(len));
+        func.instruction(&Instruction::ArrayNewDefault(ml.values));
+        func.instruction(&Instruction::LocalSet(vreg));
+        self.copy_around(func, ml.values, vreg, ml, base, 1, pos, len);
+
+        func.instruction(&Instruction::LocalGet(kreg));
+        func.instruction(&Instruction::LocalGet(vreg));
+        func.instruction(&Instruction::StructNew(ml.record));
+        func.instruction(&Instruction::LocalSet(dst));
+        func.instruction(&Instruction::End); // if
+    }
+
+    /// Copy one of a map's arrays into `into`, skipping index `pos`.
+    ///
+    /// `field` is 0 for keys and 1 for values; `len` holds the destination's
+    /// length, which is one less than the source's.
+    #[allow(clippy::too_many_arguments)]
+    fn copy_around(
+        &mut self,
+        func: &mut Function,
+        array: u32,
+        into: u32,
+        ml: MapLayout,
+        base: &mir::Operand,
+        field: u32,
+        pos: u32,
+        len: u32,
+    ) {
+        // The head: dst[0..pos] = src[0..pos]
+        func.instruction(&Instruction::LocalGet(into));
+        func.instruction(&Instruction::I32Const(0));
+        self.map_field(func, ml, base, field);
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalGet(pos));
+        func.instruction(&Instruction::ArrayCopy {
+            array_type_index_dst: array,
+            array_type_index_src: array,
+        });
+
+        // The tail: dst[pos..len] = src[pos + 1..len + 1]
+        func.instruction(&Instruction::LocalGet(into));
+        func.instruction(&Instruction::LocalGet(pos));
+        self.map_field(func, ml, base, field);
+        func.instruction(&Instruction::LocalGet(pos));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalGet(len));
+        func.instruction(&Instruction::LocalGet(pos));
+        func.instruction(&Instruction::I32Sub);
+        func.instruction(&Instruction::ArrayCopy {
+            array_type_index_dst: array,
+            array_type_index_src: array,
+        });
     }
 
     /// Emit a linear scan for `key`, leaving `Option<V>` on the stack.

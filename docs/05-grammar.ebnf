@@ -33,7 +33,14 @@ Declaration  = [ DeriveAttr ] [ "pub" ] ( FnDecl
                                        | TraitDecl
                                        | ImplDecl
                                        | TypeAlias
+                                       | ConstDecl
                                        | ExternDecl ) ;
+
+(* A module-level constant. `let` only: there is no module `var`, because a
+   mutable binding every function in the module can reach is state none of
+   their signatures mentions. The value must be one the compiler can work out
+   — see SPECIFICATION.md §4.2.                                              *)
+ConstDecl    = "let" Ident [ ":" Type ] "=" Expr ;
 
 (* `@derive` and `@host` are the only two attributes Kite has, and each is
    admitted in exactly one place: `@derive` in front of a struct or an enum,

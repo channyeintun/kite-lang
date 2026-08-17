@@ -1,0 +1,8 @@
+// `remove` changes the binding, because a map is a copy-on-write value — so
+// the binding has to be one that may change.
+
+fn main() {
+    let m = { "a": 1, "b": 2 }
+    m.remove("a") //~ ERROR E0114
+    io.print("\(m.len())")
+}

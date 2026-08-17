@@ -1415,6 +1415,46 @@ pub extern "C" fn kite_rt_map_set(m: u64, key: u64, key_kind: u64, value: u64) -
     }
 }
 
+/// A map without the entry `key` names, or the same map when it names none.
+///
+/// A copy, as every map write here is: maps are copy-on-write values, so the
+/// caller rebinds. The entries after the removed one move down by one, which
+/// is what keeps insertion order meaning what it says.
+#[no_mangle]
+pub extern "C" fn kite_rt_map_remove(m: u64, key: u64, key_kind: u64) -> u64 {
+    let mut m = m;
+    unsafe {
+        let len = obj_word1(m as *const u8) as usize;
+        let mut found = len;
+        for i in 0..len {
+            if value_eq(*slot(m as *const u8, 2 * i), key, key_kind as u8) {
+                found = i;
+                break;
+            }
+        }
+        if found == len {
+            return m;
+        }
+        root(&mut m);
+        let p = alloc(HEADER + 16 * (len - 1));
+        unroot(1);
+        // The header carries the two element kinds, so it is copied whole
+        // rather than rebuilt from parts this function would have to know.
+        std::ptr::copy_nonoverlapping(m as *const u8, p, HEADER);
+        *(p as *mut u64).add(1) = (len - 1) as u64;
+        let mut out = 0;
+        for i in 0..len {
+            if i == found {
+                continue;
+            }
+            *slot(p, 2 * out) = *slot(m as *const u8, 2 * i);
+            *slot(p, 2 * out + 1) = *slot(m as *const u8, 2 * i + 1);
+            out += 1;
+        }
+        p as u64
+    }
+}
+
 /// A map's keys or values as a slice, in insertion order, so the two line up
 /// element for element.
 fn map_side(m: u64, values: bool) -> u64 {
@@ -2363,6 +2403,7 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         kite_rt_map_len,
         kite_rt_map_get,
         kite_rt_map_set,
+        kite_rt_map_remove,
         kite_rt_map_keys,
         kite_rt_map_values,
         kite_rt_str_const,

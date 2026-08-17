@@ -151,6 +151,27 @@ codes! {
          nothing said about it. Put the operator at the end of the line it \
          continues.";
 
+    E0118 = "E0118", "module-level binding is not a constant",
+        "A `let` at the top of a module names a value the compiler works out \
+         while compiling, and every use of the name is that value. So the \
+         right-hand side has to be something the compiler can work out: a \
+         literal, an operator applied to constants, an interpolation whose \
+         holes are all constants, or another constant.\n\n\
+         A call is not, even one that would always return the same thing. \
+         Running a program's code during its own compilation is a second \
+         evaluation order, and which functions are available to it becomes a \
+         language rule nobody can predict — so there is one evaluation order \
+         here, and it is the one that already exists.\n\n\
+         There is no module-level `var` at all. A mutable binding two \
+         functions can both reach is shared state neither signature mentions, \
+         which is what `Share` and the closure capture rule exist to prevent. \
+         Put it in a struct and pass it to what changes it.";
+
+    E0119 = "E0119", "constant defined in terms of itself",
+        "A constant's value is computed from the constants it names, so a \
+         cycle among them has no value to compute. The chain is listed in the \
+         order it was followed, ending where it returned to where it began.";
+
     // ---- types ------------------------------------------------------------
     E0200 = "E0200", "type mismatch",
         "An expression's type does not match what this position requires. Kite \

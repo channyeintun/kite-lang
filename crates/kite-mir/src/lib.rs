@@ -116,6 +116,7 @@ pub enum Inst {
     /// rather than an arbitrary operand.
     SlicePush { local: Local, value: Operand },
     MapSet { local: Local, key: Operand, value: Operand },
+    MapRemove { local: Local, key: Operand },
 }
 
 #[derive(Clone, Debug)]
@@ -329,6 +330,7 @@ impl fmt::Display for Inst {
             Inst::MapSet { local, key, value } => {
                 write!(f, "_{}[{}] = {}", local.0, key, value)
             }
+            Inst::MapRemove { local, key } => write!(f, "_{}.remove({})", local.0, key),
         }
     }
 }

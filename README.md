@@ -186,24 +186,31 @@ changed. Children are matched by key where there is one, so a thirty-five row
 sort moves thirty-three elements and creates none — instead of rewriting every
 cell it moved past.
 
+**What a press does is written where the control is**, in the same list as the
+class, closing over whatever is in scope there. A listener is attached once per
+element and event; a repaint replaces the stored closure, so re-describing a
+tree costs no registrations and the handler that runs is always the newest.
+
 ```kite
-fn row(r: Row) -> html.Node {
-    return html.keyed("\(r.id)", html.el("tr", [], [
+fn row(app: App, r: Row) -> html.Node {
+    return html.keyed("\(r.id)", html.el("tr", [
+        html.click(|e: dom.Event| { open(app, r.id) }),
+    ], [
         html.txt("td", [html.class("num")], "\(r.id)"),
         html.txt("td", [], r.name),
     ]))
 }
 
-html.update(view, map(rows, row))
+html.update(view, map(rows, |r: Row| -> html.Node { return row(app, r) }))
 ```
 
 **A declared host boundary.** `@host("net") extern fn` becomes a Wasm import
 and a group in the generated glue, so the boundary is written once, in Kite,
 and the glue cannot drift from it.
 
-**The browser, without writing JavaScript.** `std/js` is about twenty
+**The browser, without writing JavaScript.** `std/js` is about thirty
 primitives — `get`, `set`, `call`, `new`, `func`, conversions — and its host
-block is a fixed ninety lines that does not grow however much of the platform a
+block is a fixed sixty-five lines that does not grow however much of the platform a
 program reaches. `std/dom` is written over it in ordinary Kite with no `extern`
 in it at all, which is what makes the primitives a real answer to *the standard
 library never wrapped the thing I need* rather than a promise. A host object is
@@ -244,16 +251,16 @@ point of the project.
 
 ```bash
 kitec build examples/hello.kite --emit wasm --out dist
-# wrote dist/app.wasm (1009 bytes), dist/app.js and dist/index.html
+# wrote dist/app.wasm (1077 bytes), dist/app.js and dist/index.html
 ```
 
 **A Kite program goes in a page.** `examples/page` is a table of five thousand
 rows. Every keystroke in the filter walks all of them, sorts what survives and
-writes only the cells that changed — in about **3 ms**, from a **19 KB**
+writes only the cells that changed — in about **3 ms**, from a **28 KB**
 module. The markup is HTML, the
 hover and the alignment and the colour of a status are CSS, and Kite holds the
 rows, does the work and writes text and class names. Finding an element and
-setting a class costs 2 KB, and there is a budget in CI that fails the build if
+setting a class costs 3 KB, and there is a budget in CI that fails the build if
 any of it grows.
 
 That replaced a UI layer that computed its own layout and painted absolutely
@@ -337,7 +344,7 @@ Recorded here rather than left to be discovered:
   Scoop and the AUR, and has never run: no tag has been pushed.
 - **No Argon2.** It is not in WebCrypto, so it waits on a runtime that has it.
 
-827 tests: unit tests per crate, an annotated compile-fail corpus, a
+834 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the host boundary and a real
 socket under Node, the DOM layer and the typed door driven under Node — with

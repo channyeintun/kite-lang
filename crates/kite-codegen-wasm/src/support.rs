@@ -54,7 +54,8 @@ pub fn unsupported(program: &mir::Program, types: &Types) -> Vec<Unsupported> {
                     mir::Inst::SetField { .. }
                     | mir::Inst::SetIndex { .. }
                     | mir::Inst::SlicePush { .. }
-                    | mir::Inst::MapSet { .. } => {}
+                    | mir::Inst::MapSet { .. }
+                    | mir::Inst::MapRemove { .. } => {}
                 }
             }
         }

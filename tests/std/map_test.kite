@@ -1,0 +1,85 @@
+// Maps: the operations the compiler supplies, and the order it promises.
+//
+// Every case runs on the bytecode VM and on WebAssembly and the two outputs
+// are compared, which is the only way a hand-written WasmGC array copy and an
+// `Rc::make_mut` on a `Vec` can be held to the same answer.
+
+use std/test
+
+/// A map written out in insertion order, so a test can assert the order rather
+/// than only the contents.
+fn laid_out(m: { str: int }) -> str {
+    var out = ""
+    for (k, v) in m {
+        out = "\(out)\(k)=\(v);"
+    }
+    return out
+}
+
+fn checks() -> [error] {
+    var out: [error] = []
+
+    var m: { str: int } = { }
+    m["a"] = 1
+    m["b"] = 2
+    m["c"] = 3
+    m["d"] = 4
+    out.push(test.equal_str(laid_out(m), "a=1;b=2;c=3;d=4;", "insertion order"))
+    out.push(test.equal_int(m.len(), 4, "len"))
+
+    // Each of the three positions a removal can be in, because the array copy
+    // underneath has an empty half in two of them.
+    m.remove("b")
+    out.push(test.equal_str(laid_out(m), "a=1;c=3;d=4;", "remove from the middle"))
+    m.remove("a")
+    out.push(test.equal_str(laid_out(m), "c=3;d=4;", "remove the first"))
+    m.remove("d")
+    out.push(test.equal_str(laid_out(m), "c=3;", "remove the last"))
+
+    // A key that is not there is not a mistake: dropping state for a row that
+    // never had any is the ordinary case, not a special one.
+    m.remove("nothing")
+    out.push(test.equal_str(laid_out(m), "c=3;", "remove what is absent"))
+
+    m.remove("c")
+    out.push(test.equal_int(m.len(), 0, "remove the only one"))
+    out.push(test.is_true(m["c"] == nil, "a removed key reads as nil"))
+    m.remove("c")
+    out.push(test.equal_int(m.len(), 0, "remove from an empty map"))
+
+    // What comes back is appended, not put where it was.
+    m["x"] = 9
+    m["y"] = 8
+    m.remove("x")
+    m["z"] = 7
+    m["x"] = 6
+    out.push(test.equal_str(laid_out(m), "y=8;z=7;x=6;", "order after a removal"))
+
+    // `keys` and `values` line up element for element, which is the promise
+    // insertion order exists to make.
+    out.push(test.equal_strs(m.keys(), ["y", "z", "x"], "keys after removals"))
+    out.push(test.equal_ints(m.values(), [8, 7, 6], "values after removals"))
+
+    // An int-keyed map takes the same path with a different comparison.
+    var counts: { int: str } = { }
+    counts[10] = "ten"
+    counts[20] = "twenty"
+    counts[30] = "thirty"
+    counts.remove(20)
+    out.push(test.equal_int(counts.len(), 2, "int keys: len after removal"))
+    out.push(test.is_true(counts[20] == nil, "int keys: the removed one is gone"))
+    out.push(test.is_true(counts[30] != nil, "int keys: the one after it survived"))
+
+    return out
+}
+
+fn main() {
+    var failed = 0
+    for e in checks() {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("map: \(checks().len() - failed) passed, \(failed) failed")
+}

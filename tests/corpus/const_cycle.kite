@@ -1,0 +1,10 @@
+// A constant's value comes from the constants it names, so a cycle among them
+// has nothing to compute. One diagnostic for the cycle, not one per member.
+
+let A = B //~ ERROR E0119
+let B = C
+let C = A
+
+fn main() {
+    io.print("\(A)\(B)\(C)")
+}

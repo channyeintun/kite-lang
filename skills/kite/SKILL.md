@@ -129,9 +129,9 @@ fn main() {
 | `[3]int`, `xs[..2]`, `let r = 0..n` | No fixed-length arrays, no open-ended ranges, and a range is not a value — it is syntax for a `for` header and an index. Write both ends. |
 | `m[key]` yields a `V`; `xs[i]` yields nil when missing | `m[key]` and `xs.get(i)` are always `Option<V>`. `xs[i]` **traps** out of range; `xs[a..b]` **clamps**. |
 | `for k in someMap` | A map needs a pair binding: `for (k, v) in m`. One binding is `E0200`. |
-| `s[0]`, `s.split(",")` | `str` is not indexable and has exactly five methods: `len` `slice` `index_of` `trim` `code_at`. `split`, `join`, `contains`, `replace`, `lower` are prelude *functions*. Slices have only `len` `get` `push`; maps only `len` `keys` `values`. |
+| `s[0]`, `s.split(",")` | `str` is not indexable and has exactly five methods: `len` `slice` `index_of` `trim` `code_at`. `split`, `join`, `contains`, `replace`, `lower` are prelude *functions*. Slices have only `len` `get` `push`; maps only `len` `keys` `values` `remove`. |
 | `if x != nil && x.field` | Narrowing does not cross `&&` (`E0200`). Nest the `if`. |
-| A module-level `var` or `let` constant | There are **no** module-level bindings of any kind. A shared constant is a `pub fn` that returns it. |
+| A module-level `var` | `E0118`. A module-level **`let` is fine** and is how a shared constant is written — `pub let ACT_SETTLE = "payments:settle"`. It must be a literal, an operator on constants, an interpolation of constants, or another constant; a call is not (`E0118`), and the four types are `bool` `int` `float` `str`. |
 | A closure captures a `var` | `E0211`. Captures are by value at creation time. Mutate through a named function taking a `var` parameter — there is no capture list. |
 | Struct fields separated by commas | **Declarations** are newline-separated (a comma is `E0100`); commas belong to literals and patterns. |
 | `P{ x: 1, ..base }` | `..base` comes **first**: `P{ ..base, x: 1 }`. Opposite of Rust. |

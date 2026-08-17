@@ -196,8 +196,36 @@ tolerance for verbosity.
 
 **A closure cannot capture a `var`**, and that rule is not weakened for this.
 The idiom is to capture a `let` handle to a struct and change it through a
-function taking `var` ([spec §4.4](../SPECIFICATION.md#44-closures)) — mutation
+function taking `var` ([spec §4.5](../SPECIFICATION.md#45-closures)) — mutation
 spelled out in a signature rather than implied by a capture list.
+
+### A handler belongs to the node, not to a table
+
+`std/html` takes handlers as attributes — `html.click(|e| { … })` sits in the
+same list as `html.class`. This was not the first design, and the first one is
+worth recording because it looked fine.
+
+A `Node` used to be pure data with nowhere to put a closure, so the only way to
+react was a `data-action` naming the control and one delegated listener that
+matched on the name. It works, and it stays readable at about forty controls.
+The largest program written against it had a hundred and forty-six, and
+**eighty-six of them were never matched**: they drew, took the press, and did
+nothing. Nothing could have reported it — a string on a button and a string in
+a `match` are not connected by anything a compiler can see. Two more controls
+carried no `data-id`, so the handler built `/sessions//register` from the
+context the closure would have captured for free.
+
+Both are unrepresentable now. What it costs is that `Node` is no longer
+`Share`, which is nothing here: a description exists to become elements in one
+document, and `Mounted` already held a host reference.
+
+The mechanism is one listener per element and event, attached the first time a
+description asks for it, whose closure reads the newest handler out of the
+element's `Live` record when the event arrives. So a repaint replaces a field
+rather than a listener, and re-describing a tree costs no registrations at all.
+`Live` is patched in place for exactly this reason — returning a fresh one, as
+the diff used to, would leave every listener reading the description its
+element was born with.
 
 Two hazards designed for rather than discovered:
 
@@ -288,3 +316,10 @@ Element trees are built with **ordinary functions** — no template language and
 no change to the grammar — and updates work by comparing trees rather than by a
 reactive graph, because a value that silently registers a dependency when it is
 read is hidden control flow.
+
+**`update` reports what left.** State kept per row — what a `useState` inside a
+list item would be, and what here is a `{str: T}` in the program's own store —
+has to be dropped when the row goes, and the diff is the only thing that knows
+which rows went. `html.departed(view)` is that list. Without it the map grows
+for the life of the program, and the pruning is hand-written against a set the
+caller has to re-derive.

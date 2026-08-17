@@ -626,6 +626,9 @@ impl Builder<'_> {
                 key: shift(key),
                 value: shift(value),
             },
+            Inst::MapRemove { local, key } => {
+                Inst::MapRemove { local: Local(local.0 + 1), key: shift(key) }
+            }
         }
     }
 

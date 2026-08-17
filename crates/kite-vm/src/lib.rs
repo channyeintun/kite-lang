@@ -1039,6 +1039,24 @@ impl<'a> Vm<'a> {
                     }
                 }
 
+                Op::MapRemove { obj, key } => {
+                    let k = self.get(base, key);
+                    let slot = base + obj as usize;
+                    let Value::Map(entries) = &mut self.regs[slot] else {
+                        return Err(Trap::TypeConfusion {
+                            op: "map removal",
+                            found: self.regs[slot].type_name(),
+                        });
+                    };
+                    let entries = Rc::make_mut(entries);
+                    // Removing what is not there is not a mistake — a caller
+                    // dropping state for a row that never had any is the
+                    // ordinary case, not a special one.
+                    if let Some(i) = entries.iter().position(|(ek, _)| *ek == k) {
+                        entries.remove(i);
+                    }
+                }
+
                 Op::MapLen { dst, obj } => {
                     let m = self.get(base, obj);
                     let Value::Map(entries) = m else {

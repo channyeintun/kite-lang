@@ -161,6 +161,11 @@ impl<'a> Emitter<'a> {
                 self.code.push(Op::MapSet { obj: reg(*local), key: k, src: v });
                 return;
             }
+            mir::Inst::MapRemove { local, key } => {
+                let k = self.operand_reg(key, 0);
+                self.code.push(Op::MapRemove { obj: reg(*local), key: k });
+                return;
+            }
             mir::Inst::SlicePush { local, value } => {
                 let src = self.operand_reg(value, 0);
                 self.code.push(Op::SlicePush { obj: reg(*local), src });

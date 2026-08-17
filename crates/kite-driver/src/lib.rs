@@ -696,6 +696,14 @@ fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Inde
             label: format!("{} {}", t.kind.describe(), t.name),
         });
     }
+    for c in &resolved.consts {
+        index.symbols.push(Symbol {
+            name: spelled(&c.name),
+            at: c.span,
+            kind: "constant",
+            label: format!("constant {}", c.name),
+        });
+    }
 
     for (at, res) in &resolved.uses {
         let (declared_at, label, kind) = match res {
@@ -710,6 +718,12 @@ fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Inde
             Res::Variant(i, v) => {
                 let t = &resolved.types[*i as usize];
                 (t.span, format!("variant #{} of {}", v, t.name), "variant")
+            }
+            Res::Const(i) => {
+                let c = &resolved.consts[*i as usize];
+                // The declaration is one line and its value is the half worth
+                // reading, so the whole line is the label.
+                (c.span, declaration_text(sources, c.span), "constant")
             }
             Res::Builtin(b) => (*at, format!("{} — a compiler builtin", b.path()), "builtin"),
             // A local's declaration is in the function's own table, which the
@@ -772,6 +786,18 @@ fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Inde
             scope: None,
         });
     }
+    let mut of_const: HashMap<u32, usize> = HashMap::new();
+    for (i, c) in resolved.consts.iter().enumerate() {
+        of_const.insert(i as u32, index.bindings.len());
+        index.bindings.push(Binding {
+            name: spelled(&c.name),
+            declared_at: c.span,
+            uses: Vec::new(),
+            mentions: Vec::new(),
+            kind: "constant",
+            scope: None,
+        });
+    }
     for (i, locals) in resolved.locals.iter().enumerate() {
         for (j, l) in locals.iter().enumerate() {
             // `self` is a keyword, and a synthetic slot was never written;
@@ -798,6 +824,7 @@ fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Inde
             // mention of the enum below. An unqualified one spells only its
             // own name, which has no recorded declaration to group under.
             Res::Variant(i, _) => of_type.get(i).copied(),
+            Res::Const(i) => of_const.get(i).copied(),
             Res::Local(id) => owner_of(*at).and_then(|f| of_local.get(&(f, *id)).copied()),
             Res::Builtin(_) => None,
         };
@@ -837,6 +864,20 @@ fn spelled(name: &str) -> String {
 }
 
 /// The first line of a declaration, which is its signature.
+/// The source line a declaration sits on, trimmed.
+///
+/// For a constant that is the whole thing — name, type and value — which is
+/// what somebody hovering one wants to see.
+fn declaration_text(sources: &SourceMap, at: Span) -> String {
+    let text = sources.text(at.file);
+    let start = text[..at.start as usize].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let end = text[at.start as usize..]
+        .find('\n')
+        .map(|i| at.start as usize + i)
+        .unwrap_or(text.len());
+    text[start..end].trim().to_string()
+}
+
 fn signature_text(sources: &SourceMap, at: Span, param_count: usize) -> String {
     let text = sources.text(at.file);
     // Back up to the start of the line, then take it up to the body.

@@ -1858,3 +1858,331 @@ fn the_wrapper_leaves_out_names_javascript_cannot_spell() {
         api_dts
     );
 }
+
+// ---- std/html handlers ------------------------------------------------------
+
+/// A tree, without a browser.
+///
+/// Richer than [`PAGE_RUNNER`]'s page because `std/html` needs a real one: it
+/// appends, inserts before, removes, and relies on `appendChild` *moving* an
+/// element that is already in the tree, which is the whole of how a reorder is
+/// done. Setting `textContent` clears children, as it does in a browser, and
+/// that is what `mount` uses to empty the root.
+///
+/// Listeners are per element and per event, and every `addEventListener` is
+/// counted. The count is the assertion that a repaint attaches nothing: a
+/// design that re-bound handlers each frame would still pass every behavioural
+/// check below and would be quietly quadratic.
+const TREE_RUNNER: &str = r##"
+import { readFile } from "node:fs/promises";
+import { instantiate, resident, setWriter } from "./app.js";
+
+class Element {}
+let attachCount = 0;
+
+const make = (tag) => {
+  const el = {
+    tagName: tag.toUpperCase(),
+    parentNode: null,
+    children: [],
+    attrs: {},
+    handlers: new Map(),
+    _text: "",
+    get textContent() {
+      return this.children.length
+        ? this.children.map((c) => c.textContent).join("")
+        : this._text;
+    },
+    set textContent(v) {
+      for (const c of this.children) c.parentNode = null;
+      this.children = [];
+      this._text = v;
+    },
+    getAttribute(n) { return n in this.attrs ? this.attrs[n] : null; },
+    setAttribute(n, v) { this.attrs[n] = String(v); },
+    removeAttribute(n) { delete this.attrs[n]; },
+    appendChild(c) {
+      if (c.parentNode) c.parentNode.children.splice(c.parentNode.children.indexOf(c), 1);
+      c.parentNode = this;
+      this._text = "";
+      this.children.push(c);
+      return c;
+    },
+    insertBefore(c, before) {
+      if (c.parentNode) c.parentNode.children.splice(c.parentNode.children.indexOf(c), 1);
+      c.parentNode = this;
+      this._text = "";
+      const i = this.children.indexOf(before);
+      this.children.splice(i < 0 ? this.children.length : i, 0, c);
+      return c;
+    },
+    remove() {
+      if (!this.parentNode) return;
+      this.parentNode.children.splice(this.parentNode.children.indexOf(this), 1);
+      this.parentNode = null;
+    },
+    addEventListener(n, f) {
+      attachCount += 1;
+      if (!this.handlers.has(n)) this.handlers.set(n, []);
+      this.handlers.get(n).push(f);
+    },
+    removeEventListener(n, f) {
+      const fs = this.handlers.get(n) ?? [];
+      const i = fs.indexOf(f);
+      if (i >= 0) fs.splice(i, 1);
+    },
+  };
+  Object.setPrototypeOf(el, Element.prototype);
+  return el;
+};
+
+const root = make("div");
+globalThis.Element = Element;
+globalThis.document = {
+  title: "tree",
+  querySelector: (s) => (s === "#root" ? root : null),
+  querySelectorAll: () => [],
+  createElement: (tag) => make(tag),
+};
+
+// Find a descendant by its `data-name`, so the test can press a control by
+// the name the program gave it rather than by position.
+const findByName = (el, name) => {
+  if (el.attrs["data-name"] === name) return el;
+  for (const c of el.children) {
+    const hit = findByName(c, name);
+    if (hit) return hit;
+  }
+  return null;
+};
+
+const press = (name) => {
+  const el = findByName(root, name);
+  if (!el) { out.push("no control called " + name); return; }
+  for (const f of el.handlers.get("click") ?? []) f({ target: el });
+};
+
+const out = [];
+setWriter((l) => out.push(l));
+const exports = await instantiate(new Uint8Array(await readFile(new URL("./app.wasm", import.meta.url))));
+exports.main();
+resident(exports);
+
+const attrsOf = (name) => {
+  const el = findByName(root, name);
+  if (!el) return name + ": missing";
+  return name + ": " + Object.keys(el.attrs).sort()
+    .map((k) => k + "=" + JSON.stringify(el.attrs[k])).join(",");
+};
+
+out.push("start: " + root.textContent);
+out.push(attrsOf("bump"));
+press("bump");
+out.push("after one press: " + root.textContent);
+out.push(attrsOf("bump"));
+press("bump");
+out.push("after two presses: " + root.textContent);
+press("drop");
+out.push("after drop: " + root.textContent);
+press("gone");
+out.push("attachments: " + attachCount);
+process.stdout.write(out.map((l) => l + "\n").join(""));
+"##;
+
+/// A handler written where the control is, and still right after a repaint.
+///
+/// The property that matters is the third line of output. `bump` is pressed
+/// twice; the second press runs the closure built by the *first* repaint, not
+/// the one built at mount. A design that captured the model's value rather than
+/// a handle to it, or that left the listener reading the description the
+/// element was born with, prints "1" twice and passes nothing else here.
+///
+/// The two `bump:` lines are the second claim, and the reason `same_attrs`
+/// exists in the shape it does: a handler sits in the same list as the
+/// attributes, and the diff has to look straight through it. `class` changes
+/// and `disabled` *leaves* between those two lines, both correctly, with the
+/// handler untouched in between.
+///
+/// `gone: b` is the third claim: a keyed child that left is reported, so a
+/// caller holding state per row knows which row to forget.
+///
+/// `attachments: 2` is the last and the one worth keeping. Two buttons, one
+/// `click` each, attached when they were built — and three repaints after that
+/// which re-describe both buttons with freshly built closures every time.
+/// Nothing re-binds. A design that attached per description would print 8.
+#[test]
+fn a_handler_survives_the_repaint_that_replaces_it() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = r##"use std/dom
+use std/html
+
+struct Model {
+    var count: int
+    var rows: [str]
+}
+
+fn bump(var m: Model) {
+    m.count = m.count + 1
+}
+
+fn drop_middle(var m: Model) {
+    var kept: [str] = []
+    for r in m.rows {
+        if r != "b" {
+            kept.push(r)
+        }
+    }
+    m.rows = kept
+}
+
+/// `view` is a plain parameter, not `var`, so the closures below can capture
+/// it. `html.update` takes it as `var`, which is the language's idiom for
+/// changing something a closure holds.
+fn disabled_when(off: bool) -> [html.Attr] {
+    if off {
+        return [html.attr("disabled", "")]
+    }
+    var none: [html.Attr] = []
+    return none
+}
+
+fn draw(m: Model, view: html.Mounted) {
+    var kids: [html.Node] = [
+        html.txt("button", concat([
+            html.data("name", "bump"),
+            html.click(|e: dom.Event| {
+                bump(m)
+                draw(m, view)
+            }),
+            html.class(if m.count == 0 { "idle" } else { "counting" }),
+        ], disabled_when(m.count == 0)), "+"),
+        html.txt("button", [
+            html.data("name", "drop"),
+            html.click(|e: dom.Event| {
+                drop_middle(m)
+                draw(m, view)
+            }),
+        ], "-"),
+        html.txt("b", [], "\(m.count)"),
+    ]
+    for r in m.rows {
+        kids.push(html.keyed(r, html.txt("li", [], r)))
+    }
+    let err = html.update(view, kids)
+    if err != nil {
+        io.error("draw: \(err.message())")
+        return
+    }
+    for key in html.departed(view) {
+        io.print("gone: \(key)")
+    }
+}
+
+fn main() {
+    let root = dom.find("#root")
+    if root == nil {
+        io.error("no #root")
+        return
+    }
+    let m = Model{ count: 0, rows: ["a", "b", "c"] }
+    let (view, merr) = html.mount(root, [])
+    if merr != nil {
+        io.error("mount: \(merr.message())")
+        return
+    }
+    draw(m, view)
+}
+"##;
+    let out = run_runner_under_node("tree", src, TREE_RUNNER, &[]);
+    assert_eq!(
+        out,
+        "start: +-0abc\n\
+         bump: class=\"idle\",data-name=\"bump\",disabled=\"\"\n\
+         after one press: +-1abc\n\
+         bump: class=\"counting\",data-name=\"bump\"\n\
+         after two presses: +-2abc\n\
+         gone: b\n\
+         after drop: +-2ac\n\
+         no control called gone\n\
+         attachments: 2\n"
+    );
+}
+
+/// What `Options` says reaches `fetch`, and the default says nothing extra.
+///
+/// A stand-in `fetch` writes out the `init` it was handed, because the whole
+/// question is what crossed the boundary — a real server cannot report whether
+/// the browser was *told* to send cookies, only whether it did, and under Node
+/// there are none to send.
+///
+/// The first line is the half worth guarding: a plain `get` names
+/// `same-origin` and `follow` rather than leaving them out. `Credentials` has
+/// no "whatever the host does" variant, so every request says what it carries
+/// — and a program keeps its behaviour on a host whose defaults are not the
+/// browser's.
+const FETCH_SPY_RUNNER: &str = r##"
+import { readFile } from "node:fs/promises";
+import { run, setWriter } from "./app.js";
+const seen = [];
+globalThis.fetch = async (url, init) => {
+  seen.push(
+    [init.method, "credentials=" + (init.credentials ?? "-"),
+     "redirect=" + (init.redirect ?? "-")].join(" "),
+  );
+  return new Response("ok", { status: 200 });
+};
+const out = [];
+setWriter((l) => out.push(l));
+await run(new Uint8Array(await readFile(new URL("./app.wasm", import.meta.url))));
+process.stdout.write(seen.concat(out).map((l) => l + "\n").join(""));
+"##;
+
+#[test]
+fn request_options_reach_fetch() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = r##"use std/http
+
+async fn main() {
+    // The plain call names nothing it did not choose.
+    let (_, e1) = await http.get("https://example.test/a")
+    if e1 != nil {
+        io.print("get failed")
+        return
+    }
+
+    // The one futsal-friday could not write at all.
+    let signed_in = http.Options{ ..http.sending(), credentials: http.Credentials.Include }
+    let (_, e2) = await http.send_with("POST", "https://example.test/b", "{}", signed_in)
+    if e2 != nil {
+        io.print("send_with failed")
+        return
+    }
+
+    let strict = http.Options{
+        headers: "content-type: application/json",
+        credentials: http.Credentials.Omit,
+        redirect: http.Redirect.Error,
+    }
+    let (_, e3) = await http.send_with("PUT", "https://example.test/c", "{}", strict)
+    if e3 != nil {
+        io.print("strict failed")
+        return
+    }
+    io.print("done")
+}
+"##;
+    let out = run_runner_under_node("options", src, FETCH_SPY_RUNNER, &[]);
+    assert_eq!(
+        out,
+        "GET credentials=same-origin redirect=follow\n\
+         POST credentials=include redirect=follow\n\
+         PUT credentials=omit redirect=error\n\
+         done\n"
+    );
+}

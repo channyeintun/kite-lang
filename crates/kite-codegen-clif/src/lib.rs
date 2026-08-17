@@ -141,6 +141,7 @@ const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_map_len", &[I64], Some(I64)),
     ("kite_rt_map_get", &[I64, I64, I64, I64], Some(I64)),
     ("kite_rt_map_set", &[I64, I64, I64, I64], Some(I64)),
+    ("kite_rt_map_remove", &[I64, I64, I64], Some(I64)),
     ("kite_rt_map_keys", &[I64], Some(I64)),
     ("kite_rt_map_values", &[I64], Some(I64)),
     ("kite_rt_str_const", &[I64], Some(I64)),
@@ -1047,6 +1048,14 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 let vw = self.operand_word(value);
                 let kk = self.iconst(key_kind as i64);
                 let new = self.call_rt("kite_rt_map_set", &[cur, kw, kk, vw]).unwrap();
+                self.b.def_var(self.vars[local.index()], new);
+            }
+            mir::Inst::MapRemove { local, key } => {
+                let cur = self.b.use_var(self.vars[local.index()]);
+                let kw = self.operand_word(key);
+                let key_kind = self.kind(self.operand_ty(key));
+                let kk = self.iconst(key_kind as i64);
+                let new = self.call_rt("kite_rt_map_remove", &[cur, kw, kk]).unwrap();
                 self.b.def_var(self.vars[local.index()], new);
             }
         }

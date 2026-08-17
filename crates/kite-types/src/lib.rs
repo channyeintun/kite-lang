@@ -22,8 +22,11 @@ use kite_hir::{Builtin, ExprKind, TyId, TyKind, Types};
 use kite_resolve::{BuiltinFn, Res, ResolveMap};
 use kite_span::{SourceMap, Span};
 
+mod consts;
 mod exclusive;
 mod exhaustive;
+
+pub use consts::{ConstTable, ConstValue};
 
 pub fn check(
     file: &ast::SourceFile,
@@ -420,8 +423,15 @@ pub fn check_recording(
 
     check_impls(file, resolved, &type_ids, &types, &sigs, diags);
 
+    // Constants are worked out before any body, because a body naming one gets
+    // the value itself rather than a reference to it — by the time a use is
+    // checked, there is nothing left to look up.
+    let const_table = consts::evaluate(file, resolved, sources, diags);
+    check_const_annotations(file, resolved, &const_table, &type_ids, &mut types, diags);
+
     for (i, sig) in resolved.fns.iter().enumerate() {
         let mut checker = Checker {
+            consts: &const_table,
             resolved,
             module: resolved.module_of_item(sig.decl_index).to_string(),
             sigs: &sigs,
@@ -795,6 +805,9 @@ fn declare_generics(
 
 struct Checker<'a> {
     resolved: &'a ResolveMap,
+    /// Every module-level constant's value, already worked out. A use of one
+    /// becomes the value here, so nothing past this point sees a constant.
+    consts: &'a ConstTable,
     /// The module whose body is being checked. Names written unqualified mean
     /// this module's first.
     module: String,
@@ -1282,6 +1295,26 @@ impl<'a> Checker<'a> {
             );
             return None;
         };
+        // A module-level constant is a name for a value, so there is nowhere
+        // to write. Saying so here matters more than it looks: without it the
+        // assignment resolved to something that is not a local, fell through,
+        // and was silently dropped.
+        if let Some(Res::Const(index)) = self.resolved.lookup_use(p.span) {
+            let decl = self.resolved.consts[index as usize].span;
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0114,
+                    format!("cannot assign to the constant `{}`", p.text()),
+                )
+                .with_primary(p.span, "cannot assign")
+                .with_secondary(decl, "declared as a constant here")
+                .with_note(
+                    "a constant is a name for a value, not a place to put one; for something \
+                     that changes, put it in a struct and pass it to what changes it",
+                ),
+            );
+            return None;
+        }
         let Some(Res::Local(local_id)) = self.resolved.lookup_use(p.span) else {
             return None;
         };
@@ -2431,6 +2464,7 @@ impl<'a> Checker<'a> {
                 // A dotted static path in value position is not a field read.
                 match self.resolved.lookup_use(*span) {
                     Some(Res::Fn(id)) => self.fn_value(id, *span),
+                    Some(Res::Const(index)) => self.const_expr(index, *span),
                     Some(Res::Builtin(_)) => {
                         self.builtin_not_a_value(*span);
                         self.lit(ExprKind::Error, TyId::ERROR, *span)
@@ -2841,8 +2875,28 @@ impl<'a> Checker<'a> {
         hir::Expr { kind: ExprKind::Cast { value: Box::new(value), to }, ty: to, span }
     }
 
+    /// A constant's value as a literal, standing where the name was written.
+    ///
+    /// The span stays the use's, not the declaration's, so a later diagnostic
+    /// about the value points at the line the reader is looking at.
+    fn const_expr(&mut self, index: u32, span: Span) -> hir::Expr {
+        match self.consts.get(index) {
+            Some(ConstValue::Bool(b)) => self.lit(ExprKind::Bool(*b), TyId::BOOL, span),
+            Some(ConstValue::Int(i)) => self.lit(ExprKind::Int(*i), TyId::INT, span),
+            Some(ConstValue::Float(f)) => self.lit(ExprKind::Float(*f), TyId::FLOAT, span),
+            Some(ConstValue::Str(s)) => {
+                let s = s.clone();
+                self.lit(ExprKind::Str(s), TyId::STR, span)
+            }
+            // Its own declaration already reported why it has no value.
+            None => self.lit(ExprKind::Error, TyId::ERROR, span),
+        }
+    }
+
     fn path_expr(&mut self, p: &ast::Path) -> hir::Expr {
         match self.resolved.lookup_use(p.span) {
+            Some(Res::Const(index)) => self.const_expr(index, p.span),
+
             Some(Res::Local(id)) => {
                 self.note_capture(id, p.span);
                 if self.taint[id as usize] == Taint::Tainted {
@@ -3213,6 +3267,21 @@ impl<'a> Checker<'a> {
             Some(Res::Fn(id)) => self.fn_call(id, &p.text(), p.span, args, span, expected),
 
             Some(Res::Builtin(b)) => self.builtin_call(b, args, span),
+
+            // `LIMIT()` where `LIMIT` is a constant. Saying "not a function"
+            // and naming what it is instead is the whole of the help needed:
+            // the fix is to delete two characters.
+            Some(Res::Const(index)) => {
+                let value = self.const_expr(index, p.span);
+                let decl = self.resolved.consts[index as usize].span;
+                self.diags.push(
+                    Diagnostic::error(codes::E0205, format!("`{}` is not a function", p.text()))
+                        .with_primary(span, format!("this is {}", self.types.with_article(value.ty)))
+                        .with_secondary(decl, "declared as a constant here")
+                        .with_note("a constant is already a value; drop the `()`"),
+                );
+                value
+            }
 
             Some(Res::Local(id)) => {
                 let ty = self.locals[id as usize].ty;
@@ -4074,6 +4143,25 @@ impl<'a> Checker<'a> {
         }
 
         if let TyKind::Map(k, v) = *self.types.kind(receiver.ty) {
+            // `remove` mutates, so it is a statement dressed as a unit
+            // expression — the shape `push` already has — and it is handled
+            // before the table below because that table ends by checking the
+            // argument count against zero.
+            if name.name == "remove" {
+                if args.len() != 1 {
+                    self.arity_error("remove", args.len(), 1, span, None);
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
+                }
+                let Some(local) = self.require_mutable_value_binding(base, "removed from", "map") else {
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
+                };
+                let key = self.expr(&args[0], Some(k));
+                self.expect_ty(key.ty, k, key.span, None);
+                return self.as_statement(
+                    hir::Stmt::MapRemove { local: hir::LocalId(local), key, span },
+                    span,
+                );
+            }
             let (kind, ty) = match name.name.as_str() {
                 "len" => (ExprKind::MapLen { base: Box::new(receiver) }, TyId::INT),
                 // Insertion order, which the specification guarantees — so
@@ -4098,8 +4186,8 @@ impl<'a> Checker<'a> {
                         )
                         .with_primary(name.span, "no such method")
                         .with_note(
-                            "a map has: len, keys, values; read with `m[key]`, \
-                             which yields an optional, and write with \
+                            "a map has: len, keys, values, remove; read with \
+                             `m[key]`, which yields an optional, and write with \
                              `m[key] = value`",
                         ),
                     );
@@ -5394,7 +5482,7 @@ impl<'a> Checker<'a> {
             return None;
         }
         if let TyKind::Map(key_ty, value_ty) = *self.types.kind(seq.ty) {
-            let local = self.require_mutable_slice_binding(base, "assigned into")?;
+            let local = self.require_mutable_value_binding(base, "assigned into", "map")?;
             let k = self.expr(index, Some(key_ty));
             self.expect_ty(k.ty, key_ty, k.span, None);
             let v = self.expr(&a.value, Some(value_ty));
@@ -5452,13 +5540,26 @@ impl<'a> Checker<'a> {
         ))
     }
 
-    /// Mutating a slice changes the binding that holds it, because slices have
-    /// value semantics. Report when that binding is immutable.
+    /// Mutating a slice or a map changes the binding that holds it, because
+    /// both have value semantics. Report when that binding is immutable.
+    ///
+    /// The two share this because they share the reason. Which one it is comes
+    /// from the receiver's type rather than from the call site, so a caller
+    /// cannot get the noun wrong — and a map used to be told it was a slice.
     fn require_mutable_slice_binding(&mut self, base: &ast::Expr, what: &str) -> Option<u32> {
+        self.require_mutable_value_binding(base, what, "slice")
+    }
+
+    fn require_mutable_value_binding(
+        &mut self,
+        base: &ast::Expr,
+        what: &str,
+        noun: &str,
+    ) -> Option<u32> {
         let ast::Expr::Path(p) = base else {
             self.not_yet(
                 base.span(),
-                "mutating a slice that is not a plain binding",
+                &format!("mutating a {} that is not a plain binding", noun),
                 "assign it to a `var` first",
             );
             return None;
@@ -5475,10 +5576,11 @@ impl<'a> Checker<'a> {
             )
             .with_primary(p.span, "this binding is immutable")
             .with_secondary(decl, "declared with `let` here")
-            .with_note(
-                "a slice is a copy-on-write value, so changing its contents changes the \
+            .with_note(format!(
+                "a {} is a copy-on-write value, so changing its contents changes the \
                  binding; declare it `var`",
-            );
+                noun
+            ));
             if let Some(kw) = self.let_keyword_span(decl) {
                 d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
             }
@@ -7655,6 +7757,36 @@ impl<'a> Checker<'a> {
         hir::Expr { kind, ty, span }
     }
 
+    /// A mutating method as a unit-typed expression.
+    ///
+    /// `xs.push(v)` and `m.remove(k)` are statements the grammar happens to
+    /// spell as calls, and HIR has no statement position inside an expression
+    /// — so the statement is wrapped in a `match` on `true`, which every
+    /// backend already lowers to a plain block.
+    fn as_statement(&self, stmt: hir::Stmt, span: Span) -> hir::Expr {
+        hir::Expr {
+            kind: ExprKind::Match {
+                scrutinee: Box::new(hir::Expr {
+                    kind: ExprKind::Bool(true),
+                    ty: TyId::BOOL,
+                    span,
+                }),
+                arms: vec![hir::MatchArm {
+                    pattern: hir::Pattern::Wildcard,
+                    guard: None,
+                    body: hir::Expr {
+                        kind: ExprKind::Block(hir::Block { stmts: vec![stmt] }),
+                        ty: TyId::UNIT,
+                        span,
+                    },
+                    span,
+                }],
+            },
+            ty: TyId::UNIT,
+            span,
+        }
+    }
+
     fn text(&self, span: Span) -> &'a str {
         self.sources.span_text(span)
     }
@@ -7809,56 +7941,7 @@ impl<'a> Checker<'a> {
     }
 
     fn decode_escapes(&mut self, inner: &str, span: Span) -> String {
-        let mut out = String::with_capacity(inner.len());
-        let mut chars = inner.chars();
-        while let Some(c) = chars.next() {
-            if c != '\\' {
-                out.push(c);
-                continue;
-            }
-            match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some('r') => out.push('\r'),
-                Some('0') => out.push('\0'),
-                Some('\\') => out.push('\\'),
-                Some('"') => out.push('"'),
-                Some('\'') => out.push('\''),
-                Some('u') => {
-                    let mut hex = String::new();
-                    if chars.next() == Some('{') {
-                        for c in chars.by_ref() {
-                            if c == '}' {
-                                break;
-                            }
-                            hex.push(c);
-                        }
-                    }
-                    match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
-                        Some(c) => out.push(c),
-                        None => self.diags.push(
-                            Diagnostic::error(codes::E0003, "invalid unicode escape")
-                                .with_primary(span, format!("`\\u{{{}}}` is not a character", hex)),
-                        ),
-                    }
-                }
-                // The parser removes every `\(`, so one reaching here is a
-                // literal backslash before a paren, which is what it looks like.
-                Some('(') => {
-                    out.push('\\');
-                    out.push('(');
-                }
-                Some(other) => {
-                    self.diags.push(
-                        Diagnostic::error(codes::E0003, "invalid escape sequence")
-                            .with_primary(span, format!("`\\{}` is not recognised", other))
-                            .with_note("valid escapes: \\n \\t \\r \\0 \\\\ \\\" \\' \\u{...}"),
-                    );
-                }
-                None => {}
-            }
-        }
-        out
+        decode_escapes_into(inner, span, self.diags)
     }
 
     /// Insert the wrap a `T` needs to stand where an `Option<T>` is wanted.
@@ -8453,6 +8536,58 @@ fn walk_named_types(t: &ast::Type, f: &mut impl FnMut(&ast::TypePath)) {
 
 /// Resolve a surface type, consulting the module's declared types before
 /// falling back to the primitives.
+/// Check each constant's written type against the value it was given.
+///
+/// Separate from evaluation because a type annotation names a type, and types
+/// are not known until the arena is built — while a value is known from the
+/// source text alone. Splitting them keeps the evaluator free of the type
+/// system entirely.
+fn check_const_annotations(
+    file: &ast::SourceFile,
+    resolved: &ResolveMap,
+    values: &ConstTable,
+    type_ids: &[Option<TypeTarget>],
+    types: &mut Types,
+    diags: &mut DiagBag,
+) {
+    for (i, sig) in resolved.consts.iter().enumerate() {
+        let ast::Item::Const(c) = &file.items[sig.decl_index] else { continue };
+        let Some(written) = &c.ty else { continue };
+        let Some(value) = values.get(i as u32) else { continue };
+
+        let module = resolved.module_of_item(sig.decl_index);
+        let want = resolve_named_ty(written, resolved, module, type_ids, &[], types, diags);
+        let got = match value {
+            ConstValue::Bool(_) => TyId::BOOL,
+            ConstValue::Int(_) => TyId::INT,
+            ConstValue::Float(_) => TyId::FLOAT,
+            ConstValue::Str(_) => TyId::STR,
+        };
+        if want == got || types.is_poisoned(want) {
+            continue;
+        }
+        let mut d = Diagnostic::error(
+            codes::E0200,
+            format!(
+                "expected {}, found {}",
+                types.with_article(want),
+                types.with_article(got)
+            ),
+        )
+        .with_primary(c.value.span(), format!("this is {}", types.with_article(got)))
+        .with_secondary(written.span(), "the type written here");
+        // The one mismatch worth a suggestion, because it is the one a reader
+        // from almost any other language expects to work.
+        if want == TyId::FLOAT && got == TyId::INT {
+            d = d.with_note(
+                "Kite performs no implicit numeric conversion: write the literal with a \
+                 decimal point",
+            );
+        }
+        diags.push(d);
+    }
+}
+
 fn resolve_named_ty(
     t: &ast::Type,
     resolved: &ResolveMap,
@@ -8758,7 +8893,7 @@ fn breaks_out(block: &ast::Block, label: Option<&str>) -> bool {
 /// at the closing quotes when they choose one. The line break after the
 /// opening delimiter and the one before the closing delimiter belong to the
 /// syntax rather than to the text, so both go.
-fn dedent_block(body: &str) -> String {
+pub(crate) fn dedent_block(body: &str) -> String {
     let body = body.strip_prefix("\r\n").or_else(|| body.strip_prefix('\n')).unwrap_or(body);
     // Everything after the last line break is the closing delimiter's own
     // indentation.
@@ -8827,7 +8962,65 @@ fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-fn parse_int(text: &str) -> Option<i64> {
+/// Turn the source text between a literal's quotes into the string it means.
+///
+/// A free function because two callers need it and only one of them has a
+/// [`Checker`]: a module-level constant is evaluated before any body is, so it
+/// has no function to be inside.
+pub(crate) fn decode_escapes_into(inner: &str, span: Span, diags: &mut DiagBag) -> String {
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('0') => out.push('\0'),
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('\'') => out.push('\''),
+            Some('u') => {
+                let mut hex = String::new();
+                if chars.next() == Some('{') {
+                    for c in chars.by_ref() {
+                        if c == '}' {
+                            break;
+                        }
+                        hex.push(c);
+                    }
+                }
+                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    Some(c) => out.push(c),
+                    None => diags.push(
+                        Diagnostic::error(codes::E0003, "invalid unicode escape")
+                            .with_primary(span, format!("`\\u{{{}}}` is not a character", hex)),
+                    ),
+                }
+            }
+            // The parser removes every `\(`, so one reaching here is a
+            // literal backslash before a paren, which is what it looks like.
+            Some('(') => {
+                out.push('\\');
+                out.push('(');
+            }
+            Some(other) => {
+                diags.push(
+                    Diagnostic::error(codes::E0003, "invalid escape sequence")
+                        .with_primary(span, format!("`\\{}` is not recognised", other))
+                        .with_note("valid escapes: \\n \\t \\r \\0 \\\\ \\\" \\' \\u{...}"),
+                );
+            }
+            None => {}
+        }
+    }
+    out
+}
+
+pub(crate) fn parse_int(text: &str) -> Option<i64> {
     let text: String = text.chars().filter(|c| *c != '_').collect();
     let text = strip_int_suffix(&text);
     if let Some(h) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
@@ -8842,7 +9035,7 @@ fn parse_int(text: &str) -> Option<i64> {
     text.parse().ok()
 }
 
-fn parse_float(text: &str) -> Option<f64> {
+pub(crate) fn parse_float(text: &str) -> Option<f64> {
     let text: String = text.chars().filter(|c| *c != '_').collect();
     let text = text
         .strip_suffix("f64")

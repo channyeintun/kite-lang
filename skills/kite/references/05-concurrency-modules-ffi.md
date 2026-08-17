@@ -682,7 +682,7 @@ the module's `pub fn` list before you touch the import.
 | `E0111` | A qualified name whose module this module never imported — **or** an unknown member of one it did (above). |
 
 **Field-level visibility is parsed but not enforced.** `FieldDecl` in the
-grammar admits `pub`, and SPECIFICATION.md §4.2 and §15.4 both say an unmarked
+grammar admits `pub`, and SPECIFICATION.md §4.3 and §15.4 both say an unmarked
 field makes a `pub struct` opaque outside its module. The compiler's
 `check_visible` only covers functions, types and variants — a struct literal
 built from another module's unmarked fields, and a read of one, both compile

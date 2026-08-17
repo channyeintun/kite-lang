@@ -1,0 +1,10 @@
+// A written type is checked against the value, with no implicit conversion
+// between `int` and `float` here any more than anywhere else.
+
+let WRONG: float = 3 //~ ERROR E0200
+let ALSO_WRONG: str = 42 //~ ERROR E0200
+let RIGHT: float = 3.0
+
+fn main() {
+    io.print("\(WRONG)\(ALSO_WRONG)\(RIGHT)")
+}

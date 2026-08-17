@@ -256,6 +256,10 @@ impl<'a> FnLowerer<'a> {
                 let v = self.operand(value);
                 self.emit(Inst::MapSet { local: Local(local.0), key: k, value: v });
             }
+            hir::Stmt::MapRemove { local, key, .. } => {
+                let k = self.operand(key);
+                self.emit(Inst::MapRemove { local: Local(local.0), key: k });
+            }
             hir::Stmt::SlicePush { local, value, .. } => {
                 let v = self.operand(value);
                 self.emit(Inst::SlicePush { local: Local(local.0), value: v });

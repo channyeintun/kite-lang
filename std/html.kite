@@ -8,10 +8,10 @@
 //! ```kite ignore
 //! use std/html
 //!
-//! fn row(r: Row) -> html.Node {
+//! fn row(app: App, r: Row) -> html.Node {
 //!     return html.keyed("\(r.id)", html.el("tr", [], [
 //!         html.txt("td", [html.class("num")], "\(r.id)"),
-//!         html.txt("td", [], r.name),
+//!         html.txt("td", [html.click(|e: dom.Event| { open(app, r.id) })], r.name),
 //!     ]))
 //! }
 //!
@@ -25,6 +25,26 @@
 //! ships. A mistyped tag becomes a `<flase>` in the document rather than a
 //! compile error, which is the price.
 //!
+//! **What a press does is written where the control is.** [`click`] and its
+//! neighbours are attributes like any other, so the handler sits in the same
+//! expression as the class and the label — and it closes over whatever is in
+//! scope there, which is normally the thing the press is about.
+//!
+//! The alternative, and what this module used to force, is a `data-action`
+//! naming the control and one delegated listener elsewhere that matches on the
+//! name. That works and stays readable at about forty controls. At a hundred
+//! and fifty it stops: nothing checks that a name written on a button is a name
+//! anybody matches, so a control can draw, take the press, and do nothing —
+//! silently, and in numbers. It also loses the closure, so everything the
+//! handler needs has to be encoded into `data-` attributes and parsed back.
+//! Both failures are unrepresentable here.
+//!
+//! A listener is attached **once per element and event**, at the moment that
+//! element first describes a handler for it. A repaint replaces the stored
+//! closure rather than the listener, so re-describing a tree costs no
+//! `addEventListener` calls at all, and an element keeps its focus, its scroll
+//! position and its listeners across every update that reuses it.
+//!
 //! **Give list items a key.** Without one, children are matched by position, so
 //! a list that reorders rewrites the text of every element it moved past. With
 //! one, the element itself moves and its contents are left alone — which is the
@@ -32,13 +52,26 @@
 //!
 //! Class names pass through exactly as written. A stylesheet somebody else
 //! wrote is the thing styling this.
+//!
+//! A `Node` that carries a handler is not `Share`, because a closure that
+//! reaches a host value is not. Nothing here was ever going to cross to another
+//! isolate — a description exists to become elements in one document — so the
+//! marker is noted rather than worked around.
 
 use std/dom
 
-/// One attribute.
+/// One attribute, or one handler.
+///
+/// Both, in one type, because both are things written in the same list about
+/// the same element — which is how they read at the call site and how JSX,
+/// where most readers meet the idea, spells them too. `run` is what tells them
+/// apart: an ordinary attribute has none, and a handler's `name` is the event
+/// rather than an attribute name.
 pub struct Attr {
     name: str
     value: str
+    /// What to run when `name` happens here. Absent for a real attribute.
+    run: Option<fn(dom.Event)>
 }
 
 /// A described element, or a run of text.
@@ -62,36 +95,99 @@ pub struct Node {
 pub struct Mounted {
     into: dom.Element
     var live: [Live]
+    /// The keys of the children the last [`update`] removed. Read it with
+    /// [`departed`].
+    var gone: [str]
 }
 
 /// One built element and the description it was built from.
+///
+/// **Patched in place, never replaced.** A listener attached at `build` closes
+/// over this value and reads `on` at the moment the event arrives, so the
+/// object the closure captured has to be the object a later description
+/// updates. Returning a fresh `Live` from `patch` — which is what this did
+/// before there were handlers — would leave every listener reading the
+/// description the element was born with.
 struct Live {
-    key: str
-    tag: str
-    body: str
-    attrs: [Attr]
+    var key: str
+    var tag: str
+    var body: str
+    var attrs: [Attr]
     el: dom.Element
-    kids: [Live]
+    var kids: [Live]
+    /// The handlers as of the newest description. Read when an event fires,
+    /// not when the listener was attached.
+    var on: [Attr]
+    /// The events this element already has a real listener for. One per name,
+    /// added the first time a description asks for it and never taken off:
+    /// the listener costs one closure, and the element it is on is discarded
+    /// whole when it leaves the document.
+    var listening: [str]
 }
 
 // ---- describing ------------------------------------------------------------
 
 pub fn attr(name: str, value: str) -> Attr {
-    return Attr{ name: name, value: value }
+    return Attr{ name: name, value: value, run: nil }
 }
 
 /// The class attribute, taken whole — the way it is written everywhere else.
 pub fn class(names: str) -> Attr {
-    return Attr{ name: "class", value: names }
+    return Attr{ name: "class", value: names, run: nil }
 }
 
 pub fn id(name: str) -> Attr {
-    return Attr{ name: "id", value: name }
+    return Attr{ name: "id", value: name, run: nil }
 }
 
 /// A `data-` attribute. The prefix is added here so a caller writes the name.
 pub fn data(name: str, value: str) -> Attr {
-    return Attr{ name: "data-\(name)", value: value }
+    return Attr{ name: "data-\(name)", value: value, run: nil }
+}
+
+// ---- handlers ---------------------------------------------------------------
+//
+// Named constructors for the events a page actually uses, and `on` for the
+// rest. The named ones exist so the common case is one word and cannot be
+// misspelled: `html.clik` does not compile, `html.on("clik", …)` does.
+
+/// Run this when `event` happens on this element.
+pub fn on(event: str, run: fn(dom.Event)) -> Attr {
+    return Attr{ name: event, value: "", run: run }
+}
+
+pub fn click(run: fn(dom.Event)) -> Attr {
+    return on("click", run)
+}
+
+/// Every keystroke in a field, as it is typed. `dom.event_value` is what it
+/// now says.
+pub fn input(run: fn(dom.Event)) -> Attr {
+    return on("input", run)
+}
+
+/// A field that has finished changing: a select, a checkbox, a blurred text
+/// box.
+pub fn change(run: fn(dom.Event)) -> Attr {
+    return on("change", run)
+}
+
+/// A form being submitted. Almost always paired with `dom.prevent_default`,
+/// because the browser's own submit navigates away from the program.
+pub fn submit(run: fn(dom.Event)) -> Attr {
+    return on("submit", run)
+}
+
+pub fn keydown(run: fn(dom.Event)) -> Attr {
+    return on("keydown", run)
+}
+
+pub fn focus_in(run: fn(dom.Event)) -> Attr {
+    return on("focusin", run)
+}
+
+pub fn focus_out(run: fn(dom.Event)) -> Attr {
+    return on("focusout", run)
 }
 
 /// A run of text.
@@ -131,9 +227,20 @@ pub fn keyed(key: str, node: Node) -> Node {
 
 // ---- building --------------------------------------------------------------
 
-fn set_attrs(on: dom.Element, attrs: [Attr]) -> error {
+/// Whether this is a handler rather than an attribute.
+fn is_handler(a: Attr) -> bool {
+    return match a.run {
+        nil => false
+        _ => true
+    }
+}
+
+fn set_attrs(onto: dom.Element, attrs: [Attr]) -> error {
     for a in attrs {
-        let err = dom.set_attribute(on, a.name, a.value)
+        if is_handler(a) {
+            continue
+        }
+        let err = dom.set_attribute(onto, a.name, a.value)
         if err != nil {
             return err
         }
@@ -141,14 +248,94 @@ fn set_attrs(on: dom.Element, attrs: [Attr]) -> error {
     return nil
 }
 
-/// Whether `name` is one of these.
+/// Whether `name` is the name of a real attribute in this list.
+///
+/// Handlers are skipped, so a `click` handler never makes the attribute
+/// remover think an attribute called `click` is still wanted.
 fn names_include(attrs: [Attr], name: str) -> bool {
     for a in attrs {
-        if a.name == name {
+        if !is_handler(a) && a.name == name {
             return true
         }
     }
     return false
+}
+
+/// Just the handlers.
+fn handlers_of(attrs: [Attr]) -> [Attr] {
+    var out: [Attr] = []
+    for a in attrs {
+        if is_handler(a) {
+            out.push(a)
+        }
+    }
+    return out
+}
+
+fn strings_include(names: [str], name: str) -> bool {
+    for n in names {
+        if n == name {
+            return true
+        }
+    }
+    return false
+}
+
+/// Take the newest handlers, and attach a real listener for any event this
+/// element has not listened for before.
+///
+/// `live` is an ordinary `let` here rather than a `var` parameter, because the
+/// closure below has to capture it and a `var` cannot be captured. What it
+/// changes, it changes through [`remember`] and [`mark_listening`] — mutation
+/// spelled out in a signature, which is the language's idiom for exactly this.
+fn listen(live: Live, attrs: [Attr]) -> error {
+    let now = handlers_of(attrs)
+    remember(live, now)
+    for h in now {
+        if strings_include(live.listening, h.name) {
+            continue
+        }
+        mark_listening(live, h.name)
+        let event = h.name
+        // The closure reads `live.on` when the event arrives, so a repaint
+        // that replaced the handler is what runs — not the one that was
+        // current when this listener was attached.
+        let (_, err) = dom.on(live.el, event, |e: dom.Event| { fire(live, event, e) })
+        if err != nil {
+            return err
+        }
+    }
+    return nil
+}
+
+fn remember(var live: Live, now: [Attr]) {
+    live.on = now
+}
+
+/// Through a local because `live.listening.push(…)` is not something this
+/// compiler version lowers — a slice has to be a plain binding to be mutated.
+/// Slices are copy-on-write, so the write back is the whole of the update.
+fn mark_listening(var live: Live, event: str) {
+    var names = live.listening
+    names.push(event)
+    live.listening = names
+}
+
+/// Run whatever the newest description says this event does.
+///
+/// Every handler for the event runs, in the order they were written. Two
+/// handlers for one event on one element is unusual, and running only the
+/// first would silently drop the second.
+fn fire(live: Live, event: str, e: dom.Event) {
+    for h in live.on {
+        if h.name != event {
+            continue
+        }
+        match h.run {
+            nil => { }
+            run => { run(e) }
+        }
+    }
 }
 
 /// Bring an element's attributes to exactly `now`, **including the ones that
@@ -200,26 +387,52 @@ fn build(node: Node) -> (Live, error) {
         }
         kids.push(live)
     }
-    return Live{
+    let live = Live{
         key: node.key,
         tag: node.tag,
         body: node.body,
         attrs: node.attrs,
         el: made,
         kids: kids,
-    }, nil
+        on: [],
+        listening: [],
+    }
+    let herr = listen(live, node.attrs)
+    if herr != nil {
+        return _, herr
+    }
+    return live, nil
 }
 
 // ---- comparing ---------------------------------------------------------------
 
+/// Whether the *attributes* are the same. Handlers are not compared and are
+/// not part of the answer.
+///
+/// Two closures cannot be compared for equality in any language worth the
+/// name, and there would be no use for the answer: the newest handler always
+/// wins, and replacing the stored one is a field write rather than a DOM
+/// write. So the diff ignores them, exactly as it ignores which frame the
+/// description was built in.
 fn same_attrs(was: [Attr], now: [Attr]) -> bool {
-    if was.len() != now.len() {
-        return false
-    }
-    for i in 0..was.len() {
-        if was[i].name != now[i].name || was[i].value != now[i].value {
+    var i = 0
+    var j = 0
+    for i < was.len() || j < now.len() {
+        for i < was.len() && is_handler(was[i]) {
+            i = i + 1
+        }
+        for j < now.len() && is_handler(now[j]) {
+            j = j + 1
+        }
+        if i >= was.len() || j >= now.len() {
+            // One list still has a real attribute and the other has run out.
+            return i >= was.len() && j >= now.len()
+        }
+        if was[i].name != now[j].name || was[i].value != now[j].value {
             return false
         }
+        i = i + 1
+        j = j + 1
     }
     return true
 }
@@ -229,7 +442,7 @@ fn same_attrs(was: [Attr], now: [Attr]) -> bool {
 /// A tag change is a different element, so it is rebuilt. Everything else is
 /// reused: the element stays where it is, keeps its focus and its scroll
 /// position, and only what differs is written.
-fn patch(parent: dom.Element, old: Live, next: Node) -> (Live, error) {
+fn patch(parent: dom.Element, old: Live, next: Node, gone: Gone) -> (Live, error) {
     if old.tag != next.tag {
         // A different tag is a different element, so it is built — and put
         // where the old one stood, in the same statement. Leaving that to the
@@ -246,6 +459,10 @@ fn patch(parent: dom.Element, old: Live, next: Node) -> (Live, error) {
         if ierr != nil {
             return _, ierr
         }
+        // The old subtree is leaving the document, so whatever was keyed
+        // inside it is gone in exactly the sense a caller pruning state cares
+        // about — even though the position it stood in is still occupied.
+        collect_keys(old, gone)
         let rerr = dom.remove(old.el)
         if rerr != nil {
             return _, rerr
@@ -258,6 +475,14 @@ fn patch(parent: dom.Element, old: Live, next: Node) -> (Live, error) {
             return _, err
         }
     }
+    // Unconditionally, and before the children: the handlers are not part of
+    // `same_attrs`, so there is nothing to compare and nothing to skip. This
+    // is one field write and it is what makes a handler close over the state
+    // of *this* repaint rather than the first one.
+    let herr = listen(old, next.attrs)
+    if herr != nil {
+        return _, herr
+    }
     if next.kids.len() == 0 {
         // A leaf: its text is all there is. Writing the same text back would
         // still be a DOM write, so it is compared first.
@@ -267,27 +492,28 @@ fn patch(parent: dom.Element, old: Live, next: Node) -> (Live, error) {
                 return _, terr
             }
         }
-        return Live{
-            key: next.key,
-            tag: next.tag,
-            body: next.body,
-            attrs: next.attrs,
-            el: old.el,
-            kids: [],
-        }, nil
+        adopt(old, next, [])
+        return old, nil
     }
-    let (kids, kerr) = reconcile(old.el, old.kids, next.kids)
+    let (kids, kerr) = reconcile(old.el, old.kids, next.kids, gone)
     if kerr != nil {
         return _, kerr
     }
-    return Live{
-        key: next.key,
-        tag: next.tag,
-        body: next.body,
-        attrs: next.attrs,
-        el: old.el,
-        kids: kids,
-    }, nil
+    adopt(old, next, kids)
+    return old, nil
+}
+
+/// Take on the description that was just applied.
+///
+/// Written into the same `Live` rather than returned as a new one, because a
+/// listener attached at `build` captured this object and reads it when an
+/// event arrives.
+fn adopt(var live: Live, next: Node, kids: [Live]) {
+    live.key = next.key
+    live.tag = next.tag
+    live.body = next.body
+    live.attrs = next.attrs
+    live.kids = kids
 }
 
 /// Match a new child list against the old one, and leave the parent holding
@@ -299,7 +525,10 @@ fn patch(parent: dom.Element, old: Live, next: Node) -> (Live, error) {
 /// nothing is written. From the first child that is built, moved, or skipped
 /// past, the rest of the list is appended in order — because once the tail is
 /// being rebuilt, a child's own two indices no longer say where it sits.
-fn reconcile(parent: dom.Element, olds: [Live], nexts: [Node]) -> ([Live], error) {
+///
+/// `gone` collects the keys of everything removed, so a caller holding state
+/// per row can drop the rows that left. See [`departed`].
+fn reconcile(parent: dom.Element, olds: [Live], nexts: [Node], gone: Gone) -> ([Live], error) {
     var by_key: { str: int } = { }
     for i in 0..olds.len() {
         if olds[i].key.len() > 0 {
@@ -351,7 +580,7 @@ fn reconcile(parent: dom.Element, olds: [Live], nexts: [Node]) -> ([Live], error
             out.push(made)
         } else {
             taken[from] = true
-            let (live, err) = patch(parent, olds[from], want)
+            let (live, err) = patch(parent, olds[from], want, gone)
             if err != nil {
                 return _, err
             }
@@ -371,6 +600,7 @@ fn reconcile(parent: dom.Element, olds: [Live], nexts: [Node]) -> ([Live], error
 
     for i in 0..olds.len() {
         if !taken[i] {
+            collect_keys(olds[i], gone)
             let err = dom.remove(olds[i].el)
             if err != nil {
                 return _, err
@@ -378,6 +608,35 @@ fn reconcile(parent: dom.Element, olds: [Live], nexts: [Node]) -> ([Live], error
         }
     }
     return out, nil
+}
+
+/// The keys removed by the update in progress.
+///
+/// A struct with one mutable field, rather than a return value threaded back
+/// up through two mutually recursive functions that already return two things
+/// each. It is passed as a `let` and written through [`note_gone`], which is
+/// the same shape every other mutation here has.
+struct Gone {
+    var keys: [str]
+}
+
+fn note_gone(var g: Gone, key: str) {
+    var keys = g.keys
+    keys.push(key)
+    g.keys = keys
+}
+
+/// Every key in a subtree that is leaving, not just the root's.
+///
+/// A keyed row removed from a list takes its keyed children with it, and a
+/// caller keeping state under one of those keys has the same reason to drop it.
+fn collect_keys(live: Live, gone: Gone) {
+    if live.key.len() > 0 {
+        note_gone(gone, live.key)
+    }
+    for k in live.kids {
+        collect_keys(k, gone)
+    }
 }
 
 // ---- mounting ----------------------------------------------------------------
@@ -400,15 +659,39 @@ pub fn mount(into: dom.Element, nodes: [Node]) -> (Mounted, error) {
         }
         live.push(made)
     }
-    return Mounted{ into: into, live: live }, nil
+    return Mounted{ into: into, live: live, gone: [] }, nil
 }
 
 /// Compare a new description against what is there, and change the difference.
 pub fn update(var view: Mounted, nodes: [Node]) -> error {
-    let (live, err) = reconcile(view.into, view.live, nodes)
+    let gone = Gone{ keys: [] }
+    let (live, err) = reconcile(view.into, view.live, nodes, gone)
+    view.gone = gone.keys
     if err != nil {
         return err
     }
     view.live = live
     return nil
+}
+
+/// The keys whose elements left the document during the last [`update`].
+///
+/// State kept per row — what a `useState` inside a list item would have been,
+/// which here is a `{str: T}` in the program's own store — has to be dropped
+/// when the row goes, and this is the only place that knows which rows went.
+/// Without it the map grows for the life of the program and the pruning is
+/// hand-written against a list the caller has to re-derive.
+///
+/// ```kite ignore
+/// let err = html.update(view, rows)
+/// for key in html.departed(view) {
+///     forget_draft(store, key)
+/// }
+/// ```
+///
+/// Every key in a removed subtree is reported, not just its root: a keyed row
+/// takes its keyed children with it. The list is replaced by each `update`,
+/// including one that removed nothing.
+pub fn departed(view: Mounted) -> [str] {
+    return view.gone
 }

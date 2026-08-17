@@ -595,6 +595,7 @@ pub fn qualify_items(module: &str, items: &mut [Item]) {
             Item::Enum(e) => Some(&mut e.name),
             Item::Trait(t) => Some(&mut t.name),
             Item::TypeAlias(a) => Some(&mut a.name),
+            Item::Const(c) => Some(&mut c.name),
             Item::Impl(_) | Item::Error(_) => None,
         };
         if let Some(n) = name {

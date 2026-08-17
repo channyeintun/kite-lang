@@ -25,6 +25,8 @@ pub enum Res {
     Local(u32),
     /// Index into [`ResolveMap::fns`].
     Fn(u32),
+    /// Index into [`ResolveMap::consts`] — a module-level `let`.
+    Const(u32),
     Builtin(BuiltinFn),
     /// Index into [`ResolveMap::types`].
     Type(u32),
@@ -498,6 +500,19 @@ pub struct FnSig {
     pub is_extern: bool,
 }
 
+/// A module-level `let`.
+///
+/// It shares the value name space with functions, so a module cannot declare
+/// both `fn limit` and `let limit` — the reader would have no way to tell from
+/// a use which one it was.
+#[derive(Debug)]
+pub struct ConstSig {
+    pub name: String,
+    pub decl_index: usize,
+    pub span: Span,
+    pub is_pub: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct MethodOwner {
     /// Index into [`ResolveMap::types`].
@@ -530,6 +545,7 @@ pub struct LocalInfo {
 #[derive(Debug, Default)]
 pub struct ResolveMap {
     pub fns: Vec<FnSig>,
+    pub consts: Vec<ConstSig>,
     pub types: Vec<TypeDecl>,
     /// Which module each item came from.
     pub modules: Modules,
@@ -620,6 +636,20 @@ impl ResolveMap {
             .iter()
             .position(|f| f.owner.is_none() && f.name == name)
             .map(|i| i as u32)
+    }
+
+    /// A constant visible from inside `module`, by the same three steps a
+    /// function name takes.
+    pub fn const_by_name_in(&self, module: &str, name: &str) -> Option<u32> {
+        let written = name;
+        let name = self.modules.canonical(module, name);
+        self.find_const(&qualify(module, &name))
+            .or_else(|| self.reachable(module, written).then(|| self.find_const(&name)).flatten())
+            .or_else(|| self.find_const(&qualify(PRELUDE, &name)))
+    }
+
+    fn find_const(&self, name: &str) -> Option<u32> {
+        self.consts.iter().position(|c| c.name == name).map(|i| i as u32)
     }
 
     pub fn type_by_name_in(&self, module: &str, name: &str) -> Option<u32> {
@@ -867,6 +897,31 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                 });
             }
 
+            // Constants share this name space, and this pass, because they
+            // share the question a use asks: given a bare name where a value
+            // belongs, what is it? A module with both `fn limit` and
+            // `let limit` gives the reader no way to answer it.
+            Item::Const(c) => {
+                if let Some(&prev) = seen.get(c.name.name.as_str()) {
+                    diags.push(
+                        Diagnostic::error(
+                            codes::E0112,
+                            format!("`{}` is defined more than once", c.name.name),
+                        )
+                        .with_primary(c.name.span, "redefined here")
+                        .with_secondary(prev, "first defined here"),
+                    );
+                    continue;
+                }
+                seen.insert(&c.name.name, c.name.span);
+                map.consts.push(ConstSig {
+                    name: c.name.name.clone(),
+                    decl_index: i,
+                    span: c.name.span,
+                    is_pub: c.is_pub,
+                });
+            }
+
             Item::Impl(imp) => {
                 let module = map.modules.of(i).to_string();
                 let target = imp.self_ty.text();
@@ -974,6 +1029,20 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
 
 /// Pass 3: resolve every function and method body.
 fn resolve_bodies(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) {
+    // Constant initialisers first, and in their own resolver each: a constant
+    // has no locals and no parameters, so the only names it can reach are
+    // other module-level ones. Doing them before the bodies means a body
+    // naming a constant finds it already resolved.
+    for const_index in 0..map.consts.len() {
+        let decl_index = map.consts[const_index].decl_index;
+        let module = map.modules.of(decl_index).to_string();
+        let Item::Const(c) = &file.items[decl_index] else {
+            unreachable!("a constant signature points at a constant")
+        };
+        let mut r = FnResolver::new(map, diags, module);
+        r.expr(&c.value);
+    }
+
     for sig_index in 0..map.fns.len() {
         let decl_index = map.fns[sig_index].decl_index;
         let owner = map.fns[sig_index].owner;
@@ -1049,6 +1118,11 @@ impl<'a> FnResolver<'a> {
         self.map.fn_by_name_in(&self.module, name)
     }
 
+    /// A constant visible from the module being resolved.
+    fn find_const(&self, name: &str) -> Option<u32> {
+        self.map.const_by_name_in(&self.module, name)
+    }
+
     /// Reject reaching into another module for something it did not mark
     /// `pub`. Two levels of visibility, exactly as the specification says.
     fn check_visible(&mut self, res: Res, span: Span, name: &str) {
@@ -1056,6 +1130,10 @@ impl<'a> FnResolver<'a> {
             Res::Fn(i) => {
                 let f = &self.map.fns[i as usize];
                 (self.map.modules.of(f.decl_index), f.is_pub, f.span, "function")
+            }
+            Res::Const(i) => {
+                let c = &self.map.consts[i as usize];
+                (self.map.modules.of(c.decl_index), c.is_pub, c.span, "constant")
             }
             Res::Type(i) | Res::Variant(i, _) => {
                 let t = &self.map.types[i as usize];
@@ -1586,6 +1664,14 @@ impl<'a> FnResolver<'a> {
             self.check_visible(Res::Fn(fi), name.span, &dotted);
             return Some(Res::Fn(fi));
         }
+        // `limits.MAX_BODY` — a constant in an imported module, reached the
+        // same way and answered before types, because a constant and a type
+        // cannot share a name and the value namespace is what a `.` in
+        // expression position is most often reaching into.
+        if let Some(ci) = self.find_const(&dotted) {
+            self.check_visible(Res::Const(ci), name.span, &dotted);
+            return Some(Res::Const(ci));
+        }
         if let Some(ti) = self.find_type(&dotted) {
             self.check_visible(Res::Type(ti), name.span, &dotted);
             return Some(Res::Type(ti));
@@ -1636,6 +1722,12 @@ impl<'a> FnResolver<'a> {
                 self.map.uses.insert(p.span, Res::Fn(fi));
                 return;
             }
+            // `limits.max_body` — a constant reached through its module.
+            if let Some(ci) = self.find_const(&text) {
+                self.check_visible(Res::Const(ci), p.span, &text);
+                self.map.uses.insert(p.span, Res::Const(ci));
+                return;
+            }
             // `Shape.Circle` — a qualified variant.
             let owner = segments_text(&p.segments[..p.segments.len() - 1]);
             let leaf = &p.last().name;
@@ -1665,6 +1757,10 @@ impl<'a> FnResolver<'a> {
         }
         if let Some(id) = self.find_fn(name) {
             self.map.uses.insert(p.span, Res::Fn(id));
+            return;
+        }
+        if let Some(id) = self.find_const(name) {
+            self.map.uses.insert(p.span, Res::Const(id));
             return;
         }
         // `assert` and `require` are the two builtins that are not dotted: a

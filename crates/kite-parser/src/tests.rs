@@ -612,3 +612,42 @@ fn ascii_identifiers_are_left_alone() {
     assert!(matches!(normalise("caf\u{e9}"), std::borrow::Cow::Borrowed(_)));
     assert!(matches!(normalise("cafe\u{301}"), std::borrow::Cow::Owned(_)));
 }
+
+// ---- module-level constants ------------------------------------------------
+
+#[test]
+fn a_module_level_let_parses_as_a_constant() {
+    let p = ok("pub let LIMIT: int = 40\nlet NAME = \"kite\"\n");
+    let consts: Vec<&ConstDecl> = p
+        .file
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Const(c) => Some(c),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(consts.len(), 2);
+    assert_eq!(consts[0].name.name, "LIMIT");
+    assert!(consts[0].is_pub);
+    assert!(consts[0].ty.is_some());
+    assert_eq!(consts[1].name.name, "NAME");
+    assert!(!consts[1].is_pub);
+    assert!(consts[1].ty.is_none());
+}
+
+/// The declaration is still built, so everything after it resolves against a
+/// name that exists. One diagnostic about the `var`, not a cascade about a
+/// missing `COUNT`.
+#[test]
+fn a_module_level_var_is_refused_but_still_declares() {
+    let p = parse_src("var COUNT = 0\n");
+    assert_eq!(p.codes(), vec!["E0118"]);
+    assert!(matches!(p.file.items.first(), Some(Item::Const(c)) if c.name.name == "COUNT"));
+}
+
+#[test]
+fn a_module_level_let_must_have_a_value() {
+    let p = parse_src("let LIMIT: int\n");
+    assert!(p.codes().contains(&"E0118"));
+}

@@ -473,6 +473,24 @@ impl<'a> Parser<'a> {
             T::Trait if !is_async => self.parse_trait(is_pub, start).map(Item::Trait),
             T::Impl if !is_async => self.parse_impl(start).map(Item::Impl),
             T::Type if !is_async => self.parse_type_alias(is_pub, start).map(Item::TypeAlias),
+            T::Let if !is_async => self.parse_const(is_pub, start).map(Item::Const),
+            // `var` at module level is refused here rather than in a later
+            // pass, because the answer is not "this one is wrong" but "there
+            // is no such declaration": two functions sharing a mutable binding
+            // is state neither of their signatures mentions.
+            T::Var if !is_async => {
+                let at = self.span();
+                self.diags.push(
+                    Diagnostic::error(codes::E0118, "a module-level binding must be `let`")
+                        .with_primary(at, "`var` is not allowed here")
+                        .with_note(
+                            "a mutable binding at module level is state shared by every \
+                             function in the module without any of them saying so; put it in a \
+                             struct and pass it to what changes it",
+                        ),
+                );
+                self.parse_const(is_pub, start).map(Item::Const)
+            }
             _ if is_async => {
                 self.error_expected("`fn` after `async`");
                 None
@@ -761,6 +779,34 @@ impl<'a> Parser<'a> {
         let span = start.to(self.prev_span());
         self.expect_terminator();
         Some(TypeAlias { is_pub, name, generics, ty, span })
+    }
+
+    /// `pub let LIMIT: int = 100`
+    ///
+    /// The same shape as a `let` statement minus the parts that mean nothing
+    /// here: no destructuring, because there is one name being declared, and
+    /// no deferred initialiser, because there is no path for the compiler to
+    /// prove an assignment on.
+    fn parse_const(&mut self, is_pub: bool, start: Span) -> Option<ConstDecl> {
+        self.bump(); // `let` or `var`
+        let name = self.ident()?;
+        let ty = if self.eat(T::Colon) { Some(self.parse_type()?) } else { None };
+        if !self.eat(T::Eq) {
+            self.error_expected("`=`");
+            self.diags.push(
+                Diagnostic::error(codes::E0118, "a module-level `let` must have a value")
+                    .with_primary(name.span, "declared here, with nothing to be")
+                    .with_note(
+                        "a constant is a name for a value the compiler knows, so there is \
+                         nowhere else the value could come from",
+                    ),
+            );
+            return None;
+        }
+        let value = self.parse_expr()?;
+        let span = start.to(self.prev_span());
+        self.expect_terminator();
+        Some(ConstDecl { is_pub, name, ty, value, span })
     }
 
     /// Recover to the next member boundary inside a braced declaration body,

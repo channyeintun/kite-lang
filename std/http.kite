@@ -22,8 +22,19 @@ use std/task
 // them, so what the host must supply and what the program may ask cannot drift
 // apart.
 
+/// `credentials` and `redirect` cross as the words `fetch` itself uses, built
+/// by [`credentials_word`] and [`redirect_word`] from enums, so a caller
+/// cannot misspell one and a value added to either enum is a compile error at
+/// every place that has to know.
 @host("net")
-extern fn fetch_start(method: str, url: str, body: str, headers: str) -> int
+extern fn fetch_start(
+    method: str,
+    url: str,
+    body: str,
+    headers: str,
+    credentials: str,
+    redirect: str,
+) -> int
 
 /// 0 while in flight, 1 when it arrived, 2 when the transport failed.
 @host("net")
@@ -145,6 +156,89 @@ pub fn header(r: Response, name: str) -> str {
     return fetch_header(r.id, name)
 }
 
+// ---- what a request carries besides its body --------------------------------
+
+/// Whether cookies, TLS client certificates and HTTP auth go out with a
+/// request, and whether a `Set-Cookie` coming back is kept.
+///
+/// This is the one `fetch` option a program cannot work around: an app that
+/// signs in with a cookie sends one on every request, and there is no header a
+/// caller can set instead — the browser will not let a page write `Cookie`.
+pub enum Credentials {
+    /// Never. A request that is purely public data.
+    Omit
+    /// To the origin the page was served from, and nowhere else. What `fetch`
+    /// does when nobody says.
+    SameOrigin
+    /// Cross-origin too. The server has to answer with
+    /// `Access-Control-Allow-Credentials: true` and name a single origin —
+    /// `*` is refused by the browser precisely here.
+    Include
+}
+
+/// What to do when the answer is a redirect.
+pub enum Redirect {
+    /// Follow it, up to the browser's own limit. The default.
+    Follow
+    /// Treat it as a transport failure, which arrives here as an `error`.
+    Error
+    /// Hand back the redirect itself, unfollowed and opaque.
+    Manual
+}
+
+/// Everything about a request except its method, its URL and its body.
+///
+/// A struct rather than six more parameters, which is what the specification
+/// says to do with many optional inputs — and it means the next option added
+/// here does not change any call site that did not want it.
+///
+/// `mode` is deliberately absent. Its only interesting value is `no-cors`,
+/// which yields a response whose status is 0 and whose body cannot be read:
+/// the request goes out and the program is told nothing. A boundary that can
+/// only be used to lose information is not worth the word.
+pub struct Options {
+    /// `name: value` pairs, one per line.
+    pub headers: str
+    pub credentials: Credentials
+    pub redirect: Redirect
+}
+
+/// The defaults, to be changed where a caller cares:
+///
+/// ```kite ignore
+/// let opts = http.Options{ ..http.sending(), credentials: http.Credentials.Include }
+/// let (res, err) = await http.send_with("POST", url, body, opts)
+/// ```
+pub fn sending() -> Options {
+    return Options{
+        headers: "",
+        credentials: Credentials.SameOrigin,
+        redirect: Redirect.Follow,
+    }
+}
+
+/// The same, carrying the caller's headers.
+pub fn sending_with(headers: str) -> Options {
+    return Options{..sending(), headers: headers }
+}
+
+/// The word `fetch` knows this by.
+fn credentials_word(c: Credentials) -> str {
+    return match c {
+        Omit => "omit",
+        SameOrigin => "same-origin",
+        Include => "include",
+    }
+}
+
+fn redirect_word(r: Redirect) -> str {
+    return match r {
+        Follow => "follow",
+        Error => "error",
+        Manual => "manual",
+    }
+}
+
 // ---- the client -------------------------------------------------------------
 
 pub async fn get(url: str) -> (Response, error) {
@@ -198,11 +292,32 @@ pub async fn query(url: str, body: str) -> (Response, error) {
     return await send("QUERY", url, body, "content-type: application/json")
 }
 
-/// Every request goes through here. Waiting is `task.wait_host()`: what is
-/// being waited for is not another task but the host itself, and saying so is
-/// what lets the runtime hand the event loop back rather than spin.
+/// A request with headers and nothing else to say about it — which is most of
+/// them, and is what `get`, `post` and the rest are written in terms of.
 pub async fn send(method: str, url: str, body: str, headers: str) -> (Response, error) {
-    let id = fetch_start(method, url, body, headers)
+    return await send_with(method, url, body, sending_with(headers))
+}
+
+/// The same, saying what the request carries besides its body.
+///
+/// The one every other function here goes through. Waiting is
+/// `task.wait_host()`: what is being waited for is not another task but the
+/// host itself, and saying so is what lets the runtime hand the event loop
+/// back rather than spin.
+pub async fn send_with(
+    method: str,
+    url: str,
+    body: str,
+    options: Options,
+) -> (Response, error) {
+    let id = fetch_start(
+        method,
+        url,
+        body,
+        options.headers,
+        credentials_word(options.credentials),
+        redirect_word(options.redirect),
+    )
     for fetch_state(id) == 0 {
         task.wait_host()
         task.yield()

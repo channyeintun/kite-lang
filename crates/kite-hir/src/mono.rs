@@ -297,6 +297,7 @@ fn stmt_exprs(s: &mut Stmt) -> Vec<&mut Expr> {
         Stmt::SetField { base, value, .. } => vec![base, value],
         Stmt::SetIndex { base, index, value, .. } => vec![base, index, value],
         Stmt::MapSet { key, value, .. } => vec![key, value],
+        Stmt::MapRemove { key, .. } => vec![key],
         Stmt::ForSlice { slice, .. } => vec![slice],
         Stmt::Expr(e) => vec![e],
         Stmt::Return { value, .. } => value.iter_mut().collect(),
@@ -324,6 +325,7 @@ fn stmt_blocks(s: &mut Stmt) -> Vec<&mut Block> {
         | Stmt::SetIndex { .. }
         | Stmt::SlicePush { .. }
         | Stmt::MapSet { .. }
+        | Stmt::MapRemove { .. }
         | Stmt::Expr(_)
         | Stmt::Return { .. }
         | Stmt::Break { .. }
@@ -489,6 +491,7 @@ fn renumber_stmt(s: &mut Stmt, map: &HashMap<u32, u32>) {
         | Stmt::Assign { local, .. }
         | Stmt::SlicePush { local, .. }
         | Stmt::MapSet { local, .. }
+        | Stmt::MapRemove { local, .. }
         | Stmt::ForSlice { var: local, .. }
         | Stmt::ForRange { var: local, .. } => remap(local, map),
         Stmt::SetField { .. }

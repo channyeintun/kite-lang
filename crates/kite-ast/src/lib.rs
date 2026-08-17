@@ -55,6 +55,13 @@ pub enum Item {
     Trait(TraitDecl),
     Impl(ImplDecl),
     TypeAlias(TypeAlias),
+    /// `let PORT = 8080` at the top of a module.
+    ///
+    /// A name for a value that is known while compiling. There is no module
+    /// `var`: a mutable binding at this level is state two functions share
+    /// without either saying so, which is the thing the language spends its
+    /// omissions avoiding.
+    Const(ConstDecl),
     /// A declaration the parser could not recover into a real item.
     Error(Span),
 }
@@ -70,6 +77,7 @@ impl Item {
             Item::Enum(e) => Some(&e.name.name),
             Item::Trait(t) => Some(&t.name.name),
             Item::TypeAlias(a) => Some(&a.name.name),
+            Item::Const(c) => Some(&c.name.name),
             Item::Impl(_) | Item::Error(_) => None,
         }
     }
@@ -83,6 +91,7 @@ impl Item {
             Item::Trait(t) => t.span,
             Item::Impl(i) => i.span,
             Item::TypeAlias(a) => a.span,
+            Item::Const(c) => c.span,
             Item::Error(s) => *s,
         }
     }
@@ -96,6 +105,7 @@ impl Item {
             Item::Enum(e) => Some(&e.name),
             Item::Trait(t) => Some(&t.name),
             Item::TypeAlias(a) => Some(&a.name),
+            Item::Const(c) => Some(&c.name),
             Item::Impl(_) | Item::Error(_) => None,
         }
     }
@@ -110,6 +120,7 @@ impl Item {
             Item::Trait(_) => "trait",
             Item::Impl(_) => "impl block",
             Item::TypeAlias(_) => "type alias",
+            Item::Const(_) => "constant",
             Item::Error(_) => "item",
         }
     }
@@ -191,6 +202,19 @@ pub struct TypeAlias {
     pub name: Ident,
     pub generics: Vec<GenericParam>,
     pub ty: Type,
+    pub span: Span,
+}
+
+/// `pub let LIMIT: int = 100`
+///
+/// The type is optional and read from the value when it is left out, exactly
+/// as a `let` inside a function does.
+#[derive(Debug)]
+pub struct ConstDecl {
+    pub is_pub: bool,
+    pub name: Ident,
+    pub ty: Option<Type>,
+    pub value: Expr,
     pub span: Span,
 }
 

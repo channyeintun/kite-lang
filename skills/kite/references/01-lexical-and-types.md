@@ -662,38 +662,36 @@ and a binding of the wrong width is `E0200 expected 2 bindings, found 3`.
 `for (k, v) in m` is lowered to a loop over `m.keys()` with a lookup per key,
 which is why the order is the insertion order `keys()` already promised.
 
-### A map cannot lose a key
+### Dropping a key is `remove`, and assigning `nil` is not it
 
-There is no `remove` and no `delete`, and the `E0205` note is the whole map
-surface: "a map has: len, keys, values; read with `m[key]`, which yields an
-optional, and write with `m[key] = value`".
-
-```kite fails
-fn main() {
-    var m = {"a": 1}
-    m.remove("a") //~ E0205
-    io.print(m.len())
-}
-```
-
-Assigning `nil` is not the back door. On a `{str: int}` it is
-`E0200 expected int, found nil`; on a `{str: Option<int>}` it is accepted and
-leaves the key **in place** with a `nil` value — `len()` is unchanged and the
-key still comes out of `keys()` and out of a pair loop. Dropping a key means
-rebuilding the map:
+`m.remove(key)` takes the entry out and shifts the ones after it down, so
+insertion order still means what it says. A key that is not there is not a
+mistake — dropping state for a row that never had any is the ordinary case —
+so a miss changes nothing and reports nothing.
 
 ```kite
 fn main() {
-    let m = {"a": 1, "b": 2}
-    var out: {str: int} = {}
-    for (k, v) in m {
-        if k != "a" {
-            out[k] = v
-        }
-    }
-    io.print(out.len())            // 1
+    var m = {"a": 1, "b": 2, "c": 3}
+    m.remove("b")
+    m.remove("gone")               // absent: nothing happens
+    io.print("\(m.len())")          // 2
+    io.print("\(m["b"] == nil)")    // true
 }
 ```
+
+The receiver has to be a plain `var` binding, exactly as `xs.push(v)` does:
+maps are copy-on-write values, so the write lands on the binding. `m.remove(k)`
+where `m` is a field is `E0200 mutating a map that is not a plain binding` —
+copy it into a local, remove, and assign it back.
+
+**Assigning `nil` is not the same thing.** On a `{str: int}` it is
+`E0200 expected int, found nil`; on a `{str: Option<int>}` it is accepted and
+leaves the key **in place** with a `nil` value — `len()` is unchanged and the
+key still comes out of `keys()` and out of a pair loop.
+
+The whole map surface is what the `E0205` note lists: "a map has: len, keys,
+values, remove; read with `m[key]`, which yields an optional, and write with
+`m[key] = value`".
 
 ### A range is not a value
 

@@ -216,6 +216,7 @@ impl Checker<'_> {
                 self.expr(key);
                 self.expr(value);
             }
+            Stmt::MapRemove { key, .. } => self.expr(key),
             Stmt::ForSlice { slice, body, .. } => {
                 self.expr(slice);
                 self.block(body);

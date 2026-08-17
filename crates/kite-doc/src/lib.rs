@@ -240,6 +240,15 @@ impl Reader<'_> {
                 self.text(a.span).trim().to_string(),
                 Vec::new(),
             ),
+            // The whole declaration is the signature: a constant's value is
+            // the interesting half, and it is short by construction.
+            Item::Const(c) => (
+                "constant",
+                c.name.name.clone(),
+                c.is_pub,
+                self.text(c.span).trim().to_string(),
+                Vec::new(),
+            ),
             // An `impl` block documents its methods against the type they are
             // on, which the type's own entry already lists.
             Item::Impl(_) | Item::Error(_) => return None,

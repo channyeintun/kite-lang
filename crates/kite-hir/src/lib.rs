@@ -181,6 +181,8 @@ pub enum Stmt {
     SlicePush { local: LocalId, value: Expr, span: Span },
     /// `m[k] = v`. Maps are copy-on-write values too.
     MapSet { local: LocalId, key: Expr, value: Expr, span: Span },
+    /// `m.remove(k)`. The same binding rule as `MapSet`, for the same reason.
+    MapRemove { local: LocalId, key: Expr, span: Span },
     /// `for x in xs`
     ForSlice {
         var: LocalId,
@@ -728,6 +730,9 @@ impl Program {
             }
             Stmt::MapSet { local, key, value, .. } => {
                 writeln!(f, "_{}[{}] = {}", local.0, self.expr(key), self.expr(value))
+            }
+            Stmt::MapRemove { local, key, .. } => {
+                writeln!(f, "_{}.remove({})", local.0, self.expr(key))
             }
             Stmt::ForSlice { var, slice, body, .. } => {
                 writeln!(f, "for _{} in {} {{", var.0, self.expr(slice))?;

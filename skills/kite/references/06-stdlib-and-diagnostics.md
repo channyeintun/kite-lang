@@ -929,10 +929,32 @@ remembers it; `update` compares and touches only the difference.
 Two constructors, not one per tag: `el(tag, attrs, kids)` and
 `txt(tag, attrs, body)`, plus `text(body)` and `empty(tag, attrs)`.
 Attributes: `attr(name, value)` `class(names)` `id(name)` `data(name, value)`.
+Handlers, which are attributes too: `click(fn(dom.Event))` `input` `change`
+`submit` `keydown` `focus_in` `focus_out`, and `on(event, fn(dom.Event))` for
+anything else.
 `keyed(key, node)` — **give list items a key**, or children are matched by
 position and a reorder rewrites everything it moved past.
 `mount(into: dom.Element, [Node]) -> (Mounted, error)` ·
-`update(var view: Mounted, [Node]) -> error`.
+`update(var view: Mounted, [Node]) -> error` ·
+`departed(view) -> [str]` — the keys removed by the last `update`, for dropping
+per-row state.
+
+**Write the handler where the control is.** It closes over what is in scope
+there, so nothing has to be encoded into `data-` attributes and parsed back:
+
+```kite
+html.txt("button", [html.class("primary"), html.click(|e: dom.Event| {
+    settle(app, bill.id)
+})], "Split it")
+```
+
+A listener is attached once per element and event; a repaint replaces the
+stored closure, so re-describing a tree costs no `addEventListener` calls and
+the handler that runs is always the newest one. A function building nodes that
+handle events takes its `Mounted` as a **plain parameter, not `var`** — a
+closure cannot capture a `var` (`E0211`) — and `html.update` takes it as `var`
+from there, which is the language's ordinary shape for mutating something a
+closure holds.
 
 A mistyped tag becomes a `<flase>` in the document, not a compile error. And
 the element mounted into has to be in the page: `dom.find("#table")` below
@@ -948,11 +970,33 @@ struct Row {
     pub name: str
 }
 
-fn row(r: Row) -> html.Node {
-    return html.keyed("\(r.id)", html.el("tr", [], [
+struct Picked {
+    var id: int
+}
+
+fn choose(var p: Picked, id: int) {
+    p.id = id
+}
+
+// `view` is a plain parameter so the closure below can capture it.
+fn row(p: Picked, view: html.Mounted, all: [Row], r: Row) -> html.Node {
+    return html.keyed("\(r.id)", html.el("tr", [
+        html.class(if r.id == p.id { "on" } else { "" }),
+        html.click(|e: dom.Event| {
+            choose(p, r.id)
+            draw(p, view, all)
+        }),
+    ], [
         html.txt("td", [html.class("num")], "\(r.id)"),
         html.txt("td", [], r.name),
     ]))
+}
+
+fn draw(p: Picked, view: html.Mounted, all: [Row]) {
+    let err = html.update(view, map(all, |r: Row| -> html.Node { return row(p, view, all, r) }))
+    if err != nil {
+        io.error(err.message())
+    }
 }
 
 fn main() {
@@ -960,13 +1004,14 @@ fn main() {
     if into == nil {
         return
     }
-    let rows = [Row{ id: 1, name: "ada" }, Row{ id: 2, name: "grace" }]
-    let (view, err) = html.mount(into, map(rows, row))
+    let all = [Row{ id: 1, name: "ada" }, Row{ id: 2, name: "grace" }]
+    let p = Picked{ id: 0 }
+    let (view, err) = html.mount(into, [])
     if err != nil {
         io.error(err.message())
         return
     }
-    _ = html.update(view, map(reversed(rows), row))
+    draw(p, view, all)
 }
 ```
 
@@ -983,6 +1028,21 @@ Client, all async `-> (Response, error)`: `get` `post` `put` `delete` `patch`
 `head` `options` `query` and `send(method, url, body, headers)`.
 Helpers: `ok(body)` `not_found()` `status(code, body)` `succeeded(r)`
 `header(r, name)`.
+
+**Cookies need `send_with`.** `send` cannot say whether credentials go out, and
+a page may not set a `Cookie` header itself — so an app that signs in with a
+cookie uses `send_with(method, url, body, Options)`:
+
+```kite
+let signed_in = http.Options{ ..http.sending(), credentials: http.Credentials.Include }
+let (res, err) = await http.send_with("POST", url, body, signed_in)
+```
+
+`Options{ headers, credentials, redirect }`, built from `sending()` (the
+defaults: `Credentials.SameOrigin`, `Redirect.Follow`) or `sending_with(headers)`.
+`Credentials` is `Omit` `SameOrigin` `Include`; `Redirect` is `Follow` `Error`
+`Manual`. There is no `mode`: its only interesting value is `no-cors`, which
+returns a response you cannot read.
 
 Routing, all synchronous and testable with no port:
 `route(method, pattern, fn(Request) -> Response)` ·

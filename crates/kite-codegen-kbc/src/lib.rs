@@ -215,6 +215,7 @@ pub enum Op {
     /// Yields an optional: a missing key is a runtime condition.
     MapGet { dst: Reg, obj: Reg, key: Reg },
     MapSet { obj: Reg, key: Reg, src: Reg },
+    MapRemove { obj: Reg, key: Reg },
     MapLen { dst: Reg, obj: Reg },
     /// A map's keys or values as a slice, in insertion order.
     MapKeys { dst: Reg, obj: Reg },
@@ -504,6 +505,9 @@ impl fmt::Display for Op {
             }
             MapSet { obj, key, src } => {
                 write!(f, "{:<12} r{}, r{}, r{}", "map.set", obj, key, src)
+            }
+            MapRemove { obj, key } => {
+                write!(f, "{:<12} r{}, r{}", "map.remove", obj, key)
             }
             MapLen { dst, obj } => write!(f, "{:<12} r{}, r{}", "map.len", dst, obj),
             NewSlice { dst, base, count } => {

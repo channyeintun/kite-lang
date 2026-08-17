@@ -1,0 +1,13 @@
+// There is no module-level `var`: a mutable binding every function in the
+// module can reach is shared state none of their signatures mentions.
+
+var COUNT = 0 //~ ERROR E0118
+
+fn bump() {
+    COUNT = COUNT + 1 //~ ERROR E0114
+}
+
+fn main() {
+    bump()
+    io.print("\(COUNT)")
+}
