@@ -210,7 +210,9 @@ first installs perfectly cleanly and then cannot find a compiler.
 The `.wasm` is a build artefact and is not in the tree. Publish without running
 `build.sh` and the package installs cleanly and then fails at the first `.kite`
 import. The tell is in npm's own output — the tarball listing should show
-`kite-compiler.wasm` at about 1.8 MB, and five files in total.
+`kite-compiler.wasm` at about 2.2 MB, and five files in total. The size climbs
+with the compiler, so treat it as an order of magnitude rather than a constant —
+what matters is that the file is there at all.
 
 ### The Vite plugin, with it
 
