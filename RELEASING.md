@@ -332,12 +332,19 @@ curl -s "https://kite-lang.dev/SPECIFICATION.md?v=$RANDOM" | diff - SPECIFICATIO
 ## 7. Afterwards
 
 ```bash
-./packaging/render.sh 0.1.9
+./packaging/render.sh v0.1.9
 ```
 
 Homebrew, Scoop and the AUR manifests keep placeholder checksums in the tree so
 they stay reviewable; this fills them in from the release's own `SHA256SUMS`,
-which is the only place they should come from. `install.sh` needs no change —
+which is the only place they should come from.
+
+**The `v` is not optional.** The argument is used verbatim as the tag, so a bare
+`0.1.9` fetches `releases/download/0.1.9/SHA256SUMS` — a tag that does not
+exist — and then fails looking for `kite-0.1.9-…` among archives named
+`kite-v0.1.9-…`. This line said `0.1.8` without it for a whole release and
+nothing noticed, because CI passes `github.ref_name` and never takes this
+path. `install.sh` needs no change —
 it reads `releases/latest`.
 
 ---

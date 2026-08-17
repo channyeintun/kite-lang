@@ -45,7 +45,7 @@ on Linux is refused before anything is unpacked:
 
 ```
 npm error code EBADPLATFORM
-npm error notsup Unsupported platform for @kite-lang/cli-darwin-arm64@0.1.0:
+npm error notsup Unsupported platform for @kite-lang/cli-darwin-arm64@0.1.9:
   wanted {"os":"darwin","cpu":"arm64"} (current: {"os":"linux","cpu":"x64"})
 ```
 
