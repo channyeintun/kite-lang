@@ -1284,13 +1284,17 @@ fn a_non_diverging_error_branch_does_not_clean_the_value() {
     assert!(c.has("E0301"), "{}", c.render());
 }
 
-/// The wrapping form the specification and `std/errors` both show. A wrapper
-/// answers nil exactly when what it wrapped was nil, so passing the `check`
-/// proves the wrapped error nil and its value readable.
+/// Passing a `check` of `errors.wrap(err, …)` proves `err` nil, because that
+/// wrapper answers nil exactly when what it wrapped was nil — which is why
+/// only it is looked through. A function of the program's own may answer nil
+/// for anything, even one called `wrap`, so passing a `check` of what it
+/// returned says nothing about the error it was handed. (The standard
+/// library's `wrap` needs `std/errors`, so the differential corpus is where
+/// the cleaning form is exercised.)
 #[test]
-fn checking_a_wrapped_error_cleans_the_value() {
-    let c = run("fn load() -> (int, error) {\n  return 1, nil\n}\nfn wrap(e: error, c: str) -> error {\n  return e\n}\nfn f() -> (int, error) {\n  let (v, err) = load()\n  check wrap(err, \"while loading\")\n  return v, nil\n}\nfn main() {\n}\n");
-    assert!(!c.diags.has_errors(), "{}", c.render());
+fn checking_what_an_arbitrary_function_returned_does_not_clean_the_value() {
+    let c = run("fn load() -> (int, error) {\n  return 1, nil\n}\nfn wrap(e: error, c: str) -> error {\n  return nil\n}\nfn f() -> (int, error) {\n  let (v, err) = load()\n  check wrap(err, \"while loading\")\n  return v, nil\n}\nfn main() {\n}\n");
+    assert!(c.has("E0301"), "{}", c.render());
 }
 
 /// Only the error arguments count: a call that happens to return an error
@@ -1814,4 +1818,132 @@ fn an_alias_naming_itself_is_rejected() {
 fn a_generic_alias_is_rejected() {
     let c = run("type Pair<T> = (T, T)\nfn main() {\n  io.print(1)\n}\n");
     assert!(c.has("E0214"), "{}", c.render());
+}
+
+// ---- flow through closures, branches and loops ----------------------------
+
+/// A `let` declared inside a loop is a fresh binding on every iteration, so
+/// its one assignment is not a second one — in a loop, or in a closure
+/// written inside one.
+#[test]
+fn a_let_declared_inside_a_loop_may_be_assigned_there() {
+    ok_body(
+        "  for i in 0..3 {\n\
+         \x20   let x: int\n\
+         \x20   if i > 1 {\n      x = 1\n    } else {\n      x = 2\n    }\n\
+         \x20   io.print(x)\n\
+         \x20   let f = |n: int| -> int {\n      let y: int\n      y = n * 2\n      return y\n    }\n\
+         \x20   io.print(f(i))\n  }",
+    );
+}
+
+/// Every arm of an exhaustive `match` assigning is every path assigning.
+#[test]
+fn a_match_whose_every_arm_assigns_definitely_assigns() {
+    ok("enum C {\n  A\n  B\n}\n\
+        fn main() {\n  let c = C.A\n  let x: int\n\
+        \x20 match c {\n    A => {\n      x = 1\n    },\n    B => {\n      x = 2\n    },\n  }\n\
+        \x20 io.print(x)\n}\n");
+}
+
+/// §7.5's own example: the `else` of a value `if` testing the error sees the
+/// value it guards as checked, and the context types both branches.
+#[test]
+fn a_value_if_cleans_and_is_typed_by_its_context() {
+    ok("fn get(k: str) -> (int, error) {\n  return 80, nil\n}\n\
+        fn main() {\n  let (value, err) = get(\"port\")\n\
+        \x20 let port = if err != nil { 8080 } else { value }\n\
+        \x20 let c = true\n  let x: Option<int> = if c { 5 } else { nil }\n\
+        \x20 io.print(port)\n  io.print(x == nil)\n}\n");
+}
+
+/// What the first test of an `else if` chain proved holds in the rest of it.
+#[test]
+fn narrowing_reaches_an_else_if() {
+    ok_body(
+        "  let x: Option<int> = 5\n  let c = true\n\
+         \x20 if x == nil {\n    io.print(0)\n  } else if c {\n    io.print(x + 1)\n  }",
+    );
+}
+
+/// A write of a value that is not optional keeps the local narrowed.
+#[test]
+fn assigning_a_present_value_keeps_a_narrowing() {
+    ok_body(
+        "  var x: Option<int> = 5\n  if x == nil {\n    return\n  }\n\
+         \x20 x = 6\n  io.print(x + 1)",
+    );
+}
+
+/// `-> (T, error)` on a closure is the fallible form, as on a declaration.
+#[test]
+fn a_closure_may_be_fallible() {
+    ok("fn main() {\n\
+        \x20 let f = |x: int| -> (int, error) {\n\
+        \x20   if x < 0 {\n      return _, errors.new(\"neg\")\n    }\n\
+        \x20   return x, nil\n  }\n\
+        \x20 let (v, err) = f(3)\n\
+        \x20 if err != nil {\n    io.print(err.message())\n  } else {\n    io.print(v)\n  }\n}\n");
+}
+
+/// A test around a closure still holds inside it: its captures were taken
+/// there.
+#[test]
+fn a_closure_sees_what_was_proved_where_it_was_made() {
+    ok_body(
+        "  let x: Option<int> = 5\n  if x != nil {\n    let f = || x + 1\n    io.print(f())\n  }",
+    );
+}
+
+/// A negative bound is a negated literal, and a range folds it as the
+/// literal pattern does.
+#[test]
+fn a_range_pattern_takes_negative_bounds() {
+    ok_body(
+        "  let n = -3\n  let s = match n {\n    -5..=-1 => \"neg\",\n    _ => \"other\",\n  }\n\
+         \x20 io.print(s)",
+    );
+}
+
+/// `Color.Red` is the qualified spelling of `Red`, and a qualified pattern
+/// is still exhaustive only with every variant.
+#[test]
+fn a_qualified_variant_pattern_is_that_variant() {
+    ok("enum Color {\n  Red\n  Green\n}\n\
+        fn name(c: Color) -> str {\n\
+        \x20 return match c {\n    Color.Red => \"red\",\n    Color.Green => \"green\",\n  }\n}\n\
+        fn main() {\n  io.print(name(Color.Green))\n}\n");
+    let c = run("enum Color {\n  Red\n  Green\n}\n\
+        fn name(c: Color) -> str {\n  return match c {\n    Color.Red => \"red\",\n  }\n}\n\
+        fn main() {\n  io.print(name(Color.Green))\n}\n");
+    assert!(c.has("E0210"), "{}", c.render());
+}
+
+/// Every `defer` in a function is run from one stack, so an exit knows about
+/// the calls registered on earlier iterations of a loop — even an exit
+/// written above the `defer`.
+#[test]
+fn every_exit_runs_the_defer_stack() {
+    let c = ok("fn note(s: str) {\n  io.print(s)\n}\n\
+        fn early() {\n  for i in 0..3 {\n    if i == 1 {\n      return\n    }\n\
+        \x20   defer note(\"registered\")\n  }\n}\n\
+        fn main() {\n  early()\n}\n");
+    let early = c.program.fns.iter().find(|f| f.name == "early").expect("early");
+    let text = format!("{:?}", early.body);
+    assert!(
+        text.matches("CallClosure").count() >= 2,
+        "the `return` and the end of the body should both run the stack:\n{}",
+        text
+    );
+}
+
+/// A tuple binding's initialiser is checked once, whichever of its two
+/// meanings the binding turns out to have — a mistake in it used to be
+/// reported by each.
+#[test]
+fn a_tuple_bindings_initialiser_is_checked_once() {
+    let c = run("fn f(n: int) -> (int, error) {\n  return n, nil\n}\n\
+        fn main() {\n  let (v, err) = f(1 + \"a\")\n  if err != nil {\n    return\n  }\n  io.print(v)\n}\n");
+    let reported = c.codes().iter().filter(|code| **code == "E0201").count();
+    assert_eq!(reported, 1, "{}", c.render());
 }

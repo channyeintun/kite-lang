@@ -249,7 +249,10 @@ impl Checker<'_> {
                 self.expr(index);
                 self.expr(value);
             }
-            Stmt::SlicePush { value, .. } => self.expr(value),
+            Stmt::SlicePush { local, value, .. } => {
+                self.expr(value);
+                self.deferred(*local, value);
+            }
             Stmt::MapSet { key, value, .. } => {
                 self.expr(key);
                 self.expr(value);
@@ -285,6 +288,39 @@ impl Checker<'_> {
             Stmt::Block(b) => self.block(b),
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
         }
+    }
+
+    /// A `defer` registers its call as a closure over operands evaluated where
+    /// the `defer` is written, pushed onto the body's hidden `__deferred`
+    /// stack. The call itself is inside that closure, a function of its own,
+    /// where the operands are captures — two names that no longer say they
+    /// were one object. So the closure is walked here too, with each capture
+    /// standing for the place it was evaluated from: `defer transfer(a, a,
+    /// 50)` names `a` twice, whichever function the call ends up in.
+    fn deferred(&mut self, stack: LocalId, value: &hir::Expr) {
+        let slot = self.func.local(stack);
+        if !(slot.synthetic && slot.name == "__deferred") {
+            return;
+        }
+        let ExprKind::ClosureNew { func, captures, .. } = &value.kind else { return };
+        let Some(lifted) = self.program.fns.get(func.0 as usize) else { return };
+        let types = &self.program.types;
+        let mut aliases = HashMap::new();
+        // A lifted function's first locals are its captures, in order.
+        for (i, capture) in captures.iter().enumerate() {
+            if let Some(place) = place_of(capture, types, self.func, &self.aliases) {
+                aliases.insert(LocalId(i as u32), place);
+            }
+        }
+        let mut cx = Checker {
+            program: self.program,
+            func: lifted,
+            diags: &mut *self.diags,
+            aliases,
+            reported: std::mem::take(&mut self.reported),
+        };
+        cx.block(&lifted.body);
+        self.reported = cx.reported;
     }
 
     fn expr(&mut self, expr: &hir::Expr) {

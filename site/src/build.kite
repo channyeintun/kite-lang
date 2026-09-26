@@ -29,12 +29,12 @@ struct Document {
 
 fn documents() -> [Document] {
     return [
-        Document { source: "SPECIFICATION.md", page: "specification" },
-        Document { source: "README.md", page: "readme" },
-        Document { source: "docs/01-platform-research.md", page: "01-platform-research" },
-        Document { source: "docs/02-concurrency.md", page: "02-concurrency" },
-        Document { source: "docs/03-compiler-architecture.md", page: "03-compiler-architecture" },
-        Document { source: "docs/04-the-web.md", page: "04-the-web" },
+        Document{ source: "SPECIFICATION.md", page: "specification" },
+        Document{ source: "README.md", page: "readme" },
+        Document{ source: "docs/01-platform-research.md", page: "01-platform-research" },
+        Document{ source: "docs/02-concurrency.md", page: "02-concurrency" },
+        Document{ source: "docs/03-compiler-architecture.md", page: "03-compiler-architecture" },
+        Document{ source: "docs/04-the-web.md", page: "04-the-web" },
     ]
 }
 

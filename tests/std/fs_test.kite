@@ -7,6 +7,7 @@
 
 use std/test
 use std/fs
+use std/text
 
 /// Asked of the host rather than hard-coded. `/tmp` is a POSIX convention and
 /// not a fact — Windows has no such directory, and a test that assumes one
@@ -56,6 +57,30 @@ fn round_trip_checks() -> [error] {
     let remove_err = fs.remove(path)
     out.push(test.ok(remove_err, "and is removed"))
     out.push(test.equal_bool(fs.exists(path), false, "and is gone"))
+    return out
+}
+
+/// A file may begin with any character, including the ones the host uses to
+/// mark its answers. With only a failure mark, a file starting with U+0001
+/// read back as an error whose message was the rest of the file.
+fn mark_checks() -> [error] {
+    var out: [error] = []
+    let path = scratch()
+    for code in [1, 2] {
+        let body = "\(text.from_code(code))rest of the file"
+        let write_err = fs.write(path, body)
+        out.push(test.ok(write_err, "a file starting with U+000\(code) is written"))
+        if write_err != nil {
+            return out
+        }
+        let (read_back, read_err) = fs.read(path)
+        out.push(test.ok(read_err, "and reads back without an error"))
+        if read_err != nil {
+            return out
+        }
+        out.push(test.equal_str(read_back, body, "with its first character intact"))
+    }
+    _ = fs.remove(path)
     return out
 }
 
@@ -115,6 +140,7 @@ fn failure_checks() -> [error] {
 fn main() {
     var results: [error] = []
     results = concat(results, round_trip_checks())
+    results = concat(results, mark_checks())
     results = concat(results, listing_checks())
     results = concat(results, failure_checks())
     var failed = 0

@@ -56,6 +56,10 @@ fn overlong_checks() -> [error] {
     // Never before a combining mark: `é` here is `e` and U+0301.
     let acute = text.from_code(0x0301)
     out.push(test.equal_str(shape("ae\(acute)b", 1.0), "a|e\(acute)|b", "a mark is not cut from its letter"))
+    // Nor from an ideograph. LB9 was not enforced, so the break the pair
+    // rules allowed before any ideograph was allowed before its mark too, and
+    // the mark went to a line of its own.
+    out.push(test.equal_str(shape("中中\(acute)", 2.0), "中|中\(acute)", "a mark is not cut from an ideograph"))
     // A width nothing fits in still makes progress, one character a line.
     out.push(test.equal_str(shape("abc", 0.0), "a|b|c", "zero width takes a character a line"))
     out.push(test.equal_str(shape("ab cd", 1.0), "a|b|c|d", "and drops the spaces between"))

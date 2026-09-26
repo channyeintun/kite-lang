@@ -14,7 +14,13 @@
    NEWLINE is significant: it terminates a statement unless the
    preceding token is an operator, an open delimiter, or a comma.
    The lexer applies this rule; the grammar below treats statements
-   as newline-terminated and omits NEWLINE for readability.
+   as newline-terminated and omits NEWLINE for readability. Two
+   refinements: `>` and `>>` also close type argument lists, so the
+   lexer keeps the line break after them and the parser skips it after
+   one it has read as a binary operator; and `return` is not an
+   operator — `ReturnStmt` may end at the line break after it.
+
+   A file may begin with a byte-order mark, which is not a token.
    =================================================================== *)
 
 
@@ -87,7 +93,6 @@ TypeAlias    = "type" Ident [ Generics ] "=" Type ;
 
 Type         = "Option" "<" Type ">"                 (* optional        *)
              | "[" Type "]"                          (* slice           *)
-             | "[" IntLit "]" Type                   (* array           *)
              | "{" Type ":" Type "}"                 (* map             *)
              | "(" Type { "," Type } ")"             (* tuple           *)
              | "fn" "(" [ TypeList ] ")" [ "->" Type ]
@@ -95,7 +100,8 @@ Type         = "Option" "<" Type ">"                 (* optional        *)
              | TypePath ;
 
 TypePath     = [ Ident "." ] Ident [ TypeArgs ] ;
-TypeArgs     = "<" Type { "," Type } ">" ;
+TypeArgs     = "<" Type { "," Type } ">" ;   (* a `>>` or `>=` right
+                                               after one is split *)
 TypeList     = Type { "," Type } [ "," ] ;
 
 
@@ -230,14 +236,26 @@ BitExpr      = ShiftExpr { ( "&" | "^" | "|" ) ShiftExpr } ;
 ShiftExpr    = AddExpr { ( "<<" | ">>" ) AddExpr } ;
 AddExpr      = MulExpr { ( "+" | "-" ) MulExpr } ;
 MulExpr      = CastExpr { ( "*" | "/" | "%" ) CastExpr } ;
-CastExpr     = UnaryExpr { "as" Type } ;
+CastExpr     = UnaryExpr { "as" CastTarget } ;
+
+(* `as` converts between `int` and `float` and nothing else, so what follows
+   it is a name with no type arguments — and a `<` after it is a comparison:
+   `f as int < n`.                                                           *)
+CastTarget   = [ Ident "." ] Ident ;
 UnaryExpr    = [ "-" | "!" | "await" ] PostfixExpr ;
 
 PostfixExpr  = PrimaryExpr { Postfix } ;
-Postfix      = "." Ident
+Postfix      = "." ( Ident | DecInt )                 (* field, tuple index:
+                                                         `t.0.1` is two *)
              | "(" [ Args ] ")"                       (* call           *)
-             | "[" Expr "]"                           (* index          *)
-             | "[" [ Expr ] ".." [ Expr ] "]" ;       (* slice          *)
+             | "[" Expr "]"                           (* index, or a range
+                                                         with both ends *)
+             | "[" [ OrExpr ] ".." [ OrExpr ] "]"     (* open-ended     *)
+             | "[" [ OrExpr ] "..=" OrExpr "]" ;
+
+(* Only an index may leave out a range's ends. A missing start is `0` and a
+   missing end the largest `int`, which is what a window clamps to anyway
+   (SPECIFICATION §5.4).                                                     *)
 
 Args         = Expr { "," Expr } [ "," ] ;
 
@@ -285,19 +303,25 @@ MatchExpr    = "match" Expr "{" { MatchArm } "}" ;
 Literal      = IntLit | FloatLit | StringLit | CharLit
              | "true" | "false" | "nil" ;
 
+(* A `_` separator sits between two digits, in every radix and every part of
+   a literal: `1_000`, `0xFF_FF`, `1.5e1_0`, and not `1_`, `0x_F` or `1_.5`.
+   A float literal too large to be a finite `float` is refused, as an `int`
+   literal too large for 64 bits is.                                         *)
 IntLit       = DecInt | HexInt | OctInt | BinInt ;
-DecInt       = Digit { Digit | "_" } ;
-HexInt       = "0x" HexDigit { HexDigit | "_" } ;
-OctInt       = "0o" OctDigit { OctDigit | "_" } ;
-BinInt       = "0b" BinDigit { BinDigit | "_" } ;
+DecInt       = Digit { [ "_" ] Digit } ;
+HexInt       = "0x" HexDigit { [ "_" ] HexDigit } ;
+OctInt       = "0o" OctDigit { [ "_" ] OctDigit } ;
+BinInt       = "0b" BinDigit { [ "_" ] BinDigit } ;
 
-FloatLit     = Digit { Digit | "_" } "." Digit { Digit | "_" } [ Exponent ]
-             | Digit { Digit | "_" } Exponent ;
-Exponent     = ( "e" | "E" ) [ "+" | "-" ] Digit { Digit } ;
+FloatLit     = DecInt "." DecInt [ Exponent ]
+             | DecInt Exponent ;
+Exponent     = ( "e" | "E" ) [ "+" | "-" ] DecInt ;
 
 StringLit    = SimpleString | MultiString ;
 SimpleString = '"' { StringElem } '"' ;
-MultiString  = '"""' NEWLINE { AnyChar } '"""' ;
+MultiString  = '"""' NEWLINE { AnyChar } '"""' ;   (* dedented by the closing
+                                                    delimiter's indentation,
+                                                    holes or not; §2.4 *)
 StringElem   = Char
              | Escape
              | Interpolation ;

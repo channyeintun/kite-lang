@@ -36,10 +36,10 @@ Everything here was checked against `target/release/kitec`. Where SPECIFICATION.
   unmarked types and functions are: another module cannot read or write one,
   build the struct with a literal or `..base`, destructure it, or call the
   method.
-- **A qualified pattern is a silent wildcard.** `Shape.Point` is a variant in
-  expression position and a catch-all in *pattern* position — it matches
-  everything and passes exhaustiveness alone, with no diagnostic. Patterns are
-  written unqualified.
+- **A pattern may be qualified.** `Shape.Point` means the same variant in a
+  pattern as in an expression, and is how a payload variant two enums share is
+  matched. A qualified name the enum does not have is `E0111`; the enum's own
+  name where a variant belongs, `Shape(r)`, is `E0200`.
 
 ---
 
@@ -392,16 +392,15 @@ fn main() {
 
 ### Construction and name resolution
 
-A variant is written `Enum.Variant(…)` when qualified — but that spelling is for
-**expression** position only. Unqualified `Variant(…)` in expression position
-works when exactly one enum in scope declares the name; with two candidates it is
-`E0111: cannot find`.
+A variant is written `Enum.Variant(…)` when qualified, in an expression or a
+pattern. Unqualified `Variant(…)` in expression position works when exactly one
+enum in scope declares the name; with two candidates it is `E0111: cannot find`.
 
-Patterns go the other way: a pattern is always written **unqualified**, and a
-variant *with a payload* is looked up by name across every enum in scope rather
-than against the scrutinee's type. So two enums declaring `Circle` make
-`Circle(r)` `E0111` even in a match whose scrutinee is unambiguous. (A *unit*
-variant does resolve against the scrutinee, and a shared name is fine.)
+An unqualified pattern for a variant *with a payload* is looked up by name across
+every enum in scope rather than against the scrutinee's type. So two enums
+declaring `Circle` make `Circle(r)` `E0111` even in a match whose scrutinee is
+unambiguous — write `Shape.Circle(r)`. (A *unit* variant does resolve against the
+scrutinee, and a shared name is fine.)
 
 ```kite
 enum Shape {
@@ -458,11 +457,10 @@ fn main() {
 }
 ```
 
-Qualifying is **not** the way out of that, because a qualified path is not a
-variant pattern at all: one that fails to resolve as a variant silently becomes a
-wildcard. `Shape.Point` as a pattern matches every `Shape`, and an arm holding it
-is exhaustive on its own. Nothing is reported — this compiles, and prints `0`
-then `7`:
+Qualifying is the way out of that. `Shape.Circle(r)` is looked up on `Shape`,
+whatever else shares the name, and is checked exactly like the bare form: it
+matches that variant and nothing else, so the arms that follow are still reachable
+and still required. This prints `7` then `0`:
 
 ```kite
 enum Shape {
@@ -470,22 +468,42 @@ enum Shape {
     Point
 }
 
-fn bad(s: Shape) -> int {
+enum Hole {
+    Circle(radius: int)
+    Slot
+}
+
+fn f(s: Shape) -> int {
     return match s {
+        Shape.Circle(r) => r
         Shape.Point => 0
     }
 }
 
-fn good(s: Shape) -> int {
+fn main() {
+    io.print(f(Shape.Circle(radius: 7)))
+    io.print(f(Shape.Point))
+}
+```
+
+A qualified name that is not a variant of that enum is `E0111`, and the enum's own
+name where a variant belongs is `E0200` — neither is a catch-all:
+
+```kite fails
+enum Shape {
+    Circle(radius: int)
+    Point
+}
+
+fn f(s: Shape) -> int {
     return match s {
-        Point => 0
-        Circle(r) => r
+        Shape.Square(r) => r //~ E0111
+        Shape(r) => 0 //~ E0200
     }
 }
 
 fn main() {
-    io.print(bad(Shape.Circle(radius: 7)))
-    io.print(good(Shape.Circle(radius: 7)))
+    io.print(f(Shape.Point))
 }
 ```
 
@@ -1887,9 +1905,6 @@ require `use std/json` in the deriving file, and `Decode` is emitted as an
 inherent associated function rather than a trait implementation, so there is no
 `Decode` trait to name in a bound.
 
-And one outright compiler bug, which the spec cannot be blamed for because it
-never writes a qualified pattern: `Enum.Variant` in pattern position resolves to
-nothing and is lowered to a wildcard, with no diagnostic. It silently matches
-every value and satisfies exhaustiveness by itself (§3). Write patterns
-unqualified; two enums sharing a payload variant name means neither spelling
-works, and the enum must be renamed.
+The specification never writes a qualified pattern; the compiler accepts one
+(`Enum.Variant(…)`) as the same variant the unqualified spelling names, and it is
+the way to match a payload variant two enums share (§3).

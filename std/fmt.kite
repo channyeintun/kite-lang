@@ -47,22 +47,115 @@ pub fn ellipsis(s: str, width: int) -> str {
 ///
 /// Rounds half away from zero, which is what most people mean, and does the
 /// work in integers so the result does not depend on how the host prints a
-/// float.
+/// float — the backends do not agree on that past about 1e21.
+///
+/// Two limits, and what happens at each. **Past eighteen places** the digits
+/// are zeros: a float carries at most seventeen significant digits, so
+/// there is nothing to show there, and ten to the nineteenth is past what an
+/// `int` holds — asking for nineteen places used to overflow and trap.
+/// **Past about 9e18 in units of the last place** — `fixed(1e20, 2)` — the
+/// scaled value no longer fits an `int`, which saturated and printed
+/// 92233720368547758.07. Such a number is written from the float itself
+/// instead: its whole part exactly, digit for digit, and its fraction from
+/// what is left, which below 2⁵³ is exact and above it is zero.
+///
+/// An infinity is written `inf` or `-inf`, and a NaN `nan`.
 pub fn fixed(x: float, places: int) -> str {
+    let wanted = if places < 0 { 0 } else { places }
+    let shown = if wanted > 18 { 18 } else { wanted }
+    var zeros = ""
+    for i in shown..wanted {
+        zeros = zeros + "0"
+    }
     var scale = 1
-    for i in 0..places {
+    for i in 0..shown {
         scale = scale * 10
     }
     let negative = x < 0.0
-    let magnitude = absf(x) * (scale as float) + 0.5
+    let sign = if negative { "-" } else { "" }
+    let size = absf(x)
+    if !(size * (scale as float) < 9000000000000000000.0) {
+        if !(size < size * 2.0) && size > 0.0 {
+            return "\(sign)inf"
+        }
+        if !(size >= 0.0) {
+            return "nan"
+        }
+        return large(sign, size, shown, scale) + zeros
+    }
+    let magnitude = size * (scale as float) + 0.5
     let units = magnitude as int
     let whole = units / scale
     let frac = units % scale
-    let sign = if negative { "-" } else { "" }
-    if places <= 0 {
+    if shown <= 0 {
         return "\(sign)\(whole)"
     }
-    return "\(sign)\(whole).\(pad_zeros(frac, places))"
+    return "\(sign)\(whole).\(pad_zeros(frac, shown))" + zeros
+}
+
+/// `fixed` for a value too large to scale into an `int`: the whole part and
+/// the fraction apart.
+fn large(sign: str, size: float, shown: int, scale: int) -> str {
+    var whole = ""
+    var units = 0
+    // 2⁵³: from here up every float is a whole number, so there is no
+    // fraction to write, and below it the whole part fits an `int` exactly.
+    if size >= 9007199254740992.0 {
+        whole = integral_digits(size)
+    } else {
+        var part = size as int
+        let fraction = size - (part as float)
+        units = (fraction * (scale as float) + 0.5) as int
+        if units >= scale {
+            part = part + 1
+            units = units - scale
+        }
+        whole = "\(part)"
+    }
+    if shown <= 0 {
+        return sign + whole
+    }
+    return sign + whole + "." + pad_zeros(units, shown)
+}
+
+/// The exact decimal digits of a whole float at or above 2⁵³.
+///
+/// Written out rather than interpolated, because interpolation is where the
+/// backends differ: one writes every digit and the other an exponent. The
+/// float is a whole number below 2⁵³ times a power of two, and doubling a
+/// number held in base-10⁹ limbs is exact.
+fn integral_digits(x: float) -> str {
+    var m = x
+    var twos = 0
+    for m >= 9007199254740992.0 {
+        m = m / 2.0
+        twos = twos + 1
+    }
+    let base = 1000000000
+    let start = m as int
+    var limbs: [int] = [start % base, (start / base) % base, start / (base * base)]
+    for i in 0..twos {
+        var carry = 0
+        for k in 0..limbs.len() {
+            let t = limbs[k] * 2 + carry
+            limbs[k] = t % base
+            carry = t / base
+        }
+        if carry > 0 {
+            limbs.push(carry)
+        }
+    }
+    var top = limbs.len() - 1
+    for top > 0 && limbs[top] == 0 {
+        top = top - 1
+    }
+    var out = "\(limbs[top])"
+    var k = top - 1
+    for k >= 0 {
+        out = out + pad_zeros(limbs[k], 9)
+        k = k - 1
+    }
+    return out
 }
 
 /// A percentage, to one decimal place.

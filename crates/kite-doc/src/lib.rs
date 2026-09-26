@@ -6,15 +6,17 @@
 //! one documented by a tool nobody else can run is not a library anyone can
 //! contribute to.
 //!
-//! A `///` comment attaches to the declaration that follows it. Everything
-//! else about a declaration — its signature, whether it is `pub`, whether it
-//! is `async` — is read from the parsed item rather than restated in prose,
-//! so a signature in the output cannot be wrong.
+//! A `///` comment attaches to the declaration that follows it, and `//!`
+//! lines are the module's own overview. Everything else about a declaration —
+//! its signature, whether it is `pub`, whether it is `async` — is read from
+//! the parsed item rather than restated in prose, so a signature in the output
+//! cannot be wrong.
 
-use kite_ast::Item;
+use kite_ast::{Item, TypePath};
 use kite_diag::DiagBag;
 use kite_lexer::Comment;
 use kite_span::{FileId, Span};
+use std::collections::HashMap;
 
 /// One documented declaration.
 pub struct Entry {
@@ -28,18 +30,25 @@ pub struct Entry {
     pub is_pub: bool,
     /// Members: a struct's fields, an enum's variants, a trait's methods.
     pub members: Vec<Member>,
+    /// What `impl` blocks in the same file add to a type: its methods, and
+    /// the traits it implements.
+    pub methods: Vec<Member>,
 }
 
 pub struct Member {
     pub name: String,
     pub signature: String,
     pub doc: String,
+    /// Whether an importer can reach it. A field without `pub` is the
+    /// module's own business even when its struct is exported.
+    pub is_pub: bool,
 }
 
 /// A module's documentation: the header comment, then every declaration.
 pub struct Docs {
     pub module: String,
-    /// The comment block at the top of the file, before any declaration.
+    /// The module's `//!` lines — or, in a file that has none, the comment
+    /// block at the top of the file, before any declaration.
     pub overview: String,
     pub entries: Vec<Entry>,
 }
@@ -73,7 +82,42 @@ pub fn extract(module: &str, src: &str) -> Docs {
             entries.push(entry);
         }
     }
+
+    // An `impl` block documents its methods against the type they are on:
+    // `Listener.cancel` belongs on `Listener`'s entry, which is where a
+    // reader looking for what a `Listener` can do will be. They used to be
+    // left out altogether.
+    for item in &ast.items {
+        let Item::Impl(imp) = item else { continue };
+        let target = last_segment(&imp.self_ty);
+        let (methods, owner_kind) = reader.impl_members(imp);
+        match entries.iter_mut().find(|e| e.name == target && e.kind != "function") {
+            Some(entry) => entry.methods.extend(methods),
+            // A type declared somewhere else gets an entry of its own here,
+            // which is the only place its methods from this file are said.
+            None => entries.push(Entry {
+                kind: owner_kind,
+                name: target.to_string(),
+                signature: reader.text(imp_head(imp)).trim().to_string(),
+                doc: reader.doc_above(imp.span.start),
+                is_pub: methods.iter().any(|m| m.is_pub),
+                members: Vec::new(),
+                methods,
+            }),
+        }
+    }
     Docs { module: module.to_string(), overview, entries }
+}
+
+/// The name a type path ends in: `Listener` for `window.Listener<T>`.
+fn last_segment(path: &TypePath) -> &str {
+    path.segments.last().map(|s| s.name.as_str()).unwrap_or("")
+}
+
+/// The part of an `impl` before its `{`.
+fn imp_head(imp: &kite_ast::ImplDecl) -> Span {
+    let end = imp.self_ty.span.end;
+    Span::new(imp.span.file, imp.span.start, end.max(imp.span.start))
 }
 
 struct Reader<'a> {
@@ -82,8 +126,28 @@ struct Reader<'a> {
 }
 
 impl Reader<'_> {
-    /// The comment block at the top of the file: everything before the first
-    /// declaration that is not attached to it.
+    /// The module's overview.
+    ///
+    /// `//!` lines say outright that they are the file's own documentation,
+    /// and where a file has them they are the overview, wherever in the header
+    /// they sit. A file without them has its header read the older way,
+    /// below. The marker comes off either way; it used to stay on a `//!`
+    /// line as a `!`, so the reference pages of `std/dom`, `std/canvas`,
+    /// `std/js`, `std/window` and `std/html` began every line of their
+    /// overview with one.
+    fn overview(&self, first_item: u32) -> String {
+        let module: Vec<String> = self
+            .comments
+            .iter()
+            .filter(|c| c.module && c.span.start < first_item)
+            .map(|c| strip(self.text(c.span)))
+            .collect();
+        if !module.is_empty() {
+            return trim_block(&module);
+        }
+        self.header(first_item)
+    }
+
     /// The file's own header: the run of comments it opens with.
     ///
     /// **The run**, and not everything before the first declaration. A file
@@ -100,7 +164,7 @@ impl Reader<'_> {
     ///
     /// A blank line ends the header. Inside one, a paragraph break is an empty
     /// `//` line, which is a comment and keeps the run going.
-    fn overview(&self, first_item: u32) -> String {
+    fn header(&self, first_item: u32) -> String {
         let attached = self.block_before(first_item);
         let mut lines = Vec::new();
         let mut previous_end: Option<u32> = None;
@@ -175,6 +239,47 @@ impl Reader<'_> {
         trim_block(&lines)
     }
 
+    /// A struct, enum or trait's signature: what is written before its `{`,
+    /// generic parameters and `pub` included. It used to be rebuilt as
+    /// `struct Pair`, which left out the two things a reader of
+    /// `pub struct Pair<A, B>` needs first.
+    fn head(&self, span: Span, name: Span) -> String {
+        let rest = self.between(name.end, span.end);
+        let generics = rest.split('{').next().unwrap_or("").trim_end();
+        let before = self.between(span.start, name.start);
+        // The keyword and `pub` before the name, without the `@derive` line
+        // above them — that is listed as what it is, below.
+        let keywords = before.lines().last().unwrap_or("").trim();
+        format!("{} {}{}", keywords, self.text(name), generics)
+    }
+
+    fn method(&self, m: &kite_ast::MethodDecl, is_pub: bool) -> Member {
+        Member {
+            name: m.name.name.clone(),
+            signature: self.text(m.sig_span).trim().to_string(),
+            doc: self.doc_above(m.span.start),
+            is_pub,
+        }
+    }
+
+    /// What an `impl` adds to its type: an inherent one's methods, each as
+    /// public as it says, or the trait a trait impl implements — whose
+    /// methods are the trait's to document, and as public as the trait is.
+    fn impl_members(&self, imp: &kite_ast::ImplDecl) -> (Vec<Member>, &'static str) {
+        match &imp.trait_path {
+            None => (imp.methods.iter().map(|m| self.method(m, m.is_pub)).collect(), "methods"),
+            Some(tr) => (
+                vec![Member {
+                    name: last_segment(tr).to_string(),
+                    signature: self.text(imp_head(imp)).trim().to_string(),
+                    doc: self.doc_above(imp.span.start),
+                    is_pub: true,
+                }],
+                "trait implementation",
+            ),
+        }
+    }
+
     fn entry(&self, item: &Item) -> Option<Entry> {
         let (kind, name, is_pub, signature, members) = match item {
             Item::Fn(f) => (
@@ -199,15 +304,10 @@ impl Reader<'_> {
                         name: f.name.name.clone(),
                         signature: self.text(f.span).trim().to_string(),
                         doc: self.doc_above(f.span.start),
+                        is_pub: f.is_pub,
                     })
                     .collect();
-                (
-                    "struct",
-                    s.name.name.clone(),
-                    s.is_pub,
-                    format!("struct {}", s.name.name),
-                    members,
-                )
+                ("struct", s.name.name.clone(), s.is_pub, self.head(s.span, s.name.span), members)
             }
             Item::Enum(e) => {
                 let members = e
@@ -217,21 +317,20 @@ impl Reader<'_> {
                         name: v.name.name.clone(),
                         signature: self.text(v.span).trim().to_string(),
                         doc: self.doc_above(v.span.start),
+                        // A variant is as visible as its enum.
+                        is_pub: true,
                     })
                     .collect();
-                ("enum", e.name.name.clone(), e.is_pub, format!("enum {}", e.name.name), members)
+                ("enum", e.name.name.clone(), e.is_pub, self.head(e.span, e.name.span), members)
             }
             Item::Trait(t) => {
                 let members = t
                     .methods
                     .iter()
-                    .map(|m| Member {
-                        name: m.name.name.clone(),
-                        signature: self.text(m.sig_span).trim().to_string(),
-                        doc: self.doc_above(m.span.start),
-                    })
+                    // A trait's methods are its interface, as visible as it.
+                    .map(|m| self.method(m, true))
                     .collect();
-                ("trait", t.name.name.clone(), t.is_pub, format!("trait {}", t.name.name), members)
+                ("trait", t.name.name.clone(), t.is_pub, self.head(t.span, t.name.span), members)
             }
             Item::TypeAlias(a) => (
                 "type alias",
@@ -249,9 +348,20 @@ impl Reader<'_> {
                 self.text(c.span).trim().to_string(),
                 Vec::new(),
             ),
-            // An `impl` block documents its methods against the type they are
-            // on, which the type's own entry already lists.
+            // An `impl` block is gathered onto the entry of the type it is
+            // for, once every entry exists; see `extract`.
             Item::Impl(_) | Item::Error(_) => return None,
+        };
+        let derives = match item {
+            Item::Struct(s) => &s.derives,
+            Item::Enum(e) => &e.derives,
+            _ => &Vec::new(),
+        };
+        let signature = if derives.is_empty() {
+            signature
+        } else {
+            let names: Vec<&str> = derives.iter().map(|d| d.name.as_str()).collect();
+            format!("@derive({})\n{}", names.join(", "), signature)
         };
         Some(Entry {
             kind,
@@ -260,6 +370,7 @@ impl Reader<'_> {
             signature,
             is_pub,
             members,
+            methods: Vec::new(),
         })
     }
 
@@ -271,6 +382,7 @@ impl Reader<'_> {
 /// A comment's text, without its marker and one leading space.
 fn strip(line: &str) -> String {
     let body = line.trim_start().trim_start_matches('/');
+    let body = body.strip_prefix('!').unwrap_or(body);
     body.strip_prefix(' ').unwrap_or(body).to_string()
 }
 
@@ -294,6 +406,12 @@ fn trim_block(lines: &[String]) -> String {
 /// Markdown rather than HTML because the documentation is read in as many
 /// places as the source is — a terminal, a repository host, an editor — and
 /// only one of them renders HTML.
+///
+/// The public reference is what an importer can reach: exported declarations,
+/// and of their members only the `pub` ones. A field without `pub` is the
+/// module's own, however public its struct — `crypto.Key.handle` and
+/// `dom.Element.raw` were listed in a reference to things nobody outside
+/// could touch.
 pub fn markdown(docs: &Docs, public_only: bool) -> String {
     let mut out = String::new();
     out.push_str(&format!("# {}\n\n", docs.module));
@@ -314,11 +432,14 @@ pub fn markdown(docs: &Docs, public_only: bool) -> String {
 
     // A table of contents, because a module's surface is what a reader is
     // looking for and scrolling to find it is not reading.
-    for e in &entries {
-        out.push_str(&format!("- [`{}`](#{})\n", e.name, anchor(&e.name)));
+    let mut anchors = Anchors::default();
+    let anchors: Vec<String> = entries.iter().map(|e| anchors.next(&e.name)).collect();
+    for (e, anchor) in entries.iter().zip(&anchors) {
+        out.push_str(&format!("- [`{}`](#{})\n", e.name, anchor));
     }
     out.push('\n');
 
+    let shown = |m: &&Member| m.is_pub || !public_only;
     for e in &entries {
         out.push_str(&format!("## {}\n\n", e.name));
         out.push_str(&format!("```kite\n{}\n```\n\n", e.signature));
@@ -326,8 +447,12 @@ pub fn markdown(docs: &Docs, public_only: bool) -> String {
             out.push_str(&e.doc);
             out.push_str("\n\n");
         }
-        if !e.members.is_empty() {
-            for m in &e.members {
+        for list in [&e.members, &e.methods] {
+            let visible: Vec<&Member> = list.iter().filter(shown).collect();
+            if visible.is_empty() {
+                continue;
+            }
+            for m in visible {
                 out.push_str(&format!("- `{}`", m.signature));
                 if !m.doc.is_empty() {
                     out.push_str(&format!(" — {}", m.doc.replace('\n', " ")));
@@ -338,6 +463,24 @@ pub fn markdown(docs: &Docs, public_only: bool) -> String {
         }
     }
     out
+}
+
+/// Heading anchors, as a repository host makes them: lowercase, and a
+/// heading whose anchor is already taken gets `-1`, `-2` and so on after it.
+/// `Pair` and `pair` both linked to `#pair`, which is the first of them.
+#[derive(Default)]
+struct Anchors {
+    seen: HashMap<String, usize>,
+}
+
+impl Anchors {
+    fn next(&mut self, name: &str) -> String {
+        let base = anchor(name);
+        let count = self.seen.entry(base.clone()).or_insert(0);
+        let out = if *count == 0 { base } else { format!("{}-{}", base, count) };
+        *count += 1;
+        out
+    }
 }
 
 fn anchor(name: &str) -> String {

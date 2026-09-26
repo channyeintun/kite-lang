@@ -1,0 +1,40 @@
+// A failure put into a binding has to be looked at, however it got there:
+// through a `var`, through `await`, through a branch of a value `if` — or in
+// a branch that leaves, where the binding goes out of scope on the way out.
+
+fn fails() -> error {
+    return errors.new("boom")
+}
+
+async fn fails_later() -> error {
+    return errors.new("boom")
+}
+
+fn as_a_var() {
+    var e = fails() //~ ERROR E0302
+    io.print("dropped")
+}
+
+fn through_a_branch(c: bool) {
+    let e = if c { fails() } else { fails() } //~ ERROR E0302
+    io.print("dropped")
+}
+
+async fn through_await() {
+    let e = await fails_later() //~ ERROR E0302
+    io.print("dropped")
+}
+
+fn in_a_branch_that_leaves(c: bool) {
+    if c {
+        let e = fails() //~ ERROR E0302
+        return
+    }
+    io.print("kept going")
+}
+
+fn main() {
+    as_a_var()
+    through_a_branch(true)
+    in_a_branch_that_leaves(false)
+}

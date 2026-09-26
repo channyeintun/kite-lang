@@ -1,0 +1,61 @@
+// Patterns that used to be accepted and then match the wrong thing, bind
+// nothing, or bind a value that is not there.
+
+enum E {
+    A(int)
+    B
+}
+
+enum Shape {
+    Circle(float)
+    Point
+}
+
+fn describe(e: E) -> str {
+    return match e {
+        A(n) => "a",
+        B => "b",
+    }
+}
+
+// `B` names the variant, which is never nil — so the arm after it can still
+// receive a nil, and binds the optional rather than the `E` inside it.
+fn nil_is_not_covered(o: Option<E>) -> str {
+    return match o {
+        B => "b",
+        x => describe(x), //~ ERROR E0200
+    }
+}
+
+// Whichever alternative matched, the arm reads `x`.
+fn bound_in_one_alternative(e: E) -> int {
+    return match e {
+        A(x) | B => x + 1, //~ ERROR E0200
+    }
+}
+
+// A range compares integers.
+fn range_over_a_float(f: float) -> str {
+    return match f {
+        1..=5 => "in", //~ ERROR E0200
+        _ => "out",
+    }
+}
+
+// The enum's own name where a variant belongs, a variant the enum does not
+// have, and a variant spelled with a struct's braces: none is a catch-all.
+fn names_the_enum(s: Shape) -> str {
+    return match s {
+        Shape(r) => "circle", //~ ERROR E0200
+        Shape.Square => "square", //~ ERROR E0111
+        Circle{ r } => "braces", //~ ERROR E0200
+        Point => "point",
+    }
+}
+
+fn main() {
+    io.print(nil_is_not_covered(nil))
+    io.print("\(bound_in_one_alternative(E.B))")
+    io.print(range_over_a_float(2.5))
+    io.print(names_the_enum(Shape.Point))
+}

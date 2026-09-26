@@ -519,3 +519,86 @@ process.exit(0);
         out
     );
 }
+
+/// A shut server stops: `run` returns what it answered, and `accept` says the
+/// server is shut rather than waiting for a request that cannot come.
+///
+/// Both used to wait for good. `accept` looped on "nothing pending" and never
+/// asked whether anything ever could be, and `run` only noticed the shut
+/// after answering a request — so a server shut while idle, which is the
+/// ordinary way to stop one, never let `run` return.
+///
+/// The program is its own client, as in the test above, and also checks the
+/// two routing cases a query string used to break and a header block that is
+/// not `name: value` lines being refused rather than silently dropped.
+#[test]
+fn a_shut_server_stops_accepting_and_run_returns() {
+    if !node_available() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let src = r##"use std/http
+
+fn index(r: http.Request) -> http.Response {
+    return http.ok("q=\(or_else(http.query_parameter(r, "q"), "-"))")
+}
+
+fn user(r: http.Request) -> http.Response {
+    return http.ok("user \(or_else(http.parameter("/users/:id", r.path, "id"), "-"))")
+}
+
+async fn main() {
+    let (server, err) = await http.open(0)
+    if err != nil {
+        io.print(err.message())
+        return
+    }
+    let port = http.port_of(server)
+    let routes = [http.route("GET", "/", index), http.route("GET", "/users/:id", user)]
+    let running = http.run(server, routes)
+    for path in ["/?q=a+b%21", "/users/7?tab=posts"] {
+        let (res, gerr) = await http.get("http://127.0.0.1:\(port)\(path)")
+        if gerr != nil {
+            io.print("get failed: \(gerr.message())")
+        } else {
+            io.print("\(path) -> \(res.status) \(res.body)")
+        }
+    }
+    let (_, lerr) = await http.send("GET", "http://127.0.0.1:\(port)/", "", "x-user: ada\nnot a header")
+    io.print("a line that is not a header is refused: \(lerr != nil)")
+    http.shut(server)
+    let (answered, rerr) = await running
+    if rerr != nil {
+        io.print("run failed: \(rerr.message())")
+        return
+    }
+    io.print("run returned after \(answered)")
+    let (_, aerr) = await http.accept(server)
+    io.print("accept after shut: \(if aerr == nil { "a request" } else { aerr.message() })")
+}
+"##;
+    let client = r#"import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const server = spawn(process.execPath, [fileURLToPath(new URL("./serve.mjs", import.meta.url))], {
+  stdio: ["ignore", "pipe", "inherit"],
+});
+let out = "";
+server.stdout.on("data", (chunk) => { out += chunk; });
+// A server that never stops is the failure this is about, so it is given a
+// deadline rather than trusted to exit.
+const timer = setTimeout(() => { try { server.kill("SIGKILL"); } catch {} }, 15000);
+const code = await new Promise((resolve) => server.on("exit", resolve));
+clearTimeout(timer);
+process.stdout.write(out + (code === 0 ? "" : "exited with " + code + "\n"));
+"#;
+    let out = serve_under_node("shut", src, client);
+    assert_eq!(
+        out,
+        "/?q=a+b%21 -> 200 q=a b!\n\
+         /users/7?tab=posts -> 200 user 7\n\
+         a line that is not a header is refused: true\n\
+         run returned after 2\n\
+         accept after shut: http.accept: the server is shut\n"
+    );
+}

@@ -116,13 +116,20 @@ pub unsafe extern "C" fn kite_emit(
     }))
 }
 
-/// The program, laid out the one way.
+/// The program, laid out the one way — or, for a program the formatter will
+/// not touch, the program exactly as it was.
+///
+/// The answer replaces the editor's contents, so it has to be source either
+/// way: an error message handed back here would be pasted over the program.
+/// `kite_check` is where a lexical error is explained.
 ///
 /// # Safety
 /// As [`kite_run`].
 #[no_mangle]
 pub unsafe extern "C" fn kite_format(ptr: *const u8, len: usize) -> *mut u8 {
-    answer(with_source(ptr, len, kite_fmt::format))
+    answer(with_source(ptr, len, |src| {
+        kite_fmt::format(src).unwrap_or_else(|_| src.to_string())
+    }))
 }
 
 /// The program's reference, from its doc comments.

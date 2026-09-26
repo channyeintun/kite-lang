@@ -8,13 +8,13 @@ trait Show {
 @host("js")
 extern fn global(name: str) -> JsValue
 
-fn by_host(m: {JsValue: int}) -> int { //~ ERROR E0201
+fn by_host(m: { JsValue: int }) -> int { //~ ERROR E0201
     return m.len()
 }
 
 fn main() {
-    let handlers: {fn() -> int: str} = {} //~ ERROR E0201
-    let shown: {dyn Show: int} = {} //~ ERROR E0201
-    let pairs: {(int, str): bool} = { (1, "a"): true }
+    let handlers: { fn() -> int: str } = { } //~ ERROR E0201
+    let shown: { dyn Show: int } = { } //~ ERROR E0201
+    let pairs: { (int, str): bool } = { (1, "a"): true }
     io.print(pairs.len())
 }

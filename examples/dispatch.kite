@@ -79,8 +79,8 @@ fn main() {
     report(Rect{ width: 4.0, height: 4.0 })
 
     let shapes: [dyn Drawable] = [
-        Circle { radius: 2.0 },
-        Rect { width: 1.0, height: 5.0 },
+        Circle{ radius: 2.0 },
+        Rect{ width: 1.0, height: 5.0 },
     ]
     io.print("\(shapes.len()) shapes, \(total_area(shapes)) units in total")
 }

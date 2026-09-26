@@ -11,7 +11,7 @@ the disagreement is called out inline.
 | `;` ends a statement | `;` is not a token at all — `E0002 invalid character` |
 | A continued line may start with `\|\|` | It parses as a zero-argument closure and is discarded — `E0117` |
 | …or with `-` | It is a fresh statement negating a number. **No diagnostic**, silently wrong answer |
-| Struct fields are comma-separated | They are **newline**-separated; a `,` after a field is a parse error |
+| Struct fields are comma-separated | They are **newline**-separated; a `,` after a field is `E0100` (reported once; the fields are kept) |
 | `let f: float = 3` | `E0200`. No implicit numeric conversion, not even for literals. Write `3.0` |
 | `a & b == c` is `a & (b == c)` | Bitwise binds **tighter** than comparison, so it is `(a & b) == c` |
 | `a < b < c` compiles | `E0100`. Comparison is non-associative |
@@ -24,7 +24,6 @@ the disagreement is called out inline.
 | `if x != nil && x.field` | Narrowing does **not** cross `&&` — `E0200`. Nest the `if` |
 | `x as str`, `flag as int` | `E0212`. `as` converts `int` ↔ `float` and nothing else |
 | Shadowing in the same block | `E0112 duplicate definition`. Only a nested scope may shadow |
-| A `"""` block always dedents | One `\(hole)` anywhere in it turns the dedent **off** |
 | `/* … */` | `E0005`. Only `//`, `///`, `//!` |
 | `if 1 { }` | `E0202`. No truthiness; the condition must be `bool` |
 
@@ -116,14 +115,19 @@ A line continues onto the next **only when it ends in** one of these tokens:
 +=  -=  *=  /=  %=
 !
 .  ..  ..=
-return  as  in  check  await  else
+as  in  check  await  else
 ```
 
 Three things are **not** on that list and routinely surprise people:
 
 - `>` and `>>`. They read as operators but far more often close a type argument
-  list, and a field declared `pub width: Option<float>` must end. A line ending
-  in `>` is a syntax error, not a continuation.
+  list, and a field declared `pub width: Option<float>` must end, so the lexer
+  keeps the line break after them. The parser then skips it after a `>` it has
+  read as a comparison: `a >` at the end of a line continues exactly as `a <`
+  does, and the `>` of `Option<float>` still ends its line.
+- `return`. It can end a statement on its own, so a line ending in it ends
+  there, and the line after a bare `return` is dead code (`E0116`), not its
+  value.
 - `)`, `]`, `}`. A closing delimiter ends the statement.
 - Newlines inside `(` or `[` are *always* insignificant, so argument lists and
   slice literals wrap freely. Inside `{` they are significant, because blocks
@@ -203,10 +207,10 @@ fn main() {
 }
 ```
 
-Note the spec's §2.5 phrasing ("the line ends in an operator") is loose in two
-directions: `>`/`>>` are operators that do not continue, and the leading-`.`
-/ leading-`else` cases continue without any trailing operator. The list above
-is what `TokenKind::continues_line` and `should_separate` actually implement.
+Note the spec's §2.5 phrasing ("the line ends in an operator") leaves out the
+leading-`.` / leading-`else` cases, which continue without any trailing
+operator. The list above is what `TokenKind::continues_line` and
+`should_separate` implement, with the parser's skip after `>` and `>>`.
 
 ## 4. Keywords
 
@@ -263,10 +267,13 @@ Details the grammar does not make obvious:
   differently. `.5` is `E0100 expected an expression`; `1.` lexes as the integer
   `1` followed by a field access and fails as `E0200 int has no fields`. Write
   `1.0` and `0.5`.
-- `1000_` is `E0004` (a decimal may not end in a separator), though `0xFF_` and
-  `0x_FF` are both accepted. Do not rely on either edge.
+- A `_` separator sits between two digits, in every radix and every part of a
+  literal. `1000_`, `0xFF_`, `0x_FF`, `1__0` and `1_.5` are all `E0004`.
 - An integer literal above `9223372036854775807` is `E0004 integer literal is
-  out of range` at compile time.
+  out of range` at compile time, and a float literal too large to be finite
+  (`1e999`) is `E0004 float literal is out of range`.
+- After a `.`, a number is a tuple index: `t.0.1` is the second element of the
+  first, not `t` followed by the float `0.1`.
 - No type suffixes:
 
 ```kite fails
@@ -300,13 +307,10 @@ fn main() {
 }
 ```
 
-**A hole switches the dedent off.** This is the trap on this page most likely to
-cost an afternoon. Stripping happens in `string_value` in `crates/kite-types`,
-which runs only for a block string with no interpolation. A string containing
-`\(…)` is lowered instead as literal runs plus holes, and each run is only
-escape-decoded — `dedent_block` is never reached. So one hole anywhere in a
-`"""` string keeps its leading newline, every line's indentation, and the
-trailing newline before the closing delimiter.
+**Holes do not change the dedent.** A block string with `\(…)` in it loses the
+same whitespace as one without: the parser cuts the literal text around each
+hole, leaving the indentation out, so the pieces joined are the dedented text.
+(Compilers through 0.1.9 switched the dedent off at the first hole.)
 
 ```kite
 fn main() {
@@ -317,14 +321,13 @@ fn main() {
         """
     io.print("[\(clean)]")     // [alpha\nbeta]
 
-    // One hole, and the raw text survives instead — note the leading
-    // newline, the eight spaces on each line, and the trailing newline.
+    // A hole, and the same thing happens.
     let n = 5
-    let raw = """
+    let held = """
         alpha \(n)
         beta
         """
-    io.print("[\(raw)]")       // [\n        alpha 5\n        beta\n        ]
+    io.print("[\(held)]")      // [alpha 5\nbeta]
 }
 ```
 
@@ -393,9 +396,7 @@ Loosest to tightest, as `crates/kite-parser/src/prec.rs` implements it:
 ||
 &&
 ==  !=  <  <=  >  >=   (non-associative — at most one per expression)
-|
-^
-&
+&  ^  |            (one level, left to right)
 <<  >>
 +  -
 *  /  %
@@ -410,14 +411,14 @@ Two deliberate departures from C, both verified:
   i.e. `true`.
 - **Comparison does not chain.**
 
-`docs/05-grammar.ebnf` puts `&`, `^` and `|` at one shared precedence level.
-The compiler does not: `1 | 2 ^ 3` evaluates to `1`, i.e. `1 | (2 ^ 3)`. The
-grammar file is stale here.
+`&`, `^` and `|` share one level, as §5.1 and `docs/05-grammar.ebnf` say, so they
+group in the order they are written: `1 | 2 ^ 3` is `(1 | 2) ^ 3`, i.e. `0`.
+(Compilers through 0.1.9 layered them the way C does.)
 
 ```kite
 fn main() {
     io.print(6 & 3 == 2)      // true  — (6 & 3) == 2
-    io.print(1 | 2 ^ 3)       // 1     — 1 | (2 ^ 3)
+    io.print(1 | 2 ^ 3)       // 0     — (1 | 2) ^ 3
     io.print(1 << 2 + 1)      // 8     — 1 << (2 + 1)
     io.print(-7 as float / 2.0)  // -3.5 — (-7 as float) / 2.0
 }
@@ -703,9 +704,20 @@ fn main() {
 ```
 
 `a..b` is syntax for a `for` header and for a slice/`str` window. There is no
-`Range` type to bind, pass or return; carry the two ends instead. Slice windows
-need **both** ends — `xs[..2]` and `xs[2..]` are parse errors, contrary to the
-grammar file's `"[" [ Expr ] ".." [ Expr ] "]"`.
+`Range` type to bind, pass or return; carry the two ends instead. A window may
+leave out either end — `xs[2..]`, `xs[..2]`, `xs[..]`, and `s[6..]` on a `str`
+— which fills in `0` or the largest `int`, and the clamp does the rest. Only an
+index may: `0..` on its own is `E0100`.
+
+```kite
+fn main() {
+    let xs = [1, 2, 3, 4]
+    io.print(xs[2..].len())     // 2
+    io.print(xs[..1].len())     // 1
+    io.print(xs[..].len())      // 4
+    io.print("hello world"[6..])  // world
+}
+```
 
 ## 9. Optionals, `nil`, and narrowing
 
@@ -953,20 +965,16 @@ plain from `1e-7` up to `1e21` and in exponent form outside: `0.3333333333333333
 
 The compiler is authoritative. Checked disagreements, all in this file's scope:
 
-1. `docs/05-grammar.ebnf` lists a fixed-length array type `[N]T`, an optional-end
-   slice postfix `xs[..2]` / `xs[2..]`, and one shared precedence level for
-   `& ^ |`. None of the three exist: the compiler rejects the first two and gives
-   `|` < `^` < `&`.
-2. `docs/05-grammar.ebnf` writes `MultiString = '"""' NEWLINE { AnyChar } '"""'`.
+1. `docs/05-grammar.ebnf` writes `MultiString = '"""' NEWLINE { AnyChar } '"""'`.
    The newline is not required — `"""one line"""` compiles.
-3. `docs/05-grammar.ebnf` has no production for a pair-binding `for`. `ForHeader
+2. `docs/05-grammar.ebnf` has no production for a pair-binding `for`. `ForHeader
    = Binding "in" Expr` covers it only because `Binding` admits a tuple; the
    grammar never says a map is what that iterates.
-4. SPECIFICATION.md §2.5 states the continuation rule as "ends in an operator".
-   `>` and `>>` are excluded, and a *leading* `.`, `else`, `)` or `]` continues
-   the previous line with no trailing operator at all. §2.5 also says `||` is
-   the only continuation that is quietly wrong; a leading `-` is quietly wrong
-   too, and unlike `||` it is not diagnosed.
+3. SPECIFICATION.md §2.5 states the continuation rule as "ends in an operator".
+   A *leading* `.`, `else`, `)` or `]` also continues the previous line, with no
+   trailing operator at all. §2.5 also says `||` is the only continuation that
+   is quietly wrong; a leading `-` is quietly wrong too, and unlike `||` it is
+   not diagnosed.
 
 SPECIFICATION.md §3.2's "maps iterate in insertion order" is **correct** —
 including under `for (k, v) in m`. An earlier draft of this page claimed maps

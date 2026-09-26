@@ -113,9 +113,23 @@ fn main() {
 }
 ```
 
-The proof is tracked per *binding*. A call result used directly —
-`errors.new("x").message()` — is not tracked and compiles; on a nil call result
-that yields an empty string at runtime rather than a diagnostic. Bind it.
+The proof is tracked per *binding*, so an error reached any other way — a
+field (`r.err.message()`), a call (`err.cause().message()`), an element — is
+`E0301` until it is bound and tested. The one exception is an error built on the
+spot, `errors.new("x").message()`, which is never nil.
+
+```kite fails
+fn main() {
+    let err = errors.new("outer")
+    if err != nil {
+        io.print(err.cause().message()) //~ E0301
+        let cause = err.cause()
+        if cause != nil {
+            io.print(cause.message())
+        }
+    }
+}
+```
 
 ### `error` is not printable
 
@@ -186,12 +200,13 @@ aliasing, no lifetimes.
 
 | | rule |
 |---|---|
-| R1 | after `let (v, e) = f()`, `e` is **Unchecked** and `v` is **Tainted**. A destructuring is the *only* thing that makes a binding Unchecked — `let e = f()` on a `-> error` function makes none |
+| R1 | after `let (v, e) = f()`, `e` is **Unchecked** and `v` is **Tainted** |
 | R2 | reading a Tainted binding is `E0301` |
 | R3 | an Unchecked binding going out of scope is `E0302` |
 | R4 | on a path where `e == nil` is proved, `e` becomes Checked and `v` Clean |
 | R5 | on a path where `e != nil`, `e` becomes Checked and `v` stays Tainted **permanently** |
 | R6 | a bare-statement call whose type is `error` or `(T, error)` is `E0302` |
+| R7 | an `error` or a whole `(T, error)` bound to one name — `let` or `var`, from a call, `await`, a value `if` — is **Unchecked**; only `nil` and a copy of another binding are not |
 
 R2 in practice:
 
@@ -341,9 +356,14 @@ Taking it apart, `let (v, err) = p`, re-enters the normal rules, and returning
 it passes it on; either clears the mark. `p` itself has no fields (`E0200`) and
 no methods (`E0205`), so destructure where you bind.
 
+The same holds however the failure got into a single binding — `var e = f()`,
+`let e = await f()`, `let e = if c { f() } else { g() }`: the binding has to be
+looked at. Only `nil` and a copy of another binding start out Checked.
+
 ## `check`
 
-`check err` is exactly, in a `-> (T, error)` function:
+`check err` is exactly, in a `-> (T, error)` function — and so it runs what was
+`defer`red on the way out, like any other `return`:
 
 ```kite ignore
 if err != nil {
@@ -500,9 +520,10 @@ fn main() {
 
 ## Handling a failure in place
 
-**The specification's example for this (§7.5) does not compile.** It writes
+Test the error: in the branch where it is nil the value is readable, in an `if`
+used as a value exactly as in an `if` statement.
 
-```kite fails
+```kite
 fn get_int(k: str) -> (int, error) {
     if k == "port" {
         return 8080, nil
@@ -512,13 +533,14 @@ fn get_int(k: str) -> (int, error) {
 
 fn main() {
     let (p, err) = get_int("prt")
-    let port = if err != nil { 80 } else { p } //~ E0301
+    let port = if err != nil { 80 } else { p }
     io.print(port)
 }
 ```
 
-The taint states are joined at statement granularity, so the `else` arm of an
-`if`-*expression* does not see `p` as Clean. Use a statement `if`/`else`:
+The value stays unreadable in the branch where the error is *not* nil, and after
+the `if`. Bind it under a name of its own — `p` here — because a second `let port`
+in the same scope is `E0112`. The statement form does the same work:
 
 ```kite
 fn get_int(k: str) -> (int, error) {
@@ -569,8 +591,11 @@ fn main() {
 ## Adding context
 
 `errors.wrap(err, context)` returns nil for nil, so it composes with `check` on
-one line. It is built on `errors.because`, so it **keeps** what it wrapped rather
-than flattening it into text.
+one line — and passing that `check` cleans the value `err` guards, because
+`wrap` answers nil *only* for nil. That is known of `errors.wrap` alone: `check`
+of what your own function returned proves nothing about the error it was handed.
+It is built on `errors.because`, so it **keeps** what it wrapped rather than
+flattening it into text.
 
 ```kite
 use std/errors
@@ -827,10 +852,6 @@ knows.
 
 ## Where the specification is wrong or incomplete
 
-- §7.5's in-place-handling example (`let port = if err != nil { 8080 } else { port }`)
-  does not compile: two same-scope `let port` bindings is `E0112`, and reading the
-  value from the `else` arm of an `if`-*expression* is `E0301` even when the error
-  was tested in its condition. Use a statement `if`/`else` or an early return.
 - §7.3 implies `-> (int, int)` is refused. It is accepted, as a tuple type; only
   the two-value `return a, b` statement inside it is refused.
 - §7.6 says `errors.wrap` "keeps what it wrapped", which is true of the cause

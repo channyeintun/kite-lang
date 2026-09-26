@@ -6,15 +6,21 @@
 //! and a browser cannot have.
 //!
 //! Failures cross as a string with a leading `\u{1}`, which is what `std/fs`
-//! unwraps back into an `error`. A sentinel is used rather than a second
-//! return value because one `str` is what an `extern` can carry, and no text
-//! file begins with a control character.
+//! unwraps back into an `error`, and every other answer of the four calls that
+//! can fail carries a leading `\u{2}`. One `str` is what an `extern` can carry,
+//! so the answer is marked rather than paired — and it is marked both ways
+//! because a file may begin with any character at all: with only a failure
+//! mark, a file starting with U+0001 read back as an error whose message was
+//! the rest of the file. `temp_path` cannot fail and is not marked.
 
 use kite_vm::{Host, Trap, Value};
 use std::rc::Rc;
 
 /// Marks a returned string as a failure. Must match `fs.FAILURE_MARK`.
 const FAILURE: char = '\u{1}';
+
+/// Marks a returned string as a success. Must match `fs.SUCCESS_MARK`.
+const SUCCESS: char = '\u{2}';
 
 pub struct NativeHost;
 
@@ -23,7 +29,7 @@ fn failure(message: impl std::fmt::Display) -> Value {
 }
 
 fn ok(text: impl Into<String>) -> Value {
-    Value::Str(Rc::from(text.into().as_str()))
+    Value::Str(Rc::from(format!("{}{}", SUCCESS, text.into()).as_str()))
 }
 
 fn path_of(args: &[Value], at: usize, name: &'static str) -> Result<String, Trap> {
@@ -110,7 +116,7 @@ impl Host for NativeHost {
                 let text = dir.to_string_lossy();
                 // Without a trailing separator, so a caller joins with one and
                 // never gets two.
-                Ok(ok(text.trim_end_matches(['/', '\\']).to_string()))
+                Ok(Value::Str(Rc::from(text.trim_end_matches(['/', '\\']))))
             }
             _ => Err(Trap::NoHostFunction { name: name.to_string() }),
         }
@@ -154,8 +160,10 @@ mod tests {
         assert_eq!(as_int(host.call("fs.path_kind", &[arg(file.to_str().unwrap())]).unwrap()), 1);
         assert_eq!(as_int(host.call("fs.path_kind", &[arg("/nope/nope")]).unwrap()), 0);
 
+        // A success is marked as a failure is, so a file's first character is
+        // never taken for either.
         let read = host.call("fs.read_text", &[arg(file.to_str().unwrap())]).unwrap();
-        assert_eq!(text(&read), "hello");
+        assert_eq!(text(&read), format!("{}hello", SUCCESS));
         std::fs::remove_file(&file).unwrap();
     }
 

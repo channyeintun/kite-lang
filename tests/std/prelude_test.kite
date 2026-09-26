@@ -7,6 +7,15 @@
 
 use std/test
 
+/// `text` parses to exactly `want`, bit for bit.
+fn exact_float(text: str, want: float) -> error {
+    let found = parse_float(text)
+    if found == nil {
+        return test.fail("parse_float(\"\(text)\"): expected \(want), found nil")
+    }
+    return test.equal_float(found, want, 0.0, "parse_float(\"\(text)\")")
+}
+
 fn checks() -> [error] {
     var out: [error] = []
 
@@ -89,6 +98,70 @@ fn checks() -> [error] {
     let whole = parse_float("3")
     out.push(test.equal_float(if whole == nil { 0.0 } else { whole }, 3.0, 0.0001, "a whole float"))
     out.push(test.is_true(parse_float("2.") == nil, "a point with nothing after it"))
+
+    // Untrusted digits: past the range is nil, where it used to be a trap.
+    out.push(test.is_true(parse_int("99999999999999999999") == nil, "an int too large is nil"))
+    out.push(test.is_true(parse_int("9223372036854775808") == nil, "one past the largest int"))
+    out.push(test.equal_int(or_else(parse_int("9223372036854775807"), 0), 9223372036854775807, "the largest int"))
+    out.push(test.equal_int(
+            or_else(parse_int("-9223372036854775808"), 0),
+            -9223372036854775807 - 1,
+            "the smallest int",
+        ))
+    out.push(test.is_true(parse_int("-9223372036854775809") == nil, "one past the smallest int"))
+    out.push(test.equal_int(or_else(parse_int("-0"), 1), 0, "minus zero is zero"))
+
+    // A fraction that is not all digits is not a number: `1.-5` was 0.95.
+    out.push(test.is_true(parse_float("1.-5") == nil, "a signed fraction"))
+    out.push(test.is_true(parse_float("-1.-5") == nil, "a signed fraction after a sign"))
+    out.push(test.is_true(parse_float("1.5x") == nil, "trailing rubbish"))
+    out.push(test.is_true(parse_float("") == nil, "nothing is not a float"))
+    out.push(test.is_true(parse_float("-") == nil, "a sign alone is not a float"))
+    out.push(test.is_true(parse_float(".") == nil, "a point alone"))
+    out.push(test.is_true(parse_float("+1") == nil, "no plus in front"))
+    out.push(test.is_true(parse_float("1e") == nil, "an exponent with no digits"))
+    out.push(test.is_true(parse_float("1e+") == nil, "an exponent with only a sign"))
+    out.push(test.is_true(parse_float("e5") == nil, "an exponent with no number"))
+    out.push(test.is_true(parse_float(" 1") == nil, "parse_float does not trim"))
+    out.push(exact_float(".5", 0.5))
+    out.push(exact_float("-.5", -0.5))
+    out.push(exact_float("1.5e3", 1500.0))
+    out.push(exact_float("1.5E+3", 1500.0))
+    out.push(exact_float("25e-2", 0.25))
+    // A fraction too long for an `int` overflowed it and trapped.
+    out.push(exact_float("0.12345678901234567890", 0.12345678901234568))
+    out.push(exact_float("123456789012345678901234567890", 123456789012345678901234567890.0))
+    out.push(exact_float("9223372036854775808", 9223372036854775808.0))
+
+    // Correctly rounded: the digits as floats gave 0.30000000000000004.
+    out.push(exact_float("0.3", 0.3))
+    out.push(exact_float("0.7", 0.7))
+    out.push(exact_float("3.14159", 3.14159))
+    out.push(exact_float("9.95", 9.95))
+    out.push(exact_float("0.035", 0.035))
+    out.push(exact_float("2.675", 2.675))
+    out.push(exact_float("1e-7", 0.0000001))
+    out.push(exact_float("0.30000000000000004", 0.1 + 0.2))
+    out.push(exact_float("1e22", 1e22))
+    out.push(exact_float("1e23", 1e23))
+    out.push(exact_float("1.7976931348623157e308", 1.7976931348623157e308))
+    out.push(exact_float("2.2250738585072014e-308", 2.2250738585072014e-308))
+    out.push(exact_float("5e-324", 5e-324))
+    // Halfway between zero and the smallest float goes to the even one, zero;
+    // anything above it goes up.
+    out.push(exact_float("2.4703282292062327e-324", 0.0))
+    out.push(exact_float("2.4703282292062328e-324", 5e-324))
+    out.push(exact_float("1e-400", 0.0))
+    out.push(test.is_true(parse_float("1e309") == nil, "past the largest float is nil"))
+    out.push(test.is_true(parse_float("1.7976931348623159e308") == nil, "just past the largest float"))
+    // Ties to even, far past the digits a fast path could hold: 2⁵³ + 1 is
+    // halfway between two floats, and a trailing digit decides.
+    out.push(exact_float("9007199254740993", 9007199254740992.0))
+    out.push(exact_float("9007199254740993.0000000000000000000001", 9007199254740994.0))
+    out.push(exact_float("9007199254740995", 9007199254740996.0))
+    let negative_zero = or_else(parse_float("-0.0"), 1.0)
+    out.push(test.is_true(negative_zero == 0.0 && 1.0 / negative_zero < 0.0, "-0.0 keeps its sign"))
+    out.push(test.is_true(hash_float(negative_zero) == hash_float(0.0), "-0.0 hashes as 0.0 does"))
 
     // ---- letters ----
     out.push(test.equal_str(lower("MiXeD"), "mixed", "lower"))

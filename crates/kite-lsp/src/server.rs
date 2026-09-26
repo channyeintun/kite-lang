@@ -439,7 +439,12 @@ impl Server {
     fn formatting(&self, message: &Json) -> Reply {
         let uri = uri_of(message).unwrap_or_default();
         let text = self.text(&uri);
-        let formatted = kite_fmt::format(&text);
+        // A document the lexer cannot read gets no edits: the formatter
+        // refuses it rather than lay out what survived, and the diagnostics
+        // already say what is wrong.
+        let Ok(formatted) = kite_fmt::format(&text) else {
+            return Reply::result(Json::Array(Vec::new()));
+        };
         if formatted == text {
             return Reply::result(Json::Array(Vec::new()));
         }

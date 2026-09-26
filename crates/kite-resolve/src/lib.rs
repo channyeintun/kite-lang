@@ -1656,7 +1656,30 @@ impl<'a> FnResolver<'a> {
             let owner = segments_text(&path.segments[..path.segments.len() - 1]);
             if let Some(ti) = self.find_type(&owner) {
                 self.check_visible(Res::Type(ti), path.span, &owner);
-                self.map.uses.insert(path.span, Res::Type(ti));
+                // The last segment is looked up on that enum, exactly as the
+                // same path is in an expression. Recording the owner instead
+                // left the checker holding a type where it wanted a variant,
+                // and it made the arm a wildcard: `Color.Red` matched green.
+                if let Some(vi) = self.map.variant_of(ti, name) {
+                    self.map.uses.insert(path.span, Res::Variant(ti, vi));
+                    return;
+                }
+                let decl = &self.map.types[ti as usize];
+                let message = if decl.kind == TypeKind::Enum {
+                    format!("`{}` has no variant `{}`", owner, name)
+                } else {
+                    format!("`{}` is a {}, not an enum", owner, decl.kind.describe())
+                };
+                let mut d = Diagnostic::error(codes::E0111, message)
+                    .with_primary(path.span, "no such variant")
+                    .with_secondary(decl.span, "declared here");
+                if let Some(names) = self.map.variants_of.get(&ti) {
+                    let mut names: Vec<(&u32, &String)> = names.iter().map(|(n, i)| (i, n)).collect();
+                    names.sort();
+                    let names: Vec<&str> = names.iter().map(|(_, n)| n.as_str()).collect();
+                    d = d.with_note(format!("`{}` has: {}", owner, names.join(", ")));
+                }
+                self.diags.push(d);
                 return;
             }
         }
@@ -1687,6 +1710,7 @@ impl<'a> FnResolver<'a> {
     fn expr(&mut self, e: &Expr) {
         match e {
             Expr::Int(_)
+            | Expr::ImpliedInt { .. }
             | Expr::Float(_)
             | Expr::Str(_)
             | Expr::Char(_)
@@ -1783,10 +1807,18 @@ impl<'a> FnResolver<'a> {
                 for p in params {
                     self.declare(&p.name, false, false);
                 }
+                // A closure body is a function of its own: a loop around the
+                // place it is written is not a loop it can leave. Without
+                // this, `break` inside one was accepted and lowered to
+                // nothing, because by the time it runs there is no loop.
+                let loop_depth = std::mem::take(&mut self.loop_depth);
+                let labels = std::mem::take(&mut self.labels);
                 match body.as_ref() {
                     ClosureBody::Expr(e) => self.expr(e),
                     ClosureBody::Block(b) => self.block(b),
                 }
+                self.loop_depth = loop_depth;
+                self.labels = labels;
                 self.pop_scope();
             }
         }

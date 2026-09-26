@@ -8,8 +8,9 @@ Everything below is checked against `target/release/kitec`, not against the pros
   A file is `use` lines — which must come first — then declarations (`fn`, `struct`,
   `enum`, `trait`, `impl`, `type`, a constant `let`, and `extern fn` under its `@host(…)`
   attribute). Every *mutable* binding lives inside a function body.
-- **A closure may not capture a `var`** (`E0211`). Captures are by value at closure-creation
-  time, so a later write would be invisible. Mutation goes through a function that takes a
+- **A closure may not capture a `var`, or assign to anything it captures** (`E0211`).
+  Captures are by value at closure-creation time, so a later write would be invisible, and a
+  write inside would change only the copy. Mutation goes through a function that takes a
   `var` parameter.
 - **An `if` used as a value takes exactly one expression per branch.** No statements, no
   trailing-expression block. `let x = if c { let y = 1  y } else { 0 }` is `E0200`.
@@ -22,10 +23,10 @@ Everything below is checked against `target/release/kitec`, not against the pros
 - **`xs[a..b]` clamps; `xs[i]` traps.** A window may run off the end; an element may not.
 - **Map indexing always yields `Option<V>`** — never a zero value, and `io.print` will not
   take it.
-- **Open-ended ranges do not exist.** `xs[..2]` and `xs[1..]` are parse errors, and a range
-  is not a value: you cannot bind, pass, or return `0..n`.
-- **Bitwise binds tighter than comparison** (unlike C), but `&`, `^`, `|` are three separate
-  levels among themselves, exactly as in C.
+- **A range is not a value**: you cannot bind, pass, or return `0..n`. As an index it may
+  leave out either end — `xs[..2]`, `xs[1..]`, `xs[..]`.
+- **Bitwise binds tighter than comparison** (unlike C), and `&`, `^`, `|` share one level
+  among themselves (also unlike C), so they group left to right.
 - **Struct declaration fields are newline-separated, not comma-separated** — and a field is
   immutable unless the field itself says `var`, whatever the binding says.
 - **An enum variant pattern that binds a payload must be written bare** — `Circle(r)`,
@@ -446,8 +447,27 @@ fn main() {
 }
 ```
 
-`E0211` also covers a parameter whose type cannot be inferred, and a block-bodied closure
-that fails to return on some path.
+**Nor may a closure assign to anything it captures** (`E0211`) — a `var` or a `let`. It
+holds copies, so the write would change the copy and nothing else.
+
+```kite fails
+fn main() {
+    let first: int
+    let set = || { first = 1 } //~ E0211
+    set()
+}
+```
+
+A closure body is a function of its own, and is checked as one. Its `return` answers to the
+closure's `-> T`, not to the function it is written in; `-> (T, error)` makes it fallible,
+exactly as on a named function; a `break` or `continue` in it is `E0115` whatever loop
+surrounds it; `await` in it is `E0521`, because a closure cannot be `async`; and its `defer`s
+run when it returns. What a test around it proved still holds inside — its captures were
+taken there — but nothing it tests or checks inside reaches back out.
+
+`E0211` also covers a parameter whose type cannot be inferred, a block-bodied closure that
+fails to return on some path, and a `return` inside an expression-bodied closure whose result
+type nothing states.
 
 ```kite fails
 fn main() {
@@ -504,22 +524,20 @@ Tightest to loosest, as the compiler's Pratt table has it
 | 4 | `*`  `/`  `%` | left |
 | 5 | `+`  `-` | left |
 | 6 | `<<`  `>>` | left |
-| 7 | `&` | left |
-| 8 | `^` | left |
-| 9 | `\|` | left |
-| 10 | `==` `!=` `<` `<=` `>` `>=` | **non-associative** |
-| 11 | `&&` | left |
-| 12 | `\|\|` | left |
-| 13 | `..`  `..=` | **non-associative** |
+| 7 | `&`  `^`  `\|` | left |
+| 8 | `==` `!=` `<` `<=` `>` `>=` | **non-associative** |
+| 9 | `&&` | left |
+| 10 | `\|\|` | left |
+| 11 | `..`  `..=` | **non-associative** |
 
 Bitwise operators bind tighter than comparison, so `a & b == c` is `(a & b) == c` — the
 one thing C gets wrong. A range is the loosest operator there is, so `0..n + 1` is
 `0..(n + 1)`.
 
-> **Compiler vs specification.** The §5.1 table and `docs/05-grammar.ebnf` both put `&`,
-> `^` and `|` on a single left-associative level. The compiler gives them three distinct
-> levels, `&` tightest, in C's relative order: `2 | 1 ^ 3` evaluates to `2`
-> (`2 | (1 ^ 3)`), not `0` (`(2 | 1) ^ 3`). Parenthesise when mixing them.
+`&`, `^` and `|` are one left-associative level, as §5.1 has it: `2 | 1 ^ 3` is
+`(2 | 1) ^ 3`, which is `0` — not C's `2 | (1 ^ 3)`, which is `2`. (Through 0.1.9 the
+compiler layered them as C does.) Parenthesise when mixing them anyway; a reader
+coming from C will read it the other way.
 
 ```kite
 fn main() {
@@ -527,7 +545,7 @@ fn main() {
     assert(1 << 3 + 1 == 16, "+ before <<")
     assert((1 & 3) == 1, "bitwise before comparison")
     assert(1 & 3 == 1, "same thing without the parentheses")
-    assert(2 | 1 ^ 3 == 2, "^ binds tighter than |")
+    assert(2 | 1 ^ 3 == 0, "& ^ | are one level, left to right")
     assert(approx_eq(-3 as float, -3.0, 0.001), "prefix before as")
     assert(approx_eq(2.0 * 3 as float, 6.0, 0.001), "as before *")
     io.print("ok")
@@ -643,13 +661,25 @@ fn main() {
 the data is what the last page of a paging loop produces, so it clamps. Use `.get(i)` when
 absence is a runtime condition rather than a bug.
 
-Open-ended ranges are not in the language, even though the EBNF's `Postfix` rule permits
-them — **the compiler is right**: write both endpoints.
+Either end of a range index may be left out: a missing start is `0` and a missing end
+the largest `int`, and the clamp makes those the edges of the data. `xs[..=b]` is allowed;
+`xs[a..=]` is not, because an inclusive range has to say what it includes. Only an index
+may leave an end out.
+
+```kite
+fn main() {
+    let xs = [1, 2, 3]
+    io.print(xs[..2].len())         // 2
+    io.print(xs[1..].len())         // 2
+    io.print(xs[..].len())          // 3
+    io.print("hello"[3..])          // lo
+}
+```
 
 ```kite fails
 fn main() {
     let xs = [1, 2, 3]
-    io.print(xs[..2].len()) //~ E0100
+    io.print(xs[1..=].len()) //~ E0100
 }
 ```
 
@@ -831,12 +861,15 @@ fn main() {
 
 ## 9. `defer`
 
-`defer` takes a **call** and nothing else. The receiver and arguments are evaluated where
-the `defer` is written, into hidden locals; the call happens when the enclosing *function*
-returns, by any path, in reverse order of the `defer` statements. A `defer` inside an `if`
-that never runs never runs. A deferred call cannot change the return value — the return
-expression is evaluated first — though when that value is a struct it is a reference, so a
-deferred write *into* it is visible to the caller.
+`defer` takes a **call** to a function or method and nothing else. The receiver and
+arguments are evaluated where the `defer` is written; the call happens when the enclosing
+*function* returns, by any path — a `return`, the end of the body, or `check` propagating —
+newest registration first. Registration is a run-time event: a `defer` inside an `if` that
+never runs never runs, and one inside a loop registers once per iteration, each with that
+iteration's values. A closure is a function of its own, so a `defer` in one runs when *the
+closure* returns. A deferred call cannot change the return value — the return expression
+is evaluated first — though when that value is a struct it is a reference, so a deferred
+write *into* it is visible to the caller.
 
 ```kite
 struct File {
@@ -866,12 +899,18 @@ fn main() {
 }
 ```
 
-> **Compiler vs specification.** §6.3 says deferred calls run "in reverse order of
-> registration". The implementation is one hidden flag and one set of hidden operand locals
-> **per syntactic `defer` site** (`defer_stmt` in `crates/kite-types/src/lib.rs`), so a
-> `defer` in a loop body runs **once**, at function exit, with the last iteration's values —
-> not once per iteration. Do not put `defer` inside a loop; move the body into a function
-> and defer there.
+```kite
+fn note(s: str) {
+    io.print(s)
+}
+
+fn main() {
+    for i in 0..3 {
+        defer note("closing \(i)")
+    }
+    io.print("body")        // body / closing 2 / closing 1 / closing 0
+}
+```
 
 ---
 
@@ -1009,26 +1048,13 @@ fn main() {
 }
 ```
 
-### Trap: qualified variant patterns
+### Qualified variant patterns
 
-Variant *constructors* may be written bare (`Circle(radius: 2)`) or qualified
-(`Shape.Circle(radius: 2)`). Variant *patterns* must be bare when they bind a payload. A
-qualified pattern parses, but its bindings are never bound, and the compiler reports the
-downstream `E0110` rather than the real mistake.
-
-```kite fails
-enum Shape {
-    Circle(radius: int)
-    Point
-}
-
-fn main() {
-    io.print(match Circle(radius: 2) {
-        Shape.Circle(r) => r, //~ E0110
-        Point => 0,
-    })
-}
-```
+Variant *constructors* and variant *patterns* may both be written bare
+(`Circle(r)`) or qualified (`Shape.Circle(r)`); the two spellings mean the same
+variant. A qualified name that is not a variant of that enum is `E0111`, and the enum's
+own name standing where a variant belongs (`Shape(r)`) is `E0200` — neither is ever
+taken as a catch-all.
 
 ```kite
 enum Shape {
@@ -1038,6 +1064,10 @@ enum Shape {
 
 fn main() {
     io.print(match Circle(radius: 2) {
+        Shape.Circle(r) => r,
+        Shape.Point => 0,
+    })
+    io.print(match Circle(radius: 3) {
         Circle(r) => r,
         Point => 0,
     })
@@ -1048,7 +1078,7 @@ Which enum an unqualified pattern names is decided by the scrutinee, so two enum
 declare `Slow` without ambiguity — and a name that matches a variant of the scrutinee is
 that variant, not a fresh binding. A *constructor* has no scrutinee to go on: once two
 enums share a variant name, the bare `Slow` is `E0111`, "cannot find `Slow`", and the call
-has to say `A.Slow`.
+has to say `A.Slow` — which a pattern may say too.
 
 ---
 

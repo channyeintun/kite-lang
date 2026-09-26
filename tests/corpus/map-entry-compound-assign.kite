@@ -1,0 +1,13 @@
+// `m[k] += 1` has nothing to add to when `k` is missing, which is why reading
+// `m[k]` gives an optional. The operator used to be dropped, and the entry
+// overwritten with the right-hand side alone.
+
+fn main() {
+    var counts = { "a": 1 }
+    counts["a"] += 10 //~ ERROR E0201
+    let seen = counts["a"]
+    if seen != nil {
+        counts["a"] = seen + 10
+    }
+    io.print(counts.len())
+}

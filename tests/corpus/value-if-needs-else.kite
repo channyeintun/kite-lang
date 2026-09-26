@@ -1,0 +1,10 @@
+// An `if` used as a value has to produce one on every path. A chain of
+// `else if` with no final `else` has none when every test is false, and used
+// to run with a hole where the value should have been.
+
+fn main() {
+    let a = false
+    let b = false
+    let x = if a { 1 } else if b { 2 } //~ ERROR E0200
+    io.print("\(x + 1)")
+}

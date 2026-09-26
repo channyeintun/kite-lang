@@ -1,0 +1,13 @@
+// A constant is worked out while compiling, and one whose arithmetic
+// overflows has no single value: the same expression in a body traps in a
+// debug build and wraps in a release one. Folding it by wrapping gave it the
+// release answer everywhere.
+
+let BIG = 9223372036854775807
+let OVER = BIG + 1 //~ ERROR E0118
+let SHIFTED = 1 << 64 //~ ERROR E0118
+
+fn main() {
+    io.print(OVER)
+    io.print(SHIFTED)
+}

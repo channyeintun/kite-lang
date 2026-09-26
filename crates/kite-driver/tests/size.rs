@@ -72,7 +72,7 @@ fn a_library_of_four_functions_stays_small() {
 /// A real island: five thousand rows, filtered, sorted and diffed on every
 /// keystroke.
 ///
-/// Today 29,643 bytes, against a budget that was 24,576. What got bigger,
+/// Today 30,566 bytes, against a budget that was 24,576. What got bigger,
 /// measured rather than estimated — each number is this test run at that
 /// commit:
 ///
@@ -93,6 +93,8 @@ fn a_library_of_four_functions_stays_small() {
 ///    every time. A hundred thousand pushes took twenty seconds on this target
 ///    before it; the island's own lists are small, so it buys the page little
 ///    and costs it these bytes. The budget did not move.
+/// 4. **923 bytes** (29,643 → 30,566) arrived with the standard library's
+///    own round of fixes, merged after (3) and measured at the merge.
 ///
 /// `examples/page` attaches its own listeners through `std/dom` and uses none
 /// of (2), so it pays for the machinery without spending it. That is the
