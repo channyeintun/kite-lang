@@ -1825,20 +1825,34 @@ if (HOSTS.dom) {
 /// changes between them is which browser object fills the queue, not how a
 /// program reads it.
 const NET_HOST: &str = r#"
+// Maps, so that entries can leave. Every request used to stay in an array for
+// the life of the page with its whole body, so two hundred fetches of a
+// megabyte each held two hundred megabytes after the program had read them.
+//
+// A request is let go once the program has read its body, or why it failed —
+// the last thing `std/http` reads of it. Its status and headers were read just
+// before, and travel with the `Response` as data: they used to stay here, read
+// back by handle whenever `http.header` was asked, so no request that
+// succeeded was ever let go at all. A stream is replaced by a record of how it
+// ended once it has ended and been drained. A handle the table no longer has
+// answers as a finished, empty one.
+//
+// Outside the block below so that `requestsHeld` can answer for a program that
+// declared a host group and not this one.
+const REQUESTS = new Map();
+
+/// How many requests the host is still holding for the program. A program
+/// that has read every response it asked for — or the error, for one that
+/// failed — leaves none, which is what a test of a leak, or a page wondering
+/// where its memory went, asks for.
+export function requestsHeld() {
+  return REQUESTS.size;
+}
+
 if (HOSTS.net) {
-  // Maps, so that entries can leave. Every request used to stay in an array
-  // for the life of the page with its whole body, so two hundred fetches of a
-  // megabyte each held two hundred megabytes after the program had read them.
-  //
-  // A request gives up its body once the program has read it, and everything
-  // but its status and headers — `http.header` reads those from a response at
-  // any time later, so they stay. A stream is replaced by a record of how it
-  // ended once it has ended and been drained. A handle the table no longer
-  // has answers as a finished, empty one.
-  const REQUESTS = new Map();
   const STREAMS = new Map();
   let NEXT_HANDLE = 0;
-  const GONE_REQUEST = { state: 2, status: 0, body: "", error: "that request is gone", headers: null };
+  const GONE_REQUEST = { state: 2, status: 0, body: "", error: "that request is gone", headers: "" };
   const requestAt = (id) => REQUESTS.get(Number(id)) ?? GONE_REQUEST;
   const ENDED = { state: 3, queue: [], taken: { name: "", id: "" }, error: "", source: null, socket: null };
   const streamAt = (id) => STREAMS.get(Number(id)) ?? ENDED;
@@ -1864,9 +1878,20 @@ if (HOSTS.net) {
     }
     return out;
   };
+  // A response's headers as the `name: value` lines everything else on this
+  // boundary crosses as. `Headers` iterates with each name in lower case and a
+  // repeated header already joined by `, ` — except `set-cookie`, one line per
+  // cookie — so `http.header` joining the lines of one name answers what
+  // `headers.get` would. A value cannot hold a line break: `Headers` refuses
+  // one, so a line is always a whole header.
+  const headerLines = (headers) => {
+    const lines = [];
+    for (const [name, value] of headers) lines.push(name + ": " + value);
+    return lines.join("\n");
+  };
   Object.assign(HOSTS.net, {
     fetch_start: (method, url, body, headers, credentials, redirect) => {
-      const request = { state: 0, status: 0, body: "", error: "", headers: null };
+      const request = { state: 0, status: 0, body: "", error: "", headers: "" };
       const id = NEXT_HANDLE++;
       REQUESTS.set(id, request);
       const init = { method: textOf(method), headers: parseHeaders(textOf(headers)) };
@@ -1891,7 +1916,7 @@ if (HOSTS.net) {
         .then(() => fetch(textOf(url), init))
         .then(async (response) => {
           request.status = response.status;
-          request.headers = response.headers;
+          request.headers = headerLines(response.headers);
           request.body = await response.text();
           request.state = 1;
           wake();
@@ -1905,17 +1930,14 @@ if (HOSTS.net) {
     },
     fetch_state: (id) => BigInt(requestAt(id).state),
     fetch_status: (id) => BigInt(requestAt(id).status),
-    // Read once, by `std/http`, when it builds the response — so the body is
-    // let go here rather than held for as long as the page lives.
+    fetch_headers: (id) => hostText(requestAt(id).headers),
+    // Read once, by `std/http`, when it builds the response, and after the
+    // status and the headers — so the request is let go here rather than
+    // held for as long as the page lives.
     fetch_body: (id) => {
-      const request = requestAt(id);
-      const body = request.body;
-      request.body = "";
+      const body = requestAt(id).body;
+      REQUESTS.delete(Number(id));
       return hostText(body);
-    },
-    fetch_header: (id, name) => {
-      const headers = requestAt(id).headers;
-      return hostText(headers ? headers.get(textOf(name)) ?? "" : "");
     },
     // A failed request has nothing else to read, so reading why is the last
     // thing the program does with it.

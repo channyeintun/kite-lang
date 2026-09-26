@@ -1033,6 +1033,14 @@ Client, all async `-> (Response, error)`: `get` `post` `put` `delete` `patch`
 Helpers: `ok(body)` `not_found()` `status(code, body)` `succeeded(r)`
 `header(r, name)`.
 
+A `Response` carries the headers it arrived with, so `header` can be asked at
+any time and the host lets a request go the moment its body is read — the
+glue's `requestsHeld()` counts what it still holds, and a program that has read
+every response leaves none. `header` answers as `fetch`'s `headers.get` does:
+the name ignores ASCII case, a header that came more than once is its values
+joined by `, ` (`Set-Cookie` included), and one that is absent — or any header
+of a response built in Kite, by `ok`, `not_found` or `status` — is `""`.
+
 **Cookies need `send_with`.** `send` cannot say whether credentials go out, and
 a page may not set a `Cookie` header itself — so an app that signs in with a
 cookie uses `send_with(method, url, body, Options)`:

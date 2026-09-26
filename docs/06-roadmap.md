@@ -1263,6 +1263,17 @@ meant two headers" and "somebody else added one" distinguishable at all; from
 the joined string it is not. A value carrying a line break is refused rather
 than stripped, because there is no escaping that keeps the meaning.
 
+**Reviewed later: a response carries its own headers.** `http.header` asked
+the host by the response's handle, so the glue kept every request that
+succeeded, status and headers and all, for as long as the page lived — nothing
+could tell it a response would never be asked about again. The headers now
+cross once, as `name: value` lines read beside the status, and travel in the
+`Response` as data; the body is the last thing `std/http` reads of a request,
+and reading it is where the glue lets the request go. `header` answers as it
+did, which is as `fetch`'s `headers.get` answers — the name ignoring case, a
+repeated header's values joined by `, ` — and the glue's `requestsHeld()` is
+how a test sees the table empty after the headers are read.
+
 **Remaining: WASI.** `wasi:http/incoming-handler` is the other implementation
 this boundary was shaped for, and it is not written — it is a component-model
 export and `kitec` emits a core module. That is a real gap, recorded rather

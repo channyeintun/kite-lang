@@ -46,8 +46,12 @@ extern fn fetch_status(id: int) -> int
 @host("net")
 extern fn fetch_body(id: int) -> str
 
+/// Every header of a response that arrived, as `name: value` lines — read
+/// once, beside the status, and carried by the `Response` from then on. A
+/// header read back from the host by handle, whenever the program asked,
+/// meant the host could never let a request go.
 @host("net")
-extern fn fetch_header(id: int, name: str) -> str
+extern fn fetch_headers(id: int) -> str
 
 @host("net")
 extern fn fetch_error(id: int) -> str
@@ -90,7 +94,7 @@ extern fn sse_pending(id: int) -> int
 /// Take the oldest event and answer its `data`.
 ///
 /// The name and the id of that same event are read back with the two
-/// functions below, the way a response's headers are read back from its
+/// functions below, the way a response's status is read back from its
 /// handle. Data crosses on its own because data is the part that can contain
 /// anything, newlines included, and a `name: value` encoding would mangle it.
 @host("net")
@@ -126,20 +130,23 @@ pub struct Request {
 pub struct Response {
     pub status: int
     pub body: str
-    /// The handle the response came from, for reading a header back.
-    id: int
+    /// The headers it arrived with, as `name: value` lines, and "" for a
+    /// response built in Kite. Taken when the response arrived rather than
+    /// asked of the host by handle later: a handle the program might still
+    /// ask with was a request the host could never let go.
+    headers: str
 }
 
 pub fn ok(body: str) -> Response {
-    return Response{ status: 200, body: body, id: -1 }
+    return Response{ status: 200, body: body, headers: "" }
 }
 
 pub fn not_found() -> Response {
-    return Response{ status: 404, body: "not found", id: -1 }
+    return Response{ status: 404, body: "not found", headers: "" }
 }
 
 pub fn status(code: int, body: str) -> Response {
-    return Response{ status: code, body: body, id: -1 }
+    return Response{ status: code, body: body, headers: "" }
 }
 
 /// Whether the status is in the 2xx range.
@@ -147,13 +154,29 @@ pub fn succeeded(r: Response) -> bool {
     return r.status >= 200 && r.status < 300
 }
 
-/// A header of a response that came from the host. A response built in Kite
-/// carries no headers, and answers with an empty string.
+/// A header of a response that came from the host, answered as `fetch`'s own
+/// `headers.get` answers it: the name is compared ignoring ASCII case, and a
+/// header that arrived more than once answers with every value, in order,
+/// joined by `, `. A header the response did not carry answers with an empty
+/// string, and so does every header of a response built in Kite, which
+/// carries none.
 pub fn header(r: Response, name: str) -> str {
-    if r.id < 0 {
-        return ""
+    var values: [str] = []
+    for line in split(r.headers, "\n") {
+        let at = line.index_of(":")
+        if at > 0 && equal_ignoring_case(line.slice(0, at), name) {
+            // The one space the host writes after the colon, and not `trim`:
+            // the host has already stripped what HTTP counts as whitespace,
+            // and `trim` would also take a no-break space that is part of the
+            // value.
+            var from = at + 1
+            if from < line.len() && line.code_at(from) == 32 {
+                from += 1
+            }
+            values.push(line.slice(from, line.len()))
+        }
     }
-    return fetch_header(r.id, name)
+    return join(values, ", ")
 }
 
 // ---- what a request carries besides its body --------------------------------
@@ -410,7 +433,12 @@ pub async fn send_with(
     if fetch_state(id) == 2 {
         return _, errors.new("http \(method) \(url): \(fetch_error(id))")
     }
-    return Response{ status: fetch_status(id), body: fetch_body(id), id: id }, nil
+    // The body last: reading it is what lets the host forget the request, so
+    // the status and the headers are taken before it, and travel with the
+    // `Response` from here on.
+    let code = fetch_status(id)
+    let headers = fetch_headers(id)
+    return Response{ status: code, body: fetch_body(id), headers: headers }, nil
 }
 
 // ---- server-sent events -----------------------------------------------------
