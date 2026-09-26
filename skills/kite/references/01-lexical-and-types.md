@@ -233,9 +233,9 @@ fn main() {
 }
 ```
 
-`Self` is listed as contextual in `docs/05-grammar.ebnf`, but the compiler does
-not implement it: `fn me(self) -> Self` is `E0204 unknown type 'Self'`. Name the
-concrete type.
+`Self` is contextual: inside a trait it is the implementing type, and inside an
+`impl` block the type the block is for — `fn me(self) -> Self`. Anywhere else it
+is an ordinary (unknown) type name.
 
 ## 5. Literals
 
@@ -952,9 +952,9 @@ overflow.
 The compiler is authoritative. Checked disagreements, all in this file's scope:
 
 1. `docs/05-grammar.ebnf` lists a fixed-length array type `[N]T`, an optional-end
-   slice postfix `xs[..2]` / `xs[2..]`, `Self` as a usable contextual type name,
-   and one shared precedence level for `& ^ |`. None of the four exist: the
-   compiler rejects the first three and gives `|` < `^` < `&`.
+   slice postfix `xs[..2]` / `xs[2..]`, and one shared precedence level for
+   `& ^ |`. None of the three exist: the compiler rejects the first two and gives
+   `|` < `^` < `&`.
 2. `docs/05-grammar.ebnf` writes `MultiString = '"""' NEWLINE { AnyChar } '"""'`.
    The newline is not required — `"""one line"""` compiles.
 3. `docs/05-grammar.ebnf` has no production for a pair-binding `for`. `ForHeader

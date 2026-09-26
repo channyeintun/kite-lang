@@ -136,7 +136,8 @@ fn main() {
 | Struct fields separated by commas | **Declarations** are newline-separated (a comma is `E0100`); commas belong to literals and patterns. |
 | `P{ x: 1, ..base }` | `..base` comes **first**: `P{ ..base, x: 1 }`. Opposite of Rust. |
 | Overloading, default arguments, named arguments, turbofish | None exist (`E0112`, `E0113`, `E0209`). Where a type cannot be inferred it names itself at the front: `Book.decode(doc)`, `NotFound.is(err)`, `let s: Stack<int> = Stack.empty()`. Many optional inputs → take a struct. |
-| `Self`; `fn method<T>(self, …)` | No `Self` type, no method-level type parameters (`E0204`). Name the concrete type; put `<T>` on a free function or on the `impl` header. |
+| `impl` for another module's type | `E0405`: no extension methods and no orphan impls. An `impl` lives with its type, or with its trait — implement a trait of your own for an imported type, or write a function taking it. |
+| Reading another module's unmarked field or method | `E0401`, like an unmarked function: fields, methods and associated functions are private unless `pub`, and a struct with a private field cannot be built — `..base` included — outside its module. |
 | `let x = if c { let y = 1  y } else { 0 }` | A value-`if` branch is exactly **one expression** — no statements, no tail expression. A `match` block arm holding more than one statement is `()`. Arms that need statements `return` instead. |
 | Re-`let` the same name in one block | `E0112`; only a nested scope shadows. The one exception is rebinding an error that is already checked. |
 | `println!` / `console.log`; deriving `Display` | `io.print(v)`. A user type needs a hand-written `impl Display` — `Display` never derives. `@derive` covers `Debug`, `Hash`, `Encode`, `Decode` only (and `Encode`/`Decode` need `use std/json` in the file). |
