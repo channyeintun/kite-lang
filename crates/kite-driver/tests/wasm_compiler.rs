@@ -161,17 +161,21 @@ fn with_compiler(name: &str, compiler: &Path, script: &str) -> String {
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
-/// A long chain of `+` compiles, and an input the compiler cannot survive does
-/// not take the compiler with it.
+/// The deepest program the front end accepts builds, and a call that traps
+/// does not take the compiler with it.
 ///
 /// With wasm-ld's default 1 MiB stack, eight hundred string literals joined
-/// by `+` ran it out — `memory access out of bounds`, where the native
-/// compiler handles a thousand — and every call on that instance after it
-/// failed the same way, so one such file broke a Vite dev server until it was
-/// restarted. The stack is 16 MiB now, and a call that traps replaces the
-/// instance. Twenty thousand terms is past what the engine's own stack takes
-/// even so, which is what makes it the input for the second half — unless
-/// the parser refuses it first, which is as good.
+/// by `+` ran the compiler out of stack — `memory access out of bounds`, where
+/// the native compiler handled a thousand — and every call on that instance
+/// after it failed the same way, so one such file broke a Vite dev server
+/// until it was restarted. The parser now refuses a chain past 256 links
+/// (E0102) on every target, and the Wasm compiler has a 16 MiB stack besides,
+/// so a chain of two hundred — near the longest there is — builds here.
+///
+/// For the second half nothing ordinary traps any more, so a trap is
+/// supplied: the first instance's `kite_run` is made to throw the way a trap
+/// does, every time. The call that meets it throws; the next one runs on a
+/// fresh instance, where it used to meet the same trap again.
 #[test]
 fn a_deep_input_neither_overflows_nor_breaks_the_compiler() {
     let Some(compiler) = wasm_compiler() else {
@@ -182,25 +186,43 @@ const chain = (n) =>
   "fn main() {\n  let s = " +
   Array.from({ length: n }, (_, i) => `"line ${i}\\n"`).join(" +\n    ") +
   "\n  io.print(s.len())\n}\n";
+const hello = 'fn main() {\n  io.print("ok")\n}\n';
+
+// The first instance's `kite_run` traps, and — as after a real trap, whose
+// memory is wherever it stopped — goes on trapping. Only a new instance works.
+const instantiate = WebAssembly.instantiate;
+WebAssembly.instantiate = async (...args) => {
+  const result = await instantiate(...args);
+  const exports = { ...result.exports ?? result.instance.exports };
+  exports.kite_run = () => {
+    throw new WebAssembly.RuntimeError("unreachable");
+  };
+  return result.instance ? { module: result.module, instance: { exports } } : { exports };
+};
+
 const c = await compiler();
-console.log("800 terms: " + (c.build({ entry: chain(800) })["app.wasm"].length > 0));
+console.log("200 links: " + (c.build({ entry: chain(200) })["app.wasm"].length > 0));
 try {
   c.build({ entry: chain(20000) });
-  console.log("20000 terms: built");
+  console.log("20000 links: built");
 } catch (e) {
-  console.log("20000 terms: " + (e.name === "BuildFailed" ? "refused" : "trapped"));
+  console.log("20000 links: " + (e.name === "BuildFailed" ? "refused" : "trapped"));
 }
-console.log("afterwards: " + JSON.stringify(c.run('fn main() {\n  io.print("ok")\n}\n')));
+try {
+  c.run(hello);
+  console.log("the trap: not met");
+} catch (e) {
+  console.log("the trap: " + (e instanceof WebAssembly.RuntimeError));
+}
+console.log("afterwards: " + JSON.stringify(c.run(hello)));
 "#;
     let out = with_compiler("deep", &compiler, script);
-    let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.first(), Some(&"800 terms: true"), "{}", out);
-    assert!(
-        lines.get(1).is_some_and(|l| l.starts_with("20000 terms: ")),
+    assert_eq!(
+        out,
+        "200 links: true\n20000 links: refused\nthe trap: true\nafterwards: \"ok\\n\"\n",
         "{}",
         out
     );
-    assert_eq!(lines.get(2), Some(&"afterwards: \"ok\\n\""), "{}", out);
 }
 
 /// `build` answers with the files `kitec build` writes, and only those: the
