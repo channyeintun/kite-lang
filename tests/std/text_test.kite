@@ -17,6 +17,12 @@ fn visual(line: str) -> [int] {
     return text.bidi_visual(line)
 }
 
+/// The values at some positions only — the ones the algorithm draws, since a
+/// removed character's level is not specified.
+fn at(values: [int], positions: [int]) -> [int] {
+    return map(positions, |p: int| values[p])
+}
+
 fn bodies(line: str) -> [str] {
     return map(text.bidi_runs(line), |r: text.Run| r.body)
 }
@@ -212,6 +218,37 @@ fn checks() -> [error] {
     out.push(test.equal_int(stretched.code_at(0), 0xFE91, "tatweel joins backwards"))
     out.push(test.equal_int(stretched.code_at(2), 0xFE90, "and forwards"))
     out.push(test.equal_str(text.join_arabic("abc"), "abc", "everything else passes through"))
+    // A mark on the lam does not stop the ligature: it was drawn as a lam
+    // and an alef apart, FEDF 064E FE8E.
+    let voweled = text.join_arabic("\u{644}\u{64e}\u{627}")
+    out.push(test.equal_int(voweled.code_at(0), 0xFEFB, "lam, fatha, alef is still the ligature"))
+    out.push(test.equal_int(voweled.code_at(1), 0x064E, "with the mark after it"))
+    out.push(test.equal_int(voweled.len(), 2, "and the alef swallowed"))
+    let joined_voweled = text.join_arabic("\u{628}\u{644}\u{651}\u{627}")
+    out.push(test.equal_int(joined_voweled.code_at(1), 0xFEFC, "joined, with a shadda, the final ligature"))
+
+    // ---- X10 and the isolates, from the conformance lines they failed ----
+    //
+    // A sequence's boundary is decided by *embedding* levels, and the levels
+    // array had already been raised by I1–I2 for the sequences resolved
+    // before it, so a later sequence saw the wrong neighbour: here the
+    // numbers after an LRE took the RTL paragraph's direction.
+    out.push(test.equal_ints(
+            at(levels("a\u{202a}\u{5d1}\u{202c} 1 2"), [0, 2, 4, 5, 6, 7]),
+            [0, 3, 0, 0, 0, 0],
+            "X10 compares embedding levels, not resolved ones",
+        ))
+    out.push(test.equal_ints(
+            at(levels("a\u{202b}b\u{202c} 1 2"), [0, 2, 4, 5, 6, 7]),
+            [0, 2, 1, 2, 1, 2],
+            "and on the right-to-left side",
+        ))
+    // An isolate initiator or PDI under an override is L or R, not a neutral.
+    out.push(test.equal_ints(
+            at(levels("\u{202e}a\u{202a}b\u{202c}\u{2066}c\u{2069}\u{202a}d\u{202c}e\u{202c}"), [1, 3, 5, 6, 7, 9, 11]),
+            [1, 2, 1, 2, 1, 2, 1],
+            "an overridden isolate keeps the override's direction",
+        ))
 
     return out
 }
