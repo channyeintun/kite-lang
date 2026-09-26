@@ -7870,7 +7870,8 @@ impl<'a> Checker<'a> {
     }
 
     /// The run-time identity of a concrete type, as a vtable row would carry
-    /// it. Zero for anything with no tag, which is why zero can mean "carries
+    /// it, or `None` for a type with no tag. `TypeTag::encode` never yields
+    /// zero — structs count from one — which is what lets zero mean "carries
     /// nothing" without colliding with a real type.
     fn type_tag_of(&self, ty: TyId) -> Option<u32> {
         Some(match *self.types.kind(ty) {

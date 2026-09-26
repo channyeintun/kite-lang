@@ -87,11 +87,30 @@ pub enum TypeTag {
 impl TypeTag {
     /// A single integer identifying the type at run time. Enums are shifted
     /// clear of structs so the two id spaces cannot collide.
+    ///
+    /// **No type encodes to zero.** Zero is the tag an error carries when it
+    /// carries nothing — a plain `errors.new` — and the tag every backend
+    /// reads off a nil error, which is what lets `T.is(err)` be a single
+    /// comparison with no nil test in front of it. Structs are therefore
+    /// counted from one: encoding the first struct declared as zero made
+    /// `NotFound.is(errors.new("x"))` true, and `NotFound.as` of it hand back
+    /// a value that was never there.
     pub fn encode(self) -> u32 {
         match self {
-            TypeTag::Struct(s) => s.0,
-            TypeTag::Enum(e) => 0x8000_0000 | e.0,
+            TypeTag::Struct(s) => Self::struct_tag(s.0),
+            TypeTag::Enum(e) => Self::enum_tag(e.0),
         }
+    }
+
+    /// The tag of struct number `id`, for a backend that has the raw id from
+    /// a run-time value rather than a [`StructId`].
+    pub fn struct_tag(id: u32) -> u32 {
+        id + 1
+    }
+
+    /// The tag of enum number `id`.
+    pub fn enum_tag(id: u32) -> u32 {
+        0x8000_0000 | id
     }
 }
 

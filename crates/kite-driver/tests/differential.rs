@@ -889,6 +889,58 @@ fn main() {
     ),
 ];
 
+/// Programs pinning down what the middle of the compiler — HIR, MIR and the
+/// bytecode it becomes — promises every backend. Each one is here because the
+/// three once disagreed about it, or all three agreed on the wrong answer.
+const MIDDLE_END: &[(&str, &str)] = &[
+    // The first struct a program declares once had type tag zero, which is
+    // also the tag of an error carrying nothing and of a nil error. So a plain
+    // `errors.new` claimed to be a `NotFound`, and `NotFound.as` of it handed
+    // back a value that was never there — a segfault natively, an illegal
+    // cast on Wasm.
+    (
+        "error-tags-are-never-zero",
+        "\
+struct NotFound {
+  id: int
+}
+
+impl Error for NotFound {
+  fn message(self) -> str { return \"not found \\(self.id)\" }
+}
+
+enum Busy {
+  Retry(after: int)
+}
+
+impl Error for Busy {
+  fn message(self) -> str { return \"busy\" }
+}
+
+fn main() {
+  let plain = errors.new(\"disk on fire\")
+  io.print(NotFound.is(plain))
+  io.print(NotFound.as(plain) == nil)
+  io.print(Busy.is(plain))
+  let none: error = nil
+  io.print(NotFound.is(none))
+  io.print(NotFound.as(none) == nil)
+  io.print(Busy.is(none))
+  let nf: error = NotFound{ id: 3 }
+  io.print(NotFound.is(nf))
+  io.print(Busy.is(nf))
+  let got = NotFound.as(nf)
+  if got != nil {
+    io.print(got.id)
+  }
+  let busy: error = Busy.Retry(after: 5)
+  io.print(Busy.is(busy))
+  io.print(NotFound.is(busy))
+}
+",
+    ),
+];
+
 fn run_on_vm(name: &str, src: &str) -> String {
     run_on_vm_at(&format!("{}.kite", name), name, src)
 }
@@ -1102,7 +1154,7 @@ fn all_backends_agree() {
     let root = std::env::temp_dir().join(format!("kite-diff-{}", std::process::id()));
     let mut mismatches = Vec::new();
 
-    for (name, src) in PROGRAMS {
+    for (name, src) in PROGRAMS.iter().chain(MIDDLE_END) {
         let vm = run_on_vm(name, src);
 
         if native {

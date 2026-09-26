@@ -1289,9 +1289,11 @@ impl<'a> Vm<'a> {
                     // the body, which is the whole of dynamic dispatch: the
                     // value carries its type, so nothing extra is stored.
                     let receiver = self.get(base, arg_base);
+                    // The same encoding the vtable rows were built with, from
+                    // the one place that defines it.
                     let tag = match &receiver {
-                        Value::Struct(s) => s.struct_id,
-                        Value::Enum(e) => 0x8000_0000 | e.enum_id,
+                        Value::Struct(s) => kite_hir::TypeTag::struct_tag(s.struct_id),
+                        Value::Enum(e) => kite_hir::TypeTag::enum_tag(e.enum_id),
                         other => {
                             return Err(Trap::TypeConfusion {
                                 op: "call.virtual",

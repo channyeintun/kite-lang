@@ -1190,6 +1190,14 @@ pub extern "C" fn kite_rt_error_as(e: u64, tag: i64, wrap_kind: i64) -> u64 {
             return 0;
         }
     };
+    // Nothing carried is nil, never a present optional holding a null: a box
+    // around zero passes the nil test and then faults on the first field
+    // read. No type's tag is zero, so a match with nothing in the slot cannot
+    // happen for a well-formed error — this is the backstop for one that is
+    // not.
+    if value == 0 {
+        return 0;
+    }
     if wrap_kind < 0 {
         return value;
     }
@@ -2339,8 +2347,11 @@ pub extern "C" fn kite_rt_drive() {
 pub extern "C" fn kite_rt_virtual_lookup(receiver: u64, table: u64, method: u64) -> u64 {
     unsafe {
         let p = receiver as *const u8;
+        // `kite_hir::TypeTag::encode`, which this crate cannot depend on:
+        // structs count from one so that no type's tag is zero, the tag of an
+        // error that carries nothing.
         let tag = match obj_kind(p) {
-            obj::STRUCT => obj_aux(p),
+            obj::STRUCT => obj_aux(p) + 1,
             obj::ENUM => 0x8000_0000 | obj_aux(p),
             other => unreachable!("virtual call on an object of kind {}", other),
         };

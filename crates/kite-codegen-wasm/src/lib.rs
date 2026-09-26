@@ -2889,7 +2889,9 @@ impl<'a> Emitter<'a> {
                     return true;
                 };
 
-                self.error_field(func, base, 2);
+                // A nil error reads as tag zero, which no type has, so the
+                // test below is false for it and the answer is nil.
+                self.error_tag_or_zero(func, base);
                 func.instruction(&Instruction::I32Const(*tag as i32));
                 func.instruction(&Instruction::I32Eq);
 
@@ -2913,8 +2915,11 @@ impl<'a> Emitter<'a> {
                 return true;
             }
 
+            // Zero for a nil error, the way the other two backends answer:
+            // `T.is(err)` compares this against `T`'s own tag, which is never
+            // zero, so a nil error is simply not a `T`.
             mir::Rvalue::ErrorTag { base } => {
-                self.error_field(func, base, 2);
+                self.error_tag_or_zero(func, base);
                 func.instruction(&Instruction::I64ExtendI32U);
                 return true;
             }
@@ -3536,6 +3541,22 @@ impl<'a> Emitter<'a> {
     /// The cast is non-null because every reader here is reached with an error
     /// the program has already tested — `err != nil` or a `check` — and a null
     /// one would be a lowering bug rather than a program's mistake.
+    /// An error's type tag as an i32, or zero when the error is nil.
+    ///
+    /// The cast in [`Self::error_field`] traps on a null, and `T.is(err)` and
+    /// `T.as(err)` are defined on a nil error — they answer false and nil.
+    /// The operand is a local or a constant, so reading it twice re-runs
+    /// nothing.
+    fn error_tag_or_zero(&mut self, func: &mut Function, base: &mir::Operand) {
+        self.operand(func, base);
+        func.instruction(&Instruction::RefIsNull);
+        func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::Else);
+        self.error_field(func, base, 2);
+        func.instruction(&Instruction::End);
+    }
+
     fn error_field(&mut self, func: &mut Function, base: &mir::Operand, field: u32) {
         self.operand(func, base);
         func.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(
