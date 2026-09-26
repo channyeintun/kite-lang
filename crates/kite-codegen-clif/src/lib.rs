@@ -40,10 +40,10 @@
 //!
 //! Allocation and mutation all cross into the runtime: variadic constructions
 //! stage their operands in `KITE_RT_STAGE` — the native shape of the bytecode
-//! VM's consecutive argument window — and the in-place heap mutations, a
-//! `var` field write and a write into a slice this function owns (see
-//! `slices`), are runtime calls so the write barrier lives in exactly one
-//! place.
+//! VM's consecutive argument window, and a literal longer than the window is
+//! built a window at a time — and the in-place heap mutations, a `var` field
+//! write and a write into a slice this function owns (see `slices`), are
+//! runtime calls so the write barrier lives in exactly one place.
 
 use cranelift_codegen::ir::{types, AbiParam, ArgumentExtension, InstBuilder, MemFlagsData, Signature, TrapCode, Type, Value};
 use cranelift_codegen::isa::{CallConv, TargetIsa};
@@ -111,6 +111,10 @@ const I64: Type = types::I64;
 const F64: Type = types::F64;
 const I8: Type = types::I8;
 
+// A map literal is staged a window at a time as alternating keys and values,
+// and a pair split across two windows would stage a key with no value.
+const _: () = assert!(kite_rt::STAGE_WORDS % 2 == 0);
+
 #[rustfmt::skip]
 const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_startup", &[], None),
@@ -128,9 +132,11 @@ const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_struct_new", &[I64, I64], Some(I64)),
     ("kite_rt_enum_new", &[I64, I64, I64], Some(I64)),
     ("kite_rt_tuple_new", &[I64, I64], Some(I64)),
-    ("kite_rt_slice_new", &[I64, I64], Some(I64)),
+    ("kite_rt_slice_new", &[I64, I64, I64], Some(I64)),
+    ("kite_rt_slice_extend", &[I64, I64], Some(I64)),
     ("kite_rt_closure_new", &[I64, I64], Some(I64)),
     ("kite_rt_map_new", &[I64, I64, I64], Some(I64)),
+    ("kite_rt_map_extend", &[I64, I64], Some(I64)),
     ("kite_rt_box_new", &[I64, I64], Some(I64)),
     ("kite_rt_pair_new", &[I64, I64, I64], Some(I64)),
     ("kite_rt_error_new", &[I64, I64, I64, I64], Some(I64)),
@@ -1091,6 +1097,32 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
         }
     }
 
+    /// The rest of a literal longer than the staging window, a window at a
+    /// time: stage each, and have `extend` add it to the value built so far.
+    /// A slice or map literal of any length compiles; a window is
+    /// `STAGE_WORDS` words, and this used to refuse anything past one.
+    ///
+    /// The value under construction lives in a variable of its own rather
+    /// than an SSA value: staging a string constant is a runtime call, each
+    /// `extend` may collect, and only a stack-mapped variable is reloaded
+    /// where a collection may have moved it.
+    fn in_windows(&mut self, built: Value, rest: &[mir::Operand], extend: &'static str) -> Value {
+        if rest.is_empty() {
+            return built;
+        }
+        let held = self.b.declare_var(I64);
+        self.b.declare_var_needs_stack_map(held);
+        self.b.def_var(held, built);
+        for window in rest.chunks(kite_rt::STAGE_WORDS) {
+            self.stage(window);
+            let so_far = self.b.use_var(held);
+            let n = self.iconst(window.len() as i64);
+            let v = self.call_rt(extend, &[so_far, n]).unwrap();
+            self.b.def_var(held, v);
+        }
+        self.b.use_var(held)
+    }
+
     /// Branch to a fresh trap block when `cond` is true.
     fn trap_if(&mut self, cond: Value, code: i64, a: i64, bb: i64) {
         let tb = self.b.create_block();
@@ -1389,14 +1421,22 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 let v = self.call_rt("kite_rt_tuple_new", &a).unwrap();
                 self.def(dst, v);
             }
+            // Room for the whole literal is allocated up front, so the windows
+            // after the first go straight in.
             mir::Rvalue::SliceNew { elems } => {
                 let elem_kind = match self.cx.types.kind(self.local_ty(dst)) {
                     TyKind::Slice(e) => self.kind(*e),
                     _ => kite_rt::kind::REF,
                 };
-                self.stage(elems);
-                let a = [self.iconst(elem_kind as i64), self.iconst(elems.len() as i64)];
+                let (first, rest) = elems.split_at(elems.len().min(kite_rt::STAGE_WORDS));
+                self.stage(first);
+                let a = [
+                    self.iconst(elem_kind as i64),
+                    self.iconst(first.len() as i64),
+                    self.iconst(elems.len() as i64),
+                ];
                 let v = self.call_rt("kite_rt_slice_new", &a).unwrap();
+                let v = self.in_windows(v, rest, "kite_rt_slice_extend");
                 self.def(dst, v);
             }
             mir::Rvalue::MapNew { entries } => {
@@ -1404,13 +1444,17 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                     TyKind::Map(k, v) => (self.kind(*k), self.kind(*v)),
                     _ => (kite_rt::kind::REF, kite_rt::kind::REF),
                 };
-                self.stage(entries);
+                // The window holds an even number of words, so no pair is
+                // split between two.
+                let (first, rest) = entries.split_at(entries.len().min(kite_rt::STAGE_WORDS));
+                self.stage(first);
                 let a = [
                     self.iconst(kk as i64),
                     self.iconst(vk as i64),
-                    self.iconst(entries.len() as i64),
+                    self.iconst(first.len() as i64),
                 ];
                 let v = self.call_rt("kite_rt_map_new", &a).unwrap();
+                let v = self.in_windows(v, rest, "kite_rt_map_extend");
                 self.def(dst, v);
             }
             // Struct fields, tuple elements and known-variant payloads all

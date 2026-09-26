@@ -1105,6 +1105,12 @@ so the write barrier has two callers now; it is still one function, which is
 the part of the claim above that mattered. §8 of `03-compiler-architecture.md`
 has the details.
 
+**Later: a literal of any length.** A slice or map literal past the 4,096 words
+of the native staging window was refused with `E0204` — a generated table that
+ran on the VM and in the browser did not build natively. It is built a window
+at a time now, and `literals_past_ten_thousand_elements_agree` compares all
+three backends where it compared two.
+
 ---
 
 ## Phase 10 — Tooling ✅ **including the package manager**

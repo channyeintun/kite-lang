@@ -2573,23 +2573,35 @@ fn slices_agree_natively_with_a_page_of_nursery() {
 /// validator has passed it, so a 10,001-element slice or map literal built a
 /// module that `build` accepted and the browser would not load. Generated
 /// rather than written out.
+///
+/// The native backend refused anything past the 4,096 words of its staging
+/// window (E0204), so this compared the VM with Wasm alone. It builds a longer
+/// literal a window at a time now. The map's last entry repeats its first key,
+/// windows apart, which must still be one entry at the first position with the
+/// last value — the rule each window follows within itself.
 #[test]
 fn literals_past_ten_thousand_elements_agree() {
     let elems: Vec<String> = (0..10_001).map(|i| i.to_string()).collect();
-    let entries: Vec<String> = (0..10_001).map(|i| format!("{}: \"v{}\"", i, i)).collect();
+    let mut entries: Vec<String> = (0..10_001).map(|i| format!("{}: \"v{}\"", i, i)).collect();
+    entries.push("0: \"again\"".to_string());
     let src = format!(
         "fn main() {{\n  let xs = [{}]\n  io.print(xs.len())\n  io.print(xs[10000])\n\
          \x20 let m = {{{}}}\n  io.print(m.len())\n  match m[10000] {{\n    nil => io.print(\"none\"),\n\
-         \x20   v => io.print(v),\n  }}\n}}\n",
+         \x20   v => io.print(v),\n  }}\n  match m[0] {{\n    nil => io.print(\"none\"),\n\
+         \x20   v => io.print(v),\n  }}\n  io.print(m.keys()[0])\n}}\n",
         elems.join(", "),
         entries.join(", ")
     );
     let name = "literals-past-ten-thousand";
     let vm = run_on_vm(name, &src);
-    assert_eq!(vm, "10001\n10000\n10001\nv10000\n");
-    // The native backend refuses a literal past 4,096 elements at compile
-    // time (E0204) rather than building one it cannot, so the comparison
-    // here is the VM against Wasm.
+    assert_eq!(vm, "10001\n10000\n10001\nv10000\nagain\n0\n");
+    if native_available() {
+        let native = run_on_native(name, &src);
+        assert_eq!(native, vm, "native");
+        // A literal past the nursery's size is born in the old generation.
+        let (paged, _) = run_on_native_with(name, &src, PAGE_OF_NURSERY);
+        assert_eq!(paged, vm, "native, with a page of nursery");
+    }
     if node_available() {
         let dir = std::env::temp_dir().join(format!("kite-biglit-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create work directory");

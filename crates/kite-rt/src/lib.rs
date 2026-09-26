@@ -194,7 +194,9 @@ fn slice_alloc(elem_kind: u32, len: usize, cap: usize) -> *mut u8 {
 ///
 /// The allocating call knows the count and the shape, so the collector can
 /// treat the staged reference slots as roots if the allocation itself has to
-/// collect.
+/// collect. A slice or map literal longer than the window is staged a window
+/// at a time, each one added by [`kite_rt_slice_extend`] or
+/// [`kite_rt_map_extend`] to what the ones before it built.
 pub const STAGE_WORDS: usize = 4096;
 
 #[no_mangle]
@@ -1197,14 +1199,51 @@ pub extern "C" fn kite_rt_tuple_new(shape: u64, argc: u64) -> u64 {
     p as u64
 }
 
+/// A slice of the `argc` staged elements, with room for `cap`.
+///
+/// The room is for a literal longer than the staging window, which the code
+/// generator builds a window at a time: the whole length is allocated here,
+/// and [`kite_rt_slice_extend`] fills the rest in place.
 #[no_mangle]
-pub extern "C" fn kite_rt_slice_new(elem_kind: u64, argc: u64) -> u64 {
+pub extern "C" fn kite_rt_slice_new(elem_kind: u64, argc: u64, cap: u64) -> u64 {
     let argc = argc as usize;
     let n = root_stage(argc, |_| elem_kind as u8 == kind::REF);
-    let p = slice_alloc(elem_kind as u32, argc, argc);
+    let p = slice_alloc(elem_kind as u32, argc, (cap as usize).max(argc));
     unroot(n);
     unsafe { fill_from_stage(p, argc) };
     p as u64
+}
+
+/// Append the `argc` staged elements to a slice the compiled code has just
+/// made and nothing else has seen — the next window of a literal too long for
+/// one. In place when the room is there, which it is when [`kite_rt_slice_new`]
+/// was asked for the literal's length; a copy with enough room otherwise.
+#[no_mangle]
+pub extern "C" fn kite_rt_slice_extend(s: u64, argc: u64) -> u64 {
+    let argc = argc as usize;
+    let mut s = s;
+    unsafe {
+        let len = slice_len(s as *const u8);
+        let aux = obj_aux(s as *const u8);
+        let elem_ref = aux as u8 == kind::REF;
+        if len + argc > slice_cap(s as *const u8) {
+            root(&mut s);
+            let n = root_stage(argc, |_| elem_ref);
+            let p = slice_alloc(aux, len, len + argc);
+            unroot(n + 1);
+            std::ptr::copy_nonoverlapping(slot(s as *const u8, 0), slot(p, 0), len);
+            s = p as u64;
+        }
+        let p = s as *mut u8;
+        for i in 0..argc {
+            *slot(p, len + i) = *stage_slot(i);
+        }
+        set_slice_len(p, len + argc);
+        if elem_ref {
+            remember(p);
+        }
+    }
+    s
 }
 
 #[no_mangle]
@@ -1242,28 +1281,62 @@ pub extern "C" fn kite_rt_map_new(key_kind: u64, val_kind: u64, argc: u64) -> u6
     let aux = (key_kind as u32 & 0xFF) | ((val_kind as u32 & 0xFF) << 8);
     unsafe {
         *(p as *mut u64) = word0(obj::MAP, aux);
-        *(p as *mut u64).add(1) = 0;
-        let mut len = 0usize;
-        for e in 0..pairs {
-            let k = *stage_slot(2 * e);
-            let v = *stage_slot(2 * e + 1);
-            let mut replaced = false;
-            for i in 0..len {
-                if value_eq(*slot(p, 2 * i), k, key_kind as u8) {
-                    *slot(p, 2 * i + 1) = v;
-                    replaced = true;
-                    break;
-                }
-            }
-            if !replaced {
-                *slot(p, 2 * len) = k;
-                *slot(p, 2 * len + 1) = v;
-                len += 1;
-            }
-        }
+        let len = insert_staged(p, 0, pairs, key_kind as u8);
         *(p as *mut u64).add(1) = len as u64;
     }
     p as u64
+}
+
+/// The next window of a map literal too long for one: a copy of `m` with the
+/// `argc` staged words — alternating keys and values, as for
+/// [`kite_rt_map_new`] — added by the same rule, so a key repeated across two
+/// windows is one entry exactly as it is within one.
+#[no_mangle]
+pub extern "C" fn kite_rt_map_extend(m: u64, argc: u64) -> u64 {
+    let argc = argc as usize;
+    let pairs = argc / 2;
+    let mut m = m;
+    unsafe {
+        let len = obj_word1(m as *const u8) as usize;
+        let aux = obj_aux(m as *const u8);
+        let key_kind = (aux & 0xFF) as u8;
+        let val_kind = ((aux >> 8) & 0xFF) as u8;
+        root(&mut m);
+        let n = root_stage(argc, |i| {
+            (if i % 2 == 0 { key_kind } else { val_kind }) == kind::REF
+        });
+        let p = alloc(HEADER + 16 * (len + pairs));
+        unroot(n + 1);
+        std::ptr::copy_nonoverlapping(m as *const u8, p, HEADER + 16 * len);
+        let len = insert_staged(p, len, pairs, key_kind);
+        *(p as *mut u64).add(1) = len as u64;
+        p as u64
+    }
+}
+
+/// Add `pairs` staged key-value pairs to the `len` entries at `p`, which has
+/// room for all of them, and answer the new length. A key already present
+/// keeps its position and takes the later value — the VM's rule for a
+/// literal that names a key twice.
+unsafe fn insert_staged(p: *mut u8, mut len: usize, pairs: usize, key_kind: u8) -> usize {
+    for e in 0..pairs {
+        let k = *stage_slot(2 * e);
+        let v = *stage_slot(2 * e + 1);
+        let mut replaced = false;
+        for i in 0..len {
+            if value_eq(*slot(p, 2 * i), k, key_kind) {
+                *slot(p, 2 * i + 1) = v;
+                replaced = true;
+                break;
+            }
+        }
+        if !replaced {
+            *slot(p, 2 * len) = k;
+            *slot(p, 2 * len + 1) = v;
+            len += 1;
+        }
+    }
+    len
 }
 
 #[no_mangle]
@@ -2010,6 +2083,13 @@ fn render_ref(p: u64, out: &mut String) {
 /// million cells recursed once per cell until the process aborted. The VM
 /// walks its values the same way, for the same reason.
 fn value_eq(a: u64, b: u64, k: u8) -> bool {
+    // A scalar needs no worklist, and a map keyed by numbers asks this once
+    // per entry on every lookup — or per pair of entries, building a literal.
+    match k {
+        kind::FLOAT => return f64::from_bits(a) == f64::from_bits(b),
+        kind::REF => {}
+        _ => return a == b,
+    }
     let mut work = vec![(a, b, k)];
     while let Some((a, b, k)) = work.pop() {
         let same = match k {
@@ -2867,8 +2947,10 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         kite_rt_enum_new,
         kite_rt_tuple_new,
         kite_rt_slice_new,
+        kite_rt_slice_extend,
         kite_rt_closure_new,
         kite_rt_map_new,
+        kite_rt_map_extend,
         kite_rt_box_new,
         kite_rt_pair_new,
         kite_rt_error_new,

@@ -23,7 +23,8 @@ pub struct Unsupported {
 /// Everything the language can express lowers today; the one refusal below
 /// is a capacity limit rather than a missing feature, and it is checked here
 /// because a limit that trips at run time would be indistinguishable from a
-/// codegen bug.
+/// codegen bug. It no longer covers slice and map literals, which are the
+/// constructions a program can make long.
 pub fn unsupported(program: &mir::Program, _types: &Types) -> Vec<Unsupported> {
     let mut found = Vec::new();
 
@@ -41,19 +42,22 @@ pub fn unsupported(program: &mir::Program, _types: &Types) -> Vec<Unsupported> {
             for stmt in &block.stmts {
                 let mir::Inst::Assign { value, .. } = stmt else { continue };
                 // A variadic construction stages its operands in a window of
-                // fixed size; a literal too wide for it has no staging path.
+                // fixed size. A slice or map literal longer than the window is
+                // built a window at a time (`FnLower::in_windows`); a struct,
+                // variant, tuple, closure or host call is made in one call, so
+                // one wider than the window has no staging path. Those are
+                // types and signatures with thousands of parts, which no
+                // program has written.
                 let staged = match value {
                     mir::Rvalue::StructNew { fields, .. }
                     | mir::Rvalue::EnumNew { fields, .. } => fields.len(),
-                    mir::Rvalue::TupleNew { elems }
-                    | mir::Rvalue::SliceNew { elems } => elems.len(),
-                    mir::Rvalue::MapNew { entries } => entries.len(),
+                    mir::Rvalue::TupleNew { elems } => elems.len(),
                     mir::Rvalue::ClosureNew { captures, .. } => captures.len(),
                     mir::Rvalue::CallExtern { args, .. } => args.len(),
                     _ => 0,
                 };
                 if staged > kite_rt::STAGE_WORDS {
-                    note("a literal with more than 4096 elements");
+                    note("a value made of more than 4096 parts");
                 }
             }
         }

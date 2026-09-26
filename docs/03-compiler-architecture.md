@@ -635,6 +635,13 @@ thing the write barrier covers. `tests/differential.rs` runs
 `slices-are-values` and `slices-grow-in-place-natively` on all three backends,
 and natively again with a nursery of one page.
 
+A variadic construction stages its operands in a fixed window of 4,096 words,
+`KITE_RT_STAGE`, before the runtime call that allocates. A slice or map
+literal longer than that is built a window at a time: the slice is allocated
+at its full length and each later window appended in place, and each window of
+a map is added to a copy by the literal's own rule, so a key repeated across
+windows is one entry.
+
 Roots come from Cranelift's stack maps. Every reference-typed local is declared
 as needing one, so at each safepoint — a call — the live references sit in
 stack slots the maps record, and are reloaded afterwards, which is what lets
