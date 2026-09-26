@@ -29,9 +29,15 @@ OPTIONS:
     --offline         with `pkg`, resolve only from what is already vendored
     --check           with `fmt`, report rather than rewrite
     --all             with `doc`, include what is not `pub`
-    --native          with `run`, execute machine code under the JIT — no linker
-    --emit <stage>    check, ast, hir, mir, kbc, wasm, native
-    --out <dir>       where `--emit wasm` and `--emit native` write artefacts
+    --native          with `run`, execute machine code under the JIT — no linker;
+                      with `build`, write an object file and link it
+    --emit <stage>    with `run`, `check` or `build`: check, ast, hir, mir, kbc
+                      print that stage; wasm and native are `build`'s, and
+                      `run --emit native` is `run --native`
+    --out <dir>       where `build --emit wasm`, `build --native` and `bundle`
+                      write what they produce
+
+An option a command does not take is an error, not something ignored.
     --update          with `pkg`, allow `kite.lock` to change; without it, a
                       dependency whose bytes moved is an error rather than a
                       new lockfile
@@ -76,6 +82,8 @@ fn main() -> ExitCode {
     let mut offline = false;
     let mut update = false;
     let mut native = false;
+    // Every option written, so each can be checked against the command.
+    let mut given: Vec<&'static str> = Vec::new();
     let mut i = 0;
 
     while i < args.len() {
@@ -96,6 +104,7 @@ fn main() -> ExitCode {
                     ));
                 };
                 emit = Some(e);
+                given.push("--emit");
                 i += 2;
             }
             "--out" => {
@@ -103,30 +112,37 @@ fn main() -> ExitCode {
                     return fail("`--out` needs a directory");
                 };
                 out_dir = Some(v.clone());
+                given.push("--out");
                 i += 2;
             }
             "--check" => {
                 check_only = true;
+                given.push("--check");
                 i += 1;
             }
             "--all" => {
                 include_private = true;
+                given.push("--all");
                 i += 1;
             }
             "--release" => {
                 release = true;
+                given.push("--release");
                 i += 1;
             }
             "--native" => {
                 native = true;
+                given.push("--native");
                 i += 1;
             }
             "--offline" => {
                 offline = true;
+                given.push("--offline");
                 i += 1;
             }
             "--update" => {
                 update = true;
+                given.push("--update");
                 i += 1;
             }
             "run" | "check" | "build" | "test" | "fmt" | "doc" | "fix" | "bundle" | "pkg"
@@ -147,6 +163,15 @@ fn main() -> ExitCode {
     }
 
     let command = command.unwrap_or_else(|| "run".to_string());
+
+    // A flag the command does not take is refused rather than obeyed. They
+    // used to be read before the command was, so `kitec test --native` wrote
+    // an object file and never ran a test, `kitec check --native` did the
+    // same, and `kitec run --emit hir` printed the stage and then failed for
+    // want of the `main` it had never been going to run.
+    if let Some(problem) = misplaced_flags(&command, &given, emit, native, out_dir.is_some()) {
+        return fail(&problem);
+    }
 
     // `pkg` takes a directory rather than a file, and defaults to this one.
     if command == "pkg" {
@@ -215,7 +240,13 @@ fn main() -> ExitCode {
             return fail(&why);
         }
     }
-    let result = kite_driver::compile_with(&path, &src, emit, release);
+    // A test run keeps every `test_…` the file declares, a private one
+    // included, which an ordinary build prunes as unreachable.
+    let result = if command == "test" {
+        kite_driver::compile_tests(&path, &src, release)
+    } else {
+        kite_driver::compile_with(&path, &src, emit, release)
+    };
 
     if !result.diags.is_empty() {
         eprint!("{}", result.render_diagnostics());
@@ -226,6 +257,11 @@ fn main() -> ExitCode {
 
     if !result.output.is_empty() {
         print!("{}", result.output);
+    }
+    // A stage that prints is the whole answer: `run --emit hir` asked to see
+    // the program, not to run it.
+    if matches!(emit, Emit::Ast | Emit::Hir | Emit::Mir | Emit::Kbc) {
+        return ExitCode::SUCCESS;
     }
 
     // `--emit wasm` writes artefacts rather than printing them.
@@ -370,7 +406,7 @@ fn main() -> ExitCode {
             eprintln!("compiled `{}` to bytecode", path);
             ExitCode::SUCCESS
         }
-        "test" => run_tests(&result, &path, &src, release),
+        "test" => run_tests(&result, &path, &src),
 
         "run" => {
             if !result.is_runnable() {
@@ -404,17 +440,23 @@ fn main() -> ExitCode {
 /// A failure is an error *value* with a message, not a trap, so one failing
 /// test does not stop the rest — which is the whole reason `std/test`'s
 /// assertions return errors rather than asserting.
-fn run_tests(
-    result: &kite_driver::Compilation,
-    path: &str,
-    src: &str,
-    release: bool,
-) -> ExitCode {
+fn run_tests(result: &kite_driver::Compilation, path: &str, src: &str) -> ExitCode {
     let tests = result.tests();
     let docs = kite_driver::doctest::extract(src, path);
+    // Named like a test and takes arguments: a helper, not a test. Said
+    // rather than skipped in silence, because the other reading — a test
+    // somebody expected to run — is the one that costs something.
+    for helper in result.not_tests() {
+        eprintln!(
+            "note: `{}` takes {} argument{}, so it is not run as a test",
+            helper.name,
+            helper.params,
+            if helper.params == 1 { "" } else { "s" }
+        );
+    }
     if tests.is_empty() && docs.is_empty() {
         eprintln!(
-            "no tests in `{}`\n\nnote: a test is a `pub fn test_…() -> (int, error)`, or a \
+            "no tests in `{}`\n\nnote: a test is a `fn test_…() -> (int, error)`, or a \
              ```kite fence in a doc comment",
             path
         );
@@ -450,7 +492,7 @@ fn run_tests(
 
     let mut ran = tests.len();
     if !docs.is_empty() {
-        let (doc_failed, doc_ran) = run_doc_tests(&mut out, path, src, &docs, release);
+        let (doc_failed, doc_ran) = run_doc_tests(&mut out, path, src, &docs);
         failed += doc_failed;
         ran += doc_ran;
     }
@@ -480,10 +522,14 @@ fn run_doc_tests(
     path: &str,
     src: &str,
     docs: &[kite_driver::doctest::DocTest],
-    release: bool,
 ) -> (usize, usize) {
     let (augmented, names) = kite_driver::doctest::augment(src, docs);
-    let compiled = kite_driver::compile_with(path, &augmented, Emit::Kbc, release);
+    // **Never a release build**, whatever `--release` said. An example fails
+    // by trapping — an `assert` that did not hold — and a release build drops
+    // `assert`, so under `--release` every example with a wrong claim in it
+    // passed. `--release` still applies to the `test_…` functions, which fail
+    // by returning an error rather than by asserting.
+    let compiled = kite_driver::compile_with(path, &augmented, Emit::Kbc, false);
     if compiled.failed() {
         // The diagnostics point into the augmented source, whose line numbers
         // are not the file's past the first fence. So the fences are named by
@@ -697,6 +743,78 @@ fn explain(code: &str) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Which commands take each option.
+const TAKES: &[(&str, &[&str])] = &[
+    ("--release", &["run", "check", "build", "test", "bundle"]),
+    ("--offline", &["pkg"]),
+    ("--update", &["pkg"]),
+    ("--check", &["fmt"]),
+    ("--all", &["doc"]),
+    ("--native", &["run", "build"]),
+    ("--emit", &["run", "check", "build"]),
+    ("--out", &["build", "bundle"]),
+];
+
+/// Why the options written do not fit the command, if they do not.
+///
+/// An option the command has no use for is an error rather than something
+/// quietly obeyed or quietly ignored: either way the command did something
+/// other than what was asked, and exited 0 while doing it.
+fn misplaced_flags(
+    command: &str,
+    given: &[&str],
+    emit: Option<Emit>,
+    native: bool,
+    out: bool,
+) -> Option<String> {
+    for flag in given {
+        let takes = TAKES.iter().find(|(f, _)| f == flag).map(|(_, c)| *c).unwrap_or(&[]);
+        if !takes.contains(&command) {
+            let which: Vec<String> = takes.iter().map(|c| format!("`kitec {}`", c)).collect();
+            return Some(format!(
+                "`{}` does not apply to `kitec {}`\n\nnote: `{}` is for {}",
+                flag,
+                command,
+                flag,
+                which.join(", ")
+            ));
+        }
+    }
+    if native && emit.is_some_and(|e| e != Emit::Native) {
+        return Some(
+            "`--native` is `--emit native`, which is not the stage `--emit` asked for — give \
+             one of them"
+                .to_string(),
+        );
+    }
+    match (command, emit) {
+        ("check", Some(Emit::Wasm | Emit::Native)) => {
+            return Some(
+                "`kitec check` writes nothing\n\nnote: `kitec build --emit …` is what writes an \
+                 artefact"
+                    .to_string(),
+            )
+        }
+        ("run", Some(Emit::Wasm)) => {
+            return Some(
+                "`kitec run` runs the program, and a WebAssembly module needs a host to run \
+                 in\n\nnote: `kitec build --emit wasm` writes one"
+                    .to_string(),
+            )
+        }
+        _ => {}
+    }
+    let writes = native || matches!(emit, Some(Emit::Wasm | Emit::Native));
+    if command == "build" && out && !writes {
+        return Some(
+            "`--out` says where `--emit wasm` or `--native` writes, and this build writes \
+             nothing"
+                .to_string(),
+        );
+    }
+    None
 }
 
 fn fail(message: &str) -> ExitCode {

@@ -444,8 +444,13 @@ pub fn run_function(chunk: &Chunk, name: &str, out: &mut dyn Write) -> Result<Va
         font_scale: 1.0,
     };
     vm.execute(index)?;
+    // What the function answered, taken before the scheduler runs: every poll
+    // of a task it started writes the same slot, so reading it afterwards
+    // handed back whatever the last poll returned. For an `async fn` that is
+    // not its task — the one thing the caller needs to read its answer from.
+    let answer = std::mem::replace(&mut vm.result, Value::Unit);
     vm.drive()?;
-    Ok(std::mem::replace(&mut vm.result, Value::Unit))
+    Ok(answer)
 }
 
 struct Vm<'a> {

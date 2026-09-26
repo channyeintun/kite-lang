@@ -79,7 +79,7 @@ pub fn extract(src: &str, module: &str) -> Vec<DocTest> {
                     out.push(DocTest {
                         name: format!("{}:{}", module, opened_at),
                         line: opened_at,
-                        declares: declares_items(&taken),
+                        declares: declares_items(&without_uses(&taken)),
                         code: taken,
                     });
                 }
@@ -114,11 +114,21 @@ fn declares_items(code: &str) -> bool {
     code.lines().any(|l| {
         [
             "fn ", "pub fn ", "struct ", "pub struct ", "enum ", "pub enum ", "trait ",
-            "pub trait ", "impl ", "use ", "type ", "pub type ", "@derive",
+            "pub trait ", "impl ", "type ", "pub type ", "@derive",
         ]
         .iter()
         .any(|kw| l.starts_with(kw))
     })
+}
+
+/// Whether a fence line is a `use`, written where one is written.
+fn is_use(line: &str) -> bool {
+    line.starts_with("use ")
+}
+
+/// A fence without its `use` lines, which go to the top of the file.
+fn without_uses(code: &str) -> String {
+    code.lines().filter(|l| !is_use(l)).map(|l| format!("{}\n", l)).collect()
 }
 
 /// The module source with every runnable fence appended as a function.
@@ -126,14 +136,36 @@ fn declares_items(code: &str) -> bool {
 /// Returns the augmented source and the names to run, in order. A fence that
 /// declares items is appended without a wrapper and contributes no name: it is
 /// checked by the fact that the whole thing compiles.
+///
+/// **A fence's `use` lines go to the top of the file**, once each, and only
+/// when the file does not already have them. They used to stay in the fence,
+/// which a `use` made a declaring one — so it was appended at file scope, after
+/// the file's own items, where neither the `use` nor the statements under it
+/// are allowed, and the example failed with a syntax error it did not contain.
 pub fn augment(src: &str, tests: &[DocTest]) -> (String, Vec<String>) {
-    let mut out = String::from(src);
+    let mut hoisted: Vec<&str> = Vec::new();
+    for t in tests {
+        for line in t.code.lines().filter(|l| is_use(l)) {
+            let line = line.trim_end();
+            let already = src.lines().any(|l| l.trim_end() == line) || hoisted.contains(&line);
+            if !already {
+                hoisted.push(line);
+            }
+        }
+    }
+    let mut out = String::new();
+    for line in &hoisted {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(src);
     let mut names = Vec::new();
     out.push('\n');
     for (i, t) in tests.iter().enumerate() {
         out.push('\n');
+        let code = without_uses(&t.code);
         if t.declares {
-            out.push_str(&t.code);
+            out.push_str(&code);
             continue;
         }
         // `pub`, because dead-code elimination is right about a private
@@ -141,7 +173,7 @@ pub fn augment(src: &str, tests: &[DocTest]) -> (String, Vec<String>) {
         // the program.
         let name = format!("doc_example_{}", i);
         out.push_str(&format!("pub fn {}() {{\n", name));
-        for line in t.code.lines() {
+        for line in code.lines() {
             out.push_str("    ");
             out.push_str(line);
             out.push('\n');
@@ -214,6 +246,35 @@ pub fn other() {}
     fn an_unterminated_fence_is_dropped() {
         let src = "/// ```kite\n/// io.print(1)\nfn real() {}\n";
         assert!(extract(src, "m").is_empty());
+    }
+
+    /// A `use` in a fence is not a declaration of the fence's: it goes to the
+    /// top of the file, where a `use` is allowed, and the rest of the fence is
+    /// run as statements.
+    #[test]
+    fn a_use_in_a_fence_goes_to_the_top_of_the_file() {
+        let src = "/// ```kite\n/// use std/json\n/// let (d, e) = json.parse(\"1\")\n\
+                   /// assert(e == nil, \"parse\")\n/// ```\npub fn nothing() -> int {\n    \
+                   return 0\n}\n";
+        let found = extract(src, "m");
+        assert_eq!(found.len(), 1);
+        assert!(!found[0].declares, "a `use` alone does not make a fence a declaration");
+        let (out, names) = augment(src, &found);
+        assert!(out.starts_with("use std/json\n"), "{}", out);
+        assert_eq!(out.matches("use std/json").count(), 2, "hoisted once, still in the comment: {}", out);
+        assert_eq!(names, vec!["doc_example_0".to_string()]);
+
+        let c = crate::compile("l3.kite", &out, crate::Emit::Kbc);
+        assert!(!c.failed(), "{}", c.render_diagnostics());
+    }
+
+    /// A `use` the file already has is not written twice.
+    #[test]
+    fn a_use_the_file_already_has_is_not_repeated() {
+        let src = "use std/json\n\n/// ```kite\n/// use std/json\n/// io.print(1)\n/// ```\n\
+                   pub fn f() {\n}\n";
+        let (out, _) = augment(src, &extract(src, "m"));
+        assert!(out.starts_with("use std/json\n\n///"), "{}", out);
     }
 
     #[test]
