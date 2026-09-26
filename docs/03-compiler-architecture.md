@@ -166,7 +166,10 @@ preceding token is an operator, an open delimiter, or a comma. Two additions
 make ordinary code read naturally — a line *starting* with `.` continues the
 previous one, so method chains work, and `else` is never separated from its
 `}`. Because Kite has no prefix-`(` or prefix-`[` expression statements, the
-rule has no ambiguous cases — unlike JavaScript's ASI.
+rule has no ambiguous cases — unlike JavaScript's ASI. The one token the lexer
+cannot classify is `>`, which also closes `Option<int>`: it keeps the line
+break after `>` and `>>`, and the parser skips it after any operator it has
+read as binary.
 
 ### 3.2 Parser
 
@@ -176,8 +179,19 @@ Recursive descent for declarations and statements, Pratt for expressions
 Error recovery is a specified requirement, not best-effort. On an unexpected
 token the parser reports once, then skips to the next synchronisation point — a
 line break or a token that starts a declaration, at the current bracket depth,
-or the `}` that closes it — and leaves an `Error` node. A missing closing brace
-produces **one** diagnostic.
+or the `}` that closes it — and leaves an `Error` node. The skip starts from
+where the failed construct began, so the brackets it opened are closed before
+anything else counts, and a declaration beginning a line always stops it. A
+missing closing brace produces **one** diagnostic: a declaration keyword at the
+indentation of an open `{`, in braces whose members are indented past it, is
+where the author thought the braces had closed, and the report points at the
+first `{` whose `}` was indented for an outer block. A comma missing between
+parameters is supplied, and a comma between struct fields read as a line
+break, so the declaration survives for the code that uses it.
+
+Recursion depth is bounded (`E0102`), and a left-deep chain — `a + b + …`,
+`x.f().g()…` — counts a level per link, because every later pass recurses over
+the tree it builds.
 
 The AST keeps a span on every node and stores no literal values; the source is
 the single truth, and a pass that wants a value reads it through the span. It

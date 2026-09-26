@@ -108,33 +108,68 @@ fn render_raw(d: &Diagnostic, sources: &SourceMap) -> String {
         return out;
     };
 
-    // Labels in the anchor's file, in source order. Cross-file labels are
-    // rendered as a separate block after the main one.
-    let mut placed: Vec<Placed> = d
-        .labels
+    // Labels grouped by file, the anchor's file first and the rest in the
+    // order they were attached, each group in source order.
+    //
+    // A label in another file is the reason for the error as often as not —
+    // the parameter in a module the call reached, whose type the argument
+    // does not match — so it gets a block of its own under its own file's
+    // header. It used to be dropped, which is the one place the "why" of a
+    // cross-module mistake was.
+    let mut files = vec![anchor.file];
+    for l in &d.labels {
+        if !files.contains(&l.span.file) {
+            files.push(l.span.file);
+        }
+    }
+    let groups: Vec<(Span, Vec<Placed>)> = files
         .iter()
-        .filter(|l| l.span.file == anchor.file)
-        .map(|l| place(sources, l.span, l.style, &l.message))
+        .map(|&file| {
+            let mut placed: Vec<Placed> = d
+                .labels
+                .iter()
+                .filter(|l| l.span.file == file)
+                .map(|l| place(sources, l.span, l.style, &l.message))
+                .collect();
+            placed.sort_by_key(|p| (p.line, p.col));
+            // The anchor's own block is headed by the anchor; another file's
+            // by the first thing in it.
+            let head = if file == anchor.file {
+                anchor
+            } else {
+                d.labels
+                    .iter()
+                    .filter(|l| l.span.file == file)
+                    .map(|l| l.span)
+                    .min_by_key(|s| s.start)
+                    .unwrap_or(anchor)
+            };
+            (head, placed)
+        })
         .collect();
-    placed.sort_by_key(|p| (p.line, p.col));
 
-    let max_line = placed.iter().map(|p| p.line).max().unwrap_or(1);
+    let max_line = groups
+        .iter()
+        .flat_map(|(_, placed)| placed.iter().map(|p| p.line))
+        .max()
+        .unwrap_or(1);
     let gutter = digits(max_line);
 
-    // ---- location ---------------------------------------------------------
-    let file = sources.file(anchor.file);
-    let lc = file.line_col(anchor.start);
-    let _ = writeln!(
-        out,
-        "{:>w$}┌─ {}:{}:{}",
-        "",
-        file.name.display(),
-        lc.line,
-        lc.col,
-        w = gutter + 1
-    );
-
-    render_snippet(&mut out, sources, anchor, &placed, gutter);
+    // ---- location and snippet, per file ------------------------------------
+    for (head, placed) in &groups {
+        let file = sources.file(head.file);
+        let lc = file.line_col(head.start);
+        let _ = writeln!(
+            out,
+            "{:>w$}┌─ {}:{}:{}",
+            "",
+            file.name.display(),
+            lc.line,
+            lc.col,
+            w = gutter + 1
+        );
+        render_snippet(&mut out, sources, *head, placed, gutter);
+    }
 
     // ---- notes ------------------------------------------------------------
     if !d.notes.is_empty() {
@@ -204,9 +239,25 @@ fn print_source_line(out: &mut String, file: &kite_span::SourceFile, line: u32, 
         out,
         "{:>w$} │ {}",
         line,
-        file.line_text(line),
+        expand_tabs(file.line_text(line)),
         w = gutter
     );
+}
+
+/// How wide a tab is drawn. A tab is printed as this many spaces rather than
+/// left for the terminal, because the underline beneath it is made of spaces
+/// and carets: the two have to agree about how wide a tab is, and only one of
+/// them is under the renderer's control otherwise.
+const TAB_WIDTH: usize = 4;
+
+/// A source line as it is drawn.
+fn expand_tabs(line: &str) -> String {
+    line.replace('\t', &" ".repeat(TAB_WIDTH))
+}
+
+/// How many columns `text` takes once drawn.
+fn drawn_width(text: &str) -> usize {
+    text.chars().map(|c| if c == '\t' { TAB_WIDTH } else { 1 }).sum()
 }
 
 fn render_fix(out: &mut String, sources: &SourceMap, fix: &crate::Fix, gutter: usize) {
@@ -228,20 +279,21 @@ fn render_fix(out: &mut String, sources: &SourceMap, fix: &crate::Fix, gutter: u
     let old_width = (end.col - start.col) as usize;
 
     let chars: Vec<char> = line_text.chars().collect();
-    let mut patched: String = chars[..col.min(chars.len())].iter().collect();
+    let before: String = chars[..col.min(chars.len())].iter().collect();
+    let mut patched = before.clone();
     patched.push_str(&edit.replacement);
     if col + old_width < chars.len() {
         patched.extend(&chars[col + old_width..]);
     }
 
     let _ = writeln!(out, "{:>w$}│", "", w = gutter + 1);
-    let _ = writeln!(out, "{:>w$} │ {}", start.line, patched, w = gutter);
-    let new_width = edit.replacement.chars().count().max(1);
+    let _ = writeln!(out, "{:>w$} │ {}", start.line, expand_tabs(&patched), w = gutter);
+    let new_width = drawn_width(&edit.replacement).max(1);
     let _ = writeln!(
         out,
         "{:>w$}│ {}{}",
         "",
-        " ".repeat(col),
+        " ".repeat(drawn_width(&before)),
         "~".repeat(new_width),
         w = gutter + 1
     );
@@ -257,17 +309,22 @@ fn place<'a>(
     let start = file.line_col(span.start);
     let end = file.line_col(span.end);
 
-    let width = if end.line == start.line {
-        (end.col - start.col) as usize
+    // Columns are counted as the line is drawn, a tab as `TAB_WIDTH`, so the
+    // caret lands under the character it means on a tab-indented line.
+    let line: Vec<char> = file.line_text(start.line).chars().collect();
+    let from = ((start.col - 1) as usize).min(line.len());
+    let to = if end.line == start.line {
+        ((end.col - 1) as usize).clamp(from, line.len())
     } else {
         // Multi-line span: underline to the end of the first line.
-        file.line_text(start.line).chars().count() - (start.col - 1) as usize
+        line.len()
     };
+    let drawn = |chars: &[char]| drawn_width(&chars.iter().collect::<String>());
 
     Placed {
         line: start.line,
-        col: (start.col - 1) as usize,
-        width: width.max(1),
+        col: drawn(&line[..from]),
+        width: drawn(&line[from..to]).max(1),
         style,
         message,
     }
@@ -376,6 +433,55 @@ help: make the binding mutable
             .with_note("Kite has no truthiness");
         let out = d.render(&m);
         assert!(out.contains("= note: Kite has no truthiness"), "\n{}", out);
+    }
+
+    /// A label in another file is drawn under that file's own header. It was
+    /// dropped: calling `util.double("x")` from `main` lost the label saying
+    /// where `int` was required, which was the half of the message that
+    /// explained it.
+    #[test]
+    fn a_label_in_another_file_gets_a_block_of_its_own() {
+        let mut m = SourceMap::new();
+        let main = m.add("main.kite", "fn main() {\n    io.print(util.double(\"x\"))\n}\n");
+        let util = m.add("util.kite", "pub fn double(n: int) -> int {\n    return n * 2\n}\n");
+        let arg = find_nth(m.text(main), "\"x\"", 0);
+        let param = find_nth(m.text(util), "int", 0);
+        let d = Diagnostic::error(codes::E0200, "mismatched types")
+            .with_primary(Span::new(main, arg, arg + 3), "found `str`")
+            .with_secondary(Span::new(util, param, param + 3), "`int` required here");
+        let out = d.render(&m);
+        let expected = "\
+error[E0200]: mismatched types
+  ┌─ main.kite:2:26
+  │
+2 │     io.print(util.double(\"x\"))
+  │                          ^^^ found `str`
+  │
+  ┌─ util.kite:1:18
+  │
+1 │ pub fn double(n: int) -> int {
+  │                  --- `int` required here
+  │
+";
+        assert_eq!(out, expected, "\n--- got ---\n{}", out);
+    }
+
+    /// A tab is drawn as four spaces, in the line and in the underline alike,
+    /// so the caret lands under what it means. The line used to be printed
+    /// with its tab for the terminal to expand while the caret counted it as
+    /// one column.
+    #[test]
+    fn a_tab_indented_line_keeps_its_caret_in_place() {
+        let mut m = SourceMap::new();
+        let src = "fn main() {\n\tlet x: int = \"s\"\n}\n";
+        let f = m.add("tab.kite", src);
+        let at = find_nth(src, "\"s\"", 0);
+        let d = Diagnostic::error(codes::E0200, "mismatched types")
+            .with_primary(Span::new(f, at, at + 3), "found `str`");
+        let out = d.render(&m);
+        assert!(out.contains("2 │     let x: int = \"s\"\n"), "\n{}", out);
+        assert!(out.contains("  │                  ^^^ found `str`\n"), "\n{}", out);
+        assert!(!out.contains('\t'), "\n{}", out);
     }
 
     #[test]

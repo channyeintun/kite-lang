@@ -48,7 +48,7 @@ fn names_the_enum(s: Shape) -> str {
     return match s {
         Shape(r) => "circle", //~ ERROR E0200
         Shape.Square => "square", //~ ERROR E0111
-        Circle { r } => "braces", //~ ERROR E0200
+        Circle{ r } => "braces", //~ ERROR E0200
         Point => "point",
     }
 }

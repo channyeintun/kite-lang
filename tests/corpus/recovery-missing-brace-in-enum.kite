@@ -1,0 +1,17 @@
+// An enum whose `}` is missing keeps its variants, so the match that uses it is
+// still exhaustive, and the file ending is the one error.
+
+fn name(l: Light) -> str {
+    return match l {
+        Red => "red",
+        Green => "green",
+    }
+}
+
+fn main() {
+    io.print(name(Red))
+}
+
+enum Light { //~ ERROR E0101
+    Red
+    Green

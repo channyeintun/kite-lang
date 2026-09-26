@@ -119,7 +119,7 @@ fn main() {
 | The reflex | Kite |
 |---|---|
 | `;` ends a statement | `;` is not a token — `E0002`. Newlines terminate statements. |
-| Continue a line by starting the next one with `\|\|`, `+`, `-` | Continuation is decided by the **last** token of a line. A leading `\|\|` is a zero-argument closure, built and discarded (`E0117`); a leading `-` is a fresh statement with **no diagnostic** and a silently wrong answer. Put the operator at the end of the line it continues. `>` and `>>` never continue. |
+| Continue a line by starting the next one with `\|\|`, `+`, `-` | Continuation is decided by the **last** token of a line. A leading `\|\|` is a zero-argument closure, built and discarded (`E0117`); a leading `-` is a fresh statement with **no diagnostic** and a silently wrong answer. Put the operator at the end of the line it continues (`>` and `>>` included; the `>` closing `Option<int>` does not continue). |
 | `/* … */` | Only `//`, `///`, `//!`. |
 | A ` ```kite ` fence in a `///` comment is prose | It is a test. `kitec test` appends it to **its own module** — everything the comment documents is already in scope, no import — and runs it. Mark an illustration ` ```kite ignore `. |
 | `'a'` is a char; `42i64`; `1.0f32` | No `char` type (a code point is an `int`, via `s.code_at(i)`), one `int`, one `float`, no literal suffixes. |

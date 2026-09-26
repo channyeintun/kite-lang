@@ -99,7 +99,8 @@ This decision, made once, pays three times:
 
 ### 2.1 Source encoding
 
-Source files are UTF-8. The file extension is `.kite`. Identifiers may contain
+Source files are UTF-8. The file extension is `.kite`. A file may begin with a
+byte-order mark, which is not part of the program. Identifiers may contain
 any Unicode `XID_Start` / `XID_Continue` characters, so non-Latin identifiers are
 supported. Source is normalised to NFC before comparison, so visually identical
 identifiers are the same identifier.
@@ -119,11 +120,15 @@ type     use      var
 ### 2.3 Comments
 
 ```kite
+//! Module documentation: the file's own overview, written at its top.
+
 // Line comment.
 
 /// Documentation comment. Attaches to the following declaration.
 /// Markdown is permitted. Code fences are extracted and compiled as tests.
 ```
+
+There is no block comment: `/*` is `E0005`.
 
 A ` ```kite ` fence is compiled and run by `kitec test`, alongside the file's
 `test_…` functions. It is appended to the module it was written in, so
@@ -137,7 +142,7 @@ A fence tagged anything else is prose.
 
 ```kite
 42            // int
-1_000_000     // underscores permitted as separators
+1_000_000     // underscores permitted as separators, between two digits
 0xFF  0o755  0b1010_1101
 3.14          // float
 1e10  1.5e-3
@@ -147,6 +152,7 @@ A fence tagged anything else is prose.
 multi-line string, leading indentation stripped
 to match the closing delimiter
 """
+t.0.1         // a tuple index after a tuple index, not the float `0.1`
 true  false
 nil
 ```
@@ -159,7 +165,11 @@ io.print("hello, \(name), you are \(age) years old")
 ```
 
 Interpolation calls `Display.show` on the operand: a hole is an ordinary
-expression, evaluated where it stands.
+expression, evaluated where it stands, and holds exactly one.
+
+A block string is dedented the same way with holes in it as without: the line
+break after the opening `"""` goes, the closing delimiter's line goes, and that
+line's indentation comes off the front of every line.
 
 `int`, `float`, `bool` and `str` render themselves; every other type renders
 through its own `Display`. Because a hole is an expression,
@@ -171,7 +181,9 @@ the language.
 Statements are newline-terminated. Semicolons are never written. A statement
 continues onto the next line when the line ends in an operator, an open
 delimiter, or a comma. The same rule as Swift and Kotlin, and unambiguous here
-because a statement never begins with `(` or `[`.
+because a statement never begins with `(` or `[`. `>` and `>>` continue a line
+as the other operators do, and the `>` that closes `Option<int>` ends one;
+`return` is not an operator, and a line ending in it ends there.
 
 **The operator ends the line it continues, and `||` is why that is a rule and
 not a style.** A line opening with `||` is not the tail of the expression
@@ -680,6 +692,9 @@ xs[0]                 // int — bounds-checked, traps on failure
 xs.get(0)             // Option<int> — bounds-checked, nil on failure
 xs[1..3]              // [int] — subslice, half-open, clamped
 xs[1..=2]             // [int] — the same subslice, inclusive
+xs[1..]               // [int] — from index 1 to the end
+xs[..2]               // [int] — the first two
+xs[..]                // [int] — all of it
 xs.len()              // int
 m["a"]                // Option<int> — map indexing always yields an optional
 m.remove("a")         // takes the entry out; a key that is not there is not an error
@@ -705,6 +720,14 @@ empty rather than an error, and a negative start is the beginning. This is the
 same rule `s.slice(from, to)` has had all along ([§3.1](#31-primitives)), and
 `s[a..b]` is that call written as an index: one syntax with two answers about
 its edges is precisely the drift this language spends its omissions avoiding.
+
+**Either end of a range index may be left out**: `xs[a..]` runs to the end,
+`xs[..b]` starts at the beginning, and `xs[..]` is the whole sequence, a `str`
+as much as a slice. A missing start is `0` and a missing end the largest `int`,
+which the clamp turns into the edge of the data — so an open end is not a
+second rule, only the first one written shorter. An inclusive range has to say
+what it includes: `xs[..=b]` is allowed, `xs[a..=]` is not. Only an index may
+leave an end out; `0..` alone has nothing to stop at.
 
 A slice is the only sequence a range indexes other than a `str`. A map has no
 order over its keys for a range to name, so `m[a..b]` is an error rather than a

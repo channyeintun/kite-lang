@@ -774,7 +774,12 @@ fn runtime_lib() -> Result<Option<RuntimeLib>, String> {
 
 /// `kitec fmt` — rewrite a file, or say whether it would change.
 fn format_file(path: &str, src: &str, check_only: bool) -> ExitCode {
-    let formatted = kite_fmt::format(src);
+    // A file the formatter will not touch fails `--check` too: "not
+    // formatted" is the honest answer for a file that cannot be.
+    let formatted = match kite_fmt::format(src) {
+        Ok(formatted) => formatted,
+        Err(e) => return fail(&format!("`{}`: {}", path, e)),
+    };
     if formatted == src {
         if !check_only {
             eprintln!("{} is already formatted", path);

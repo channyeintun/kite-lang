@@ -64,9 +64,15 @@ codes! {
         "Recognised escapes are \\n \\t \\r \\0 \\\\ \\\" \\' and \\u{...}.";
 
     E0004 = "E0004", "invalid number literal",
-        "A numeric literal is malformed. Digit separators may appear between \
-         digits but not at either end, and a float must have digits on both \
+        "A numeric literal is malformed. A digit separator `_` sits between two \
+         digits, in every radix and every part of a literal — `1_000`, \
+         `0xFF_FF`, `1.5e1_0` — so it cannot end the digits, follow a radix \
+         prefix, double up, or touch a `.` or an exponent: `1_`, `0x_F`, \
+         `1__0` and `1_.5` are all refused. A float must have digits on both \
          sides of the point.\n\n\
+         A literal too large for its type is refused too: an `int` above \
+         9223372036854775807, and a `float` too large to be finite, such as \
+         `1e999`, which would otherwise become infinity without a word.\n\n\
          A type suffix — `42i32`, `2.5f32` — is also refused. Kite has one \
          integer type and one float, so a suffix names nothing. It used to be \
          consumed and thrown away, which made `300i8` read as a width the \
@@ -103,7 +109,11 @@ codes! {
          the moment it is opened — and exhausting the stack is a guard-page \
          abort, not a panic, so nothing can catch it. A ceiling turns that \
          into this diagnostic. The bytecode VM has bounded call depth for the \
-         same reason; this is the same rule applied to the front end.";
+         same reason; this is the same rule applied to the front end.\n\n\
+         A long chain counts too: each `+` of `a + b + c + …`, each call of \
+         `x.f().g()…`, each `else if`, each prefix `-`. The parser reads a \
+         chain in a loop, but the tree it builds is as deep as the chain is \
+         long, and every pass after the parser walks that tree by recursion.";
 
     E0110 = "E0110", "use of possibly-uninitialised binding",
         "A `let` binding may be assigned after declaration, but only if the \

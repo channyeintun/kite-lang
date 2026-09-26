@@ -149,3 +149,49 @@ fn every_corpus_file_fails_to_compile() {
         );
     }
 }
+
+/// A `}` missing before the next declaration is one diagnostic, from the
+/// parser through the type checker, at the `{` that lost it.
+///
+/// These live here rather than in `tests/corpus` because the corpus is
+/// formatted like every other `.kite` file, and `kitec fmt` indents what
+/// follows an unclosed brace one level in — which is the very layout the
+/// parser reads to find where the brace went missing.
+#[test]
+fn a_brace_missing_before_a_declaration_is_one_diagnostic() {
+    let cases = [
+        // The `}` after `return 0` closes the `if`, but it is indented to
+        // close the function, and that is where the missing one was.
+        (
+            "fn a(x: int) -> int {\n    if x > 0 {\n        return 1\n    return 0\n}\n\n\
+             fn b() -> int {\n    return 2\n}\n\n\
+             fn main() {\n    io.print(a(1) + b())\n}\n",
+            2,
+        ),
+        ("struct P {\n    x: int\n\nfn main() {\n    let p = P{ x: 1 }\n    io.print(p.x)\n}\n", 1),
+        (
+            "enum Light {\n    Red\n    Green\n\n\
+             fn main() {\n    let l = Red\n    io.print(match l {\n        Red => 1,\n        Green => 2,\n    })\n}\n",
+            1,
+        ),
+        (
+            "struct P {\n    n: int\n}\n\nimpl P {\n    fn get(self) -> int {\n        return self.n\n    }\n\n\
+             fn main() {\n    io.print(P{ n: 1 }.get())\n}\n",
+            5,
+        ),
+    ];
+    for (src, line) in cases {
+        let result = compile(Path::new("t.kite"), src, Emit::Check);
+        let errors: Vec<(u32, String)> = actual(&result)
+            .into_iter()
+            .flat_map(|(line, codes)| codes.into_iter().map(move |c| (line, c)))
+            .collect();
+        assert_eq!(
+            errors,
+            vec![(line, "E0101".to_string())],
+            "{}\n{}",
+            src,
+            result.render_diagnostics()
+        );
+    }
+}

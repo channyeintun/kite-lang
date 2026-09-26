@@ -1710,6 +1710,7 @@ impl<'a> FnResolver<'a> {
     fn expr(&mut self, e: &Expr) {
         match e {
             Expr::Int(_)
+            | Expr::ImpliedInt { .. }
             | Expr::Float(_)
             | Expr::Str(_)
             | Expr::Char(_)

@@ -1195,7 +1195,12 @@ impl<'a> Checker<'a> {
 
         self.report_unchecked_errors(None);
 
-        if body.is_some() && sig.ret != TyId::UNIT && flow == Flow::Falls {
+        // A body the parser could not read to its end — its last statement
+        // failed, or its `}` was never found — has had its syntax error
+        // reported already, and whether the rest would have returned is not
+        // something to guess at in a second diagnostic.
+        let cut_short = matches!(body.and_then(|b| b.stmts.last()), Some(ast::Stmt::Error(_)));
+        if body.is_some() && sig.ret != TyId::UNIT && flow == Flow::Falls && !cut_short {
             self.diags.push(
                 Diagnostic::error(codes::E0203, "not every path returns a value")
                     .with_primary(
@@ -2780,6 +2785,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            ast::Expr::ImpliedInt { value, span } => self.lit(ExprKind::Int(*value), TyId::INT, *span),
             ast::Expr::Float(span) => {
                 let text = self.text(*span);
                 match parse_float(text) {
@@ -10831,6 +10837,7 @@ fn visit_expr_stmts(e: &ast::Expr, closures: bool, f: &mut dyn FnMut(&ast::Stmt)
         | ast::Expr::Nil(_)
         | ast::Expr::Path(_)
         | ast::Expr::SelfExpr(_)
+        | ast::Expr::ImpliedInt { .. }
         | ast::Expr::Error(_) => {}
         ast::Expr::Interpolated { parts, .. } => {
             for part in parts {
