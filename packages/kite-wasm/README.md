@@ -45,8 +45,11 @@ try {
     entry: await readFile("src/main.kite", "utf8"),
     siblings: { checkout: await readFile("src/checkout.kite", "utf8") },
     release: true,
+    path: "src/main.kite", // what diagnostics call the file
   });
-  // → { "app.wasm", "app.js", "api.js", "api.d.ts" } as Uint8Array
+  // → { "app.wasm", "app.js" } as Uint8Array, plus "api.js" and "api.d.ts"
+  //   when the program has a `pub fn` of its own, and "app.wasm.map" in a
+  //   debug build — the files `kitec build` writes
 } catch (error) {
   if (error instanceof BuildFailed) process.stderr.write(error.diagnostics);
 }
@@ -56,7 +59,10 @@ try {
 a project wants: `check` takes a single file and would report a missing module
 for a program that says `use checkout`.
 
-The module is instantiated once per process and imports nothing.
+The module is instantiated once per process and imports nothing. If the
+compiler traps on an input — a panic, or a stack it runs out of — that call
+throws and the instance is replaced, so the next call works; it used to fail
+the same way on every call after, until the process restarted.
 
 ## As a command
 

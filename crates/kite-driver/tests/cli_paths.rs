@@ -185,3 +185,48 @@ fn an_option_the_command_does_not_take_is_refused() {
     assert!(!err.contains("has no `main`"), "{}", err);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- the source map names what a browser can find ---------------------------
+
+/// A source map names each source relative to the directory it is written
+/// into, never by an absolute path, and carries every source's text.
+///
+/// `kitec build src/main.kite --out dist` wrote `"sources": ["src/main.kite"]`,
+/// which a browser resolves against the map's own URL — `dist/src/main.kite`,
+/// a 404. An absolute input path went into the artefact as it was, naming the
+/// builder's machine, and the standard library appeared as `<std/http>` with
+/// nothing behind it. Now the map says `../src/main.kite`, the library's
+/// modules are `kite-std/…`, and `sourcesContent` means none of it has to be
+/// fetched at all.
+#[test]
+fn a_source_map_names_sources_where_a_browser_finds_them() {
+    let dir = scratch("sourcemap", "unused.kite", "");
+    std::fs::create_dir_all(dir.join("src")).expect("src");
+    std::fs::write(
+        dir.join("src/main.kite"),
+        "use std/json\n\nfn main() {\n    io.print(json.stringify(json.Json.Null))\n}\n",
+    )
+    .expect("write");
+    let absolute = dir.join("src/main.kite");
+    for entry in ["src/main.kite", absolute.to_str().unwrap()] {
+        let _ = std::fs::remove_dir_all(dir.join("dist"));
+        let Some((ok, _, err)) =
+            kitec_in(&dir, &["build", entry, "--emit", "wasm", "--out", "dist"])
+        else {
+            return;
+        };
+        assert!(ok, "{}", err);
+        let map = std::fs::read_to_string(dir.join("dist/app.wasm.map")).expect("a map");
+        assert!(
+            map.contains("\"sources\":[\"../src/main.kite\","),
+            "built from {}: {}",
+            entry,
+            &map[..map.len().min(200)]
+        );
+        assert!(map.contains("\"kite-std/json.kite\""), "{}", &map[..map.len().min(300)]);
+        assert!(map.contains("\"sourcesContent\":[\"use std/json\\n"), "{}", &map[..map.len().min(300)]);
+        let home = dir.to_string_lossy().replace('\\', "/");
+        assert!(!map.contains(&home), "the builder's path leaked into the map");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

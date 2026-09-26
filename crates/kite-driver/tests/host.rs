@@ -286,6 +286,11 @@ fn server_sent_events_arrive_in_order() {
 /// would lose it silently. And once they are read the stream reports being
 /// closed, which is a different bug from a stream whose network went away and
 /// sends a reader looking somewhere else.
+///
+/// The program waits for both unnamed events to arrive before it closes. It used
+/// to close straight after opening and rely on the batch driver's busy-polling
+/// having let them in first; a driver that sleeps until the host wakes it runs
+/// the program the moment the stream opens, before anything has been sent.
 #[test]
 fn a_closed_event_stream_drains_then_says_it_is_closed() {
     if !node_available() {
@@ -295,9 +300,11 @@ fn a_closed_event_stream_drains_then_says_it_is_closed() {
     let port = free_port();
     let src = format!(
         "use std/http\n\
+         use std/task\n\
          async fn main() {{\n\
          \x20 let (s, err) = await http.events(\"http://127.0.0.1:{port}/events\")\n\
          \x20 if err != nil {{\n    io.print(\"failed to open\")\n    return\n  }}\n\
+         \x20 for http.pending(s) < 2 {{\n    task.wait_host()\n    task.yield()\n  }}\n\
          \x20 http.close(s)\n\
          \x20 var read = 0\n\
          \x20 for {{\n\
@@ -2371,5 +2378,390 @@ async fn main() {
          POST credentials=include redirect=follow\n\
          PUT credentials=omit redirect=error\n\
          done\n"
+    );
+}
+
+// ---- the drivers, and what crosses the boundary when something fails --------
+
+/// Compile and run under Node, keeping what went to standard error too, and
+/// whether the process succeeded — for a test about a failure.
+fn run_capturing(name: &str, src: &str, runner: &str, args: &[&str]) -> (String, String, bool) {
+    let work = Workspace::new(&format!("host-{}", name));
+    let dir = work.path();
+    let c = compile(format!("{}.kite", name), src, Emit::Wasm);
+    assert!(!c.failed(), "{} does not compile:\n{}", name, c.render_diagnostics());
+    let module = c.wasm.as_ref().expect("a module");
+    std::fs::write(dir.join("app.wasm"), &module.bytes).expect("write wasm");
+    std::fs::write(
+        dir.join("app.js"),
+        kite_driver::generate_glue_with_hosts("app.wasm", &module.hosts),
+    )
+    .expect("write glue");
+    std::fs::write(dir.join("run.mjs"), runner).expect("write runner");
+    let output = Command::new("node")
+        .args(args)
+        .arg(dir.join("run.mjs"))
+        .output()
+        .expect("node runs");
+    (
+        String::from_utf8(output.stdout).expect("utf-8"),
+        String::from_utf8(output.stderr).expect("utf-8"),
+        output.status.success(),
+    )
+}
+
+/// A runner that reports a trap as a line rather than as a failed process.
+const TRAP_RUNNER: &str = r#"import { readFile } from "node:fs/promises";
+import { run, setWriter } from "./app.js";
+const out = [];
+setWriter((l) => out.push(l));
+try {
+  await run(new Uint8Array(await readFile(new URL("./app.wasm", import.meta.url))));
+} catch (e) {
+  out.push(e instanceof WebAssembly.RuntimeError ? "trapped" : "threw " + e.message);
+}
+process.stdout.write(out.map((l) => l + "\n").join(""));
+"#;
+
+/// A failed `require` says what was claimed on standard error, where the VM's
+/// trap report puts it. It used to be printed like program output, in the
+/// middle of whatever the program was writing.
+#[test]
+fn a_failed_require_speaks_on_standard_error() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "fn main() {\n\
+        \x20 io.print(\"before\")\n\
+        \x20 require(1 > 2, \"one is not more than two\")\n\
+        \x20 io.print(\"after\")\n\
+        }\n";
+    let (out, err, _) = run_capturing("require", src, TRAP_RUNNER, &[]);
+    assert_eq!(out, "before\ntrapped\n");
+    assert!(err.contains("one is not more than two"), "stderr was {:?}", err);
+}
+
+/// A sleep or a timeout comes due while another task waits on the host.
+///
+/// The batch driver answered a wait on the host by yielding one tick and
+/// polling the waiting task again — which counted as progress, so the virtual
+/// clock never moved while anything was outstanding. `task.timeout` around a
+/// request to a slow server waited for the server.
+#[test]
+fn a_timeout_fires_while_a_request_is_outstanding() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let port = free_port();
+    let src = format!(
+        "use std/http\n\
+         use std/task\n\
+         async fn main() {{\n\
+         \x20 let answer = await task.timeout(http.get(\"http://127.0.0.1:{port}/slow\"), 100)\n\
+         \x20 io.print(if answer == nil {{ \"timed out\" }} else {{ \"answered\" }})\n\
+         }}\n",
+        port = port
+    );
+    let runner = format!(
+        r#"import {{ createServer }} from "node:http";
+import {{ readFile }} from "node:fs/promises";
+import {{ run, setWriter }} from "./app.js";
+const server = createServer((req, res) => setTimeout(() => res.end("late"), 2000));
+await new Promise((r) => server.listen({port}, "127.0.0.1", r));
+const out = [];
+const started = Date.now();
+setWriter((l) => out.push(l + (Date.now() - started < 1000 ? " promptly" : " late")));
+await run(new Uint8Array(await readFile(new URL("./app.wasm", import.meta.url))));
+server.close();
+process.stdout.write(out.map((l) => l + "\n").join(""));
+"#,
+        port = port
+    );
+    let out = run_runner_under_node("timeoutfetch", &src, &runner, &[]);
+    assert_eq!(out, "timed out promptly\n");
+}
+
+/// A trap ends a resident program: the other tasks stop, and a later `wake`
+/// does not run the task that trapped a second time.
+///
+/// The VM's rule — traps are not catchable — enforced on a module the page
+/// still holds. The trapped task used to stay in the task list and run again
+/// at the next `wake`, printing its last words twice.
+#[test]
+fn a_trap_ends_a_resident_program() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "use std/task\n\
+        async fn bad(n: int) -> int {\n\
+        \x20 io.print(\"bad starts\")\n\
+        \x20 await task.sleep(10)\n\
+        \x20 io.print(\"bad about to trap\")\n\
+        \x20 return 10 / n\n\
+        }\n\
+        async fn good() -> int {\n\
+        \x20 for i in 0..3 {\n\
+        \x20   await task.sleep(30)\n\
+        \x20   io.print(\"good tick \\(i)\")\n\
+        \x20 }\n\
+        \x20 return 0\n\
+        }\n\
+        fn main() {\n\
+        \x20 let a = bad(0)\n\
+        \x20 let b = good()\n\
+        }\n";
+    let runner = r#"import { readFile } from "node:fs/promises";
+import { instantiate, resident, setWriter, wake, stopped } from "./app.js";
+const out = [];
+setWriter((l) => out.push(l));
+let reported = 0;
+process.on("uncaughtException", () => { reported += 1; });
+const exports = await instantiate(new Uint8Array(await readFile(new URL("./app.wasm", import.meta.url))));
+exports.main();
+resident(exports);
+await new Promise((r) => setTimeout(r, 150));
+wake();
+await new Promise((r) => setTimeout(r, 150));
+out.push("stopped: " + (stopped() instanceof WebAssembly.RuntimeError));
+out.push("reported: " + reported);
+process.stdout.write(out.map((l) => l + "\n").join(""));
+"#;
+    let out = run_runner_under_node("residenttrap", src, runner, &[]);
+    assert_eq!(
+        out,
+        "bad starts\nbad about to trap\nstopped: true\nreported: 1\n",
+        "a trap must end the program once, with nothing after it"
+    );
+}
+
+/// Nothing a host throws crosses the boundary as an exception: not a thrown
+/// value that cannot be turned into text, not a global whose getter throws,
+/// not a stream whose URL the constructor refuses, not a request for more
+/// random bytes than one call to the host may fill.
+#[test]
+fn a_host_failure_never_crosses_raw() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = r#"use std/js
+use std/http
+use std/crypto
+
+fn throws(body: str) -> str {
+  let (f, err) = js.new1("Function", js.of_str(body))
+  if err != nil {
+    return "could not build"
+  }
+  let (_, cerr) = js.call0(f, "call")
+  if cerr != nil {
+    return "caught: \(cerr.message())"
+  }
+  return "no error"
+}
+
+async fn main() {
+  io.print(throws("throw Object.create(null)"))
+  io.print(throws("throw Symbol('boom')"))
+  io.print(throws("Object.defineProperty(globalThis, 'guarded', { get() { throw new Error('denied') } })"))
+  let g = js.global("guarded")
+  let (_, gerr) = js.get(g, "anything")
+  io.print(if gerr == nil { "no error" } else { "caught: \(gerr.message())" })
+  io.print(crypto.random(70000).len())
+  io.print(crypto.random(-1).len())
+  let (_, serr) = await http.events("http://[not-a-url")
+  io.print(serr != nil)
+}
+"#;
+    let out = run_runner_under_node("hostthrows", src, PLAIN_RUNNER, &["--experimental-eventsource"]);
+    assert_eq!(
+        out,
+        "caught: the host threw: [object Object]\n\
+         caught: the host threw: Symbol(boom)\n\
+         no error\n\
+         caught: the host threw: denied\n\
+         140000\n\
+         0\n\
+         true\n"
+    );
+}
+
+/// A program's own function in a group the standard library also fills keeps
+/// its place in that group.
+///
+/// The standard groups were assigned over the declared ones, so the stub that
+/// names a missing declaration went with them: a program that declared one
+/// extra function in `net` failed to instantiate with a `LinkError` naming an
+/// import by number, and `provide` could not have saved it.
+#[test]
+fn a_programs_own_function_survives_a_standard_group() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = r#"use std/http
+
+@host("net")
+extern fn extra(n: int) -> int
+
+async fn main() {
+  io.print(extra(20))
+  let (r, err) = await http.get("https://example.test/")
+  if err != nil {
+    io.print(err.message())
+    return
+  }
+  io.print(r.body)
+}
+"#;
+    let runner = r#"import { readFile } from "node:fs/promises";
+import { run, setWriter, provide } from "./app.js";
+globalThis.fetch = async () => new Response("fetched", { status: 200 });
+const out = [];
+setWriter((l) => out.push(l));
+const bytes = new Uint8Array(await readFile(new URL("./app.wasm", import.meta.url)));
+try {
+  await run(bytes);
+} catch (e) {
+  out.push(e.message);
+}
+provide("net", { extra: (n) => n + 1n });
+await run(bytes);
+process.stdout.write(out.map((l) => l + "\n").join(""));
+"#;
+    let out = run_runner_under_node("ownnet", src, runner, &[]);
+    assert_eq!(
+        out,
+        "no host supplied for @host(\"net\") extra\n21\nfetched\n",
+        "unsupplied, the call names itself; supplied, it runs beside the standard group"
+    );
+}
+
+/// A response body is let go once the program has read it.
+///
+/// Every request stayed in the glue's table for the life of the page with its
+/// whole body: two hundred fetches of a megabyte held two hundred megabytes
+/// after the program had finished with all of them.
+#[test]
+fn a_fetched_body_is_not_kept_after_it_is_read() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let port = free_port();
+    let src = format!(
+        "use std/http\n\
+         async fn main() {{\n\
+         \x20 var ok = 0\n\
+         \x20 for i in 0..80 {{\n\
+         \x20   let (r, err) = await http.get(\"http://127.0.0.1:{port}/big\")\n\
+         \x20   if err != nil {{\n      io.print(err.message())\n      return\n    }}\n\
+         \x20   if r.body.len() > 0 {{\n      ok = ok + 1\n    }}\n\
+         \x20 }}\n\
+         \x20 io.print(\"fetched \\(ok)\")\n\
+         }}\n",
+        port = port
+    );
+    let runner = format!(
+        r#"import {{ createServer }} from "node:http";
+import {{ readFile }} from "node:fs/promises";
+import {{ run, setWriter }} from "./app.js";
+const body = "x".repeat(1024 * 1024);
+const server = createServer((req, res) => res.end(body));
+await new Promise((r) => server.listen({port}, "127.0.0.1", r));
+const out = [];
+setWriter((l) => out.push(l));
+const bytes = new Uint8Array(await readFile(new URL("./app.wasm", import.meta.url)));
+globalThis.gc();
+const before = process.memoryUsage().heapUsed;
+await run(bytes);
+server.close();
+globalThis.gc();
+globalThis.gc();
+const kept = (process.memoryUsage().heapUsed - before) / 1048576;
+out.push("under 20 MiB kept: " + (kept < 20));
+process.stdout.write(out.map((l) => l + "\n").join(""));
+"#,
+        port = port
+    );
+    let out = run_runner_under_node("fetchleak", &src, &runner, &["--expose-gc"]);
+    assert_eq!(out, "fetched 80\nunder 20 MiB kept: true\n");
+}
+
+// ---- names the wrapper has to spell ----------------------------------------
+
+/// A `pub fn` or a parameter named with a word JavaScript reserves, or with a
+/// name the wrapper itself uses, still reaches JavaScript under its own name.
+///
+/// `pub fn delete` became `export function delete`, a syntax error that took
+/// every other function with it; `static` as a parameter is refused in the
+/// strict mode every module is in; a `pub fn text` redeclared the conversion
+/// helper of that name, and a parameter called `text` shadowed it so the call
+/// inside tried to call a string. And `load()` with no argument looked for
+/// `app.wasm` beside the page, which under Node is not a URL at all.
+#[test]
+fn the_wrapper_spells_names_javascript_reserves() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "pub fn delete(n: int) -> int {\n  return n + 1\n}\n\
+        pub fn shout(static: str, interface: str) -> str {\n  return static + interface\n}\n\
+        pub fn text(s: str) -> str {\n  return \"<\" + s + \">\"\n}\n\
+        pub fn greet(text: str) -> str {\n  return \"hi \" + text\n}\n\
+        pub fn wrap(str: str) -> int {\n  return str.len()\n}\n\
+        pub fn ready(eval: bool) -> bool {\n  return !eval\n}\n\
+        pub fn load(n: int) -> int {\n  return n\n}\n\
+        fn main() {\n}\n";
+    let work = build_library("reserved", src);
+    let dir = work.path();
+    std::fs::write(
+        dir.join("run.mjs"),
+        "import { load, delete as del, shout, text, greet, wrap, ready } from \"./api.js\";\n\
+         const loaded = await load();\n\
+         console.log(String(del(1n)), shout(\"a\", \"b\"), text(\"x\"), greet(\"y\"),\n\
+         \x20 String(wrap(\"four\")), ready(true), String(loaded.load(9n)));\n",
+    )
+    .expect("write runner");
+    let output = Command::new("node").arg(dir.join("run.mjs")).output().expect("node runs");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "2 ab <x> hi y 4 false 9\n");
+
+    let dts = std::fs::read_to_string(dir.join("api.d.ts")).expect("api.d.ts");
+    assert!(dts.contains("export { $kite_delete as delete };"), "{}", dts);
+    assert!(dts.contains("shout(static_0: string, interface_1: string): string;"), "{}", dts);
+    assert!(dts.contains("Left out: `load`"), "{}", dts);
+}
+
+/// A generic `pub fn` is named in the note, and a program with no `pub fn`
+/// of its own has no wrapper to write.
+///
+/// The first vanished without a word: monomorphisation leaves a copy per type
+/// and none exported, so there was nothing to describe and nothing said why.
+/// The second got an `api.js` holding only `load`, because the standard
+/// library's qualified exports counted as the program's interface.
+#[test]
+fn the_wrapper_describes_the_programs_own_interface() {
+    let generic = "pub fn ident<T>(x: T) -> T {\n  return x\n}\n\
+        fn main() {\n  io.print(ident(3))\n}\n";
+    let c = compile("generic.kite", generic, Emit::Wasm);
+    assert!(!c.failed(), "{}", c.render_diagnostics());
+    let module = c.wasm.as_ref().expect("a module");
+    assert!(kite_driver::has_api(&module.api));
+    let (_, dts) = kite_driver::generate_api(&module.api, "app.wasm");
+    assert!(dts.contains("they are generic") && dts.contains(": ident."), "{}", dts);
+
+    let std_only = "use std/json\n\
+        fn main() {\n  io.print(json.stringify(json.Json.Null))\n}\n";
+    let c = compile("stdonly.kite", std_only, Emit::Wasm);
+    assert!(!c.failed(), "{}", c.render_diagnostics());
+    let module = c.wasm.as_ref().expect("a module");
+    assert!(
+        !kite_driver::has_api(&module.api),
+        "a program with no pub fn of its own has no interface: {:?}",
+        module.api.iter().map(|e| &e.name).collect::<Vec<_>>()
     );
 }

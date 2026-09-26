@@ -19,7 +19,7 @@
 
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { dirname, join, resolve, basename, sep } from "node:path";
+import { dirname, join, resolve, basename, isAbsolute, sep } from "node:path";
 
 import { compiler, BuildFailed } from "@kite-lang/compiler-wasm";
 
@@ -55,6 +55,33 @@ const ENTRY = "?kite-entry";
 /// collided with a name in the other. Two modules cost nothing and cannot.
 const GLUE = "\0kite-glue:";
 
+/// A path with forward slashes, which is how Vite spells every id and every
+/// file it reports — on Windows too. `node:path` answers with backslashes
+/// there, so a directory recorded from `join` never equalled one read back
+/// from a Vite id, and an edit to a sibling rebuilt nothing.
+const slash = (path) => path.replace(/\\/g, "/");
+
+/// Whether `file` is `dir` or inside it, compared the way Vite compares.
+const within = (dir, file) => {
+  const d = slash(resolve(dir)).replace(/\/$/, "");
+  const f = slash(resolve(file));
+  return f === d || f.startsWith(d + "/");
+};
+
+/// The glue and the wrapper name the module beside them, which in a Vite
+/// build is not where it goes: both are pointed at the URL Vite gives it.
+const BESIDE = /new URL\("\.\/app\.wasm", import\.meta\.url\)/g;
+
+/// What a program with no `pub fn` of its own is imported as: `kitec` writes
+/// no `api.js` for it, and the page still needs `load`.
+const LOADER =
+  'import { instantiate as $kiteInstantiate } from "./app.js";\n' +
+  "let $kiteModule = null;\n" +
+  "export async function load(source) {\n" +
+  '  $kiteModule = await $kiteInstantiate(source ?? new URL("./app.wasm", import.meta.url));\n' +
+  "  return $kiteModule;\n" +
+  "}\n";
+
 /**
  * @param {object} [options]
  * @param {boolean} [options.release] Build with `--release`: `assert` is
@@ -64,6 +91,12 @@ export default function kite(options = {}) {
   let root = process.cwd();
   let release = options.release;
   let cacheDir;
+  /// Whether this is the dev server, which answers requests from a browser,
+  /// and the directories it may answer with: the root and
+  /// `server.fs.allow`, which is what Vite itself holds `/@fs/` to.
+  let serving = false;
+  let allowed = [];
+  let strict = true;
   /**
    * Per source file: where its output went, and every directory its meaning
    * depends on — its own, and each declared dependency's. An edit anywhere in
@@ -132,6 +165,7 @@ export default function kite(options = {}) {
         entry: await readFile(file, "utf8"),
         siblings: sources,
         release,
+        path: basename(file),
       });
     } catch (e) {
       // The diagnostics are the useful part, and they are already rendered the
@@ -148,22 +182,42 @@ export default function kite(options = {}) {
     return { out, files: vendored.map(([path]) => path) };
   }
 
-  /// Where an import actually is on disk.
+  /// Where an import actually is on disk, or `null` when it is nowhere this
+  /// plugin may read.
   ///
   /// A path from HTML is **root-relative** — `<script src="/src/main.kite">`
   /// means `<root>/src/main.kite`, not a file at the top of the filesystem —
   /// and a path from another module is relative to that module. Resolving the
   /// first as though it were absolute is how the entry came back as
   /// `cannot read /src/main.kite`.
+  ///
+  /// **An absolute path on disk is taken only from a module**, never from a
+  /// request. The dev server hands a URL to `resolveId` as though the page's
+  /// HTML had imported it, and a URL naming `/home/you/elsewhere/secret.kite`
+  /// used to be compiled and served — with its `pub fn`s callable through the
+  /// `api.js` that came back — while Vite itself refused `/@fs/` for the same
+  /// file. The entry stub below imports its program by absolute path, and is
+  /// a module.
   async function locate(source, importer) {
-    const candidates = source.startsWith("/")
-      ? [join(root, source), source]
-      : [importer ? resolve(dirname(importer), source) : resolve(root, source)];
-    for (const path of candidates) {
-      if (await stat(path).then(() => true, () => false)) return path;
+    const exists = (path) => stat(path).then(() => true, () => false);
+    if (source.startsWith("/") || isAbsolute(source)) {
+      const fromRoot = join(root, source);
+      if (within(root, fromRoot) && (await exists(fromRoot))) return fromRoot;
+      if (fromModule(importer) && isAbsolute(source) && (await exists(source))) return source;
+      return null;
     }
-    return candidates[0];
+    const path = importer ? resolve(dirname(importer), source) : resolve(root, source);
+    return (await exists(path)) ? path : null;
   }
+
+  /// Whether an import came from a module of the project's, rather than from
+  /// a page — which is what the dev server says a request came from.
+  const fromModule = (importer) => Boolean(importer) && !/\.html?$/.test(importer);
+
+  /// Whether the dev server may hand out what `file` compiles to: inside the
+  /// root or `server.fs.allow`, the boundary Vite draws for every other file.
+  /// A build reads what the project imports and serves nothing.
+  const servable = (file) => !serving || !strict || allowed.some((dir) => within(dir, file));
 
   /// Every `.kite` file beside this one.
   ///
@@ -285,13 +339,19 @@ export default function kite(options = {}) {
       root = config.root;
       release ??= config.command === "build";
       cacheDir = join(config.cacheDir ?? join(root, "node_modules/.vite"), "kite");
+      serving = config.command === "serve";
+      strict = config.server?.fs?.strict !== false;
+      allowed = [root, ...(config.server?.fs?.allow ?? [])];
     },
 
     /// `<script type="module" src="…​.kite">` becomes the program's entry.
     ///
     /// Marked rather than rewritten to a generated file, so what a reader sees
-    /// in the HTML is the file that actually runs. Only a `type="module"`
-    /// script is touched, and only its `src`.
+    /// in the HTML is the file that actually runs. Only a module script is
+    /// touched, and only its `src` — however the attributes are quoted: HTML
+    /// takes `type=module` and `src='…'` as readily as double quotes, and a
+    /// tag written that way used to be left alone, so the page loaded a
+    /// program that never started and said nothing.
     ///
     /// **`order: "pre"`**, and it is not a preference. Vite reads the HTML for
     /// its entry points before the default transforms run, so a rewrite that
@@ -302,12 +362,13 @@ export default function kite(options = {}) {
     transformIndexHtml: {
       order: "pre",
       handler(html) {
-        return html.replace(
-          /<script\b[^>]*>/g,
-          (tag) =>
-            tag.includes('type="module"')
-              ? tag.replace(/(\bsrc=")([^"]+\.kite)(")/, `$1$2${ENTRY}$3`)
-              : tag,
+        return html.replace(/<script\b[^>]*>/gi, (tag) =>
+          /\stype\s*=\s*(["']?)module\1(?=[\s>/])/i.test(tag)
+            ? tag.replace(
+                /(\ssrc\s*=\s*)(["']?)([^"'\s>]+\.kite)\2(?=[\s>/])/i,
+                `$1$2$3${ENTRY}$2`,
+              )
+            : tag,
         );
       },
     },
@@ -321,6 +382,16 @@ export default function kite(options = {}) {
       if (!KITE.test(bare)) return null;
       const file = await locate(bare, importer);
       if (!file) return null;
+      if (!servable(file)) {
+        // A request is answered as though there were nothing there. A module
+        // of the project's own reaching outside is told why, since the fix
+        // is theirs to make.
+        if (!fromModule(importer)) return null;
+        this.error(
+          `${file} is outside the Vite root and server.fs.allow, so the dev server ` +
+            `will not serve it — add its directory to server.fs.allow`,
+        );
+      }
       return entry ? file + ENTRY : file;
     },
 
@@ -328,19 +399,27 @@ export default function kite(options = {}) {
       if (id.startsWith(GLUE)) {
         const dir = id.slice(GLUE.length);
         if (!producedHere(dir)) return null;
-        return readFile(join(dir, "app.js"), "utf8");
+        const glue = await readFile(join(dir, "app.js"), "utf8");
+        return (
+          `import __wasm from ${JSON.stringify(join(dir, "app.wasm") + "?url")};\n` +
+          glue.replace(BESIDE, "__wasm")
+        );
       }
       // The entry module is two lines and they are generated, which is the
       // point: a `.kite` page has no JavaScript in its source at all.
       if (id.endsWith(ENTRY)) {
         const file = id.slice(0, -ENTRY.length);
+        if (!servable(file)) return null;
         return `import { start } from ${JSON.stringify(file)};\nawait start();\n`;
       }
       if (!KITE.test(id)) return null;
+      // An id can arrive without `resolveId` having passed it — `/@id/` is
+      // the dev server's way of naming one — so the boundary is held here too.
+      if (!servable(id)) return null;
 
       const { out, files } = await compile(id);
       const own = await siblings(id);
-      built.set(id, { out, dirs: new Set([...own, ...files].map(dirname)) });
+      built.set(id, { out, dirs: new Set([...own, ...files].map((f) => slash(dirname(f)))) });
 
       // A dependency's files are watched exactly as siblings are: they are as
       // much a part of what this module means, and a package edited in place
@@ -349,7 +428,7 @@ export default function kite(options = {}) {
       for (const s of own) this.addWatchFile(s);
       for (const f of files) this.addWatchFile(f);
 
-      const api = await readFile(join(out, "api.js"), "utf8");
+      const api = await readFile(join(out, "api.js"), "utf8").catch(() => LOADER);
       const wasm = join(out, "app.wasm");
 
       // Two rewrites, and both are about letting Vite do its job rather than
@@ -371,8 +450,7 @@ export default function kite(options = {}) {
         `import { resident as __resident } from ${JSON.stringify(GLUE + out)};\n` +
         api
           .replace(/from "\.\/app\.js"/, `from ${JSON.stringify(GLUE + out)}`)
-          .replace(/export async function load\(source = "app\.wasm"\)/,
-                   "export async function load(source = __wasm)") +
+          .replace(BESIDE, "__wasm") +
         `
 /// Instantiate and run \`main\`, for a program that owns its own page.
 ///
@@ -399,7 +477,7 @@ export async function start(source = __wasm) {
     /// the directory that changed.
     async handleHotUpdate({ file, server, modules }) {
       if (!KITE.test(file)) return;
-      const dir = dirname(file);
+      const dir = slash(dirname(file));
       const affected = [];
       for (const [source, { dirs }] of built) {
         if (!dirs.has(dir)) continue;

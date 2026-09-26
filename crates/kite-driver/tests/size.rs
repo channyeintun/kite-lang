@@ -72,7 +72,7 @@ fn a_library_of_four_functions_stays_small() {
 /// A real island: five thousand rows, filtered, sorted and diffed on every
 /// keystroke.
 ///
-/// Today 28,437 bytes, against a budget that was 24,576. What got bigger,
+/// Today 30,566 bytes, against a budget that was 24,576. What got bigger,
 /// measured rather than estimated — each number is this test run at that
 /// commit:
 ///
@@ -85,6 +85,16 @@ fn a_library_of_four_functions_stays_small() {
 ///    list, one listener per element and event, the in-place patch that keeps
 ///    a listener reading the newest description, and the departed-key
 ///    collection.
+/// 3. **1,178 bytes** (28,465 → 29,643) for slices that grow in place. A
+///    slice became a header over a buffer with spare capacity, and `push`,
+///    `xs[i] = v` and `xs[i]` became calls to a helper per element type — the
+///    page pushes onto seven kinds of slice, at about a hundred bytes of
+///    helper each — in exchange for `push` no longer copying the whole array
+///    every time. A hundred thousand pushes took twenty seconds on this target
+///    before it; the island's own lists are small, so it buys the page little
+///    and costs it these bytes. The budget did not move.
+/// 4. **923 bytes** (29,643 → 30,566) arrived with the standard library's
+///    own round of fixes, merged after (3) and measured at the merge.
 ///
 /// `examples/page` attaches its own listeners through `std/dom` and uses none
 /// of (2), so it pays for the machinery without spending it. That is the

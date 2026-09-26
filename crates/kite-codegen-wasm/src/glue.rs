@@ -191,6 +191,11 @@ export function text(value) {
             "// function the module imports, and `provide` replaces one before the module",
             "// is instantiated. A declaration nobody supplied fails saying which it was,",
             "// rather than quietly doing nothing.",
+            "//",
+            "// The groups the standard library declares are filled in below, into these",
+            "// objects rather than in place of them: a program may declare a function of",
+            "// its own in `net` or `js`, and replacing the group lost its stub — so the",
+            "// module failed to instantiate with a `LinkError` naming an import number.",
             "const HOSTS = {",
             &host_entries,
             "};",
@@ -1134,11 +1139,19 @@ function imports() {{
         // `preventDefault` could not if this were deferred — and because a
         // comparator handed to `sort` is asked for its answer now.
         const run = (...args) => {{
-          const result = invoke(
-            shape,
-            handler,
-            args.map((a) => (a === undefined ? null : a)),
-          );
+          // A program that trapped has ended, and ending is not a state a
+          // listener the page still holds can bring it back from.
+          if (halted !== null) return undefined;
+          let result;
+          try {{
+            result = invoke(
+              shape,
+              handler,
+              args.map((a) => (a === undefined ? null : a)),
+            );
+          }} catch (e) {{
+            throw halt(e);
+          }}
           // The handler may have made a sleeping task runnable, or started
           // one. This happens after the call so that the value is already in
           // hand: a pump that ran first could re-enter and the answer would be
@@ -1197,6 +1210,46 @@ const millis = () =>
   typeof performance !== "undefined" ? performance.now() : Date.now();
 const now = () => (realClock ? Math.round(millis()) : clock);
 
+// ---- a trap ends the program ------------------------------------------------
+//
+// On the VM a trap is the end: "traps are not catchable". Here the module is
+// an object the page still holds, so the end has to be enforced — the task
+// that trapped stayed in the list and ran again at the next `wake`, and the
+// others stalled because the pass that would have rescheduled them never
+// finished. Once anything traps, the list is emptied, nothing is scheduled,
+// and a handler the page still holds does not enter the module again.
+let halted = null;
+
+/// The trap that ended the program, or `null` while it is running.
+export function stopped() {{
+  return halted;
+}}
+
+/// End the program because of `e`, and hand `e` back to be thrown. Only the
+/// first trap is reported; after it nothing runs that could trap again.
+function halt(e) {{
+  if (halted === null) halted = e;
+  TASKS.length = 0;
+  if (timer !== null) {{
+    clearTimeout(timer);
+    timer = null;
+  }}
+  if (driveWake !== null) driveWake();
+  return e;
+}}
+
+/// Poll one task, turning a trap into the end of the program.
+function poll(exports, task) {{
+  try {{
+    return exports.kite_poll(task.poll) !== 0;
+  }} catch (e) {{
+    throw halt(e);
+  }}
+}}
+
+// Set while `drive` is waiting for the host, to end the wait early.
+let driveWake = null;
+
 export async function drive(exports) {{
   useExports(exports);
   while (TASKS.length > 0) {{
@@ -1213,7 +1266,7 @@ export async function drive(exports) {{
       wakeRequest = null;
       parkRequest = false;
       hostWaitRequest = false;
-      const done = exports.kite_poll(task.poll) !== 0;
+      const done = poll(exports, task);
       if (TASKS[i] === task) {{
         task.wakeAt = wakeRequest;
         task.parked = parkRequest;
@@ -1236,18 +1289,42 @@ export async function drive(exports) {{
       }}
     }}
     if (!polled) {{
-      // Everything is waiting. A task waiting on the host — a fetch, a timer
-      // the host owns — needs the event loop to run, which is what yielding to
-      // a macrotask does. Only then does the virtual clock move.
-      if (TASKS.some((t) => t.waitingOnHost)) {{
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        for (const t of TASKS) t.waitingOnHost = false;
-        continue;
-      }}
       const next = TASKS.reduce(
         (best, t) => (t.wakeAt !== null && (best === null || t.wakeAt < best) ? t.wakeAt : best),
         null,
       );
+      // Everything is waiting, and something is waiting on the host — a
+      // fetch, a request to a server, a socket. Only the event loop can
+      // change that, so it is handed back until the host calls `wake` or the
+      // earliest deadline comes round, whichever is first — and the clock
+      // moves by the real time that took.
+      //
+      // This used to yield for a single tick and then poll every host-waiting
+      // task again, which was wrong twice. It spun: an idle server polled its
+      // accept loop some nine hundred times a second. And it froze time: a
+      // pass that polled anything did not move the clock, so while one task
+      // waited on the host no other task's sleep or timeout ever came due —
+      // `task.timeout(http.get(slow), 100)` waited out the three-second
+      // server, and a task that slept before closing a server never woke.
+      if (TASKS.some((t) => t.waitingOnHost)) {{
+        const started = millis();
+        const delay = next === null ? null : Math.max(0, next - clock);
+        let timed = null;
+        await new Promise((resolve) => {{
+          driveWake = resolve;
+          if (delay !== null) timed = setTimeout(resolve, delay);
+        }});
+        driveWake = null;
+        if (timed !== null) clearTimeout(timed);
+        if (halted !== null) throw halted;
+        clock += Math.round(millis() - started);
+        // A timer that fired a hair early still means the deadline came.
+        if (next !== null && millis() - started >= delay) clock = Math.max(clock, next);
+        continue;
+      }}
+      // Nothing waits on the host, so the only thing that can happen next is
+      // a deadline: jump to it. A program that only sleeps costs no real time
+      // and interleaves exactly as it does on the bytecode VM.
       if (next === null || next <= clock) {{
         throw new Error(TASKS.length + ' task(s) can never make progress');
       }}
@@ -1259,9 +1336,9 @@ export async function drive(exports) {{
 // ---- living in a page -----------------------------------------------------
 //
 // `drive` above runs a program to completion: it returns when the last task
-// finishes, and while anything waits on the host it spins on a zero-delay
-// timeout. Both are right for a program that starts, does its work and ends,
-// and both are fatal to one that sits in a page.
+// finishes, and its clock is virtual except while it waits on the host. Both
+// are right for a program that starts, does its work and ends, and both are
+// wrong for one that sits in a page.
 //
 // An island is idle almost all of the time. After its last task finishes there
 // must still be something to run the next click, and while nothing is happening
@@ -1292,7 +1369,7 @@ function step(exports) {{
     wakeRequest = null;
     parkRequest = false;
     hostWaitRequest = false;
-    const done = exports.kite_poll(task.poll) !== 0;
+    const done = poll(exports, task);
     // A handler firing during the poll can splice this task out from under us,
     // which is why the slot is checked before it is written back.
     if (TASKS[i] === task) {{
@@ -1353,6 +1430,7 @@ function schedule() {{
 /// would mutate the task list underneath the loop that is walking it, so a
 /// wake-up during a pump sets a flag and the pump goes round again.
 function pump() {{
+  if (halted !== null) return;
   if (residentExports === null || pumping) {{
     if (pumping) pumpAgain = true;
     return;
@@ -1375,17 +1453,23 @@ function pump() {{
 /// listener, a settled promise, a host callback. Cheap and idempotent, so a
 /// handler need not know whether the pump is already awake.
 export function wake() {{
-  if (residentExports === null) return;
+  if (halted !== null) return;
   // Something happened on the host, which is precisely what a task waiting on
-  // the host asked to be told about. This is `drive`'s "yield to the event
-  // loop, then clear the flag", written for a driver that does not own the
-  // loop and so cannot yield to it — the callback that woke us *is* the yield.
+  // the host asked to be told about, so every such task gets another look.
+  // Both drivers are told this way: neither polls a host-waiting task until
+  // something calls here.
   //
   // Without this line a `wait_host` task is not merely slow, it is finished:
   // `step` skips a task carrying the flag and `schedule` gives it no deadline,
   // so nothing ever polls it again. The request completes, the response is
   // sitting in `REQUESTS`, and the program never looks.
   for (const t of TASKS) t.waitingOnHost = false;
+  // The batch driver is not resident: it is inside `drive`, possibly waiting
+  // for exactly this.
+  if (residentExports === null) {{
+    if (driveWake !== null) driveWake();
+    return;
+  }}
   if (pumping) {{
     pumpAgain = true;
     return;
@@ -1452,17 +1536,43 @@ export function useExports(exports) {{
 }}
 
 export function resident(exports) {{
+  if (halted !== null) throw halted;
   useExports(exports);
   realClock = true;
   residentExports = exports;
   pump();
 }}
 
-export async function instantiate(source = {wasm}) {{
-  const bytes =
-    source instanceof Uint8Array
-      ? source
-      : new Uint8Array(await (await fetch(source)).arrayBuffer());
+/// The module's bytes, from wherever `source` says.
+///
+/// With no source, the module beside this file: `new URL(…, import.meta.url)`
+/// rather than a bare name, which `fetch` resolves against the *page* — a page
+/// in another directory asked for the wrong file, and under Node there is no
+/// page and a bare name is not a URL at all. A `file:` URL is read from disk,
+/// since that is what one names under Node and `fetch` cannot read it; the
+/// module is found through the runtime rather than an `import` a bundler
+/// would try to follow into a browser build.
+async function bytesOf(source) {{
+  if (source instanceof Uint8Array) return source;
+  if (source instanceof ArrayBuffer) return new Uint8Array(source);
+  const where = source ?? new URL({wasm}, import.meta.url);
+  if (where instanceof URL && where.protocol === "file:") {{
+    const fs =
+      globalThis.process?.getBuiltinModule?.("node:fs/promises") ??
+      (await import(/* @vite-ignore */ ["node:fs", "promises"].join("/")));
+    return new Uint8Array(await fs.readFile(where));
+  }}
+  return new Uint8Array(await (await fetch(where)).arrayBuffer());
+}}
+
+export async function instantiate(source) {{
+  const bytes = await bytesOf(source);
+  // A new module is a new program. One that trapped before it is over, and
+  // what it left in the task list is not this program's work.
+  if (halted !== null) {{
+    halted = null;
+    TASKS.length = 0;
+  }}
 {compile_step}
   // Before anything in the module can run. A driver sets this too, and used to
   // be the only thing that did — which was enough while a handler could only
@@ -1478,7 +1588,12 @@ export async function run(source) {{
   if (typeof exports.main !== "function") {{
     throw new Error("this module has no `main`");
   }}
-  const result = exports.main();
+  let result;
+  try {{
+    result = exports.main();
+  }} catch (e) {{
+    throw halt(e);
+  }}
   // `main` returning is not the program ending: a task it started is still
   // the program's work, and dropping it would make `async` silently lossy.
   if (typeof exports.kite_poll === "function") {{
@@ -1496,7 +1611,7 @@ export async function run(source) {{
         } else {
             "    ...HOSTS,\n"
         },
-        wasm = json_string(wasm_path),
+        wasm = json_string(&format!("./{}", wasm_path.trim_start_matches("./"))),
     ))
 }
 
@@ -1535,9 +1650,23 @@ if (HOSTS.js) {
   // What a throw becomes. `THREW` is a symbol so that no object a program
   // legitimately holds can be mistaken for one.
   const THREW = Symbol("kite.threw");
-  const failure = (e) => ({
-    [THREW]: e instanceof Error ? e.message : String(e),
-  });
+  // What was thrown, as text — without throwing again. `String(e)` does for
+  // an object with no prototype (`Object.create(null)` has no `toString`),
+  // and a message getter or a `Proxy` can throw from inside `instanceof`, so
+  // each attempt is its own `try`, and the last cannot fail.
+  const describe = (e) => {
+    try {
+      if (e instanceof Error) return String(e.message);
+    } catch {}
+    try {
+      return String(e);
+    } catch {}
+    try {
+      return Object.prototype.toString.call(e);
+    } catch {}
+    return "a value that cannot be described";
+  };
+  const failure = (e) => ({ [THREW]: describe(e) });
   const guard = (f) => {
     try {
       return f();
@@ -1549,6 +1678,9 @@ if (HOSTS.js) {
   // primitive, so both are ruled out before the marker is looked for.
   const threw = (v) =>
     v !== null && typeof v === "object" && THREW in v;
+  // An operation on a failure is that failure: `js.get(js.global("x"), "y")`
+  // reports why `x` could not be read, rather than that a marker has no `y`.
+  const on = (target, f) => (threw(target) ? target : guard(f));
   const root = () => (typeof globalThis === "undefined" ? {} : globalThis);
   // A constructor named on the global object. Kept to one place because
   // `js_new*` and `js_instance_of` must agree about what a name means.
@@ -1560,25 +1692,28 @@ if (HOSTS.js) {
     return c;
   };
 
-  HOSTS.js = {
-    js_global: (name) => root()[textOf(name)],
+  Object.assign(HOSTS.js, {
+    // Guarded like everything else: a global can be a getter, and some throw
+    // — `localStorage` in a sandboxed or storage-blocked frame is a
+    // `SecurityError` — which trapped the program through `window.kept()`.
+    js_global: (name) => guard(() => root()[textOf(name)]),
     js_nothing: () => null,
-    js_get: (target, name) => guard(() => target[textOf(name)]),
+    js_get: (target, name) => on(target, () => target[textOf(name)]),
     // The value is returned so that a write has something to carry a failure
     // in. A strict-mode assignment to a read-only property throws, and so does
     // a setter of the page's own.
     js_set: (target, name, value) =>
-      guard(() => {
+      on(target, () => {
         target[textOf(name)] = value;
         return null;
       }),
-    js_at: (target, index) => guard(() => target[Number(index)]),
+    js_at: (target, index) => on(target, () => target[Number(index)]),
 
-    js_call0: (t, name) => guard(() => t[textOf(name)]()),
-    js_call1: (t, name, a) => guard(() => t[textOf(name)](a)),
-    js_call2: (t, name, a, b) => guard(() => t[textOf(name)](a, b)),
-    js_call3: (t, name, a, b, c) => guard(() => t[textOf(name)](a, b, c)),
-    js_call4: (t, name, a, b, c, d) => guard(() => t[textOf(name)](a, b, c, d)),
+    js_call0: (t, name) => on(t, () => t[textOf(name)]()),
+    js_call1: (t, name, a) => on(t, () => t[textOf(name)](a)),
+    js_call2: (t, name, a, b) => on(t, () => t[textOf(name)](a, b)),
+    js_call3: (t, name, a, b, c) => on(t, () => t[textOf(name)](a, b, c)),
+    js_call4: (t, name, a, b, c, d) => on(t, () => t[textOf(name)](a, b, c, d)),
 
     js_new0: (name) => guard(() => new (ctor(name))()),
     js_new1: (name, a) => guard(() => new (ctor(name))(a)),
@@ -1614,7 +1749,7 @@ if (HOSTS.js) {
 
     js_threw: (v) => (threw(v) ? 1 : 0),
     js_detail: (v) => hostText(threw(v) ? v[THREW] : ""),
-  };
+  });
 }
 "#;
 
@@ -1625,7 +1760,7 @@ if (HOSTS.dom) {
   const NODES = [null];
   const at = (id) => NODES[Number(id)] ?? null;
   const handle = (el) => (el ? BigInt(NODES.push(el) - 1) : 0n);
-  HOSTS.dom = {
+  Object.assign(HOSTS.dom, {
     query: (selector) => handle(document.querySelector(textOf(selector))),
     query_all: (selector) =>
       hostText(
@@ -1672,7 +1807,7 @@ if (HOSTS.dom) {
     set_title: (body) => {
       document.title = textOf(body);
     },
-  };
+  });
 }
 "#;
 
@@ -1691,8 +1826,36 @@ if (HOSTS.dom) {
 /// program reads it.
 const NET_HOST: &str = r#"
 if (HOSTS.net) {
-  const REQUESTS = [];
-  const STREAMS = [];
+  // Maps, so that entries can leave. Every request used to stay in an array
+  // for the life of the page with its whole body, so two hundred fetches of a
+  // megabyte each held two hundred megabytes after the program had read them.
+  //
+  // A request gives up its body once the program has read it, and everything
+  // but its status and headers — `http.header` reads those from a response at
+  // any time later, so they stay. A stream is replaced by a record of how it
+  // ended once it has ended and been drained. A handle the table no longer
+  // has answers as a finished, empty one.
+  const REQUESTS = new Map();
+  const STREAMS = new Map();
+  let NEXT_HANDLE = 0;
+  const GONE_REQUEST = { state: 2, status: 0, body: "", error: "that request is gone", headers: null };
+  const requestAt = (id) => REQUESTS.get(Number(id)) ?? GONE_REQUEST;
+  const ENDED = { state: 3, queue: [], taken: { name: "", id: "" }, error: "", source: null, socket: null };
+  const streamAt = (id) => STREAMS.get(Number(id)) ?? ENDED;
+  // A stream that has ended and has nothing left to read keeps only how it
+  // ended — failed, with what the failure said, or closed.
+  const settle = (id) => {
+    const s = STREAMS.get(Number(id));
+    if (s === undefined || s.queue.length > 0 || (s.state !== 2 && s.state !== 3)) return;
+    STREAMS.set(Number(id), s.state === 3 ? ENDED : { ...ENDED, state: 2, error: s.error });
+  };
+  const described = (e) => {
+    try {
+      return String(e && e.message ? e.message : e);
+    } catch {
+      return "the host failed";
+    }
+  };
   const parseHeaders = (text) => {
     const out = {};
     for (const line of String(text).split("\n")) {
@@ -1701,10 +1864,11 @@ if (HOSTS.net) {
     }
     return out;
   };
-  HOSTS.net = {
+  Object.assign(HOSTS.net, {
     fetch_start: (method, url, body, headers, credentials, redirect) => {
       const request = { state: 0, status: 0, body: "", error: "", headers: null };
-      const id = REQUESTS.push(request) - 1;
+      const id = NEXT_HANDLE++;
+      REQUESTS.set(id, request);
       const init = { method: textOf(method), headers: parseHeaders(textOf(headers)) };
       // `std/http` builds these from enums, so they are always one of the
       // words `fetch` knows. They are still only applied when non-empty, so a
@@ -1719,7 +1883,12 @@ if (HOSTS.net) {
       // one of them ends in `wake`. A host that changes what a program is
       // blocked on and does not say so leaves the program blocked on it
       // forever — the scheduler has no other way to find out.
-      fetch(textOf(url), init)
+      //
+      // `fetch` itself is called inside the promise chain, so a host with no
+      // `fetch`, or one that refuses the arguments synchronously, fails the
+      // request rather than throwing through the module.
+      Promise.resolve()
+        .then(() => fetch(textOf(url), init))
         .then(async (response) => {
           request.status = response.status;
           request.headers = response.headers;
@@ -1728,20 +1897,33 @@ if (HOSTS.net) {
           wake();
         })
         .catch((e) => {
-          request.error = String(e && e.message ? e.message : e);
+          request.error = described(e);
           request.state = 2;
           wake();
         });
       return BigInt(id);
     },
-    fetch_state: (id) => BigInt(REQUESTS[Number(id)].state),
-    fetch_status: (id) => BigInt(REQUESTS[Number(id)].status),
-    fetch_body: (id) => hostText(REQUESTS[Number(id)].body),
+    fetch_state: (id) => BigInt(requestAt(id).state),
+    fetch_status: (id) => BigInt(requestAt(id).status),
+    // Read once, by `std/http`, when it builds the response — so the body is
+    // let go here rather than held for as long as the page lives.
+    fetch_body: (id) => {
+      const request = requestAt(id);
+      const body = request.body;
+      request.body = "";
+      return hostText(body);
+    },
     fetch_header: (id, name) => {
-      const headers = REQUESTS[Number(id)].headers;
+      const headers = requestAt(id).headers;
       return hostText(headers ? headers.get(textOf(name)) ?? "" : "");
     },
-    fetch_error: (id) => hostText(REQUESTS[Number(id)].error),
+    // A failed request has nothing else to read, so reading why is the last
+    // thing the program does with it.
+    fetch_error: (id) => {
+      const error = requestAt(id).error;
+      REQUESTS.delete(Number(id));
+      return hostText(error);
+    },
 
     // ---- server-sent events, which are EventSource ----
     //
@@ -1749,13 +1931,24 @@ if (HOSTS.net) {
     // by itself — so only a source it has given up on (readyState 2) is a
     // failure the program is told about.
     sse_open: (url, names) => {
-      const s = { state: 0, queue: [], taken: { name: "", id: "" }, source: null };
-      const id = STREAMS.push(s) - 1;
+      const s = { state: 0, queue: [], taken: { name: "", id: "" }, error: "", source: null };
+      const id = NEXT_HANDLE++;
+      STREAMS.set(id, s);
       if (typeof EventSource === "undefined") {
         s.state = 2;
         return BigInt(id);
       }
-      const source = new EventSource(textOf(url));
+      // The constructor throws for a URL it cannot parse, where a socket's
+      // was already guarded: a failed stream, not an exception through the
+      // module.
+      let source;
+      try {
+        source = new EventSource(textOf(url));
+      } catch (e) {
+        s.state = 2;
+        s.error = described(e);
+        return BigInt(id);
+      }
       s.source = source;
       s.take = (e) => {
         s.queue.push({ name: e.type || "message", id: e.lastEventId || "", data: e.data ?? "" });
@@ -1771,29 +1964,34 @@ if (HOSTS.net) {
       source.onerror = () => { if (source.readyState === 2) { s.state = 2; wake(); } };
       return BigInt(id);
     },
-    sse_state: (id) => BigInt(STREAMS[Number(id)].state),
-    sse_pending: (id) => BigInt(STREAMS[Number(id)].queue.length),
+    sse_state: (id) => {
+      const state = streamAt(id).state;
+      settle(id);
+      return BigInt(state);
+    },
+    sse_pending: (id) => BigInt(streamAt(id).queue.length),
     sse_next: (id) => {
-      const s = STREAMS[Number(id)];
+      const s = streamAt(id);
       const e = s.queue.shift();
       if (e === undefined) {
-        s.taken = { name: "", id: "" };
+        if (s !== ENDED) s.taken = { name: "", id: "" };
         return hostText("");
       }
       s.taken = { name: e.name, id: e.id };
       return hostText(e.data);
     },
-    sse_event_name: (id) => hostText(STREAMS[Number(id)].taken.name),
-    sse_event_id: (id) => hostText(STREAMS[Number(id)].taken.id),
+    sse_event_name: (id) => hostText(streamAt(id).taken.name),
+    sse_event_id: (id) => hostText(streamAt(id).taken.id),
     sse_listen: (id, name) => {
-      const s = STREAMS[Number(id)];
+      const s = streamAt(id);
       if (s.source) s.source.addEventListener(textOf(name), s.take);
       return 1n;
     },
     sse_close: (id) => {
-      const s = STREAMS[Number(id)];
+      const s = streamAt(id);
       if (s.source) s.source.close();
-      s.state = 3;
+      if (s !== ENDED) s.state = 3;
+      settle(id);
       return 1n;
     },
 
@@ -1804,7 +2002,8 @@ if (HOSTS.net) {
     // a message that was never sent.
     socket_open: (url) => {
       const s = { state: 0, queue: [], error: "", socket: null };
-      const id = STREAMS.push(s) - 1;
+      const id = NEXT_HANDLE++;
+      STREAMS.set(id, s);
       if (typeof WebSocket === "undefined") {
         s.state = 2;
         s.error = "this host has no WebSocket";
@@ -1815,7 +2014,7 @@ if (HOSTS.net) {
         socket = new WebSocket(textOf(url));
       } catch (e) {
         s.state = 2;
-        s.error = String(e && e.message ? e.message : e);
+        s.error = described(e);
         return BigInt(id);
       }
       s.socket = socket;
@@ -1837,27 +2036,42 @@ if (HOSTS.net) {
       };
       return BigInt(id);
     },
-    socket_state: (id) => BigInt(STREAMS[Number(id)].state),
-    socket_pending: (id) => BigInt(STREAMS[Number(id)].queue.length),
+    // The state is read last of all, after the queue is drained and the
+    // error said, so a socket that has ended is let go when it is asked.
+    socket_state: (id) => {
+      const state = streamAt(id).state;
+      if (state === 3) settle(id);
+      return BigInt(state);
+    },
+    socket_pending: (id) => BigInt(streamAt(id).queue.length),
     socket_next: (id) => {
-      const s = STREAMS[Number(id)];
-      const message = s.queue.shift();
+      const message = streamAt(id).queue.shift();
       return hostText(message === undefined ? "" : message);
     },
     socket_send: (id, message) => {
-      const s = STREAMS[Number(id)];
+      const s = streamAt(id);
       if (s.state !== 1 || !s.socket) return 0n;
-      s.socket.send(textOf(message));
+      // A socket closing under the send throws; that is a message not sent.
+      try {
+        s.socket.send(textOf(message));
+      } catch {
+        return 0n;
+      }
       return 1n;
     },
-    socket_error: (id) => hostText(STREAMS[Number(id)].error),
+    socket_error: (id) => {
+      const error = streamAt(id).error;
+      settle(id);
+      return hostText(error);
+    },
     socket_close: (id) => {
-      const s = STREAMS[Number(id)];
+      const s = streamAt(id);
       if (s.socket) s.socket.close();
-      s.state = 3;
+      if (s !== ENDED) s.state = 3;
+      settle(id);
       return 1n;
     },
-  };
+  });
 }
 "#;
 
@@ -1903,7 +2117,7 @@ if (HOSTS.audio) {
     if (context.state === "suspended") context.resume();
     return context;
   };
-  HOSTS.audio = {
+  Object.assign(HOSTS.audio, {
     note: (frequency, delay, seconds, gain) => {
       const ctx = ready();
       if (ctx === null) return;
@@ -2046,34 +2260,55 @@ if (HOSTS.audio) {
       return Number.isFinite(element.duration) ? element.duration : 0;
     },
     ended: () => element !== null && element.ended,
-  };
+  });
 }
 "#;
 
 const CRYPTO_HOST: &str = r#"
 if (HOSTS.crypto) {
-  const WORK = [];
+  // A `Map`, so finished work can leave: the program reads a piece of work's
+  // result or its error once, and then nothing refers to it again.
+  const WORK = new Map();
+  let NEXT_WORK = 0;
+  const GONE_WORK = { state: 2, result: "", error: "that work is gone" };
+  const workAt = (id) => WORK.get(Number(id)) ?? GONE_WORK;
   // Keys live here, on this side of the boundary. What the program holds is
   // an index into this array; the material itself never crosses. A key pair
   // is stored whole, and the private half is created non-extractable, so even
   // this file could not export it.
   const KEYS = [];
   const subtle = globalThis.crypto && globalThis.crypto.subtle;
+  // WebCrypto's `subtle` exists only in a secure context — https or
+  // localhost — and every call below would otherwise throw a `TypeError`
+  // about `undefined` straight through the module.
+  const needSubtle = () => {
+    if (!subtle) throw new Error("this host has no WebCrypto here — is the page served over https?");
+    return subtle;
+  };
   const hex = (buffer) =>
     [...new Uint8Array(buffer)].map((b) => b.toString(16).padStart(2, "0")).join("");
   const unhex = (text) =>
     new Uint8Array((String(text).match(/../g) ?? []).map((b) => parseInt(b, 16)));
-  const start = (promise) => {
+  // Takes the work as a function, called inside the promise chain: WebCrypto
+  // throws synchronously for some bad arguments rather than rejecting, and a
+  // throw there crossed the boundary raw.
+  const start = (begin) => {
     const work = { state: 0, result: "", error: "" };
-    const id = WORK.push(work) - 1;
-    promise
+    const id = NEXT_WORK++;
+    WORK.set(id, work);
+    Promise.resolve()
+      .then(begin)
       .then((value) => {
         work.result = value;
         work.state = 1;
         wake();
       })
       .catch((e) => {
-        work.error = String(e && e.message ? e.message : e);
+        try {
+          work.error = String(e && e.message ? e.message : e);
+        } catch {
+          work.error = "the host failed";
+        }
         work.state = 2;
         wake();
       });
@@ -2090,17 +2325,30 @@ if (HOSTS.crypto) {
     }
     throw e;
   };
-  HOSTS.crypto = {
+  Object.assign(HOSTS.crypto, {
+    // `getRandomValues` fills at most 65,536 bytes a call and throws a
+    // `QuotaExceededError` past that, so a larger request is filled a slice at
+    // a time. A count that is not a size answers the empty string: nothing
+    // was asked for that can be given.
     random_hex: (count) => {
-      const out = new Uint8Array(Number(count));
-      globalThis.crypto.getRandomValues(out);
+      const n = Number(count);
+      if (!Number.isSafeInteger(n) || n <= 0) return hostText("");
+      let out;
+      try {
+        out = new Uint8Array(n);
+      } catch {
+        return hostText("");
+      }
+      for (let at = 0; at < n; at += 65536) {
+        globalThis.crypto.getRandomValues(out.subarray(at, Math.min(n, at + 65536)));
+      }
       return hostText(hex(out.buffer));
     },
     digest_start: (algorithm, text) =>
-      start(subtle.digest(textOf(algorithm), bytes(textOf(text))).then(hex)),
+      start(() => needSubtle().digest(textOf(algorithm), bytes(textOf(text))).then(hex)),
     hmac_start: (algorithm, key, text) =>
-      start(
-        subtle
+      start(() =>
+        needSubtle()
           .importKey(
             "raw",
             bytes(textOf(key)),
@@ -2114,8 +2362,8 @@ if (HOSTS.crypto) {
           .then(hex),
       ),
     derive_start: (password, salt, iterations) =>
-      start(
-        subtle
+      start(() =>
+        needSubtle()
           .importKey("raw", bytes(textOf(password)), "PBKDF2", false, ["deriveBits"])
           .then((k) =>
             subtle.deriveBits(
@@ -2134,31 +2382,31 @@ if (HOSTS.crypto) {
     key_generate_start: (kind) => {
       const name = textOf(kind);
       if (name === "AES-GCM") {
-        return start(
-          subtle.generateKey({ name, length: 256 }, false, ["encrypt", "decrypt"]).then(keep),
+        return start(() =>
+          needSubtle().generateKey({ name, length: 256 }, false, ["encrypt", "decrypt"]).then(keep),
         );
       }
       const usages = name === "Ed25519" ? ["sign", "verify"] : ["deriveBits"];
-      return start(subtle.generateKey(name, false, usages).catch(unsupported(name)).then(keep));
+      return start(() => needSubtle().generateKey(name, false, usages).catch(unsupported(name)).then(keep));
     },
     key_import_start: (material) => {
       const text = textOf(material);
       if (!/^[0-9a-f]{64}$/i.test(text)) {
-        return start(Promise.reject(new Error("a key is 32 bytes — 64 hex characters")));
+        return start(() => Promise.reject(new Error("a key is 32 bytes — 64 hex characters")));
       }
-      return start(
-        subtle.importKey("raw", unhex(text), "AES-GCM", false, ["encrypt", "decrypt"]).then(keep),
+      return start(() =>
+        needSubtle().importKey("raw", unhex(text), "AES-GCM", false, ["encrypt", "decrypt"]).then(keep),
       );
     },
     key_public_start: (key) =>
-      start(
+      start(() =>
         Promise.resolve(KEYS[Number(key)])
           .then((pair) => subtle.exportKey("raw", pair.publicKey))
           .then(hex),
       ),
     seal_start: (key, nonce, plaintext) =>
-      start(
-        subtle
+      start(() =>
+        needSubtle()
           .encrypt(
             { name: "AES-GCM", iv: unhex(textOf(nonce)) },
             KEYS[Number(key)],
@@ -2167,8 +2415,8 @@ if (HOSTS.crypto) {
           .then(hex),
       ),
     open_start: (key, nonce, cipher) =>
-      start(
-        subtle
+      start(() =>
+        needSubtle()
           .decrypt(
             { name: "AES-GCM", iv: unhex(textOf(nonce)) },
             KEYS[Number(key)],
@@ -2183,12 +2431,12 @@ if (HOSTS.crypto) {
           }),
       ),
     sign_start: (key, text) =>
-      start(
-        subtle.sign("Ed25519", KEYS[Number(key)].privateKey, bytes(textOf(text))).then(hex),
+      start(() =>
+        needSubtle().sign("Ed25519", KEYS[Number(key)].privateKey, bytes(textOf(text))).then(hex),
       ),
     verify_start: (pub, text, signature) =>
-      start(
-        subtle
+      start(() =>
+        needSubtle()
           .importKey("raw", unhex(textOf(pub)), "Ed25519", false, ["verify"])
           .catch(unsupported("Ed25519"))
           .then((k) =>
@@ -2205,8 +2453,8 @@ if (HOSTS.crypto) {
     // only inside this chain: it has structure an attacker can use, and HKDF
     // is what turns it into a key that does not.
     agree_start: (key, pub) =>
-      start(
-        subtle
+      start(() =>
+        needSubtle()
           .importKey("raw", unhex(textOf(pub)), "X25519", false, [])
           .catch(unsupported("X25519"))
           .then((theirs) =>
@@ -2224,9 +2472,18 @@ if (HOSTS.crypto) {
           )
           .then(keep),
       ),
-    work_state: (id) => BigInt(WORK[Number(id)].state),
-    work_result: (id) => hostText(WORK[Number(id)].result),
-    work_error: (id) => hostText(WORK[Number(id)].error),
+    work_state: (id) => BigInt(workAt(id).state),
+    // Either of these is the last read of a piece of work.
+    work_result: (id) => {
+      const result = workAt(id).result;
+      WORK.delete(Number(id));
+      return hostText(result);
+    },
+    work_error: (id) => {
+      const error = workAt(id).error;
+      WORK.delete(Number(id));
+      return hostText(error);
+    },
     // Same time whichever way it goes: every byte is compared, and the length
     // is folded in rather than returned early on.
     constant_time_equal: (a, b) => {
@@ -2238,7 +2495,7 @@ if (HOSTS.crypto) {
       }
       return diff === 0 ? 1 : 0;
     },
-  };
+  });
 }
 "#;
 
@@ -2383,11 +2640,11 @@ pub fn generate_api(api: &[crate::Export], wasm_path: &str) -> (String, String) 
     // function. Those names come from a `use`d module rather than from the
     // program, and a program's public interface is its own `pub fn`s: the
     // standard library is not part of the door this file opens.
-    let own = |e: &&crate::Export| !e.name.contains('.');
+    let own = |e: &&crate::Export| e.name != "main" && !e.name.contains('.');
     let describable: Vec<&crate::Export> = api
         .iter()
-        .filter(|e| e.name != "main")
         .filter(own)
+        .filter(|e| !e.generic && e.name != "load")
         .filter(|e| {
             e.params.iter().all(|(_, t)| ts_type(t).is_some())
                 && e.ret
@@ -2397,6 +2654,12 @@ pub fn generate_api(api: &[crate::Export], wasm_path: &str) -> (String, String) 
         })
         .collect();
 
+    // The file's own bindings all start with `$kite`, which no Kite name can:
+    // a `pub fn text` or a parameter called `str` used to redeclare or shadow
+    // the conversion helper of that name, and the wrapper either failed to
+    // load or called a string. `load` is the one name a caller has to know,
+    // so it stays plain — and a Kite function called `load` is the one that
+    // cannot be exported, and is named below as left out.
     let mut js = String::from(
         "// Generated by kitec. Do not edit.\n\
          //\n\
@@ -2404,21 +2667,27 @@ pub fn generate_api(api: &[crate::Export], wasm_path: &str) -> (String, String) 
          // conversions already applied: an `int` is a BigInt on the wire, and a\n\
          // `str` crosses through the module's Unicode-scalar conversion helpers.\n\
          // A caller sees ordinary JavaScript values.\n\n\
-         import { instantiate, str, text } from \"./app.js\";\n\n\
-         let module = null;\n\n\
-         /// Load the module. Call this once before anything else here.\n\
-         export async function load(source = ",
-    );
-    js.push_str(&json_string(wasm_path));
-    js.push_str(
-        ") {\n  module = await instantiate(source);\n  return module;\n}\n\n\
-         const ready = () => {\n\
-         \x20 if (module === null) {\n\
+         import {\n\
+         \x20 instantiate as $kiteInstantiate,\n\
+         \x20 str as $kiteStr,\n\
+         \x20 text as $kiteText,\n\
+         } from \"./app.js\";\n\n\
+         let $kiteModule = null;\n\n\
+         /// Load the module. Call this once before anything else here. With no\n\
+         /// source, the module beside this file — not beside the page, which is\n\
+         /// what a bare name resolves against, and which Node does not have.\n\
+         export async function load(source) {\n\
+         \x20 $kiteModule = await $kiteInstantiate(source ?? new URL(\"./WASM_PATH\", import.meta.url));\n\
+         \x20 return $kiteModule;\n\
+         }\n\n\
+         const $kiteReady = () => {\n\
+         \x20 if ($kiteModule === null) {\n\
          \x20   throw new Error(\"call `await load()` before calling into the module\");\n\
          \x20 }\n\
-         \x20 return module;\n\
+         \x20 return $kiteModule;\n\
          };\n",
-    );
+    )
+    .replace("WASM_PATH", wasm_path.trim_start_matches("./"));
 
     let mut dts = String::from(
         "// Generated by kitec. Do not edit.\n\
@@ -2426,12 +2695,14 @@ pub fn generate_api(api: &[crate::Export], wasm_path: &str) -> (String, String) 
          // A Kite module, described for TypeScript. `int` is 64-bit, so it is a\n\
          // `bigint` here rather than a `number` that would silently lose the top\n\
          // eleven bits.\n\n\
-         export declare function load(source?: string | Uint8Array): Promise<unknown>;\n",
+         export declare function load(source?: string | URL | Uint8Array): Promise<unknown>;\n",
     );
 
     for e in &describable {
         // A JavaScript reserved word would be a syntax error in the wrapper,
-        // and a Kite parameter may legitimately be called `new` or `class`.
+        // and a Kite parameter may legitimately be called `new` or `class` —
+        // or `static`, `eval` or `arguments`, which only strict mode refuses,
+        // and a module is always strict.
         let names: Vec<String> = e
             .params
             .iter()
@@ -2455,86 +2726,171 @@ pub fn generate_api(api: &[crate::Export], wasm_path: &str) -> (String, String) 
             .iter()
             .zip(&names)
             .map(|((_, ty), n)| match ty.as_str() {
-                "str" => format!("str({})", n),
+                "str" => format!("$kiteStr({})", n),
                 "bool" => format!("{} ? 1 : 0", n),
                 _ => n.clone(),
             })
             .collect();
-        let call = format!("ready().{}({})", e.name, args.join(", "));
+        // A property name may be any word, reserved or not.
+        let call = format!("$kiteReady().{}({})", e.name, args.join(", "));
         let body = match e.ret.as_deref() {
-            Some("str") => format!("text({})", call),
+            Some("str") => format!("$kiteText({})", call),
             Some("bool") => format!("({}) !== 0", call),
             _ => call,
         };
-        js.push_str(&format!(
-            "\nexport function {}({}) {{\n  return {};\n}}\n",
-            e.name,
-            names.join(", "),
-            body
-        ));
-
         let sig: Vec<String> = e
             .params
             .iter()
             .zip(&names)
             .map(|((_, ty), n)| format!("{}: {}", n, ts_type(ty).unwrap_or("unknown")))
             .collect();
-        dts.push_str(&format!(
-            "export declare function {}({}): {};\n",
-            e.name,
-            sig.join(", "),
-            e.ret.as_deref().and_then(ts_type).unwrap_or("void")
-        ));
+        let ret = e.ret.as_deref().and_then(ts_type).unwrap_or("void");
+
+        // A name JavaScript cannot declare — `pub fn delete` — is declared
+        // under a private one and exported under its own, which an export
+        // clause may spell with any word. Written plainly it was a syntax
+        // error that took the whole file, and every other function, with it.
+        if reserved(&e.name) {
+            let local = format!("$kite_{}", e.name);
+            js.push_str(&format!(
+                "\nfunction {}({}) {{\n  return {};\n}}\nexport {{ {} as {} }};\n",
+                local,
+                names.join(", "),
+                body,
+                local,
+                e.name
+            ));
+            dts.push_str(&format!(
+                "declare function {}({}): {};\nexport {{ {} as {} }};\n",
+                local,
+                sig.join(", "),
+                ret,
+                local,
+                e.name
+            ));
+        } else {
+            js.push_str(&format!(
+                "\nexport function {}({}) {{\n  return {};\n}}\n",
+                e.name,
+                names.join(", "),
+                body
+            ));
+            dts.push_str(&format!(
+                "export declare function {}({}): {};\n",
+                e.name,
+                sig.join(", "),
+                ret
+            ));
+        }
     }
 
-    let skipped: Vec<&str> = api
-        .iter()
-        .filter(|e| e.name != "main")
-        .filter(own)
-        .filter(|e| !describable.iter().any(|d| d.name == e.name))
-        .map(|e| e.name.as_str())
-        .collect();
-    if !skipped.is_empty() {
-        let note = format!(
+    // Everything of the program's own that is not above, and why.
+    let left_out = |why: fn(&crate::Export) -> bool| -> Vec<&str> {
+        api.iter()
+            .filter(own)
+            .filter(|e| !describable.iter().any(|d| d.name == e.name))
+            .filter(|e| why(e))
+            .map(|e| e.name.as_str())
+            .collect()
+    };
+    let generic = left_out(|e| e.generic);
+    let named_load = left_out(|e| !e.generic && e.name == "load");
+    let untyped = left_out(|e| !e.generic && e.name != "load");
+    let mut note = String::new();
+    if !untyped.is_empty() {
+        note.push_str(&format!(
             "\n// Left out, because these take or answer with a type JavaScript has no\n\
              // representation for yet: {}.\n\
              // The module still exports them; describing them wrongly would be worse\n\
              // than not describing them.\n",
-            skipped.join(", ")
-        );
-        js.push_str(&note);
-        dts.push_str(&note);
+            untyped.join(", ")
+        ));
     }
+    if !generic.is_empty() {
+        note.push_str(&format!(
+            "\n// Left out, because they are generic and the module has a copy per type\n\
+             // it was used at rather than one function to call: {}.\n",
+            generic.join(", ")
+        ));
+    }
+    if !named_load.is_empty() {
+        note.push_str(
+            "\n// Left out: `load`, whose name this file needs for loading the module.\n\
+             // The module still exports it; call it through the object `load` answers.\n",
+        );
+    }
+    js.push_str(&note);
+    dts.push_str(&note);
 
     (js, dts)
 }
 
-/// Words JavaScript will not accept as a parameter name.
+/// Whether there is anything of a program's own to write `api.js` about: a
+/// `pub fn` other than `main`, described or left out with a reason.
+///
+/// Not "does the module export anything": a program that uses the standard
+/// library exports `http.get` and the rest under their qualified names, and a
+/// program with no `pub fn` of its own got an `api.js` with nothing in it but
+/// `load`.
+pub fn has_api(api: &[crate::Export]) -> bool {
+    api.iter().any(|e| e.name != "main" && !e.name.contains('.'))
+}
+
+/// Words JavaScript will not accept as a name a module declares: the reserved
+/// words, the ones strict mode adds — a module is always strict — and the two
+/// strict mode refuses to bind.
 fn reserved(name: &str) -> bool {
     matches!(
         name,
-        "new"
+        "await"
+            | "break"
+            | "case"
+            | "catch"
             | "class"
-            | "function"
-            | "var"
-            | "let"
             | "const"
-            | "return"
-            | "typeof"
-            | "await"
-            | "yield"
-            | "this"
-            | "null"
-            | "true"
-            | "false"
+            | "continue"
+            | "debugger"
             | "default"
-            | "import"
-            | "export"
             | "delete"
-            | "void"
+            | "do"
+            | "else"
+            | "enum"
+            | "export"
+            | "extends"
+            | "false"
+            | "finally"
+            | "for"
+            | "function"
+            | "if"
+            | "import"
             | "in"
-            | "of"
+            | "instanceof"
+            | "new"
+            | "null"
+            | "return"
+            | "super"
+            | "switch"
+            | "this"
+            | "throw"
+            | "true"
+            | "try"
+            | "typeof"
+            | "var"
+            | "void"
+            | "while"
             | "with"
+            | "yield"
+            | "let"
+            | "static"
+            | "implements"
+            | "interface"
+            | "package"
+            | "private"
+            | "protected"
+            | "public"
+            | "eval"
+            | "arguments"
+            | "of"
     )
 }
 
@@ -2577,7 +2933,8 @@ mod tests {
         assert!(g.contains("new WebAssembly.Memory({ initial: 1, maximum: 1 })"));
         assert!(g.contains("text_len: textLength"));
         assert!(g.contains(r#"stringRuntime()["$kite.str.from_host"]"#));
-        assert!(g.contains(r#""app.wasm""#));
+        // Beside the glue, not beside whatever page loaded it.
+        assert!(g.contains(r#"new URL("./app.wasm", import.meta.url)"#));
         assert!(g.contains("export async function run"));
     }
 }

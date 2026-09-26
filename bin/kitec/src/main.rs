@@ -283,7 +283,7 @@ fn main() -> ExitCode {
         // has to be beside it or a browser asks for something that is not
         // there. §16 is what requires it: a trap in a Kite island should name
         // a `.kite` file rather than `wasm-function[37]`.
-        if let Some(map) = result.wasm_source_map() {
+        if let Some(map) = result.wasm_source_map(Some(std::path::Path::new(dir))) {
             let map_path = format!("{}/{}", dir, kite_driver::SOURCE_MAP_NAME);
             if let Err(e) = std::fs::write(&map_path, map) {
                 return fail(&format!("cannot write `{}`: {}", map_path, e));
@@ -309,7 +309,7 @@ fn main() -> ExitCode {
         let (api_js, api_dts) = kite_driver::generate_api(&module.api, "app.wasm");
         let api_js_path = format!("{}/api.js", dir);
         let api_dts_path = format!("{}/api.d.ts", dir);
-        let has_api = module.api.iter().any(|e| e.name != "main");
+        let has_api = kite_driver::has_api(&module.api);
         if has_api {
             if let Err(e) = std::fs::write(&api_js_path, api_js) {
                 return fail(&format!("cannot write `{}`: {}", api_js_path, e));

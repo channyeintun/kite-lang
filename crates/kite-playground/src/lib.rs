@@ -190,7 +190,7 @@ pub unsafe extern "C" fn kite_build(
         Err(message) => return frame(&[("diagnostics", message.into_bytes())]),
     };
     let compiled = kite_driver::compile_provided(
-        "main.kite",
+        &module.path,
         &module.entry,
         kite_driver::Emit::Wasm,
         release != 0,
@@ -199,17 +199,28 @@ pub unsafe extern "C" fn kite_build(
     if compiled.failed() {
         return frame(&[("diagnostics", compiled.render_diagnostics().into_bytes())]);
     }
-    let Some(module) = compiled.wasm.as_ref() else {
+    let Some(wasm) = compiled.wasm.as_ref() else {
         return frame(&[("diagnostics", b"error: no module was produced\n".to_vec())]);
     };
-    let glue = kite_driver::generate_glue_with_hosts("app.wasm", &module.hosts);
-    let (api_js, api_dts) = kite_driver::generate_api(&module.api, "app.wasm");
-    frame(&[
-        ("app.wasm", module.bytes.clone()),
+    let glue = kite_driver::generate_glue_with_hosts("app.wasm", &wasm.hosts);
+    let mut out: Vec<(&str, Vec<u8>)> = vec![
+        ("app.wasm", wasm.bytes.clone()),
         ("app.js", glue.into_bytes()),
-        ("api.js", api_js.into_bytes()),
-        ("api.d.ts", api_dts.into_bytes()),
-    ])
+    ];
+    // The files `kitec build` writes, and only those: a wrapper when the
+    // program has an interface of its own, and the map the module's
+    // `sourceMappingURL` names whenever it names one — which it does in every
+    // debug build, so a dev server served a module pointing at a map that was
+    // never written.
+    if kite_driver::has_api(&wasm.api) {
+        let (api_js, api_dts) = kite_driver::generate_api(&wasm.api, "app.wasm");
+        out.push(("api.js", api_js.into_bytes()));
+        out.push(("api.d.ts", api_dts.into_bytes()));
+    }
+    if let Some(map) = compiled.wasm_source_map(None) {
+        out.push((kite_driver::SOURCE_MAP_NAME, map.into_bytes()));
+    }
+    frame(&out)
 }
 
 /// Run a whole module, the way [`kite_build`] compiles one.
@@ -229,7 +240,7 @@ pub unsafe extern "C" fn kite_run_module(ptr: *const u8, len: usize) -> *mut u8 
         Err(message) => return answer(message),
     };
     let compiled = kite_driver::compile_provided(
-        "main.kite",
+        &module.path,
         &module.entry,
         kite_driver::Emit::Check,
         false,
@@ -273,7 +284,7 @@ pub unsafe extern "C" fn kite_check_module(ptr: *const u8, len: usize) -> *mut u
         Err(message) => return answer(message),
     };
     let compiled = kite_driver::compile_provided(
-        "main.kite",
+        &module.path,
         &module.entry,
         kite_driver::Emit::Check,
         false,
@@ -282,8 +293,14 @@ pub unsafe extern "C" fn kite_check_module(ptr: *const u8, len: usize) -> *mut u
     answer(compiled.render_diagnostics())
 }
 
-/// A framed module: the program, and its siblings by module name.
+/// A framed module: the program, what to call it, and its siblings by module
+/// name.
 struct ModuleInput {
+    /// The name diagnostics give the program's file. The first entry's name
+    /// when it is a `.kite` path — which is how a caller says which file it
+    /// read — and `main.kite` otherwise, which is what every diagnostic used
+    /// to say whatever the file was called.
+    path: String,
     entry: String,
     siblings: std::collections::HashMap<String, String>,
 }
@@ -301,8 +318,13 @@ unsafe fn module_input(ptr: *const u8, len: usize) -> Result<ModuleInput, String
     let Some(files) = unframe(bytes) else {
         return Err("error: the input is malformed\n".to_string());
     };
-    let Some((_, entry)) = files.first() else {
+    let Some((name, entry)) = files.first() else {
         return Err("error: no program was given\n".to_string());
+    };
+    let path = if name.ends_with(".kite") {
+        name.clone()
+    } else {
+        "main.kite".to_string()
     };
     let Ok(src) = std::str::from_utf8(entry) else {
         return Err("error: the source is not valid UTF-8\n".to_string());
@@ -313,7 +335,7 @@ unsafe fn module_input(ptr: *const u8, len: usize) -> Result<ModuleInput, String
             siblings.insert(name.clone(), text.to_string());
         }
     }
-    Ok(ModuleInput { entry: src.to_string(), siblings })
+    Ok(ModuleInput { path, entry: src.to_string(), siblings })
 }
 
 /// The framing described on [`kite_build`], read back.

@@ -1693,6 +1693,360 @@ fn main() {
     ),
 ];
 
+/// Programs pinning down the WebAssembly target against the other two. Each
+/// one is here because Wasm once refused it, trapped on it, or answered
+/// differently.
+const WASM_TARGET: &[(&str, &str)] = &[
+    // A map key was compared with `i32.eq` unless it was a number or a string,
+    // so a struct, enum, tuple, optional or slice key produced a module the
+    // validator refused (E0900). The removal from a map built elsewhere is here
+    // because it was the one key comparison the string runtime's scan missed.
+    (
+        "aggregate-map-keys",
+        r#"struct P {
+  x: int
+  name: str
+}
+
+enum C {
+  Red
+  Rgb(int, int, int)
+}
+
+fn drop_a(m: {str: int}) -> {str: int} {
+  var n = m
+  n.remove("a")
+  return n
+}
+
+fn ori(o: Option<int>, d: int) -> int {
+  return match o {
+    nil => d,
+    v => v,
+  }
+}
+
+fn ors(o: Option<str>, d: str) -> str {
+  return match o {
+    nil => d,
+    v => v,
+  }
+}
+
+fn orb(o: Option<bool>, d: bool) -> bool {
+  return match o {
+    nil => d,
+    v => v,
+  }
+}
+
+fn main() {
+  var ps: {P: int} = {P{ x: 1, name: "one" }: 1}
+  ps[P{ x: 1, name: "one" }] = 10
+  ps[P{ x: 2, name: "two" }] = 20
+  io.print(ps.len())
+  io.print(ori(ps[P{ x: 1, name: "one" }], -1))
+  io.print(ori(ps[P{ x: 1, name: "uno" }], -1))
+  ps.remove(P{ x: 1, name: "one" })
+  io.print(ps.len())
+
+  var cs: {C: str} = {}
+  cs[C.Red] = "red"
+  cs[C.Rgb(1, 2, 3)] = "grey"
+  cs[C.Rgb(1, 2, 3)] = "gray"
+  cs[C.Rgb(3, 2, 1)] = "other"
+  io.print(cs.len())
+  io.print(ors(cs[C.Rgb(1, 2, 3)], "?"))
+
+  var ts: {(int, str): bool} = {}
+  ts[(1, "a")] = true
+  ts[(1, "a")] = false
+  ts[(1, "b")] = true
+  io.print(ts.len())
+  io.print(orb(ts[(1, "a")], true))
+
+  var os: {Option<int>: int} = {}
+  os[nil] = 1
+  os[nil] = 2
+  os[5] = 3
+  io.print(os.len())
+  io.print(ori(os[nil], 0))
+
+  var ss: {[int]: int} = {}
+  ss[[1, 2]] = 1
+  ss[[1, 2]] = 2
+  ss[[2, 1]] = 3
+  io.print(ss.len())
+  io.print(ori(ss[[1, 2]], 0))
+
+  var nested: {{str: int}: str} = {}
+  nested[{"a": 1}] = "x"
+  nested[{"a": 1}] = "y"
+  io.print(nested.len())
+
+  let m = drop_a({"a": 1, "b": 2})
+  io.print(m.len())
+  let q: {P: int} = {P{ x: 1, name: "one" }: 1}
+  let r: {P: int} = {P{ x: 1, name: "one" }: 1}
+  io.print(q == r)
+}
+"#,
+    ),
+    // `Option<Option<T>>` is `Option<T>`, so a lookup in a map of optional
+    // values, or `.get()` on a slice of them, answers the stored optional
+    // itself. Wasm looked for a box around an optional, found none and trapped.
+    // A slice is a header over a buffer that may be longer than it, written
+    // in place when nothing else can see it (`slices` in the Wasm backend).
+    // Every way a slice's reference can be kept — another local, a call, a
+    // field, a map, an optional, a closure, a slice of slices, a loop over it —
+    // is here, with both copies changed afterwards: the case that breaks is a
+    // buffer shared by two names, each pushing into the other's next slot.
+    (
+        "slices-are-values",
+        r#"struct Holder {
+  items: [int]
+}
+
+fn show(xs: [int]) -> str {
+  var s = "["
+  for x in xs {
+    s = s + " \(x)"
+  }
+  return s + " ]"
+}
+
+fn grow(xs: [int]) -> [int] {
+  var ys = xs
+  ys.push(99)
+  return ys
+}
+
+fn stamp(xs: [int], v: int) -> [int] {
+  var ys = xs
+  ys[0] = v
+  return ys
+}
+
+fn counted(n: int) -> [int] {
+  var xs: [int] = []
+  for i in 0..n {
+    xs.push(i)
+  }
+  return xs
+}
+
+fn main() {
+  // A snapshot is a value: what happens to the original afterwards is not
+  // seen through it, even when the storage had room to spare.
+  var xs = counted(10)
+  let a = xs
+  xs.push(10)
+  xs[0] = 100
+  io.print(show(a))
+  io.print(show(xs))
+
+  // Two names for one buffer with capacity left, both pushing: neither may
+  // write into the other's next slot.
+  var p: [int] = [1, 2, 3]
+  p.push(4)
+  var q = p
+  p.push(5)
+  q.push(6)
+  q[0] = -1
+  io.print(show(p))
+  io.print(show(q))
+
+  // Through a call, both ways.
+  let g = grow(p)
+  let s = stamp(p, 7)
+  io.print(show(p))
+  io.print(show(g))
+  io.print(show(s))
+
+  // Into a struct, a map, an optional and a closure, then changed.
+  var h = Holder{ items: xs }
+  var m = {"k": xs}
+  let o: Option<[int]> = xs
+  let held = xs
+  let f = || held.len()
+  xs.push(11)
+  xs[1] = -5
+  io.print(show(h.items))
+  match m["k"] {
+    nil => io.print("nil"),
+    v => io.print(show(v)),
+  }
+  io.print(f())
+  io.print(xs.len())
+  match o {
+    nil => io.print("nil"),
+    v => io.print(v.len()),
+  }
+  var it = h.items
+  it.push(12)
+  io.print(h.items.len())
+  io.print(it.len())
+
+  // The classic: one row reused while it is collected.
+  var rows: [[int]] = []
+  var row: [int] = []
+  for i in 0..4 {
+    row.push(i)
+    rows.push(row)
+  }
+  for r in rows {
+    io.print(show(r))
+  }
+  var first = rows[0]
+  first.push(50)
+  rows[1] = first
+  io.print(show(rows[0]))
+  io.print(show(rows[1]))
+
+  // Iterating a slice while pushing onto it sees the slice as it was.
+  var walk: [int] = [1, 2]
+  for w in walk {
+    walk.push(w * 10)
+  }
+  io.print(show(walk))
+
+  // A window is a copy.
+  var base = counted(6)
+  var win = base[1..4]
+  win[0] = 42
+  win.push(43)
+  base[2] = 24
+  io.print(show(base))
+  io.print(show(win))
+
+  // Self-assignment, and a slice rebuilt in a loop from its own copy.
+  var self_ = [5]
+  self_ = self_
+  self_.push(6)
+  var acc: [int] = []
+  for i in 0..5 {
+    let before = acc
+    acc.push(i)
+    if before.len() + 1 != acc.len() {
+      io.print("bad")
+    }
+  }
+  io.print(show(acc))
+
+  // Capacity is not length: equality, `get` and ranges see only the slice.
+  var spare: [int] = []
+  spare.push(1)
+  io.print(spare == [1])
+  io.print(spare.get(1) == nil)
+  io.print(show(spare[0..3]))
+  var keys: {[int]: str} = {}
+  keys[spare] = "one"
+  match keys[[1]] {
+    nil => io.print("missing"),
+    v => io.print(v),
+  }
+}
+"#,
+    ),
+    // Wasm's generated `==` called itself for each component, so two lists a
+    // few hundred thousand cells long exhausted the engine's stack with a
+    // `RangeError` where the other two answer. It walks a worklist now.
+    (
+        "deep-values-compare-without-recursing",
+        r#"enum List {
+  Empty
+  Cons(int, List)
+}
+
+struct Node {
+  label: str
+  next: Option<Node>
+}
+
+fn build(n: int, last: int) -> List {
+  var l = List.Cons(last, List.Empty)
+  for i in 0..n {
+    l = List.Cons(i, l)
+  }
+  return l
+}
+
+fn chain(n: int) -> Option<Node> {
+  var head: Option<Node> = nil
+  for i in 0..n {
+    head = Node{ label: "n\(i % 3)", next: head }
+  }
+  return head
+}
+
+fn main() {
+  let a = build(200000, 0)
+  let b = build(200000, 0)
+  let c = build(200000, 1)
+  io.print(a == b)
+  io.print(a == c)
+  io.print(a != c)
+  io.print(chain(100000) == chain(100000))
+  let nested = [[build(3, 0)], [build(2, 0), List.Empty]]
+  io.print(nested == [[build(3, 0)], [build(2, 0), List.Empty]])
+  io.print(nested == [[build(3, 0)], [build(2, 1), List.Empty]])
+  io.print((1, [1.5, 2.5], "x") == (1, [1.5, 2.5], "x"))
+  io.print({"k": [build(1, 0)]} == {"k": [build(1, 0)]})
+}
+"#,
+    ),
+    // A map literal with a key given twice is one entry, at the first key's
+    // position with the last value — the VM's rule. Wasm built its arrays
+    // as written and had two.
+    (
+        "a-map-literal-keeps-one-entry-per-key",
+        r#"fn main() {
+    let k = "a"
+    let m = {k: 1, "b": 2, "a": 3}
+    io.print(m.len())
+    io.print(m.keys().len())
+    for key in m.keys() {
+        io.print(key)
+    }
+    let n = {1: "x", 1: "y"}
+    io.print(n.len())
+}
+"#,
+    ),
+    (
+        "optional-values-in-maps-and-slices",
+        r#"fn main() {
+    var m: {str: Option<int>} = {"a": 5, "b": nil}
+    m["c"] = 7
+    m["d"] = nil
+    let a = m["a"]
+    let b = m["b"]
+    let z = m["z"]
+    io.print(a == nil)
+    io.print(b == nil)
+    io.print(z == nil)
+    let c = m["c"]
+    if c != nil {
+        io.print(c)
+    }
+    io.print(m.len())
+    var xs: [Option<str>] = ["x", nil]
+    xs.push(nil)
+    io.print(xs.get(0) == nil)
+    io.print(xs.get(1) == nil)
+    io.print(xs.get(9) == nil)
+    match xs.get(0) {
+        nil => io.print("none"),
+        s => io.print(s),
+    }
+    for k in m.keys() {
+        io.print(k)
+    }
+}
+"#,
+    ),
+];
+
 /// Programs above that need a rule of the checker's which may not have landed:
 /// they are skipped while the checker still refuses them, and compared the
 /// moment it accepts them. `A(x) | B(x)` is lowered correctly already; until
@@ -1912,7 +2266,7 @@ fn all_backends_agree() {
     let root = std::env::temp_dir().join(format!("kite-diff-{}", std::process::id()));
     let mut mismatches = Vec::new();
 
-    for (name, src) in PROGRAMS.iter().chain(MIDDLE_END) {
+    for (name, src) in PROGRAMS.iter().chain(MIDDLE_END).chain(WASM_TARGET) {
         if AWAITING_THE_CHECKER.contains(name)
             && compile(format!("{}.kite", name), src, Emit::Check).failed()
         {
@@ -1952,6 +2306,37 @@ fn all_backends_agree() {
         mismatches.len(),
         mismatches.join("\n\n")
     );
+}
+
+/// Literals longer than one `array.new_fixed` may be. V8 refuses more than
+/// 10,000 operands to one when the module is *instantiated*, after the
+/// validator has passed it, so a 10,001-element slice or map literal built a
+/// module that `build` accepted and the browser would not load. Generated
+/// rather than written out.
+#[test]
+fn literals_past_ten_thousand_elements_agree() {
+    let elems: Vec<String> = (0..10_001).map(|i| i.to_string()).collect();
+    let entries: Vec<String> = (0..10_001).map(|i| format!("{}: \"v{}\"", i, i)).collect();
+    let src = format!(
+        "fn main() {{\n  let xs = [{}]\n  io.print(xs.len())\n  io.print(xs[10000])\n\
+         \x20 let m = {{{}}}\n  io.print(m.len())\n  match m[10000] {{\n    nil => io.print(\"none\"),\n\
+         \x20   v => io.print(v),\n  }}\n}}\n",
+        elems.join(", "),
+        entries.join(", ")
+    );
+    let name = "literals-past-ten-thousand";
+    let vm = run_on_vm(name, &src);
+    assert_eq!(vm, "10001\n10000\n10001\nv10000\n");
+    // The native backend refuses a literal past 4,096 elements at compile
+    // time (E0204) rather than building one it cannot, so the comparison
+    // here is the VM against Wasm.
+    if node_available() {
+        let dir = std::env::temp_dir().join(format!("kite-biglit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create work directory");
+        let wasm = run_on_wasm(name, &src, &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(wasm, vm, "wasm");
+    }
 }
 
 /// The object-file path, through the system linker: one program built into a
@@ -2129,6 +2514,49 @@ fn id(x: int) -> int {
 fn main() {
   io.print(id(1) << id(63))
   io.print(id(1) << id(64))
+}
+",
+    ),
+    // A slice's buffer is longer than the slice once `push` has grown it, so
+    // an index has to be checked against the slice's own length: `v[1]` here
+    // is inside the buffer and outside the slice.
+    (
+        "an-index-past-the-length-traps-within-capacity",
+        "\
+fn main() {
+  var v: [int] = []
+  v.push(1)
+  io.print(v[0])
+  io.print(v[1])
+}
+",
+    ),
+    (
+        "a-write-past-the-length-traps-within-capacity",
+        "\
+fn main() {
+  var v: [int] = []
+  v.push(1)
+  v[0] = 2
+  io.print(v[0])
+  v[2] = 3
+  io.print(\"after\")
+}
+",
+    ),
+    // An index is an `int`; narrowing it to Wasm's i32 before the check made
+    // `xs[4294967296]` read `xs[0]`.
+    (
+        "an-index-past-i32-traps",
+        "\
+fn id(x: int) -> int {
+  return x
+}
+
+fn main() {
+  let xs = [7, 8, 9]
+  io.print(xs[id(2)])
+  io.print(xs[id(4294967296)])
 }
 ",
     ),

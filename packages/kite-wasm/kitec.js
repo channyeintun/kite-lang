@@ -15,6 +15,7 @@
 import { readFile, writeFile, readdir } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { compiler, BuildFailed } from "./compiler.js";
 
@@ -126,7 +127,10 @@ const outDir = outIndex === -1 ? null : argv[outIndex + 1];
 const files = positional.filter((a) => a !== outDir);
 
 if (flags.has("--version") || command === "--version") {
-  const here = dirname(new URL(import.meta.url).pathname);
+  // `fileURLToPath`, not `.pathname`: the path of a URL is percent-encoded,
+  // so an install directory with a space in it was not found, and on Windows
+  // it is `/C:/…`, which is not a path at all.
+  const here = dirname(fileURLToPath(import.meta.url));
   const { version } = JSON.parse(await readFile(join(here, "package.json"), "utf8"));
   process.stdout.write(`kitec ${version} (WebAssembly)\n`);
   process.exit(0);
@@ -149,6 +153,7 @@ switch (command) {
     const output = kite.runModule({
       entry: await readFile(file, "utf8"),
       siblings: await siblingsOf(file),
+      path: file,
     });
     process.stdout.write(output);
     // Diagnostics are rendered into the same answer, so a failed compile is
@@ -160,9 +165,12 @@ switch (command) {
     const diagnostics = kite.checkModule({
       entry: await readFile(file, "utf8"),
       siblings: await siblingsOf(file),
+      path: file,
     });
     process.stdout.write(diagnostics);
-    process.exit(diagnostics.trim() === "" ? 0 : 1);
+    // An error fails the check; a warning is said and does not, as with the
+    // native `kitec`. Any output at all used to count as failure.
+    process.exit(/^error(\[|:)/m.test(diagnostics) ? 1 : 0);
   }
 
   case "doc": {
@@ -197,6 +205,7 @@ switch (command) {
         entry: await readFile(file, "utf8"),
         siblings: await siblingsOf(file),
         release: flags.has("--release"),
+        path: file,
       });
     } catch (error) {
       if (error instanceof BuildFailed) fail(error.diagnostics);

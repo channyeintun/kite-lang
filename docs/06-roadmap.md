@@ -1835,6 +1835,19 @@ pump sets a flag and the pump goes round again rather than recursing, which is
 what keeps a handler that spawns a task from mutating the list underneath the
 loop walking it.
 
+**Reviewed later, and three things were still wrong.** `drive` was not in fact
+untouched by the page's problems: the generated server, `serve.mjs`, ran through
+it, so an idle server still spun on `setTimeout(0)` — the fault this phase
+fixed, one file over — and while any task waited on the host the batch clock
+did not move at all, so a `task.timeout` around a slow request waited for the
+request. `serve.mjs` now uses `resident`, and every host event it owns calls
+`wake`; `drive` waits for `wake` or the earliest deadline, whichever is first,
+and moves its clock by the real time that took. A program that only sleeps
+still costs no real time. And a trap ended nothing: the task that trapped stayed
+in the list and ran again at the next `wake`. A trap now ends the program, as it
+does on the VM — the list is emptied, nothing is scheduled, handlers the page
+still holds do not re-enter, and `stopped()` says why.
+
 ---
 
 ## Phase 20 — `std/dom`
@@ -2237,6 +2250,15 @@ worse than absent.
   its declaration span and a MIR instruction carries nothing. Both are dropped
   by `--release`: they were more than half of a hello world, and debug
   information is not semantics.
+
+  *Reviewed later:* the map resolved nowhere. It named a source as the command
+  line had — `src/main.kite`, which a browser looks for beside the map, in
+  `dist/src/` — or by an absolute path from the builder's machine; the
+  standard library was `<std/http>`, and the compiler-as-Wasm never wrote the
+  map its module names, so a Vite dev server answered it with a 404. Sources
+  are now named relative to where the map is written, the library as
+  `kite-std/…`, every source's text travels in `sourcesContent`, and the Wasm
+  compiler writes the map too.
 
 - **`[N]T`, the fixed-length array §3.2 listed.** Struck from the
   specification rather than built, because the document already said twice that
