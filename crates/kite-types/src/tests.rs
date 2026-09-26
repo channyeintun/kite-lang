@@ -1168,13 +1168,17 @@ fn a_non_diverging_error_branch_does_not_clean_the_value() {
     assert!(c.has("E0301"), "{}", c.render());
 }
 
-/// The wrapping form the specification and `std/errors` both show. A wrapper
-/// answers nil exactly when what it wrapped was nil, so passing the `check`
-/// proves the wrapped error nil and its value readable.
+/// Passing a `check` of `errors.wrap(err, …)` proves `err` nil, because that
+/// wrapper answers nil exactly when what it wrapped was nil — which is why
+/// only it is looked through. A function of the program's own may answer nil
+/// for anything, even one called `wrap`, so passing a `check` of what it
+/// returned says nothing about the error it was handed. (The standard
+/// library's `wrap` needs `std/errors`, so the differential corpus is where
+/// the cleaning form is exercised.)
 #[test]
-fn checking_a_wrapped_error_cleans_the_value() {
-    let c = run("fn load() -> (int, error) {\n  return 1, nil\n}\nfn wrap(e: error, c: str) -> error {\n  return e\n}\nfn f() -> (int, error) {\n  let (v, err) = load()\n  check wrap(err, \"while loading\")\n  return v, nil\n}\nfn main() {\n}\n");
-    assert!(!c.diags.has_errors(), "{}", c.render());
+fn checking_what_an_arbitrary_function_returned_does_not_clean_the_value() {
+    let c = run("fn load() -> (int, error) {\n  return 1, nil\n}\nfn wrap(e: error, c: str) -> error {\n  return nil\n}\nfn f() -> (int, error) {\n  let (v, err) = load()\n  check wrap(err, \"while loading\")\n  return v, nil\n}\nfn main() {\n}\n");
+    assert!(c.has("E0301"), "{}", c.render());
 }
 
 /// Only the error arguments count: a call that happens to return an error

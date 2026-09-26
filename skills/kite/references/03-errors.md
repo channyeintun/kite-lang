@@ -113,9 +113,23 @@ fn main() {
 }
 ```
 
-The proof is tracked per *binding*. A call result used directly —
-`errors.new("x").message()` — is not tracked and compiles; on a nil call result
-that yields an empty string at runtime rather than a diagnostic. Bind it.
+The proof is tracked per *binding*, so an error reached any other way — a
+field (`r.err.message()`), a call (`err.cause().message()`), an element — is
+`E0301` until it is bound and tested. The one exception is an error built on the
+spot, `errors.new("x").message()`, which is never nil.
+
+```kite fails
+fn main() {
+    let err = errors.new("outer")
+    if err != nil {
+        io.print(err.cause().message()) //~ E0301
+        let cause = err.cause()
+        if cause != nil {
+            io.print(cause.message())
+        }
+    }
+}
+```
 
 ### `error` is not printable
 

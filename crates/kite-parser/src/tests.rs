@@ -256,6 +256,15 @@ fn chained_comparison_is_rejected() {
     assert!(p.render().contains("cannot be chained"), "{}", p.render());
 }
 
+/// What was reported is not handed on to be reported again: the checker would
+/// otherwise go on to compare the first comparison's `bool` with `c`.
+#[test]
+fn a_chained_comparison_leaves_an_error_node() {
+    let p = parse_src("fn f() {\n    let x = a < b < c\n}\n");
+    let Stmt::Let(l) = &p.fns()[0].body.stmts[0] else { panic!("a let") };
+    assert!(matches!(l.init, Some(Expr::Error(_))), "{:?}", l.init);
+}
+
 // ---- statements -----------------------------------------------------------
 
 #[test]

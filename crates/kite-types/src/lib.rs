@@ -987,6 +987,19 @@ struct FlowState {
     error_nonnil: std::collections::HashSet<u32>,
 }
 
+/// What a trial check may change, kept to be put back.
+struct Trial {
+    diags: DiagBag,
+    flow: FlowState,
+    guards: std::collections::HashMap<u32, u32>,
+    captures: Vec<u32>,
+    reported: std::collections::HashSet<u32>,
+    locals: usize,
+    lifted: usize,
+    /// The lengths of what [`Solved`] had recorded.
+    solved: [usize; 4],
+}
+
 /// The enclosing function's flow state, set aside while a closure's body is
 /// checked and put back afterwards.
 struct Enclosing {
@@ -2211,11 +2224,8 @@ impl<'a> Checker<'a> {
 
     /// `for (key, value) in m`.
     ///
-    /// Lowered to a loop over `m.keys()` with the value looked up per key,
-    /// which is exactly what a reader would write by hand — and it keeps
-    /// insertion order, which the specification guarantees. The lookup yields
-    /// an optional and is unwrapped, because the key came out of the map one
-    /// line earlier and cannot be missing.
+    /// Lowered to a walk over `m.keys()` and `m.values()` side by side, in
+    /// insertion order, which the specification guarantees.
     fn for_map(
         &mut self,
         f: &ast::ForStmt,
@@ -2266,71 +2276,81 @@ impl<'a> Checker<'a> {
             return None;
         }
 
-        // The map is bound once: iterating re-reads it per key, and an
-        // expression with side effects must not run per iteration.
-        let holder = self.synthetic_local("map", map.ty, *span);
+        // The map is read once, into its keys and its values — both in
+        // insertion order, so element `i` of one belongs with element `i` of
+        // the other — and the loop walks the two side by side. Looking each
+        // value up by its key instead was a second search per entry, and it
+        // was wrong for a key that is not equal to itself: a NaN key found no
+        // entry, and the unwrap of that missing value is what each backend
+        // then disagreed about.
         let keys_ty = self.types.slice_of(key_ty);
-        let key_local = match &elems[0] {
-            ast::BindElem::Name(n) => self.resolved.lookup_binding(n.span)?,
-            ast::BindElem::Wildcard(w) => self.synthetic_local("key", key_ty, *w),
-        };
-        self.locals[key_local as usize].ty = key_ty;
-        self.init[key_local as usize] = Init::Assigned;
-
-        let map_expr = |this: &Self| hir::Expr {
-            kind: ExprKind::Local(hir::LocalId(holder)),
-            ty: this.locals[holder as usize].ty,
+        let values_ty = self.types.slice_of(value_ty);
+        let holder = self.synthetic_local("map", map.ty, *span);
+        let keys = self.synthetic_local("keys", keys_ty, *span);
+        let values = self.synthetic_local("values", values_ty, *span);
+        let index = self.synthetic_local("entry", TyId::INT, *span);
+        let local = |id: u32, ty: TyId| hir::Expr {
+            kind: ExprKind::Local(hir::LocalId(id)),
+            ty,
             span: *span,
         };
-        let lookup = hir::Expr {
-            kind: ExprKind::Unwrap {
-                value: Box::new(hir::Expr {
-                    kind: ExprKind::MapGet {
-                        base: Box::new(map_expr(self)),
-                        key: Box::new(hir::Expr {
-                            kind: ExprKind::Local(hir::LocalId(key_local)),
-                            ty: key_ty,
-                            span: *span,
-                        }),
-                    },
-                    ty: self.types.optional_of(value_ty),
-                    span: *span,
-                }),
+        let element = |slice: u32, slice_ty: TyId, ty: TyId| hir::Expr {
+            kind: ExprKind::Index {
+                base: Box::new(local(slice, slice_ty)),
+                index: Box::new(local(index, TyId::INT)),
             },
-            ty: value_ty,
+            ty,
             span: *span,
         };
 
         let mut body_stmts = Vec::new();
-        if let ast::BindElem::Name(n) = &elems[1] {
-            let value_local = self.resolved.lookup_binding(n.span)?;
-            self.locals[value_local as usize].ty = value_ty;
-            self.init[value_local as usize] = Init::Assigned;
+        for (elem, (from, from_ty, ty)) in
+            elems.iter().zip([(keys, keys_ty, key_ty), (values, values_ty, value_ty)])
+        {
+            let ast::BindElem::Name(n) = elem else { continue };
+            let Some(bound) = self.resolved.lookup_binding(n.span) else { continue };
+            self.locals[bound as usize].ty = ty;
+            self.init[bound as usize] = Init::Assigned;
             body_stmts.push(hir::Stmt::Let {
-                local: hir::LocalId(value_local),
-                init: Some(lookup),
+                local: hir::LocalId(bound),
+                init: Some(element(from, from_ty, ty)),
                 span: n.span,
             });
         }
         let (body, _) = self.block(&f.body, sig);
         body_stmts.extend(body.stmts);
 
-        let keys = hir::Expr {
-            kind: ExprKind::MapKeys { base: Box::new(map_expr(self)) },
-            ty: keys_ty,
-            span: *span,
-        };
-        let loop_stmt = hir::Stmt::ForSlice {
-            var: hir::LocalId(key_local),
-            slice: keys,
+        let whole = |kind| hir::Expr { kind, ty: TyId::INT, span: *span };
+        let loop_stmt = hir::Stmt::ForRange {
+            var: hir::LocalId(index),
+            start: whole(ExprKind::Int(0)),
+            end: whole(ExprKind::SliceLen { base: Box::new(local(keys, keys_ty)) }),
+            inclusive: false,
             body: hir::Block { stmts: body_stmts },
             label: f.label.as_ref().map(|l| l.name.clone()),
             span: f.span,
         };
+        let read = |kind, ty| hir::Expr { kind, ty, span: *span };
         Some((
             hir::Stmt::Block(hir::Block {
                 stmts: vec![
                     hir::Stmt::Let { local: hir::LocalId(holder), init: Some(map), span: *span },
+                    hir::Stmt::Let {
+                        local: hir::LocalId(keys),
+                        init: Some(read(
+                            ExprKind::MapKeys { base: Box::new(local(holder, self.locals[holder as usize].ty)) },
+                            keys_ty,
+                        )),
+                        span: *span,
+                    },
+                    hir::Stmt::Let {
+                        local: hir::LocalId(values),
+                        init: Some(read(
+                            ExprKind::MapValues { base: Box::new(local(holder, self.locals[holder as usize].ty)) },
+                            values_ty,
+                        )),
+                        span: *span,
+                    },
                     loop_stmt,
                 ],
             }),
@@ -2506,6 +2526,50 @@ impl<'a> Checker<'a> {
         let mut taint = std::mem::take(&mut self.taint);
         self.clean_guarded(&mut taint, tested, in_then);
         self.taint = taint;
+    }
+
+    /// Start checking something only to learn its type.
+    ///
+    /// Inference sometimes checks an expression twice: once to see what type
+    /// it has, and again for real against what that settled. Everything the
+    /// first check does is thrown away, not only its diagnostics — a read
+    /// that reports a tainted value marks it clean, so that one mistake is one
+    /// diagnostic, and with the report discarded that mark let the value
+    /// through unreported on the real check. So a trial works on the checker
+    /// as it is, and [`Self::end_trial`] puts back everything it changed.
+    fn begin_trial(&mut self) -> Trial {
+        Trial {
+            diags: std::mem::replace(self.diags, DiagBag::new()),
+            flow: self.flow_state(),
+            guards: self.guards.clone(),
+            captures: self.captures.clone(),
+            reported: self.reported_unchecked.clone(),
+            locals: self.locals.len(),
+            lifted: self.lifted.len(),
+            solved: [
+                self.solved.bindings.len(),
+                self.solved.calls.len(),
+                self.solved.locals.len(),
+                self.solved.methods.len(),
+            ],
+        }
+    }
+
+    fn end_trial(&mut self, t: Trial) {
+        *self.diags = t.diags;
+        // A temporary the trial made is referred to only by what the trial
+        // built, which is being thrown away; so is a closure it lifted, whose
+        // number the real check hands out again.
+        self.locals.truncate(t.locals);
+        self.lifted.truncate(t.lifted);
+        self.set_flow_state(t.flow);
+        self.guards = t.guards;
+        self.captures = t.captures;
+        self.reported_unchecked = t.reported;
+        self.solved.bindings.truncate(t.solved[0]);
+        self.solved.calls.truncate(t.solved[1]);
+        self.solved.locals.truncate(t.solved[2]);
+        self.solved.methods.truncate(t.solved[3]);
     }
 
     /// Everything the flow analysis knows at this point.
@@ -4537,6 +4601,9 @@ impl<'a> Checker<'a> {
         }
 
         if receiver.ty == TyId::ERR {
+            // `errors.new(…)` and its kin build an error on the spot, and a
+            // built error is never nil.
+            let built = matches!(receiver.kind, ExprKind::ErrorNew { .. });
             let (kind, ty) = match name.name.as_str() {
                 "message" => (
                     ExprKind::ErrorMessage { base: Box::new(receiver) },
@@ -4566,7 +4633,9 @@ impl<'a> Checker<'a> {
             if !args.is_empty() {
                 self.arity_error(&name.name, args.len(), 0, span, None);
             }
-            self.require_error_present(base, name.span);
+            if !built {
+                self.require_error_present(base, name.span);
+            }
             return hir::Expr { kind, ty, span };
         }
 
@@ -5140,10 +5209,9 @@ impl<'a> Checker<'a> {
         // so this look is a trial like the field pass below: its diagnostics
         // are discarded rather than reported twice.
         if let Some(base) = &lit.base {
-            let mut scratch = DiagBag::new();
-            std::mem::swap(self.diags, &mut scratch);
+            let trial = self.begin_trial();
             let seen = self.expr(base, None);
-            std::mem::swap(self.diags, &mut scratch);
+            self.end_trial(trial);
             if let TyKind::Struct(s) = *self.types.kind(seen.ty) {
                 if self.instance_of(s) == Some(template) {
                     return Some(s);
@@ -5162,8 +5230,7 @@ impl<'a> Checker<'a> {
         // until the parameter is known, and complaining about it here would
         // report a problem that the real check — which runs against the
         // specialisation — does not have. Its diagnostics are discarded.
-        let mut scratch = DiagBag::new();
-        std::mem::swap(self.diags, &mut scratch);
+        let trial = self.begin_trial();
         for init in &lit.fields {
             let Some(declared) =
                 self.types.struct_def(template).field(&init.name.name).map(|(_, f)| f.ty)
@@ -5173,7 +5240,7 @@ impl<'a> Checker<'a> {
             let v = self.expr(&init.value, None);
             self.unify(declared, v.ty, &generics, &mut subst, v.span);
         }
-        std::mem::swap(self.diags, &mut scratch);
+        self.end_trial(trial);
 
         let mut args = Vec::with_capacity(count);
         for (i, s) in subst.iter().enumerate() {
@@ -5671,7 +5738,13 @@ impl<'a> Checker<'a> {
                     self.taint[guarded as usize] = Taint::Clean;
                 }
             }
-            ast::Expr::Call { args, .. } => {
+            // Only a wrapper that answers nil exactly when what it wrapped was
+            // nil can speak for its argument, and the standard library's is
+            // the one known to. `check ignore(err)` falls past the `check`
+            // whenever `ignore` answers nil, whatever `err` was, so reading
+            // through any call made the value readable on the failure path.
+            // The callee is known by what it resolves to, not by its name.
+            ast::Expr::Call { callee, args, .. } if self.preserves_nil(callee) => {
                 for a in args {
                     if self.is_error_operand(a) {
                         self.mark_checked(a);
@@ -5679,6 +5752,18 @@ impl<'a> Checker<'a> {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Whether a callee is `errors.wrap`, which answers nil for nil and
+    /// nothing else.
+    fn preserves_nil(&self, callee: &ast::Expr) -> bool {
+        match self.resolved.lookup_use(callee.span()) {
+            Some(Res::Fn(id)) => {
+                let f = &self.resolved.fns[id as usize];
+                f.name == "errors.wrap" && self.resolved.module_of_item(f.decl_index) == "errors"
+            }
+            _ => false,
         }
     }
 
@@ -5937,6 +6022,24 @@ impl<'a> Checker<'a> {
         }
         if let TyKind::Map(key_ty, value_ty) = *self.types.kind(seq.ty) {
             let local = self.require_mutable_value_binding(base, "assigned into", "map")?;
+            // `m[k] += 1` has nothing to add to when `k` is missing, and a map
+            // entry is read as an optional for exactly that reason. The
+            // operator used to be dropped and the entry overwritten with the
+            // right-hand side alone.
+            if a.op.to_binary().is_some() {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0201,
+                        format!("`{}` cannot update a map entry", a.op.text()),
+                    )
+                    .with_primary(a.span, "the entry may be missing")
+                    .with_note(
+                        "read it with `m[k]`, which is optional, decide what a missing entry \
+                         counts as, and write the result back with `m[k] = …`",
+                    ),
+                );
+                return None;
+            }
             let k = self.expr(index, Some(key_ty));
             self.expect_ty(k.ty, key_ty, k.span, None);
             let v = self.expr(&a.value, Some(value_ty));
@@ -5970,26 +6073,38 @@ impl<'a> Checker<'a> {
         self.expect_ty(i.ty, TyId::INT, i.span, None);
 
         let value = self.expr(&a.value, Some(elem));
-        let value = match a.op.to_binary() {
-            None => {
-                self.expect_ty(value.ty, elem, value.span, None);
-                value
-            }
-            Some(binop) => {
-                let current = hir::Expr {
-                    kind: ExprKind::Index {
-                        base: Box::new(self.expr(base, None)),
-                        index: Box::new(self.expr(index, Some(TyId::INT))),
-                    },
-                    ty: elem,
-                    span,
-                };
-                self.binary(binop, current, value, a.span)
-            }
+        let Some(binop) = a.op.to_binary() else {
+            // An element slot typed `Option<T>` takes a `T` by subsumption,
+            // and the `Wrap` has to be written for that, as it is everywhere
+            // else a value is stored.
+            let value = self.coerce(value, Some(elem));
+            self.expect_ty(value.ty, elem, value.span, None);
+            return Some((
+                hir::Stmt::SetIndex { base: seq, index: i, value, span: a.span },
+                Flow::Falls,
+            ));
         };
-
+        // `xs[i] += v` reads and writes one element, so the index is worked
+        // out once, into a hidden local both sides use. Checking the index
+        // expression twice evaluated it twice: `xs[next()] += 1` called
+        // `next` twice and added the second element to the first.
+        let slot = self.synthetic_local("index", TyId::INT, span);
+        let at = hir::Expr { kind: ExprKind::Local(hir::LocalId(slot)), ty: TyId::INT, span: i.span };
+        let current = hir::Expr {
+            kind: ExprKind::Index { base: Box::new(seq.clone()), index: Box::new(at.clone()) },
+            ty: elem,
+            span,
+        };
+        let sum = self.binary(binop, current, value, a.span);
+        let sum = self.coerce(sum, Some(elem));
+        self.expect_ty(sum.ty, elem, sum.span, None);
         Some((
-            hir::Stmt::SetIndex { base: seq, index: i, value, span: a.span },
+            hir::Stmt::Block(hir::Block {
+                stmts: vec![
+                    hir::Stmt::Let { local: hir::LocalId(slot), init: Some(i), span },
+                    hir::Stmt::SetIndex { base: seq, index: at, value: sum, span: a.span },
+                ],
+            }),
             Flow::Falls,
         ))
     }
@@ -6107,11 +6222,41 @@ impl<'a> Checker<'a> {
     /// error was never checked — and it is one the backends cannot even agree
     /// to get wrong the same way.
     fn require_error_present(&mut self, base: &ast::Expr, span: Span) {
-        // A call answering an `error` cannot be nil-tested by a binding, and a
-        // nil literal is caught by its own diagnostic. Only a local can be
-        // proved, so only a local is required to be.
-        let ast::Expr::Path(p) = base else { return };
-        let Some(Res::Local(id)) = self.resolved.lookup_use(p.span) else {
+        let mut inner = base;
+        while let ast::Expr::Paren { inner: i, .. } = inner {
+            inner = i;
+        }
+        // Only a local can be proved present, so an error reached any other
+        // way — a field, a call, an element — has to be bound and tested
+        // first. Waving those through was how `r.e.message()` on a nil field
+        // and `err.cause().message()` on an error with no cause reached a
+        // backend, which answered with an empty string or a trap depending on
+        // which one it was.
+        let local = match inner {
+            ast::Expr::Path(p) => match self.resolved.lookup_use(p.span) {
+                Some(Res::Local(id)) => Some(id),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(id) = local else {
+            let what = self.text(inner.span()).to_string();
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0301,
+                    format!("`{}` may be nil, so it has no message", what),
+                )
+                .with_primary(span, "reading the message needs an error that is present")
+                .with_secondary(inner.span(), "only a binding can be proved non-nil")
+                .with_note(format!(
+                    "bind it and test it: `let e = {}` then `if e != nil {{ … e.message() … }}`",
+                    what
+                ))
+                .with_note(
+                    "an `error` is either nil or a failure; there is no message on the nil side, \
+                     and no zero value standing in for one",
+                ),
+            );
             return;
         };
         if self.error_nonnil.contains(&id) {
@@ -6299,14 +6444,13 @@ impl<'a> Checker<'a> {
             .collect();
         // A trial pass, as for struct literals: its diagnostics belong to the
         // real check against the specialisation, not to inference.
-        let mut scratch = DiagBag::new();
-        std::mem::swap(self.diags, &mut scratch);
+        let trial = self.begin_trial();
         for (i, a) in args.iter().enumerate() {
             let Some(d) = declared.get(i).copied() else { continue };
             let v = self.expr(a, None);
             self.unify(d, v.ty, &generics, &mut subst, v.span);
         }
-        std::mem::swap(self.diags, &mut scratch);
+        self.end_trial(trial);
 
         let mut solved = Vec::with_capacity(count);
         for (i, s) in subst.iter().enumerate() {
@@ -8074,32 +8218,35 @@ impl<'a> Checker<'a> {
         self.require_mutable_base(base);
 
         let value = self.expr(&a.value, Some(ty));
-        let value = match a.op.to_binary() {
-            None => {
-                let value = self.coerce(value, Some(ty));
-                self.expect_ty(value.ty, ty, value.span, Some(decl_span));
-                value
-            }
-            Some(binop) => {
-                let current = hir::Expr {
-                    kind: ExprKind::FieldGet {
-                        base: Box::new(self.expr(base, None)),
-                        index: index as u32,
-                    },
-                    ty,
-                    span,
-                };
-                self.binary(binop, current, value, a.span)
-            }
+        let Some(binop) = a.op.to_binary() else {
+            let value = self.coerce(value, Some(ty));
+            self.expect_ty(value.ty, ty, value.span, Some(decl_span));
+            return Some((
+                hir::Stmt::SetField { base: obj, index: index as u32, value, span: a.span },
+                Flow::Falls,
+            ));
         };
-
+        // `make().n += 1` reads and writes one field of one struct, so the
+        // struct is worked out once, into a hidden local both sides use —
+        // a struct is a reference, so the write lands in the same one.
+        // Checking the base twice called `make` twice.
+        let holder = self.synthetic_local("base", obj.ty, span);
+        let read = hir::Expr { kind: ExprKind::Local(hir::LocalId(holder)), ty: obj.ty, span: obj.span };
+        let current = hir::Expr {
+            kind: ExprKind::FieldGet { base: Box::new(read.clone()), index: index as u32 },
+            ty,
+            span,
+        };
+        let sum = self.binary(binop, current, value, a.span);
+        let sum = self.coerce(sum, Some(ty));
+        self.expect_ty(sum.ty, ty, sum.span, Some(decl_span));
         Some((
-            hir::Stmt::SetField {
-                base: obj,
-                index: index as u32,
-                value,
-                span: a.span,
-            },
+            hir::Stmt::Block(hir::Block {
+                stmts: vec![
+                    hir::Stmt::Let { local: hir::LocalId(holder), init: Some(obj), span },
+                    hir::Stmt::SetField { base: read, index: index as u32, value: sum, span: a.span },
+                ],
+            }),
             Flow::Falls,
         ))
     }
@@ -8718,6 +8865,13 @@ impl<'a> Checker<'a> {
         if self.types.satisfies(found, expected) || self.coerces_to_dyn(found, expected) {
             return;
         }
+        // A type built around one that was already reported — `[Foo]` where
+        // `Foo` does not exist — is as poisoned as the bare error, and
+        // comparing it would print `expected [<error>]` for the mistake that
+        // was reported where `Foo` was written.
+        if self.mentions_error(found) || self.mentions_error(expected) {
+            return;
+        }
         let mut d = Diagnostic::error(
             codes::E0200,
             format!("expected `{}`, found `{}`", self.types.name(expected), self.types.name(found)),
@@ -8756,6 +8910,20 @@ impl<'a> Checker<'a> {
             ));
         }
         self.diags.push(d);
+    }
+
+    /// Whether a type is, or is built from, one that failed to check.
+    fn mentions_error(&self, ty: TyId) -> bool {
+        match self.types.kind(ty) {
+            _ if ty == TyId::ERROR => true,
+            TyKind::Slice(e) | TyKind::Optional(e) | TyKind::Fallible(e) => self.mentions_error(*e),
+            TyKind::Map(k, v) => self.mentions_error(*k) || self.mentions_error(*v),
+            TyKind::Tuple(es) => es.iter().any(|e| self.mentions_error(*e)),
+            TyKind::Fn { params, ret } => {
+                params.iter().any(|p| self.mentions_error(*p)) || self.mentions_error(*ret)
+            }
+            _ => false,
+        }
     }
 
     fn arity_error(

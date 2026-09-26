@@ -1,0 +1,12 @@
+// A type that does not exist is reported where it is written. A slice of it
+// is as unknown as it is, and comparing that with an argument would report
+// the same mistake again as `expected [<error>], found [int]`.
+
+fn apply(xs: [Foo]) -> int { //~ ERROR E0204
+    return xs.len()
+}
+
+fn main() {
+    let ys: [int] = [1]
+    io.print(apply(ys))
+}

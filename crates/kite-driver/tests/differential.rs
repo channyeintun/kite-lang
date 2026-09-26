@@ -1263,6 +1263,28 @@ const EXPECTED: &[(&str, &str, &str)] = &[
          \x20 io.print(sign(-3))\n  io.print(sign(0))\n  io.print(sign(9))\n}\n",
         "green\nblue\nnegative\nzero\nother\n",
     ),
+    (
+        "compound-assignment-evaluates-once",
+        "struct Counter {\n  var n: int\n}\nstruct Box {\n  var total: int\n}\n\
+         fn next(var c: Counter) -> int {\n  c.n = c.n + 1\n  return c.n\n}\n\
+         fn pick(var c: Counter, b: Box) -> Box {\n  c.n = c.n + 1\n  return b\n}\n\
+         fn main() {\n  var c = Counter{ n: -1 }\n  var xs = [10, 20, 30]\n\
+         \x20 xs[next(c)] += 1\n  io.print(\"\\(xs[0]) \\(xs[1]) \\(xs[2]) calls=\\(c.n + 1)\")\n\
+         \x20 let b = Box{ total: 0 }\n  var d = Counter{ n: 0 }\n\
+         \x20 pick(d, b).total += 5\n  io.print(\"\\(b.total) calls=\\(d.n)\")\n\
+         \x20 var slots: [Option<int>] = [nil, nil]\n  slots[1] = 5\n  let got = slots[1]\n\
+         \x20 if got != nil {\n    io.print(got + 1)\n  }\n}\n",
+        "11 20 30 calls=1\n5 calls=1\n6\n",
+    ),
+    (
+        "map-iteration-pairs-keys-with-values",
+        "fn same(x: float) -> float {\n  return x\n}\n\
+         fn main() {\n  var m: {float: int} = {}\n  let nan = same(0.0) / same(0.0)\n\
+         \x20 m[nan] = 1\n  m[nan] = 2\n  m[1.5] = 3\n\
+         \x20 for (k, v) in m {\n    io.print(v)\n  }\n\
+         \x20 let words = {\"b\": 2, \"a\": 1}\n  for (w, n) in words {\n    io.print(\"\\(w)=\\(n)\")\n  }\n}\n",
+        "1\n2\n3\nb=2\na=1\n",
+    ),
 ];
 
 #[test]

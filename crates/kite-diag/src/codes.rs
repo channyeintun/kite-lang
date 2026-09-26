@@ -162,6 +162,10 @@ codes! {
          evaluation order, and which functions are available to it becomes a \
          language rule nobody can predict — so there is one evaluation order \
          here, and it is the one that already exists.\n\n\
+         Arithmetic on constants is done while compiling, so an operation \
+         with no `int` result — dividing by zero, overflowing, shifting by a \
+         negative amount or by 64 or more — is reported here rather than \
+         trapping in one build and wrapping in another.\n\n\
          There is no module-level `var` at all. A mutable binding two \
          functions can both reach is shared state neither signature mentions, \
          which is what `Share` and the closure capture rule exist to prevent. \

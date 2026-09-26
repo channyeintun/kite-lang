@@ -1,0 +1,19 @@
+// Only a binding can be proved present, so an error reached through a field
+// or a call has to be bound and tested before its message is read. Reading it
+// directly reached a backend with a nil receiver, which printed an empty
+// string on one and trapped on another.
+
+struct R {
+    e: error
+}
+
+fn main() {
+    let r = R{ e: nil }
+    io.print("[" + r.e.message() + "]") //~ ERROR E0301
+    let err = errors.new("top")
+    if err != nil {
+        io.print("[" + err.cause().message() + "]") //~ ERROR E0301
+    }
+    // Built on the spot, an error is never nil.
+    io.print(errors.new("here").message())
+}
