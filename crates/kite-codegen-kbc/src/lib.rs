@@ -163,8 +163,14 @@ pub enum Op {
     BitXor { dst: Reg, a: Reg, b: Reg },
     Shl { dst: Reg, a: Reg, b: Reg },
     Shr { dst: Reg, a: Reg, b: Reg },
+    /// The release forms: the count is taken modulo 64 where the two above
+    /// trap on one outside `0..=63`.
+    ShlWrap { dst: Reg, a: Reg, b: Reg },
+    ShrWrap { dst: Reg, a: Reg, b: Reg },
 
     NegInt { dst: Reg, a: Reg },
+    /// The release form: `-min` wraps to `min` where `NegInt` traps.
+    NegIntWrap { dst: Reg, a: Reg },
     NegFloat { dst: Reg, a: Reg },
     Not { dst: Reg, a: Reg },
 
@@ -332,6 +338,8 @@ pub fn binop_instruction(op: BinOp) -> Option<fn(Reg, Reg, Reg) -> Op> {
         BitXor => |dst, a, b| Op::BitXor { dst, a, b },
         Shl => |dst, a, b| Op::Shl { dst, a, b },
         Shr => |dst, a, b| Op::Shr { dst, a, b },
+        ShlWrap => |dst, a, b| Op::ShlWrap { dst, a, b },
+        ShrWrap => |dst, a, b| Op::ShrWrap { dst, a, b },
         EqInt => |dst, a, b| Op::EqInt { dst, a, b },
         NeInt => |dst, a, b| Op::NeInt { dst, a, b },
         LtInt => |dst, a, b| Op::LtInt { dst, a, b },
@@ -361,6 +369,7 @@ pub fn binop_instruction(op: BinOp) -> Option<fn(Reg, Reg, Reg) -> Op> {
 pub fn unop_instruction(op: UnOp) -> fn(Reg, Reg) -> Op {
     match op {
         UnOp::NegInt => |dst, a| Op::NegInt { dst, a },
+        UnOp::NegIntWrap => |dst, a| Op::NegIntWrap { dst, a },
         UnOp::NegFloat => |dst, a| Op::NegFloat { dst, a },
         UnOp::Not => |dst, a| Op::Not { dst, a },
     }
@@ -456,8 +465,11 @@ impl fmt::Display for Op {
             BitXor { dst, a, b } => bin(f, "xor", dst, a, b),
             Shl { dst, a, b } => bin(f, "shl", dst, a, b),
             Shr { dst, a, b } => bin(f, "shr", dst, a, b),
+            ShlWrap { dst, a, b } => bin(f, "shl.wrap", dst, a, b),
+            ShrWrap { dst, a, b } => bin(f, "shr.wrap", dst, a, b),
 
             NegInt { dst, a } => un(f, "neg.int", dst, a),
+            NegIntWrap { dst, a } => un(f, "neg.int.wrap", dst, a),
             NegFloat { dst, a } => un(f, "neg.float", dst, a),
             Not { dst, a } => un(f, "not", dst, a),
 

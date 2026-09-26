@@ -733,12 +733,17 @@ impl<'a> Vm<'a> {
                         x.checked_div(y).ok_or(Trap::IntegerOverflow("/"))
                     }
                 }),
+                // `min % -1` is 0, which is representable, so it is not an
+                // overflow even though `min / -1` is. Every remainder by -1 is
+                // 0; saying so directly keeps the one input where the
+                // hardware's answer and the arithmetic one differ from
+                // mattering.
                 Op::RemInt { dst, a, b } => arith!(self, base, dst, a, b, "%", Int, Int, |x: i64,
                                                                                           y: i64| {
-                    if y == 0 {
-                        Err(Trap::DivideByZero)
-                    } else {
-                        x.checked_rem(y).ok_or(Trap::IntegerOverflow("%"))
+                    match y {
+                        0 => Err(Trap::DivideByZero),
+                        -1 => Ok(0),
+                        _ => Ok(x % y),
                     }
                 }),
 
@@ -802,6 +807,18 @@ impl<'a> Vm<'a> {
                         }
                     })
                 }
+                // The release forms take the count's low six bits, which is
+                // what `wrapping_shl` does and what Wasm's `i64.shl` does.
+                Op::ShlWrap { dst, a, b } => {
+                    arith!(self, base, dst, a, b, "<<", Int, Int, |x: i64, y: i64| {
+                        Ok(x.wrapping_shl(y as u32))
+                    })
+                }
+                Op::ShrWrap { dst, a, b } => {
+                    arith!(self, base, dst, a, b, ">>", Int, Int, |x: i64, y: i64| {
+                        Ok(x.wrapping_shr(y as u32))
+                    })
+                }
 
                 // ---- unary -----------------------------------------------
                 Op::NegInt { dst, a } => match self.get(base, a) {
@@ -809,6 +826,12 @@ impl<'a> Vm<'a> {
                         let r = v.checked_neg().ok_or(Trap::IntegerOverflow("-"))?;
                         self.set(base, dst, Value::Int(r));
                     }
+                    other => {
+                        return Err(Trap::TypeConfusion { op: "-", found: other.type_name() })
+                    }
+                },
+                Op::NegIntWrap { dst, a } => match self.get(base, a) {
+                    Value::Int(v) => self.set(base, dst, Value::Int(v.wrapping_neg())),
                     other => {
                         return Err(Trap::TypeConfusion { op: "-", found: other.type_name() })
                     }

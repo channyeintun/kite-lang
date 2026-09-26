@@ -2153,9 +2153,12 @@ fn compile_fn(
                 i,
                 mir::Inst::Assign {
                     value: mir::Rvalue::Binary {
-                        op: BinOp::AddInt | BinOp::SubInt | BinOp::MulInt,
+                        op: BinOp::AddInt | BinOp::SubInt | BinOp::MulInt | BinOp::Shl | BinOp::Shr,
                         ..
                     },
+                    ..
+                } | mir::Inst::Assign {
+                    value: mir::Rvalue::Unary { op: UnOp::NegInt, .. },
                     ..
                 }
             )
@@ -2460,7 +2463,17 @@ impl<'a> Emitter<'a> {
             }
 
             mir::Rvalue::Unary { op, operand } => match op {
+                // `0 - x`, checked: the subtraction overflows for exactly the
+                // one input negation does, `int`'s minimum. Debug Wasm used to
+                // wrap there while the other two backends trapped.
                 UnOp::NegInt => {
+                    func.instruction(&Instruction::I64Const(0));
+                    self.operand(func, operand);
+                    if !self.checked_int(func, BinOp::SubInt) {
+                        func.instruction(&Instruction::I64Sub);
+                    }
+                }
+                UnOp::NegIntWrap => {
                     func.instruction(&Instruction::I64Const(0));
                     self.operand(func, operand);
                     func.instruction(&Instruction::I64Sub);
@@ -4293,6 +4306,25 @@ impl<'a> Emitter<'a> {
                 func.instruction(&Instruction::LocalGet(r));
                 return true;
             }
+            // A count outside `0..=63` traps, where the instruction alone
+            // would take it modulo 64. Compared unsigned, so a negative count
+            // is out of range with the rest.
+            BinOp::Shl | BinOp::Shr => {
+                // Both operands are back on the stack; the test reads the
+                // count from its register and leaves them where they are.
+                func.instruction(&Instruction::LocalGet(b));
+                func.instruction(&Instruction::I64Const(64));
+                func.instruction(&Instruction::I64GeU);
+                func.instruction(&Instruction::If(BlockType::Empty));
+                func.instruction(&Instruction::Unreachable);
+                func.instruction(&Instruction::End);
+                func.instruction(&if op == BinOp::Shl {
+                    Instruction::I64Shl
+                } else {
+                    Instruction::I64ShrS
+                });
+                return true;
+            }
             _ => return false,
         }
         func.instruction(&Instruction::I64Const(0));
@@ -4308,7 +4340,7 @@ impl<'a> Emitter<'a> {
         use BinOp::*;
         // The checked forms are several instructions, not one, so they are
         // emitted before the single-instruction table is consulted.
-        if matches!(op, AddInt | SubInt | MulInt) && self.checked_int(func, op) {
+        if matches!(op, AddInt | SubInt | MulInt | Shl | Shr) && self.checked_int(func, op) {
             return;
         }
         let inst = match op {
@@ -4326,8 +4358,10 @@ impl<'a> Emitter<'a> {
             BitAnd => Instruction::I64And,
             BitOr => Instruction::I64Or,
             BitXor => Instruction::I64Xor,
-            Shl => Instruction::I64Shl,
-            Shr => Instruction::I64ShrS,
+            // Wasm takes a shift count modulo 64 itself, which is exactly the
+            // release rule. The debug forms are checked above.
+            Shl | ShlWrap => Instruction::I64Shl,
+            Shr | ShrWrap => Instruction::I64ShrS,
             EqInt => Instruction::I64Eq,
             NeInt => Instruction::I64Ne,
             LtInt => Instruction::I64LtS,

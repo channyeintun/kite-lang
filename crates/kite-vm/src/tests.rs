@@ -625,6 +625,57 @@ fn main() {
     assert_eq!(exec_release(src).unwrap().trim(), "-9223372036854775808");
 }
 
+/// Negation overflows for one input, and follows the same rule: a trap in a
+/// debug build, a wrap in a release one. There was no release form, so a
+/// release build trapped on the VM and natively and wrapped on Wasm.
+#[test]
+fn negating_the_minimum_traps_in_debug_and_wraps_in_release() {
+    let src = "\
+fn id(x: int) -> int {
+    return x
+}
+fn main() {
+    io.print(-id(-9223372036854775807 - 1))
+}
+";
+    assert_eq!(exec(src), Err(Trap::IntegerOverflow("-")));
+    assert_eq!(exec_release(src).unwrap().trim(), "-9223372036854775808");
+}
+
+/// A shift count outside `0..=63` traps in a debug build and is taken modulo
+/// 64 in a release one. The VM trapped in both, Wasm masked in both.
+#[test]
+fn an_out_of_range_shift_traps_in_debug_and_masks_in_release() {
+    let src = "\
+fn id(x: int) -> int {
+    return x
+}
+fn main() {
+    io.print(id(1) << id(65))
+    io.print(id(-16) >> id(-63))
+}
+";
+    assert_eq!(exec(src), Err(Trap::IntegerOverflow("<<")));
+    assert_eq!(exec_release(src).unwrap(), "2\n-8\n");
+}
+
+/// `min % -1` is 0, which fits, so unlike `min / -1` it is no overflow. The
+/// VM and the native backend trapped on it and Wasm answered 0.
+#[test]
+fn the_remainder_of_the_minimum_by_minus_one_is_zero() {
+    let src = "\
+fn id(x: int) -> int {
+    return x
+}
+fn main() {
+    io.print(id(-9223372036854775807 - 1) % id(-1))
+    io.print(-9223372036854775808)
+}
+";
+    assert_eq!(exec(src).unwrap(), "0\n-9223372036854775808\n");
+    assert_eq!(exec(&src.replace('%', "/")), Err(Trap::IntegerOverflow("/")));
+}
+
 #[test]
 fn runaway_recursion_traps_instead_of_crashing_the_host() {
     let src = "\
@@ -1516,3 +1567,4 @@ fn counts_wider_than_a_byte_survive() {
     );
     assert_eq!(lines(&src), ["300", "299", "130", "299"]);
 }
+

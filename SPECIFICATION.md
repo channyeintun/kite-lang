@@ -210,6 +210,28 @@ and a numeric literal may not carry a type suffix: `42i32` is `E0004`.
 
 Integer overflow traps in debug builds and wraps in release builds, matching
 the default most users expect while keeping release performance predictable.
+The rule covers every operation that can overflow, on every target:
+
+| Operation | Debug build | Release build |
+|---|---|---|
+| `a + b`, `a - b`, `a * b` past the range | traps | wraps |
+| `-a` where `a` is `int`'s minimum | traps | wraps: `-min` is `min` |
+| `a << n`, `a >> n` with `n` outside `0..=63` | traps | `n` is taken modulo 64, its low six bits: `1 << 65` is `2` |
+| `a / 0`, `a % 0` | traps | traps |
+| `min / -1` | traps | traps |
+| `min % -1` | `0` | `0` |
+
+Division is the exception to wrapping: there is no quotient to wrap to when
+the divisor is zero, and `min / -1` traps with it so that a quotient is always
+the true one. A remainder by `-1` is always `0`, `min`'s included — the answer
+fits, so it is not an overflow. `>>` is arithmetic, keeping the sign. A
+module-level constant ([§4.2](#42-module-level-constants)) is the same in
+every build, so a shift count outside `0..=63` in one is a compile error,
+`E0118`, as a division by zero is.
+
+`-9223372036854775808` is `int`'s minimum. The digits alone are one past the
+largest `int` and are refused (`E0004`), but a `-` written directly in front
+of them is read with them as one constant.
 `math.wrapping_add` wraps in both, and `math.checked_add` answers `Option<int>`
 in both, for the code that has to mean one of the two regardless of how it was
 built. Both are ordinary Kite over `math.max_int()` and `math.min_int()`, and

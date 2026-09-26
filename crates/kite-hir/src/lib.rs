@@ -633,8 +633,15 @@ pub enum BinOp {
     BitAnd,
     BitOr,
     BitXor,
+    /// A shift count outside `0..=63` traps, the way overflow does in a debug
+    /// build: there is no bit pattern that is the right answer to `1 << 64`.
     Shl,
     Shr,
+    /// The release-build forms, which take the count modulo 64 — its low six
+    /// bits — as the hardware does. Chosen by the checker for the reason the
+    /// `…IntWrap` forms are.
+    ShlWrap,
+    ShrWrap,
     EqInt,
     NeInt,
     LtInt,
@@ -676,7 +683,11 @@ impl BinOp {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum UnOp {
+    /// `-x`, which overflows for exactly one input: `int`'s minimum has no
+    /// positive counterpart. Traps there, as a debug build's `+` does.
     NegInt,
+    /// The release-build form, which wraps: `-min` is `min`.
+    NegIntWrap,
     NegFloat,
     Not,
 }

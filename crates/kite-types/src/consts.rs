@@ -262,6 +262,16 @@ impl<'a> Eval<'a> {
 
             ast::Expr::Paren { inner, .. } => self.eval(inner),
 
+            // `int`'s minimum, whose digits alone are out of range. The same
+            // rule the checker applies to an expression.
+            ast::Expr::Unary { op: UnaryOp::Neg, operand, span }
+                if matches!(operand.as_ref(), ast::Expr::Int(digits)
+                    if crate::is_int_min_magnitude(self.text(*digits))) =>
+            {
+                let _ = span;
+                Some(ConstValue::Int(i64::MIN))
+            }
+
             ast::Expr::Unary { op, operand, span } => {
                 let v = self.eval(operand)?;
                 match (op, &v) {
@@ -359,8 +369,23 @@ impl<'a> Eval<'a> {
             (BitAnd, Int(x), Int(y)) => Some(Int(x & y)),
             (BitOr, Int(x), Int(y)) => Some(Int(x | y)),
             (BitXor, Int(x), Int(y)) => Some(Int(x ^ y)),
-            (Shl, Int(x), Int(y)) => Some(Int(x.wrapping_shl(*y as u32))),
-            (Shr, Int(x), Int(y)) => Some(Int(x.wrapping_shr(*y as u32))),
+            // A count outside `0..=63` traps at run time in a debug build and
+            // is taken modulo 64 in a release one. A constant is the same in
+            // both, so neither answer is right for it: like a division by
+            // zero, it is found here instead.
+            (Shl, Int(_), Int(y)) | (Shr, Int(_), Int(y)) if !(0..64).contains(y) => {
+                self.diags.push(
+                    Diagnostic::error(codes::E0118, "this constant shifts by a count outside `0..=63`")
+                        .with_primary(span, format!("a shift by {} has no value", y))
+                        .with_note(
+                            "an `int` has 64 bits, so a shift count must be in `0..=63`; at \
+                             run time this would trap in a debug build",
+                        ),
+                );
+                return None;
+            }
+            (Shl, Int(x), Int(y)) => Some(Int(x << y)),
+            (Shr, Int(x), Int(y)) => Some(Int(x >> y)),
             (Lt, Int(x), Int(y)) => Some(Bool(x < y)),
             (Le, Int(x), Int(y)) => Some(Bool(x <= y)),
             (Gt, Int(x), Int(y)) => Some(Bool(x > y)),

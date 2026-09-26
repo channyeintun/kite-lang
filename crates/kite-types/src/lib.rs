@@ -2301,6 +2301,14 @@ impl<'a> Checker<'a> {
             ast::Expr::Paren { inner, .. } => self.expr(inner, expected),
 
             ast::Expr::Unary { op, operand, span } => {
+                // `-9223372036854775808` is `int`'s minimum, but the literal
+                // after the `-` is one past its maximum and would be refused
+                // on its own. Written together they are one constant.
+                if let (ast::UnaryOp::Neg, ast::Expr::Int(digits)) = (op, operand.as_ref()) {
+                    if is_int_min_magnitude(self.text(*digits)) {
+                        return self.lit(ExprKind::Int(i64::MIN), TyId::INT, *span);
+                    }
+                }
                 let val = self.expr(operand, expected);
                 self.unary(*op, val, *span)
             }
@@ -6649,8 +6657,11 @@ impl<'a> Checker<'a> {
                     ExprKind::Float(v) => hir::Pattern::Float(v),
                     ExprKind::Str(s) => hir::Pattern::Str(s),
                     ExprKind::Bool(b) => hir::Pattern::Bool(b),
-                    ExprKind::Unary { op: hir::UnOp::NegInt, operand } => match operand.kind {
-                        ExprKind::Int(v) => hir::Pattern::Int(-v),
+                    ExprKind::Unary {
+                        op: hir::UnOp::NegInt | hir::UnOp::NegIntWrap,
+                        operand,
+                    } => match operand.kind {
+                        ExprKind::Int(v) => hir::Pattern::Int(v.wrapping_neg()),
                         _ => hir::Pattern::Wildcard,
                     },
                     ExprKind::Unary { op: hir::UnOp::NegFloat, operand } => match operand.kind {
@@ -7513,6 +7524,9 @@ impl<'a> Checker<'a> {
             return hir::Expr { kind: ExprKind::Error, ty: TyId::ERROR, span };
         }
         let (hop, ty) = match (op, val.ty) {
+            // Negating `int`'s minimum overflows: a trap in a debug build and
+            // a wrap in a release one, like every other overflow.
+            (ast::UnaryOp::Neg, TyId::INT) if self.release => (hir::UnOp::NegIntWrap, TyId::INT),
             (ast::UnaryOp::Neg, TyId::INT) => (hir::UnOp::NegInt, TyId::INT),
             (ast::UnaryOp::Neg, TyId::FLOAT) => (hir::UnOp::NegFloat, TyId::FLOAT),
             (ast::UnaryOp::Not, TyId::BOOL) => (hir::UnOp::Not, TyId::BOOL),
@@ -7579,6 +7593,10 @@ impl<'a> Checker<'a> {
             (B::BitAnd, TyId::INT) => Some((H::BitAnd, TyId::INT)),
             (B::BitOr, TyId::INT) => Some((H::BitOr, TyId::INT)),
             (B::BitXor, TyId::INT) => Some((H::BitXor, TyId::INT)),
+            // A shift count outside `0..=63` traps in a debug build and is
+            // taken modulo 64 in a release one — the overflow rule again.
+            (B::Shl, TyId::INT) if self.release => Some((H::ShlWrap, TyId::INT)),
+            (B::Shr, TyId::INT) if self.release => Some((H::ShrWrap, TyId::INT)),
             (B::Shl, TyId::INT) => Some((H::Shl, TyId::INT)),
             (B::Shr, TyId::INT) => Some((H::Shr, TyId::INT)),
 
@@ -9034,6 +9052,23 @@ pub(crate) fn parse_int(text: &str) -> Option<i64> {
         return i64::from_str_radix(b, 2).ok();
     }
     text.parse().ok()
+}
+
+/// Whether an integer literal's digits are `2^63`: out of range alone, and
+/// `int`'s minimum when a `-` is written in front of them.
+pub(crate) fn is_int_min_magnitude(text: &str) -> bool {
+    let text: String = text.chars().filter(|c| *c != '_').collect();
+    let text = strip_int_suffix(&text);
+    let magnitude = if let Some(h) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        u64::from_str_radix(h, 16).ok()
+    } else if let Some(o) = text.strip_prefix("0o").or_else(|| text.strip_prefix("0O")) {
+        u64::from_str_radix(o, 8).ok()
+    } else if let Some(b) = text.strip_prefix("0b").or_else(|| text.strip_prefix("0B")) {
+        u64::from_str_radix(b, 2).ok()
+    } else {
+        text.parse::<u64>().ok()
+    };
+    magnitude == Some(i64::MIN.unsigned_abs())
 }
 
 pub(crate) fn parse_float(text: &str) -> Option<f64> {
