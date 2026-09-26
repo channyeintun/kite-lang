@@ -13,10 +13,11 @@ The deltas that will break your assumptions, in the order you will hit them:
    error unless the function's second return component is `error`.
 2. **On the failure path there is no value at all.** Not a zero value, not `nil`
    — the value slot is unreadable, and reading it is `E0301`.
-3. **An error cannot be dropped**, except two ways the analysis cannot see. An
-   uninspected `err` from a destructuring, `_` in the error slot, and a bare call
-   statement are all `E0302`; binding a bare `-> error` result, or a whole pair,
-   to a single name is not caught. See *An error cannot be dropped* below.
+3. **An error cannot be dropped**, except one way the analysis cannot see. An
+   uninspected `err` from a destructuring or from binding a bare `-> error`
+   result, `_` in the error slot, and a bare call statement are all `E0302`;
+   binding a whole pair to a single name is not caught. See *An error cannot be
+   dropped* below.
 4. **`check err` is a statement, not a postfix `?`.** It is greppable and it
    occupies its own line, by design.
 5. **`err.message()` needs a proof that `err` is not nil.** An untested `error`
@@ -235,7 +236,7 @@ fn main() {
 
 ## An error cannot be dropped
 
-Six spellings of "drop it": three rejected, one deliberate, two holes.
+Six spellings of "drop it": four rejected, one deliberate, one hole.
 
 **Never inspected** (R3) — the error slot of a destructuring:
 
@@ -282,6 +283,22 @@ fn main() {
 }
 ```
 
+**A bare `error` bound to a name and never looked at.** `let e =
+dom.set_text(…)` is exactly what you write by habit, and naming the result does
+not buy silence: a lone `error` binding is watched like the error slot of a
+destructuring. Test it, or write `_ = …` and mean it.
+
+```kite fails
+fn touch() -> error {
+    return errors.new("no")
+}
+
+fn main() {
+    let e = touch() //~ E0302
+    io.print("dropped")
+}
+```
+
 **`_ = …`, which is allowed** — the one way to throw an error away, chosen so
 that it is a line a reader sees and `grep` finds:
 
@@ -305,36 +322,26 @@ Note the asymmetry: `_ = f()` discards the *whole* call and is fine; `_` standin
 in for the error inside a destructuring is not. `_ = …` takes only `=` — there is
 no `_ +=`, since that would read the hole.
 
-### The two holes
+### The hole
 
-Both are cases where nothing is destructured, so R1 never makes an Unchecked
-binding and R3 has nothing to fire on. **Neither is a diagnostic — this compiles
-and silently throws two failures away:**
+A whole pair bound to one name destructures nothing, so R1 never makes an
+Unchecked binding and R3 has nothing to fire on. **It is not a diagnostic —
+this compiles and silently throws the failure away:**
 
 ```kite
-fn touch() -> error {
-    return errors.new("no")
-}
-
 fn load() -> (int, error) {
     return 1, nil
 }
 
 fn main() {
-    let e = touch()     // a lone `error` binding is never Unchecked
     let p = load()      // the whole pair under one name
-    io.print("both errors are gone")
+    io.print("the error is gone")
 }
 ```
 
-The first is the dangerous one, because `let e = dom.set_text(…)` is exactly what
-you write by habit and `std/dom` answers with a bare `error` nearly everywhere.
-Only the *statement* form `dom.set_text(…)` is caught (R6); naming the result
-buys silence. Bind it and test it, or write `_ = …` and mean it.
-
-The second binding is close to useless anyway — `p` has no fields (`E0200`) and
-no methods (`E0205`) — and `let (v, e) = p` afterwards re-enters the normal
-rules. Do not reach for either.
+The binding is close to useless anyway — `p` has no fields (`E0200`) and no
+methods (`E0205`) — and `let (v, e) = p` afterwards re-enters the normal rules.
+Do not reach for it.
 
 ## `check`
 

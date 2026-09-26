@@ -25,10 +25,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Node 24 where it can be had: `--js-strings` builds a module against
-          # the JS String Builtins, and an engine without them cannot
-          # instantiate it — testing that path on an engine that skips it would
-          # be testing nothing.
+          # Node 24 where it can be had, because it is the current release and
+          # its engine is the nearest to a current browser's. Nothing in the
+          # suite needs it: the `--js-strings` mode that did went when strings
+          # became Kite's own GC arrays, so Windows on 22 misses nothing.
           - { os: ubuntu-latest, node: 24 }
           - { os: macos-latest, node: 24 }
           # Windows stays on 22. Node 24 there aborts inside libuv —
@@ -36,7 +36,7 @@ jobs:
           # test's HTTP server shuts down, and it does so after the server's
           # connections have been destroyed explicitly, which is as far as this
           # side of the boundary can reach. It is Node's own shutdown path, not
-          # the program's, and the builtins are covered on the other two.
+          # the program's.
           - { os: windows-latest, node: 22 }
     steps:
       - uses: actions/checkout@v4
@@ -96,6 +96,11 @@ jobs:
             ./target/release/kitec fmt --check "$file" || status=1
           done
           exit $status
+      # The skill tells an agent that every example in it compiles, and so do
+      # `llms.txt` and the `llms-full.txt` generated from it. This is what makes
+      # that true on the next commit as well as this one.
+      - name: every example in the skill behaves as marked
+        run: bash skills/kite/verify.sh skills/kite/SKILL.md skills/kite/references/*.md
 
   # The site's examples are compiled, so a documentation example that stops
   # working fails the build rather than sitting there wrong.
