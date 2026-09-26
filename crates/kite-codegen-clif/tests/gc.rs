@@ -65,9 +65,10 @@ fn a_live_list_survives_many_collections() {
         return;
     }
     // The list is live from the first allocation to the last print, while
-    // the loop churns through far more garbage than the nursery holds —
-    // every element is re-boxed on each push because the slice is
-    // copy-on-write, so the survivors are re-reached through fresh copies.
+    // the loop churns through far more garbage than the nursery holds. The
+    // list is promoted by an early collection and then pushed onto in place,
+    // so most new elements are nursery objects stored into an old one, which
+    // the next collection finds only through the remembered set.
     agree_with_gc(
         "struct P {\n  x: int\n  y: str\n}\n\
          fn main() {\n  var keep: [P] = []\n  var junk = 0\n\
@@ -148,6 +149,73 @@ fn maps_and_closures_survive_collections() {
     );
 }
 
+/// A loop of pushes, and then of index writes, is linear.
+///
+/// Every push and every `xs[i] = v` used to copy the whole slice, so building
+/// one by pushing was quadratic: a hundred thousand pushes took four seconds
+/// natively where the VM took sixteen milliseconds. The count of collections
+/// is what this measures, because it does not depend on how fast the machine
+/// is: once a slice outgrows this nursery, each copy of it is an allocation
+/// the nursery cannot hold, and each of those is a collection — twenty
+/// thousand pushes past that point were twenty thousand collections. Written
+/// in place, the slice is reallocated only as its room doubles.
+#[test]
+fn a_loop_of_pushes_is_linear() {
+    if unsupported_here() {
+        return;
+    }
+    let src = "fn main() {\n  var xs: [int] = []\n\
+               \x20 for i in 0..20000 {\n    xs.push(i)\n  }\n\
+               \x20 for i in 0..20000 {\n    xs[i] = xs[i] * 3\n  }\n\
+               \x20 var sum = 0\n  for x in xs {\n    sum = sum + x\n  }\n\
+               \x20 io.print(xs.len())\n  io.print(sum)\n}\n";
+    let vm = common::run_vm(src);
+    let config = RunConfig { nursery_bytes: Some(SMALL_NURSERY), ..RunConfig::default() };
+    let (native, stats) = common::run_native_with(src, config);
+    assert_eq!(vm, native, "the VM and the collected native run disagree");
+    assert!(
+        stats.minor_collections < 100,
+        "{} collections for 40,000 writes to one slice: each write is copying it",
+        stats.minor_collections
+    );
+}
+
+/// A slice written in place after it was promoted keeps the young values
+/// written into it.
+///
+/// An in-place write is the second heap mutation the collector must be told
+/// about, after a `var` field: a nursery object stored into an old slice is
+/// reachable only through that slice, and a minor collection does not trace
+/// the old generation. The first slice here is promoted by an early
+/// collection; the second outgrows the nursery and is born old. Both then
+/// have fresh structs and strings pushed and written into them while the
+/// loop churns, and every one is read back at the end — a missed barrier is
+/// a dangling element, and a wrong total or a crash here.
+#[test]
+fn slices_written_in_place_keep_their_young_elements() {
+    if unsupported_here() {
+        return;
+    }
+    let src = "struct P {\n  x: int\n  name: str\n}\n\
+               fn main() {\n  var small: [P] = []\n  var big: [str] = []\n\
+               \x20 for i in 0..3000 {\n\
+               \x20   small.push(P{x: i, name: \"p\\(i)\"})\n\
+               \x20   big.push(\"b\\(i)\")\n\
+               \x20   if small.len() > 200 {\n      small[i % 200] = P{x: -i, name: \"q\\(i)\"}\n    }\n\
+               \x20   var scratch: [int] = []\n\
+               \x20   for j in 0..8 {\n      scratch.push(j)\n    }\n  }\n\
+               \x20 for round in 0..3 {\n    for i in 0..3000 {\n\
+               \x20     big[i] = \"r\\(round) \\(i)\"\n    }\n  }\n\
+               \x20 var sum = 0\n  var chars = 0\n\
+               \x20 for p in small {\n    sum = sum + p.x\n    chars = chars + p.name.len()\n  }\n\
+               \x20 for s in big {\n    chars = chars + s.len()\n  }\n\
+               \x20 io.print(small.len())\n  io.print(sum)\n  io.print(chars)\n\
+               \x20 io.print(small[0].name)\n  io.print(small[2999].name)\n\
+               \x20 io.print(big[0])\n  io.print(big[2999])\n}\n";
+    agree_with_gc(src);
+    agree_with_major_gc(src);
+}
+
 #[test]
 fn major_collections_sweep_the_dead_and_keep_the_live() {
     if unsupported_here() {
@@ -156,9 +224,12 @@ fn major_collections_sweep_the_dead_and_keep_the_live() {
     // Everything here survives a minor collection long enough to be promoted
     // — the tree through the builder's frames, the list through `main`'s, the
     // holder's field through the remembered set — and then most of it dies in
-    // the old generation: every push copies the list, and every copy but the
-    // last is garbage. Only mark-and-sweep can reclaim that, and a mark that
-    // missed a root would free something still printed below.
+    // the old generation: every push copies the list, because a snapshot of
+    // it was taken first and a push may not write into what the snapshot
+    // sees, and every copy but the last is garbage. Only mark-and-sweep can
+    // reclaim that, and a mark that missed a root would free something still
+    // printed below. (A push into a list nothing else holds writes in place,
+    // so without the snapshot there is too little garbage to sweep.)
     agree_with_major_gc(
         "struct Holder {\n  var latest: str\n  var count: int\n}\n\
          enum Tree {\n  Leaf(int)\n  Node(left: Tree, right: Tree)\n}\n\
@@ -174,7 +245,9 @@ fn major_collections_sweep_the_dead_and_keep_the_live() {
          fn main() {\n  var h = Holder{latest: \"start\", count: 0}\n\
          \x20 var keep: [str] = []\n\
          \x20 for i in 0..400 {\n\
+         \x20   let before = keep\n\
          \x20   keep.push(\"item \\(i)\")\n\
+         \x20   if before.len() + 1 != keep.len() {\n      io.print(\"impossible\")\n    }\n\
          \x20   h.latest = \"value \\(i)\"\n\
          \x20   h.count = h.count + 1\n  }\n\
          \x20 let t = build(9, 1)\n  io.print(total(t))\n\

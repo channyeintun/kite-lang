@@ -2047,6 +2047,203 @@ fn main() {
     ),
 ];
 
+/// Programs pinning down the native target against the other two. Each one is
+/// here because the native backend once got it wrong or took too long.
+const NATIVE_TARGET: &[(&str, &str)] = &[
+    // Every native `push` and `xs[i] = v` copied the whole slice, so a loop of
+    // pushes was quadratic. A slice has room to spare now, and is written in
+    // place when the local it is in is the only thing that can reach it —
+    // `slices` in the native backend. `slices-are-values` above covers the
+    // ways a reference can be kept; this covers the ways a slice can reach a
+    // function without being its own — a parameter, a generic, a field read
+    // back, a capture, an optional, a task's frame across a suspension — and
+    // each element kind, with enough pushes to reallocate many times.
+    (
+        "slices-grow-in-place-natively",
+        r#"struct Holder {
+    var items: [int]
+}
+
+fn show(xs: [int]) -> str {
+    var s = "["
+    for x in xs {
+        s = s + " \(x)"
+    }
+    return s + " ]"
+}
+
+fn total(xs: [int]) -> int {
+    var t = 0
+    for x in xs {
+        t = t + x
+    }
+    return t
+}
+
+// A parameter's slice is the caller's too: the first push copies, and the
+// ones after it go straight into the copy.
+fn extended(var xs: [int], n: int) -> [int] {
+    for i in 0..n {
+        xs.push(i)
+    }
+    return xs
+}
+
+fn appended<T>(xs: [T], v: T) -> [T] {
+    var ys = xs
+    ys.push(v)
+    return ys
+}
+
+// Every local is spilled into the task's frame at a suspension and read back
+// after it, so after `yield` the slice is one read out of the frame, which the
+// first push must copy rather than write into.
+async fn gather(n: int) -> [int] {
+    var xs: [int] = []
+    for i in 0..n {
+        xs.push(i)
+        let seen = xs
+        task.yield()
+        xs.push(seen.len() * 100)
+    }
+    return xs
+}
+
+async fn main() {
+    // Built by pushing, through many doublings, then written in place.
+    var xs: [int] = []
+    for i in 0..1000 {
+        xs.push(i)
+    }
+    for i in 0..1000 {
+        xs[i] = xs[i] * 2
+    }
+    io.print(xs.len())
+    io.print(total(xs))
+
+    // A snapshot every time round: each push copies, and each snapshot keeps
+    // the length and the contents it had.
+    var snaps: [[int]] = []
+    var grow: [int] = []
+    for i in 0..300 {
+        snaps.push(grow)
+        grow.push(i)
+    }
+    var lengths = 0
+    var wrong = 0
+    for s in snaps {
+        lengths = lengths + s.len()
+        for j in 0..s.len() {
+            if s[j] != j {
+                wrong = wrong + 1
+            }
+        }
+    }
+    io.print(lengths)
+    io.print(wrong)
+    io.print(show(snaps[5]))
+    io.print(grow.len())
+
+    // Through a parameter, leaving the caller's slice alone.
+    let base = [1, 2, 3]
+    let more = extended(base, 50)
+    io.print(base.len())
+    io.print(more.len())
+    io.print(total(more))
+
+    // Generic, over a slice of slices: the rows are shared between the two,
+    // and a row written through one is not seen through the other.
+    let rows = [[1], [2, 3]]
+    var more_rows = appended(rows, [4, 5, 6])
+    var r0 = more_rows[0]
+    r0.push(10)
+    more_rows[0] = r0
+    io.print(rows[0].len())
+    io.print(more_rows[0].len())
+    io.print(more_rows.len())
+
+    // A `var` field grown through a local and stored back each time, and a
+    // copy of it taken between.
+    var h = Holder{ items: [] }
+    for i in 0..20 {
+        var it = h.items
+        it.push(i)
+        h.items = it
+    }
+    let held = h.items
+    var it = h.items
+    it[0] = 99
+    h.items = it
+    io.print(held[0])
+    io.print(h.items[0])
+
+    // A captured slice is the closure's, and every call starts from it.
+    let fixed = xs
+    let f = || -> int {
+        var local = fixed
+        local.push(1)
+        return local.len()
+    }
+    io.print(f())
+    io.print(f())
+
+    // Floats and booleans, written in place.
+    var fs: [float] = []
+    var bs: [bool] = []
+    for i in 0..10 {
+        fs.push(0.5 * (i as float))
+        bs.push(i % 3 == 0)
+    }
+    fs[9] = -1.0
+    bs[0] = false
+    for x in fs {
+        io.print(x)
+    }
+    var trues = 0
+    for x in bs {
+        if x {
+            trues = trues + 1
+        }
+    }
+    io.print(trues)
+
+    // An optional's payload is a copy once it is written.
+    let o: Option<[int]> = xs
+    match o {
+        nil => io.print("nil"),
+        v => {
+            var w = v
+            w.push(1)
+            io.print(w.len())
+        },
+    }
+    io.print(xs.len())
+
+    // A grid, one row at a time.
+    var grid: [[int]] = []
+    for i in 0..4 {
+        var row: [int] = []
+        for j in 0..4 {
+            row.push(i * j)
+        }
+        grid.push(row)
+    }
+    for i in 0..4 {
+        var row = grid[i]
+        row[i] = -1
+        grid[i] = row
+    }
+    for row in grid {
+        io.print(show(row))
+    }
+
+    let g = await gather(4)
+    io.print(show(g))
+}
+"#,
+    ),
+];
+
 /// Programs above that need a rule of the checker's which may not have landed:
 /// they are skipped while the checker still refuses them, and compared the
 /// moment it accepts them. `A(x) | B(x)` is lowered correctly already; until
@@ -2266,7 +2463,12 @@ fn all_backends_agree() {
     let root = std::env::temp_dir().join(format!("kite-diff-{}", std::process::id()));
     let mut mismatches = Vec::new();
 
-    for (name, src) in PROGRAMS.iter().chain(MIDDLE_END).chain(WASM_TARGET) {
+    for (name, src) in PROGRAMS
+        .iter()
+        .chain(MIDDLE_END)
+        .chain(WASM_TARGET)
+        .chain(NATIVE_TARGET)
+    {
         if AWAITING_THE_CHECKER.contains(name)
             && compile(format!("{}.kite", name), src, Emit::Check).failed()
         {
@@ -2308,28 +2510,98 @@ fn all_backends_agree() {
     );
 }
 
+/// A nursery of one page and an old generation small enough to be swept: the
+/// collector runs between nearly every pair of allocations.
+const PAGE_OF_NURSERY: kite_codegen_clif::RunConfig = kite_codegen_clif::RunConfig {
+    nursery_bytes: Some(4096),
+    major_threshold: Some(32 << 10),
+};
+
+/// Run natively with the collector configured, and hand back what was printed
+/// and how many minor collections that took.
+fn run_on_native_with(name: &str, src: &str, config: kite_codegen_clif::RunConfig) -> (String, u64) {
+    let c = compile(format!("{}.kite", name), src, Emit::Native);
+    assert!(
+        !c.failed(),
+        "{} does not compile natively:\n{}",
+        name,
+        c.render_diagnostics()
+    );
+    let mut out = Vec::new();
+    let stats = c
+        .native
+        .as_ref()
+        .expect("a native program")
+        .run_with(config, &mut out)
+        .unwrap_or_else(|e| panic!("{} failed on the native backend: {}", name, e));
+    (String::from_utf8(out).expect("output is valid UTF-8"), stats.minor_collections)
+}
+
+/// The slice programs, natively, under a collector made to run constantly.
+///
+/// A slice written in place is the collector's business: once it has been
+/// promoted, a young element written into it is reachable only through the
+/// write barrier, and a slice grown past the nursery is born in the old
+/// generation. The default nursery of a megabyte never fills for these
+/// programs, so they run here too with one of a page.
+#[test]
+fn slices_agree_natively_with_a_page_of_nursery() {
+    if !native_available() {
+        eprintln!(
+            "skipping: {}",
+            kite_codegen_clif::supported_here().unwrap_err()
+        );
+        return;
+    }
+    let mut collections = 0;
+    for name in ["slices-are-values", "slices-grow-in-place-natively"] {
+        let (_, src) = WASM_TARGET
+            .iter()
+            .chain(NATIVE_TARGET)
+            .find(|(n, _)| *n == name)
+            .expect("the corpus has the program");
+        let vm = run_on_vm(name, src);
+        let (native, minor) = run_on_native_with(name, src, PAGE_OF_NURSERY);
+        assert_eq!(native, vm, "{} with a page of nursery", name);
+        collections += minor;
+    }
+    assert!(collections > 100, "only {} collections: the nursery did not fill", collections);
+}
+
 /// Literals longer than one `array.new_fixed` may be. V8 refuses more than
 /// 10,000 operands to one when the module is *instantiated*, after the
 /// validator has passed it, so a 10,001-element slice or map literal built a
 /// module that `build` accepted and the browser would not load. Generated
 /// rather than written out.
+///
+/// The native backend refused anything past the 4,096 words of its staging
+/// window (E0204), so this compared the VM with Wasm alone. It builds a longer
+/// literal a window at a time now. The map's last entry repeats its first key,
+/// windows apart, which must still be one entry at the first position with the
+/// last value — the rule each window follows within itself.
 #[test]
 fn literals_past_ten_thousand_elements_agree() {
     let elems: Vec<String> = (0..10_001).map(|i| i.to_string()).collect();
-    let entries: Vec<String> = (0..10_001).map(|i| format!("{}: \"v{}\"", i, i)).collect();
+    let mut entries: Vec<String> = (0..10_001).map(|i| format!("{}: \"v{}\"", i, i)).collect();
+    entries.push("0: \"again\"".to_string());
     let src = format!(
         "fn main() {{\n  let xs = [{}]\n  io.print(xs.len())\n  io.print(xs[10000])\n\
          \x20 let m = {{{}}}\n  io.print(m.len())\n  match m[10000] {{\n    nil => io.print(\"none\"),\n\
-         \x20   v => io.print(v),\n  }}\n}}\n",
+         \x20   v => io.print(v),\n  }}\n  match m[0] {{\n    nil => io.print(\"none\"),\n\
+         \x20   v => io.print(v),\n  }}\n  io.print(m.keys()[0])\n}}\n",
         elems.join(", "),
         entries.join(", ")
     );
     let name = "literals-past-ten-thousand";
     let vm = run_on_vm(name, &src);
-    assert_eq!(vm, "10001\n10000\n10001\nv10000\n");
-    // The native backend refuses a literal past 4,096 elements at compile
-    // time (E0204) rather than building one it cannot, so the comparison
-    // here is the VM against Wasm.
+    assert_eq!(vm, "10001\n10000\n10001\nv10000\nagain\n0\n");
+    if native_available() {
+        let native = run_on_native(name, &src);
+        assert_eq!(native, vm, "native");
+        // A literal past the nursery's size is born in the old generation.
+        let (paged, _) = run_on_native_with(name, &src, PAGE_OF_NURSERY);
+        assert_eq!(paged, vm, "native, with a page of nursery");
+    }
     if node_available() {
         let dir = std::env::temp_dir().join(format!("kite-biglit-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create work directory");

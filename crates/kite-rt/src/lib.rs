@@ -40,10 +40,11 @@
 //! Cranelift spills stack-map values before each safepoint and reloads them
 //! after, which is exactly what allows the nursery to move objects.
 //!
-//! The **write barrier** covers the one in-place heap mutation the language
-//! has: a `var` field assignment. Everything else — slice writes, map writes,
-//! pushes — is copy-on-write and allocates a fresh object, so the barrier
-//! lives in `kite_rt_set_field` and nowhere else. An old object that has a
+//! The **write barrier** covers the in-place heap mutations: a `var` field
+//! assignment, and a slice write or push into a slice the compiled code owns
+//! (see [`kite_rt_slice_push`]). Map writes are copy-on-write and allocate a
+//! fresh object. Every in-place store of a reference goes through
+//! [`remember`], so the barrier is one function. An old object that has a
 //! reference stored into it joins the remembered set, and the remembered set
 //! is scanned as roots by the next minor collection.
 //!
@@ -100,7 +101,8 @@ const MARK_BIT: u64 = 1 << 8;
 const REMEMBERED_BIT: u64 = 1 << 9;
 
 /// Header: two words. Word 0 is `kind | gc bits | aux << 32`; word 1 is
-/// kind-specific (a length, a variant, a capture count). Payload slots follow.
+/// kind-specific (a length, a variant, a capture count; for a slice, the
+/// length and the capacity — see [`slice_len`]). Payload slots follow.
 const HEADER: usize = 16;
 
 #[inline]
@@ -132,6 +134,54 @@ fn round8(n: usize) -> usize {
     (n + 7) & !7
 }
 
+/// A slice's length: the low half of its second header word.
+///
+/// A slice is one object with room to spare. The high half of word 1 is its
+/// capacity — how many payload slots the object was allocated with — and only
+/// the first `len` of them are elements; the rest have never been written, so
+/// nothing reads them. The collector traces, and the renderer and `==` walk,
+/// the length; only the object's size comes from the capacity. The room is
+/// what lets a push go straight into a slice the compiled code owns (see
+/// [`kite_rt_slice_push`]).
+///
+/// The code generator reads the length inline, as a 32-bit load of word 1 —
+/// the low half on both little-endian targets the backend supports.
+#[inline]
+unsafe fn slice_len(p: *const u8) -> usize {
+    (obj_word1(p) & 0xFFFF_FFFF) as usize
+}
+
+#[inline]
+unsafe fn slice_cap(p: *const u8) -> usize {
+    (obj_word1(p) >> 32) as usize
+}
+
+#[inline]
+unsafe fn set_slice_len(p: *mut u8, len: usize) {
+    *(p as *mut u64).add(1) = len as u64 | ((slice_cap(p) as u64) << 32);
+}
+
+/// The most elements a slice can hold here: its length and capacity share
+/// one header word. Eight bytes a slot makes that 32 GiB, which no program has
+/// reached; a trap says so rather than a length that wrapped.
+const SLICE_MAX: usize = u32::MAX as usize;
+
+/// Allocate a slice of element kind `elem_kind` with `len` elements and room
+/// for `cap`, header written and payload not. May collect, so the caller
+/// roots whatever it holds across it.
+fn slice_alloc(elem_kind: u32, len: usize, cap: usize) -> *mut u8 {
+    debug_assert!(len <= cap);
+    if cap > SLICE_MAX {
+        trap(&format!("a slice cannot hold more than {} elements", SLICE_MAX));
+    }
+    let p = alloc(HEADER + 8 * cap);
+    unsafe {
+        *(p as *mut u64) = word0(obj::SLICE, elem_kind);
+        *(p as *mut u64).add(1) = len as u64 | ((cap as u64) << 32);
+    }
+    p
+}
+
 // ---------------------------------------------------------------------------
 // The staging window
 // ---------------------------------------------------------------------------
@@ -144,7 +194,9 @@ fn round8(n: usize) -> usize {
 ///
 /// The allocating call knows the count and the shape, so the collector can
 /// treat the staged reference slots as roots if the allocation itself has to
-/// collect.
+/// collect. A slice or map literal longer than the window is staged a window
+/// at a time, each one added by [`kite_rt_slice_extend`] or
+/// [`kite_rt_map_extend`] to what the ones before it built.
 pub const STAGE_WORDS: usize = 4096;
 
 #[no_mangle]
@@ -733,7 +785,7 @@ unsafe fn object_size_of(p: *const u8, shapes: &Shapes) -> usize {
         obj::STRUCT => 8 * shapes.structs[aux].len(),
         obj::ENUM => 8 * ((obj_word1(p) >> 32) as usize),
         obj::TUPLE => 8 * shapes.tuples[aux].len(),
-        obj::SLICE => 8 * obj_word1(p) as usize,
+        obj::SLICE => 8 * slice_cap(p),
         obj::MAP => 16 * obj_word1(p) as usize,
         obj::PAIR => 16,
         obj::ERR => 32,
@@ -769,9 +821,10 @@ unsafe fn for_each_ref_slot(p: *mut u8, f: &mut dyn FnMut(*mut u64)) {
             shaped(rt().shapes.enums[aux][variant].clone(), 0, f);
         }
         obj::TUPLE => shaped(rt().shapes.tuples[aux].clone(), 0, f),
+        // The elements only: the slots past the length are unwritten room.
         obj::SLICE => {
             if aux as u8 == kind::REF {
-                for i in 0..obj_word1(p) as usize {
+                for i in 0..slice_len(p) {
                     f(slot(p, i));
                 }
             }
@@ -1146,18 +1199,51 @@ pub extern "C" fn kite_rt_tuple_new(shape: u64, argc: u64) -> u64 {
     p as u64
 }
 
+/// A slice of the `argc` staged elements, with room for `cap`.
+///
+/// The room is for a literal longer than the staging window, which the code
+/// generator builds a window at a time: the whole length is allocated here,
+/// and [`kite_rt_slice_extend`] fills the rest in place.
 #[no_mangle]
-pub extern "C" fn kite_rt_slice_new(elem_kind: u64, argc: u64) -> u64 {
+pub extern "C" fn kite_rt_slice_new(elem_kind: u64, argc: u64, cap: u64) -> u64 {
     let argc = argc as usize;
     let n = root_stage(argc, |_| elem_kind as u8 == kind::REF);
-    let p = alloc(HEADER + 8 * argc);
+    let p = slice_alloc(elem_kind as u32, argc, (cap as usize).max(argc));
     unroot(n);
-    unsafe {
-        *(p as *mut u64) = word0(obj::SLICE, elem_kind as u32);
-        *(p as *mut u64).add(1) = argc as u64;
-        fill_from_stage(p, argc);
-    }
+    unsafe { fill_from_stage(p, argc) };
     p as u64
+}
+
+/// Append the `argc` staged elements to a slice the compiled code has just
+/// made and nothing else has seen — the next window of a literal too long for
+/// one. In place when the room is there, which it is when [`kite_rt_slice_new`]
+/// was asked for the literal's length; a copy with enough room otherwise.
+#[no_mangle]
+pub extern "C" fn kite_rt_slice_extend(s: u64, argc: u64) -> u64 {
+    let argc = argc as usize;
+    let mut s = s;
+    unsafe {
+        let len = slice_len(s as *const u8);
+        let aux = obj_aux(s as *const u8);
+        let elem_ref = aux as u8 == kind::REF;
+        if len + argc > slice_cap(s as *const u8) {
+            root(&mut s);
+            let n = root_stage(argc, |_| elem_ref);
+            let p = slice_alloc(aux, len, len + argc);
+            unroot(n + 1);
+            std::ptr::copy_nonoverlapping(slot(s as *const u8, 0), slot(p, 0), len);
+            s = p as u64;
+        }
+        let p = s as *mut u8;
+        for i in 0..argc {
+            *slot(p, len + i) = *stage_slot(i);
+        }
+        set_slice_len(p, len + argc);
+        if elem_ref {
+            remember(p);
+        }
+    }
+    s
 }
 
 #[no_mangle]
@@ -1195,28 +1281,62 @@ pub extern "C" fn kite_rt_map_new(key_kind: u64, val_kind: u64, argc: u64) -> u6
     let aux = (key_kind as u32 & 0xFF) | ((val_kind as u32 & 0xFF) << 8);
     unsafe {
         *(p as *mut u64) = word0(obj::MAP, aux);
-        *(p as *mut u64).add(1) = 0;
-        let mut len = 0usize;
-        for e in 0..pairs {
-            let k = *stage_slot(2 * e);
-            let v = *stage_slot(2 * e + 1);
-            let mut replaced = false;
-            for i in 0..len {
-                if value_eq(*slot(p, 2 * i), k, key_kind as u8) {
-                    *slot(p, 2 * i + 1) = v;
-                    replaced = true;
-                    break;
-                }
-            }
-            if !replaced {
-                *slot(p, 2 * len) = k;
-                *slot(p, 2 * len + 1) = v;
-                len += 1;
-            }
-        }
+        let len = insert_staged(p, 0, pairs, key_kind as u8);
         *(p as *mut u64).add(1) = len as u64;
     }
     p as u64
+}
+
+/// The next window of a map literal too long for one: a copy of `m` with the
+/// `argc` staged words — alternating keys and values, as for
+/// [`kite_rt_map_new`] — added by the same rule, so a key repeated across two
+/// windows is one entry exactly as it is within one.
+#[no_mangle]
+pub extern "C" fn kite_rt_map_extend(m: u64, argc: u64) -> u64 {
+    let argc = argc as usize;
+    let pairs = argc / 2;
+    let mut m = m;
+    unsafe {
+        let len = obj_word1(m as *const u8) as usize;
+        let aux = obj_aux(m as *const u8);
+        let key_kind = (aux & 0xFF) as u8;
+        let val_kind = ((aux >> 8) & 0xFF) as u8;
+        root(&mut m);
+        let n = root_stage(argc, |i| {
+            (if i % 2 == 0 { key_kind } else { val_kind }) == kind::REF
+        });
+        let p = alloc(HEADER + 16 * (len + pairs));
+        unroot(n + 1);
+        std::ptr::copy_nonoverlapping(m as *const u8, p, HEADER + 16 * len);
+        let len = insert_staged(p, len, pairs, key_kind);
+        *(p as *mut u64).add(1) = len as u64;
+        p as u64
+    }
+}
+
+/// Add `pairs` staged key-value pairs to the `len` entries at `p`, which has
+/// room for all of them, and answer the new length. A key already present
+/// keeps its position and takes the later value — the VM's rule for a
+/// literal that names a key twice.
+unsafe fn insert_staged(p: *mut u8, mut len: usize, pairs: usize, key_kind: u8) -> usize {
+    for e in 0..pairs {
+        let k = *stage_slot(2 * e);
+        let v = *stage_slot(2 * e + 1);
+        let mut replaced = false;
+        for i in 0..len {
+            if value_eq(*slot(p, 2 * i), k, key_kind) {
+                *slot(p, 2 * i + 1) = v;
+                replaced = true;
+                break;
+            }
+        }
+        if !replaced {
+            *slot(p, 2 * len) = k;
+            *slot(p, 2 * len + 1) = v;
+            len += 1;
+        }
+    }
+    len
 }
 
 #[no_mangle]
@@ -1352,23 +1472,55 @@ pub extern "C" fn kite_rt_error_message(err: u64) -> u64 {
 // Reads and writes
 // ---------------------------------------------------------------------------
 
-/// The one in-place heap mutation the language has, and therefore the one
-/// place the write barrier lives.
+/// A `var` field write: one of the two in-place heap mutations the language
+/// has. The other is a write into an owned slice, below; both store through
+/// [`remember`].
 #[no_mangle]
 pub extern "C" fn kite_rt_set_field(base: u64, index: u64, value: u64, is_ref: u64) {
     let p = base as *mut u8;
     unsafe {
         *slot(p, index as usize) = value;
-        if is_ref != 0 && !in_nursery(base) && *(p as *const u64) & REMEMBERED_BIT == 0 {
-            *(p as *mut u64) |= REMEMBERED_BIT;
-            rt().remembered.push(p);
+        if is_ref != 0 {
+            remember(p);
         }
+    }
+}
+
+/// The write barrier, for an object that has just had a reference stored into
+/// it in place: an old one joins the remembered set, because it may now be
+/// the only path to a nursery object and a minor collection does not trace
+/// the old generation.
+///
+/// The bit is how a second store into the same object stays cheap, so it
+/// must never be set on an object that is not in the set — which is why a
+/// copy of a slice writes a fresh first header word rather than copying the
+/// original's, collector bits and all.
+unsafe fn remember(p: *mut u8) {
+    if !in_nursery(p as u64) && *(p as *const u64) & REMEMBERED_BIT == 0 {
+        *(p as *mut u64) |= REMEMBERED_BIT;
+        rt().remembered.push(p);
     }
 }
 
 unsafe fn slice_parts(s: u64) -> (*mut u8, usize) {
     let p = s as *mut u8;
-    (p, obj_word1(p) as usize)
+    (p, slice_len(p))
+}
+
+/// A copy of the slice `s`, `len` elements long with room for `cap`. `s` and
+/// `value` are rooted across the allocation, so the answer is the copy and
+/// `value` as it is after it.
+unsafe fn slice_copy(s: u64, value: u64, len: usize, cap: usize) -> (*mut u8, u64) {
+    let (mut s, mut value) = (s, value);
+    let elem_ref = obj_aux(s as *const u8) as u8 == kind::REF;
+    root(&mut s);
+    if elem_ref {
+        root(&mut value);
+    }
+    let p = slice_alloc(obj_aux(s as *const u8), len, cap);
+    unroot(if elem_ref { 2 } else { 1 });
+    std::ptr::copy_nonoverlapping(slot(s as *const u8, 0), slot(p, 0), len);
+    (p, value)
 }
 
 /// Bounds-checked; traps on failure, because an index bug is a program bug.
@@ -1386,57 +1538,70 @@ pub extern "C" fn kite_rt_index_get(s: u64, index: i64) -> u64 {
     }
 }
 
-/// Copy-on-write: the whole slice is copied and the copy mutated, and the
-/// code generator rebinds the local — the same observable behaviour as the
-/// VM's clone-if-shared, bought with a copy instead of a reference count.
+/// `xs[i] = v`, answering the slice the local keeps.
+///
+/// Slices are values, and `owned` is how the code generator says whether this
+/// one can be written where it stands: nonzero when nothing but the local
+/// being written can reach the object (see `kite-codegen-clif`'s `slices`
+/// module). Then the element is stored in place. Otherwise the slice is
+/// copied — exactly as long as it is, since a write does not suggest a push
+/// to follow — and the copy written, which is the VM's `Rc::make_mut` answer
+/// without a count to ask. The index is checked first either way, as the VM
+/// checks it before its `make_mut`.
 #[no_mangle]
-pub extern "C" fn kite_rt_set_index(s: u64, index: i64, value: u64) -> u64 {
-    let mut s = s;
-    let mut value = value;
+pub extern "C" fn kite_rt_set_index(s: u64, index: i64, value: u64, owned: u8) -> u64 {
     unsafe {
-        let (_, len) = slice_parts(s);
-        if usize::try_from(index).ok().filter(|u| *u < len).is_none() {
+        let (p, len) = slice_parts(s);
+        let Some(i) = usize::try_from(index).ok().filter(|u| *u < len) else {
             trap(&format!(
                 "index {} is out of range for a slice of length {}",
                 index, len
             ));
-        }
-        root(&mut s);
-        let elem_ref = obj_aux(s as *const u8) as u8 == kind::REF;
+        };
+        let elem_ref = obj_aux(p) as u8 == kind::REF;
+        let (p, value) = if owned != 0 { (p, value) } else { slice_copy(s, value, len, len) };
+        *slot(p, i) = value;
         if elem_ref {
-            root(&mut value);
+            remember(p);
         }
-        let p = alloc(HEADER + 8 * len);
-        unroot(if elem_ref { 2 } else { 1 });
-        std::ptr::copy_nonoverlapping(s as *const u8, p, HEADER + 8 * len);
-        *slot(p, index as usize) = value;
         p as u64
     }
 }
 
+/// `xs.push(v)`, answering the slice the local keeps.
+///
+/// With `owned` (as for [`kite_rt_set_index`]) and room to spare, the value
+/// goes into the next slot and the length moves, with nothing allocated.
+/// Otherwise the elements move to a new object twice as long plus four — 4,
+/// 12, 28, … from empty — which the local then owns. The doubling is what
+/// makes a loop of pushes linear: this copied the whole slice on every push
+/// once, and a hundred thousand pushes took four seconds. A snapshot someone
+/// else holds is never written, which is what keeps a slice a value.
 #[no_mangle]
-pub extern "C" fn kite_rt_slice_push(s: u64, value: u64) -> u64 {
-    let mut s = s;
-    let mut value = value;
+pub extern "C" fn kite_rt_slice_push(s: u64, value: u64, owned: u8) -> u64 {
     unsafe {
-        let (_, len) = slice_parts(s);
-        root(&mut s);
-        let elem_ref = obj_aux(s as *const u8) as u8 == kind::REF;
-        if elem_ref {
-            root(&mut value);
-        }
-        let p = alloc(HEADER + 8 * (len + 1));
-        unroot(if elem_ref { 2 } else { 1 });
-        std::ptr::copy_nonoverlapping(s as *const u8, p, HEADER + 8 * len);
-        *(p as *mut u64).add(1) = (len + 1) as u64;
+        let (p, len) = slice_parts(s);
+        let elem_ref = obj_aux(p) as u8 == kind::REF;
+        let (p, value) = if owned != 0 && len < slice_cap(p) {
+            (p, value)
+        } else {
+            if len >= SLICE_MAX {
+                trap(&format!("a slice cannot hold more than {} elements", SLICE_MAX));
+            }
+            slice_copy(s, value, len, (2 * len + 4).min(SLICE_MAX))
+        };
         *slot(p, len) = value;
+        set_slice_len(p, len + 1);
+        if elem_ref {
+            remember(p);
+        }
         p as u64
     }
 }
 
 #[no_mangle]
 pub extern "C" fn kite_rt_slice_len(s: u64) -> i64 {
-    unsafe { obj_word1(s as *const u8) as i64 }
+    unsafe { slice_len(s as *const u8) as i64 }
 }
 
 /// `xs[a..b]` — a fresh slice of the half-open window.
@@ -1459,17 +1624,13 @@ pub extern "C" fn kite_rt_slice_range(s: u64, start: i64, end: i64) -> u64 {
         let count = (hi - lo) as usize;
 
         root(&mut s);
-        let p = alloc(HEADER + 8 * count);
+        // A fresh header with the original's element kind, which the copy
+        // must keep for the collector to trace it at all — but not the
+        // original's first word whole: its collector bits are not the copy's
+        // (see `remember`).
+        let p = slice_alloc(obj_aux(s as *const u8), count, count);
         unroot(1);
-        // The header carries the element kind, which the copy must preserve
-        // for the collector to trace the new slice at all.
-        *(p as *mut u64) = *(s as *const u64);
-        *(p as *mut u64).add(1) = count as u64;
-        std::ptr::copy_nonoverlapping(
-            slot(s as *const u8, lo as usize) as *const u8,
-            slot(p, 0) as *mut u8,
-            8 * count,
-        );
+        std::ptr::copy_nonoverlapping(slot(s as *const u8, lo as usize), slot(p, 0), count);
         p as u64
     }
 }
@@ -1606,10 +1767,8 @@ fn map_side(m: u64, values: bool) -> u64 {
         let aux = obj_aux(m as *const u8);
         let elem_kind = if values { (aux >> 8) & 0xFF } else { aux & 0xFF };
         root(&mut m);
-        let p = alloc(HEADER + 8 * len);
+        let p = slice_alloc(elem_kind, len, len);
         unroot(1);
-        *(p as *mut u64) = word0(obj::SLICE, elem_kind);
-        *(p as *mut u64).add(1) = len as u64;
         for i in 0..len {
             *slot(p, i) = *slot(m as *const u8, 2 * i + usize::from(values));
         }
@@ -1869,7 +2028,7 @@ fn render_ref(p: u64, out: &mut String) {
             }
             obj::TUPLE => fields(&rt().shapes.tuples[aux].clone(), 0, "(", ")", out),
             obj::SLICE => {
-                let len = obj_word1(o) as usize;
+                let len = slice_len(o);
                 out.push('[');
                 for i in 0..len {
                     if i > 0 {
@@ -1924,6 +2083,13 @@ fn render_ref(p: u64, out: &mut String) {
 /// million cells recursed once per cell until the process aborted. The VM
 /// walks its values the same way, for the same reason.
 fn value_eq(a: u64, b: u64, k: u8) -> bool {
+    // A scalar needs no worklist, and a map keyed by numbers asks this once
+    // per entry on every lookup — or per pair of entries, building a literal.
+    match k {
+        kind::FLOAT => return f64::from_bits(a) == f64::from_bits(b),
+        kind::REF => {}
+        _ => return a == b,
+    }
     let mut work = vec![(a, b, k)];
     while let Some((a, b, k)) = work.pop() {
         let same = match k {
@@ -1969,8 +2135,10 @@ fn ref_eq(a: u64, b: u64, work: &mut Vec<(u64, u64, u8)>) -> bool {
                 each(&rt().shapes.enums[obj_aux(pa) as usize][variant].clone())
             }
             obj::TUPLE => each(&rt().shapes.tuples[obj_aux(pa) as usize].clone()),
+            // By length: two slices of equal contents are equal whatever room
+            // each has spare.
             obj::SLICE => {
-                let (la, lb) = (obj_word1(pa) as usize, obj_word1(pb) as usize);
+                let (la, lb) = (slice_len(pa), slice_len(pb));
                 if la != lb {
                     return false;
                 }
@@ -2779,8 +2947,10 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         kite_rt_enum_new,
         kite_rt_tuple_new,
         kite_rt_slice_new,
+        kite_rt_slice_extend,
         kite_rt_closure_new,
         kite_rt_map_new,
+        kite_rt_map_extend,
         kite_rt_box_new,
         kite_rt_pair_new,
         kite_rt_error_new,
