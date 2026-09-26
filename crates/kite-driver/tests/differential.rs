@@ -1443,7 +1443,7 @@ fn all_backends_agree() {
 
     for (name, src) in PROGRAMS.iter().chain(MIDDLE_END) {
         if AWAITING_THE_CHECKER.contains(name)
-            && compile(format!("{}.kite", name), *src, Emit::Check).failed()
+            && compile(format!("{}.kite", name), src, Emit::Check).failed()
         {
             eprintln!("skipping {}: the checker does not accept it yet", name);
             continue;
