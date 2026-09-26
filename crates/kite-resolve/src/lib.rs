@@ -542,6 +542,9 @@ pub struct LocalInfo {
     pub synthetic: bool,
 }
 
+/// A variant's name, with its enum's type index and its own position.
+type NamedVariant = (String, (u32, u32));
+
 #[derive(Debug, Default)]
 pub struct ResolveMap {
     pub fns: Vec<FnSig>,
@@ -582,7 +585,7 @@ pub struct ResolveMap {
     ambiguous_variants: Vec<String>,
     /// Every enum's variants, grouped by the module that declares the enum:
     /// what `variant_index` is cut from.
-    variants_by_module: HashMap<String, Vec<(String, (u32, u32))>>,
+    variants_by_module: HashMap<String, Vec<NamedVariant>>,
     /// The module `variant_index` currently describes.
     variant_scope: Option<String>,
 }

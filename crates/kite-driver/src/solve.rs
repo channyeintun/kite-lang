@@ -504,7 +504,7 @@ mod tests {
     struct Sourced {
         table: Table,
         /// Per row: where each dependency comes from.
-        places: Vec<(&'static str, &'static str, Vec<(&'static str, &'static str)>)>,
+        places: Vec<Row>,
         /// Name → (who said so, where).
         learned: BTreeMap<String, Vec<(String, String)>>,
         unwound: Vec<String>,
