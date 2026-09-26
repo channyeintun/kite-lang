@@ -6,7 +6,7 @@
 use kite_diag::{DiagBag, Diagnostic};
 use kite_span::{FileId, SourceMap, Span};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub mod derive;
 pub mod doctest;
@@ -287,29 +287,42 @@ impl Compilation {
     /// map "so browser stack traces name `.kite` files and lines"; what it
     /// carries is one entry per function, pointing at the line the function
     /// was declared on. A MIR instruction has no span to do better with.
-    pub fn wasm_source_map(&self) -> Option<String> {
+    ///
+    /// A source is named relative to `beside`, the directory the map is
+    /// written into: a browser resolves a source against the map's own URL,
+    /// so `src/main.kite` as given on the command line, written into `dist/`,
+    /// was looked for at `dist/src/main.kite`. An absolute input path is made
+    /// relative the same way rather than published, since it names the
+    /// builder's machine. With no directory, a source keeps only its file
+    /// name. The standard library's modules are named under `kite-std/`, and
+    /// every source's text travels in the map, so none of it has to be found.
+    pub fn wasm_source_map(&self, beside: Option<&Path>) -> Option<String> {
+        use kite_codegen_wasm::sourcemap::{render, FunctionSpan, Source};
         let module = self.wasm.as_ref()?;
         // A release build carries no debug information, and a map with no
         // entries is a file that exists only to be fetched and found useless.
         if module.source_spans.is_empty() {
             return None;
         }
-        let mut sources: Vec<String> = Vec::new();
+        let mut sources: Vec<Source> = Vec::new();
         let mut spans = Vec::with_capacity(module.source_spans.len());
         for (offset, span) in &module.source_spans {
-            let file = self.sources.file(span.file).name.display().to_string();
+            let file = source_name(&self.sources.file(span.file).name, beside);
             let at = self.sources.line_col(*span);
-            if !sources.contains(&file) {
-                sources.push(file.clone());
+            if !sources.iter().any(|s| s.name == file) {
+                sources.push(Source {
+                    name: file.clone(),
+                    content: self.sources.text(span.file).to_string(),
+                });
             }
-            spans.push(kite_codegen_wasm::sourcemap::FunctionSpan {
+            spans.push(FunctionSpan {
                 offset: *offset,
                 file,
                 line: at.line,
                 column: at.col,
             });
         }
-        Some(kite_codegen_wasm::sourcemap::render(&spans, &sources))
+        Some(render(&spans, &sources))
     }
 
     /// Run one named function that takes nothing and answers with nothing.
@@ -363,6 +376,65 @@ impl Compilation {
 /// `map`, `filter`, `Display`. Everything else is a module, reached through
 /// `use` and written qualified at every use site.
 pub const PRELUDE: &str = include_str!("../../../std/prelude.kite");
+
+/// What a source map calls a file: relative to the directory the map is
+/// written into, with forward slashes, which is what a URL is made of.
+fn source_name(file: &Path, beside: Option<&Path>) -> String {
+    let text = file.to_string_lossy();
+    // `<prelude>` and `<std/http>` are the names the loader gives the
+    // library's own text. Not paths, and not anything a browser could fetch.
+    if let Some(inner) = text.strip_prefix('<').and_then(|t| t.strip_suffix('>')) {
+        let inner = inner.strip_prefix("std/").unwrap_or(inner);
+        return format!("kite-std/{}.kite", inner);
+    }
+    let absolute = |p: &Path| -> Option<PathBuf> {
+        if p.is_absolute() {
+            Some(p.to_path_buf())
+        } else {
+            std::env::current_dir().ok().map(|d| d.join(p))
+        }
+    };
+    let relative = beside.and_then(|dir| {
+        let (from, to) = (absolute(dir)?, absolute(file)?);
+        relative_path(&normalise(&from), &normalise(&to))
+    });
+    match relative {
+        Some(r) => r,
+        None => file
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| text.to_string()),
+    }
+}
+
+/// `a/./b/../c` as `a/c`, without asking the filesystem.
+fn normalise(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// The path from directory `from` to `to`, joined with `/`. `None` when the
+/// two share no root — two drives on Windows — and no relative path exists.
+fn relative_path(from: &Path, to: &Path) -> Option<String> {
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    if from.first() != to.first() {
+        return None;
+    }
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut parts: Vec<String> = vec!["..".to_string(); from.len() - common];
+    parts.extend(to[common..].iter().map(|c| c.as_os_str().to_string_lossy().to_string()));
+    Some(parts.join("/"))
+}
 
 /// Compile one file's text, for a debug build.
 pub fn compile(path: impl AsRef<Path>, src: &str, emit: Emit) -> Compilation {

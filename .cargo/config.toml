@@ -28,3 +28,21 @@
 # them, and that is how the release workflow shipped binaries without it.
 [build]
 rustflags = ["-C", "force-frame-pointers=yes"]
+
+# The compiler built for WebAssembly — `kite-playground`, which is the
+# playground and `@kite-lang/compiler-wasm` — gets a 16 MiB stack instead of
+# wasm-ld's 1 MiB default.
+#
+# The parser and the checker recurse, and 1 MiB ran out at five to eight
+# hundred string literals joined with `+`, which the native compiler handles
+# at a thousand. It ran out as `memory access out of bounds` rather than as a
+# diagnostic, and the instance it happened in was broken for every call after
+# it — one such file took down a Vite dev server until it was restarted. The
+# stack is linear memory the instance reserves, not bytes in the module.
+#
+# A target's `rustflags` *replace* `[build] rustflags` rather than adding to
+# them, so the frame-pointer flag above is repeated here. No Wasm frame walk
+# needs it, but a rule that quietly stopped applying to one target is the kind
+# of thing the comment at the top of this file warns about.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "force-frame-pointers=yes", "-C", "link-arg=-zstack-size=16777216"]

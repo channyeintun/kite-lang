@@ -1795,7 +1795,10 @@ A name section and a source map (`app.wasm.map`, pointed at by a
 files and lines. **One entry per function** — a frame resolves to the line the
 function was declared on, not the line that trapped. Both are dropped by
 `--release`, which is observable: the release output directory has no
-`app.wasm.map`.
+`app.wasm.map`. The map names a source relative to the directory it is written
+into (`../src/main.kite` for `--out dist`), the standard library's modules as
+`kite-std/<name>.kite`, and carries every source's text in `sourcesContent`, so
+DevTools shows the line without fetching anything.
 
 ## The toolchain
 

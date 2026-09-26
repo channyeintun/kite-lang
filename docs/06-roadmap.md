@@ -2251,6 +2251,15 @@ worse than absent.
   by `--release`: they were more than half of a hello world, and debug
   information is not semantics.
 
+  *Reviewed later:* the map resolved nowhere. It named a source as the command
+  line had — `src/main.kite`, which a browser looks for beside the map, in
+  `dist/src/` — or by an absolute path from the builder's machine; the
+  standard library was `<std/http>`, and the compiler-as-Wasm never wrote the
+  map its module names, so a Vite dev server answered it with a 404. Sources
+  are now named relative to where the map is written, the library as
+  `kite-std/…`, every source's text travels in `sourcesContent`, and the Wasm
+  compiler writes the map too.
+
 - **`[N]T`, the fixed-length array §3.2 listed.** Struck from the
   specification rather than built, because the document already said twice that
   it should not be there. §1.1 lists the composite types a reader must hold and

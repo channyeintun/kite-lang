@@ -31,19 +31,39 @@ pub struct FunctionSpan {
     pub column: u32,
 }
 
+/// One source the map names: what it is called, relative to the map, and
+/// its text.
+pub struct Source {
+    pub name: String,
+    pub content: String,
+}
+
 /// Render a source map in the shape browsers expect for WebAssembly.
 ///
 /// The generated-column field carries the byte offset into the module, which
 /// is the convention for Wasm: there are no lines in a binary, so every
 /// mapping sits on generated line zero and the column is the offset. Chrome
 /// and Firefox both read it this way.
-pub fn render(spans: &[FunctionSpan], sources: &[String]) -> String {
+///
+/// **Every source's text goes in `sourcesContent`.** A name alone has to be
+/// fetched, relative to the map — and the standard library, a program served
+/// from somewhere other than its source, and anything built on another
+/// machine have nothing there to fetch. With the text inline, a frame opens
+/// the line it names wherever the map went.
+pub fn render(spans: &[FunctionSpan], sources: &[Source]) -> String {
     let mut out = String::from("{\"version\":3,\"sources\":[");
     for (i, s) in sources.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
-        out.push_str(&json_string(s));
+        out.push_str(&json_string(&s.name));
+    }
+    out.push_str("],\"sourcesContent\":[");
+    for (i, s) in sources.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&json_string(&s.content));
     }
     out.push_str("],\"names\":[],\"mappings\":\"");
 
@@ -60,7 +80,7 @@ pub fn render(spans: &[FunctionSpan], sources: &[String]) -> String {
         }
         let src = sources
             .iter()
-            .position(|f| *f == s.file)
+            .position(|f| f.name == s.file)
             .unwrap_or(0) as i64;
         // Source maps count from zero; the fields here count from one.
         let line = s.line.saturating_sub(1) as i64;
@@ -114,7 +134,9 @@ fn json_string(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 0x20 || c == '\u{2028}' || c == '\u{2029}' => {
+                out.push_str(&format!("\\u{:04x}", c as u32))
+            }
             c => out.push(c),
         }
     }
@@ -152,9 +174,17 @@ mod tests {
             FunctionSpan { offset: 40, file: "b.kite".into(), line: 7, column: 1 },
             FunctionSpan { offset: 10, file: "a.kite".into(), line: 3, column: 1 },
         ];
-        let sources = vec!["a.kite".to_string(), "b.kite".to_string()];
+        let sources = vec![
+            Source { name: "a.kite".into(), content: "fn a() {}\n".into() },
+            Source { name: "b.kite".into(), content: "fn \"b\"".into() },
+        ];
         let map = render(&spans, &sources);
         assert!(map.contains("\"sources\":[\"a.kite\",\"b.kite\"]"), "{}", map);
+        assert!(
+            map.contains("\"sourcesContent\":[\"fn a() {}\\n\",\"fn \\\"b\\\"\"]"),
+            "{}",
+            map
+        );
         assert!(map.contains("\"version\":3"), "{}", map);
         // Two segments, comma-separated, lowest offset first.
         let mappings = map.split("\"mappings\":\"").nth(1).unwrap().trim_end_matches("\"}");
@@ -164,6 +194,9 @@ mod tests {
     #[test]
     fn an_empty_map_is_still_valid_json() {
         let map = render(&[], &[]);
-        assert_eq!(map, "{\"version\":3,\"sources\":[],\"names\":[],\"mappings\":\"\"}");
+        assert_eq!(
+            map,
+            "{\"version\":3,\"sources\":[],\"sourcesContent\":[],\"names\":[],\"mappings\":\"\"}"
+        );
     }
 }

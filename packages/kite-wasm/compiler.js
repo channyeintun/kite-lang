@@ -38,8 +38,8 @@ let instantiated;
  */
 export function compiler() {
   instantiated ??= readFile(WASM)
-    .then((bytes) => WebAssembly.instantiate(bytes, {}))
-    .then(({ instance }) => new Compiler(instance.exports));
+    .then((bytes) => WebAssembly.compile(bytes))
+    .then(async (module) => new Compiler(module, await WebAssembly.instantiate(module, {})));
   return instantiated;
 }
 
@@ -57,10 +57,12 @@ export class BuildFailed extends Error {
 }
 
 class Compiler {
+  #module;
   #exports;
 
-  constructor(exports) {
-    this.#exports = exports;
+  constructor(module, instance) {
+    this.#module = module;
+    this.#exports = instance.exports;
   }
 
   /** Compile and run a program; answers with what it printed. */
@@ -90,12 +92,13 @@ class Compiler {
    * a sibling the checker has to see. `check` takes one file and would report
    * a missing module for it.
    *
-   * @param {{entry: string, siblings?: Record<string, string>}} module
+   * @param {{entry: string, siblings?: Record<string, string>, path?: string}} module
    *   `siblings` is keyed by module path — `checkout`, not `checkout.kite`,
    *   and `markdown/render` for a module inside a declared dependency.
+   *   `path` is what diagnostics call the entry file; `main.kite` without it.
    */
-  checkModule({ entry, siblings = {} }) {
-    const answer = this.#call("kite_check_module", this.#frame(entry, siblings));
+  checkModule({ entry, siblings = {}, path }) {
+    const answer = this.#call("kite_check_module", this.#frame(entry, siblings, path));
     return decoder.decode(answer);
   }
 
@@ -106,10 +109,10 @@ class Compiler {
    * consequence: a program with a `use` in it reports a missing module rather
    * than running.
    *
-   * @param {{entry: string, siblings?: Record<string, string>}} module
+   * @param {{entry: string, siblings?: Record<string, string>, path?: string}} module
    */
-  runModule({ entry, siblings = {} }) {
-    const answer = this.#call("kite_run_module", this.#frame(entry, siblings));
+  runModule({ entry, siblings = {}, path }) {
+    const answer = this.#call("kite_run_module", this.#frame(entry, siblings, path));
     return decoder.decode(answer);
   }
 
@@ -120,15 +123,18 @@ class Compiler {
    *   entry: string,
    *   siblings?: Record<string, string>,
    *   release?: boolean,
+   *   path?: string,
    * }} module
-   * @returns {Record<string, Uint8Array>} `app.wasm`, `app.js`, `api.js` and
-   *   `api.d.ts`, exactly as the native compiler writes them.
+   * @returns {Record<string, Uint8Array>} `app.wasm` and `app.js`; `api.js`
+   *   and `api.d.ts` when the program has a `pub fn` of its own; and
+   *   `app.wasm.map` in a debug build — exactly the files the native compiler
+   *   writes.
    * @throws {BuildFailed} with the diagnostics a terminal would have shown.
    */
-  build({ entry, siblings = {}, release = false }) {
+  build({ entry, siblings = {}, release = false, path }) {
     const answer = this.#call(
       "kite_build",
-      this.#frame(entry, siblings),
+      this.#frame(entry, siblings, path),
       release ? 1 : 0,
     );
     const artefacts = unframe(answer);
@@ -156,10 +162,31 @@ class Compiler {
    */
   #call(name, input, ...args) {
     const exports = this.#exports;
+    if (exports === null) {
+      throw new Error("the compiler stopped on an earlier input: ask `compiler()` for a fresh one");
+    }
     const pointer = exports.kite_alloc(input.length);
     new Uint8Array(exports.memory.buffer, pointer, input.length).set(input);
+    let answer;
     try {
-      const answer = exports[name](pointer, input.length, ...args);
+      answer = exports[name](pointer, input.length, ...args);
+    } catch (error) {
+      // The compiler trapped — a panic, or a stack it ran out of. Its memory
+      // is whatever it was when it stopped, and every call after this one
+      // used to fail on that same broken instance, so one bad file took a
+      // dev server down until it was restarted. The instance is replaced; the
+      // compiled module is kept, so that costs no recompilation. Where a host
+      // will not instantiate synchronously this object is retired instead,
+      // and `compiler()` hands out a fresh one either way.
+      instantiated = undefined;
+      try {
+        this.#exports = new WebAssembly.Instance(this.#module, {}).exports;
+      } catch {
+        this.#exports = null;
+      }
+      throw error;
+    }
+    try {
       const length = exports.kite_answer_length();
       const bytes = new Uint8Array(exports.memory.buffer, answer, length).slice();
       exports.kite_free(answer, length);
@@ -175,10 +202,11 @@ class Compiler {
    *     u32 count, then per entry: u32 name length, name, u32 body length, body
    *
    * Little-endian, which is what Wasm's memory is. The first entry is the
-   * program; the rest are its siblings by module name.
+   * program, named by the path diagnostics should give it; the rest are its
+   * siblings by module name.
    */
-  #frame(entry, siblings) {
-    const entries = [["main", encoder.encode(entry)]];
+  #frame(entry, siblings, path) {
+    const entries = [[path ?? "main", encoder.encode(entry)]];
     for (const [name, source] of Object.entries(siblings)) {
       entries.push([name, encoder.encode(source)]);
     }
