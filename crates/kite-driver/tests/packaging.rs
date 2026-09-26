@@ -475,7 +475,7 @@ fn every_link_in_llms_txt_reaches_something_the_site_serves() {
     // subcommand ever moves, the one instruction an agent will actually run
     // stops working.
     assert!(
-        text.contains("npx --yes @kite-lang/compiler-wasm kitec check"),
+        text.contains("npx --yes --package=@kite-lang/compiler-wasm kitec check"),
         "llms.txt no longer tells an agent how to check its own work"
     );
 }

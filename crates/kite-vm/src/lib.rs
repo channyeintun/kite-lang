@@ -1633,7 +1633,7 @@ impl<'a> Vm<'a> {
                 // The label goes last, and it is the only field that may
                 // contain a space — so everything before it is fixed and
                 // whatever follows is the label, empty or not. That is what
-                // makes this line parseable by `kite check --a11y`, which is
+                // makes the line parseable by whatever reads it back, which is
                 // the whole reason it is written down.
                 let _ = writeln!(
                     self.out,
