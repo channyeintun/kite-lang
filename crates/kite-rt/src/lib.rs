@@ -2412,6 +2412,11 @@ pub extern "C" fn kite_rt_require(cond: u8, message: u64) {
 /// `std/fs.kite`, and the VM's host.
 const HOST_FAILURE: char = '\u{1}';
 
+/// Marks the answer of a call that can fail but did not. Must match
+/// `fs.SUCCESS_MARK`: with only a failure mark, a file beginning with U+0001
+/// read back as an error.
+const HOST_SUCCESS: char = '\u{2}';
+
 /// The host functions this runtime implements: the name, the signature a
 /// declaration must have, and the name the VM's type-confusion trap uses for
 /// it — so a mismatched argument is reported in the VM's words.
@@ -2434,6 +2439,10 @@ fn host_failure(message: impl std::fmt::Display) -> HostAnswer {
     HostAnswer::Str(format!("{}{}", HOST_FAILURE, message))
 }
 
+fn host_success(text: impl std::fmt::Display) -> HostAnswer {
+    HostAnswer::Str(format!("{}{}", HOST_SUCCESS, text))
+}
+
 /// Answer one call. `args` are the declared parameters, already copied out of
 /// the heap and already checked against the signature, so indexing them is
 /// safe for every name matched here.
@@ -2444,13 +2453,13 @@ fn host_call(name: &str, args: &[String]) -> HostAnswer {
             // message rather than a panic — and not lossy decoding, which
             // turns a binary file into plausible-looking rubbish.
             Ok(bytes) => match String::from_utf8(bytes) {
-                Ok(text) => HostAnswer::Str(text),
+                Ok(text) => host_success(text),
                 Err(_) => host_failure("not valid UTF-8"),
             },
             Err(e) => host_failure(e),
         },
         "fs.write_text" => match std::fs::write(&args[0], &args[1]) {
-            Ok(()) => HostAnswer::Str(String::new()),
+            Ok(()) => host_success(""),
             Err(e) => host_failure(e),
         },
         "fs.list_dir" => match std::fs::read_dir(&args[0]) {
@@ -2465,7 +2474,7 @@ fn host_call(name: &str, args: &[String]) -> HostAnswer {
                         Err(e) => return host_failure(e),
                     }
                 }
-                HostAnswer::Str(names)
+                host_success(names)
             }
             Err(e) => host_failure(e),
         },
@@ -2482,7 +2491,7 @@ fn host_call(name: &str, args: &[String]) -> HostAnswer {
                 std::fs::remove_file(&args[0])
             };
             match result {
-                Ok(()) => HostAnswer::Str(String::new()),
+                Ok(()) => host_success(""),
                 Err(e) => host_failure(e),
             }
         }
@@ -3044,14 +3053,15 @@ mod tests {
         let dir = text(host_call("fs.temp_path", &[]));
         assert!(!dir.ends_with('/') && !dir.ends_with('\\'), "{:?}", dir);
         let file = format!("{}/kite-rt-host-test-{}.txt", dir, std::process::id());
-        assert_eq!(text(host_call("fs.write_text", &[file.clone(), "hello".to_string()])), "");
-        assert_eq!(text(host_call("fs.read_text", std::slice::from_ref(&file))), "hello");
+        assert_eq!(text(host_call("fs.write_text", &[file.clone(), "hello".to_string()])), "\u{2}");
+        assert_eq!(text(host_call("fs.read_text", std::slice::from_ref(&file))), "\u{2}hello");
         assert_eq!(int(host_call("fs.path_kind", std::slice::from_ref(&file))), 1);
         assert_eq!(int(host_call("fs.path_kind", std::slice::from_ref(&dir))), 2);
         let listing = text(host_call("fs.list_dir", std::slice::from_ref(&dir)));
         let name = format!("kite-rt-host-test-{}.txt", std::process::id());
-        assert!(listing.lines().any(|l| l == name), "{} is not in the listing", name);
-        assert_eq!(text(host_call("fs.remove_path", std::slice::from_ref(&file))), "");
+        assert!(listing.starts_with(HOST_SUCCESS), "{:?}", listing);
+        assert!(listing[1..].lines().any(|l| l == name), "{} is not in the listing", name);
+        assert_eq!(text(host_call("fs.remove_path", std::slice::from_ref(&file))), "\u{2}");
         assert_eq!(int(host_call("fs.path_kind", std::slice::from_ref(&file))), 0);
         assert!(text(host_call("fs.remove_path", &[file])).starts_with(HOST_FAILURE));
     }

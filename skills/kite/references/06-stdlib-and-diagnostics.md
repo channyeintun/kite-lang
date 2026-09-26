@@ -890,9 +890,9 @@ Every fallible call returns `(T, error)`; there is no errno.
 `read(path) -> (str, error)` `write(path, body) -> error`
 `list(path) -> ([str], error)` `remove(path) -> error`
 `kind(path) -> Kind` (`File` | `Directory` | `Missing`) `exists` `is_file`
-`is_dir` `temp_dir() -> str`. A file whose first character is U+0001 reads as
-a failure: the host marks failures with that character and does not yet mark
-successes.
+`is_dir` `temp_dir() -> str`. A file may begin with any character: the host
+marks failures and successes alike, so its answer is never confused with the
+file's first character.
 
 This is the one host group `kitec run` supplies, so the block below actually
 runs.

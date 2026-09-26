@@ -38,33 +38,39 @@ extern fn path_kind(path: str) -> int
 @host("fs")
 extern fn temp_path() -> str
 
-/// How the host reports a failure.
+/// How the host reports a failure: a leading `\u{1}`, then the reason.
 ///
-/// A leading `\u{1}` marks an error, because a path, a file's contents and a
-/// directory listing are all ordinary strings and one `str` is all an
-/// `extern` carries back.
-///
-/// **This is not sound, and it cannot be made sound from this side alone.**
-/// Nothing stops a file beginning with U+0001, and then its contents and a
-/// failure are the same string: `read` reports such a file as an error whose
-/// message is the rest of the file. The fix is for the host to mark success
-/// too — a leading `\u{2}` on every answer that is not a failure — and for
-/// `unwrap` to strip it, so that nothing after a mark is ever read as a mark.
-/// The two halves have to change together: stripping a success mark the host
-/// does not send would eat the first character of a file that begins with
-/// U+0002, which is the same bug moved one code point along. The host is
-/// `crates/kite-driver/src/host.rs`, whose `ok` is where the mark would go.
+/// A path, a file's contents and a directory listing are all ordinary strings,
+/// and one `str` is all an `extern` carries back, so the answer is marked
+/// rather than paired.
 fn FAILURE_MARK() -> str {
     return "\u{1}"
 }
 
+/// How the host reports that a call which can fail did not: a leading
+/// `\u{2}`, then the answer.
+///
+/// Marking only failures was not sound. A file may begin with any character,
+/// and one beginning with U+0001 read back as an error whose message was the
+/// rest of the file. With both marks, the first character of an answer is
+/// always a mark and never the answer's own, so nothing a file contains can be
+/// mistaken for one.
+fn SUCCESS_MARK() -> str {
+    return "\u{2}"
+}
+
 fn unwrap(answer: str, what: str) -> (str, error) {
-    if answer.len() > 0 {
-        if answer.slice(0, 1) == FAILURE_MARK() {
-            return _, errors.new("fs: \(what): \(answer.slice(1, answer.len()))")
-        }
+    let mark = answer.slice(0, 1)
+    if mark == FAILURE_MARK() {
+        return _, errors.new("fs: \(what): \(answer.slice(1, answer.len()))")
     }
-    return answer, nil
+    if mark == SUCCESS_MARK() {
+        return answer.slice(1, answer.len()), nil
+    }
+    // Every host this library runs on marks its answers. One that does not is
+    // a host from before the success mark, and guessing which kind of answer
+    // it meant is the bug the mark exists to prevent.
+    return _, errors.new("fs: \(what): the host's answer carries no mark")
 }
 
 /// The whole of a file, as text.
@@ -73,9 +79,6 @@ fn unwrap(answer: str, what: str) -> (str, error) {
 /// valid UTF-8 is an error rather than a string of replacement characters —
 /// silently substituting them is how a binary file becomes corrupt data that
 /// looks fine.
-///
-/// A file whose first character is U+0001 is misread as a failure; see
-/// [`FAILURE_MARK`] for why and for what fixes it.
 pub fn read(path: str) -> (str, error) {
     return unwrap(read_text(path), "read \(path)")
 }
