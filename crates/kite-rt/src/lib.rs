@@ -2930,6 +2930,24 @@ mod tests {
         assert!(why.contains("outside the frame"), "{}", why);
     }
 
+    /// A run's settings are consumed by the run they were for, and its heap
+    /// is gone once it is over — not held until some later startup, which in
+    /// `kitec` never comes.
+    #[test]
+    fn a_finished_run_leaves_nothing_behind() {
+        let _lock = run_lock();
+        prepare_run(RunConfig { nursery_bytes: Some(4096), major_threshold: None }, true);
+        kite_rt_startup();
+        assert!(NEXT_RUN.lock().unwrap().is_none(), "startup left its settings for the next run");
+        assert_eq!(rt().nursery_size, 4096);
+        kite_rt_print_str(make_str(b"hello"));
+        let (captured, stats) = finish_run();
+        assert_eq!(captured, b"hello\n");
+        assert_eq!(stats, RunStats::default());
+        assert!(rt_if_started().is_none(), "the heap outlived the run");
+        assert_eq!(unsafe { ENTRY_FP }, 0);
+    }
+
     /// Run this test's own binary again, filtered to `name`, with a variable
     /// that tells it to do the thing that exits — the way to test a trap,
     /// which ends the process rather than panicking.
