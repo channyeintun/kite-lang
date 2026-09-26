@@ -366,8 +366,9 @@ fn used_imports(program: &mir::Program, types: &Types) -> Hosts {
                         // `ref.eq` is an instruction, so identity costs no
                         // import — a program may ask it with no host at all.
                         Builtin::PtrSame => {}
-                        // A failed claim prints what was claimed and traps.
-                        Builtin::Require => mark(host::PRINT_STR),
+                        // A failed claim says what was claimed, on standard
+                        // error, and traps.
+                        Builtin::Require => mark(host::ERROR_STR),
                     },
                     mir::Rvalue::ToStr { from, .. } => match types.kind(*from) {
                         TyKind::Int => mark(host::STR_OF_INT),
@@ -3737,6 +3738,9 @@ impl<'a> Emitter<'a> {
             }
             // `require(cond, message)`: when the claim is false, say what it
             // was and trap. `unreachable` is what a trap *is* on this target.
+            // The message goes to standard error, where the VM's trap report
+            // puts it: it is a diagnostic, not something the program produced,
+            // and it used to land in the middle of the program's output.
             Builtin::Require => {
                 let Some(cond) = args.first() else {
                     func.instruction(&Instruction::Unreachable);
@@ -3748,7 +3752,7 @@ impl<'a> Emitter<'a> {
                 if let Some(message) = args.get(1) {
                     self.operand(func, message);
                     self.to_host_str(func);
-                    func.instruction(&Instruction::Call(self.hosts.at(host::PRINT_STR)));
+                    func.instruction(&Instruction::Call(self.hosts.at(host::ERROR_STR)));
                 }
                 func.instruction(&Instruction::Unreachable);
                 func.instruction(&Instruction::End);

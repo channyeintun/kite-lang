@@ -47,7 +47,7 @@ pub fn generate_server(wasm_path: &str) -> String {
 
 import {{ readFile }} from "node:fs/promises";
 import {{ createServer }} from "node:http";
-import {{ run, provide, setWriter }} from "./app.js";
+import {{ instantiate, resident, provide, setWriter, wake }} from "./app.js";
 
 // One entry per listening socket. A handle is an index, as everywhere else on
 // this boundary: nothing but numbers and text crosses it.
@@ -98,9 +98,15 @@ const headerLines = (headers) =>
 // NUL", and anything else is dropped rather than sent. Dropped, not escaped:
 // there is no escaping that keeps the meaning, and a header nobody can read is
 // better than a header somebody else wrote.
+//
+// What comes back is Node's *raw* form, a flat `[name, value, name, value…]`,
+// not an object. An object has one slot per name, so two `Set-Cookie`s kept
+// only the last — a login that set a session and a CSRF cookie lost one — and
+// `Content-type` and `content-type` were two different slots, so a program's
+// own type went out beside the default one.
 const TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const parseHeaders = (lines) => {{
-  const out = {{}};
+  const out = [];
   // `\r?\n`, so a CR cannot ride along on the end of a value.
   for (const line of String(lines).split(/\r?\n/)) {{
     const at = line.indexOf(":");
@@ -109,9 +115,17 @@ const parseHeaders = (lines) => {{
     const value = line.slice(at + 1).trim();
     if (!TOKEN.test(name)) continue;
     if (/[\r\n\0]/.test(value)) continue;
-    out[name] = value;
+    out.push(name, value);
   }}
   return out;
+}};
+// Whether a raw header list names a header, the way HTTP compares names:
+// without regard to case.
+const names = (raw, wanted) => {{
+  for (let i = 0; i < raw.length; i += 2) {{
+    if (raw[i].toLowerCase() === wanted) return true;
+  }}
+  return false;
 }};
 
 provide("net", {{
@@ -169,14 +183,20 @@ provide("net", {{
             answered: false,
           }});
           state.queue.push(handle);
+          // A task is waiting on the host for exactly this. The drivers poll
+          // a host-waiting task only when told to, which is what lets an idle
+          // server cost nothing.
+          wake();
         }});
       }});
       state.server.on("error", (e) => {{
         state.error = String(e && e.message ? e.message : e);
+        wake();
       }});
       state.server.listen(Number(port));
       state.server.on("listening", () => {{
         state.port = state.server.address().port;
+        wake();
       }});
     }} catch (e) {{
       state.error = String(e && e.message ? e.message : e);
@@ -220,8 +240,8 @@ provide("net", {{
     if (!request || request.answered) return 0n;
     request.answered = true;
     const fields = parseHeaders(headers);
-    if (fields["content-type"] === undefined && fields["Content-Type"] === undefined) {{
-      fields["content-type"] = "text/plain; charset=utf-8";
+    if (!names(fields, "content-type")) {{
+      fields.push("content-type", "text/plain; charset=utf-8");
     }}
     // A header Node still refuses is a bug in the program, not a reason to end
     // the process: `writeHead` throws, and an uncaught throw here unwinds
@@ -253,6 +273,8 @@ provide("net", {{
       state.server.close();
       state.port = -1;
     }}
+    // A task waiting to accept on this server has something new to see.
+    wake();
     return 1n;
   }},
 }});
@@ -260,7 +282,19 @@ provide("net", {{
 // `io.print` goes to stdout here rather than to a page.
 setWriter((line) => process.stdout.write(line + "\n"));
 
-await run(new Uint8Array(await readFile(new URL("./{wasm_path}", import.meta.url))));
+// Resident, not run to completion: a server is idle almost all of the time,
+// and the resident driver runs nothing until `wake` says something happened.
+// Driven the batch way it polled its accept loop hundreds of times a second
+// while nothing arrived. The clock is the real one, which is what a `sleep`
+// in a server means. A trap ends the process, as it would a native one.
+const exports = await instantiate(
+  new Uint8Array(await readFile(new URL("./{wasm_path}", import.meta.url))),
+);
+if (typeof exports.main !== "function") {{
+  throw new Error("this module has no `main`");
+}}
+exports.main();
+if (typeof exports.kite_poll === "function") resident(exports);
 "#
     )
 }

@@ -1835,6 +1835,19 @@ pump sets a flag and the pump goes round again rather than recursing, which is
 what keeps a handler that spawns a task from mutating the list underneath the
 loop walking it.
 
+**Reviewed later, and three things were still wrong.** `drive` was not in fact
+untouched by the page's problems: the generated server, `serve.mjs`, ran through
+it, so an idle server still spun on `setTimeout(0)` — the fault this phase
+fixed, one file over — and while any task waited on the host the batch clock
+did not move at all, so a `task.timeout` around a slow request waited for the
+request. `serve.mjs` now uses `resident`, and every host event it owns calls
+`wake`; `drive` waits for `wake` or the earliest deadline, whichever is first,
+and moves its clock by the real time that took. A program that only sleeps
+still costs no real time. And a trap ended nothing: the task that trapped stayed
+in the list and ran again at the next `wake`. A trap now ends the program, as it
+does on the VM — the list is emptied, nothing is scheduled, handlers the page
+still holds do not re-enter, and `stopped()` says why.
+
 ---
 
 ## Phase 20 — `std/dom`
