@@ -1054,6 +1054,34 @@ fn main() {
 "#,
     ),
     (
+        "optional-equals-its-value",
+        r#"// Equality is structural for all types, and a `T` stands wherever an
+// `Option<T>` does: `found == 5` asks whether `found` is present and five.
+struct P {
+    x: int
+}
+
+fn find(xs: [int], want: int) -> Option<int> {
+    for x in xs {
+        if x == want {
+            return x
+        }
+    }
+    return nil
+}
+
+fn main() {
+    let found = find([1, 5, 9], 5)
+    let lost = find([1, 5, 9], 4)
+    io.print("\(found == 5) \(5 == found) \(found != 6) \(lost == 5) \(lost != 5)")
+    let p: Option<P> = P{ x: 1 }
+    io.print("\(p == P{ x: 1 }) \(P{ x: 2 } == p)")
+    let s: Option<str> = "k"
+    io.print("\(s == "k") \(s == "j")")
+}
+"#,
+    ),
+    (
         "interpolation",
         "fn main() {\n  let name = \"world\"\n  let n = 42\n  let pi = 2.5\n  let ok = true\n\
          \x20 io.print(\"hello, \\(name)!\")\n\

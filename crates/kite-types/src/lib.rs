@@ -474,11 +474,11 @@ pub fn check_recording(
     // are still part of whether its type implements the trait.
     for (i, item) in file.items.iter().enumerate() {
         if let ast::Item::Impl(imp) = item {
-            if !impl_generics.contains_key(&i) {
+            if let std::collections::hash_map::Entry::Vacant(slot) = impl_generics.entry(i) {
                 let module = resolved.module_of_item(i);
-                let defs =
-                    declare_generics(&imp.generics, &[], resolved, module, &type_ids, &mut types, diags);
-                impl_generics.insert(i, defs);
+                slot.insert(declare_generics(
+                    &imp.generics, &[], resolved, module, &type_ids, &mut types, diags,
+                ));
             }
         }
     }
@@ -8191,6 +8191,22 @@ impl<'a> Checker<'a> {
         if self.types.is_poisoned(l.ty) || self.types.is_poisoned(r.ty) {
             return hir::Expr { kind: ExprKind::Error, ty: TyId::ERROR, span };
         }
+
+        // Equality is structural for all types (§5.2), and a `T` stands
+        // wherever an `Option<T>` does — so `found == 5` asks whether `found`
+        // is present and five, by comparing two optionals.
+        let optional_of = |types: &Types, outer: TyId, inner: TyId| {
+            matches!(types.kind(outer), TyKind::Optional(t) if *t == inner)
+        };
+        let (l, r) = if matches!(op, B::Eq | B::Ne) && optional_of(self.types, l.ty, r.ty) {
+            let want = l.ty;
+            (l, self.coerce(r, Some(want)))
+        } else if matches!(op, B::Eq | B::Ne) && optional_of(self.types, r.ty, l.ty) {
+            let want = r.ty;
+            (self.coerce(l, Some(want)), r)
+        } else {
+            (l, r)
+        };
 
         if l.ty != r.ty {
             self.mismatched_operands(op, &l, &r, span);
