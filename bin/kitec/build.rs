@@ -15,10 +15,11 @@
 //! way of getting `kitec` — a release archive, npm, Homebrew, `cargo install`
 //! — then carries the one runtime its code generator was written against.
 //!
-//! `kite-rt` has no dependencies, which is what makes this one `rustc`
-//! invocation rather than a nested Cargo build. It is built with fat LTO, which
-//! keeps only what the runtime's exported functions reach and makes the
-//! archive about a third of the size Cargo's is.
+//! `kite-rt` has one dependency, `kite-float`, which has none — so this is two
+//! `rustc` invocations rather than a nested Cargo build: the float crate as an
+//! rlib, then the runtime against it. The runtime is built with fat LTO, which
+//! reaches through the rlib, keeps only what the runtime's exported functions
+//! reach, and makes the archive about a third of the size Cargo's is.
 //!
 //! **Linux with musl.** The released Linux `kitec` is built for musl so that it
 //! runs anywhere, but the `cc` a user links with is almost always glibc's, and a
@@ -53,7 +54,9 @@ fn main() {
     let link_args = out.join("kite_rt_link_args.txt");
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("Cargo sets it"));
     let source = manifest.join("../../crates/kite-rt/src/lib.rs");
+    let float = manifest.join("../../crates/kite-float/src/lib.rs");
     println!("cargo:rerun-if-changed={}", source.display());
+    println!("cargo:rerun-if-changed={}", float.display());
 
     let mode = env::var("KITE_RT_EMBED").unwrap_or_default();
     let required = mode == "require";
@@ -65,7 +68,7 @@ fn main() {
         write(&link_args, b"");
         return;
     }
-    if !source.exists() {
+    if !source.exists() || !float.exists() {
         if required {
             panic!("KITE_RT_EMBED=require, and `{}` is not here", source.display());
         }
@@ -74,7 +77,7 @@ fn main() {
         return;
     }
 
-    match build(&source, &archive) {
+    match build(&source, &float, &out, &archive) {
         Ok(args) => write(&link_args, args.as_bytes()),
         Err(why) => {
             if required {
@@ -96,21 +99,15 @@ fn write(path: &Path, bytes: &[u8]) {
         .unwrap_or_else(|e| panic!("cannot write `{}`: {}", path.display(), e));
 }
 
-/// Compile the runtime and return the linker arguments its archive needs.
-fn build(source: &Path, archive: &Path) -> Result<String, String> {
-    let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
-    let target = runtime_target();
-    let mut cmd = Command::new(&rustc);
-    cmd.arg(source)
-        .args(["--crate-name", "kite_rt", "--crate-type", "staticlib"])
-        .args(["--edition", &workspace_edition()])
-        .args(["--target", &target])
-        .args(["-C", "opt-level=3", "-C", "lto=fat", "-C", "codegen-units=1"])
+/// A `rustc` for one of the runtime's crates, with everything the two share:
+/// the edition, the target, the build's own flags, and frame pointers.
+fn rustc_for(rustc: &str, target: &str) -> Command {
+    let mut cmd = Command::new(rustc);
+    cmd.args(["--edition", &workspace_edition()])
+        .args(["--target", target])
+        .args(["-C", "opt-level=3", "-C", "codegen-units=1"])
         .args(["-C", "debuginfo=0"])
-        .args(["--cap-lints", "allow"])
-        .args(["--print", "native-static-libs"])
-        .arg("-o")
-        .arg(archive);
+        .args(["--cap-lints", "allow"]);
     // The same flags the rest of this build gets — a path remapping, a
     // target CPU — so the runtime is built the way `kite-rt` is.
     if let Ok(flags) = env::var("CARGO_ENCODED_RUSTFLAGS") {
@@ -120,6 +117,39 @@ fn build(source: &Path, archive: &Path) -> Result<String, String> {
     // this code, and rustc takes the strongest request it is given, so no
     // flag above can turn this off. See `crates/kite-rt/build.rs`.
     cmd.args(["-C", "force-frame-pointers=yes"]);
+    cmd
+}
+
+/// Compile the runtime and return the linker arguments its archive needs.
+fn build(source: &Path, float: &Path, out: &Path, archive: &Path) -> Result<String, String> {
+    let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let target = runtime_target();
+
+    // `kite-float` first, as the rlib the runtime is compiled against. Its
+    // bitcode is kept, so the fat LTO below reaches into it.
+    let float_lib = out.join("libkite_float.rlib");
+    let mut cmd = rustc_for(&rustc, &target);
+    cmd.arg(float)
+        .args(["--crate-name", "kite_float", "--crate-type", "rlib"])
+        .args(["-C", "embed-bitcode=yes"])
+        .arg("-o")
+        .arg(&float_lib);
+    let ran = cmd.output().map_err(|e| format!("cannot run `{}`: {}", rustc, e))?;
+    if !ran.status.success() {
+        let stderr = String::from_utf8_lossy(&ran.stderr);
+        let first = stderr.lines().find(|l| l.starts_with("error")).unwrap_or("");
+        return Err(format!("`rustc --target {}` failed on kite-float: {}\n{}", target, first, stderr));
+    }
+
+    let mut cmd = rustc_for(&rustc, &target);
+    cmd.arg(source)
+        .args(["--crate-name", "kite_rt", "--crate-type", "staticlib"])
+        .args(["-C", "lto=fat"])
+        .arg("--extern")
+        .arg(format!("kite_float={}", float_lib.display()))
+        .args(["--print", "native-static-libs"])
+        .arg("-o")
+        .arg(archive);
 
     let ran = cmd.output().map_err(|e| format!("cannot run `{}`: {}", rustc, e))?;
     let stderr = String::from_utf8_lossy(&ran.stderr);
