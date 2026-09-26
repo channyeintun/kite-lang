@@ -1494,3 +1494,25 @@ fn maps_have_value_semantics() {
         vec!["1"]
     );
 }
+
+// ---- counts wider than a byte -----------------------------------------------
+
+/// An element or argument count was one byte wide, so a 300-element literal
+/// was 44 elements long on this backend alone, a 130-entry map had two
+/// entries, and a call passing 300 arguments passed 44 of them.
+#[test]
+fn counts_wider_than_a_byte_survive() {
+    let elems: Vec<String> = (0..300).map(|i| i.to_string()).collect();
+    let entries: Vec<String> = (0..130).map(|i| format!("\"k{}\": {}", i, i)).collect();
+    let params: Vec<String> = (0..300).map(|i| format!("a{}: int", i)).collect();
+    let src = format!(
+        "fn last({}) -> int {{\n  return a299 - a0\n}}\n\
+         fn main() {{\n  let xs = [{}]\n  io.print(xs.len())\n  io.print(xs[299])\n\
+         \x20 let m = {{{}}}\n  io.print(m.len())\n  io.print(last({}))\n}}\n",
+        params.join(", "),
+        elems.join(", "),
+        entries.join(", "),
+        elems.join(", "),
+    );
+    assert_eq!(lines(&src), ["300", "299", "130", "299"]);
+}

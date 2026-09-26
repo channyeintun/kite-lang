@@ -632,6 +632,25 @@ fn run_passes(
         return (String::new(), None, None, Some(native), index);
     }
 
+    // A frame wider than a register index can address was once emitted with
+    // its indices silently cut short, so two values shared a register.
+    let limits = kite_codegen_kbc::limits(&mir);
+    if !limits.is_empty() {
+        for limit in limits {
+            diags.push(
+                Diagnostic::error(
+                    kite_diag::codes::E0902,
+                    format!("`{}` is too large for the bytecode VM", limit.function),
+                )
+                .with_primary(limit.span, limit.what)
+                .with_note(
+                    "split the function, or build a large literal in a loop; \
+                     `--emit wasm` and `--native` do not have this limit",
+                ),
+            );
+        }
+        return (String::new(), None, None, None, index);
+    }
     let chunk = kite_codegen_kbc::compile(&mir);
     if emit == Emit::Kbc {
         return (chunk.to_string(), Some(chunk), None, None, index);

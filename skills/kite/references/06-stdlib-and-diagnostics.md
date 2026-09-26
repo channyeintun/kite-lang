@@ -1643,7 +1643,7 @@ help: make the binding mutable
 | E0800–E0899 | exclusivity |
 | E0900–E0999 | the compiler failing, rather than the program |
 
-### All 48 codes `--explain` knows
+### All 53 codes `--explain` knows
 
 `kitec --explain E0301` prints the rationale for the rule, not just the
 message. An unknown code prints the whole list. This table is the whole of
@@ -1664,6 +1664,8 @@ cannot emit.
 | E0401 private item | E0402 module cycle | E0403 module name reserved by the standard library | E0404 two modules of the same name |
 | E0520 type cannot be moved to another task | E0521 `await` outside an async function | E0600 comparing a secret with `==` | E0700 malformed `@derive` |
 | E0701 nothing derives that | E0702 a field the derive cannot write | E0800 one object under two argument names | E0900 the compiler emitted an invalid module |
+| E0118 module-level binding is not a constant | E0119 constant defined in terms of itself | E0220 generic instantiation does not terminate | E0901 internal compiler error |
+| E0902 the program exceeds a limit of this target | | | |
 
 ### Warnings, not errors
 

@@ -163,7 +163,7 @@ const NOMINAL_ADVANCE: f64 = 8.0;
 fn string_op(
     op: kite_hir::StrKind,
     s: &str,
-    arg: impl Fn(u8) -> Value,
+    arg: impl Fn(u16) -> Value,
 ) -> Result<Value, Trap> {
     use kite_hir::StrKind;
     let chars: Vec<char> = s.chars().collect();
@@ -1229,7 +1229,7 @@ impl<'a> Vm<'a> {
                 }
 
                 Op::StrOp { dst, op, base: arg_base, argc } => {
-                    let a = |i: u8| self.get(base, arg_base + i as Reg);
+                    let a = |i: u16| self.get(base, arg_base + i as Reg);
                     let subject = a(0);
                     let Value::Str(s) = &subject else {
                         return Err(Trap::TypeConfusion {
@@ -1340,7 +1340,7 @@ impl<'a> Vm<'a> {
         callee: u32,
         base: usize,
         arg_base: Reg,
-        argc: u8,
+        argc: u16,
         dst: Reg,
     ) -> Result<(), Trap> {
         self.call_with(callee, base, arg_base, argc, dst, &[])
@@ -1354,7 +1354,7 @@ impl<'a> Vm<'a> {
         callee: u32,
         base: usize,
         arg_base: Reg,
-        argc: u8,
+        argc: u16,
         dst: Reg,
         leading: &[Value],
     ) -> Result<(), Trap> {
@@ -1507,7 +1507,7 @@ impl<'a> Vm<'a> {
         native: Native,
         base: usize,
         arg_base: Reg,
-        argc: u8,
+        argc: u16,
     ) -> Result<Value, Trap> {
         match native {
             // The VM has no window. Writing each call out is what lets the
