@@ -1,0 +1,45 @@
+// An immutable binding is written exactly once. A write after a branch that
+// may already have written it is a second write on that path — and a read
+// needs a value on every path.
+
+enum C {
+    A
+    B
+}
+
+fn after_an_if(c: bool) {
+    let x: int
+    if c {
+        x = 1
+    }
+    x = 2 //~ ERROR E0114
+    io.print("\(x)")
+}
+
+fn after_a_match(c: C) {
+    let x: int
+    match c {
+        A => {
+            x = 1
+        },
+        B => {
+            io.print("b")
+        },
+    }
+    x = 5 //~ ERROR E0114
+    io.print("\(x)")
+}
+
+fn reads_itself() {
+    let x: int
+    x = x + 1 //~ ERROR E0110
+    let y: int
+    y += 1 //~ ERROR E0110
+    io.print("\(x) \(y)")
+}
+
+fn main() {
+    after_an_if(true)
+    after_a_match(C.A)
+    reads_itself()
+}

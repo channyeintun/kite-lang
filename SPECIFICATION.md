@@ -555,6 +555,10 @@ var total = 0
 let add = |n: int| { total = total + n }    // error[E0211]
 ```
 
+For the same reason a closure may not **assign** to a binding it captures, `let`
+or `var` ([E0211](#16-diagnostics)): it holds a copy, and a write to the copy is
+seen by nothing.
+
 To let a closure change something, **capture a `let` handle to a struct and pass
 it to a function that takes it as `var`.** Structs are references
 ([§14](#14-memory-model)), so the write lands where the holder can see it, and
@@ -791,7 +795,11 @@ async fn greeting(url: str) -> (str, error) {
 ```
 
 Deferred calls run in reverse order of registration when the enclosing function
-returns, by any path. Unlike Go, `defer` cannot modify the return value — it is
+returns, by any path — `check` propagating an error included. A `defer` registers
+when control reaches it, so one inside a loop registers once per iteration, each
+with the operands that iteration evaluated, and one in a branch not taken never
+registers. A closure is a function of its own: a `defer` in its body runs when
+the closure returns. Unlike Go, `defer` cannot modify the return value — it is
 purely for release of resources, which is the only use that survives scrutiny.
 
 ### 6.4 `match`
@@ -903,10 +911,13 @@ The rules:
 > error)`, is a compile error (`E0302`). Binding nothing is not a way out of
 > binding an error.
 >
-> **R7.** A call whose `error`, or whose whole `(T, error)`, is bound to a
-> single name makes that binding Unchecked. Reading it — testing it, checking
-> it, returning it, taking it apart — inspects it, and R3 applies otherwise.
-> Binding everything under one name is not a way out either.
+> **R7.** An `error`, or a whole `(T, error)`, bound to a single name makes
+> that binding Unchecked — by `let` or by `var`, whether it came straight from
+> a call or through `await`, a branch of a value `if`, or anything else that
+> can hold a new failure. Only `nil` and a copy of another binding, which
+> carries its own obligation, leave it Checked. Reading it — testing it,
+> checking it, returning it, taking it apart — inspects it, and R3 applies
+> otherwise. Binding everything under one name is not a way out either.
 
 R1–R5 are about bindings, and R6 and R7 close the shapes they leave open: a
 call written as a statement makes no binding, so nothing in R1–R5 ever sees it,
@@ -1025,8 +1036,8 @@ To handle a failure rather than propagate it, test the error. In the branch wher
 it is nil, the value becomes readable:
 
 ```kite
-let (port, err) = config.get_int("port")
-let port = if err != nil { 8080 } else { port }
+let (value, err) = config.get_int("port")
+let port = if err != nil { 8080 } else { value }
 ```
 
 The branch is written out, on the line where the failure happens, which is what
@@ -1040,7 +1051,11 @@ check errors.wrap(err, "loading config from \(path)")
 ```
 
 `errors.wrap` returns nil when given nil, so this composes with `check`
-directly. The context goes in front of the message, so a failure that crosses
+directly — and because it returns nil *only* when given nil, passing the
+`check` proves `err` nil and makes the value it guards readable (R4). That is
+known of `errors.wrap` alone: a function of the program's own may answer nil
+for anything, so `check` of what it returned proves nothing about what it was
+handed. The context goes in front of the message, so a failure that crosses
 four layers reads as the four sentences that produced it.
 
 **It keeps what it wrapped**, rather than flattening it into text. `err.cause()`

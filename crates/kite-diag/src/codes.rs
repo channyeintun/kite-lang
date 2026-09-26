@@ -167,6 +167,10 @@ codes! {
          evaluation order, and which functions are available to it becomes a \
          language rule nobody can predict — so there is one evaluation order \
          here, and it is the one that already exists.\n\n\
+         Arithmetic on constants is done while compiling, so an operation \
+         with no `int` result — dividing by zero, overflowing, shifting by a \
+         negative amount or by 64 or more — is reported here rather than \
+         trapping in one build and wrapping in another.\n\n\
          There is no module-level `var` at all. A mutable binding two \
          functions can both reach is shared state neither signature mentions, \
          which is what `Share` and the closure capture rule exist to prevent. \
@@ -252,7 +256,13 @@ codes! {
          Captures are by value and taken when the closure is made, so a `var` \
          cannot be captured: later writes to it would not be seen, and code \
          reading it as if they were is a bug waiting to happen. Copy it into a \
-         `let`, or pass it as a parameter.";
+         `let`, or pass it as a parameter. For the same reason a closure may \
+         not assign to anything it captures: the write would land on its copy \
+         and nowhere else.\n\n\
+         A closure's body is a function of its own. Its `return` answers to the \
+         closure's `-> T`, and where the body is an expression and nothing \
+         states that type, a `return` inside it has nothing to be checked \
+         against — write the type.";
 
     E0212 = "E0212", "invalid cast",
         "`as` converts between `int` and `float`. There is no conversion \

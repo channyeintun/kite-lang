@@ -1,0 +1,72 @@
+// A closure body is a function of its own. What it proves stays inside it,
+// its `return` answers to its own type, and it has no loop to leave and no
+// task to suspend.
+
+fn fails() -> (int, error) {
+    return _, errors.new("boom")
+}
+
+async fn answer() -> int {
+    return 41
+}
+
+fn value_is_still_tainted() {
+    let (v, err) = fails()
+    // Testing the error inside the closure says nothing about the path out
+    // here, where it was never tested.
+    let g = || {
+        if err != nil {
+            return
+        }
+    }
+    g()
+    io.print("\(v + 1)") //~ ERROR E0301
+}
+
+fn outer() -> int {
+    let f = |x: int| -> str {
+        match x {
+            0 => {
+                return 5 //~ ERROR E0200
+            },
+            _ => {
+                return "many"
+            },
+        }
+    }
+    io.print(f(0))
+    return 0
+}
+
+fn leaves_no_loop() {
+    for i in 0..3 {
+        let f = || {
+            break //~ ERROR E0115
+        }
+        f()
+    }
+}
+
+async fn suspends_nothing() {
+    let f = || -> int {
+        return await answer() //~ ERROR E0521
+    }
+    io.print("\(f())")
+}
+
+fn untyped_return() {
+    let pick = |x: int| match x {
+        0 => {
+            return 1 //~ ERROR E0211
+        },
+        _ => x,
+    }
+    io.print("\(pick(2))")
+}
+
+fn main() {
+    value_is_still_tainted()
+    io.print("\(outer())")
+    leaves_no_loop()
+    untyped_return()
+}

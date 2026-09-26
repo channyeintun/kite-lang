@@ -251,7 +251,7 @@ impl<'a> Eval<'a> {
             ast::Expr::Unary { op, operand, span } => {
                 let v = self.eval(operand)?;
                 match (op, &v) {
-                    (UnaryOp::Neg, ConstValue::Int(i)) => Some(ConstValue::Int(i.wrapping_neg())),
+                    (UnaryOp::Neg, ConstValue::Int(i)) => self.int_result(i.checked_neg(), "-", *span),
                     (UnaryOp::Neg, ConstValue::Float(f)) => Some(ConstValue::Float(-f)),
                     (UnaryOp::Not, ConstValue::Bool(b)) => Some(ConstValue::Bool(!b)),
                     _ => {
@@ -301,6 +301,32 @@ impl<'a> Eval<'a> {
         }
     }
 
+    /// An integer operation's result, or E0118 where it has none.
+    ///
+    /// Overflow traps at run time in a debug build and wraps in a release
+    /// one, so a constant that overflows has a different value in each — and
+    /// a constant has one value. Folding it by wrapping gave it the release
+    /// build's answer in both, where the same expression written in a body
+    /// trapped. It is refused here instead, as division by zero is. So is a
+    /// shift by a negative amount or by 64 or more, which traps in every
+    /// build.
+    fn int_result(&mut self, value: Option<i64>, op: &str, span: Span) -> Option<ConstValue> {
+        if value.is_none() {
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0118,
+                    format!("this constant's `{}` overflows `int`", op),
+                )
+                .with_primary(span, "there is no `int` value for this")
+                .with_note(
+                    "at run time this would trap in a debug build and wrap in a release \
+                     one; a constant has one value, so it is found here instead",
+                ),
+            );
+        }
+        value.map(ConstValue::Int)
+    }
+
     fn binary(
         &mut self,
         op: BinaryOp,
@@ -323,9 +349,9 @@ impl<'a> Eval<'a> {
         }
 
         let out = match (op, &a, &b) {
-            (Add, Int(x), Int(y)) => Some(Int(x.wrapping_add(*y))),
-            (Sub, Int(x), Int(y)) => Some(Int(x.wrapping_sub(*y))),
-            (Mul, Int(x), Int(y)) => Some(Int(x.wrapping_mul(*y))),
+            (Add, Int(x), Int(y)) => return self.int_result(x.checked_add(*y), "+", span),
+            (Sub, Int(x), Int(y)) => return self.int_result(x.checked_sub(*y), "-", span),
+            (Mul, Int(x), Int(y)) => return self.int_result(x.checked_mul(*y), "*", span),
             // Division by zero traps at run time. In a constant there is no
             // run time to trap in, so it is a compile error — which is the
             // better place for it to be found anyway.
@@ -340,8 +366,8 @@ impl<'a> Eval<'a> {
                 );
                 return None;
             }
-            (Div, Int(x), Int(y)) => Some(Int(x.wrapping_div(*y))),
-            (Rem, Int(x), Int(y)) => Some(Int(x.wrapping_rem(*y))),
+            (Div, Int(x), Int(y)) => return self.int_result(x.checked_div(*y), "/", span),
+            (Rem, Int(x), Int(y)) => return self.int_result(x.checked_rem(*y), "%", span),
             (BitAnd, Int(x), Int(y)) => Some(Int(x & y)),
             (BitOr, Int(x), Int(y)) => Some(Int(x | y)),
             (BitXor, Int(x), Int(y)) => Some(Int(x ^ y)),

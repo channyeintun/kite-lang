@@ -1712,6 +1712,7 @@ impl<'a> Parser<'a> {
 
                     // Comparison is non-associative: `a < b < c` is rejected
                     // rather than silently comparing a bool to an int.
+                    let span = lhs.span().to(rhs.span());
                     if bop.is_comparison() {
                         if let Expr::Binary { op: inner, .. } = &lhs {
                             if inner.is_comparison() {
@@ -1726,11 +1727,16 @@ impl<'a> Parser<'a> {
                                         "write `a < b && b < c` to compare three values",
                                     ),
                                 );
+                                // What was written has no meaning to check,
+                                // and checking the tree it would have been
+                                // reported a `bool` compared to an `int` —
+                                // the same mistake, told twice.
+                                lhs = Expr::Error(span);
+                                continue;
                             }
                         }
                     }
 
-                    let span = lhs.span().to(rhs.span());
                     lhs = Expr::Binary {
                         op: bop,
                         lhs: Box::new(lhs),
