@@ -312,13 +312,11 @@ fn remember(var live: Live, now: [Attr]) {
     live.on = now
 }
 
-/// Through a local because `live.listening.push(…)` is not something this
-/// compiler version lowers — a slice has to be a plain binding to be mutated.
-/// Slices are copy-on-write, so the write back is the whole of the update.
+/// A function of its own, taking `var live`, because [`listen`] holds `live`
+/// in a `let` its closure can capture — and pushing to a field changes the
+/// struct, which a `let` promises nothing will.
 fn mark_listening(var live: Live, event: str) {
-    var names = live.listening
-    names.push(event)
-    live.listening = names
+    live.listening.push(event)
 }
 
 /// Run whatever the newest description says this event does.
@@ -648,9 +646,7 @@ struct Gone {
 }
 
 fn note_gone(var g: Gone, key: str) {
-    var keys = g.keys
-    keys.push(key)
-    g.keys = keys
+    g.keys.push(key)
 }
 
 /// Every key in a subtree that is leaving, not just the root's.

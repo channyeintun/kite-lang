@@ -2427,6 +2427,25 @@ fn find_runtime_lib() -> Option<std::path::PathBuf> {
 /// trap, and the fact of the trap. What each backend *says* about the trap is
 /// not compared — Wasm says `unreachable` for everything.
 const TRAPPING: &[(&str, &str)] = &[
+    // A write through a field or into a nested slice goes through a hidden
+    // copy, and the bounds check has to survive the trip.
+    (
+        "a-nested-write-out-of-range-traps",
+        "\
+struct Board {
+  var cells: [int]
+}
+
+fn main() {
+  var b = Board{ cells: [1] }
+  var grid = [[1]]
+  grid[0][0] = 2
+  io.print(\"before\")
+  b.cells[3] = 2
+  io.print(\"after\")
+}
+",
+    ),
     // A discarded value is not a discarded check: sections 5.4 and 7.7 say
     // these trap, and lowering used to drop them along with the value.
     (
@@ -2790,6 +2809,164 @@ const EXPECTED: &[(&str, &str, &str)] = &[
          \x20 for (k, v) in m {\n    io.print(v)\n  }\n\
          \x20 let words = {\"b\": 2, \"a\": 1}\n  for (w, n) in words {\n    io.print(\"\\(w)=\\(n)\")\n  }\n}\n",
         "1\n2\n3\nb=2\na=1\n",
+    ),
+    // A slice inside a slice used to be refused as "not a plain binding".
+    // Changing one now copies each level out, changes the innermost, and
+    // writes every level back — and since slices are values, a copy of the
+    // outer slice taken before the write, or of a row, keeps what it had.
+    (
+        "nested-slices-write-back",
+        r#"fn show(xs: [int]) -> str {
+  var out = ""
+  for x in xs {
+    out = out + "\(x),"
+  }
+  return out
+}
+
+fn main() {
+  var grid = [[1, 2], [3, 4]]
+  let before = grid
+  let row = grid[0]
+  grid[0][1] = 9
+  grid[1].push(5)
+  io.print("\(show(grid[0])) \(show(grid[1])) \(show(before[0])) \(show(before[1])) \(show(row))")
+  var cube = [[[1, 2], [3]], [[4], [5, 6]]]
+  let copy = cube
+  cube[1][1][0] = 50
+  cube[0][1].push(30)
+  cube[1][0][0] *= 10
+  io.print("\(show(cube[1][1])) \(show(cube[0][1])) \(show(cube[1][0])) \(show(copy[1][1])) \(copy[1][0][0])")
+  for i in 0..2 {
+    for j in 0..2 {
+      grid[i][j] += 10 * i + j
+    }
+  }
+  io.print("\(show(grid[0])) \(show(grid[1])) \(show(before[1]))")
+  var ms = [{"k": 1}]
+  ms[0]["k"] = 2
+  ms[0]["j"] = 3
+  ms[0].remove("k")
+  io.print("\(ms[0].len()) \(ms[0]["j"] == 3) \(ms[0]["k"] == nil)")
+}
+"#,
+        "1,9, 3,4,5, 1,2, 3,4, 1,2,\n50,6, 3,30, 40, 5,6, 4\n1,10, 13,15,5, 3,4,\n1 true true\n",
+    ),
+    // A struct is a reference, so a slice or map in a `var` field is changed
+    // by copying the field out and writing it back through the same struct —
+    // which every holder of that struct then sees, while a copy of the field
+    // taken before does not.
+    (
+        "slices-in-fields-write-back",
+        r#"struct Board {
+  var cells: [int]
+  var rows: [[int]]
+  var counts: {str: int}
+}
+
+impl Board {
+  fn add(var self, n: int) {
+    self.cells.push(n)
+    self.rows[0][0] += n
+  }
+}
+
+fn show(xs: [int]) -> str {
+  var out = ""
+  for x in xs {
+    out = out + "\(x),"
+  }
+  return out
+}
+
+fn main() {
+  var b = Board{ cells: [0, 0, 0], rows: [[1], [2]], counts: {"a": 1} }
+  let same = b
+  let cells = b.cells
+  b.cells[1] = 7
+  b.cells.push(4)
+  b.cells[0] -= 2
+  b.rows[1][0] = 20
+  b.rows[0].push(11)
+  b.counts["b"] = 2
+  b.counts.remove("a")
+  b.add(100)
+  io.print("\(show(b.cells)) \(show(cells)) \(show(b.rows[0])) \(show(b.rows[1])) \(b.counts.len())")
+  io.print("\(show(same.cells)) \(same.counts["b"] == 2)")
+  var boards = [Board{ cells: [1], rows: [], counts: {} }]
+  boards[0].cells.push(2)
+  boards[0].cells[0] = 3
+  io.print(show(boards[0].cells))
+}
+"#,
+        "-2,7,0,4,100, 0,0,0, 101,11, 20, 1\n-2,7,0,4,100, true\n3,2,\n",
+    ),
+    // Every index and the value are evaluated once, left to right, before
+    // anything is copied out — so nothing the program runs sits between the
+    // copy and the write back, and a call that changes the same field is not
+    // undone by it.
+    (
+        "place-operands-evaluate-once",
+        r#"struct Counter {
+  var n: int
+  var log: [str]
+}
+
+struct Board {
+  var cells: [int]
+}
+
+fn next(var c: Counter, what: str) -> int {
+  c.n = c.n + 1
+  c.log.push(what)
+  return c.n
+}
+
+fn grow(var b: Board, n: int) -> int {
+  b.cells.push(n)
+  return n
+}
+
+fn main() {
+  var c = Counter{ n: -1, log: [] }
+  var sums = [[0, 0], [0, 0]]
+  sums[next(c, "i")][next(c, "j")] += next(c, "v")
+  io.print("\(sums[0][0]) \(sums[0][1]) \(sums[1][0]) \(c.n) \(c.log.len())")
+  io.print(c.log[0] + c.log[1] + c.log[2])
+  var g = Board{ cells: [0, 0] }
+  g.cells[grow(g, 0)] = 9
+  g.cells[1] += grow(g, 5)
+  io.print("\(g.cells.len()) \(g.cells[0]) \(g.cells[1]) \(g.cells[3])")
+}
+"#,
+        "0 2 0 2 3\nijv\n4 9 5 5\n",
+    ),
+    // An optional binding narrowed to a slice. `xs[0] = 5` wrote into an
+    // unwrapped copy and the change went nowhere, on every backend.
+    (
+        "narrowed-optional-slices-change",
+        r#"fn main() {
+  var maybe: Option<[int]> = [1, 2]
+  if maybe != nil {
+    maybe[0] = 5
+    maybe.push(3)
+    io.print("\(maybe[0]) \(maybe.len())")
+  }
+  var nested: Option<[[int]]> = [[1]]
+  if nested != nil {
+    nested[0][0] = 8
+    nested[0].push(9)
+    io.print("\(nested[0][0]) \(nested[0][1])")
+  }
+  var table: Option<{str: int}> = {"a": 1}
+  if table != nil {
+    table["b"] = 2
+    table.remove("a")
+    io.print("\(table.len()) \(table["b"] == 2)")
+  }
+}
+"#,
+        "5 3\n8 9\n1 true\n",
     ),
 ];
 

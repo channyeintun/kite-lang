@@ -2357,6 +2357,18 @@ segment naming a declared dependency roots there.
   `var` local, push, assign back — which is what the compiler would have to
   generate anyway, and the diagnostic says so.
 
+  *Closed later:* the compiler generates it, for every change to a slice or map
+  held anywhere but a plain binding — `b.cells.push(x)`, `grid[i][j] += 1`,
+  `boards[0].cells[2] = v`, `ms[0].remove(k)`, to any depth. The operands are
+  evaluated once, into hidden locals, before each level is copied out; the
+  innermost is changed and every level written back, so nothing the program
+  wrote runs between a copy and its write-back. Each level is checked as the
+  assignment to it would be (§5.4). The same code found that a narrowed
+  optional — `if xs != nil { xs[0] = 5 }` — had been writing into an unwrapped
+  copy on all three backends, and the change went nowhere. What it costs is a
+  copy of each level per change, as the hand-written version cost: a loop
+  pushing through a field is still quicker on a local assigned back once.
+
 ---
 
 ## Phase 27 — `std/window`, and a calendar that is not the host's

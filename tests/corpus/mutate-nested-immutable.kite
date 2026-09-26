@@ -1,0 +1,38 @@
+// Changing a slice or map that is held somewhere other than a plain binding
+// writes it back through every level that holds it, so each level has to
+// allow the write an assignment to it would need: a `var` binding at the root,
+// a `var` field, and a binding that may change the struct the field is on. A
+// value nothing holds has nowhere for the change to go at all.
+struct Board {
+    var cells: [int]
+    fixed: [int]
+    var counts: { str: int }
+}
+
+impl Board {
+    fn peek(self) {
+        self.cells.push(1) //~ ERROR E0114
+    }
+}
+
+fn make() -> [[int]] {
+    return [[1]]
+}
+
+fn main() {
+    let grid = [[1, 2], [3, 4]]
+    grid[0][1] = 9 //~ ERROR E0114
+    grid[1].push(3) //~ ERROR E0114
+    let b = Board{ cells: [0], fixed: [1], counts: { } }
+    b.cells[0] = 7 //~ ERROR E0114
+    b.counts.remove("a") //~ ERROR E0114
+    var v = Board{ cells: [0], fixed: [1], counts: { } }
+    v.fixed[0] = 1 //~ ERROR E0114
+    v.fixed.push(2) //~ ERROR E0114
+    make()[0].push(1) //~ ERROR E0200
+    let t = ([1], 2)
+    t.0.push(1) //~ ERROR E0200
+    let ms = [{ "a": 1 }]
+    ms[0]["a"] = 2 //~ ERROR E0114
+    io.print(v.cells.len())
+}

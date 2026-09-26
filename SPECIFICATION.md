@@ -704,10 +704,11 @@ Map indexing returns `Option<V>`, never a zero value.
 
 `remove` shifts the entries after it down, so insertion order keeps meaning what
 it says and `keys()` and `values()` still line up element for element. Its
-receiver must be a plain `var` binding, exactly as `xs.push(v)`'s must: both are
-copy-on-write values, so changing the contents changes the binding. Assigning
-`nil` is not the same thing — on a `{str: Option<int>}` it leaves the key in
-place with a `nil` value, and `len()` does not move. Slice indexing with `[]` traps on
+receiver must be somewhere a change can be kept, exactly as `xs.push(v)`'s
+must: both are copy-on-write values, so changing the contents changes what
+holds them (below). Assigning `nil` is not the same thing — on a
+`{str: Option<int>}` it leaves the key in place with a `nil` value, and `len()`
+does not move. Slice indexing with `[]` traps on
 out-of-bounds because that is a program bug, not a runtime condition; `.get()` is
 provided for the case where it genuinely is a runtime condition.
 
@@ -732,6 +733,36 @@ leave an end out; `0..` alone has nothing to stop at.
 A slice is the only sequence a range indexes other than a `str`. A map has no
 order over its keys for a range to name, so `m[a..b]` is an error rather than a
 guess.
+
+**A slice or map is changed where it is held.** `xs[i] = v`, `xs[i] += v`,
+`xs.push(v)`, `m[k] = v` and `m.remove(k)` change a copy-on-write value, and so
+change whatever holds it — which must therefore be able to change: a `var`
+binding; a `var` field (§8.1) of a struct reached through a binding that may
+change it; or an element of a slice that is itself held one of these ways. The
+nesting goes as deep as the data does. `grid[i][j] = v` means exactly
+
+```kite
+let at = i              // the operands, once each and in order
+let slot = j
+let value = v
+var row = grid[at]      // copy out
+row[slot] = value       // change
+grid[at] = row          // write back
+```
+
+and `b.cells.push(x)` means `var c = b.cells` / `c.push(x)` / `b.cells = c`:
+each level is copied out, the innermost is changed, and each is written back
+through the same place. The operands — every index, the struct a field is read
+from, and the right-hand side — are evaluated once, left to right, before
+anything is copied, so no code the program wrote runs between taking a copy and
+writing it back, and a call in an index that changes the same field is not
+undone by the write. Because these are values, a copy of `grid` or of `grid[i]`
+taken before the write still holds what it did.
+
+A `let` binding at the root, or a field not declared `var`, is `E0114`, as the
+same assignment written out would be. A value nothing holds — a call's result,
+a tuple's element — has nowhere to keep the change, and is `E0200`: bind it to
+a `var` and change that.
 
 ---
 
