@@ -5320,22 +5320,13 @@ impl<'a> Checker<'a> {
     /// Unchecked; neither is usable until the error is tested.
     /// `let (a, b) = pair` for an ordinary tuple.
     ///
-    /// Returns `None` when the initialiser is not a tuple, which is how the
-    /// fallible-result path — the other meaning of the same syntax — gets its
-    /// turn. The initialiser is checked here either way; the fallible path
-    /// checks it again, which is one wasted walk on a path that is about to
-    /// build different statements from it anyway.
+    /// Called with the initialiser already checked, and found to be a tuple.
     fn let_tuple(
         &mut self,
-        l: &ast::LetStmt,
         elems: &[ast::BindElem],
-        init: &ast::Expr,
+        value: hir::Expr,
         span: Span,
     ) -> Option<(hir::Stmt, Flow)> {
-        let annotated = l.ty.as_ref().map(|t| self.resolve_type(t));
-        // A peek: the expression is checked once, here, and reused whichever
-        // path takes it.
-        let value = self.expr(init, annotated);
         let TyKind::Tuple(parts) = self.types.kind(value.ty).clone() else {
             return None;
         };
@@ -5399,12 +5390,16 @@ impl<'a> Checker<'a> {
         // A tuple binding is either a fallible result being split into its
         // value and its error, or an ordinary tuple being taken apart. Which
         // one it is comes from the initialiser's type, so that is checked
-        // first and the two paths diverge after.
-        if let Some(init) = &l.init {
-            if let Some(stmt) = self.let_tuple(l, elems, init, span) {
-                return Some(stmt);
+        // first — once, for both paths: checking it again on the second
+        // reported every mistake in it twice.
+        let annotated = l.ty.as_ref().map(|t| self.resolve_type(t));
+        let checked = l.init.as_ref().map(|init| self.expr(init, annotated));
+        let checked = match checked {
+            Some(value) if matches!(self.types.kind(value.ty), TyKind::Tuple(_)) => {
+                return self.let_tuple(elems, value, span);
             }
-        }
+            other => other,
+        };
 
         if elems.len() != 2 {
             self.diags.push(
@@ -5431,15 +5426,13 @@ impl<'a> Checker<'a> {
             );
         }
 
-        let Some(init) = &l.init else {
+        let Some(call) = checked else {
             self.diags.push(
                 Diagnostic::error(codes::E0204, "a tuple binding needs an initialiser")
                     .with_primary(span, "nothing to destructure"),
             );
             return None;
         };
-
-        let call = self.expr(init, None);
         let Some(inner) = self.types.fallible_value(call.ty) else {
             if !self.types.is_poisoned(call.ty) {
                 let found = self.types.with_article(call.ty);

@@ -840,10 +840,13 @@ The rules:
 > error)`, is a compile error (`E0302`). Binding nothing is not a way out of
 > binding an error.
 >
-> **R7.** A call whose `error`, or whose whole `(T, error)`, is bound to a
-> single name makes that binding Unchecked. Reading it — testing it, checking
-> it, returning it, taking it apart — inspects it, and R3 applies otherwise.
-> Binding everything under one name is not a way out either.
+> **R7.** An `error`, or a whole `(T, error)`, bound to a single name makes
+> that binding Unchecked — by `let` or by `var`, whether it came straight from
+> a call or through `await`, a branch of a value `if`, or anything else that
+> can hold a new failure. Only `nil` and a copy of another binding, which
+> carries its own obligation, leave it Checked. Reading it — testing it,
+> checking it, returning it, taking it apart — inspects it, and R3 applies
+> otherwise. Binding everything under one name is not a way out either.
 
 R1–R5 are about bindings, and R6 and R7 close the shapes they leave open: a
 call written as a statement makes no binding, so nothing in R1–R5 ever sees it,
@@ -977,7 +980,11 @@ check errors.wrap(err, "loading config from \(path)")
 ```
 
 `errors.wrap` returns nil when given nil, so this composes with `check`
-directly. The context goes in front of the message, so a failure that crosses
+directly — and because it returns nil *only* when given nil, passing the
+`check` proves `err` nil and makes the value it guards readable (R4). That is
+known of `errors.wrap` alone: a function of the program's own may answer nil
+for anything, so `check` of what it returned proves nothing about what it was
+handed. The context goes in front of the message, so a failure that crosses
 four layers reads as the four sentences that produced it.
 
 **It keeps what it wrapped**, rather than flattening it into text. `err.cause()`

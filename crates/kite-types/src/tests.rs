@@ -1820,3 +1820,14 @@ fn every_exit_runs_the_defer_stack() {
         text
     );
 }
+
+/// A tuple binding's initialiser is checked once, whichever of its two
+/// meanings the binding turns out to have — a mistake in it used to be
+/// reported by each.
+#[test]
+fn a_tuple_bindings_initialiser_is_checked_once() {
+    let c = run("fn f(n: int) -> (int, error) {\n  return n, nil\n}\n\
+        fn main() {\n  let (v, err) = f(1 + \"a\")\n  if err != nil {\n    return\n  }\n  io.print(v)\n}\n");
+    let reported = c.codes().iter().filter(|code| **code == "E0201").count();
+    assert_eq!(reported, 1, "{}", c.render());
+}

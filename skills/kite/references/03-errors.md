@@ -200,12 +200,13 @@ aliasing, no lifetimes.
 
 | | rule |
 |---|---|
-| R1 | after `let (v, e) = f()`, `e` is **Unchecked** and `v` is **Tainted**. A destructuring is the *only* thing that makes a binding Unchecked — `let e = f()` on a `-> error` function makes none |
+| R1 | after `let (v, e) = f()`, `e` is **Unchecked** and `v` is **Tainted** |
 | R2 | reading a Tainted binding is `E0301` |
 | R3 | an Unchecked binding going out of scope is `E0302` |
 | R4 | on a path where `e == nil` is proved, `e` becomes Checked and `v` Clean |
 | R5 | on a path where `e != nil`, `e` becomes Checked and `v` stays Tainted **permanently** |
 | R6 | a bare-statement call whose type is `error` or `(T, error)` is `E0302` |
+| R7 | an `error` or a whole `(T, error)` bound to one name — `let` or `var`, from a call, `await`, a value `if` — is **Unchecked**; only `nil` and a copy of another binding are not |
 
 R2 in practice:
 
@@ -343,7 +344,10 @@ fn main() {
 ```
 
 The first is the shape written by habit — `let e = dom.set_text(…)` — and
-`std/dom` answers with a bare `error` nearly everywhere. Reading the binding is
+`std/dom` answers with a bare `error` nearly everywhere. The same goes for `var e
+= f()`, `let e = await f()` and `let e = if c { f() } else { g() }`: however the
+failure got into the binding, the binding has to be looked at. Only `nil` and a
+copy of another binding start out Checked. Reading the binding is
 inspecting it, so `if e != nil`, `check e`, `return e` and passing it on all
 clear it. A whole pair is cleared by taking it apart, `let (v, err) = p`, which
 re-enters the normal rules, or by returning it; `p` itself has no fields
@@ -351,7 +355,8 @@ re-enters the normal rules, or by returning it; `p` itself has no fields
 
 ## `check`
 
-`check err` is exactly, in a `-> (T, error)` function:
+`check err` is exactly, in a `-> (T, error)` function — and so it runs what was
+`defer`red on the way out, like any other `return`:
 
 ```kite ignore
 if err != nil {
@@ -579,8 +584,11 @@ fn main() {
 ## Adding context
 
 `errors.wrap(err, context)` returns nil for nil, so it composes with `check` on
-one line. It is built on `errors.because`, so it **keeps** what it wrapped rather
-than flattening it into text.
+one line — and passing that `check` cleans the value `err` guards, because
+`wrap` answers nil *only* for nil. That is known of `errors.wrap` alone: `check`
+of what your own function returned proves nothing about the error it was handed.
+It is built on `errors.because`, so it **keeps** what it wrapped rather than
+flattening it into text.
 
 ```kite
 use std/errors
@@ -844,10 +852,6 @@ knows.
   own, so `T.is` must be applied to `errors.root(err)`, never the wrapper. The
   spec never says this, and its own §7.6 example is correct only because it uses
   `errors.root`.
-- §7.3's R3 ("an Unchecked binding going out of scope is a compile error") reads
-  as though it covers every error binding. Only a destructured `e` is ever
-  Unchecked: `let e = touch()` on a `-> error` function compiles and drops the
-  failure, and so does `let p = load()` on a pair.
 - Undocumented: `err.message()` requires the error to be proved non-nil (`E0301`);
   `error` is not printable by `io.print`; `let (v, _) = f()` has its own `E0302`
   wording; `-> error` alone satisfies `check`; and `return _, nil` is accepted,
