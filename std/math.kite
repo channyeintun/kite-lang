@@ -28,11 +28,24 @@ pub fn clamp(x: float, low: float, high: float) -> float {
     return min(max(x, low), high)
 }
 
-/// Truncation towards zero, which is what an `as int` cast does. Casts are
-/// saturating on every backend, so a value out of range gives a number rather
-/// than killing the program.
+/// Truncation towards zero, which is what an `as int` cast does.
+///
+/// Not *only* the cast, though. Every float of magnitude 2⁵² or more is
+/// already a whole number, and most of them are past what an `int` holds, where
+/// the cast saturates: `trunc(1e20)` used to answer 9223372036854775808. Such a
+/// value is its own truncation, and so is an infinity or a NaN, so they are
+/// handed back untouched and only what fits goes through the cast.
 pub fn trunc(x: float) -> float {
+    if !(abs(x) < two_52()) {
+        return x
+    }
     return (x as int) as float
+}
+
+/// 2⁵², the magnitude from which every float is a whole number: the spacing
+/// between neighbouring floats there is 1.
+fn two_52() -> float {
+    return 4503599627370496.0
 }
 
 /// Comparisons rather than `t != x`, which would be exact float equality and
@@ -54,11 +67,25 @@ pub fn ceil(x: float) -> float {
 }
 
 /// Half away from zero, which is what most people mean by rounding.
+///
+/// Decided on the fraction itself, `x - trunc(x)`, which is exact below 2⁵².
+/// The obvious `floor(x + 0.5)` is not: the addition rounds, so
+/// `0.49999999999999994 + 0.5` is 1.0 and the largest float below a half
+/// rounded up, and above 2⁵² the addition moved `x` to a neighbouring whole
+/// number.
 pub fn round(x: float) -> float {
-    if x < 0.0 {
-        return 0.0 - floor(0.0 - x + 0.5)
+    if !(abs(x) < two_52()) {
+        return x
     }
-    return floor(x + 0.5)
+    let t = trunc(x)
+    let fraction = x - t
+    if fraction >= 0.5 {
+        return t + 1.0
+    }
+    if fraction <= -0.5 {
+        return t - 1.0
+    }
+    return t
 }
 
 /// A float as an `int`, rounded to nearest.
@@ -80,25 +107,77 @@ pub fn trunc_to(x: float) -> int {
     return x as int
 }
 
-/// The square root, by Newton's method.
+/// The square root, correctly rounded. Zero and negatives answer zero; an
+/// infinity is its own root.
 ///
 /// Written in Kite rather than reached for from the host: a host call is a
-/// boundary two runtimes have to agree about, and this one converges to the
-/// same answer everywhere. Twenty iterations is far more than a `float`
-/// needs — the loop stops as soon as it stops moving.
+/// boundary two runtimes have to agree about, and this one gives the same bits
+/// everywhere — the same bits IEEE 754 requires of a hardware square root.
+///
+/// **The range is reduced first**, and that is most of the function. `x` is
+/// written as `m · 4ᵏ` with `m` in `[1, 4)` — multiplying by 4 and by 2 is
+/// exact, so this costs nothing — and Newton runs on `m`, from a start within
+/// 25% of the answer, where six steps are more than the quadratic convergence
+/// needs. Starting from `x` itself and stopping on an absolute tolerance, as
+/// this once did, was right only between about 1e-8 and 1e10: `sqrt(1e12)`
+/// answered 1279996.5 and `sqrt(1e-12)` 1.28e-6.
+///
+/// Newton in floating point lands within one unit in the last place, and a
+/// quarter of the time on the wrong side of the halfway point. The last step
+/// settles it in integers, where nothing rounds — see [`nearest_root`].
 pub fn sqrt(x: float) -> float {
     if x <= 0.0 {
         return 0.0
     }
-    var guess = x
-    for i in 0..20 {
-        let next = (guess + x / guess) / 2.0
-        if abs(next - guess) < 0.0000000001 {
-            return next
-        }
-        guess = next
+    // An infinity (or a NaN) answers itself: halving one never ends.
+    if !(x < x * 2.0) {
+        return x
     }
-    return guess
+    var m = x
+    var scale = 1.0
+    for m >= 4.0 {
+        m = m / 4.0
+        scale = scale * 2.0
+    }
+    for m < 1.0 {
+        m = m * 4.0
+        scale = scale / 2.0
+    }
+    var guess = (m + 1.0) / 2.0
+    for i in 0..6 {
+        guess = (guess + m / guess) / 2.0
+    }
+    return nearest_root(m, guess) * scale
+}
+
+/// Of `guess` and its neighbours, the one nearest `√m`, for `m` in `[1, 4)`.
+///
+/// Both are whole numbers of units in the last place once scaled by 2⁵²: `M`
+/// for `m` and `G` for the root, which is in `[1, 2)`. `G` is the nearest
+/// exactly when `(G − ½)² < M · 2⁵² < (G + ½)²`, and since both sides are
+/// whole numbers that is `−G < M · 2⁵² − G² ≤ G`. The difference is small but
+/// its two terms are near 2¹⁰⁶, so it is taken in 26-bit pieces, where every
+/// product fits in an `int` and nothing is ever rounded.
+fn nearest_root(m: float, guess: float) -> float {
+    let unit = 4503599627370496.0
+    let piece = 67108864
+    let big = trunc_to(m * unit)
+    var root = trunc_to(guess * unit)
+    for step in 0..3 {
+        let high = root / piece
+        let low = root % piece
+        let cross = 2 * high * low
+        let top = (big - high * high) - cross / piece
+        let difference = top * 4503599627370496 - (cross % piece) * piece - low * low
+        if difference > root {
+            root += 1
+        } else if difference <= 0 - root {
+            root -= 1
+        } else {
+            break
+        }
+    }
+    return (root as float) / unit
 }
 
 /// `base` raised to a whole power. Negative powers give the reciprocal.
@@ -174,8 +253,37 @@ pub fn wrapping_add(a: int, b: int) -> int {
 }
 
 /// The length of the hypotenuse — the distance from the origin to (x, y).
+///
+/// `sqrt(x * x + y * y)` overflows to infinity once either side passes about
+/// 1e154, though the answer is nowhere near that large, and loses its
+/// precision to underflow below about 1e-154. So outside a comfortable range
+/// both sides are first scaled by a power of two — exact, so it costs no
+/// precision — and the answer is scaled back.
 pub fn hypot(x: float, y: float) -> float {
-    return sqrt(x * x + y * y)
+    let a = abs(x)
+    let b = abs(y)
+    let big = max(a, b)
+    if !(big < big * 2.0) {
+        // Zero, an infinity, or a NaN: nothing to scale.
+        if big == 0.0 {
+            return 0.0
+        }
+        return big
+    }
+    // 2⁵⁰⁰, 2⁻⁵⁰⁰ and 2⁶⁰⁰, each a power of two and so held exactly.
+    if big > 3.273390607896142e150 {
+        let down = 2.409919865102884e-181
+        return hypot_near(a * down, b * down) / down
+    }
+    if big < 3.054936363499605e-151 {
+        let up = 4.149515568880993e180
+        return hypot_near(a * up, b * up) / up
+    }
+    return hypot_near(a, b)
+}
+
+fn hypot_near(a: float, b: float) -> float {
+    return sqrt(a * a + b * b)
 }
 
 /// A point `t` of the way from `a` to `b`.
@@ -232,12 +340,13 @@ pub fn ln2() -> float {
 /// the rest is a power of two. Without that a series for `exp(20)` would need
 /// hundreds of terms and lose most of its precision to cancellation.
 pub fn exp(x: float) -> float {
-    if x > 709.0 {
-        // Past the largest `float`. Saturating rather than trapping, which is
-        // what the casts do too.
+    // `ln` of the largest float. Past it the answer is past the largest
+    // float; saturating rather than trapping, which is what the casts do too.
+    if x > 709.782712893384 {
         return 1.7976931348623157e308
     }
-    if x < -745.0 {
+    // `ln` of half the smallest float, below which the answer rounds to zero.
+    if x < -745.1332191019412 {
         return 0.0
     }
     let k = round(x / ln2())
@@ -257,7 +366,31 @@ pub fn exp(x: float) -> float {
         term = term * r / (n as float)
         sum = sum + term
     }
-    return sum * pow(2.0, round_to(k))
+    return scaled(sum, round_to(k))
+}
+
+/// `x · 2ᵏ`, without the power itself overflowing or underflowing first.
+///
+/// `exp` near either end of its range needs a `k` whose power of two is not a
+/// float — 2¹⁰²⁴ is past the largest and 2⁻¹⁰⁷⁵ below the smallest — though
+/// the product is. So the power is applied in pieces, each of them exact, and
+/// only the last multiplication rounds. `exp(709.7)` used to saturate and
+/// `exp(-740)` to answer zero.
+fn scaled(x: float, k: int) -> float {
+    var out = x
+    var left = k
+    for left > 1000 {
+        out = out * pow(2.0, 1000)
+        left -= 1000
+    }
+    for left < -1000 {
+        out = out * pow(0.5, 1000)
+        left += 1000
+    }
+    if left >= 0 {
+        return out * pow(2.0, left)
+    }
+    return out * pow(0.5, 0 - left)
 }
 
 /// The natural logarithm. Zero and negatives have none; both answer zero,
@@ -332,29 +465,36 @@ pub fn cbrt(x: float) -> float {
     return guess
 }
 
-/// `x` folded into `[-π, π]`, which is where the sine and cosine series are
-/// asked to work.
+/// `x` less a whole number of quarter turns, and how many quarter turns that
+/// was.
 ///
-/// `τ` in two pieces, for the reason `exp` splits `ln2`: at `x = 100` the fold
-/// subtracts about 100.5, and a single rounded `τ` has already lost the low
-/// bits of that product before the series sees the remainder. The high part
-/// here has its bottom thirty mantissa bits clear, so `k · τ_hi` is *exact*
-/// for any `k` a program will plausibly reach, and the correction carries the
-/// rest.
-fn wrapped(x: float) -> float {
-    let k = round(x / tau())
-    return (x - k * 6.28318500518798828125) - k * 3.019915981956753e-7
+/// The remainder is within `π/4` of zero, where the sine and cosine series are
+/// asked to work, and the count says which of `±sin` and `±cos` of it the
+/// answer is. Both functions share this, which is what makes `cos(0)` exactly
+/// 1: it used to be `sin(0 + π/2)`, and the sine's series summed at `π/2`
+/// gives 1.0000000000000002.
+///
+/// `π/2` in two pieces, for the reason `exp` splits `ln2`: at `x = 100` the
+/// fold subtracts about 100.5, and a single rounded `π/2` has already lost the
+/// low bits of that product before the series sees the remainder. The high
+/// part here has its bottom thirty mantissa bits clear, so `k · hi` is *exact*
+/// for any `k` below 2³⁰ — a few hundred million turns — and the correction
+/// carries the rest. Past that the answer loses accuracy steadily.
+struct Quarter {
+    r: float
+    turns: int
 }
 
-pub fn sin(x: float) -> float {
-    var r = wrapped(x)
-    // Folded again about ±π/2, where the series needs half as many terms:
-    // sin(π − r) = sin(r).
-    if r > pi() / 2.0 {
-        r = pi() - r
-    } else if r < -pi() / 2.0 {
-        r = -pi() - r
-    }
+fn quarter(x: float) -> Quarter {
+    let k = round(x / (pi() / 2.0))
+    let r = (x - k * 1.5707962512969970703125) - k * 7.549789954891882e-8
+    // Which quarter, 0 to 3. `%` keeps the sign of `k`, hence the second one.
+    let turns = ((round_to(k) % 4) + 4) % 4
+    return Quarter{ r: r, turns: turns }
+}
+
+/// The sine series, for `|r| ≤ π/4`.
+fn sin_near(r: float) -> float {
     let squared = r * r
     var term = r
     var sum = r
@@ -366,8 +506,45 @@ pub fn sin(x: float) -> float {
     return sum
 }
 
+/// The cosine series, for `|r| ≤ π/4`.
+fn cos_near(r: float) -> float {
+    let squared = r * r
+    var term = 1.0
+    var sum = 1.0
+    for n in 1..12 {
+        let k = 2 * n
+        term = -term * squared / (((k - 1) * k) as float)
+        sum = sum + term
+    }
+    return sum
+}
+
+pub fn sin(x: float) -> float {
+    let q = quarter(x)
+    if q.turns == 0 {
+        return sin_near(q.r)
+    }
+    if q.turns == 1 {
+        return cos_near(q.r)
+    }
+    if q.turns == 2 {
+        return -sin_near(q.r)
+    }
+    return -cos_near(q.r)
+}
+
 pub fn cos(x: float) -> float {
-    return sin(x + pi() / 2.0)
+    let q = quarter(x)
+    if q.turns == 0 {
+        return cos_near(q.r)
+    }
+    if q.turns == 1 {
+        return -sin_near(q.r)
+    }
+    if q.turns == 2 {
+        return -cos_near(q.r)
+    }
+    return sin_near(q.r)
 }
 
 pub fn tan(x: float) -> float {
