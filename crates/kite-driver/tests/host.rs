@@ -2691,6 +2691,114 @@ process.stdout.write(out.map((l) => l + "\n").join(""));
     assert_eq!(out, "fetched 80\nunder 20 MiB kept: true\n");
 }
 
+/// A response carries its status and headers as data, so the host lets a
+/// request go the moment its body is read — and `http.header` still answers,
+/// long after, as `fetch`'s `headers.get` would.
+///
+/// `http.header` used to ask the host by the response's handle, so the glue
+/// kept every request that succeeded, status and headers and all, for as long
+/// as the page lived: nothing could tell it a response would never be asked
+/// about again. The program asks the glue how many it holds through a host
+/// function of its own, once every body is read and before any header is.
+#[test]
+fn a_response_keeps_its_headers_and_the_host_lets_the_request_go() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let port = free_port();
+    let src = format!(
+        r#"use std/http
+
+@host("probe")
+extern fn held() -> int
+
+async fn main() {{
+    var responses: [http.Response] = []
+    for i in 0..40 {{
+        let (r, err) = await http.get("http://127.0.0.1:{port}/\(i)")
+        if err != nil {{
+            io.print(err.message())
+            return
+        }}
+        responses.push(r)
+    }}
+    io.print("held after 40: \(held())")
+    var right = 0
+    for i in 0..responses.len() {{
+        let r = responses[i]
+        if r.status == 200 && r.body == "body \(i)" && http.header(r, "X-Request") == "\(i)" {{
+            right += 1
+        }}
+    }}
+    io.print("right: \(right)")
+    let first = responses[0]
+    io.print(http.header(first, "Content-Type"))
+    io.print(http.header(first, "x-many"))
+    io.print(http.header(first, "SET-COOKIE"))
+    io.print("absent: [\(http.header(first, "x-absent"))]")
+    let (spaced, serr) = await http.get("http://127.0.0.1:{port}/spaced")
+    if serr != nil {{
+        io.print(serr.message())
+        return
+    }}
+    io.print("spaced: [\(http.header(spaced, "x-spaced"))]")
+    io.print("built: [\(http.header(http.ok("here"), "content-type"))]")
+    let (_, ferr) = await http.get("http://127.0.0.1:9/refused")
+    io.print("failed: \(ferr != nil), held: \(held())")
+}}
+"#,
+        port = port
+    );
+    let runner = format!(
+        r#"import {{ createServer }} from "node:http";
+import {{ readFile }} from "node:fs/promises";
+import {{ run, setWriter, provide, requestsHeld }} from "./app.js";
+const server = createServer((req, res) => {{
+  res.setHeader("content-type", "text/plain");
+  res.setHeader("x-request", req.url.slice(1));
+  // Sent as two lines each: `fetch` joins the first pair, and hands a cookie
+  // back one at a time.
+  res.setHeader("x-many", ["one", "two"]);
+  res.setHeader("set-cookie", ["a=1", "b=2"]);
+  res.end("body " + req.url.slice(1));
+}});
+await new Promise((r) => server.listen({port}, "127.0.0.1", r));
+// One answer is written by hand, because no server here can send it as meant
+// — Node writes a header as UTF-8 and `fetch` reads one as Latin-1: a value
+// with a no-break space at either end, which `fetch` keeps and `trim` would
+// not.
+const network = globalThis.fetch;
+globalThis.fetch = (url, init) =>
+  String(url).endsWith("/spaced")
+    ? Promise.resolve(new Response("", {{ headers: {{ "x-spaced": "\u00a0inside\u00a0" }} }}))
+    : network(url, init);
+const out = [];
+setWriter((l) => out.push(l));
+provide("probe", {{ held: () => BigInt(requestsHeld()) }});
+await run(new Uint8Array(await readFile(new URL("./app.wasm", import.meta.url))));
+server.close();
+out.push("held at the end: " + requestsHeld());
+process.stdout.write(out.map((l) => l + "\n").join(""));
+"#,
+        port = port
+    );
+    let out = run_runner_under_node("fetchheaders", &src, &runner, &[]);
+    assert_eq!(
+        out,
+        "held after 40: 0\n\
+         right: 40\n\
+         text/plain\n\
+         one, two\n\
+         a=1, b=2\n\
+         absent: []\n\
+         spaced: [\u{a0}inside\u{a0}]\n\
+         built: []\n\
+         failed: true, held: 0\n\
+         held at the end: 0\n"
+    );
+}
+
 // ---- names the wrapper has to spell ----------------------------------------
 
 /// A `pub fn` or a parameter named with a word JavaScript reserves, or with a

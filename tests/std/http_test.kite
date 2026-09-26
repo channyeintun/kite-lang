@@ -71,6 +71,14 @@ fn checks() -> [error] {
     out.push(test.equal_str(query("/search?", "q"), "<nil>", "an empty query"))
     out.push(test.equal_str(query("/search?qq=1", "q"), "<nil>", "a name is not a prefix"))
 
+    // ---- response headers ----
+    //
+    // A response built here carries none, and says so with "" rather than by
+    // asking a host — so `header` answers the same on every backend, host or
+    // no host.
+    out.push(test.equal_str(http.header(http.ok("x"), "content-type"), "", "a built response has no headers"))
+    out.push(test.equal_str(http.header(http.status(301, ""), "Location"), "", "not even a redirect's"))
+
     // ---- request headers ----
     //
     // As pairs, a value that came from elsewhere cannot add a header of its
