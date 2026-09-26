@@ -52,7 +52,7 @@ mod serve;
 mod slices;
 mod strings;
 mod support;
-pub use glue::{generate_api, generate_glue, generate_glue_with_hosts, generate_page};
+pub use glue::{generate_api, generate_glue, generate_glue_with_hosts, generate_page, has_api};
 pub use serve::{generate_server, listens};
 pub use support::{unsupported, Unsupported};
 
@@ -499,6 +499,11 @@ pub struct Export {
     pub params: Vec<(String, String)>,
     /// What it answers with, or `None` for nothing.
     pub ret: Option<String>,
+    /// A generic `pub fn`, which the module does *not* export: it has a copy
+    /// per type it was used at and no one function to call. Listed so the
+    /// wrapper can say so, rather than leaving a caller to wonder where it
+    /// went. The driver adds these; the code generator never sees a generic.
+    pub generic: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1696,6 +1701,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
             } else {
                 Some(types.name(f.ret))
             },
+            generic: false,
         });
     }
 

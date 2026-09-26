@@ -2503,3 +2503,78 @@ process.stdout.write(out.map((l) => l + "\n").join(""));
     let out = run_runner_under_node("fetchleak", &src, &runner, &["--expose-gc"]);
     assert_eq!(out, "fetched 80\nunder 20 MiB kept: true\n");
 }
+
+// ---- names the wrapper has to spell ----------------------------------------
+
+/// A `pub fn` or a parameter named with a word JavaScript reserves, or with a
+/// name the wrapper itself uses, still reaches JavaScript under its own name.
+///
+/// `pub fn delete` became `export function delete`, a syntax error that took
+/// every other function with it; `static` as a parameter is refused in the
+/// strict mode every module is in; a `pub fn text` redeclared the conversion
+/// helper of that name, and a parameter called `text` shadowed it so the call
+/// inside tried to call a string. And `load()` with no argument looked for
+/// `app.wasm` beside the page, which under Node is not a URL at all.
+#[test]
+fn the_wrapper_spells_names_javascript_reserves() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = "pub fn delete(n: int) -> int {\n  return n + 1\n}\n\
+        pub fn shout(static: str, interface: str) -> str {\n  return static + interface\n}\n\
+        pub fn text(s: str) -> str {\n  return \"<\" + s + \">\"\n}\n\
+        pub fn greet(text: str) -> str {\n  return \"hi \" + text\n}\n\
+        pub fn wrap(str: str) -> int {\n  return str.len()\n}\n\
+        pub fn ready(eval: bool) -> bool {\n  return !eval\n}\n\
+        pub fn load(n: int) -> int {\n  return n\n}\n\
+        fn main() {\n}\n";
+    let work = build_library("reserved", src);
+    let dir = work.path();
+    std::fs::write(
+        dir.join("run.mjs"),
+        "import { load, delete as del, shout, text, greet, wrap, ready } from \"./api.js\";\n\
+         const loaded = await load();\n\
+         console.log(String(del(1n)), shout(\"a\", \"b\"), text(\"x\"), greet(\"y\"),\n\
+         \x20 String(wrap(\"four\")), ready(true), String(loaded.load(9n)));\n",
+    )
+    .expect("write runner");
+    let output = Command::new("node").arg(dir.join("run.mjs")).output().expect("node runs");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "2 ab <x> hi y 4 false 9\n");
+
+    let dts = std::fs::read_to_string(dir.join("api.d.ts")).expect("api.d.ts");
+    assert!(dts.contains("export { $kite_delete as delete };"), "{}", dts);
+    assert!(dts.contains("shout(static_0: string, interface_1: string): string;"), "{}", dts);
+    assert!(dts.contains("Left out: `load`"), "{}", dts);
+}
+
+/// A generic `pub fn` is named in the note, and a program with no `pub fn`
+/// of its own has no wrapper to write.
+///
+/// The first vanished without a word: monomorphisation leaves a copy per type
+/// and none exported, so there was nothing to describe and nothing said why.
+/// The second got an `api.js` holding only `load`, because the standard
+/// library's qualified exports counted as the program's interface.
+#[test]
+fn the_wrapper_describes_the_programs_own_interface() {
+    let generic = "pub fn ident<T>(x: T) -> T {\n  return x\n}\n\
+        fn main() {\n  io.print(ident(3))\n}\n";
+    let c = compile("generic.kite", generic, Emit::Wasm);
+    assert!(!c.failed(), "{}", c.render_diagnostics());
+    let module = c.wasm.as_ref().expect("a module");
+    assert!(kite_driver::has_api(&module.api));
+    let (_, dts) = kite_driver::generate_api(&module.api, "app.wasm");
+    assert!(dts.contains("they are generic") && dts.contains(": ident."), "{}", dts);
+
+    let std_only = "use std/json\n\
+        fn main() {\n  io.print(json.stringify(json.Json.Null))\n}\n";
+    let c = compile("stdonly.kite", std_only, Emit::Wasm);
+    assert!(!c.failed(), "{}", c.render_diagnostics());
+    let module = c.wasm.as_ref().expect("a module");
+    assert!(
+        !kite_driver::has_api(&module.api),
+        "a program with no pub fn of its own has no interface: {:?}",
+        module.api.iter().map(|e| &e.name).collect::<Vec<_>>()
+    );
+}

@@ -18,7 +18,7 @@ pub mod solve;
 
 pub use kite_codegen_wasm::{
     generate_api, generate_glue, generate_glue_with_hosts, generate_page, generate_server,
-    listens, SOURCE_MAP_NAME,
+    has_api, listens, SOURCE_MAP_NAME,
 };
 pub use kite_vm::Trap;
 
@@ -664,6 +664,17 @@ fn run_passes(
         .map(|f| TestFn { name: f.name.clone(), params: f.param_count, is_async: f.is_async })
         .collect();
 
+    // The program's own generic `pub fn`s, named while they are still
+    // generic. Monomorphisation replaces each with a copy per type it is used
+    // at, none of them exported, so without this a generic function vanished
+    // from `api.js` without the note that says why a function is missing.
+    let generic_exports: Vec<String> = hir
+        .fns
+        .iter()
+        .filter(|f| f.is_pub && f.is_free && f.generic_count > 0 && !f.name.contains(['.', '#', '$']))
+        .map(|f| f.name.clone())
+        .collect();
+
     // Specialise generic functions before lowering, so no backend ever sees a
     // type parameter. Nothing after this point knows generics exist.
     //
@@ -774,7 +785,13 @@ fn run_passes(
             }
             return (String::new(), None, None, None, index);
         }
-        let module = kite_codegen_wasm::compile_with(&mir, &hir.types, !release);
+        let mut module = kite_codegen_wasm::compile_with(&mir, &hir.types, !release);
+        module.api.extend(generic_exports.into_iter().map(|name| kite_codegen_wasm::Export {
+            name,
+            params: Vec::new(),
+            ret: None,
+            generic: true,
+        }));
         // The last thing that can catch a bad lowering. Everything above this
         // line checks the program; this checks the compiler, and it is the only
         // check whose absence is invisible until a browser refuses the module.

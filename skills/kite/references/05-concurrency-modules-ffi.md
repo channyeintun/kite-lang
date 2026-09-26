@@ -1289,15 +1289,16 @@ fn main() {
 ```
 
 The exported half of the `api.js` that comes out of it, verbatim — above it the
-file declares `load(source = "app.wasm")` and the `ready()` guard:
+file declares `load(source)` and the `$kiteReady()` guard, and imports the
+module's string helpers as `$kiteStr` and `$kiteText`:
 
 ```js
 export function with_tax(cents, rate) {
-  return ready().with_tax(cents, rate);
+  return $kiteReady().with_tax(cents, rate);
 }
 
 export function label(name, settled) {
-  return text(ready().label(str(name), settled ? 1 : 0));
+  return $kiteText($kiteReady().label($kiteStr(name), settled ? 1 : 0));
 }
 
 // Left out, because these take or answer with a type JavaScript has no
@@ -1319,14 +1320,24 @@ Three more rules, each read off a generated file:
 - **`main` is never in the wrapper**, whatever its signature.
 - **A parameter named as a JavaScript reserved word is renamed by position.**
   `pub fn label(new: str, class: int)` becomes `label(new_0, class_1)` in both
-  files.
+  files. Strict mode's words count too — `static`, `interface`, `private`,
+  `eval`, `arguments` — because a module is always strict.
+- **A `pub fn` named as a reserved word keeps its name.** `pub fn delete` is
+  declared as `$kite_delete` and exported `as delete`, so
+  `import { delete as del } from "./api.js"` works. The file's own bindings all
+  begin `$kite`, which no Kite name can, so `pub fn text` and a parameter called
+  `str` are ordinary names.
+- **A `pub fn load` is left out**, with a note: `load` is the wrapper's own. The
+  module still exports it — call it on the object `load()` answers.
+- **A generic `pub fn` is left out**, with a note: the module has a copy per
+  type it was used at and no one function to export.
 
 Loading is explicit and once:
 
 ```js
 import { load, with_tax } from "./api.js";
 
-await load();            // defaults to "app.wasm"; also takes a Uint8Array
+await load();            // the app.wasm beside api.js; also a URL or a Uint8Array
 with_tax(100n, 0.07);    // => 107n
 ```
 

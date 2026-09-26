@@ -309,7 +309,7 @@ fn main() -> ExitCode {
         let (api_js, api_dts) = kite_driver::generate_api(&module.api, "app.wasm");
         let api_js_path = format!("{}/api.js", dir);
         let api_dts_path = format!("{}/api.d.ts", dir);
-        let has_api = module.api.iter().any(|e| e.name != "main");
+        let has_api = kite_driver::has_api(&module.api);
         if has_api {
             if let Err(e) = std::fs::write(&api_js_path, api_js) {
                 return fail(&format!("cannot write `{}`: {}", api_js_path, e));
