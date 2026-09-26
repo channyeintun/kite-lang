@@ -408,67 +408,532 @@ pub fn is_some<T>(value: Option<T>) -> bool {
 /// A whole number, or nil. Accepts a leading `-` and digits, and nothing else:
 /// no spaces, no separators, no trailing units. A caller who wants those
 /// trims first, which is a decision this cannot make for them.
+///
+/// A number too large for an `int` is nil as well. The text is untrusted by
+/// assumption, and twenty nines used to overflow the multiplication — a trap,
+/// which is not catchable — so the function that exists to say "not a number"
+/// ended the process instead. The digits are accumulated as a *negative*
+/// number, the wider half of an `int`, which is also what lets the one value
+/// with no positive counterpart, `-9223372036854775808`, through.
 pub fn parse_int(text: str) -> Option<int> {
     if text.len() == 0 {
         return nil
     }
-    var negative = false
     var start = 0
-    if text.slice(0, 1) == "-" {
-        negative = true
+    if text.code_at(0) == 45 {
         start = 1
     }
     if start >= text.len() {
         return nil
     }
+    let lowest = -9223372036854775807 - 1
     var value = 0
     for i in start..text.len() {
-        let d = "0123456789".index_of(text.slice(i, i + 1))
-        if d < 0 {
+        let d = text.code_at(i) - 48
+        if d < 0 || d > 9 {
             return nil
         }
-        value = value * 10 + d
+        // `value * 10 - d >= lowest`, rearranged so that asking cannot
+        // overflow. Integer division truncates toward zero, which for a
+        // negative numerator is the ceiling — the bound this needs.
+        if value < (lowest + d) / 10 {
+            return nil
+        }
+        value = value * 10 - d
     }
-    if negative {
-        return 0 - value
+    if start == 1 {
+        return value
     }
-    return value
+    if value == lowest {
+        return nil
+    }
+    return 0 - value
 }
 
-/// A number with an optional fractional part, or nil. No exponent: a program
-/// that needs one is reading a format that has other rules too, and `std/json`
-/// is where those live.
+/// A decimal number, or nil: an optional `-`, digits with an optional
+/// fractional part, and an optional exponent — `2.5`, `-0.25`, `.5`, `6.02e23`.
+/// Nothing else: no `+` in front, no spaces, no separators, no `inf` or `nan`,
+/// and a point needs a digit after it. A number too large for a `float` is nil
+/// rather than an infinity; one too small to be told from zero is zero, and
+/// `-0` keeps its sign, both as IEEE 754 has it.
+///
+/// **Correctly rounded.** The answer is the float nearest the decimal the text
+/// denotes, ties to even — the float every other language's parser gives, and
+/// the one `\(x)` printed if that is where the text came from. Adding up digit
+/// values as floats is not that: `0.3` came out as 0.30000000000000004, and a
+/// fraction too long for an `int` overflowed it and trapped. `std/json` and
+/// `std/toml` read their numbers through this, so the three agree.
 pub fn parse_float(text: str) -> Option<float> {
-    let point = text.index_of(".")
-    if point < 0 {
-        let whole = parse_int(text)
-        if whole == nil {
+    let n = text.len()
+    var i = 0
+    var negative = false
+    if n > 0 && text.code_at(0) == 45 {
+        negative = true
+        i = 1
+    }
+    // The significant digits, from the first that is not zero, and the power
+    // of ten they are scaled by: `0.0250` is [2, 5, 0] × 10⁻⁴.
+    var digits: [int] = []
+    var exponent = 0
+    var seen = 0
+    // Whether a digit past the ones kept was not zero.
+    var dropped = false
+    for i < n {
+        let d = text.code_at(i) - 48
+        if d < 0 || d > 9 {
+            break
+        }
+        seen += 1
+        if digits.len() < kept_digits() {
+            if digits.len() > 0 || d > 0 {
+                digits.push(d)
+            }
+        } else {
+            exponent += 1
+            dropped = dropped || d > 0
+        }
+        i += 1
+    }
+    if i < n && text.code_at(i) == 46 {
+        i += 1
+        let from = i
+        for i < n {
+            let d = text.code_at(i) - 48
+            if d < 0 || d > 9 {
+                break
+            }
+            seen += 1
+            if digits.len() < kept_digits() {
+                if digits.len() > 0 || d > 0 {
+                    digits.push(d)
+                }
+                exponent -= 1
+            } else {
+                dropped = dropped || d > 0
+            }
+            i += 1
+        }
+        if i == from {
             return nil
         }
-        return whole as float
     }
-    let left = text.slice(0, point)
-    let right = text.slice(point + 1, text.len())
-    if right.len() == 0 {
+    if seen == 0 {
         return nil
     }
-    let whole = parse_int(if left.len() == 0 { "0" } else { left })
-    let fraction = parse_int(right)
-    if whole == nil {
+    if i < n && (text.code_at(i) == 101 || text.code_at(i) == 69) {
+        i += 1
+        var minus = false
+        if i < n && (text.code_at(i) == 45 || text.code_at(i) == 43) {
+            minus = text.code_at(i) == 45
+            i += 1
+        }
+        let from = i
+        var power = 0
+        for i < n {
+            let d = text.code_at(i) - 48
+            if d < 0 || d > 9 {
+                break
+            }
+            // Past any exponent a float can use, more digits change nothing
+            // but would overflow the `int` holding them.
+            if power < 100000 {
+                power = power * 10 + d
+            }
+            i += 1
+        }
+        if i == from {
+            return nil
+        }
+        exponent = if minus { exponent - power } else { exponent + power }
+    }
+    if i < n {
         return nil
     }
-    if fraction == nil {
+    if dropped {
+        // One more digit, standing for everything dropped: it puts the value
+        // strictly between the digits kept and the next number up, which is
+        // on the same side of every rounding boundary as the whole text.
+        digits.push(1)
+        exponent -= 1
+    }
+    let magnitude = nearest_float(digits, exponent)
+    if magnitude == nil {
         return nil
     }
-    var scale = 1.0
-    for i in 0..right.len() {
-        scale = scale * 10.0
-    }
-    let magnitude = absf(whole as float) + (fraction as float) / scale
-    if starts_with(text, "-") {
-        return 0.0 - magnitude
+    if negative {
+        // Multiplied rather than subtracted from zero: `0.0 - 0.0` is +0.
+        return magnitude * -1.0
     }
     return magnitude
+}
+
+/// How many significant digits a decimal is read to. Past 767 no digit can
+/// move the answer — no float, and no point halfway between two, needs more to
+/// write out exactly — so the rest count only as "something more".
+fn kept_digits() -> int {
+    return 800
+}
+
+/// The float nearest `digits × 10^exponent`, or nil past the largest float.
+///
+/// **Clinger's fast path first**, which is most numbers anyone writes: when the
+/// digits make an integer of at most 2⁵³ and the power of ten is at most 10²²,
+/// both are floats *exactly*, and one IEEE multiplication or division rounds
+/// their product or quotient correctly by definition.
+///
+/// Everything else — seventeen significant digits, as JavaScript prints
+/// `0.30000000000000004`, or a large exponent — goes to [`nearest_slowly`],
+/// which is exact too, at the price of arithmetic on big integers.
+fn nearest_float(digits: [int], exponent: int) -> Option<float> {
+    var count = digits.len()
+    var e = exponent
+    for count > 0 && digits[count - 1] == 0 {
+        count -= 1
+        e += 1
+    }
+    if count == 0 {
+        return 0.0
+    }
+    // At least 10³⁰⁹, past the largest float; below 10⁻³²⁵, under half the
+    // smallest, which rounds to zero.
+    if count + e > 310 {
+        return nil
+    }
+    if count + e < -324 {
+        return 0.0
+    }
+    if count <= 18 {
+        var whole = 0
+        for k in 0..count {
+            whole = whole * 10 + digits[k]
+        }
+        let limit = 9007199254740992
+        if whole <= limit {
+            if e >= 0 && e <= 22 {
+                return (whole as float) * exact_ten(e)
+            }
+            if e < 0 && e >= -22 {
+                return (whole as float) / exact_ten(0 - e)
+            }
+            // `12e30` is `12000000000e22`, and that integer is still exact.
+            if e > 22 && e <= 37 {
+                var shift = 1
+                let extra = e - 22
+                for k in 0..extra {
+                    shift = shift * 10
+                }
+                if whole <= limit / shift {
+                    return ((whole * shift) as float) * exact_ten(22)
+                }
+            }
+        }
+    }
+    return nearest_slowly(digits, count, e)
+}
+
+/// 10ᵏ for `k` up to 22, every one of which is a float exactly — so is each
+/// step of the product, which is why multiplying is safe here and nowhere else.
+fn exact_ten(k: int) -> float {
+    var out = 1.0
+    for i in 0..k {
+        out = out * 10.0
+    }
+    return out
+}
+
+/// The float nearest `digits[..count] × 10^e`, decided in exact arithmetic.
+///
+/// Clinger's AlgorithmR. An estimate from floating point is within a few units
+/// of the answer; for a candidate `m · 2ᵖ`, the points halfway to its
+/// neighbours are `(2m ± 1) · 2ᵖ⁻¹`, and the decimal is compared with them as
+/// big integers — powers of five and two moved to whichever side keeps both
+/// whole. Above the upper point the candidate moves up, below the lower one it
+/// moves down, and on a point it goes to the even neighbour. Nothing is
+/// approximated, so the answer is the correctly rounded one for every input
+/// and not only for the ones tried.
+fn nearest_slowly(digits: [int], count: int, e: int) -> Option<float> {
+    // The estimate, from the first eighteen digits.
+    let taken = if count < 18 { count } else { 18 }
+    var whole = 0
+    for k in 0..taken {
+        whole = whole * 10 + digits[k]
+    }
+    var scale = e + (count - taken)
+    var estimate = whole as float
+    for scale > 22 {
+        estimate = estimate * exact_ten(22)
+        scale -= 22
+    }
+    for scale < -22 {
+        estimate = estimate / exact_ten(22)
+        scale += 22
+    }
+    if scale >= 0 {
+        estimate = estimate * exact_ten(scale)
+    } else {
+        estimate = estimate / exact_ten(0 - scale)
+    }
+
+    // The estimate as `mantissa · 2^power`: a mantissa in [2⁵², 2⁵³), or
+    // below it at the smallest power, which is what a subnormal is.
+    let low = 4503599627370496
+    let high = 9007199254740992
+    var mantissa = 0
+    var power = -1074
+    if !(estimate < estimate * 2.0) && estimate > 0.0 {
+        // Past the largest float: start from the largest and let the
+        // comparison say whether the decimal rounds down to it.
+        mantissa = high - 1
+        power = 971
+    } else if estimate > 0.0 {
+        var s = estimate
+        power = 0
+        for s >= 18446744073709551616.0 {
+            s = s / 18446744073709551616.0
+            power += 64
+        }
+        for s >= 9007199254740992.0 {
+            s = s / 2.0
+            power += 1
+        }
+        for s < 4503599627370496.0 && power > -1074 {
+            if s < 0.000244140625 && power - 64 >= -1074 {
+                s = s * 18446744073709551616.0
+                power -= 64
+            } else {
+                s = s * 2.0
+                power -= 1
+            }
+        }
+        mantissa = s as int
+    }
+
+    // The decimal as `number × 5^e × 2^e`. A negative power of five moves to
+    // the other side of every comparison, so it is kept there.
+    var number = big_of_digits(digits, count)
+    var fives: [int] = [1]
+    if e >= 0 {
+        number = big_times_five_to(number, e)
+    } else {
+        fives = big_times_five_to(fives, 0 - e)
+    }
+
+    for step in 0..100 {
+        let above = compare_halfway(number, fives, e, 2 * mantissa + 1, power - 1)
+        if above > 0 || (above == 0 && mantissa % 2 == 1) {
+            mantissa += 1
+            if mantissa == high {
+                mantissa = low
+                power += 1
+            }
+            if power > 971 {
+                return nil
+            }
+            if above == 0 {
+                break
+            }
+            continue
+        }
+        if mantissa == 0 {
+            break
+        }
+        // At the bottom of a binade the neighbour below is half as far away.
+        var below = 0
+        if mantissa == low && power > -1074 {
+            below = compare_halfway(number, fives, e, 4 * mantissa - 1, power - 2)
+        } else {
+            below = compare_halfway(number, fives, e, 2 * mantissa - 1, power - 1)
+        }
+        if below < 0 || (below == 0 && mantissa % 2 == 1) {
+            mantissa -= 1
+            if mantissa < low && power > -1074 {
+                mantissa = high - 1
+                power -= 1
+            }
+            if below == 0 {
+                break
+            }
+            continue
+        }
+        break
+    }
+    return times_two_to(mantissa as float, power)
+}
+
+/// The sign of `number × 5^e × 2^e − odd × 2^power`, where `fives` holds
+/// `5^-e` when `e` is negative and 1 otherwise.
+fn compare_halfway(number: [int], fives: [int], e: int, odd: int, power: int) -> int {
+    var left = number
+    var right = big_times(fives, big_of(odd))
+    let twos = e - power
+    if twos >= 0 {
+        left = big_shifted(left, twos)
+    } else {
+        right = big_shifted(right, 0 - twos)
+    }
+    return big_compare(left, right)
+}
+
+/// `x · 2ᵏ`, applying the power in pieces that are each a float, so that only
+/// the last multiplication can round.
+fn times_two_to(x: float, k: int) -> float {
+    var out = x
+    var left = k
+    for left > 1000 {
+        out = out * two_to(1000)
+        left -= 1000
+    }
+    for left < -1000 {
+        out = out / two_to(1000)
+        left += 1000
+    }
+    if left >= 0 {
+        return out * two_to(left)
+    }
+    return out / two_to(0 - left)
+}
+
+/// 2ᵏ for `k` from 0 to 1023, by squaring; every step is exact.
+fn two_to(k: int) -> float {
+    var out = 1.0
+    var base = 2.0
+    var n = k
+    for n > 0 {
+        if n % 2 == 1 {
+            out = out * base
+        }
+        n = n / 2
+        if n > 0 {
+            base = base * base
+        }
+    }
+    return out
+}
+
+// Natural numbers of any size, for `nearest_slowly`: least significant limb
+// first, 28 bits a limb, and no zero limbs at the top. A limb times anything
+// below 2³¹, plus a carry, stays well inside an `int`, and so does a limb
+// times a limb plus two more.
+
+fn big_of(n: int) -> [int] {
+    var out: [int] = []
+    var rest = n
+    for rest > 0 {
+        out.push(rest & 268435455)
+        rest = rest >> 28
+    }
+    return out
+}
+
+fn big_of_digits(digits: [int], count: int) -> [int] {
+    var out: [int] = []
+    var k = 0
+    // Seven digits at a time: 10⁷ is below 2³¹.
+    for k < count {
+        var chunk = 0
+        var size = 1
+        var taken = 0
+        for taken < 7 && k < count {
+            chunk = chunk * 10 + digits[k]
+            size = size * 10
+            taken += 1
+            k += 1
+        }
+        out = big_times_small(out, size, chunk)
+    }
+    return out
+}
+
+/// `a × m + add`, for `m` and `add` below 2³¹.
+fn big_times_small(a: [int], m: int, add: int) -> [int] {
+    var out: [int] = []
+    var carry = add
+    for limb in a {
+        let t = limb * m + carry
+        out.push(t & 268435455)
+        carry = t >> 28
+    }
+    for carry > 0 {
+        out.push(carry & 268435455)
+        carry = carry >> 28
+    }
+    return out
+}
+
+fn big_times_five_to(a: [int], k: int) -> [int] {
+    var out = a
+    var left = k
+    // 5¹³ is the largest power of five below 2³¹.
+    for left >= 13 {
+        out = big_times_small(out, 1220703125, 0)
+        left -= 13
+    }
+    var last = 1
+    for i in 0..left {
+        last = last * 5
+    }
+    return big_times_small(out, last, 0)
+}
+
+fn big_times(a: [int], b: [int]) -> [int] {
+    var out: [int] = []
+    let size = a.len() + b.len()
+    for i in 0..size {
+        out.push(0)
+    }
+    for i in 0..a.len() {
+        var carry = 0
+        for j in 0..b.len() {
+            let t = out[i + j] + a[i] * b[j] + carry
+            out[i + j] = t & 268435455
+            carry = t >> 28
+        }
+        var k = i + b.len()
+        for carry > 0 {
+            let t = out[k] + carry
+            out[k] = t & 268435455
+            carry = t >> 28
+            k += 1
+        }
+    }
+    var top = out.len()
+    for top > 0 && out[top - 1] == 0 {
+        top -= 1
+    }
+    var trimmed: [int] = []
+    for i in 0..top {
+        trimmed.push(out[i])
+    }
+    return trimmed
+}
+
+/// `a × 2ᵏ`: whole limbs of zeros underneath, then the remaining bits.
+fn big_shifted(a: [int], k: int) -> [int] {
+    if a.len() == 0 {
+        return a
+    }
+    var out: [int] = []
+    for i in 0..k / 28 {
+        out.push(0)
+    }
+    for limb in a {
+        out.push(limb)
+    }
+    return big_times_small(out, 1 << (k % 28), 0)
+}
+
+fn big_compare(a: [int], b: [int]) -> int {
+    if a.len() != b.len() {
+        return if a.len() < b.len() { -1 } else { 1 }
+    }
+    var i = a.len() - 1
+    for i >= 0 {
+        if a[i] != b[i] {
+            return if a[i] < b[i] { -1 } else { 1 }
+        }
+        i -= 1
+    }
+    return 0
 }
 
 // ---- letters ----------------------------------------------------------------
@@ -744,7 +1209,13 @@ pub fn hash_bool(value: bool) -> int {
 /// backends already agree on exactly — it is shared with `io.print` and with
 /// interpolation — whereas reinterpreting the bits would need an operation
 /// Kite does not have and the two runtimes would have to be made to match.
+///
+/// Zero is the one place that needs a word. `-0.0 == 0.0`, so the two must
+/// hash alike, and they render differently — so both hash as `0.0` does.
 pub fn hash_float(value: float) -> int {
+    if value == 0.0 {
+        return hash_str("0.0")
+    }
     return hash_str("\(value)")
 }
 

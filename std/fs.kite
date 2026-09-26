@@ -41,9 +41,19 @@ extern fn temp_path() -> str
 /// How the host reports a failure.
 ///
 /// A leading `\u{1}` marks an error, because a path, a file's contents and a
-/// directory listing are all ordinary strings and none of them may be confused
-/// with a failure. A sentinel byte no text file starts with is the cheapest
-/// discriminator that crosses a boundary carrying only `str`.
+/// directory listing are all ordinary strings and one `str` is all an
+/// `extern` carries back.
+///
+/// **This is not sound, and it cannot be made sound from this side alone.**
+/// Nothing stops a file beginning with U+0001, and then its contents and a
+/// failure are the same string: `read` reports such a file as an error whose
+/// message is the rest of the file. The fix is for the host to mark success
+/// too — a leading `\u{2}` on every answer that is not a failure — and for
+/// `unwrap` to strip it, so that nothing after a mark is ever read as a mark.
+/// The two halves have to change together: stripping a success mark the host
+/// does not send would eat the first character of a file that begins with
+/// U+0002, which is the same bug moved one code point along. The host is
+/// `crates/kite-driver/src/host.rs`, whose `ok` is where the mark would go.
 fn FAILURE_MARK() -> str {
     return "\u{1}"
 }
@@ -63,6 +73,9 @@ fn unwrap(answer: str, what: str) -> (str, error) {
 /// valid UTF-8 is an error rather than a string of replacement characters —
 /// silently substituting them is how a binary file becomes corrupt data that
 /// looks fine.
+///
+/// A file whose first character is U+0001 is misread as a failure; see
+/// [`FAILURE_MARK`] for why and for what fixes it.
 pub fn read(path: str) -> (str, error) {
     return unwrap(read_text(path), "read \(path)")
 }
