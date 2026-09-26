@@ -192,6 +192,9 @@ pub struct TraitMethodDef {
     pub ret: TyId,
     pub fallible: bool,
     pub takes_self: bool,
+    /// Declared `var self`: the method may modify its receiver, so a call
+    /// through the trait needs a receiver that may change.
+    pub var_self: bool,
     /// Whether the trait supplied a body.
     pub has_default: bool,
     pub span: Span,

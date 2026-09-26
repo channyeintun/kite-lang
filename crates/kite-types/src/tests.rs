@@ -983,6 +983,33 @@ fn implementing_an_unknown_trait_is_reported() {
     assert!(c.has("E0204"), "{}", c.render());
 }
 
+// ---- generics, conversions and coherence ----------------------------------
+
+/// Two arguments disagreeing about a parameter is one mistake. The conflict
+/// names both sides; a mismatch on top of it would say the same thing again.
+#[test]
+fn a_conflicting_argument_is_reported_once() {
+    let c = run(
+        "fn same<T>(a: T, b: T) -> T {\n  return a\n}\n\
+         fn main() {\n  let x = same(1, \"two\")\n}\n",
+    );
+    assert_eq!(c.codes(), vec!["E0209"], "{}", c.render());
+}
+
+/// A value converted where a generic parameter is solved only by a later
+/// argument: `x: Option<T>` learns `T` is `int` after `7` was checked, and
+/// the `7` must still be wrapped.
+#[test]
+fn an_argument_is_converted_once_its_parameter_is_solved() {
+    let c = ok(
+        "fn get<T>(x: Option<T>, d: T) -> T {\n  if x == nil {\n    return d\n  }\n  return x\n}\n\
+         fn main() {\n  io.print(get(7, 3))\n}\n",
+    );
+    let main = &c.program.fns[1];
+    let text = format!("{:?}", main.body);
+    assert!(text.contains("Wrap"), "the argument was not wrapped: {}", text);
+}
+
 // ---- slices and optionals -------------------------------------------------
 
 #[test]

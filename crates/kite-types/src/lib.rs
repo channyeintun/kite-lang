@@ -227,6 +227,7 @@ pub fn check_recording(
                         },
                         fallible: m.ret.as_ref().is_some_and(|r| r.is_fallible()),
                         takes_self: m.self_param.is_some(),
+                        var_self: m.self_param.as_ref().is_some_and(|s| s.is_var),
                         has_default: m.body.is_some(),
                         span: m.name.span,
                     })
@@ -2507,18 +2508,25 @@ impl<'a> Checker<'a> {
                 let mut val_ty = hint.map(|(_, v)| v);
                 for e in entries {
                     let k = self.expr(&e.key, key_ty);
-                    match key_ty {
-                        None if !self.types.is_poisoned(k.ty) => key_ty = Some(k.ty),
-                        Some(want) => self.expect_ty(k.ty, want, k.span, None),
-                        None => {}
-                    }
+                    let k = match key_ty {
+                        None => {
+                            if !self.types.is_poisoned(k.ty) {
+                                key_ty = Some(k.ty);
+                            }
+                            k
+                        }
+                        Some(want) => self.accept(k, want, None),
+                    };
                     let v = self.expr(&e.value, val_ty);
-                    let v = self.coerce(v, val_ty);
-                    match val_ty {
-                        None if !self.types.is_poisoned(v.ty) => val_ty = Some(v.ty),
-                        Some(want) => self.expect_ty(v.ty, want, v.span, None),
-                        None => {}
-                    }
+                    let v = match val_ty {
+                        None => {
+                            if !self.types.is_poisoned(v.ty) {
+                                val_ty = Some(v.ty);
+                            }
+                            v
+                        }
+                        Some(want) => self.accept(v, want, None),
+                    };
                     flat.push(k);
                     flat.push(v);
                 }
@@ -3128,11 +3136,26 @@ impl<'a> Checker<'a> {
             let want = declared.and_then(|d| self.apply_subst_opt(d, &subst));
             let e = self.expr(a, want);
             let e = self.coerce(e, want);
-            if let Some(d) = declared {
-                self.unify(d, e.ty, &generics, &mut subst, e.span);
-                let expected = self.apply_subst(d, &subst);
-                self.expect_ty(e.ty, expected, e.span, Some(decl_span));
-            }
+            let e = match declared {
+                Some(d) => {
+                    // A conflict is its own diagnostic, naming both sides;
+                    // a mismatch reported on top of it would say the same
+                    // thing again, less clearly.
+                    let before = self.diags.error_count();
+                    self.unify(d, e.ty, &generics, &mut subst, e.span);
+                    if self.diags.error_count() != before {
+                        e
+                    } else {
+                        // Converted again now the parameter is known: `get(7,
+                        // 3)` against `x: Option<T>` only learns that the
+                        // `7` must be wrapped once `T` is `int`, which is
+                        // after it was checked.
+                        let expected = self.apply_subst(d, &subst);
+                        self.accept(e, expected, Some(decl_span))
+                    }
+                }
+                None => e,
+            };
             hargs.push(e);
         }
 
@@ -3891,7 +3914,7 @@ impl<'a> Checker<'a> {
                 let m = self.expr(&args[0], Some(TyId::STR));
                 self.expect_ty(m.ty, TyId::STR, m.span, None);
                 let c = self.expr(&args[1], Some(TyId::ERR));
-                self.expect_ty(c.ty, TyId::ERR, c.span, None);
+                let c = self.accept(c, TyId::ERR, None);
                 let span_of = m.span;
                 hir::Expr {
                     kind: ExprKind::ErrorNew {
@@ -3989,6 +4012,7 @@ impl<'a> Checker<'a> {
     /// trait, so checking is entirely static.
     fn virtual_call(
         &mut self,
+        base: &ast::Expr,
         receiver: hir::Expr,
         tr: hir::TraitId,
         name: &ast::Ident,
@@ -4014,8 +4038,14 @@ impl<'a> Checker<'a> {
             self.diags.push(d);
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         };
-        let (params, ret) = (method.params.clone(), method.ret);
+        let (params, ret, var_self) = (method.params.clone(), method.ret, method.var_self);
         let method = index as u32;
+        // The trait's receiver is the one every implementation agreed to, so
+        // `var self` asks the same of a call through a `dyn` or a bound as it
+        // does of a direct call.
+        if var_self {
+            self.require_mutable_receiver(base, &name.name);
+        }
 
         if args.len() != params.len() {
             self.arity_error(&name.name, args.len(), params.len(), span, None);
@@ -4024,10 +4054,10 @@ impl<'a> Checker<'a> {
         for (i, a) in args.iter().enumerate() {
             let want = params.get(i).copied();
             let e = self.expr(a, want);
-            if let Some(w) = want {
-                self.expect_ty(e.ty, w, e.span, None);
-            }
-            let e = self.coerce(e, want);
+            let e = match want {
+                Some(w) => self.accept(e, w, None),
+                None => e,
+            };
             lowered.push(e);
         }
         hir::Expr {
@@ -4156,7 +4186,7 @@ impl<'a> Checker<'a> {
                     return self.lit(ExprKind::Error, TyId::ERROR, span);
                 };
                 let key = self.expr(&args[0], Some(k));
-                self.expect_ty(key.ty, k, key.span, None);
+                let key = self.accept(key, k, None);
                 return self.as_statement(
                     hir::Stmt::MapRemove { local: hir::LocalId(local), key, span },
                     span,
@@ -4211,7 +4241,7 @@ impl<'a> Checker<'a> {
         }
 
         if let TyKind::Dyn(tr) = *self.types.kind(receiver.ty) {
-            return self.virtual_call(receiver, tr, name, args, span);
+            return self.virtual_call(base, receiver, tr, name, args, span);
         }
 
         // A method on a type parameter. Only its bounds say what it can do —
@@ -4227,7 +4257,7 @@ impl<'a> Checker<'a> {
                 .find(|tr| self.types.trait_def(**tr).method(&name.name).is_some())
                 .copied();
             match found {
-                Some(tr) => return self.virtual_call(receiver, tr, name, args, span),
+                Some(tr) => return self.virtual_call(base, receiver, tr, name, args, span),
                 None => {
                     let mut d = Diagnostic::error(
                         codes::E0205,
@@ -5329,11 +5359,15 @@ impl<'a> Checker<'a> {
         let mut elem_ty = hint;
         for e in elems {
             let v = self.expr(e, elem_ty);
-            match elem_ty {
-                None if !self.types.is_poisoned(v.ty) => elem_ty = Some(v.ty),
-                Some(want) => self.expect_ty(v.ty, want, v.span, None),
-                None => {}
-            }
+            let v = match elem_ty {
+                None => {
+                    if !self.types.is_poisoned(v.ty) {
+                        elem_ty = Some(v.ty);
+                    }
+                    v
+                }
+                Some(want) => self.accept(v, want, None),
+            };
             out.push(v);
         }
 
@@ -5360,7 +5394,7 @@ impl<'a> Checker<'a> {
         // Map indexing always yields an optional, never a zero value.
         if let TyKind::Map(key_ty, value_ty) = *self.types.kind(seq.ty) {
             let k = self.expr(index, Some(key_ty));
-            self.expect_ty(k.ty, key_ty, k.span, None);
+            let k = self.accept(k, key_ty, None);
             let ty = self.types.optional_of(value_ty);
             return hir::Expr {
                 kind: ExprKind::MapGet { base: Box::new(seq), key: Box::new(k) },
@@ -5484,7 +5518,7 @@ impl<'a> Checker<'a> {
         if let TyKind::Map(key_ty, value_ty) = *self.types.kind(seq.ty) {
             let local = self.require_mutable_value_binding(base, "assigned into", "map")?;
             let k = self.expr(index, Some(key_ty));
-            self.expect_ty(k.ty, key_ty, k.span, None);
+            let k = self.accept(k, key_ty, None);
             let v = self.expr(&a.value, Some(value_ty));
             let v = self.coerce(v, Some(value_ty));
             self.expect_ty(v.ty, value_ty, v.span, None);
@@ -5517,10 +5551,7 @@ impl<'a> Checker<'a> {
 
         let value = self.expr(&a.value, Some(elem));
         let value = match a.op.to_binary() {
-            None => {
-                self.expect_ty(value.ty, elem, value.span, None);
-                value
-            }
+            None => self.accept(value, elem, None),
             Some(binop) => {
                 let current = hir::Expr {
                     kind: ExprKind::Index {
@@ -5757,7 +5788,7 @@ impl<'a> Checker<'a> {
                 }
                 let id = self.require_mutable_slice_binding(base, "pushed to")?;
                 let v = self.expr(&args[0], Some(elem));
-                self.expect_ty(v.ty, elem, v.span, None);
+                let v = self.accept(v, elem, None);
                 // `push` is a statement, not an expression; the checker returns
                 // unit and MIR emits the mutation.
                 Some(hir::Expr {
@@ -5978,8 +6009,7 @@ impl<'a> Checker<'a> {
             };
             let want = field_tys[index];
             let e = self.expr(a, Some(want));
-            self.expect_ty(e.ty, want, e.span, Some(decl_span));
-            slots[index] = Some(e);
+            slots[index] = Some(self.accept(e, want, Some(decl_span)));
         }
 
         let mut fields = Vec::with_capacity(field_tys.len());
@@ -7467,12 +7497,23 @@ impl<'a> Checker<'a> {
             }
         };
 
+        // One branch may need converting to the other's type — an `int` beside
+        // an `Option<int>`, a concrete value beside a `dyn` — and the
+        // conversion has to be in the tree for the backends to lay the two
+        // out alike. Either side may be the one converted.
+        let (t, e) = if t.ty == e.ty || self.types.is_poisoned(t.ty) || self.types.is_poisoned(e.ty) {
+            (t, e)
+        } else {
+            let e = self.coerce(e, Some(t.ty));
+            let t = if e.ty == t.ty { t } else { self.coerce(t, Some(e.ty)) };
+            (t, e)
+        };
         let ty = if t.ty == TyId::NEVER {
             e.ty
         } else if e.ty == TyId::NEVER {
             t.ty
         } else {
-            if !self.types.satisfies(e.ty, t.ty) && !self.types.is_poisoned(t.ty) && !self.types.is_poisoned(e.ty) {
+            if e.ty != t.ty && !self.types.is_poisoned(t.ty) && !self.types.is_poisoned(e.ty) {
                 self.diags.push(
                     Diagnostic::error(codes::E0200, "`if` branches have different types")
                         .with_primary(e.span, format!("this branch is {}", self.types.with_article(e.ty)))
@@ -8011,8 +8052,29 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A value standing where a `want` is required: converted, then checked.
+    ///
+    /// The two halves belong together. A value that is acceptable only
+    /// because of a conversion — a `T` into an `Option<T>`, a concrete type
+    /// into a `dyn Trait` or an `error` — is acceptable only *once converted*,
+    /// and a site that checked it without converting it handed a bare `int`
+    /// to a slot the backends lay out as a boxed optional: the VM shrugged,
+    /// native code crashed, and the Wasm module did not validate. Every site
+    /// that takes a value goes through here so that cannot be forgotten.
+    fn accept(&mut self, e: hir::Expr, want: TyId, because: Option<Span>) -> hir::Expr {
+        let e = self.coerce(e, Some(want));
+        self.expect_ty(e.ty, want, e.span, because);
+        e
+    }
+
+    /// Report a value whose type is not the one required.
+    ///
+    /// Strict: the conversions are [`Self::coerce`]'s job, and a value that
+    /// needed one and did not get it is a mismatch here rather than something
+    /// waved through for the backends to disagree about. Only poison and
+    /// `!` — which never produce a value — stand in for anything.
     fn expect_ty(&mut self, found: TyId, expected: TyId, span: Span, because: Option<Span>) {
-        if self.types.satisfies(found, expected) || self.coerces_to_dyn(found, expected) {
+        if found == expected || self.types.is_poisoned(found) || self.types.is_poisoned(expected) {
             return;
         }
         let mut d = Diagnostic::error(
@@ -8156,13 +8218,19 @@ fn check_impls(
     let mut claimed: std::collections::HashMap<(u32, u32), Span> =
         std::collections::HashMap::new();
 
-    for item in &file.items {
+    for (item_index, item) in file.items.iter().enumerate() {
         let ast::Item::Impl(imp) = item else { continue };
         let Some(tp) = &imp.trait_path else { continue };
 
+        // Both names mean what they mean where the `impl` is written — which
+        // is how the resolver registered its methods. Looking them up from
+        // the root instead found nothing for an `impl` inside any module, and
+        // an implementation nothing checked was one a `dyn` call could reach
+        // with the wrong signature.
+        let module = resolved.module_of_item(item_index);
         let (Some(ti), Some(target)) = (
-            resolved.type_by_name(tp.name()),
-            resolved.type_by_name(imp.self_ty.name()),
+            resolved.type_by_name_in(module, &tp.text()),
+            resolved.type_by_name_in(module, &imp.self_ty.text()),
         ) else {
             continue;
         };
@@ -8252,6 +8320,35 @@ fn check_impls(
                         "the trait declares this without `self`"
                     })
                     .with_secondary(decl.span, "declared here"),
+                );
+            } else if decl.takes_self
+                && decl.var_self != m.self_param.as_ref().is_some_and(|s| s.is_var)
+            {
+                // A caller reaching the method through the trait — a `dyn`, or
+                // a bound — sees the trait's receiver and nothing else. An
+                // implementation that quietly took `var self` would modify a
+                // value its caller holds in a `let`, which is the change the
+                // rule exists to keep visible at the call site; one that took
+                // plain `self` where the trait promised `var self` would be
+                // refusing a permission every caller already paid for.
+                diags.push(
+                    Diagnostic::error(
+                        codes::E0200,
+                        format!("`{}` has the wrong receiver", m.name.name),
+                    )
+                    .with_primary(
+                        m.sig_span,
+                        if decl.var_self {
+                            "the trait declares this with `var self`"
+                        } else {
+                            "the trait declares this with `self`, which may not modify it"
+                        },
+                    )
+                    .with_secondary(decl.span, "declared here")
+                    .with_note(
+                        "whether a method may modify its receiver is part of the signature \
+                         every caller through the trait relies on, so the two must agree",
+                    ),
                 );
             }
 

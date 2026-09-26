@@ -646,6 +646,98 @@ fn main() {
          \x20 io.print(depth(twice(twice(1))))\n}\n",
     ),
     (
+        "conversions-at-every-site",
+        r#"use std/errors
+
+// A value converted where it is accepted: wrapped into an optional, made
+// into a trait object, or turned into an `error` — at every site that takes
+// one, including the ones that used to check it without converting it.
+trait Show {
+    fn show(self) -> str
+}
+
+struct P {
+    a: int
+}
+
+impl Show for P {
+    fn show(self) -> str {
+        return "P\(self.a)"
+    }
+}
+
+struct Bad {
+    m: str
+}
+
+impl Error for Bad {
+    fn message(self) -> str {
+        return "bad \(self.m)"
+    }
+}
+
+enum Slot {
+    Held(Option<int>)
+    Failed(error)
+    Empty
+}
+
+fn get<T>(x: Option<T>, d: T) -> T {
+    if x == nil {
+        return d
+    }
+    return x
+}
+
+fn opt(v: Option<int>) -> str {
+    if v == nil {
+        return "nil"
+    }
+    return "\(v + 1)"
+}
+
+fn describe(s: Slot) -> str {
+    return match s {
+        Held(v) => opt(v),
+        Failed(e) => if e == nil { "no error" } else { e.message() },
+        Empty => "empty",
+    }
+}
+
+fn main() {
+    let xs: [Option<int>] = [1, nil, 3]
+    io.print("\(opt(xs[0])) \(opt(xs[1])) \(opt(xs[2]))")
+    var ys: [Option<int>] = []
+    ys.push(5)
+    ys.push(nil)
+    io.print("\(opt(ys[0])) \(opt(ys[1]))")
+    var zs: [Option<int>] = [nil]
+    zs[0] = 7
+    io.print(opt(zs[0]))
+    io.print(describe(Slot.Held(9)))
+    io.print(describe(Slot.Failed(Bad{ m: "slot" })))
+    io.print(describe(Slot.Empty))
+    io.print("\(get(7, 3)) \(get(P{ a: 4 }, P{ a: 5 }).a)")
+    var ds: [dyn Show] = [P{ a: 1 }]
+    ds.push(P{ a: 2 })
+    ds[0] = P{ a: 3 }
+    io.print("\(ds[0].show()) \(ds[1].show())")
+    var es: [error] = [Bad{ m: "first" }]
+    es.push(Bad{ m: "second" })
+    let e = es[1]
+    if e != nil {
+        io.print(e.message())
+    }
+    let o: Option<int> = nil
+    let pick = if xs.len() > 2 { o } else { 4 }
+    let back = if xs.len() > 9 { 4 } else { o }
+    io.print("\(opt(pick)) \(opt(back))")
+    let wrapped = errors.because("outer", Bad{ m: "cause" })
+    io.print(join(errors.chain(wrapped), " <- "))
+}
+"#,
+    ),
+    (
         "interpolation",
         "fn main() {\n  let name = \"world\"\n  let n = 42\n  let pi = 2.5\n  let ok = true\n\
          \x20 io.print(\"hello, \\(name)!\")\n\

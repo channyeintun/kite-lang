@@ -117,6 +117,34 @@ fn an_unmarked_declaration_is_private_to_its_module() {
     assert!(err.contains("private to module `secrets`"), "{}", err);
 }
 
+/// An `impl` inside a module is held to its trait exactly as one in the
+/// program's own file is. Its names used to be looked up from the root, where
+/// they mean nothing, so a module's implementations went unchecked — and a
+/// `dyn` call reached one with the wrong signature.
+#[test]
+fn an_impl_inside_a_module_is_checked_against_its_trait() {
+    let p = Project::new("impl-in-module");
+    p.file(
+        "shapes/shapes.kite",
+        "pub trait Area {\n  fn area(self) -> int\n  fn name(self) -> str\n}\n\n\
+         pub struct Sq {\n  pub side: int\n}\n\n\
+         impl Area for Sq {\n  fn area(self, extra: str) -> str {\n    return \"x\"\n  }\n}\n\n\
+         pub struct Tri {\n  pub base: int\n}\n\n\
+         impl Area for Tri {\n  fn area(self) -> int {\n    return 1\n  }\n\
+         \x20 fn name(self) -> str {\n    return \"tri\"\n  }\n}\n\n\
+         impl Area for Tri {\n  fn area(self) -> int {\n    return 2\n  }\n\
+         \x20 fn name(self) -> str {\n    return \"tri\"\n  }\n}\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use shapes\n\nfn main() {\n  io.print(shapes.Sq{ side: 3 }.side)\n}\n",
+    );
+    let err = p.run(&main).expect_err("the impls are wrong");
+    assert!(err.contains("does not implement `name` of `Area`"), "{}", err);
+    assert!(err.contains("takes 1 parameter, but the trait declares 0"), "{}", err);
+    assert!(err.contains("E0112"), "{}", err);
+}
+
 #[test]
 fn an_alias_is_how_the_module_is_spelled() {
     let p = Project::new("alias");
