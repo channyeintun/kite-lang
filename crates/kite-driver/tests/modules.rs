@@ -717,6 +717,46 @@ fn a_dependencys_git_dependency_is_read_from_the_programs_vendor() {
     assert_eq!(p.run(&main).expect("compiles"), "vendored b\n");
 }
 
+/// Two packages of one name, from two places, are refused rather than one of
+/// them silently answering for both — the rule `kitec pkg` already applies to
+/// the same manifests: a name means one thing.
+#[test]
+fn two_packages_of_one_name_from_two_places_are_refused() {
+    let p = Project::new("two-shared");
+    for (dir, who) in [("s1", "first"), ("s2", "second")] {
+        p.file(
+            &format!("{}/kite.toml", dir),
+            "[package]\nname = \"shared\"\nversion = \"1.0.0\"\n",
+        );
+        p.file(
+            &format!("{}/shared.kite", dir),
+            &format!("pub fn who() -> str {{\n  return \"{}\"\n}}\n", who),
+        );
+    }
+    p.file(
+        "a/kite.toml",
+        "[package]\nname = \"a\"\nversion = \"1.0.0\"\n\n[dependencies]\nshared = { path = \"../s1\" }\n",
+    );
+    p.file("a/a.kite", "use shared\n\npub fn go() -> str {\n  return shared.who()\n}\n");
+    p.file(
+        "b/kite.toml",
+        "[package]\nname = \"b\"\nversion = \"1.0.0\"\n\n[dependencies]\nshared = { path = \"../s2\" }\n",
+    );
+    p.file("b/b.kite", "use shared\n\npub fn go() -> str {\n  return shared.who()\n}\n");
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\na = { path = \"../a\" }\nb = { path = \"../b\" }\n",
+    );
+    let main = p.file(
+        "app/main.kite",
+        "use a\nuse b\n\nfn main() {\n  io.print(a.go())\n  io.print(b.go())\n}\n",
+    );
+    let said = p.run(&main).expect_err("`shared` is two packages");
+    assert!(said.contains("E0404"), "{}", said);
+    assert!(said.contains("a package's name means one thing"), "{}", said);
+}
+
 /// A manifest that does not parse is reported where it is wrong. It was
 /// treated as no manifest, so a typo in `[package]` read as `cannot find
 /// module` at every `use` of a dependency.

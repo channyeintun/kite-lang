@@ -320,7 +320,10 @@ impl Compilation {
             return Ok(Some("an async test did not answer with a task".to_string()));
         };
         let fields = task.fields.borrow();
-        let done = matches!(fields.get(kite_mir::TASK_DONE as usize), Some(kite_vm::Value::Bool(true)));
+        let done = matches!(
+            fields.get(kite_mir::TASK_DONE as usize),
+            Some(kite_vm::Value::Bool(true))
+        );
         if !done {
             return Ok(Some("the test's task never finished".to_string()));
         }
