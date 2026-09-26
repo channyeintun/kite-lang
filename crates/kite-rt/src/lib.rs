@@ -1655,12 +1655,10 @@ pub extern "C" fn kite_rt_str_code_at(s: u64, at: i64) -> i64 {
 // ---------------------------------------------------------------------------
 
 /// Print a float so it reads back as a Kite float: `1.0`, not `1`.
+/// The rule the bytecode VM and the Wasm glue follow too, from the one place
+/// it is written.
 fn float_text(v: f64) -> String {
-    if v.fract() == 0.0 && v.is_finite() {
-        format!("{:.1}", v)
-    } else {
-        format!("{}", v)
-    }
+    kite_float::float_text(v)
 }
 
 fn render(word: u64, k: u8, out: &mut String) {

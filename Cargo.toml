@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/kite-span",
+    "crates/kite-float",
     "crates/kite-diag",
     "crates/kite-lexer",
     "crates/kite-fmt",
@@ -32,6 +33,7 @@ repository = "https://github.com/channyeintun/kite-lang"
 
 [workspace.dependencies]
 kite-span = { path = "crates/kite-span" }
+kite-float = { path = "crates/kite-float" }
 kite-diag = { path = "crates/kite-diag" }
 kite-lexer = { path = "crates/kite-lexer" }
 kite-fmt = { path = "crates/kite-fmt" }

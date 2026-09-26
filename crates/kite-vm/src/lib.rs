@@ -401,15 +401,8 @@ impl fmt::Display for Value {
             match &v {
                 Value::Unit => write!(f, "()")?,
                 Value::Int(v) => write!(f, "{}", v)?,
-                Value::Float(v) => {
-                    // Print floats so they read back as Kite floats: `1.0`,
-                    // not `1`.
-                    if v.fract() == 0.0 && v.is_finite() {
-                        write!(f, "{:.1}", v)?
-                    } else {
-                        write!(f, "{}", v)?
-                    }
-                }
+                // The rule the native runtime and the Wasm glue follow too.
+                Value::Float(v) => f.write_str(&kite_float::float_text(*v))?,
                 Value::Bool(v) => write!(f, "{}", v)?,
                 Value::Str(s) => write!(f, "{}", s)?,
                 // A closure has no text form; `io.print` rejects one long

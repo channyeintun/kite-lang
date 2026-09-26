@@ -35,6 +35,7 @@ Backends never affect semantics.
 kite/
 ├── crates/
 │   ├── kite-span/          Source positions, file interning, spans
+│   ├── kite-float/         How a float is written as text, for the VM and kite-rt
 │   ├── kite-diag/          Diagnostic types, rendering, --explain, kite fix
 │   ├── kite-lexer/         Tokeniser + newline-termination rules
 │   ├── kite-ast/           Concrete syntax tree, spans on every node

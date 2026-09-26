@@ -401,6 +401,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kite-float"
+version = "0.1.9"
+
+[[package]]
 name = "kite-fmt"
 version = "0.1.9"
 dependencies = [
@@ -484,6 +488,9 @@ dependencies = [
 [[package]]
 name = "kite-rt"
 version = "0.1.9"
+dependencies = [
+ "kite-float",
+]
 
 [[package]]
 name = "kite-span"
@@ -495,6 +502,7 @@ version = "0.1.9"
 dependencies = [
  "kite-ast",
  "kite-diag",
+ "kite-float",
  "kite-hir",
  "kite-lexer",
  "kite-parser",
@@ -508,6 +516,7 @@ version = "0.1.9"
 dependencies = [
  "kite-codegen-kbc",
  "kite-diag",
+ "kite-float",
  "kite-hir",
  "kite-lexer",
  "kite-mir",

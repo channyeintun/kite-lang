@@ -942,10 +942,12 @@ fn main() {
 
 ## 14. How floats print
 
-`io.print` and `Display` always show a float with a decimal point, and show the
-shortest round-tripping form: `3.0`, `1000000.0`, `10000000000.0` for `1e10`,
-`0.3333333333333333`, `0.30000000000000004` for `0.1 + 0.2`, and `inf` for
-overflow.
+`io.print` and `"\(x)"` write a float the same way on every backend. A whole
+number below `1e21` gets all its digits and `.0`: `3.0`, `1000000.0`,
+`10000000000.0` for `1e10`. Anything else is the shortest form that reads back,
+plain from `1e-7` up to `1e21` and in exponent form outside: `0.3333333333333333`,
+`0.30000000000000004` for `0.1 + 0.2`, `0.000001`, `1e-7`, `1e+21`. Overflow is
+`inf` or `-inf`, `0.0 / 0.0` is `NaN`, and negative zero is `-0.0`.
 
 ## 15. Where the written sources are wrong
 

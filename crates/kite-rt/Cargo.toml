@@ -14,3 +14,6 @@ description = "Native runtime for Kite: the collector, the host functions, and t
 crate-type = ["rlib", "staticlib"]
 
 [dependencies]
+# Only the rule for writing a float as text, shared with the bytecode VM so the
+# two cannot drift. It depends on nothing.
+kite-float.workspace = true

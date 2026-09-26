@@ -1180,6 +1180,46 @@ fn main() {
 }
 ",
     ),
+    // Floats at every edge of how they are written. The VM and the native
+    // runtime used Rust's `{}` and the Wasm glue JavaScript's `String`, so
+    // this printed `inf` or `Infinity`, `-0.0` or `0.0`, `0.0000001` or
+    // `1e-7`, and a 327-character decimal or `5e-324`, by backend. A float
+    // interpolated into a constant was refused for the same reason.
+    (
+        "floats-are-written-alike",
+        "\
+fn f(x: float) -> float { return x }
+
+let BIG = \"big \\(1e21) tiny \\(1.5e-7) whole \\(2.0)\"
+
+fn main() {
+  io.print(f(0.1) + f(0.2))
+  io.print(f(1.0) / f(3.0))
+  io.print(f(1e21))
+  io.print(f(1e20))
+  io.print(f(123456789012345680000.0))
+  io.print(f(1e-7))
+  io.print(f(1.5e-7))
+  io.print(f(0.000001))
+  io.print(f(1.5e300) * f(1e10))
+  io.print(-f(1.5e300) * f(1e10))
+  io.print(f(0.0) / f(0.0))
+  io.print(f(-0.0))
+  io.print(f(0.0))
+  io.print(f(2.0))
+  io.print(f(-2.5))
+  io.print(f(5e-324))
+  io.print(f(1.7976931348623157e308))
+  io.print(f(-1e21))
+  io.print(f(1e16))
+  io.print(f(1e15) + f(0.5))
+  io.print(9007199254740993 as float)
+  io.print(9223372036854775807 as float)
+  io.print(\"\\(f(1e21)) \\(f(-0.0)) \\(f(0.1)) \\(f(1.0) / f(0.0)) \\(f(2.5e-7))\")
+  io.print(BIG)
+}
+",
+    ),
 ];
 
 /// Programs above that need a rule of the checker's which may not have landed:

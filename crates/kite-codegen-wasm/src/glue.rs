@@ -227,9 +227,18 @@ export function text(value) {
 // An `int` is an i64, which reaches here as a BigInt.
 const showInt = (v) => String(v);
 
-// Floats print so they read back as Kite floats: `1.0`, not `1`.
-const showFloat = (v) =>
-  Number.isFinite(v) && Number.isInteger(v) ? v.toFixed(1) : String(v);
+// Floats print so they read back as Kite floats: `1.0`, not `1`. The rule is
+// section 4.2's, and `kite_float::float_text` is the same rule for the bytecode
+// VM and the native runtime: whole numbers below 1e21 in full, anything else
+// as `Number#toString` writes it, and the three values it spells its own way
+// spelled Kite's way instead — `inf`, `-inf`, and a zero that keeps its sign.
+const showFloat = (v) => {{
+  if (v !== v) return "NaN";
+  if (v === Infinity) return "inf";
+  if (v === -Infinity) return "-inf";
+  if (v === 0) return Object.is(v, -0) ? "-0.0" : "0.0";
+  return Number.isInteger(v) && Math.abs(v) < 1e21 ? v.toFixed(1) : String(v);
+}};
 
 const showBool = (v) => (v ? "true" : "false");
 

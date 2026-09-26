@@ -424,12 +424,25 @@ A constant shares the value name space with functions, so a module cannot
 declare both `fn limit` and `let limit`; a cycle among constants is
 [E0119](#16-diagnostics).
 
-One restriction is worth stating outright: **a `float` may not be interpolated
-into a constant**. The browser and the native runtime write a float differently
-at the exponent boundary — `1e21` against `1000000000000000000000` — so folding
-one at compile time would give the same program a different string depending on
-which backend built it. Interpolate it in a function, where the running host
-decides.
+A `float` interpolated into a constant is written the way every backend writes
+one at run time, so `let LABEL = "max \(1e21)"` is `"max 1e+21"` everywhere:
+
+- `NaN` is `NaN`, and the infinities are `inf` and `-inf`.
+- Zero is `0.0`, and negative zero `-0.0` — it is a different value, and
+  `1.0 / -0.0` says so.
+- A whole number below `1e21` in magnitude is written with all its digits and
+  `.0`, so that it reads back as a `float`: `3.0`, `100000000000000000000.0`.
+- Anything else is the shortest decimal that reads back as the same value,
+  written plainly from `1e-7` up to `1e21` and in exponent form outside it:
+  `0.30000000000000004`, `0.000001`, `1e-7`, `1.5e-7`, `1e+21`, `5e-324`,
+  `1.7976931348623157e+308`. Every one is a valid float literal.
+
+This is also the text of `io.print(x)` and `"\(x)"` for any `float`, on every
+target: ECMAScript's `Number#toString` with Kite's own spelling for the three
+values it writes differently. It was not always: the bytecode VM and the
+native runtime once wrote `inf`, `-0.0` and `0.0000001` where the browser wrote
+`Infinity`, `0.0` and `1e-7`, and a float in a constant was refused because
+folding it would have had to pick one.
 
 ### 4.3 Visibility
 
