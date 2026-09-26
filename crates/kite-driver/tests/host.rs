@@ -1819,6 +1819,193 @@ fn a_keyed_list_survives_insertion_at_the_front() {
     );
 }
 
+/// An update leaves the tree a fresh mount of the same description would.
+///
+/// The property every other `std/html` test is an instance of, checked on four
+/// hundred random pairs of descriptions — tags, classes, titles, text,
+/// nesting, and keys drawn from a small set so that some repeat. The generator
+/// is a fixed-seed LCG, so a failure names the same trees every run.
+///
+/// The page is the other half. Setting `textContent` here leaves the text as a
+/// node of its own, and `appendChild` puts an element *after* it, as a browser
+/// does — the stand-in in [`TREE_RUNNER`] clears the text on append instead,
+/// which is why it could not see the bug the first case pins down: a leaf
+/// `"Loading..."` that became a list kept the text in front of the rows, in
+/// 108 of 3,000 random updates.
+///
+/// The other two cases are about `html.departed`. Children replaced by
+/// text left the document without their keys being reported, and a key that
+/// appeared twice was matched only at its last position, so an unchanged list
+/// reported it gone.
+#[test]
+fn an_update_matches_a_fresh_mount() {
+    if !node_available() {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let src = r##"use std/dom
+use std/html
+use std/js
+
+struct Rng {
+    var s: int
+}
+
+fn next(var r: Rng, n: int) -> int {
+    r.s = (r.s * 1103515245 + 12345) % 2147483648
+    return (r.s / 65536) % n
+}
+
+fn node(r: Rng, depth: int) -> html.Node {
+    let tags = ["li", "p", "div"]
+    let tag = tags[next(r, 3)]
+    var attrs: [html.Attr] = []
+    if next(r, 2) == 0 {
+        attrs.push(html.class("c\(next(r, 3))"))
+    }
+    if next(r, 3) == 0 {
+        attrs.push(html.attr("title", "t\(next(r, 2))"))
+    }
+    var n = html.txt(tag, attrs, "x\(next(r, 3))")
+    if depth > 0 && next(r, 2) == 0 {
+        n = html.el(tag, attrs, list(r, depth - 1))
+    }
+    let k = next(r, 8)
+    if k < 6 {
+        return html.keyed("k\(k)", n)
+    }
+    return n
+}
+
+fn list(r: Rng, depth: int) -> [html.Node] {
+    var out: [html.Node] = []
+    let count = next(r, 6)
+    for i in 0..count {
+        out.push(node(r, depth))
+    }
+    return out
+}
+
+fn shape(e: dom.Element) -> str {
+    return js.str_or(dom.raw(e), "outerHTML", "?")
+}
+
+fn compare(a: [html.Node], b: [html.Node]) -> str {
+    let (r1, e1) = dom.create("root")
+    if e1 != nil {
+        return "no root"
+    }
+    let (r2, e2) = dom.create("root")
+    if e2 != nil {
+        return "no root"
+    }
+    let (view, err) = html.mount(r1, a)
+    if err != nil {
+        return "mount failed: \(err.message())"
+    }
+    var v = view
+    let uerr = html.update(v, b)
+    if uerr != nil {
+        return "update failed: \(uerr.message())"
+    }
+    let (_, ferr) = html.mount(r2, b)
+    if ferr != nil {
+        return "mount failed: \(ferr.message())"
+    }
+    let got = shape(r1)
+    let want = shape(r2)
+    if got != want {
+        return "differs: \(got) against \(want)"
+    }
+    return "\(got) departed [\(join(html.departed(v), ","))]"
+}
+
+fn main() {
+    io.print(compare([html.txt("div", [], "Loading...")], [html.el("div", [], [html.txt("p", [], "row")])]))
+    io.print(compare(
+        [html.el("div", [], [html.keyed("k", html.txt("p", [], "row")), html.keyed("j", html.txt("p", [], "row"))])],
+        [html.txt("div", [], "empty")],
+    ))
+    let twice = [html.keyed("a", html.txt("li", [], "1")), html.keyed("a", html.txt("li", [], "2"))]
+    io.print(compare(twice, twice))
+    let r = Rng{ s: 42 }
+    var bad = 0
+    for i in 0..400 {
+        let found = compare(list(r, 2), list(r, 2))
+        if !starts_with(found, "<root>") {
+            bad += 1
+            if bad <= 3 {
+                io.print(found)
+            }
+        }
+    }
+    io.print("mismatches: \(bad)")
+}
+"##;
+    let runner = r##"
+import { readFile } from "node:fs/promises";
+import { instantiate, resident, setWriter } from "./app.js";
+
+class Element {}
+const make = (tag) => {
+  const el = {
+    tag, attrs: {}, nodes: [], parent: null,
+    set textContent(v) {
+      for (const n of this.nodes) if (n.tag) n.parent = null;
+      this.nodes = v === "" ? [] : [{ text: v }];
+    },
+    get textContent() {
+      return this.nodes.map((n) => (n.tag ? n.textContent : n.text)).join("");
+    },
+    setAttribute(n, v) { this.attrs[n] = String(v); },
+    removeAttribute(n) { delete this.attrs[n]; },
+    getAttribute(n) { return n in this.attrs ? this.attrs[n] : null; },
+    appendChild(c) { c.remove(); this.nodes.push(c); c.parent = this; return c; },
+    insertBefore(c, ref) {
+      c.remove();
+      const at = this.nodes.indexOf(ref);
+      if (at === -1) throw new Error("insertBefore: not a child");
+      this.nodes.splice(at, 0, c); c.parent = this; return c;
+    },
+    remove() {
+      const p = this.parent; if (!p) return;
+      const at = p.nodes.indexOf(this);
+      if (at !== -1) p.nodes.splice(at, 1);
+      this.parent = null;
+    },
+    get outerHTML() {
+      const a = Object.keys(this.attrs).sort().map((k) => ` ${k}="${this.attrs[k]}"`).join("");
+      return `<${this.tag}${a}>` +
+        this.nodes.map((n) => (n.tag ? n.outerHTML : n.text)).join("") + `</${this.tag}>`;
+    },
+    addEventListener() {}, removeEventListener() {},
+  };
+  Object.setPrototypeOf(el, Element.prototype);
+  return el;
+};
+globalThis.Element = Element;
+globalThis.document = {
+  querySelector: () => null,
+  querySelectorAll: () => [],
+  createElement: (t) => make(t),
+};
+const out = [];
+setWriter((l) => out.push(l));
+const exports = await instantiate(new Uint8Array(await readFile(new URL("./app.wasm", import.meta.url))));
+resident(exports);
+exports.main();
+process.stdout.write(out.map((l) => l + "\n").join(""));
+"##;
+    let out = run_runner_under_node("htmlfresh", src, runner, &[]);
+    assert_eq!(
+        out,
+        "<root><div><p>row</p></div></root> departed []\n\
+         <root><div>empty</div></root> departed [k,j]\n\
+         <root><li>1</li><li>2</li></root> departed []\n\
+         mismatches: 0\n"
+    );
+}
+
 /// The wrapper is valid JavaScript even when the module re-exports a library.
 ///
 /// It was not. A `pub fn` reached through a `use`d module keeps its qualified
