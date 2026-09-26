@@ -703,9 +703,9 @@ impl<'a> Parser<'a> {
         let is_async = self.eat(T::Async);
         self.expect(T::Fn)?;
         let name = self.ident()?;
-        // A method's own `<T>` list is parsed and discarded: type parameters
-        // live on the declaration a method belongs to, not on the method.
-        let _generics = self.parse_generics()?;
+        // A method's own `<U>` list, beside the ones its `impl` declares:
+        // `fn map<U>(self, f: fn(T) -> U) -> Box<U>`.
+        let generics = self.parse_generics()?;
 
         self.expect(T::LParen)?;
         self.skip_newlines();
@@ -761,6 +761,7 @@ impl<'a> Parser<'a> {
             is_pub,
             is_async,
             name,
+            generics,
             self_param,
             params,
             ret,

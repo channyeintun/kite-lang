@@ -1,0 +1,40 @@
+// `Self` in a trait is the implementing type, and a method's own type
+// parameters are part of its signature: an implementation is held to both.
+
+trait Same {
+    fn same(self, other: Self) -> bool
+}
+
+trait Mapper {
+    fn map_to<U>(self, f: fn(int) -> U) -> [U]
+}
+
+struct A {
+    x: int
+}
+
+struct B {
+    y: int
+}
+
+impl Same for A {
+    fn same(self, other: B) -> bool { //~ ERROR E0200
+        return self.x == other.y
+    }
+}
+
+impl Mapper for A {
+    fn map_to(self, f: fn(int) -> int) -> [int] { //~ ERROR E0208
+        return [f(self.x)]
+    }
+}
+
+impl Same for B {
+    fn same(self, other: Self) -> bool {
+        return self.y == other.y
+    }
+}
+
+fn main() {
+    io.print(B{ y: 1 }.same(B{ y: 1 }))
+}

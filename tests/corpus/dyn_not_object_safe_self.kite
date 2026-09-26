@@ -1,0 +1,44 @@
+// A `dyn` can call only what is the same for every type behind it (§10.3):
+// no method mentioning `Self`, which is a different type behind every `dyn`,
+// and no generic method, which has a body per type argument. Either trait is
+// still a perfectly good bound.
+
+trait Same {
+    fn same(self, other: Self) -> bool
+}
+
+trait Mapper {
+    fn map_to<U>(self, f: fn(int) -> U) -> [U]
+}
+
+struct A {
+    x: int
+}
+
+impl Same for A {
+    fn same(self, other: A) -> bool {
+        return self.x == other.x
+    }
+}
+
+impl Mapper for A {
+    fn map_to<U>(self, f: fn(int) -> U) -> [U] {
+        return [f(self.x)]
+    }
+}
+
+fn both<T: Same>(a: T, b: T) -> bool {
+    return a.same(b)
+}
+
+fn first(xs: [dyn Same]) -> int { //~ ERROR E0206
+    return xs.len()
+}
+
+fn mapped(m: dyn Mapper) -> int { //~ ERROR E0206
+    return 0
+}
+
+fn main() {
+    io.print(both(A{ x: 1 }, A{ x: 1 }))
+}

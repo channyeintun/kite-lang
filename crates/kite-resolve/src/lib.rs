@@ -744,6 +744,15 @@ impl ResolveMap {
 /// lets a program shadow one of its names without breaking it.
 pub const PRELUDE: &str = "prelude";
 
+/// A module's name as a diagnostic shows it; the root module has none.
+fn display_module(module: &str) -> &str {
+    if module.is_empty() {
+        "the program's own file"
+    } else {
+        module
+    }
+}
+
 /// The qualified form of a name declared in `module`.
 fn qualify(module: &str, name: &str) -> String {
     if module.is_empty() {
@@ -843,6 +852,10 @@ fn index_variants(file: &SourceFile, map: &mut ResolveMap) {
 /// Pass 2: free functions and methods.
 fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) {
     let mut seen: HashMap<&str, Span> = HashMap::new();
+    // Inherent methods per type. One name, one method: a second of the same
+    // name — in the same block or another — used to be accepted and never
+    // reached, since a call finds the first.
+    let mut inherent: HashMap<(u32, &str), Span> = HashMap::new();
 
     for (i, item) in file.items.iter().enumerate() {
         match item {
@@ -965,7 +978,67 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                     },
                 };
 
+                // Coherence (§8.2, §10.2): an inherent `impl` is written where
+                // its type is declared, and a trait's where the trait or the
+                // type is. The methods are still registered, so a call to one
+                // is not reported a second time as a method that is missing.
+                let home_of = |t: u32| map.modules.of(map.types[t as usize].decl_index).to_string();
+                let owns_type = home_of(type_index) == module;
+                let owns_trait = trait_index.is_some_and(|t| home_of(t) == module);
+                if !owns_type && !owns_trait {
+                    let type_home = home_of(type_index);
+                    let mut d = match (&imp.trait_path, trait_index) {
+                        (Some(tp), Some(t)) => Diagnostic::error(
+                            codes::E0405,
+                            format!(
+                                "`{}` cannot be implemented for `{}` here",
+                                tp.text(),
+                                target
+                            ),
+                        )
+                        .with_primary(imp.span, "neither the trait nor the type is declared in this module")
+                        .with_note(format!(
+                            "a trait is implemented in the module that declares it (`{}`) or the \
+                             one that declares the type (`{}`), so that only one `impl` can exist",
+                            display_module(&home_of(t)),
+                            display_module(&type_home)
+                        )),
+                        _ => Diagnostic::error(
+                            codes::E0405,
+                            format!("`{}` cannot be given methods outside module `{}`", target, display_module(&type_home)),
+                        )
+                        .with_primary(imp.self_ty.span, "declared in another module")
+                        .with_note(
+                            "Kite has no extension methods: a type's methods are all declared \
+                             where the type is, which is what makes `x.foo()` answerable by \
+                             looking in one place",
+                        ),
+                    };
+                    d = d.with_note(
+                        "write a function that takes the value, or implement a trait of this \
+                         module's own for it",
+                    );
+                    diags.push(d);
+                }
+
                 for (mi, m) in imp.methods.iter().enumerate() {
+                    if trait_index.is_none() {
+                        if let Some(&prev) = inherent.get(&(type_index, m.name.name.as_str())) {
+                            diags.push(
+                                Diagnostic::error(
+                                    codes::E0112,
+                                    format!("`{}` is defined more than once for `{}`", m.name.name, target),
+                                )
+                                .with_primary(m.name.span, "redefined here")
+                                .with_secondary(prev, "first defined here")
+                                .with_note(
+                                    "Kite has no overloading: a type has one method of each name",
+                                ),
+                            );
+                            continue;
+                        }
+                        inherent.insert((type_index, m.name.name.as_str()), m.name.span);
+                    }
                     map.fns.push(FnSig {
                         name: m.name.name.clone(),
                         param_count: m.params.len(),

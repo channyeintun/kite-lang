@@ -15,7 +15,7 @@
 //! substitution threaded through every step of lowering.
 
 use crate::{BinOp, Block, EnumId, Expr, ExprKind, FnId, Function, Local, Pattern, Program, Stmt,
-            StructId, TyId, TyKind, Types};
+            StructId, TraitId, TyId, TyKind, TypeTag, Types, VTable, VTableEntry};
 use std::collections::HashMap;
 
 /// A generic function that instantiates itself with a larger type on each call
@@ -26,7 +26,18 @@ const MAX_INSTANTIATIONS: usize = 4096;
 /// Specialise every generic function for the argument sets its callers use, and
 /// drop the templates.
 pub fn monomorphise(program: &mut Program) {
+    // A trait a `dyn` cannot hold is reached only through bounds, and every
+    // call through a bound is a direct call by the end of this pass. Its
+    // table would be dead weight at best; at worst a backend would type a
+    // dispatcher for a method that mentions `Self`, which has no one type.
+    let dispatchable: Vec<TraitId> = program
+        .vtables
+        .iter()
+        .map(|v| v.trait_id)
+        .filter(|t| program.types.is_object_safe(*t))
+        .collect();
     if program.fns.iter().all(|f| f.generic_count == 0) {
+        program.vtables.retain(|v| dispatchable.contains(&v.trait_id));
         return;
     }
     let Program { types, fns, entry, vtables, externs: _ } = program;
@@ -45,6 +56,7 @@ pub fn monomorphise(program: &mut Program) {
     let mut made: HashMap<(u32, Vec<TyId>), u32> = HashMap::new();
     let mut pending: Vec<usize> = (0..out.len()).collect();
     let mut budget = MAX_INSTANTIATIONS;
+    let mut rows: Vec<(TraitId, VTableEntry)> = Vec::new();
 
     while let Some(index) = pending.pop() {
         if budget == 0 {
@@ -61,6 +73,8 @@ pub fn monomorphise(program: &mut Program) {
                 made: &mut made,
                 out: &mut out,
                 pending: &mut pending,
+                vtables,
+                rows: &mut rows,
             };
             m.block(&mut body);
         }
@@ -72,15 +86,26 @@ pub fn monomorphise(program: &mut Program) {
             *e = FnId(*new);
         }
     }
-    // A trait method is never generic today, so every vtable entry is a moved
-    // original rather than an instantiation.
+    // A row the checker wrote names the declared methods. Those of a generic
+    // type's `impl` are templates, and are gone: the type is dispatched to
+    // through the rows made above for each specialisation of it that became
+    // a `dyn`. Every other row names moved originals.
+    vtables.retain(|v| dispatchable.contains(&v.trait_id));
     for v in vtables.iter_mut() {
+        v.entries
+            .retain(|row| row.methods.iter().all(|m| fns[m.index()].generic_count == 0));
         for row in &mut v.entries {
             for m in &mut row.methods {
                 if let Some(new) = moved.get(&m.0) {
                     *m = FnId(*new);
                 }
             }
+        }
+    }
+    for (trait_id, row) in rows {
+        if let Some(v) = vtables.iter_mut().find(|v| v.trait_id == trait_id) {
+            v.entries.push(row);
+            v.entries.sort_by_key(|e| e.tag);
         }
     }
 
@@ -95,6 +120,11 @@ struct Mono<'a> {
     made: &'a mut HashMap<(u32, Vec<TyId>), u32>,
     out: &'a mut Vec<Function>,
     pending: &'a mut Vec<usize>,
+    /// The tables the checker built, over the declared functions.
+    vtables: &'a [VTable],
+    /// Rows for specialisations of generic types that became a `dyn`, over
+    /// the functions made here.
+    rows: &'a mut Vec<(TraitId, VTableEntry)>,
 }
 
 impl Mono<'_> {
@@ -153,6 +183,18 @@ impl Mono<'_> {
     }
 
     fn expr(&mut self, e: &mut Expr) {
+        // A call through a bound, now its receiver's type is known, is a call
+        // to that type's method — and becomes one here, before the forms
+        // below renumber or specialise it like any other.
+        if let ExprKind::CallVirtual { trait_id, method, args, targs } = &mut e.kind {
+            if let Some((callee, all)) = self.devirtualise(*trait_id, *method, args, targs) {
+                let args = std::mem::take(args);
+                e.kind = ExprKind::Call { callee, args, targs: all };
+            }
+        }
+        if let ExprKind::ToDyn { value, trait_id } = &e.kind {
+            self.dispatch_row(*trait_id, value.ty);
+        }
         // Both forms name a function by index, so both need the same treatment:
         // renumbered when it moved, specialised when it is a template.
         let target = match &mut e.kind {
@@ -176,6 +218,87 @@ impl Mono<'_> {
         for b in expr_blocks(&mut e.kind) {
             self.block(b);
         }
+    }
+}
+
+impl Mono<'_> {
+    /// The run-time identity of a nominal type, its declaration's, and the
+    /// arguments it was specialised with.
+    fn identity(&self, ty: TyId) -> Option<(TypeTag, TypeTag, Vec<TyId>)> {
+        match *self.types.kind(ty) {
+            TyKind::Struct(s) => {
+                let (template, args) = self.types.struct_origin_of(s).unwrap_or((s, Vec::new()));
+                Some((TypeTag::Struct(s), TypeTag::Struct(template), args))
+            }
+            TyKind::Enum(x) => {
+                let (template, args) = self.types.enum_origin_of(x).unwrap_or((x, Vec::new()));
+                Some((TypeTag::Enum(x), TypeTag::Enum(template), args))
+            }
+            _ => None,
+        }
+    }
+
+    /// The declared function a trait's method runs for a type's declaration.
+    fn declared_method(&self, trait_id: TraitId, template: TypeTag, method: u32) -> Option<FnId> {
+        let table = self.vtables.iter().find(|v| v.trait_id == trait_id)?;
+        let row = table.entries.iter().find(|r| r.tag == template)?;
+        row.methods.get(method as usize).copied()
+    }
+
+    /// The direct call a call through a bound becomes, once the receiver's
+    /// type is concrete: the implementing function, with the receiver's own
+    /// type arguments ahead of the method's.
+    fn devirtualise(
+        &self,
+        trait_id: TraitId,
+        method: u32,
+        args: &[Expr],
+        targs: &[TyId],
+    ) -> Option<(FnId, Vec<TyId>)> {
+        let receiver = args.first()?;
+        let (_, template, own) = self.identity(receiver.ty)?;
+        let callee = self.declared_method(trait_id, template, method)?;
+        // A method's parameters are its block's, which the receiver's type
+        // supplies, then its own, which the call solved.
+        let block = self.fns[callee.index()].generic_count.checked_sub(targs.len())?;
+        if own.len() < block {
+            return None;
+        }
+        let mut all: Vec<TyId> = own[..block].to_vec();
+        all.extend_from_slice(targs);
+        Some((callee, all))
+    }
+
+    /// Make sure a specialisation of a generic type has a row in a trait's
+    /// table once a value of it becomes that trait's `dyn`.
+    ///
+    /// The checker's rows are per declaration and name the methods as
+    /// written — templates, for a generic type — while a value carries the
+    /// tag of its specialisation. Rows are made only for what actually
+    /// becomes a `dyn`, which is also what the checker proved satisfies the
+    /// `impl`'s bounds.
+    fn dispatch_row(&mut self, trait_id: TraitId, ty: TyId) {
+        let Some((tag, template, args)) = self.identity(ty) else { return };
+        if tag == template || self.rows.iter().any(|(t, r)| *t == trait_id && r.tag == tag) {
+            return;
+        }
+        let Some(table) = self.vtables.iter().find(|v| v.trait_id == trait_id) else { return };
+        let Some(row) = table.entries.iter().find(|r| r.tag == template) else { return };
+        let declared = row.methods.clone();
+        let mut methods = Vec::with_capacity(declared.len());
+        for m in declared {
+            let count = self.fns[m.index()].generic_count;
+            let made = if count == 0 {
+                self.moved.get(&m.0).copied()
+            } else if args.len() >= count {
+                Some(self.instantiate(m.0, &args[..count]))
+            } else {
+                None
+            };
+            let Some(made) = made else { return };
+            methods.push(FnId(made));
+        }
+        self.rows.push((trait_id, VTableEntry { tag, methods }));
     }
 }
 
@@ -221,7 +344,9 @@ fn substitute_expr(e: &mut Expr, targs: &[TyId], types: &mut Types) {
         // A nested generic call's own type arguments may mention this
         // function's parameters — `f<T>` calling `g<[T]>` — so they substitute
         // too, before the call is instantiated.
-        ExprKind::Call { targs: inner, .. } | ExprKind::ClosureNew { targs: inner, .. } => {
+        ExprKind::Call { targs: inner, .. }
+        | ExprKind::ClosureNew { targs: inner, .. }
+        | ExprKind::CallVirtual { targs: inner, .. } => {
             for t in inner.iter_mut() {
                 *t = subst(*t, targs, types);
             }
@@ -238,6 +363,20 @@ fn substitute_expr(e: &mut Expr, targs: &[TyId], types: &mut Types) {
     }
     for b in expr_blocks(&mut e.kind) {
         substitute_block(b, targs, types);
+    }
+    // `Option<Option<T>>` is `Option<T>`, so a `T` wrapped into an optional
+    // in a template needs no wrapping in a copy where `T` is already one —
+    // and wrapping it anyway boxes a value that is already boxed, which the
+    // Wasm backend's types do not admit. Unwrapping it is the same no-op
+    // from the other side.
+    if let ExprKind::Wrap { value } | ExprKind::Unwrap { value } = &mut e.kind {
+        if value.ty == e.ty {
+            let inner = std::mem::replace(
+                &mut **value,
+                Expr { kind: ExprKind::Error, ty: e.ty, span: e.span },
+            );
+            *e = inner;
+        }
     }
 }
 

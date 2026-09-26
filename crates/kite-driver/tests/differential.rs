@@ -738,6 +738,197 @@ fn main() {
 "#,
     ),
     (
+        "self-and-method-generics",
+        r#"// `Self` in a trait, and methods with type parameters of their own — on an
+// `impl`, on a trait reached through a bound, and on an associated function.
+trait Cmp {
+    fn same(self, other: Self) -> bool
+    fn pick(self, other: Self) -> Self
+}
+
+struct A {
+    x: int
+}
+
+struct B {
+    s: str
+}
+
+impl Cmp for A {
+    fn same(self, other: A) -> bool {
+        return self.x == other.x
+    }
+    fn pick(self, other: A) -> A {
+        return if self.x > other.x { self } else { other }
+    }
+}
+
+impl Cmp for B {
+    fn same(self, other: Self) -> bool {
+        return self.s == other.s
+    }
+    fn pick(self, other: Self) -> Self {
+        return self
+    }
+}
+
+fn all_same<T: Cmp>(xs: [T]) -> bool {
+    for x in xs {
+        if !x.same(xs[0]) {
+            return false
+        }
+    }
+    return true
+}
+
+fn best<T: Cmp>(a: T, b: T) -> T {
+    return a.pick(b)
+}
+
+trait Mapper {
+    fn map_to<U>(self, f: fn(int) -> U) -> [U]
+}
+
+struct Nums {
+    ns: [int]
+}
+
+impl Mapper for Nums {
+    fn map_to<U>(self, f: fn(int) -> U) -> [U] {
+        var out: [U] = []
+        for n in self.ns {
+            out.push(f(n))
+        }
+        return out
+    }
+}
+
+fn twice<M: Mapper>(m: M) -> [str] {
+    return m.map_to(|n: int| "\(n)\(n)")
+}
+
+struct Box<T> {
+    v: T
+}
+
+impl<T> Box<T> {
+    fn map<U>(self, f: fn(T) -> U) -> Box<U> {
+        return Box{ v: f(self.v) }
+    }
+    fn pair<U>(self, other: U) -> (T, U) {
+        return (self.v, other)
+    }
+    fn of<U>(v: T, u: U) -> Box<(T, U)> {
+        return Box{ v: (v, u) }
+    }
+}
+
+fn main() {
+    io.print(all_same([A{ x: 1 }, A{ x: 1 }]))
+    io.print(all_same([B{ s: "a" }, B{ s: "b" }]))
+    io.print(best(A{ x: 3 }, A{ x: 9 }).x)
+    io.print(best(B{ s: "l" }, B{ s: "r" }).s)
+    io.print(A{ x: 2 }.same(A{ x: 2 }))
+    let t = twice(Nums{ ns: [1, 2] })
+    io.print(t[0] + t[1])
+    let b = Box{ v: 5 }
+    let c = b.map(|x: int| -> str { return "n\(x)" })
+    io.print(c.v)
+    let d = c.map(|s: str| s.len())
+    io.print(d.v)
+    let (x, y) = b.pair("p")
+    io.print("\(x) \(y)")
+    let e = Box.of(1, true)
+    let (i, f) = e.v
+    io.print("\(i) \(f)")
+}
+"#,
+    ),
+    (
+        "bounds-through-generics",
+        r#"// A bounded parameter meets the same bound; a generic type's `impl` is
+// reached through a bound and through a `dyn`; `Display` shows a bounded
+// parameter and a trait object; and an optional wrapped in a generic body
+// where its parameter is already optional is not wrapped twice.
+use std/task
+
+trait Named {
+    fn name(self) -> str
+}
+
+struct Box<T> {
+    v: T
+}
+
+impl<T> Named for Box<T> {
+    fn name(self) -> str {
+        return "box"
+    }
+}
+
+struct Plain {
+    n: int
+}
+
+impl Named for Plain {
+    fn name(self) -> str {
+        return "plain \(self.n)"
+    }
+}
+
+impl Display for Plain {
+    fn show(self) -> str {
+        return "P\(self.n)"
+    }
+}
+
+fn inner<T: Named>(x: T) -> str {
+    return x.name()
+}
+
+fn outer<T: Named>(x: T) -> str {
+    return inner(x)
+}
+
+fn show(x: dyn Named) -> str {
+    return x.name()
+}
+
+fn say<T: Display>(x: T) -> str {
+    return "<\(x)>"
+}
+
+fn wrap<T>(x: T) -> Option<T> {
+    return x
+}
+
+async fn count<T: Share>(xs: [T]) -> int {
+    let r = await task.parallel(xs, |x: T| -> int { return 1 })
+    return r.len()
+}
+
+async fn main() {
+    io.print(outer(Plain{ n: 1 }))
+    io.print(outer(Box{ v: 1 }))
+    io.print(show(Box{ v: "s" }))
+    io.print(show(Plain{ n: 2 }))
+    io.print(Box{ v: true }.name())
+    io.print(say(Plain{ n: 3 }))
+    let d: dyn Display = Plain{ n: 4 }
+    io.print("\(d)")
+    io.print(d)
+    let a: Option<int> = 5
+    let f = wrap(a)
+    io.print(if f == nil { -1 } else { f + 1 })
+    let none: Option<int> = nil
+    let g = wrap(none)
+    io.print(if g == nil { -1 } else { g + 1 })
+    let n = await count([1, 2, 3])
+    io.print(n)
+}
+"#,
+    ),
+    (
         "interpolation",
         "fn main() {\n  let name = \"world\"\n  let n = 42\n  let pi = 2.5\n  let ok = true\n\
          \x20 io.print(\"hello, \\(name)!\")\n\

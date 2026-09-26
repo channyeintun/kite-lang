@@ -586,7 +586,7 @@ impl<'a> FnLowerer<'a> {
                 let args = args.iter().map(|a| self.operand(a)).collect();
                 Rvalue::Call { callee: FnId(callee.0), args }
             }
-            hir::ExprKind::CallVirtual { trait_id, method, args } => {
+            hir::ExprKind::CallVirtual { trait_id, method, args, .. } => {
                 let args = args.iter().map(|a| self.operand(a)).collect();
                 Rvalue::CallVirtual { trait_id: *trait_id, method: *method, args }
             }

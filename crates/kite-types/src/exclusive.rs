@@ -252,7 +252,7 @@ impl Checker<'_> {
     fn expr(&mut self, expr: &hir::Expr) {
         match &expr.kind {
             ExprKind::Call { callee, args, .. } => self.call(*callee, args, expr.span),
-            ExprKind::CallVirtual { trait_id, method, args } => {
+            ExprKind::CallVirtual { trait_id, method, args, .. } => {
                 self.call_virtual(*trait_id, *method, args, expr.span)
             }
             _ => {}

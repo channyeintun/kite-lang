@@ -868,10 +868,13 @@ impl Writer<'_, '_> {
                 ));
             }
         }
+        // `pub`, because it is inherent: a trait's methods are as visible as
+        // the trait, but an associated function is private to its module
+        // unless it says otherwise, and decoding is for the type's users.
         wrap_impl(
             &decl.bare,
             None,
-            &format!("fn decode(doc: json.Json) -> ({}, error)", decl.bare),
+            &format!("pub fn decode(doc: json.Json) -> ({}, error)", decl.bare),
             &body,
         )
     }
