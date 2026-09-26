@@ -1658,6 +1658,142 @@ fn main() {
     ),
 ];
 
+/// Programs pinning down the WebAssembly target against the other two. Each
+/// one is here because Wasm once refused it, trapped on it, or answered
+/// differently.
+const WASM_TARGET: &[(&str, &str)] = &[
+    // A map key was compared with `i32.eq` unless it was a number or a string,
+    // so a struct, enum, tuple, optional or slice key produced a module the
+    // validator refused (E0900). The removal from a map built elsewhere is here
+    // because it was the one key comparison the string runtime's scan missed.
+    (
+        "aggregate-map-keys",
+        r#"struct P {
+  x: int
+  name: str
+}
+
+enum C {
+  Red
+  Rgb(int, int, int)
+}
+
+fn drop_a(m: {str: int}) -> {str: int} {
+  var n = m
+  n.remove("a")
+  return n
+}
+
+fn ori(o: Option<int>, d: int) -> int {
+  return match o {
+    nil => d,
+    v => v,
+  }
+}
+
+fn ors(o: Option<str>, d: str) -> str {
+  return match o {
+    nil => d,
+    v => v,
+  }
+}
+
+fn orb(o: Option<bool>, d: bool) -> bool {
+  return match o {
+    nil => d,
+    v => v,
+  }
+}
+
+fn main() {
+  var ps: {P: int} = {P{ x: 1, name: "one" }: 1}
+  ps[P{ x: 1, name: "one" }] = 10
+  ps[P{ x: 2, name: "two" }] = 20
+  io.print(ps.len())
+  io.print(ori(ps[P{ x: 1, name: "one" }], -1))
+  io.print(ori(ps[P{ x: 1, name: "uno" }], -1))
+  ps.remove(P{ x: 1, name: "one" })
+  io.print(ps.len())
+
+  var cs: {C: str} = {}
+  cs[C.Red] = "red"
+  cs[C.Rgb(1, 2, 3)] = "grey"
+  cs[C.Rgb(1, 2, 3)] = "gray"
+  cs[C.Rgb(3, 2, 1)] = "other"
+  io.print(cs.len())
+  io.print(ors(cs[C.Rgb(1, 2, 3)], "?"))
+
+  var ts: {(int, str): bool} = {}
+  ts[(1, "a")] = true
+  ts[(1, "a")] = false
+  ts[(1, "b")] = true
+  io.print(ts.len())
+  io.print(orb(ts[(1, "a")], true))
+
+  var os: {Option<int>: int} = {}
+  os[nil] = 1
+  os[nil] = 2
+  os[5] = 3
+  io.print(os.len())
+  io.print(ori(os[nil], 0))
+
+  var ss: {[int]: int} = {}
+  ss[[1, 2]] = 1
+  ss[[1, 2]] = 2
+  ss[[2, 1]] = 3
+  io.print(ss.len())
+  io.print(ori(ss[[1, 2]], 0))
+
+  var nested: {{str: int}: str} = {}
+  nested[{"a": 1}] = "x"
+  nested[{"a": 1}] = "y"
+  io.print(nested.len())
+
+  let m = drop_a({"a": 1, "b": 2})
+  io.print(m.len())
+  let q: {P: int} = {P{ x: 1, name: "one" }: 1}
+  let r: {P: int} = {P{ x: 1, name: "one" }: 1}
+  io.print(q == r)
+}
+"#,
+    ),
+    // `Option<Option<T>>` is `Option<T>`, so a lookup in a map of optional
+    // values, or `.get()` on a slice of them, answers the stored optional
+    // itself. Wasm looked for a box around an optional, found none and trapped.
+    (
+        "optional-values-in-maps-and-slices",
+        r#"fn main() {
+    var m: {str: Option<int>} = {"a": 5, "b": nil}
+    m["c"] = 7
+    m["d"] = nil
+    let a = m["a"]
+    let b = m["b"]
+    let z = m["z"]
+    io.print(a == nil)
+    io.print(b == nil)
+    io.print(z == nil)
+    let c = m["c"]
+    if c != nil {
+        io.print(c)
+    }
+    io.print(m.len())
+    var xs: [Option<str>] = ["x", nil]
+    xs.push(nil)
+    io.print(xs.get(0) == nil)
+    io.print(xs.get(1) == nil)
+    io.print(xs.get(9) == nil)
+    match xs.get(0) {
+        nil => io.print("none"),
+        s => io.print(s),
+    }
+    for k in m.keys() {
+        io.print(k)
+    }
+}
+"#,
+    ),
+];
+
 /// Programs above that need a rule of the checker's which may not have landed:
 /// they are skipped while the checker still refuses them, and compared the
 /// moment it accepts them. `A(x) | B(x)` is lowered correctly already; until
@@ -1877,7 +2013,7 @@ fn all_backends_agree() {
     let root = std::env::temp_dir().join(format!("kite-diff-{}", std::process::id()));
     let mut mismatches = Vec::new();
 
-    for (name, src) in PROGRAMS.iter().chain(MIDDLE_END) {
+    for (name, src) in PROGRAMS.iter().chain(MIDDLE_END).chain(WASM_TARGET) {
         if AWAITING_THE_CHECKER.contains(name)
             && compile(format!("{}.kite", name), src, Emit::Check).failed()
         {

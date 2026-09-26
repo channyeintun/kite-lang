@@ -30,6 +30,14 @@ pub fn collect(program: &mir::Program, types: &Types) -> Vec<EqFn> {
     let mut wanted: HashSet<TyId> = HashSet::new();
 
     for f in &program.fns {
+        // A map compares its keys with `==` on every read, write and removal,
+        // so a key type that needs a generated comparison needs it whether or
+        // not the program ever writes `==` itself.
+        for l in &f.locals {
+            if let TyKind::Map(k, _) = types.kind(l.ty) {
+                close_over(*k, types, &mut wanted);
+            }
+        }
         for block in &f.blocks {
             for stmt in &block.stmts {
                 let mir::Inst::Assign {

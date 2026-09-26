@@ -2809,15 +2809,14 @@ impl<'a> Emitter<'a> {
             // optimisation for later; a scan is what makes the semantics —
             // insertion order, and first match wins — obviously right.
             mir::Rvalue::MapGet { base, key } => {
-                let (Some(ml), Some(box_idx)) = (
-                    self.map_of(base),
-                    self.map_of(base)
-                        .and_then(|m| self.layout.option_type(m.value_ty)),
-                ) else {
+                let Some((ml, found)) = self
+                    .map_of(base)
+                    .and_then(|m| Some((m, self.optional_answer(m.value_ty)?)))
+                else {
                     func.instruction(&Instruction::Unreachable);
                     return true;
                 };
-                self.map_scan(func, ml, base, key, box_idx);
+                self.map_scan(func, ml, base, key, found);
                 return true;
             }
 
@@ -3014,15 +3013,13 @@ impl<'a> Emitter<'a> {
             // a runtime condition, so it bounds-checks and yields an optional
             // rather than trapping.
             mir::Rvalue::SliceGet { base, index } => {
-                let (Some((idx, elem)), Some(box_idx)) = (
-                    self.slice_of(base),
-                    self.slice_of(base)
-                        .and_then(|(_, e)| self.layout.option_type(e)),
-                ) else {
+                let Some((idx, (result, wrap))) = self
+                    .slice_of(base)
+                    .and_then(|(idx, e)| Some((idx, self.optional_answer(e)?)))
+                else {
                     func.instruction(&Instruction::Unreachable);
                     return true;
                 };
-                let _ = elem;
 
                 self.index_operand(func, index);
                 func.instruction(&Instruction::LocalTee(self.index_scratch));
@@ -3034,15 +3031,13 @@ impl<'a> Emitter<'a> {
                 func.instruction(&Instruction::I32LtU);
                 func.instruction(&Instruction::I32And);
 
-                let result = ValType::Ref(RefType {
-                    nullable: true,
-                    heap_type: HeapType::Concrete(box_idx),
-                });
                 func.instruction(&Instruction::If(BlockType::Result(result)));
                 self.operand(func, base);
                 func.instruction(&Instruction::LocalGet(self.index_scratch));
                 func.instruction(&Instruction::ArrayGet(idx));
-                func.instruction(&Instruction::StructNew(box_idx));
+                if let Some(box_idx) = wrap {
+                    func.instruction(&Instruction::StructNew(box_idx));
+                }
                 func.instruction(&Instruction::Else);
                 func.instruction(&Instruction::RefNull(HeapType::Abstract {
                     shared: false,
@@ -3978,16 +3973,12 @@ impl<'a> Emitter<'a> {
         ml: MapLayout,
         base: &mir::Operand,
         key: &mir::Operand,
-        box_idx: u32,
+        (result, wrap): (ValType, Option<u32>),
     ) {
         let i = self.index_scratch;
         func.instruction(&Instruction::I32Const(0));
         func.instruction(&Instruction::LocalSet(i));
 
-        let result = ValType::Ref(RefType {
-            nullable: true,
-            heap_type: HeapType::Concrete(box_idx),
-        });
         func.instruction(&Instruction::Block(BlockType::Result(result)));
         func.instruction(&Instruction::Block(BlockType::Empty));
         func.instruction(&Instruction::Loop(BlockType::Empty));
@@ -4010,7 +4001,9 @@ impl<'a> Emitter<'a> {
         self.map_field(func, ml, base, 1);
         func.instruction(&Instruction::LocalGet(i));
         func.instruction(&Instruction::ArrayGet(ml.values));
-        func.instruction(&Instruction::StructNew(box_idx));
+        if let Some(box_idx) = wrap {
+            func.instruction(&Instruction::StructNew(box_idx));
+        }
         // 0 = if, 1 = loop, 2 = the miss block, 3 = the result block.
         func.instruction(&Instruction::Br(3));
         func.instruction(&Instruction::End);
@@ -4039,17 +4032,56 @@ impl<'a> Emitter<'a> {
         });
     }
 
+    /// Compare two keys already on the stack, leaving an `i32`.
+    ///
+    /// A key is compared the way `==` compares it, so an aggregate key — a
+    /// struct, an enum, a tuple, an optional, a slice — goes through the same
+    /// generated function `==` on that type calls. This used to fall through
+    /// to `i32.eq` for anything that was not a number or a string, which is
+    /// not an instruction a reference can be given, and every map keyed by a
+    /// struct produced a module the validator refused.
     fn key_equality(&mut self, func: &mut Function, key_ty: TyId) {
         if matches!(self.types.kind(key_ty), TyKind::Str) {
             func.instruction(&Instruction::Call(self.strings.eq()));
             return;
         }
+        if eq::needs_function(key_ty, self.types) {
+            match self.eq.index_of(key_ty) {
+                Some(i) => func.instruction(&Instruction::Call(i)),
+                // `eq::collect` closes over every map's key type, so this is
+                // a compiler bug rather than a program's.
+                None => func.instruction(&Instruction::Unreachable),
+            };
+            return;
+        }
         let inst = match val_type_with(key_ty, self.types, self.layout) {
             ValType::I64 => Instruction::I64Eq,
             ValType::F64 => Instruction::F64Eq,
-            _ => Instruction::I32Eq,
+            ValType::I32 => Instruction::I32Eq,
+            // A host value or a function has no `==`, and the checker refuses
+            // both as a key (E0201). Nothing reaches here.
+            _ => Instruction::Unreachable,
         };
         func.instruction(&inst);
+    }
+
+    /// What a lookup that may miss answers with, for a payload of `payload`:
+    /// the optional's type, and the box to wrap a found value in.
+    ///
+    /// `Option<Option<T>>` is `Option<T>` — the checker flattens it — so when
+    /// the payload is already optional the found value *is* the answer and is
+    /// not boxed again. A map of optional values or a slice of them used to
+    /// look for a box around an optional, find none, and trap.
+    fn optional_answer(&self, payload: TyId) -> Option<(ValType, Option<u32>)> {
+        if matches!(self.types.kind(payload), TyKind::Optional(_)) {
+            return Some((val_type_with(payload, self.types, self.layout), None));
+        }
+        let boxed = self.layout.option_type(payload)?;
+        let result = ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Concrete(boxed),
+        });
+        Some((result, Some(boxed)))
     }
 
     fn map_of(&self, o: &mir::Operand) -> Option<MapLayout> {
