@@ -3001,6 +3001,7 @@ impl<'a> Checker<'a> {
                     Some(Res::Variant(ti, vi)) => {
                         self.variant_value(ti, vi, &[], &[], *span, *span, expected)
                     }
+                    Some(Res::Type(ti)) => self.type_member_value(ti, base, name, *span),
                     _ => self.field_access(base, name, *span),
                 }
             }
@@ -4041,11 +4042,19 @@ impl<'a> Checker<'a> {
                         span,
                     };
                 }
-                self.diags.push(
-                    Diagnostic::error(codes::E0205, format!("`{}` is not a function", p.text()))
-                        .with_primary(p.span, format!("this is {}", self.types.with_article(ty)))
-                        .with_secondary(decl, "declared here"),
-                );
+                // A local whose initialiser was already reported has no type
+                // to be wrong about: `let f = Rect.square` then `f(2)` is one
+                // mistake, and it is on the first line.
+                if !self.types.is_poisoned(ty) {
+                    self.diags.push(
+                        Diagnostic::error(codes::E0205, format!("`{}` is not a function", p.text()))
+                            .with_primary(
+                                p.span,
+                                format!("this is {}", self.types.with_article(ty)),
+                            )
+                            .with_secondary(decl, "declared here"),
+                    );
+                }
                 self.lit(ExprKind::Error, TyId::ERROR, span)
             }
 
@@ -5504,6 +5513,108 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `Color.Blue` in value position, where the resolver found the type but
+    /// not the member.
+    ///
+    /// The resolver cannot tell `Color.Blue` from `Rect.square`: a dotted name
+    /// whose head is a type and whose tail is not one of its variants might be
+    /// an associated function, which only the checker can look up. So it hands
+    /// over the type, and this is where the tail has to be accounted for. It
+    /// used to fall through to a field read of the type's name, which had no
+    /// resolution of its own and so came back as the error type with nothing
+    /// said: `let c = Color.Blue` compiled, and `c == Color.Red` printed `()`.
+    fn type_member_value(
+        &mut self,
+        ti: u32,
+        base: &ast::Expr,
+        name: &ast::Ident,
+        span: Span,
+    ) -> hir::Expr {
+        let owner = expr_text(base);
+        let declared = self.resolved.type_decl(ti).name.clone();
+        let simple = declared.rsplit('.').next().unwrap_or(&declared).to_string();
+        if let Some(fn_index) = self.resolved.method_on(ti, &name.name) {
+            let takes_self = self.resolved.fns[fn_index as usize]
+                .owner
+                .is_some_and(|o| o.takes_self);
+            let kind = if takes_self { "a method" } else { "an associated function" };
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0200,
+                    format!("`{}.{}` is {}, not a value", owner, name.name, kind),
+                )
+                .with_primary(span, "named here without being called")
+                .with_note(if takes_self {
+                    format!("call it on a value: `value.{}(…)`", name.name)
+                } else {
+                    format!(
+                        "call it — `{}.{}(…)` — or, to pass it on, wrap the call in a closure",
+                        owner, name.name
+                    )
+                }),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+        // `json.Json` — the whole path is the type, reached through its
+        // module, and a type is no more a value spelled this way than bare.
+        if simple == name.name && owner != simple {
+            let full = format!("{}.{}", owner, name.name);
+            let build = match self.type_ids[ti as usize] {
+                Some(TypeTarget::Enum(_)) => format!("to make one, name a variant: `{}.…`", full),
+                _ => format!("to build one, write a struct literal such as `{}{{ … }}`", full),
+            };
+            self.diags.push(
+                Diagnostic::error(codes::E0200, format!("`{}` is a type, not a value", full))
+                    .with_primary(span, "a type name cannot stand alone here")
+                    .with_note(build),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+        if !self.no_such_variant(ti, &owner, &name.name, span) {
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0205,
+                    format!("`{}` has no associated function `{}`", owner, name.name),
+                )
+                .with_primary(name.span, "no such function"),
+            );
+        }
+        self.lit(ExprKind::Error, TyId::ERROR, span)
+    }
+
+    /// Report `Enum.Name` naming a variant the enum does not have, worded as
+    /// the resolver words the same mistake in a pattern: one mistake, one
+    /// message, wherever it is written. Answers whether the type was one that
+    /// has variants to be missing — an enum, or an alias, which reaches none.
+    fn no_such_variant(&mut self, ti: u32, owner: &str, member: &str, span: Span) -> bool {
+        let decl_span = self.resolved.type_decl(ti).span;
+        let d = match self.type_ids[ti as usize] {
+            Some(TypeTarget::Enum(eid)) => {
+                let names: Vec<String> =
+                    self.types.enum_def(eid).variants.iter().map(|v| v.name.clone()).collect();
+                let mut d = Diagnostic::error(
+                    codes::E0111,
+                    format!("`{}` has no variant `{}`", owner, member),
+                )
+                .with_primary(span, "no such variant")
+                .with_secondary(decl_span, "declared here");
+                if !names.is_empty() {
+                    d = d.with_note(format!("`{}` has: {}", owner, names.join(", ")));
+                }
+                d
+            }
+            Some(TypeTarget::Alias(_)) => Diagnostic::error(
+                codes::E0111,
+                format!("`{}` is a type alias, not an enum", owner),
+            )
+            .with_primary(span, "no such variant")
+            .with_secondary(decl_span, "declared here"),
+            _ => return false,
+        };
+        self.diags.push(d);
+        true
+    }
+
     fn associated_call_named(
         &mut self,
         ti: u32,
@@ -5534,13 +5645,23 @@ impl<'a> Checker<'a> {
         }
 
         let Some(fn_index) = self.resolved.method_on(ti, &method_name) else {
-            self.diags.push(
-                Diagnostic::error(
-                    codes::E0205,
-                    format!("`{}` has no associated function `{}`", type_name, method_name),
-                )
-                .with_primary(p_span, "no such function"),
-            );
+            // `Shape.Square(1.0)` on an enum is a variant that is not there
+            // far more often than a function that is not, and it is reported
+            // as the same line without its arguments is.
+            let written = self.text(p_span);
+            let owner = match written.rsplit_once('.') {
+                Some((owner, _)) => owner.trim().to_string(),
+                None => type_name.clone(),
+            };
+            if !self.no_such_variant(ti, &owner, &method_name, p_span) {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0205,
+                        format!("`{}` has no associated function `{}`", type_name, method_name),
+                    )
+                    .with_primary(p_span, "no such function"),
+                );
+            }
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         };
 

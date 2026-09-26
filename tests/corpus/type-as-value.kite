@@ -1,7 +1,21 @@
+use std/json
+
 struct P {
     x: int
 }
 
+impl P {
+    fn origin() -> P {
+        return P{ x: 0 }
+    }
+}
+
+// A dotted name reaching a type, or a member of one that is not a variant,
+// used to come back as the error type with nothing said about it.
 fn main() {
     let p = P //~ ERROR E0200
+    let j = json.Json //~ ERROR E0200
+    let f = P.origin //~ ERROR E0200
+    io.print(f().x)
+    let g = P.nope //~ ERROR E0205
 }

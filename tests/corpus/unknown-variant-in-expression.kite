@@ -1,0 +1,27 @@
+// A qualified name whose last segment is not one of the enum's variants. In a
+// pattern this was always E0111; in an expression it compiled, and the value
+// was nothing at all — `c == Color.Red` printed `()`. A call with a payload
+// was blamed on a missing associated function, and a path through a module
+// compiled just as quietly as one without.
+use std/json
+
+enum Color {
+    Red
+    Green
+}
+
+enum Shape {
+    Circle(float)
+    Point
+}
+
+type Hue = Color
+
+fn main() {
+    let c = Color.Blue //~ ERROR E0111
+    io.print(c == Color.Red)
+    let s = Shape.Square(1.0) //~ ERROR E0111
+    let j = json.Json.Nope //~ ERROR E0111
+    let k = json.Json.Nope(1) //~ ERROR E0111
+    let h = Hue.Red //~ ERROR E0111
+}
