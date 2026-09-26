@@ -312,6 +312,41 @@ fn main() {
          \x20 let s = \"hello world\"\n\
          \x20 io.print(s[0..5])\n  io.print(s[6..100])\n  io.print(s[0..=4])\n}\n",
     ),
+    // A range index may leave out either end. The parser fills in `0` and the
+    // largest `int`, and relies on every backend clamping a window to the
+    // sequence — so the largest `int` as an end, on slices of values, of
+    // references and on strings, is the edge to check.
+    (
+        "open-slice-range",
+        "fn show(xs: [int]) -> str {\n  var out = \"\"\n  for x in xs {\n\
+         \x20   out = out + \"\\(x),\"\n  }\n  return \"[\" + out + \"]\"\n}\n\
+         fn main() {\n  let xs = [1, 2, 3, 4, 5]\n\
+         \x20 io.print(show(xs[2..]))\n  io.print(show(xs[..2]))\n  io.print(show(xs[..]))\n\
+         \x20 io.print(show(xs[..=1]))\n  io.print(show(xs[9..]))\n  io.print(show(xs[-3..]))\n\
+         \x20 io.print(show(xs[..0]))\n\
+         \x20 let names = [\"ay\", \"bee\", \"cee\"]\n\
+         \x20 io.print(join(names[1..], \"-\"))\n  io.print(join(names[..1], \"-\"))\n\
+         \x20 let s = \"hello world\"\n\
+         \x20 io.print(s[6..])\n  io.print(s[..5])\n  io.print(s[..])\n  io.print(s[..=0])\n\
+         \x20 io.print(s[20..] == \"\")\n}\n",
+    ),
+    // What the parser decides, run: `&`, `^` and `|` share a level (§5.1), a
+    // name after `as` takes no type arguments, `t.0.1` is two indexes,
+    // `Option<int>=` splits, a line ending in `>` continues, and a block
+    // string with a hole is dedented like one without.
+    (
+        "parser-decisions",
+        "fn main() {\n  let a = 1\n  let b = 2\n  let c = 4\n\
+         \x20 io.print(a | b & c)\n  io.print(1 | 6 ^ 3)\n  io.print(6 & 3 | 8)\n\
+         \x20 io.print(6 & 3 == 2)\n\
+         \x20 let f = 2.5\n  if f as int < 3 {\n    io.print(\"less\")\n  }\n\
+         \x20 let t = ((1, 2), 3)\n  io.print(t.0.1)\n  io.print(t.1)\n\
+         \x20 let o: Option<int>= nil\n  io.print(o == nil)\n\
+         \x20 let big = a >\n    b\n  io.print(big)\n\
+         \x20 let n = 7\n\
+         \x20 let block = \"\"\"\n      first \\(n)\n        second \\(n + 1)\n      \"\"\"\n\
+         \x20 io.print(\"[\\(block)]\")\n}\n",
+    ),
     (
         "error-handling",
         "fn divide(a: int, b: int) -> (int, error) {\n  if b == 0 {\n\

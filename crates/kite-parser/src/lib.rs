@@ -7,7 +7,7 @@
 //! closing brace produces one diagnostic, not forty.
 
 use kite_ast::*;
-use kite_diag::{codes, DiagBag, Diagnostic};
+use kite_diag::{codes, DiagBag, Diagnostic, Fix};
 use kite_lexer::{Token, TokenKind as T};
 use kite_span::{FileId, Span};
 
@@ -25,6 +25,41 @@ enum Attribute {
     Host(String),
     /// `@derive(Debug, Hash)` — bodies the compiler writes from the fields.
     Derive(Vec<Ident>),
+}
+
+/// Where recovery from a syntax error resumes.
+#[derive(Clone, Copy)]
+enum Resume {
+    /// At the next line: the next statement of a block, or the next member
+    /// of a struct, an enum or an `impl`.
+    Line,
+    /// At the next element of a comma-separated list, or at the bracket that
+    /// closes it.
+    List(T),
+}
+
+/// A `{` whose members are being read, kept so that one left unclosed can be
+/// recognised and reported where it was opened.
+struct Open {
+    brace: Span,
+    /// How far in the line holding the `{` is indented.
+    indent: usize,
+    /// How far in the first member that begins a line is indented.
+    members: Option<usize>,
+}
+
+/// Whether a piece of a string is text with nothing in it.
+fn is_empty_text(part: &StrPart) -> bool {
+    matches!(part, StrPart::Text(span) if span.is_empty())
+}
+
+/// The bracket a closing bracket closes.
+fn opener_of(close: T) -> T {
+    match close {
+        T::RParen => T::LParen,
+        T::RBracket => T::LBracket,
+        _ => T::LBrace,
+    }
 }
 
 /// The index of the `)` closing the `(` at `open`, accounting for nesting and
@@ -95,20 +130,25 @@ fn normalise(text: &str) -> std::borrow::Cow<'_, str> {
 }
 
 pub fn parse(file: FileId, src: &str, tokens: &[Token], diags: &mut DiagBag) -> SourceFile {
-    let mut p = Parser {
-        file,
-        src,
-        tokens,
-        pos: 0,
-        diags,
-        panicking: false,
-        no_struct_literal: 0,
-        in_hole: false,
-        split_gt: false,
-        depth: 0,
-        depth_reported: false,
-    };
-    p.parse_source_file()
+    Parser::new(file, src, tokens, diags).parse_source_file()
+}
+
+/// Where the type argument brackets are: the byte offset of every `<` that
+/// opens a type argument or generic parameter list, and of every `>` that
+/// closes one — including each half of a `>>` or a `>=` the parser split.
+///
+/// `Option<int>` and `count < n` are the same three tokens, and only a parser
+/// knows which is which. `kitec fmt` spaces a comparison and not a type, and
+/// used to guess by reading forward from the `<`, which could not tell
+/// `f(a < b, c > d)` from a type. `None` when the file does not parse: an
+/// answer from a parse that went wrong partway is not one to lay a file out
+/// by.
+pub fn type_brackets(file: FileId, src: &str, tokens: &[Token]) -> Option<Vec<u32>> {
+    let mut diags = DiagBag::new();
+    let mut p = Parser::new(file, src, tokens, &mut diags);
+    p.parse_source_file();
+    let brackets = std::mem::take(&mut p.type_brackets);
+    (!diags.has_errors()).then_some(brackets)
 }
 
 struct Parser<'a> {
@@ -129,9 +169,32 @@ struct Parser<'a> {
     /// Set for the sub-parser of a `\(...)` hole, where "end of input" means
     /// the closing paren.
     in_hole: bool,
-    /// Half of a `>>` has been consumed as the `>` closing a type argument
-    /// list; the other half is still to come.
-    split_gt: bool,
+    /// How many string literals enclose the tokens being parsed: zero for a
+    /// file, one inside a hole of a literal at the top level, and so on.
+    strings: u32,
+    /// The first half of a `>>` or `>=` has been consumed as the `>` closing
+    /// a type argument list; this is the other half, still to come.
+    split: Option<T>,
+    /// A braced construct has been found unclosed and reported. Everything
+    /// that encloses it returns without looking for its own `}` or reporting
+    /// anything, until the next declaration starts afresh — one missing
+    /// brace is one diagnostic.
+    unwinding: bool,
+    /// The first `{ … }` in the current declaration whose `}` was indented
+    /// differently from the line its `{` opened on, with that `}`.
+    ///
+    /// When a brace goes missing, every `}` after it closes the block one
+    /// level out from the one it was written for, and the first of them is
+    /// where the indentation stops agreeing. The parser only finds out at a
+    /// declaration or at the end of the file, by which point the block it is
+    /// in is some way out from the one the author forgot to close; this is
+    /// how the report points at the right one.
+    misaligned: Option<(Span, Span)>,
+    /// The token index of the last syntax error reported, so a construct
+    /// found unclosed at a token that already has an error says nothing more.
+    last_error_at: Option<usize>,
+    /// See [`type_brackets`].
+    type_brackets: Vec<u32>,
     /// How many levels of recursive descent are currently on the stack.
     ///
     /// Descent recursion means the nesting depth of the *file* is the native
@@ -164,9 +227,39 @@ struct Parser<'a> {
 ///
 /// Still far past any program written on purpose. The standard library's
 /// deepest expression is nowhere near it.
+///
+/// **A chain counts as well as a nest.** `a + b + c` and `x.f().g()` are
+/// parsed by a loop, not by recursion, so the parser itself would take any
+/// length — but each link wraps everything before it, so the tree comes out
+/// as deep as the chain is long, and every pass after this one recurses over
+/// the tree. Twenty thousand `1 +` parsed happily here and then aborted the
+/// type checker. Each link is charged one level for as long as the expression
+/// holding it is being parsed, so the depth of the tree, whether it grew by
+/// nesting or by chaining, is what the ceiling bounds.
 const MAX_DEPTH: u32 = 256;
 
 impl<'a> Parser<'a> {
+    fn new(file: FileId, src: &'a str, tokens: &'a [Token], diags: &'a mut DiagBag) -> Self {
+        Parser {
+            file,
+            src,
+            tokens,
+            pos: 0,
+            diags,
+            panicking: false,
+            no_struct_literal: 0,
+            in_hole: false,
+            strings: 0,
+            split: None,
+            unwinding: false,
+            misaligned: None,
+            last_error_at: None,
+            type_brackets: Vec::new(),
+            depth: 0,
+            depth_reported: false,
+        }
+    }
+
     // ---- recursion ---------------------------------------------------------
 
     /// Take one level of descent, or `None` if that would be too deep.
@@ -194,18 +287,35 @@ impl<'a> Parser<'a> {
         self.diags.push(
             Diagnostic::error(codes::E0102, "expression nested too deeply")
                 .with_primary(span, "the nesting here is deeper than the parser will go")
-                .with_note(format!("at most {MAX_DEPTH} levels may nest")),
+                .with_note(format!(
+                    "at most {MAX_DEPTH} levels may nest, counting each link of a chain such as \
+                     `a + b + …` or `x.f().g()…` as one"
+                )),
         );
+    }
+
+    /// Charge one more link of a left-deep chain against the depth ceiling.
+    ///
+    /// The caller returns what it has built so far when this says no, and
+    /// hands the levels back through `links` once the whole expression is
+    /// done, as [`Parser::deeper`]'s callers do one at a time.
+    fn link(&mut self, links: &mut u32) -> bool {
+        if self.deeper().is_none() {
+            return false;
+        }
+        *links += 1;
+        true
     }
 
     // ---- cursor -----------------------------------------------------------
 
     fn peek(&self) -> T {
-        // `Box<Box<int>>` ends in a token the lexer read as a shift. Rather
-        // than make the lexer care about types, the parser splits it: the
-        // first half is consumed as `>` and the second is left standing here.
-        if self.split_gt {
-            return T::Gt;
+        // `Box<Box<int>>` ends in a token the lexer read as a shift, and
+        // `Option<int>= nil` in one it read as `>=`. Rather than make the
+        // lexer care about types, the parser splits them: the first half is
+        // consumed as `>` and the second is left standing here.
+        if let Some(rest) = self.split {
+            return rest;
         }
         self.tokens[self.pos].kind
     }
@@ -234,11 +344,10 @@ impl<'a> Parser<'a> {
     }
 
     fn bump(&mut self) -> Token {
-        if self.split_gt {
-            self.split_gt = false;
+        if let Some(rest) = self.split.take() {
             let t = self.tokens[self.pos];
             self.pos += 1;
-            return Token { kind: T::Gt, span: Span::new(t.span.file, t.span.start + 1, t.span.end) };
+            return Token { kind: rest, span: Span::new(t.span.file, t.span.start + 1, t.span.end) };
         }
         let t = self.tokens[self.pos];
         if t.kind != T::Eof {
@@ -247,15 +356,26 @@ impl<'a> Parser<'a> {
         t
     }
 
-    /// Consume the `>` that closes a type argument list, splitting a `>>` if
-    /// that is what the lexer produced.
+    /// Consume the `>` that closes a type argument list, splitting a `>>` or
+    /// a `>=` if that is what the lexer produced. The `=` of
+    /// `let a: Option<int>= nil` is then the assignment it was written as.
     fn expect_closing_gt(&mut self) -> Option<Span> {
-        if self.tokens[self.pos].kind == T::Shr && !self.split_gt {
-            let t = self.tokens[self.pos];
-            self.split_gt = true;
+        let t = self.tokens[self.pos];
+        if self.split.is_none() && matches!(t.kind, T::Shr | T::Ge) {
+            self.split = Some(if t.kind == T::Shr { T::Gt } else { T::Eq });
+            self.type_brackets.push(t.span.start);
             return Some(Span::new(t.span.file, t.span.start, t.span.start + 1));
         }
-        self.expect(T::Gt)
+        let at = if self.split.is_some() { t.span.start + 1 } else { t.span.start };
+        let span = self.expect(T::Gt)?;
+        self.type_brackets.push(at);
+        Some(span)
+    }
+
+    /// Consume the `<` that opens a type argument or generic parameter list.
+    fn bump_opening_lt(&mut self) {
+        let t = self.bump();
+        self.type_brackets.push(t.span.start);
     }
 
     fn eat(&mut self, k: T) -> bool {
@@ -294,10 +414,11 @@ impl<'a> Parser<'a> {
     }
 
     fn error_expected(&mut self, what: &str) {
-        if self.panicking {
+        if self.panicking || self.unwinding {
             return;
         }
         self.panicking = true;
+        self.last_error_at = Some(self.pos);
         let found = self.peek();
         let span = if found == T::Newline || found == T::Eof {
             // Point at the end of the previous token rather than at an
@@ -321,31 +442,143 @@ impl<'a> Parser<'a> {
         );
     }
 
-    /// Skip forward to somewhere parsing can sensibly resume.
-    fn synchronize(&mut self) {
+    // ---- recovery ---------------------------------------------------------
+
+    /// The brackets opened since token `from` and not closed again, innermost
+    /// last.
+    fn opened_since(&self, from: usize) -> Vec<T> {
+        let mut open = Vec::new();
+        for t in &self.tokens[from.min(self.pos)..self.pos] {
+            match t.kind {
+                T::LParen | T::LBracket | T::LBrace => open.push(t.kind),
+                T::RParen | T::RBracket | T::RBrace => {
+                    if let Some(i) = open.iter().rposition(|&o| o == opener_of(t.kind)) {
+                        open.truncate(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        open
+    }
+
+    /// Skip the rest of something that failed to parse, to where parsing can
+    /// sensibly resume.
+    ///
+    /// `from` is the token the failed construct began at, and the brackets it
+    /// opened are closed again before anything else counts. Without that, a
+    /// mistake inside `Point{ … }` or `f(…)` was skipped from the mistake
+    /// itself: the literal's own `}` was taken for the end of the enclosing
+    /// block, and everything after it was read at the wrong depth — four
+    /// errors for one missing value.
+    ///
+    /// Whatever else, recovery stops at a declaration that begins a line. No
+    /// bracket is still open there in a file that is right, so one that seems
+    /// to be was never closed, and carrying on past it would swallow the rest
+    /// of the file.
+    fn skip_rest(&mut self, from: usize, resume: Resume) {
+        let mut open = self.opened_since(from);
         self.panicking = false;
+        self.split = None;
+        loop {
+            let k = self.peek();
+            if k == T::Eof || self.declaration_starts_line() {
+                return;
+            }
+            if open.is_empty() {
+                match resume {
+                    Resume::Line if k == T::Newline => {
+                        self.bump();
+                        return;
+                    }
+                    Resume::List(close) if k == T::Comma || k == close => return,
+                    _ if k.starts_declaration() => return,
+                    _ => {}
+                }
+            }
+            match k {
+                T::LParen | T::LBracket | T::LBrace => open.push(k),
+                T::RParen | T::RBracket | T::RBrace => {
+                    match open.iter().rposition(|&o| o == opener_of(k)) {
+                        Some(i) => open.truncate(i),
+                        // It closes something the failed construct is
+                        // inside: the block a statement is in, or the list an
+                        // element is in. A stray `)` in a statement is only
+                        // stray, and goes.
+                        None if k == T::RBrace || matches!(resume, Resume::List(_)) => return,
+                        None => {}
+                    }
+                }
+                _ => {}
+            }
+            self.bump();
+        }
+    }
+
+    /// Skip a declaration that failed to parse, to the next one.
+    ///
+    /// Everything at the top level is a declaration, so this looks for the
+    /// keyword that begins the next — outside any bracket the failed one
+    /// opened. `fn add(a: int b: int) -> int { … }` used to resume at the
+    /// first line break, which is inside the body, and report every
+    /// statement there as a declaration gone wrong.
+    fn skip_item(&mut self, from: usize) {
+        let mut open = self.opened_since(from);
+        self.panicking = false;
+        self.split = None;
+        loop {
+            let k = self.peek();
+            if k == T::Eof {
+                return;
+            }
+            let at_line_start = self.starts_line(self.pos);
+            let declaration = k.starts_declaration()
+                || k == T::Async
+                || (matches!(k, T::Let | T::Var) && at_line_start);
+            // A declaration at the left margin ends the one before it, even
+            // with a bracket seemingly still open.
+            let at_margin = at_line_start && self.line_indent(self.span().start) == 0;
+            if declaration && (open.is_empty() || at_margin) {
+                return;
+            }
+            match k {
+                T::LParen | T::LBracket | T::LBrace => open.push(k),
+                T::RParen | T::RBracket | T::RBrace => {
+                    if let Some(i) = open.iter().rposition(|&o| o == opener_of(k)) {
+                        open.truncate(i);
+                    }
+                }
+                _ => {}
+            }
+            self.bump();
+        }
+    }
+
+    /// Skip a declaration written inside a block, which is not somewhere a
+    /// declaration can be: its line, and any brackets it opens.
+    fn skip_declaration(&mut self) {
+        let indent = self.line_indent(self.span().start);
+        self.bump();
         let mut depth = 0i32;
         loop {
-            match self.peek() {
+            let k = self.peek();
+            match k {
                 T::Eof => return,
                 T::Newline if depth <= 0 => {
                     self.bump();
                     return;
                 }
                 T::RBrace if depth <= 0 => return,
-                T::LBrace | T::LParen | T::LBracket => {
-                    depth += 1;
-                    self.bump();
+                _ if self.declaration_starts_line()
+                    && self.line_indent(self.span().start) <= indent =>
+                {
+                    return
                 }
-                T::RBrace | T::RParen | T::RBracket => {
-                    depth -= 1;
-                    self.bump();
-                }
-                k if depth <= 0 && k.starts_declaration() => return,
-                _ => {
-                    self.bump();
-                }
+                T::LBrace | T::LParen | T::LBracket => depth += 1,
+                T::RBrace | T::RParen | T::RBracket => depth -= 1,
+                _ => {}
             }
+            self.bump();
         }
     }
 
@@ -356,11 +589,152 @@ impl<'a> Parser<'a> {
                 self.bump();
             }
             T::RBrace | T::Eof => {}
+            _ if self.unwinding => {}
             _ => {
                 self.error_expected("a line break");
-                self.synchronize();
+                self.skip_rest(self.pos, Resume::Line);
             }
         }
+    }
+
+    // ---- layout -------------------------------------------------------------
+
+    /// Whether the token at `pos` is the first thing on its line.
+    fn starts_line(&self, pos: usize) -> bool {
+        let Some(t) = self.tokens.get(pos) else { return false };
+        let start = (t.span.start as usize).min(self.src.len());
+        let line_start = self.src[..start].rfind('\n').map_or(0, |i| i + 1);
+        self.src[line_start..start]
+            .trim_start_matches(kite_lexer::BYTE_ORDER_MARK)
+            .chars()
+            .all(|c| c == ' ' || c == '\t' || c == '\r')
+    }
+
+    /// How far in the line holding `offset` is indented. A tab counts as
+    /// four, which is what the formatter would have written instead.
+    fn line_indent(&self, offset: u32) -> usize {
+        let at = (offset as usize).min(self.src.len());
+        let line_start = self.src[..at].rfind('\n').map_or(0, |i| i + 1);
+        self.src[line_start..]
+            .trim_start_matches(kite_lexer::BYTE_ORDER_MARK)
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .map(|c| if c == '\t' { 4 } else { 1 })
+            .sum()
+    }
+
+    /// Whether the current token begins a declaration and is the first thing
+    /// on its line.
+    fn declaration_starts_line(&self) -> bool {
+        let k = self.peek();
+        (k.starts_declaration() || k == T::Async) && self.split.is_none() && self.starts_line(self.pos)
+    }
+
+    // ---- braces ---------------------------------------------------------------
+
+    /// A `{` that has just been consumed, whose members are about to be read.
+    fn open_brace(&self, brace: Span) -> Open {
+        Open { brace, indent: self.line_indent(brace.start), members: None }
+    }
+
+    /// Note where a member of `open` begins, before parsing it.
+    fn member(&self, open: &mut Open) {
+        if open.members.is_none() && self.starts_line(self.pos) {
+            open.members = Some(self.line_indent(self.span().start));
+        }
+    }
+
+    /// Whether `open` was left unclosed, judging by the token about to be
+    /// read. Reports it the first time.
+    ///
+    /// A declaration keyword beginning a line no further in than the `{`, in
+    /// braces whose members are indented past it, is where the author
+    /// thought the braces had already closed. Nothing inside a block, a
+    /// struct or an `impl` is written at that indentation, so the parser has
+    /// found the end the author meant, and everything enclosing it returns
+    /// quietly. What used to happen is that `fn b` was read as a statement
+    /// of `fn a`, then everything after it too — eight errors for one brace.
+    ///
+    /// Braces whose members are not indented past them say nothing either
+    /// way, and are left to the ordinary rules — and so do braces with no
+    /// member yet, since the first one is what says how they are indented.
+    /// An unindented `impl` has its methods at the margin.
+    fn left_open(&mut self, open: &Open) -> bool {
+        if self.unwinding {
+            return true;
+        }
+        if !self.declaration_starts_line() {
+            return false;
+        }
+        let here = self.line_indent(self.span().start);
+        if here > open.indent || open.members.is_none_or(|m| m <= open.indent) {
+            return false;
+        }
+        let at = self.span();
+        self.report_unclosed(open, Some(at));
+        true
+    }
+
+    /// Report that `open` was never closed, and start unwinding.
+    fn report_unclosed(&mut self, open: &Open, declaration: Option<Span>) {
+        self.unwinding = true;
+        self.panicking = false;
+        // The token that showed the braces open already has an error of its
+        // own — the `fn` after an unclosed `f(1, 2` is where `)` was expected
+        // — and it is the same mistake.
+        if self.last_error_at == Some(self.pos) {
+            return;
+        }
+        // The `}` whose indentation gave the missing one away, if there is
+        // one inside these braces.
+        let (brace, closer) = match self.misaligned {
+            Some((brace, closer)) if brace.start > open.brace.start => (brace, Some(closer)),
+            _ => (open.brace, None),
+        };
+        let mut d = Diagnostic::error(codes::E0101, "unclosed delimiter").with_primary(
+            brace,
+            if closer.is_some() {
+                "this `{` is probably the one never closed"
+            } else {
+                "this `{` is never closed"
+            },
+        );
+        if let Some(closer) = closer {
+            d = d.with_secondary(closer, "this `}` is indented to close an outer block instead");
+        }
+        d = match declaration {
+            Some(at) => d.with_secondary(
+                at,
+                "a declaration cannot be inside braces, so they must have closed before here",
+            ),
+            None if self.in_hole => d.with_secondary(self.span(), "the interpolation ends here"),
+            None => d.with_secondary(self.span(), "the file ends here"),
+        };
+        self.diags.push(d);
+    }
+
+    /// The `}` ending `open`.
+    ///
+    /// When the braces were found unclosed — here, at the end of the file, or
+    /// by something inside them — what was read so far is kept rather than
+    /// thrown away. The declarations in it still exist for the rest of the
+    /// program, which is what keeps one missing brace one diagnostic rather
+    /// than a missing function reported at every call.
+    fn close(&mut self, open: &Open) -> Option<Span> {
+        if !self.unwinding && self.at_end() {
+            self.report_unclosed(open, None);
+        }
+        if self.unwinding {
+            return Some(self.prev_span());
+        }
+        let end = self.expect(T::RBrace)?;
+        if self.misaligned.is_none()
+            && self.starts_line(self.pos - 1)
+            && self.line_indent(end.start) != open.indent
+        {
+            self.misaligned = Some((open.brace, end));
+        }
+        Some(end)
     }
 
     fn ident(&mut self) -> Option<Ident> {
@@ -403,12 +777,16 @@ impl<'a> Parser<'a> {
             if self.at_end() {
                 break;
             }
+            // Each declaration starts afresh: whatever the one before left
+            // unclosed has been reported, and ends where this one begins.
+            self.unwinding = false;
+            self.misaligned = None;
             let before = self.pos;
             match self.parse_item() {
                 Some(item) => file.items.push(item),
                 None => {
                     let span = self.span();
-                    self.synchronize();
+                    self.skip_item(before);
                     file.items.push(Item::Error(span));
                 }
             }
@@ -507,7 +885,7 @@ impl<'a> Parser<'a> {
         if !self.at(T::Lt) {
             return Some(Vec::new());
         }
-        self.bump();
+        self.bump_opening_lt();
         let mut params = Vec::new();
         while !self.at(T::Gt) && !self.at_end() {
             let start = self.span();
@@ -524,7 +902,7 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        self.expect(T::Gt)?;
+        self.expect_closing_gt()?;
         Some(params)
     }
 
@@ -537,28 +915,40 @@ impl<'a> Parser<'a> {
         self.bump(); // `struct`
         let name = self.ident()?;
         let generics = self.parse_generics()?;
-        self.expect(T::LBrace)?;
+        let brace = self.expect(T::LBrace)?;
+        let mut open = self.open_brace(brace);
 
         let mut fields = Vec::new();
+        let mut commas = false;
         loop {
             self.skip_newlines();
-            if self.at(T::RBrace) || self.at_end() {
+            if self.at(T::RBrace) || self.at_end() || self.left_open(&open) {
                 break;
             }
+            // `pub x: int` is a field; `pub fn` is not.
+            let field = self.at(T::Pub) && matches!(self.peek_at(1), T::Ident | T::Var);
+            if self.declaration_starts_line() && !field {
+                self.misplaced_declaration(
+                    "a field",
+                    "a struct's braces hold its fields; its methods go in an `impl` block",
+                );
+                continue;
+            }
+            self.member(&mut open);
             let before = self.pos;
-            match self.parse_field_decl() {
+            match self.parse_field_decl(&mut commas) {
                 Some(f) => fields.push(f),
-                None => self.synchronize_in_braces(),
+                None => self.skip_rest(before, Resume::Line),
             }
             if self.pos == before {
                 self.bump();
             }
         }
-        let end = self.expect(T::RBrace)?;
+        let end = self.close(&open)?;
         Some(StructDecl { is_pub, name, generics, fields, derives, span: start.to(end) })
     }
 
-    fn parse_field_decl(&mut self) -> Option<FieldDecl> {
+    fn parse_field_decl(&mut self, commas: &mut bool) -> Option<FieldDecl> {
         let start = self.span();
         let is_pub = self.eat(T::Pub);
         let is_var = self.eat(T::Var);
@@ -566,36 +956,96 @@ impl<'a> Parser<'a> {
         self.expect(T::Colon)?;
         let ty = self.parse_type()?;
         let span = start.to(self.prev_span());
-        self.expect_terminator();
+        self.end_member("struct fields", commas);
         Some(FieldDecl { is_pub, is_var, name, ty, span })
+    }
+
+    /// The end of a struct field or an enum variant: a line break — or a `,`,
+    /// which is what every language with braces and commas writes there.
+    ///
+    /// The comma is reported, once per declaration, and then taken as the
+    /// line break it stands for. Treating it as an error to recover from
+    /// threw away the member after it, because a line ending in a comma
+    /// continues onto the next, so the next member was on "the same line" and
+    /// skipped with the comma.
+    fn end_member(&mut self, what: &str, commas: &mut bool) {
+        if !self.at(T::Comma) {
+            self.expect_terminator();
+            return;
+        }
+        let comma = self.bump().span;
+        if *commas || self.unwinding || self.panicking {
+            return;
+        }
+        *commas = true;
+        let mut d = Diagnostic::error(codes::E0100, format!("{} are not separated by commas", what))
+            .with_primary(comma, "remove this comma")
+            .with_note("each one goes on a line of its own, and the line break is the separator");
+        // Deleting the comma is the whole fix only where a line break or the
+        // closing brace already follows it.
+        if self.at(T::RBrace) || self.starts_line(self.pos) {
+            d = d.with_fix(Fix::replace("remove the comma", comma, ""));
+        }
+        self.diags.push(d);
+    }
+
+    /// A declaration written where only the members of something else can
+    /// be: a function inside a function, a method inside a struct.
+    ///
+    /// It is reported and skipped whole. Read token by token as whatever the
+    /// braces around it expect, it was one error per line of it.
+    fn misplaced_declaration(&mut self, expected: &str, note: &str) {
+        if !self.unwinding && !self.panicking {
+            self.last_error_at = Some(self.pos);
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0100,
+                    format!("expected {}, found `{}`", expected, self.peek().text()),
+                )
+                .with_primary(self.span(), "a declaration cannot be written here")
+                .with_note(note.to_string()),
+            );
+        }
+        self.skip_declaration();
+        self.panicking = false;
     }
 
     fn parse_enum(&mut self, is_pub: bool, derives: Vec<Ident>, start: Span) -> Option<EnumDecl> {
         self.bump(); // `enum`
         let name = self.ident()?;
         let generics = self.parse_generics()?;
-        self.expect(T::LBrace)?;
+        let brace = self.expect(T::LBrace)?;
+        let mut open = self.open_brace(brace);
 
         let mut variants = Vec::new();
+        let mut commas = false;
         loop {
             self.skip_newlines();
-            if self.at(T::RBrace) || self.at_end() {
+            if self.at(T::RBrace) || self.at_end() || self.left_open(&open) {
                 break;
             }
+            if self.declaration_starts_line() {
+                self.misplaced_declaration(
+                    "a variant",
+                    "an enum's braces hold its variants; its methods go in an `impl` block",
+                );
+                continue;
+            }
+            self.member(&mut open);
             let before = self.pos;
-            match self.parse_variant() {
+            match self.parse_variant(&mut commas) {
                 Some(v) => variants.push(v),
-                None => self.synchronize_in_braces(),
+                None => self.skip_rest(before, Resume::Line),
             }
             if self.pos == before {
                 self.bump();
             }
         }
-        let end = self.expect(T::RBrace)?;
+        let end = self.close(&open)?;
         Some(EnumDecl { is_pub, name, generics, variants, derives, span: start.to(end) })
     }
 
-    fn parse_variant(&mut self) -> Option<VariantDecl> {
+    fn parse_variant(&mut self, commas: &mut bool) -> Option<VariantDecl> {
         let start = self.span();
         let name = self.ident()?;
 
@@ -645,7 +1095,7 @@ impl<'a> Parser<'a> {
         };
 
         let span = start.to(self.prev_span());
-        self.expect_terminator();
+        self.end_member("enum variants", commas);
         Some(VariantDecl { name, payload, span })
     }
 
@@ -653,9 +1103,10 @@ impl<'a> Parser<'a> {
         self.bump(); // `trait`
         let name = self.ident()?;
         let generics = self.parse_generics()?;
-        self.expect(T::LBrace)?;
-        let methods = self.parse_method_list()?;
-        let end = self.expect(T::RBrace)?;
+        let brace = self.expect(T::LBrace)?;
+        let mut open = self.open_brace(brace);
+        let methods = self.parse_method_list(&mut open);
+        let end = self.close(&open)?;
         Some(TraitDecl { is_pub, name, generics, methods, span: start.to(end) })
     }
 
@@ -672,29 +1123,45 @@ impl<'a> Parser<'a> {
             (None, first)
         };
 
-        self.expect(T::LBrace)?;
-        let methods = self.parse_method_list()?;
-        let end = self.expect(T::RBrace)?;
+        let brace = self.expect(T::LBrace)?;
+        let mut open = self.open_brace(brace);
+        let methods = self.parse_method_list(&mut open);
+        let end = self.close(&open)?;
         Some(ImplDecl { generics, trait_path, self_ty, methods, span: start.to(end) })
     }
 
-    fn parse_method_list(&mut self) -> Option<Vec<MethodDecl>> {
+    fn parse_method_list(&mut self, open: &mut Open) -> Vec<MethodDecl> {
         let mut methods = Vec::new();
         loop {
             self.skip_newlines();
-            if self.at(T::RBrace) || self.at_end() {
+            if self.at(T::RBrace) || self.at_end() || self.left_open(open) {
                 break;
             }
+            // `fn`, `pub fn`, `async fn` and `pub async fn` are what these
+            // braces hold. Any other declaration is not a method.
+            let method = match self.peek() {
+                T::Fn | T::Async => true,
+                T::Pub => matches!(self.peek_at(1), T::Fn | T::Async),
+                _ => false,
+            };
+            if self.declaration_starts_line() && !method {
+                self.misplaced_declaration(
+                    "a method",
+                    "an `impl` or a `trait` holds methods; other declarations go at module level",
+                );
+                continue;
+            }
+            self.member(open);
             let before = self.pos;
             match self.parse_method() {
                 Some(m) => methods.push(m),
-                None => self.synchronize_in_braces(),
+                None => self.skip_rest(before, Resume::Line),
             }
-            if self.pos == before {
+            if self.pos == before && !self.unwinding {
                 self.bump();
             }
         }
-        Some(methods)
+        methods
     }
 
     fn parse_method(&mut self) -> Option<MethodDecl> {
@@ -724,21 +1191,7 @@ impl<'a> Parser<'a> {
             self.expect(T::Comma)?;
         }
 
-        let mut params = Vec::new();
-        self.skip_newlines();
-        while !self.at(T::RParen) && !self.at_end() {
-            let p_start = self.span();
-            let is_var = self.eat(T::Var);
-            let p_name = self.ident()?;
-            self.expect(T::Colon)?;
-            let ty = self.parse_type()?;
-            params.push(Param { is_var, name: p_name, ty, span: p_start.to(self.prev_span()) });
-            self.skip_newlines();
-            if !self.eat(T::Comma) {
-                break;
-            }
-            self.skip_newlines();
-        }
+        let params = self.parse_params(true)?;
         self.expect(T::RParen)?;
 
         let ret = if self.eat(T::Arrow) {
@@ -792,7 +1245,10 @@ impl<'a> Parser<'a> {
         let name = self.ident()?;
         let ty = if self.eat(T::Colon) { Some(self.parse_type()?) } else { None };
         if !self.eat(T::Eq) {
-            self.error_expected("`=`");
+            // One diagnostic, the one that names the rule. The declaration is
+            // still built, with a value that is already an error, so the name
+            // exists for everything that uses it — which used to be a second
+            // report of a missing `=` and a third of an unknown name.
             self.diags.push(
                 Diagnostic::error(codes::E0118, "a module-level `let` must have a value")
                     .with_primary(name.span, "declared here, with nothing to be")
@@ -801,7 +1257,10 @@ impl<'a> Parser<'a> {
                          nowhere else the value could come from",
                     ),
             );
-            return None;
+            let span = start.to(self.prev_span());
+            let value = Expr::Error(Span::empty_at(self.file, span.end));
+            self.expect_terminator();
+            return Some(ConstDecl { is_pub, name, ty, value, span });
         }
         let value = self.parse_expr()?;
         let span = start.to(self.prev_span());
@@ -809,32 +1268,49 @@ impl<'a> Parser<'a> {
         Some(ConstDecl { is_pub, name, ty, value, span })
     }
 
-    /// Recover to the next member boundary inside a braced declaration body,
-    /// without consuming the closing brace.
-    fn synchronize_in_braces(&mut self) {
-        self.panicking = false;
-        let mut depth = 0i32;
-        loop {
-            match self.peek() {
-                T::Eof => return,
-                T::RBrace if depth <= 0 => return,
-                T::Newline if depth <= 0 => {
-                    self.bump();
-                    return;
-                }
-                T::LBrace | T::LParen | T::LBracket => {
-                    depth += 1;
-                    self.bump();
-                }
-                T::RBrace | T::RParen | T::RBracket => {
-                    depth -= 1;
-                    self.bump();
-                }
-                _ => {
-                    self.bump();
-                }
+    /// A parameter list, after its `(` and up to its `)`.
+    ///
+    /// A comma missing between two parameters is reported and supplied.
+    /// `fn add(a: int b: int)` is a signature with one typo in it; dropping
+    /// the whole function over it made every call to `add` an error too.
+    fn parse_params(&mut self, allow_var: bool) -> Option<Vec<Param>> {
+        let mut params = Vec::new();
+        self.skip_newlines();
+        while !self.at(T::RParen) && !self.at_end() {
+            let p_start = self.span();
+            let is_var = allow_var && self.eat(T::Var);
+            let p_name = self.ident()?;
+            self.expect(T::Colon)?;
+            let ty = self.parse_type()?;
+            params.push(Param { is_var, name: p_name, ty, span: p_start.to(self.prev_span()) });
+            self.skip_newlines();
+            if self.eat(T::Comma) {
+                self.skip_newlines();
+                continue;
             }
+            let another = (self.at(T::Ident) && self.peek_at(1) == T::Colon)
+                || (allow_var && self.at(T::Var) && self.peek_at(1) == T::Ident);
+            if !another {
+                break;
+            }
+            self.missing_comma("parameters");
         }
+        Some(params)
+    }
+
+    /// Report a `,` missing before the current token, which is the start of
+    /// the list's next element, and carry on as if it had been written.
+    fn missing_comma(&mut self, between: &str) {
+        if self.panicking || self.unwinding {
+            return;
+        }
+        self.last_error_at = Some(self.pos);
+        let after = self.prev_span();
+        self.diags.push(
+            Diagnostic::error(codes::E0100, format!("expected `,` between {}", between))
+                .with_primary(self.span(), format!("found {}", self.peek().describe()))
+                .with_fix(Fix::replace("add a comma", Span::empty_at(self.file, after.end), ",")),
+        );
     }
 
     /// `@host("net")`, or `@derive(Debug, Hash)`.
@@ -918,20 +1394,7 @@ impl<'a> Parser<'a> {
         let name = self.ident()?;
 
         self.expect(T::LParen)?;
-        let mut params = Vec::new();
-        self.skip_newlines();
-        while !self.at(T::RParen) && !self.at_end() {
-            let p_start = self.span();
-            let p_name = self.ident()?;
-            self.expect(T::Colon)?;
-            let ty = self.parse_type()?;
-            params.push(Param { is_var: false, name: p_name, ty, span: p_start.to(self.prev_span()) });
-            self.skip_newlines();
-            if !self.eat(T::Comma) {
-                break;
-            }
-            self.skip_newlines();
-        }
+        let params = self.parse_params(false)?;
         self.expect(T::RParen)?;
 
         let ret = if self.eat(T::Arrow) {
@@ -949,26 +1412,7 @@ impl<'a> Parser<'a> {
         let generics = self.parse_generics()?;
 
         self.expect(T::LParen)?;
-        let mut params = Vec::new();
-        self.skip_newlines();
-        while !self.at(T::RParen) && !self.at_end() {
-            let p_start = self.span();
-            let is_var = self.eat(T::Var);
-            let p_name = self.ident()?;
-            self.expect(T::Colon)?;
-            let ty = self.parse_type()?;
-            params.push(Param {
-                is_var,
-                name: p_name,
-                ty,
-                span: p_start.to(self.prev_span()),
-            });
-            self.skip_newlines();
-            if !self.eat(T::Comma) {
-                break;
-            }
-            self.skip_newlines();
-        }
+        let params = self.parse_params(true)?;
         self.expect(T::RParen)?;
 
         let ret = if self.eat(T::Arrow) {
@@ -1071,7 +1515,7 @@ impl<'a> Parser<'a> {
             // the language has no `?` sigil at all.
             T::Ident if self.text_at(self.pos) == "Option" && self.peek_at(1) == T::Lt => {
                 self.bump();
-                self.bump();
+                self.bump_opening_lt();
                 let inner = self.parse_type()?;
                 let end = self.expect_closing_gt()?;
                 Some(Type::Optional { inner: Box::new(inner), span: start.to(end) })
@@ -1098,7 +1542,7 @@ impl<'a> Parser<'a> {
         }
         let mut args = Vec::new();
         if self.at(T::Lt) {
-            self.bump();
+            self.bump_opening_lt();
             while !self.at(T::Gt) && !self.at_end() {
                 args.push(self.parse_type()?);
                 if !self.eat(T::Comma) {
@@ -1108,6 +1552,27 @@ impl<'a> Parser<'a> {
             self.expect_closing_gt()?;
         }
         Some(TypePath { segments, args, span: start.to(self.prev_span()) })
+    }
+
+    /// The type after `as`.
+    ///
+    /// `as` converts between `int` and `float` and nothing else, so what
+    /// follows it never has type arguments — and reading a `<` there as the
+    /// start of some made `if f as int < n {` a syntax error, looking for the
+    /// `>` of a type that was never being written. A name after `as` is only
+    /// a name; anything else is parsed as a type as usual and left to the
+    /// type checker to refuse.
+    fn parse_cast_target(&mut self) -> Option<Type> {
+        if !self.at(T::Ident) || self.text_at(self.pos) == "dyn" {
+            return self.parse_type();
+        }
+        let start = self.span();
+        let mut segments = vec![self.ident()?];
+        while self.at(T::Dot) && self.peek_at(1) == T::Ident {
+            self.bump();
+            segments.push(self.ident()?);
+        }
+        Some(Type::Path(TypePath { segments, args: Vec::new(), span: start.to(self.prev_span()) }))
     }
 
     // ---- blocks and statements -------------------------------------------
@@ -1126,36 +1591,46 @@ impl<'a> Parser<'a> {
             return None;
         }
         self.bump();
+        let mut open = self.open_brace(start);
 
         let mut stmts = Vec::new();
         loop {
             self.skip_newlines();
-            if self.at(T::RBrace) || self.at_end() {
+            if self.at(T::RBrace) || self.at_end() || self.left_open(&open) {
                 break;
             }
+            if self.declaration_starts_line() {
+                let at = self.span();
+                self.misplaced_declaration(
+                    "a statement",
+                    "functions and types are declared at module level; inside a function, a \
+                     closure `|x| …` is the function value to write",
+                );
+                stmts.push(Stmt::Error(at));
+                continue;
+            }
+            self.member(&mut open);
             let before = self.pos;
             match self.parse_stmt() {
                 Some(s) => stmts.push(s),
                 None => {
                     let span = self.span();
-                    self.synchronize();
+                    self.skip_rest(before, Resume::Line);
                     stmts.push(Stmt::Error(span));
                 }
             }
-            if self.pos == before {
+            if self.pos == before && !self.unwinding {
                 self.bump();
             }
         }
 
-        if self.at_end() {
-            self.diags.push(
-                Diagnostic::error(codes::E0101, "unclosed delimiter")
-                    .with_primary(start, "this `{` is never closed")
-                    .with_secondary(self.span(), "file ends here"),
-            );
-            return Some(Block { stmts, span: start.to(self.prev_span()) });
+        let end = self.close(&open)?;
+        // A block cut short by a missing `}` ends in an error statement, so
+        // nothing downstream reasons about how the block it never saw the
+        // end of would have ended — whether it returns, say.
+        if self.unwinding {
+            stmts.push(Stmt::Error(Span::empty_at(self.file, end.end)));
         }
-        let end = self.expect(T::RBrace)?;
         Some(Block { stmts, span: start.to(end) })
     }
 
@@ -1249,14 +1724,21 @@ impl<'a> Parser<'a> {
         };
         // Unlike `let`, a `var` must be initialised: there is no definite
         // assignment story for something that may be reassigned anyway.
+        //
+        // The statement is still built, around an initialiser that is already
+        // an error, so the binding exists for the lines after it. Returning
+        // nothing used to add a missing `=` to the report, and then an unknown
+        // name for every use of the variable.
         if !self.eat(T::Eq) {
-            self.error_expected("`=`");
             self.diags.push(
                 Diagnostic::error(codes::E0110, "`var` must be initialised")
                     .with_primary(name.span, "declared here without a value")
                     .with_note("`let x: T` may be assigned later; `var` may not"),
             );
-            return None;
+            let span = start.to(self.prev_span());
+            let init = Expr::Error(Span::empty_at(self.file, span.end));
+            self.expect_terminator();
+            return Some(Stmt::Var(VarStmt { name, ty, init, span }));
         }
         let init = self.parse_expr()?;
         let span = start.to(init.span());
@@ -1340,7 +1822,13 @@ impl<'a> Parser<'a> {
         let else_ = if self.at(T::Else) {
             self.bump();
             if self.at(T::If) {
-                Some(Box::new(ElseBranch::If(self.parse_if()?)))
+                // An `else if` chain is recursion, one level per link, so it
+                // is charged against the same ceiling as any other nesting.
+                // Fifteen thousand of them used to abort the process.
+                self.deeper()?;
+                let chained = self.parse_if();
+                self.depth -= 1;
+                Some(Box::new(ElseBranch::If(chained?)))
             } else {
                 Some(Box::new(ElseBranch::Block(self.parse_block()?)))
             }
@@ -1408,23 +1896,25 @@ impl<'a> Parser<'a> {
         self.no_struct_literal -= 1;
         let scrutinee = scrutinee?;
 
-        self.expect(T::LBrace)?;
+        let brace = self.expect(T::LBrace)?;
+        let mut open = self.open_brace(brace);
         let mut arms = Vec::new();
         loop {
             self.skip_newlines();
-            if self.at(T::RBrace) || self.at_end() {
+            if self.at(T::RBrace) || self.at_end() || self.left_open(&open) {
                 break;
             }
+            self.member(&mut open);
             let before = self.pos;
             match self.parse_match_arm() {
                 Some(a) => arms.push(a),
-                None => self.synchronize_in_braces(),
+                None => self.skip_rest(before, Resume::Line),
             }
-            if self.pos == before {
+            if self.pos == before && !self.unwinding {
                 self.bump();
             }
         }
-        let end = self.expect(T::RBrace)?;
+        let end = self.close(&open)?;
 
         Some(MatchExpr {
             scrutinee: Box::new(scrutinee),
@@ -1675,7 +2165,16 @@ impl<'a> Parser<'a> {
 
     fn parse_expr_bp_inner(&mut self, min_bp: u8) -> Option<Expr> {
         let mut lhs = self.parse_prefix()?;
+        let mut links = 0;
+        let out = self.parse_infix(&mut lhs, min_bp, &mut links).map(|()| lhs);
+        self.depth -= links;
+        out
+    }
 
+    /// The operators after a left operand, for as long as they bind at
+    /// `min_bp`. Each one wraps everything before it, so each is charged as
+    /// one level of depth in `links` (see [`MAX_DEPTH`]).
+    fn parse_infix(&mut self, lhs: &mut Expr, min_bp: u8, links: &mut u32) -> Option<()> {
         #[allow(clippy::while_let_loop)]
         loop {
             let Some(op) = InfixOp::from_token(self.peek()) else {
@@ -1685,34 +2184,39 @@ impl<'a> Parser<'a> {
             if lbp < min_bp {
                 break;
             }
+            if !self.link(links) {
+                return None;
+            }
+            let left = std::mem::replace(lhs, Expr::Error(Span::empty_at(self.file, 0)));
 
-            match op {
+            *lhs = match op {
                 InfixOp::Cast => {
                     self.bump();
-                    let ty = self.parse_type()?;
-                    let span = lhs.span().to(ty.span());
-                    lhs = Expr::Cast { expr: Box::new(lhs), ty, span };
+                    let ty = self.parse_cast_target()?;
+                    let span = left.span().to(ty.span());
+                    Expr::Cast { expr: Box::new(left), ty, span }
                 }
                 InfixOp::Range { inclusive } => {
-                    self.bump();
+                    let op_span = self.bump().span;
+                    self.skip_newlines();
                     let rhs = self.parse_expr_bp(rbp)?;
-                    let span = lhs.span().to(rhs.span());
-                    lhs = Expr::Range {
-                        start: Box::new(lhs),
-                        end: Box::new(rhs),
-                        inclusive,
-                        span,
-                    };
+                    self.range(left, rhs, inclusive, op_span)
                 }
                 InfixOp::Binary(bop) => {
                     let op_span = self.span();
                     self.bump();
+                    // A line that ends in an operator continues onto the next,
+                    // which the lexer cannot always see: `>` and `>>` close
+                    // type argument lists too, so it keeps the line break after
+                    // them. Here the operator has been consumed as binary, so
+                    // the break is inside an expression and ends nothing.
+                    self.skip_newlines();
                     let rhs = self.parse_expr_bp(rbp)?;
 
                     // Comparison is non-associative: `a < b < c` is rejected
                     // rather than silently comparing a bool to an int.
                     if bop.is_comparison() {
-                        if let Expr::Binary { op: inner, .. } = &lhs {
+                        if let Expr::Binary { op: inner, .. } = &left {
                             if inner.is_comparison() {
                                 self.diags.push(
                                     Diagnostic::error(
@@ -1720,7 +2224,7 @@ impl<'a> Parser<'a> {
                                         "comparison operators cannot be chained",
                                     )
                                     .with_primary(op_span, "second comparison here")
-                                    .with_secondary(lhs.span(), "first comparison here")
+                                    .with_secondary(left.span(), "first comparison here")
                                     .with_note(
                                         "write `a < b && b < c` to compare three values",
                                     ),
@@ -1729,53 +2233,98 @@ impl<'a> Parser<'a> {
                         }
                     }
 
-                    let span = lhs.span().to(rhs.span());
-                    lhs = Expr::Binary {
-                        op: bop,
-                        lhs: Box::new(lhs),
-                        rhs: Box::new(rhs),
-                        span,
-                    };
+                    let span = left.span().to(rhs.span());
+                    Expr::Binary { op: bop, lhs: Box::new(left), rhs: Box::new(rhs), span }
                 }
-            }
+            };
         }
+        Some(())
+    }
 
-        Some(lhs)
+    /// `start..end` or `start..=end`, refusing one range as the start of
+    /// another.
+    ///
+    /// A range is non-associative, as §5.1 says: `a..b..c` has no meaning to
+    /// give. It used to parse as a range whose start was a range, and reach
+    /// the type checker as something stranger than a syntax error.
+    fn range(&mut self, start: Expr, end: Expr, inclusive: bool, op_span: Span) -> Expr {
+        let span = start.span().to(end.span());
+        if let Expr::Range { span: first, .. } = &start {
+            self.diags.push(
+                Diagnostic::error(codes::E0100, "ranges cannot be chained")
+                    .with_primary(op_span, "second range here")
+                    .with_secondary(*first, "first range here")
+                    .with_note("a range has one start and one end"),
+            );
+            // Not a range of ranges for the type checker to find fault with
+            // as well.
+            return Expr::Error(span);
+        }
+        Expr::Range { start: Box::new(start), end: Box::new(end), inclusive, span }
     }
 
     /// Prefix operators bind looser than postfix ones, so the recursive call
     /// consumes the postfix chain before the prefix operator wraps it:
     /// `-x.foo` is `-(x.foo)`, and `await f()` is `await (f())`.
+    ///
+    /// Each prefix operator is a level of recursion, charged against the
+    /// depth ceiling like any other: thirty thousand `-` in a row used to
+    /// exhaust the stack before anything could report it.
     fn parse_prefix(&mut self) -> Option<Expr> {
         let start = self.span();
         match self.peek() {
             T::Minus => {
                 self.bump();
-                let operand = self.parse_prefix()?;
+                let operand = self.prefix_operand()?;
                 let span = start.to(operand.span());
                 Some(Expr::Unary { op: UnaryOp::Neg, operand: Box::new(operand), span })
             }
             T::Bang => {
                 self.bump();
-                let operand = self.parse_prefix()?;
+                let operand = self.prefix_operand()?;
                 let span = start.to(operand.span());
                 Some(Expr::Unary { op: UnaryOp::Not, operand: Box::new(operand), span })
             }
             T::Await => {
                 self.bump();
-                let operand = self.parse_prefix()?;
+                let operand = self.prefix_operand()?;
                 let span = start.to(operand.span());
                 Some(Expr::Await { expr: Box::new(operand), span })
             }
             _ => {
                 let primary = self.parse_primary()?;
-                self.parse_postfix(primary)
+                let mut links = 0;
+                let out = self.parse_postfix(primary, &mut links);
+                self.depth -= links;
+                out
             }
         }
     }
 
-    fn parse_postfix(&mut self, mut expr: Expr) -> Option<Expr> {
+    /// The operand of a prefix operator, one level deeper.
+    fn prefix_operand(&mut self) -> Option<Expr> {
+        self.deeper()?;
+        let out = self.parse_prefix();
+        self.depth -= 1;
+        out
+    }
+
+    /// The postfix chain after a primary: `.name`, `(args)`, `[index]` and
+    /// `Type{ … }`. Each link wraps everything before it, so each is charged
+    /// as one level of depth in `links` (see [`MAX_DEPTH`]).
+    fn parse_postfix(&mut self, mut expr: Expr, links: &mut u32) -> Option<Expr> {
         loop {
+            let link = match self.peek() {
+                T::Dot | T::LParen | T::LBracket => true,
+                T::LBrace => self.no_struct_literal == 0 && type_path_of(&expr).is_some(),
+                _ => false,
+            };
+            if !link {
+                return Some(expr);
+            }
+            if !self.link(links) {
+                return None;
+            }
             match self.peek() {
                 T::Dot => {
                     self.bump();
@@ -1824,10 +2373,28 @@ impl<'a> Parser<'a> {
                         arg_names.push(name);
                         args.push(self.in_brackets(|p| p.parse_expr())?);
                         self.skip_newlines();
-                        if !self.eat(T::Comma) {
+                        if self.eat(T::Comma) {
+                            self.skip_newlines();
+                            continue;
+                        }
+                        // `f(a b)`: a second argument where the `,` should
+                        // be. Only a token that can begin an expression and
+                        // cannot continue one says so.
+                        if !matches!(
+                            self.peek(),
+                            T::Ident
+                                | T::Int
+                                | T::Float
+                                | T::Str
+                                | T::Char
+                                | T::True
+                                | T::False
+                                | T::Nil
+                                | T::SelfKw
+                        ) {
                             break;
                         }
-                        self.skip_newlines();
+                        self.missing_comma("arguments");
                     }
                     let end = self.expect(T::RParen)?;
                     let span = expr.span().to(end);
@@ -1835,7 +2402,7 @@ impl<'a> Parser<'a> {
                 }
                 T::LBracket => {
                     self.bump();
-                    let index = self.in_brackets(|p| p.parse_expr())?;
+                    let index = self.in_brackets(|p| p.parse_index())?;
                     let end = self.expect(T::RBracket)?;
                     let span = expr.span().to(end);
                     expr = Expr::Index {
@@ -1847,20 +2414,64 @@ impl<'a> Parser<'a> {
                 // `Point{ x: 1.0 }`. Suppressed inside an `if`/`for`/`match`
                 // scrutinee, where `{` opens the body; the specification tells
                 // the user to parenthesise in that position.
-                T::LBrace if self.no_struct_literal == 0 => {
-                    // `ui.Style{ … }` reaches here as a field access, because
-                    // `a.b` is a resolution question rather than a syntactic
-                    // one. Only a chain of plain names can be a type, so
-                    // anything else stays a field access and the `{` is left
-                    // for whatever follows.
-                    let Some(path) = type_path_of(&expr) else {
-                        return Some(expr);
-                    };
+                //
+                // `ui.Style{ … }` reaches here as a field access, because
+                // `a.b` is a resolution question rather than a syntactic one.
+                // Only a chain of plain names can be a type, so anything else
+                // stays a field access and the `{` is left for whatever
+                // follows — which `link` above has already decided.
+                _ => {
+                    let path = type_path_of(&expr)?;
                     expr = Expr::StructLit(self.parse_struct_literal(path)?);
                 }
-                _ => return Some(expr),
             }
         }
+    }
+
+    /// What is between the brackets of `xs[…]`: an index, or a range.
+    ///
+    /// A range here may leave out either end, or both — `xs[a..]`, `xs[..b]`,
+    /// `xs[..]` — and nowhere else, since only a window over a sequence has
+    /// an obvious edge to stop at. The missing end is filled in with the
+    /// bound a subslice clamps to anyway: `0` for the start, the largest
+    /// `int` for the end. Because a range index clamps rather than traps
+    /// (§5.4), that is the whole of what an open end means, and no backend
+    /// has to know the difference.
+    fn parse_index(&mut self) -> Option<Expr> {
+        // Everything tighter than a range; the range itself is built here.
+        const INSIDE_RANGE: u8 = 3;
+        let start = if matches!(self.peek(), T::DotDot | T::DotDotEq) {
+            Expr::ImpliedInt { value: 0, span: Span::empty_at(self.file, self.span().start) }
+        } else {
+            let first = self.parse_expr_bp(INSIDE_RANGE)?;
+            if !matches!(self.peek(), T::DotDot | T::DotDotEq) {
+                // Not a range after all. Nothing looser than a range can
+                // follow an index, so what comes next is the `]`, or a
+                // syntax error the caller reports.
+                return Some(first);
+            }
+            first
+        };
+        let op = self.bump();
+        let inclusive = op.kind == T::DotDotEq;
+        self.skip_newlines();
+        let end = if self.at(T::RBracket) {
+            if inclusive {
+                self.error_expected("the last index, which an inclusive range needs");
+                return None;
+            }
+            Expr::ImpliedInt { value: i64::MAX, span: Span::empty_at(self.file, op.span.end) }
+        } else {
+            self.parse_expr_bp(INSIDE_RANGE)?
+        };
+        let range = self.range(start, end, inclusive, op.span);
+        if matches!(self.peek(), T::DotDot | T::DotDotEq) {
+            // `xs[a..b..c]`, refused where it is built.
+            let op_span = self.bump().span;
+            let rest = self.parse_expr_bp(INSIDE_RANGE)?;
+            return Some(self.range(range, rest, false, op_span));
+        }
+        Some(range)
     }
 
     fn parse_primary(&mut self) -> Option<Expr> {
@@ -2058,39 +2669,134 @@ impl<'a> Parser<'a> {
                 (start + text_end) as u32,
             )));
         }
+        if open == 3 {
+            parts = self.dedent_parts(parts);
+        }
         Some(parts)
+    }
+
+    /// A block string's pieces, with the indentation its closing delimiter
+    /// sets taken off every line.
+    ///
+    /// This is `§2.4`'s rule, and the one a block string without holes gets
+    /// from the type checker: the line break after the opening `"""` goes,
+    /// the closing delimiter's line goes, and its indentation comes off the
+    /// front of every line. A string with a hole in it used to keep all of
+    /// it — the same text written with and without a `\(n)` came out
+    /// differently indented.
+    ///
+    /// It is done here, by cutting the text pieces rather than rewriting
+    /// them, because a piece is a span of the source: the whitespace that
+    /// goes is simply left out between two spans. Everything downstream
+    /// joins the pieces as they are.
+    fn dedent_parts(&self, parts: Vec<StrPart>) -> Vec<StrPart> {
+        let text = |s: Span| &self.src[s.start as usize..s.end as usize];
+        let mut parts = parts;
+
+        // The line break after the opening delimiter.
+        if let Some(StrPart::Text(first)) = parts.first_mut() {
+            let skip = if text(*first).starts_with("\r\n") {
+                2
+            } else if text(*first).starts_with('\n') {
+                1
+            } else {
+                0
+            };
+            first.start += skip;
+        }
+
+        // The closing delimiter's line, which has to hold nothing but its
+        // indentation — a string whose `"""` ends a line of text keeps
+        // every line as written.
+        let indent = match parts.last_mut() {
+            Some(StrPart::Text(last)) => match text(*last).rfind('\n') {
+                Some(at) if text(*last)[at + 1..].chars().all(|c| c == ' ' || c == '\t') => {
+                    let indent = &self.src[last.start as usize + at + 1..last.end as usize];
+                    last.end = last.start + at as u32;
+                    indent
+                }
+                _ => return parts.into_iter().filter(|p| !is_empty_text(p)).collect(),
+            },
+            _ => return parts.into_iter().filter(|p| !is_empty_text(p)).collect(),
+        };
+
+        let mut out = Vec::new();
+        let mut line_start = true;
+        for part in parts {
+            let StrPart::Text(span) = part else {
+                out.push(part);
+                line_start = false;
+                continue;
+            };
+            let mut from = span.start as usize;
+            let end = span.end as usize;
+            loop {
+                if line_start {
+                    let line = &self.src[from..end];
+                    let strip = if line.starts_with(indent) {
+                        indent.len()
+                    } else {
+                        line.len() - line.trim_start_matches([' ', '\t']).len()
+                    };
+                    from += strip;
+                }
+                match self.src[from..end].find('\n') {
+                    Some(at) => {
+                        let to = from + at + 1;
+                        out.push(StrPart::Text(Span::new(self.file, from as u32, to as u32)));
+                        from = to;
+                        line_start = true;
+                    }
+                    None => {
+                        if from < end {
+                            out.push(StrPart::Text(Span::new(self.file, from as u32, end as u32)));
+                        }
+                        line_start = false;
+                        break;
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Parse one hole's expression, over a byte range of the file.
     fn parse_hole(&mut self, start: usize, end: usize) -> Expr {
-        let tokens = kite_lexer::tokenize_range(self.file, self.src, start, end, self.diags);
-        let mut sub = Parser {
-            file: self.file,
-            src: self.src,
-            tokens: &tokens,
-            pos: 0,
-            diags: self.diags,
-            panicking: false,
-            no_struct_literal: 0,
-            in_hole: true,
-            split_gt: false,
-            // A hole holding a string holding a hole is still this process's
-            // stack, so the sub-parser continues the count rather than
-            // starting a fresh one.
-            depth: self.depth,
-            depth_reported: self.depth_reported,
-        };
+        let tokens =
+            kite_lexer::tokenize_range(self.file, self.src, start, end, self.strings + 1, self.diags);
+        let mut sub = Parser::new(self.file, self.src, &tokens, self.diags);
+        sub.in_hole = true;
+        sub.strings = self.strings + 1;
+        // A hole holding a string holding a hole is still this process's
+        // stack, so the sub-parser continues the count rather than starting a
+        // fresh one.
+        sub.depth = self.depth;
+        sub.depth_reported = self.depth_reported;
         let span = Span::new(self.file, start as u32, end as u32);
-        match sub.parse_expr() {
+        let expr = match sub.parse_expr() {
             Some(e) => e,
             None => Expr::Error(span),
+        };
+        // A hole is one expression. Whatever is left after it used to be
+        // dropped without a word, so `"sum: \(a b)"` printed `sum: 1`.
+        sub.skip_newlines();
+        if !sub.at_end() && !sub.panicking {
+            let leftover = sub.span();
+            sub.diags.push(
+                Diagnostic::error(codes::E0100, "expected `)` to close the interpolation")
+                    .with_primary(leftover, format!("found {}", sub.peek().describe()))
+                    .with_note("an interpolation holds a single expression"),
+            );
         }
+        self.depth_reported = sub.depth_reported;
+        expr
     }
 
     /// The `{ .. }` of a struct literal. `path` has already been consumed.
     fn parse_struct_literal(&mut self, path: TypePath) -> Option<StructLit> {
         let start = path.span;
-        self.bump(); // `{`
+        let brace = self.bump().span; // `{`
+        let mut open = self.open_brace(brace);
         self.skip_newlines();
 
         // `Point{ ..p, y: 5.0 }` produces a new value; it never mutates `p`.
@@ -2105,12 +2811,24 @@ impl<'a> Parser<'a> {
         };
 
         let mut fields = Vec::new();
-        while !self.at(T::RBrace) && !self.at_end() {
+        while !self.at(T::RBrace) && !self.at_end() && !self.left_open(&open) {
+            self.member(&mut open);
             let f_start = self.span();
             let name = self.ident()?;
             // `Point{ x }` is shorthand for `Point{ x: x }`.
             let value = if self.eat(T::Colon) {
-                self.parse_expr()?
+                let value_start = self.pos;
+                match self.parse_expr() {
+                    Some(value) => value,
+                    // One field's value is wrong, and that is all that is
+                    // wrong: the rest of the literal is read as usual, and
+                    // the binding it initialises still exists.
+                    None => {
+                        let at = self.span();
+                        self.skip_rest(value_start, Resume::List(T::RBrace));
+                        Expr::Error(at)
+                    }
+                }
             } else {
                 Expr::Path(Path { span: name.span, segments: vec![name.clone()] })
             };
@@ -2121,7 +2839,7 @@ impl<'a> Parser<'a> {
             }
             self.skip_newlines();
         }
-        let end = self.expect(T::RBrace)?;
+        let end = self.close(&open)?;
         Some(StructLit { path, base, fields, span: start.to(end) })
     }
 

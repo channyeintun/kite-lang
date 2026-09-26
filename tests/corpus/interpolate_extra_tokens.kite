@@ -1,0 +1,8 @@
+// A hole is one expression. What was left after it used to be dropped without
+// a word, so this printed `sum: 1`.
+
+fn main() {
+    let a = 1
+    let b = 2
+    io.print("sum: \(a b)") //~ ERROR E0100
+}

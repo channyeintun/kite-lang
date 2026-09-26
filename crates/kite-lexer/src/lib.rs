@@ -32,7 +32,18 @@ pub struct Comment {
     pub span: Span,
     /// `///` — attaches to the declaration that follows.
     pub doc: bool,
+    /// `//!` — documents the file it is in rather than anything in it: the
+    /// module's own overview, wherever in the header it is written.
+    pub module: bool,
 }
+
+/// The byte-order mark some editors write at the start of a UTF-8 file.
+///
+/// It is an encoding signature rather than text — UTF-8 has no byte order to
+/// mark — so it is not read as a token. It was once reported as an invalid
+/// character, which made a file saved by a Windows editor fail on its first
+/// byte with an error pointing at nothing visible.
+pub const BYTE_ORDER_MARK: char = '\u{feff}';
 
 /// Tokenise `text`. Always returns a stream ending in `Eof`, even when
 /// diagnostics were produced — later passes can then still make progress and
@@ -47,11 +58,12 @@ pub fn tokenize_with_comments(
     text: &str,
     diags: &mut DiagBag,
 ) -> (Vec<Token>, Vec<Comment>) {
+    let start = if text.starts_with(BYTE_ORDER_MARK) { BYTE_ORDER_MARK.len_utf8() } else { 0 };
     Lexer {
         file,
         src: text,
         bytes: text.as_bytes(),
-        pos: 0,
+        pos: start,
         limit: text.len(),
         out: Vec::new(),
         comments: Vec::new(),
@@ -70,11 +82,21 @@ pub fn tokenize_with_comments(
 /// file rather than an offset into a fragment. That is what lets an
 /// interpolated `\(expr)` be parsed as an ordinary expression and still point
 /// at the right place in a diagnostic.
+///
+/// `strings` is how many string literals enclose the range — one for the
+/// hole of a literal at the top level. It continues the whole-file scan's
+/// count of nested interpolations rather than starting a fresh one, so the
+/// ceiling on them falls at the same depth here as it did there. The
+/// whole-file scan has already reported reaching it, so this one does not
+/// report it again: a hole is re-scanned once per level it is nested, and a
+/// file seventy levels deep used to hear about the ceiling once per level
+/// past it.
 pub fn tokenize_range(
     file: FileId,
     text: &str,
     start: usize,
     end: usize,
+    strings: u32,
     diags: &mut DiagBag,
 ) -> Vec<Token> {
     Lexer {
@@ -87,8 +109,8 @@ pub fn tokenize_range(
         comments: Vec::new(),
         delims: Vec::new(),
         pending_newline: false,
-        nesting: 0,
-        nesting_reported: false,
+        nesting: strings,
+        nesting_reported: strings > 0,
         diags,
     }
     .run()
@@ -222,6 +244,7 @@ impl<'a> Lexer<'a> {
                 Some(b'/') if self.peek_at(1) == Some(b'/') => {
                     let start = self.pos;
                     let doc = self.peek_at(2) == Some(b'/');
+                    let module = self.peek_at(2) == Some(b'!');
                     while let Some(c) = self.peek() {
                         if c == b'\n' {
                             break;
@@ -231,6 +254,7 @@ impl<'a> Lexer<'a> {
                     self.comments.push(Comment {
                         span: Span::new(self.file, start as u32, self.pos as u32),
                         doc,
+                        module,
                     });
                 }
                 Some(b'/') if self.peek_at(1) == Some(b'*') => {
@@ -322,6 +346,18 @@ impl<'a> Lexer<'a> {
     fn scan_number(&mut self) -> TokenKind {
         let start = self.pos;
 
+        // `t.0.1` is two tuple indexes, not `t` followed by the float `0.1`.
+        // After a `.` a number is a member name, so it is digits and nothing
+        // more: no fraction, no exponent, no radix. Without this the only
+        // spelling was `t.0 .1`, which the formatter then tightened back into
+        // the one that does not lex.
+        if self.last_kind() == Some(TokenKind::Dot) {
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                self.pos += 1;
+            }
+            return TokenKind::Int;
+        }
+
         if self.peek() == Some(b'0') {
             match self.peek_at(1) {
                 Some(b'x') | Some(b'X') => return self.scan_radix(start, 16),
@@ -357,16 +393,26 @@ impl<'a> Lexer<'a> {
         }
 
         let before_suffix = self.pos;
-        self.eat_suffix();
+        let suffixed = self.eat_suffix();
         let suffix = &self.src[before_suffix..self.pos];
         let digits = &self.src[start..before_suffix];
 
-        if digits.ends_with('_') || digits.contains("__") {
+        if !separators_between_digits(digits, 10) {
             self.error_here(
                 codes::E0004,
                 start,
                 "invalid number literal",
                 "digit separators must appear between digits",
+            );
+        } else if is_float && !suffixed && float_overflows(digits) {
+            // An `int` too large for 64 bits is refused, so a `float` too
+            // large for 64 bits is refused too. It used to become infinity
+            // without a word, which no one writing `1e999` meant.
+            self.error_here(
+                codes::E0004,
+                start,
+                "float literal is out of range",
+                "the largest finite `float` is about 1.8e308",
             );
         }
 
@@ -387,6 +433,15 @@ impl<'a> Lexer<'a> {
                 start,
                 "invalid number literal",
                 "expected at least one digit after the radix prefix",
+            );
+        } else if !separators_between_digits(&self.src[digits_start..self.pos], radix) {
+            // `0x_F`, `0xFF_` and `0b__1` were accepted while `1_` was not.
+            // One rule for every radix: a separator sits between two digits.
+            self.error_here(
+                codes::E0004,
+                start,
+                "invalid number literal",
+                "digit separators must appear between digits",
             );
         }
         self.eat_suffix();
@@ -409,7 +464,8 @@ impl<'a> Lexer<'a> {
     /// They were once consumed and thrown away, which made `300i8` read as a
     /// width the compiler was checking — when there was no `i8` for the value
     /// to overflow, and 300 came out as 300.
-    fn eat_suffix(&mut self) {
+    /// Returns whether a suffix was found (and reported).
+    fn eat_suffix(&mut self) -> bool {
         const SUFFIXES: [&str; 10] = [
             "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64",
         ];
@@ -428,10 +484,11 @@ impl<'a> Lexer<'a> {
                         "Kite has one integer, `int`, and one float, `float`; write the number \
                          on its own",
                     );
-                    return;
+                    return true;
                 }
             }
         }
+        false
     }
 
     /// Whether the delimiter starts at `self.pos`.
@@ -606,6 +663,28 @@ impl<'a> Lexer<'a> {
                 .with_note(note.to_string()),
         );
     }
+}
+
+/// Whether every `_` in a number sits between two digits of its radix.
+///
+/// That is the whole rule, in every part of a literal: `1_000`, `0xFF_FF` and
+/// `1.5e1_0` are fine; `1_`, `0x_F`, `1__0`, `1_.5` and `1.5_e3` are not. The
+/// radix prefix is not part of `text` for a radix literal, so a separator
+/// straight after `0x` has nothing before it.
+fn separators_between_digits(text: &str, radix: u32) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    chars.iter().enumerate().all(|(i, &c)| {
+        c != '_'
+            || (i > 0
+                && chars[i - 1].is_digit(radix)
+                && chars.get(i + 1).is_some_and(|n| n.is_digit(radix)))
+    })
+}
+
+/// Whether a well-formed float literal is too large to be a finite `float`.
+fn float_overflows(text: &str) -> bool {
+    let digits: String = text.chars().filter(|c| *c != '_').collect();
+    digits.parse::<f64>().is_ok_and(|v| v.is_infinite())
 }
 
 /// Whether a newline between `prev` and `next` separates two statements.

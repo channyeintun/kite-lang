@@ -1,0 +1,10 @@
+// A struct whose `}` is missing ends where the next declaration begins, and
+// keeps the fields it had, so the literal below still checks.
+
+struct P { //~ ERROR E0101
+    x: int
+
+fn main() {
+    let p = P{ x: 1 }
+    io.print(p.x)
+}

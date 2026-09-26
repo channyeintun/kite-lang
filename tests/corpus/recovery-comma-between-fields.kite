@@ -1,0 +1,13 @@
+// Fields are separated by line breaks. A comma is reported once and read as a
+// line break; it used to swallow the field after it, because a line ending in
+// a comma continues onto the next.
+
+struct P {
+    x: int, //~ ERROR E0100
+    y: int,
+}
+
+fn main() {
+    let p = P{ x: 1, y: 2 }
+    io.print(p.x + p.y)
+}
