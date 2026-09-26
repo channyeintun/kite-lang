@@ -1044,6 +1044,32 @@ corrupted the heap on the other two — which is the argument for running CI on
 three operating systems, and for the differential corpus being the thing that
 noticed.
 
+**Correction: "plus sixteen" was not true on AArch64 either — not on Linux.**
+The paragraph above says the walk's assumption holds on AArch64, and it holds
+only on Apple's. The frame a Kite function calls is usually a Rust function in
+`kite-rt`, and on AArch64 Linux LLVM puts that function's frame record *below*
+the registers it saves, so the caller's stack pointer is the record plus 16
+plus the save area — every stack-map slot was read 32 to 80 bytes low, the
+collector rewrote saved registers as references and missed the real ones.
+`aarch64-unknown-linux-musl` was a shipped target, and no CI job ran it; a
+review found it by reading the assembly LLVM emits for that triple. The walk
+no longer derives a stack pointer from the callee at all: the code generator
+records each slot as a distance below the Kite frame's *own* frame pointer,
+using the frame layout Cranelift reports, and the walk subtracts it from the
+frame pointer the callee's record holds — which is the same on every target.
+A unit test lays out that platform's stack by hand. The same review found the
+walk gave up silently after a million frames, losing every root above them,
+and that the check the comments promised — that the walk reaches the program's
+entry — did not exist; both are traps now. Windows stays refused: its
+explanation had blamed the same assumption, but what may be left there is the
+frame-pointer chain itself, and that still wants a Windows machine to settle.
+
+The same pass made `kitec build --emit native` link out of the box — the
+runtime is compiled into `kitec` rather than looked for beside it, where Cargo
+never put it and no release shipped it — made `kitec run --native` print as it
+goes instead of collecting everything until exit, and gave the native runtime
+the `std/fs` host the VM already had, so `fs_test` passes on both.
+
 **What the collector does not do**, said plainly because a collector's gaps are
 where the surprises live:
 
