@@ -171,23 +171,26 @@ fn main() {
 ### Maps
 
 The prelude has nothing for them. No `merge`, no `get_or`, no `map_values` — a
-map's whole surface is three methods and the index: `len`, `keys`, `values`,
-`m[k]` (an `Option<V>`) and `m[k] = v`.
+map's whole surface is four methods and the index: `len`, `keys`, `values`,
+`remove`, `m[k]` (an `Option<V>`) and `m[k] = v`.
 
-**A key cannot be removed.** `m.remove(k)` is `E0205`, whose note is the
-surface list above; there is no `delete` statement; and `m[k] = nil` is `E0200`
-because `nil` is not a value of `V`.
+**`m.remove(k)` drops a key** and shifts the entries after it down, so
+insertion order keeps meaning what it says; a key that is not there is not an
+error. The receiver has to be a plain `var` binding, as for `xs.push(v)`,
+because a map is a copy-on-write value. **`m[k] = nil` is not removal**: it is
+`E0200` because `nil` is not a value of `V`.
 
 ```kite fails
 fn main() {
     var counts = { "a": 1, "b": 2 }
-    counts.remove("a")   //~ E0205
+    counts.remove("a")
+    counts["b"] = nil   //~ E0200
     io.print("\(counts.len())")
 }
 ```
 
-Removal is a rebuild, and the copy is visible in the code rather than hidden in
-a method:
+A copy without one key is a loop, and the copy is visible in the code rather
+than hidden in a method:
 
 ```kite
 fn without(m: { str: int }, key: str) -> { str: int } {
@@ -942,7 +945,7 @@ per-row state.
 **Write the handler where the control is.** It closes over what is in scope
 there, so nothing has to be encoded into `data-` attributes and parsed back:
 
-```kite
+```kite ignore
 html.txt("button", [html.class("primary"), html.click(|e: dom.Event| {
     settle(app, bill.id)
 })], "Split it")
@@ -1033,7 +1036,7 @@ Helpers: `ok(body)` `not_found()` `status(code, body)` `succeeded(r)`
 a page may not set a `Cookie` header itself — so an app that signs in with a
 cookie uses `send_with(method, url, body, Options)`:
 
-```kite
+```kite ignore
 let signed_in = http.Options{ ..http.sending(), credentials: http.Credentials.Include }
 let (res, err) = await http.send_with("POST", url, body, signed_in)
 ```

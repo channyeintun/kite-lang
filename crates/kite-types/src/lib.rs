@@ -1236,7 +1236,12 @@ impl<'a> Checker<'a> {
         // Only a *call* is marked. `let e: error = nil` is a deliberate
         // absence and there is nothing there to drop; reading the binding
         // anywhere clears it, because reading an error is inspecting it.
-        if ty == TyId::ERR {
+        //
+        // A whole `(T, error)` bound to one name is the same hole one level
+        // up: `let p = load()` never destructures, so R1 never marks an error
+        // and the failure inside `p` went out of scope in silence. Taking it
+        // apart later, or returning it, reads it and clears the mark.
+        if ty == TyId::ERR || self.types.fallible_value(ty).is_some() {
             if let Some(i) = &init {
                 if is_call(&i.kind) {
                     self.taint[local_id as usize] = Taint::Unchecked;
@@ -5264,25 +5269,37 @@ impl<'a> Checker<'a> {
     /// Run once at the end of the body, where all paths have merged, so a
     /// single error is reported once rather than per branch.
     fn report_unchecked_errors(&mut self) {
-        let mut pending: Vec<(String, Span)> = Vec::new();
+        let mut pending: Vec<(String, Span, bool)> = Vec::new();
         for (i, state) in self.taint.iter().enumerate() {
             if *state == Taint::Unchecked && !self.locals[i].synthetic {
-                pending.push((self.locals[i].name.clone(), self.locals[i].span));
+                let local = &self.locals[i];
+                let pair = self.types.fallible_value(local.ty).is_some();
+                pending.push((local.name.clone(), local.span, pair));
             }
         }
-        for (name, span) in pending {
-            self.diags.push(
-                Diagnostic::error(codes::E0302, format!("`{}` is never checked", name))
-                    .with_primary(span, "this error goes out of scope uninspected")
-                    .with_note(
-                        "silently dropping errors is the single most common source of \
-                         production failures in languages that permit it",
-                    )
-                    .with_note(
-                        "to propagate, write `check` on its own line; to handle it here, \
-                         test `err != nil`",
-                    ),
+        for (name, span, pair) in pending {
+            let d = Diagnostic::error(codes::E0302, format!("`{}` is never checked", name));
+            let d = if pair {
+                d.with_primary(span, "the error in this result goes out of scope uninspected")
+            } else {
+                d.with_primary(span, "this error goes out of scope uninspected")
+            };
+            let d = d.with_note(
+                "silently dropping errors is the single most common source of \
+                 production failures in languages that permit it",
             );
+            let d = if pair {
+                d.with_note(
+                    "take the result apart where it is bound — `let (value, err) = …` — \
+                     and then check `err`",
+                )
+            } else {
+                d.with_note(
+                    "to propagate, write `check` on its own line; to handle it here, \
+                     test `err != nil`",
+                )
+            };
+            self.diags.push(d);
         }
     }
 

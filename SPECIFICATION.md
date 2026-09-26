@@ -831,8 +831,13 @@ The rules:
 > **R6.** A call left as a bare statement, whose type is `error` or `(T,
 > error)`, is a compile error (`E0302`). Binding nothing is not a way out of
 > binding an error.
+>
+> **R7.** A call whose `error`, or whose whole `(T, error)`, is bound to a
+> single name makes that binding Unchecked. Reading it — testing it, checking
+> it, returning it, taking it apart — inspects it, and R3 applies otherwise.
+> Binding everything under one name is not a way out either.
 
-R1–R5 are about bindings, and R6 is what closes the shape they leave open: a
+R1–R5 are about bindings, and R6 and R7 close the shapes they leave open: a
 call written as a statement makes no binding, so nothing in R1–R5 ever sees it,
 and `dom.set_text(e, "hi")` would drop its failure in silence. That is
 [§7.1](#71-the-problem-being-solved)'s first flaw arriving through the one door
