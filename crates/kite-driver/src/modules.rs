@@ -146,6 +146,19 @@ impl Files {
             Files::Memory(_) => normalise(path),
         }
     }
+
+    /// A path made absolute by reading it, without resolving links — so the
+    /// directories above it are the ones it was written under, and a bundle
+    /// can lay the same tree out again.
+    fn absolute(&self, path: &Path) -> PathBuf {
+        match self {
+            Files::Disk if path.is_relative() => match std::env::current_dir() {
+                Ok(here) => normalise(&here.join(path)),
+                Err(_) => normalise(path),
+            },
+            _ => normalise(path),
+        }
+    }
 }
 
 /// `.` and `..` folded away by reading the path, not the disk.
@@ -431,7 +444,10 @@ impl Loader {
         sources: &mut SourceMap,
         diags: &mut DiagBag,
     ) -> Rc<HashMap<String, PathBuf>> {
-        let start = self.files.canonical(dir);
+        // From the absolute directory, so `kitec run main.kite` inside `src/`
+        // finds the manifest beside `src/` exactly as `kitec run src/main.kite`
+        // does from above it.
+        let start = self.files.absolute(dir);
         let mut here = Some(start.as_path());
         while let Some(directory) = here {
             if self.files.is_file(&directory.join("kite.toml")) {
