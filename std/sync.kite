@@ -67,12 +67,20 @@ pub fn try_lock<T>(var m: Mutex<T>) -> Option<T> {
 /// Yielding rather than spinning is what makes this work at all under a
 /// cooperative scheduler: a spin would never let the holder run, so the lock
 /// would never be released and the program would hang rather than wait.
+///
+/// And parking before each yield, as `task.race` does, is what makes it work
+/// when the holder is *sleeping*. The clock jumps to the next deadline only
+/// when every task is waiting, and a task that merely yields is not waiting —
+/// it is ready to run again at once. So a waiter that only yielded kept the
+/// clock where it was, the holder's `task.sleep` never ended, the lock was
+/// never released, and the two waited on each other forever.
 pub async fn lock<T>(var m: Mutex<T>) -> T {
     for {
         if !m.held {
             m.held = true
             return m.value
         }
+        task.park()
         task.yield()
     }
 }
