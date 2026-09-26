@@ -66,6 +66,13 @@ fn checks() -> [error] {
     out.push(test.equal_str(time.show(1500), "1.5s", "show, seconds"))
     out.push(test.equal_str(time.show(90000), "1m 30s", "show, minutes"))
     out.push(test.equal_str(time.clock(3723000), "01:02:03", "clock"))
+    // A negative duration is signed once, in front, where each field used to
+    // carry its own minus.
+    out.push(test.equal_str(time.clock(-61000), "-00:01:01", "clock of a negative duration"))
+    out.push(test.equal_str(time.clock(-3723000), "-01:02:03", "and a longer one"))
+    out.push(test.equal_str(time.clock(-500), "00:00:00", "under a second rounds to no sign"))
+    out.push(test.equal_str(time.show(-5000), "-5.0s", "show of a negative duration"))
+    out.push(test.equal_str(time.show(-90000), "-1m 30s", "in minutes"))
 
     // ---- the calendar, both directions ----
 
@@ -113,6 +120,14 @@ fn checks() -> [error] {
             time.stamp(1786284333000, 0), "2026-08-09T14:05:33", "a full stamp"))
     out.push(test.equal_str(
             time.iso_day(-62135596800000, 0), "0001-01-01", "a year is padded to four"))
+    // Before year 1: ISO 8601's expanded years, sign first. The padding went in
+    // front of the minus, `00-1-12-31`.
+    let before = time.epoch_of(time.Civil{ year: -1, month: 12, day: 31, hour: 23, minute: 59, second: 59 }, 0)
+    out.push(test.equal_str(time.stamp(before, 0), "-0001-12-31T23:59:59", "a year before 1 BC"))
+    let zero = time.epoch_of(time.Civil{ year: 0, month: 1, day: 1, hour: 0, minute: 0, second: 0 }, 0)
+    out.push(test.equal_str(time.iso_day(zero, 0), "0000-01-01", "year zero"))
+    let ides = time.epoch_of(time.Civil{ year: -43, month: 3, day: 15, hour: 12, minute: 0, second: 0 }, 0)
+    out.push(test.equal_str(time.iso_day(ides, 0), "-0043-03-15", "the Ides of March, 44 BC"))
 
     // ---- the shape of a month ----
 

@@ -28,8 +28,14 @@ pub fn since(start: int) -> int {
     return time.now() - start
 }
 
-/// A duration in the largest unit that keeps it readable.
+/// A duration in the largest unit that keeps it readable. A negative one —
+/// a deadline already past — is the same with a minus in front.
 pub fn show(ms: int) -> str {
+    if ms < 0 {
+        // `0 - ms` has no answer for the smallest `int`; one millisecond
+        // less changes nothing anybody reads.
+        return "-" + show(0 - max(ms, -9223372036854775807))
+    }
     if ms < 1000 {
         return "\(ms)ms"
     }
@@ -43,12 +49,21 @@ pub fn show(ms: int) -> str {
 }
 
 /// `hh:mm:ss` from a duration, for a stopwatch or a progress line.
+///
+/// A negative duration — a countdown that has run over — is signed once, in
+/// front. `%` keeps the sign of what it divides, so without that each field
+/// came out negative on its own: `-61000` was `00:0-1:0-1`.
 pub fn clock(ms: int) -> str {
-    let total = ms / 1000
+    var total = ms / 1000
+    var sign = ""
+    if total < 0 {
+        sign = "-"
+        total = 0 - total
+    }
     let h = total / 3600
     let m = (total % 3600) / 60
     let s = total % 60
-    return "\(pad2(h)):\(pad2(m)):\(pad2(s))"
+    return "\(sign)\(pad2(h)):\(pad2(m)):\(pad2(s))"
 }
 
 fn pad2(n: int) -> str {
@@ -271,6 +286,12 @@ fn floor_mod(a: int, b: int) -> int {
     return a - floor_div(a, b) * b
 }
 
+/// A year in four digits, and a year before 1 BC with its sign in front —
+/// ISO 8601's expanded form, where year 0 is 1 BC and -1 is 2 BC. Padding the
+/// text of a negative number put the zeros before its minus: `00-1`.
 fn pad4(n: int) -> str {
+    if n < 0 {
+        return "-" + pad_start("\(0 - n)", 4, "0")
+    }
     return pad_start("\(n)", 4, "0")
 }
