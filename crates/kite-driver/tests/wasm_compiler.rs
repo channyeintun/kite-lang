@@ -259,3 +259,32 @@ fn check_fails_on_errors_and_not_on_warnings() {
     );
     assert!(!broken.status.success(), "{}", String::from_utf8_lossy(&broken.stdout));
 }
+
+/// `kitec --version` works from an install path with a space in it.
+///
+/// It found `package.json` through `new URL(import.meta.url).pathname`, which
+/// is percent-encoded — `sp%20ace` — and on Windows is `/C:/…`, so the file
+/// was not there and the command crashed.
+#[test]
+fn version_works_from_a_path_with_a_space() {
+    if wasm_compiler().is_none() {
+        return;
+    }
+    let dir = work_dir("space").join("with a space");
+    std::fs::create_dir_all(&dir).expect("directory");
+    let package = root().join("packages/kite-wasm");
+    for name in ["kitec.js", "compiler.js", "package.json"] {
+        std::fs::copy(package.join(name), dir.join(name)).expect("copy");
+    }
+    let out = Command::new("node")
+        .args([dir.join("kitec.js").to_str().unwrap(), "--version"])
+        .output()
+        .expect("node runs");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).starts_with("kitec "),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
