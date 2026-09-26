@@ -49,22 +49,19 @@ impl ConstValue {
         }
     }
 
-    /// The text this value renders as inside `\( )`, where that text is the
-    /// same on every target.
+    /// The text this value renders as inside `\( )`, which is the same on
+    /// every target.
     ///
-    /// A `float` is `None`, and that is not an oversight. The two hosts do not
-    /// agree on how to write one: the native runtime formats with Rust's
-    /// shortest round-trip and the browser with JavaScript's, and those differ
-    /// at the exponent boundary — `1e21` against
-    /// `1000000000000000000000`. Rendering here would pick one of them at
-    /// compile time and hand the same program a different string depending on
-    /// where it was built, which is worse than not allowing it.
-    fn rendered(&self) -> Option<String> {
+    /// A `float` was refused here once, because the hosts wrote one
+    /// differently — `1e21` against `1000000000000000000000` — and folding it
+    /// would have picked one. They follow one rule now, `kite_float`'s, which
+    /// is the text every backend prints at run time.
+    fn rendered(&self) -> String {
         match self {
-            ConstValue::Bool(b) => Some(b.to_string()),
-            ConstValue::Int(i) => Some(i.to_string()),
-            ConstValue::Str(s) => Some(s.clone()),
-            ConstValue::Float(_) => None,
+            ConstValue::Bool(b) => b.to_string(),
+            ConstValue::Int(i) => i.to_string(),
+            ConstValue::Str(s) => s.clone(),
+            ConstValue::Float(f) => kite_float::float_text(*f),
         }
     }
 }
@@ -231,28 +228,7 @@ impl<'a> Eval<'a> {
                             out.push_str(&decode_escapes_into(&raw, *span, self.diags));
                         }
                         ast::StrPart::Hole(inner) => match self.eval(inner) {
-                            Some(v) => match v.rendered() {
-                                Some(text) => out.push_str(&text),
-                                None => {
-                                    ok = false;
-                                    self.diags.push(
-                                        Diagnostic::error(
-                                            codes::E0118,
-                                            "a `float` cannot be interpolated into a constant",
-                                        )
-                                        .with_primary(inner.span(), "this is a `float`")
-                                        .with_note(
-                                            "the browser and the native runtime write a float \
-                                             differently at the exponent boundary, so the text \
-                                             would depend on which backend built the program",
-                                        )
-                                        .with_note(
-                                            "interpolate it where it is used, in a function, \
-                                             where the running host decides",
-                                        ),
-                                    );
-                                }
-                            },
+                            Some(v) => out.push_str(&v.rendered()),
                             None => ok = false,
                         },
                     }
@@ -261,6 +237,16 @@ impl<'a> Eval<'a> {
             }
 
             ast::Expr::Paren { inner, .. } => self.eval(inner),
+
+            // `int`'s minimum, whose digits alone are out of range. The same
+            // rule the checker applies to an expression.
+            ast::Expr::Unary { op: UnaryOp::Neg, operand, span }
+                if matches!(operand.as_ref(), ast::Expr::Int(digits)
+                    if crate::is_int_min_magnitude(self.text(*digits))) =>
+            {
+                let _ = span;
+                Some(ConstValue::Int(i64::MIN))
+            }
 
             ast::Expr::Unary { op, operand, span } => {
                 let v = self.eval(operand)?;
@@ -359,8 +345,23 @@ impl<'a> Eval<'a> {
             (BitAnd, Int(x), Int(y)) => Some(Int(x & y)),
             (BitOr, Int(x), Int(y)) => Some(Int(x | y)),
             (BitXor, Int(x), Int(y)) => Some(Int(x ^ y)),
-            (Shl, Int(x), Int(y)) => Some(Int(x.wrapping_shl(*y as u32))),
-            (Shr, Int(x), Int(y)) => Some(Int(x.wrapping_shr(*y as u32))),
+            // A count outside `0..=63` traps at run time in a debug build and
+            // is taken modulo 64 in a release one. A constant is the same in
+            // both, so neither answer is right for it: like a division by
+            // zero, it is found here instead.
+            (Shl, Int(_), Int(y)) | (Shr, Int(_), Int(y)) if !(0..64).contains(y) => {
+                self.diags.push(
+                    Diagnostic::error(codes::E0118, "this constant shifts by a count outside `0..=63`")
+                        .with_primary(span, format!("a shift by {} has no value", y))
+                        .with_note(
+                            "an `int` has 64 bits, so a shift count must be in `0..=63`; at \
+                             run time this would trap in a debug build",
+                        ),
+                );
+                return None;
+            }
+            (Shl, Int(x), Int(y)) => Some(Int(x << y)),
+            (Shr, Int(x), Int(y)) => Some(Int(x >> y)),
             (Lt, Int(x), Int(y)) => Some(Bool(x < y)),
             (Le, Int(x), Int(y)) => Some(Bool(x <= y)),
             (Gt, Int(x), Int(y)) => Some(Bool(x > y)),

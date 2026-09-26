@@ -43,7 +43,7 @@ fn build(src: &str) -> Built {
         "test source does not compile:\n{}",
         diags.render_all(&sources)
     );
-    kite_hir::mono::monomorphise(&mut hir);
+    kite_hir::mono::monomorphise(&mut hir).expect("specialisation terminates");
     let mir = kite_mir::lower(&hir);
     Built {
         module: compile(&mir, &hir.types),
@@ -632,7 +632,7 @@ fn gaps(src: &str) -> Vec<String> {
     let resolved = kite_resolve::resolve(&ast, &mut diags);
     let mut hir = kite_types::check(&ast, &resolved, &sources, &mut diags);
     assert!(!diags.has_errors(), "{}", diags.render_all(&sources));
-    kite_hir::mono::monomorphise(&mut hir);
+    kite_hir::mono::monomorphise(&mut hir).expect("specialisation terminates");
     let mir = kite_mir::lower(&hir);
     unsupported(&mir, &hir.types)
         .into_iter()

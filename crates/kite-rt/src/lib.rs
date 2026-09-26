@@ -1324,6 +1324,14 @@ pub extern "C" fn kite_rt_error_as(e: u64, tag: i64, wrap_kind: i64) -> u64 {
             return 0;
         }
     };
+    // Nothing carried is nil, never a present optional holding a null: a box
+    // around zero passes the nil test and then faults on the first field
+    // read. No type's tag is zero, so a match with nothing in the slot cannot
+    // happen for a well-formed error — this is the backstop for one that is
+    // not.
+    if value == 0 {
+        return 0;
+    }
     if wrap_kind < 0 {
         return value;
     }
@@ -1811,12 +1819,10 @@ pub extern "C" fn kite_rt_str_code_at(s: u64, at: i64) -> i64 {
 // ---------------------------------------------------------------------------
 
 /// Print a float so it reads back as a Kite float: `1.0`, not `1`.
+/// The rule the bytecode VM and the Wasm glue follow too, from the one place
+/// it is written.
 fn float_text(v: f64) -> String {
-    if v.fract() == 0.0 && v.is_finite() {
-        format!("{:.1}", v)
-    } else {
-        format!("{}", v)
-    }
+    kite_float::float_text(v)
 }
 
 fn render(word: u64, k: u8, out: &mut String) {
@@ -1913,15 +1919,27 @@ fn render_ref(p: u64, out: &mut String) {
 // Structural equality — the VM's `PartialEq`, transcribed
 // ---------------------------------------------------------------------------
 
+/// Walked with a worklist of pairs still to compare rather than by recursion: a
+/// value can be as deep as the program makes it, and comparing two lists of a
+/// million cells recursed once per cell until the process aborted. The VM
+/// walks its values the same way, for the same reason.
 fn value_eq(a: u64, b: u64, k: u8) -> bool {
-    match k {
-        kind::FLOAT => f64::from_bits(a) == f64::from_bits(b),
-        kind::REF => ref_eq(a, b),
-        _ => a == b,
+    let mut work = vec![(a, b, k)];
+    while let Some((a, b, k)) = work.pop() {
+        let same = match k {
+            kind::FLOAT => f64::from_bits(a) == f64::from_bits(b),
+            kind::REF => ref_eq(a, b, &mut work),
+            _ => a == b,
+        };
+        if !same {
+            return false;
+        }
     }
+    true
 }
 
-fn ref_eq(a: u64, b: u64) -> bool {
+/// Compare two references one level deep, queueing their contents.
+fn ref_eq(a: u64, b: u64, work: &mut Vec<(u64, u64, u8)>) -> bool {
     if a == 0 || b == 0 {
         return a == b;
     }
@@ -1931,48 +1949,63 @@ fn ref_eq(a: u64, b: u64) -> bool {
         if ka != kb {
             return false;
         }
-        let each = |kinds: &[u8], base: usize| {
-            kinds
-                .iter()
-                .enumerate()
-                .all(|(i, k)| value_eq(*slot(pa, base + i), *slot(pb, base + i), *k))
+        let mut each = |kinds: &[u8]| {
+            for (i, k) in kinds.iter().enumerate() {
+                work.push((*slot(pa, i), *slot(pb, i), *k));
+            }
+            true
         };
         match ka {
             obj::STR => str_bytes(a) == str_bytes(b),
             obj::STRUCT => {
                 obj_aux(pa) == obj_aux(pb)
-                    && each(&rt().shapes.structs[obj_aux(pa) as usize].clone(), 0)
+                    && each(&rt().shapes.structs[obj_aux(pa) as usize].clone())
             }
             obj::ENUM => {
                 if obj_aux(pa) != obj_aux(pb) || obj_word1(pa) != obj_word1(pb) {
                     return false;
                 }
                 let variant = (obj_word1(pa) & 0xFFFF_FFFF) as usize;
-                each(&rt().shapes.enums[obj_aux(pa) as usize][variant].clone(), 0)
+                each(&rt().shapes.enums[obj_aux(pa) as usize][variant].clone())
             }
-            obj::TUPLE => each(&rt().shapes.tuples[obj_aux(pa) as usize].clone(), 0),
+            obj::TUPLE => each(&rt().shapes.tuples[obj_aux(pa) as usize].clone()),
             obj::SLICE => {
                 let (la, lb) = (obj_word1(pa) as usize, obj_word1(pb) as usize);
-                la == lb
-                    && (0..la).all(|i| value_eq(*slot(pa, i), *slot(pb, i), obj_aux(pa) as u8))
+                if la != lb {
+                    return false;
+                }
+                for i in 0..la {
+                    work.push((*slot(pa, i), *slot(pb, i), obj_aux(pa) as u8));
+                }
+                true
             }
             obj::MAP => {
                 // In order: the VM compares the entry vectors directly, so two
                 // maps built in different orders are different values.
                 let (la, lb) = (obj_word1(pa) as usize, obj_word1(pb) as usize);
                 let (kk, vk) = ((obj_aux(pa) & 0xFF) as u8, ((obj_aux(pa) >> 8) & 0xFF) as u8);
-                la == lb
-                    && (0..la).all(|i| {
-                        value_eq(*slot(pa, 2 * i), *slot(pb, 2 * i), kk)
-                            && value_eq(*slot(pa, 2 * i + 1), *slot(pb, 2 * i + 1), vk)
-                    })
+                if la != lb {
+                    return false;
+                }
+                for i in 0..la {
+                    work.push((*slot(pa, 2 * i), *slot(pb, 2 * i), kk));
+                    work.push((*slot(pa, 2 * i + 1), *slot(pb, 2 * i + 1), vk));
+                }
+                true
             }
             obj::PAIR => {
-                value_eq(*slot(pa, 0), *slot(pb, 0), obj_aux(pa) as u8)
-                    && ref_eq(*slot(pa, 1), *slot(pb, 1))
+                work.push((*slot(pa, 0), *slot(pb, 0), obj_aux(pa) as u8));
+                work.push((*slot(pa, 1), *slot(pb, 1), kind::REF));
+                true
             }
-            obj::ERR => ref_eq(*slot(pa, 0), *slot(pb, 0)),
-            obj::BOX => value_eq(*slot(pa, 0), *slot(pb, 0), obj_aux(pa) as u8),
+            obj::ERR => {
+                work.push((*slot(pa, 0), *slot(pb, 0), kind::REF));
+                true
+            }
+            obj::BOX => {
+                work.push((*slot(pa, 0), *slot(pb, 0), obj_aux(pa) as u8));
+                true
+            }
             // The VM's equality has no closure arm, so closures — even the
             // same closure — compare unequal.
             obj::CLOSURE => false,
@@ -2690,8 +2723,11 @@ pub extern "C" fn kite_rt_drive() {
 pub extern "C" fn kite_rt_virtual_lookup(receiver: u64, table: u64, method: u64) -> u64 {
     unsafe {
         let p = receiver as *const u8;
+        // `kite_hir::TypeTag::encode`, which this crate cannot depend on:
+        // structs count from one so that no type's tag is zero, the tag of an
+        // error that carries nothing.
         let tag = match obj_kind(p) {
-            obj::STRUCT => obj_aux(p),
+            obj::STRUCT => obj_aux(p) + 1,
             obj::ENUM => 0x8000_0000 | obj_aux(p),
             other => unreachable!("virtual call on an object of kind {}", other),
         };

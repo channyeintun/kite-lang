@@ -21,13 +21,32 @@ use std::collections::HashMap;
 /// A generic function that instantiates itself with a larger type on each call
 /// never terminates. The cap is far above any real program and low enough that
 /// a runaway stops in well under a second.
+///
+/// It counts specialisations made, not functions walked: a program of five
+/// thousand ordinary functions and one generic one is not a runaway, and used
+/// to be treated as one — the walk stopped partway, leaving calls into
+/// functions that had moved and generic calls never specialised, and nothing
+/// said so.
 const MAX_INSTANTIATIONS: usize = 4096;
+
+/// A generic function that asked for copies of itself without end, which
+/// monomorphisation cannot finish.
+#[derive(Clone, Debug)]
+pub struct Unbounded {
+    /// The template, by its source name.
+    pub template: String,
+    pub span: kite_span::Span,
+}
 
 /// Specialise every generic function for the argument sets its callers use, and
 /// drop the templates.
-pub fn monomorphise(program: &mut Program) {
+///
+/// Fails when a generic function recurses at an ever larger type — `depth([x],
+/// n - 1)` inside `depth<T>` — which has no finite set of copies. The program
+/// is left half-rewritten then, and must not be lowered.
+pub fn monomorphise(program: &mut Program) -> Result<(), Unbounded> {
     if program.fns.iter().all(|f| f.generic_count == 0) {
-        return;
+        return Ok(());
     }
     let Program { types, fns, entry, vtables, externs: _ } = program;
 
@@ -44,13 +63,12 @@ pub fn monomorphise(program: &mut Program) {
 
     let mut made: HashMap<(u32, Vec<TyId>), u32> = HashMap::new();
     let mut pending: Vec<usize> = (0..out.len()).collect();
-    let mut budget = MAX_INSTANTIATIONS;
+    let mut unbounded: Option<Unbounded> = None;
 
     while let Some(index) = pending.pop() {
-        if budget == 0 {
-            break;
+        if let Some(u) = unbounded {
+            return Err(u);
         }
-        budget -= 1;
         // Take the body so the walk does not borrow `out` while `out` grows.
         let mut body = std::mem::take(&mut out[index].body);
         {
@@ -61,10 +79,14 @@ pub fn monomorphise(program: &mut Program) {
                 made: &mut made,
                 out: &mut out,
                 pending: &mut pending,
+                unbounded: &mut unbounded,
             };
             m.block(&mut body);
         }
         out[index].body = body;
+    }
+    if let Some(u) = unbounded {
+        return Err(u);
     }
 
     if let Some(e) = entry {
@@ -85,6 +107,7 @@ pub fn monomorphise(program: &mut Program) {
     }
 
     *fns = out;
+    Ok(())
 }
 
 struct Mono<'a> {
@@ -95,6 +118,8 @@ struct Mono<'a> {
     made: &'a mut HashMap<(u32, Vec<TyId>), u32>,
     out: &'a mut Vec<Function>,
     pending: &'a mut Vec<usize>,
+    /// Set by the first specialisation refused; the walk stops there.
+    unbounded: &'a mut Option<Unbounded>,
 }
 
 impl Mono<'_> {
@@ -104,6 +129,19 @@ impl Mono<'_> {
         let key = (template, targs.to_vec());
         if let Some(&existing) = self.made.get(&key) {
             return existing;
+        }
+        // A runaway shows itself two ways: arguments nesting deeper with each
+        // copy, which is polymorphic recursion and is caught within a few
+        // dozen levels, or simply too many copies. Either way the template is
+        // named and nothing more is made; the index handed back is never
+        // lowered, because the caller stops at the error.
+        if self.made.len() >= MAX_INSTANTIATIONS || self.types.too_large(targs) {
+            if self.unbounded.is_none() {
+                let source = &self.fns[template as usize];
+                *self.unbounded =
+                    Some(Unbounded { template: source.name.clone(), span: source.span });
+            }
+            return template;
         }
         let index = self.out.len() as u32;
         // Claim the slot before the body is built, so a recursive call to the
@@ -762,7 +800,7 @@ mod tests {
         p.fns.push(main);
         p.entry = Some(FnId(1));
 
-        monomorphise(&mut p);
+        monomorphise(&mut p).unwrap();
 
         // `main` plus two specialisations; the template itself is gone.
         assert_eq!(p.fns.len(), 3);
@@ -788,7 +826,7 @@ mod tests {
         p.fns.push(template("b", 0, TyId::INT));
         p.entry = Some(FnId(1));
 
-        monomorphise(&mut p);
+        monomorphise(&mut p).unwrap();
 
         assert_eq!(p.fns.len(), 2);
         assert_eq!(p.fns[0].name, "a");
@@ -839,6 +877,53 @@ mod tests {
 
         assert_eq!(p.fns.len(), 2, "a vtable method is reachable");
         assert_eq!(p.vtables[0].entries[0].methods[0], FnId(0));
+    }
+
+    /// Many ordinary functions and one generic one is not a runaway. The budget
+    /// once counted every function walked, so past four thousand of them the
+    /// walk stopped, leaving calls into functions that had moved.
+    #[test]
+    fn a_large_program_is_specialised_completely() {
+        let mut p = Program::default();
+        let param = p.types.param_ty(0, "T");
+        p.fns.push(template("id", 1, param));
+        for i in 0..5000 {
+            let mut f = template(&format!("f{}", i), 0, TyId::UNIT);
+            f.body.stmts = vec![Stmt::Expr(call(0, vec![TyId::INT]))];
+            p.fns.push(f);
+        }
+        p.entry = Some(FnId(5000));
+
+        monomorphise(&mut p).unwrap();
+
+        assert_eq!(p.fns.len(), 5001);
+        assert_eq!(p.entry, Some(FnId(4999)));
+        let copy = p.fns.iter().position(|f| f.name == "id<int>").expect("a copy") as u32;
+        for f in &p.fns[..5000] {
+            let Stmt::Expr(e) = &f.body.stmts[0] else { panic!("expected a call") };
+            let ExprKind::Call { callee, targs, .. } = &e.kind else { panic!("expected a call") };
+            assert_eq!(callee.0, copy, "{} still calls the template", f.name);
+            assert!(targs.is_empty());
+        }
+    }
+
+    /// `f<T>` calling `f<[T]>` needs a copy at every depth. That is refused,
+    /// by name, rather than cut off partway without a word.
+    #[test]
+    fn polymorphic_recursion_is_refused() {
+        let mut p = Program::default();
+        let param = p.types.param_ty(0, "T");
+        let slice_of_t = p.types.slice_of(param);
+        let mut depth = template("depth", 1, TyId::UNIT);
+        depth.body.stmts = vec![Stmt::Expr(call(0, vec![slice_of_t]))];
+        p.fns.push(depth);
+        let mut main = template("main", 0, TyId::UNIT);
+        main.body.stmts = vec![Stmt::Expr(call(0, vec![TyId::INT]))];
+        p.fns.push(main);
+        p.entry = Some(FnId(1));
+
+        let err = monomorphise(&mut p).expect_err("an unbounded instantiation");
+        assert_eq!(err.template, "depth");
     }
 
     /// Substitution rebuilds composite types around the parameter rather than

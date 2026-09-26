@@ -1,7 +1,7 @@
 //! Structural equality on aggregates.
 //!
 //! The specification says two structs are equal when their fields are, and the
-//! same for tuples, slices, enums and optionals. Reference identity is a
+//! same for tuples, slices, maps, enums and optionals. Reference identity is a
 //! separate operation, spelled `ptr.same`.
 //!
 //! Wasm has no deep-equality instruction, so each aggregate type that is
@@ -79,6 +79,10 @@ fn close_over(ty: TyId, types: &Types, out: &mut HashSet<TyId>) {
         }
         TyKind::Slice(elem) => close_over(*elem, types, out),
         TyKind::Optional(inner) => close_over(*inner, types, out),
+        TyKind::Map(k, v) => {
+            close_over(*k, types, out);
+            close_over(*v, types, out);
+        }
         _ => {}
     }
 }
@@ -92,6 +96,7 @@ pub fn needs_function(ty: TyId, types: &Types) -> bool {
             | TyKind::Enum(_)
             | TyKind::Tuple(_)
             | TyKind::Slice(_)
+            | TyKind::Map(..)
             | TyKind::Optional(_)
             | TyKind::Err
     )
@@ -130,6 +135,7 @@ impl EqBuilder<'_> {
             TyKind::Enum(e) => self.enum_eq(*e),
             TyKind::Slice(elem) => self.slice_eq(ty, *elem),
             TyKind::Optional(inner) => self.optional_eq(ty, *inner),
+            TyKind::Map(..) => self.map_eq(ty),
             TyKind::Err => self.error_eq(),
             // `collect` only ever asks for the kinds above.
             _ => {
@@ -318,6 +324,72 @@ impl EqBuilder<'_> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
+
+        f.instruction(&Instruction::LocalGet(i));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(i));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// Equal lengths, then equal entries position by position: the same keys
+    /// with equal values, inserted in the same order. Insertion order is part
+    /// of what a Kite map is — iteration, `keys()` and a derived `hash()` all
+    /// observe it — so two maps that differ in it are different values. The
+    /// other two backends compare their entry vectors the same way.
+    fn map_eq(&self, ty: TyId) -> Function {
+        let Some(ml) = self.layout.map_layout(ty) else {
+            let mut f = Function::new(Vec::new());
+            f.instruction(&Instruction::Unreachable);
+            f.instruction(&Instruction::End);
+            return f;
+        };
+        // One local: the cursor.
+        let mut f = Function::new(vec![(1, ValType::I32)]);
+        let i = 2;
+        let len = |f: &mut Function, local: u32| {
+            struct_get(f, local, ml.record, 0);
+            f.instruction(&Instruction::ArrayLen);
+        };
+
+        len(&mut f, 0);
+        len(&mut f, 1);
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(i));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(i));
+        len(&mut f, 0);
+        f.instruction(&Instruction::I32GeU);
+        f.instruction(&Instruction::BrIf(1));
+
+        // Field 0 of the record is the key array and field 1 the value array,
+        // each read at the cursor on both sides.
+        for (field, array, elem) in [(0, ml.keys, ml.key_ty), (1, ml.values, ml.value_ty)] {
+            for side in [0, 1] {
+                struct_get(&mut f, side, ml.record, field);
+                f.instruction(&Instruction::LocalGet(i));
+                f.instruction(&Instruction::ArrayGet(array));
+            }
+            self.compare_values(&mut f, elem);
+            f.instruction(&Instruction::I32Eqz);
+            f.instruction(&Instruction::If(BlockType::Empty));
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::Return);
+            f.instruction(&Instruction::End);
+        }
 
         f.instruction(&Instruction::LocalGet(i));
         f.instruction(&Instruction::I32Const(1));

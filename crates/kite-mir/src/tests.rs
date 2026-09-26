@@ -325,6 +325,113 @@ fn a_resume_function_takes_a_frame_and_returns_whether_it_finished() {
 }
 
 /// Every block a rewritten terminator names must exist. This is the invariant
+/// A `break` with no loop to leave — the checker's to refuse, as it does for
+/// one inside a closure whose body sits in a loop — used to be dropped, so the
+/// closure ran on as if it were not there. Lowering now records it as the
+/// compiler's error, and the block traps.
+#[test]
+fn a_break_with_no_loop_is_an_internal_error_not_a_silence() {
+    let span = kite_span::Span::new(kite_span::FileId(0), 0, 0);
+    let program = kite_hir::Program {
+        fns: vec![kite_hir::Function {
+            name: "lifted".into(),
+            is_free: false,
+            generic_count: 0,
+            is_pub: false,
+            is_async: false,
+            param_count: 0,
+            locals: Vec::new(),
+            ret: TyId::UNIT,
+            body: kite_hir::Block {
+                stmts: vec![kite_hir::Stmt::Break { label: None, span }],
+            },
+            span,
+        }],
+        ..Default::default()
+    };
+    let mir = lower(&program);
+    let found = internal_errors(&mir);
+    assert_eq!(found.len(), 1, "{:?}", found);
+    assert_eq!(found[0].function, "lifted");
+    assert!(found[0].what.contains("`break`"), "{}", found[0].what);
+    assert!(matches!(mir.fns[0].blocks[0].term, Terminator::Unreachable));
+}
+
+/// An `await` in a function the state-machine transform did not rewrite — a
+/// closure's lifted body, which is never `async` — reached every backend, and
+/// each panicked on it. It is reported before any backend is asked.
+#[test]
+fn an_await_the_transform_left_is_an_internal_error() {
+    let span = kite_span::Span::new(kite_span::FileId(0), 0, 0);
+    let mut program = Program::default();
+    program.fns.push(Function {
+        name: "main#closure0".into(),
+        is_async: false,
+        exportable: false,
+        param_count: 1,
+        locals: vec![
+            LocalDecl { ty: TyId::INT, name: None },
+            LocalDecl { ty: TyId::INT, name: None },
+        ],
+        ret: TyId::UNIT,
+        blocks: vec![BasicBlock {
+            stmts: vec![Inst::Assign {
+                dst: Local(1),
+                value: Rvalue::Await { task: Operand::Local(Local(0)) },
+            }],
+            term: Terminator::Return(None),
+        }],
+        span,
+    });
+    let found = internal_errors(&program);
+    assert_eq!(found.len(), 1, "{:?}", found);
+    assert_eq!(found[0].function, "main#closure0");
+
+    // Everything the driver lowers passes, async included.
+    let (lowered, _) = lower_async("async fn work() -> int {\n  return 1\n}\nasync fn main() {\n  io.print(await work())\n}\n");
+    assert!(internal_errors(&lowered).is_empty());
+}
+
+/// `for i in a..=max` stopped only once the counter passed the bound, and the
+/// increment that would pass `int`'s maximum overflowed. The step now leaves
+/// when the counter equals the bound, before incrementing.
+#[test]
+fn an_inclusive_range_leaves_before_incrementing_past_its_bound() {
+    let b = main_only("  for i in 0..=3 {\n    io.print(i)\n  }");
+    let f = b.main();
+    b.assert_well_formed(f);
+    let leaves_on_equal = f.blocks.iter().any(|blk| {
+        blk.stmts.iter().any(|s| {
+            matches!(s, Inst::Assign { value: Rvalue::Binary { op: BinOp::EqInt, .. }, .. })
+        }) && matches!(blk.term, Terminator::Branch { .. })
+    });
+    assert!(leaves_on_equal, "no equality test before the increment:\n{}", b.show());
+}
+
+/// A discarded value still has to be computed when computing it can trap.
+#[test]
+fn a_discarded_index_or_division_is_still_evaluated() {
+    let b = build(
+        "fn id(x: int) -> int {\n  return x\n}\n\
+         fn main() {\n  let xs = [1, 2, 3]\n  _ = xs[10]\n  _ = id(1) / id(0)\n  xs[5]\n}\n",
+    );
+    let f = b.main();
+    let count = |want: fn(&Rvalue) -> bool| {
+        f.blocks
+            .iter()
+            .flat_map(|blk| &blk.stmts)
+            .filter(|s| matches!(s, Inst::Assign { value, .. } if want(value)))
+            .count()
+    };
+    assert_eq!(count(|v| matches!(v, Rvalue::IndexGet { .. })), 2, "{}", b.show());
+    assert_eq!(
+        count(|v| matches!(v, Rvalue::Binary { op: BinOp::DivInt, .. })),
+        1,
+        "{}",
+        b.show()
+    );
+}
+
 /// most easily broken by the block arithmetic, so it is asserted directly.
 #[test]
 fn every_block_the_transform_names_exists() {

@@ -1,0 +1,10 @@
+[package]
+name = "kite-float"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "How a Kite float is written as text, for the runtimes written in Rust"
+
+[dependencies]

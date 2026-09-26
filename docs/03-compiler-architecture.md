@@ -44,6 +44,7 @@ them to it.
 kite-lang/
 ├── crates/
 │   ├── kite-span/          Source positions, file interning, spans
+│   ├── kite-float/         How a float is written as text, for the VM and kite-rt
 │   ├── kite-diag/          Diagnostic types, the renderer, codes and --explain text
 │   ├── kite-lexer/         Tokeniser; newline termination decided here
 │   ├── kite-ast/           Syntax tree, a span on every node
@@ -618,8 +619,9 @@ bytecode for reading, nothing is written to disk in a versioned form, and
 nothing loads one back.
 
 The VM does not share `kite-rt`'s collector or scheduler. Its values are its own
-tagged enum, with aggregates behind `Rc`, and it runs tasks on its own
-cooperative loop. The two runtimes agree on behaviour because the differential
+tagged enum, with aggregates behind `Rc` — so a cycle of references is never
+freed while the program runs ([SPECIFICATION §14](../SPECIFICATION.md#14-memory-model))
+— and it runs tasks on its own cooperative loop. The two runtimes agree on behaviour because the differential
 suite makes them, not because they share code.
 
 ---

@@ -187,7 +187,7 @@ the compiler and they say where SPECIFICATION.md is wrong.
 | `references/03-errors.md` | anything with an `error` in it: the taint analysis, `check`, `errors.wrap`, typed errors and `T.is`/`T.as` |
 | `references/04-structs-enums-traits-generics.md` | structs, methods, enums and how variant names resolve, traits, `dyn`, generics and inference, `@derive` |
 | `references/05-concurrency-modules-ffi.md` | `async`/`await`/`Task<T>`, `Share`, modules, `kite.toml` and `kitec pkg`, memory and `E0800`, `JsValue`, `extern`/`@host`, `std/js` |
-| `references/06-stdlib-and-diagnostics.md` | what a function is *called*: the prelude, the builtin dotted paths, the twenty `std/` modules, all 51 diagnostic codes, the `kitec` CLI |
+| `references/06-stdlib-and-diagnostics.md` | what a function is *called*: the prelude, the builtin dotted paths, the twenty `std/` modules, all 54 diagnostic codes, the `kitec` CLI |
 
 Three worked projects sit in the repository's `examples/`, and they are the three
 shapes usually asked for: `page/` — hand-written `index.html` with `--emit wasm`

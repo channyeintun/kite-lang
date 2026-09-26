@@ -2153,9 +2153,12 @@ fn compile_fn(
                 i,
                 mir::Inst::Assign {
                     value: mir::Rvalue::Binary {
-                        op: BinOp::AddInt | BinOp::SubInt | BinOp::MulInt,
+                        op: BinOp::AddInt | BinOp::SubInt | BinOp::MulInt | BinOp::Shl | BinOp::Shr,
                         ..
                     },
+                    ..
+                } | mir::Inst::Assign {
+                    value: mir::Rvalue::Unary { op: UnOp::NegInt, .. },
                     ..
                 }
             )
@@ -2460,7 +2463,17 @@ impl<'a> Emitter<'a> {
             }
 
             mir::Rvalue::Unary { op, operand } => match op {
+                // `0 - x`, checked: the subtraction overflows for exactly the
+                // one input negation does, `int`'s minimum. Debug Wasm used to
+                // wrap there while the other two backends trapped.
                 UnOp::NegInt => {
+                    func.instruction(&Instruction::I64Const(0));
+                    self.operand(func, operand);
+                    if !self.checked_int(func, BinOp::SubInt) {
+                        func.instruction(&Instruction::I64Sub);
+                    }
+                }
+                UnOp::NegIntWrap => {
                     func.instruction(&Instruction::I64Const(0));
                     self.operand(func, operand);
                     func.instruction(&Instruction::I64Sub);
@@ -2889,7 +2902,9 @@ impl<'a> Emitter<'a> {
                     return true;
                 };
 
-                self.error_field(func, base, 2);
+                // A nil error reads as tag zero, which no type has, so the
+                // test below is false for it and the answer is nil.
+                self.error_tag_or_zero(func, base);
                 func.instruction(&Instruction::I32Const(*tag as i32));
                 func.instruction(&Instruction::I32Eq);
 
@@ -2913,8 +2928,11 @@ impl<'a> Emitter<'a> {
                 return true;
             }
 
+            // Zero for a nil error, the way the other two backends answer:
+            // `T.is(err)` compares this against `T`'s own tag, which is never
+            // zero, so a nil error is simply not a `T`.
             mir::Rvalue::ErrorTag { base } => {
-                self.error_field(func, base, 2);
+                self.error_tag_or_zero(func, base);
                 func.instruction(&Instruction::I64ExtendI32U);
                 return true;
             }
@@ -3188,9 +3206,12 @@ impl<'a> Emitter<'a> {
             }
 
             // The state-machine transform replaced both of these before any
-            // backend saw the program.
+            // backend saw the program, and the driver reports one that it did
+            // not (`kite_mir::internal_errors`). Anything that lowers without
+            // asking gets a trap rather than a panic.
             mir::Rvalue::Await { .. } | mir::Rvalue::Yield => {
-                unreachable!("`await` survived the state-machine transform")
+                func.instruction(&Instruction::Unreachable);
+                return false;
             } // Every MIR rvalue is handled: there is deliberately no catch-all
               // here, so adding one to MIR fails to compile rather than silently
               // producing a module that traps.
@@ -3536,6 +3557,22 @@ impl<'a> Emitter<'a> {
     /// The cast is non-null because every reader here is reached with an error
     /// the program has already tested — `err != nil` or a `check` — and a null
     /// one would be a lowering bug rather than a program's mistake.
+    /// An error's type tag as an i32, or zero when the error is nil.
+    ///
+    /// The cast in [`Self::error_field`] traps on a null, and `T.is(err)` and
+    /// `T.as(err)` are defined on a nil error — they answer false and nil.
+    /// The operand is a local or a constant, so reading it twice re-runs
+    /// nothing.
+    fn error_tag_or_zero(&mut self, func: &mut Function, base: &mir::Operand) {
+        self.operand(func, base);
+        func.instruction(&Instruction::RefIsNull);
+        func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::Else);
+        self.error_field(func, base, 2);
+        func.instruction(&Instruction::End);
+    }
+
     fn error_field(&mut self, func: &mut Function, base: &mir::Operand, field: u32) {
         self.operand(func, base);
         func.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(
@@ -4272,6 +4309,25 @@ impl<'a> Emitter<'a> {
                 func.instruction(&Instruction::LocalGet(r));
                 return true;
             }
+            // A count outside `0..=63` traps, where the instruction alone
+            // would take it modulo 64. Compared unsigned, so a negative count
+            // is out of range with the rest.
+            BinOp::Shl | BinOp::Shr => {
+                // Both operands are back on the stack; the test reads the
+                // count from its register and leaves them where they are.
+                func.instruction(&Instruction::LocalGet(b));
+                func.instruction(&Instruction::I64Const(64));
+                func.instruction(&Instruction::I64GeU);
+                func.instruction(&Instruction::If(BlockType::Empty));
+                func.instruction(&Instruction::Unreachable);
+                func.instruction(&Instruction::End);
+                func.instruction(&if op == BinOp::Shl {
+                    Instruction::I64Shl
+                } else {
+                    Instruction::I64ShrS
+                });
+                return true;
+            }
             _ => return false,
         }
         func.instruction(&Instruction::I64Const(0));
@@ -4287,7 +4343,7 @@ impl<'a> Emitter<'a> {
         use BinOp::*;
         // The checked forms are several instructions, not one, so they are
         // emitted before the single-instruction table is consulted.
-        if matches!(op, AddInt | SubInt | MulInt) && self.checked_int(func, op) {
+        if matches!(op, AddInt | SubInt | MulInt | Shl | Shr) && self.checked_int(func, op) {
             return;
         }
         let inst = match op {
@@ -4305,8 +4361,10 @@ impl<'a> Emitter<'a> {
             BitAnd => Instruction::I64And,
             BitOr => Instruction::I64Or,
             BitXor => Instruction::I64Xor,
-            Shl => Instruction::I64Shl,
-            Shr => Instruction::I64ShrS,
+            // Wasm takes a shift count modulo 64 itself, which is exactly the
+            // release rule. The debug forms are checked above.
+            Shl | ShlWrap => Instruction::I64Shl,
+            Shr | ShrWrap => Instruction::I64ShrS,
             EqInt => Instruction::I64Eq,
             NeInt => Instruction::I64Ne,
             LtInt => Instruction::I64LtS,

@@ -132,8 +132,8 @@ to constants, an interpolation whose holes are all constants, or another constan
 including an imported one, `limits.MAX_BODY`. A **call is not** (`E0118`), even one that
 would always return the same answer. The types are `bool`, `int`, `float` and `str`; a
 slice or map constant would be an allocation, so it stays an ordinary `let` inside the
-function that wants it. A `float` may not be interpolated *into* a constant (`E0118`) —
-the browser and the native runtime write one differently at the exponent boundary.
+function that wants it. A `float` interpolated into a constant is written as every
+backend writes it at run time: `"\(1e21)"` is `"1e+21"`.
 
 There is no module-level `var`: a mutable binding every function can reach is state none
 of their signatures mentions. Put it in a struct and pass it to what changes it.

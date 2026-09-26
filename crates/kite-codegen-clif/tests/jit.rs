@@ -206,3 +206,20 @@ fn drawing_writes_the_same_lines() {
          \x20 io.print(text.width(\"abc\"))\n  io.print(text.height())\n}\n",
     );
 }
+
+/// Equality on a value a few hundred thousand cells deep. The runtime compared
+/// by recursion, once per cell, and the process aborted on a stack overflow;
+/// it walks a worklist now, as the VM does. A test thread's stack is small,
+/// which makes the old failure come early.
+#[test]
+fn deep_values_compare_without_recursing() {
+    if unsupported_here() {
+        return;
+    }
+    agree(
+        "enum List {\n  Cons(head: int, tail: List)\n  Empty\n}\n\
+         fn build(n: int) -> List {\n  var l = Empty\n  for i in 0..n {\n    l = Cons(i, l)\n  }\n  return l\n}\n\
+         fn main() {\n  let a = build(200000)\n  io.print(a == build(200000))\n\
+         \x20 io.print(a == build(199999))\n}\n",
+    );
+}

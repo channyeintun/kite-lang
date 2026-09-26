@@ -207,7 +207,6 @@ mod trap_code {
     pub const OVERFLOW_SUB: i64 = 3;
     pub const OVERFLOW_MUL: i64 = 4;
     pub const OVERFLOW_DIV: i64 = 5;
-    pub const OVERFLOW_REM: i64 = 6;
     pub const OVERFLOW_SHL: i64 = 7;
     pub const OVERFLOW_SHR: i64 = 8;
     pub const UNREACHABLE: i64 = 10;
@@ -1144,8 +1143,13 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
 
     fn rvalue(&mut self, dst: mir::Local, value: &mir::Rvalue) {
         match value {
+            // Replaced by the state-machine transform, and reported by the
+            // driver (`kite_mir::internal_errors`) when one was not. Anything
+            // that lowers without asking gets a trap rather than a panic.
             mir::Rvalue::Await { .. } | mir::Rvalue::Yield => {
-                unreachable!("`await` survived the state-machine transform")
+                let always = self.iconst(1);
+                self.trap_if(always, trap_code::UNREACHABLE, self.fn_index as i64, 0);
+                self.def_zero(dst);
             }
             mir::Rvalue::Use(o) => {
                 let v = self.operand(o);
@@ -1164,6 +1168,7 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                         self.trap_if(min, trap_code::OVERFLOW_SUB, 0, 0);
                         self.b.ins().ineg(v)
                     }
+                    UnOp::NegIntWrap => self.b.ins().ineg(v),
                     UnOp::NegFloat => self.b.ins().fneg(v),
                     UnOp::Not => self.b.ins().bxor_imm_s(v, 1),
                 };
@@ -1568,9 +1573,17 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 self.div_guards(a, b, trap_code::OVERFLOW_DIV);
                 self.b.ins().sdiv(a, b)
             }
+            // `min % -1` is 0 and representable, so unlike `min / -1` it is
+            // not an overflow. Every remainder by -1 is 0, so a divisor of -1
+            // is swapped for 1 — whose remainder is 0 as well — rather than
+            // leaving the one input the hardware faults on to it.
             BinOp::RemInt => {
-                self.div_guards(a, b, trap_code::OVERFLOW_REM);
-                self.b.ins().srem(a, b)
+                let zero = self.b.ins().icmp_imm_s(IntCC::Equal, b, 0);
+                self.trap_if(zero, trap_code::DIV_ZERO, 0, 0);
+                let m1 = self.b.ins().icmp_imm_s(IntCC::Equal, b, -1);
+                let one = self.b.ins().iconst(types::I64, 1);
+                let safe = self.b.ins().select(m1, one, b);
+                self.b.ins().srem(a, safe)
             }
             BinOp::AddFloat => self.b.ins().fadd(a, b),
             BinOp::SubFloat => self.b.ins().fsub(a, b),
@@ -1588,7 +1601,7 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 } else {
                     trap_code::OVERFLOW_SHR
                 };
-                // The VM refuses a shift outside 0..64 rather than masking.
+                // A count outside 0..64 traps; the release forms below mask.
                 let lo = self.b.ins().icmp_imm_s(IntCC::SignedLessThan, b, 0);
                 self.trap_if(lo, code, 0, 0);
                 let hi = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, b, 64);
@@ -1597,6 +1610,16 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                     self.b.ins().ishl(a, b)
                 } else {
                     self.b.ins().sshr(a, b)
+                }
+            }
+            // The count's low six bits, stated rather than left to the
+            // instruction's own masking, so all three backends plainly agree.
+            BinOp::ShlWrap | BinOp::ShrWrap => {
+                let count = self.b.ins().band_imm_u(b, 63);
+                if op == BinOp::ShlWrap {
+                    self.b.ins().ishl(a, count)
+                } else {
+                    self.b.ins().sshr(a, count)
                 }
             }
             BinOp::EqInt | BinOp::EqBool => self.b.ins().icmp(IntCC::Equal, a, b),

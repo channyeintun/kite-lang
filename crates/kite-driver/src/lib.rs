@@ -633,6 +633,13 @@ fn run_passes(
         index.uses.push(Use { at, declared_at: at, label: signature, kind: "method" });
     }
 
+    // A generic type that contains itself at a larger type has no finite
+    // expansion. The arena stops making it past a cap rather than recursing
+    // until the stack is gone, and says which declaration asked.
+    if let Some((name, span)) = hir.types.unbounded_instantiation() {
+        diags.push(unbounded_instantiation("type", name, span));
+    }
+
     if emit == Emit::Hir {
         return (hir.to_string(), None, None, None, index);
     }
@@ -659,7 +666,18 @@ fn run_passes(
 
     // Specialise generic functions before lowering, so no backend ever sees a
     // type parameter. Nothing after this point knows generics exist.
-    kite_hir::mono::monomorphise(&mut hir);
+    //
+    // A function that calls itself at an ever larger type asks for a copy per
+    // level, forever; monomorphisation refuses rather than stopping partway
+    // and handing on calls into copies it never made.
+    if let Err(u) = kite_hir::mono::monomorphise(&mut hir) {
+        diags.push(unbounded_instantiation("function", &u.template, u.span));
+        return (String::new(), None, None, None, index);
+    }
+    if let Some((name, span)) = hir.types.unbounded_instantiation() {
+        diags.push(unbounded_instantiation("type", name, span));
+        return (String::new(), None, None, None, index);
+    }
     // The prelude is in every program; without this a `hello world` would
     // carry every helper it never mentions. Compiling for tests keeps every
     // test that can be called, `pub` or not.
@@ -677,6 +695,26 @@ fn run_passes(
     // `async fn` becomes a starter and a resume function here, once, so both
     // backends see ordinary functions and neither knows concurrency exists.
     kite_mir::asyncify(&mut mir, &mut hir.types);
+    // What lowering found that the checker promised it never would — a
+    // `break` with no loop, an `await` the transform could not reach. Each
+    // once went silently wrong or crashed a backend; now each is named.
+    let internal = kite_mir::internal_errors(&mir);
+    if !internal.is_empty() {
+        for i in internal {
+            diags.push(
+                Diagnostic::error(
+                    kite_diag::codes::E0901,
+                    format!("internal compiler error in `{}`", i.function),
+                )
+                .with_primary(i.span, i.what)
+                .with_note(
+                    "this is a bug in Kite, not in this program — please report it, \
+                     with the program if it can be shared",
+                ),
+            );
+        }
+        return (String::new(), None, None, None, index);
+    }
     if emit == Emit::Mir {
         return (mir.render(&hir.types).to_string(), None, None, None, index);
     }
@@ -790,12 +828,47 @@ fn run_passes(
         return (String::new(), None, None, Some(native), index);
     }
 
+    // A frame wider than a register index can address was once emitted with
+    // its indices silently cut short, so two values shared a register.
+    let limits = kite_codegen_kbc::limits(&mir);
+    if !limits.is_empty() {
+        for limit in limits {
+            diags.push(
+                Diagnostic::error(
+                    kite_diag::codes::E0902,
+                    format!("`{}` is too large for the bytecode VM", limit.function),
+                )
+                .with_primary(limit.span, limit.what)
+                .with_note(
+                    "split the function, or build a large literal in a loop; \
+                     `--emit wasm` and `--native` do not have this limit",
+                ),
+            );
+        }
+        return (String::new(), None, None, None, index);
+    }
     let chunk = kite_codegen_kbc::compile(&mir);
     if emit == Emit::Kbc {
         return (chunk.to_string(), Some(chunk), None, None, index);
     }
 
     (String::new(), Some(chunk), None, None, index)
+}
+
+/// `E0220`: a generic `what` (a function or a type) named `name` asked for
+/// specialisations of itself without end.
+fn unbounded_instantiation(what: &str, name: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        kite_diag::codes::E0220,
+        format!("the generic {} `{}` instantiates itself without end", what, name),
+    )
+    .with_primary(span, "each copy asks for another at a larger type argument")
+    .with_note(
+        "generics are specialised: every set of type arguments gets its own copy, \
+         so recursion at `[T]` from inside `T` needs infinitely many — polymorphic \
+         recursion has no finite expansion",
+    )
+    .with_note("recurse at the same type, or hold the growing part in a type that does not grow")
 }
 
 /// What an editor needs, from the resolution the checker already ran.

@@ -15,7 +15,7 @@ use std::fmt;
 use std::rc::Rc;
 
 mod emit;
-pub use emit::compile;
+pub use emit::{compile, limits, Limit, MAX_REGISTERS};
 
 /// A register index within the current frame.
 pub type Reg = u16;
@@ -163,8 +163,14 @@ pub enum Op {
     BitXor { dst: Reg, a: Reg, b: Reg },
     Shl { dst: Reg, a: Reg, b: Reg },
     Shr { dst: Reg, a: Reg, b: Reg },
+    /// The release forms: the count is taken modulo 64 where the two above
+    /// trap on one outside `0..=63`.
+    ShlWrap { dst: Reg, a: Reg, b: Reg },
+    ShrWrap { dst: Reg, a: Reg, b: Reg },
 
     NegInt { dst: Reg, a: Reg },
+    /// The release form: `-min` wraps to `min` where `NegInt` traps.
+    NegIntWrap { dst: Reg, a: Reg },
     NegFloat { dst: Reg, a: Reg },
     Not { dst: Reg, a: Reg },
 
@@ -202,16 +208,16 @@ pub enum Op {
 
     // ---- aggregates -------------------------------------------------------
     /// Field values occupy `base .. base + count`, in declaration order.
-    NewStruct { dst: Reg, struct_id: u32, base: Reg, count: u8 },
+    NewStruct { dst: Reg, struct_id: u32, base: Reg, count: u16 },
     GetField { dst: Reg, obj: Reg, index: u16 },
     /// Payload values occupy `base .. base + count`.
-    NewEnum { dst: Reg, enum_id: u32, variant: u32, base: Reg, count: u8 },
+    NewEnum { dst: Reg, enum_id: u32, variant: u32, base: Reg, count: u16 },
     /// The variant index of an enum value, as an int.
     TagOf { dst: Reg, obj: Reg },
     /// Elements occupy `base .. base + count`.
-    NewTuple { dst: Reg, base: Reg, count: u8 },
+    NewTuple { dst: Reg, base: Reg, count: u16 },
     /// Key/value pairs occupy `base .. base + count`, flattened.
-    NewMap { dst: Reg, base: Reg, count: u8 },
+    NewMap { dst: Reg, base: Reg, count: u16 },
     /// Yields an optional: a missing key is a runtime condition.
     MapGet { dst: Reg, obj: Reg, key: Reg },
     MapSet { obj: Reg, key: Reg, src: Reg },
@@ -221,7 +227,7 @@ pub enum Op {
     MapKeys { dst: Reg, obj: Reg },
     MapValues { dst: Reg, obj: Reg },
     /// Elements occupy `base .. base + count`.
-    NewSlice { dst: Reg, base: Reg, count: u8 },
+    NewSlice { dst: Reg, base: Reg, count: u16 },
     /// Traps when out of range: an index bug is a program bug.
     GetIndex { dst: Reg, obj: Reg, index: Reg },
     SetIndex { obj: Reg, index: Reg, src: Reg },
@@ -236,29 +242,29 @@ pub enum Op {
     SetField { obj: Reg, index: u16, src: Reg },
 
     /// Arguments occupy `base .. base + argc`.
-    Call { dst: Reg, func: u32, base: Reg, argc: u8 },
+    Call { dst: Reg, func: u32, base: Reg, argc: u16 },
     /// A call dispatched from the concrete type of the receiver, which sits at
     /// `base`. `table` indexes [`Chunk::vtables`].
-    CallVirtual { dst: Reg, table: u32, method: u32, base: Reg, argc: u8 },
+    CallVirtual { dst: Reg, table: u32, method: u32, base: Reg, argc: u16 },
     /// Render a value as text. One instruction covers every type because a VM
     /// value carries its own tag; the Wasm backend needs three host calls for
     /// the same job.
     ToStr { dst: Reg, src: Reg },
     /// A string operation. Arguments occupy `base .. base + argc`, the
     /// receiver first.
-    StrOp { dst: Reg, op: kite_hir::StrKind, base: Reg, argc: u8 },
+    StrOp { dst: Reg, op: kite_hir::StrKind, base: Reg, argc: u16 },
     IntToFloat { dst: Reg, src: Reg },
     FloatToInt { dst: Reg, src: Reg },
     /// Build a closure: a function index plus the captured values, which sit
     /// at `base .. base + count`.
-    Closure { dst: Reg, func: u32, base: Reg, count: u8 },
+    Closure { dst: Reg, func: u32, base: Reg, count: u16 },
     /// Call a closure. Its captures are prepended to the arguments at `base`,
     /// so the callee is entered exactly like a named function.
-    CallClosure { dst: Reg, callee: Reg, base: Reg, argc: u8 },
-    CallNative { dst: Reg, native: Native, base: Reg, argc: u8 },
+    CallClosure { dst: Reg, callee: Reg, base: Reg, argc: u16 },
+    CallNative { dst: Reg, native: Native, base: Reg, argc: u16 },
     /// A call across the declared host boundary. `index` is into
     /// [`Chunk::externs`]; what answers it is the embedder's business.
-    CallExtern { dst: Reg, index: u32, base: Reg, argc: u8 },
+    CallExtern { dst: Reg, index: u32, base: Reg, argc: u16 },
     Return { src: Option<Reg> },
 
     /// A trap. Never catchable — Kite has no `recover`.
@@ -332,6 +338,8 @@ pub fn binop_instruction(op: BinOp) -> Option<fn(Reg, Reg, Reg) -> Op> {
         BitXor => |dst, a, b| Op::BitXor { dst, a, b },
         Shl => |dst, a, b| Op::Shl { dst, a, b },
         Shr => |dst, a, b| Op::Shr { dst, a, b },
+        ShlWrap => |dst, a, b| Op::ShlWrap { dst, a, b },
+        ShrWrap => |dst, a, b| Op::ShrWrap { dst, a, b },
         EqInt => |dst, a, b| Op::EqInt { dst, a, b },
         NeInt => |dst, a, b| Op::NeInt { dst, a, b },
         LtInt => |dst, a, b| Op::LtInt { dst, a, b },
@@ -361,6 +369,7 @@ pub fn binop_instruction(op: BinOp) -> Option<fn(Reg, Reg, Reg) -> Op> {
 pub fn unop_instruction(op: UnOp) -> fn(Reg, Reg) -> Op {
     match op {
         UnOp::NegInt => |dst, a| Op::NegInt { dst, a },
+        UnOp::NegIntWrap => |dst, a| Op::NegIntWrap { dst, a },
         UnOp::NegFloat => |dst, a| Op::NegFloat { dst, a },
         UnOp::Not => |dst, a| Op::Not { dst, a },
     }
@@ -456,8 +465,11 @@ impl fmt::Display for Op {
             BitXor { dst, a, b } => bin(f, "xor", dst, a, b),
             Shl { dst, a, b } => bin(f, "shl", dst, a, b),
             Shr { dst, a, b } => bin(f, "shr", dst, a, b),
+            ShlWrap { dst, a, b } => bin(f, "shl.wrap", dst, a, b),
+            ShrWrap { dst, a, b } => bin(f, "shr.wrap", dst, a, b),
 
             NegInt { dst, a } => un(f, "neg.int", dst, a),
+            NegIntWrap { dst, a } => un(f, "neg.int.wrap", dst, a),
             NegFloat { dst, a } => un(f, "neg.float", dst, a),
             Not { dst, a } => un(f, "not", dst, a),
 

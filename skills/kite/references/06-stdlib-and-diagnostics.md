@@ -48,7 +48,7 @@ repository says otherwise, the compiler won.
   `http.open`, `net.socket_open` for `socket.connect`, `crypto.digest_start` for
   `crypto.sha256`, `crypto.random_hex` for `crypto.random`, `js.js_global` for
   anything over `std/js`. Those need `--emit wasm` and the generated glue.
-- **`--explain` knows 51 codes.** The ranges leave room for a thousand; the
+- **`--explain` knows 54 codes.** The ranges leave room for a thousand; the
   gaps are real, and a code nobody can provoke is deleted rather than kept to be
   explained. Any unknown code — `kitec --explain E0999` — prints the whole list.
 
@@ -1656,7 +1656,7 @@ help: make the binding mutable
 | E0800–E0899 | exclusivity |
 | E0900–E0999 | the compiler failing, rather than the program |
 
-### All 51 codes `--explain` knows
+### All 54 codes `--explain` knows
 
 `kitec --explain E0301` prints the rationale for the rule, not just the
 message. An unknown code prints the whole list. This table is the whole of
@@ -1666,18 +1666,19 @@ cannot emit.
 | | | | |
 |---|---|---|---|
 | E0001 unterminated string literal | E0002 invalid character in source | E0003 invalid escape sequence | E0004 invalid number literal |
-| E0005 block comments are not supported | E0006 interpolation nested too deeply | E0100 unexpected token | E0101 unclosed delimiter |
+| E0005 block comments are not supported | E0006 string interpolation nested too deeply | E0100 unexpected token | E0101 unclosed delimiter |
 | E0102 expression nested too deeply | E0110 use of possibly-uninitialised binding | E0111 unknown name | E0112 duplicate definition |
-| E0113 wrong number of arguments | E0114 cannot assign to immutable binding | E0115 `break`/`continue` outside a loop | E0116 unreachable code |
+| E0113 wrong number of arguments | E0114 cannot assign to immutable binding | E0115 `break` or `continue` outside a loop | E0116 unreachable code |
 | E0117 statement has no effect | E0118 module-level binding is not a constant | E0119 constant defined in terms of itself | E0200 type mismatch |
 | E0201 cannot apply operator to these types | E0202 condition must be `bool` | E0203 missing return value | E0204 unknown type |
 | E0205 no such method, function, or callable value | E0206 trait cannot be a trait object | E0207 value cannot be interpolated | E0208 invalid type parameter |
 | E0209 type argument cannot be inferred | E0210 non-exhaustive match | E0211 invalid closure | E0212 invalid cast |
-| E0213 type has no identity | E0214 invalid type alias | E0301 value used before its error was checked | E0302 error is never checked |
-| E0303 `check` outside a fallible function | E0400 module not found | E0401 private item | E0402 module cycle |
-| E0403 module name reserved by the standard library | E0404 two modules of the same name | E0405 a `kite.toml` that does not read | E0520 type cannot be moved to another task |
-| E0521 `await` outside an async function | E0600 comparing a secret with `==` | E0700 malformed `@derive` | E0701 nothing derives that |
-| E0702 a field the derive cannot write | E0800 one object under two argument names | E0900 the compiler emitted an invalid module |  |
+| E0213 type has no identity | E0214 invalid type alias | E0220 generic instantiation does not terminate | E0301 value used before its error was checked |
+| E0302 error is never checked | E0303 `check` outside a fallible function | E0400 module not found | E0401 private item |
+| E0402 module cycle | E0403 module name is reserved by the standard library | E0404 two modules of the same name | E0405 a `kite.toml` that does not read |
+| E0520 type cannot be moved to another task | E0521 `await` outside an async function | E0600 comparing a secret with `==` | E0700 malformed `@derive` |
+| E0701 nothing derives that | E0702 a field the derive cannot write | E0800 one object under two argument names | E0900 the compiler emitted an invalid module |
+| E0901 internal compiler error | E0902 the program exceeds a limit of this target |  |  |
 
 ### Warnings, not errors
 

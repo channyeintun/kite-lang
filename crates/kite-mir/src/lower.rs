@@ -2,7 +2,7 @@
 
 use crate::*;
 use kite_hir::TyId as Ty;
-use kite_hir::{EnumId, StructId, Types};
+use kite_hir::{EnumId, StructId, TyKind, Types};
 use kite_hir as hir;
 use std::collections::HashMap;
 
@@ -14,7 +14,7 @@ pub fn lower(program: &hir::Program) -> Program {
     let mut strings = StringPool::default();
 
     for func in &program.fns {
-        let lowered = FnLowerer::new(func, &program.types, &mut strings).run();
+        let lowered = FnLowerer::new(func, &program.types, &mut strings, &mut out.internal).run();
         out.fns.push(lowered);
     }
     out.externs = program.externs.clone();
@@ -74,10 +74,18 @@ struct FnLowerer<'a> {
     /// it is dropped rather than emitted after the terminator.
     sealed: bool,
     loops: Vec<LoopCtx>,
+    /// Where this lowering found HIR an earlier stage promised it would never
+    /// produce. See [`Internal`].
+    internal: &'a mut Vec<Internal>,
 }
 
 impl<'a> FnLowerer<'a> {
-    fn new(hir_fn: &'a hir::Function, types: &'a Types, strings: &'a mut StringPool) -> Self {
+    fn new(
+        hir_fn: &'a hir::Function,
+        types: &'a Types,
+        strings: &'a mut StringPool,
+        internal: &'a mut Vec<Internal>,
+    ) -> Self {
         let locals = hir_fn
             .locals
             .iter()
@@ -96,6 +104,7 @@ impl<'a> FnLowerer<'a> {
             current: BlockId(0),
             sealed: false,
             loops: Vec::new(),
+            internal,
         }
     }
 
@@ -282,6 +291,11 @@ impl<'a> FnLowerer<'a> {
                 // all: the statement vanished, silently, and the program ran on
                 // without it. It showed up the moment anything took a `fn(T)`
                 // and called it to draw.
+                //
+                // So does a trap. `_ = xs[10]`, `_ = a / b` and a bare `xs[10]`
+                // discard a value, not the check that produces it: sections 5.4
+                // and 7.7 say an index out of range and a division by zero
+                // trap, and they used to vanish here along with the value.
                 let v = self.rvalue(e);
                 if matches!(
                     v,
@@ -292,7 +306,8 @@ impl<'a> FnLowerer<'a> {
                         | Rvalue::CallVirtual { .. }
                         | Rvalue::Await { .. }
                         | Rvalue::Yield
-                ) {
+                ) || can_trap(&v)
+                {
                     let t = self.temp(e.ty);
                     self.assign(t, v);
                 }
@@ -309,17 +324,40 @@ impl<'a> FnLowerer<'a> {
                 self.while_loop(cond, body, label.as_deref())
             }
             hir::Stmt::Loop { body, label, .. } => self.infinite_loop(body, label.as_deref()),
-            hir::Stmt::Break { label, .. } => {
-                if let Some(target) = self.find_loop(label.as_deref()).map(|c| c.break_to) {
-                    self.terminate(Terminator::Goto(target));
+            hir::Stmt::Break { label, span } => {
+                match self.find_loop(label.as_deref()).map(|c| c.break_to) {
+                    Some(target) => self.terminate(Terminator::Goto(target)),
+                    None => self.no_loop("break", label.as_deref(), *span),
                 }
             }
-            hir::Stmt::Continue { label, .. } => {
-                if let Some(target) = self.find_loop(label.as_deref()).map(|c| c.continue_to) {
-                    self.terminate(Terminator::Goto(target));
+            hir::Stmt::Continue { label, span } => {
+                match self.find_loop(label.as_deref()).map(|c| c.continue_to) {
+                    Some(target) => self.terminate(Terminator::Goto(target)),
+                    None => self.no_loop("continue", label.as_deref(), *span),
                 }
             }
         }
+    }
+
+    /// A `break` or `continue` with no loop in this function to leave.
+    ///
+    /// The checker rejects these — including the one that looks fine, inside
+    /// a closure whose body sits in a loop: the closure is its own function,
+    /// and the loop is not in it. One reaching here is a bug in an earlier
+    /// stage. It used to be dropped, so the closure simply ran on as if the
+    /// statement were not there; now it is reported, and the block traps in
+    /// case anything runs it anyway.
+    fn no_loop(&mut self, what: &str, label: Option<&str>, span: kite_span::Span) {
+        let target = match label {
+            Some(l) => format!("`{} {}`", what, l),
+            None => format!("`{}`", what),
+        };
+        self.internal.push(Internal {
+            function: self.hir_fn.name.clone(),
+            span,
+            what: format!("{} has no enclosing loop in this function to leave", target),
+        });
+        self.terminate(Terminator::Unreachable);
     }
 
     fn find_loop(&self, label: Option<&str>) -> Option<&LoopCtx> {
@@ -366,6 +404,9 @@ impl<'a> FnLowerer<'a> {
     ///   step:   i = i + 1 ; goto header      <- `continue` lands here
     ///   exit:                                 <- `break` lands here
     /// ```
+    ///
+    /// An inclusive range tests `i <= bound` in the header, and its step
+    /// leaves when `i == bound` before incrementing.
     /// Putting the increment in its own block is the whole reason loops survive
     /// HIR: a `continue` that jumped straight to the header would never advance
     /// the counter.
@@ -425,6 +466,29 @@ impl<'a> FnLowerer<'a> {
         self.loops.pop();
 
         self.switch_to(step);
+        // An inclusive range leaves after the pass where the counter reached
+        // the bound, before incrementing — the increment past it would
+        // overflow when the bound is `int`'s maximum, and `for i in a..=max`
+        // trapped on its last step for exactly that reason. The header's own
+        // test still guards the first pass, for a range that starts empty.
+        if inclusive {
+            let last = self.temp(TyId::BOOL);
+            self.assign(
+                last,
+                Rvalue::Binary {
+                    op: BinOp::EqInt,
+                    lhs: Operand::Local(counter),
+                    rhs: Operand::Local(bound),
+                },
+            );
+            let advance = self.new_block();
+            self.terminate(Terminator::Branch {
+                cond: Operand::Local(last),
+                then: exit,
+                else_: advance,
+            });
+            self.switch_to(advance);
+        }
         self.assign(
             counter,
             Rvalue::Binary {
@@ -783,8 +847,8 @@ impl<'a> FnLowerer<'a> {
     /// Arms are tested in order, each falling through to the next on failure.
     ///
     /// ```text
-    ///   test_0: <pattern test> ? bind_0 : test_1
-    ///   bind_0: <bind names> ; <guard> ? body_0 : test_1
+    ///   test_0: <pattern test, binding as it goes> ? guard_0 : test_1
+    ///   guard_0: <guard> ? body_0 : test_1
     ///   body_0: result = <body> ; goto join
     ///   ...
     ///   fail:   unreachable        <- exhaustiveness proved this is dead
@@ -816,12 +880,8 @@ impl<'a> FnLowerer<'a> {
             };
 
             let body_bb = self.new_block();
-            self.test_pattern(&arm.pattern, &subject, body_bb, next);
-
+            self.match_pattern(&arm.pattern, &subject, scrutinee.ty, body_bb, next);
             self.switch_to(body_bb);
-            // Bindings are written only once the pattern has matched, so a
-            // failed arm never leaves a half-written local behind.
-            self.bind_pattern(&arm.pattern, &subject);
 
             if let Some(g) = &arm.guard {
                 let guarded = self.new_block();
@@ -848,20 +908,77 @@ impl<'a> FnLowerer<'a> {
         result
     }
 
-    /// Branch to `on_match` when `pattern` accepts `subject`, else `on_fail`.
-    fn test_pattern(
+    /// Branch to `on_match` when `pattern` accepts `subject`, else `on_fail`,
+    /// writing the pattern's bindings on the way.
+    ///
+    /// **Testing and binding are one walk.** They were two: a test, and then,
+    /// once the whole pattern had matched, a separate pass writing the names.
+    /// That second pass cannot know which alternative of an or-pattern was the
+    /// one that matched, so it bound through the first — and `A(x) | B(x)`
+    /// matching a `B` read `B`'s payload as an `A`, or bound nothing at all.
+    /// Binding as each alternative's own test succeeds is what makes every
+    /// alternative's names come from that alternative.
+    ///
+    /// A failed test may leave a name written by an earlier part of the
+    /// pattern. Nothing can read it: the names a pattern binds are in scope
+    /// only in its own arm, and any path that reaches the arm has written
+    /// every one of them afresh.
+    ///
+    /// `subject_ty` is the subject's type. It matters for one case: a literal,
+    /// variant, struct or tuple pattern against an *optional* subject tests
+    /// the payload, so the subject is tested for nil and unwrapped first. It
+    /// used to be compared directly — an `Option<int>` against `4` — which the
+    /// VM's untyped registers forgave and the other two backends did not.
+    fn match_pattern(
         &mut self,
         pattern: &hir::Pattern,
         subject: &Operand,
+        subject_ty: Ty,
         on_match: BlockId,
         on_fail: BlockId,
     ) {
-        if pattern.is_irrefutable() {
-            self.terminate(Terminator::Goto(on_match));
-            return;
+        let payload_pattern = matches!(
+            pattern,
+            hir::Pattern::Int(_)
+                | hir::Pattern::Float(_)
+                | hir::Pattern::Bool(_)
+                | hir::Pattern::Str(_)
+                | hir::Pattern::IntRange { .. }
+                | hir::Pattern::Variant { .. }
+                | hir::Pattern::Struct { .. }
+                | hir::Pattern::Tuple { .. }
+        );
+        if payload_pattern {
+            if let TyKind::Optional(inner) = *self.types.kind(subject_ty) {
+                let absent = self.temp(Ty::BOOL);
+                self.assign(absent, Rvalue::IsNil { value: subject.clone() });
+                let present = self.new_block();
+                self.terminate(Terminator::Branch {
+                    cond: Operand::Local(absent),
+                    then: on_fail,
+                    else_: present,
+                });
+                self.switch_to(present);
+                let payload = self.temp(inner);
+                self.assign(payload, Rvalue::Unwrap { value: subject.clone() });
+                self.match_pattern(pattern, &Operand::Local(payload), inner, on_match, on_fail);
+                return;
+            }
         }
 
         match pattern {
+            hir::Pattern::Wildcard => self.terminate(Terminator::Goto(on_match)),
+
+            hir::Pattern::Binding { local, unwrap } => {
+                let value = if *unwrap {
+                    Rvalue::Unwrap { value: subject.clone() }
+                } else {
+                    Rvalue::Use(subject.clone())
+                };
+                self.assign(Local(local.0), value);
+                self.terminate(Terminator::Goto(on_match));
+            }
+
             hir::Pattern::Int(v) => self.test_eq(subject, Operand::Int(*v), BinOp::EqInt, on_match, on_fail),
             hir::Pattern::Float(v) => {
                 self.test_eq(subject, Operand::Float(*v), BinOp::EqFloat, on_match, on_fail)
@@ -921,23 +1038,8 @@ impl<'a> FnLowerer<'a> {
                     },
                 );
 
-                // Nested patterns are tested only once the tag matches, so
-                // reading a payload is always safe.
-                let refutable: Vec<(usize, &hir::Pattern)> = fields
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, p)| !p.is_irrefutable())
-                    .collect();
-
-                if refutable.is_empty() {
-                    self.terminate(Terminator::Branch {
-                        cond: Operand::Local(hit),
-                        then: on_match,
-                        else_: on_fail,
-                    });
-                    return;
-                }
-
+                // The payload is read only once the tag matches, so reading
+                // it is always safe.
                 let payload_bb = self.new_block();
                 self.terminate(Terminator::Branch {
                     cond: Operand::Local(hit),
@@ -945,9 +1047,11 @@ impl<'a> FnLowerer<'a> {
                     else_: on_fail,
                 });
                 self.switch_to(payload_bb);
-                self.test_fields(
+                let fields: Vec<(u32, &hir::Pattern)> =
+                    fields.iter().enumerate().map(|(i, p)| (i as u32, p)).collect();
+                self.match_fields(
                     subject,
-                    &refutable,
+                    &fields,
                     FieldOwner::Variant(*enum_id, *variant),
                     on_match,
                     on_fail,
@@ -955,25 +1059,19 @@ impl<'a> FnLowerer<'a> {
             }
 
             hir::Pattern::Struct { struct_id, fields } => {
-                let refutable: Vec<(usize, &hir::Pattern)> = fields
-                    .iter()
-                    .filter(|(_, p)| !p.is_irrefutable())
-                    .map(|(i, p)| (*i as usize, p))
-                    .collect();
-                if refutable.is_empty() {
-                    self.terminate(Terminator::Goto(on_match));
-                    return;
-                }
-                self.test_fields(
-                    subject,
-                    &refutable,
-                    FieldOwner::Struct(*struct_id),
-                    on_match,
-                    on_fail,
-                );
+                let fields: Vec<(u32, &hir::Pattern)> =
+                    fields.iter().map(|(i, p)| (*i, p)).collect();
+                self.match_fields(subject, &fields, FieldOwner::Struct(*struct_id), on_match, on_fail);
             }
 
-            // Any alternative matching is enough.
+            hir::Pattern::Tuple { ty, elems } => {
+                let elems: Vec<(u32, &hir::Pattern)> =
+                    elems.iter().enumerate().map(|(i, p)| (i as u32, p)).collect();
+                self.match_fields(subject, &elems, FieldOwner::Tuple(*ty), on_match, on_fail);
+            }
+
+            // Any alternative matching is enough, and whichever one does
+            // writes the names — each through its own shape.
             hir::Pattern::Or(alts) => {
                 for (i, alt) in alts.iter().enumerate() {
                     let next = if i + 1 < alts.len() {
@@ -981,24 +1079,11 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         on_fail
                     };
-                    self.test_pattern(alt, subject, on_match, next);
+                    self.match_pattern(alt, subject, subject_ty, on_match, next);
                     if next != on_fail {
                         self.switch_to(next);
                     }
                 }
-            }
-
-            hir::Pattern::Tuple { ty, elems } => {
-                let refutable: Vec<(usize, &hir::Pattern)> = elems
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, p)| !p.is_irrefutable())
-                    .collect();
-                if refutable.is_empty() {
-                    self.terminate(Terminator::Goto(on_match));
-                    return;
-                }
-                self.test_fields(subject, &refutable, FieldOwner::Tuple(*ty), on_match, on_fail);
             }
 
             hir::Pattern::Nil => {
@@ -1010,32 +1095,38 @@ impl<'a> FnLowerer<'a> {
                     else_: on_fail,
                 });
             }
-
-            hir::Pattern::Wildcard | hir::Pattern::Binding { .. } => {
-                self.terminate(Terminator::Goto(on_match));
-            }
         }
     }
 
-    fn test_fields(
+    /// Match each field against its sub-pattern in turn, the whole succeeding
+    /// only when every one does. A `_` reads nothing.
+    fn match_fields(
         &mut self,
         subject: &Operand,
-        fields: &[(usize, &hir::Pattern)],
+        fields: &[(u32, &hir::Pattern)],
         owner: FieldOwner,
         on_match: BlockId,
         on_fail: BlockId,
     ) {
+        let fields: Vec<&(u32, &hir::Pattern)> = fields
+            .iter()
+            .filter(|(_, p)| !matches!(p, hir::Pattern::Wildcard))
+            .collect();
+        if fields.is_empty() {
+            self.terminate(Terminator::Goto(on_match));
+            return;
+        }
         for (n, (index, sub)) in fields.iter().enumerate() {
-            let ty = self.field_type(owner, *index as u32);
+            let ty = self.field_type(owner, *index);
             let slot = self.temp(ty);
-            let read = self.read_field(subject, owner, *index as u32);
+            let read = self.read_field(subject, owner, *index);
             self.assign(slot, read);
             let target = if n + 1 < fields.len() {
                 self.new_block()
             } else {
                 on_match
             };
-            self.test_pattern(sub, &Operand::Local(slot), target, on_fail);
+            self.match_pattern(sub, &Operand::Local(slot), ty, target, on_fail);
             if target != on_match {
                 self.switch_to(target);
             }
@@ -1060,60 +1151,6 @@ impl<'a> FnLowerer<'a> {
             then: on_match,
             else_: on_fail,
         });
-    }
-
-    /// Write the pattern's bindings, once it is known to have matched.
-    fn bind_pattern(&mut self, pattern: &hir::Pattern, subject: &Operand) {
-        match pattern {
-            hir::Pattern::Binding { local, unwrap } => {
-                let value = if *unwrap {
-                    Rvalue::Unwrap { value: subject.clone() }
-                } else {
-                    Rvalue::Use(subject.clone())
-                };
-                self.assign(Local(local.0), value);
-            }
-            hir::Pattern::Variant { enum_id, variant, fields } => {
-                for (i, sub) in fields.iter().enumerate() {
-                    self.bind_field(sub, subject, FieldOwner::Variant(*enum_id, *variant), i as u32);
-                }
-            }
-            hir::Pattern::Struct { struct_id, fields } => {
-                for (i, sub) in fields {
-                    self.bind_field(sub, subject, FieldOwner::Struct(*struct_id), *i);
-                }
-            }
-            hir::Pattern::Tuple { ty, elems } => {
-                for (i, sub) in elems.iter().enumerate() {
-                    self.bind_field(sub, subject, FieldOwner::Tuple(*ty), i as u32);
-                }
-            }
-            // Every alternative of an or-pattern must bind the same names, so
-            // binding through the first is enough.
-            hir::Pattern::Or(alts) => {
-                if let Some(first) = alts.first() {
-                    self.bind_pattern(first, subject);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn bind_field(
-        &mut self,
-        sub: &hir::Pattern,
-        subject: &Operand,
-        owner: FieldOwner,
-        index: u32,
-    ) {
-        if matches!(sub, hir::Pattern::Wildcard) {
-            return;
-        }
-        let ty = self.field_type(owner, index);
-        let slot = self.temp(ty);
-        let read = self.read_field(subject, owner, index);
-        self.assign(slot, read);
-        self.bind_pattern(sub, &Operand::Local(slot));
     }
 
     /// Read a field, naming the variant when the subject is an enum so a
@@ -1203,5 +1240,32 @@ impl<'a> FnLowerer<'a> {
 
         self.resume_after(join, then_joins || else_joins);
         result
+    }
+}
+
+/// Whether evaluating an rvalue can trap, so that discarding its value must
+/// still evaluate it.
+///
+/// The checked arithmetic forms trap on overflow and a shift on a count out
+/// of range — the release forms wrap instead and are left out — and an index
+/// or a division traps on its operands. Nothing else here can: a cast
+/// saturates, a map lookup and `get` answer an optional, a range index and a
+/// string slice clamp, and `Unwrap` is only ever emitted where narrowing has
+/// proved the value present.
+fn can_trap(v: &Rvalue) -> bool {
+    match v {
+        Rvalue::IndexGet { .. } => true,
+        Rvalue::Binary { op, .. } => matches!(
+            op,
+            BinOp::AddInt
+                | BinOp::SubInt
+                | BinOp::MulInt
+                | BinOp::DivInt
+                | BinOp::RemInt
+                | BinOp::Shl
+                | BinOp::Shr
+        ),
+        Rvalue::Unary { op, .. } => matches!(op, UnOp::NegInt),
+        _ => false,
     }
 }

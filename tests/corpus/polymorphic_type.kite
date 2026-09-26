@@ -1,0 +1,12 @@
+// A generic type holding itself at a larger type has no finite expansion. It
+// used to overflow the checker's stack.
+
+struct Nested<T> { //~ ERROR E0220
+    value: T
+    inner: Option<Nested<[T]>>
+}
+
+fn main() {
+    let n = Nested{ value: 1, inner: nil }
+    io.print(n.value)
+}

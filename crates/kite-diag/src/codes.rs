@@ -278,6 +278,21 @@ codes! {
          and enums already have. Kite has one. Write the generic type itself, \
          or a struct that wraps it.";
 
+    E0220 = "E0220", "generic instantiation does not terminate",
+        "Kite specialises generics: every set of type arguments a program uses \
+         gets a copy of its own, made at compile time. A generic function that \
+         calls itself at a larger type — `depth([x], n - 1)` inside \
+         `depth<T>(x: T, …)` — or a generic type that contains itself at a \
+         larger one — `inner: Option<Nested<[T]>>` inside `Nested<T>` — asks \
+         for a new copy at every level, forever.\n\n\
+         Languages that box their generics can run this, because a boxed \
+         generic is one copy whatever the argument. Kite cannot, and says so \
+         rather than giving up partway and emitting a program with calls into \
+         copies that were never made.\n\n\
+         Recurse at the same type, or hold the growing part in something whose \
+         type does not grow — a slice of the original type, say, rather than a \
+         nesting of slices.";
+
     // ---- error handling ---------------------------------------------------
     E0301 = "E0301", "value used before its error was checked",
         "A function returning `(T, error)` returns a correlated pair. The \
@@ -423,4 +438,30 @@ codes! {
          with the program if it can be shared: the validator's message \
          identifies the function, which is usually enough to find the bad \
          lowering.";
+
+    E0901 = "E0901", "internal compiler error",
+        "This is a bug in Kite, not in the program being compiled. A stage of \
+         the compiler found something an earlier stage promised it would never \
+         see — a `break` with no loop to leave, an `await` the state-machine \
+         transform did not remove — and stopped rather than guess.\n\n\
+         Guessing is what it used to do. The `break` was dropped and the \
+         program ran on as if it had not been written; the `await` crashed \
+         the compiler. Stopping with this names the function, which is \
+         usually enough to find the stage at fault.\n\n\
+         There is no source change that is the right fix, though rewriting the \
+         construct the note points at may avoid it. Please report it, with \
+         the program if it can be shared.";
+
+    E0902 = "E0902", "the program exceeds a limit of this target",
+        "The program is valid Kite, and the target it is being compiled for \
+         cannot represent it.\n\n\
+         The bytecode VM addresses a frame's registers with sixteen bits, so \
+         one function may use at most 65,536 of them: one per local and \
+         temporary, plus the widest call or literal it builds. A function \
+         past that — tens of thousands of locals, or a literal with tens of \
+         thousands of elements — used to be emitted anyway, with register \
+         numbers silently cut short, so that unrelated values shared a \
+         register.\n\n\
+         Split the function, or build the large literal in a loop. The Wasm \
+         and native targets have limits of their own, but not this one.";
 }

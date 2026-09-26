@@ -62,6 +62,53 @@ pub struct Program {
     /// Dispatch tables, carried through unchanged from HIR. Lowering does not
     /// need them; the backends do.
     pub vtables: Vec<kite_hir::VTable>,
+    /// Constructs lowering met that an earlier stage promised it never would.
+    /// Non-empty means the program must not reach a backend; see
+    /// [`internal_errors`].
+    pub internal: Vec<Internal>,
+}
+
+/// A bug in the compiler rather than in the program: something a stage found
+/// that an earlier one promised it would not. Lowering records these instead
+/// of guessing — it once dropped the statement, or panicked — and the driver
+/// reports each as an internal compiler error.
+#[derive(Clone, Debug)]
+pub struct Internal {
+    /// The function it is in, as named in MIR.
+    pub function: String,
+    pub span: Span,
+    pub what: String,
+}
+
+/// Everything wrong with a lowered program that is the compiler's fault: what
+/// lowering recorded, and any `await` or `yield` the state-machine transform
+/// left behind.
+///
+/// Every backend assumes the transform removed each suspension, and each once
+/// panicked on one it had not — which happens for an `await` inside a closure,
+/// because a closure's body is lifted into a function of its own that is not
+/// `async`, so the transform never visits it. The checker refuses those; this
+/// is what stands behind it. Ask after [`asyncify`], before any backend.
+pub fn internal_errors(program: &Program) -> Vec<Internal> {
+    let mut found = program.internal.clone();
+    for f in &program.fns {
+        let suspends = f.blocks.iter().flat_map(|b| &b.stmts).any(|s| {
+            matches!(
+                s,
+                Inst::Assign { value: Rvalue::Await { .. } | Rvalue::Yield, .. }
+            )
+        });
+        if suspends {
+            found.push(Internal {
+                function: f.name.clone(),
+                span: f.span,
+                what: "an `await` survived the state-machine transform: this function \
+                       suspends but is not `async`"
+                    .to_string(),
+            });
+        }
+    }
+    found
 }
 
 #[derive(Debug)]

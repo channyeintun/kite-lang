@@ -13,6 +13,9 @@ kite-diag.workspace = true
 kite-ast.workspace = true
 kite-resolve.workspace = true
 kite-hir.workspace = true
+# A float interpolated into a constant is written at compile time, by the rule
+# every backend writes one by at run time.
+kite-float.workspace = true
 
 [dev-dependencies]
 kite-lexer.workspace = true

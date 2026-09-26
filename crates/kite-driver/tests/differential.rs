@@ -889,6 +889,345 @@ fn main() {
     ),
 ];
 
+/// Programs pinning down what the middle of the compiler — HIR, MIR and the
+/// bytecode it becomes — promises every backend. Each one is here because the
+/// three once disagreed about it, or all three agreed on the wrong answer.
+const MIDDLE_END: &[(&str, &str)] = &[
+    // The first struct a program declares once had type tag zero, which is
+    // also the tag of an error carrying nothing and of a nil error. So a plain
+    // `errors.new` claimed to be a `NotFound`, and `NotFound.as` of it handed
+    // back a value that was never there — a segfault natively, an illegal
+    // cast on Wasm.
+    (
+        "error-tags-are-never-zero",
+        "\
+struct NotFound {
+  id: int
+}
+
+impl Error for NotFound {
+  fn message(self) -> str { return \"not found \\(self.id)\" }
+}
+
+enum Busy {
+  Retry(after: int)
+}
+
+impl Error for Busy {
+  fn message(self) -> str { return \"busy\" }
+}
+
+fn main() {
+  let plain = errors.new(\"disk on fire\")
+  io.print(NotFound.is(plain))
+  io.print(NotFound.as(plain) == nil)
+  io.print(Busy.is(plain))
+  let none: error = nil
+  io.print(NotFound.is(none))
+  io.print(NotFound.as(none) == nil)
+  io.print(Busy.is(none))
+  let nf: error = NotFound{ id: 3 }
+  io.print(NotFound.is(nf))
+  io.print(Busy.is(nf))
+  let got = NotFound.as(nf)
+  if got != nil {
+    io.print(got.id)
+  }
+  let busy: error = Busy.Retry(after: 5)
+  io.print(Busy.is(busy))
+  io.print(NotFound.is(busy))
+}
+",
+    ),
+    // `==` on a recursive type recursed through the type itself until the
+    // checker's stack ran out, and `==` on a map was refused outright although
+    // section 5.2 defines it. Maps compare entry by entry in insertion order.
+    (
+        "equality-on-recursive-types-and-maps",
+        "\
+enum List {
+  Cons(h: int, t: List)
+  Empty
+}
+
+struct Node {
+  label: int
+  children: [Node]
+}
+
+enum Json {
+  Null
+  Num(float)
+  Text(str)
+  Arr([Json])
+  Obj({str: Json})
+}
+
+struct Inventory {
+  name: str
+  stock: {str: int}
+}
+
+fn main() {
+  let a = Cons(1, Cons(2, Empty))
+  io.print(a == Cons(1, Cons(2, Empty)))
+  io.print(a == Cons(1, Empty))
+  let n = Node{ label: 1, children: [Node{ label: 2, children: [] }] }
+  io.print(n == Node{ label: 1, children: [Node{ label: 2, children: [] }] })
+  io.print(n != Node{ label: 1, children: [] })
+  let doc = Json.Obj({\"k\": Json.Arr([Json.Num(1.5), Json.Null]), \"t\": Json.Text(\"x\")})
+  io.print(doc == Json.Obj({\"k\": Json.Arr([Json.Num(1.5), Json.Null]), \"t\": Json.Text(\"x\")}))
+  io.print(doc == Json.Obj({\"k\": Json.Arr([Json.Num(1.5)]), \"t\": Json.Text(\"x\")}))
+  let x = {\"a\": 1, \"b\": 2}
+  io.print(x == {\"a\": 1, \"b\": 2})
+  io.print(x == {\"b\": 2, \"a\": 1})
+  io.print(x == {\"a\": 1, \"b\": 3})
+  io.print(x != {\"a\": 1})
+  let i = Inventory{ name: \"shop\", stock: x }
+  io.print(i == Inventory{ name: \"shop\", stock: {\"a\": 1, \"b\": 2} })
+  io.print(i == Inventory{ name: \"shop\", stock: {\"b\": 2, \"a\": 1} })
+  let nested = {\"k\": [1, 2]}
+  io.print(nested == {\"k\": [1, 2]})
+  io.print(nested == {\"k\": [1]})
+}
+",
+    ),
+    // A literal, variant, struct or tuple pattern against an optional was
+    // compared with the optional itself — `Option<int>` against `4`. The VM's
+    // untyped registers hid it; natively it matched nothing, and Wasm refused
+    // the module.
+    (
+        "match-on-an-optional-tests-its-payload",
+        "\
+enum Shape {
+  Circle(r: int)
+  Square(s: int)
+}
+
+struct P {
+  x: int
+  y: int
+}
+
+fn shape(o: Option<Shape>) -> str {
+  return match o {
+    nil => \"none\",
+    Circle(r) => \"circle \\(r)\",
+    Square(s) => \"square \\(s)\",
+    _ => \"other\",
+  }
+}
+
+fn point(o: Option<P>) -> str {
+  return match o {
+    nil => \"nowhere\",
+    P{ x: 0, y } => \"on y at \\(y)\",
+    P{ x, y } => \"at \\(x),\\(y)\",
+    _ => \"other\",
+  }
+}
+
+fn flag(o: Option<bool>) -> str {
+  return match o {
+    nil => \"unset\",
+    true => \"on\",
+    false => \"off\",
+    _ => \"other\",
+  }
+}
+
+fn count(o: Option<int>) -> str {
+  return match o {
+    nil => \"none\",
+    4 => \"four\",
+    1..=3 => \"few\",
+    n => \"many \\(n)\",
+  }
+}
+
+fn word(o: Option<str>) -> str {
+  return match o {
+    nil => \"none\",
+    \"q\" => \"queue\",
+    s => s,
+  }
+}
+
+fn tagged(t: (Option<int>, str)) -> str {
+  return match t {
+    (nil, s) => \"nil \\(s)\",
+    (4, \"x\") => \"four x\",
+    (n, s) => s,
+  }
+}
+
+fn main() {
+  io.print(shape(nil))
+  io.print(shape(Circle(r: 2)))
+  io.print(shape(Square(s: 3)))
+  io.print(point(nil))
+  io.print(point(P{ x: 0, y: 4 }))
+  io.print(point(P{ x: 1, y: 4 }))
+  io.print(flag(nil))
+  io.print(flag(true))
+  io.print(flag(false))
+  io.print(count(nil))
+  io.print(count(4))
+  io.print(count(2))
+  io.print(count(9))
+  io.print(word(nil))
+  io.print(word(\"q\"))
+  io.print(word(\"z\"))
+  io.print(tagged((nil, \"a\")))
+  io.print(tagged((4, \"x\")))
+  io.print(tagged((4, \"y\")))
+}
+",
+    ),
+    // `for i in a..=max` incremented past the bound before testing it, which
+    // overflows at `int`'s maximum: a trap on the last step.
+    (
+        "an-inclusive-range-ends-at-the-maximum",
+        "\
+fn id(x: int) -> int { return x }
+
+fn main() {
+  let hi = id(9223372036854775807)
+  var n = 0
+  for i in (hi - 2)..=hi {
+    n = n + 1
+  }
+  io.print(n)
+  var last = 0
+  for i in (hi - 1)..=hi {
+    if i == hi - 1 {
+      continue
+    }
+    last = i
+  }
+  io.print(last == hi)
+  for i in 3..=3 {
+    io.print(i)
+  }
+  for i in 4..=3 {
+    io.print(i)
+  }
+}
+",
+    ),
+    // `int`'s minimum written as a literal, a remainder by -1, and shifts at
+    // the edge of their range. `min % -1` trapped on two backends and was 0 on
+    // the third; it is 0.
+    (
+        "integer-edges",
+        "\
+fn id(x: int) -> int { return x }
+
+let LOW = -9223372036854775808
+
+fn main() {
+  let min = -9223372036854775808
+  io.print(min)
+  io.print(LOW == min)
+  io.print(min % id(-1))
+  io.print(id(7) % id(-1))
+  io.print(id(-7) % id(2))
+  io.print(id(1) << id(63))
+  io.print(id(-8) >> id(1))
+  io.print(-id(5))
+  let v = match id(min) {
+    -9223372036854775808 => \"min\",
+    _ => \"other\",
+  }
+  io.print(v)
+}
+",
+    ),
+    // An or-pattern bound its names through its first alternative whichever
+    // one matched, so a `Square` here read its payload as a `Circle`'s.
+    (
+        "or-pattern-binds-through-the-alternative-that-matched",
+        "\
+enum Shape {
+  Circle(r: int)
+  Square(colour: int, side: int)
+  Dot
+}
+
+fn size(s: Shape) -> int {
+  return match s {
+    Circle(n) | Square(_, n) => n,
+    Dot => 0,
+  }
+}
+
+fn describe(o: Option<Shape>) -> str {
+  return match o {
+    nil => \"none\",
+    Circle(n) | Square(_, n) if n > 5 => \"big \\(n)\",
+    Circle(n) | Square(_, n) => \"small \\(n)\",
+    _ => \"dot\",
+  }
+}
+
+fn main() {
+  io.print(size(Square(99, 7)))
+  io.print(size(Circle(3)))
+  io.print(size(Dot))
+  io.print(describe(Square(1, 9)))
+  io.print(describe(Circle(2)))
+  io.print(describe(nil))
+}
+",
+    ),
+    // Floats at every edge of how they are written. The VM and the native
+    // runtime used Rust's `{}` and the Wasm glue JavaScript's `String`, so
+    // this printed `inf` or `Infinity`, `-0.0` or `0.0`, `0.0000001` or
+    // `1e-7`, and a 327-character decimal or `5e-324`, by backend. A float
+    // interpolated into a constant was refused for the same reason.
+    (
+        "floats-are-written-alike",
+        "\
+fn f(x: float) -> float { return x }
+
+let BIG = \"big \\(1e21) tiny \\(1.5e-7) whole \\(2.0)\"
+
+fn main() {
+  io.print(f(0.1) + f(0.2))
+  io.print(f(1.0) / f(3.0))
+  io.print(f(1e21))
+  io.print(f(1e20))
+  io.print(f(123456789012345680000.0))
+  io.print(f(1e-7))
+  io.print(f(1.5e-7))
+  io.print(f(0.000001))
+  io.print(f(1.5e300) * f(1e10))
+  io.print(-f(1.5e300) * f(1e10))
+  io.print(f(0.0) / f(0.0))
+  io.print(f(-0.0))
+  io.print(f(0.0))
+  io.print(f(2.0))
+  io.print(f(-2.5))
+  io.print(f(5e-324))
+  io.print(f(1.7976931348623157e308))
+  io.print(f(-1e21))
+  io.print(f(1e16))
+  io.print(f(1e15) + f(0.5))
+  io.print(9007199254740993 as float)
+  io.print(9223372036854775807 as float)
+  io.print(\"\\(f(1e21)) \\(f(-0.0)) \\(f(0.1)) \\(f(1.0) / f(0.0)) \\(f(2.5e-7))\")
+  io.print(BIG)
+}
+",
+    ),
+];
+
+/// Programs above that need a rule of the checker's which may not have landed:
+/// they are skipped while the checker still refuses them, and compared the
+/// moment it accepts them. `A(x) | B(x)` is lowered correctly already; until
+/// the checker admits two alternatives binding one name, it is `E0112`.
+const AWAITING_THE_CHECKER: &[&str] = &["or-pattern-binds-through-the-alternative-that-matched"];
+
 fn run_on_vm(name: &str, src: &str) -> String {
     run_on_vm_at(&format!("{}.kite", name), name, src)
 }
@@ -1102,7 +1441,13 @@ fn all_backends_agree() {
     let root = std::env::temp_dir().join(format!("kite-diff-{}", std::process::id()));
     let mut mismatches = Vec::new();
 
-    for (name, src) in PROGRAMS {
+    for (name, src) in PROGRAMS.iter().chain(MIDDLE_END) {
+        if AWAITING_THE_CHECKER.contains(name)
+            && compile(format!("{}.kite", name), src, Emit::Check).failed()
+        {
+            eprintln!("skipping {}: the checker does not accept it yet", name);
+            continue;
+        }
         let vm = run_on_vm(name, src);
 
         if native {
@@ -1213,4 +1558,266 @@ fn find_runtime_lib() -> Option<std::path::PathBuf> {
         dir = dir.parent()?.to_path_buf();
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// Traps
+// ---------------------------------------------------------------------------
+
+/// Programs that must trap on every backend, after printing the same lines.
+///
+/// `all_backends_agree` insists every run finishes, so a program whose point
+/// is where it stops needs a comparison of its own: the output before the
+/// trap, and the fact of the trap. What each backend *says* about the trap is
+/// not compared — Wasm says `unreachable` for everything.
+const TRAPPING: &[(&str, &str)] = &[
+    // A discarded value is not a discarded check: sections 5.4 and 7.7 say
+    // these trap, and lowering used to drop them along with the value.
+    (
+        "a-discarded-index-still-traps",
+        "\
+fn id(x: int) -> int {
+  return x
+}
+
+fn main() {
+  let xs = [1, 2, 3]
+  io.print(\"before\")
+  _ = xs[10]
+  io.print(\"after\")
+}
+",
+    ),
+    (
+        "a-discarded-division-still-traps",
+        "\
+fn id(x: int) -> int {
+  return x
+}
+
+fn main() {
+  io.print(\"before\")
+  _ = id(1) / id(0)
+  io.print(\"after\")
+}
+",
+    ),
+    (
+        "a-bare-index-still-traps",
+        "\
+fn id(x: int) -> int {
+  return x
+}
+
+fn main() {
+  let xs = [1, 2, 3]
+  io.print(\"before\")
+  xs[id(5)]
+  io.print(\"after\")
+}
+",
+    ),
+    (
+        "a-discarded-negation-still-traps",
+        "\
+fn id(x: int) -> int {
+  return x
+}
+
+fn main() {
+  io.print(\"before\")
+  _ = -id(-9223372036854775807 - 1)
+  io.print(\"after\")
+}
+",
+    ),
+    // Negating `int`'s minimum overflows. Debug Wasm computed `0 - x` and
+    // wrapped while the other two trapped.
+    (
+        "negating-the-minimum-traps",
+        "\
+fn id(x: int) -> int {
+  return x
+}
+
+fn main() {
+  io.print(\"before\")
+  io.print(-id(-9223372036854775807 - 1))
+}
+",
+    ),
+    // A shift count outside 0..=63 traps in a debug build. Wasm took it
+    // modulo 64 while the other two trapped.
+    (
+        "a-shift-past-the-width-traps",
+        "\
+fn id(x: int) -> int {
+  return x
+}
+
+fn main() {
+  io.print(id(1) << id(63))
+  io.print(id(1) << id(64))
+}
+",
+    ),
+    (
+        "a-negative-shift-traps",
+        "\
+fn id(x: int) -> int {
+  return x
+}
+
+fn main() {
+  io.print(id(16) >> id(4))
+  io.print(id(16) >> id(-1))
+}
+",
+    ),
+];
+
+/// What a run printed, and whether it ended in a trap.
+type Outcome = (String, bool);
+
+fn trap_on_vm(name: &str, src: &str) -> Outcome {
+    let c = compile(format!("{}.kite", name), src, Emit::Check);
+    assert!(!c.failed(), "{} does not compile:\n{}", name, c.render_diagnostics());
+    let mut out = Vec::new();
+    let trapped = c.run(&mut out).is_err();
+    (String::from_utf8(out).expect("output is valid UTF-8"), trapped)
+}
+
+fn trap_on_wasm(name: &str, src: &str, dir: &std::path::Path) -> Outcome {
+    let c = compile(format!("{}.kite", name), src, Emit::Wasm);
+    assert!(!c.failed(), "{} does not compile to wasm:\n{}", name, c.render_diagnostics());
+    let module = c.wasm.as_ref().expect("a wasm module");
+    std::fs::write(dir.join("app.wasm"), &module.bytes).expect("write wasm");
+    std::fs::write(dir.join("app.js"), kite_driver::generate_glue("app.wasm")).expect("write glue");
+    // The runner reports a trap through its exit code, and prints what the
+    // program wrote before it either way.
+    std::fs::write(
+        dir.join("run.mjs"),
+        "import { readFile } from \"node:fs/promises\";\n\
+         import { run, setWriter } from \"./app.js\";\n\
+         const out = [];\n\
+         setWriter((l) => out.push(l));\n\
+         let trapped = false;\n\
+         try {\n\
+         \x20 await run(new Uint8Array(await readFile(new URL(\"./app.wasm\", import.meta.url))));\n\
+         } catch (e) {\n\
+         \x20 trapped = e instanceof WebAssembly.RuntimeError;\n\
+         \x20 if (!trapped) throw e;\n\
+         }\n\
+         process.stdout.write(out.map((l) => l + \"\\n\").join(\"\"));\n\
+         process.exitCode = trapped ? 3 : 0;\n",
+    )
+    .expect("write runner");
+    let output = Command::new("node").arg(dir.join("run.mjs")).output().expect("node runs");
+    let trapped = match output.status.code() {
+        Some(0) => false,
+        Some(3) => true,
+        _ => panic!(
+            "{} failed under node:\n{}",
+            name,
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    };
+    (String::from_utf8(output.stdout).expect("output is valid UTF-8"), trapped)
+}
+
+/// Where the child's program output begins and, for a run that finishes,
+/// ends. A trap ends the process between the two.
+const CHILD_BEGIN: &str = "\n<<kite-native-begin>>\n";
+const CHILD_END: &str = "\n<<kite-native-end>>\n";
+
+/// A native trap ends the process, exactly as it would a linked executable,
+/// so each program runs in a child: this test binary again, asked through the
+/// environment to run one program and nothing else.
+fn trap_on_native(name: &str) -> Outcome {
+    let exe = std::env::current_exe().expect("the test binary");
+    let output = Command::new(exe)
+        .args(["native_trap_child", "--exact", "--nocapture", "--test-threads=1"])
+        .env("KITE_NATIVE_TRAP_CHILD", name)
+        .output()
+        .expect("the child runs");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let Some((_, printed)) = stdout.split_once(CHILD_BEGIN) else {
+        panic!(
+            "{}: the native child never started:\n{}\n{}",
+            name,
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    match printed.split_once(CHILD_END) {
+        Some((printed, _)) => (printed.to_string(), false),
+        None => {
+            assert!(!output.status.success(), "{}: no end marker and a clean exit", name);
+            (printed.to_string(), true)
+        }
+    }
+}
+
+/// The child half of [`trap_on_native`]. Does nothing unless asked.
+#[test]
+fn native_trap_child() {
+    let Ok(name) = std::env::var("KITE_NATIVE_TRAP_CHILD") else {
+        return;
+    };
+    let (_, src) = TRAPPING
+        .iter()
+        .find(|(n, _)| *n == name)
+        .unwrap_or_else(|| panic!("no trapping program {}", name));
+    let c = compile(format!("{}.kite", name), src, Emit::Native);
+    assert!(!c.failed(), "{} does not compile natively:\n{}", name, c.render_diagnostics());
+    let program = c.native.as_ref().expect("a native program");
+    // Written straight to the process's stdout, past the test harness's
+    // capture: a trap writes what the program printed the same way and exits.
+    let mut stdout = std::io::stdout().lock();
+    use std::io::Write as _;
+    stdout.write_all(CHILD_BEGIN.as_bytes()).unwrap();
+    stdout.flush().unwrap();
+    drop(stdout);
+    let mut out = Vec::new();
+    program.run(&mut out).unwrap_or_else(|e| panic!("{} failed natively: {}", name, e));
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(&out).unwrap();
+    stdout.write_all(CHILD_END.as_bytes()).unwrap();
+    stdout.flush().unwrap();
+}
+
+#[test]
+fn every_backend_traps_alike() {
+    let native = native_available();
+    let node = node_available();
+    let root = std::env::temp_dir().join(format!("kite-traps-{}", std::process::id()));
+    let mut mismatches = Vec::new();
+
+    for (name, src) in TRAPPING {
+        let vm = trap_on_vm(name, src);
+        assert!(vm.1, "{} did not trap on the VM; printed {:?}", name, vm.0);
+
+        if native {
+            let out = trap_on_native(name);
+            if out != vm {
+                mismatches.push(format!("{}:\n  vm:     {:?}\n  native: {:?}", name, vm, out));
+            }
+        }
+        if node {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).expect("create work directory");
+            let out = trap_on_wasm(name, src, &dir);
+            if out != vm {
+                mismatches.push(format!("{}:\n  vm:   {:?}\n  wasm: {:?}", name, vm, out));
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        mismatches.is_empty(),
+        "{} backend disagreement(s):\n\n{}",
+        mismatches.len(),
+        mismatches.join("\n\n")
+    );
 }

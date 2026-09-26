@@ -210,6 +210,28 @@ and a numeric literal may not carry a type suffix: `42i32` is `E0004`.
 
 Integer overflow traps in debug builds and wraps in release builds, matching
 the default most users expect while keeping release performance predictable.
+The rule covers every operation that can overflow, on every target:
+
+| Operation | Debug build | Release build |
+|---|---|---|
+| `a + b`, `a - b`, `a * b` past the range | traps | wraps |
+| `-a` where `a` is `int`'s minimum | traps | wraps: `-min` is `min` |
+| `a << n`, `a >> n` with `n` outside `0..=63` | traps | `n` is taken modulo 64, its low six bits: `1 << 65` is `2` |
+| `a / 0`, `a % 0` | traps | traps |
+| `min / -1` | traps | traps |
+| `min % -1` | `0` | `0` |
+
+Division is the exception to wrapping: there is no quotient to wrap to when
+the divisor is zero, and `min / -1` traps with it so that a quotient is always
+the true one. A remainder by `-1` is always `0`, `min`'s included — the answer
+fits, so it is not an overflow. `>>` is arithmetic, keeping the sign. A
+module-level constant ([§4.2](#42-module-level-constants)) is the same in
+every build, so a shift count outside `0..=63` in one is a compile error,
+`E0118`, as a division by zero is.
+
+`-9223372036854775808` is `int`'s minimum. The digits alone are one past the
+largest `int` and are refused (`E0004`), but a `-` written directly in front
+of them is read with them as one constant.
 `math.wrapping_add` wraps in both, and `math.checked_add` answers `Option<int>`
 in both, for the code that has to mean one of the two regardless of how it was
 built. Both are ordinary Kite over `math.max_int()` and `math.min_int()`, and
@@ -402,12 +424,25 @@ A constant shares the value name space with functions, so a module cannot
 declare both `fn limit` and `let limit`; a cycle among constants is
 [E0119](#16-diagnostics).
 
-One restriction is worth stating outright: **a `float` may not be interpolated
-into a constant**. The browser and the native runtime write a float differently
-at the exponent boundary — `1e21` against `1000000000000000000000` — so folding
-one at compile time would give the same program a different string depending on
-which backend built it. Interpolate it in a function, where the running host
-decides.
+A `float` interpolated into a constant is written the way every backend writes
+one at run time, so `let LABEL = "max \(1e21)"` is `"max 1e+21"` everywhere:
+
+- `NaN` is `NaN`, and the infinities are `inf` and `-inf`.
+- Zero is `0.0`, and negative zero `-0.0` — it is a different value, and
+  `1.0 / -0.0` says so.
+- A whole number below `1e21` in magnitude is written with all its digits and
+  `.0`, so that it reads back as a `float`: `3.0`, `100000000000000000000.0`.
+- Anything else is the shortest decimal that reads back as the same value,
+  written plainly from `1e-7` up to `1e21` and in exponent form outside it:
+  `0.30000000000000004`, `0.000001`, `1e-7`, `1.5e-7`, `1e+21`, `5e-324`,
+  `1.7976931348623157e+308`. Every one is a valid float literal.
+
+This is also the text of `io.print(x)` and `"\(x)"` for any `float`, on every
+target: ECMAScript's `Number#toString` with Kite's own spelling for the three
+values it writes differently. It was not always: the bytecode VM and the
+native runtime once wrote `inf`, `-0.0` and `0.0000001` where the browser wrote
+`Infinity`, `0.0` and `1e-7`, and a float in a constant was refused because
+folding it would have had to pick one.
 
 ### 4.3 Visibility
 
@@ -571,7 +606,12 @@ is how it reads. It is non-associative too: `a..b..c` has no meaning to give.
 ### 5.2 Equality
 
 `==` is structural for all types: two structs are equal when their fields are
-equal, two slices when their elements are. There is no reference equality
+equal, two slices when their elements are, two maps when they hold equal
+entries in the same insertion order. Order counts for a map because it is part
+of what a map is — iteration, `keys()` and a derived `hash()` all observe it —
+so `{"a": 1, "b": 2} != {"b": 2, "a": 1}`. A recursive type — a list whose
+tail is another list, a tree whose children are trees — is compared the same
+way, as deep as the values go. There is no reference equality
 operator in the surface language; `ptr.same(a, b)` is a compiler builtin, for
 the rare case that needs it.
 
@@ -1703,14 +1743,14 @@ broken by extracting the shared part.
 
 ## 14. Memory model
 
-Kite is garbage-collected on every target. There is no manual allocation, no
+Kite's memory is managed on every target. There is no manual allocation, no
 `free`, no ownership, no borrowing, and no lifetimes.
 
 | Target | Collector |
 |---|---|
 | `wasm32-gc` | **The host engine's collector.** WasmGC objects are allocated with `struct.new` / `array.new` and traced by V8, SpiderMonkey, or JavaScriptCore directly. Kite ships no collector in the binary. |
-| `native-*` | Precise tracing collector: generational, non-moving in v1. Type maps emitted by the compiler give exact root and field information. |
-| `kbc` | Same collector as native. |
+| `native-*` | Precise tracing collector, generational. New objects are bump-allocated in a nursery, and a minor collection **moves** the survivors into the old generation, updating every reference to them; the old generation does not move, and is collected by mark-and-sweep. Stack maps emitted by the compiler give exact root and field information. |
+| `kbc` | **Reference counting**, not a tracing collector. The bytecode VM is the development loop, the embedding target and the differential-testing oracle, and a value is freed when its last reference goes. A cycle of references — two structs whose `var` fields point at each other — is never freed while the program runs. That is a leak in a long-running embedding and harmless in a test run; programs meant to run for a long time with cyclic data belong on the native or Wasm target. |
 
 Delegating collection to the browser engine on the web target is the single
 largest binary-size win available in 2026, and it is why this design was not

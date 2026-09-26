@@ -1,0 +1,14 @@
+// A generic function calling itself at a larger type needs a copy per level,
+// without end. It used to be cut off partway with no diagnostic, leaving calls
+// into copies that were never made.
+
+fn depth<T>(x: T, n: int) -> int { //~ ERROR E0220
+    if n == 0 {
+        return 0
+    }
+    return 1 + depth([x], n - 1)
+}
+
+fn main() {
+    io.print(depth(1, 3))
+}
