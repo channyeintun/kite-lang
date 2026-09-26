@@ -398,6 +398,7 @@ dependencies = [
  "kite-span",
  "kite-types",
  "kite-vm",
+ "unicode-normalization",
 ]
 
 [[package]]

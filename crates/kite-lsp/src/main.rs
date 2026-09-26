@@ -14,18 +14,53 @@ mod server;
 
 use json::Json;
 use std::io::{BufRead, Write};
+use std::process::ExitCode;
 
-fn main() {
+fn main() -> ExitCode {
     let stdin = std::io::stdin();
-    let mut input = stdin.lock();
     let stdout = std::io::stdout();
-    let mut output = stdout.lock();
+    ExitCode::from(serve(&mut stdin.lock(), &mut stdout.lock()))
+}
+
+/// Answer messages until the editor says to stop or goes away, and say with
+/// what exit status.
+fn serve(input: &mut impl BufRead, output: &mut impl Write) -> u8 {
     let mut server = server::Server::new();
 
-    while let Some(message) = read_message(&mut input) {
+    loop {
+        let message = match read_message(input) {
+            Incoming::Closed => return 0,
+            // One bad message is one bad message. It used to end the loop,
+            // and the session with it, exiting as if asked to — the editor
+            // saw its server vanish over a request it would have forgotten.
+            Incoming::Malformed => {
+                write_message(
+                    output,
+                    &Json::object(vec![
+                        ("jsonrpc", Json::str("2.0")),
+                        // The id is in the message that could not be read.
+                        ("id", Json::Null),
+                        (
+                            "error",
+                            Json::object(vec![
+                                ("code", Json::number(-32700)),
+                                ("message", Json::str("the message is not valid JSON")),
+                            ]),
+                        ),
+                    ]),
+                );
+                continue;
+            }
+            Incoming::Message(message) => message,
+        };
         let Some(method) = message.get("method").and_then(|m| m.as_str()) else {
             continue;
         };
+        // The protocol's rule: 0 after a `shutdown`, 1 without one, so an
+        // editor that stopped its server without asking is told it did.
+        if method == "exit" {
+            return if server.shutdown { 0 } else { 1 };
+        }
         let id = message.get("id").cloned();
         let reply = server.handle(method, &message);
 
@@ -38,7 +73,7 @@ fn main() {
                 // is no — which the editor shows, where an empty result
                 // would just look like nothing happening.
                 write_message(
-                    &mut output,
+                    output,
                     &Json::object(vec![
                         ("jsonrpc", Json::str("2.0")),
                         ("id", id),
@@ -53,7 +88,7 @@ fn main() {
                 );
             } else if let Some(result) = reply.result {
                 write_message(
-                    &mut output,
+                    output,
                     &Json::object(vec![
                         ("jsonrpc", Json::str("2.0")),
                         ("id", id),
@@ -64,7 +99,7 @@ fn main() {
         }
         for (method, params) in reply.notifications {
             write_message(
-                &mut output,
+                output,
                 &Json::object(vec![
                     ("jsonrpc", Json::str("2.0")),
                     ("method", Json::str(method)),
@@ -72,19 +107,27 @@ fn main() {
                 ]),
             );
         }
-        if server.shutdown && method == "exit" {
-            break;
-        }
     }
 }
 
+/// What arrived on the input.
+enum Incoming {
+    Message(Json),
+    /// Framed, and not something this can read: not JSON, not UTF-8, or
+    /// headers without a length. The next message is still readable.
+    Malformed,
+    /// The editor closed the stream, or it ended inside a message.
+    Closed,
+}
+
 /// Read one `Content-Length`-framed message.
-fn read_message(input: &mut impl BufRead) -> Option<Json> {
+fn read_message(input: &mut impl BufRead) -> Incoming {
     let mut length = None;
     loop {
         let mut line = String::new();
-        if input.read_line(&mut line).ok()? == 0 {
-            return None;
+        match input.read_line(&mut line) {
+            Ok(0) | Err(_) => return Incoming::Closed,
+            Ok(_) => {}
         }
         let trimmed = line.trim_end();
         if trimmed.is_empty() {
@@ -94,9 +137,15 @@ fn read_message(input: &mut impl BufRead) -> Option<Json> {
             length = value.trim().parse::<usize>().ok();
         }
     }
-    let mut body = vec![0u8; length?];
-    input.read_exact(&mut body).ok()?;
-    json::parse(std::str::from_utf8(&body).ok()?)
+    let Some(length) = length else { return Incoming::Malformed };
+    let mut body = vec![0u8; length];
+    if input.read_exact(&mut body).is_err() {
+        return Incoming::Closed;
+    }
+    match std::str::from_utf8(&body).ok().and_then(json::parse) {
+        Some(message) => Incoming::Message(message),
+        None => Incoming::Malformed,
+    }
 }
 
 fn write_message(output: &mut impl Write, message: &Json) {

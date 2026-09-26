@@ -7,9 +7,10 @@
 
 use crate::json::Json;
 use kite_diag::Severity;
-use kite_driver::{compile, Binding, Compilation, Emit};
+use kite_driver::{compile_provided, Binding, Compilation, Emit};
 use kite_span::{FileId, Span};
 use std::collections::HashMap;
+use std::path::{Component, Path};
 
 /// Files the editor has open, by URI. The editor's copy is the truth while a
 /// file is open — it may hold edits that are not on disk yet.
@@ -17,6 +18,18 @@ use std::collections::HashMap;
 pub struct Server {
     open: HashMap<String, String>,
     pub shutdown: bool,
+}
+
+/// One open file, compiled the way `kitec check` would compile it.
+struct Compiled {
+    uri: String,
+    path: String,
+    text: String,
+    compilation: Compilation,
+    /// The [`FileId`] this file was given, which is what tells its spans apart
+    /// from the prelude's and every module's. Each of those numbers its bytes
+    /// from zero too, so an offset means nothing until its file is checked.
+    own: Option<FileId>,
 }
 
 /// What to send back: an answer to a request, and any notifications.
@@ -42,6 +55,10 @@ impl Reply {
     fn refuse(message: impl Into<String>) -> Reply {
         Reply { result: None, error: Some(message.into()), notifications: Vec::new() }
     }
+
+    fn notify(notifications: Vec<(String, Json)>) -> Reply {
+        Reply { result: None, error: None, notifications }
+    }
 }
 
 impl Server {
@@ -66,7 +83,7 @@ impl Server {
                     .unwrap_or("")
                     .to_string();
                 self.open.insert(uri.clone(), text);
-                self.diagnostics(&uri)
+                self.republish(&uri)
             }
             "textDocument/didChange" => {
                 let uri = uri_of(message).unwrap_or_default();
@@ -81,27 +98,31 @@ impl Server {
                         }
                     }
                 }
-                self.diagnostics(&uri)
+                self.republish(&uri)
             }
             "textDocument/didSave" => {
+                // The buffer was already the truth, so saving it changes
+                // nothing another file sees.
                 let uri = uri_of(message).unwrap_or_default();
-                self.diagnostics(&uri)
+                Reply::notify(vec![self.diagnostics(&uri)])
             }
             "textDocument/didClose" => {
                 let uri = uri_of(message).unwrap_or_default();
                 self.open.remove(&uri);
-                // An empty list clears what was shown for the file.
-                Reply {
-                    result: None,
-                    error: None,
-                    notifications: vec![(
-                        "textDocument/publishDiagnostics".to_string(),
-                        Json::object(vec![
-                            ("uri", Json::str(uri)),
-                            ("diagnostics", Json::Array(Vec::new())),
-                        ]),
-                    )],
+                // An empty list clears what was shown for the file. The files
+                // that import it read it from disk again, and the disk may not
+                // hold what the buffer that just went away did.
+                let mut notifications = vec![(
+                    "textDocument/publishDiagnostics".to_string(),
+                    Json::object(vec![
+                        ("uri", Json::str(uri.clone())),
+                        ("diagnostics", Json::Array(Vec::new())),
+                    ]),
+                )];
+                for other in self.importers(&uri) {
+                    notifications.push(self.diagnostics(&other));
                 }
+                Reply::notify(notifications)
             }
 
             "textDocument/hover" => self.hover(message),
@@ -125,22 +146,94 @@ impl Server {
         self.open.get(uri).cloned().unwrap_or_default()
     }
 
-    // ---- diagnostics -------------------------------------------------------
-
-    fn diagnostics(&self, uri: &str) -> Reply {
+    /// Compile an open file, with the other open buffers it could import
+    /// handed over rather than read from disk.
+    ///
+    /// Reading them from disk meant an edit to `config.kite` was invisible to
+    /// `main.kite` until it was saved: the editor reported a function missing
+    /// while showing it on screen.
+    fn compile(&self, uri: &str) -> Compiled {
         let text = self.text(uri);
         let path = path_of(uri);
-        let compiled = compile(&path, &text, Emit::Check);
+        let compilation =
+            compile_provided(&path, &text, Emit::Check, false, self.buffers_for(&path));
+        let own = file_of(&compilation, &path);
+        Compiled { uri: uri.to_string(), path, text, compilation, own }
+    }
+
+    /// The open buffers `path` could import, keyed the way a `use` names them:
+    /// the path below its directory, without `.kite`.
+    ///
+    /// The loader takes a handed-over module as one file, so a module that is
+    /// a whole directory is still read from disk. What this covers is the
+    /// common case, a module that is one sibling file.
+    fn buffers_for(&self, path: &str) -> HashMap<String, String> {
+        let mut provided = HashMap::new();
+        let Some(dir) = Path::new(path).parent().filter(|d| !d.as_os_str().is_empty()) else {
+            return provided;
+        };
+        for (uri, text) in &self.open {
+            if !uri.starts_with("file://") {
+                continue;
+            }
+            let other = path_of(uri);
+            if other == path {
+                continue;
+            }
+            let Ok(below) = Path::new(&other).strip_prefix(dir) else { continue };
+            if let Some(key) = module_key(below) {
+                provided.insert(key, text.clone());
+            }
+        }
+        provided
+    }
+
+    /// The other open files that could import `uri`: those in its directory or
+    /// above it, which is everywhere a `use` path reaches it from.
+    fn importers(&self, uri: &str) -> Vec<String> {
+        if !uri.starts_with("file://") {
+            return Vec::new();
+        }
+        let path = path_of(uri);
+        let mut found: Vec<String> = self
+            .open
+            .keys()
+            .filter(|other| *other != uri && other.starts_with("file://"))
+            .filter(|other| {
+                let other = path_of(other);
+                Path::new(&other).parent().is_some_and(|dir| {
+                    !dir.as_os_str().is_empty() && Path::new(&path).starts_with(dir)
+                })
+            })
+            .cloned()
+            .collect();
+        // In a stable order, so two runs publish the same sequence.
+        found.sort();
+        found
+    }
+
+    // ---- diagnostics -------------------------------------------------------
+
+    /// This file's diagnostics, and those of every other open file that could
+    /// import it — an edit here can break, or mend, a file the editor also
+    /// shows.
+    fn republish(&self, uri: &str) -> Reply {
+        let mut notifications = vec![self.diagnostics(uri)];
+        for other in self.importers(uri) {
+            notifications.push(self.diagnostics(&other));
+        }
+        Reply::notify(notifications)
+    }
+
+    fn diagnostics(&self, uri: &str) -> (String, Json) {
+        let c = self.compile(uri);
         let mut items = Vec::new();
-        for d in compiled.diags.iter() {
+        for d in c.compilation.diags.iter() {
             let Some(span) = d.primary_span() else { continue };
             // Only what is in this file: a diagnostic pointing into the
             // standard library is not something the editor can show against a
             // line the user has open.
-            let Some(file) = compiled.sources.iter().find(|(_, name)| *name == path) else {
-                continue;
-            };
-            if span.file != file.0 {
+            if Some(span.file) != c.own {
                 continue;
             }
             let mut notes: Vec<String> = d.notes.clone();
@@ -157,7 +250,7 @@ impl Server {
                 message.push_str(&format!("\nnote: {}", note));
             }
             items.push(Json::object(vec![
-                ("range", range_of(&text, span)),
+                ("range", range_of(&c.text, span)),
                 (
                     "severity",
                     Json::number(match d.severity {
@@ -171,33 +264,27 @@ impl Server {
                 ("message", Json::str(message)),
             ]));
         }
-        Reply {
-            result: None,
-            error: None,
-            notifications: vec![(
-                "textDocument/publishDiagnostics".to_string(),
-                Json::object(vec![
-                    ("uri", Json::str(uri.to_string())),
-                    ("diagnostics", Json::Array(items)),
-                ]),
-            )],
-        }
+        (
+            "textDocument/publishDiagnostics".to_string(),
+            Json::object(vec![
+                ("uri", Json::str(uri.to_string())),
+                ("diagnostics", Json::Array(items)),
+            ]),
+        )
     }
 
     // ---- hover and definition ----------------------------------------------
 
     fn hover(&self, message: &Json) -> Reply {
         let uri = uri_of(message).unwrap_or_default();
-        let text = self.text(&uri);
-        let Some(offset) = position_of(message, &text) else {
+        let Some(offset) = position_of(message, &self.text(&uri)) else {
             return Reply::result(Json::Null);
         };
-        let compiled = compile(path_of(&uri), &text, Emit::Check);
-        let Some(found) = compiled
-            .index
-            .uses
-            .iter()
-            .find(|u| u.at.start <= offset && offset < u.at.end.max(u.at.start + 1))
+        let c = self.compile(&uri);
+        // Only this file's uses. Every file numbers its bytes from zero, so a
+        // use in the prelude sits at the same offsets as one here — and the
+        // prelude's are recorded first.
+        let Some(found) = c.compilation.index.uses.iter().find(|u| covers(&u.at, c.own, offset))
         else {
             return Reply::result(Json::Null);
         };
@@ -215,42 +302,75 @@ impl Server {
 
     fn definition(&self, message: &Json) -> Reply {
         let uri = uri_of(message).unwrap_or_default();
-        let text = self.text(&uri);
-        let Some(offset) = position_of(message, &text) else {
+        let Some(offset) = position_of(message, &self.text(&uri)) else {
             return Reply::result(Json::Null);
         };
-        let path = path_of(&uri);
-        let compiled = compile(&path, &text, Emit::Check);
-        let own_file = compiled
-            .sources
-            .iter()
-            .find(|(_, name)| *name == path)
-            .map(|(id, _)| id);
-        let Some(found) = compiled
-            .index
-            .uses
-            .iter()
-            .find(|u| u.at.start <= offset && offset < u.at.end.max(u.at.start + 1))
-        else {
-            return Reply::result(Json::Null);
-        };
-        // A definition in another file — the standard library — has no URI the
-        // editor can open, so only this file's are answered.
-        if Some(found.declared_at.file) != own_file {
-            return Reply::result(Json::Null);
+        let c = self.compile(&uri);
+        let index = &c.compilation.index;
+        // The binding table first: it knows where a local was declared, and
+        // the use index only knows where a local was used.
+        let target = named_at(&index.bindings, c.own, offset)
+            .map(|b| b.declared_at)
+            .or_else(|| {
+                index
+                    .uses
+                    .iter()
+                    .find(|u| covers(&u.at, c.own, offset))
+                    .map(|u| u.declared_at)
+            })
+            .or_else(|| binding_at(&index.bindings, c.own, offset).map(|b| b.declared_at));
+        match target {
+            Some(span) => Reply::result(self.location(&c, span)),
+            None => Reply::result(Json::Null),
         }
-        Reply::result(Json::object(vec![
+    }
+
+    /// Where a span is, as the editor names places.
+    ///
+    /// A span in one of the program's own modules is in a file the editor can
+    /// open. One in the prelude or the standard library is not — they are
+    /// compiled into the binary — so that is answered with nothing.
+    fn location(&self, c: &Compiled, span: Span) -> Json {
+        if Some(span.file) == c.own {
+            return Json::object(vec![
+                ("uri", Json::str(c.uri.clone())),
+                ("range", range_of(&c.text, span)),
+            ]);
+        }
+        let name = c.compilation.sources.file(span.file).name.clone();
+        if name.to_string_lossy().starts_with('<') {
+            return Json::Null;
+        }
+        // A module read from disk is named by its path. One handed over from
+        // an open buffer is named by its key, which is relative to this file's
+        // directory.
+        let path = match Path::new(&c.path).parent() {
+            Some(dir) if name.is_relative() && Path::new(&c.path).is_absolute() => dir.join(&name),
+            _ => name,
+        };
+        let mut path = path.to_string_lossy().to_string();
+        if cfg!(windows) {
+            path = path.replace('/', "\\");
+        }
+        // The editor's own spelling of the URI when the file is open, so the
+        // answer lands in the buffer it already has.
+        let uri = self
+            .open
+            .keys()
+            .find(|u| u.starts_with("file://") && path_of(u) == path)
+            .cloned()
+            .unwrap_or_else(|| uri_of_path(&path));
+        Json::object(vec![
             ("uri", Json::str(uri)),
-            ("range", range_of(&text, found.declared_at)),
-        ]))
+            ("range", range_of(c.compilation.sources.text(span.file), span)),
+        ])
     }
 
     // ---- completion and symbols --------------------------------------------
 
     fn completion(&self, message: &Json) -> Reply {
         let uri = uri_of(message).unwrap_or_default();
-        let text = self.text(&uri);
-        let compiled = compile(path_of(&uri), &text, Emit::Check);
+        let c = self.compile(&uri);
         let mut items = Vec::new();
         for keyword in kite_lexer::KEYWORDS {
             items.push(Json::object(vec![
@@ -258,7 +378,12 @@ impl Server {
                 ("kind", Json::number(14)), // Keyword
             ]));
         }
-        for symbol in &compiled.index.symbols {
+        for symbol in &c.compilation.index.symbols {
+            // Another module's private item — the prelude's included — is not
+            // a name this file can write, and offering it offers an error.
+            if Some(symbol.at.file) != c.own && !symbol.is_pub {
+                continue;
+            }
             items.push(Json::object(vec![
                 ("label", Json::str(symbol.name.clone())),
                 (
@@ -267,8 +392,10 @@ impl Server {
                         "function" | "host function" => 3, // Function
                         "struct" => 22,                    // Struct
                         "enum" => 13,                      // Enum
-                        "trait" => 11,                     // Interface
-                        _ => 7,                            // Class
+                        "trait" => 8,                      // Interface
+                        "constant" => 21,                  // Constant
+                        // The protocol has no kind for a type alias.
+                        _ => 7, // Class
                     }),
                 ),
                 ("detail", Json::str(symbol.label.clone())),
@@ -282,17 +409,10 @@ impl Server {
 
     fn symbols(&self, message: &Json) -> Reply {
         let uri = uri_of(message).unwrap_or_default();
-        let text = self.text(&uri);
-        let path = path_of(&uri);
-        let compiled = compile(&path, &text, Emit::Check);
-        let own_file = compiled
-            .sources
-            .iter()
-            .find(|(_, name)| *name == path)
-            .map(|(id, _)| id);
+        let c = self.compile(&uri);
         let mut items = Vec::new();
-        for symbol in &compiled.index.symbols {
-            if Some(symbol.at.file) != own_file {
+        for symbol in &c.compilation.index.symbols {
+            if Some(symbol.at.file) != c.own {
                 continue;
             }
             items.push(Json::object(vec![
@@ -300,15 +420,17 @@ impl Server {
                 (
                     "kind",
                     Json::number(match symbol.kind {
-                        "function" | "host function" => 12,
-                        "struct" => 23,
-                        "enum" => 10,
-                        "trait" => 11,
-                        _ => 5,
+                        "function" | "host function" => 12, // Function
+                        "struct" => 23,                     // Struct
+                        "enum" => 10,                       // Enum
+                        "trait" => 11,                      // Interface
+                        "constant" => 14,                   // Constant
+                        // The protocol has no kind for a type alias.
+                        _ => 5, // Class
                     }),
                 ),
-                ("range", range_of(&text, symbol.at)),
-                ("selectionRange", range_of(&text, symbol.at)),
+                ("range", range_of(&c.text, symbol.at)),
+                ("selectionRange", range_of(&c.text, symbol.at)),
             ]));
         }
         Reply::result(Json::Array(items))
@@ -346,14 +468,12 @@ impl Server {
 
     fn references(&self, message: &Json) -> Reply {
         let uri = uri_of(message).unwrap_or_default();
-        let text = self.text(&uri);
-        let Some(offset) = position_of(message, &text) else {
+        let Some(offset) = position_of(message, &self.text(&uri)) else {
             return Reply::result(Json::Null);
         };
-        let path = path_of(&uri);
-        let compiled = compile(&path, &text, Emit::Check);
-        let own = file_of(&compiled, &path);
-        let Some(binding) = binding_at(&compiled.index.bindings, own, offset) else {
+        let c = self.compile(&uri);
+        let own = c.own;
+        let Some(binding) = binding_at(&c.compilation.index.bindings, own, offset) else {
             return Reply::result(Json::Null);
         };
         let mut spans: Vec<Span> = Vec::new();
@@ -377,7 +497,7 @@ impl Server {
             .map(|s| {
                 Json::object(vec![
                     ("uri", Json::str(uri.clone())),
-                    ("range", range_of(&text, s)),
+                    ("range", range_of(&c.text, s)),
                 ])
             })
             .collect();
@@ -386,25 +506,22 @@ impl Server {
 
     fn prepare_rename(&self, message: &Json) -> Reply {
         let uri = uri_of(message).unwrap_or_default();
-        let text = self.text(&uri);
-        let Some(offset) = position_of(message, &text) else {
+        let Some(offset) = position_of(message, &self.text(&uri)) else {
             return Reply::refuse("nothing here can be renamed");
         };
-        let path = path_of(&uri);
-        let compiled = compile(&path, &text, Emit::Check);
-        let own = file_of(&compiled, &path);
-        match renameable(&compiled, own, offset) {
+        let c = self.compile(&uri);
+        match renameable(&c.compilation, c.own, offset) {
             Err(why) => Reply::refuse(why),
             Ok(binding) => {
                 // The occurrence under the cursor, so the editor selects
                 // exactly what is about to change.
                 let hit = std::iter::once(&binding.declared_at)
                     .chain(binding.uses.iter())
-                    .find(|s| covers(s, own, offset))
+                    .find(|s| covers(s, c.own, offset))
                     .copied()
                     .unwrap_or(binding.declared_at);
                 Reply::result(Json::object(vec![
-                    ("range", range_of(&text, hit)),
+                    ("range", range_of(&c.text, hit)),
                     ("placeholder", Json::str(binding.name.clone())),
                 ]))
             }
@@ -413,14 +530,12 @@ impl Server {
 
     fn rename(&self, message: &Json) -> Reply {
         let uri = uri_of(message).unwrap_or_default();
-        let text = self.text(&uri);
-        let Some(offset) = position_of(message, &text) else {
+        let Some(offset) = position_of(message, &self.text(&uri)) else {
             return Reply::refuse("nothing here can be renamed");
         };
-        let path = path_of(&uri);
-        let compiled = compile(&path, &text, Emit::Check);
-        let own = file_of(&compiled, &path);
-        let binding = match renameable(&compiled, own, offset) {
+        let c = self.compile(&uri);
+        let own = c.own;
+        let binding = match renameable(&c.compilation, own, offset) {
             Err(why) => return Reply::refuse(why),
             Ok(b) => b,
         };
@@ -429,7 +544,7 @@ impl Server {
             .and_then(|n| n.as_str())
             .unwrap_or("")
             .to_string();
-        if let Some(why) = bad_new_name(&new, binding, &compiled) {
+        if let Some(why) = bad_new_name(&new, binding, &c.compilation) {
             return Reply::refuse(why);
         }
         let mut spans = vec![binding.declared_at];
@@ -439,7 +554,7 @@ impl Server {
             .into_iter()
             .map(|s| {
                 Json::object(vec![
-                    ("range", range_of(&text, s)),
+                    ("range", range_of(&c.text, s)),
                     ("newText", Json::str(new.clone())),
                 ])
             })
@@ -451,14 +566,11 @@ impl Server {
 
     fn inlay_hints(&self, message: &Json) -> Reply {
         let uri = uri_of(message).unwrap_or_default();
-        let text = self.text(&uri);
-        let path = path_of(&uri);
-        let compiled = compile(&path, &text, Emit::Check);
-        let own = file_of(&compiled, &path);
-        let (from, to) = range_offsets(message, &text);
+        let c = self.compile(&uri);
+        let (from, to) = range_offsets(message, &c.text);
         let mut items = Vec::new();
-        for hint in &compiled.index.hints {
-            if Some(hint.after.file) != own {
+        for hint in &c.compilation.index.hints {
+            if Some(hint.after.file) != c.own {
                 continue;
             }
             if hint.after.end < from || hint.after.start > to {
@@ -471,7 +583,7 @@ impl Server {
                 _ => format!(": {}", hint.text),
             };
             items.push(Json::object(vec![
-                ("position", position_at(&text, hint.after.end)),
+                ("position", position_at(&c.text, hint.after.end)),
                 ("label", Json::str(label)),
                 // 1 is `Type` — both kinds of hint say what something is.
                 ("kind", Json::number(1)),
@@ -524,13 +636,92 @@ fn uri_of(message: &Json) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// The key a `use` reaches an open file by: its path below the importer's
+/// directory, segments joined with `/` and `.kite` dropped. Nothing for a file
+/// that is not a `.kite` file or is not below the directory at all.
+fn module_key(below: &Path) -> Option<String> {
+    let mut segments = Vec::new();
+    for part in below.components() {
+        match part {
+            Component::Normal(s) => segments.push(s.to_str()?),
+            _ => return None,
+        }
+    }
+    let last = segments.pop()?.strip_suffix(".kite")?;
+    segments.push(last);
+    Some(segments.join("/"))
+}
+
 /// The file path a `file://` URI names.
 ///
 /// The path matters: a module is a sibling file or directory, so a program's
 /// own imports only resolve when the compiler is told where the file lives.
 fn path_of(uri: &str) -> String {
-    let path = uri.strip_prefix("file://").unwrap_or(uri);
-    percent_decode(path)
+    path_from_uri(uri, cfg!(windows))
+}
+
+/// [`path_of`], for either kind of system, so both can be tested on one.
+///
+/// A Windows editor sends `file:///c%3A/Users/…`: the slash in front of the
+/// drive letter belongs to the URI, and `/c:/Users/…` is not a path Windows
+/// can open. A URI with a host is a UNC share, `\\host\share\…`.
+fn path_from_uri(uri: &str, windows: bool) -> String {
+    let Some(rest) = uri.strip_prefix("file://") else {
+        return percent_decode(uri);
+    };
+    let (host, path) = match rest.find('/') {
+        Some(at) => (&rest[..at], &rest[at..]),
+        None => (rest, ""),
+    };
+    let path = percent_decode(path);
+    let native = |p: String| if windows { p.replace('/', "\\") } else { p };
+    if !host.is_empty() && host != "localhost" {
+        return native(format!("//{}{}", percent_decode(host), path));
+    }
+    let bytes = path.as_bytes();
+    if windows && bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':'
+    {
+        return native(path[1..].to_string());
+    }
+    native(path)
+}
+
+/// The `file://` URI for a path: the way back from [`path_of`].
+fn uri_of_path(path: &str) -> String {
+    uri_from_path(path, cfg!(windows))
+}
+
+fn uri_from_path(path: &str, windows: bool) -> String {
+    let path = if windows { path.replace('\\', "/") } else { path.to_string() };
+    if windows {
+        // `\\host\share\…`: the host is the URI's authority.
+        if let Some(unc) = path.strip_prefix("//") {
+            let (host, rest) = match unc.find('/') {
+                Some(at) => (&unc[..at], &unc[at..]),
+                None => (unc, ""),
+            };
+            return format!("file://{}{}", host, percent_encode(rest));
+        }
+        let bytes = path.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            return format!("file:///{}", percent_encode(&path));
+        }
+    }
+    format!("file://{}", percent_encode(&path))
+}
+
+/// Everything but the unreserved characters and the separator, escaped — which
+/// is how editors write a path into a URI, drive colon included.
+fn percent_encode(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{:02X}", byte));
+        }
+    }
+    out
 }
 
 fn percent_decode(s: &str) -> String {
@@ -609,27 +800,33 @@ fn covers(span: &Span, own: Option<FileId>, offset: u32) -> bool {
     Some(span.file) == own && span.start <= offset && offset < span.end.max(span.start + 1)
 }
 
-/// The binding under the cursor: its declaration or one of its uses first, and
-/// only failing those a longer span that merely mentions it.
-fn binding_at(bindings: &[Binding], own: Option<FileId>, offset: u32) -> Option<&Binding> {
+/// The binding whose own name is under the cursor: its declaration or one of
+/// its uses.
+fn named_at(bindings: &[Binding], own: Option<FileId>, offset: u32) -> Option<&Binding> {
     bindings
         .iter()
         .find(|b| covers(&b.declared_at, own, offset) || b.uses.iter().any(|s| covers(s, own, offset)))
-        .or_else(|| {
-            bindings
-                .iter()
-                .find(|b| b.mentions.iter().any(|s| covers(s, own, offset)))
-        })
+}
+
+/// The binding under the cursor: its declaration or one of its uses first, and
+/// only failing those a longer span that merely mentions it.
+fn binding_at(bindings: &[Binding], own: Option<FileId>, offset: u32) -> Option<&Binding> {
+    named_at(bindings, own, offset).or_else(|| {
+        bindings
+            .iter()
+            .find(|b| b.mentions.iter().any(|s| covers(s, own, offset)))
+    })
 }
 
 /// The binding the cursor may rename, or the reason it may not.
 ///
 /// The rule is the table's own coverage: a rename starts only when every
 /// occurrence is recorded and every recorded occurrence is editable. That
-/// admits locals and this file's own functions — and refuses keywords and
-/// literals (no binding), prelude and module names (declared elsewhere),
-/// types (annotations are not in the table), methods (call sites need the
-/// receiver's type), and host functions (the name is the host's contract).
+/// admits locals, constants and this file's own functions — and refuses
+/// keywords and literals (no binding), prelude and module names (declared
+/// elsewhere), types (annotations are not in the table), methods (call sites
+/// need the receiver's type), and host functions (the name is the host's
+/// contract).
 fn renameable(
     compiled: &Compilation,
     own: Option<FileId>,
@@ -652,7 +849,7 @@ fn renameable(
         });
     }
     match binding.kind {
-        "local" | "function" => {}
+        "local" | "function" | "constant" => {}
         "host function" => {
             return Err(format!(
                 "`{}` is a host function — its name is the contract with the host, which an \
@@ -766,4 +963,56 @@ fn range_of(text: &str, span: Span) -> Json {
         ("start", position_at(text, span.start)),
         ("end", position_at(text, span.end.max(span.start))),
     ])
+}
+
+#[cfg(test)]
+mod uri_tests {
+    use super::{path_from_uri, uri_from_path};
+
+    #[test]
+    fn a_unix_uri_is_its_path() {
+        assert_eq!(path_from_uri("file:///home/me/a%20b.kite", false), "/home/me/a b.kite");
+        assert_eq!(uri_from_path("/home/me/a b.kite", false), "file:///home/me/a%20b.kite");
+    }
+
+    /// VS Code on Windows escapes the drive colon, and the slash in front of
+    /// the drive letter is the URI's, not the path's.
+    #[test]
+    fn a_windows_drive_loses_the_slash_in_front_of_it() {
+        assert_eq!(
+            path_from_uri("file:///c%3A/Users/me/main.kite", true),
+            "c:\\Users\\me\\main.kite"
+        );
+        assert_eq!(path_from_uri("file:///C:/src/x.kite", true), "C:\\src\\x.kite");
+        assert_eq!(
+            uri_from_path("c:\\Users\\me\\main.kite", true),
+            "file:///c%3A/Users/me/main.kite"
+        );
+    }
+
+    /// A URI with a host is a share, and the share is the path's first part.
+    #[test]
+    fn a_windows_share_is_a_unc_path() {
+        assert_eq!(
+            path_from_uri("file://server/share/app/main.kite", true),
+            "\\\\server\\share\\app\\main.kite"
+        );
+        assert_eq!(
+            uri_from_path("\\\\server\\share\\app\\main.kite", true),
+            "file://server/share/app/main.kite"
+        );
+        // `localhost` is this machine, which is no host at all.
+        assert_eq!(path_from_uri("file://localhost/tmp/x.kite", false), "/tmp/x.kite");
+    }
+
+    #[test]
+    fn a_path_survives_the_round_trip() {
+        for (path, windows) in [
+            ("/tmp/dir with space/ü.kite", false),
+            ("d:\\work\\#1\\main.kite", true),
+            ("\\\\nas\\kite\\main.kite", true),
+        ] {
+            assert_eq!(path_from_uri(&uri_from_path(path, windows), windows), path);
+        }
+    }
 }
