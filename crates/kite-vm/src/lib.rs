@@ -15,9 +15,13 @@ use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
 
-/// The maximum call depth before the VM reports a trap rather than exhausting
-/// the host stack.
-pub const MAX_FRAMES: usize = 2048;
+/// The maximum call depth before the VM reports a trap.
+///
+/// Frames live in a vector on the heap and a Kite call is not a Rust call, so
+/// this bounds memory rather than guarding the host's stack. It was 2,048,
+/// which made a recursion three thousand deep trap here and nowhere else; the
+/// native and Wasm backends go far deeper on an ordinary stack.
+pub const MAX_FRAMES: usize = 100_000;
 
 #[derive(Clone, Debug)]
 pub enum Value {
@@ -99,35 +103,177 @@ pub struct EnumValue {
     pub fields: Vec<Value>,
 }
 
-/// Structural equality, per the specification: two structs are equal when
-/// their fields are. Reference identity is `ptr.same`, not `==`.
-impl PartialEq for Value {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Value::Unit, Value::Unit) => true,
-            (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a == b,
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Str(a), Value::Str(b)) => a == b,
-            (Value::Struct(a), Value::Struct(b)) => {
-                a.struct_id == b.struct_id && *a.fields.borrow() == *b.fields.borrow()
+// ---------------------------------------------------------------------------
+// Deep values
+// ---------------------------------------------------------------------------
+//
+// A Kite value can be as deep as the program makes it: a list of a million
+// `Cons` cells is a million nested `Rc`s. Everything that walks one — dropping
+// it, comparing it, rendering it — must therefore walk with a worklist on the
+// heap rather than by recursion, or a perfectly valid program aborts the VM
+// with a Rust stack overflow, which is not a trap and cannot be reported as
+// one. It happened somewhere between a hundred thousand and three hundred
+// thousand cells.
+
+/// Drop values without recursing.
+///
+/// Each value whose last reference this is gives up its children to the
+/// worklist before it is freed, so the aggregate itself is dropped holding
+/// nothing and every level is handled by this one loop. A value still shared
+/// elsewhere is not freed at all — only its count falls — so the walk stops
+/// there.
+fn drop_iteratively(mut work: Vec<Value>) {
+    while let Some(v) = work.pop() {
+        match v {
+            Value::Struct(rc) => {
+                if let Ok(s) = Rc::try_unwrap(rc) {
+                    work.append(&mut s.fields.borrow_mut());
+                }
             }
-            (Value::Enum(a), Value::Enum(b)) => {
-                a.enum_id == b.enum_id && a.variant == b.variant && a.fields == b.fields
+            Value::Enum(rc) => {
+                if let Ok(mut e) = Rc::try_unwrap(rc) {
+                    work.append(&mut e.fields);
+                }
             }
-            (Value::Slice(a), Value::Slice(b)) => a == b,
-            (Value::Tuple(a), Value::Tuple(b)) => a == b,
-            (Value::Map(a), Value::Map(b)) => a == b,
-            (Value::Pair(a), Value::Pair(b)) => a == b,
-            // Two errors are equal when they say the same thing. What they
-            // carry is provenance rather than identity: a caller comparing
-            // errors is comparing failures, and two failures that read alike
-            // are alike.
-            (Value::Err(a), Value::Err(b)) => a.message == b.message,
-            (Value::Nil, Value::Nil) => true,
-            _ => false,
+            Value::Closure(rc) => {
+                if let Ok(mut c) = Rc::try_unwrap(rc) {
+                    work.append(&mut c.captures);
+                }
+            }
+            Value::Err(rc) => {
+                if let Ok(mut e) = Rc::try_unwrap(rc) {
+                    work.push(std::mem::replace(&mut e.value, Value::Nil));
+                    work.push(std::mem::replace(&mut e.cause, Value::Nil));
+                }
+            }
+            Value::Slice(rc) | Value::Tuple(rc) => {
+                if let Ok(items) = Rc::try_unwrap(rc) {
+                    work.extend(items);
+                }
+            }
+            Value::Map(rc) => {
+                if let Ok(entries) = Rc::try_unwrap(rc) {
+                    for (k, v) in entries {
+                        work.push(k);
+                        work.push(v);
+                    }
+                }
+            }
+            Value::Pair(rc) => {
+                if let Ok((a, b)) = Rc::try_unwrap(rc) {
+                    work.push(a);
+                    work.push(b);
+                }
+            }
+            Value::Unit
+            | Value::Int(_)
+            | Value::Float(_)
+            | Value::Bool(_)
+            | Value::Str(_)
+            | Value::Nil => {}
         }
     }
+}
+
+// The four records that hold other values each hand them to the worklist when
+// they go. A slice, tuple, map or pair is a plain `Rc` of a vector or a tuple,
+// which cannot have a `Drop` of its own; but a recursive type is always a
+// struct or an enum somewhere along its cycle, and the worklist unwraps the
+// plain ones it meets on the way, so none of them nests unboundedly.
+
+impl Drop for StructValue {
+    fn drop(&mut self) {
+        drop_iteratively(std::mem::take(self.fields.get_mut()));
+    }
+}
+
+impl Drop for EnumValue {
+    fn drop(&mut self) {
+        drop_iteratively(std::mem::take(&mut self.fields));
+    }
+}
+
+impl Drop for ClosureValue {
+    fn drop(&mut self) {
+        drop_iteratively(std::mem::take(&mut self.captures));
+    }
+}
+
+impl Drop for ErrorValue {
+    fn drop(&mut self) {
+        let value = std::mem::replace(&mut self.value, Value::Nil);
+        let cause = std::mem::replace(&mut self.cause, Value::Nil);
+        drop_iteratively(vec![value, cause]);
+    }
+}
+
+/// Structural equality, per the specification: two structs are equal when
+/// their fields are. Reference identity is `ptr.same`, not `==`.
+///
+/// Walked with a worklist of pairs still to compare, for the reason
+/// [`drop_iteratively`] gives. Both sides of each pair are cloned onto it,
+/// which for an aggregate is a reference count and nothing more.
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        let mut work: Vec<(Value, Value)> = vec![(self.clone(), other.clone())];
+        while let Some((a, b)) = work.pop() {
+            let same = match (&a, &b) {
+                (Value::Unit, Value::Unit) => true,
+                (Value::Int(a), Value::Int(b)) => a == b,
+                (Value::Float(a), Value::Float(b)) => a == b,
+                (Value::Bool(a), Value::Bool(b)) => a == b,
+                (Value::Str(a), Value::Str(b)) => a == b,
+                (Value::Struct(a), Value::Struct(b)) => {
+                    let (fa, fb) = (a.fields.borrow(), b.fields.borrow());
+                    a.struct_id == b.struct_id && pairs(&mut work, &fa, &fb)
+                }
+                (Value::Enum(a), Value::Enum(b)) => {
+                    a.enum_id == b.enum_id
+                        && a.variant == b.variant
+                        && pairs(&mut work, &a.fields, &b.fields)
+                }
+                (Value::Slice(a), Value::Slice(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
+                    pairs(&mut work, a, b)
+                }
+                // In insertion order, which is part of what a map is.
+                (Value::Map(a), Value::Map(b)) => {
+                    if a.len() == b.len() {
+                        for ((ka, va), (kb, vb)) in a.iter().zip(b.iter()) {
+                            work.push((ka.clone(), kb.clone()));
+                            work.push((va.clone(), vb.clone()));
+                        }
+                    }
+                    a.len() == b.len()
+                }
+                (Value::Pair(a), Value::Pair(b)) => {
+                    work.push((a.0.clone(), b.0.clone()));
+                    work.push((a.1.clone(), b.1.clone()));
+                    true
+                }
+                // Two errors are equal when they say the same thing. What they
+                // carry is provenance rather than identity: a caller comparing
+                // errors is comparing failures, and two failures that read
+                // alike are alike.
+                (Value::Err(a), Value::Err(b)) => a.message == b.message,
+                (Value::Nil, Value::Nil) => true,
+                _ => false,
+            };
+            if !same {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Queue the element-wise comparisons of two sequences, answering whether
+/// their lengths allow them to be equal at all.
+fn pairs(work: &mut Vec<(Value, Value)>, a: &[Value], b: &[Value]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    work.extend(a.iter().cloned().zip(b.iter().cloned()));
+    true
 }
 
 impl Value {
@@ -219,85 +365,87 @@ fn saturating_trunc(f: f64) -> i64 {
     f as i64
 }
 
-impl fmt::Display for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Value::Unit => write!(f, "()"),
-            Value::Int(v) => write!(f, "{}", v),
-            Value::Float(v) => {
-                // Print floats so they read back as Kite floats: `1.0`, not `1`.
-                if v.fract() == 0.0 && v.is_finite() {
-                    write!(f, "{:.1}", v)
-                } else {
-                    write!(f, "{}", v)
-                }
-            }
-            Value::Bool(v) => write!(f, "{}", v),
-            Value::Str(s) => write!(f, "{}", s),
-            // A closure has no text form; `io.print` rejects one long before
-            // this, so this only ever appears in a debug dump.
-            Value::Closure(c) => write!(f, "closure#{}", c.func),
-            Value::Struct(s) => {
-                // Debug-shaped output until the `Display` trait lands.
-                write!(f, "{{")?;
-                for (i, v) in s.fields.borrow().iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "}}")
-            }
-            Value::Enum(e) => {
-                write!(f, "#{}", e.variant)?;
-                if e.fields.is_empty() {
-                    return Ok(());
-                }
-                write!(f, "(")?;
-                for (i, v) in e.fields.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, ")")
-            }
-            Value::Slice(items) => {
-                write!(f, "[")?;
-                for (i, v) in items.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            Value::Pair(p) => write!(f, "({}, {})", p.0, p.1),
-            Value::Err(e) => write!(f, "{}", e.message),
-            Value::Tuple(items) => {
-                write!(f, "(")?;
-                for (i, v) in items.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, ")")
-            }
-            Value::Map(entries) => {
-                write!(f, "{{")?;
-                for (i, (k, v)) in entries.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}: {}", k, v)?;
-                }
-                write!(f, "}}")
-            }
-            Value::Nil => write!(f, "nil"),
+/// One step of rendering a value: a value still to render, or text already
+/// decided.
+enum Piece {
+    Value(Value),
+    Text(&'static str),
+}
+
+/// Push a bracketed, comma-separated sequence onto the render stack, last
+/// piece first so the stack pops it in reading order.
+fn bracketed(stack: &mut Vec<Piece>, open: &'static str, items: &[Value], close: &'static str) {
+    stack.push(Piece::Text(close));
+    for (i, v) in items.iter().enumerate().rev() {
+        stack.push(Piece::Value(v.clone()));
+        if i > 0 {
+            stack.push(Piece::Text(", "));
         }
     }
+    stack.push(Piece::Text(open));
 }
+
+/// Rendered with a stack of pieces rather than by recursion, for the reason
+/// [`drop_iteratively`] gives.
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut stack = vec![Piece::Value(self.clone())];
+        while let Some(piece) = stack.pop() {
+            let v = match piece {
+                Piece::Text(t) => {
+                    f.write_str(t)?;
+                    continue;
+                }
+                Piece::Value(v) => v,
+            };
+            match &v {
+                Value::Unit => write!(f, "()")?,
+                Value::Int(v) => write!(f, "{}", v)?,
+                Value::Float(v) => {
+                    // Print floats so they read back as Kite floats: `1.0`,
+                    // not `1`.
+                    if v.fract() == 0.0 && v.is_finite() {
+                        write!(f, "{:.1}", v)?
+                    } else {
+                        write!(f, "{}", v)?
+                    }
+                }
+                Value::Bool(v) => write!(f, "{}", v)?,
+                Value::Str(s) => write!(f, "{}", s)?,
+                // A closure has no text form; `io.print` rejects one long
+                // before this, so this only ever appears in a debug dump.
+                Value::Closure(c) => write!(f, "closure#{}", c.func)?,
+                // Debug-shaped output until the `Display` trait lands.
+                Value::Struct(s) => bracketed(&mut stack, "{", &s.fields.borrow(), "}"),
+                Value::Enum(e) => {
+                    write!(f, "#{}", e.variant)?;
+                    if !e.fields.is_empty() {
+                        bracketed(&mut stack, "(", &e.fields, ")");
+                    }
+                }
+                Value::Slice(items) => bracketed(&mut stack, "[", items, "]"),
+                Value::Pair(p) => bracketed(&mut stack, "(", &[p.0.clone(), p.1.clone()], ")"),
+                Value::Err(e) => write!(f, "{}", e.message)?,
+                Value::Tuple(items) => bracketed(&mut stack, "(", items, ")"),
+                Value::Map(entries) => {
+                    stack.push(Piece::Text("}"));
+                    for (i, (k, v)) in entries.iter().enumerate().rev() {
+                        stack.push(Piece::Value(v.clone()));
+                        stack.push(Piece::Text(": "));
+                        stack.push(Piece::Value(k.clone()));
+                        if i > 0 {
+                            stack.push(Piece::Text(", "));
+                        }
+                    }
+                    stack.push(Piece::Text("{"));
+                }
+                Value::Nil => write!(f, "nil")?,
+            }
+        }
+        Ok(())
+    }
+}
+
 
 #[derive(Debug, PartialEq)]
 pub enum Trap {

@@ -1568,6 +1568,58 @@ fn counts_wider_than_a_byte_survive() {
     assert_eq!(lines(&src), ["300", "299", "130", "299"]);
 }
 
+// ---- deep values and deep calls -------------------------------------------------
+
+/// A list of a few hundred thousand cells is an ordinary value, and dropping
+/// or comparing one used to recurse once per cell on the Rust stack until the
+/// VM aborted — not a trap, a crash of the process. The tests here run on a
+/// test thread's small stack, which makes the old failure come early.
+#[test]
+fn a_deep_value_is_dropped_and_compared_without_recursing() {
+    let src = "\
+enum List {
+    Cons(head: int, tail: List)
+    Empty
+}
+fn build(n: int) -> List {
+    var l = Empty
+    for i in 0..n {
+        l = Cons(i, l)
+    }
+    return l
+}
+fn main() {
+    let a = build(200000)
+    let b = build(200000)
+    io.print(a == b)
+    io.print(a == build(199999))
+    var c = build(200000)
+    c = Empty
+    io.print(c == Empty)
+}
+";
+    assert_eq!(lines(src), ["true", "false", "true"]);
+}
+
+/// Frames live on the heap, so depth is bounded by memory rather than by the
+/// host's stack. The limit was 2,048, and a recursion 3,000 deep trapped here
+/// and nowhere else.
+#[test]
+fn a_deep_recursion_runs_on_the_heap() {
+    let src = "\
+fn sum(n: int) -> int {
+    if n == 0 {
+        return 0
+    }
+    return n + sum(n - 1)
+}
+fn main() {
+    io.print(sum(50000))
+}
+";
+    assert_eq!(lines(src), ["1250025000"]);
+}
+
 // ---- or-patterns --------------------------------------------------------------
 
 /// `match s { Circle(n) | Square(n) => n, Dot => 0 }`, built as HIR directly.
