@@ -254,7 +254,7 @@ what a call inferred — all over the same passes the compiler runs.
 | `wasm32-gc` | WasmGC via `wasm-encoder` | Every construct the language has. `--emit wasm` refuses nothing it can express |
 | `kbc` | Register bytecode and a VM | The dev loop, the embedding target, and the differential oracle |
 | bundle | This compiler with the program appended | One file, nothing installed, starts in about a millisecond |
-| `native-*` | Cranelift, AOT and JIT | Machine code, with a precise collector in `kite-rt`. `--emit native` writes an object file; `run --native` needs no linker. macOS and Linux; Windows is refused, and says why |
+| `native-*` | Cranelift, AOT and JIT | Machine code, with a precise collector in `kite-rt`. `--emit native` writes an object file and links it into an executable with `cc`, against a runtime `kitec` carries inside itself; `run --native` needs no linker. macOS and Linux; Windows is refused, and says why |
 
 Every program in the differential corpus is compiled to **all three** real
 backends, run on all three, and the outputs compared. Three independent
@@ -335,10 +335,11 @@ Recorded here rather than left to be discovered:
   layout engine that fed them. `std/text`'s bidi, joining and line breaking keep
   their direct tests; the end-to-end comparison does not exist, and pixels never
   did — that needs a browser and a dependency this does not have.
-- **No native backend on Windows.** The collector finds roots by walking frame
-  pointers, and Cranelift's Win64 prologue puts the frame record where that
-  walk does not expect it. `--native` refuses there rather than corrupting the
-  heap. Finishing it wants a Windows machine.
+- **No native backend on Windows.** The collector finds roots by walking the
+  frame-pointer chain, and nobody has shown that chain holds on Win64, where
+  LLVM may point a frame pointer into the middle of a frame for its unwind
+  tables. `--native` refuses there rather than risk corrupting the heap.
+  Finishing it wants a Windows machine.
 - **No `wasi:http/incoming-handler`.** A Kite program listens on a port through
   a generated Node adapter. WASI's version is a component-model export, and
   `kitec` emits a core module.
