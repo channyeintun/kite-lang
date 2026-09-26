@@ -214,6 +214,120 @@ fn a_hand_written_impl_beside_a_derive_is_refused_once() {
     assert!(text.contains("already implements `Debug`"), "{}", text);
 }
 
+/// `Decode` has no trait, so a hand-written `decode` beside `@derive(Decode)`
+/// was never compared against anything — and the hand-written one silently
+/// won. §10.4: deriving what is already written is an error.
+#[test]
+fn a_hand_written_decode_beside_a_derive_is_refused() {
+    let text = errors_of(
+        "use std/json\n\n\
+         @derive(Decode)\n\
+         struct User {\n    name: str\n}\n\
+         impl User {\n    fn decode(doc: json.Json) -> (User, error) {\n\
+         \x20       return User{ name: \"hand-written\" }, nil\n    }\n}\n\
+         fn main() {\n}\n",
+    );
+    assert!(text.contains("E0701"), "{}", text);
+    assert!(text.contains("`User` already has a `decode`"), "{}", text);
+    assert!(text.contains("written by hand here"), "{}", text);
+}
+
+/// An inherent `debug` is the method a call reaches, so beside a derived
+/// `impl Debug` it would win without a word.
+#[test]
+fn a_hand_written_inherent_debug_beside_a_derive_is_refused() {
+    let text = errors_of(
+        "@derive(Debug)\n\
+         struct User {\n    name: str\n}\n\
+         impl User {\n    fn debug(self) -> str {\n        return \"hand-written\"\n    }\n}\n\
+         fn main() {\n}\n",
+    );
+    assert!(text.contains("`User` already has a `debug`"), "{}", text);
+}
+
+/// A field typed through a `type` alias is the type it stands for. It read as
+/// "no such type", which was not true.
+#[test]
+fn a_field_typed_through_an_alias_is_walked_as_what_it_names() {
+    let out = run(
+        "type Id = int\n\
+         type Tags = [str]\n\n\
+         @derive(Debug, Hash, Encode, Decode)\n\
+         struct User {\n    id: Id\n    tags: Tags\n}\n\n\
+         fn main() {\n\
+         \x20   let u = User{ id: 7, tags: [\"a\"] }\n\
+         \x20   io.print(u.debug())\n\
+         \x20   io.print(u.hash() == User{ id: 7, tags: [\"a\"] }.hash())\n\
+         \x20   let (back, err) = User.decode(u.encode())\n\
+         \x20   if err != nil {\n        return\n    }\n\
+         \x20   io.print(back.debug())\n\
+         }\n",
+    );
+    assert_eq!(out, "User{ id: 7, tags: [\"a\"] }\ntrue\nUser{ id: 7, tags: [\"a\"] }\n");
+}
+
+/// Derived `Encode` and `Decode` are written against `std/json` whatever the
+/// module deriving them calls it — or whether it imports it at all. They were
+/// written as `json.…`, which named nothing under `use std/json as j`.
+#[test]
+fn a_json_derive_does_not_depend_on_how_the_module_spells_std_json() {
+    let aliased = run(
+        "use std/json as j\n\n\
+         @derive(Encode, Decode)\n\
+         struct Q {\n    x: int\n}\n\n\
+         fn main() {\n\
+         \x20   io.print(j.stringify(Q{ x: 1 }.encode()))\n\
+         }\n",
+    );
+    assert_eq!(aliased, "{\"x\":1}\n");
+
+    let unimported = run(
+        "@derive(Encode, Decode)\n\
+         struct Q {\n    x: int\n}\n\n\
+         fn main() {\n\
+         \x20   let (q, err) = Q.decode(Q{ x: 2 }.encode())\n\
+         \x20   if err != nil {\n        return\n    }\n\
+         \x20   io.print(q.x)\n\
+         }\n",
+    );
+    assert_eq!(unimported, "2\n");
+}
+
+/// The spelling derived code uses is its own. The module that derived
+/// something still reaches only what it imported.
+#[test]
+fn a_json_derive_does_not_import_std_json_for_the_program() {
+    let text = errors_of(
+        "@derive(Encode)\n\
+         struct Q {\n    x: int\n}\n\n\
+         fn main() {\n\
+         \x20   io.print(json.stringify(Q{ x: 1 }.encode()))\n\
+         }\n",
+    );
+    assert!(text.contains("cannot find `json`"), "{}", text);
+}
+
+/// An enum whose variants share names with `json.Json`'s. The variant index
+/// was one table for the whole program, so `Text`, `Number` and `Null` were
+/// ambiguous everywhere — including inside `std/json` itself, which could not
+/// compile its own `match`, and inside the derived bodies.
+#[test]
+fn an_enum_may_share_variant_names_with_std_json() {
+    let out = run(
+        "use std/json\n\n\
+         @derive(Debug, Encode, Decode, Hash)\n\
+         enum Value {\n    Text(str)\n    Number(float)\n    Null\n}\n\n\
+         fn main() {\n\
+         \x20   io.print(Value.Text(\"hi\").debug())\n\
+         \x20   io.print(json.stringify(Value.Number(2.0).encode()))\n\
+         \x20   let (v, err) = Value.decode(Value.Null.encode())\n\
+         \x20   if err != nil {\n        return\n    }\n\
+         \x20   io.print(v.debug())\n\
+         }\n",
+    );
+    assert_eq!(out, "Text(\"hi\")\n{\"Number\":[2]}\nNull\n");
+}
+
 #[test]
 fn a_derive_on_a_generic_type_says_why_not() {
     let text = errors_of("@derive(Debug)\nstruct Box<T> {\n    value: T\n}\nfn main() {\n}\n");

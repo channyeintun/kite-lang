@@ -1988,6 +1988,7 @@ away: `LoadError` below is a real concrete error type, and the test is what says
 so.
 
 ```kite
+use std/errors
 use std/fs
 use std/json
 use std/http

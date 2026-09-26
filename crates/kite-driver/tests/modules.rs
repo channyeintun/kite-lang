@@ -528,3 +528,340 @@ fn a_value_widened_to_an_option_in_a_fallible_return_builds() {
     let wasm = kite_driver::compile(&main, &src, Emit::Wasm);
     assert!(!wasm.failed(), "{}", wasm.render_diagnostics());
 }
+
+// ---- a module is where its source is -------------------------------------------
+//
+// A module used to be identified by its `use` path as the importer wrote it,
+// so `use util` in `a/` and `use util` in `b/` were one module to the loader.
+// The second was a false collision when both existed, and — worse — was
+// silently answered by the first when its own did not.
+
+/// Two directories may each have a `util` of their own. §13.1: a spelling
+/// belongs to the file that writes it, so two files may spell different
+/// modules alike.
+#[test]
+fn two_directories_may_each_have_a_util_of_their_own() {
+    let p = Project::new("two-utils");
+    p.file("a/a.kite", "use util\n\npub fn go() -> str {\n  return util.name()\n}\n");
+    p.file("a/util/util.kite", "pub fn name() -> str {\n  return \"a-util\"\n}\n");
+    p.file("b/b.kite", "use util\n\npub fn go() -> str {\n  return util.name()\n}\n");
+    p.file("b/util/util.kite", "pub fn name() -> str {\n  return \"b-util\"\n}\n");
+    let main = p.file(
+        "main.kite",
+        "use a\nuse b\n\nfn main() {\n  io.print(a.go())\n  io.print(b.go())\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "a-util\nb-util\n");
+}
+
+/// A module that lacks one is told so, rather than handed another module's.
+///
+/// This printed "a's private util" twice: `b`'s `use util` found nothing, was
+/// compared against the `util` `a` had loaded under the same spelling, and was
+/// answered by it — a module reading another module's private code with no
+/// diagnostic, and only because of the order of two `use` lines in `main`.
+#[test]
+fn a_missing_module_is_not_answered_by_another_of_the_same_spelling() {
+    let p = Project::new("missing-util");
+    p.file("a/a.kite", "use util\n\npub fn go() -> str {\n  return util.name()\n}\n");
+    p.file("a/util/util.kite", "pub fn name() -> str {\n  return \"a's private util\"\n}\n");
+    p.file("b/b.kite", "use util\n\npub fn go() -> str {\n  return util.name()\n}\n");
+    let main = p.file(
+        "main.kite",
+        "use a\nuse b\n\nfn main() {\n  io.print(a.go())\n  io.print(b.go())\n}\n",
+    );
+    let said = p.run(&main).expect_err("`b` has no util");
+    assert!(said.contains("E0400"), "{}", said);
+    assert!(said.contains("cannot find module `util`"), "{}", said);
+    assert!(said.contains("b/b.kite"), "the error is at b's `use`: {}", said);
+}
+
+/// The same across a package boundary, which is the case Phase 28 set out to
+/// close: a dependency's `use helper` bound to the application's `helper`
+/// whenever the application had imported its own first.
+#[test]
+fn a_dependency_cannot_reach_an_application_module_it_lacks() {
+    let p = Project::new("dep-lacks-helper");
+    p.file("kitex/kite.toml", "[package]\nname = \"kitex\"\nversion = \"0.1.0\"\n");
+    p.file(
+        "kitex/greet.kite",
+        "use helper\n\npub fn hello() -> str {\n  return helper.who()\n}\n",
+    );
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nkitex = { path = \"../kitex\" }\n",
+    );
+    p.file(
+        "app/src/helper.kite",
+        "pub fn who() -> str {\n  return \"the application (private data)\"\n}\n",
+    );
+    let main = p.file(
+        "app/src/main.kite",
+        "use helper\nuse kitex/greet\n\n\
+         fn main() {\n  io.print(helper.who())\n  io.print(greet.hello())\n}\n",
+    );
+    let said = p.run(&main).expect_err("the package has no helper");
+    assert!(said.contains("cannot find module `helper`"), "{}", said);
+    assert!(said.contains("greet.kite"), "the error is in the package: {}", said);
+}
+
+/// The application's `util` and a dependency's own `util` are two modules.
+#[test]
+fn an_application_util_and_a_dependencys_util_are_two_modules() {
+    let p = Project::new("app-and-dep-util");
+    p.file("md/kite.toml", "[package]\nname = \"md\"\nversion = \"1.0.0\"\n");
+    p.file("md/md.kite", "use util\n\npub fn render() -> str {\n  return util.me()\n}\n");
+    p.file("md/util.kite", "pub fn me() -> str {\n  return \"md-util\"\n}\n");
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nmd = { path = \"../md\" }\n",
+    );
+    p.file("app/src/util.kite", "pub fn me() -> str {\n  return \"app-util\"\n}\n");
+    let main = p.file(
+        "app/src/main.kite",
+        "use md\nuse util\n\nfn main() {\n  io.print(md.render())\n  io.print(util.me())\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "md-util\napp-util\n");
+}
+
+/// `x` beside the entry and `lib/x` inside `lib` are two modules, so a chain
+/// through both is not a cycle. It was reported as one, because both were
+/// spelled `x`.
+#[test]
+fn a_nested_module_of_the_same_spelling_is_not_a_cycle() {
+    let p = Project::new("not-a-cycle");
+    p.file("x.kite", "use lib\n\npub fn top() -> str {\n  return lib.mid()\n}\n");
+    p.file("lib/lib.kite", "use x\n\npub fn mid() -> str {\n  return x.leaf()\n}\n");
+    p.file("lib/x/x.kite", "pub fn leaf() -> str {\n  return \"leaf\"\n}\n");
+    let main = p.file("main.kite", "use x\n\nfn main() {\n  io.print(x.top())\n}\n");
+    assert_eq!(p.run(&main).expect("compiles"), "leaf\n");
+}
+
+/// A diagnostic names a module by where it is, so two `util`s are told apart
+/// in what the compiler says as well as in what it does.
+#[test]
+fn a_privacy_error_names_the_module_by_where_it_is() {
+    let p = Project::new("identity-in-diagnostic");
+    p.file("a/a.kite", "use util\n\npub fn go() -> str {\n  return util.hidden()\n}\n");
+    p.file("a/util/util.kite", "fn hidden() -> str {\n  return \"x\"\n}\n");
+    let main = p.file("main.kite", "use a\n\nfn main() {\n  io.print(a.go())\n}\n");
+    let said = p.run(&main).expect_err("private");
+    assert!(said.contains("private to module `a/util`"), "{}", said);
+}
+
+// ---- each package's dependencies are its own ---------------------------------
+
+/// A dependency may use what it declares. There was one table of
+/// dependencies, read from the program's manifest, so this looked for `b`
+/// inside `a` and failed.
+#[test]
+fn a_dependency_uses_what_it_declares() {
+    let p = Project::new("transitive-deps");
+    p.file(
+        "a/kite.toml",
+        "[package]\nname = \"a\"\nversion = \"1.0.0\"\n\n[dependencies]\nb = { path = \"../b\" }\n",
+    );
+    p.file("a/a.kite", "use b\n\npub fn hello() -> str {\n  return b.name()\n}\n");
+    p.file("b/kite.toml", "[package]\nname = \"b\"\nversion = \"1.0.0\"\n");
+    p.file("b/b.kite", "pub fn name() -> str {\n  return \"from b\"\n}\n");
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\na = { path = \"../a\" }\n",
+    );
+    let main = p.file("app/main.kite", "use a\n\nfn main() {\n  io.print(a.hello())\n}\n");
+    assert_eq!(p.run(&main).expect("compiles"), "from b\n");
+}
+
+/// And may not use what only the program declares — §13.2: there is no
+/// transitive-dependency hoisting.
+#[test]
+fn a_dependency_cannot_use_what_only_the_program_declares() {
+    let p = Project::new("no-hoisting");
+    p.file("a/kite.toml", "[package]\nname = \"a\"\nversion = \"1.0.0\"\n");
+    p.file("a/a.kite", "use c\n\npub fn hello() -> str {\n  return c.name()\n}\n");
+    p.file("c/kite.toml", "[package]\nname = \"c\"\nversion = \"1.0.0\"\n");
+    p.file("c/c.kite", "pub fn name() -> str {\n  return \"from c\"\n}\n");
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\na = { path = \"../a\" }\nc = { path = \"../c\" }\n",
+    );
+    let main = p.file("app/main.kite", "use a\n\nfn main() {\n  io.print(a.hello())\n}\n");
+    let said = p.run(&main).expect_err("`a` does not declare `c`");
+    assert!(said.contains("cannot find module `c`"), "{}", said);
+}
+
+/// A git dependency a dependency declares is where `kitec pkg` put it: in the
+/// program's `.kite/vendor`, which is the one place it puts every package.
+#[test]
+fn a_dependencys_git_dependency_is_read_from_the_programs_vendor() {
+    let p = Project::new("vendored-transitive");
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\na = { git = \"https://example.com/a\", tag = \"v1.0.0\" }\n",
+    );
+    p.file(
+        "app/.kite/vendor/a/kite.toml",
+        "[package]\nname = \"a\"\nversion = \"1.0.0\"\n\n\
+         [dependencies]\nb = { git = \"https://example.com/b\", tag = \"v2.0.0\" }\n",
+    );
+    p.file(
+        "app/.kite/vendor/a/a.kite",
+        "use b\n\npub fn hello() -> str {\n  return b.name()\n}\n",
+    );
+    p.file("app/.kite/vendor/b/kite.toml", "[package]\nname = \"b\"\nversion = \"2.0.0\"\n");
+    p.file("app/.kite/vendor/b/b.kite", "pub fn name() -> str {\n  return \"vendored b\"\n}\n");
+    let main = p.file("app/src/main.kite", "use a\n\nfn main() {\n  io.print(a.hello())\n}\n");
+    assert_eq!(p.run(&main).expect("compiles"), "vendored b\n");
+}
+
+/// A manifest that does not parse is reported where it is wrong. It was
+/// treated as no manifest, so a typo in `[package]` read as `cannot find
+/// module` at every `use` of a dependency.
+#[test]
+fn a_manifest_that_does_not_read_is_reported_at_its_line() {
+    let p = Project::new("broken-manifest");
+    p.file("a/a.kite", "pub fn hello() -> str {\n  return \"a\"\n}\n");
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [dependencies]\na = { path = \"../a\" }\n",
+    );
+    let main = p.file("app/main.kite", "use a\n\nfn main() {\n  io.print(a.hello())\n}\n");
+    let said = p.run(&main).expect_err("the manifest does not read");
+    assert!(said.contains("E0405"), "{}", said);
+    assert!(said.contains("kite.toml:4"), "points at the line: {}", said);
+    assert!(said.contains("has no `edition`"), "{}", said);
+}
+
+/// `prelude` is reserved like the standard library's names. A module of that
+/// name was accepted, and since the prelude is found by its name from
+/// everywhere, its declarations became every module's unqualified fallback —
+/// private ones included.
+#[test]
+fn a_module_called_prelude_is_refused() {
+    let p = Project::new("prelude-module");
+    p.file("prelude.kite", "fn sneaky() -> int {\n  return 1\n}\n");
+    let main = p.file("main.kite", "use prelude\n\nfn main() {\n  io.print(sneaky())\n}\n");
+    let said = p.run(&main).expect_err("reserved");
+    assert!(said.contains("E0403"), "{}", said);
+}
+
+/// A standard module is `std/<name>`, exactly. Only the last segment used to
+/// be read, so any path ending in `json` under `std` was `std/json`.
+#[test]
+fn a_standard_module_is_one_segment_under_std() {
+    let c = compile("t.kite", "use std/bogus/nested/json\n\nfn main() {\n}\n", Emit::Check);
+    let said = c.render_diagnostics();
+    assert!(said.contains("no standard module `std/bogus/nested/json`"), "{}", said);
+}
+
+// ---- the entry file and bare variants go through the gate too -----------------
+
+/// The entry reaches only what it imports.
+///
+/// Its own declarations are the only unqualified ones, so the first lookup
+/// step — "the asking module's own" — turned `secret.describe` into
+/// `secret.describe` and found module `secret`'s item. That step is ungated,
+/// so importing `helper`, which imports `secret`, was enough to call `secret`.
+#[test]
+fn the_entry_cannot_reach_a_module_only_its_imports_import() {
+    let p = Project::new("entry-gate");
+    p.file("secret.kite", "pub fn describe() -> str {\n  return \"secret\"\n}\n");
+    p.file(
+        "helper.kite",
+        "use secret\n\npub fn hi() -> str {\n  return secret.describe()\n}\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use helper\n\nfn main() {\n  io.print(secret.describe())\n  io.print(helper.hi())\n}\n",
+    );
+    let said = p.run(&main).expect_err("`secret` is not imported by main");
+    assert!(said.contains("cannot find `secret`"), "{}", said);
+}
+
+/// A bare variant is one of the asking module's own enums' or the prelude's.
+///
+/// The index was one table for the whole program, so `let m = Magic` reached
+/// a private enum in a module the entry never imported.
+#[test]
+fn a_bare_variant_does_not_reach_another_modules_enum() {
+    let p = Project::new("bare-variant");
+    p.file("secret.kite", "enum Hidden {\n  Magic\n  Other\n}\n\npub fn ok() -> str {\n  return \"ok\"\n}\n");
+    p.file("helper.kite", "use secret\n\npub fn hi() -> str {\n  return secret.ok()\n}\n");
+    let main = p.file(
+        "main.kite",
+        "use helper\n\nfn main() {\n  let m = Magic\n  io.print(helper.hi())\n}\n",
+    );
+    let said = p.run(&main).expect_err("`Magic` is another module's");
+    assert!(said.contains("cannot find `Magic`"), "{}", said);
+}
+
+/// Two modules may each name a variant alike: neither is ambiguous in the
+/// other. A program's `Token.Number` made `Number` ambiguous inside
+/// `std/json`, which then failed to compile its own `match`.
+#[test]
+fn a_variant_name_is_not_ambiguous_across_modules() {
+    let p = Project::new("variant-scope");
+    let main = p.file(
+        "main.kite",
+        "use std/json\n\nenum Token {\n  Number(float)\n  Word(str)\n}\n\n\
+         fn main() {\n\
+         \x20 let (doc, err) = json.parse(\"[1, 2]\")\n\
+         \x20 if err != nil {\n    return\n  }\n\
+         \x20 io.print(json.stringify(doc))\n\
+         \x20 let t = Number(1.5)\n\
+         \x20 match t {\n    Number(n) => io.print(n),\n    Word(w) => io.print(w),\n  }\n\
+         }\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "[1,2]\n1.5\n");
+}
+
+/// A derive walks a field typed through an aliased module the way the module
+/// spells it. `a: m.Point` under `use models as m` read as "no such type".
+#[test]
+fn a_derive_walks_a_field_typed_through_an_aliased_module() {
+    let p = Project::new("derive-aliased-field");
+    p.file(
+        "lib/models.kite",
+        "@derive(Debug)\npub struct Point {\n  pub x: int\n}\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use lib/models as m\n\n@derive(Debug)\nstruct Line {\n  a: m.Point\n}\n\n\
+         fn main() {\n  io.print(Line{ a: m.Point{ x: 1 } }.debug())\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "Line{ a: Point{ x: 1 } }\n");
+}
+
+/// A module that derives `Encode` under its own spelling of `std/json`, used
+/// from a program that spells it differently.
+#[test]
+fn a_json_derive_in_a_module_uses_that_modules_spelling() {
+    let p = Project::new("derive-json-spelling");
+    p.file(
+        "models.kite",
+        "use std/json as j\n\n@derive(Encode)\npub struct P {\n  pub x: int\n}\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use std/json\nuse models\n\n\
+         fn main() {\n  io.print(json.stringify(models.P{ x: 1 }.encode()))\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "{\"x\":1}\n");
+}
+
+/// A syntax error in an imported module is one diagnostic. The loader parsed
+/// the file to find its imports and the driver parsed it again to merge it,
+/// and both reported.
+#[test]
+fn a_syntax_error_in_an_imported_module_is_reported_once() {
+    let p = Project::new("syntax-once");
+    p.file("bad.kite", "pub fn f() -> int {\n  return 1 +\n}\n\nconst x = $\n");
+    let main = p.file("main.kite", "use bad\n\nfn main() {\n  io.print(bad.f())\n}\n");
+    let said = p.run(&main).expect_err("does not parse");
+    assert_eq!(said.matches("invalid character `$`").count(), 1, "{}", said);
+    assert_eq!(said.matches("expected an expression").count(), 1, "{}", said);
+}

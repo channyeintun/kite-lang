@@ -116,6 +116,11 @@ pub struct Compilation {
     /// language server that re-derives its own answers is a second compiler
     /// that disagrees with the first one.
     pub index: Index,
+    /// Every file the program was compiled from — the entry, each module's
+    /// sources and each manifest consulted — with its contents. What `kitec
+    /// bundle` carries, so the program loads again the same way with nothing
+    /// on disk.
+    pub inputs: Vec<(std::path::PathBuf, String)>,
 }
 
 /// Where names are, for an editor.
@@ -330,6 +335,32 @@ pub fn compile_provided(
     release: bool,
     provided: std::collections::HashMap<String, String>,
 ) -> Compilation {
+    compile_reading(path, src, emit, release, provided, modules::Files::Disk)
+}
+
+/// Compile with every module read from `files` rather than from disk.
+///
+/// For a bundle, which carries the files its build read: the program loads
+/// through the same resolution the build used, so a `use` means in the
+/// bundle exactly what it meant beside the source.
+pub fn compile_files(
+    path: impl AsRef<Path>,
+    src: &str,
+    emit: Emit,
+    release: bool,
+    files: modules::Files,
+) -> Compilation {
+    compile_reading(path, src, emit, release, std::collections::HashMap::new(), files)
+}
+
+fn compile_reading(
+    path: impl AsRef<Path>,
+    src: &str,
+    emit: Emit,
+    release: bool,
+    provided: std::collections::HashMap<String, String>,
+    files: modules::Files,
+) -> Compilation {
     let mut sources = SourceMap::new();
     // The prelude is added first, so its spans and the user's never collide and
     // a diagnostic inside it says which file it came from.
@@ -337,11 +368,20 @@ pub fn compile_provided(
     let path = path.as_ref().to_path_buf();
     let file = sources.add(&path, src);
     let mut diags = DiagBag::new();
+    let mut inputs = vec![(path.clone(), src.to_string())];
     let (output, chunk, wasm, native, index) = run_passes(
-        prelude, file, &path, &mut sources, emit, release, provided, &mut diags,
+        prelude,
+        file,
+        &path,
+        &mut sources,
+        emit,
+        release,
+        (provided, files),
+        &mut inputs,
+        &mut diags,
     );
 
-    let mut c = Compilation { sources, diags, output, chunk, wasm, native, index };
+    let mut c = Compilation { sources, diags, output, chunk, wasm, native, index, inputs };
     // The standard library's own advice is not the user's to act on.
     let library: Vec<FileId> = c
         .sources
@@ -362,7 +402,8 @@ fn run_passes(
     sources: &mut SourceMap,
     emit: Emit,
     release: bool,
-    provided: std::collections::HashMap<String, String>,
+    (provided, files): (std::collections::HashMap<String, String>, modules::Files),
+    inputs: &mut Vec<(std::path::PathBuf, String)>,
     diags: &mut DiagBag,
 ) -> (
     String,
@@ -383,7 +424,8 @@ fn run_passes(
     // nothing asked for, which is what keeps a `hello world` from carrying the
     // standard library.
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
-    let loader = modules::Loader::load_with(&ast, dir, provided, sources, diags);
+    let mut loader = modules::Loader::load_from(&ast, dir, provided, files, sources, diags);
+    inputs.append(&mut loader.inputs);
 
     // Every item's module, aligned with the merged item list. The program's own
     // items and the prelude's are the root module.
@@ -409,12 +451,11 @@ fn run_passes(
 
     // Each module's declarations are merged qualified, so `load` in module
     // `config` is declared as `config.load` — unforgeable as an identifier,
-    // and exactly what an importer writes.
-    for module in &loader.loaded {
-        for id in &module.files {
-            let text = sources.text(*id).to_string();
-            let tokens = kite_lexer::tokenize(*id, &text, diags);
-            let mut parsed = kite_parser::parse(*id, &text, &tokens, diags);
+    // and exactly what an importer writes. The loader already parsed them,
+    // and parsing again here reported every syntax error in an imported
+    // module twice.
+    for module in std::mem::take(&mut loader.loaded) {
+        for (_, mut parsed) in module.files {
             modules::qualify_items(&module.name, &mut parsed.items);
             item_modules.extend(std::iter::repeat_n(module.name.clone(), parsed.items.len()));
             ast.items.extend(parsed.items);
@@ -426,7 +467,8 @@ fn run_passes(
     // produces is ordinary Kite, parsed here like anything else — so nothing
     // after this point knows derivation happened, and `--emit hir` shows what
     // actually ran.
-    if let Some(derived) = derive::expand(&ast.items, &item_modules, diags) {
+    let mut aliases = std::mem::take(&mut loader.aliases);
+    if let Some(derived) = derive::expand(&ast.items, &item_modules, &aliases, diags) {
         let id = sources.add("<derive>", &derived.source);
         let text = sources.text(id).to_string();
         let tokens = kite_lexer::tokenize(id, &text, diags);
@@ -438,15 +480,14 @@ fn run_passes(
             item_modules.push(derived.modules.get(i).cloned().unwrap_or_default());
             ast.items.push(item);
         }
+        // And it spells `std/json` its own way where its module wrote none.
+        aliases.extend(derived.aliases);
     }
 
     // Resolution and checking still run after a syntax error — the parser
     // recovers, so later passes can report their own findings on the parts that
     // did parse. Code generation does not, because its input would be poisoned.
-    let module_map = kite_resolve::Modules {
-        of_item: item_modules,
-        aliases: loader.aliases.clone(),
-    };
+    let module_map = kite_resolve::Modules { of_item: item_modules, aliases };
     let resolved = kite_resolve::resolve_modules(&ast, module_map, diags);
     let mut solved = kite_types::Solved::default();
     let mut hir = kite_types::check_recording(&ast, &resolved, sources, diags, release, &mut solved);

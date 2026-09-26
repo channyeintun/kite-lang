@@ -1584,24 +1584,28 @@ true
 
 ### `Encode` / `Decode`
 
-Both expand to code that mentions `json.Json`, so **the file must
-`use std/json`** or the expansion fails on a name the source never wrote:
+Both expand to code written against `std/json`, and the expansion names it
+however the module does — `use std/json as j` makes it `j.Encode` — or, in a
+module that never imports it, by a spelling of its own. So the derive itself
+needs no `use`; what needs one is *your* code calling `json.stringify` or
+`json.parse` on the result:
 
-```kite fails
-@derive(Encode)
-struct U { //~ E0204
+```kite
+@derive(Encode, Decode)
+struct U {
     n: int
 }
 
 fn main() {
-    io.print(1)
+    let (back, err) = U.decode(U{ n: 1 }.encode())
+    if err != nil {
+        return
+    }
+    io.print(back.n)
 }
 ```
 
-> ``error[E0204]: unknown trait `Encode` `` — pointing into `<derive>`, at the
-> line `impl json.Encode for U {` that the expansion wrote.
-
-With the import, the round trip is an ordinary pair of calls. `decode` is named
+The round trip is an ordinary pair of calls. `decode` is named
 on the type because there is no turbofish to write `json.decode<User>(text)`
 with, and it returns `(T, error)` — a missing field is an error, never a zero:
 
