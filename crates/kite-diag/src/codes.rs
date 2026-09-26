@@ -135,7 +135,12 @@ codes! {
         "These statements are only meaningful inside a `for` loop.";
 
     E0116 = "E0116", "unreachable code",
-        "This statement follows one that always diverges, so it can never run.";
+        "This statement follows one that always diverges, so it can never run.\n\n\
+         The same holds for a `match` arm whose every value is taken by the arms \
+         above it. The commonest cause is a name meant as a variant that is not \
+         one — `Dir` where the enum says `Directory` — which is a binding: it \
+         matches everything, and every arm after it is dead. A guarded arm \
+         shadows nothing, because its guard may fail.";
 
     E0117 = "E0117", "statement has no effect",
         "A closure written as a statement is built and thrown away. Nothing \

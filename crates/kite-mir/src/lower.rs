@@ -799,7 +799,16 @@ impl<'a> FnLowerer<'a> {
         arms: &[hir::MatchArm],
         result_ty: Ty,
     ) -> Local {
-        let subject = self.operand(scrutinee);
+        let mut subject = self.operand(scrutinee);
+        // An optional is held in a local, so a pattern written for its
+        // payload can find out that it is one; see `payload_of`.
+        if matches!(self.types.kind(scrutinee.ty), kite_hir::TyKind::Optional(_))
+            && !matches!(subject, Operand::Local(_))
+        {
+            let slot = self.temp(scrutinee.ty);
+            self.assign(slot, Rvalue::Use(subject));
+            subject = Operand::Local(slot);
+        }
         let result = self.temp(result_ty);
         let join = self.new_block();
         let mut join_reached = false;
@@ -858,6 +867,26 @@ impl<'a> FnLowerer<'a> {
     ) {
         if pattern.is_irrefutable() {
             self.terminate(Terminator::Goto(on_match));
+            return;
+        }
+
+        // A pattern for the payload, against an optional: it matches a
+        // present value whose payload it matches. Testing the optional itself
+        // read a variant's tag, or compared an `int`, off a value that might
+        // not be there — and each backend did something different with that.
+        if let Some(inner) = self.payload_of(pattern, subject) {
+            let present = self.new_block();
+            let absent = self.temp(Ty::BOOL);
+            self.assign(absent, Rvalue::IsNil { value: subject.clone() });
+            self.terminate(Terminator::Branch {
+                cond: Operand::Local(absent),
+                then: on_fail,
+                else_: present,
+            });
+            self.switch_to(present);
+            let slot = self.temp(inner);
+            self.assign(slot, Rvalue::Unwrap { value: subject.clone() });
+            self.test_pattern(pattern, &Operand::Local(slot), on_match, on_fail);
             return;
         }
 
@@ -1062,8 +1091,35 @@ impl<'a> FnLowerer<'a> {
         });
     }
 
+    /// The payload type when `pattern` is written for what an optional
+    /// `subject` holds rather than for the optional: anything but `nil`, a
+    /// catch-all, or an or-pattern, whose alternatives are asked one by one.
+    fn payload_of(&self, pattern: &hir::Pattern, subject: &Operand) -> Option<TyId> {
+        if matches!(
+            pattern,
+            hir::Pattern::Nil
+                | hir::Pattern::Wildcard
+                | hir::Pattern::Binding { .. }
+                | hir::Pattern::Or(_)
+        ) {
+            return None;
+        }
+        let Operand::Local(l) = subject else { return None };
+        match self.types.kind(self.locals[l.0 as usize].ty) {
+            kite_hir::TyKind::Optional(inner) => Some(*inner),
+            _ => None,
+        }
+    }
+
     /// Write the pattern's bindings, once it is known to have matched.
     fn bind_pattern(&mut self, pattern: &hir::Pattern, subject: &Operand) {
+        // The payload's pattern binds the payload.
+        if let Some(inner) = self.payload_of(pattern, subject) {
+            let slot = self.temp(inner);
+            self.assign(slot, Rvalue::Unwrap { value: subject.clone() });
+            self.bind_pattern(pattern, &Operand::Local(slot));
+            return;
+        }
         match pattern {
             hir::Pattern::Binding { local, unwrap } => {
                 let value = if *unwrap {

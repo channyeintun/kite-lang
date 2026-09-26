@@ -7180,8 +7180,15 @@ impl<'a> Checker<'a> {
             },
 
             ast::Pattern::Literal(e) => {
-                let lit = self.expr(e, Some(scrut));
-                self.expect_ty(lit.ty, scrut, lit.span, None);
+                // Against an optional, a literal is one for the value inside:
+                // `1` matches a present `1`, as a variant's name matches a
+                // present value of that variant.
+                let want = match *self.types.kind(scrut) {
+                    TyKind::Optional(inner) => inner,
+                    _ => scrut,
+                };
+                let lit = self.expr(e, Some(want));
+                self.expect_ty(lit.ty, want, lit.span, None);
                 match lit.kind {
                     ExprKind::Int(v) => hir::Pattern::Int(v),
                     ExprKind::Float(v) => hir::Pattern::Float(v),
@@ -7576,6 +7583,8 @@ impl<'a> Checker<'a> {
             .map(|a| &a.pattern)
             .collect();
 
+        self.report_unreachable_arms(m, arms, scrut);
+
         let missing = exhaustive::missing_patterns(scrut, &unguarded, self.types);
         if missing.is_empty() {
             return true;
@@ -7604,6 +7613,68 @@ impl<'a> Checker<'a> {
         }
         self.diags.push(d);
         false
+    }
+
+    /// Warn about every arm the ones above it leave nothing for.
+    ///
+    /// The usual cause is a name meant as a variant that is not one — `Dir`
+    /// where the enum says `Directory` — which is a binding, takes every value,
+    /// and silently makes each arm after it dead. So when a catch-all binding
+    /// above is spelled almost like a variant, the warning says which.
+    fn report_unreachable_arms(&mut self, m: &ast::MatchExpr, arms: &[hir::MatchArm], scrut: TyId) {
+        let rows: Vec<(&hir::Pattern, bool)> =
+            arms.iter().map(|a| (&a.pattern, a.guard.is_some())).collect();
+        for i in exhaustive::unreachable_arms(scrut, &rows, self.types) {
+            let Some(arm) = m.arms.get(i) else { continue };
+            let mut d = Diagnostic::warning(codes::E0116, "unreachable match arm")
+                .with_primary(arm.pattern.span(), "no value can reach this arm")
+                .with_note("every value it matches is taken by an arm above it");
+            if let Some((at, name, variant)) = self.near_miss_binding(m, arms, scrut, i) {
+                d = d
+                    .with_secondary(at, format!("`{}` takes every value that reaches it", name))
+                    .with_note(format!(
+                        "`{}` is not a variant, so it is a binding; did you mean `{}`?",
+                        name, variant
+                    ));
+            }
+            self.diags.push(d);
+        }
+    }
+
+    /// An arm above `before` that is a bare, unguarded binding spelled almost
+    /// like a variant of the scrutinee's enum: its span, its name, and the
+    /// variant.
+    fn near_miss_binding(
+        &self,
+        m: &ast::MatchExpr,
+        arms: &[hir::MatchArm],
+        scrut: TyId,
+        before: usize,
+    ) -> Option<(Span, String, String)> {
+        let inner = match *self.types.kind(scrut) {
+            TyKind::Optional(inner) => inner,
+            _ => scrut,
+        };
+        let TyKind::Enum(e) = *self.types.kind(inner) else { return None };
+        let variants: Vec<String> =
+            self.types.enum_def(e).variants.iter().map(|v| v.name.clone()).collect();
+        for (arm, checked) in m.arms.iter().zip(arms).take(before) {
+            let ast::Pattern::Binding(name) = &arm.pattern else { continue };
+            // Only a name written like a variant — capitalised — is taken for
+            // one that was misspelled; `other` and `x` mean what they say.
+            if checked.guard.is_some() || !name.name.starts_with(char::is_uppercase) {
+                continue;
+            }
+            let close = variants.iter().find(|v| {
+                v.starts_with(name.name.as_str())
+                    || name.name.starts_with(v.as_str())
+                    || edit_distance(&name.name.to_lowercase(), &v.to_lowercase()) <= 2
+            });
+            if let Some(v) = close {
+                return Some((name.span, name.name.clone(), v.clone()));
+            }
+        }
+        None
     }
 
     // ---- structs ----------------------------------------------------------

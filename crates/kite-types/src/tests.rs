@@ -1054,6 +1054,35 @@ fn a_display_bound_or_object_interpolates() {
         fn main() {\n}\n");
 }
 
+/// A name meant as a variant that is not one is a binding: it takes every
+/// value, and each arm after it is dead — which is said, with the variant it
+/// was probably meant to be.
+#[test]
+fn an_arm_after_a_misspelt_variant_is_unreachable() {
+    let c = ok("enum Kind {\n  Missing\n  File\n  Directory\n}\n\
+                fn f(k: Kind) -> int {\n  return match k {\n\
+                \x20   Dir => 1,\n    File => 2,\n    Missing => 3,\n  }\n}\n\
+                fn main() {\n  io.print(f(Kind.File))\n}\n");
+    let warnings: Vec<&kite_diag::Diagnostic> = c
+        .diags
+        .iter()
+        .filter(|d| d.code == Some(codes::E0116))
+        .collect();
+    assert_eq!(warnings.len(), 2, "{}", c.render());
+    assert!(c.render().contains("did you mean `Directory`?"), "{}", c.render());
+}
+
+/// Matches exhaustive only through their nested patterns.
+#[test]
+fn nested_patterns_make_a_match_exhaustive() {
+    ok("enum Light {\n  On(bool)\n  Off\n}\n\
+        fn f(l: Light, p: (bool, int)) -> int {\n\
+        \x20 let a = match l {\n    On(true) => 1,\n    On(false) => 2,\n    Off => 3,\n  }\n\
+        \x20 let b = match p {\n    (true, _) => 1,\n    (false, _) => 2,\n  }\n\
+        \x20 return a + b\n}\n\
+        fn main() {\n  io.print(f(Light.Off, (true, 1)))\n}\n");
+}
+
 /// A method may be generic in its own right, after its block's parameters.
 #[test]
 fn a_method_solves_its_own_type_parameters() {

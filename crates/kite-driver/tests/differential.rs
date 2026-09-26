@@ -929,6 +929,131 @@ async fn main() {
 "#,
     ),
     (
+        "nested-exhaustiveness",
+        r#"// Matches exhaustive only through their nested patterns: a variant covered
+// by its payloads together, a tuple and a struct covered column by column,
+// and an optional enum covered by `nil` and each of its variants.
+enum Light {
+    On(bool)
+    Off
+}
+
+enum E {
+    A
+    B
+}
+
+struct S {
+    a: bool
+    b: bool
+}
+
+fn light(l: Light) -> str {
+    return match l {
+        On(true) => "bright",
+        On(false) => "dim",
+        Off => "off",
+    }
+}
+
+fn pair(t: (int, bool)) -> int {
+    return match t {
+        (0, _) => 1,
+        (_, true) => 2,
+        (n, false) if n > 100 => 3,
+        (_, false) => 4,
+    }
+}
+
+fn both(s: S) -> int {
+    return match s {
+        S { a: true, b: true } => 1,
+        S { a: false, b } => 2,
+        S { a: true, b: false } => 3,
+    }
+}
+
+fn maybe(o: Option<E>) -> str {
+    return match o {
+        nil => "none",
+        A => "a",
+        B => "b",
+    }
+}
+
+fn main() {
+    io.print(light(Light.On(true)) + light(Light.On(false)) + light(Light.Off))
+    io.print(pair((0, true)) + pair((5, true)) + pair((500, false)) + pair((5, false)))
+    io.print(both(S{ a: true, b: true }) + both(S{ a: false, b: true }) + both(S{ a: true, b: false }))
+    let none: Option<E> = nil
+    io.print(maybe(none) + maybe(E.A) + maybe(E.B))
+}
+"#,
+    ),
+    (
+        "payload-patterns-on-optionals",
+        r#"// A pattern for a value, written against an optional, matches a present
+// value it matches: a literal, a variant, a struct. Testing the optional
+// itself read a tag or compared an `int` off a value that might not be
+// there, and each backend answered differently.
+enum E {
+    A
+    B
+}
+
+struct P {
+    x: int
+}
+
+fn number(o: Option<int>) -> str {
+    return match o {
+        nil => "none",
+        1 => "one",
+        _ => "other",
+    }
+}
+
+fn word(o: Option<str>) -> str {
+    return match o {
+        "a" => "A",
+        _ => "?",
+    }
+}
+
+fn which(o: Option<E>) -> str {
+    return match o {
+        nil => "none",
+        A => "a",
+        B => "b",
+    }
+}
+
+fn point(o: Option<P>) -> str {
+    return match o {
+        P { x: 0 } => "origin",
+        P { x } => "at \(x)",
+        nil => "nowhere",
+    }
+}
+
+fn main() {
+    let one: Option<int> = 1
+    let two: Option<int> = 2
+    let no: Option<int> = nil
+    io.print(number(one) + " " + number(two) + " " + number(no))
+    let a: Option<str> = "a"
+    let n: Option<str> = nil
+    io.print(word(a) + word(n))
+    let none: Option<E> = nil
+    io.print(which(none) + which(E.A) + which(E.B))
+    let origin: Option<P> = P{ x: 0 }
+    let far: Option<P> = P{ x: 7 }
+    let gone: Option<P> = nil
+    io.print(point(origin) + ", " + point(far) + ", " + point(gone))
+}
+"#,
+    ),
+    (
         "interpolation",
         "fn main() {\n  let name = \"world\"\n  let n = 42\n  let pi = 2.5\n  let ok = true\n\
          \x20 io.print(\"hello, \\(name)!\")\n\
