@@ -346,11 +346,13 @@ fn main() -> ExitCode {
                     path
                 ));
             }
-            let stdout = io::stdout();
-            let mut out = stdout.lock();
-            return match program.run(&mut out) {
+            // Streamed, not collected: a line the program prints reaches the
+            // terminal when it is printed — before a prompt waits for input,
+            // in order with standard error, and whether or not the program
+            // ever finishes.
+            return match program.run_to_stdout() {
                 Ok(()) => {
-                    let _ = out.flush();
+                    let _ = io::stdout().flush();
                     ExitCode::SUCCESS
                 }
                 Err(e) => fail(&e),

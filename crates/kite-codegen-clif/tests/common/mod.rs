@@ -29,11 +29,24 @@ pub fn lower(src: &str) -> Lowered {
 }
 
 /// Run natively, in process, and hand back what was printed.
+#[allow(dead_code)]
 pub fn run_native(src: &str) -> String {
     let l = lower(src);
     let mut out = Vec::new();
     kite_codegen_clif::run_jit(&l.mir, &l.types, &mut out).expect("the JIT runs");
     String::from_utf8(out).expect("output is valid UTF-8")
+}
+
+/// Run natively with the collector configured, and hand back what was printed
+/// and what the collector did during that run — counted under the same lock
+/// as the run, so a neighbouring test's collections are not this one's.
+#[allow(dead_code)]
+pub fn run_native_with(src: &str, config: kite_codegen_clif::RunConfig) -> (String, kite_codegen_clif::RunStats) {
+    let l = lower(src);
+    let mut out = Vec::new();
+    let stats = kite_codegen_clif::run_jit_with(&l.mir, &l.types, config, Some(&mut out))
+        .expect("the JIT runs");
+    (String::from_utf8(out).expect("output is valid UTF-8"), stats)
 }
 
 /// The oracle: the same program on the bytecode VM.

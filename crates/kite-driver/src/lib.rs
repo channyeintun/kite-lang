@@ -93,10 +93,29 @@ impl NativeProgram {
         kite_codegen_clif::compile_object(&self.mir, &self.types)
     }
 
-    /// Compile into this process and run to completion — `kitec run
-    /// --native`, with no linker anywhere.
+    /// Compile into this process and run to completion, with no linker
+    /// anywhere, collecting what the program prints into `out` — for a
+    /// harness comparing output. Nothing is written until the program ends.
     pub fn run(&self, out: &mut dyn Write) -> Result<(), String> {
         kite_codegen_clif::run_jit(&self.mir, &self.types, out)
+    }
+
+    /// The same run, with the collector configured and what it did reported
+    /// back — for a test that means to make it work.
+    pub fn run_with(
+        &self,
+        config: kite_codegen_clif::RunConfig,
+        out: &mut dyn Write,
+    ) -> Result<kite_codegen_clif::RunStats, String> {
+        kite_codegen_clif::run_jit_with(&self.mir, &self.types, config, Some(out))
+    }
+
+    /// Run printing straight to standard output as the program goes — `kitec
+    /// run --native`, which behaves like the executable `--emit native`
+    /// links: output in order with standard error, and none of it lost if
+    /// the program crashes or never ends.
+    pub fn run_to_stdout(&self) -> Result<(), String> {
+        kite_codegen_clif::run_jit_stdout(&self.mir, &self.types)
     }
 }
 
