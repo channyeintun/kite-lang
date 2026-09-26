@@ -135,6 +135,24 @@ pub struct Compilation {
     /// language server that re-derives its own answers is a second compiler
     /// that disagrees with the first one.
     pub index: Index,
+    /// Every file the program was compiled from — the entry, each module's
+    /// sources and each manifest consulted — with its contents. What `kitec
+    /// bundle` carries, so the program loads again the same way with nothing
+    /// on disk.
+    pub inputs: Vec<(std::path::PathBuf, String)>,
+    /// Every `test_…` function the program's own file declares.
+    test_fns: Vec<TestFn>,
+}
+
+/// A function named like a test, and what the runner needs to know to call it.
+pub struct TestFn {
+    pub name: String,
+    /// How many arguments it takes. A test takes none; one that takes some is
+    /// a helper that happens to be named like a test, and is not called.
+    pub params: usize,
+    /// Called by name, an `async fn` answers with its task rather than with
+    /// what it returns, so the runner has to drive it and read the task.
+    pub is_async: bool,
 }
 
 /// Where names are, for an editor.
@@ -242,14 +260,24 @@ impl Compilation {
     /// A test is a function whose name starts with `test_`. There is no
     /// attribute syntax in Kite and there is not going to be one: a naming
     /// convention needs no machinery, and `grep test_` finds every test.
+    ///
+    /// **Read from the declarations, not from the compiled functions.** It
+    /// used to be every compiled function whose name began `test_`, which
+    /// took in a closure lifted out of a test (`test_x#closure0`), the resume
+    /// half of an `async` one (`test_x$resume`), and a helper that takes an
+    /// argument — each then called with nothing and reported as a trap or a
+    /// pass — while a private test, pruned as unreachable, was silently not
+    /// there at all. [`compile_tests`] keeps a private one.
     pub fn tests(&self) -> Vec<String> {
-        let Some(chunk) = &self.chunk else { return Vec::new() };
-        chunk
-            .functions
-            .iter()
-            .filter(|f| f.name.starts_with("test_"))
-            .map(|f| f.name.clone())
-            .collect()
+        if self.chunk.is_none() {
+            return Vec::new();
+        }
+        self.test_fns.iter().filter(|t| t.params == 0).map(|t| t.name.clone()).collect()
+    }
+
+    /// Functions named like tests that take arguments, so are not called.
+    pub fn not_tests(&self) -> Vec<&TestFn> {
+        self.test_fns.iter().filter(|t| t.params > 0).collect()
     }
 
     /// The source map for the compiled WebAssembly module, if there is one.
@@ -302,7 +330,26 @@ impl Compilation {
     pub fn run_test(&self, name: &str, out: &mut dyn Write) -> Result<Option<String>, Trap> {
         let Some(chunk) = &self.chunk else { return Ok(None) };
         let value = kite_vm::run_function(chunk, name, out)?;
-        Ok(kite_vm::failure_message(&value))
+        let is_async = self.test_fns.iter().any(|t| t.name == name && t.is_async);
+        if !is_async {
+            return Ok(kite_vm::failure_message(&value));
+        }
+        // An `async` test answered with its task, and `run_function` has
+        // already driven the scheduler until nothing was left. What the test
+        // returned is in the task — reading the task itself as the answer
+        // reported every async test as passing.
+        let kite_vm::Value::Struct(task) = &value else {
+            return Ok(Some("an async test did not answer with a task".to_string()));
+        };
+        let fields = task.fields.borrow();
+        let done = matches!(
+            fields.get(kite_mir::TASK_DONE as usize),
+            Some(kite_vm::Value::Bool(true))
+        );
+        if !done {
+            return Ok(Some("the test's task never finished".to_string()));
+        }
+        Ok(fields.get(kite_mir::TASK_VALUE as usize).and_then(kite_vm::failure_message))
     }
 }
 
@@ -352,6 +399,60 @@ pub fn compile_provided(
     release: bool,
     provided: std::collections::HashMap<String, String>,
 ) -> Compilation {
+    let input = Input { provided, files: modules::Files::Disk, tests: false };
+    compile_reading(path, src, emit, release, input)
+}
+
+/// Compile for `kitec test`: to bytecode, with every `test_…` the file
+/// declares kept — a private one included, which nothing calls and which
+/// pruning would otherwise remove before the runner could find it.
+pub fn compile_tests(path: impl AsRef<Path>, src: &str, release: bool) -> Compilation {
+    let input = Input {
+        provided: std::collections::HashMap::new(),
+        files: modules::Files::Disk,
+        tests: true,
+    };
+    compile_reading(path, src, Emit::Check, release, input)
+}
+
+/// Compile with every module read from `files` rather than from disk.
+///
+/// For a bundle, which carries the files its build read: the program loads
+/// through the same resolution the build used, so a `use` means in the
+/// bundle exactly what it meant beside the source.
+pub fn compile_files(
+    path: impl AsRef<Path>,
+    src: &str,
+    emit: Emit,
+    release: bool,
+    files: modules::Files,
+) -> Compilation {
+    let input = Input { provided: std::collections::HashMap::new(), files, tests: false };
+    compile_reading(path, src, emit, release, input)
+}
+
+/// Where a compilation reads its modules from, and what it is for.
+struct Input {
+    /// Modules handed over by the host; see [`modules::Loader`].
+    provided: std::collections::HashMap<String, String>,
+    files: modules::Files,
+    /// Whether to keep every `test_…` the program declares through pruning.
+    tests: bool,
+}
+
+/// What a compilation learned on the way besides its artefact.
+struct Found {
+    inputs: Vec<(std::path::PathBuf, String)>,
+    tests: Vec<TestFn>,
+}
+
+fn compile_reading(
+    path: impl AsRef<Path>,
+    src: &str,
+    emit: Emit,
+    release: bool,
+    input: Input,
+) -> Compilation {
     let mut sources = SourceMap::new();
     // The prelude is added first, so its spans and the user's never collide and
     // a diagnostic inside it says which file it came from.
@@ -359,11 +460,22 @@ pub fn compile_provided(
     let path = path.as_ref().to_path_buf();
     let file = sources.add(&path, src);
     let mut diags = DiagBag::new();
+    let mut found = Found { inputs: vec![(path.clone(), src.to_string())], tests: Vec::new() };
     let (output, chunk, wasm, native, index) = run_passes(
-        prelude, file, &path, &mut sources, emit, release, provided, &mut diags,
+        prelude,
+        file,
+        &path,
+        &mut sources,
+        emit,
+        release,
+        input,
+        &mut found,
+        &mut diags,
     );
 
-    let mut c = Compilation { sources, diags, output, chunk, wasm, native, index };
+    let Found { inputs, tests: test_fns } = found;
+    let mut c =
+        Compilation { sources, diags, output, chunk, wasm, native, index, inputs, test_fns };
     // The standard library's own advice is not the user's to act on.
     let library: Vec<FileId> = c
         .sources
@@ -384,7 +496,8 @@ fn run_passes(
     sources: &mut SourceMap,
     emit: Emit,
     release: bool,
-    provided: std::collections::HashMap<String, String>,
+    input: Input,
+    found: &mut Found,
     diags: &mut DiagBag,
 ) -> (
     String,
@@ -405,7 +518,9 @@ fn run_passes(
     // nothing asked for, which is what keeps a `hello world` from carrying the
     // standard library.
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
-    let loader = modules::Loader::load_with(&ast, dir, provided, sources, diags);
+    let mut loader =
+        modules::Loader::load_from(&ast, dir, input.provided, input.files, sources, diags);
+    found.inputs.append(&mut loader.inputs);
 
     // Every item's module, aligned with the merged item list. The program's own
     // items and the prelude's are the root module.
@@ -431,12 +546,11 @@ fn run_passes(
 
     // Each module's declarations are merged qualified, so `load` in module
     // `config` is declared as `config.load` — unforgeable as an identifier,
-    // and exactly what an importer writes.
-    for module in &loader.loaded {
-        for id in &module.files {
-            let text = sources.text(*id).to_string();
-            let tokens = kite_lexer::tokenize(*id, &text, diags);
-            let mut parsed = kite_parser::parse(*id, &text, &tokens, diags);
+    // and exactly what an importer writes. The loader already parsed them,
+    // and parsing again here reported every syntax error in an imported
+    // module twice.
+    for module in std::mem::take(&mut loader.loaded) {
+        for (_, mut parsed) in module.files {
             modules::qualify_items(&module.name, &mut parsed.items);
             item_modules.extend(std::iter::repeat_n(module.name.clone(), parsed.items.len()));
             ast.items.extend(parsed.items);
@@ -448,7 +562,8 @@ fn run_passes(
     // produces is ordinary Kite, parsed here like anything else — so nothing
     // after this point knows derivation happened, and `--emit hir` shows what
     // actually ran.
-    if let Some(derived) = derive::expand(&ast.items, &item_modules, diags) {
+    let mut aliases = std::mem::take(&mut loader.aliases);
+    if let Some(derived) = derive::expand(&ast.items, &item_modules, &aliases, diags) {
         let id = sources.add("<derive>", &derived.source);
         let text = sources.text(id).to_string();
         let tokens = kite_lexer::tokenize(id, &text, diags);
@@ -460,15 +575,14 @@ fn run_passes(
             item_modules.push(derived.modules.get(i).cloned().unwrap_or_default());
             ast.items.push(item);
         }
+        // And it spells `std/json` its own way where its module wrote none.
+        aliases.extend(derived.aliases);
     }
 
     // Resolution and checking still run after a syntax error — the parser
     // recovers, so later passes can report their own findings on the parts that
     // did parse. Code generation does not, because its input would be poisoned.
-    let module_map = kite_resolve::Modules {
-        of_item: item_modules,
-        aliases: loader.aliases.clone(),
-    };
+    let module_map = kite_resolve::Modules { of_item: item_modules, aliases };
     let resolved = kite_resolve::resolve_modules(&ast, module_map, diags);
     let mut solved = kite_types::Solved::default();
     let mut hir = kite_types::check_recording(&ast, &resolved, sources, diags, release, &mut solved);
@@ -526,12 +640,34 @@ fn run_passes(
         return (String::new(), None, None, None, index);
     }
 
+    // The program's own `test_…` functions, read while the declarations are
+    // still what was written: a closure lifted out of a test and the resume
+    // half of an `async` one are functions too, and are neither free nor
+    // named by anyone.
+    let is_test = |f: &kite_hir::Function| {
+        f.is_free
+            && f.generic_count == 0
+            && f.name.starts_with("test_")
+            && !f.name.contains(['.', '#', '$'])
+    };
+    found.tests = hir
+        .fns
+        .iter()
+        .filter(|f| is_test(f))
+        .map(|f| TestFn { name: f.name.clone(), params: f.param_count, is_async: f.is_async })
+        .collect();
+
     // Specialise generic functions before lowering, so no backend ever sees a
     // type parameter. Nothing after this point knows generics exist.
     kite_hir::mono::monomorphise(&mut hir);
     // The prelude is in every program; without this a `hello world` would
-    // carry every helper it never mentions.
-    kite_hir::mono::prune(&mut hir);
+    // carry every helper it never mentions. Compiling for tests keeps every
+    // test that can be called, `pub` or not.
+    if input.tests {
+        kite_hir::mono::prune_keeping(&mut hir, |f| is_test(f) && f.param_count == 0);
+    } else {
+        kite_hir::mono::prune(&mut hir);
+    }
     // `==` inside a generic function was checked as a structural comparison,
     // because nothing was known about the type. Now that specialisation has
     // made it concrete, a primitive gets the primitive's own comparison.

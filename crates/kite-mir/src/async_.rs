@@ -54,8 +54,12 @@ const TASK: u32 = 1;
 const FIRST_LOCAL: u32 = 2;
 
 /// Field positions in a `Task<T>`, as declared by [`Types::task_of`].
-const DONE: u32 = 0;
-const VALUE: u32 = 1;
+///
+/// Public because a runner that calls an `async fn` by name gets the task
+/// back rather than what it answered: `kitec test` reads the answer out of
+/// the finished task through these.
+pub const DONE: u32 = 0;
+pub const VALUE: u32 = 1;
 
 /// How many MIR blocks one original block becomes, given `k` suspensions in
 /// it: a segment between each pair, plus a test, a suspend and a landing block

@@ -21,7 +21,7 @@
 use kite_driver::manifest::{self, Locked, Manifest, Source};
 use kite_driver::semver::Version;
 use kite_driver::solve::{self, Registry};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -29,61 +29,84 @@ use std::process::{Command, ExitCode};
 const VENDOR: &str = ".kite/vendor";
 
 pub fn run(dir: &Path, offline: bool, update: bool) -> ExitCode {
+    match sync(dir, offline, update) {
+        Ok(manifest) => check_entries(&manifest, dir),
+        Err(message) => {
+            eprintln!("error: {}", message);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Resolve, compare against `kite.lock`, and — only if that comparison
+/// passes — install what was resolved and write the lockfile.
+fn sync(dir: &Path, offline: bool, update: bool) -> Result<Manifest, String> {
     let manifest_path = dir.join("kite.toml");
     let Ok(text) = std::fs::read_to_string(&manifest_path) else {
-        eprintln!(
-            "error: no `kite.toml` in {}\n\nnote: a package is a directory with a manifest in it",
+        return Err(format!(
+            "no `kite.toml` in {}\n\nnote: a package is a directory with a manifest in it",
             dir.display()
-        );
-        return ExitCode::FAILURE;
+        ));
     };
-    let manifest = match manifest::parse(&text) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("error: {}", e);
-            return ExitCode::FAILURE;
-        }
+    let manifest = manifest::parse(&text).map_err(|e| e.to_string())?;
+
+    // **The lockfile is an input**, not only an output. It is read before
+    // resolution, so the versions it records are preferred over newer ones
+    // nobody asked for, and compared entry by entry afterwards.
+    let lock_path = dir.join("kite.lock");
+    let previous_text = std::fs::read_to_string(&lock_path).ok();
+    let previous = match &previous_text {
+        None => Vec::new(),
+        Some(text) => match manifest::parse_lockfile(text) {
+            Ok(entries) => entries,
+            Err(_) if update => Vec::new(),
+            Err(e) => {
+                return Err(format!(
+                    "`{}` does not read: {}\n\nnote: `kitec pkg --update` writes it again from \
+                     what resolution finds",
+                    lock_path.display(),
+                    e
+                ))
+            }
+        },
+    };
+    let preferred: BTreeMap<String, Version> = if update {
+        BTreeMap::new()
+    } else {
+        previous
+            .iter()
+            .filter_map(|l| Version::parse(&l.version).ok().map(|v| (l.name.clone(), v)))
+            .collect()
     };
 
     eprintln!("{} {}", manifest.name, manifest.version);
-    let resolution = match lock_dependencies(&manifest, dir, offline) {
-        Ok(resolution) => resolution,
-        Err(message) => {
-            eprintln!("error: {}", message);
-            return ExitCode::FAILURE;
-        }
-    };
+    let resolution = lock_dependencies(&manifest, dir, offline, update, &preferred)?;
     for entry in &resolution.locked {
         eprintln!("  {} {} {}", entry.name, entry.version, entry.hash);
     }
 
-    let lock_path = dir.join("kite.lock");
-    let text = manifest::lockfile(&resolution.locked);
-    // A lockfile that changed is worth saying out loud: it is the difference
-    // between a build from the same bytes and a build from different ones.
-    let previous = std::fs::read_to_string(&lock_path).unwrap_or_default();
-
-    // A lockfile that changed is an *error*, not a notice.
+    // A dependency whose bytes changed under the same version and the same
+    // source is an *error*, not a notice.
     //
     // The point of recording a hash is that the same version resolves to the
     // same bytes twice. What used to happen when it did not was that the new
     // hash was written over the old one, a line was printed to stderr, and the
     // command exited 0 — so a moved tag, a re-pushed repository, or a network
     // that answered differently was indistinguishable from a clean build to
-    // anything reading the exit code, which is what CI reads. The control was
-    // recorded but never enforced.
+    // anything reading the exit code, which is what CI reads. `--update` is
+    // how a change gets accepted, because accepting one is a decision somebody
+    // makes rather than something a build does on its way past.
     //
-    // `--update` is how a change gets accepted, because accepting one is a
-    // decision somebody makes rather than something a build does on its way
-    // past.
-    if !previous.is_empty() && previous != text && !update {
-        eprintln!(
-            "error: `{}` does not match what resolution produced\n\n\
-             note: a dependency's contents changed under the same version — a moved tag, a \
-             re-pushed repository, or something answering for one\n\
-             note: run `kitec pkg --update` to accept the new bytes and rewrite the lockfile",
-            lock_path.display()
-        );
+    // **Only that.** The lockfile used to be compared as a whole text, so
+    // adding a dependency to `kite.toml` — or a version moving because the
+    // manifest now asks for a different one — failed with the claim that a
+    // dependency's contents had changed under the same version, which was not
+    // true, and taught everyone to reach for `--update` by reflex.
+    let changes = compare(&previous, &resolution.locked);
+    for note in &changes.notes {
+        eprintln!("  {}", note);
+    }
+    if !changes.moved.is_empty() && !update {
         // Deliberately not written: the committed lockfile is the record of
         // what was agreed to, and overwriting it here is what destroyed the
         // evidence that anything moved.
@@ -93,29 +116,75 @@ pub fn run(dir: &Path, offline: bool, update: bool) -> ExitCode {
         // rather than the ones that turned up. Refusing while leaving the new
         // bytes where the next build reads them was a refusal in the exit
         // code only.
-        return ExitCode::FAILURE;
+        return Err(format!(
+            "`{}` does not match what resolution produced\n{}\n\n\
+             note: a dependency's contents changed under the same version — a moved tag, a \
+             re-pushed repository, or something answering for one\n\
+             note: run `kitec pkg --update` to accept the new bytes and rewrite the lockfile",
+            lock_path.display(),
+            changes.moved.iter().map(|m| format!("  {}", m)).collect::<Vec<_>>().join("\n")
+        ));
     }
 
     // Past the gate: the lockfile agrees with what resolution found, or
     // `--update` accepted that it does not. Only now do the resolved bytes go
     // where a build will read them.
-    if let Err(message) = resolution.install() {
-        eprintln!("error: {}", message);
-        return ExitCode::FAILURE;
-    }
+    resolution.install()?;
 
-    if let Err(e) = std::fs::write(&lock_path, &text) {
-        eprintln!("error: cannot write `{}`: {}", lock_path.display(), e);
-        return ExitCode::FAILURE;
+    let text = manifest::lockfile(&resolution.locked);
+    let previous_text = previous_text.unwrap_or_default();
+    if previous_text != text {
+        std::fs::write(&lock_path, &text)
+            .map_err(|e| format!("cannot write `{}`: {}", lock_path.display(), e))?;
     }
-    if previous.is_empty() {
+    if previous_text.is_empty() {
         eprintln!("wrote kite.lock");
-    } else if previous != text {
+    } else if !changes.moved.is_empty() {
         eprintln!("kite.lock changed — a dependency is not what it was");
+    } else if previous_text != text {
+        eprintln!("kite.lock updated");
     } else {
         eprintln!("kite.lock is unchanged");
     }
-    check_entries(&manifest, dir)
+    Ok(manifest)
+}
+
+/// How a resolution differs from the lockfile before it.
+#[derive(Debug, Default, PartialEq)]
+struct Changes {
+    /// Same name, version and source, different bytes: what the lockfile
+    /// exists to catch.
+    moved: Vec<String>,
+    /// Everything else that changed, which is a manifest having changed and
+    /// is said rather than refused.
+    notes: Vec<String>,
+}
+
+fn compare(previous: &[Locked], now: &[Locked]) -> Changes {
+    let mut changes = Changes::default();
+    for entry in now {
+        match previous.iter().find(|p| p.name == entry.name) {
+            None => changes.notes.push(format!("added {} {}", entry.name, entry.version)),
+            Some(p) if p.version != entry.version => changes
+                .notes
+                .push(format!("{} {} → {}", entry.name, p.version, entry.version)),
+            Some(p) if p.source != entry.source => changes.notes.push(format!(
+                "{} {} now comes from {} (was {})",
+                entry.name, entry.version, entry.source, p.source
+            )),
+            Some(p) if p.hash != entry.hash => changes.moved.push(format!(
+                "{} {}: {} was {}",
+                entry.name, entry.version, entry.hash, p.hash
+            )),
+            Some(_) => {}
+        }
+    }
+    for p in previous {
+        if !now.iter().any(|entry| entry.name == p.name) {
+            changes.notes.push(format!("removed {} {}", p.name, p.version));
+        }
+    }
+    changes
 }
 
 /// Every target's entry must exist, because a manifest that names a file that
@@ -164,12 +233,19 @@ impl Resolution {
 /// Hashing reads the checkout a candidate was cloned into rather than the
 /// directory a build reads, so resolving and hashing are answers about the
 /// world rather than changes to it.
-fn lock_dependencies(root: &Manifest, dir: &Path, offline: bool) -> Result<Resolution, String> {
-    let mut vendor = Vendor::new(dir, offline);
+fn lock_dependencies(
+    root: &Manifest,
+    dir: &Path,
+    offline: bool,
+    update: bool,
+    preferred: &BTreeMap<String, Version>,
+) -> Result<Resolution, String> {
+    let mut vendor = Vendor::new(dir, offline, update);
     for dep in &root.dependencies {
-        vendor.register(&dep.name, Origin::of(&vendor.root, &dep.source))?;
+        let origin = Origin::of(&vendor.root, &dep.source);
+        vendor.register(ROOT, &dep.name, origin)?;
     }
-    let chosen = solve::resolve(root, &mut vendor)?;
+    let chosen = solve::resolve_preferring(root, &mut vendor, preferred)?;
 
     let mut locked = Vec::new();
     for resolved in &chosen {
@@ -223,6 +299,10 @@ impl std::fmt::Display for Origin {
     }
 }
 
+/// Who a registration is from when it is the root manifest's, which nothing
+/// unwinds.
+const ROOT: &str = "";
+
 /// The real [`Registry`]: what exists on disk and at the ends of git URLs.
 #[derive(Debug)]
 struct Vendor {
@@ -230,7 +310,18 @@ struct Vendor {
     /// relative to it.
     root: PathBuf,
     offline: bool,
-    origins: BTreeMap<String, Origin>,
+    /// `--update`: a checkout already on disk is fetched again rather than
+    /// trusted. It never was — a candidate directory that existed was used as
+    /// it stood — so `--update` could not see a moved tag it was meant to
+    /// accept, and hashed the bytes it had fetched the first time.
+    update: bool,
+    /// Checkouts fetched in this run, so each is fetched once.
+    refreshed: BTreeSet<PathBuf>,
+    /// Where each name comes from, and which manifest said so — the root's is
+    /// [`ROOT`], a dependency's is its `name version`. Kept per requirer so
+    /// that a candidate the solver gives up on can take back what its manifest
+    /// taught; see [`Registry::unwind`].
+    origins: BTreeMap<String, Vec<(String, Origin)>>,
     /// How each discovered version was spelled as a tag — `1.2.0` may be the
     /// tag `v1.2.0`, and the lockfile should quote what the repository says.
     tags: BTreeMap<(String, String), String>,
@@ -240,10 +331,12 @@ struct Vendor {
 }
 
 impl Vendor {
-    fn new(dir: &Path, offline: bool) -> Vendor {
+    fn new(dir: &Path, offline: bool, update: bool) -> Vendor {
         Vendor {
             root: dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()),
             offline,
+            update,
+            refreshed: BTreeSet::new(),
             origins: BTreeMap::new(),
             tags: BTreeMap::new(),
             checkouts: BTreeMap::new(),
@@ -251,18 +344,18 @@ impl Vendor {
         }
     }
 
-    /// Learn where a name comes from. Registration is first-writer-wins and
-    /// disagreement is an error rather than something backtracked around: a
+    /// Learn where a name comes from, from the manifest of `by`.
+    /// Disagreement is an error rather than something backtracked around: a
     /// name that means two things depending on which manifest is read is
     /// exactly the ambiguity resolution exists to refuse.
-    fn register(&mut self, name: &str, origin: Origin) -> Result<(), String> {
-        let Some(existing) = self.origins.get(name) else {
-            self.origins.insert(name.to_string(), origin);
+    fn register(&mut self, by: &str, name: &str, origin: Origin) -> Result<(), String> {
+        let known = self.origins.entry(name.to_string()).or_default();
+        let Some((_, existing)) = known.iter().find(|(_, o)| *o != origin) else {
+            if !known.iter().any(|(who, _)| who == by) {
+                known.push((by.to_string(), origin));
+            }
             return Ok(());
         };
-        if *existing == origin {
-            return Ok(());
-        }
         match (existing, &origin) {
             (Origin::Git { url: a, tag: first }, Origin::Git { url: b, tag: second }) if a == b => {
                 Err(match (first, second) {
@@ -289,9 +382,9 @@ impl Vendor {
     }
 
     fn origin(&self, name: &str) -> Result<Origin, String> {
-        self.origins.get(name).cloned().ok_or_else(|| {
-            format!("nothing says where `{}` comes from — no reachable kite.toml declares it", name)
-        })
+        self.origins.get(name).and_then(|known| known.first()).map(|(_, o)| o.clone()).ok_or_else(
+            || format!("nothing says where `{}` comes from — no reachable kite.toml declares it", name),
+        )
     }
 
     fn candidate_dir(&self, name: &str, version: &str) -> PathBuf {
@@ -300,9 +393,8 @@ impl Vendor {
         self.root.join(VENDOR).join(format!("{}@{}", vendor_name(name), version))
     }
 
-    /// Read and parse a dependency's manifest, and learn where its own
-    /// dependencies come from — their relative paths are relative to *it*.
-    fn load_manifest(&mut self, name: &str, dir: &Path) -> Result<Manifest, String> {
+    /// Read and parse a dependency's manifest.
+    fn read_manifest(&self, name: &str, dir: &Path) -> Result<Manifest, String> {
         let path = dir.join("kite.toml");
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Err(format!(
@@ -312,11 +404,38 @@ impl Vendor {
                 dir.display()
             ));
         };
-        let parsed = manifest::parse(&text).map_err(|e| format!("`{}`: {}", name, e))?;
+        manifest::parse(&text).map_err(|e| format!("`{}`: {}", name, e))
+    }
+
+    /// Read a candidate's manifest, and learn where its own dependencies come
+    /// from — their relative paths are relative to *it*.
+    ///
+    /// Only the solver's choosing a candidate does this. Learning from a
+    /// manifest merely read for its version would pin its dependencies'
+    /// sources for a candidate that may never be chosen, and nothing would
+    /// take that back.
+    fn load_manifest(&mut self, name: &str, dir: &Path) -> Result<Manifest, String> {
+        let parsed = self.read_manifest(name, dir)?;
+        let by = requirer(name, &parsed.version);
         for dep in &parsed.dependencies {
-            self.register(&dep.name, Origin::of(dir, &dep.source))?;
+            self.register(&by, &dep.name, Origin::of(dir, &dep.source))?;
         }
         Ok(parsed)
+    }
+
+    /// Make sure a tag's checkout is on disk — and, under `--update`, that it
+    /// is what the remote says now rather than what it said last time.
+    fn checkout(&mut self, name: &str, url: &str, tag: &str, dir: &Path) -> Result<(), String> {
+        match fetch_plan(dir.exists(), self.update, self.refreshed.contains(dir), self.offline) {
+            Fetch::Keep => return Ok(()),
+            Fetch::Unavailable => return Err(self.not_vendored(name)),
+            Fetch::Replace => std::fs::remove_dir_all(dir)
+                .map_err(|e| format!("cannot clear `{}`: {}", dir.display(), e))?,
+            Fetch::Clone => {}
+        }
+        clone(url, Some(tag), &dir.to_path_buf())?;
+        self.refreshed.insert(dir.to_path_buf());
+        Ok(())
     }
 
     /// The version a manifest declares, which is the version the package has.
@@ -347,13 +466,8 @@ impl Vendor {
             Some(v) => self.candidate_dir(name, &v.to_string()),
             None => self.candidate_dir(name, tag),
         };
-        if !dir.exists() {
-            if self.offline {
-                return Err(self.not_vendored(name));
-            }
-            clone(url, Some(tag), &dir)?;
-        }
-        let manifest = self.load_manifest(name, &dir)?;
+        self.checkout(name, url, tag, &dir)?;
+        let manifest = self.read_manifest(name, &dir)?;
         let declared = self.declared_version(name, &manifest)?;
         if let Some(tagged) = tagged {
             if tagged != declared {
@@ -438,7 +552,7 @@ impl Vendor {
 
     /// The `source` line the lockfile shows for a resolved package.
     fn lock_source(&self, name: &str, version: &Version) -> String {
-        match self.origins.get(name) {
+        match self.origin(name).ok().as_ref() {
             Some(Origin::Path(dir)) => relative_to(&self.root, dir),
             Some(Origin::Git { url, tag: Some(tag) }) => format!("{}#{}", url, tag),
             Some(Origin::Git { url, tag: None }) => {
@@ -465,7 +579,7 @@ impl Registry for Vendor {
         }
         let found = match self.origin(name)? {
             Origin::Path(dir) => {
-                let manifest = self.load_manifest(name, &dir)?;
+                let manifest = self.read_manifest(name, &dir)?;
                 let version = self.declared_version(name, &manifest)?;
                 self.checkouts.insert((name.to_string(), version.to_string()), dir);
                 vec![version]
@@ -511,17 +625,8 @@ impl Registry for Vendor {
                     .get(&key)
                     .cloned()
                     .unwrap_or_else(|| self.candidate_dir(name, &version.to_string()));
-                if !dir.exists() {
-                    if self.offline {
-                        return Err(self.not_vendored(name));
-                    }
-                    let tag = self
-                        .tags
-                        .get(&key)
-                        .cloned()
-                        .unwrap_or_else(|| version.to_string());
-                    clone(&url, Some(&tag), &dir)?;
-                }
+                let tag = self.tags.get(&key).cloned().unwrap_or_else(|| version.to_string());
+                self.checkout(name, &url, &tag, &dir)?;
                 self.checkouts.insert(key.clone(), dir.clone());
                 let manifest = self.load_manifest(name, &dir)?;
                 let declared = self.declared_version(name, &manifest)?;
@@ -537,6 +642,58 @@ impl Registry for Vendor {
             }
         }
     }
+
+    fn unwind(&mut self, name: &str, version: &Version) {
+        let by = requirer(name, &version.to_string());
+        let mut forgotten = Vec::new();
+        for (dep, known) in self.origins.iter_mut() {
+            known.retain(|(who, _)| *who != by);
+            if known.is_empty() {
+                forgotten.push(dep.clone());
+            }
+        }
+        // A name nobody names any more has no source; the versions listed for
+        // the one it had are not its versions either.
+        for dep in forgotten {
+            self.origins.remove(&dep);
+            self.versions.remove(&dep);
+        }
+    }
+}
+
+/// What to do about a candidate's checkout.
+#[derive(Debug, PartialEq)]
+enum Fetch {
+    /// Use what is on disk.
+    Keep,
+    /// Nothing is on disk; clone it.
+    Clone,
+    /// Something is on disk and `--update` asked for the remote's answer
+    /// rather than the one cached: remove it and clone again.
+    Replace,
+    /// Nothing is on disk and `--offline` forbids fetching it.
+    Unavailable,
+}
+
+/// Whether a checkout is fetched, given what is on disk and what was asked.
+///
+/// Under `--update` a checkout on disk is fetched again, once per run —
+/// otherwise `--update` accepted and hashed the bytes it had cached the first
+/// time, and a moved tag it was meant to take could never be seen.
+fn fetch_plan(exists: bool, update: bool, refreshed: bool, offline: bool) -> Fetch {
+    match (exists, offline) {
+        (true, true) => Fetch::Keep,
+        (true, false) if update && !refreshed => Fetch::Replace,
+        (true, false) => Fetch::Keep,
+        (false, true) => Fetch::Unavailable,
+        (false, false) => Fetch::Clone,
+    }
+}
+
+/// How a registration names the manifest it came from.
+fn requirer(name: &str, version: &str) -> String {
+    let version = Version::parse(version).map(|v| v.to_string()).unwrap_or_else(|_| version.to_string());
+    format!("{} {}", name, version)
 }
 
 /// `dir`, written the way a manifest would write it: relative to the root
@@ -941,6 +1098,11 @@ mod tests {
         write(dir.join(name).join("src/lib.kite"), &format!("fn {}() {{\n}}\n", name));
     }
 
+    /// Resolve with no network and nothing preferred.
+    fn lock(root: &Manifest, dir: &Path) -> Result<Resolution, String> {
+        lock_dependencies(root, dir, true, false, &BTreeMap::new())
+    }
+
     #[test]
     fn path_dependencies_resolve_transitively_and_lock_with_versions() {
         let dir = fixture("resolves");
@@ -958,7 +1120,7 @@ mod tests {
         let text = std::fs::read_to_string(root_dir.join("kite.toml")).expect("read");
         let root = manifest::parse(&text).expect("parses");
         // Paths never fetch, so `--offline` resolves them too.
-        let resolved = lock_dependencies(&root, &root_dir, true).expect("resolves");
+        let resolved = lock(&root, &root_dir).expect("resolves");
 
         let locked = &resolved.locked;
         let summary: Vec<(String, String)> =
@@ -991,7 +1153,7 @@ mod tests {
         let root_dir = dir.join("app");
         let text = std::fs::read_to_string(root_dir.join("kite.toml")).expect("read");
         let root = manifest::parse(&text).expect("parses");
-        let err = lock_dependencies(&root, &root_dir, true).expect_err("conflicts");
+        let err = lock(&root, &root_dir).expect_err("conflicts");
 
         assert!(err.contains("no version of `shared`"), "{}", err);
         assert!(err.contains("a 1.2.0"), "{}", err);
@@ -1018,7 +1180,7 @@ mod tests {
         let root_dir = dir.join("app");
         let text = std::fs::read_to_string(root_dir.join("kite.toml")).expect("read");
         let root = manifest::parse(&text).expect("parses");
-        let err = lock_dependencies(&root, &root_dir, true).expect_err("two places");
+        let err = lock(&root, &root_dir).expect_err("two places");
         assert!(err.contains("two different places"), "{}", err);
         assert!(err.contains("a name means one thing"), "{}", err);
 
@@ -1034,10 +1196,117 @@ mod tests {
         let root_dir = dir.join("app");
         let text = std::fs::read_to_string(root_dir.join("kite.toml")).expect("read");
         let root = manifest::parse(&text).expect("parses");
-        let err = lock_dependencies(&root, &root_dir, true).expect_err("no version");
+        let err = lock(&root, &root_dir).expect_err("no version");
         assert!(err.contains("declares no version"), "{}", err);
         assert!(err.contains("version = \"0.1.0\""), "{}", err);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- the lockfile is compared entry by entry --------------------------
+
+    /// Adding a dependency is a change to the manifest, said rather than
+    /// refused. The lockfile was compared as a whole text, so this failed
+    /// claiming a dependency's contents had changed under the same version.
+    #[test]
+    fn adding_a_dependency_is_reported_not_refused() {
+        let dir = fixture("adding");
+        package(&dir, "app", "0.1.0", "a = { path = \"../a\" }");
+        package(&dir, "a", "1.0.0", "");
+        package(&dir, "b", "1.0.0", "");
+        let app = dir.join("app");
+        sync(&app, true, false).expect("the first lock");
+
+        package(&dir, "app", "0.1.0", "a = { path = \"../a\" }\nb = { path = \"../b\" }");
+        sync(&app, true, false).expect("an added dependency is not a moved one");
+        let lock = std::fs::read_to_string(app.join("kite.lock")).expect("read");
+        assert!(lock.contains("name = \"b\""), "{}", lock);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What the lockfile exists to catch still fails: the same name, version
+    /// and source, and different bytes. `--update` accepts it.
+    #[test]
+    fn bytes_that_moved_under_one_version_are_refused() {
+        let dir = fixture("moved");
+        package(&dir, "app", "0.1.0", "a = { path = \"../a\" }");
+        package(&dir, "a", "1.0.0", "");
+        let app = dir.join("app");
+        sync(&app, true, false).expect("the first lock");
+        let agreed = std::fs::read_to_string(app.join("kite.lock")).expect("read");
+
+        write(dir.join("a/src/lib.kite"), "fn a() {\n    io.print(1)\n}\n");
+        let err = sync(&app, true, false).expect_err("the bytes moved");
+        assert!(err.contains("does not match what resolution produced"), "{}", err);
+        assert!(err.contains("a 1.0.0"), "names the dependency: {}", err);
+        assert_eq!(
+            std::fs::read_to_string(app.join("kite.lock")).expect("read"),
+            agreed,
+            "a refused lockfile is left as it was"
+        );
+
+        sync(&app, true, true).expect("--update accepts it");
+        assert_ne!(std::fs::read_to_string(app.join("kite.lock")).expect("read"), agreed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_comparison_separates_moved_bytes_from_manifest_changes() {
+        let entry = |name: &str, version: &str, source: &str, hash: &str| Locked {
+            name: name.into(),
+            version: version.into(),
+            source: source.into(),
+            hash: hash.into(),
+        };
+        let before = vec![
+            entry("a", "1.0.0", "../a", "11"),
+            entry("b", "1.0.0", "../b", "22"),
+            entry("c", "1.0.0", "../c", "33"),
+            entry("gone", "1.0.0", "../gone", "44"),
+        ];
+        let after = vec![
+            entry("a", "1.0.0", "../a", "99"),
+            entry("b", "1.1.0", "../b", "55"),
+            entry("c", "1.0.0", "../c2", "66"),
+            entry("new", "0.1.0", "../new", "77"),
+        ];
+        let changes = compare(&before, &after);
+        assert_eq!(changes.moved, vec!["a 1.0.0: 99 was 11".to_string()]);
+        assert_eq!(
+            changes.notes,
+            vec![
+                "b 1.0.0 → 1.1.0".to_string(),
+                "c 1.0.0 now comes from ../c2 (was ../c)".to_string(),
+                "added new 0.1.0".to_string(),
+                "removed gone 1.0.0".to_string(),
+            ]
+        );
+    }
+
+    /// `--update` fetches a checkout again rather than trusting the one on
+    /// disk — once per run, and never under `--offline`.
+    #[test]
+    fn update_fetches_a_cached_checkout_again() {
+        assert_eq!(fetch_plan(true, false, false, false), Fetch::Keep);
+        assert_eq!(fetch_plan(true, true, false, false), Fetch::Replace);
+        assert_eq!(fetch_plan(true, true, true, false), Fetch::Keep, "once per run");
+        assert_eq!(fetch_plan(true, true, false, true), Fetch::Keep, "offline keeps what it has");
+        assert_eq!(fetch_plan(false, false, false, false), Fetch::Clone);
+        assert_eq!(fetch_plan(false, true, false, true), Fetch::Unavailable);
+    }
+
+    /// A candidate the solver unwinds takes back what its manifest taught.
+    #[test]
+    fn an_unwound_candidate_releases_the_sources_it_named() {
+        let dir = fixture("unwind");
+        let mut vendor = Vendor::new(&dir, true, false);
+        let old = Origin::Git { url: "https://old.example/shared".into(), tag: None };
+        let new = Origin::Git { url: "https://new.example/shared".into(), tag: None };
+        vendor.register("a 2.0.0", "shared", old.clone()).expect("first");
+        assert!(vendor.register("a 1.0.0", "shared", new.clone()).is_err());
+        vendor.unwind("a", &Version::parse("2.0.0").expect("version"));
+        vendor.register("a 1.0.0", "shared", new).expect("the old claim is gone");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

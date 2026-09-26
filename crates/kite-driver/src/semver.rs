@@ -139,9 +139,18 @@ fn parse_loose(text: &str, partial: bool) -> Result<Version, String> {
         )
     };
 
+    // A leading zero is refused, as SemVer §2 and §9 refuse it. It used to be
+    // read as the number, so `01.0.0` was `1.0.0` — and a pre-release `-01`
+    // compared equal to `-1` while being a different string, so two versions
+    // that `==` called different were the same to the solver's ordering.
+    let leading_zero = |part: &str| part.len() > 1 && part.starts_with('0');
     let mut parts = base.split('.');
     let mut next = |required: bool| -> Result<Option<u64>, String> {
         match parts.next() {
+            Some(part) if leading_zero(part) => Err(format!(
+                "`{}` has a leading zero in `{}`, which a version may not",
+                text, part
+            )),
             Some(part) => as_number(part).map(Some).ok_or_else(complaint),
             None if required || !partial => Err(complaint()),
             None => Ok(None),
@@ -166,6 +175,13 @@ fn parse_loose(text: &str, partial: bool) -> Result<Version, String> {
                     "`{}` has a malformed pre-release: identifiers are dot-separated \
                      letters, digits and hyphens, like `rc.1`",
                     text
+                ));
+            }
+            if let Some(id) = pre.split('.').find(|id| as_number(id).is_some() && leading_zero(id)) {
+                return Err(format!(
+                    "`{}` has a leading zero in the pre-release number `{}`, which a version \
+                     may not",
+                    text, id
                 ));
             }
             Some(pre.to_string())
@@ -398,6 +414,22 @@ mod tests {
         assert!(Version::parse("1").is_err());
         assert!(Version::parse("1.2.3.4").is_err());
         assert!(Version::parse("1.two.3").is_err());
+    }
+
+    /// SemVer §2 and §9: no leading zeros, in the numbers or in a numeric
+    /// pre-release identifier. `-01` and `-1` compared equal and were not
+    /// `==`, so the solver's order and its equality disagreed.
+    #[test]
+    fn a_leading_zero_is_refused() {
+        for text in ["01.0.0", "1.00.0", "1.0.07", "1.0.0-01", "1.0.0-rc.00"] {
+            let err = Version::parse(text).expect_err(text);
+            assert!(err.contains("leading zero"), "{}: {}", text, err);
+        }
+        assert!(Requirement::parse(">=01.2").is_err());
+        // Zero itself, and an identifier that is not a number, are fine.
+        for text in ["0.0.0", "1.0.0-0", "1.0.0-0a", "1.0.0-rc.0"] {
+            Version::parse(text).unwrap_or_else(|e| panic!("{}: {}", text, e));
+        }
     }
 
     #[test]

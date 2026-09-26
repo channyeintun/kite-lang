@@ -542,6 +542,9 @@ pub struct LocalInfo {
     pub synthetic: bool,
 }
 
+/// A variant's name, with its enum's type index and its own position.
+type NamedVariant = (String, (u32, u32));
+
 #[derive(Debug, Default)]
 pub struct ResolveMap {
     pub fns: Vec<FnSig>,
@@ -563,8 +566,16 @@ pub struct ResolveMap {
     /// touch these, or the field stops matching its declaration.
     pub pinned: Vec<Span>,
     /// Unqualified variant names, so `match shape { Circle(r) => … }` works
-    /// without writing `Shape.Circle`. Ambiguous names are removed and must be
-    /// qualified.
+    /// without writing `Shape.Circle` — **as the module being resolved sees
+    /// them**: its own enums' variants, then the prelude's. Ambiguous names
+    /// are removed and must be qualified. [`FnResolver::new`] installs the
+    /// view for the module whose body it resolves.
+    ///
+    /// It used to be one table for the whole program. So a program declaring
+    /// `enum Token { Number(float) }` made `Number` ambiguous inside
+    /// `std/json`, which then could not compile its own `match` — and a
+    /// module could name another module's private variant, unimported and
+    /// unqualified, because nothing in the table said whose it was.
     variant_index: HashMap<String, (u32, u32)>,
     /// Variant names per enum, so a qualified `Shape.Circle` resolves against
     /// that enum rather than against the unqualified index — which drops any
@@ -572,12 +583,61 @@ pub struct ResolveMap {
     /// exactly where it is most needed.
     variants_of: HashMap<u32, HashMap<String, u32>>,
     ambiguous_variants: Vec<String>,
+    /// Every enum's variants, grouped by the module that declares the enum:
+    /// what `variant_index` is cut from.
+    variants_by_module: HashMap<String, Vec<NamedVariant>>,
+    /// The module `variant_index` currently describes.
+    variant_scope: Option<String>,
 }
 
 impl ResolveMap {
     /// The index of a variant on one enum.
     pub fn variant_of(&self, type_index: u32, name: &str) -> Option<u32> {
         self.variants_of.get(&type_index)?.get(name).copied()
+    }
+
+    /// Make the unqualified variant index the one `module` sees: its own
+    /// enums' variants, then the prelude's for any name it does not declare.
+    ///
+    /// Another module's variants are not in it, imported or not. A use site
+    /// reaches those qualified — `shapes.Shape.Circle` — which is §13.1's
+    /// rule that there is no way to bring a bare name into scope; and a
+    /// module's own variants are its own, so a name two modules share is not
+    /// ambiguous in either.
+    fn scope_variants(&mut self, module: &str) {
+        if self.variant_scope.as_deref() == Some(module) {
+            return;
+        }
+        let mut index: HashMap<String, (u32, u32)> = HashMap::new();
+        let mut ambiguous: Vec<String> = Vec::new();
+        let own = self.variants_by_module.get(module).cloned().unwrap_or_default();
+        for (name, at) in &own {
+            if index.insert(name.clone(), *at).is_some() && !ambiguous.contains(name) {
+                ambiguous.push(name.clone());
+            }
+        }
+        if module != PRELUDE {
+            let mut prelude: HashMap<String, (u32, u32)> = HashMap::new();
+            let mut shared: Vec<String> = Vec::new();
+            for (name, at) in self.variants_by_module.get(PRELUDE).into_iter().flatten() {
+                // The module's own declaration shadows the prelude's, as a
+                // module's own `take` shadows the prelude's function.
+                if own.iter().any(|(n, _)| n == name) {
+                    continue;
+                }
+                if prelude.insert(name.clone(), *at).is_some() && !shared.contains(name) {
+                    shared.push(name.clone());
+                }
+            }
+            index.extend(prelude);
+            ambiguous.extend(shared);
+        }
+        for name in &ambiguous {
+            index.remove(name);
+        }
+        self.variant_index = index;
+        self.ambiguous_variants = ambiguous;
+        self.variant_scope = Some(module.to_string());
     }
 
     pub fn lookup_use(&self, span: Span) -> Option<Res> {
@@ -605,7 +665,9 @@ impl ResolveMap {
     pub fn fn_by_name_in(&self, module: &str, name: &str) -> Option<u32> {
         let written = name;
         let name = self.modules.canonical(module, name);
-        self.find_fn(&qualify(module, &name))
+        own_step(module, written)
+            .then(|| self.find_fn(&qualify(module, &name)))
+            .flatten()
             .or_else(|| self.reachable(module, written).then(|| self.find_fn(&name)).flatten())
             // The prelude is last, so a program's own `take` wins — and the
             // prelude's own calls to `take` find the prelude's, because its
@@ -643,7 +705,9 @@ impl ResolveMap {
     pub fn const_by_name_in(&self, module: &str, name: &str) -> Option<u32> {
         let written = name;
         let name = self.modules.canonical(module, name);
-        self.find_const(&qualify(module, &name))
+        own_step(module, written)
+            .then(|| self.find_const(&qualify(module, &name)))
+            .flatten()
             .or_else(|| self.reachable(module, written).then(|| self.find_const(&name)).flatten())
             .or_else(|| self.find_const(&qualify(PRELUDE, &name)))
     }
@@ -655,7 +719,9 @@ impl ResolveMap {
     pub fn type_by_name_in(&self, module: &str, name: &str) -> Option<u32> {
         let written = name;
         let name = self.modules.canonical(module, name);
-        self.find_type(&qualify(module, &name))
+        own_step(module, written)
+            .then(|| self.find_type(&qualify(module, &name)))
+            .flatten()
             .or_else(|| self.reachable(module, written).then(|| self.find_type(&name)).flatten())
             .or_else(|| self.find_type(&qualify(PRELUDE, &name)))
     }
@@ -744,6 +810,20 @@ impl ResolveMap {
 /// lets a program shadow one of its names without breaking it.
 pub const PRELUDE: &str = "prelude";
 
+/// Whether a name written in `module` may be looked for among that module's
+/// own declarations — the first of the three lookup steps.
+///
+/// Not for a dotted name written in the entry file. The entry's declarations
+/// are the only unqualified ones, so its "own" form of `secret.describe` is
+/// `secret.describe` itself: the very name module `secret` declared. That
+/// step is ungated, so the entry reached any module some *other* module had
+/// imported — `use helper` alone was enough to call `helper`'s private
+/// dependency. A dotted name in the entry goes through the gate like
+/// anyone's.
+fn own_step(module: &str, written: &str) -> bool {
+    !(module.is_empty() && written.contains('.'))
+}
+
 /// The qualified form of a name declared in `module`.
 fn qualify(module: &str, name: &str) -> String {
     if module.is_empty() {
@@ -807,10 +887,10 @@ fn collect_types(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) {
     }
 }
 
-/// Build the unqualified variant index. A name carried by two enums is
-/// ambiguous and must be written qualified.
+/// Record every enum's variants, per enum and per declaring module. The
+/// unqualified index is cut from the second for each module as its bodies are
+/// resolved; see [`ResolveMap::scope_variants`].
 fn index_variants(file: &SourceFile, map: &mut ResolveMap) {
-    let mut ambiguous = Vec::new();
     for (type_index, decl) in map.types.iter().enumerate() {
         if decl.kind != TypeKind::Enum {
             continue;
@@ -818,26 +898,20 @@ fn index_variants(file: &SourceFile, map: &mut ResolveMap) {
         let Item::Enum(e) = &file.items[decl.decl_index] else {
             continue;
         };
+        let module = map.modules.of(decl.decl_index).to_string();
         for (vi, v) in e.variants.iter().enumerate() {
             let key = v.name.name.clone();
             map.variants_of
                 .entry(type_index as u32)
                 .or_default()
                 .insert(key.clone(), vi as u32);
-            // A name two enums share is ambiguous and must be written
-            // qualified, so the first one in does not win.
-            match map.variant_index.entry(key.clone()) {
-                std::collections::hash_map::Entry::Occupied(_) => ambiguous.push(key),
-                std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert((type_index as u32, vi as u32));
-                }
-            }
+            map.variants_by_module
+                .entry(module.clone())
+                .or_default()
+                .push((key, (type_index as u32, vi as u32)));
         }
     }
-    for name in &ambiguous {
-        map.variant_index.remove(name);
-    }
-    map.ambiguous_variants = ambiguous;
+    map.variant_scope = None;
 }
 
 /// Pass 2: free functions and methods.
@@ -1097,6 +1171,9 @@ struct FnResolver<'a> {
 
 impl<'a> FnResolver<'a> {
     fn new(map: &'a mut ResolveMap, diags: &'a mut DiagBag, module: String) -> Self {
+        // A body sees its own module's variants unqualified, and no one
+        // else's.
+        map.scope_variants(&module);
         FnResolver {
             map,
             diags,
@@ -1155,7 +1232,8 @@ impl<'a> FnResolver<'a> {
             .with_primary(span, "not visible here")
             .with_secondary(decl, format!("this {} is not marked `pub`", what))
             .with_note(
-                "unmarked declarations are visible only within their own module;                  write `pub` to export one",
+                "unmarked declarations are visible only within their own module; \
+                 write `pub` to export one",
             ),
         );
     }
@@ -1771,6 +1849,10 @@ impl<'a> FnResolver<'a> {
             return;
         }
         if let Some(&(ty, vi)) = self.map.variant_index.get(name) {
+            // The index holds only this module's variants and the prelude's,
+            // both always visible here; checked anyway, so that what makes a
+            // bare variant reachable is stated where it is used.
+            self.check_visible(Res::Variant(ty, vi), p.span, name);
             self.map.uses.insert(p.span, Res::Variant(ty, vi));
             return;
         }

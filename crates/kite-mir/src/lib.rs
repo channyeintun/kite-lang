@@ -16,6 +16,7 @@ use std::fmt;
 mod async_;
 mod lower;
 pub use async_::transform as asyncify;
+pub use async_::{DONE as TASK_DONE, VALUE as TASK_VALUE};
 pub use lower::lower;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]

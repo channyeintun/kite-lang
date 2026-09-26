@@ -2507,6 +2507,78 @@ not say that a `use` is required to reach one.
 
 ---
 
+## Phase 30 — A review of the boundary, and what it found
+
+**Goal:** the claims Phases 26, 28 and 29 made about modules and packages are
+true, and so are the tools' claims about themselves.
+
+A review compiled what §13 says rather than reading the loader, and found that
+three of those phases had closed the case they were written against and left
+its neighbours open. The history above stands as it was written; this is what
+was wrong with it.
+
+**A module was still its `use` path, as the importer wrote it.** Phase 26 made
+the *whole* path count, which kept `dep/utils` and `utils` apart — but the path
+was the importer's, so `use util` inside `a/` and `use util` inside `b/` were
+one module. Two directories each with a `util` were `E0404`; a nested `lib/x`
+beside a top-level `x` was a false cycle; and a `use` that found nothing was
+compared against whatever had been loaded under that spelling first and
+answered by it. So Phase 28's exit criterion was met only in the order its test
+happened to import things: when the application imported its own `helper`
+*first*, a package's `use helper` with no `helper` of its own bound to the
+application's, silently. A module is now identified by where its source is and
+named by its path within its package (`a/util`, `md/util`), and a `use` that
+finds nothing is always `E0400`.
+
+**Dependencies were one table**, read from the program's manifest. A package
+could not use what it declared and could use what only the program declared —
+the transitive hoisting §13.2 says there is none of. Each package now resolves
+against its own manifest; a git dependency any package declares is read from
+the program's `.kite/vendor`; and a manifest that does not parse is `E0405` at
+its line rather than `cannot find module` at every `use` of a dependency.
+
+**Phase 29's gate had a door in the entry file.** Its declarations are the only
+unqualified ones, so its "own" `secret.describe` was module `secret`'s item —
+reached before the gate was asked. Appendix A had been leaning on it for
+`errors.wrap`, and now writes `use std/errors`. The unqualified variant index
+had the same shape: one table for the program, so a program's `Token.Number`
+made `Number` ambiguous inside `std/json` itself, and a bare `Magic` reached a
+private variant in a module nothing imported. A body now sees its own module's
+variants and the prelude's.
+
+`@derive` had been depending on both holes: its `Encode` and `Decode` bodies
+said `json.…`, which resolved only in a module importing `std/json` under
+exactly that name — or in the entry file, through the door. They now use the
+module's own spelling, or one of the compiler's where it wrote none.
+
+**The tools, measured against their own descriptions:**
+
+- `kitec bundle` carried the entry file alone, so a program with a `use`
+  bundled cleanly and failed where it was sent; it carries every file the build
+  read now, manifests and dependencies included, and keeps its build mode.
+- `kitec test` ran every compiled function whose name began `test_` — a
+  lifted closure, the resume half of an `async` test, a helper taking an
+  argument — and could not find a private test at all. It reads the
+  declarations now, keeps private tests, and drives an `async` one.
+- An option a command does not take is an error: `kitec test --native` had
+  written an object file and exited 0.
+- `kitec pkg` compared its lockfile as one string, so adding a dependency
+  failed with a false claim that bytes had moved; it compares entry by entry,
+  prefers the locked versions, fetches again under `--update`, and takes back
+  what a backtracked candidate's manifest taught the resolver.
+
+**Not built, and why.** §4.3 lists enum variants and modules among the things
+`pub` applies to, but nothing says what a private variant of a public enum
+means, or what `pub use` would export; the compiler refuses both spellings, and
+inventing either semantics here would be the specification being written by
+the implementation.
+
+**Exit criterion:** every finding reproduced by a test that fails without its
+fix — `tests/modules.rs`, `cli_paths.rs`, `bundle.rs`, and the unit tests of the
+loader, the derive, the solver, the manifest and `kitec pkg`.
+
+---
+
 ## Where the implementation actually stands
 
 Recorded honestly, because a roadmap that overstates progress is worse than
@@ -2544,6 +2616,7 @@ none.
 | 27 — `std/window` | 🟡 the module is built and tested — window events, timers, both storages, the address bar, history, the wall clock — and `std/time` gained a portable calendar under it. ❌ the two applications cannot import it until a compiler carrying it is published |
 | 28 — Packages from a bundler | ✅ `vite-plugin-kite` and the WebAssembly `kitec` read `kite.toml` and compile what it declares; provided modules are keyed by their whole path and a package resolves its own imports inside itself; a one-file module reads its imports from its own directory; `kitec run` sees modules |
 | 29 — Imports are the boundary | ✅ a qualified name resolves only in a module that imported it, and the entry file is reachable from nowhere. ❌ two sibling *directory* modules still cannot import each other by any spelling — exposed by this, not caused by it |
+| 30 — The boundary, reviewed | ✅ a module is where its source is; each package's dependencies are its own; the entry file and bare variants are gated too; `bundle`, `test`, `pkg` and the option parser do what they say. ❌ `pub` on an enum variant and `pub use`, which §4.3 names and nothing defines |
 
 834 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,

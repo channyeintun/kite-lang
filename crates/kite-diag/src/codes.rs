@@ -309,32 +309,37 @@ codes! {
          module.";
 
     E0403 = "E0403", "module name is reserved by the standard library",
-        "A module is known by the last segment of its `use` path, so `use \
-         std/crypto` and `use crypto` both name a module called `crypto` — and \
-         whichever was loaded first won, silently, for the whole program.\n\n\
-         That made the standard library replaceable by any module that got \
-         there first: a dependency shipping a `crypto` directory, imported \
-         anywhere before the first `use std/crypto`, took over every \
-         `crypto.hash` call in the program with no diagnostic. Since `std` is \
-         not part of a module's identity, nothing afterwards could tell the \
-         two apart.\n\n\
-         So the standard library's names belong to it. Rename the module.";
+        "A use site spells a module by the last segment of its `use` path, so \
+         `use crypto` naming a sibling would be spelled `crypto` in the file \
+         that imported it — and shadow `std/crypto` there. It was worse when a \
+         module was *known* by that segment: a dependency shipping a `crypto` \
+         directory, imported anywhere before the first `use std/crypto`, took \
+         over every `crypto.hash` call in the program with no diagnostic.\n\n\
+         So the standard library's names belong to it, and so does `prelude`, \
+         whose declarations are in scope everywhere without a `use`: a module \
+         of that name became every module's unqualified fallback. Rename the \
+         module.";
 
     E0404 = "E0404", "two modules of the same name",
-        "A module is known by the last segment of its `use` path, so two \
-         modules in different directories with the same final name are one \
-         module as far as the rest of the compiler is concerned — and the one \
-         loaded first won, for the whole program.\n\n\
-         Which one that is depends on the order of the `use` lines in the \
-         entry file, and nothing was reported either way. A dependency \
-         shipping a `utils` directory could therefore answer every \
-         `utils.…` call in the importing program's own source, with no \
-         diagnostic and nothing changed in that program. `E0403` reserves the \
-         standard library's names for the same reason; this is the general \
-         case.\n\n\
-         Rename one of them. Full paths as identities — so `dep/utils` and \
-         `utils` are two modules rather than a collision — is the better \
-         answer and is not what this compiler does yet.";
+        "A module is identified by where its source is, and a use site writes \
+         a *spelling* — the last segment of the path, or the name after `as`. \
+         A spelling belongs to the file that writes it, so two files may spell \
+         different modules alike; what one file may not do is spell two \
+         modules alike, because every `utils.…` above the second `use` would \
+         quietly change meaning. Give one of them a name of its own with \
+         `use … as …`.\n\n\
+         The same code reports two packages of one name reached from two \
+         different places. A package's name means one thing across the whole \
+         program — `kitec pkg` refuses the same manifests for the same \
+         reason — so the manifests naming it must agree on where it is.";
+
+    E0405 = "E0405", "a `kite.toml` that does not read",
+        "The manifest is what says where a package's dependencies are, so a \
+         build reads it before it can find any of them. One that does not \
+         parse used to be treated as no manifest at all, and the error a \
+         typo in `[package]` produced was `cannot find module` at every `use` \
+         of a dependency — a diagnostic about the wrong file. The manifest is \
+         reported instead, at the line that did not read.";
 
     E0402 = "E0402", "module cycle",
         "Modules may not depend on each other cyclically. Extract the shared \

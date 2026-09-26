@@ -11,16 +11,16 @@ The deltas that will catch you out, in the order you will hit them:
    the task, put it in a slice, and return it. Only `await` needs `async`.
 3. **`use` is per *module*, not per file** — and a module reaches only what it
    imports. A qualified name that resolves in one module does not resolve in
-   another, even in the same program. The **entry file is not gated**, which is
-   the one place this rule does not hold (§4).
+   another, even in the same program — the entry file included (§4).
 4. **The file you hand `kitec` is a one-file module.** The directory it sits in
    is *not* a module: a sibling `.kite` file is reachable only through a `use`,
    exactly like any other module (§4).
 5. **`use` paths are relative to the importing file's own directory**, not to
    the project root.
-6. **A module's identity is its whole path**, so `dep/utils` and `utils` are two
-   modules — but the standard library's twenty names are reserved on the *last*
-   segment, so `use dep/json` is `E0403`.
+6. **A module is where its source is**, so `util` inside `a/` and `util` inside
+   `b/` are two modules, and so are `dep/utils` and `utils` — but the standard
+   library's twenty names and `prelude` are reserved on the *last* segment, so
+   `use dep/json` is `E0403`.
 7. **`Share` is a real bound you can write yourself**, and closures, `dyn`
    values, bare type parameters and `JsValue` all fail it.
 8. **Nothing is parallel on any target today.** `Share` is enforced anyway.
@@ -535,19 +535,11 @@ Without the rule, a dependency loading `config` anywhere would put `config.load`
 in scope everywhere, and a dependency could reach the importing program's own
 modules just by naming them.
 
-**The entry file is exempt, and this is a compiler hole rather than a
-decision.** The gate is a lookup of the name as written, qualified by the asking
-module — and the entry file's module is the *root*, whose name is empty, so the
-qualified form and the written form are the same string and the gated lookup is
-never reached. In practice: a module loaded anywhere in the program is reachable
-from the entry file with no `use` of its own.
-
-**"Loaded" is the load-bearing word.** The exemption skips the *gate*, not the
-resolution: a module nothing imported was never compiled, so there is nothing to
-find. That is why the sibling above still fails — `src/words.kite` is on disk
-and no `use` anywhere named it. Once *any* module in the program writes
-`use words`, the entry file can write `words.unit()` without its own import
-(verified). Do not build on that either.
+**The entry file is held to it too.** It was exempt for a while — its
+declarations are the only unqualified ones, so its "own" `json.parse` was
+module `json`'s, and anything *any* module had loaded was reachable from it
+with no `use` of its own. That is gone: below, `other` imports `std/json`, and
+`main.kite` still has to.
 
 ```kite ignore
 // src/other/o.kite
@@ -559,7 +551,7 @@ pub fn go() -> bool {
 ```
 
 ```kite ignore
-// src/main.kite — compiles, though `main.kite` never imported json
+// src/main.kite — error[E0111]: cannot find `json`, until it says `use std/json`
 use other
 
 fn main() {
@@ -568,10 +560,14 @@ fn main() {
 }
 ```
 
-The same hole lets the entry file spell a module it only aliased: after
-`use std/math as m`, both `m.floor(1.5)` and `math.floor(2.5)` resolve there.
-Neither works one directory down. Do not lean on either — write the `use`, and
-expect the leniency to go away.
+An alias is the same: after `use std/math as m`, `m.floor(1.5)` resolves and
+`math.floor(2.5)` does not, in the entry file as everywhere else.
+
+**Unqualified variants are the module's own.** A bare `Circle` — in an
+expression or a pattern with a payload — is one of the asking module's own
+enums' variants, or the prelude's. Another module's variants are written
+qualified, `shapes.Shape.Circle`, imported or not. (A bare *unit* variant in a
+`match` arm is still read against the scrutinee's own enum.)
 
 ### Imports are always qualified
 
@@ -587,11 +583,20 @@ supply chain reasons: aliases used to share one program-wide table, so
 `use leak as crypto` written inside a dependency rewrote every `crypto.…` call
 in the importing program with no diagnostic.
 
-### Identity is the whole path — except for `std`
+### A module is where its source is — except for `std`
+
+A module is identified by the file or directory it was loaded from, and named
+by its path within its package: `a/util` for `a/util.kite` beside the entry,
+`md/util` for `util.kite` inside a dependency called `md`. That is the name a
+diagnostic uses — ``private to module `a/util` ``. So `use util` inside `a/`
+and `use util` inside `b/` are two modules, each spelled `util` in the file
+that imported it; a nested `lib/x` beside a top-level `x` is not a cycle; and a
+module whose `util` does not exist gets `E0400` rather than whichever `util`
+somebody else loaded first.
 
 `use dep/utils` and `use utils` are two different modules, and every segment is
-honoured when the files are found. Two spellings coexist as long as one is
-aliased:
+honoured when the files are found. Two spellings coexist in one file as long as
+one is aliased:
 
 ```kite ignore
 use utils                   // `utils.…` is this one
@@ -599,19 +604,24 @@ use dep/utils as theirs     // `theirs.…` is that one
 ```
 
 `std` is the exception: `use std/json` has identity `json`, because that is how
-every program writes it.
+every program writes it. A standard module is exactly `std/<name>` —
+`use std/a/b/json` is `E0400`.
 
 ### `E0403` — the standard library's names are reserved
 
-Exactly twenty names, taken from the compiler's `STD_MODULES` table:
+The twenty names in the compiler's `STD_MODULES` table, and `prelude`:
 
 ```
 buffer  canvas  crypto  dom   errors  fmt   fs    html   http  js
 json    math    socket  sync  task    test  text  time   toml  window
+prelude
 ```
 
 A non-`std` module may not take one. `use crypto` naming a sibling directory is
-`E0403` before the file system is even consulted.
+`E0403` before the file system is even consulted. `prelude` is reserved because
+the prelude is found by that name from everywhere: a module called `prelude`
+used to compile, and its declarations — private ones included — became every
+module's unqualified fallback.
 
 ```kite fails
 use crypto //~ E0403
@@ -621,16 +631,12 @@ fn main() {
 }
 ```
 
-Two corrections to SPECIFICATION.md §13.1 here:
-
-- **`prelude` is not on the list.** The spec includes it, but `prelude` is
-  ambient rather than a module — `use std/prelude` is `E0400` ("no standard
-  module `prelude`"), and a user module called `prelude` compiles fine.
-- **The check is on the last segment regardless of depth**, so `use dep/crypto`
-  is *also* `E0403`, contradicting the spec's claim that "full paths keep
-  `dep/crypto` and `std/crypto` apart on their own". The note it prints
-  ("`use std/dep/crypto` is that module") is garbled for this case. A dependency
-  whose module is named after any of the twenty is unreachable; rename it.
+One correction to SPECIFICATION.md §13.1 here: **the check is on the last
+segment regardless of depth**, so `use dep/crypto` is *also* `E0403`, although
+the spec says "full paths keep `dep/crypto` and `std/crypto` apart on their
+own". A dependency whose module is named after any of the reserved names is
+unreachable; rename it. (`use std/prelude` is `E0400`: the prelude is ambient,
+not a module you import.)
 
 ### `E0111` blames the module even when the module is fine
 
@@ -678,7 +684,8 @@ the module's `pub fn` list before you touch the import.
 | `E0401` | The item is not `pub`, so it is visible only inside its own module. Applies to functions, types and enum variants. |
 | `E0402` | Import cycle. The diagnostic prints the chain (`a → b`). Extract the shared part into a third module. |
 | `E0403` | Reserved standard-library name (above). |
-| `E0404` | One module spelling two modules alike. Give one an alias. |
+| `E0404` | One module spelling two modules alike — give one an alias — or two packages of one name reached from two different places. |
+| `E0405` | A `kite.toml` that does not read. Reported at the offending line; a build no longer treats a broken manifest as no manifest. |
 | `E0111` | A qualified name whose module this module never imported — **or** an unknown member of one it did (above). |
 
 **Field-level visibility is parsed but not enforced.** `FieldDecl` in the
@@ -714,19 +721,25 @@ solver   = { git = "https://github.com/example/solver", version = "^1.2" }
 shortcut = "../shortcut"
 ```
 
-- `[package]` accepts `name` and `version` and nothing else.
-- A target needs an `entry`; `renderer` is optional.
+- `[package]` accepts `name` and `version` and nothing else, and the version
+  must be a version (`1.2.0`, no leading zeros).
+- A target needs an `entry`; `renderer` is optional; nothing else.
 - A dependency needs **exactly one** of `path` or `git`. A bare string value is
-  shorthand for `path`.
+  shorthand for `path`. It takes `path`, `git`, `tag` and `version` and nothing
+  else — a misspelt `verison` or a `branch` is an error, not something dropped —
+  and a `tag` goes only with `git`.
 - `tag` and `version` are mutually exclusive: a tag pins, a version resolves.
-- Names — package and dependency alike — are ASCII letters, digits, `-` and `_`,
-  at most 64, not starting with `-`. The name becomes a directory under
-  `.kite/vendor` and a segment in a `use`, so a `/` or a `..` in one would
-  escape that directory — and since a *transitive* manifest introduces names,
-  the escaping name need never appear in a manifest anybody wrote.
+- Names — package and dependency alike — are identifiers: ASCII letters,
+  digits and `_`, not starting with a digit, at most 64. The name is written in
+  a `use`, so `kite-md` could never be imported, and it becomes a directory
+  under `.kite/vendor`, so a `/` or a `..` in one would escape that directory —
+  and since a *transitive* manifest introduces names, the escaping name need
+  never appear in a manifest anybody wrote.
 
-The manifest is looked for **upwards** from the entry file, so `src/main.kite`
-finds the `kite.toml` beside `src/`.
+The program's manifest is looked for **upwards** from the entry file, so
+`src/main.kite` finds the `kite.toml` beside `src/`. A manifest that does not
+parse is `E0405` at its line, in `kitec run`/`check`/`build` as well as in
+`kitec pkg`.
 
 ### Reaching a dependency
 
@@ -747,6 +760,16 @@ what happens to be lying next to it. `git` dependencies
 resolve to `<manifest dir>/.kite/vendor/<name>`, which is where `kitec pkg` put
 them; nothing is fetched during a build.
 
+**Each package's dependencies are its own.** A module inside a dependency
+resolves `use` against *that* package's `kite.toml` — the one in the
+dependency's own directory, never one above it — so a package can use what it
+declares and cannot use what only the program declared. There is no hoisting.
+A `path` in a dependency's manifest is relative to that manifest; a `git`
+dependency any package declares is read from the program's
+`.kite/vendor/<name>`, where `kitec pkg` puts every package in the graph. A
+package's unqualified `use helper` names the package's own `helper` and nothing
+else: without one it is `E0400`, never the application's.
+
 ### `kitec pkg` and the lockfile
 
 ```
@@ -766,17 +789,28 @@ source = "../markdown"
 hash = "ba29ae3668aa1ea41dd84ebc4490c1fd0f9c687d50f79945d83b755a2245981e"
 ```
 
-It is **checked, not just written**. Change one byte of a dependency without
-changing its version and plain `kitec pkg` fails:
+It is **checked, not just written**, entry by entry. Change one byte of a
+dependency without changing its version or its source and plain `kitec pkg`
+fails, naming it:
 
 ```
 error: `app/kite.lock` does not match what resolution produced
+  a 1.0.0: <new hash> was <old hash>
+
 note: a dependency's contents changed under the same version — a moved tag,
       a re-pushed repository, or something answering for one
 note: run `kitec pkg --update` to accept the new bytes and rewrite the lockfile
 ```
 
-`--update` prints `kite.lock changed — a dependency is not what it was`. The
+`--update` prints `kite.lock changed — a dependency is not what it was`, and
+fetches every git checkout again rather than trusting the one cached. Anything
+else that changed — a dependency added or removed, a new version because the
+manifest now asks for one, a new source — is a line of output (`added b 1.0.0`,
+`a 1.0.0 → 1.2.0`) and `kite.lock updated`, not an error.
+
+The lockfile is also an input: resolution **tries the locked versions first**,
+so a release published since is not taken until the manifest stops accepting
+the locked one or `--update` asks. The
 digest is cryptographic because the party it is aimed at chooses the bytes; it
 was FNV-1a, which is invertible, so a suffix landing the digest on the recorded
 value could be solved for rather than searched for.

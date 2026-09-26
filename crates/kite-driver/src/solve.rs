@@ -31,6 +31,16 @@ pub trait Registry {
 
     /// The manifest of one candidate, so its own dependencies can be walked.
     fn manifest(&mut self, name: &str, version: &Version) -> Result<Manifest, String>;
+
+    /// A candidate whose manifest was read has been given up on.
+    ///
+    /// Whatever the registry learned from that manifest — where the
+    /// candidate's own dependencies come from — was learned from a choice
+    /// that no longer stands, and must be forgotten with it. Otherwise a
+    /// version tried and backtracked out of still pins its dependencies'
+    /// sources, and the candidate that replaces it is refused for naming them
+    /// differently: a conflict with something that is not in the solution.
+    fn unwind(&mut self, _name: &str, _version: &Version) {}
 }
 
 /// One package the solution settled on.
@@ -49,12 +59,28 @@ pub struct Resolved {
 /// declared — passes through as its own error rather than being dressed up
 /// as a conflict.
 pub fn resolve(root: &Manifest, registry: &mut dyn Registry) -> Result<Vec<Resolved>, String> {
+    resolve_preferring(root, registry, &BTreeMap::new())
+}
+
+/// The same, trying `preferred` versions first — the ones a lockfile records.
+///
+/// A preference is only an order. A preferred version that no longer
+/// satisfies everyone is passed over like any other, so a manifest that now
+/// asks for something different still gets it; what a preference prevents is
+/// a newer release nobody asked for replacing the one that was agreed to,
+/// just because it was published since.
+pub fn resolve_preferring(
+    root: &Manifest,
+    registry: &mut dyn Registry,
+    preferred: &BTreeMap<String, Version>,
+) -> Result<Vec<Resolved>, String> {
     let mut solver = Solver {
         registry,
         wanted: BTreeMap::new(),
         order: Vec::new(),
         chosen: Vec::new(),
         conflict: None,
+        preferred,
     };
     // The root is a requirer like any other; its version joins the label when
     // it has one, because "myapp 0.1.0 requires" reads as a fact.
@@ -108,6 +134,8 @@ struct Solver<'a> {
     order: Vec<String>,
     chosen: Vec<(String, Version)>,
     conflict: Option<Conflict>,
+    /// Versions to try before the highest, by name.
+    preferred: &'a BTreeMap<String, Version>,
 }
 
 impl Solver<'_> {
@@ -145,8 +173,13 @@ impl Solver<'_> {
         let exist = self.registry.versions(&name)?;
         let mut viable: Vec<Version> =
             exist.iter().filter(|v| self.satisfied(&name, v)).cloned().collect();
-        // Highest first: the newest everyone can live with.
+        // Highest first: the newest everyone can live with — after the one
+        // already agreed to, if it is still among them.
         viable.sort_by(|a, b| b.cmp(a));
+        if let Some(at) = self.preferred.get(&name).and_then(|p| viable.iter().position(|v| v == p)) {
+            let kept = viable.remove(at);
+            viable.insert(0, kept);
+        }
         if viable.is_empty() {
             self.note(&name, exist);
             return Ok(false);
@@ -195,6 +228,7 @@ impl Solver<'_> {
                 }
             }
             self.chosen.pop();
+            self.registry.unwind(&name, &version);
         }
         Ok(false)
     }
@@ -290,6 +324,7 @@ mod tests {
     type Row = (&'static str, &'static str, Vec<(&'static str, &'static str)>);
 
     /// A registry that is a table.
+    #[derive(Clone)]
     struct Table(Vec<Row>);
 
     impl Registry for Table {
@@ -444,6 +479,102 @@ mod tests {
         ]);
         let out = resolve(&root(&[("a", "*")]), &mut table).expect("resolves");
         assert_eq!(out.len(), 2);
+    }
+
+    /// A version already agreed to is kept while it still satisfies
+    /// everyone, rather than replaced by a newer one nobody asked for.
+    #[test]
+    fn a_preferred_version_is_tried_first() {
+        let rows = vec![("a", "1.0.0", vec![]), ("a", "1.4.0", vec![])];
+        let mut preferred = BTreeMap::new();
+        preferred.insert("a".to_string(), v("1.0.0"));
+        let out = resolve_preferring(&root(&[("a", "^1")]), &mut Table(rows.clone()), &preferred)
+            .expect("resolves");
+        assert_eq!(out, vec![Resolved { name: "a".into(), version: v("1.0.0") }]);
+
+        // And passed over like any other when it no longer does.
+        let out = resolve_preferring(&root(&[("a", ">=1.2")]), &mut Table(rows), &preferred)
+            .expect("resolves");
+        assert_eq!(out, vec![Resolved { name: "a".into(), version: v("1.4.0") }]);
+    }
+
+    /// A registry that learns, from each manifest it reads, where that
+    /// package's dependencies come from — as `kitec pkg`'s does — and refuses
+    /// a name that two manifests place differently.
+    struct Sourced {
+        table: Table,
+        /// Per row: where each dependency comes from.
+        places: Vec<Row>,
+        /// Name → (who said so, where).
+        learned: BTreeMap<String, Vec<(String, String)>>,
+        unwound: Vec<String>,
+    }
+
+    impl Registry for Sourced {
+        fn versions(&mut self, name: &str) -> Result<Vec<Version>, String> {
+            self.table.versions(name)
+        }
+
+        fn manifest(&mut self, name: &str, version: &Version) -> Result<Manifest, String> {
+            let manifest = self.table.manifest(name, version)?;
+            let by = format!("{} {}", name, version);
+            let row = self
+                .places
+                .iter()
+                .find(|(n, ver, _)| *n == name && v(ver) == *version)
+                .map(|(_, _, places)| places.clone())
+                .unwrap_or_default();
+            for (dep, place) in row {
+                let known = self.learned.entry(dep.to_string()).or_default();
+                if let Some((who, there)) = known.iter().find(|(_, there)| there != place) {
+                    return Err(format!(
+                        "`{}` is named from two different places: {} (by {}) and {} (by {})",
+                        dep, there, who, place, by
+                    ));
+                }
+                known.push((by.clone(), place.to_string()));
+            }
+            Ok(manifest)
+        }
+
+        fn unwind(&mut self, name: &str, version: &Version) {
+            let by = format!("{} {}", name, version);
+            for known in self.learned.values_mut() {
+                known.retain(|(who, _)| *who != by);
+            }
+            self.unwound.push(by);
+        }
+    }
+
+    /// The highest `a` names `shared` from one place and needs a `b` that does
+    /// not exist; the next `a` names `shared` from another. Unwinding the
+    /// first has to take back what its manifest said, or the second is
+    /// refused over a source that is no longer part of anything.
+    #[test]
+    fn unwinding_a_candidate_forgets_what_its_manifest_said() {
+        let mut registry = Sourced {
+            table: Table(vec![
+                ("a", "2.0.0", vec![("shared", "*"), ("b", ">=9.0")]),
+                ("a", "1.0.0", vec![("shared", "*")]),
+                ("b", "1.0.0", vec![]),
+                ("shared", "1.0.0", vec![]),
+            ]),
+            places: vec![
+                ("a", "2.0.0", vec![("shared", "https://old.example/shared"), ("b", "../b")]),
+                ("a", "1.0.0", vec![("shared", "https://new.example/shared")]),
+            ],
+            learned: BTreeMap::new(),
+            unwound: Vec::new(),
+        };
+        let out = resolve(&root(&[("a", "*")]), &mut registry).expect("resolves");
+        assert_eq!(
+            out,
+            vec![
+                Resolved { name: "a".into(), version: v("1.0.0") },
+                Resolved { name: "shared".into(), version: v("1.0.0") },
+            ]
+        );
+        assert!(registry.unwound.contains(&"a 2.0.0".to_string()), "{:?}", registry.unwound);
     }
 
     #[test]

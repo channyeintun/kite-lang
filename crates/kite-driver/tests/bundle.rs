@@ -125,3 +125,91 @@ fn a_broken_program_is_not_bundled() {
     assert!(!dir.join("broken").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn write(path: PathBuf, text: &str) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create");
+    }
+    std::fs::write(path, text).expect("write");
+}
+
+/// A bundle carries every file its build read, not only the one it was
+/// pointed at.
+///
+/// It carried the entry alone, so a program with a `use` bundled cleanly —
+/// the check ran beside the sources — and then failed on the machine it was
+/// for with `cannot find module`. This one has a sibling module, a package
+/// dependency declared in a manifest above `src/`, and a module inside that
+/// dependency; the sources are deleted before the bundle runs, from somewhere
+/// else, so nothing on disk can be answering for it.
+#[test]
+fn a_bundle_carries_the_modules_its_program_uses() {
+    let compiler = kitec();
+    if !compiler.exists() {
+        eprintln!("skipping: no kitec binary");
+        return;
+    }
+    let dir = work_dir("modules");
+    write(dir.join("md/kite.toml"), "[package]\nname = \"md\"\nversion = \"1.0.0\"\n");
+    write(dir.join("md/md.kite"), "use util\n\npub fn render() -> str {\n    return util.me()\n}\n");
+    write(dir.join("md/util.kite"), "pub fn me() -> str {\n    return \"md-util\"\n}\n");
+    write(
+        dir.join("app/kite.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nmd = { path = \"../md\" }\n",
+    );
+    write(dir.join("app/src/util.kite"), "pub fn me() -> str {\n    return \"app-util\"\n}\n");
+    let source = dir.join("app/src/main.kite");
+    write(
+        source.clone(),
+        "use md\nuse util\n\nfn main() {\n    io.print(md.render())\n    io.print(util.me())\n}\n",
+    );
+    let out = dir.join("out");
+    let built = Command::new(&compiler)
+        .args(["bundle", source.to_str().unwrap(), "--out", out.to_str().unwrap()])
+        .output()
+        .expect("kitec runs");
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+
+    let _ = std::fs::remove_dir_all(dir.join("app"));
+    let _ = std::fs::remove_dir_all(dir.join("md"));
+    let program = out.join(if cfg!(windows) { "main.exe" } else { "main" });
+    let ran = Command::new(&program).current_dir(&out).output().expect("the bundle runs");
+    assert!(ran.status.success(), "{}", String::from_utf8_lossy(&ran.stderr));
+    assert_eq!(String::from_utf8_lossy(&ran.stdout), "md-util\napp-util\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A bundle is built the way it was asked for. It always compiled for
+/// release, so a debug bundle silently dropped every `assert`.
+#[test]
+fn a_bundle_keeps_its_build_mode() {
+    let compiler = kitec();
+    if !compiler.exists() {
+        eprintln!("skipping: no kitec binary");
+        return;
+    }
+    let dir = work_dir("mode");
+    let source = dir.join("claim.kite");
+    std::fs::write(
+        &source,
+        "fn main() {\n    assert(1 == 2, \"debug assert fired\")\n    io.print(\"skipped\")\n}\n",
+    )
+    .expect("write");
+    for (flag, out, fires) in [(None, "debug", true), (Some("--release"), "release", false)] {
+        let mut args = vec!["bundle", source.to_str().unwrap(), "--out"];
+        let target = dir.join(out);
+        args.push(target.to_str().unwrap());
+        args.extend(flag);
+        let built = Command::new(&compiler).args(&args).output().expect("kitec runs");
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        let program = target.join(if cfg!(windows) { "claim.exe" } else { "claim" });
+        let ran = Command::new(&program).output().expect("the bundle runs");
+        assert_eq!(!ran.status.success(), fires, "{} bundle", out);
+        if fires {
+            assert!(String::from_utf8_lossy(&ran.stderr).contains("debug assert fired"));
+        } else {
+            assert_eq!(String::from_utf8_lossy(&ran.stdout), "skipped\n");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

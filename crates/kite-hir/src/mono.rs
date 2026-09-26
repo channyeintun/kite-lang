@@ -566,6 +566,15 @@ fn renumber_pattern(p: &mut Pattern, map: &HashMap<u32, u32>) {
 /// index, a closure names its lifted body, and a trait object can reach any
 /// method in its vtable. There is nothing else that can enter a function.
 pub fn prune(program: &mut Program) {
+    prune_keeping(program, |_| false);
+}
+
+/// The same, keeping every function `keep` answers true for as a way in too.
+///
+/// For `kitec test`, which calls the program's `test_…` functions by name —
+/// including a private one, which nothing else calls and which pruning would
+/// otherwise have removed before the runner went looking for it.
+pub fn prune_keeping(program: &mut Program, keep: impl Fn(&Function) -> bool) {
     let Program { fns, entry, vtables, .. } = program;
 
     let mut roots: Vec<u32> = Vec::new();
@@ -591,7 +600,7 @@ pub fn prune(program: &mut Program) {
     // "declared here". That is what keeps a `hello world` from carrying the
     // prelude it never mentions.
     for (i, f) in fns.iter().enumerate() {
-        if f.is_pub && f.is_free && !f.name.contains('.') {
+        if (f.is_pub && f.is_free && !f.name.contains('.')) || keep(f) {
             roots.push(i as u32);
         }
     }
