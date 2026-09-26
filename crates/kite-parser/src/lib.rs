@@ -205,6 +205,11 @@ struct Parser<'a> {
     last_error_at: Option<usize>,
     /// See [`layout`].
     layout: Layout,
+    /// The byte offset each line of the file starts at. Finding a line's start
+    /// by searching back for a line break costs the length of the line, and
+    /// is asked of every `{`: a file written as one long line made that
+    /// quadratic.
+    line_starts: std::rc::Rc<[u32]>,
     /// How many levels of recursive descent are currently on the stack.
     ///
     /// Descent recursion means the nesting depth of the *file* is the native
@@ -250,6 +255,22 @@ const MAX_DEPTH: u32 = 256;
 
 impl<'a> Parser<'a> {
     fn new(file: FileId, src: &'a str, tokens: &'a [Token], diags: &'a mut DiagBag) -> Self {
+        let breaks = src.bytes().enumerate().filter(|(_, b)| *b == b'\n');
+        let line_starts: Vec<u32> =
+            std::iter::once(0).chain(breaks.map(|(i, _)| i as u32 + 1)).collect();
+        Parser::with_lines(file, src, tokens, diags, line_starts.into())
+    }
+
+    /// A parser over `tokens`, sharing a table of where the file's lines
+    /// start with the parser that made it — a hole's parser is one of many
+    /// over the same file.
+    fn with_lines(
+        file: FileId,
+        src: &'a str,
+        tokens: &'a [Token],
+        diags: &'a mut DiagBag,
+        line_starts: std::rc::Rc<[u32]>,
+    ) -> Self {
         Parser {
             file,
             src,
@@ -265,6 +286,7 @@ impl<'a> Parser<'a> {
             misaligned: None,
             last_error_at: None,
             layout: Layout::default(),
+            line_starts,
             depth: 0,
             depth_reported: false,
         }
@@ -306,9 +328,10 @@ impl<'a> Parser<'a> {
 
     /// Charge one more link of a left-deep chain against the depth ceiling.
     ///
-    /// The caller returns what it has built so far when this says no, and
-    /// hands the levels back through `links` once the whole expression is
-    /// done, as [`Parser::deeper`]'s callers do one at a time.
+    /// When this says no, the ceiling has been reported and the caller gives
+    /// the expression up as one that did not parse. Either way the caller
+    /// hands the levels back through `links` once it is done, as
+    /// [`Parser::deeper`]'s callers do one at a time.
     fn link(&mut self, links: &mut u32) -> bool {
         if self.deeper().is_none() {
             return false;
@@ -541,14 +564,18 @@ impl<'a> Parser<'a> {
             if k == T::Eof {
                 return;
             }
-            let at_line_start = self.starts_line(self.pos);
+            // Whether a token starts its line is only asked of a keyword that
+            // could begin a declaration: asked of every token, it made a
+            // long line quadratic.
             let declaration = k.starts_declaration()
                 || k == T::Async
-                || (matches!(k, T::Let | T::Var) && at_line_start);
+                || (matches!(k, T::Let | T::Var) && self.starts_line(self.pos));
             // A declaration at the left margin ends the one before it, even
             // with a bracket seemingly still open.
-            let at_margin = at_line_start && self.line_indent(self.span().start) == 0;
-            if declaration && (open.is_empty() || at_margin) {
+            if declaration
+                && (open.is_empty()
+                    || (self.starts_line(self.pos) && self.line_indent(self.span().start) == 0))
+            {
                 return;
             }
             match k {
@@ -613,18 +640,28 @@ impl<'a> Parser<'a> {
     fn starts_line(&self, pos: usize) -> bool {
         let Some(t) = self.tokens.get(pos) else { return false };
         let start = (t.span.start as usize).min(self.src.len());
-        let line_start = self.src[..start].rfind('\n').map_or(0, |i| i + 1);
+        let line_start = self.line_start(start);
         self.src[line_start..start]
             .trim_start_matches(kite_lexer::BYTE_ORDER_MARK)
             .chars()
             .all(|c| c == ' ' || c == '\t' || c == '\r')
     }
 
+    /// The byte offset of the start of the line holding `offset`.
+    fn line_start(&self, offset: usize) -> usize {
+        let at = offset as u32;
+        let line = match self.line_starts.binary_search(&at) {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        };
+        self.line_starts.get(line).map_or(0, |&s| s as usize)
+    }
+
     /// How far in the line holding `offset` is indented. A tab counts as
     /// four, which is what the formatter would have written instead.
     fn line_indent(&self, offset: u32) -> usize {
         let at = (offset as usize).min(self.src.len());
-        let line_start = self.src[..at].rfind('\n').map_or(0, |i| i + 1);
+        let line_start = self.line_start(at);
         self.src[line_start..]
             .trim_start_matches(kite_lexer::BYTE_ORDER_MARK)
             .chars()
@@ -2775,7 +2812,8 @@ impl<'a> Parser<'a> {
     fn parse_hole(&mut self, start: usize, end: usize) -> Expr {
         let tokens =
             kite_lexer::tokenize_range(self.file, self.src, start, end, self.strings + 1, self.diags);
-        let mut sub = Parser::new(self.file, self.src, &tokens, self.diags);
+        let lines = self.line_starts.clone();
+        let mut sub = Parser::with_lines(self.file, self.src, &tokens, self.diags, lines);
         sub.in_hole = true;
         sub.strings = self.strings + 1;
         // A hole holding a string holding a hole is still this process's

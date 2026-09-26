@@ -109,7 +109,11 @@ codes! {
          the moment it is opened — and exhausting the stack is a guard-page \
          abort, not a panic, so nothing can catch it. A ceiling turns that \
          into this diagnostic. The bytecode VM has bounded call depth for the \
-         same reason; this is the same rule applied to the front end.";
+         same reason; this is the same rule applied to the front end.\n\n\
+         A long chain counts too: each `+` of `a + b + c + …`, each call of \
+         `x.f().g()…`, each `else if`, each prefix `-`. The parser reads a \
+         chain in a loop, but the tree it builds is as deep as the chain is \
+         long, and every pass after the parser walks that tree by recursion.";
 
     E0110 = "E0110", "use of possibly-uninitialised binding",
         "A `let` binding may be assigned after declaration, but only if the \

@@ -116,6 +116,7 @@ pub fn format(src: &str) -> Result<String, FormatError> {
         prev2: None,
         prev_bracket: false,
         last_line_end: None,
+        line_start: 0,
         prev_text: (0, 0),
         prev_end: 0,
     };
@@ -222,6 +223,8 @@ struct Formatter<'a> {
     prev_bracket: bool,
     /// The last token of the line before this one.
     last_line_end: Option<T>,
+    /// Where in `out` the line being written begins.
+    line_start: usize,
     /// Where the previous token's text is, for asking whether the next one
     /// would glue to it.
     prev_text: (u32, u32),
@@ -572,11 +575,12 @@ impl Formatter<'_> {
             .any(|token| head.ends_with(token))
     }
 
+    /// The line being written. Kept as an offset rather than found by
+    /// searching back for the last line break, which is a search the length
+    /// of the line on every token: a file written on one long line took the
+    /// formatter a time proportional to the square of it.
     fn current_line(&self) -> &str {
-        match self.out.rfind('\n') {
-            Some(i) => &self.out[i + 1..],
-            None => &self.out,
-        }
+        &self.out[self.line_start..]
     }
 
     // ---- lines and comments --------------------------------------------------
@@ -585,6 +589,7 @@ impl Formatter<'_> {
         if self.line_started {
             return;
         }
+        self.line_start = self.out.len();
         for _ in 0..self.depth {
             self.out.push_str("    ");
         }
