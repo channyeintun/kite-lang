@@ -38,8 +38,9 @@ Everything here was checked against `target/release/kitec`. Where SPECIFICATION.
   method.
 - **A pattern may be qualified.** `Shape.Point` means the same variant in a
   pattern as in an expression, and is how a payload variant two enums share is
-  matched. A qualified name the enum does not have is `E0111`; the enum's own
-  name where a variant belongs, `Shape(r)`, is `E0200`.
+  matched. A qualified name the enum does not have is `E0111` — in a pattern,
+  a value or a call alike; the enum's own name where a variant belongs,
+  `Shape(r)`, is `E0200`.
 
 ---
 
@@ -504,6 +505,23 @@ fn f(s: Shape) -> int {
 
 fn main() {
     io.print(f(Shape.Point))
+}
+```
+
+The same name in an expression is the same `E0111`, called or not. (Before it
+was, `let s = Shape.Square` compiled to a value of no type at all, and
+`s == Shape.Point` printed `()`.)
+
+```kite fails
+enum Shape {
+    Circle(radius: int)
+    Point
+}
+
+fn main() {
+    let s = Shape.Square //~ E0111
+    let t = Shape.Oval(2) //~ E0111
+    io.print(s == Shape.Point)
 }
 ```
 

@@ -174,8 +174,8 @@ The prelude has nothing for them. No `merge`, no `get_or`, no `map_values` — a
 map's whole surface is four methods and the index: `len`, `keys`, `values`,
 `remove`, `m[k]` (an `Option<V>`) and `m[k] = v`.
 
-**A key goes with `m.remove(k)`**, on a plain `var` binding, and a key that is
-not there is not an error. There is no `delete` statement, and `m[k] = nil` is
+**A key goes with `m.remove(k)`**, on a `var` binding, a `var` field or an
+element of a `var` slice, and a key that is not there is not an error. There is no `delete` statement, and `m[k] = nil` is
 `E0200` because `nil` is not a value of `V`. `01-lexical-and-types.md` has the
 details.
 

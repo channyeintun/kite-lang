@@ -741,6 +741,38 @@ enum TypeTarget {
     Alias(TyId),
 }
 
+/// Where a slice or map that is about to change in place is kept. See
+/// `Checker::container_place`, which builds one, and `Checker::change_at`,
+/// which changes what it holds.
+struct Place {
+    root: PlaceRoot,
+    /// The slices between the root and the value being changed, outermost
+    /// first: each is the element at `.0` of the one before it, and `.1` is
+    /// that element's type.
+    steps: Vec<(hir::Expr, TyId)>,
+}
+
+enum PlaceRoot {
+    /// A `var` binding holding the value.
+    Local { id: u32, ty: TyId },
+    /// A `var` binding holding it as an optional, proved present here.
+    Narrowed { id: u32, declared: TyId, ty: TyId },
+    /// A `var` field of the struct `holder` reads.
+    Field { holder: hir::Expr, index: u32, ty: TyId },
+}
+
+impl Place {
+    /// The binding to change where it lies, when the value is a plain
+    /// binding's own — every change this compiler could make before it
+    /// understood places.
+    fn binding(&self) -> Option<u32> {
+        match self.root {
+            PlaceRoot::Local { id, .. } if self.steps.is_empty() => Some(id),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Signature {
     params: Vec<TyId>,
@@ -3001,6 +3033,7 @@ impl<'a> Checker<'a> {
                     Some(Res::Variant(ti, vi)) => {
                         self.variant_value(ti, vi, &[], &[], *span, *span, expected)
                     }
+                    Some(Res::Type(ti)) => self.type_member_value(ti, base, name, *span),
                     _ => self.field_access(base, name, *span),
                 }
             }
@@ -4041,11 +4074,19 @@ impl<'a> Checker<'a> {
                         span,
                     };
                 }
-                self.diags.push(
-                    Diagnostic::error(codes::E0205, format!("`{}` is not a function", p.text()))
-                        .with_primary(p.span, format!("this is {}", self.types.with_article(ty)))
-                        .with_secondary(decl, "declared here"),
-                );
+                // A local whose initialiser was already reported has no type
+                // to be wrong about: `let f = Rect.square` then `f(2)` is one
+                // mistake, and it is on the first line.
+                if !self.types.is_poisoned(ty) {
+                    self.diags.push(
+                        Diagnostic::error(codes::E0205, format!("`{}` is not a function", p.text()))
+                            .with_primary(
+                                p.span,
+                                format!("this is {}", self.types.with_article(ty)),
+                            )
+                            .with_secondary(decl, "declared here"),
+                    );
+                }
                 self.lit(ExprKind::Error, TyId::ERROR, span)
             }
 
@@ -4908,16 +4949,27 @@ impl<'a> Checker<'a> {
                     self.arity_error("remove", args.len(), 1, span, None);
                     return self.lit(ExprKind::Error, TyId::ERROR, span);
                 }
-                let Some(local) = self.require_mutable_value_binding(base, "removed from", "map") else {
+                let mut stmts = Vec::new();
+                let Some(place) =
+                    self.container_place(base, receiver, "removed from", None, &mut stmts, span)
+                else {
                     return self.lit(ExprKind::Error, TyId::ERROR, span);
                 };
                 let key = self.expr(&args[0], Some(k));
                 let key = self.accept(key, k, None);
                 self.note_compared(k, key.span);
-                return self.as_statement(
-                    hir::Stmt::MapRemove { local: hir::LocalId(local), key, span },
-                    span,
-                );
+                let remove = match place.binding() {
+                    Some(local) => hir::Stmt::MapRemove { local: hir::LocalId(local), key, span },
+                    None => {
+                        let key = self.hoist(key, &mut stmts, span);
+                        self.change_at(place, stmts, span, |_, local, _| hir::Stmt::MapRemove {
+                            local: hir::LocalId(local),
+                            key,
+                            span,
+                        })
+                    }
+                };
+                return self.as_statement(remove, span);
             }
             let (kind, ty) = match name.name.as_str() {
                 "len" => (ExprKind::MapLen { base: Box::new(receiver) }, TyId::INT),
@@ -5504,6 +5556,108 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `Color.Blue` in value position, where the resolver found the type but
+    /// not the member.
+    ///
+    /// The resolver cannot tell `Color.Blue` from `Rect.square`: a dotted name
+    /// whose head is a type and whose tail is not one of its variants might be
+    /// an associated function, which only the checker can look up. So it hands
+    /// over the type, and this is where the tail has to be accounted for. It
+    /// used to fall through to a field read of the type's name, which had no
+    /// resolution of its own and so came back as the error type with nothing
+    /// said: `let c = Color.Blue` compiled, and `c == Color.Red` printed `()`.
+    fn type_member_value(
+        &mut self,
+        ti: u32,
+        base: &ast::Expr,
+        name: &ast::Ident,
+        span: Span,
+    ) -> hir::Expr {
+        let owner = expr_text(base);
+        let declared = self.resolved.type_decl(ti).name.clone();
+        let simple = declared.rsplit('.').next().unwrap_or(&declared).to_string();
+        if let Some(fn_index) = self.resolved.method_on(ti, &name.name) {
+            let takes_self = self.resolved.fns[fn_index as usize]
+                .owner
+                .is_some_and(|o| o.takes_self);
+            let kind = if takes_self { "a method" } else { "an associated function" };
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0200,
+                    format!("`{}.{}` is {}, not a value", owner, name.name, kind),
+                )
+                .with_primary(span, "named here without being called")
+                .with_note(if takes_self {
+                    format!("call it on a value: `value.{}(…)`", name.name)
+                } else {
+                    format!(
+                        "call it — `{}.{}(…)` — or, to pass it on, wrap the call in a closure",
+                        owner, name.name
+                    )
+                }),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+        // `json.Json` — the whole path is the type, reached through its
+        // module, and a type is no more a value spelled this way than bare.
+        if simple == name.name && owner != simple {
+            let full = format!("{}.{}", owner, name.name);
+            let build = match self.type_ids[ti as usize] {
+                Some(TypeTarget::Enum(_)) => format!("to make one, name a variant: `{}.…`", full),
+                _ => format!("to build one, write a struct literal such as `{}{{ … }}`", full),
+            };
+            self.diags.push(
+                Diagnostic::error(codes::E0200, format!("`{}` is a type, not a value", full))
+                    .with_primary(span, "a type name cannot stand alone here")
+                    .with_note(build),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+        if !self.no_such_variant(ti, &owner, &name.name, span) {
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0205,
+                    format!("`{}` has no associated function `{}`", owner, name.name),
+                )
+                .with_primary(name.span, "no such function"),
+            );
+        }
+        self.lit(ExprKind::Error, TyId::ERROR, span)
+    }
+
+    /// Report `Enum.Name` naming a variant the enum does not have, worded as
+    /// the resolver words the same mistake in a pattern: one mistake, one
+    /// message, wherever it is written. Answers whether the type was one that
+    /// has variants to be missing — an enum, or an alias, which reaches none.
+    fn no_such_variant(&mut self, ti: u32, owner: &str, member: &str, span: Span) -> bool {
+        let decl_span = self.resolved.type_decl(ti).span;
+        let d = match self.type_ids[ti as usize] {
+            Some(TypeTarget::Enum(eid)) => {
+                let names: Vec<String> =
+                    self.types.enum_def(eid).variants.iter().map(|v| v.name.clone()).collect();
+                let mut d = Diagnostic::error(
+                    codes::E0111,
+                    format!("`{}` has no variant `{}`", owner, member),
+                )
+                .with_primary(span, "no such variant")
+                .with_secondary(decl_span, "declared here");
+                if !names.is_empty() {
+                    d = d.with_note(format!("`{}` has: {}", owner, names.join(", ")));
+                }
+                d
+            }
+            Some(TypeTarget::Alias(_)) => Diagnostic::error(
+                codes::E0111,
+                format!("`{}` is a type alias, not an enum", owner),
+            )
+            .with_primary(span, "no such variant")
+            .with_secondary(decl_span, "declared here"),
+            _ => return false,
+        };
+        self.diags.push(d);
+        true
+    }
+
     fn associated_call_named(
         &mut self,
         ti: u32,
@@ -5534,13 +5688,23 @@ impl<'a> Checker<'a> {
         }
 
         let Some(fn_index) = self.resolved.method_on(ti, &method_name) else {
-            self.diags.push(
-                Diagnostic::error(
-                    codes::E0205,
-                    format!("`{}` has no associated function `{}`", type_name, method_name),
-                )
-                .with_primary(p_span, "no such function"),
-            );
+            // `Shape.Square(1.0)` on an enum is a variant that is not there
+            // far more often than a function that is not, and it is reported
+            // as the same line without its arguments is.
+            let written = self.text(p_span);
+            let owner = match written.rsplit_once('.') {
+                Some((owner, _)) => owner.trim().to_string(),
+                None => type_name.clone(),
+            };
+            if !self.no_such_variant(ti, &owner, &method_name, p_span) {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0205,
+                        format!("`{}` has no associated function `{}`", type_name, method_name),
+                    )
+                    .with_primary(p_span, "no such function"),
+                );
+            }
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         };
 
@@ -6536,7 +6700,8 @@ impl<'a> Checker<'a> {
             return None;
         }
         if let TyKind::Map(key_ty, value_ty) = *self.types.kind(seq.ty) {
-            let local = self.require_mutable_value_binding(base, "assigned into", "map")?;
+            let mut stmts = Vec::new();
+            let place = self.container_place(base, seq, "assigned into", None, &mut stmts, span)?;
             // `m[k] += 1` has nothing to add to when `k` is missing, and a map
             // entry is read as an optional for exactly that reason. The
             // operator used to be dropped and the entry overwritten with the
@@ -6561,15 +6726,21 @@ impl<'a> Checker<'a> {
             let v = self.expr(&a.value, Some(value_ty));
             let v = self.coerce(v, Some(value_ty));
             self.expect_ty(v.ty, value_ty, v.span, None);
-            return Some((
-                hir::Stmt::MapSet {
-                    local: hir::LocalId(local),
-                    key: k,
-                    value: v,
-                    span: a.span,
-                },
-                Flow::Falls,
-            ));
+            if let Some(local) = place.binding() {
+                return Some((
+                    hir::Stmt::MapSet { local: hir::LocalId(local), key: k, value: v, span: a.span },
+                    Flow::Falls,
+                ));
+            }
+            let key = self.hoist(k, &mut stmts, span);
+            let value = self.hoist(v, &mut stmts, span);
+            let set = self.change_at(place, stmts, span, |_, local, _| hir::Stmt::MapSet {
+                local: hir::LocalId(local),
+                key,
+                value,
+                span: a.span,
+            });
+            return Some((set, Flow::Falls));
         }
 
         let Some(elem) = self.types.slice_elem(seq.ty) else {
@@ -6581,14 +6752,53 @@ impl<'a> Checker<'a> {
             return None;
         };
 
-        // A slice is a copy-on-write value, so writing into it changes the
-        // binding, which must therefore be mutable.
-        self.require_mutable_slice_binding(base, "assigned into")?;
+        // A slice is a copy-on-write value, so writing into it changes
+        // whatever holds it, which must therefore be able to change.
+        let mut stmts = Vec::new();
+        let place = self.container_place(base, seq, "assigned into", None, &mut stmts, span)?;
 
         let i = self.expr(index, Some(TyId::INT));
         self.expect_ty(i.ty, TyId::INT, i.span, None);
 
         let value = self.expr(&a.value, Some(elem));
+        let Some(local) = place.binding() else {
+            // Held anywhere but a plain binding, the slice is changed as a
+            // copy that is then written back, so the index and the value are
+            // worked out first. Nothing the program wrote runs between taking
+            // the copy and putting it back, so nothing it does can be lost.
+            let at = self.hoist(i, &mut stmts, span);
+            let op = a.op.to_binary();
+            let value = match op {
+                None => self.accept(value, elem, None),
+                Some(_) => value,
+            };
+            let value = self.hoist(value, &mut stmts, span);
+            let set = self.change_at(place, stmts, span, |this, local, ty| {
+                let base = hir::Expr { kind: ExprKind::Local(hir::LocalId(local)), ty, span };
+                let value = match op {
+                    None => value,
+                    Some(binop) => {
+                        let current = hir::Expr {
+                            kind: ExprKind::Index {
+                                base: Box::new(base.clone()),
+                                index: Box::new(at.clone()),
+                            },
+                            ty: elem,
+                            span,
+                        };
+                        let sum = this.binary(binop, current, value, a.span);
+                        this.accept(sum, elem, None)
+                    }
+                };
+                hir::Stmt::SetIndex { base, index: at, value, span: a.span }
+            });
+            return Some((set, Flow::Falls));
+        };
+        let seq = hir::Expr {
+            kind: ExprKind::Local(hir::LocalId(local)),
+            ty: self.locals[local as usize].ty,
+            span: base.span(),
+        };
         let Some(binop) = a.op.to_binary() else {
             // An element slot typed `Option<T>` takes a `T` by subsumption,
             // and the `Wrap` has to be written for that, as it is everywhere
@@ -6623,54 +6833,310 @@ impl<'a> Checker<'a> {
         ))
     }
 
-    /// Mutating a slice or a map changes the binding that holds it, because
-    /// both have value semantics. Report when that binding is immutable.
+    /// Where a slice or map that is about to change in place is kept.
     ///
-    /// The two share this because they share the reason. Which one it is comes
-    /// from the receiver's type rather than from the call site, so a caller
-    /// cannot get the noun wrong — and a map used to be told it was a slice.
-    fn require_mutable_slice_binding(&mut self, base: &ast::Expr, what: &str) -> Option<u32> {
-        self.require_mutable_value_binding(base, what, "slice")
-    }
-
-    fn require_mutable_value_binding(
+    /// Both are copy-on-write values, so changing one's contents changes
+    /// whatever holds it. A plain `var` binding is changed where it lies, as
+    /// it always was. Anything deeper — `grid[i][j] = v`, `b.cells.push(x)` —
+    /// becomes what the roadmap used to tell people to write by hand: copy
+    /// the value out into a hidden local, change that, and assign it back
+    /// through the same place, level by level. Each level is checked as an
+    /// assignment to it would be, so this accepts exactly what the
+    /// hand-written version would and no more.
+    ///
+    /// The sub-expressions the place is built from — the struct a field is
+    /// read from, each index — are evaluated here, once and in the order they
+    /// were written, into hidden locals bound by `stmts`. `top` is the span
+    /// of the value being changed, when this call is for something holding
+    /// it rather than for that value itself.
+    fn container_place(
         &mut self,
         base: &ast::Expr,
+        seq: hir::Expr,
         what: &str,
-        noun: &str,
-    ) -> Option<u32> {
-        let ast::Expr::Path(p) = base else {
-            self.not_yet(
-                base.span(),
-                &format!("mutating a {} that is not a plain binding", noun),
-                "assign it to a `var` first",
-            );
-            return None;
-        };
-        let Some(Res::Local(id)) = self.resolved.lookup_use(p.span) else {
-            return None;
-        };
-        if !self.locals[id as usize].mutable {
-            let name = self.locals[id as usize].name.clone();
-            let decl = self.locals[id as usize].span;
-            let mut d = Diagnostic::error(
-                codes::E0114,
-                format!("`{}` cannot be {}", name, what),
-            )
-            .with_primary(p.span, "this binding is immutable")
-            .with_secondary(decl, "declared with `let` here")
-            .with_note(format!(
-                "a {} is a copy-on-write value, so changing its contents changes the \
-                 binding; declare it `var`",
-                noun
-            ));
-            if let Some(kw) = self.let_keyword_span(decl) {
-                d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
-            }
-            self.diags.push(d);
-            return None;
+        top: Option<Span>,
+        stmts: &mut Vec<hir::Stmt>,
+        span: Span,
+    ) -> Option<Place> {
+        let mut written = base;
+        while let ast::Expr::Paren { inner, .. } = written {
+            written = inner;
         }
-        Some(id)
+        let ty = seq.ty;
+        match seq.kind {
+            ExprKind::Local(id) => {
+                self.require_mutable_holder(id.0, written.span(), what, top)?;
+                Some(Place { root: PlaceRoot::Local { id: id.0, ty }, steps: Vec::new() })
+            }
+            // An optional binding narrowed to its value. The value is taken
+            // out, changed, and put back present: changing the unwrapped
+            // copy where it stood is how `xs[0] = 5` inside `if xs != nil`
+            // used to go missing.
+            ExprKind::Unwrap { value } if matches!(value.kind, ExprKind::Local(_)) => {
+                let ExprKind::Local(id) = value.kind else { return None };
+                self.require_mutable_holder(id.0, written.span(), what, top)?;
+                let root = PlaceRoot::Narrowed { id: id.0, declared: value.ty, ty };
+                Some(Place { root, steps: Vec::new() })
+            }
+            ExprKind::FieldGet { base: obj, index } => {
+                let struct_id = match self.types.kind(obj.ty) {
+                    TyKind::Struct(sid) => Some(*sid),
+                    _ => None,
+                };
+                let (ast::Expr::Field { base: obj_written, name, .. }, Some(sid)) =
+                    (written, struct_id)
+                else {
+                    // A tuple is held, but it is a value whose elements are
+                    // fixed once it is built: `t.0 = …` is refused, so the
+                    // write back this would need is too.
+                    if matches!(self.types.kind(obj.ty), TyKind::Tuple(_)) {
+                        let noun = self.container_noun(ty);
+                        self.diags.push(
+                            Diagnostic::error(
+                                codes::E0200,
+                                format!("a {} in a tuple cannot be {}", noun, what),
+                            )
+                            .with_primary(written.span(), "an element of a tuple")
+                            .with_note(
+                                "a tuple's elements are fixed once it is built; build a new \
+                                 one, or keep the value in a struct's `var` field",
+                            ),
+                        );
+                        return None;
+                    }
+                    self.not_a_place(written, ty, what);
+                    return None;
+                };
+                let (mutable, fty, decl) = {
+                    let f = &self.types.struct_def(sid).fields[index as usize];
+                    (f.mutable, f.ty, f.span)
+                };
+                if !mutable {
+                    let sname = self.types.struct_def(sid).name.clone();
+                    let noun = self.container_noun(ty);
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0114,
+                            format!("cannot change immutable field `{}`", name.name),
+                        )
+                        .with_primary(name.span, "this field cannot change")
+                        .with_secondary(decl, "declared immutable here")
+                        .with_note(format!(
+                            "a {} held in a field is changed by writing the field back, so the \
+                             field must be `var`: write `var {}: {}` on `{}`",
+                            noun,
+                            name.name,
+                            self.types.name(fty),
+                            sname
+                        )),
+                    );
+                    return None;
+                }
+                // The field is written through the struct, which is a
+                // reference, so nothing above it needs writing back — but the
+                // binding it is reached through must allow the write, exactly
+                // as it must for `b.cells = …`.
+                if !self.require_mutable_base(obj_written) {
+                    return None;
+                }
+                let holder = self.hoist(*obj, stmts, span);
+                Some(Place { root: PlaceRoot::Field { holder, index, ty }, steps: Vec::new() })
+            }
+            ExprKind::Index { base: outer, index } if self.types.slice_elem(outer.ty).is_some() => {
+                let ast::Expr::Index { base: outer_written, .. } = written else {
+                    self.not_a_place(written, ty, what);
+                    return None;
+                };
+                // Putting the changed element back is an assignment into the
+                // slice holding it, whatever was done to the element.
+                let top = top.or(Some(written.span()));
+                let mut place =
+                    self.container_place(outer_written, *outer, "assigned into", top, stmts, span)?;
+                let at = self.hoist(*index, stmts, span);
+                place.steps.push((at, ty));
+                Some(place)
+            }
+            _ => {
+                self.not_a_place(written, ty, what);
+                None
+            }
+        }
+    }
+
+    /// "slice" or "map", for a message about changing one.
+    fn container_noun(&self, ty: TyId) -> &'static str {
+        match self.types.kind(ty) {
+            TyKind::Map(..) => "map",
+            _ => "slice",
+        }
+    }
+
+    /// A slice or map is changed in place only where the change has somewhere
+    /// to go. A call's result or a literal is a value nothing holds, so
+    /// changing it would change nothing anybody could see.
+    fn not_a_place(&mut self, written: &ast::Expr, ty: TyId, what: &str) {
+        let noun = self.container_noun(ty);
+        let name = if noun == "map" { "m" } else { "xs" };
+        self.diags.push(
+            Diagnostic::error(
+                codes::E0200,
+                format!("this {} cannot be {}: nothing holds it", noun, what),
+            )
+            .with_primary(written.span(), "a value, not a place the change could be kept")
+            .with_note(format!(
+                "a {} is a copy-on-write value, so changing it in place changes what holds \
+                 it: a `var` binding, a `var` field, or an element of a slice held by one \
+                 of those",
+                noun
+            ))
+            .with_note(format!("bind it first — `var {} = …` — and change that", name)),
+        );
+    }
+
+    /// The binding a slice or map is changed through must be `var`.
+    ///
+    /// `top` is set when what changes is inside the binding's value rather
+    /// than the value itself: `grid[0].push(1)` changes `grid`.
+    fn require_mutable_holder(
+        &mut self,
+        id: u32,
+        at: Span,
+        what: &str,
+        top: Option<Span>,
+    ) -> Option<()> {
+        let local = &self.locals[id as usize];
+        if local.mutable {
+            return Some(());
+        }
+        let (name, decl, ty) = (local.name.clone(), local.span, local.ty);
+        let noun = match *self.types.kind(ty) {
+            TyKind::Optional(inner) => self.container_noun(inner),
+            _ => self.container_noun(ty),
+        };
+        let mut d = Diagnostic::error(codes::E0114, format!("`{}` cannot be {}", name, what))
+            .with_primary(at, "this binding is immutable")
+            .with_secondary(decl, "declared with `let` here")
+            .with_note(match top {
+                None => format!(
+                    "a {} is a copy-on-write value, so changing its contents changes the \
+                     binding; declare it `var`",
+                    noun
+                ),
+                Some(inner) => format!(
+                    "`{}` is held in `{}`, and a {} is a copy-on-write value: changing \
+                     anything inside it changes the binding; declare it `var`",
+                    self.text(inner),
+                    name,
+                    noun
+                ),
+            });
+        if let Some(kw) = self.let_keyword_span(decl) {
+            d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
+        }
+        self.diags.push(d);
+        None
+    }
+
+    /// Bind an operand to a hidden local, so it is evaluated once and before
+    /// anything is copied out. A literal or a local is left where it is:
+    /// nothing between here and its use can change either.
+    fn hoist(&mut self, e: hir::Expr, stmts: &mut Vec<hir::Stmt>, span: Span) -> hir::Expr {
+        if matches!(
+            e.kind,
+            ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Str(_)
+                | ExprKind::Bool(_)
+                | ExprKind::Nil
+                | ExprKind::Local(_)
+        ) {
+            return e;
+        }
+        let (ty, at) = (e.ty, e.span);
+        let id = self.synthetic_local("place", ty, span);
+        stmts.push(hir::Stmt::Let { local: hir::LocalId(id), init: Some(e), span });
+        hir::Expr { kind: ExprKind::Local(hir::LocalId(id)), ty, span: at }
+    }
+
+    /// Change the value a place holds by changing a copy of it and writing
+    /// the copy back. `change` is handed the local holding the copy, and its
+    /// type; `stmts` already binds the operands, which run first.
+    fn change_at(
+        &mut self,
+        place: Place,
+        mut stmts: Vec<hir::Stmt>,
+        span: Span,
+        change: impl FnOnce(&mut Self, u32, TyId) -> hir::Stmt,
+    ) -> hir::Stmt {
+        let local = |(id, ty): (u32, TyId)| hir::Expr {
+            kind: ExprKind::Local(hir::LocalId(id)),
+            ty,
+            span,
+        };
+        // Copy out each value from the root to the one being changed,
+        // outermost first. A binding at the root is its own copy.
+        let first = match &place.root {
+            PlaceRoot::Local { id, ty } => (*id, *ty),
+            PlaceRoot::Narrowed { id, declared, ty } => {
+                let value = Box::new(local((*id, *declared)));
+                let read = hir::Expr { kind: ExprKind::Unwrap { value }, ty: *ty, span };
+                (self.copy_of(read, &mut stmts, span), *ty)
+            }
+            PlaceRoot::Field { holder, index, ty } => {
+                let base = Box::new(holder.clone());
+                let read = hir::Expr { kind: ExprKind::FieldGet { base, index: *index }, ty: *ty, span };
+                (self.copy_of(read, &mut stmts, span), *ty)
+            }
+        };
+        let mut chain = vec![first];
+        for (at, elem) in &place.steps {
+            let outer = chain[chain.len() - 1];
+            let read = hir::Expr {
+                kind: ExprKind::Index { base: Box::new(local(outer)), index: Box::new(at.clone()) },
+                ty: *elem,
+                span,
+            };
+            chain.push((self.copy_of(read, &mut stmts, span), *elem));
+        }
+
+        let (inner, ty) = chain[chain.len() - 1];
+        stmts.push(change(self, inner, ty));
+
+        // And write each copy back where it came from, innermost first.
+        for (k, (at, _)) in place.steps.iter().enumerate().rev() {
+            stmts.push(hir::Stmt::SetIndex {
+                base: local(chain[k]),
+                index: at.clone(),
+                value: local(chain[k + 1]),
+                span,
+            });
+        }
+        match place.root {
+            PlaceRoot::Local { .. } => {}
+            PlaceRoot::Narrowed { id, declared, .. } => stmts.push(hir::Stmt::Assign {
+                local: hir::LocalId(id),
+                value: hir::Expr {
+                    kind: ExprKind::Wrap { value: Box::new(local(chain[0])) },
+                    ty: declared,
+                    span,
+                },
+                span,
+            }),
+            PlaceRoot::Field { holder, index, .. } => stmts.push(hir::Stmt::SetField {
+                base: holder,
+                index,
+                value: local(chain[0]),
+                span,
+            }),
+        }
+        hir::Stmt::Block(hir::Block { stmts })
+    }
+
+    /// Bind a read to a new hidden local and answer the local.
+    fn copy_of(&mut self, read: hir::Expr, stmts: &mut Vec<hir::Stmt>, span: Span) -> u32 {
+        let id = self.synthetic_local("held", read.ty, span);
+        stmts.push(hir::Stmt::Let { local: hir::LocalId(id), init: Some(read), span });
+        id
     }
 
     /// The local a place expression is ultimately rooted at: `a.b.c[0]` is
@@ -6693,11 +7159,12 @@ impl<'a> Checker<'a> {
 
     /// Report when what is about to be modified is rooted at an immutable
     /// binding. `self` is the same rule wearing a different word: the receiver
-    /// is mutable exactly when the method declared `var self`.
-    fn require_mutable_base(&mut self, base: &ast::Expr) {
-        let Some(id) = self.root_binding(base) else { return };
+    /// is mutable exactly when the method declared `var self`. Answers
+    /// whether the modification may go ahead.
+    fn require_mutable_base(&mut self, base: &ast::Expr) -> bool {
+        let Some(id) = self.root_binding(base) else { return true };
         if self.locals[id as usize].mutable {
-            return;
+            return true;
         }
         let name = self.locals[id as usize].name.clone();
         let decl = self.locals[id as usize].span;
@@ -6715,7 +7182,7 @@ impl<'a> Checker<'a> {
                      the call site rather than hidden inside the method",
                 ),
             );
-            return;
+            return false;
         }
         let mut d = Diagnostic::error(
             codes::E0114,
@@ -6727,6 +7194,7 @@ impl<'a> Checker<'a> {
             d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
         }
         self.diags.push(d);
+        false
     }
 
     /// `err.message()` needs an error that is there.
@@ -6868,38 +7336,24 @@ impl<'a> Checker<'a> {
                     self.arity_error("push", args.len(), 1, span, None);
                     return Some(self.lit(ExprKind::Error, TyId::ERROR, span));
                 }
-                let id = self.require_mutable_slice_binding(base, "pushed to")?;
+                let mut stmts = Vec::new();
+                let place = self.container_place(base, seq, "pushed to", None, &mut stmts, span)?;
                 let v = self.expr(&args[0], Some(elem));
                 let v = self.accept(v, elem, None);
                 // `push` is a statement, not an expression; the checker returns
                 // unit and MIR emits the mutation.
-                Some(hir::Expr {
-                    kind: ExprKind::Match {
-                        scrutinee: Box::new(hir::Expr {
-                            kind: ExprKind::Bool(true),
-                            ty: TyId::BOOL,
+                let push = match place.binding() {
+                    Some(id) => hir::Stmt::SlicePush { local: hir::LocalId(id), value: v, span },
+                    None => {
+                        let value = self.hoist(v, &mut stmts, span);
+                        self.change_at(place, stmts, span, |_, local, _| hir::Stmt::SlicePush {
+                            local: hir::LocalId(local),
+                            value,
                             span,
-                        }),
-                        arms: vec![hir::MatchArm {
-                            pattern: hir::Pattern::Wildcard,
-                            guard: None,
-                            body: hir::Expr {
-                                kind: ExprKind::Block(hir::Block {
-                                    stmts: vec![hir::Stmt::SlicePush {
-                                        local: hir::LocalId(id),
-                                        value: v,
-                                        span,
-                                    }],
-                                }),
-                                ty: TyId::UNIT,
-                                span,
-                            },
-                            span,
-                        }],
-                    },
-                    ty: TyId::UNIT,
-                    span,
-                })
+                        })
+                    }
+                };
+                Some(self.as_statement(push, span))
             }
 
             _ => {
@@ -8857,7 +9311,7 @@ impl<'a> Checker<'a> {
         // `self` receiver promises the caller nothing was modified, and
         // honouring the field's `var` while ignoring the receiver's would let
         // it be modified anyway.
-        self.require_mutable_base(base);
+        let _ = self.require_mutable_base(base);
 
         let value = self.expr(&a.value, Some(ty));
         let Some(binop) = a.op.to_binary() else {
@@ -9759,14 +10213,6 @@ impl<'a> Checker<'a> {
                      the type of their argument",
                 )
                 .with_note("wrap it in a closure, which names the types it works on"),
-        );
-    }
-
-    fn not_yet(&mut self, span: Span, what: &str, when: &str) {
-        self.diags.push(
-            Diagnostic::error(codes::E0200, format!("{} is not implemented yet", what))
-                .with_primary(span, "not supported by this compiler version")
-                .with_note(when.to_string()),
         );
     }
 }

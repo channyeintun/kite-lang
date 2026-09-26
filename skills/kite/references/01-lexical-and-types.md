@@ -581,6 +581,56 @@ fn main() {
 }
 ```
 
+### Nested slices and slices in fields change in place
+
+`grid[i][j] = v`, `grid[i].push(x)`, `b.cells.push(x)`, `b.counts["k"] = 1`,
+`ms[0].remove(k)` and the compound forms (`grid[i][j] += 1`) all work, to any
+depth. The compiler copies each level out, changes the innermost and writes
+every level back — what you would otherwise write by hand — with the indices
+and the right-hand side evaluated once, first. So a copy of the outer slice
+taken before the write keeps its old contents: slices are values.
+
+```kite
+struct Board {
+    var cells: [int]
+}
+
+fn main() {
+    var grid = [[1, 2], [3, 4]]
+    let before = grid
+    grid[0][1] = 9
+    grid[1].push(5)
+    grid[1][0] += 10
+    var b = Board{ cells: [] }
+    b.cells.push(7)
+    b.cells[0] *= 2
+    io.print("\(grid[0][1]) \(grid[1][0]) \(grid[1].len()) \(before[0][1])") // 9 13 3 2
+    io.print(b.cells[0]) // 14
+}
+```
+
+Every level must allow the write: the root binding is a `var` (a `let` is
+`E0114`), a field on the way is declared `var` (else `E0114`), and a struct is
+reached through a binding that may change it. A call's result (held by
+nothing) and a tuple element (fixed once built) are `E0200`: bind the value to
+a `var` first.
+
+```kite fails
+fn rows() -> [[int]] {
+    return [[1]]
+}
+
+fn main() {
+    let grid = [[1, 2]]
+    grid[0][0] = 5 //~ E0114
+    rows()[0].push(2) //~ E0200
+}
+```
+
+A loop that pushes thousands of times through a field copies the field's slice
+on each push; for a hot loop, build the slice in a `var` local and assign it to
+the field once.
+
 ### An empty `[]` or `{}` has nothing to infer from
 
 Both are `E0204`, and the fix is an annotation on the binding — inference never
@@ -680,10 +730,10 @@ fn main() {
 }
 ```
 
-The receiver has to be a plain `var` binding, exactly as `xs.push(v)` does:
-maps are copy-on-write values, so the write lands on the binding. `m.remove(k)`
-where `m` is a field is `E0200 mutating a map that is not a plain binding` —
-copy it into a local, remove, and assign it back.
+The receiver has to be somewhere the change can be kept, exactly as
+`xs.push(v)`'s does: maps are copy-on-write values, so the write lands on what
+holds the map. A `var` binding, a `var` field (`b.counts.remove(k)`) and an
+element of a `var` slice (`ms[0].remove(k)`) all are; a `let` is `E0114`.
 
 **Assigning `nil` is not the same thing.** On a `{str: int}` it is
 `E0200 expected int, found nil`; on a `{str: Option<int>}` it is accepted and

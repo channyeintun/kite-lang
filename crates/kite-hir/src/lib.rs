@@ -196,7 +196,10 @@ pub enum Stmt {
     /// `xs[i] = v`
     SetIndex { base: Expr, index: Expr, value: Expr, span: Span },
     /// `xs.push(v)`. Slices are copy-on-write values, so this mutates the
-    /// binding, which must therefore be `var`.
+    /// binding, which must therefore be `var`. A slice held anywhere else —
+    /// `b.cells.push(v)` — is copied into a hidden local that this pushes to,
+    /// and the checker writes it back; so this, `SetIndex`, `MapSet` and
+    /// `MapRemove` only ever change a local.
     SlicePush { local: LocalId, value: Expr, span: Span },
     /// `m[k] = v`. Maps are copy-on-write values too.
     MapSet { local: LocalId, key: Expr, value: Expr, span: Span },
