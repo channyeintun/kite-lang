@@ -238,10 +238,11 @@ impl<'a> Emitter<'a> {
 
         match value {
             // Both are replaced by the state-machine transform before any
-            // backend sees them.
-            mir::Rvalue::Await { .. } | mir::Rvalue::Yield => {
-                unreachable!("`await` survived the state-machine transform")
-            }
+            // backend sees them, and the driver reports one that was not
+            // (`kite_mir::internal_errors`) before asking for bytecode. An
+            // embedder that skipped the question gets a trap here, not a
+            // compiler that panics.
+            mir::Rvalue::Await { .. } | mir::Rvalue::Yield => self.code.push(Op::Unreachable),
             mir::Rvalue::Use(o) => self.load_into(dst, o),
 
             mir::Rvalue::Binary { op, lhs, rhs } => {

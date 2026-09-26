@@ -1064,8 +1064,13 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
 
     fn rvalue(&mut self, dst: mir::Local, value: &mir::Rvalue) {
         match value {
+            // Replaced by the state-machine transform, and reported by the
+            // driver (`kite_mir::internal_errors`) when one was not. Anything
+            // that lowers without asking gets a trap rather than a panic.
             mir::Rvalue::Await { .. } | mir::Rvalue::Yield => {
-                unreachable!("`await` survived the state-machine transform")
+                let always = self.iconst(1);
+                self.trap_if(always, trap_code::UNREACHABLE, self.fn_index as i64, 0);
+                self.def_zero(dst);
             }
             mir::Rvalue::Use(o) => {
                 let v = self.operand(o);

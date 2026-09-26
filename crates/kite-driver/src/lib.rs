@@ -537,6 +537,26 @@ fn run_passes(
     // `async fn` becomes a starter and a resume function here, once, so both
     // backends see ordinary functions and neither knows concurrency exists.
     kite_mir::asyncify(&mut mir, &mut hir.types);
+    // What lowering found that the checker promised it never would — a
+    // `break` with no loop, an `await` the transform could not reach. Each
+    // once went silently wrong or crashed a backend; now each is named.
+    let internal = kite_mir::internal_errors(&mir);
+    if !internal.is_empty() {
+        for i in internal {
+            diags.push(
+                Diagnostic::error(
+                    kite_diag::codes::E0901,
+                    format!("internal compiler error in `{}`", i.function),
+                )
+                .with_primary(i.span, i.what)
+                .with_note(
+                    "this is a bug in Kite, not in this program — please report it, \
+                     with the program if it can be shared",
+                ),
+            );
+        }
+        return (String::new(), None, None, None, index);
+    }
     if emit == Emit::Mir {
         return (mir.render(&hir.types).to_string(), None, None, None, index);
     }

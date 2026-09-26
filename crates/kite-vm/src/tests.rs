@@ -1568,3 +1568,142 @@ fn counts_wider_than_a_byte_survive() {
     assert_eq!(lines(&src), ["300", "299", "130", "299"]);
 }
 
+// ---- or-patterns --------------------------------------------------------------
+
+/// `match s { Circle(n) | Square(n) => n, Dot => 0 }`, built as HIR directly.
+///
+/// Lowering bound an or-pattern's names through its first alternative
+/// whichever one matched, so a `Square` read its payload as a `Circle`'s — or,
+/// where the first alternative bound nothing, left the name unwritten. The
+/// program is built by hand because it is MIR's half of the rule being tested:
+/// the checker's half, that every alternative binds the same names, is what
+/// admits this source form.
+#[test]
+fn an_or_pattern_binds_through_the_alternative_that_matched() {
+    use kite_hir::{self as hir, Expr, ExprKind, FieldDef, LocalId, Pattern, TyId, VariantDef};
+    let span = kite_span::Span::new(kite_span::FileId(0), 0, 0);
+    let mut types = hir::Types::new();
+    let shape = types.declare_enum("Shape", true, span);
+    let payload = |name: &str| FieldDef {
+        name: name.into(),
+        ty: TyId::INT,
+        mutable: false,
+        is_pub: true,
+        span,
+    };
+    let variant = |name: &str, fields: Vec<FieldDef>| VariantDef {
+        name: name.into(),
+        named: !fields.is_empty(),
+        fields,
+        span,
+    };
+    types.set_enum_variants(
+        shape,
+        vec![
+            variant("Circle", vec![payload("r")]),
+            // A second field ahead of the bound one, so reading `Square`'s
+            // payload at `Circle`'s position would find the wrong value.
+            variant("Square", vec![payload("colour"), payload("side")]),
+            variant("Dot", Vec::new()),
+        ],
+    );
+    let shape_ty = types.enum_ty(shape);
+    let expr = |kind: ExprKind, ty: TyId| Expr { kind, ty, span };
+    let n = || Pattern::Binding { local: LocalId(1), unwrap: false };
+    let local = |name: &str, ty: TyId| hir::Local {
+        name: name.into(),
+        ty,
+        mutable: false,
+        span,
+        synthetic: false,
+    };
+
+    let arms = vec![
+        hir::MatchArm {
+            pattern: Pattern::Or(vec![
+                Pattern::Variant { enum_id: shape, variant: 0, fields: vec![n()] },
+                Pattern::Variant { enum_id: shape, variant: 1, fields: vec![Pattern::Wildcard, n()] },
+            ]),
+            guard: None,
+            body: expr(ExprKind::Local(LocalId(1)), TyId::INT),
+            span,
+        },
+        hir::MatchArm {
+            pattern: Pattern::Variant { enum_id: shape, variant: 2, fields: Vec::new() },
+            guard: None,
+            body: expr(ExprKind::Int(0), TyId::INT),
+            span,
+        },
+    ];
+    let subject = expr(ExprKind::Local(LocalId(0)), shape_ty);
+    let pick = hir::Function {
+        name: "pick".into(),
+        is_free: true,
+        generic_count: 0,
+        is_pub: false,
+        is_async: false,
+        param_count: 1,
+        locals: vec![local("s", shape_ty), local("n", TyId::INT)],
+        ret: TyId::INT,
+        body: hir::Block {
+            stmts: vec![hir::Stmt::Return {
+                value: Some(expr(
+                    ExprKind::Match { scrutinee: Box::new(subject), arms },
+                    TyId::INT,
+                )),
+                span,
+            }],
+        },
+        span,
+    };
+
+    let print_pick = |variant: u32, fields: Vec<i64>| {
+        let value = expr(
+            ExprKind::EnumNew {
+                enum_id: shape,
+                variant,
+                fields: fields.into_iter().map(|v| expr(ExprKind::Int(v), TyId::INT)).collect(),
+            },
+            shape_ty,
+        );
+        let call = expr(
+            ExprKind::Call { callee: hir::FnId(0), args: vec![value], targs: Vec::new() },
+            TyId::INT,
+        );
+        hir::Stmt::Expr(expr(
+            ExprKind::CallBuiltin { builtin: hir::Builtin::IoPrint, args: vec![call] },
+            TyId::UNIT,
+        ))
+    };
+    let main = hir::Function {
+        name: "main".into(),
+        is_free: true,
+        generic_count: 0,
+        is_pub: false,
+        is_async: false,
+        param_count: 0,
+        locals: Vec::new(),
+        ret: TyId::UNIT,
+        body: hir::Block {
+            stmts: vec![
+                print_pick(1, vec![99, 7]),
+                print_pick(0, vec![3]),
+                print_pick(2, Vec::new()),
+            ],
+        },
+        span,
+    };
+
+    let program = hir::Program {
+        types,
+        externs: Vec::new(),
+        fns: vec![pick, main],
+        entry: Some(hir::FnId(1)),
+        vtables: Vec::new(),
+    };
+    let mir = kite_mir::lower(&program);
+    let chunk = kite_codegen_kbc::compile(&mir);
+    let mut out = Vec::new();
+    run(&chunk, &mut out).expect("the program runs");
+    assert_eq!(String::from_utf8(out).unwrap(), "7\n3\n0\n");
+}

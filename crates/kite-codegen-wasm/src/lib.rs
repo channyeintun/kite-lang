@@ -3206,9 +3206,12 @@ impl<'a> Emitter<'a> {
             }
 
             // The state-machine transform replaced both of these before any
-            // backend saw the program.
+            // backend saw the program, and the driver reports one that it did
+            // not (`kite_mir::internal_errors`). Anything that lowers without
+            // asking gets a trap rather than a panic.
             mir::Rvalue::Await { .. } | mir::Rvalue::Yield => {
-                unreachable!("`await` survived the state-machine transform")
+                func.instruction(&Instruction::Unreachable);
+                return false;
             } // Every MIR rvalue is handled: there is deliberately no catch-all
               // here, so adding one to MIR fails to compile rather than silently
               // producing a module that traps.
