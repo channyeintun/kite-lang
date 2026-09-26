@@ -56,6 +56,11 @@ impl fmt::Debug for Span {
     }
 }
 
+/// The byte-order mark an editor may write at the start of a file. It is not
+/// a character of the program — the lexer skips it — so it is not a column
+/// either, and a line is shown without it.
+const BYTE_ORDER_MARK: char = '\u{feff}';
+
 /// A 1-indexed line and column, for display. Column counts characters, not
 /// bytes, so multi-byte identifiers point at the right place.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -110,7 +115,8 @@ impl SourceFile {
         }
         let li = self.line_index(offset as u32);
         let line_start = self.line_starts[li] as usize;
-        let col = self.text[line_start..offset].chars().count() as u32 + 1;
+        let before = self.text[line_start..offset].trim_start_matches(BYTE_ORDER_MARK);
+        let col = before.chars().count() as u32 + 1;
         LineCol { line: li as u32 + 1, col }
     }
 
@@ -126,7 +132,7 @@ impl SourceFile {
             .get(li + 1)
             .map(|&e| e as usize)
             .unwrap_or(self.text.len());
-        self.text[start..end].trim_end_matches(['\n', '\r'])
+        self.text[start..end].trim_start_matches(BYTE_ORDER_MARK).trim_end_matches(['\n', '\r'])
     }
 
     pub fn line_count(&self) -> u32 {
@@ -280,6 +286,17 @@ mod tests {
         assert_eq!(file.line_col(2), LineCol { line: 1, col: 2 });
         // Through the `SourceMap`, which is what the renderer holds.
         assert_eq!(m.line_col(Span::new(f, 2, 2)), LineCol { line: 1, col: 2 });
+    }
+
+    /// A leading byte-order mark is neither shown nor counted.
+    #[test]
+    fn a_byte_order_mark_is_not_a_column() {
+        let mut m = SourceMap::new();
+        let f = m.add("t.kite", "\u{feff}fn main() {\n}\n");
+        let file = m.file(f);
+        assert_eq!(file.line_text(1), "fn main() {");
+        assert_eq!(file.line_col(3), LineCol { line: 1, col: 1 });
+        assert_eq!(file.line_col(6), LineCol { line: 1, col: 4 });
     }
 
     #[test]
