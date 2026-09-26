@@ -1564,11 +1564,13 @@ declares without the `use money`.
 
 Imports are always qualified by module name at the use site. There is no
 wildcard import and no way to bring a bare name into scope. `config.load` always
-tells you where `load` came from.
+tells you where `load` came from. That holds for enum variants too: a bare
+`Circle` is a variant of one of the module's own enums, or of the prelude's,
+and another module's is written `shapes.Shape.Circle`.
 
 **And a module reaches only what it imports.** Writing `config.load` in a file
 whose module has no `use config` is an error even when another module in the
-program does import it. Declarations are merged under their qualified names, so
+program does import it — the entry file included. Declarations are merged under their qualified names, so
 without this rule `config.load` would exist for the whole program the moment
 anybody loaded `config` — whether a name resolved in one file would depend on a
 `use` line in a file that had nothing to do with it, and a dependency could
@@ -1580,11 +1582,14 @@ program-wide table, so `use leak as crypto` written anywhere — including insid
 a dependency — rewrote every `crypto.…` call in every other module, silently
 and with no diagnostic. An alias is a convenience for the file that writes it.
 
-**A module is its whole path.** `use dep/utils` and `use utils` are two
-different modules, and every segment is honoured when the files are found:
-`dep/utils` is that directory, not whichever `utils` was reached first. A first
-segment naming a declared dependency roots there instead, so
-`use markdown/render` reaches inside the package.
+**A module is where its source is.** Two `use` lines reach one module exactly
+when they reach one file or directory: `use utils` inside `a/` and `use utils`
+inside `b/` are two modules, and `use dep/utils` and `use utils` are two
+modules, because every segment is honoured when the files are found. A `use`
+that finds nothing is `E0400` — never answered by some other module that
+happens to be spelled alike. A first segment naming one of the importing
+package's declared dependencies roots there instead, so `use markdown/render`
+reaches inside the package.
 
 What a use site writes is a **spelling**, and by default it is the last
 segment. A spelling belongs to the module that writes it, so two files may
@@ -1624,12 +1629,25 @@ native = { entry = "src/main.kite" }
 markdown = { git = "https://github.com/example/kite-markdown", tag = "v1.2.0" }
 ```
 
+**A package's dependencies are its own.** A module inside a package resolves
+`use` against that package's manifest — the one in its own directory, never
+one above it — so a package uses what it declares and nothing the program
+declared for itself. A `path` is relative to the manifest that writes it; a
+`git` dependency is read from the program's `.kite/vendor`, where `kitec pkg`
+puts every package in the graph. A name — package or dependency — is an
+identifier, because it is written in a `use`. A key the manifest does not
+define is an error rather than something ignored, and a manifest that does not
+parse is `E0405` in every command that reads it.
+
 Dependencies are resolved to a lockfile of **SHA-256** content hashes, and the
 lockfile is **checked, not just written**: a dependency whose contents changed
-under the same version — a moved tag, a re-pushed repository — makes `kitec pkg`
-fail rather than quietly recording the new bytes. `--update` accepts a change,
-which is a decision someone makes rather than something a build does on its way
-past.
+under the same version and source — a moved tag, a re-pushed repository —
+makes `kitec pkg` fail rather than quietly recording the new bytes. `--update`
+accepts a change, which is a decision someone makes rather than something a
+build does on its way past, and fetches every checkout again to make it.
+Anything else that changed — a dependency added or removed, a new version
+because the manifest now asks for one — is reported rather than refused, and
+resolution tries the versions the lockfile records before any newer one.
 
 The digest is cryptographic because the party it is checked against is the one
 who chooses the bytes. It was FNV-1a, which is invertible, so a dependency's

@@ -942,7 +942,7 @@ per-row state.
 **Write the handler where the control is.** It closes over what is in scope
 there, so nothing has to be encoded into `data-` attributes and parsed back:
 
-```kite
+```kite ignore
 html.txt("button", [html.class("primary"), html.click(|e: dom.Event| {
     settle(app, bill.id)
 })], "Split it")
@@ -1033,7 +1033,7 @@ Helpers: `ok(body)` `not_found()` `status(code, body)` `succeeded(r)`
 a page may not set a `Cookie` header itself — so an app that signs in with a
 cookie uses `send_with(method, url, body, Options)`:
 
-```kite
+```kite ignore
 let signed_in = http.Options{ ..http.sending(), credentials: http.Credentials.Include }
 let (res, err) = await http.send_with("POST", url, body, signed_in)
 ```
@@ -1380,22 +1380,25 @@ pub async fn main() {
 
 ### test — assertions as values
 
-A test is a `pub fn` whose name starts with `test_`. The runner will happily
-call a `test_` of any shape, but write `-> (int, error)` — that is the shape
-`check` needs, and the only one that can report a failure rather than pass
-silently. `kitec test file.kite` finds them, runs each, and also runs every
-` ```kite ` doc example. No assertion traps: a failure reports and the rest
-still run.
+A test is a function whose name starts with `test_` and that takes no
+arguments. Write `-> (int, error)` — that is the shape `check` needs, and the
+only one that can report a failure rather than pass silently. `kitec test
+file.kite` finds them, runs each, and also runs every ` ```kite ` doc example.
+No assertion traps: a failure reports and the rest still run.
 
-Discovery walks the *compiled* functions and matches `test_` against the name
-each one ended up with, which has two consequences worth knowing before you
-lay a project out.
+`pub` is not needed: a private test is kept for the run and runs. An `async fn
+test_…` is driven to completion and its answer read out of its task. A `test_`
+function that takes arguments is a helper, and is named in a note rather than
+called. A closure written inside a test is not a test of its own.
 
-`pub` is load-bearing, because an unreached private function has already been
-dropped and is not there to be found. Put a `pub` and a private `test_` in one
-file and the runner reports `1 passed`.
+Doc examples are always compiled as a debug build, `--release` or not — an
+example fails by trapping on an `assert`, which a release build drops. A
+` ```kite ` fence may start with `use` lines; they go to the top of the file.
 
-**And `kitec test` is entry-file-only.** A function that arrived through `use`
+Discovery reads the entry file's own declarations, which has one consequence
+worth knowing before you lay a project out.
+
+**`kitec test` is entry-file-only.** A function that arrived through `use`
 is compiled under its *qualified* name — `money.test_double` — which does not
 start with `test_`, so it is never a test, even when it is in the binary
 because `main` calls it. Doc examples are worse: they are extracted from the
@@ -1404,7 +1407,7 @@ entry file's text, and a module's are never read at all.
 ```
 $ kitec test proj/src/main.kite          # main calls money.test_double()
 no tests in `proj/src/main.kite`
-note: a test is a `pub fn test_…() -> (int, error)`, or a ```kite fence in a doc comment
+note: a test is a `fn test_…() -> (int, error)`, or a ```kite fence in a doc comment
 ```
 
 Pointing `kitec test` at the module file instead recompiles that file alone, so
@@ -1801,12 +1804,16 @@ kitec pkg    [directory]     resolve dependency versions, write `kite.lock`
 | `--offline` | with `pkg`, resolve only from what is already vendored |
 | `--check` | with `fmt`, report rather than rewrite (exit 1 if unformatted) |
 | `--all` | with `doc`, include what is not `pub` |
-| `--native` | with `run`, execute machine code under the JIT — no linker |
-| `--emit <stage>` | `check`, `ast`, `hir`, `mir`, `kbc`, `wasm`, `native` |
-| `--out <dir>` | where `--emit wasm` and `--emit native` write |
+| `--native` | with `run`, execute machine code under the JIT — no linker; with `build`, write and link an object file |
+| `--emit <stage>` | with `run`, `check` or `build`: `check`, `ast`, `hir`, `mir`, `kbc` print that stage and stop; `wasm` and `native` are `build`'s (`run --emit native` is `run --native`) |
+| `--out <dir>` | where `build --emit wasm`, `build --native` and `bundle` write |
 | `--update` | with `pkg`, allow `kite.lock` to change; without it a dependency whose bytes moved is an error |
 | `--explain <CODE>` | the rationale for a diagnostic |
 | `--version`, `--help` | |
+
+An option a command does not take is an error, not something ignored or quietly
+obeyed: `kitec test --native`, `kitec check --emit wasm` and `kitec fmt
+--release` all refuse, naming the commands the option is for.
 
 Notes worth having:
 
@@ -1828,11 +1835,17 @@ Notes worth having:
   `<pre id="out">` and nothing else, so a DOM program building into an empty
   directory finds no mount point — put your own `index.html` there first and it
   is left alone.
-- **`--emit ast|hir|mir|kbc`** dumps that stage to stdout. Useful for
-  confirming what the compiler actually did.
-- **`kitec test`** runs `pub fn test_*() -> (int, error)` and every ` ```kite `
-  doc comment example, reporting both — **in the entry file only**. A `use`d
-  module's tests and doc examples are invisible to it; see `### test`.
+- **`--emit ast|hir|mir|kbc`** dumps that stage to stdout and exits — with
+  `run` too, which does not then run the program. Useful for confirming what
+  the compiler actually did.
+- **`kitec test`** runs every `fn test_*() -> (int, error)` — `pub` or not,
+  `async` or not — and every ` ```kite ` doc comment example, reporting both —
+  **in the entry file only**. A `use`d module's tests and doc examples are
+  invisible to it; see `### test`.
+- **`kitec bundle`** carries every file the build read — the entry, its
+  modules, the manifests and the dependencies they name — so a bundle with
+  `use` lines runs with none of its sources beside it. It keeps the build mode
+  it was made with: `assert` fires in a bundle made without `--release`.
 - **`kitec doc`** reads signatures from the parse, so it cannot describe a
   function that is not there.
 - **`kitec pkg`** needs a `kite.toml`; without one it says so. It resolves path

@@ -29,7 +29,7 @@ passes `kitec` as the *subcommand* and fails.
 Every diagnostic carries a code, and the code explains itself. Run
 `kitec --explain E0302` for any code you see — it prints the rule and its
 rationale, not a restatement of the message. Also `kitec run`, `kitec test`
-(`pub fn test_*` **and** every doc-comment example, **in the entry file only** —
+(`fn test_*` **and** every doc-comment example, **in the entry file only** —
 a `use`d module's tests are invisible to it), `kitec fmt`, `kitec fix`,
 `kitec build --emit wasm --out dist`. Write, check, fix, check again.
 
