@@ -8,8 +8,9 @@ Everything below is checked against `target/release/kitec`, not against the pros
   A file is `use` lines — which must come first — then declarations (`fn`, `struct`,
   `enum`, `trait`, `impl`, `type`, a constant `let`, and `extern fn` under its `@host(…)`
   attribute). Every *mutable* binding lives inside a function body.
-- **A closure may not capture a `var`** (`E0211`). Captures are by value at closure-creation
-  time, so a later write would be invisible. Mutation goes through a function that takes a
+- **A closure may not capture a `var`, or assign to anything it captures** (`E0211`).
+  Captures are by value at closure-creation time, so a later write would be invisible, and a
+  write inside would change only the copy. Mutation goes through a function that takes a
   `var` parameter.
 - **An `if` used as a value takes exactly one expression per branch.** No statements, no
   trailing-expression block. `let x = if c { let y = 1  y } else { 0 }` is `E0200`.
@@ -450,8 +451,27 @@ fn main() {
 }
 ```
 
-`E0211` also covers a parameter whose type cannot be inferred, and a block-bodied closure
-that fails to return on some path.
+**Nor may a closure assign to anything it captures** (`E0211`) — a `var` or a `let`. It
+holds copies, so the write would change the copy and nothing else.
+
+```kite fails
+fn main() {
+    let first: int
+    let set = || { first = 1 } //~ E0211
+    set()
+}
+```
+
+A closure body is a function of its own, and is checked as one. Its `return` answers to the
+closure's `-> T`, not to the function it is written in; `-> (T, error)` makes it fallible,
+exactly as on a named function; a `break` or `continue` in it is `E0115` whatever loop
+surrounds it; `await` in it is `E0521`, because a closure cannot be `async`; and its `defer`s
+run when it returns. What a test around it proved still holds inside — its captures were
+taken there — but nothing it tests or checks inside reaches back out.
+
+`E0211` also covers a parameter whose type cannot be inferred, a block-bodied closure that
+fails to return on some path, and a `return` inside an expression-bodied closure whose result
+type nothing states.
 
 ```kite fails
 fn main() {
@@ -835,12 +855,15 @@ fn main() {
 
 ## 9. `defer`
 
-`defer` takes a **call** and nothing else. The receiver and arguments are evaluated where
-the `defer` is written, into hidden locals; the call happens when the enclosing *function*
-returns, by any path, in reverse order of the `defer` statements. A `defer` inside an `if`
-that never runs never runs. A deferred call cannot change the return value — the return
-expression is evaluated first — though when that value is a struct it is a reference, so a
-deferred write *into* it is visible to the caller.
+`defer` takes a **call** to a function or method and nothing else. The receiver and
+arguments are evaluated where the `defer` is written; the call happens when the enclosing
+*function* returns, by any path — a `return`, the end of the body, or `check` propagating —
+newest registration first. Registration is a run-time event: a `defer` inside an `if` that
+never runs never runs, and one inside a loop registers once per iteration, each with that
+iteration's values. A closure is a function of its own, so a `defer` in one runs when *the
+closure* returns. A deferred call cannot change the return value — the return expression
+is evaluated first — though when that value is a struct it is a reference, so a deferred
+write *into* it is visible to the caller.
 
 ```kite
 struct File {
@@ -870,12 +893,18 @@ fn main() {
 }
 ```
 
-> **Compiler vs specification.** §6.3 says deferred calls run "in reverse order of
-> registration". The implementation is one hidden flag and one set of hidden operand locals
-> **per syntactic `defer` site** (`defer_stmt` in `crates/kite-types/src/lib.rs`), so a
-> `defer` in a loop body runs **once**, at function exit, with the last iteration's values —
-> not once per iteration. Do not put `defer` inside a loop; move the body into a function
-> and defer there.
+```kite
+fn note(s: str) {
+    io.print(s)
+}
+
+fn main() {
+    for i in 0..3 {
+        defer note("closing \(i)")
+    }
+    io.print("body")        // body / closing 2 / closing 1 / closing 0
+}
+```
 
 ---
 
@@ -1013,26 +1042,13 @@ fn main() {
 }
 ```
 
-### Trap: qualified variant patterns
+### Qualified variant patterns
 
-Variant *constructors* may be written bare (`Circle(radius: 2)`) or qualified
-(`Shape.Circle(radius: 2)`). Variant *patterns* must be bare when they bind a payload. A
-qualified pattern parses, but its bindings are never bound, and the compiler reports the
-downstream `E0110` rather than the real mistake.
-
-```kite fails
-enum Shape {
-    Circle(radius: int)
-    Point
-}
-
-fn main() {
-    io.print(match Circle(radius: 2) {
-        Shape.Circle(r) => r, //~ E0110
-        Point => 0,
-    })
-}
-```
+Variant *constructors* and variant *patterns* may both be written bare
+(`Circle(r)`) or qualified (`Shape.Circle(r)`); the two spellings mean the same
+variant. A qualified name that is not a variant of that enum is `E0111`, and the enum's
+own name standing where a variant belongs (`Shape(r)`) is `E0200` — neither is ever
+taken as a catch-all.
 
 ```kite
 enum Shape {
@@ -1042,6 +1058,10 @@ enum Shape {
 
 fn main() {
     io.print(match Circle(radius: 2) {
+        Shape.Circle(r) => r,
+        Shape.Point => 0,
+    })
+    io.print(match Circle(radius: 3) {
         Circle(r) => r,
         Point => 0,
     })
@@ -1052,7 +1072,7 @@ Which enum an unqualified pattern names is decided by the scrutinee, so two enum
 declare `Slow` without ambiguity — and a name that matches a variant of the scrutinee is
 that variant, not a fresh binding. A *constructor* has no scrutinee to go on: once two
 enums share a variant name, the bare `Slow` is `E0111`, "cannot find `Slow`", and the call
-has to say `A.Slow`.
+has to say `A.Slow` — which a pattern may say too.
 
 ---
 

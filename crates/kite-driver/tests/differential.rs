@@ -1214,3 +1214,81 @@ fn find_runtime_lib() -> Option<std::path::PathBuf> {
     }
     None
 }
+
+/// Programs whose output is known, not merely agreed on.
+///
+/// Three backends agreeing is strong evidence, but not about a rule the
+/// checker applies before any of them sees the program: a `defer` the checker
+/// lowered to run once runs once on all three. These pin what the language
+/// says the program prints.
+const EXPECTED: &[(&str, &str, &str)] = &[
+    (
+        "defer-runs-per-registration",
+        "fn note(s: str) {\n  io.print(s)\n}\n\
+         fn fails() -> (int, error) {\n  return _, errors.new(\"boom\")\n}\n\
+         fn with_check() -> (int, error) {\n  defer note(\"closed by check\")\n\
+         \x20 let (v, err) = fails()\n  check err\n  return v, nil\n}\n\
+         fn per_iteration() {\n  for i in 0..3 {\n    defer note(\"iteration \\(i)\")\n  }\n\
+         \x20 note(\"loop done\")\n}\n\
+         fn early() {\n  for i in 0..3 {\n    if i == 1 {\n      return\n    }\n\
+         \x20   defer note(\"registered at \\(i)\")\n  }\n}\n\
+         fn main() {\n  defer note(\"main deferred\")\n\
+         \x20 let (v, err) = with_check()\n  if err != nil {\n    note(err.message())\n  }\n\
+         \x20 per_iteration()\n  early()\n\
+         \x20 let f = || {\n    defer note(\"closure deferred\")\n    note(\"in closure\")\n    return\n  }\n\
+         \x20 f()\n  f()\n  note(\"end\")\n}\n",
+        "closed by check\nboom\nloop done\niteration 2\niteration 1\niteration 0\n\
+         registered at 0\nin closure\nclosure deferred\nin closure\nclosure deferred\nend\n\
+         main deferred\n",
+    ),
+    (
+        "closure-is-its-own-function",
+        "struct P {\n  n: int\n}\n\
+         impl P {\n  fn adder(self) -> fn(int) -> int {\n    return |x: int| x + self.n\n  }\n}\n\
+         fn main() {\n  let add = P{ n: 10 }.adder()\n  io.print(add(5))\n\
+         \x20 let f = |x: int| -> (int, error) {\n    if x < 0 {\n      return _, errors.new(\"neg\")\n    }\n\
+         \x20   return x * 2, nil\n  }\n\
+         \x20 let (v, err) = f(3)\n  if err != nil {\n    io.print(err.message())\n  } else {\n    io.print(v)\n  }\n\
+         \x20 let (w, e2) = f(-1)\n  if e2 != nil {\n    io.print(e2.message())\n  } else {\n    io.print(w)\n  }\n}\n",
+        "15\n6\nneg\n",
+    ),
+    (
+        "patterns-match-what-they-name",
+        "enum Color {\n  Red\n  Green\n  Blue\n}\n\
+         fn name(c: Color) -> str {\n  return match c {\n    Color.Red => \"red\",\n\
+         \x20   Color.Green => \"green\",\n    Color.Blue => \"blue\",\n  }\n}\n\
+         fn sign(n: int) -> str {\n  return match n {\n    -5..=-1 => \"negative\",\n    0 => \"zero\",\n\
+         \x20   _ => \"other\",\n  }\n}\n\
+         fn main() {\n  io.print(name(Color.Green))\n  io.print(name(Color.Blue))\n\
+         \x20 io.print(sign(-3))\n  io.print(sign(0))\n  io.print(sign(9))\n}\n",
+        "green\nblue\nnegative\nzero\nother\n",
+    ),
+];
+
+#[test]
+fn programs_print_what_the_language_says() {
+    let root = std::env::temp_dir().join(format!("kite-expected-{}", std::process::id()));
+    let mut wrong = Vec::new();
+    for (name, src, want) in EXPECTED {
+        let vm = run_on_vm(name, src);
+        if vm != *want {
+            wrong.push(format!("{} on the VM:\n  want: {:?}\n  got:  {:?}", name, want, vm));
+        }
+        if native_available() {
+            let native = run_on_native(name, src);
+            if native != *want {
+                wrong.push(format!("{} natively:\n  want: {:?}\n  got:  {:?}", name, want, native));
+            }
+        }
+        if node_available() {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).expect("create work directory");
+            let wasm = run_on_wasm(name, src, &dir);
+            if wasm != *want {
+                wrong.push(format!("{} on wasm:\n  want: {:?}\n  got:  {:?}", name, want, wasm));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(wrong.is_empty(), "{}", wrong.join("\n\n"));
+}

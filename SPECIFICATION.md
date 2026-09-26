@@ -505,6 +505,10 @@ var total = 0
 let add = |n: int| { total = total + n }    // error[E0211]
 ```
 
+For the same reason a closure may not **assign** to a binding it captures, `let`
+or `var` ([E0211](#16-diagnostics)): it holds a copy, and a write to the copy is
+seen by nothing.
+
 To let a closure change something, **capture a `let` handle to a struct and pass
 it to a function that takes it as `var`.** Structs are references
 ([§14](#14-memory-model)), so the write lands where the holder can see it, and
@@ -720,7 +724,11 @@ fn process(path: str) -> (Data, error) {
 ```
 
 Deferred calls run in reverse order of registration when the enclosing function
-returns, by any path. Unlike Go, `defer` cannot modify the return value — it is
+returns, by any path — `check` propagating an error included. A `defer` registers
+when control reaches it, so one inside a loop registers once per iteration, each
+with the operands that iteration evaluated, and one in a branch not taken never
+registers. A closure is a function of its own: a `defer` in its body runs when
+the closure returns. Unlike Go, `defer` cannot modify the return value — it is
 purely for release of resources, which is the only use that survives scrutiny.
 
 ### 6.4 `match`
@@ -954,8 +962,8 @@ To handle a failure rather than propagate it, test the error. In the branch wher
 it is nil, the value becomes readable:
 
 ```kite
-let (port, err) = config.get_int("port")
-let port = if err != nil { 8080 } else { port }
+let (value, err) = config.get_int("port")
+let port = if err != nil { 8080 } else { value }
 ```
 
 The branch is written out, on the line where the failure happens, which is what

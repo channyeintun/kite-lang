@@ -494,9 +494,10 @@ fn main() {
 
 ## Handling a failure in place
 
-**The specification's example for this (§7.5) does not compile.** It writes
+Test the error: in the branch where it is nil the value is readable, in an `if`
+used as a value exactly as in an `if` statement.
 
-```kite fails
+```kite
 fn get_int(k: str) -> (int, error) {
     if k == "port" {
         return 8080, nil
@@ -506,13 +507,14 @@ fn get_int(k: str) -> (int, error) {
 
 fn main() {
     let (p, err) = get_int("prt")
-    let port = if err != nil { 80 } else { p } //~ E0301
+    let port = if err != nil { 80 } else { p }
     io.print(port)
 }
 ```
 
-The taint states are joined at statement granularity, so the `else` arm of an
-`if`-*expression* does not see `p` as Clean. Use a statement `if`/`else`:
+The value stays unreadable in the branch where the error is *not* nil, and after
+the `if`. Bind it under a name of its own — `p` here — because a second `let port`
+in the same scope is `E0112`. The statement form does the same work:
 
 ```kite
 fn get_int(k: str) -> (int, error) {
@@ -821,10 +823,6 @@ knows.
 
 ## Where the specification is wrong or incomplete
 
-- §7.5's in-place-handling example (`let port = if err != nil { 8080 } else { port }`)
-  does not compile: two same-scope `let port` bindings is `E0112`, and reading the
-  value from the `else` arm of an `if`-*expression* is `E0301` even when the error
-  was tested in its condition. Use a statement `if`/`else` or an early return.
 - §7.3 implies `-> (int, int)` is refused. It is accepted, as a tuple type; only
   the two-value `return a, b` statement inside it is refused.
 - §7.6 says `errors.wrap` "keeps what it wrapped", which is true of the cause

@@ -427,11 +427,10 @@ fn main() {
 }
 ```
 
-Qualifying is **not** the way out of that, because a qualified path is not a
-variant pattern at all: one that fails to resolve as a variant silently becomes a
-wildcard. `Shape.Point` as a pattern matches every `Shape`, and an arm holding it
-is exhaustive on its own. Nothing is reported — this compiles, and prints `0`
-then `7`:
+Qualifying is the way out of that. `Shape.Circle(r)` is looked up on `Shape`,
+whatever else shares the name, and is checked exactly like the bare form: it
+matches that variant and nothing else, so the arms that follow are still reachable
+and still required. This prints `7` then `0`:
 
 ```kite
 enum Shape {
@@ -439,22 +438,42 @@ enum Shape {
     Point
 }
 
-fn bad(s: Shape) -> int {
+enum Hole {
+    Circle(radius: int)
+    Slot
+}
+
+fn f(s: Shape) -> int {
     return match s {
+        Shape.Circle(r) => r
         Shape.Point => 0
     }
 }
 
-fn good(s: Shape) -> int {
+fn main() {
+    io.print(f(Shape.Circle(radius: 7)))
+    io.print(f(Shape.Point))
+}
+```
+
+A qualified name that is not a variant of that enum is `E0111`, and the enum's own
+name where a variant belongs is `E0200` — neither is a catch-all:
+
+```kite fails
+enum Shape {
+    Circle(radius: int)
+    Point
+}
+
+fn f(s: Shape) -> int {
     return match s {
-        Point => 0
-        Circle(r) => r
+        Shape.Square(r) => r //~ E0111
+        Shape(r) => 0 //~ E0200
     }
 }
 
 fn main() {
-    io.print(bad(Shape.Circle(radius: 7)))
-    io.print(good(Shape.Circle(radius: 7)))
+    io.print(f(Shape.Point))
 }
 ```
 

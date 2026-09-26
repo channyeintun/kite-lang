@@ -1,0 +1,52 @@
+// A write replaces the value every earlier test was about. `x != nil` said
+// nothing about what `x = nil` put there, and neither did a test above a loop
+// that ends by writing `x`.
+
+fn fails() -> error {
+    return errors.new("boom")
+}
+
+fn after_a_write() {
+    var x: Option<int> = 5
+    if x != nil {
+        x = nil
+        io.print("\(x + 1)") //~ ERROR E0201
+    }
+}
+
+fn across_a_back_edge() {
+    var x: Option<int> = 5
+    if x == nil {
+        return
+    }
+    for i in 0..3 {
+        io.print("\(x + 1)") //~ ERROR E0201
+        x = nil
+    }
+}
+
+fn in_one_branch() {
+    var x: Option<int> = 5
+    if x == nil {
+        return
+    }
+    if x == 7 {
+        x = nil
+    }
+    io.print("\(x + 1)") //~ ERROR E0201
+}
+
+fn an_error_too() {
+    var e = fails()
+    if e != nil {
+        e = nil
+        io.print(e.message()) //~ ERROR E0301
+    }
+}
+
+fn main() {
+    after_a_write()
+    across_a_back_edge()
+    in_one_branch()
+    an_error_too()
+}
