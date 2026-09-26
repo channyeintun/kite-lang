@@ -1,8 +1,11 @@
 # Getting Kite into Linguist
 
 GitHub highlights through [Linguist](https://github.com/github-linguist/linguist),
-and until a language is in it, `.kite` files are coloured by whatever
-`.gitattributes` says — which for now is Rust, the closest fit available.
+and until a language is in it, `.kite` files go uncoloured. `.gitattributes`
+already names Kite, and Linguist ignores an override it cannot resolve, so the
+line does nothing until the entry is accepted. That is deliberate: mapping them
+to Rust would colour them by claiming, in the one file a repository keeps for
+saying what its sources are, that they are Rust.
 
 Everything a submission needs is here except the one thing that cannot be
 written: evidence that people use the language.
@@ -64,6 +67,6 @@ distinctive is better left to the classifier trained on the samples.
 
 ## Afterwards
 
-The `.gitattributes` mapping onto Rust comes out once the entry ships, and
-`linguist-detectable` is no longer needed: a language Linguist knows counts on
-its own.
+Nothing in `.gitattributes` has to change: `linguist-language=Kite` starts
+resolving the day the entry ships. `linguist-detectable` becomes redundant
+then, because a language Linguist knows counts on its own.

@@ -9,9 +9,9 @@
 # everywhere else rather than a fresh choice.
 #
 # `ace_mode: rust` is not a claim that Kite is Rust. Ace has no Kite mode, the
-# field must name one that exists, and Rust is the closest of them — the same
-# reasoning `.gitattributes` uses today, for the same reason. `codemirror_mode`
-# follows it.
+# field must name one that exists, and Rust is the closest of them — an editor
+# mode is a choice of colours, where `.gitattributes` would be a statement
+# about what the sources are. `codemirror_mode` follows it.
 Kite:
   type: programming
   color: "#e9a63c"
