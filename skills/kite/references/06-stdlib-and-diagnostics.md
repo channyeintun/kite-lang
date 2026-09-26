@@ -242,8 +242,12 @@ are **ASCII only** and say so.
 `or_else<T>(Option<T>, T) -> T` · `is_some<T>(Option<T>) -> bool` ·
 `parse_int(str) -> Option<int>` · `parse_float(str) -> Option<float>`
 
-`parse_int` accepts a leading `-` and digits, nothing else. `parse_float` has
-no exponent — that is `std/json`'s job.
+`parse_int` accepts a leading `-` and digits, nothing else, and is nil past the
+range of an `int` rather than trapping. `parse_float` accepts a leading `-`,
+digits with an optional fraction and an optional exponent (`2.5`, `.5`,
+`6.02e23`) — no `+`, no `inf` — and is **correctly rounded**: the nearest
+float to the decimal written, as `std/json` and `std/toml` also read numbers.
+Past the largest float it is nil; `-0` keeps its sign.
 
 ### Hashing and debug helpers
 
@@ -890,8 +894,10 @@ interpolation already renders. What it cannot do is *align*.
 Every fallible call returns `(T, error)`; there is no errno.
 `read(path) -> (str, error)` `write(path, body) -> error`
 `list(path) -> ([str], error)` `remove(path) -> error`
-`kind(path) -> Kind` (`File` | `Dir` | `Missing`) `exists` `is_file` `is_dir`
-`temp_dir() -> str`.
+`kind(path) -> Kind` (`File` | `Directory` | `Missing`) `exists` `is_file`
+`is_dir` `temp_dir() -> str`. A file whose first character is U+0001 reads as
+a failure: the host marks failures with that character and does not yet mark
+successes.
 
 This is the one host group `kitec run` supplies, so the block below actually
 runs.
@@ -917,7 +923,7 @@ fn main() {
     }
     io.print(body)
     match fs.kind("/etc") {
-        Dir => io.print("dir"),
+        Directory => io.print("dir"),
         File => io.print("file"),
         Missing => io.print("missing"),
     }
@@ -1047,17 +1053,27 @@ defaults: `Credentials.SameOrigin`, `Redirect.Follow`) or `sending_with(headers)
 `Manual`. There is no `mode`: its only interesting value is `no-cors`, which
 returns a response you cannot read.
 
-Routing, all synchronous and testable with no port:
+**Headers as text are unsafe for a value from elsewhere.** `send`'s headers
+and `sending_with(headers)` are `name: value` lines, so a newline inside an
+interpolated value becomes a header of its own. Use
+`sending_pairs([Header]) -> (Options, error)`, which refuses a line break in a
+value and a name that is not a token, as `respond` does for responses.
+
+Routing, all synchronous and testable with no port. Matching looks at the path
+alone — a `?query` or `#fragment` after it takes no part:
 `route(method, pattern, fn(Request) -> Response)` ·
 `serve([Route], Request) -> Response` · `matches(pattern, path)` ·
-`parameter(pattern, path, name) -> Option<str>` ·
-`request_header(request, name) -> Option<str>`.
+`parameter(pattern, path, name) -> Option<str>` (still percent-encoded) ·
+`query_parameter(request, name) -> Option<str>` (decoded as a form is: `+` is a
+space, `%XX` UTF-8 bytes) · `request_header(request, name) -> Option<str>`.
 
 Server: `open(port) -> (Server, error)` async (port 0 asks the host to choose),
 `port_of` · `accept(server) -> (Incoming, error)` async ·
 `respond(incoming, response, [Header]) -> error` — headers as **pairs, not
 text**, because a newline in a value would otherwise become a separator ·
-`run(server, [Route]) -> (int, error)` · `serve_closed` · `shut`.
+`run(server, [Route]) -> (int, error)` · `serve_closed` · `shut`. Once a
+server is `shut` and nothing is waiting, `accept` answers with an error and
+`run` returns the count it answered.
 
 Server-sent events: `events(url)` / `events_named(url, names)` ·
 `listen(stream, name)` · `receive(stream) -> (Event, error)` · `pending` ·
@@ -1180,6 +1196,11 @@ navigation `field(v, key)` `at(v, index)` `items(v) -> [Json]`
 The navigation functions take `Option<Json>` and return `Option<Json>`, so they
 chain without unwrapping and a `Json` passes where an `Option<Json>` is wanted.
 
+`parse` reads RFC 8259 and nothing looser — `01`, `1.`, `\x` and a raw control
+character in a string are errors — and each number is the float nearest what
+was written. `int_of` is nil unless the number is whole and fits an `int`, so
+`@derive(Decode)` refuses `3.7` for an `int` field.
+
 ```kite
 use std/json
 
@@ -1210,6 +1231,10 @@ helpers are in the prelude. Nothing here needs compiler support.
 constants as functions: `pi()` `e()` `tau()` `ln2()` ·
 integers: `max_int()` `min_int()` `checked_add(a, b) -> Option<int>`
 `wrapping_add(a, b) -> int`.
+
+`sqrt` is correctly rounded over the whole range; `trunc`, `floor`, `ceil` and
+`round` hand back a float that is already whole (anything from 2⁵²) rather than
+casting it through `int`.
 
 There is no `math.approx_eq` despite what the float-equality warning says —
 the prelude's `approx_eq` is the one that exists.
@@ -1478,8 +1503,10 @@ canvas, a character count in a terminal); trailing spaces hang, a mandatory
 break ends a line, and a run wider than the line is cut between characters.
 
 UAX #9 rules P2–P3, X1–X10, W1–W7, N0–N2, I1–I2, L1–L2 (not L3, L4, HL1–HL6);
-UAX #14 LB1–LB31 with SA treated as AL and CB unimplemented; Arabic joining to
-Presentation Forms-B with the lam-alef ligature, not HarfBuzz.
+UAX #14 as of Unicode 15.0, LB1–LB31, with SA treated as AL, CB unimplemented,
+the later LB15a–d, LB20a and LB28a not implemented, and East Asian Width read
+only for LB30's openers; Arabic joining to Presentation Forms-B with the
+lam-alef ligature, not HarfBuzz.
 
 ```kite
 use std/text
@@ -1535,11 +1562,14 @@ Same shape as `std/json`. `enum Toml`, `parse(input) -> (Toml, error)`,
 `text_at(doc, path, fallback)`, `int_at`, `float_at`, `bool_at`.
 
 The subset is named: comments, bare/quoted/dotted keys, `[table]` and
-`[[array.of.tables]]`, basic and literal and multi-line strings, integers with
-`_` separators, floats with exponents (`inf` and `nan` are refused), booleans,
-arrays, inline tables. **Dates and times are not implemented** — a date parses
-as the string it was written as, losslessly, rather than being half-mapped onto
-`std/time`.
+`[[array.of.tables]]` (with `[a.b]` and `[[a.b]]` inside an element), basic and
+literal and multi-line strings, integers with `_` separators and `0x`/`0o`/`0b`
+prefixes, floats with exponents (`inf` and `nan` are refused), booleans,
+arrays, inline tables. TOML 1.0's rules about tables are enforced: a table is
+defined once, an inline table or a `[…]` array is closed, and dotted keys do not
+reopen a table a header defined. **Dates and times are not implemented** — a
+date is checked to be one of TOML's four forms and parses as the string it was
+written as, losslessly, rather than being half-mapped onto `std/time`.
 
 ```kite
 use std/toml
