@@ -182,8 +182,8 @@ The AST keeps a span on every node and stores no literal values; the source is
 the single truth, and a pass that wants a value reads it through the span. It
 is not a lossless tree — comments and blank lines are gone — which is exactly
 why `kitec fmt` works on tokens instead: a formatter that rebuilt a program
-from this tree would delete them. `kitec fix`
-does not need the tree at all. It applies the text edits that diagnostics carry.
+from this tree would delete them. `kitec fix` does not need the tree at all. It
+applies the text edits that diagnostics carry.
 
 ### 3.3 Modules
 
