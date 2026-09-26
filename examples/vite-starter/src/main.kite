@@ -30,9 +30,9 @@ struct Line {
 
 fn starting_lines() -> [Line] {
     return [
-        Line { what: "Keyboard", price: 8999, quantity: 1 },
-        Line { what: "Cable", price: 450, quantity: 3 },
-        Line { what: "Stand", price: 2075, quantity: 1 },
+        Line{ what: "Keyboard", price: 8999, quantity: 1 },
+        Line{ what: "Cable", price: 450, quantity: 3 },
+        Line{ what: "Stand", price: 2075, quantity: 1 },
     ]
 }
 

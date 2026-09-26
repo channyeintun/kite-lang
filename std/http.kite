@@ -219,7 +219,7 @@ pub fn sending() -> Options {
 
 /// The same, carrying the caller's headers.
 pub fn sending_with(headers: str) -> Options {
-    return Options{..sending(), headers: headers }
+    return Options{ ..sending(), headers: headers }
 }
 
 /// The word `fetch` knows this by.

@@ -23,8 +23,8 @@ fn describe(n: int) -> (int, str) {
 
 fn main() {
     let items = [
-        Item { name: "book", price: 30 },
-        Item { name: "lamp", price: 120 },
+        Item{ name: "book", price: 30 },
+        Item{ name: "lamp", price: 120 },
     ]
     io.print(items.len())
     io.print(total(items))

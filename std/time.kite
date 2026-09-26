@@ -204,7 +204,7 @@ pub fn days_in_month(year: int, month: int) -> int {
 /// without asking how long the month it is ending happens to be.
 pub fn month_start(year: int, month: int, east_minutes: int) -> int {
     return epoch_of(
-        Civil { year: year, month: month, day: 1, hour: 0, minute: 0, second: 0 },
+        Civil{ year: year, month: month, day: 1, hour: 0, minute: 0, second: 0 },
         east_minutes,
     )
 }
