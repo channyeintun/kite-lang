@@ -6886,6 +6886,24 @@ impl<'a> Checker<'a> {
                 let (ast::Expr::Field { base: obj_written, name, .. }, Some(sid)) =
                     (written, struct_id)
                 else {
+                    // A tuple is held, but it is a value whose elements are
+                    // fixed once it is built: `t.0 = …` is refused, so the
+                    // write back this would need is too.
+                    if matches!(self.types.kind(obj.ty), TyKind::Tuple(_)) {
+                        let noun = self.container_noun(ty);
+                        self.diags.push(
+                            Diagnostic::error(
+                                codes::E0200,
+                                format!("a {} in a tuple cannot be {}", noun, what),
+                            )
+                            .with_primary(written.span(), "an element of a tuple")
+                            .with_note(
+                                "a tuple's elements are fixed once it is built; build a new \
+                                 one, or keep the value in a struct's `var` field",
+                            ),
+                        );
+                        return None;
+                    }
                     self.not_a_place(written, ty, what);
                     return None;
                 };
@@ -6954,8 +6972,8 @@ impl<'a> Checker<'a> {
     }
 
     /// A slice or map is changed in place only where the change has somewhere
-    /// to go. A call's result, a literal, a tuple's element: each is a value
-    /// nothing holds, so changing it would change nothing anybody could see.
+    /// to go. A call's result or a literal is a value nothing holds, so
+    /// changing it would change nothing anybody could see.
     fn not_a_place(&mut self, written: &ast::Expr, ty: TyId, what: &str) {
         let noun = self.container_noun(ty);
         let name = if noun == "map" { "m" } else { "xs" };

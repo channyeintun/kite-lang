@@ -264,6 +264,7 @@ AST; there is no separate desugaring pass. What each surface form becomes:
 | `"a \(b) c"` | concatenation folded left to right, each hole rendered — `int`, `float` and `bool` directly, anything else through its `Display` implementation |
 | `Point{ ..p, y: 5.0 }` | an explicit construction naming every field, reading the base for each field it supplies |
 | `m.remove(k)`, `xs.push(v)` | statements on the binding (`MapRemove`, `SlicePush`), because both write to it |
+| `grid[i][j] = v`, `b.cells.push(x)`, any change to a slice or map held other than in a plain binding | a block: the operands bound to hidden locals, each level copied into another, the innermost changed, and each written back (`SetIndex`, `SetField`) — so every such statement still changes a local |
 | a module-level constant | the literal it evaluated to |
 
 `match` remains in HIR — it is lowered in MIR, after the exhaustiveness check

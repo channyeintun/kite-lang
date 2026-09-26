@@ -611,8 +611,9 @@ fn main() {
 
 Every level must allow the write: the root binding is a `var` (a `let` is
 `E0114`), a field on the way is declared `var` (else `E0114`), and a struct is
-reached through a binding that may change it. A value nothing holds — a call's
-result, a tuple element — is `E0200`: bind it to a `var` first.
+reached through a binding that may change it. A call's result (held by
+nothing) and a tuple element (fixed once built) are `E0200`: bind the value to
+a `var` first.
 
 ```kite fails
 fn rows() -> [[int]] {

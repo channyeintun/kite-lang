@@ -760,9 +760,9 @@ undone by the write. Because these are values, a copy of `grid` or of `grid[i]`
 taken before the write still holds what it did.
 
 A `let` binding at the root, or a field not declared `var`, is `E0114`, as the
-same assignment written out would be. A value nothing holds — a call's result,
-a tuple's element — has nowhere to keep the change, and is `E0200`: bind it to
-a `var` and change that.
+same assignment written out would be. A call's result is held by nothing, so
+there is nowhere to keep the change, and a tuple's elements are fixed once it
+is built; both are `E0200`. Bind the value to a `var` and change that.
 
 ---
 
