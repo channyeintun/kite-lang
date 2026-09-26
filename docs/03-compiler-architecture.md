@@ -393,9 +393,11 @@ is a bug in Kite rather than in the program.
 
 MIR → Cranelift IR → object file → system linker.
 
-The garbage collector is Kite's own: precise, generational, non-moving in v1.
-Non-moving avoids needing a read barrier and keeps interior state simple; the
-tradeoff is fragmentation, revisited after v1.
+The garbage collector is Kite's own: precise and generational. New objects are
+bump-allocated in a nursery, and a minor collection moves the survivors into
+the old generation, updating every reference; the old generation itself does
+not move, which avoids needing a read barrier and keeps interior state simple,
+at the cost of fragmentation there.
 
 Precision comes from stack maps emitted at every safepoint, using type maps the
 compiler already has from MIR. Because Kite has no `unsafe`, no pointer
@@ -423,9 +425,11 @@ Purpose:
 - **Compiler test oracle** — differential testing against the Wasm and native
   backends catches codegen bugs that no single backend would reveal
 
-`.kbc` files are versioned and validated on load. The VM shares `kite-rt`'s
-collector and scheduler with the native target, so only the execution engine
-differs.
+`.kbc` files are versioned and validated on load. The VM does not share
+`kite-rt`'s collector: its values are reference-counted, so a cycle of
+references is never freed while the program runs ([SPECIFICATION §14](../SPECIFICATION.md#14-memory-model)).
+Its scheduler is its own too, deterministic by the same rules, which is what
+lets the three backends be compared line for line.
 
 ---
 

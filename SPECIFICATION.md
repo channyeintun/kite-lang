@@ -1699,14 +1699,14 @@ broken by extracting the shared part.
 
 ## 14. Memory model
 
-Kite is garbage-collected on every target. There is no manual allocation, no
+Kite's memory is managed on every target. There is no manual allocation, no
 `free`, no ownership, no borrowing, and no lifetimes.
 
 | Target | Collector |
 |---|---|
 | `wasm32-gc` | **The host engine's collector.** WasmGC objects are allocated with `struct.new` / `array.new` and traced by V8, SpiderMonkey, or JavaScriptCore directly. Kite ships no collector in the binary. |
-| `native-*` | Precise tracing collector: generational, non-moving in v1. Type maps emitted by the compiler give exact root and field information. |
-| `kbc` | Same collector as native. |
+| `native-*` | Precise tracing collector, generational. New objects are bump-allocated in a nursery, and a minor collection **moves** the survivors into the old generation, updating every reference to them; the old generation does not move, and is collected by mark-and-sweep. Stack maps emitted by the compiler give exact root and field information. |
+| `kbc` | **Reference counting**, not a tracing collector. The bytecode VM is the development loop, the embedding target and the differential-testing oracle, and a value is freed when its last reference goes. A cycle of references — two structs whose `var` fields point at each other — is never freed while the program runs. That is a leak in a long-running embedding and harmless in a test run; programs meant to run for a long time with cyclic data belong on the native or Wasm target. |
 
 Delegating collection to the browser engine on the web target is the single
 largest binary-size win available in 2026, and it is why this design was not

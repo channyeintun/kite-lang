@@ -794,14 +794,14 @@ cleartext it never chose.
 
 ## 6. Memory
 
-Garbage-collected on every target. No manual allocation, no `free`, no
-ownership, no moves, no borrowing, no lifetimes, no annotations.
+Managed on every target. No manual allocation, no `free`, no ownership, no
+moves, no borrowing, no lifetimes, no annotations.
 
 | Target | Collector |
 |---|---|
 | `wasm32-gc` | The host engine's — V8, SpiderMonkey, JavaScriptCore. Kite ships no collector in the binary. |
-| `native-*` | Precise tracing, generational, non-moving in v1. |
-| `kbc` (bytecode VM) | The same collector as native. |
+| `native-*` | Precise tracing, generational: the nursery moves survivors into an old generation that does not move. |
+| `kbc` (bytecode VM) | Reference counting. A cycle of references is never freed while the program runs — harmless in a test, a leak in a long-running embedding. |
 
 Three consequences of WasmGC's shape, accepted deliberately:
 
