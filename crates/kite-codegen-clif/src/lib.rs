@@ -40,9 +40,10 @@
 //!
 //! Allocation and mutation all cross into the runtime: variadic constructions
 //! stage their operands in `KITE_RT_STAGE` — the native shape of the bytecode
-//! VM's consecutive argument window — and the one in-place heap mutation the
-//! language has, a `var` field write, is a runtime call so the write barrier
-//! lives in exactly one place.
+//! VM's consecutive argument window — and the in-place heap mutations, a
+//! `var` field write and a write into a slice this function owns (see
+//! `slices`), are runtime calls so the write barrier lives in exactly one
+//! place.
 
 use cranelift_codegen::ir::{types, AbiParam, ArgumentExtension, InstBuilder, MemFlagsData, Signature, TrapCode, Type, Value};
 use cranelift_codegen::isa::{CallConv, TargetIsa};
@@ -53,6 +54,7 @@ use kite_hir::{BinOp, Builtin, StrKind, TyId, TyKind, Types, UnOp};
 use kite_mir as mir;
 use std::collections::HashMap;
 
+mod slices;
 mod support;
 pub use support::{unsupported, Unsupported};
 
@@ -138,8 +140,8 @@ const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_error_as", &[I64, I64, I64], Some(I64)),
     ("kite_rt_set_field", &[I64, I64, I64, I64], None),
     ("kite_rt_index_get", &[I64, I64], Some(I64)),
-    ("kite_rt_set_index", &[I64, I64, I64], Some(I64)),
-    ("kite_rt_slice_push", &[I64, I64], Some(I64)),
+    ("kite_rt_set_index", &[I64, I64, I64, I8], Some(I64)),
+    ("kite_rt_slice_push", &[I64, I64, I8], Some(I64)),
     ("kite_rt_slice_len", &[I64], Some(I64)),
     ("kite_rt_slice_get", &[I64, I64, I64], Some(I64)),
     ("kite_rt_map_len", &[I64], Some(I64)),
@@ -813,6 +815,10 @@ struct FnLower<'a, 'b, M: Module> {
     fn_index: usize,
     b: FunctionBuilder<'a>,
     vars: Vec<Variable>,
+    /// One `i8` owned flag per slice local the function writes into, by
+    /// local index: whether nothing but that local can reach its slice, so a
+    /// write may go straight in. See the `slices` module.
+    owned: HashMap<usize, Variable>,
     blocks: Vec<cranelift_codegen::ir::Block>,
     /// Function references imported into this function, on first use.
     rt_refs: HashMap<&'static str, cranelift_codegen::ir::FuncRef>,
@@ -866,6 +872,15 @@ fn define_fn<M: Module>(
         };
         b.def_var(vars[i], zero);
     }
+    // Every flag starts clear: a parameter's slice is the caller's too, and
+    // any other local has not been given one yet.
+    let mut owned = HashMap::new();
+    for l in slices::written(f) {
+        let flag = b.declare_var(I8);
+        let clear = b.ins().iconst(I8, 0);
+        b.def_var(flag, clear);
+        owned.insert(l.index(), flag);
+    }
     b.ins().jump(blocks[0], &[]);
 
     let mut lower = FnLower {
@@ -874,6 +889,7 @@ fn define_fn<M: Module>(
         fn_index,
         b,
         vars,
+        owned,
         blocks,
         rt_refs: HashMap::new(),
         fn_refs: HashMap::new(),
@@ -1091,9 +1107,55 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
 
     // ---- statements ------------------------------------------------------
 
+    /// Clear the owned flag of every written slice local this instruction
+    /// reads in a way that can keep the reference — before the instruction,
+    /// so a local passed to a call is already unowned when the call returns.
+    ///
+    /// This is the whole of the rule that lets a write skip the copy. What
+    /// cannot keep a reference is a read of its length or an element, a
+    /// comparison, or a range (which copies); see `slices::escaping_operands`.
+    fn release(&mut self, s: &mir::Inst) {
+        if self.owned.is_empty() {
+            return;
+        }
+        for o in slices::escaping_operands(s) {
+            if let mir::Operand::Local(l) = o {
+                if let Some(&flag) = self.owned.get(&l.index()) {
+                    let clear = self.b.ins().iconst(I8, 0);
+                    self.b.def_var(flag, clear);
+                }
+            }
+        }
+    }
+
+    /// `xs.push(v)` or `xs[i] = v`: the runtime writes in place when the
+    /// flag says the local owns its slice and copies when it does not, and
+    /// either way answers the slice the local keeps — which it then owns.
+    fn slice_write(&mut self, local: mir::Local, name: &'static str, args: &[Value]) {
+        let cur = self.b.use_var(self.vars[local.index()]);
+        let flag = self.owned[&local.index()];
+        let owned = self.b.use_var(flag);
+        let mut all = vec![cur];
+        all.extend_from_slice(args);
+        all.push(owned);
+        let new = self.call_rt(name, &all).unwrap();
+        self.b.def_var(self.vars[local.index()], new);
+        let set = self.b.ins().iconst(I8, 1);
+        self.b.def_var(flag, set);
+    }
+
     fn stmt(&mut self, s: &mir::Inst) {
+        self.release(s);
         match s {
-            mir::Inst::Assign { dst, value } => self.rvalue(*dst, value),
+            mir::Inst::Assign { dst, value } => {
+                self.rvalue(*dst, value);
+                // A slice made here is the destination's alone; one read from
+                // anywhere else may be shared with where it came from.
+                if let Some(&flag) = self.owned.get(&dst.index()) {
+                    let fresh = self.b.ins().iconst(I8, i64::from(slices::fresh(value)));
+                    self.b.def_var(flag, fresh);
+                }
+            }
             mir::Inst::SetField { base, index, value } => {
                 let obj = self.operand(base);
                 let w = self.operand_word(value);
@@ -1101,23 +1163,27 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 let args = [obj, self.iconst(*index as i64), w, self.iconst(i64::from(is_ref))];
                 self.call_rt("kite_rt_set_field", &args);
             }
-            // Slices are copy-on-write values: the runtime copies, mutates
-            // the copy, and the local is rebound — the same observable
-            // behaviour as the VM's clone-if-shared.
+            // Slices are values: the write goes into the slice itself only
+            // when the local's owned flag says nothing else can see it, and
+            // into a copy the local is rebound to otherwise — the VM's
+            // `Rc::make_mut`, decided by the compiler instead of a count.
             mir::Inst::SetIndex { base, index, value } => {
-                let cur = self.operand(base);
                 let idx = self.operand(index);
                 let w = self.operand_word(value);
-                let new = self.call_rt("kite_rt_set_index", &[cur, idx, w]).unwrap();
-                if let mir::Operand::Local(l) = base {
-                    self.b.def_var(self.vars[l.index()], new);
+                match base {
+                    mir::Operand::Local(l) => self.slice_write(*l, "kite_rt_set_index", &[idx, w]),
+                    // Not a place, so nothing can see the write; it still
+                    // traps on a bad index, as the VM's does.
+                    _ => {
+                        let cur = self.operand(base);
+                        let unowned = self.b.ins().iconst(I8, 0);
+                        self.call_rt("kite_rt_set_index", &[cur, idx, w, unowned]);
+                    }
                 }
             }
             mir::Inst::SlicePush { local, value } => {
-                let cur = self.b.use_var(self.vars[local.index()]);
                 let w = self.operand_word(value);
-                let new = self.call_rt("kite_rt_slice_push", &[cur, w]).unwrap();
-                self.b.def_var(self.vars[local.index()], new);
+                self.slice_write(*local, "kite_rt_slice_push", &[w]);
             }
             mir::Inst::MapSet { local, key, value } => {
                 let cur = self.b.use_var(self.vars[local.index()]);
@@ -1468,9 +1534,12 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 let v = self.word_as(w, ty);
                 self.def(dst, v);
             }
+            // The low half of the second header word; the high half is the
+            // room the slice has to grow into, which is not its length.
             mir::Rvalue::SliceLen { base } => {
                 let s = self.operand(base);
-                let v = self.b.ins().load(I64, MemFlagsData::trusted(), s, 8);
+                let v = self.b.ins().load(types::I32, MemFlagsData::trusted(), s, 8);
+                let v = self.b.ins().uextend(I64, v);
                 self.def(dst, v);
             }
             mir::Rvalue::SliceGet { base, index } => {

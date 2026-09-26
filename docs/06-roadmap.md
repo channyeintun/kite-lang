@@ -1090,6 +1090,21 @@ and that difference is the backend's, not the language's. And the runtime is
 is not this phase's to give, and the `Share` marker is still what will make it
 free when the platform allows it.
 
+**Later: slices grow in place, so the barrier covers two mutations.** "Everything
+else is copy-on-write and allocates afresh" was true, and it made every `push`
+and `xs[i] = v` copy the whole slice: a hundred thousand pushes took 4.1 s under
+`--native` against the VM's 16 ms, and a hundred thousand index writes 10.8 s.
+The Wasm backend had the same problem and fixed it first, and this is its fix on
+this heap: a slice object carries a capacity beside its length, and each slice
+local a function writes into has an owned flag the compiler keeps — set when the
+function made the slice, cleared wherever the reference could be kept — so a
+write into an owned slice goes in place and a write into a shared one copies,
+as `Rc::make_mut` decides on the VM. The same loops take a few milliseconds.
+Writing in place means a young reference can be stored into a promoted slice,
+so the write barrier has two callers now; it is still one function, which is
+the part of the claim above that mattered. §8 of `03-compiler-architecture.md`
+has the details.
+
 ---
 
 ## Phase 10 — Tooling ✅ **including the package manager**

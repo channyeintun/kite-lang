@@ -611,10 +611,29 @@ are bump-allocated in a contiguous nursery, and a minor collection *evacuates*
 the live ones into the old generation, updating every reference — which is why
 precision is not optional. The old generation does not move: each object is its
 own allocation, swept by an occasional mark-and-sweep once the generation has
-grown past a threshold. The one in-place heap mutation the language has, a
-`var` field write, goes through the runtime so the write barrier lives in one
-place; an old object that has a reference stored into it joins the remembered
-set, which the next minor collection scans as roots.
+grown past a threshold. The in-place heap mutations — a `var` field write, and a
+write into a slice the function owns (below) — go through the runtime so the
+write barrier lives in one place; an old object that has a reference stored
+into it joins the remembered set, which the next minor collection scans as
+roots.
+
+**A slice is one object with room to spare, written in place when nothing else
+can see it** — the Wasm backend's rule (§7), on a different heap. The second
+header word holds the length in its low half and the capacity in its high
+half; only the first `len` slots are elements, and they are all the collector
+traces and all `==` and the renderer walk. Every slice local a function writes
+into has an `i8` *owned* flag, set when the function made the slice itself (a
+literal, a range, `keys()`, or the copy a write made) and cleared wherever the
+local is read in a way that can keep the reference — the Wasm backend's list,
+plus an `Unwrap` of a non-optional, which is a move here. `kite_rt_slice_push`
+and `kite_rt_set_index` take the flag: owned with room, they write the slot
+and return the same object; otherwise they copy — twice the length plus four
+for a push, exactly the length for a write — and the local owns the copy. A
+hundred thousand pushes went from four seconds to a few milliseconds, and a
+store of a reference into an owned slice that has been promoted is the second
+thing the write barrier covers. `tests/differential.rs` runs
+`slices-are-values` and `slices-grow-in-place-natively` on all three backends,
+and natively again with a nursery of one page.
 
 Roots come from Cranelift's stack maps. Every reference-typed local is declared
 as needing one, so at each safepoint — a call — the live references sit in
