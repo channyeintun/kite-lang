@@ -126,7 +126,10 @@ let (first, second) = await task.both(a, b)   // 100ms, not 150
 
 **Errors that are types.** `impl Error for MyType` makes a concrete type
 usable wherever an `error` is expected — the conversion happens at that point
-and is an ordinary call in the IR, so nothing about it is hidden.
+and is an ordinary call in the IR, so nothing about it is hidden. The error
+keeps the value it was made from and whatever it wrapped, so a caller four
+layers up can still ask `LoadError.is(errors.root(err))`, take the value back
+out with `LoadError.as(…)`, or read the whole story with `errors.chain(err)`.
 
 ```kite
 pub enum LoadError {
@@ -309,12 +312,6 @@ python3 -m http.server -d site 8000
 
 Recorded here rather than left to be discovered:
 
-- **An error carries its message, not its value.** `impl Error for MyType` now
-  works and a concrete type may be returned in an error slot — but the
-  conversion renders the message and drops the value, so `cause`,
-  `errors.chain`, `errors.is<T>` and `errors.as<T>` are still absent. Carrying
-  the value needs a change to the error representation in all three backends:
-  [Phase 24's remaining half](docs/06-roadmap.md#phase-24--concrete-error-types).
 - **No real parallelism, on any target.** A WasmGC reference cannot cross a
   thread boundary until shared-everything-threads ships, and the VM's values
   are `Rc`-based. `Share` is enforced now so that the day either changes, no
