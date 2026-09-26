@@ -1599,6 +1599,12 @@ person doing a demolition would get wrong the same way:
   UAX #14 opportunities and `canvas.width_of` has the measurement, so this is a
   small function that has not been written rather than a missing capability —
   but it is a gap, and it belongs to canvas rather than to the document.
+  **Since written:** `text.wrap(body, width, measure)` takes the opportunities
+  greedily against a measurement the caller hands in, so it wraps for a canvas
+  and a terminal alike, and it is tested on both backends in
+  `tests/std/wrap_test.kite`. Writing it found that `CR LF` was reported as two
+  breaks rather than one (LB5), which would have given every CRLF paragraph an
+  empty line per line.
 
 ---
 

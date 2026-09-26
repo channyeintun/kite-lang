@@ -315,11 +315,6 @@ Recorded here rather than left to be discovered:
   `errors.chain`, `errors.is<T>` and `errors.as<T>` are still absent. Carrying
   the value needs a change to the error representation in all three backends:
   [Phase 24's remaining half](docs/06-roadmap.md#phase-24--concrete-error-types).
-- **No line breaking outside the browser.** `ui.wrap` was the only one, and it
-  went with `std/ui`. The browser wraps its own text, so this only matters to a
-  program painting into a `<canvas>` — `std/text` has the UAX #14 break
-  opportunities and `canvas.width_of` has the measurement, so it is a small
-  function nobody has written rather than a missing capability.
 - **No real parallelism, on any target.** A WasmGC reference cannot cross a
   thread boundary until shared-everything-threads ships, and the VM's values
   are `Rc`-based. `Share` is enforced now so that the day either changes, no

@@ -1775,9 +1775,9 @@ pub fn join_arabic(run: str) -> str {
 //
 // Where a line *may* break, as opposed to where it *must* fit. The two are
 // different questions and only the second needs a font: this decides the
-// opportunities, and a caller with `canvas.width_of` decides which of them to
-// take. Nothing in the standard library does that second half — see the
-// README's list of what is not done.
+// opportunities, and `wrap`, at the end of this section, takes them: the
+// greedy half, with the measurement handed in by the caller — `canvas.width_of`
+// on a canvas, one per character in a terminal.
 //
 // **The subset, named.** The Line_Break property is a table of every assigned
 // code point, and what is here covers the classes that occur in the scripts the
@@ -2158,6 +2158,11 @@ fn may_break(classes: [LineBreak], i: int) -> bool {
     let before = classes[i - 1]
     let here = classes[i]
 
+    // LB5: `CR × LF`. A carriage return and the line feed after it are one
+    // break, not two, or every CRLF file would grow an empty line per line.
+    if before == LineBreak.CR && here == LineBreak.LF {
+        return false
+    }
     // LB4, LB5: always break after a mandatory break. LB6: never before one.
     if is_mandatory(before) {
         return true
@@ -2350,4 +2355,128 @@ fn hangul_joins(before: LineBreak, here: LineBreak) -> bool {
         }
     }
     return false
+}
+
+// ---- wrapping ---------------------------------------------------------------
+
+/// A paragraph set into lines no wider than `width`, as `measure` counts width.
+///
+/// The half of line breaking that needs a measurement: `break_opportunities`
+/// says where a line *may* end, and this ends each line at the last of them
+/// that still fits — greedy first fit, which is what a browser does. The
+/// measurement is the caller's, so the same function wraps for a canvas
+/// (`canvas.width_of`), for a terminal (one per character), or for anything
+/// else with a notion of width, and gives the same lines on every backend for
+/// the same measurements.
+///
+/// Three things a caller should know:
+///
+/// - **A mandatory break always ends a line.** `\n`, `\r\n`, `\r` and the
+///   Unicode line and paragraph separators each end the line they are on, and
+///   are not part of it. Two in a row make an empty line between them; one at
+///   the very end of the text does not start an empty line after it.
+/// - **Spaces at the end of a line hang.** They neither count toward the width
+///   nor appear in the answer, which is UAX #14's treatment of a line end.
+///   Spaces at the start of a paragraph are kept: they are indentation.
+/// - **A run too wide for any line is broken between characters** rather than
+///   left to overflow — what CSS calls `overflow-wrap: break-word`. The break
+///   never falls before a combining mark, so an accent stays with its letter,
+///   and every line holds at least one character, so a width too narrow for
+///   anything still makes progress rather than looping.
+///
+/// ```kite
+/// let chars = |s: str| -> float { return s.len() as float }
+/// let lines = wrap("the quick brown fox", 10.0, chars)
+/// assert(lines.len() == 2, "two lines")
+/// assert(lines[0] == "the quick", "as much as fits on the first")
+/// assert(lines[1] == "brown fox", "and the rest on the second")
+/// ```
+pub fn wrap(body: str, width: float, measure: fn(str) -> float) -> [str] {
+    var lines: [str] = []
+    let n = body.len()
+    let allowed = break_opportunities(body)
+    // The line being set is `body[start..pos]`, and all of it is known to fit.
+    // `pos` only ever stops at an opportunity, or mid-run after a forced break.
+    var start = 0
+    var pos = 0
+    for pos < n {
+        var next = pos + 1
+        for next < n && !allowed[next] {
+            next += 1
+        }
+        let seen = visible_end(body, start, next)
+        if seen == start || measure(body.slice(start, seen)) <= width {
+            pos = next
+            if is_mandatory(line_break_class(body.code_at(next - 1))) {
+                lines.push(body.slice(start, seen))
+                start = next
+            }
+            continue
+        }
+        // It does not fit. End the line before this run if the line holds
+        // anything, and look at the run again on a line of its own.
+        let held = visible_end(body, start, pos)
+        if held > start {
+            lines.push(body.slice(start, held))
+            start = pos
+            continue
+        }
+        // The run is wider than a whole line: break inside it.
+        let cut = split_point(body, start, seen, width, measure)
+        lines.push(body.slice(start, cut))
+        if cut >= seen {
+            // All of it went, and what is left of the run is the spaces that
+            // hang after it — or the break that ends its paragraph.
+            start = next
+            pos = next
+        } else {
+            start = cut
+            pos = cut
+        }
+    }
+    if start < n {
+        lines.push(body.slice(start, visible_end(body, start, n)))
+    }
+    return lines
+}
+
+/// Where `body[from..to]` ends once the spaces and the mandatory break that
+/// hang off its end are set aside.
+fn visible_end(body: str, from: int, to: int) -> int {
+    var end = to
+    for end > from && hangs(body.code_at(end - 1)) {
+        end -= 1
+    }
+    return end
+}
+
+/// Whether a character at the end of a line takes no room on it.
+fn hangs(code: int) -> bool {
+    let c = line_break_class(code)
+    return c == LineBreak.SP || is_mandatory(c)
+}
+
+/// The longest prefix of `body[start..end]` that fits, cut between characters
+/// and never before a combining mark — and never shorter than one character,
+/// so that a line too narrow for anything still takes something.
+fn split_point(body: str, start: int, end: int, width: float, measure: fn(str) -> float) -> int {
+    var best = next_cluster(body, start, end)
+    var m = next_cluster(body, best, end)
+    for m < end {
+        if measure(body.slice(start, m)) > width {
+            return best
+        }
+        best = m
+        m = next_cluster(body, m, end)
+    }
+    return best
+}
+
+/// The position after the character at `i` and any marks attached to it.
+fn next_cluster(body: str, i: int, end: int) -> int {
+    var k = i + 1
+    for k < end && is_combining(body.code_at(k)) {
+        k += 1
+    }
+    return k
 }

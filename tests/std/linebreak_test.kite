@@ -121,6 +121,9 @@ fn mandatory_checks() -> [error] {
     var out: [error] = []
     out.push(test.equal_str(shape("a\nb"), "..|", "a newline is a break after it"))
     out.push(test.equal_str(shape("a\n"), "..", "and before it, never"))
+    // LB5: a carriage return and its line feed are one break, not two.
+    out.push(test.equal_str(shape("a\r\nb"), "...|", "CRLF breaks once, after the LF"))
+    out.push(test.equal_str(shape("a\rb"), "..|", "a lone CR breaks after itself"))
     return out
 }
 

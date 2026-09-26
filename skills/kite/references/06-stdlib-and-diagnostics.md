@@ -1468,7 +1468,11 @@ stated.
 `bidi_runs(line) -> [Run]` (a `Run` has `body` and `rtl` — no offsets) ·
 `bidi_runs_with(line, base)` · `bidi_levels` · `bidi_visual` ·
 `is_combining(code)` · `join_arabic(run) -> str` ·
-`line_break_class(code) -> LineBreak` · `break_opportunities(body) -> [bool]`.
+`line_break_class(code) -> LineBreak` · `break_opportunities(body) -> [bool]` ·
+`wrap(body, width: float, measure: fn(str) -> float) -> [str]` — greedy lines
+over those opportunities, measured by the caller (`canvas.width_of` on a
+canvas, a character count in a terminal); trailing spaces hang, a mandatory
+break ends a line, and a run wider than the line is cut between characters.
 
 UAX #9 rules P2–P3, X1–X10, W1–W7, N0–N2, I1–I2, L1–L2 (not L3, L4, HL1–HL6);
 UAX #14 LB1–LB31 with SA treated as AL and CB unimplemented; Arabic joining to
@@ -1485,6 +1489,8 @@ fn main() {
     }
     io.print("\(text.bidi_levels(line).len()) \(text.bidi_visual(line).len())")
     io.print("\(count(text.break_opportunities("a b c"), |b| b))")
+    let chars = |s: str| -> float { return s.len() as float }
+    io.print(join(text.wrap("the quick brown fox", 10.0, chars), "|"))
     io.print("\(text.join_arabic("\u{0628}\u{0627}")) \(text.is_combining(0x0301))")
     match text.bidi_class(65) {
         L => io.print("left"),

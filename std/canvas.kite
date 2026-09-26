@@ -77,9 +77,9 @@ pub fn circle_ring(cx: float, cy: float, radius: float, width: float, colour: in
 /// A run of text, with `(x, y)` at the top left of its line box.
 ///
 /// One run on one line: this draws what it is given and does not wrap. Wrapping
-/// is a measurement rather than a drawing decision, and nothing here does it:
-/// [`width_of`] and `text.break_opportunities` are the two halves it would be
-/// written from.
+/// is a measurement rather than a drawing decision, so it is `text.wrap`'s:
+/// hand it [`width_of`] as the measurement and draw the lines it answers, one
+/// [`line_height`] apart.
 pub fn text(x: float, y: float, body: str, colour: int) {
     draw.text(x, y, body, colour)
 }
