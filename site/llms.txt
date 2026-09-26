@@ -9,7 +9,7 @@ Run this before believing any Kite you read or write. No install, no toolchain,
 works in a sandbox:
 
 ```
-npx --yes @kite-lang/compiler-wasm kitec check program.kite
+npx --yes --package=@kite-lang/compiler-wasm kitec check program.kite
 ```
 
 `kitec --explain E0302` prints the reasoning behind any diagnostic code.

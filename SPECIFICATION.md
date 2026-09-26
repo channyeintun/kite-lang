@@ -7,7 +7,7 @@ otherwise. Where this document and the compiler disagree, the compiler is
 right and the disagreement is a bug in this file — and five of them were,
 found by an audit that compiled what each section claimed rather than reading
 a status table. Four were built and one was struck, which is recorded in
-[Phase 26](../docs/06-roadmap.md#phase-26--the-gaps-between-the-specification-and-the-compiler).
+[Phase 26](docs/06-roadmap.md#phase-26--the-gaps-between-the-specification-and-the-compiler).
 
 ---
 
@@ -456,27 +456,35 @@ default arguments, no variadic parameters, no named arguments at call sites, and
 no overloading. If a function needs many optional inputs, it takes a struct:
 
 ```kite
-pub struct RequestOptions {
-    method: str
-    /// Milliseconds. There is no `Duration` type: `std/time` names the units
-    /// in the functions that build one — `time.seconds(30)` is `30000` — and a
-    /// wrapper around an `int` would buy nothing the name does not.
-    timeout: int
-    headers: {str: str}
+// std/http
+pub struct Options {
+    /// `name: value` pairs, one per line.
+    pub headers: str
+    pub credentials: Credentials
+    pub redirect: Redirect
 }
 
-pub fn request(url: str, opts: RequestOptions) -> (Response, error)
+/// The defaults, to be changed where a caller cares.
+pub fn sending() -> Options
+
+pub async fn send_with(method: str, url: str, body: str, options: Options) -> (Response, error)
 
 // call site
-let (res, err) = http.request(url, RequestOptions{
-    method:  "POST",
-    timeout: time.seconds(30),
-    headers: {"content-type": "application/json"},
+let (res, err) = await http.send_with("POST", url, body, http.Options{
+    ..http.sending(),
+    headers: "content-type: application/json",
+    credentials: http.Credentials.Include,
 })
 ```
 
 Struct literals require field names, so this reads as well as named arguments
-would, using machinery the language already has.
+would, using machinery the language already has — and a functional update from
+a function that returns the defaults makes every field optional, with the call
+site naming only what it changes.
+
+A length of time is an `int` of milliseconds. There is no `Duration` type:
+`std/time` names the units in the functions that build one — `time.seconds(30)`
+is `30000` — and a wrapper around an `int` would buy nothing the name does not.
 
 ### 4.5 Closures
 
@@ -583,7 +591,7 @@ answers a different question at the cost of walking the whole value.
 
 Floating-point `==` follows IEEE-754, so `nan != nan`. The compiler emits a
 warning when both operands of `==` are statically known to be floats and neither
-is a literal, suggesting `math.approx_eq`.
+is a literal, suggesting the prelude's `approx_eq(a, b, tolerance)`.
 
 ### 5.3 Struct literals
 
@@ -710,12 +718,17 @@ outer: for row in grid {
 ### 6.3 `defer`
 
 ```kite
-fn process(path: str) -> (Data, error) {
-    let (file, err) = fs.open(path)
-    check err
-    defer file.close()
+use std/socket
 
-    // ... any return from here closes the file
+async fn greeting(url: str) -> (str, error) {
+    let (sock, err) = await socket.connect(url)
+    check err
+    defer socket.close(sock)
+
+    // ... any return from here closes the socket
+    let (first, rerr) = await socket.receive(sock)
+    check rerr
+    return first, nil
 }
 ```
 
@@ -1556,9 +1569,17 @@ use std/http
 use std/json as j
 
 fn main() {
+    let err = start()
+    if err != nil {
+        io.print("cannot start: \(err.message())")
+    }
+}
+
+fn start() -> error {
     let (cfg, err) = config.load("app.toml")
     check err
     ui.run(ui.App{ config: cfg })
+    return nil
 }
 ```
 

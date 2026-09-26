@@ -169,7 +169,7 @@
       "patterns": [
         {
           "name": "support.type.primitive.kite",
-          "match": "\\b(int|float|bool|str|char|error)\\b"
+          "match": "\\b(int|float|bool|str|error)\\b"
         },
         {
           "comment": "`dyn Trait` — the trait is a type, and the `dyn` before it is what says the dispatch is dynamic.",

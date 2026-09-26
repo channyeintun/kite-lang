@@ -283,6 +283,22 @@ fn main() {
 }
 ```
 
+**A bare `error` bound to a name and never looked at.** `let e =
+dom.set_text(…)` is exactly what you write by habit, and naming the result does
+not buy silence: a lone `error` binding is watched like the error slot of a
+destructuring. Test it, or write `_ = …` and mean it.
+
+```kite fails
+fn touch() -> error {
+    return errors.new("no")
+}
+
+fn main() {
+    let e = touch() //~ E0302
+    io.print("dropped")
+}
+```
+
 **`_ = …`, which is allowed** — the one way to throw an error away, chosen so
 that it is a line a reader sees and `grep` finds:
 
@@ -306,34 +322,24 @@ Note the asymmetry: `_ = f()` discards the *whole* call and is fine; `_` standin
 in for the error inside a destructuring is not. `_ = …` takes only `=` — there is
 no `_ +=`, since that would read the hole.
 
-### A result bound to one name
-
-Both of these bind the call's whole answer to a single name, so nothing is
-destructured and R1 never marks an `err`. The binding itself is marked instead:
-it is Unchecked until something reads it, and leaving scope unread is `E0302`.
+**A whole `(T, error)` bound to one name.** Nothing is destructured, so R1
+never marks an `err` — the binding itself is marked instead, exactly as a lone
+`error` binding is, and leaving scope unread is `E0302` (R7).
 
 ```kite fails
-fn touch() -> error {
-    return errors.new("no")
-}
-
 fn load() -> (int, error) {
     return 1, nil
 }
 
 fn main() {
-    let e = touch() //~ E0302
     let p = load() //~ E0302
-    io.print("both errors are caught")
+    io.print("dropped")
 }
 ```
 
-The first is the shape written by habit — `let e = dom.set_text(…)` — and
-`std/dom` answers with a bare `error` nearly everywhere. Reading the binding is
-inspecting it, so `if e != nil`, `check e`, `return e` and passing it on all
-clear it. A whole pair is cleared by taking it apart, `let (v, err) = p`, which
-re-enters the normal rules, or by returning it; `p` itself has no fields
-(`E0200`) and no methods (`E0205`), so destructure where you bind.
+Taking it apart, `let (v, err) = p`, re-enters the normal rules, and returning
+it passes it on; either clears the mark. `p` itself has no fields (`E0200`) and
+no methods (`E0205`), so destructure where you bind.
 
 ## `check`
 
@@ -832,10 +838,6 @@ knows.
   own, so `T.is` must be applied to `errors.root(err)`, never the wrapper. The
   spec never says this, and its own §7.6 example is correct only because it uses
   `errors.root`.
-- §7.3's R3 ("an Unchecked binding going out of scope is a compile error") reads
-  as though it covers every error binding. Only a destructured `e` is ever
-  Unchecked: `let e = touch()` on a `-> error` function compiles and drops the
-  failure, and so does `let p = load()` on a pair.
 - Undocumented: `err.message()` requires the error to be proved non-nil (`E0301`);
   `error` is not printable by `io.print`; `let (v, _) = f()` has its own `E0302`
   wording; `-> error` alone satisfies `check`; and `return _, nil` is accepted,

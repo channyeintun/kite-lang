@@ -238,24 +238,35 @@ impl Parser {
                     'b' => out.push('\u{8}'),
                     'f' => out.push('\u{c}'),
                     'u' => {
-                        let mut code = 0u32;
-                        for _ in 0..4 {
-                            code = code * 16 + self.bump()?.to_digit(16)?;
-                        }
-                        // A surrogate pair arrives as two escapes; the second
-                        // completes the first.
-                        if (0xD800..0xDC00).contains(&code) {
-                            self.expect('\\')?;
-                            self.expect('u')?;
-                            let mut low = 0u32;
-                            for _ in 0..4 {
-                                low = low * 16 + self.bump()?.to_digit(16)?;
+                        let code = self.hex4()?;
+                        match code {
+                            // A surrogate pair arrives as two escapes; the
+                            // second completes the first.
+                            0xD800..=0xDBFF => {
+                                let before = self.at;
+                                let low = match (self.bump(), self.bump()) {
+                                    (Some('\\'), Some('u')) => self.hex4(),
+                                    _ => None,
+                                };
+                                match low {
+                                    Some(low @ 0xDC00..=0xDFFF) => {
+                                        let combined =
+                                            0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                                        out.push(char::from_u32(combined)?);
+                                    }
+                                    // Half a pair is not a character. JSON
+                                    // allows it all the same, so it becomes
+                                    // U+FFFD and whatever followed is read
+                                    // again on its own — refusing the whole
+                                    // message over it would lose the request.
+                                    _ => {
+                                        out.push('\u{FFFD}');
+                                        self.at = before;
+                                    }
+                                }
                             }
-                            let combined =
-                                0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
-                            out.push(char::from_u32(combined)?);
-                        } else {
-                            out.push(char::from_u32(code)?);
+                            0xDC00..=0xDFFF => out.push('\u{FFFD}'),
+                            _ => out.push(char::from_u32(code)?),
                         }
                     }
                     other => out.push(other),
@@ -263,6 +274,15 @@ impl Parser {
                 c => out.push(c),
             }
         }
+    }
+
+    /// The four hex digits of a `\u` escape.
+    fn hex4(&mut self) -> Option<u32> {
+        let mut code = 0u32;
+        for _ in 0..4 {
+            code = code * 16 + self.bump()?.to_digit(16)?;
+        }
+        Some(code)
     }
 
     fn number(&mut self) -> Option<Json> {
@@ -304,6 +324,19 @@ mod tests {
         assert!(parse("{").is_none());
         assert!(parse(r#"{"a" 1}"#).is_none());
         assert!(parse("").is_none());
+    }
+
+    /// Half a surrogate pair is legal JSON and not a character. It used to
+    /// fail the parse — and a failed parse ended the session — or, followed by
+    /// an escape below U+DC00, underflow computing the pair.
+    #[test]
+    fn a_lone_surrogate_becomes_the_replacement_character() {
+        let value = parse(r#"{"a":"\ud800","b":"x\udc00y","c":"\ud800A","d":"😀"}"#)
+            .expect("parses");
+        assert_eq!(value.get("a").unwrap().as_str(), Some("\u{FFFD}"));
+        assert_eq!(value.get("b").unwrap().as_str(), Some("x\u{FFFD}y"));
+        assert_eq!(value.get("c").unwrap().as_str(), Some("\u{FFFD}A"));
+        assert_eq!(value.get("d").unwrap().as_str(), Some("😀"));
     }
 
     #[test]

@@ -17,7 +17,7 @@ unchecked Kite is not.
 
 ```bash
 # in this repo
-/Users/channyeintun/Desktop/may/target/release/kitec check file.kite
+./target/release/kitec check file.kite
 
 # anywhere, nothing installed
 npx --yes --package=@kite-lang/compiler-wasm kitec check file.kite
@@ -187,9 +187,9 @@ the compiler and they say where SPECIFICATION.md is wrong.
 | `references/03-errors.md` | anything with an `error` in it: the taint analysis, `check`, `errors.wrap`, typed errors and `T.is`/`T.as` |
 | `references/04-structs-enums-traits-generics.md` | structs, methods, enums and how variant names resolve, traits, `dyn`, generics and inference, `@derive` |
 | `references/05-concurrency-modules-ffi.md` | `async`/`await`/`Task<T>`, `Share`, modules, `kite.toml` and `kitec pkg`, memory and `E0800`, `JsValue`, `extern`/`@host`, `std/js` |
-| `references/06-stdlib-and-diagnostics.md` | what a function is *called*: the prelude, the builtin dotted paths, the twenty `std/` modules, all 48 diagnostic codes, the `kitec` CLI |
+| `references/06-stdlib-and-diagnostics.md` | what a function is *called*: the prelude, the builtin dotted paths, the twenty `std/` modules, all 50 diagnostic codes, the `kitec` CLI |
 
-Three worked projects sit in `/Users/channyeintun/Desktop/may/examples/`, and they are the three
+Three worked projects sit in the repository's `examples/`, and they are the three
 shapes usually asked for: `page/` — hand-written `index.html` with `--emit wasm`
 built into that same directory; `vite-starter/` — `vite-plugin-kite`, one file
 per module; `inventory/` — a module directory whose two files share a namespace.

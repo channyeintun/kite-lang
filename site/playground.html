@@ -35,7 +35,7 @@
       <button id="run" class="primary" disabled>Run</button>
       <button id="check" disabled>Check</button>
       <button id="format" disabled>Format</button>
-      <select id="stage">
+      <select id="stage" disabled>
         <option value="">Show a stage…</option>
         <option value="ast">AST</option>
         <option value="hir">HIR</option>
@@ -276,7 +276,7 @@ playground
   .load()
   .then(() => {
     status.textContent = "ready — nothing here talks to a server";
-    for (const id of ["run", "check", "format"]) {
+    for (const id of ["run", "check", "format", "stage"]) {
       document.getElementById(id).disabled = false;
     }
   })

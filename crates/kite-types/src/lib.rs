@@ -7714,8 +7714,8 @@ impl<'a> Checker<'a> {
                 Diagnostic::warning(codes::E0201, "comparing floats for exact equality")
                     .with_primary(span, "floating-point equality is rarely what you want")
                     .with_note(
-                        "compare within a tolerance instead: `abs(a - b) < epsilon`. \
-                         `math.approx_eq` arrives with the standard library in Phase 6",
+                        "compare within a tolerance instead: the prelude's \
+                         `approx_eq(a, b, tolerance)`",
                     ),
             );
         }

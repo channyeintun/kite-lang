@@ -131,6 +131,22 @@ fn module_dir(base: &Path, segments: &[&str], dependencies: &HashMap<String, Pat
     path
 }
 
+/// The package prefix a module found on disk resolves handed-over names under:
+/// its directory, spelled the way a provided key spells it.
+///
+/// Without it a module in `dep/` that imports `helper` would be handed an
+/// editor's unsaved `helper.kite` from beside the entry file rather than the
+/// `dep/helper.kite` it reads from disk. Only a host that both provides
+/// modules and has a filesystem — an editor — can tell the difference.
+fn within(prefix: &str, segments: &[&str]) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if !prefix.is_empty() {
+        parts.push(prefix);
+    }
+    parts.extend_from_slice(segments);
+    parts.join("/")
+}
+
 /// A module's identity: its whole `use` path.
 ///
 /// `dep/utils` and `utils` are therefore two modules rather than one, which is
@@ -470,7 +486,7 @@ impl Loader {
         // one-file module used to read its imports out of somebody else's
         // directory.
         let own_dir: Option<PathBuf>;
-        let mut own_prefix = prefix.to_string();
+        let own_prefix: String;
 
         if is_std {
             let Some(src) = std_module(last) else {
@@ -494,7 +510,12 @@ impl Loader {
         } else if let Some(key) = self.provided_key(prefix, name) {
             let text = self.provided.get(&key).cloned().expect("the key just matched");
             files.push(sources.add(format!("{}.kite", key), &text));
-            own_dir = None;
+            // Where the file would have been read from, when there is a disk:
+            // an editor hands over the buffers it holds unsaved, not every
+            // module those import, and the rest are still on disk beside them.
+            own_dir = dir
+                .map(|base| module_dir(base, segments, &self.dependencies))
+                .and_then(|path| path.parent().map(Path::to_path_buf));
             own_prefix = Loader::package_of(&key);
         } else {
             let Some(base) = dir else {
@@ -536,6 +557,7 @@ impl Loader {
                     }
                 }
                 own_dir = Some(as_dir);
+                own_prefix = within(prefix, segments);
             } else if let Ok(text) = std::fs::read_to_string(&as_file) {
                 files.push(sources.add(&as_file, &text));
                 // **Its own directory, not the importer's.** This used to be
@@ -547,6 +569,7 @@ impl Loader {
                 // dependency reading the program that depends on it, silently
                 // and with no diagnostic.
                 own_dir = as_file.parent().map(|p| p.to_path_buf());
+                own_prefix = within(prefix, &segments[..segments.len() - 1]);
             } else {
                 diags.push(
                     Diagnostic::error(codes::E0400, format!("cannot find module `{}`", name))

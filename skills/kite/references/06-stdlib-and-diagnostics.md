@@ -31,8 +31,8 @@ repository says otherwise, the compiler won.
   `map(xs, |n| n * 2)` is `E0209`. Write `map(xs, |n: int| n * 2)`.
 - **Slices and maps have almost no methods.** A slice has exactly `len`, `get`
   (bounds-checked, `-> Option<T>`) and `push`; `xs[i]` traps out of range. A map
-  has `len`, `keys`, `values`, and is read with `m[k]` (an optional) and written
-  with `m[k] = v` — and a key cannot be removed at all. Everything else is a
+  has `len`, `keys`, `values` and `remove`, and is read with `m[k]` (an
+  optional) and written with `m[k] = v`. Everything else is a
   prelude *function*, because Kite has no extension methods and a slice takes
   methods only from the compiler.
 - **`str` has exactly five methods** — `len`, `slice`, `index_of`, `trim`,
@@ -48,7 +48,7 @@ repository says otherwise, the compiler won.
   `http.open`, `net.socket_open` for `socket.connect`, `crypto.digest_start` for
   `crypto.sha256`, `crypto.random_hex` for `crypto.random`, `js.js_global` for
   anything over `std/js`. Those need `--emit wasm` and the generated glue.
-- **`--explain` knows 48 codes.** The ranges leave room for a thousand; the
+- **`--explain` knows 50 codes.** The ranges leave room for a thousand; the
   gaps are real, and a code nobody can provoke is deleted rather than kept to be
   explained. Any unknown code — `kitec --explain E0999` — prints the whole list.
 
@@ -174,44 +174,39 @@ The prelude has nothing for them. No `merge`, no `get_or`, no `map_values` — a
 map's whole surface is four methods and the index: `len`, `keys`, `values`,
 `remove`, `m[k]` (an `Option<V>`) and `m[k] = v`.
 
-**`m.remove(k)` drops a key** and shifts the entries after it down, so
-insertion order keeps meaning what it says; a key that is not there is not an
-error. The receiver has to be a plain `var` binding, as for `xs.push(v)`,
-because a map is a copy-on-write value. **`m[k] = nil` is not removal**: it is
-`E0200` because `nil` is not a value of `V`.
+**A key goes with `m.remove(k)`**, on a plain `var` binding, and a key that is
+not there is not an error. There is no `delete` statement, and `m[k] = nil` is
+`E0200` because `nil` is not a value of `V`. `01-lexical-and-types.md` has the
+details.
 
 ```kite fails
 fn main() {
     var counts = { "a": 1, "b": 2 }
-    counts.remove("a")
-    counts["b"] = nil   //~ E0200
+    counts["a"] = nil   //~ E0200
     io.print("\(counts.len())")
 }
 ```
 
-A copy without one key is a loop, and the copy is visible in the code rather
-than hidden in a method:
+Anything more is a loop you write, and the copy is visible in the code rather
+than hidden in a function:
 
 ```kite
-fn without(m: { str: int }, key: str) -> { str: int } {
+fn merged(a: { str: int }, b: { str: int }) -> { str: int } {
     var out: { str: int } = {}
-    for k in m.keys() {
-        if k == key {
-            continue
-        }
-        let v = m[k]
-        if v == nil {
-            continue
-        }
+    for (k, v) in a {
+        out[k] = v
+    }
+    for (k, v) in b {
         out[k] = v
     }
     return out
 }
 
 fn main() {
-    let counts = { "a": 1, "b": 2, "c": 3 }
-    let fewer = without(counts, "b")
-    io.print("\(counts.len()) \(fewer.len()) \(or_else(fewer["a"], 0))")
+    var counts = { "a": 1, "b": 2, "c": 3 }
+    counts.remove("b")
+    let both = merged(counts, { "d": 4 })
+    io.print("\(counts.len()) \(both.len()) \(or_else(both["d"], 0))")
 }
 ```
 
@@ -1036,9 +1031,15 @@ Helpers: `ok(body)` `not_found()` `status(code, body)` `succeeded(r)`
 a page may not set a `Cookie` header itself — so an app that signs in with a
 cookie uses `send_with(method, url, body, Options)`:
 
-```kite ignore
-let signed_in = http.Options{ ..http.sending(), credentials: http.Credentials.Include }
-let (res, err) = await http.send_with("POST", url, body, signed_in)
+```kite
+use std/http
+
+async fn sign_in(url: str, body: str) -> (http.Response, error) {
+    let signed_in = http.Options{ ..http.sending(), credentials: http.Credentials.Include }
+    let (res, err) = await http.send_with("POST", url, body, signed_in)
+    check err
+    return res, nil
+}
 ```
 
 `Options{ headers, credentials, redirect }`, built from `sending()` (the
@@ -1211,8 +1212,8 @@ constants as functions: `pi()` `e()` `tau()` `ln2()` ·
 integers: `max_int()` `min_int()` `checked_add(a, b) -> Option<int>`
 `wrapping_add(a, b) -> int`.
 
-There is no `math.approx_eq` despite what the float-equality warning says —
-the prelude's `approx_eq` is the one that exists.
+There is no `math.approx_eq`: the prelude's `approx_eq(a, b, tolerance)` is
+the one that exists, and it is what the float-equality warning suggests.
 
 ### socket — WebSocket, client side
 
@@ -1652,7 +1653,7 @@ help: make the binding mutable
 | E0800–E0899 | exclusivity |
 | E0900–E0999 | the compiler failing, rather than the program |
 
-### All 48 codes `--explain` knows
+### All 50 codes `--explain` knows
 
 `kitec --explain E0301` prints the rationale for the rule, not just the
 message. An unknown code prints the whole list. This table is the whole of
@@ -1665,14 +1666,15 @@ cannot emit.
 | E0005 block comments are not supported | E0006 interpolation nested too deeply | E0100 unexpected token | E0101 unclosed delimiter |
 | E0102 expression nested too deeply | E0110 use of possibly-uninitialised binding | E0111 unknown name | E0112 duplicate definition |
 | E0113 wrong number of arguments | E0114 cannot assign to immutable binding | E0115 `break`/`continue` outside a loop | E0116 unreachable code |
-| E0117 statement has no effect | E0200 type mismatch | E0201 cannot apply operator to these types | E0202 condition must be `bool` |
-| E0203 missing return value | E0204 unknown type | E0205 no such method, function, or callable value | E0206 trait cannot be a trait object |
-| E0207 value cannot be interpolated | E0208 invalid type parameter | E0209 type argument cannot be inferred | E0210 non-exhaustive match |
-| E0211 invalid closure | E0212 invalid cast | E0213 type has no identity | E0214 invalid type alias |
-| E0301 value used before its error was checked | E0302 error is never checked | E0303 `check` outside a fallible function | E0400 module not found |
-| E0401 private item | E0402 module cycle | E0403 module name reserved by the standard library | E0404 two modules of the same name |
-| E0520 type cannot be moved to another task | E0521 `await` outside an async function | E0600 comparing a secret with `==` | E0700 malformed `@derive` |
-| E0701 nothing derives that | E0702 a field the derive cannot write | E0800 one object under two argument names | E0900 the compiler emitted an invalid module |
+| E0117 statement has no effect | E0118 module-level binding is not a constant | E0119 constant defined in terms of itself | E0200 type mismatch |
+| E0201 cannot apply operator to these types | E0202 condition must be `bool` | E0203 missing return value | E0204 unknown type |
+| E0205 no such method, function, or callable value | E0206 trait cannot be a trait object | E0207 value cannot be interpolated | E0208 invalid type parameter |
+| E0209 type argument cannot be inferred | E0210 non-exhaustive match | E0211 invalid closure | E0212 invalid cast |
+| E0213 type has no identity | E0214 invalid type alias | E0301 value used before its error was checked | E0302 error is never checked |
+| E0303 `check` outside a fallible function | E0400 module not found | E0401 private item | E0402 module cycle |
+| E0403 module name reserved by the standard library | E0404 two modules of the same name | E0520 type cannot be moved to another task | E0521 `await` outside an async function |
+| E0600 comparing a secret with `==` | E0700 malformed `@derive` | E0701 nothing derives that | E0702 a field the derive cannot write |
+| E0800 one object under two argument names | E0900 the compiler emitted an invalid module | | |
 
 ### Warnings, not errors
 
@@ -1910,9 +1912,6 @@ several files, which `kitec` reads whole, is not handed over at all and its
   because "no Kite target has yet" got them.** It is stale: `http.open`,
   `accept`, `respond`, `run`, `shut` and `Server`/`Incoming` are all there, over
   the `net` host, and `--emit wasm` writes a `serve.mjs` for them.
-- **The float-equality warning, and specification §16's line about it, point at
-  `math.approx_eq`.** No such function exists. The prelude's
-  `approx_eq(a, b, tolerance)` is the real one, and it is unqualified.
 - **The specification never enumerates the builtin dotted paths.** They are only
   in `crates/kite-resolve/src/lib.rs`, which is why `io.println` and
   `use std/io` are the two mistakes a model makes first.

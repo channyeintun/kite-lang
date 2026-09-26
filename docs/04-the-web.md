@@ -87,8 +87,9 @@ handed to the module, and the only question is how those functions are written.
       of JavaScript
 ```
 
-**`std/js`** is the floor: `global`, `get`, `set`, `call0`…`call4`, `new`,
-`func`, `await`, `same`, `is_nil`, `instance_of`, and conversions both ways.
+**`std/js`** is the floor: `global`, `get`, `set`, `at`, `length`,
+`call0`…`call4`, `new0`…`new3`, `func`, `settle`, `same`, `is_nothing`,
+`kind_of`, `instance_of`, and conversions both ways.
 Full list and rationale in [the specification](../SPECIFICATION.md#15-foreign-function-interface).
 
 **`std/dom`** is written over it, in Kite, with no `extern` declarations left in
@@ -239,8 +240,12 @@ Two hazards designed for rather than discovered:
 
 ## 6. Effects
 
-Every modern browser API returns a promise. `js.await(p)` bridges one into a
-`Task`, with a rejection arriving as an `error`.
+Every modern browser API returns a promise, and a promise is an object with a
+`then` method — so it needs no bridge. `js.settle(p, done, failed)` handles
+both halves of one: `done` receives the value, and `failed` the rejection's
+reason as text. Both callbacks are required, because `then` with one compiles,
+runs, and throws a rejection away. There is no `js.await`; a result comes back
+as a message the callback sends, which is the next paragraph's point.
 
 Kite gets a simplification here that Elm structurally cannot have. Elm needs a
 command algebra because it has no way to *do* anything — an effect must be

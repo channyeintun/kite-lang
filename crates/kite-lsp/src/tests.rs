@@ -537,3 +537,298 @@ fn hovering_a_declaration_shows_its_type() {
     assert!(value.contains("names"), "{}", value);
     assert!(value.contains("[str]"), "{}", value);
 }
+
+fn change(server: &mut Server, uri: &str, text: &str) -> Vec<Json> {
+    let message = Json::object(vec![
+        ("method", Json::str("textDocument/didChange")),
+        (
+            "params",
+            Json::object(vec![
+                ("textDocument", Json::object(vec![("uri", Json::str(uri))])),
+                (
+                    "contentChanges",
+                    Json::Array(vec![Json::object(vec![("text", Json::str(text))])]),
+                ),
+            ]),
+        ),
+    ]);
+    let reply = server.handle("textDocument/didChange", &message);
+    reply
+        .notifications
+        .into_iter()
+        .map(|(_, params)| params)
+        .collect()
+}
+
+/// The codes of the diagnostics published for one URI, if it was published.
+fn codes_for(published: &[Json], uri: &str) -> Option<Vec<String>> {
+    let entry = published
+        .iter()
+        .find(|p| p.get("uri").and_then(|u| u.as_str()) == Some(uri))?;
+    let Some(Json::Array(items)) = entry.get("diagnostics") else {
+        return None;
+    };
+    Some(
+        items
+            .iter()
+            .map(|d| d.get("code").and_then(|c| c.as_str()).unwrap_or("").to_string())
+            .collect(),
+    )
+}
+
+/// A directory of real files, for what the loader reads from disk.
+struct Project {
+    dir: std::path::PathBuf,
+}
+
+impl Project {
+    fn new(name: &str) -> Project {
+        let dir = std::env::temp_dir().join(format!("kite-lsp-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        Project { dir }
+    }
+
+    /// Write a file, and answer the URI an editor would name it by.
+    fn file(&self, name: &str, text: &str) -> String {
+        let path = self.dir.join(name);
+        std::fs::write(&path, text).expect("written");
+        format!("file://{}", path.display())
+    }
+}
+
+impl Drop for Project {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Hover answers from this file only.
+///
+/// Every file numbers its bytes from zero, and the prelude's uses are recorded
+/// before the program's. Hover used to take the first span covering the
+/// offset in *any* file, so a cursor on nothing in particular — or on a name
+/// that did not resolve — was described as whatever the prelude had there.
+#[test]
+fn hover_never_answers_with_another_files_declaration() {
+    // An offset where the prelude has a use, found from the compiler's index.
+    let probe = kite_driver::compile("/probe.kite", "fn main() {\n}\n", kite_driver::Emit::Check);
+    let prelude_use = probe
+        .index
+        .uses
+        .iter()
+        .find(|u| u.at.file.0 == 0 && u.at.start > 40)
+        .expect("the prelude uses names")
+        .at
+        .start as usize;
+    // A file that is all comment until well past that offset.
+    let mut text = String::from("fn main() {\n");
+    while text.len() < prelude_use + 100 {
+        text.push_str("    // nothing to see here, and nothing to hover over at all\n");
+    }
+    text.push_str("}\n");
+    let before = &text[..prelude_use];
+    let line = before.matches('\n').count() as u32;
+    let character = (before.len() - before.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32;
+    let mut s = Server::new();
+    open(&mut s, "file:///t.kite", &text);
+    let reply = s.handle("textDocument/hover", &at("file:///t.kite", line, character));
+    assert_eq!(reply.result, Some(Json::Null), "a comment was described");
+    let reply = s.handle("textDocument/definition", &at("file:///t.kite", line, character));
+    assert_eq!(reply.result, Some(Json::Null), "a comment had a definition");
+}
+
+/// Go to definition on a local reaches its `let`, not the use it started on.
+#[test]
+fn go_to_definition_on_a_local_finds_its_declaration() {
+    let mut s = Server::new();
+    let text = "fn helper(n: int) -> int {\n    let total = n + 1\n    return total\n}\n";
+    open(&mut s, "file:///t.kite", text);
+    let reply = s.handle("textDocument/definition", &at("file:///t.kite", 2, 12));
+    let result = reply.result.expect("an answer");
+    assert_eq!(result.path("range.start.line").and_then(|l| l.as_u32()), Some(1));
+    assert_eq!(result.path("range.start.character").and_then(|c| c.as_u32()), Some(8));
+    // And a parameter reaches the signature.
+    let reply = s.handle("textDocument/definition", &at("file:///t.kite", 1, 16));
+    let result = reply.result.expect("an answer");
+    assert_eq!(result.path("range.start.line").and_then(|l| l.as_u32()), Some(0));
+    assert_eq!(result.path("range.start.character").and_then(|c| c.as_u32()), Some(10));
+}
+
+/// A name from one of the program's own modules is in a file the editor can
+/// open, so definition answers with that file.
+#[test]
+fn go_to_definition_reaches_a_sibling_module() {
+    let p = Project::new("definition");
+    let config = p.file("config.kite", "// the port\n\npub fn port() -> int {\n    return 80\n}\n");
+    let main_text = "use config\n\nfn main() {\n    io.print(config.port())\n}\n";
+    let main = p.file("main.kite", main_text);
+    let mut s = Server::new();
+    open(&mut s, &main, main_text);
+    // `port` in `config.port()`. config.kite is not open, so it was read from
+    // disk and its URI is made from its path.
+    let reply = s.handle("textDocument/definition", &at(&main, 3, 21));
+    let result = reply.result.expect("an answer");
+    assert_eq!(result.get("uri").and_then(|u| u.as_str()), Some(config.as_str()));
+    assert_eq!(result.path("range.start.line").and_then(|l| l.as_u32()), Some(2));
+    // Open, it is answered with the editor's own URI for the buffer, and the
+    // range is in the buffer's text rather than the file's.
+    let unsaved = "pub fn port() -> int {\n    return 80\n}\n";
+    open(&mut s, "file:///elsewhere/config.kite", unsaved);
+    open(&mut s, &config, unsaved);
+    let reply = s.handle("textDocument/definition", &at(&main, 3, 21));
+    let result = reply.result.expect("an answer");
+    assert_eq!(result.get("uri").and_then(|u| u.as_str()), Some(config.as_str()));
+    assert_eq!(result.path("range.start.line").and_then(|l| l.as_u32()), Some(0));
+}
+
+/// An open buffer is the truth, for the files that import it too.
+///
+/// Modules used to be read from disk whatever the editor held, so an unsaved
+/// `pub fn host` in config.kite was an unknown name in main.kite until it was
+/// saved — and an edit that broke main.kite was not reported there at all.
+#[test]
+fn an_unsaved_module_is_what_its_importers_see() {
+    let p = Project::new("unsaved");
+    let config = p.file("config.kite", "pub fn port() -> int {\n    return 80\n}\n");
+    // Only on disk, and imported by the unsaved buffer: a handed-over module
+    // still finds its own imports beside it.
+    p.file("helper.kite", "pub fn name() -> str {\n    return \"x\"\n}\n");
+    let main_text = "use config\n\nfn main() {\n    io.print(config.host())\n}\n";
+    let main = p.file("main.kite", main_text);
+    let mut s = Server::new();
+    let published = open(
+        &mut s,
+        &config,
+        "use helper\n\npub fn port() -> int {\n    return 80\n}\n\n\
+         pub fn host() -> str {\n    return helper.name()\n}\n",
+    );
+    assert_eq!(codes_for(&published, &config), Some(Vec::new()), "{:?}", published);
+    let published = open(&mut s, &main, main_text);
+    assert_eq!(codes_for(&published, &main), Some(Vec::new()), "{:?}", published);
+
+    // Taking `host` away again is reported against main.kite, which is
+    // republished along with the file that changed.
+    let published = change(&mut s, &config, "pub fn port() -> int {\n    return 80\n}\n");
+    assert_eq!(codes_for(&published, &config), Some(Vec::new()));
+    let broken = codes_for(&published, &main).expect("main.kite is republished");
+    assert_eq!(broken.len(), 1, "{:?}", published);
+
+    // Closing the buffer goes back to the disk, where `host` never existed.
+    let reply = s.handle("textDocument/didClose", &at(&config, 0, 0));
+    let published: Vec<Json> = reply.notifications.into_iter().map(|(_, p)| p).collect();
+    assert_eq!(codes_for(&published, &config), Some(Vec::new()));
+    assert_eq!(codes_for(&published, &main).map(|c| c.len()), Some(1), "{:?}", published);
+}
+
+/// Completion offers what this file can write: another module's private items
+/// — the prelude's included — are not among them.
+#[test]
+fn completion_leaves_out_another_modules_private_items() {
+    let mut s = Server::new();
+    open(
+        &mut s,
+        "file:///proj/config.kite",
+        "pub fn port() -> int {\n    return secret()\n}\n\nfn secret() -> int {\n    return 80\n}\n",
+    );
+    open(&mut s, "file:///proj/main.kite", "use config\n\nfn own() {\n}\n\nfn main() {\n}\n");
+    let reply = s.handle("textDocument/completion", &at("file:///proj/main.kite", 6, 0));
+    let Some(Json::Array(items)) = reply.result.as_ref().and_then(|r| r.get("items")) else {
+        panic!("no items");
+    };
+    let labels: Vec<&str> = items
+        .iter()
+        .filter_map(|i| i.get("label").and_then(|l| l.as_str()))
+        .collect();
+    assert!(labels.contains(&"config.port"), "{:?}", labels);
+    assert!(labels.contains(&"own"), "{:?}", labels);
+    assert!(!labels.contains(&"config.secret"), "{:?}", labels);
+}
+
+/// A constant's uses are all in the binding table, so it renames like a local
+/// — and it is listed as a constant, not a class.
+#[test]
+fn a_constant_renames_and_is_listed_as_a_constant() {
+    let mut s = Server::new();
+    let text = "let LIMIT = 10\n\nfn main() {\n    io.print(LIMIT)\n}\n";
+    open(&mut s, "file:///t.kite", text);
+    let reply = s.handle("textDocument/rename", &rename_at("file:///t.kite", 3, 14, "CAP"));
+    assert_eq!(reply.error, None);
+    let result = reply.result.expect("an answer");
+    let Some(Json::Array(edits)) = result.get("changes").and_then(|c| c.get("file:///t.kite"))
+    else {
+        panic!("no edits");
+    };
+    assert_eq!(edits.len(), 2, "{:?}", edits);
+
+    let reply = s.handle("textDocument/documentSymbol", &at("file:///t.kite", 0, 0));
+    let Some(Json::Array(symbols)) = reply.result else {
+        panic!("no symbols");
+    };
+    let limit = symbols
+        .iter()
+        .find(|i| i.get("name").and_then(|n| n.as_str()) == Some("LIMIT"))
+        .expect("LIMIT is listed");
+    assert_eq!(limit.get("kind").and_then(|k| k.as_u32()), Some(14));
+
+    let reply = s.handle("textDocument/completion", &at("file:///t.kite", 3, 0));
+    let Some(Json::Array(items)) = reply.result.as_ref().and_then(|r| r.get("items")) else {
+        panic!("no items");
+    };
+    let limit = items
+        .iter()
+        .find(|i| i.get("label").and_then(|n| n.as_str()) == Some("LIMIT"))
+        .expect("LIMIT is offered");
+    assert_eq!(limit.get("kind").and_then(|k| k.as_u32()), Some(21));
+}
+
+/// §2.1 compares identifiers after NFC, so `café` spelled with a combining
+/// accent is the same variable — and a rename that skipped that spelling left
+/// a use of a name that no longer existed.
+#[test]
+fn rename_rewrites_every_spelling_of_the_name() {
+    let mut s = Server::new();
+    let text = "fn main() {\n    let caf\u{e9} = 1\n    io.print(cafe\u{301} + caf\u{e9})\n}\n";
+    open(&mut s, "file:///t.kite", text);
+    let reply = s.handle("textDocument/rename", &rename_at("file:///t.kite", 1, 9, "tea"));
+    assert_eq!(reply.error, None);
+    let result = reply.result.expect("an answer");
+    let Some(Json::Array(edits)) = result.get("changes").and_then(|c| c.get("file:///t.kite"))
+    else {
+        panic!("no edits");
+    };
+    assert_eq!(edits.len(), 3, "{:?}", edits);
+}
+
+fn frame(body: &str) -> String {
+    format!("Content-Length: {}\r\n\r\n{}", body.len(), body)
+}
+
+/// A message that is not JSON is answered with the protocol's parse error, and
+/// the next one is still read. One unpaired surrogate used to end the session.
+#[test]
+fn a_malformed_message_is_answered_and_the_session_goes_on() {
+    let input = [
+        frame(r#"{"jsonrpc":"2.0","id":1,"method":"initialize""#),
+        frame(r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{"x":"\ud800"}}"#),
+        frame(r#"{"jsonrpc":"2.0","id":3,"method":"shutdown"}"#),
+        frame(r#"{"jsonrpc":"2.0","method":"exit"}"#),
+    ]
+    .concat();
+    let mut output = Vec::new();
+    let code = crate::serve(&mut std::io::Cursor::new(input), &mut output);
+    let said = String::from_utf8(output).expect("utf-8");
+    assert!(said.contains(r#""code":-32700"#), "{}", said);
+    assert!(said.contains(r#""id":2"#), "{}", said);
+    assert!(said.contains(r#""id":3"#), "{}", said);
+    assert_eq!(code, 0);
+}
+
+/// `exit` without a `shutdown` first is the editor stopping a server it did
+/// not ask to stop, and the protocol says that exits with 1.
+#[test]
+fn exit_without_shutdown_is_a_failure() {
+    let input = frame(r#"{"jsonrpc":"2.0","method":"exit"}"#);
+    let mut output = Vec::new();
+    assert_eq!(crate::serve(&mut std::io::Cursor::new(input), &mut output), 1);
+}

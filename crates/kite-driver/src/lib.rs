@@ -146,6 +146,9 @@ pub struct Symbol {
     pub at: Span,
     pub kind: &'static str,
     pub label: String,
+    /// Declared `pub`. Another module's private item is not a name its
+    /// importer can write, so an editor should not offer it.
+    pub is_pub: bool,
 }
 
 /// One name and every place it is written.
@@ -670,6 +673,7 @@ fn host_types_used(program: &kite_mir::Program, types: &kite_hir::Types) -> Vec<
 fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Index {
     use kite_resolve::Res;
     use std::collections::HashMap;
+    use unicode_normalization::UnicodeNormalization;
     let mut index = Index::default();
 
     for (i, f) in resolved.fns.iter().enumerate() {
@@ -685,6 +689,7 @@ fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Inde
             at: f.span,
             kind: if f.is_extern { "host function" } else { "function" },
             label,
+            is_pub: f.is_pub,
         });
         let _ = i;
     }
@@ -694,6 +699,7 @@ fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Inde
             at: t.span,
             kind: t.kind.describe(),
             label: format!("{} {}", t.kind.describe(), t.name),
+            is_pub: t.is_pub,
         });
     }
     for c in &resolved.consts {
@@ -702,6 +708,7 @@ fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Inde
             at: c.span,
             kind: "constant",
             label: format!("constant {}", c.name),
+            is_pub: c.is_pub,
         });
     }
 
@@ -834,7 +841,10 @@ fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Inde
             .get(at.start as usize..at.end as usize)
             .unwrap_or("");
         let binding = &mut index.bindings[b];
-        if text == binding.name && !resolved.pinned.contains(at) {
+        // Compared as the resolver compared it: after NFC (§2.1), so `café`
+        // spelled with a combining accent is a use a rename must rewrite too.
+        let same = text == binding.name || text.nfc().eq(binding.name.chars());
+        if same && !resolved.pinned.contains(at) {
             binding.uses.push(*at);
         } else if resolved.pinned.contains(at) || text.starts_with(&format!("{}.", binding.name)) {
             binding.mentions.push(*at);
