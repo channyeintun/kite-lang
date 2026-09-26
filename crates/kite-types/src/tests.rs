@@ -1010,6 +1010,66 @@ fn an_argument_is_converted_once_its_parameter_is_solved() {
     assert!(text.contains("Wrap"), "the argument was not wrapped: {}", text);
 }
 
+/// A unit variant says nothing about a generic enum's arguments; the
+/// annotation it is bound under does.
+#[test]
+fn an_annotation_settles_a_bare_unit_variant() {
+    ok("enum Maybe<T> {\n  None\n  Some(T)\n}\n\
+        fn main() {\n  let m: Maybe<str> = None\n  let n: Maybe<int> = Maybe.None\n}\n");
+}
+
+/// Inside `outer<T: Show>`, `T` is a `Show`, and may be handed to anything
+/// that asks for one — `Share` included.
+#[test]
+fn a_bounded_parameter_meets_its_own_bound() {
+    ok("trait Show {\n  fn show(self) -> str\n}\ntrait Share {\n}\n\
+        fn inner<T: Show>(x: T) -> str {\n  return x.show()\n}\n\
+        fn outer<T: Show>(x: T) -> str {\n  return inner(x)\n}\n\
+        fn send<T: Share>(v: T) -> T {\n  return v\n}\n\
+        fn pass<T: Share>(v: T) -> [T] {\n  return [send(v)]\n}\n\
+        fn main() {\n  io.print(pass(1).len())\n}\n");
+}
+
+/// An unbounded parameter is not known to be anything, and the fix is to say
+/// more about it where it is declared.
+#[test]
+fn an_unbounded_parameter_does_not_meet_a_bound() {
+    let c = run(
+        "trait Show {\n  fn show(self) -> str\n}\n\
+         fn inner<T: Show>(x: T) -> str {\n  return x.show()\n}\n\
+         fn outer<T>(x: T) -> str {\n  return inner(x)\n}\n\
+         fn main() {\n}\n",
+    );
+    assert!(c.has("E0208"), "{}", c.render());
+    assert!(c.render().contains("add the bound: `T: Show`"), "{}", c.render());
+}
+
+/// `Display` is how anything but a primitive becomes text, and a bound or a
+/// trait object says a value has it just as an `impl` does.
+#[test]
+fn a_display_bound_or_object_interpolates() {
+    ok("trait Display {\n  fn show(self) -> str\n}\n\
+        fn say<T: Display>(x: T) -> str {\n  return \"<\\(x)>\"\n}\n\
+        fn tell(d: dyn Display) -> str {\n  return \"\\(d)\"\n}\n\
+        fn main() {\n}\n");
+}
+
+/// A method may be generic in its own right, after its block's parameters.
+#[test]
+fn a_method_solves_its_own_type_parameters() {
+    let c = ok(
+        "struct Box<T> {\n  v: T\n}\n\
+         impl<T> Box<T> {\n\
+         \x20 fn map<U>(self, f: fn(T) -> U) -> Box<U> {\n    return Box{ v: f(self.v) }\n  }\n}\n\
+         fn main() {\n\
+         \x20 let b = Box{ v: 5 }\n\
+         \x20 let c = b.map(|x: int| x > 2)\n}\n",
+    );
+    let main = c.program.fns.iter().find(|f| f.name == "main").expect("main");
+    let c_ty = main.locals.iter().find(|l| l.name == "c").expect("c").ty;
+    assert_eq!(c.program.types.name(c_ty), "Box<bool>");
+}
+
 // ---- slices and optionals -------------------------------------------------
 
 #[test]

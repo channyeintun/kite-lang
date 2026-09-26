@@ -49,13 +49,20 @@
 use kite_diag::{codes, DiagBag, Diagnostic};
 use kite_hir::{self as hir, ExprKind, LocalId, Stmt, TyId, TyKind, Types};
 use kite_span::Span;
+use std::collections::{HashMap, HashSet};
 
 /// Check every call in the program. Runs after type checking, on HIR, before
 /// monomorphisation — so a generic function is checked once rather than once
 /// per instantiation.
 pub fn check(program: &hir::Program, diags: &mut DiagBag) {
     for func in &program.fns {
-        let mut cx = Checker { program, func, diags };
+        let mut cx = Checker {
+            program,
+            func,
+            diags,
+            aliases: HashMap::new(),
+            reported: HashSet::new(),
+        };
         cx.block(&func.body);
     }
 }
@@ -64,6 +71,14 @@ struct Checker<'a> {
     program: &'a hir::Program,
     func: &'a hir::Function,
     diags: &'a mut DiagBag,
+    /// Hidden locals the checker bound to a place, and the place. A deferred
+    /// call's operands are evaluated where the `defer` is written, into
+    /// locals of their own, and the call at each exit reads those — so
+    /// without this, `defer transfer(a, a, 50)` looked like two objects.
+    aliases: HashMap<LocalId, Place>,
+    /// Calls already reported. A deferred call is emitted at every exit, and
+    /// one mistake is one diagnostic.
+    reported: HashSet<Span>,
 }
 
 /// One parameter of whatever the call reaches. Flattened out of `hir::Local`
@@ -81,6 +96,7 @@ struct Param {
 /// A path to an object, rooted at a local. This is the whole of what the pass
 /// knows how to name; anything else — a call result, a struct literal — is a
 /// fresh object no other argument can be holding.
+#[derive(Clone)]
 struct Place {
     root: LocalId,
     path: Vec<Step>,
@@ -101,22 +117,37 @@ enum Step {
 }
 
 /// The place an expression names, if it names one at all.
-fn place_of(expr: &hir::Expr, types: &Types, func: &hir::Function) -> Option<Place> {
+fn place_of(
+    expr: &hir::Expr,
+    types: &Types,
+    func: &hir::Function,
+    aliases: &HashMap<LocalId, Place>,
+) -> Option<Place> {
     match &expr.kind {
-        ExprKind::Local(id) => Some(Place {
-            root: *id,
-            path: Vec::new(),
-            text: func.local(*id).name.clone(),
-        }),
+        ExprKind::Local(id) => match aliases.get(id) {
+            Some(place) => Some(place.clone()),
+            None => Some(Place {
+                root: *id,
+                path: Vec::new(),
+                text: func.local(*id).name.clone(),
+            }),
+        },
+        // A change of representation is not a change of object: an optional
+        // narrowed to its value, a value widened to an optional or to a
+        // `dyn`, is the same cell under another type. `if o != nil {
+        // transfer(o, o, 50) }` names `o` twice.
+        ExprKind::Unwrap { value } | ExprKind::Wrap { value } | ExprKind::ToDyn { value, .. } => {
+            place_of(value, types, func, aliases)
+        }
         ExprKind::FieldGet { base, index } => {
-            let mut place = place_of(base, types, func)?;
+            let mut place = place_of(base, types, func, aliases)?;
             place.text.push('.');
             place.text.push_str(&field_name(base.ty, *index, types));
             place.path.push(Step::Field(*index));
             Some(place)
         }
         ExprKind::Index { base, index } => {
-            let mut place = place_of(base, types, func)?;
+            let mut place = place_of(base, types, func, aliases)?;
             let constant = match index.kind {
                 ExprKind::Int(n) => Some(n),
                 _ => None,
@@ -196,9 +227,16 @@ impl Checker<'_> {
 
     fn stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::Let { init, .. } => {
+            Stmt::Let { local, init, .. } => {
                 if let Some(e) = init {
                     self.expr(e);
+                    // A hidden local stands for what it was bound to.
+                    if self.func.local(*local).synthetic {
+                        let types = &self.program.types;
+                        if let Some(place) = place_of(e, types, self.func, &self.aliases) {
+                            self.aliases.insert(*local, place);
+                        }
+                    }
                 }
             }
             Stmt::Assign { value, .. } => self.expr(value),
@@ -415,13 +453,16 @@ impl Checker<'_> {
     /// pairwise. Cost is quadratic in the number of reference-typed arguments,
     /// which in practice is two or three.
     fn check_args(&mut self, params: &[Param], args: &[hir::Expr], call_span: Span) {
+        if self.reported.contains(&call_span) {
+            return;
+        }
         let types = &self.program.types;
         let mut named: Vec<(Place, &Param, Span)> = Vec::new();
         for (arg, param) in args.iter().zip(params) {
             if !is_reference(param.ty, types) {
                 continue;
             }
-            if let Some(place) = place_of(arg, types, self.func) {
+            if let Some(place) = place_of(arg, types, self.func, &self.aliases) {
                 named.push((place, param, arg.span));
             }
         }
@@ -498,6 +539,7 @@ impl Checker<'_> {
                     can see it. Pass distinct objects, or take one `var` parameter \
                     and return the second result.";
 
+        self.reported.insert(call_span);
         let diag = Diagnostic::error(codes::E0800, message)
             .with_primary(span_other, primary)
             .with_secondary(span_written, secondary)

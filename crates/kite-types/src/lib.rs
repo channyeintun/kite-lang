@@ -2389,7 +2389,15 @@ impl<'a> Checker<'a> {
             ast::Expr::Bool { value, span } => self.lit(ExprKind::Bool(*value), TyId::BOOL, *span),
             ast::Expr::Interpolated { parts, span } => self.interpolated(parts, *span),
 
-            ast::Expr::Path(p) => self.path_expr(p),
+            // A unit variant of a generic enum says nothing about its
+            // arguments, so the type the context expects is what settles them:
+            // `let m: Maybe<str> = None`.
+            ast::Expr::Path(p) => match self.resolved.lookup_use(p.span) {
+                Some(Res::Variant(ti, vi)) => {
+                    self.variant_value(ti, vi, &[], &[], p.span, p.span, expected)
+                }
+                _ => self.path_expr(p),
+            },
             ast::Expr::Paren { inner, .. } => self.expr(inner, expected),
 
             ast::Expr::Unary { op, operand, span } => {
@@ -2624,15 +2632,8 @@ impl<'a> Checker<'a> {
 
                 let k = key_ty.unwrap_or(TyId::ERROR);
                 let v = val_ty.unwrap_or(TyId::ERROR);
-                if !self.types.is_equatable(k) && !self.types.is_poisoned(k) {
-                    self.diags.push(
-                        Diagnostic::error(
-                            codes::E0200,
-                            format!("`{}` cannot be a map key", self.types.name(k)),
-                        )
-                        .with_primary(*span, "a key must be equatable")
-                        .with_note("lookup compares keys, so every field must itself compare"),
-                    );
+                if check_map_key(self.types, k, *span, self.diags) {
+                    self.note_compared(k, *span);
                 }
                 let ty = self.types.map_of(k, v);
                 hir::Expr { kind: ExprKind::MapNew { entries: flat }, ty, span: *span }
@@ -3262,6 +3263,12 @@ impl<'a> Checker<'a> {
         args: &[ast::Expr],
         decl_span: Option<Span>,
     ) -> Vec<hir::Expr> {
+        // A callee that demands `Share` of its type arguments is one that
+        // hands values to another task — and a function it is given goes with
+        // them, along with everything that function captured.
+        let crosses = generics
+            .iter()
+            .any(|g| g.bounds.iter().any(|b| self.is_share_bound(*b)));
         let mut hargs = Vec::with_capacity(args.len());
         for (i, a) in args.iter().enumerate() {
             let declared = sig_params.get(i).copied();
@@ -3291,9 +3298,83 @@ impl<'a> Checker<'a> {
                 }
                 None => e,
             };
+            if crosses && declared.is_some_and(|d| matches!(self.types.kind(d), TyKind::Fn { .. })) {
+                self.require_share_captures(&e);
+            }
             hargs.push(e);
         }
         hargs
+    }
+
+    /// A function handed to another task takes its captures with it, so each
+    /// must be `Share` exactly as an argument would (§4.5, §12.3). A closure
+    /// capturing a `Counter` with a `var` field, or a `JsValue`, would
+    /// otherwise carry one across the boundary that the arguments are checked
+    /// at.
+    fn require_share_captures(&mut self, e: &hir::Expr) {
+        match &e.kind {
+            ExprKind::ClosureNew { captures, .. } => {
+                for c in captures {
+                    if self.types.is_poisoned(c.ty) || self.share_given_params(c.ty) {
+                        continue;
+                    }
+                    let ExprKind::Local(id) = c.kind else { continue };
+                    let (name, decl) = {
+                        let l = &self.locals[id.0 as usize];
+                        (l.name.clone(), l.span)
+                    };
+                    let what = self.types.with_article(c.ty);
+                    let mut d = Diagnostic::error(
+                        codes::E0520,
+                        "this closure cannot be moved to another task",
+                    )
+                    .with_primary(e.span, format!("it captures `{}`, which is {}", name, what))
+                    .with_secondary(decl, format!("`{}` is declared here", name));
+                    d = if self.types.mentions_host_value(c.ty) {
+                        d.with_note(
+                            "a `JsValue` belongs to the isolate that created it, and the \
+                             closure would carry it to one where it names nothing",
+                        )
+                    } else {
+                        d.with_note(format!(
+                            "{} is not `Share`, and a closure takes what it captures along \
+                             with it: two tasks would hold one mutable value",
+                            what
+                        ))
+                    };
+                    self.diags.push(d.with_note(
+                        "pass what the work needs as the items instead, or capture a value \
+                         that is `Share`",
+                    ));
+                }
+            }
+            // A function value whose closure is out of sight here — held in a
+            // binding, returned from a call — could be carrying anything.
+            ExprKind::Local(_)
+            | ExprKind::Call { .. }
+            | ExprKind::CallClosure { .. }
+            | ExprKind::FieldGet { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Match { .. } => {
+                if self.types.is_poisoned(e.ty) {
+                    return;
+                }
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0520,
+                        "a function handed to another task must be written where it is handed",
+                    )
+                    .with_primary(e.span, "what this captured cannot be seen here")
+                    .with_note(
+                        "a closure takes what it captures to the other task, and each capture \
+                         must be `Share`; write the closure literal here, or name a function, \
+                         so the captures can be checked",
+                    ),
+                );
+            }
+            _ => {}
+        }
     }
 
     fn call(
@@ -4317,6 +4398,7 @@ impl<'a> Checker<'a> {
                 };
                 let key = self.expr(&args[0], Some(k));
                 let key = self.accept(key, k, None);
+                self.note_compared(k, key.span);
                 return self.as_statement(
                     hir::Stmt::MapRemove { local: hir::LocalId(local), key, span },
                     span,
@@ -5786,6 +5868,7 @@ impl<'a> Checker<'a> {
         if let TyKind::Map(key_ty, value_ty) = *self.types.kind(seq.ty) {
             let k = self.expr(index, Some(key_ty));
             let k = self.accept(k, key_ty, None);
+            self.note_compared(key_ty, k.span);
             let ty = self.types.optional_of(value_ty);
             return hir::Expr {
                 kind: ExprKind::MapGet { base: Box::new(seq), key: Box::new(k) },
@@ -5910,6 +5993,7 @@ impl<'a> Checker<'a> {
             let local = self.require_mutable_value_binding(base, "assigned into", "map")?;
             let k = self.expr(index, Some(key_ty));
             let k = self.accept(k, key_ty, None);
+            self.note_compared(key_ty, k.span);
             let v = self.expr(&a.value, Some(value_ty));
             let v = self.coerce(v, Some(value_ty));
             self.expect_ty(v.ty, value_ty, v.span, None);
@@ -9390,6 +9474,7 @@ fn resolve_named_ty(
         ast::Type::Map { key, value, .. } => {
             let k = resolve_named_ty(key, resolved, module, type_ids, generics, types, diags);
             let v = resolve_named_ty(value, resolved, module, type_ids, generics, types, diags);
+            check_map_key(types, k, key.span(), diags);
             types.map_of(k, v)
         }
         ast::Type::Optional { inner, .. } => {
@@ -9446,6 +9531,32 @@ fn resolve_named_ty(
         },
         other => resolve_ty(other, types, diags),
     }
+}
+
+/// A map compares its keys with `==`, so a key type is one `==` is defined
+/// on: not a function, a trait object or a host value, nor anything holding
+/// one. A type parameter is taken on trust here and held to it by whoever
+/// chooses it. Returns whether the key may be used.
+fn check_map_key(types: &Types, key: TyId, span: Span, diags: &mut DiagBag) -> bool {
+    if types.is_poisoned(key) || equatable_given_params(types, key, &mut Vec::new()) {
+        return true;
+    }
+    let name = types.name(key);
+    let mut d = Diagnostic::error(codes::E0201, format!("`{}` cannot be a map key", name))
+        .with_primary(span, "a map compares its keys with `==`, which this does not have");
+    d = if types.mentions_host_value(key) {
+        d.with_note(
+            "a host object has no structure Kite can see, so there is nothing to compare \
+             field by field; keep a key the host object is known by — an id, a name — instead",
+        )
+    } else {
+        d.with_note(
+            "equality is structural, so every field must itself be equatable; functions and \
+             trait objects are not",
+        )
+    };
+    diags.push(d);
+    false
 }
 
 /// Reject naming another module's private type in a type — a parameter, a

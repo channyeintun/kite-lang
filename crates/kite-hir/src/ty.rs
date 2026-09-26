@@ -954,7 +954,14 @@ impl Types {
             // synchronised" is exactly the claim a type system should not
             // accept on trust. Two names the standard library owns is the
             // smaller hole.
-            TyKind::Struct(s) if is_synchronised(&self.struct_def(*s).name) => true,
+            //
+            // A lock serialises access, which settles races and nothing else:
+            // a `JsValue` inside one still belongs to the isolate that made
+            // it (§12.3), so a mutex holding a host reference is no more
+            // `Share` than the reference.
+            TyKind::Struct(s) if is_synchronised(&self.struct_def(*s).name) => {
+                !self.mentions_host_value(id)
+            }
             TyKind::Struct(s) => self
                 .struct_def(*s)
                 .fields
