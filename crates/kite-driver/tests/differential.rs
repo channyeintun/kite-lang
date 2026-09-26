@@ -939,6 +939,59 @@ fn main() {
 }
 ",
     ),
+    // `==` on a recursive type recursed through the type itself until the
+    // checker's stack ran out, and `==` on a map was refused outright although
+    // section 5.2 defines it. Maps compare entry by entry in insertion order.
+    (
+        "equality-on-recursive-types-and-maps",
+        "\
+enum List {
+  Cons(h: int, t: List)
+  Empty
+}
+
+struct Node {
+  label: int
+  children: [Node]
+}
+
+enum Json {
+  Null
+  Num(float)
+  Text(str)
+  Arr([Json])
+  Obj({str: Json})
+}
+
+struct Inventory {
+  name: str
+  stock: {str: int}
+}
+
+fn main() {
+  let a = Cons(1, Cons(2, Empty))
+  io.print(a == Cons(1, Cons(2, Empty)))
+  io.print(a == Cons(1, Empty))
+  let n = Node{ label: 1, children: [Node{ label: 2, children: [] }] }
+  io.print(n == Node{ label: 1, children: [Node{ label: 2, children: [] }] })
+  io.print(n != Node{ label: 1, children: [] })
+  let doc = Json.Obj({\"k\": Json.Arr([Json.Num(1.5), Json.Null]), \"t\": Json.Text(\"x\")})
+  io.print(doc == Json.Obj({\"k\": Json.Arr([Json.Num(1.5), Json.Null]), \"t\": Json.Text(\"x\")}))
+  io.print(doc == Json.Obj({\"k\": Json.Arr([Json.Num(1.5)]), \"t\": Json.Text(\"x\")}))
+  let x = {\"a\": 1, \"b\": 2}
+  io.print(x == {\"a\": 1, \"b\": 2})
+  io.print(x == {\"b\": 2, \"a\": 1})
+  io.print(x == {\"a\": 1, \"b\": 3})
+  io.print(x != {\"a\": 1})
+  let i = Inventory{ name: \"shop\", stock: x }
+  io.print(i == Inventory{ name: \"shop\", stock: {\"a\": 1, \"b\": 2} })
+  io.print(i == Inventory{ name: \"shop\", stock: {\"b\": 2, \"a\": 1} })
+  let nested = {\"k\": [1, 2]}
+  io.print(nested == {\"k\": [1, 2]})
+  io.print(nested == {\"k\": [1]})
+}
+",
+    ),
 ];
 
 fn run_on_vm(name: &str, src: &str) -> String {

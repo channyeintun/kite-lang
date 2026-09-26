@@ -718,25 +718,45 @@ impl Types {
     }
 
     /// Whether `==` and `!=` are defined. Structural for aggregates, per the
-    /// specification: two structs are equal when their fields are.
+    /// specification: two structs are equal when their fields are, two maps
+    /// when their entries are.
     pub fn is_equatable(&self, id: TyId) -> bool {
-        match self.kind(id) {
+        self.is_equatable_inner(id, &mut Vec::new())
+    }
+
+    /// The walk behind [`Self::is_equatable`]. A recursive type — `enum List
+    /// { Cons(h: int, t: List) }`, `struct Node { children: [Node] }` — reaches
+    /// itself, and following that edge again recursed until the checker's own
+    /// stack ran out. On the back edge the answer is yes: the type is
+    /// equatable exactly when nothing else in it disqualifies it, and the rest
+    /// of the walk decides that. The same rule [`Self::is_share`] follows.
+    fn is_equatable_inner(&self, id: TyId, visiting: &mut Vec<TyId>) -> bool {
+        if visiting.contains(&id) {
+            return true;
+        }
+        visiting.push(id);
+        let result = match self.kind(id) {
             TyKind::Int | TyKind::Float | TyKind::Bool | TyKind::Str | TyKind::Err => true,
-            TyKind::Optional(inner) => self.is_equatable(*inner),
-            TyKind::Slice(elem) => self.is_equatable(*elem),
-            TyKind::Tuple(elems) => elems.iter().all(|e| self.is_equatable(*e)),
+            TyKind::Optional(inner) => self.is_equatable_inner(*inner, visiting),
+            TyKind::Slice(elem) => self.is_equatable_inner(*elem, visiting),
+            TyKind::Map(k, v) => {
+                self.is_equatable_inner(*k, visiting) && self.is_equatable_inner(*v, visiting)
+            }
+            TyKind::Tuple(elems) => elems.iter().all(|e| self.is_equatable_inner(*e, visiting)),
             TyKind::Struct(s) => self
                 .struct_def(*s)
                 .fields
                 .iter()
-                .all(|f| self.is_equatable(f.ty)),
+                .all(|f| self.is_equatable_inner(f.ty, visiting)),
             TyKind::Enum(e) => self
                 .enum_def(*e)
                 .variants
                 .iter()
-                .all(|v| v.fields.iter().all(|f| self.is_equatable(f.ty))),
+                .all(|v| v.fields.iter().all(|f| self.is_equatable_inner(f.ty, visiting))),
             _ => false,
-        }
+        };
+        visiting.pop();
+        result
     }
 
     /// Whether this type is, or contains, a host object.
@@ -1170,6 +1190,51 @@ mod tests {
         let f = t.fn_of(vec![], TyId::UNIT);
         let with_fn = struct_with(&mut t, "Handler", vec![("f", f, false)]);
         assert!(!t.is_equatable(with_fn), "functions have no equality");
+    }
+
+    /// A type that contains itself must end the walk rather than recurse until
+    /// the checker's stack runs out — `==` on a tree or a linked list is the
+    /// ordinary case, not a corner of one.
+    #[test]
+    fn a_recursive_type_is_equatable() {
+        let mut t = Types::new();
+        let id = t.declare_struct("Node", true, span());
+        let node_ty = t.struct_ty(id);
+        let children = t.slice_of(node_ty);
+        t.set_struct_fields(
+            id,
+            vec![
+                FieldDef { name: "value".into(), ty: TyId::INT, mutable: false, is_pub: true, span: span() },
+                FieldDef { name: "children".into(), ty: children, mutable: false, is_pub: true, span: span() },
+            ],
+        );
+        assert!(t.is_equatable(node_ty));
+
+        // The back edge is not a pass: a function elsewhere in the type still
+        // disqualifies it.
+        let f = t.fn_of(vec![], TyId::UNIT);
+        let bad = t.declare_struct("Bad", true, span());
+        let bad_ty = t.struct_ty(bad);
+        let more = t.slice_of(bad_ty);
+        t.set_struct_fields(
+            bad,
+            vec![
+                FieldDef { name: "more".into(), ty: more, mutable: false, is_pub: true, span: span() },
+                FieldDef { name: "f".into(), ty: f, mutable: false, is_pub: true, span: span() },
+            ],
+        );
+        assert!(!t.is_equatable(bad_ty));
+    }
+
+    /// Section 5.2 makes `==` structural for every type, maps included.
+    #[test]
+    fn maps_are_equatable_when_their_entries_are() {
+        let mut t = Types::new();
+        let m = t.map_of(TyId::STR, TyId::INT);
+        assert!(t.is_equatable(m));
+        let f = t.fn_of(vec![], TyId::UNIT);
+        let of_fns = t.map_of(TyId::STR, f);
+        assert!(!t.is_equatable(of_fns));
     }
 
     /// Structs alias on assignment; slices do not, because they are
