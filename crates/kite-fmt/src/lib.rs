@@ -115,6 +115,7 @@ pub fn format(src: &str) -> Result<String, FormatError> {
         prev: None,
         prev2: None,
         prev_bracket: false,
+        last_line_end: None,
         prev_text: (0, 0),
         prev_end: 0,
     };
@@ -219,6 +220,8 @@ struct Formatter<'a> {
     prev2: Option<T>,
     /// Whether the previous token was a type bracket.
     prev_bracket: bool,
+    /// The last token of the line before this one.
+    last_line_end: Option<T>,
     /// Where the previous token's text is, for asking whether the next one
     /// would glue to it.
     prev_text: (u32, u32),
@@ -541,7 +544,14 @@ impl Formatter<'_> {
             .trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '.')
             .trim_end();
         if head.is_empty() {
-            return false;
+            // The name begins its line, so the line before decides. After a
+            // binary operator or `in`, a condition was split across lines and
+            // this `{` opens its block; after anything else — a `,` in a
+            // list, the `=>` of an arm, the arm before — it is a literal or a
+            // pattern. The parser answers this for a file that parses, and
+            // the two have to agree, or saving a file with a typo elsewhere
+            // in it would respace every literal that starts a line.
+            return !self.last_line_end.is_some_and(continues_a_condition);
         }
         // `=` ends an assignment, but `<=`, `>=`, `==` and `!=` end a
         // comparison — and `if a <= b {` opens a block. A struct literal in a
@@ -587,6 +597,7 @@ impl Formatter<'_> {
         if self.line_started {
             self.out.push('\n');
             self.line_started = false;
+            self.last_line_end = self.prev;
             self.prev = None;
             self.prev2 = None;
         }
@@ -647,6 +658,37 @@ impl Formatter<'_> {
     fn text(&self, span: Span) -> &str {
         &self.src[span.start as usize..span.end as usize]
     }
+}
+
+/// Whether a line ending in `kind` leaves a condition unfinished, so that a
+/// `{` on the next line opens the block the condition guards.
+fn continues_a_condition(kind: T) -> bool {
+    matches!(
+        kind,
+        T::AmpAmp
+            | T::PipePipe
+            | T::EqEq
+            | T::Ne
+            | T::Lt
+            | T::Le
+            | T::Gt
+            | T::Ge
+            | T::Plus
+            | T::Minus
+            | T::Star
+            | T::Slash
+            | T::Percent
+            | T::Amp
+            | T::Pipe
+            | T::Caret
+            | T::Shl
+            | T::Shr
+            | T::DotDot
+            | T::DotDotEq
+            | T::In
+            | T::As
+            | T::Bang
+    )
 }
 
 struct Gap {

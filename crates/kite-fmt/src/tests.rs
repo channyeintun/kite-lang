@@ -409,3 +409,18 @@ fn no_two_tokens_are_glued_into_a_third() {
 fn a_byte_order_mark_is_kept() {
     assert_eq!(idempotent("\u{feff}fn main() {\nio.print(1)\n}\n"), "\u{feff}fn main() {\n    io.print(1)\n}\n");
 }
+
+/// A struct literal that begins its line is written against its name whether
+/// or not the file parses, and a condition split across lines still has its
+/// block spaced. The fallback for a broken file used to space every literal
+/// that began a line, so format-on-save flipped them each time a typo
+/// elsewhere came and went.
+#[test]
+fn a_literal_starting_a_line_is_tight_in_a_broken_file_too() {
+    // A continuation line is not indented further: indentation is bracket
+    // depth, and nothing else.
+    let good = "fn f() {\n    let xs = [\n        Item{ n: 1 },\n    ]\n    if a &&\n    b {\n    }\n}\n";
+    same(good);
+    let broken = format!("{}fn g( {{\n", good);
+    assert!(fmt(&broken).starts_with(good), "{}", fmt(&broken));
+}
