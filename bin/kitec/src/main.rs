@@ -599,29 +599,45 @@ fn write_native(
         .and_then(|s| s.to_str())
         .unwrap_or("app");
     let exe_path = format!("{}/{}", dir, stem);
-    let Some(runtime) = find_runtime_lib() else {
-        eprintln!(
-            "wrote {} ({} bytes)\n\
-             note: `libkite_rt.a` was not found, so no executable was linked; \
-             set KITE_RT_LIB to its path, or link the object yourself",
-            obj_path,
-            object.len()
-        );
-        return ExitCode::SUCCESS;
+    let runtime = match runtime_lib() {
+        Ok(Some(runtime)) => runtime,
+        Ok(None) => {
+            eprintln!(
+                "wrote {} ({} bytes)\n\
+                 note: this `kitec` was built without the native runtime, and `libkite_rt.a` \
+                 was not found, so no executable was linked; set KITE_RT_LIB to its path, or \
+                 link the object yourself",
+                obj_path,
+                object.len()
+            );
+            return ExitCode::SUCCESS;
+        }
+        Err(e) => return fail(&e),
     };
-    let linked = std::process::Command::new("cc")
-        .arg(&obj_path)
-        .arg(&runtime)
+    let mut cc = std::process::Command::new("cc");
+    // On a Mac, `cc` builds for its own architecture, which is not
+    // necessarily this binary's: an Intel `kitec` under Rosetta wrote an
+    // x86-64 object, and the runtime it carries is x86-64 too.
+    if cfg!(target_os = "macos") {
+        cc.args(["-arch", if cfg!(target_arch = "aarch64") { "arm64" } else { "x86_64" }]);
+    }
+    cc.arg(&obj_path)
+        .arg(&runtime.path)
+        .args(&runtime.libs)
         .arg("-o")
-        .arg(&exe_path)
-        .output();
+        .arg(&exe_path);
+    let linked = cc.output();
+    runtime.clean_up();
     match linked {
         Ok(o) if o.status.success() => {
             eprintln!("wrote {} ({} bytes) and {}", obj_path, object.len(), exe_path);
             ExitCode::SUCCESS
         }
         Ok(o) => fail(&format!(
-            "`cc` could not link `{}`:\n{}",
+            "`cc` could not link `{}`:\n{}\n\
+             note: KITE_RT_LIB names a `libkite_rt.a` to link against instead of the one \
+             this `kitec` carries — built for this machine with \
+             `cargo build --release -p kite-rt`",
             obj_path,
             String::from_utf8_lossy(&o.stderr)
         )),
@@ -641,25 +657,73 @@ fn write_native(
     }
 }
 
-/// Where the runtime's static library is. Next to this binary in a
-/// development tree, or wherever `KITE_RT_LIB` says in an installed one.
-fn find_runtime_lib() -> Option<std::path::PathBuf> {
-    if let Ok(p) = std::env::var("KITE_RT_LIB") {
-        let p = std::path::PathBuf::from(p);
-        return p.exists().then_some(p);
-    }
-    let exe = std::env::current_exe().ok()?;
-    let mut dir = exe.parent()?.to_path_buf();
-    // `target/debug/kitec` sits beside `libkite_rt.a`; a test binary sits one
-    // level further down, in `deps/`.
-    for _ in 0..3 {
-        let candidate = dir.join("libkite_rt.a");
-        if candidate.exists() {
-            return Some(candidate);
+/// The runtime archive `build.rs` compiled for this `kitec` from the same
+/// source its code generator was written against — empty when it could not,
+/// which that file explains.
+static EMBEDDED_RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libkite_rt.a"));
+
+/// What that archive needs from the system when it is linked, as `rustc`
+/// reported it: `-lc` and its neighbours, or frameworks on a Mac.
+static EMBEDDED_RUNTIME_LIBS: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/kite_rt_link_args.txt"));
+
+/// A runtime archive to link against.
+struct RuntimeLib {
+    path: std::path::PathBuf,
+    /// System libraries to name after it, when they are known.
+    libs: Vec<String>,
+    /// The directory the embedded archive was written into, for removal once
+    /// the link is done.
+    scratch: Option<std::path::PathBuf>,
+}
+
+impl RuntimeLib {
+    fn clean_up(&self) {
+        if let Some(dir) = &self.scratch {
+            let _ = std::fs::remove_dir_all(dir);
         }
-        dir = dir.parent()?.to_path_buf();
     }
-    None
+}
+
+/// The runtime to link against: the one `KITE_RT_LIB` names, when it names
+/// one; otherwise the one this binary carries, written out for the linker;
+/// otherwise an archive next to this binary, for a `kitec` built without it.
+fn runtime_lib() -> Result<Option<RuntimeLib>, String> {
+    if let Ok(p) = std::env::var("KITE_RT_LIB") {
+        let path = std::path::PathBuf::from(&p);
+        if !path.exists() {
+            return Err(format!("KITE_RT_LIB names `{}`, which does not exist", p));
+        }
+        return Ok(Some(RuntimeLib { path, libs: Vec::new(), scratch: None }));
+    }
+    if !EMBEDDED_RUNTIME.is_empty() {
+        // A directory of its own, so two builds at once never share a file,
+        // and so removing it cannot touch anything else.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("kitec-rt-{}-{}", std::process::id(), stamp));
+        let path = dir.join("libkite_rt.a");
+        std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(&path, EMBEDDED_RUNTIME))
+            .map_err(|e| format!("cannot write the native runtime to `{}`: {}", path.display(), e))?;
+        let libs = EMBEDDED_RUNTIME_LIBS.split_whitespace().map(String::from).collect();
+        return Ok(Some(RuntimeLib { path, libs, scratch: Some(dir) }));
+    }
+    let Ok(exe) = std::env::current_exe() else { return Ok(None) };
+    let mut dir = exe.parent().map(|d| d.to_path_buf());
+    // `target/debug/kitec` sits beside `libkite_rt.a` when the workspace was
+    // built whole; a test binary sits one level further down, in `deps/`.
+    for _ in 0..3 {
+        let Some(d) = dir else { break };
+        let candidate = d.join("libkite_rt.a");
+        if candidate.exists() {
+            return Ok(Some(RuntimeLib { path: candidate, libs: Vec::new(), scratch: None }));
+        }
+        dir = d.parent().map(|p| p.to_path_buf());
+    }
+    Ok(None)
 }
 
 /// `kitec fmt` — rewrite a file, or say whether it would change.

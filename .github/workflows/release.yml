@@ -1,8 +1,10 @@
 # Binaries, on a tag.
 #
 # A compiler nobody can install is a compiler nobody uses. One file, no runtime
-# dependency: Kite ships no garbage collector and links no LLVM, so there is no
-# reason it should need anything alongside it.
+# dependency: Kite links no LLVM, and the native runtime that `--emit native`
+# links programs against — the collector included — is built into `kitec`
+# (see `bin/kitec/build.rs`), so there is no reason it should need anything
+# alongside it.
 
 name: Release
 
@@ -28,16 +30,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, target: aarch64-apple-darwin }
+          # `runtime` is the target the embedded native runtime is built for
+          # when it is not `target` itself: a musl `kitec` links programs with
+          # the glibc `cc` a user has, so it carries a glibc runtime, and a
+          # cross build needs that target's standard library as well. `smoke`
+          # marks the builds the runner can execute, whose `kitec` is asked to
+          # link and run a program before it is shipped.
+          - { os: macos-latest, target: aarch64-apple-darwin, smoke: true }
           - { os: macos-latest, target: x86_64-apple-darwin }
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
-          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, runtime: x86_64-unknown-linux-gnu, smoke: true }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl, runtime: aarch64-unknown-linux-gnu }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.target }}${{ matrix.runtime && format(',{0}', matrix.runtime) || '' }}
       - name: musl needs a cross linker
         if: contains(matrix.target, 'musl')
         run: |
@@ -57,7 +65,24 @@ jobs:
           # why `cargo test` never saw the difference.
           RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/kite -C debuginfo=0 -C force-frame-pointers=yes"
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+          # Embedding the runtime is best-effort in a development build, which
+          # warns and carries on when it cannot. A release must not: a `kitec`
+          # without it writes an object file and cannot link it.
+          KITE_RT_EMBED: require
         run: cargo build --release --locked -p kitec -p kite-lsp --target ${{ matrix.target }}
+      # The binary about to be shipped, asked to do what a user will ask of it:
+      # build a program into an executable with nothing but the system `cc`,
+      # and run it. Where the runner can execute this target, a release that
+      # cannot link is caught here rather than by whoever downloads it.
+      - name: the shipped kitec links a native executable
+        if: matrix.smoke
+        shell: bash
+        run: |
+          set -e
+          dir="$(mktemp -d)"
+          printf 'fn main() {\n    io.print("linked")\n}\n' > "$dir/hello.kite"
+          "target/${{ matrix.target }}/release/kitec" build --emit native --out "$dir" "$dir/hello.kite"
+          test "$("$dir/hello")" = linked
       - name: package
         shell: bash
         run: |
