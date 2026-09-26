@@ -1493,7 +1493,7 @@ using.
 
 ---
 
-## Phase 15 — Distribution 🟡 **signed, packaged, and not yet published**
+## Phase 15 — Distribution 🟡 **signed, released, and not in a package manager**
 
 `.github/workflows/release.yml` cross-compiles `kitec` and `kite-lsp` for macOS
 (arm64, x86-64), Linux (x86-64 and arm64, static musl) and Windows on a tag,
@@ -2497,7 +2497,7 @@ none.
 | 12 — Cryptography | ✅ hashing, HMAC, PBKDF2, randomness, constant-time comparison, E0600, and AES-GCM, Ed25519 and X25519 over opaque key handles. ❌ Argon2, which no host has |
 | 13 — Documentation site | ✅ four pages, the reference generated from the library, and a playground that is the compiler |
 | 14 — Editor support | ✅ the language server and a VS Code extension over it, with rename, references, and inlay hints for solved generic arguments |
-| 15 — Distribution | 🟡 CI, cross-compiled builds, Sigstore signing, Homebrew/Scoop/AUR manifests rendered from the release's own checksums, `kitec.wasm` as an artefact. ❌ nothing published: no tag has been pushed |
+| 15 — Distribution | 🟡 CI, cross-compiled builds, Sigstore signing, Homebrew/Scoop/AUR manifests rendered from the release's own checksums, `kitec.wasm` as an artefact. Tagged releases, v0.1.1 through v0.1.9, on GitHub, and the compiler on npm. ❌ the three manifests are not submitted: no tap, no bucket, no AUR package |
 | 16 — Demolition | ✅ complete — 19,700 lines out; build and tests green with nothing rendering |
 | 17 — `JsValue` / `externref` | ✅ complete — crosses, is held, survives an `await`, refused off the web. ❌ collection asserted, which needs a heap snapshot |
 | 18 — `std/js` primitives | ✅ complete — 23 primitives, a fixed ~90-line host block, throws caught as errors. `js.func` moved to 20, `js.await` to 21 |

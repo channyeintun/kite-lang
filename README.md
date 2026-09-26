@@ -6,11 +6,21 @@ A small, explicit programming language for the web.
 WebAssembly is the primary target, not an afterthought.
 
 ```kite
+use config
+
 fn main() {
+    let err = serve()
+    if err != nil {
+        io.print("cannot start: \(err.message())")
+    }
+}
+
+fn serve() -> error {
     let (cfg, err) = config.load("app.toml")
     check err
 
     io.print("listening on \(cfg.port)")
+    return nil
 }
 ```
 
@@ -48,7 +58,7 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 | **One concurrency concept, not two** | `async`/`await`. No goroutines, no channels, no mutex-by-default. Calling an `async fn` starts it; `await` is how the value comes out. |
 | **Wasm is the reference target** | The semantics are chosen so that lowering to WasmGC is direct. |
 | **HTML and CSS keep their jobs** | Kite replaces JavaScript, and nothing else. A program creates real elements with real class names, so somebody else's stylesheet — Tailwind, Bootstrap, a design system you already own — works on it unchanged. The browser lays out. Canvas is a `<canvas>` you draw into. |
-| **Adoptable one file at a time** | Every `pub fn` is a real export, and `kitec build` writes `api.js` and `api.d.ts` beside the module. A TypeScript project imports it and type-checks against it, with none of the calling convention visible. That is how TypeScript itself spread. |
+| **Adoptable one file at a time** | Every `pub fn` is a real export, and `kitec build --emit wasm` writes `api.js` and `api.d.ts` beside the module. A TypeScript project imports it and type-checks against it, with none of the calling convention visible. That is how TypeScript itself spread. |
 | **It lives inside a page, not instead of one** | A Kite program owns the parts of a page that need real logic, rather than owning the page. Attaching to `<body>` is still available; making it the only option is what puts a Wasm download in front of the first paint of everything. |
 
 ## Install
@@ -340,16 +350,19 @@ Recorded here rather than left to be discovered:
 - **No `wasi:http/incoming-handler`.** A Kite program listens on a port through
   a generated Node adapter. WASI's version is a component-model export, and
   `kitec` emits a core module.
-- **Nothing published.** The release pipeline is signed, packaged for Homebrew,
-  Scoop and the AUR, and has never run: no tag has been pushed.
+- **No package-manager listing.** Releases are tagged, signed and published —
+  on GitHub and on npm — and each renders Homebrew, Scoop and AUR manifests
+  from its own checksums, but none has been submitted: a tap, a bucket and an
+  AUR account are decisions about identity and hosting, not code.
 - **No Argon2.** It is not in WebCrypto, so it waits on a runtime that has it.
 
 834 tests: unit tests per crate, an annotated compile-fail corpus, a
 differential corpus that runs every program on **three** backends and compares,
 the standard library's own suite on two of them, the host boundary and a real
 socket under Node, the DOM layer and the typed door driven under Node — with
-real `tsc` type-checking the generated declarations where it is installed — both
-string representations compared against each other and against the VM, size
+real `tsc` type-checking the generated declarations where it is installed — the
+one string representation compared against the VM and across the JavaScript
+boundary, size
 budgets that fail the build when a module grows, every example on the site, the
 specification's own Appendix A, and the brand assets, which are checked for
 drift because the mark is drawn once and copied three times.
