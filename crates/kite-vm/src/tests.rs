@@ -23,7 +23,7 @@ fn exec(src: &str) -> Result<String, Trap> {
         diags.render_all(&sources)
     );
 
-    kite_hir::mono::monomorphise(&mut hir);
+    kite_hir::mono::monomorphise(&mut hir).expect("specialisation terminates");
     let mir = kite_mir::lower(&hir);
     let chunk = kite_codegen_kbc::compile(&mir);
 
@@ -48,7 +48,7 @@ fn exec_release(src: &str) -> Result<String, Trap> {
         diags.render_all(&sources)
     );
 
-    kite_hir::mono::monomorphise(&mut hir);
+    kite_hir::mono::monomorphise(&mut hir).expect("specialisation terminates");
     let mir = kite_mir::lower(&hir);
     let chunk = kite_codegen_kbc::compile(&mir);
 

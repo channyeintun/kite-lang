@@ -497,6 +497,13 @@ fn run_passes(
         index.uses.push(Use { at, declared_at: at, label: signature, kind: "method" });
     }
 
+    // A generic type that contains itself at a larger type has no finite
+    // expansion. The arena stops making it past a cap rather than recursing
+    // until the stack is gone, and says which declaration asked.
+    if let Some((name, span)) = hir.types.unbounded_instantiation() {
+        diags.push(unbounded_instantiation("type", name, span));
+    }
+
     if emit == Emit::Hir {
         return (hir.to_string(), None, None, None, index);
     }
@@ -506,7 +513,18 @@ fn run_passes(
 
     // Specialise generic functions before lowering, so no backend ever sees a
     // type parameter. Nothing after this point knows generics exist.
-    kite_hir::mono::monomorphise(&mut hir);
+    //
+    // A function that calls itself at an ever larger type asks for a copy per
+    // level, forever; monomorphisation refuses rather than stopping partway
+    // and handing on calls into copies it never made.
+    if let Err(u) = kite_hir::mono::monomorphise(&mut hir) {
+        diags.push(unbounded_instantiation("function", &u.template, u.span));
+        return (String::new(), None, None, None, index);
+    }
+    if let Some((name, span)) = hir.types.unbounded_instantiation() {
+        diags.push(unbounded_instantiation("type", name, span));
+        return (String::new(), None, None, None, index);
+    }
     // The prelude is in every program; without this a `hello world` would
     // carry every helper it never mentions.
     kite_hir::mono::prune(&mut hir);
@@ -657,6 +675,22 @@ fn run_passes(
     }
 
     (String::new(), Some(chunk), None, None, index)
+}
+
+/// `E0220`: a generic `what` (a function or a type) named `name` asked for
+/// specialisations of itself without end.
+fn unbounded_instantiation(what: &str, name: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        kite_diag::codes::E0220,
+        format!("the generic {} `{}` instantiates itself without end", what, name),
+    )
+    .with_primary(span, "each copy asks for another at a larger type argument")
+    .with_note(
+        "generics are specialised: every set of type arguments gets its own copy, \
+         so recursion at `[T]` from inside `T` needs infinitely many — polymorphic \
+         recursion has no finite expansion",
+    )
+    .with_note("recurse at the same type, or hold the growing part in a type that does not grow")
 }
 
 /// What an editor needs, from the resolution the checker already ran.

@@ -223,7 +223,27 @@ pub struct Types {
     enum_origin: HashMap<EnumId, (EnumId, Vec<TyId>)>,
     /// The `Task<T>` template, declared the first time a task is needed.
     task_template: Option<StructId>,
+    /// The first generic declaration refused a specialisation because its
+    /// arguments had grown past [`MAX_TYPE_DEPTH`] or [`MAX_TYPE_SIZE`]: a
+    /// type that contains itself at a larger type, which has no finite
+    /// expansion. Reported by the driver as `E0220`.
+    unbounded: Option<(String, Span)>,
 }
+
+/// How deeply a specialisation's type arguments may nest.
+///
+/// `struct Nested<T> { inner: Option<Nested<[T]>> }` asks for `Nested<[T]>`,
+/// which asks for `Nested<[[T]]>`, and so on without end; so does a generic
+/// function calling itself at `[T]`. Every step of that recursion is a Rust
+/// call, and it used to run until the checker's stack was gone. No program
+/// writes a type argument nested this deeply on purpose, and a runaway
+/// reaches it in a few dozen steps.
+pub const MAX_TYPE_DEPTH: usize = 48;
+
+/// How many nodes a specialisation's type arguments may hold between them.
+/// The depth cap alone would let `P<(T, T)>` double at every step, and naming
+/// that specialisation renders every node.
+pub const MAX_TYPE_SIZE: usize = 1024;
 
 impl Default for Types {
     fn default() -> Self {
@@ -276,6 +296,7 @@ impl Types {
             struct_origin: HashMap::new(),
             enum_origin: HashMap::new(),
             task_template: None,
+            unbounded: None,
         }
     }
 
@@ -469,6 +490,17 @@ impl Types {
         if let Some(&existing) = self.struct_instances.get(&key) {
             return existing;
         }
+        if self.too_large(args) {
+            let def = &self.structs[template.index()];
+            let (name, is_pub, span) = (def.name.clone(), def.is_pub, def.span);
+            // A placeholder with no fields and no origin, so nothing expands
+            // it further — neither substitution nor `refresh_instances`. The
+            // program never runs: the driver reports the refusal.
+            self.unbounded.get_or_insert((name.clone(), span));
+            let id = self.declare_struct(format!("{}<…>", name), is_pub, span);
+            self.struct_instances.insert(key, id);
+            return id;
+        }
         let def = &self.structs[template.index()];
         let name = format!("{}<{}>", def.name, self.arg_names(args));
         let (is_pub, span) = (def.is_pub, def.span);
@@ -492,6 +524,15 @@ impl Types {
         if let Some(&existing) = self.enum_instances.get(&key) {
             return existing;
         }
+        if self.too_large(args) {
+            let def = &self.enums[template.index()];
+            let (name, is_pub, span) = (def.name.clone(), def.is_pub, def.span);
+            // A placeholder, for the reason `instantiate_struct` gives.
+            self.unbounded.get_or_insert((name.clone(), span));
+            let id = self.declare_enum(format!("{}<…>", name), is_pub, span);
+            self.enum_instances.insert(key, id);
+            return id;
+        }
         let def = &self.enums[template.index()];
         let name = format!("{}<{}>", def.name, self.arg_names(args));
         let (is_pub, span) = (def.is_pub, def.span);
@@ -512,6 +553,54 @@ impl Types {
             .collect();
         self.enums[id.index()].variants = variants;
         id
+    }
+
+    /// The generic type that asked for a specialisation of itself without
+    /// end, and where it is declared, if any did.
+    pub fn unbounded_instantiation(&self) -> Option<(&str, Span)> {
+        self.unbounded.as_ref().map(|(name, span)| (name.as_str(), *span))
+    }
+
+    /// Whether a set of type arguments is past what any program writes on
+    /// purpose: nested deeper than [`MAX_TYPE_DEPTH`], or holding more than
+    /// [`MAX_TYPE_SIZE`] nodes between them. A specialisation asked for at
+    /// such arguments is a runaway, and is refused rather than made.
+    ///
+    /// The walk goes through a specialisation's own arguments but never its
+    /// fields, which may be recursive: `List<int>` is two nodes however long
+    /// a list is.
+    pub fn too_large(&self, args: &[TyId]) -> bool {
+        let mut budget = MAX_TYPE_SIZE;
+        args.iter()
+            .any(|a| !self.fits(*a, MAX_TYPE_DEPTH, &mut budget))
+    }
+
+    fn fits(&self, ty: TyId, depth: usize, budget: &mut usize) -> bool {
+        if depth == 0 || *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        let depth = depth - 1;
+        match self.kind(ty) {
+            TyKind::Slice(t) | TyKind::Optional(t) | TyKind::Fallible(t) => {
+                self.fits(*t, depth, budget)
+            }
+            TyKind::Map(k, v) => self.fits(*k, depth, budget) && self.fits(*v, depth, budget),
+            TyKind::Tuple(elems) => elems.iter().all(|e| self.fits(*e, depth, budget)),
+            TyKind::Fn { params, ret } => {
+                params.iter().all(|p| self.fits(*p, depth, budget))
+                    && self.fits(*ret, depth, budget)
+            }
+            TyKind::Struct(s) => match self.struct_origin.get(s) {
+                Some((_, own)) => own.iter().all(|a| self.fits(*a, depth, budget)),
+                None => true,
+            },
+            TyKind::Enum(e) => match self.enum_origin.get(e) {
+                Some((_, own)) => own.iter().all(|a| self.fits(*a, depth, budget)),
+                None => true,
+            },
+            _ => true,
+        }
     }
 
     /// The generic declaration a specialisation came from.
@@ -1235,6 +1324,62 @@ mod tests {
         let f = t.fn_of(vec![], TyId::UNIT);
         let of_fns = t.map_of(TyId::STR, f);
         assert!(!t.is_equatable(of_fns));
+    }
+
+    /// `struct Nested<T> { inner: Option<Nested<[T]>> }` contains itself at a
+    /// larger type, so specialising it asks for another specialisation at
+    /// every level. That recursed until the checker's stack ran out; now the
+    /// specialisation past the cap is refused and the template named.
+    #[test]
+    fn a_type_that_grows_as_it_recurses_is_refused() {
+        let mut t = Types::new();
+        let nested = t.declare_struct("Nested", true, span());
+        t.set_struct_generics(nested, 1);
+        let param = t.param_ty(0, "T");
+        let bigger = t.slice_of(param);
+        let inner = t.instantiate_struct(nested, &[bigger]);
+        let inner_ty = t.struct_ty(inner);
+        let field = t.optional_of(inner_ty);
+        t.set_struct_fields(
+            nested,
+            vec![
+                FieldDef { name: "value".into(), ty: param, mutable: false, is_pub: true, span: span() },
+                FieldDef { name: "inner".into(), ty: field, mutable: false, is_pub: true, span: span() },
+            ],
+        );
+        // Filling in the declaration's own `Nested<[T]>` is already the
+        // runaway: the type has no finite expansion whatever it is used at.
+        t.refresh_instances();
+        t.instantiate_struct(nested, &[TyId::INT]);
+        let (name, _) = t.unbounded_instantiation().expect("the runaway is reported");
+        assert_eq!(name, "Nested");
+    }
+
+    /// An ordinary generic type, however recursive its fields, is nowhere
+    /// near the cap: the walk measures arguments, not values.
+    #[test]
+    fn a_recursive_generic_type_is_not_a_runaway() {
+        let mut t = Types::new();
+        let list = t.declare_struct("List", true, span());
+        t.set_struct_generics(list, 1);
+        let param = t.param_ty(0, "T");
+        let same = t.instantiate_struct(list, &[param]);
+        let same_ty = t.struct_ty(same);
+        let next = t.optional_of(same_ty);
+        t.set_struct_fields(
+            list,
+            vec![
+                FieldDef { name: "head".into(), ty: param, mutable: false, is_pub: true, span: span() },
+                FieldDef { name: "tail".into(), ty: next, mutable: false, is_pub: true, span: span() },
+            ],
+        );
+        t.refresh_instances();
+        let of_ints = t.instantiate_struct(list, &[TyId::INT]);
+        let slices = t.slice_of(TyId::INT);
+        let of_slices = t.map_of(TyId::STR, slices);
+        t.instantiate_struct(list, &[of_slices]);
+        assert!(t.unbounded_instantiation().is_none());
+        assert_eq!(t.struct_def(of_ints).fields.len(), 2);
     }
 
     /// Structs alias on assignment; slices do not, because they are

@@ -22,7 +22,7 @@ pub fn lower(src: &str) -> Lowered {
         "test source does not compile:\n{}",
         diags.render_all(&sources)
     );
-    kite_hir::mono::monomorphise(&mut hir);
+    kite_hir::mono::monomorphise(&mut hir).expect("specialisation terminates");
     let mut mir = kite_mir::lower(&hir);
     kite_mir::asyncify(&mut mir, &mut hir.types);
     Lowered { mir, types: hir.types }
