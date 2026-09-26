@@ -487,6 +487,11 @@ fn patch(parent: dom.Element, old: Live, next: Node, gone: Gone) -> (Live, error
         // A leaf: its text is all there is. Writing the same text back would
         // still be a DOM write, so it is compared first.
         if old.body != next.body || old.kids.len() > 0 {
+            // The children are leaving the document with the text write, and
+            // a caller keeping state under their keys needs to hear it.
+            for k in old.kids {
+                collect_keys(k, gone)
+            }
             let terr = dom.set_text(old.el, next.body)
             if terr != nil {
                 return _, terr
@@ -494,6 +499,14 @@ fn patch(parent: dom.Element, old: Live, next: Node, gone: Gone) -> (Live, error
         }
         adopt(old, next, [])
         return old, nil
+    }
+    if old.kids.len() == 0 && old.body.len() > 0 {
+        // It held text and now holds elements. `reconcile` only appends, so
+        // without this the old text stays in front of the new children.
+        let cerr = dom.set_text(old.el, "")
+        if cerr != nil {
+            return _, cerr
+        }
     }
     let (kids, kerr) = reconcile(old.el, old.kids, next.kids, gone)
     if kerr != nil {
@@ -529,10 +542,22 @@ fn adopt(var live: Live, next: Node, kids: [Live]) {
 /// `gone` collects the keys of everything removed, so a caller holding state
 /// per row can drop the rows that left. See [`departed`].
 fn reconcile(parent: dom.Element, olds: [Live], nexts: [Node], gone: Gone) -> ([Live], error) {
-    var by_key: { str: int } = { }
+    // Every old position a key stands at, in order. A key is meant to be
+    // unique among its siblings, but nothing stops a description repeating
+    // one, and keeping only the last position left the earlier elements
+    // unmatched: each was rebuilt, and `departed` reported the key as gone
+    // while elements under it stayed. Repeats are matched in order instead.
+    var by_key: { str: [int] } = { }
     for i in 0..olds.len() {
-        if olds[i].key.len() > 0 {
-            by_key[olds[i].key] = i
+        let key = olds[i].key
+        if key.len() > 0 {
+            var at: [int] = []
+            let seen = by_key[key]
+            if seen != nil {
+                at = seen
+            }
+            at.push(i)
+            by_key[key] = at
         }
     }
 
@@ -557,8 +582,10 @@ fn reconcile(parent: dom.Element, olds: [Live], nexts: [Node], gone: Gone) -> ([
         if want.key.len() > 0 {
             let found = by_key[want.key]
             if found != nil {
-                if !taken[found] {
-                    from = found
+                for candidate in found {
+                    if from < 0 && !taken[candidate] {
+                        from = candidate
+                    }
                 }
             }
         } else {
