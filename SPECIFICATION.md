@@ -453,7 +453,14 @@ folding it would have had to pick one.
 
 `pub` applies to modules, functions, types, struct fields, enum variants, traits,
 and trait methods. A `pub struct` with unmarked fields is an opaque type: callers
-can hold it and pass it, but cannot read, construct, or destructure it.
+can hold it and pass it, but cannot read, construct, or destructure it — not
+with a literal, not with a `..base` update, not in a pattern.
+
+Methods and associated functions in an `impl` block are unmarked, and so
+private to the module, unless they say `pub`. The methods of a trait
+implementation are as visible as the trait. A type that is not `pub` cannot be
+named outside its module at all — not in an expression, and not in a signature,
+a field or an annotation either. Each of these is `E0401`.
 
 ```kite
 pub struct Connection {
@@ -628,6 +635,17 @@ too.
 The motivating case is a fixpoint. A loop that repeats while a value keeps
 changing must ask "is this the value I passed in?", and structural equality
 answers a different question at the cost of walking the whole value.
+
+Structural means a `T` compares with an `Option<T>` as it would be passed to
+one: `found == 5` is true exactly when `found` is present and five.
+
+`==` is defined on everything but a function, a `dyn Trait` and a `JsValue`, or a
+value holding one ([E0201](#16-diagnostics)): a function has no identity to
+compare, a trait object is a record made where it was converted, and a host
+object has no structure Kite can see. A map compares its keys, so the same three
+cannot be keys. A generic function that compares its `T` with `==` is held to
+that at every call — `T` may not be chosen as one of the three — and so is a
+generic function that passes its own parameter on to one that compares it.
 
 Floating-point `==` follows IEEE-754, so `nan != nan`. The compiler emits a
 warning when both operands of `==` are statically known to be floats and neither
@@ -1102,10 +1120,25 @@ self` cannot be called on a binding the caller does not own mutably.
 
 `Rect.square(2.0)` calls the associated function; `r.area()` calls the method.
 
-Multiple `impl` blocks for the same type are permitted within a module. A type's
+Multiple `impl` blocks for the same type are permitted within a module, and a
+type has one method of each name across all of them (`E0112`). A type's
 inherent methods must be declared in the module that declares the type — there
 are no extension methods, so `x.foo()` can always be resolved by looking at where
-`x`'s type is defined.
+`x`'s type is defined. An `impl` block for another module's type is `E0406`.
+
+A method may declare type parameters of its own, after its block's:
+
+```kite
+impl<T> Box<T> {
+    pub fn map<U>(self, f: fn(T) -> U) -> Box<U> {
+        return Box{ value: f(self.value) }
+    }
+}
+```
+
+The block's parameters come from the receiver's type and the method's own from
+its arguments, as a generic function's do. `Self` inside an `impl` block is the
+type the block is for.
 
 ---
 
@@ -1160,6 +1193,19 @@ help: add the missing arms, or a catch-all `_ =>`
 
 Exhaustiveness is what makes adding an enum variant safe: the compiler shows you
 every place that must change.
+
+Coverage is decided through nested patterns, not just the outermost one:
+`On(true)`, `On(false)` and `Off` cover an `enum Light { On(bool) Off }`,
+`(true, _)` and `(false, _)` cover a `(bool, int)`, and `nil`, `A` and `B` cover
+an `Option<E>` — a pattern written against an optional is one for the value
+inside it, present. A missing case is named however deep it is: `Add(Num(_),
+_)`. Numbers and strings have no finite set of values, so a match on one needs a
+catch-all. A guarded arm counts towards nothing, since its guard may fail.
+
+An arm no value can reach — everything it matches is taken by an unguarded arm
+above it — is a warning (`E0116`). The usual cause is a name meant as a variant
+that is not one: `Dir` where the enum says `Directory` is a binding, which takes
+every value.
 
 An arm is an expression or a block. A block arm **runs for its effects**: it
 produces a value only when it is a single expression, because there are no tail
@@ -1230,11 +1276,12 @@ pub trait Display {
 }
 
 pub trait Comparable {
-    fn compare(self, other: Self) -> Ordering
+    // Negative, zero or positive, as `self` sorts before, with or after `other`.
+    fn compare(self, other: Self) -> int
 
     // Default methods
     fn less_than(self, other: Self) -> bool {
-        return self.compare(other) == Ordering.Less
+        return self.compare(other) < 0
     }
 }
 
@@ -1252,14 +1299,22 @@ satisfaction possible. `impl Display for Rect` is a statement the author made on
 purpose, and the compiler can say "`Rect` does not implement `Display`" with a
 precise place to point at.
 
-`Self` inside a trait refers to the implementing type.
+`Self` inside a trait refers to the implementing type. An implementation is
+checked against the trait with `Self` read as its own type, so `Rect` writes
+`fn compare(self, other: Rect) -> int` or, equally, `other: Self`. It must also
+agree about the receiver: a method the trait declares with `self` may not take
+`var self`, and the reverse, because a call through the trait — a bound or a
+`dyn` — sees only the trait's.
 
 ### 10.2 Coherence
 
 A trait implementation is permitted only in the module that declares the trait or
-the module that declares the type. This is the orphan rule, and it guarantees
-that a given (trait, type) pair has exactly one implementation program-wide,
-which is what makes trait resolution decidable and separate compilation possible.
+the module that declares the type (`E0406`). This is the orphan rule, and it
+guarantees that a given (trait, type) pair has exactly one implementation
+program-wide, which is what makes trait resolution decidable and separate
+compilation possible. A trait of your own may therefore be implemented for an
+imported type, and an imported trait for a type of your own; implementing an
+imported trait for an imported type is the one thing refused.
 
 ### 10.3 Static and dynamic dispatch
 
@@ -1284,10 +1339,12 @@ struct holding the data reference plus a vtable of typed function references
 indirect call is type-checked by the engine rather than through a signature
 table.
 
-Not every trait can be made `dyn`. A trait is **object-safe** when no method
-takes or returns `Self` by value and no method is generic. Non-object-safe traits
-can still be used as generic bounds; the error message says which method is
-responsible.
+Not every trait can be made `dyn`. A trait is **object-safe** when every method
+takes `self`, no method mentions `Self` otherwise, and no method is generic — a
+`dyn` holds some type the call cannot know, so each method must mean the same
+thing whichever it is (`E0206`). Non-object-safe traits can still be used as
+generic bounds, where the type *is* known and every method is an ordinary call;
+the error message says which method is responsible.
 
 ### 10.4 Built-in traits
 
@@ -1418,6 +1475,15 @@ is the whole of the system: a generic function is a function whose parameter
 types are named rather than fixed, and monomorphisation makes each use an
 ordinary call.
 
+A bound holds wherever it is written. On a function, it is checked at every call
+(`E0208`). On a struct or an enum, it is checked wherever a value is built — a
+`Cache<fn(), int>` cannot come into existence — and on an `impl` block, at every
+call of its methods and wherever the type is used as the trait the block
+implements. A generic type implements a trait only where its arguments meet
+that block's bounds. Inside a generic function a parameter is known only by its
+bounds, and it satisfies exactly those: `fn outer<T: Show>(x: T)` may pass `x`
+to `fn inner<T: Show>`, and an unbounded `T` may not.
+
 ---
 
 ## 12. Concurrency
@@ -1532,7 +1598,17 @@ A type is **not** `Share` when it has a `var` field anywhere in its transitive
 structure, or when it holds a `JsValue` — a DOM node, a canvas context, a file
 handle ([§15.1](#151-jsvalue)). A host reference belongs to the isolate that
 created it, and an integer standing in for one would carry none of that: it
-would satisfy every rule above and mean nothing on the other side.
+would satisfy every rule above and mean nothing on the other side. A lock does
+not change that — it settles races, not isolates — so a `sync.Mutex` holding a
+`JsValue` is not `Share` either. Nor is a function or a `dyn Trait`, whose
+contents are not known where the type is.
+
+A function handed to a `Share`-bounded parameter — `task.parallel`'s mapper —
+goes to the other task with everything it captured, so each capture must be
+`Share` too; a closure holding a `Counter` with a `var` field, or a `JsValue`,
+is refused where it is written. So is a function value whose closure is out of
+sight there, such as one read from a binding. A type parameter bounded by
+`Share` is `Share`, and may be passed on to another such bound.
 
 Because struct fields are immutable by default, **most user types are `Share`
 without the author doing anything or knowing the trait exists.** The marker only
@@ -2044,6 +2120,9 @@ Requirements on the implementation:
 - **Type errors name the source of the expectation**, not just the mismatch —
   the parameter or return type that created the constraint gets a secondary span.
 - **`--explain E0301`** prints the full rationale for the rule.
+- **One cause, one code, however it is reached.** Visibility is `E0401` for a
+  function, a type, a field or a method alike; an `impl` in the wrong module is
+  `E0406`, whether it adds methods or implements a trait.
 - **`kitec fix`** applies every machine-applicable suggestion.
 - **A name section and source map** are emitted for the Wasm target so browser
   stack traces name `.kite` files and lines. The name section is what gives a

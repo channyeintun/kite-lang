@@ -48,7 +48,7 @@ repository says otherwise, the compiler won.
   `http.open`, `net.socket_open` for `socket.connect`, `crypto.digest_start` for
   `crypto.sha256`, `crypto.random_hex` for `crypto.random`, `js.js_global` for
   anything over `std/js`. Those need `--emit wasm` and the generated glue.
-- **`--explain` knows 54 codes.** The ranges leave room for a thousand; the
+- **`--explain` knows 55 codes.** The ranges leave room for a thousand; the
   gaps are real, and a code nobody can provoke is deleted rather than kept to be
   explained. Any unknown code — `kitec --explain E0999` — prints the whole list.
 
@@ -69,8 +69,8 @@ functions are dropped before code generation.
 
 The four derivable traits are `Debug`, `Hash`, `Encode` and `Decode`.
 `Encode` is `json.Encode` and needs `use std/json`; `Decode` becomes an
-*associated function* `T.decode(doc) -> (T, error)`, because a trait method
-cannot return `Self`.
+*associated function* `T.decode(doc) -> (T, error)` rather than a trait method,
+so it is called on the type and cannot be named in a bound.
 
 ```kite
 use std/json
@@ -912,7 +912,7 @@ fn main() {
     }
     io.print(body)
     match fs.kind("/etc") {
-        Dir => io.print("dir"),
+        Directory => io.print("dir"),
         File => io.print("file"),
         Missing => io.print("missing"),
     }
@@ -1656,7 +1656,7 @@ help: make the binding mutable
 | E0800–E0899 | exclusivity |
 | E0900–E0999 | the compiler failing, rather than the program |
 
-### All 54 codes `--explain` knows
+### All 55 codes `--explain` knows
 
 `kitec --explain E0301` prints the rationale for the rule, not just the
 message. An unknown code prints the whole list. This table is the whole of
@@ -1676,14 +1676,15 @@ cannot emit.
 | E0213 type has no identity | E0214 invalid type alias | E0220 generic instantiation does not terminate | E0301 value used before its error was checked |
 | E0302 error is never checked | E0303 `check` outside a fallible function | E0400 module not found | E0401 private item |
 | E0402 module cycle | E0403 module name is reserved by the standard library | E0404 two modules of the same name | E0405 a `kite.toml` that does not read |
-| E0520 type cannot be moved to another task | E0521 `await` outside an async function | E0600 comparing a secret with `==` | E0700 malformed `@derive` |
-| E0701 nothing derives that | E0702 a field the derive cannot write | E0800 one object under two argument names | E0900 the compiler emitted an invalid module |
-| E0901 internal compiler error | E0902 the program exceeds a limit of this target |  |  |
+| E0406 implementation outside its type's module | E0520 type cannot be moved to another task | E0521 `await` outside an async function | E0600 comparing a secret with `==` |
+| E0700 malformed `@derive` | E0701 nothing derives that | E0702 a field the derive cannot write | E0800 one object under two argument names |
+| E0900 the compiler emitted an invalid module | E0901 internal compiler error | E0902 the program exceeds a limit of this target |  |
 
 ### Warnings, not errors
 
-`E0116` (unreachable code), `E0600` (secret compared with `==`) and `E0201` in
-its float-equality form are **warnings**: `kitec check` still exits 0. The
+`E0116` (unreachable code, and a `match` arm no value can reach), `E0600`
+(secret compared with `==`) and `E0201` in its float-equality form are
+**warnings**: `kitec check` still exits 0. The
 float lint deliberately does not fire when either operand is a literal, because
 `x == 0.0` is the guard written before a division and a tolerance would answer
 a different question.

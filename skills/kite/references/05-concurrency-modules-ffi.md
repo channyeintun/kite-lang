@@ -272,7 +272,9 @@ A type is `Share` when it is:
 - `int`, `float`, `bool`, `str`, `()`, `error`;
 - a slice, `Option`, map, tuple or `(T, error)` of `Share` elements;
 - a struct or enum **all of whose fields are non-`var` and `Share`**;
-- `sync.Mutex<T>` or `sync.Atomic` — **by name**, whatever `T` is.
+- `sync.Mutex<T>` or `sync.Atomic` — **by name**, whatever `T` is, unless `T`
+  holds a `JsValue`: a lock settles races, not which isolate a host reference
+  belongs to.
 
 A type is **not** `Share` when it is:
 
@@ -281,20 +283,30 @@ A type is **not** `Share` when it is:
 - **a function or closure type** (`fn(int) -> int`) — it may have captured a
   `var` binding;
 - **a `dyn Trait`** — the concrete type is not known at the bound;
-- **a bare generic parameter `T`** — always, and **re-declaring `T: Share` on
-  the forwarding function does not help**. A type parameter is answered `not
-  Share` unconditionally, so a `Share`-bounded function can only be called with
-  a concrete type; there is no way to pass a `T` on.
+- **a generic parameter `T` without a `Share` bound** — it could be anything.
+  Declaring `T: Share` makes it `Share`, so a `Share`-bounded function may pass
+  its `T` on to another:
 
-The last three are not in SPECIFICATION.md §12.3 and they are the ones that
-actually bite. The third is the one that looks like a mistake and is not:
+```kite
+fn send<T: Share>(value: T) -> T {
+    return value
+}
+
+fn pass<T: Share>(v: T) -> T {
+    return send(v)
+}
+
+fn main() {
+    io.print(pass(1))
+}
+```
 
 ```kite fails
 fn send<T: Share>(value: T) -> T {
     return value
 }
 
-fn pass<T: Share>(v: T) -> T {
+fn pass<T>(v: T) -> T {
     return send(v) //~ E0520
 }
 
@@ -303,9 +315,12 @@ fn main() {
 }
 ```
 
-`task.parallel` is written the way it is for this reason: it takes
-`T: Share, U: Share` and calls a plain `fn(T) -> U`, never forwarding either
-parameter to another `Share` bound.
+**A function handed to a `Share`-bounded parameter takes its captures with it**,
+so every capture must be `Share` too — `task.parallel(xs, |x| bump(c) + x)` over a
+`c` with a `var` field is `E0520`, and so is a closure holding a `JsValue`. A
+function value read from a binding cannot have its captures checked there, and
+is refused the same way; write the closure literal, or name a function, where it
+is handed over.
 
 ```kite fails
 fn send<T: Share>(value: T) -> T {
@@ -681,20 +696,19 @@ the module's `pub fn` list before you touch the import.
 | Code | Meaning |
 |---|---|
 | `E0400` | Module not found. Prints the directory and the `.kite` file it looked for. Also used for `use std/<not-a-std-module>`, and then lists the whole standard library. |
-| `E0401` | The item is not `pub`, so it is visible only inside its own module. Applies to functions, types and enum variants. |
+| `E0401` | The item is not `pub`, so it is visible only inside its own module. Applies to functions, types (in expressions and in signatures), enum variants, struct fields, methods and associated functions. |
+| `E0406` | An `impl` outside its type's module: an extension method, or an imported trait implemented for an imported type. |
 | `E0402` | Import cycle. The diagnostic prints the chain (`a → b`). Extract the shared part into a third module. |
 | `E0403` | Reserved standard-library name (above). |
 | `E0404` | One module spelling two modules alike — give one an alias — or two packages of one name reached from two different places. |
 | `E0405` | A `kite.toml` that does not read. Reported at the offending line; a build no longer treats a broken manifest as no manifest. |
 | `E0111` | A qualified name whose module this module never imported — **or** an unknown member of one it did (above). |
 
-**Field-level visibility is parsed but not enforced.** `FieldDecl` in the
-grammar admits `pub`, and SPECIFICATION.md §4.3 and §15.4 both say an unmarked
-field makes a `pub struct` opaque outside its module. The compiler's
-`check_visible` only covers functions, types and variants — a struct literal
-built from another module's unmarked fields, and a read of one, both compile
-today. Do not rely on the opaque-wrapper guarantee for safety; rely on it for
-convention.
+**An unmarked field makes a `pub struct` opaque outside its module**
+(SPECIFICATION.md §4.3, §15.4): reading or writing it, building the struct with a
+literal or a `..base` update, and destructuring it are all `E0401`. That is what
+makes an opaque wrapper — `crypto.Key`, a `JsValue` in a struct — something the
+module that owns it can rely on.
 
 ---
 
@@ -1325,9 +1339,8 @@ into the module``.
 stopped helping. Two conventions keep it in:
 
 1. **Wrap it in a struct with unmarked fields**, so the value inside is reached
-   only through the wrapping module. Note the caveat in §4: the compiler does
-   not currently enforce field visibility across modules, so this is a
-   convention today rather than a guarantee.
+   only through the wrapping module — the compiler holds every other module to
+   that (§4).
 2. **Provide exactly one door out** — `dom.raw(e)` and `dom.wrap(v)`, greppable
    and documented. Sealing a wrapper completely is worse: the user who needs the
    one method nobody wrapped rebuilds a parallel untyped world beside the typed

@@ -258,7 +258,12 @@ pub enum ExprKind {
     Call { callee: FnId, args: Vec<Expr>, targs: Vec<TyId> },
     /// A call through a trait object. `args[0]` is the receiver; which function
     /// runs is decided at run time from its concrete type.
-    CallVirtual { trait_id: TraitId, method: u32, args: Vec<Expr> },
+    ///
+    /// Also a call through a bound, whose receiver is a type parameter.
+    /// Monomorphisation turns that into a direct call once the parameter is
+    /// known, which is what lets such a method mention `Self` or be generic:
+    /// `targs` are its own type arguments, empty for every other method.
+    CallVirtual { trait_id: TraitId, method: u32, args: Vec<Expr>, targs: Vec<TyId> },
     /// A concrete value standing where a `dyn Trait` is wanted. Explicit so the
     /// representation change is visible in the IR.
     ToDyn { value: Box<Expr>, trait_id: TraitId },
@@ -831,7 +836,7 @@ impl Program {
                 let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();
                 format!("fn{}({})", callee.0, a.join(", "))
             }
-            ExprKind::CallVirtual { trait_id, method, args } => {
+            ExprKind::CallVirtual { trait_id, method, args, .. } => {
                 let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();
                 format!(
                     "virtual {}#{}({})",

@@ -21,10 +21,11 @@
 //
 // **The type-system half.** `Share` means "deeply immutable, and so safe to
 // move to another task" — a type with a `var` field anywhere in it is not
-// `Share`. `Mutex<T>` has a `var` field and *is* `Share` regardless of `T`,
-// because reaching the value requires taking the lock. The compiler knows
-// these two types by name, which is the one carve-out in an otherwise purely
-// structural rule; `docs/02 §4` is where that is specified.
+// `Share`. `Mutex<T>` has a `var` field and *is* `Share` whatever else `T`
+// holds, because reaching the value requires taking the lock — unless `T`
+// holds a `JsValue`, which a lock cannot carry to another isolate. The
+// compiler knows these two types by name, which is the one carve-out in an
+// otherwise purely structural rule; `docs/02 §4` is where that is specified.
 
 use std/task
 

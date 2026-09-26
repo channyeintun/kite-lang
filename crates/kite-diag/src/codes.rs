@@ -135,7 +135,12 @@ codes! {
         "These statements are only meaningful inside a `for` loop.";
 
     E0116 = "E0116", "unreachable code",
-        "This statement follows one that always diverges, so it can never run.";
+        "This statement follows one that always diverges, so it can never run.\n\n\
+         The same holds for a `match` arm whose every value is taken by the arms \
+         above it. The commonest cause is a name meant as a variant that is not \
+         one — `Dir` where the enum says `Directory` — which is a binding: it \
+         matches everything, and every arm after it is dead. A guarded arm \
+         shadows nothing, because its guard may fail.";
 
     E0117 = "E0117", "statement has no effect",
         "A closure written as a statement is built and thrown away. Nothing \
@@ -204,11 +209,16 @@ codes! {
          not known where the call is written.";
 
     E0206 = "E0206", "trait cannot be a trait object",
-        "A `dyn Trait` dispatches by looking at the value it holds, so every \
-         method must take `self`. A method without a receiver has nothing to \
-         dispatch on.\n\n\
-         Either give the method a `self` parameter, or accept the concrete \
-         type instead of the trait object.";
+        "A `dyn Trait` dispatches by looking at the value it holds, and the \
+         call has to make sense whichever type that turns out to be. So every \
+         method must take `self` — a method without a receiver has nothing to \
+         dispatch on — must not be generic, because a generic method has a body \
+         per type argument rather than one to call, and must not mention \
+         `Self`, which is a different type behind every `dyn`.\n\n\
+         Such a trait is still a perfectly good bound: `fn f<T: Trait>(x: T)` \
+         knows the type, so every method is callable. Take a type parameter \
+         instead of the trait object, or move what a `dyn` needs into a trait \
+         of its own.";
 
     E0207 = "E0207", "value cannot be interpolated",
         "String interpolation renders `int`, `float`, `bool` and `str`. Any \
@@ -359,6 +369,21 @@ codes! {
     E0402 = "E0402", "module cycle",
         "Modules may not depend on each other cyclically. Extract the shared \
          part into a third module.";
+
+    E0406 = "E0406", "implementation outside its type's module",
+        "An `impl` block belongs to the module that declares its type — or, \
+         for a trait implementation, to the module that declares the trait.\n\n\
+         There are no extension methods (§8.2). Every method a type has is \
+         declared where the type is, so `x.foo()` is answered by looking in one \
+         place, and nobody else's module can add to a type or read its private \
+         fields from outside.\n\n\
+         A trait is implemented for a type at most once, by one of the two \
+         modules that own them (§10.2, the orphan rule). Were a third module \
+         allowed, two of them could each write the same `impl`, and which one \
+         a call reached would depend on which happened to be loaded.\n\n\
+         To give another module's type new behaviour, write a function that \
+         takes it, or declare a trait of your own and implement that for it \
+         here.";
 
     // ---- concurrency ------------------------------------------------------
     E0520 = "E0520", "type cannot be moved to another task",

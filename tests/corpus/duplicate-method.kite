@@ -1,0 +1,26 @@
+// A type has one method of each name. A second one — in the same `impl`
+// block or another — used to be accepted and silently never called, since a
+// call finds the first.
+
+struct U {
+    n: int
+}
+
+impl U {
+    fn who(self) -> str {
+        return "first"
+    }
+    fn who(self) -> str { //~ ERROR E0112
+        return "second"
+    }
+}
+
+impl U {
+    fn who(self) -> str { //~ ERROR E0112
+        return "third"
+    }
+}
+
+fn main() {
+    io.print(U{ n: 1 }.who())
+}

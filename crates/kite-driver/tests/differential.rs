@@ -646,6 +646,442 @@ fn main() {
          \x20 io.print(depth(twice(twice(1))))\n}\n",
     ),
     (
+        "conversions-at-every-site",
+        r#"use std/errors
+
+// A value converted where it is accepted: wrapped into an optional, made
+// into a trait object, or turned into an `error` — at every site that takes
+// one, including the ones that used to check it without converting it.
+trait Show {
+    fn show(self) -> str
+}
+
+struct P {
+    a: int
+}
+
+impl Show for P {
+    fn show(self) -> str {
+        return "P\(self.a)"
+    }
+}
+
+struct Bad {
+    m: str
+}
+
+impl Error for Bad {
+    fn message(self) -> str {
+        return "bad \(self.m)"
+    }
+}
+
+enum Slot {
+    Held(Option<int>)
+    Failed(error)
+    Empty
+}
+
+fn get<T>(x: Option<T>, d: T) -> T {
+    if x == nil {
+        return d
+    }
+    return x
+}
+
+fn opt(v: Option<int>) -> str {
+    if v == nil {
+        return "nil"
+    }
+    return "\(v + 1)"
+}
+
+fn describe(s: Slot) -> str {
+    return match s {
+        Held(v) => opt(v),
+        Failed(e) => if e == nil { "no error" } else { e.message() },
+        Empty => "empty",
+    }
+}
+
+fn main() {
+    let xs: [Option<int>] = [1, nil, 3]
+    io.print("\(opt(xs[0])) \(opt(xs[1])) \(opt(xs[2]))")
+    var ys: [Option<int>] = []
+    ys.push(5)
+    ys.push(nil)
+    io.print("\(opt(ys[0])) \(opt(ys[1]))")
+    var zs: [Option<int>] = [nil]
+    zs[0] = 7
+    io.print(opt(zs[0]))
+    io.print(describe(Slot.Held(9)))
+    io.print(describe(Slot.Failed(Bad{ m: "slot" })))
+    io.print(describe(Slot.Empty))
+    io.print("\(get(7, 3)) \(get(P{ a: 4 }, P{ a: 5 }).a)")
+    var ds: [dyn Show] = [P{ a: 1 }]
+    ds.push(P{ a: 2 })
+    ds[0] = P{ a: 3 }
+    io.print("\(ds[0].show()) \(ds[1].show())")
+    var es: [error] = [Bad{ m: "first" }]
+    es.push(Bad{ m: "second" })
+    let e = es[1]
+    if e != nil {
+        io.print(e.message())
+    }
+    let o: Option<int> = nil
+    let pick = if xs.len() > 2 { o } else { 4 }
+    let back = if xs.len() > 9 { 4 } else { o }
+    io.print("\(opt(pick)) \(opt(back))")
+    let wrapped = errors.because("outer", Bad{ m: "cause" })
+    io.print(join(errors.chain(wrapped), " <- "))
+}
+"#,
+    ),
+    (
+        "self-and-method-generics",
+        r#"// `Self` in a trait, and methods with type parameters of their own — on an
+// `impl`, on a trait reached through a bound, and on an associated function.
+trait Cmp {
+    fn same(self, other: Self) -> bool
+    fn pick(self, other: Self) -> Self
+}
+
+struct A {
+    x: int
+}
+
+struct B {
+    s: str
+}
+
+impl Cmp for A {
+    fn same(self, other: A) -> bool {
+        return self.x == other.x
+    }
+    fn pick(self, other: A) -> A {
+        return if self.x > other.x { self } else { other }
+    }
+}
+
+impl Cmp for B {
+    fn same(self, other: Self) -> bool {
+        return self.s == other.s
+    }
+    fn pick(self, other: Self) -> Self {
+        return self
+    }
+}
+
+fn all_same<T: Cmp>(xs: [T]) -> bool {
+    for x in xs {
+        if !x.same(xs[0]) {
+            return false
+        }
+    }
+    return true
+}
+
+fn best<T: Cmp>(a: T, b: T) -> T {
+    return a.pick(b)
+}
+
+trait Mapper {
+    fn map_to<U>(self, f: fn(int) -> U) -> [U]
+}
+
+struct Nums {
+    ns: [int]
+}
+
+impl Mapper for Nums {
+    fn map_to<U>(self, f: fn(int) -> U) -> [U] {
+        var out: [U] = []
+        for n in self.ns {
+            out.push(f(n))
+        }
+        return out
+    }
+}
+
+fn twice<M: Mapper>(m: M) -> [str] {
+    return m.map_to(|n: int| "\(n)\(n)")
+}
+
+struct Box<T> {
+    v: T
+}
+
+impl<T> Box<T> {
+    fn map<U>(self, f: fn(T) -> U) -> Box<U> {
+        return Box{ v: f(self.v) }
+    }
+    fn pair<U>(self, other: U) -> (T, U) {
+        return (self.v, other)
+    }
+    fn of<U>(v: T, u: U) -> Box<(T, U)> {
+        return Box{ v: (v, u) }
+    }
+}
+
+fn main() {
+    io.print(all_same([A{ x: 1 }, A{ x: 1 }]))
+    io.print(all_same([B{ s: "a" }, B{ s: "b" }]))
+    io.print(best(A{ x: 3 }, A{ x: 9 }).x)
+    io.print(best(B{ s: "l" }, B{ s: "r" }).s)
+    io.print(A{ x: 2 }.same(A{ x: 2 }))
+    let t = twice(Nums{ ns: [1, 2] })
+    io.print(t[0] + t[1])
+    let b = Box{ v: 5 }
+    let c = b.map(|x: int| -> str { return "n\(x)" })
+    io.print(c.v)
+    let d = c.map(|s: str| s.len())
+    io.print(d.v)
+    let (x, y) = b.pair("p")
+    io.print("\(x) \(y)")
+    let e = Box.of(1, true)
+    let (i, f) = e.v
+    io.print("\(i) \(f)")
+}
+"#,
+    ),
+    (
+        "bounds-through-generics",
+        r#"// A bounded parameter meets the same bound; a generic type's `impl` is
+// reached through a bound and through a `dyn`; `Display` shows a bounded
+// parameter and a trait object; and an optional wrapped in a generic body
+// where its parameter is already optional is not wrapped twice.
+use std/task
+
+trait Named {
+    fn name(self) -> str
+}
+
+struct Box<T> {
+    v: T
+}
+
+impl<T> Named for Box<T> {
+    fn name(self) -> str {
+        return "box"
+    }
+}
+
+struct Plain {
+    n: int
+}
+
+impl Named for Plain {
+    fn name(self) -> str {
+        return "plain \(self.n)"
+    }
+}
+
+impl Display for Plain {
+    fn show(self) -> str {
+        return "P\(self.n)"
+    }
+}
+
+fn inner<T: Named>(x: T) -> str {
+    return x.name()
+}
+
+fn outer<T: Named>(x: T) -> str {
+    return inner(x)
+}
+
+fn show(x: dyn Named) -> str {
+    return x.name()
+}
+
+fn say<T: Display>(x: T) -> str {
+    return "<\(x)>"
+}
+
+fn wrap<T>(x: T) -> Option<T> {
+    return x
+}
+
+async fn count<T: Share>(xs: [T]) -> int {
+    let r = await task.parallel(xs, |x: T| -> int { return 1 })
+    return r.len()
+}
+
+async fn main() {
+    io.print(outer(Plain{ n: 1 }))
+    io.print(outer(Box{ v: 1 }))
+    io.print(show(Box{ v: "s" }))
+    io.print(show(Plain{ n: 2 }))
+    io.print(Box{ v: true }.name())
+    io.print(say(Plain{ n: 3 }))
+    let d: dyn Display = Plain{ n: 4 }
+    io.print("\(d)")
+    io.print(d)
+    let a: Option<int> = 5
+    let f = wrap(a)
+    io.print(if f == nil { -1 } else { f + 1 })
+    let none: Option<int> = nil
+    let g = wrap(none)
+    io.print(if g == nil { -1 } else { g + 1 })
+    let n = await count([1, 2, 3])
+    io.print(n)
+}
+"#,
+    ),
+    (
+        "nested-exhaustiveness",
+        r#"// Matches exhaustive only through their nested patterns: a variant covered
+// by its payloads together, a tuple and a struct covered column by column,
+// and an optional enum covered by `nil` and each of its variants.
+enum Light {
+    On(bool)
+    Off
+}
+
+enum E {
+    A
+    B
+}
+
+struct S {
+    a: bool
+    b: bool
+}
+
+fn light(l: Light) -> str {
+    return match l {
+        On(true) => "bright",
+        On(false) => "dim",
+        Off => "off",
+    }
+}
+
+fn pair(t: (int, bool)) -> int {
+    return match t {
+        (0, _) => 1,
+        (_, true) => 2,
+        (n, false) if n > 100 => 3,
+        (_, false) => 4,
+    }
+}
+
+fn both(s: S) -> int {
+    return match s {
+        S { a: true, b: true } => 1,
+        S { a: false, b } => 2,
+        S { a: true, b: false } => 3,
+    }
+}
+
+fn maybe(o: Option<E>) -> str {
+    return match o {
+        nil => "none",
+        A => "a",
+        B => "b",
+    }
+}
+
+fn main() {
+    io.print(light(Light.On(true)) + light(Light.On(false)) + light(Light.Off))
+    io.print(pair((0, true)) + pair((5, true)) + pair((500, false)) + pair((5, false)))
+    io.print(both(S{ a: true, b: true }) + both(S{ a: false, b: true }) + both(S{ a: true, b: false }))
+    let none: Option<E> = nil
+    io.print(maybe(none) + maybe(E.A) + maybe(E.B))
+}
+"#,
+    ),
+    (
+        "payload-patterns-on-optionals",
+        r#"// A pattern for a value, written against an optional, matches a present
+// value it matches: a literal, a variant, a struct. Testing the optional
+// itself read a tag or compared an `int` off a value that might not be
+// there, and each backend answered differently.
+enum E {
+    A
+    B
+}
+
+struct P {
+    x: int
+}
+
+fn number(o: Option<int>) -> str {
+    return match o {
+        nil => "none",
+        1 => "one",
+        _ => "other",
+    }
+}
+
+fn word(o: Option<str>) -> str {
+    return match o {
+        "a" => "A",
+        _ => "?",
+    }
+}
+
+fn which(o: Option<E>) -> str {
+    return match o {
+        nil => "none",
+        A => "a",
+        B => "b",
+    }
+}
+
+fn point(o: Option<P>) -> str {
+    return match o {
+        P { x: 0 } => "origin",
+        P { x } => "at \(x)",
+        nil => "nowhere",
+    }
+}
+
+fn main() {
+    let one: Option<int> = 1
+    let two: Option<int> = 2
+    let no: Option<int> = nil
+    io.print(number(one) + " " + number(two) + " " + number(no))
+    let a: Option<str> = "a"
+    let n: Option<str> = nil
+    io.print(word(a) + word(n))
+    let none: Option<E> = nil
+    io.print(which(none) + which(E.A) + which(E.B))
+    let origin: Option<P> = P{ x: 0 }
+    let far: Option<P> = P{ x: 7 }
+    let gone: Option<P> = nil
+    io.print(point(origin) + ", " + point(far) + ", " + point(gone))
+}
+"#,
+    ),
+    (
+        "optional-equals-its-value",
+        r#"// Equality is structural for all types, and a `T` stands wherever an
+// `Option<T>` does: `found == 5` asks whether `found` is present and five.
+struct P {
+    x: int
+}
+
+fn find(xs: [int], want: int) -> Option<int> {
+    for x in xs {
+        if x == want {
+            return x
+        }
+    }
+    return nil
+}
+
+fn main() {
+    let found = find([1, 5, 9], 5)
+    let lost = find([1, 5, 9], 4)
+    io.print("\(found == 5) \(5 == found) \(found != 6) \(lost == 5) \(lost != 5)")
+    let p: Option<P> = P{ x: 1 }
+    io.print("\(p == P{ x: 1 }) \(P{ x: 2 } == p)")
+    let s: Option<str> = "k"
+    io.print("\(s == "k") \(s == "j")")
+}
+"#,
+    ),
+    (
         "interpolation",
         "fn main() {\n  let name = \"world\"\n  let n = 42\n  let pi = 2.5\n  let ok = true\n\
          \x20 io.print(\"hello, \\(name)!\")\n\

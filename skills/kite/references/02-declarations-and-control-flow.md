@@ -204,16 +204,12 @@ fn main() {
 }
 ```
 
-`E0401` is the diagnostic for reaching into another module for something unmarked.
-
-> **Compiler vs specification.** SPECIFICATION.md §4.3 says a `pub struct` with unmarked
-> fields is opaque — importers "cannot read, construct, or destructure it". The compiler
-> does not enforce this. `check_visible` in `crates/kite-resolve/src/lib.rs` runs only for
-> `Res::Fn`, `Res::Type` and `Res::Variant`; field-level `pub` is parsed and then ignored,
-> so an importer can read a private field and write a struct literal naming it. Treat field
-> `pub` as documentation until that gap closes. §4.3 lists enum variants as taking `pub`
-> too; there the parser rejects it outright (`E0100`) — a variant's visibility is its
-> enum's.
+`E0401` is the diagnostic for reaching into another module for something unmarked —
+a function, a type (in an expression or in a signature), a field, a method or an
+associated function. A `pub struct` with unmarked fields is opaque, as SPECIFICATION.md
+§4.3 says: importers cannot read, write, construct (not even with `..base`) or
+destructure it. §4.3 lists enum variants as taking `pub` too; there the parser rejects it
+outright (`E0100`) — a variant's visibility is its enum's.
 
 ---
 

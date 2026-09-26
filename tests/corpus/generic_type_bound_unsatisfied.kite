@@ -1,0 +1,55 @@
+// A bound on a struct's or an enum's parameter holds wherever a value is
+// built, and a bound on an `impl` block holds for every receiver. Before, a
+// `Holder<int>` was built without complaint and its `show_it` called `show`
+// on an `int`, which trapped on one backend and crashed on another.
+
+trait Show {
+    fn show(self) -> str
+}
+
+struct Label {
+    text: str
+}
+
+impl Show for Label {
+    fn show(self) -> str {
+        return self.text
+    }
+}
+
+struct Holder<T: Show> {
+    v: T
+}
+
+impl<T: Show> Holder<T> {
+    fn show_it(self) -> str {
+        return self.v.show()
+    }
+}
+
+enum Slot<T: Show> {
+    Empty
+    Full(T)
+}
+
+struct Plain<T> {
+    v: T
+}
+
+impl<T: Show> Plain<T> {
+    fn show_it(self) -> str {
+        return self.v.show()
+    }
+}
+
+fn wrap<T>(v: T) -> Holder<T> {
+    return Holder{ v: v } //~ ERROR E0208
+}
+
+fn main() {
+    io.print(Holder{ v: Label{ text: "fine" } }.show_it())
+    let h = Holder{ v: 5 } //~ ERROR E0208
+    let s: Slot<int> = Slot.Full(5) //~ ERROR E0208
+    io.print(Plain{ v: 5 }.show_it()) //~ ERROR E0208
+    io.print(Plain{ v: Label{ text: "also fine" } }.show_it())
+}

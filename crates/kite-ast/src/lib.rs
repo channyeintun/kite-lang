@@ -246,6 +246,8 @@ pub struct MethodDecl {
     pub is_pub: bool,
     pub is_async: bool,
     pub name: Ident,
+    /// The method's own type parameters, after those of its `impl`.
+    pub generics: Vec<GenericParam>,
     /// Absent for an associated function such as `Rect.square(2.0)`.
     pub self_param: Option<SelfParam>,
     pub params: Vec<Param>,

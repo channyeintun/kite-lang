@@ -117,6 +117,123 @@ fn an_unmarked_declaration_is_private_to_its_module() {
     assert!(err.contains("private to module `secrets`"), "{}", err);
 }
 
+/// An `impl` inside a module is held to its trait exactly as one in the
+/// program's own file is. Its names used to be looked up from the root, where
+/// they mean nothing, so a module's implementations went unchecked — and a
+/// `dyn` call reached one with the wrong signature.
+#[test]
+fn an_impl_inside_a_module_is_checked_against_its_trait() {
+    let p = Project::new("impl-in-module");
+    p.file(
+        "shapes/shapes.kite",
+        "pub trait Area {\n  fn area(self) -> int\n  fn name(self) -> str\n}\n\n\
+         pub struct Sq {\n  pub side: int\n}\n\n\
+         impl Area for Sq {\n  fn area(self, extra: str) -> str {\n    return \"x\"\n  }\n}\n\n\
+         pub struct Tri {\n  pub base: int\n}\n\n\
+         impl Area for Tri {\n  fn area(self) -> int {\n    return 1\n  }\n\
+         \x20 fn name(self) -> str {\n    return \"tri\"\n  }\n}\n\n\
+         impl Area for Tri {\n  fn area(self) -> int {\n    return 2\n  }\n\
+         \x20 fn name(self) -> str {\n    return \"tri\"\n  }\n}\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use shapes\n\nfn main() {\n  io.print(shapes.Sq{ side: 3 }.side)\n}\n",
+    );
+    let err = p.run(&main).expect_err("the impls are wrong");
+    assert!(err.contains("does not implement `name` of `Area`"), "{}", err);
+    assert!(err.contains("takes 1 parameter, but the trait declares 0"), "{}", err);
+    assert!(err.contains("E0112"), "{}", err);
+}
+
+/// A field, a method and an associated function are private to the module
+/// that declares their type unless marked `pub` (§4.3) — and so is a type
+/// named in a signature. Only top-level functions used to be held to it: an
+/// importer could read and write a private field, forge a value through a
+/// literal or a `..` update, take one apart in a pattern, and call a private
+/// method.
+#[test]
+fn a_member_is_private_to_the_module_of_its_type() {
+    let p = Project::new("private-members");
+    p.file(
+        "acct/acct.kite",
+        "pub struct Conn {\n  pub host: str\n  secret: str\n  var retries: int\n}\n\n\
+         struct Key {\n  code: int\n}\n\n\
+         pub fn open(h: str) -> Conn {\n  return Conn{ host: h, secret: \"s\", retries: 0 }\n}\n\n\
+         impl Conn {\n  fn reveal(self) -> str {\n    return self.secret\n  }\n\
+         \x20 pub fn host_name(self) -> str {\n    return self.host\n  }\n\
+         \x20 fn make() -> Conn {\n    return Conn{ host: \"m\", secret: \"m\", retries: 0 }\n  }\n}\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use acct\n\n\
+         fn take(k: acct.Key) -> int {\n  return 1\n}\n\n\
+         fn main() {\n\
+         \x20 var c = acct.open(\"h\")\n\
+         \x20 io.print(c.host)\n\
+         \x20 io.print(c.host_name())\n\
+         \x20 io.print(c.secret)\n\
+         \x20 c.retries = 5\n\
+         \x20 let d = acct.Conn{ ..c, host: \"y\" }\n\
+         \x20 match c {\n    acct.Conn{ secret, .. } => io.print(secret),\n  }\n\
+         \x20 io.print(c.reveal())\n\
+         \x20 let m = acct.Conn.make()\n\
+         }\n",
+    );
+    let err = p.run(&main).expect_err("private members are private");
+    for want in [
+        "`acct.Key` is private to module `acct`",
+        "field `secret` is private to module `acct`",
+        "field `retries` is private to module `acct`",
+        "`acct.Conn` cannot be built outside module `acct`",
+        "method `reveal` is private to module `acct`",
+        "associated function `make` is private to module `acct`",
+    ] {
+        assert!(err.contains(want), "missing {:?} in:\n{}", want, err);
+    }
+    assert!(!err.contains("`host`"), "a `pub` field was refused:\n{}", err);
+    assert!(!err.contains("host_name"), "a `pub` method was refused:\n{}", err);
+}
+
+/// The standard library's opaque handles are private for a reason: a key
+/// built from an `int` is a key to whatever that number names.
+#[test]
+fn a_standard_librarys_opaque_value_cannot_be_forged() {
+    let p = Project::new("forge");
+    let main = p.file(
+        "main.kite",
+        "use std/crypto\n\nfn main() {\n  let k = crypto.Key{ handle: 3 }\n  io.print(1)\n}\n",
+    );
+    let err = p.run(&main).expect_err("the handle is private");
+    assert!(err.contains("cannot be built outside module `crypto`"), "{}", err);
+}
+
+/// An `impl` belongs to the module that declares its type, or — for a trait
+/// implementation — the trait (§8.2, §10.2). There are no extension methods,
+/// and no third module may implement someone else's trait for someone else's
+/// type. A trait of one's own may still be implemented for an imported type.
+#[test]
+fn an_impl_belongs_to_the_module_of_its_type_or_its_trait() {
+    let p = Project::new("coherence");
+    p.file(
+        "acct/acct.kite",
+        "pub struct Conn {\n  pub host: str\n}\n\n\
+         pub fn open(h: str) -> Conn {\n  return Conn{ host: h }\n}\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use acct\n\n\
+         impl Display for acct.Conn {\n  fn show(self) -> str {\n    return \"conn\"\n  }\n}\n\n\
+         impl acct.Conn {\n  fn extra(self) -> int {\n    return 7\n  }\n}\n\n\
+         trait Named {\n  fn name(self) -> str\n}\n\n\
+         impl Named for acct.Conn {\n  fn name(self) -> str {\n    return self.host\n  }\n}\n\n\
+         fn main() {\n  io.print(acct.open(\"h\").name())\n}\n",
+    );
+    let err = p.run(&main).expect_err("both are outside their modules");
+    assert!(err.contains("`Display` cannot be implemented for `acct.Conn` here"), "{}", err);
+    assert!(err.contains("`acct.Conn` cannot be given methods outside module `acct`"), "{}", err);
+    assert!(!err.contains("Named"), "a local trait for an imported type was refused:\n{}", err);
+}
+
 #[test]
 fn an_alias_is_how_the_module_is_spelled() {
     let p = Project::new("alias");

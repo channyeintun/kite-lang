@@ -139,6 +139,9 @@ pub fn check_recording(
 
     // Now fill in fields and variants, resolving their types against the
     // arena, which already knows every name.
+    let mut type_generics: Vec<Vec<GenericDef>> = vec![Vec::new(); resolved.types.len()];
+    let mut trait_method_generics: std::collections::HashMap<(hir::TraitId, usize), Vec<GenericDef>> =
+        std::collections::HashMap::new();
     for (i, decl) in resolved.types.iter().enumerate() {
         // Types named inside a module mean that module's, so its own name is
         // tried first everywhere a type is written.
@@ -150,9 +153,12 @@ pub fn check_recording(
             ast::Item::Trait(tr) => &tr.generics,
             _ => &[][..],
         };
-        let defs = declare_generics(own_generics, resolved, module, &type_ids, &mut types, diags);
+        let defs = declare_generics(own_generics, &[], resolved, module, &type_ids, &mut types, diags);
         let generics: &[(String, TyId)] =
             &defs.iter().map(|g| (g.name.clone(), g.ty)).collect::<Vec<_>>();
+        // Kept, because a bound on a struct's or an enum's parameter holds at
+        // every place one is built — not only where the declaration is read.
+        type_generics[i] = defs.clone();
         match type_ids[i] {
             Some(TypeTarget::Struct(sid)) => types.set_struct_generics(sid, defs.len()),
             Some(TypeTarget::Enum(eid)) => types.set_enum_generics(eid, defs.len()),
@@ -207,30 +213,44 @@ pub fn check_recording(
                 types.set_enum_variants(eid, variants);
             }
             (Some(TypeTarget::Trait(tid)), ast::Item::Trait(tr)) => {
-                let methods = tr
-                    .methods
-                    .iter()
-                    .map(|m| kite_hir::TraitMethodDef {
+                // Inside a trait, `Self` is whichever type implements it, and
+                // a method may have type parameters of its own after the
+                // trait's.
+                let self_ty = types.self_param();
+                let mut methods = Vec::with_capacity(tr.methods.len());
+                for (mi, m) in tr.methods.iter().enumerate() {
+                    let own = declare_generics(
+                        &m.generics, &defs, resolved, module, &type_ids, &mut types, diags,
+                    );
+                    let mut names: Vec<(String, TyId)> = generics.to_vec();
+                    names.extend(own.iter().map(|g| (g.name.clone(), g.ty)));
+                    names.push(("Self".to_string(), self_ty));
+                    let params = m
+                        .params
+                        .iter()
+                        .map(|p| {
+                            resolve_named_ty(&p.ty, resolved, module, &type_ids, &names, &mut types, diags)
+                        })
+                        .collect();
+                    let ret = match &m.ret {
+                        None => TyId::UNIT,
+                        Some(r) => resolve_named_ty(
+                            r.value_type(), resolved, module, &type_ids, &names, &mut types, diags,
+                        ),
+                    };
+                    methods.push(kite_hir::TraitMethodDef {
                         name: m.name.name.clone(),
-                        params: m
-                            .params
-                            .iter()
-                            .map(|p| {
-                                resolve_named_ty(&p.ty, resolved, module, &type_ids, generics, &mut types, diags)
-                            })
-                            .collect(),
-                        ret: match &m.ret {
-                            None => TyId::UNIT,
-                            Some(r) => resolve_named_ty(
-                                r.value_type(), resolved, module, &type_ids, generics, &mut types, diags,
-                            ),
-                        },
+                        params,
+                        ret,
                         fallible: m.ret.as_ref().is_some_and(|r| r.is_fallible()),
                         takes_self: m.self_param.is_some(),
+                        var_self: m.self_param.as_ref().is_some_and(|s| s.is_var),
                         has_default: m.body.is_some(),
+                        generic_count: own.len(),
                         span: m.name.span,
-                    })
-                    .collect();
+                    });
+                    trait_method_generics.insert((tid, mi), own);
+                }
                 types.set_trait_methods(tid, methods);
             }
             (Some(TypeTarget::Struct(sid)), ast::Item::Struct(s)) => {
@@ -263,27 +283,70 @@ pub fn check_recording(
     // later would be matching a module-qualified name against a host-facing
     // one, which is how a stub ends up calling the wrong import.
     let mut extern_of_sig: Vec<Option<u32>> = Vec::new();
+    // An `impl` block's `<T: Bound>` list belongs to every method in it, so
+    // it is declared once per block — which is also what keeps a mistake in
+    // it to one diagnostic rather than one per method.
+    let mut impl_generics: std::collections::HashMap<usize, Vec<GenericDef>> =
+        std::collections::HashMap::new();
     for sig in &resolved.fns {
         let module = resolved.module_of_item(sig.decl_index);
-        // A function's own type parameters are in scope for its signature.
-        let ast_generics: &[ast::GenericParam] = match sig.owner {
+        // A function's own type parameters are in scope for its signature. A
+        // method has its block's first, then its own: `fn map<U>` inside
+        // `impl<T> Box<T>` is generic over `T` and `U`, in that order, which
+        // is the order a call supplies them in — the receiver's arguments,
+        // then whatever the call solves.
+        let generic_defs = match sig.owner {
             None => match &file.items[sig.decl_index] {
-                ast::Item::Fn(f) => &f.generics,
-                _ => &[],
+                ast::Item::Fn(f) => {
+                    declare_generics(&f.generics, &[], resolved, module, &type_ids, &mut types, diags)
+                }
+                _ => Vec::new(),
             },
-            // A method's parameters come from its `impl` block; per-method
-            // parameters are not supported yet.
-            Some(owner) => match &file.items[owner.impl_index] {
-                ast::Item::Impl(i) => &i.generics,
-                _ => &[],
-            },
+            Some(owner) => {
+                let mut defs = impl_generics
+                    .entry(owner.impl_index)
+                    .or_insert_with(|| match &file.items[owner.impl_index] {
+                        ast::Item::Impl(i) => declare_generics(
+                            &i.generics, &[], resolved, module, &type_ids, &mut types, diags,
+                        ),
+                        _ => Vec::new(),
+                    })
+                    .clone();
+                let own: &[ast::GenericParam] = match &file.items[owner.impl_index] {
+                    ast::Item::Impl(i) => &i.methods[owner.method_index].generics,
+                    ast::Item::Trait(tr) => &tr.methods[owner.method_index].generics,
+                    _ => &[],
+                };
+                let more = declare_generics(own, &defs, resolved, module, &type_ids, &mut types, diags);
+                defs.extend(more);
+                defs
+            }
         };
-        let generic_defs =
-            declare_generics(ast_generics, resolved, module, &type_ids, &mut types, diags);
-        let generics: &[(String, TyId)] = &generic_defs
-            .iter()
-            .map(|g| (g.name.clone(), g.ty))
-            .collect::<Vec<_>>();
+        // `Self` in a method's signature is the type the method is on, at the
+        // block's own parameters — `Box<T>` inside `impl<T> Box<T>`.
+        let owner_ty = sig.owner.map(|owner| {
+            let own: Vec<TyId> = impl_generics
+                .get(&owner.impl_index)
+                .map(|defs| defs.iter().map(|g| g.ty).collect())
+                .unwrap_or_default();
+            match type_ids[owner.type_index as usize] {
+                Some(TypeTarget::Struct(s)) if !own.is_empty() => {
+                    let id = types.instantiate_struct(s, &own);
+                    types.struct_ty(id)
+                }
+                Some(TypeTarget::Enum(e)) if !own.is_empty() => {
+                    let id = types.instantiate_enum(e, &own);
+                    types.enum_ty(id)
+                }
+                other => named_ty(other, &mut types),
+            }
+        });
+        let mut named: Vec<(String, TyId)> =
+            generic_defs.iter().map(|g| (g.name.clone(), g.ty)).collect();
+        if let Some(ty) = owner_ty {
+            named.push(("Self".to_string(), ty));
+        }
+        let generics: &[(String, TyId)] = &named;
         if let ast::Item::Extern(e) = &file.items[sig.decl_index] {
             let params: Vec<TyId> = e
                 .params
@@ -376,26 +439,11 @@ pub fn check_recording(
                         resolve_named_ty(r.value_type(), resolved, module, &type_ids, generics, &mut types, diags)
                     }
                 };
-                let self_ty = if owner.takes_self {
-                    // On a generic type, `self` is the declaration at its own
-                    // parameters — `Box<T>`, not `Box`. Without that, the copy
-                    // made for `Box<int>` would still take a `Box` and the
-                    // call would not type-check where types are checked.
-                    let own: Vec<TyId> = generic_defs.iter().map(|g| g.ty).collect();
-                    Some(match type_ids[owner.type_index as usize] {
-                        Some(TypeTarget::Struct(s)) if !own.is_empty() => {
-                            let id = types.instantiate_struct(s, &own);
-                            types.struct_ty(id)
-                        }
-                        Some(TypeTarget::Enum(e)) if !own.is_empty() => {
-                            let id = types.instantiate_enum(e, &own);
-                            types.enum_ty(id)
-                        }
-                        other => named_ty(other, &mut types),
-                    })
-                } else {
-                    None
-                };
+                // On a generic type, `self` is the declaration at its own
+                // parameters — `Box<T>`, not `Box`. Without that, the copy
+                // made for `Box<int>` would still take a `Box` and the call
+                // would not type-check where types are checked.
+                let self_ty = if owner.takes_self { owner_ty } else { None };
                 let fallible = m.ret.as_ref().is_some_and(|r| r.is_fallible());
                 let ret = if fallible { types.fallible_of(ret) } else { ret };
                 (params, ret, fallible, m.name.span, self_ty)
@@ -421,7 +469,20 @@ pub fn check_recording(
         });
     }
 
-    check_impls(file, resolved, &type_ids, &types, &sigs, diags);
+    // An `impl` whose methods are all inherited defaults declared none of its
+    // own, so its `<T: Bound>` list was never reached above — and its bounds
+    // are still part of whether its type implements the trait.
+    for (i, item) in file.items.iter().enumerate() {
+        if let ast::Item::Impl(imp) = item {
+            if let std::collections::hash_map::Entry::Vacant(slot) = impl_generics.entry(i) {
+                let module = resolved.module_of_item(i);
+                slot.insert(declare_generics(
+                    &imp.generics, &[], resolved, module, &type_ids, &mut types, diags,
+                ));
+            }
+        }
+    }
+    let trait_impls = check_impls(file, resolved, &type_ids, &mut types, &sigs, &trait_method_generics, diags);
 
     // Constants are worked out before any body, because a body naming one gets
     // the value itself rather than a reference to it — by the time a use is
@@ -429,8 +490,17 @@ pub fn check_recording(
     let const_table = consts::evaluate(file, resolved, sources, diags);
     check_const_annotations(file, resolved, &const_table, &type_ids, &mut types, diags);
 
+    let mut facts = GenericFacts {
+        compared: sigs.iter().map(|s| vec![None; s.generics.len()]).collect(),
+        calls: Vec::new(),
+    };
     for (i, sig) in resolved.fns.iter().enumerate() {
         let mut checker = Checker {
+            facts: &mut facts,
+            type_generics: &type_generics,
+            impl_generics: &impl_generics,
+            trait_method_generics: &trait_method_generics,
+            trait_impls: &trait_impls,
             consts: &const_table,
             resolved,
             module: resolved.module_of_item(sig.decl_index).to_string(),
@@ -552,6 +622,7 @@ pub fn check_recording(
         lifted.append(&mut checker.lifted);
     }
     fns.append(&mut lifted);
+    check_compared_params(&mut facts, resolved, &sigs, &types, diags);
 
     let vtables = build_vtables(resolved, &type_ids, &types);
 
@@ -759,8 +830,13 @@ fn missing_args(p: &ast::TypePath, want: usize, diags: &mut DiagBag) -> TyId {
 }
 
 /// Turn a declaration's `<T: Bound, U>` list into parameter types.
+///
+/// `before` is the list this one continues: a method's own parameters follow
+/// its `impl` block's, so they are numbered after them and may not reuse a
+/// name the block already declared.
 fn declare_generics(
     params: &[ast::GenericParam],
+    before: &[GenericDef],
     resolved: &ResolveMap,
     module: &str,
     type_ids: &[Option<TypeTarget>],
@@ -768,8 +844,8 @@ fn declare_generics(
     diags: &mut DiagBag,
 ) -> Vec<GenericDef> {
     let mut out: Vec<GenericDef> = Vec::new();
-    for (i, p) in params.iter().enumerate() {
-        if let Some(prev) = out.iter().find(|g| g.name == p.name.name) {
+    for p in params.iter() {
+        if let Some(prev) = before.iter().chain(out.iter()).find(|g| g.name == p.name.name) {
             diags.push(
                 Diagnostic::error(
                     codes::E0208,
@@ -780,13 +856,14 @@ fn declare_generics(
             );
             continue;
         }
-        let ty = types.param_ty(i as u32, &p.name.name);
+        let ty = types.param_ty((before.len() + out.len()) as u32, &p.name.name);
         let mut bounds = Vec::new();
         for b in &p.bounds {
-            match resolved
-                .type_by_name_in(module, &b.text())
-                .and_then(|i| type_ids[i as usize])
-            {
+            let found = resolved.type_by_name_in(module, &b.text());
+            if let Some(i) = found {
+                check_type_visible(resolved, module, i, b.span, &b.text(), diags);
+            }
+            match found.and_then(|i| type_ids[i as usize]) {
                 Some(TypeTarget::Trait(tr)) => bounds.push(tr),
                 _ => diags.push(
                     Diagnostic::error(
@@ -823,6 +900,21 @@ struct Checker<'a> {
     /// here rather than re-derived later, because a second derivation is a
     /// second checker waiting to disagree with this one.
     solved: &'a mut Solved,
+    /// What generic bodies demand of their arguments beyond their bounds, and
+    /// the calls to hold to it. See [`GenericFacts`].
+    facts: &'a mut GenericFacts,
+    /// Each declared type's own `<T: Bound>` list, parallel to
+    /// `resolved.types`. A bound there holds wherever a value is built.
+    type_generics: &'a [Vec<GenericDef>],
+    /// Each `impl` block's `<T: Bound>` list, by item index. Its methods take
+    /// these first, from the receiver's own type.
+    impl_generics: &'a std::collections::HashMap<usize, Vec<GenericDef>>,
+    /// A trait method's own type parameters, by trait and position.
+    trait_method_generics: &'a std::collections::HashMap<(hir::TraitId, usize), Vec<GenericDef>>,
+    /// Which `impl` block implements a trait for a type: `(type index, trait
+    /// index)` to item index. Its bounds are what a generic type needs of
+    /// its arguments to implement the trait at all.
+    trait_impls: &'a std::collections::HashMap<(u32, u32), usize>,
     sigs: &'a [Signature],
     /// Functions lifted out of this function's closure literals.
     lifted: Vec<hir::Function>,
@@ -2302,7 +2394,15 @@ impl<'a> Checker<'a> {
             ast::Expr::Bool { value, span } => self.lit(ExprKind::Bool(*value), TyId::BOOL, *span),
             ast::Expr::Interpolated { parts, span } => self.interpolated(parts, *span),
 
-            ast::Expr::Path(p) => self.path_expr(p),
+            // A unit variant of a generic enum says nothing about its
+            // arguments, so the type the context expects is what settles them:
+            // `let m: Maybe<str> = None`.
+            ast::Expr::Path(p) => match self.resolved.lookup_use(p.span) {
+                Some(Res::Variant(ti, vi)) => {
+                    self.variant_value(ti, vi, &[], &[], p.span, p.span, expected)
+                }
+                _ => self.path_expr(p),
+            },
             ast::Expr::Paren { inner, .. } => self.expr(inner, expected),
 
             ast::Expr::Unary { op, operand, span } => {
@@ -2520,33 +2620,33 @@ impl<'a> Checker<'a> {
                 let mut val_ty = hint.map(|(_, v)| v);
                 for e in entries {
                     let k = self.expr(&e.key, key_ty);
-                    match key_ty {
-                        None if !self.types.is_poisoned(k.ty) => key_ty = Some(k.ty),
-                        Some(want) => self.expect_ty(k.ty, want, k.span, None),
-                        None => {}
-                    }
+                    let k = match key_ty {
+                        None => {
+                            if !self.types.is_poisoned(k.ty) {
+                                key_ty = Some(k.ty);
+                            }
+                            k
+                        }
+                        Some(want) => self.accept(k, want, None),
+                    };
                     let v = self.expr(&e.value, val_ty);
-                    let v = self.coerce(v, val_ty);
-                    match val_ty {
-                        None if !self.types.is_poisoned(v.ty) => val_ty = Some(v.ty),
-                        Some(want) => self.expect_ty(v.ty, want, v.span, None),
-                        None => {}
-                    }
+                    let v = match val_ty {
+                        None => {
+                            if !self.types.is_poisoned(v.ty) {
+                                val_ty = Some(v.ty);
+                            }
+                            v
+                        }
+                        Some(want) => self.accept(v, want, None),
+                    };
                     flat.push(k);
                     flat.push(v);
                 }
 
                 let k = key_ty.unwrap_or(TyId::ERROR);
                 let v = val_ty.unwrap_or(TyId::ERROR);
-                if !self.types.is_equatable(k) && !self.types.is_poisoned(k) {
-                    self.diags.push(
-                        Diagnostic::error(
-                            codes::E0200,
-                            format!("`{}` cannot be a map key", self.types.name(k)),
-                        )
-                        .with_primary(*span, "a key must be equatable")
-                        .with_note("lookup compares keys, so every field must itself compare"),
-                    );
+                if check_map_key(self.types, k, *span, self.diags) {
+                    self.note_compared(k, *span);
                 }
                 let ty = self.types.map_of(k, v);
                 hir::Expr { kind: ExprKind::MapNew { entries: flat }, ty, span: *span }
@@ -3132,25 +3232,11 @@ impl<'a> Checker<'a> {
                 self.unify(ret, want, &generics, &mut subst, span);
             }
         }
-        let mut hargs = Vec::with_capacity(args.len());
-        for (i, a) in args.iter().enumerate() {
-            let declared = sig_params.get(i).copied();
-            // An argument is checked against the parameter type only once that
-            // type is fully known; until then it is checked on its own and used
-            // to fill parameters in.
-            let want = declared.and_then(|d| self.apply_subst_opt(d, &subst));
-            let e = self.expr(a, want);
-            let e = self.coerce(e, want);
-            if let Some(d) = declared {
-                self.unify(d, e.ty, &generics, &mut subst, e.span);
-                let expected = self.apply_subst(d, &subst);
-                self.expect_ty(e.ty, expected, e.span, Some(decl_span));
-            }
-            hargs.push(e);
-        }
+        let hargs = self.check_args(&sig_params, &generics, &mut subst, args, Some(decl_span));
 
         let targs = self.finish_subst(&generics, &subst, span);
         self.check_bounds(&generics, &targs, span);
+        self.note_generic_call(id, &targs, span);
         // What the call inferred, once it inferred all of it. A partial answer
         // would be a hint that lies, so an unsolved parameter records nothing.
         if !targs.is_empty() && !targs.iter().any(|t| self.types.is_poisoned(*t)) {
@@ -3172,6 +3258,135 @@ impl<'a> Checker<'a> {
             kind: ExprKind::Call { callee: hir::FnId(id), args: hargs, targs },
             ty: ret,
             span,
+        }
+    }
+
+    /// Check a call's arguments against a signature, solving its type
+    /// parameters as they go.
+    ///
+    /// Shared by every call that can be generic — a function, a method, an
+    /// associated function, a trait's method reached through a bound — so
+    /// they infer, convert and report alike. `subst` arrives holding whatever
+    /// is already known, such as the arguments a receiver's own type fixes.
+    fn check_args(
+        &mut self,
+        sig_params: &[TyId],
+        generics: &[GenericDef],
+        subst: &mut Vec<Option<TyId>>,
+        args: &[ast::Expr],
+        decl_span: Option<Span>,
+    ) -> Vec<hir::Expr> {
+        // A callee that demands `Share` of its type arguments is one that
+        // hands values to another task — and a function it is given goes with
+        // them, along with everything that function captured.
+        let crosses = generics
+            .iter()
+            .any(|g| g.bounds.iter().any(|b| self.is_share_bound(*b)));
+        let mut hargs = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let declared = sig_params.get(i).copied();
+            // An argument is checked against the parameter type only once that
+            // type is fully known; until then it is checked on its own and used
+            // to fill parameters in.
+            let want = declared.and_then(|d| self.apply_subst_opt(d, subst));
+            let e = self.expr(a, want);
+            let e = self.coerce(e, want);
+            let e = match declared {
+                Some(d) => {
+                    // A conflict is its own diagnostic, naming both sides;
+                    // a mismatch reported on top of it would say the same
+                    // thing again, less clearly.
+                    let before = self.diags.error_count();
+                    self.unify(d, e.ty, generics, subst, e.span);
+                    if self.diags.error_count() != before {
+                        e
+                    } else {
+                        // Converted again now the parameter is known: `get(7,
+                        // 3)` against `x: Option<T>` only learns that the
+                        // `7` must be wrapped once `T` is `int`, which is
+                        // after it was checked.
+                        let expected = self.apply_subst(d, subst);
+                        self.accept(e, expected, decl_span)
+                    }
+                }
+                None => e,
+            };
+            if crosses && declared.is_some_and(|d| matches!(self.types.kind(d), TyKind::Fn { .. })) {
+                self.require_share_captures(&e);
+            }
+            hargs.push(e);
+        }
+        hargs
+    }
+
+    /// A function handed to another task takes its captures with it, so each
+    /// must be `Share` exactly as an argument would (§4.5, §12.3). A closure
+    /// capturing a `Counter` with a `var` field, or a `JsValue`, would
+    /// otherwise carry one across the boundary that the arguments are checked
+    /// at.
+    fn require_share_captures(&mut self, e: &hir::Expr) {
+        match &e.kind {
+            ExprKind::ClosureNew { captures, .. } => {
+                for c in captures {
+                    if self.types.is_poisoned(c.ty) || self.share_given_params(c.ty) {
+                        continue;
+                    }
+                    let ExprKind::Local(id) = c.kind else { continue };
+                    let (name, decl) = {
+                        let l = &self.locals[id.0 as usize];
+                        (l.name.clone(), l.span)
+                    };
+                    let what = self.types.with_article(c.ty);
+                    let mut d = Diagnostic::error(
+                        codes::E0520,
+                        "this closure cannot be moved to another task",
+                    )
+                    .with_primary(e.span, format!("it captures `{}`, which is {}", name, what))
+                    .with_secondary(decl, format!("`{}` is declared here", name));
+                    d = if self.types.mentions_host_value(c.ty) {
+                        d.with_note(
+                            "a `JsValue` belongs to the isolate that created it, and the \
+                             closure would carry it to one where it names nothing",
+                        )
+                    } else {
+                        d.with_note(format!(
+                            "{} is not `Share`, and a closure takes what it captures along \
+                             with it: two tasks would hold one mutable value",
+                            what
+                        ))
+                    };
+                    self.diags.push(d.with_note(
+                        "pass what the work needs as the items instead, or capture a value \
+                         that is `Share`",
+                    ));
+                }
+            }
+            // A function value whose closure is out of sight here — held in a
+            // binding, returned from a call — could be carrying anything.
+            ExprKind::Local(_)
+            | ExprKind::Call { .. }
+            | ExprKind::CallClosure { .. }
+            | ExprKind::FieldGet { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Match { .. } => {
+                if self.types.is_poisoned(e.ty) {
+                    return;
+                }
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0520,
+                        "a function handed to another task must be written where it is handed",
+                    )
+                    .with_primary(e.span, "what this captured cannot be seen here")
+                    .with_note(
+                        "a closure takes what it captures to the other task, and each capture \
+                         must be `Share`; write the closure literal here, or name a function, \
+                         so the captures can be checked",
+                    ),
+                );
+            }
+            _ => {}
         }
     }
 
@@ -3229,7 +3444,7 @@ impl<'a> Checker<'a> {
                     Some(Res::Variant(ti, vi)) => {
                         self.variant_value(ti, vi, args, arg_names, *fspan, span, expected)
                     }
-                    _ => self.method_call(base, name, args, span),
+                    _ => self.method_call(base, name, args, span, expected),
                 };
             }
         }
@@ -3904,7 +4119,7 @@ impl<'a> Checker<'a> {
                 let m = self.expr(&args[0], Some(TyId::STR));
                 self.expect_ty(m.ty, TyId::STR, m.span, None);
                 let c = self.expr(&args[1], Some(TyId::ERR));
-                self.expect_ty(c.ty, TyId::ERR, c.span, None);
+                let c = self.accept(c, TyId::ERR, None);
                 let span_of = m.span;
                 hir::Expr {
                     kind: ExprKind::ErrorNew {
@@ -3950,9 +4165,11 @@ impl<'a> Checker<'a> {
                     // A type with `Display` prints through it, so `io.print(p)`
                     // and `"\(p)"` agree by construction rather than by
                     // everyone remembering to keep them the same.
-                    if !self.types.is_printable(e.ty) && self.display_method(e.ty).is_some() {
-                        hargs.push(self.render(e));
-                        continue;
+                    if !self.types.is_printable(e.ty) && !self.types.is_poisoned(e.ty) {
+                        if let Some(shown) = self.show_through_display(e.clone()) {
+                            hargs.push(shown);
+                            continue;
+                        }
                     }
                     if !self.types.is_printable(e.ty) && !self.types.is_poisoned(e.ty) {
                         let article = self.types.with_article(e.ty);
@@ -4002,6 +4219,7 @@ impl<'a> Checker<'a> {
     /// trait, so checking is entirely static.
     fn virtual_call(
         &mut self,
+        base: &ast::Expr,
         receiver: hir::Expr,
         tr: hir::TraitId,
         name: &ast::Ident,
@@ -4027,24 +4245,46 @@ impl<'a> Checker<'a> {
             self.diags.push(d);
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         };
-        let (params, ret) = (method.params.clone(), method.ret);
+        let (params, ret, var_self) = (method.params.clone(), method.ret, method.var_self);
         let method = index as u32;
+        // The trait's receiver is the one every implementation agreed to, so
+        // `var self` asks the same of a call through a `dyn` or a bound as it
+        // does of a direct call.
+        if var_self {
+            self.require_mutable_receiver(base, &name.name);
+        }
+
+        // `Self` is the receiver's type. Through a bound that is the
+        // parameter, and monomorphisation makes it the concrete type; through
+        // a `dyn` no method mentioning it is callable at all, which is what
+        // object safety is (§10.3).
+        let self_param = self.types.self_param();
+        let map = [(self_param, receiver.ty)];
+        let params: Vec<TyId> = params.iter().map(|p| replace_types(self.types, *p, &map)).collect();
+        let ret = replace_types(self.types, ret, &map);
+
+        // A method generic in its own right solves its parameters from its
+        // arguments, as a generic function does. They are numbered after the
+        // trait's own, so the substitution has a slot for those too.
+        let mut generics: Vec<GenericDef> = self
+            .trait_index_of(tr)
+            .and_then(|ti| self.type_generics.get(ti as usize).cloned())
+            .unwrap_or_default();
+        let before = generics.len();
+        generics.extend(self.trait_method_generics.get(&(tr, index)).cloned().unwrap_or_default());
+        let mut subst: Vec<Option<TyId>> = vec![None; generics.len()];
 
         if args.len() != params.len() {
             self.arity_error(&name.name, args.len(), params.len(), span, None);
         }
         let mut lowered = vec![receiver];
-        for (i, a) in args.iter().enumerate() {
-            let want = params.get(i).copied();
-            let e = self.expr(a, want);
-            if let Some(w) = want {
-                self.expect_ty(e.ty, w, e.span, None);
-            }
-            let e = self.coerce(e, want);
-            lowered.push(e);
-        }
+        lowered.extend(self.check_args(&params, &generics, &mut subst, args, None));
+        let own = generics[before..].to_vec();
+        let targs = self.finish_subst(&own, &subst[before..], span);
+        self.check_bounds(&own, &targs, span);
+        let ret = self.apply_subst(ret, &subst);
         hir::Expr {
-            kind: ExprKind::CallVirtual { trait_id: tr, method, args: lowered },
+            kind: ExprKind::CallVirtual { trait_id: tr, method, args: lowered, targs },
             ty: ret,
             span,
         }
@@ -4111,6 +4351,7 @@ impl<'a> Checker<'a> {
         name: &ast::Ident,
         args: &[ast::Expr],
         span: Span,
+        expected: Option<TyId>,
     ) -> hir::Expr {
         let receiver = self.expr(base, None);
         if self.types.is_poisoned(receiver.ty) {
@@ -4169,7 +4410,8 @@ impl<'a> Checker<'a> {
                     return self.lit(ExprKind::Error, TyId::ERROR, span);
                 };
                 let key = self.expr(&args[0], Some(k));
-                self.expect_ty(key.ty, k, key.span, None);
+                let key = self.accept(key, k, None);
+                self.note_compared(k, key.span);
                 return self.as_statement(
                     hir::Stmt::MapRemove { local: hir::LocalId(local), key, span },
                     span,
@@ -4224,7 +4466,7 @@ impl<'a> Checker<'a> {
         }
 
         if let TyKind::Dyn(tr) = *self.types.kind(receiver.ty) {
-            return self.virtual_call(receiver, tr, name, args, span);
+            return self.virtual_call(base, receiver, tr, name, args, span);
         }
 
         // A method on a type parameter. Only its bounds say what it can do —
@@ -4240,7 +4482,7 @@ impl<'a> Checker<'a> {
                 .find(|tr| self.types.trait_def(**tr).method(&name.name).is_some())
                 .copied();
             match found {
-                Some(tr) => return self.virtual_call(receiver, tr, name, args, span),
+                Some(tr) => return self.virtual_call(base, receiver, tr, name, args, span),
                 None => {
                     let mut d = Diagnostic::error(
                         codes::E0205,
@@ -4298,6 +4540,7 @@ impl<'a> Checker<'a> {
                     .map(|(i, f)| (i as u32, f.ty));
                 if let Some((index, field_ty)) = field {
                     if let TyKind::Fn { params, ret } = self.types.kind(field_ty).clone() {
+                        self.check_field_visible(sid, index as usize, name.span);
                         let callee = hir::Expr {
                             kind: ExprKind::FieldGet { base: Box::new(receiver), index },
                             ty: field_ty,
@@ -4380,17 +4623,49 @@ impl<'a> Checker<'a> {
             self.require_mutable_receiver(base, &name.name);
         }
 
+        self.check_member_visible(
+            self.resolved.module_of_fn(fn_index).to_string(),
+            self.resolved.fns[fn_index as usize].is_pub || owner.trait_index.is_some(),
+            "method",
+            &name.name,
+            name.span,
+            self.sigs[fn_index as usize].name_span,
+        );
+
         // A method on a generic type is written once against the parameters
-        // and specialised per receiver: the arguments come off the receiver's
-        // own type, so there is nothing at a call site to infer.
-        let targs = self.receiver_args(receiver.ty);
-        let subst: Vec<Option<TyId>> = targs.iter().map(|t| Some(*t)).collect();
+        // and specialised per receiver: its block's arguments come off the
+        // receiver's own type. Its own parameters, if it has any, are solved
+        // from its arguments exactly as a generic function's are.
+        let generics = self.sigs[fn_index as usize].generics.clone();
+        let block = self.block_generic_count(owner.impl_index);
+        let mut subst: Vec<Option<TyId>> = vec![None; generics.len()];
+        for (slot, t) in subst.iter_mut().zip(self.receiver_args(receiver.ty)).take(block) {
+            *slot = Some(t);
+        }
         let raw_params = self.sigs[fn_index as usize].params.clone();
+        let raw_ret = self.sigs[fn_index as usize].ret;
+        let decl_span = self.sigs[fn_index as usize].name_span;
+        self.seed_from_expected(raw_ret, expected, &generics, &mut subst, span);
+
+        if args.len() != raw_params.len() {
+            self.arity_error(&name.name, args.len(), raw_params.len(), span, Some(decl_span));
+        }
+
+        // The receiver becomes the first argument, which is exactly how `self`
+        // is stored: local 0.
+        let receiver_ty = receiver.ty;
+        let mut hargs = vec![receiver];
+        hargs.extend(self.check_args(&raw_params, &generics, &mut subst, args, Some(decl_span)));
+        let targs = self.finish_subst(&generics, &subst, span);
+        // A bound on the block holds for the receiver as for anything else.
+        // One the declaration itself carries was checked where the value was
+        // built, so it is not reported a second time here.
+        let owned = self.block_bounds_to_check(ti, &generics, block);
+        self.check_bounds(&owned, &targs, span);
+        self.note_generic_call(fn_index, &targs, span);
+        let ret = self.apply_subst(raw_ret, &subst);
         let sig_params: Vec<TyId> =
             raw_params.iter().map(|p| self.apply_subst(*p, &subst)).collect();
-        let raw_ret = self.sigs[fn_index as usize].ret;
-        let ret = self.apply_subst(raw_ret, &subst);
-        let decl_span = self.sigs[fn_index as usize].name_span;
 
         // What an editor says when the method name is hovered. Recorded here
         // because this is the only place that knows: finding a method needs
@@ -4404,14 +4679,14 @@ impl<'a> Checker<'a> {
         let shown = if ret == TyId::UNIT {
             format!(
                 "fn {}.{}({})",
-                self.types.name(receiver.ty),
+                self.types.name(receiver_ty),
                 name.name,
                 shown_params.join(", ")
             )
         } else {
             format!(
                 "fn {}.{}({}) -> {}",
-                self.types.name(receiver.ty),
+                self.types.name(receiver_ty),
                 name.name,
                 shown_params.join(", "),
                 self.types.name(ret)
@@ -4419,28 +4694,181 @@ impl<'a> Checker<'a> {
         };
         self.solved.methods.push((name.span, shown));
 
-        if args.len() != sig_params.len() {
-            self.arity_error(&name.name, args.len(), sig_params.len(), span, Some(decl_span));
-        }
-
-        // The receiver becomes the first argument, which is exactly how `self`
-        // is stored: local 0.
-        let mut hargs = vec![receiver];
-        for (i, a) in args.iter().enumerate() {
-            let want = sig_params.get(i).copied();
-            let e = self.expr(a, want);
-            let e = self.coerce(e, want);
-            if let Some(w) = want {
-                self.expect_ty(e.ty, w, e.span, Some(decl_span));
-            }
-            hargs.push(e);
-        }
-
         hir::Expr {
             kind: ExprKind::Call { callee: hir::FnId(fn_index), args: hargs, targs },
             ty: ret,
             span,
         }
+    }
+
+    /// The module declaring a struct, which is where its private fields may
+    /// be reached. `None` for one the compiler declared, such as a task.
+    fn module_of_struct(&self, sid: kite_hir::StructId) -> Option<String> {
+        let template = self.types.struct_template_of(sid).unwrap_or(sid);
+        let i = self
+            .type_ids
+            .iter()
+            .position(|t| matches!(t, Some(TypeTarget::Struct(s)) if *s == template))?;
+        Some(self.resolved.module_of_item(self.resolved.types[i].decl_index).to_string())
+    }
+
+    /// A field reached from outside its struct's module must be `pub`
+    /// (§4.3). Reported at the name; false when it was not visible.
+    fn check_field_visible(&mut self, sid: kite_hir::StructId, index: usize, span: Span) -> bool {
+        let Some(module) = self.module_of_struct(sid) else { return true };
+        let f = &self.types.struct_def(sid).fields[index];
+        let (is_pub, name, decl) = (f.is_pub, f.name.clone(), f.span);
+        self.check_member_visible(module, is_pub, "field", &name, span, decl)
+    }
+
+    /// A struct literal outside the struct's module needs every field to be
+    /// `pub`: a private one cannot be named, and a literal cannot leave one
+    /// out.
+    fn check_constructible(&mut self, sid: kite_hir::StructId, span: Span) {
+        let Some(module) = self.module_of_struct(sid) else { return };
+        if module == self.module {
+            return;
+        }
+        let private: Vec<(String, Span)> = self
+            .types
+            .struct_def(sid)
+            .fields
+            .iter()
+            .filter(|f| !f.is_pub)
+            .map(|f| (f.name.clone(), f.span))
+            .collect();
+        let Some((_, first)) = private.first().cloned() else { return };
+        let name = self.types.struct_def(sid).name.clone();
+        let fields: Vec<String> = private.iter().map(|(n, _)| format!("`{}`", n)).collect();
+        self.diags.push(
+            Diagnostic::error(
+                codes::E0401,
+                format!("`{}` cannot be built outside module `{}`", name, module),
+            )
+            .with_primary(span, "not visible here")
+            .with_secondary(first, "this field is not marked `pub`")
+            .with_note(format!(
+                "{} {} private, and a literal — even one starting from `..` — has to \
+                 give every field",
+                fields.join(", "),
+                if fields.len() == 1 { "is" } else { "are" }
+            ))
+            .with_note(format!(
+                "build one with a function module `{}` exports, which is what a private \
+                 field is asking for",
+                module
+            )),
+        );
+    }
+
+    /// The bounds a generic struct or enum declares, held against the type
+    /// arguments of a value being built.
+    fn check_type_bounds(&mut self, ti: u32, ty: TyId, span: Span) {
+        let Some(defs) = self.type_generics.get(ti as usize).cloned() else { return };
+        if defs.iter().all(|g| g.bounds.is_empty()) {
+            return;
+        }
+        let args = self.receiver_args(ty);
+        self.check_bounds(&defs, &args, span);
+    }
+
+    /// How many of a method's type parameters its `impl` block declares —
+    /// the ones a receiver's own type supplies. The rest are the method's.
+    fn block_generic_count(&self, impl_index: usize) -> usize {
+        self.impl_generics.get(&impl_index).map_or(0, |g| g.len())
+    }
+
+    /// A method's parameters with the bounds still to be checked at a call:
+    /// all of the method's own, and the block's except those the type's
+    /// declaration already demands of whatever builds a value of it.
+    fn block_bounds_to_check(&self, ti: u32, generics: &[GenericDef], block: usize) -> Vec<GenericDef> {
+        let declared = self.type_generics.get(ti as usize);
+        generics
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                let mut g = g.clone();
+                if i < block {
+                    if let Some(d) = declared.and_then(|d| d.get(i)) {
+                        g.bounds.retain(|b| !d.bounds.contains(b));
+                    }
+                }
+                g
+            })
+            .collect()
+    }
+
+    /// Fill in type parameters from the type a call's result is used as,
+    /// where it says more than the arguments will.
+    ///
+    /// A trial: any disagreement is reported by the argument or the use that
+    /// has it, where it can be explained, rather than here.
+    fn seed_from_expected(
+        &mut self,
+        ret: TyId,
+        expected: Option<TyId>,
+        generics: &[GenericDef],
+        subst: &mut Vec<Option<TyId>>,
+        span: Span,
+    ) {
+        let Some(want) = expected else { return };
+        if subst.iter().all(|s| s.is_some()) {
+            return;
+        }
+        let mut scratch = DiagBag::new();
+        std::mem::swap(self.diags, &mut scratch);
+        self.unify(ret, want, generics, subst, span);
+        // A `T` is acceptable where an `Option<T>` is wanted, so an optional
+        // context says what the value inside it is.
+        if let TyKind::Optional(inner) = *self.types.kind(want) {
+            if !matches!(self.types.kind(ret), TyKind::Optional(_)) {
+                self.unify(ret, inner, generics, subst, span);
+            }
+        }
+        std::mem::swap(self.diags, &mut scratch);
+    }
+
+    /// Reject reaching into another module for a member it did not mark
+    /// `pub` — a field, a method, an associated function.
+    ///
+    /// The same two levels of visibility the resolver enforces for top-level
+    /// names (§4.3), applied where a member is found, which is here: which
+    /// field or method a `.name` means depends on the type of what is to its
+    /// left, and only the checker knows that.
+    fn check_member_visible(
+        &mut self,
+        decl_module: String,
+        is_pub: bool,
+        what: &str,
+        name: &str,
+        span: Span,
+        decl: Span,
+    ) -> bool {
+        if is_pub || decl_module == self.module {
+            return true;
+        }
+        // A `let (a, b) = …` initialiser is checked twice, once to see which
+        // kind of binding it is; one mistake is still one diagnostic.
+        let already = self
+            .diags
+            .iter()
+            .any(|d| d.code == Some(codes::E0401) && d.primary_span() == Some(span));
+        if already {
+            return false;
+        }
+        self.diags.push(
+            Diagnostic::error(
+                codes::E0401,
+                format!("{} `{}` is private to module `{}`", what, name, decl_module),
+            )
+            .with_primary(span, "not visible here")
+            .with_secondary(decl, format!("this {} is not marked `pub`", what))
+            .with_note(
+                "unmarked members are visible only within the module that declares their \
+                 type; write `pub` to export one",
+            ),
+        );
+        false
     }
 
     /// The type arguments a receiver's own type was specialised with, or none
@@ -4629,56 +5057,52 @@ impl<'a> Checker<'a> {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
 
+        self.check_member_visible(
+            self.resolved.module_of_fn(fn_index).to_string(),
+            self.resolved.fns[fn_index as usize].is_pub || owner.trait_index.is_some(),
+            "associated function",
+            &method_name,
+            p_span,
+            self.sigs[fn_index as usize].name_span,
+        );
+
         // An associated function on a generic type has no receiver to take
-        // arguments from, so they come from the type the result is used as:
-        // `let s: Stack<int> = Stack.empty()`.
+        // arguments from, so they come from the type the result is used as —
+        // `let s: Stack<int> = Stack.empty()` — or failing that from its
+        // arguments, as any generic call's do: `Stack.of(5)` is a
+        // `Stack<int>`. Its own parameters, if it has any, come from the
+        // arguments too.
         let generics = self.sigs[fn_index as usize].generics.clone();
-        let targs = if generics.is_empty() {
-            Vec::new()
-        } else {
-            match expected.map(|e| self.receiver_args(e)).filter(|a| a.len() == generics.len()) {
-                Some(a) => a,
-                None => {
-                    let names: Vec<&str> = generics.iter().map(|g| g.name.as_str()).collect();
-                    self.diags.push(
-                        Diagnostic::error(
-                            codes::E0209,
-                            format!("cannot infer {} for `{}`", names.join(", "), type_name),
-                        )
-                        .with_primary(span, "nothing here says what this returns")
-                        .with_note(format!(
-                            "annotate the binding: `let x: {}<...> = ...`",
-                            type_name
-                        )),
-                    );
-                    return self.lit(ExprKind::Error, TyId::ERROR, span);
-                }
-            }
-        };
-        let subst: Vec<Option<TyId>> = targs.iter().map(|t| Some(*t)).collect();
+        let block = self.block_generic_count(owner.impl_index);
+        let mut subst: Vec<Option<TyId>> = vec![None; generics.len()];
 
         let raw_params = self.sigs[fn_index as usize].params.clone();
-        let sig_params: Vec<TyId> =
-            raw_params.iter().map(|p| self.apply_subst(*p, &subst)).collect();
         let raw_ret = self.sigs[fn_index as usize].ret;
-        let ret = self.apply_subst(raw_ret, &subst);
         let decl_span = self.sigs[fn_index as usize].name_span;
+        self.seed_from_expected(raw_ret, expected, &generics, &mut subst, span);
 
-        if args.len() != sig_params.len() {
+        if args.len() != raw_params.len() {
             let full = format!("{}.{}", type_name, method_name);
-            self.arity_error(&full, args.len(), sig_params.len(), span, Some(decl_span));
+            self.arity_error(&full, args.len(), raw_params.len(), span, Some(decl_span));
         }
 
-        let mut hargs = Vec::with_capacity(args.len());
-        for (i, a) in args.iter().enumerate() {
-            let want = sig_params.get(i).copied();
-            let e = self.expr(a, want);
-            let e = self.coerce(e, want);
-            if let Some(w) = want {
-                self.expect_ty(e.ty, w, e.span, Some(decl_span));
-            }
-            hargs.push(e);
+        let hargs = self.check_args(&raw_params, &generics, &mut subst, args, Some(decl_span));
+        if subst.iter().take(block).any(|s| s.is_none()) {
+            let names: Vec<&str> = generics.iter().take(block).map(|g| g.name.as_str()).collect();
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0209,
+                    format!("cannot infer {} for `{}`", names.join(", "), type_name),
+                )
+                .with_primary(span, "nothing here says what this returns")
+                .with_note(format!("annotate the binding: `let x: {}<...> = ...`", type_name)),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
+        let targs = self.finish_subst(&generics, &subst, span);
+        self.check_bounds(&generics, &targs, span);
+        self.note_generic_call(fn_index, &targs, span);
+        let ret = self.apply_subst(raw_ret, &subst);
 
         hir::Expr {
             kind: ExprKind::Call { callee: hir::FnId(fn_index), args: hargs, targs },
@@ -4800,12 +5224,91 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether a concrete value may stand where a trait object is wanted.
-    fn coerces_to_dyn(&self, found: TyId, expected: TyId) -> bool {
+    fn coerces_to_dyn(&mut self, found: TyId, expected: TyId) -> bool {
         let TyKind::Dyn(tr) = *self.types.kind(expected) else { return false };
-        let (Some(ti), Some(tri)) = (self.type_index_of(found), self.trait_index_of(tr)) else {
+        self.type_implements(found, tr)
+    }
+
+    /// Whether a type implements a trait.
+    ///
+    /// A type parameter does exactly when its bounds say so — inside
+    /// `fn outer<T: Show>`, `T` is a `Show` and may be handed to anything
+    /// that asks for one. A generic type implements a trait through a block
+    /// that may itself be bounded: after `impl<T: Show> Named for Box<T>`, a
+    /// `Box<int>` is not `Named` at all, and a call that treated it as one
+    /// reached a body calling `show` on an `int`.
+    fn type_implements(&mut self, ty: TyId, tr: hir::TraitId) -> bool {
+        if let TyKind::Param { index, .. } = *self.types.kind(ty) {
+            return self.generic_defs.get(index as usize).is_some_and(|d| d.bounds.contains(&tr));
+        }
+        let (Some(ti), Some(tri)) = (self.type_index_of(ty), self.trait_index_of(tr)) else {
             return false;
         };
-        self.resolved.implements(ti, tri)
+        if !self.resolved.implements(ti, tri) {
+            return false;
+        }
+        let Some(defs) = self
+            .trait_impls
+            .get(&(ti, tri))
+            .and_then(|block| self.impl_generics.get(block))
+            .cloned()
+        else {
+            return true;
+        };
+        let args = self.receiver_args(ty);
+        for (g, a) in defs.iter().zip(args) {
+            for b in &g.bounds {
+                let held = if self.is_share_bound(*b) {
+                    self.share_given_params(a)
+                } else {
+                    self.type_implements(a, *b)
+                };
+                if !held {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Whether a trait is `Share`, the one bound nobody implements.
+    ///
+    /// The prelude is a module, so its trait is `prelude.Share` — and a
+    /// program that declares its own `Share` gets the same treatment, exactly
+    /// as it does for `Display`.
+    fn is_share_bound(&self, tr: hir::TraitId) -> bool {
+        last_segment(&self.types.trait_def(tr).name) == "Share"
+    }
+
+    /// Whether a type may cross a task boundary, where it may mention the
+    /// enclosing function's type parameters.
+    ///
+    /// A parameter bounded by `Share` is as good as any type that is; one
+    /// that is not might turn out to be anything, and so is taken to be the
+    /// worst case. Standing each in for a representative type lets the one
+    /// structural rule in `Types::is_share` answer, rather than a second copy
+    /// of it that knows about parameters.
+    fn share_given_params(&mut self, ty: TyId) -> bool {
+        let mut params = Vec::new();
+        params_in(self.types, ty, &mut params);
+        params.retain(|p| *p != kite_hir::ty::SELF_INDEX);
+        let Some(max) = params.iter().max().copied() else {
+            return self.types.is_share(ty);
+        };
+        let stand_ins: Vec<TyId> = (0..=max)
+            .map(|i| {
+                let bounded = self.generic_defs.get(i as usize).is_some_and(|d| {
+                    d.bounds.iter().any(|b| last_segment(&self.types.trait_def(*b).name) == "Share")
+                });
+                if bounded {
+                    TyId::INT
+                } else {
+                    TyId::JS_VALUE
+                }
+            })
+            .collect();
+        let concrete = self.types.substitute(ty, &stand_ins);
+        self.types.is_share(concrete)
     }
 
     fn type_index_of(&self, ty: TyId) -> Option<u32> {
@@ -5354,11 +5857,15 @@ impl<'a> Checker<'a> {
         let mut elem_ty = hint;
         for e in elems {
             let v = self.expr(e, elem_ty);
-            match elem_ty {
-                None if !self.types.is_poisoned(v.ty) => elem_ty = Some(v.ty),
-                Some(want) => self.expect_ty(v.ty, want, v.span, None),
-                None => {}
-            }
+            let v = match elem_ty {
+                None => {
+                    if !self.types.is_poisoned(v.ty) {
+                        elem_ty = Some(v.ty);
+                    }
+                    v
+                }
+                Some(want) => self.accept(v, want, None),
+            };
             out.push(v);
         }
 
@@ -5385,7 +5892,8 @@ impl<'a> Checker<'a> {
         // Map indexing always yields an optional, never a zero value.
         if let TyKind::Map(key_ty, value_ty) = *self.types.kind(seq.ty) {
             let k = self.expr(index, Some(key_ty));
-            self.expect_ty(k.ty, key_ty, k.span, None);
+            let k = self.accept(k, key_ty, None);
+            self.note_compared(key_ty, k.span);
             let ty = self.types.optional_of(value_ty);
             return hir::Expr {
                 kind: ExprKind::MapGet { base: Box::new(seq), key: Box::new(k) },
@@ -5509,7 +6017,8 @@ impl<'a> Checker<'a> {
         if let TyKind::Map(key_ty, value_ty) = *self.types.kind(seq.ty) {
             let local = self.require_mutable_value_binding(base, "assigned into", "map")?;
             let k = self.expr(index, Some(key_ty));
-            self.expect_ty(k.ty, key_ty, k.span, None);
+            let k = self.accept(k, key_ty, None);
+            self.note_compared(key_ty, k.span);
             let v = self.expr(&a.value, Some(value_ty));
             let v = self.coerce(v, Some(value_ty));
             self.expect_ty(v.ty, value_ty, v.span, None);
@@ -5542,10 +6051,7 @@ impl<'a> Checker<'a> {
 
         let value = self.expr(&a.value, Some(elem));
         let value = match a.op.to_binary() {
-            None => {
-                self.expect_ty(value.ty, elem, value.span, None);
-                value
-            }
+            None => self.accept(value, elem, None),
             Some(binop) => {
                 let current = hir::Expr {
                     kind: ExprKind::Index {
@@ -5782,7 +6288,7 @@ impl<'a> Checker<'a> {
                 }
                 let id = self.require_mutable_slice_binding(base, "pushed to")?;
                 let v = self.expr(&args[0], Some(elem));
-                self.expect_ty(v.ty, elem, v.span, None);
+                let v = self.accept(v, elem, None);
                 // `push` is a statement, not an expression; the checker returns
                 // unit and MIR emits the mutation.
                 Some(hir::Expr {
@@ -5932,6 +6438,7 @@ impl<'a> Checker<'a> {
             eid
         };
         let enum_ty = self.types.enum_ty(eid);
+        self.check_type_bounds(ti, enum_ty, span);
 
         let (enum_name, variant_name, field_tys, named, decl_span) = {
             let def = self.types.enum_def(eid);
@@ -6003,8 +6510,7 @@ impl<'a> Checker<'a> {
             };
             let want = field_tys[index];
             let e = self.expr(a, Some(want));
-            self.expect_ty(e.ty, want, e.span, Some(decl_span));
-            slots[index] = Some(e);
+            slots[index] = Some(self.accept(e, want, Some(decl_span)));
         }
 
         let mut fields = Vec::with_capacity(field_tys.len());
@@ -6479,32 +6985,46 @@ impl<'a> Checker<'a> {
                 // Most types satisfy it without their author knowing it
                 // exists, which is what makes data races impossible here
                 // without an annotation burden.
-                // The prelude is a module, so its trait is `prelude.Share` —
-                // and a program that declares its own `Share` gets the same
-                // treatment, exactly as it does for `Display`.
-                if last_segment(&self.types.trait_def(*bound).name) == "Share" {
-                    if !self.types.is_share(*t) {
+                if self.is_share_bound(*bound) {
+                    if !self.share_given_params(*t) {
                         self.report_not_share(*t, &g.name, span, g.span);
                     }
                     continue;
                 }
-                let ok = match (self.type_index_of(*t), self.trait_index_of(*bound)) {
-                    (Some(ti), Some(tri)) => self.resolved.implements(ti, tri),
-                    _ => false,
-                };
-                if !ok {
-                    let (tn, bn) =
-                        (self.types.name(*t), self.types.trait_def(*bound).name.clone());
-                    self.diags.push(
-                        Diagnostic::error(
-                            codes::E0208,
-                            format!("`{}` does not implement `{}`", tn, bn),
-                        )
-                        .with_primary(span, format!("`{}` is required to be `{}`", g.name, bn))
-                        .with_secondary(g.span, "the bound is declared here")
-                        .with_note(format!("write `impl {} for {}`", bn, tn)),
-                    );
+                if self.type_implements(*t, *bound) {
+                    continue;
                 }
+                let (tn, bn) = (self.types.name(*t), self.types.trait_def(*bound).name.clone());
+                let mut d = Diagnostic::error(
+                    codes::E0208,
+                    format!("`{}` does not implement `{}`", tn, bn),
+                )
+                .with_primary(span, format!("`{}` is required to be `{}`", g.name, bn))
+                .with_secondary(g.span, "the bound is declared here");
+                d = match *self.types.kind(*t) {
+                    // A parameter is known only by its bounds, so the fix is
+                    // to say more about it where it is declared.
+                    TyKind::Param { index, .. } => {
+                        match self.generic_defs.get(index as usize).map(|d| d.span) {
+                            Some(decl) => d
+                                .with_secondary(decl, format!("`{}` is declared here", tn))
+                                .with_note(format!("add the bound: `{}: {}`", tn, bn)),
+                            None => d,
+                        }
+                    }
+                    _ if self.type_index_of(*t).is_some_and(|ti| {
+                        self.trait_index_of(*bound).is_some_and(|tri| self.resolved.implements(ti, tri))
+                    }) =>
+                    {
+                        d.with_note(format!(
+                            "`{}` implements `{}` only where its type arguments meet the \
+                             bounds of that `impl`",
+                            tn, bn
+                        ))
+                    }
+                    _ => d.with_note(format!("write `impl {} for {}`", bn, tn)),
+                };
+                self.diags.push(d);
             }
         }
     }
@@ -6534,6 +7054,24 @@ impl<'a> Checker<'a> {
                  number, a copy — and leave the host object here",
             ));
             return;
+        }
+        // A type parameter is not known to be anything, so it is not known to
+        // be Share either — until its declaration says so.
+        let mut params = Vec::new();
+        params_in(self.types, ty, &mut params);
+        if let Some(p) = params.first() {
+            if let Some(def) = self.generic_defs.get(*p as usize) {
+                let (pname, pspan) = (def.name.clone(), def.span);
+                self.diags.push(
+                    d.with_secondary(pspan, format!("`{}` is declared here", pname))
+                        .with_note(format!(
+                            "`{}` could be any type, and not every type may cross; write \
+                             `{}: Share` to accept only the ones that can",
+                            pname, pname
+                        )),
+                );
+                return;
+            }
         }
         if let Some((field, owner)) = self.first_mutable_field(ty) {
             d = d.with_secondary(
@@ -6667,8 +7205,15 @@ impl<'a> Checker<'a> {
             },
 
             ast::Pattern::Literal(e) => {
-                let lit = self.expr(e, Some(scrut));
-                self.expect_ty(lit.ty, scrut, lit.span, None);
+                // Against an optional, a literal is one for the value inside:
+                // `1` matches a present `1`, as a variant's name matches a
+                // present value of that variant.
+                let want = match *self.types.kind(scrut) {
+                    TyKind::Optional(inner) => inner,
+                    _ => scrut,
+                };
+                let lit = self.expr(e, Some(want));
+                self.expect_ty(lit.ty, want, lit.span, None);
                 match lit.kind {
                     ExprKind::Int(v) => hir::Pattern::Int(v),
                     ExprKind::Float(v) => hir::Pattern::Float(v),
@@ -6814,6 +7359,9 @@ impl<'a> Checker<'a> {
                         );
                         continue;
                     };
+                    // Taking a value apart reads its fields, so a private one
+                    // is as out of reach here as through `.`.
+                    self.check_field_visible(sid, index, f.name.span);
                     let sub = match &f.pattern {
                         Some(p) => self.pattern(p, fty),
                         // `Point{ x }` binds `x` to the field's value.
@@ -7063,6 +7611,8 @@ impl<'a> Checker<'a> {
             .map(|a| &a.pattern)
             .collect();
 
+        self.report_unreachable_arms(m, arms, scrut);
+
         let missing = exhaustive::missing_patterns(scrut, &unguarded, self.types);
         if missing.is_empty() {
             return true;
@@ -7091,6 +7641,68 @@ impl<'a> Checker<'a> {
         }
         self.diags.push(d);
         false
+    }
+
+    /// Warn about every arm the ones above it leave nothing for.
+    ///
+    /// The usual cause is a name meant as a variant that is not one — `Dir`
+    /// where the enum says `Directory` — which is a binding, takes every value,
+    /// and silently makes each arm after it dead. So when a catch-all binding
+    /// above is spelled almost like a variant, the warning says which.
+    fn report_unreachable_arms(&mut self, m: &ast::MatchExpr, arms: &[hir::MatchArm], scrut: TyId) {
+        let rows: Vec<(&hir::Pattern, bool)> =
+            arms.iter().map(|a| (&a.pattern, a.guard.is_some())).collect();
+        for i in exhaustive::unreachable_arms(scrut, &rows, self.types) {
+            let Some(arm) = m.arms.get(i) else { continue };
+            let mut d = Diagnostic::warning(codes::E0116, "unreachable match arm")
+                .with_primary(arm.pattern.span(), "no value can reach this arm")
+                .with_note("every value it matches is taken by an arm above it");
+            if let Some((at, name, variant)) = self.near_miss_binding(m, arms, scrut, i) {
+                d = d
+                    .with_secondary(at, format!("`{}` takes every value that reaches it", name))
+                    .with_note(format!(
+                        "`{}` is not a variant, so it is a binding; did you mean `{}`?",
+                        name, variant
+                    ));
+            }
+            self.diags.push(d);
+        }
+    }
+
+    /// An arm above `before` that is a bare, unguarded binding spelled almost
+    /// like a variant of the scrutinee's enum: its span, its name, and the
+    /// variant.
+    fn near_miss_binding(
+        &self,
+        m: &ast::MatchExpr,
+        arms: &[hir::MatchArm],
+        scrut: TyId,
+        before: usize,
+    ) -> Option<(Span, String, String)> {
+        let inner = match *self.types.kind(scrut) {
+            TyKind::Optional(inner) => inner,
+            _ => scrut,
+        };
+        let TyKind::Enum(e) = *self.types.kind(inner) else { return None };
+        let variants: Vec<String> =
+            self.types.enum_def(e).variants.iter().map(|v| v.name.clone()).collect();
+        for (arm, checked) in m.arms.iter().zip(arms).take(before) {
+            let ast::Pattern::Binding(name) = &arm.pattern else { continue };
+            // Only a name written like a variant — capitalised — is taken for
+            // one that was misspelled; `other` and `x` mean what they say.
+            if checked.guard.is_some() || !name.name.starts_with(char::is_uppercase) {
+                continue;
+            }
+            let close = variants.iter().find(|v| {
+                v.starts_with(name.name.as_str())
+                    || name.name.starts_with(v.as_str())
+                    || edit_distance(&name.name.to_lowercase(), &v.to_lowercase()) <= 2
+            });
+            if let Some(v) = close {
+                return Some((name.span, name.name.clone(), v.clone()));
+            }
+        }
+        None
     }
 
     // ---- structs ----------------------------------------------------------
@@ -7135,6 +7747,16 @@ impl<'a> Checker<'a> {
 
         let struct_ty = self.types.struct_ty(sid);
         let field_count = self.types.struct_def(sid).fields.len();
+        // A bound on the declaration's parameters holds for every value that
+        // is built, which is here: `struct Holder<T: Show>` is a promise that
+        // a `Holder`'s `T` can be shown, and a body relying on it would call
+        // `show` on whatever was put in if nothing kept the promise.
+        self.check_type_bounds(ti, struct_ty, lit.span);
+
+        // A struct with a private field can only be built where the field
+        // can be named — `..base` included, which would copy a value its
+        // author meant nobody outside to be able to forge or alter.
+        self.check_constructible(sid, lit.path.span);
 
         // `Point{ ..p, y: 5.0 }` starts from an existing value.
         let base = lit.base.as_ref().map(|b| self.expr(b, Some(struct_ty)));
@@ -7318,6 +7940,7 @@ impl<'a> Checker<'a> {
 
         match self.types.struct_def(sid).field(&name.name).map(|(i, f)| (i, f.ty)) {
             Some((index, ty)) => {
+                self.check_field_visible(sid, index, name.span);
                 // The third of the family the editor could not describe, and
                 // for the same reason: a field is found through the receiver's
                 // type, which only the checker has.
@@ -7346,7 +7969,10 @@ impl<'a> Checker<'a> {
                     format!("`{}` has no field `{}`", sname, name.name),
                 )
                 .with_primary(name.span, "no such field");
-                if self.resolved.method_on(0, &name.name).is_some() {
+                if self
+                    .type_index_of(obj.ty)
+                    .is_some_and(|ti| self.resolved.method_on(ti, &name.name).is_some())
+                {
                     d = d.with_note("this is a method; call it with `()`");
                 }
                 d = d.with_note(if known.is_empty() {
@@ -7398,6 +8024,9 @@ impl<'a> Checker<'a> {
             );
             return None;
         };
+        if !self.check_field_visible(sid, index, name.span) {
+            return None;
+        }
 
         if !mutable {
             let sname = self.types.struct_def(sid).name.clone();
@@ -7495,12 +8124,23 @@ impl<'a> Checker<'a> {
             }
         };
 
+        // One branch may need converting to the other's type — an `int` beside
+        // an `Option<int>`, a concrete value beside a `dyn` — and the
+        // conversion has to be in the tree for the backends to lay the two
+        // out alike. Either side may be the one converted.
+        let (t, e) = if t.ty == e.ty || self.types.is_poisoned(t.ty) || self.types.is_poisoned(e.ty) {
+            (t, e)
+        } else {
+            let e = self.coerce(e, Some(t.ty));
+            let t = if e.ty == t.ty { t } else { self.coerce(t, Some(e.ty)) };
+            (t, e)
+        };
         let ty = if t.ty == TyId::NEVER {
             e.ty
         } else if e.ty == TyId::NEVER {
             t.ty
         } else {
-            if !self.types.satisfies(e.ty, t.ty) && !self.types.is_poisoned(t.ty) && !self.types.is_poisoned(e.ty) {
+            if e.ty != t.ty && !self.types.is_poisoned(t.ty) && !self.types.is_poisoned(e.ty) {
                 self.diags.push(
                     Diagnostic::error(codes::E0200, "`if` branches have different types")
                         .with_primary(e.span, format!("this branch is {}", self.types.with_article(e.ty)))
@@ -7583,6 +8223,22 @@ impl<'a> Checker<'a> {
             return hir::Expr { kind: ExprKind::Error, ty: TyId::ERROR, span };
         }
 
+        // Equality is structural for all types (§5.2), and a `T` stands
+        // wherever an `Option<T>` does — so `found == 5` asks whether `found`
+        // is present and five, by comparing two optionals.
+        let optional_of = |types: &Types, outer: TyId, inner: TyId| {
+            matches!(types.kind(outer), TyKind::Optional(t) if *t == inner)
+        };
+        let (l, r) = if matches!(op, B::Eq | B::Ne) && optional_of(self.types, l.ty, r.ty) {
+            let want = l.ty;
+            (l, self.coerce(r, Some(want)))
+        } else if matches!(op, B::Eq | B::Ne) && optional_of(self.types, r.ty, l.ty) {
+            let want = r.ty;
+            (self.coerce(l, Some(want)), r)
+        } else {
+            (l, r)
+        };
+
         if l.ty != r.ty {
             self.mismatched_operands(op, &l, &r, span);
             return hir::Expr { kind: ExprKind::Error, ty: TyId::ERROR, span };
@@ -7651,10 +8307,16 @@ impl<'a> Checker<'a> {
             // every type structurally, so this holds for whatever the
             // parameter turns out to be — and monomorphisation has replaced it
             // with a concrete type long before any backend sees it.
+            //
+            // Every type but a function, a trait object and a host value, that
+            // is — so the comparison is written down, and each call is held to
+            // it once every body has been seen.
             (B::Eq, _) if matches!(self.types.kind(t), TyKind::Param { .. }) => {
+                self.note_compared(t, span);
                 Some((H::EqValue, TyId::BOOL))
             }
             (B::Ne, _) if matches!(self.types.kind(t), TyKind::Param { .. }) => {
+                self.note_compared(t, span);
                 Some((H::NeValue, TyId::BOOL))
             }
 
@@ -7743,6 +8405,34 @@ impl<'a> Checker<'a> {
             ty,
             span,
         }
+    }
+
+    /// `==` on values whose type is a parameter: the parameter is compared,
+    /// and every caller will be held to it.
+    fn note_compared(&mut self, ty: TyId, span: Span) {
+        let mut params = Vec::new();
+        params_in(self.types, ty, &mut params);
+        if let Some(row) = self.facts.compared.get_mut(self.fn_index) {
+            for p in params {
+                if let Some(slot) = row.get_mut(p as usize) {
+                    slot.get_or_insert(span);
+                }
+            }
+        }
+    }
+
+    /// A call that chose a generic callee's type arguments, kept to be held
+    /// to whatever the callee's body turns out to compare.
+    fn note_generic_call(&mut self, callee: u32, targs: &[TyId], span: Span) {
+        if targs.is_empty() {
+            return;
+        }
+        self.facts.calls.push(GenericCall {
+            caller: self.fn_index,
+            callee: callee as usize,
+            targs: targs.to_vec(),
+            span,
+        });
     }
 
     /// Whether a value came straight from `crypto`.
@@ -7929,32 +8619,75 @@ impl<'a> Checker<'a> {
             let span = v.span;
             return hir::Expr { span, kind: ExprKind::ToStr { value: Box::new(v) }, ty: TyId::STR };
         }
-        if let Some(show) = self.display_method(v.ty) {
-            let span = v.span;
-            let targs = self.receiver_args(v.ty);
-            return hir::Expr {
-                kind: ExprKind::Call { callee: hir::FnId(show), args: vec![v], targs },
-                ty: TyId::STR,
-                span,
-            };
+        if let Some(shown) = self.show_through_display(v.clone()) {
+            return shown;
         }
         let name = self.types.name(v.ty);
-        self.diags.push(
-            Diagnostic::error(
-                codes::E0207,
-                format!("`{}` has no text form", name),
-            )
+        let mut d = Diagnostic::error(codes::E0207, format!("`{}` has no text form", name))
             .with_primary(v.span, "this cannot be rendered")
             .with_note(
                 "`int`, `float`, `bool` and `str` render themselves. Anything else needs \
                  `Display`",
-            )
-            .with_note(format!(
+            );
+        d = match *self.types.kind(v.ty) {
+            // Neither of these can be given an `impl`: a parameter is known by
+            // its bounds, and a trait object by its trait.
+            TyKind::Param { .. } => d.with_note(format!("add the bound: `{}: Display`", name)),
+            TyKind::Dyn(_) => d.with_note(format!(
+                "{} shows only what its trait declares; call one of its methods, or \
+                 make the trait `Display` itself and hold a `dyn Display`",
+                self.types.with_article(v.ty)
+            )),
+            _ => d.with_note(format!(
                 "write `impl Display for {} {{ fn show(self) -> str {{ … }} }}`",
                 name
             )),
-        );
+        };
+        self.diags.push(d);
         hir::Expr { span: v.span, kind: ExprKind::Error, ty: TyId::STR }
+    }
+
+    /// The `Display` trait, found by name as `display_method` finds it.
+    fn display_trait(&self) -> Option<hir::TraitId> {
+        let index = self.resolved.type_by_name("Display")?;
+        match self.type_ids.get(index as usize)? {
+            Some(TypeTarget::Trait(tr)) => Some(*tr),
+            _ => None,
+        }
+    }
+
+    /// A value rendered through its `Display`, if it has one.
+    ///
+    /// A concrete type calls its own `show`. A `dyn Display`, and a type
+    /// parameter bounded by it, have none to name here, so they call through
+    /// the trait — the same dispatch any other method of theirs gets, which
+    /// monomorphisation turns into a direct call for the parameter.
+    fn show_through_display(&mut self, v: hir::Expr) -> Option<hir::Expr> {
+        let tr = self.display_trait()?;
+        let span = v.span;
+        let through_trait = match *self.types.kind(v.ty) {
+            TyKind::Dyn(t) => t == tr,
+            TyKind::Param { .. } => self.type_implements(v.ty, tr),
+            _ => false,
+        };
+        if through_trait {
+            let method = self.types.trait_def(tr).method("show")?.0 as u32;
+            return Some(hir::Expr {
+                kind: ExprKind::CallVirtual { trait_id: tr, method, args: vec![v], targs: Vec::new() },
+                ty: TyId::STR,
+                span,
+            });
+        }
+        if !self.type_implements(v.ty, tr) {
+            return None;
+        }
+        let show = self.display_method(v.ty)?;
+        let targs = self.receiver_args(v.ty);
+        Some(hir::Expr {
+            kind: ExprKind::Call { callee: hir::FnId(show), args: vec![v], targs },
+            ty: TyId::STR,
+            span,
+        })
     }
 
     fn string_value(&mut self, span: Span) -> String {
@@ -7989,7 +8722,8 @@ impl<'a> Checker<'a> {
         if e.ty == want || self.types.is_poisoned(e.ty) {
             return e;
         }
-        match *self.types.kind(want) {
+        let kind = self.types.kind(want).clone();
+        match kind {
             TyKind::Optional(inner) if inner == e.ty => hir::Expr {
                 span: e.span,
                 kind: ExprKind::Wrap { value: Box::new(e) },
@@ -8047,8 +8781,29 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A value standing where a `want` is required: converted, then checked.
+    ///
+    /// The two halves belong together. A value that is acceptable only
+    /// because of a conversion — a `T` into an `Option<T>`, a concrete type
+    /// into a `dyn Trait` or an `error` — is acceptable only *once converted*,
+    /// and a site that checked it without converting it handed a bare `int`
+    /// to a slot the backends lay out as a boxed optional: the VM shrugged,
+    /// native code crashed, and the Wasm module did not validate. Every site
+    /// that takes a value goes through here so that cannot be forgotten.
+    fn accept(&mut self, e: hir::Expr, want: TyId, because: Option<Span>) -> hir::Expr {
+        let e = self.coerce(e, Some(want));
+        self.expect_ty(e.ty, want, e.span, because);
+        e
+    }
+
+    /// Report a value whose type is not the one required.
+    ///
+    /// Strict: the conversions are [`Self::coerce`]'s job, and a value that
+    /// needed one and did not get it is a mismatch here rather than something
+    /// waved through for the backends to disagree about. Only poison and
+    /// `!` — which never produce a value — stand in for anything.
     fn expect_ty(&mut self, found: TyId, expected: TyId, span: Span, because: Option<Span>) {
-        if self.types.satisfies(found, expected) || self.coerces_to_dyn(found, expected) {
+        if found == expected || self.types.is_poisoned(found) || self.types.is_poisoned(expected) {
             return;
         }
         let mut d = Diagnostic::error(
@@ -8179,26 +8934,39 @@ fn short_circuit(op: ast::BinaryOp) -> Option<hir::BinOp> {
 
 /// Verify every `impl Trait for Type` block: the trait is implemented once,
 /// every required method is present, and each signature matches.
+///
+/// Returns which block implements each trait for each type — `(type index,
+/// trait index)` to item index — because a block's own bounds are part of
+/// whether a generic type implements the trait at all.
 fn check_impls(
     file: &ast::SourceFile,
     resolved: &ResolveMap,
     type_ids: &[Option<TypeTarget>],
-    types: &Types,
+    types: &mut Types,
     sigs: &[Signature],
+    trait_method_generics: &std::collections::HashMap<(hir::TraitId, usize), Vec<GenericDef>>,
     diags: &mut DiagBag,
-) {
+) -> std::collections::HashMap<(u32, u32), usize> {
     // (trait index, type index) -> the span that first claimed it. Exactly one
     // implementation per pair is what makes trait resolution decidable.
     let mut claimed: std::collections::HashMap<(u32, u32), Span> =
         std::collections::HashMap::new();
+    let mut blocks: std::collections::HashMap<(u32, u32), usize> =
+        std::collections::HashMap::new();
 
-    for item in &file.items {
+    for (item_index, item) in file.items.iter().enumerate() {
         let ast::Item::Impl(imp) = item else { continue };
         let Some(tp) = &imp.trait_path else { continue };
 
+        // Both names mean what they mean where the `impl` is written — which
+        // is how the resolver registered its methods. Looking them up from
+        // the root instead found nothing for an `impl` inside any module, and
+        // an implementation nothing checked was one a `dyn` call could reach
+        // with the wrong signature.
+        let module = resolved.module_of_item(item_index);
         let (Some(ti), Some(target)) = (
-            resolved.type_by_name(tp.name()),
-            resolved.type_by_name(imp.self_ty.name()),
+            resolved.type_by_name_in(module, &tp.text()),
+            resolved.type_by_name_in(module, &imp.self_ty.text()),
         ) else {
             continue;
         };
@@ -8226,6 +8994,7 @@ fn check_impls(
             continue;
         }
         claimed.insert((ti, target), imp.span);
+        blocks.insert((target, ti), item_index);
 
         let def = types.trait_def(tid);
 
@@ -8261,7 +9030,8 @@ fn check_impls(
 
         // Every provided method must belong to the trait, and match its shape.
         for m in &imp.methods {
-            let Some((_, decl)) = def.method(&m.name.name) else {
+            let def = types.trait_def(tid);
+            let Some((di, decl)) = def.method(&m.name.name) else {
                 diags.push(
                     Diagnostic::error(
                         codes::E0200,
@@ -8275,6 +9045,8 @@ fn check_impls(
                 );
                 continue;
             };
+            let (decl_params, decl_ret, decl_fallible, decl_span, decl_generics) =
+                (decl.params.clone(), decl.ret, decl.fallible, decl.span, decl.generic_count);
 
             if decl.takes_self != m.self_param.is_some() {
                 diags.push(
@@ -8287,11 +9059,40 @@ fn check_impls(
                     } else {
                         "the trait declares this without `self`"
                     })
-                    .with_secondary(decl.span, "declared here"),
+                    .with_secondary(decl_span, "declared here"),
+                );
+            } else if decl.takes_self
+                && decl.var_self != m.self_param.as_ref().is_some_and(|s| s.is_var)
+            {
+                // A caller reaching the method through the trait — a `dyn`, or
+                // a bound — sees the trait's receiver and nothing else. An
+                // implementation that quietly took `var self` would modify a
+                // value its caller holds in a `let`, which is the change the
+                // rule exists to keep visible at the call site; one that took
+                // plain `self` where the trait promised `var self` would be
+                // refusing a permission every caller already paid for.
+                diags.push(
+                    Diagnostic::error(
+                        codes::E0200,
+                        format!("`{}` has the wrong receiver", m.name.name),
+                    )
+                    .with_primary(
+                        m.sig_span,
+                        if decl.var_self {
+                            "the trait declares this with `var self`"
+                        } else {
+                            "the trait declares this with `self`, which may not modify it"
+                        },
+                    )
+                    .with_secondary(decl_span, "declared here")
+                    .with_note(
+                        "whether a method may modify its receiver is part of the signature \
+                         every caller through the trait relies on, so the two must agree",
+                    ),
                 );
             }
 
-            if decl.params.len() != m.params.len() {
+            if decl_params.len() != m.params.len() {
                 diags.push(
                     Diagnostic::error(
                         codes::E0113,
@@ -8300,11 +9101,28 @@ fn check_impls(
                             m.name.name,
                             m.params.len(),
                             if m.params.len() == 1 { "" } else { "s" },
-                            decl.params.len()
+                            decl_params.len()
                         ),
                     )
                     .with_primary(m.sig_span, "signature does not match")
-                    .with_secondary(decl.span, "declared here"),
+                    .with_secondary(decl_span, "declared here"),
+                );
+                continue;
+            }
+            if decl_generics != m.generics.len() {
+                diags.push(
+                    Diagnostic::error(
+                        codes::E0208,
+                        format!(
+                            "`{}` has {} type parameter{}, but the trait declares {}",
+                            m.name.name,
+                            m.generics.len(),
+                            if m.generics.len() == 1 { "" } else { "s" },
+                            decl_generics
+                        ),
+                    )
+                    .with_primary(m.sig_span, "signature does not match")
+                    .with_secondary(decl_span, "declared here"),
                 );
                 continue;
             }
@@ -8319,7 +9137,34 @@ fn check_impls(
             };
             let sig = &sigs[fi as usize];
 
-            for (i, (&want, &got)) in decl.params.iter().zip(sig.params.iter()).enumerate() {
+            // The declaration speaks of `Self` and of its own type parameters;
+            // the implementation, of its type and of its parameters. Those are
+            // the same things by position, so the declaration is translated
+            // before the two are compared.
+            let block = sig.generics.len().saturating_sub(m.generics.len());
+            let own: Vec<TyId> = sig.generics[..block].iter().map(|g| g.ty).collect();
+            let implementing = match type_ids[target as usize] {
+                Some(TypeTarget::Struct(s)) if !own.is_empty() => {
+                    let id = types.instantiate_struct(s, &own);
+                    types.struct_ty(id)
+                }
+                Some(TypeTarget::Enum(e)) if !own.is_empty() => {
+                    let id = types.instantiate_enum(e, &own);
+                    types.enum_ty(id)
+                }
+                other => named_ty(other, types),
+            };
+            let mut map = vec![(types.self_param(), implementing)];
+            if let Some(declared) = trait_method_generics.get(&(tid, di)) {
+                for (d, g) in declared.iter().zip(&sig.generics[block..]) {
+                    map.push((d.ty, g.ty));
+                }
+            }
+            let decl_params: Vec<TyId> =
+                decl_params.iter().map(|p| replace_types(types, *p, &map)).collect();
+            let decl_ret = replace_types(types, decl_ret, &map);
+
+            for (i, (&want, &got)) in decl_params.iter().zip(sig.params.iter()).enumerate() {
                 if want == got || types.is_poisoned(want) || types.is_poisoned(got) {
                     continue;
                 }
@@ -8335,7 +9180,7 @@ fn check_impls(
                         ),
                     )
                     .with_primary(span, format!("this is {}", types.with_article(got)))
-                    .with_secondary(decl.span, "declared here")
+                    .with_secondary(decl_span, "declared here")
                     .with_note(
                         "a call through `dyn Trait` is checked against the trait, so an \
                          implementation that takes something else would receive a value of \
@@ -8350,7 +9195,7 @@ fn check_impls(
                 sig.ret
             };
             let ret_span = m.ret.as_ref().map_or(m.sig_span, |r| r.span());
-            if sig.fallible != decl.fallible {
+            if sig.fallible != decl_fallible {
                 diags.push(
                     Diagnostic::error(
                         codes::E0200,
@@ -8358,19 +9203,19 @@ fn check_impls(
                             "`{}` {} an error, but the trait declares it {}",
                             m.name.name,
                             if sig.fallible { "returns" } else { "does not return" },
-                            if decl.fallible { "fallible" } else { "infallible" },
+                            if decl_fallible { "fallible" } else { "infallible" },
                         ),
                     )
                     .with_primary(ret_span, "fallibility does not match")
-                    .with_secondary(decl.span, "declared here")
+                    .with_secondary(decl_span, "declared here")
                     .with_note(
                         "whether a call can fail is part of the signature every caller sees, \
                          so the trait and its implementations must agree",
                     ),
                 );
-            } else if got_ret != decl.ret
+            } else if got_ret != decl_ret
                 && !types.is_poisoned(got_ret)
-                && !types.is_poisoned(decl.ret)
+                && !types.is_poisoned(decl_ret)
             {
                 diags.push(
                     Diagnostic::error(
@@ -8379,43 +9224,46 @@ fn check_impls(
                             "`{}` returns {}, but the trait declares {}",
                             m.name.name,
                             types.with_article(got_ret),
-                            types.with_article(decl.ret)
+                            types.with_article(decl_ret)
                         ),
                     )
                     .with_primary(ret_span, format!("this is {}", types.with_article(got_ret)))
-                    .with_secondary(decl.span, "declared here"),
+                    .with_secondary(decl_span, "declared here"),
                 );
             }
         }
     }
+    blocks
 }
 
-/// The arena type for a declared name.
-/// A trait is usable as an object only when every method dispatches on a
-/// receiver. A method without `self` has no value to dispatch from, so a trait
-/// object could never supply one — the rule belongs at every place a `dyn` is
-/// written, which is why it lives beside type resolution rather than in one
-/// caller.
+/// A trait is usable as an object only when every method can be called
+/// through one (§10.3): it takes `self`, so there is a value to dispatch on;
+/// it is not generic, so there is one body to call rather than one per type
+/// argument; and it does not mention `Self`, which is a different type behind
+/// every `dyn`. The rule belongs at every place a `dyn` is written, which is
+/// why it lives beside type resolution rather than in one caller.
 fn check_object_safe(tr: kite_hir::TraitId, span: Span, types: &Types, diags: &mut DiagBag) {
     let def = types.trait_def(tr);
-    let offenders: Vec<&str> = def
+    let offenders: Vec<String> = def
         .methods
         .iter()
-        .filter(|m| !m.takes_self)
-        .map(|m| m.name.as_str())
+        .filter_map(|m| types.not_dispatchable(m).map(|why| format!("`{}` {}", m.name, why)))
         .collect();
     if offenders.is_empty() {
         return;
     }
-    diags.push(
-        Diagnostic::error(
-            codes::E0206,
-            format!("`{}` cannot be a trait object", def.name),
-        )
-        .with_primary(span, "this trait has a method that does not take `self`")
-        .with_note(format!("`{}` has no receiver to dispatch on", offenders.join("`, `")))
-        .with_note("give every method a `self` parameter, or take the concrete type"),
-    );
+    let mut d = Diagnostic::error(
+        codes::E0206,
+        format!("`{}` cannot be a trait object", def.name),
+    )
+    .with_primary(span, "not every method of this trait can be called through a `dyn`");
+    for o in offenders {
+        d = d.with_note(o);
+    }
+    diags.push(d.with_note(
+        "take a type parameter bounded by the trait instead — `fn f<T: Trait>(x: T)` — \
+         or move what a `dyn` needs into a trait of its own",
+    ));
 }
 
 fn named_ty(target: Option<TypeTarget>, types: &mut Types) -> TyId {
@@ -8656,9 +9504,11 @@ fn resolve_named_ty(
                 let id = types.task_of(args[0], p.span);
                 return types.struct_ty(id);
             }
-            let target = resolved
-                .type_by_name_in(module, &p.text())
-                .and_then(|i| type_ids[i as usize]);
+            let found = resolved.type_by_name_in(module, &p.text());
+            if let Some(i) = found {
+                check_type_visible(resolved, module, i, p.span, &p.text(), diags);
+            }
+            let target = found.and_then(|i| type_ids[i as usize]);
             match target {
                 Some(TypeTarget::Struct(s)) => {
                     let want = types.struct_def(s).generic_count;
@@ -8701,7 +9551,11 @@ fn resolve_named_ty(
                     return prim;
                 }
             }
-            match resolved.type_by_name_in(module, &p.text()) {
+            let found = resolved.type_by_name_in(module, &p.text());
+            if let Some(i) = found {
+                check_type_visible(resolved, module, i, p.span, &p.text(), diags);
+            }
+            match found {
                 Some(i) => match type_ids[i as usize] {
                     Some(TypeTarget::Trait(_)) => {
                         diags.push(
@@ -8743,6 +9597,7 @@ fn resolve_named_ty(
         ast::Type::Map { key, value, .. } => {
             let k = resolve_named_ty(key, resolved, module, type_ids, generics, types, diags);
             let v = resolve_named_ty(value, resolved, module, type_ids, generics, types, diags);
+            check_map_key(types, k, key.span(), diags);
             types.map_of(k, v)
         }
         ast::Type::Optional { inner, .. } => {
@@ -8774,6 +9629,7 @@ fn resolve_named_ty(
         ast::Type::Dyn { path, span } => match resolved.type_by_name_in(module, &path.text()) {
             Some(i) => match type_ids[i as usize] {
                 Some(TypeTarget::Trait(tr)) => {
+                    check_type_visible(resolved, module, i, path.span, &path.text(), diags);
                     check_object_safe(tr, *span, types, diags);
                     types.dyn_ty(tr)
                 }
@@ -8798,6 +9654,61 @@ fn resolve_named_ty(
         },
         other => resolve_ty(other, types, diags),
     }
+}
+
+/// A map compares its keys with `==`, so a key type is one `==` is defined
+/// on: not a function, a trait object or a host value, nor anything holding
+/// one. A type parameter is taken on trust here and held to it by whoever
+/// chooses it. Returns whether the key may be used.
+fn check_map_key(types: &Types, key: TyId, span: Span, diags: &mut DiagBag) -> bool {
+    if types.is_poisoned(key) || equatable_given_params(types, key, &mut Vec::new()) {
+        return true;
+    }
+    let name = types.name(key);
+    let mut d = Diagnostic::error(codes::E0201, format!("`{}` cannot be a map key", name))
+        .with_primary(span, "a map compares its keys with `==`, which this does not have");
+    d = if types.mentions_host_value(key) {
+        d.with_note(
+            "a host object has no structure Kite can see, so there is nothing to compare \
+             field by field; keep a key the host object is known by — an id, a name — instead",
+        )
+    } else {
+        d.with_note(
+            "equality is structural, so every field must itself be equatable; functions and \
+             trait objects are not",
+        )
+    };
+    diags.push(d);
+    false
+}
+
+/// Reject naming another module's private type in a type — a parameter, a
+/// field, an annotation, a bound. The resolver holds expressions to §4.3;
+/// types are resolved here, so they are held to it here.
+fn check_type_visible(
+    resolved: &ResolveMap,
+    module: &str,
+    index: u32,
+    span: Span,
+    written: &str,
+    diags: &mut DiagBag,
+) {
+    let decl = &resolved.types[index as usize];
+    let home = resolved.module_of_item(decl.decl_index);
+    // The root module is the program's own, and the prelude is in scope
+    // everywhere by construction — the same two exemptions the resolver makes.
+    if decl.is_pub || home.is_empty() || home == kite_resolve::PRELUDE || home == module {
+        return;
+    }
+    diags.push(
+        Diagnostic::error(codes::E0401, format!("`{}` is private to module `{}`", written, home))
+            .with_primary(span, "not visible here")
+            .with_secondary(decl.span, format!("this {} is not marked `pub`", decl.kind.describe()))
+            .with_note(
+                "unmarked declarations are visible only within their own module; write `pub` \
+                 to export one",
+            ),
+    );
 }
 
 /// Resolve a surface type to a [`TyId`], interning composite types as it goes.
@@ -8946,6 +9857,236 @@ pub(crate) fn dedent_block(body: &str) -> String {
         .map(|line| line.strip_prefix(indent).unwrap_or(line.trim_start_matches([' ', '\t'])))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A type with some of the types inside it replaced — `Self` by the type
+/// implementing a trait, or one declaration's parameters by another's.
+fn replace_types(types: &mut Types, ty: TyId, map: &[(TyId, TyId)]) -> TyId {
+    if let Some((_, to)) = map.iter().find(|(from, _)| *from == ty) {
+        return *to;
+    }
+    match types.kind(ty).clone() {
+        TyKind::Slice(e) => {
+            let e = replace_types(types, e, map);
+            types.slice_of(e)
+        }
+        TyKind::Optional(e) => {
+            let e = replace_types(types, e, map);
+            types.optional_of(e)
+        }
+        TyKind::Fallible(e) => {
+            let e = replace_types(types, e, map);
+            types.fallible_of(e)
+        }
+        TyKind::Map(k, v) => {
+            let (k, v) = (replace_types(types, k, map), replace_types(types, v, map));
+            types.map_of(k, v)
+        }
+        TyKind::Tuple(es) => {
+            let es = es.iter().map(|e| replace_types(types, *e, map)).collect();
+            types.tuple_of(es)
+        }
+        TyKind::Fn { params, ret } => {
+            let ps = params.iter().map(|p| replace_types(types, *p, map)).collect();
+            let r = replace_types(types, ret, map);
+            types.fn_of(ps, r)
+        }
+        TyKind::Struct(s) => match types.struct_origin_of(s) {
+            Some((template, args)) => {
+                let args: Vec<TyId> = args.iter().map(|a| replace_types(types, *a, map)).collect();
+                let id = types.instantiate_struct(template, &args);
+                types.struct_ty(id)
+            }
+            None => ty,
+        },
+        TyKind::Enum(e) => match types.enum_origin_of(e) {
+            Some((template, args)) => {
+                let args: Vec<TyId> = args.iter().map(|a| replace_types(types, *a, map)).collect();
+                let id = types.instantiate_enum(template, &args);
+                types.enum_ty(id)
+            }
+            None => ty,
+        },
+        _ => ty,
+    }
+}
+
+/// What generic bodies ask of their type arguments that no bound says.
+///
+/// `==` on a type parameter is the one such demand. Equality is structural and
+/// defined for every type except functions, trait objects and host values, so
+/// `fn eq<T>(a: T, b: T) -> bool { return a == b }` is sound for almost every
+/// `T` and meaningless for those three — where the backends used to disagree
+/// about what it answered. A bound would make every caller say so; recording
+/// the comparison and checking each call's arguments against it asks nothing
+/// of the programs that were already right.
+#[derive(Default)]
+struct GenericFacts {
+    /// Per function, per type parameter: where its body compares one with `==`.
+    compared: Vec<Vec<Option<Span>>>,
+    /// Every call that chose a generic callee's type arguments.
+    calls: Vec<GenericCall>,
+}
+
+struct GenericCall {
+    caller: usize,
+    callee: usize,
+    targs: Vec<TyId>,
+    span: Span,
+}
+
+/// Every type parameter a type mentions, by index.
+fn params_in(types: &Types, ty: TyId, out: &mut Vec<u32>) {
+    match types.kind(ty) {
+        TyKind::Param { index, .. } => {
+            if !out.contains(index) {
+                out.push(*index);
+            }
+        }
+        TyKind::Struct(s) => {
+            if let Some((_, args)) = types.struct_origin_of(*s) {
+                for a in args {
+                    params_in(types, a, out);
+                }
+            }
+        }
+        TyKind::Enum(e) => {
+            if let Some((_, args)) = types.enum_origin_of(*e) {
+                for a in args {
+                    params_in(types, a, out);
+                }
+            }
+        }
+        TyKind::Slice(e) | TyKind::Optional(e) | TyKind::Fallible(e) => params_in(types, *e, out),
+        TyKind::Map(k, v) => {
+            params_in(types, *k, out);
+            params_in(types, *v, out);
+        }
+        TyKind::Tuple(es) => {
+            for e in es {
+                params_in(types, *e, out);
+            }
+        }
+        TyKind::Fn { params, ret } => {
+            for p in params {
+                params_in(types, *p, out);
+            }
+            params_in(types, *ret, out);
+        }
+        _ => {}
+    }
+}
+
+/// Whether `==` is defined on a type once its parameters are chosen — taking
+/// each parameter to be something comparable, which the parameter's own
+/// callers are then held to.
+fn equatable_given_params(types: &Types, ty: TyId, seen: &mut Vec<TyId>) -> bool {
+    let mut params = Vec::new();
+    params_in(types, ty, &mut params);
+    if params.is_empty() {
+        return types.is_equatable(ty);
+    }
+    if seen.contains(&ty) {
+        return true;
+    }
+    seen.push(ty);
+    let ok = match types.kind(ty).clone() {
+        TyKind::Param { .. } => true,
+        TyKind::Slice(e) | TyKind::Optional(e) => equatable_given_params(types, e, seen),
+        TyKind::Tuple(es) => es.iter().all(|e| equatable_given_params(types, *e, seen)),
+        TyKind::Struct(s) => {
+            let fields: Vec<TyId> = types.struct_def(s).fields.iter().map(|f| f.ty).collect();
+            fields.into_iter().all(|t| equatable_given_params(types, t, seen))
+        }
+        TyKind::Enum(e) => {
+            let fields: Vec<TyId> = types
+                .enum_def(e)
+                .variants
+                .iter()
+                .flat_map(|v| v.fields.iter().map(|f| f.ty))
+                .collect();
+            fields.into_iter().all(|t| equatable_given_params(types, t, seen))
+        }
+        // Whatever the arguments, a function or a map is compared by the
+        // rule for its kind, which a parameter inside it does not change.
+        _ => false,
+    };
+    seen.pop();
+    ok
+}
+
+/// Hold every call to a generic function to the comparisons its body makes.
+///
+/// Run once every body has been checked, because a call may be checked before
+/// the body it reaches. A caller forwarding its own parameter to one that is
+/// compared inherits the comparison, so the facts are closed over the call
+/// graph before anything is reported.
+fn check_compared_params(
+    facts: &mut GenericFacts,
+    resolved: &ResolveMap,
+    sigs: &[Signature],
+    types: &Types,
+    diags: &mut DiagBag,
+) {
+    loop {
+        let mut changed = false;
+        for call in &facts.calls {
+            for (i, t) in call.targs.iter().enumerate() {
+                if facts.compared[call.callee].get(i).copied().flatten().is_none() {
+                    continue;
+                }
+                let mut params = Vec::new();
+                params_in(types, *t, &mut params);
+                for p in params {
+                    if let Some(slot) = facts.compared[call.caller].get_mut(p as usize) {
+                        if slot.is_none() {
+                            *slot = Some(call.span);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for call in &facts.calls {
+        for (i, t) in call.targs.iter().enumerate() {
+            let Some(at) = facts.compared[call.callee].get(i).copied().flatten() else {
+                continue;
+            };
+            if types.is_poisoned(*t) || equatable_given_params(types, *t, &mut Vec::new()) {
+                continue;
+            }
+            let name = last_segment(&resolved.fns[call.callee].name).to_string();
+            let param = sigs[call.callee].generics.get(i).map(|g| g.name.clone()).unwrap_or_default();
+            let mut d = Diagnostic::error(
+                codes::E0201,
+                format!(
+                    "`{}` compares its `{}` with `==`, and {} cannot be compared",
+                    name,
+                    param,
+                    types.with_article(*t)
+                ),
+            )
+            .with_primary(call.span, format!("`{}` is {} here", param, types.with_article(*t)))
+            .with_secondary(at, "compared here");
+            d = if types.mentions_host_value(*t) {
+                d.with_note(
+                    "a host object has no structure Kite can see, so there is nothing to \
+                     compare field by field; `js.same(a, b)` asks the host whether two are \
+                     the same object",
+                )
+            } else {
+                d.with_note(
+                    "equality is structural, so every field must itself be equatable; \
+                     functions and trait objects are not",
+                )
+            };
+            diags.push(d);
+        }
+    }
 }
 
 /// The last segment of a possibly-qualified name.

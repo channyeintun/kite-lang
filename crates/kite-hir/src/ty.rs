@@ -32,6 +32,9 @@ def_id!(StructId, "A declared struct.");
 def_id!(EnumId, "A declared enum.");
 def_id!(TraitId, "A declared trait.");
 
+/// The parameter index `Self` has inside a trait. See [`Types::self_param`].
+pub const SELF_INDEX: u32 = u32::MAX;
+
 impl TyId {
     // Primitives occupy fixed ids so they need no lookup.
     pub const UNIT: TyId = TyId(0);
@@ -192,8 +195,15 @@ pub struct TraitMethodDef {
     pub ret: TyId,
     pub fallible: bool,
     pub takes_self: bool,
+    /// Declared `var self`: the method may modify its receiver, so a call
+    /// through the trait needs a receiver that may change.
+    pub var_self: bool,
     /// Whether the trait supplied a body.
     pub has_default: bool,
+    /// How many type parameters the method declares of its own: `fn map<U>`
+    /// has one. A generic method has a body per argument, so a `dyn` has no
+    /// single one to dispatch to.
+    pub generic_count: usize,
     pub span: Span,
 }
 
@@ -770,6 +780,61 @@ impl Types {
         self.traits.len()
     }
 
+    /// `Self` inside a trait declaration: the type implementing it, which the
+    /// declaration cannot name.
+    ///
+    /// A parameter at an index no declaration reaches, so substituting a
+    /// declaration's own arguments never touches it; only something that
+    /// knows the implementing type replaces it.
+    pub fn self_param(&mut self) -> TyId {
+        self.param_ty(SELF_INDEX, "Self")
+    }
+
+    /// Whether a type mentions a trait's `Self`.
+    pub fn mentions_self(&self, id: TyId) -> bool {
+        match self.kind(id) {
+            TyKind::Param { index, .. } => *index == SELF_INDEX,
+            TyKind::Slice(t) | TyKind::Optional(t) | TyKind::Fallible(t) => self.mentions_self(*t),
+            TyKind::Map(k, v) => self.mentions_self(*k) || self.mentions_self(*v),
+            TyKind::Tuple(es) => es.iter().any(|e| self.mentions_self(*e)),
+            TyKind::Fn { params, ret } => {
+                params.iter().any(|p| self.mentions_self(*p)) || self.mentions_self(*ret)
+            }
+            TyKind::Struct(s) => self
+                .struct_origin
+                .get(s)
+                .is_some_and(|(_, args)| args.iter().any(|a| self.mentions_self(*a))),
+            TyKind::Enum(e) => self
+                .enum_origin
+                .get(e)
+                .is_some_and(|(_, args)| args.iter().any(|a| self.mentions_self(*a))),
+            _ => false,
+        }
+    }
+
+    /// Why a trait's method cannot be called through a `dyn`, if it cannot.
+    ///
+    /// A call through a trait object reaches a body chosen at run time, so
+    /// the call has to be typable without knowing which: it needs a receiver
+    /// to dispatch on, one body rather than one per type argument, and no
+    /// `Self` — which would be a different type for every row of the table.
+    pub fn not_dispatchable(&self, m: &TraitMethodDef) -> Option<&'static str> {
+        if !m.takes_self {
+            Some("takes no `self`, so there is no receiver to dispatch on")
+        } else if m.generic_count > 0 {
+            Some("is generic, so there is a body per type argument rather than one to call")
+        } else if m.params.iter().any(|p| self.mentions_self(*p)) || self.mentions_self(m.ret) {
+            Some("mentions `Self`, which is a different type behind every `dyn`")
+        } else {
+            None
+        }
+    }
+
+    /// Whether `dyn Trait` is a type: every method can be called through one.
+    pub fn is_object_safe(&self, id: TraitId) -> bool {
+        self.trait_def(id).methods.iter().all(|m| self.not_dispatchable(m).is_none())
+    }
+
     // ---- queries ----------------------------------------------------------
 
     /// Whether a value of type `found` is acceptable where `expected` is
@@ -998,7 +1063,14 @@ impl Types {
             // synchronised" is exactly the claim a type system should not
             // accept on trust. Two names the standard library owns is the
             // smaller hole.
-            TyKind::Struct(s) if is_synchronised(&self.struct_def(*s).name) => true,
+            //
+            // A lock serialises access, which settles races and nothing else:
+            // a `JsValue` inside one still belongs to the isolate that made
+            // it (§12.3), so a mutex holding a host reference is no more
+            // `Share` than the reference.
+            TyKind::Struct(s) if is_synchronised(&self.struct_def(*s).name) => {
+                !self.mentions_host_value(id)
+            }
             TyKind::Struct(s) => self
                 .struct_def(*s)
                 .fields

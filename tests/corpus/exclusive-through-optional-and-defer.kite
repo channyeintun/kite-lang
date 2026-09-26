@@ -1,0 +1,32 @@
+// One object under two `var` parameters is E0800 however the two names are
+// spelled. An optional narrowed to its value is the same object, and so is a
+// deferred call's operand, which is evaluated into a hidden local where the
+// `defer` is written.
+
+struct Account {
+    var balance: int
+}
+
+fn transfer(var from: Account, var to: Account, amount: int) {
+    from.balance = from.balance - amount
+    to.balance = to.balance + amount
+}
+
+fn settle(var a: Account) -> int {
+    defer transfer(a, a, 50) //~ ERROR E0800
+    if a.balance > 10 {
+        return 1
+    }
+    return 0
+}
+
+fn main() {
+    var a = Account{ balance: 100 }
+    let o: Option<Account> = a
+    if o != nil {
+        transfer(o, o, 50) //~ ERROR E0800
+    }
+    var b = Account{ balance: 5 }
+    transfer(a, b, 1)
+    io.print(settle(a))
+}
