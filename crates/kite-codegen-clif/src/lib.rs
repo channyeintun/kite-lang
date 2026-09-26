@@ -33,7 +33,10 @@
 //! and reloaded afterwards, which is what lets the nursery move objects. The
 //! maps are serialised into a data section next to the code (with relocated
 //! function addresses, so the same bytes work under the JIT and the linker)
-//! and registered with the runtime before `main` runs.
+//! and registered with the runtime before `main` runs. Each slot is recorded
+//! as a distance below its own frame's frame pointer, which is the one
+//! address the runtime's frame-pointer walk has for that frame on every
+//! target — see `collect_maps` for why not the stack pointer.
 //!
 //! Allocation and mutation all cross into the runtime: variadic constructions
 //! stage their operands in `KITE_RT_STAGE` — the native shape of the bytecode
@@ -117,6 +120,7 @@ const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_register_closure", &[I64, I64, I64, I64], None),
     ("kite_rt_register_fn_name", &[I64, I64, I64], None),
     ("kite_rt_register_extern", &[I64, I64, I64], None),
+    ("kite_rt_register_extern_sig", &[I64, I64, I64], None),
     ("kite_rt_register_vtable_method", &[I64, I64, I64, I64], None),
     ("kite_rt_register_stack_maps", &[I64], None),
     ("kite_rt_struct_new", &[I64, I64], Some(I64)),
@@ -421,6 +425,28 @@ fn build<M: Module>(
     Ok(Artifacts { wrapper })
 }
 
+/// A host function's signature as the program declared it, in the encoding
+/// `kite-rt`'s host boundary checks before it reads a word: one byte per
+/// parameter, `:`, one for the result.
+///
+/// `str` gets its own letter rather than sharing "reference" with everything
+/// else because it is the distinction the host needs: every reference is a
+/// word here, and only a string is something the host can read as a path.
+fn extern_sig(e: &kite_hir::ExternDef, types: &Types) -> Vec<u8> {
+    let code = |ty: TyId| match types.kind(ty) {
+        TyKind::Str => b's',
+        TyKind::Int => b'i',
+        TyKind::Float => b'f',
+        TyKind::Bool => b'b',
+        TyKind::Unit | TyKind::Never | TyKind::Error => b'u',
+        _ => b'r',
+    };
+    let mut sig: Vec<u8> = e.params.iter().map(|t| code(*t)).collect();
+    sig.push(b':');
+    sig.push(code(e.ret));
+    sig
+}
+
 /// A named, read-only byte blob the registration function can point at.
 fn define_bytes<M: Module>(
     cx: &mut ModuleCx<M>,
@@ -500,7 +526,13 @@ fn define_init<M: Module>(
     let mut extern_names = Vec::new();
     for (i, e) in cx.program.externs.iter().enumerate() {
         let name = format!("{}.{}", e.host, e.name);
-        extern_names.push((define_bytes(cx, &format!("kite_extern_{}", i), name.as_bytes())?, name.len()));
+        let sig = extern_sig(e, cx.types);
+        extern_names.push((
+            define_bytes(cx, &format!("kite_extern_{}", i), name.as_bytes())?,
+            name.len(),
+            define_bytes(cx, &format!("kite_extern_sig_{}", i), &sig)?,
+            sig.len(),
+        ));
     }
 
     let cfg = cx.module.target_config();
@@ -533,6 +565,7 @@ fn define_init<M: Module>(
         "kite_rt_register_closure",
         "kite_rt_register_fn_name",
         "kite_rt_register_extern",
+        "kite_rt_register_extern_sig",
         "kite_rt_register_vtable_method",
         "kite_rt_register_stack_maps",
     ] {
@@ -589,11 +622,15 @@ fn define_init<M: Module>(
         let (idx, n) = (init.i(i as u64), init.i(*len as u64));
         init.call("kite_rt_register_fn_name", &[idx, ptr, n]);
     }
-    for (i, (data, len)) in extern_names.iter().enumerate() {
+    for (i, (data, len, sig, sig_len)) in extern_names.iter().enumerate() {
         let gv = cx.module.declare_data_in_func(*data, init.b.func);
         let ptr = init.b.ins().symbol_value(I64, gv);
         let (idx, n) = (init.i(i as u64), init.i(*len as u64));
         init.call("kite_rt_register_extern", &[idx, ptr, n]);
+        let gv = cx.module.declare_data_in_func(*sig, init.b.func);
+        let ptr = init.b.ins().symbol_value(I64, gv);
+        let n = init.i(*sig_len as u64);
+        init.call("kite_rt_register_extern_sig", &[idx, ptr, n]);
     }
     for (t, table) in cx.program.vtables.iter().enumerate() {
         for entry in &table.entries {
@@ -706,23 +743,65 @@ fn define_thunk<M: Module>(
     b.ins().return_(&results);
     b.finalize(cfg);
     cx.module.define_function(id, &mut ctx).map_err(|e| e.to_string())?;
-    let maps = collect_maps(&ctx);
+    let maps = collect_maps(&ctx)?;
     cx.module.clear_context(&mut ctx);
     Ok(maps)
 }
 
-/// The safepoints Cranelift recorded for the function just defined.
-fn collect_maps(ctx: &cranelift_codegen::Context) -> FnMaps {
+/// The safepoints Cranelift recorded for the function just defined, each
+/// entry turned into a distance *below this function's own frame pointer*.
+///
+/// Cranelift reports an entry as an offset from the stack pointer at the
+/// safepoint. The collector cannot use that as it stands: it walks frame
+/// pointers, and the only way to get this frame's stack pointer back from a
+/// frame pointer is through the frame it called — which means assuming where
+/// the *callee* keeps its frame record. The callee is usually a Rust function
+/// in `kite-rt`, and that assumption ("the record is at the top, so the
+/// caller's stack pointer is the record plus 16") holds on x86-64 and Apple
+/// AArch64 and is false on AArch64 Linux, where LLVM puts the record below
+/// the saved registers. Measured from this frame's own frame pointer, an entry
+/// needs nothing from the callee at all.
+///
+/// The conversion is exact because this frame's layout is Cranelift's and is
+/// known here: the frame record sits at the top of the frame, directly above
+/// the callee-saved registers, and `frame_to_fp_offset` is the distance from
+/// the stack pointer — the bottom of the frame while it is active — up to it.
+/// Each map also carries its own `span`, Cranelift's figure for the same
+/// distance at that safepoint; they agree, and if a future Cranelift ever let
+/// them differ, neither could be trusted, so that is an error rather than a
+/// guess.
+fn collect_maps(ctx: &cranelift_codegen::Context) -> Result<FnMaps, String> {
     let compiled = ctx.compiled_code().expect("the function was just compiled");
-    compiled
-        .buffer
-        .user_stack_maps()
-        .iter()
-        .map(|(ret_off, _, map)| {
-            let offsets: Vec<u32> = map.entries().map(|(_, off)| off).collect();
-            (*ret_off, offsets)
-        })
-        .collect()
+    let maps = compiled.buffer.user_stack_maps();
+    if maps.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(layout) = compiled.buffer.frame_layout() else {
+        return Err("Cranelift recorded stack maps without a frame layout".to_string());
+    };
+    let fp_above_sp = layout.frame_to_fp_offset;
+    let mut out = Vec::with_capacity(maps.len());
+    for (ret_off, span, map) in maps {
+        if *span != fp_above_sp {
+            return Err(format!(
+                "a stack map spans {} bytes of a frame whose pointer is {} above its bottom",
+                span, fp_above_sp
+            ));
+        }
+        let mut below = Vec::new();
+        for (_, sp_off) in map.entries() {
+            // A spill slot is inside the frame, so strictly under its record.
+            if sp_off >= fp_above_sp {
+                return Err(format!(
+                    "a stack-map slot at sp+{} is not below the frame pointer at sp+{}",
+                    sp_off, fp_above_sp
+                ));
+            }
+            below.push(fp_above_sp - sp_off);
+        }
+        out.push((*ret_off, below));
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -828,7 +907,7 @@ fn define_fn<M: Module>(
     cx.module.define_function(id, &mut ctx).map_err(|e| {
         format!("compiling `{}`: {}", f.name, e)
     })?;
-    let maps = collect_maps(&ctx);
+    let maps = collect_maps(&ctx).map_err(|e| format!("compiling `{}`: {}", f.name, e))?;
     cx.module.clear_context(&mut ctx);
     Ok(maps)
 }
@@ -1789,30 +1868,32 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
 // Entry points
 // ---------------------------------------------------------------------------
 
-/// Compile to a relocatable object file, for the linker.
 /// Whether this host can run the native backend at all.
 ///
 /// **Windows x86-64 cannot, yet, and the reason is the collector rather than
-/// the code generator.** Roots are found by walking the frame-pointer chain,
-/// and that walk assumes the caller's stack pointer at a call is the frame
-/// record's address plus sixteen — which holds on the System V ABI and on
-/// AArch64, and is what makes macOS and Linux work. Cranelift's Win64
-/// prologue establishes the frame pointer differently, so the offsets the
-/// stack maps are relative to do not land where the walk expects, and the
-/// collector traces a stack word that was never a reference. It shows up as
-/// a corrupted heap under a small nursery, which is exactly the failure a
-/// precise collector must never have.
+/// the code generator.** Roots are found by walking the frame-pointer chain
+/// through the runtime's own Rust frames and the compiled ones, and on Win64
+/// that walk corrupted the heap under a small nursery — which is exactly the
+/// failure a precise collector must never have.
 ///
-/// Refusing is the honest answer until someone with a Windows machine can
-/// read the prologue and fix the offset. A backend that emitted code which
-/// corrupts memory on one in three platforms would be worse than one that
-/// says where it does not work.
+/// The first explanation was that the walk found a Kite frame's stack
+/// pointer as "the frame record of the function it called, plus sixteen",
+/// and that Win64 prologues break that. The walk no longer does that at all:
+/// each stack-map slot is recorded as a distance below its own frame's frame
+/// pointer (see `collect_maps`), which is what made AArch64 Linux — where
+/// "plus sixteen" was also false — correct. What may be left on Win64 is the
+/// chain itself: LLVM may point a Win64 frame pointer into the middle of a
+/// frame, where its unwind tables want it, rather than at the saved
+/// register, and a chain of such pointers is not a chain of records. Nobody
+/// has checked either on a Windows machine, and guessing from a distance is
+/// how a collector acquires a second bug — so this refuses until someone
+/// does. A backend that emitted code which corrupts memory on one in three
+/// platforms would be worse than one that says where it does not work.
 pub fn supported_here() -> Result<(), String> {
     if cfg!(all(windows, target_arch = "x86_64")) {
         return Err(
             "the native backend does not support Windows yet: the collector finds roots by \
-             walking frame pointers, and Cranelift's Win64 prologue puts the frame record \
-             where that walk does not expect it\n\
+             walking frame pointers, and that walk has not been shown to hold on Win64\n\
              note: the bytecode and WebAssembly targets work here — run without `--native`"
                 .to_string(),
         );
@@ -1820,6 +1901,7 @@ pub fn supported_here() -> Result<(), String> {
     Ok(())
 }
 
+/// Compile to a relocatable object file, for the linker.
 pub fn compile_object(program: &mir::Program, types: &Types) -> Result<Vec<u8>, String> {
     supported_here()?;
     let isa = host_isa(true)?;
@@ -1834,16 +1916,46 @@ pub fn compile_object(program: &mir::Program, types: &Types) -> Result<Vec<u8>, 
     module.finish().emit().map_err(|e| e.to_string())
 }
 
-/// Compile into this process and run to completion, writing the program's
-/// output to `out`. This is `kitec run --native`, and it is also how the
-/// differential suite runs the corpus without needing a linker.
+pub use kite_rt::{RunConfig, RunStats};
+
+/// Compile into this process and run to completion, collecting the program's
+/// output and writing it to `out` when the run is over. This is how the
+/// differential suite and the backend's own tests run programs without a
+/// linker, and compare what they print.
+///
+/// Collected, not streamed, which is right for a harness and wrong for a
+/// person: nothing appears until the program ends, and nothing at all if it
+/// crashes. `kitec run --native` uses [`run_jit_stdout`].
 ///
 /// A trap ends the process, exactly as it would in a linked executable — the
-/// runtime prints the message first, so nothing is quieter than the VM.
+/// runtime prints the message first, after whatever was collected so far, so
+/// nothing is quieter than the VM.
 pub fn run_jit(program: &mir::Program, types: &Types, out: &mut dyn std::io::Write) -> Result<(), String> {
+    run_jit_with(program, types, RunConfig::default(), Some(out)).map(|_| ())
+}
+
+/// Compile into this process and run to completion, printing straight to
+/// standard output as the program goes — `kitec run --native`, which should
+/// behave like the executable `kitec build --emit native` links: a line
+/// printed is a line on the terminal, in order with standard error, before a
+/// prompt reads input and before a crash, however long the program runs.
+pub fn run_jit_stdout(program: &mir::Program, types: &Types) -> Result<(), String> {
+    run_jit_with(program, types, RunConfig::default(), None).map(|_| ())
+}
+
+/// The general form of [`run_jit`] and [`run_jit_stdout`]: a run with the
+/// collector configured, its output collected into `out` or streamed when
+/// there is none, and what the collector did reported back — read under the
+/// same lock as the run, so a test's count is its own program's and not a
+/// neighbour's.
+pub fn run_jit_with(
+    program: &mir::Program,
+    types: &Types,
+    config: RunConfig,
+    out: Option<&mut dyn std::io::Write>,
+) -> Result<RunStats, String> {
     supported_here()?;
     let _guard = kite_rt::run_lock();
-    kite_rt::begin_capture();
 
     let isa = host_isa(false)?;
     let mut builder = cranelift_jit::JITBuilder::with_isa(
@@ -1854,14 +1966,33 @@ pub fn run_jit(program: &mir::Program, types: &Types, out: &mut dyn std::io::Wri
         builder.symbol(name, ptr);
     }
     let mut module = cranelift_jit::JITModule::new(builder);
-    let arts = build(&mut module, program, types)?;
-    module.finalize_definitions().map_err(|e| e.to_string())?;
+    let built = build(&mut module, program, types)
+        .and_then(|arts| module.finalize_definitions().map(|()| arts).map_err(|e| e.to_string()));
+    let arts = match built {
+        Ok(arts) => arts,
+        Err(e) => {
+            // SAFETY: nothing from this module was ever called, so no
+            // function pointer into its memory exists to outlive it.
+            unsafe { module.free_memory() };
+            return Err(e);
+        }
+    };
     let entry = module.get_finalized_function(arts.wrapper);
+    // SAFETY: the wrapper is declared with exactly this signature in
+    // `define_wrapper`, and `finalize_definitions` succeeded.
     let entry: extern "C" fn() -> i32 = unsafe { std::mem::transmute(entry) };
+    // Set up immediately before the entry, under the lock, so a compilation
+    // that failed above leaves nothing behind for another run to inherit.
+    let capture = out.is_some();
+    kite_rt::prepare_run(config, capture);
     entry();
-    out.write_all(&kite_rt::take_capture()).map_err(|e| e.to_string())?;
-    // The code pages hold nothing live once the run is over; the next
-    // startup resets the runtime's pointers into them.
+    let (captured, stats) = kite_rt::finish_run();
+    // SAFETY: the run is over. The runtime held the only pointers into this
+    // code — thunk addresses in closures, vtable rows, stack maps — and
+    // `finish_run` dropped all of them with the heap.
     unsafe { module.free_memory() };
-    Ok(())
+    if let Some(out) = out {
+        out.write_all(&captured).map_err(|e| e.to_string())?;
+    }
+    Ok(stats)
 }

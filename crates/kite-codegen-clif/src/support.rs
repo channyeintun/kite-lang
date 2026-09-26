@@ -20,10 +20,10 @@ pub struct Unsupported {
 
 /// Scan a program for constructs the native backend cannot lower.
 ///
-/// Everything the language can express lowers today; the two refusals below
-/// are capacity limits rather than missing features, and they are checked
-/// here because a limit that trips at run time would be indistinguishable
-/// from a codegen bug.
+/// Everything the language can express lowers today; the one refusal below
+/// is a capacity limit rather than a missing feature, and it is checked here
+/// because a limit that trips at run time would be indistinguishable from a
+/// codegen bug.
 pub fn unsupported(program: &mir::Program, _types: &Types) -> Vec<Unsupported> {
     let mut found = Vec::new();
 

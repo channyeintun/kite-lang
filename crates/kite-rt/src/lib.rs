@@ -31,11 +31,12 @@
 //! Roots are found **precisely** from Cranelift's user stack maps: the code
 //! generator declares every reference-typed local as needing a stack map, so
 //! at each safepoint (a call) the live references sit in stack slots whose
-//! offsets from that frame's stack pointer are recorded. At collection time
-//! the runtime walks the frame-pointer chain; a frame whose return address is
-//! a registered safepoint has its recorded slots visited, and every other
-//! frame — the runtime's own Rust frames included — is skipped, because
-//! nothing in it can hold a Kite reference the maps do not already cover.
+//! distances below that frame's own frame pointer are recorded. At collection
+//! time the runtime walks the frame-pointer chain; a frame whose return
+//! address is a registered safepoint has its caller's recorded slots visited,
+//! and every other frame — the runtime's own Rust frames included — is
+//! skipped, because nothing in it can hold a Kite reference the maps do not
+//! already cover.
 //! Cranelift spills stack-map values before each safepoint and reloads them
 //! after, which is exactly what allows the nursery to move objects.
 //!
@@ -182,6 +183,11 @@ struct Shapes {
     fn_names: Vec<String>,
     /// Declared host function names, for the no-host trap to name.
     externs: Vec<String>,
+    /// Per declared host function, its signature as the program declared it
+    /// (encoded as the host boundary describes), so a declaration that does
+    /// not match what the host implements is a trap rather than a string read
+    /// out of an integer.
+    extern_sigs: Vec<Vec<u8>>,
     /// Per dispatch table: rows of `(type tag, method addresses)`, sorted.
     vtables: Vec<Vec<(u32, Vec<usize>)>>,
 }
@@ -203,6 +209,13 @@ struct Rt {
     old_bytes: usize,
     /// Old-generation size that triggers a major collection.
     threshold: usize,
+    /// The least `threshold` is ever set to. A test lowers it to make major
+    /// collections happen at all; everything else gets the default.
+    min_threshold: usize,
+    /// Collections this run, for a harness that must know the collector it
+    /// meant to exercise actually ran.
+    minor_collections: u64,
+    major_collections: u64,
     /// Old objects a reference has been stored into since the last minor
     /// collection. Scanned as roots so the nursery never needs a full
     /// old-generation scan.
@@ -211,7 +224,7 @@ struct Rt {
     /// a possible collection. Registered explicitly, because Rust frames have
     /// no stack maps.
     extra_roots: Vec<*mut u64>,
-    /// `(safepoint pc, slot offsets from that frame's sp)`, sorted by pc.
+    /// `(safepoint pc, slot distances below that frame's fp)`, sorted by pc.
     stack_maps: Vec<(usize, Vec<u32>)>,
 
     // ---- the program ---------------------------------------------------
@@ -231,8 +244,10 @@ struct Rt {
 }
 
 static mut RT: *mut Rt = std::ptr::null_mut();
-static NURSERY_OVERRIDE: Mutex<Option<usize>> = Mutex::new(None);
-static CAPTURE_NEXT: Mutex<bool> = Mutex::new(false);
+
+/// How the next run is set up, when something other than a linked executable
+/// starts it. Consumed by `kite_rt_startup`.
+static NEXT_RUN: Mutex<Option<(RunConfig, bool)>> = Mutex::new(None);
 
 /// The runtime is process-global, so two JIT-compiled programs must not run at
 /// once. The test harness holds this around each run.
@@ -246,23 +261,61 @@ pub fn run_lock() -> MutexGuard<'static, ()> {
     }
 }
 
-/// Shrink the nursery for subsequent runs, so a test can force collections
-/// without allocating gigabytes. Sticky rather than one-shot: tests in one
-/// binary run concurrently, and a one-shot override could be consumed by a
-/// neighbour's run before its setter's own.
-pub fn set_nursery_bytes(n: usize) {
-    *NURSERY_OVERRIDE.lock().unwrap() = Some(n);
+/// What a harness running a program in this process may change about the
+/// collector. The defaults are what a linked executable gets.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RunConfig {
+    /// The nursery's size in bytes, in place of `KITE_NURSERY_BYTES` and the
+    /// default — small enough, and a test forces collections without
+    /// allocating gigabytes.
+    pub nursery_bytes: Option<usize>,
+    /// The old-generation size that triggers a major collection, and the
+    /// least it is ever raised back to. The default is 8 MB, which no test
+    /// program reaches; lowering it is how a test makes mark-and-sweep run.
+    pub major_threshold: Option<usize>,
 }
 
-/// Capture the next run's output instead of writing it to stdout.
-pub fn begin_capture() {
-    *CAPTURE_NEXT.lock().unwrap() = true;
+/// What the collector did during a run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunStats {
+    pub minor_collections: u64,
+    pub major_collections: u64,
 }
 
-/// The output the finished run produced under [`begin_capture`].
-pub fn take_capture() -> Vec<u8> {
-    let rt = rt();
-    rt.capture.take().unwrap_or_default()
+/// Set up the next run, which starts when the compiled wrapper calls
+/// `kite_rt_startup`. With `capture`, what the program prints is kept for
+/// [`finish_run`] instead of being written to stdout — which is for a harness
+/// comparing output, and nothing else: captured output is lost if the program
+/// crashes, and it cannot interleave with standard error.
+///
+/// One-shot, and meant to be called under [`run_lock`] immediately before the
+/// entry, so that neither a neighbouring test nor a compilation that failed
+/// after asking can leave it set for a run it was not meant for.
+pub fn prepare_run(config: RunConfig, capture: bool) {
+    *NEXT_RUN.lock().unwrap_or_else(|p| p.into_inner()) = Some((config, capture));
+}
+
+/// After a run started by the compiled wrapper returns: what it printed under
+/// capture, and what the collector did. Then free its heap — nothing can
+/// reach it once the entry has returned, and holding it until the next
+/// startup would keep the whole of the last program's memory alive for as
+/// long as the process lasts.
+pub fn finish_run() -> (Vec<u8>, RunStats) {
+    unsafe {
+        if RT.is_null() {
+            return (Vec::new(), RunStats::default());
+        }
+        let mut done = Box::from_raw(RT);
+        RT = std::ptr::null_mut();
+        ENTRY_FP = 0;
+        let captured = done.capture.take().unwrap_or_default();
+        let stats = RunStats {
+            minor_collections: done.minor_collections,
+            major_collections: done.major_collections,
+        };
+        release(done);
+        (captured, stats)
+    }
 }
 
 #[allow(static_mut_refs)]
@@ -273,6 +326,13 @@ fn rt() -> &'static mut Rt {
     }
 }
 
+/// The runtime's state, if a run is in progress — for the one caller that
+/// must work either way.
+#[allow(static_mut_refs)]
+fn rt_if_started() -> Option<&'static mut Rt> {
+    unsafe { RT.as_mut() }
+}
+
 const DEFAULT_NURSERY: usize = 1 << 20;
 const DEFAULT_THRESHOLD: usize = 8 << 20;
 
@@ -281,16 +341,21 @@ const DEFAULT_THRESHOLD: usize = 8 << 20;
 /// JIT run in one process start clean.
 #[no_mangle]
 pub extern "C" fn kite_rt_startup() {
-    // The highest stack address the Kite program owns. The compiled entry
-    // calls this, so its own frame — and every frame the program makes below
-    // it — is at an address at or under this local, the stack growing down.
-    // The root walk stops here, which is what keeps it out of the frames of
-    // whatever called the program: a test harness, `main`, a threading
-    // runtime. None of those can hold a Kite reference, and walking into them
-    // is how a garbage word gets read as an object header.
-    let floor = 0usize;
+    // The compiled entry's frame pointer. The entry is what called this, so
+    // this function's own frame record holds it — the saved frame pointer is
+    // the record's first word on both x86-64 and AArch64, wherever in the
+    // frame the record sits. Every frame the program makes is below the
+    // entry's, and the root walk must arrive at exactly this one: that is
+    // what keeps it out of the frames of whatever called the program — a test
+    // harness, `main`, a threading runtime, none of which can hold a Kite
+    // reference — and what makes a broken chain a trap rather than a missed
+    // root.
+    //
+    // SAFETY: this crate is built with frame pointers forced (see `build.rs`),
+    // so `current_fp` is this function's frame record, and its first word is
+    // readable stack memory holding the caller's frame pointer.
     unsafe {
-        STACK_TOP = (&floor as *const usize as usize) + STACK_TOP_MARGIN;
+        ENTRY_FP = *(current_fp() as *const usize);
     }
     unsafe {
         if !RT.is_null() {
@@ -298,7 +363,16 @@ pub extern "C" fn kite_rt_startup() {
             RT = std::ptr::null_mut();
             release(old);
         }
-        let nursery_size = (*NURSERY_OVERRIDE.lock().unwrap())
+        // A harness's settings, when a harness started this run; otherwise
+        // what a linked executable gets, and the environment may shrink the
+        // nursery for anyone stress-testing the collector from outside.
+        let (config, capture) = NEXT_RUN
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+            .unwrap_or_default();
+        let nursery_size = config
+            .nursery_bytes
             .or_else(|| {
                 std::env::var("KITE_NURSERY_BYTES")
                     .ok()
@@ -306,20 +380,20 @@ pub extern "C" fn kite_rt_startup() {
             })
             .unwrap_or(DEFAULT_NURSERY)
             .max(4096);
+        let threshold = config.major_threshold.unwrap_or(DEFAULT_THRESHOLD);
         let nursery = sys_alloc(Layout::from_size_align(nursery_size, 16).unwrap());
         assert!(!nursery.is_null(), "cannot allocate the nursery");
-        let capture = if std::mem::take(&mut *CAPTURE_NEXT.lock().unwrap()) {
-            Some(Vec::new())
-        } else {
-            None
-        };
+        let capture = if capture { Some(Vec::new()) } else { None };
         RT = Box::into_raw(Box::new(Rt {
             nursery,
             nursery_size,
             nursery_top: 0,
             old: Vec::new(),
             old_bytes: 0,
-            threshold: DEFAULT_THRESHOLD,
+            threshold,
+            min_threshold: threshold,
+            minor_collections: 0,
+            major_collections: 0,
             remembered: Vec::new(),
             extra_roots: Vec::new(),
             stack_maps: Vec::new(),
@@ -335,8 +409,8 @@ pub extern "C" fn kite_rt_startup() {
     }
 }
 
-/// Free a previous run's heap. The capture buffer is intentionally not part of
-/// this: `take_capture` reads it after the run.
+/// Free a run's heap. The capture buffer goes with the rest of the state, so
+/// [`finish_run`] takes it out first.
 fn release(rt: Box<Rt>) {
     unsafe {
         for &(p, size) in &rt.old {
@@ -360,7 +434,9 @@ fn release(rt: Box<Rt>) {
 /// thing about the same bug.
 fn trap(message: &str) -> ! {
     // Whatever the program printed so far should still reach the terminal.
-    if let Some(buf) = rt().capture.take() {
+    // There may be no run to have printed anything — a check can fire before
+    // startup, under a unit test — and that is no reason to panic instead.
+    if let Some(buf) = rt_if_started().and_then(|rt| rt.capture.take()) {
         let _ = std::io::stdout().lock().write_all(&buf);
     }
     eprintln!("\nerror: {}", message);
@@ -425,12 +501,13 @@ fn ensure_len<T: Default>(v: &mut Vec<T>, n: usize) {
 #[no_mangle]
 pub unsafe extern "C" fn kite_rt_register_string(idx: u64, ptr: *const u8, len: u64) {
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    let header = str_word0(bytes.len());
     // Straight into the old generation: a constant lives as long as the
     // program, and an immortal object in the nursery would be copied out on
     // the first collection anyway.
     let p = old_alloc(HEADER + round8(bytes.len()));
     unsafe {
-        *(p as *mut u64) = word0(obj::STR, bytes.len() as u32);
+        *(p as *mut u64) = header;
         *(p as *mut u64).add(1) = 0;
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), p.add(HEADER), bytes.len());
     }
@@ -511,6 +588,20 @@ pub unsafe extern "C" fn kite_rt_register_extern(idx: u64, ptr: *const u8, len: 
             .into_owned();
 }
 
+/// A host function's declared signature, in the encoding the host boundary
+/// below describes.
+///
+/// # Safety
+///
+/// `ptr` must point at `len` readable bytes. The generated registration
+/// function always passes a data symbol of exactly that length.
+#[no_mangle]
+pub unsafe extern "C" fn kite_rt_register_extern_sig(idx: u64, ptr: *const u8, len: u64) {
+    let rt = rt();
+    ensure_len(&mut rt.shapes.extern_sigs, idx as usize + 1);
+    rt.shapes.extern_sigs[idx as usize] = unsafe { bytes_arg(ptr, len) };
+}
+
 #[no_mangle]
 pub extern "C" fn kite_rt_register_vtable_method(
     table: u64,
@@ -536,9 +627,13 @@ pub extern "C" fn kite_rt_register_vtable_method(
 
 /// The stack-map table, as words: `[fn count]`, then per function
 /// `[address][map count]` and per map `[return-address offset][entry count]`
-/// followed by the entry offsets. The addresses are relocated function
-/// addresses, which is why the table is data the code generator emits rather
-/// than something serialised on the side.
+/// followed by the entries. Each entry is how far *below that function's own
+/// frame pointer* a live reference is spilled — measured from the frame the
+/// map describes, never from whatever frame it happens to have called, which
+/// is what `stack_root_slots` relies on. The addresses are relocated
+/// function addresses, which is why the table is data the code generator
+/// emits rather than something serialised on the side.
+///
 /// # Safety
 ///
 /// `ptr` must point at a well-formed table in the format above, which is
@@ -717,16 +812,10 @@ unsafe fn for_each_ref_slot(p: *mut u8, f: &mut dyn FnMut(*mut u64)) {
     }
 }
 
-/// The highest stack address the root walk may reach, set by
-/// `kite_rt_startup`. Zero before a program has started, which makes the walk
-/// find nothing rather than guess.
-static mut STACK_TOP: usize = 0;
-
-/// How far above `kite_rt_startup`'s own frame the program's entry frame may
-/// sit. The compiled wrapper called into here, so its frame is immediately
-/// above; a page is far more room than that needs and still stops well short
-/// of a harness's frames.
-const STACK_TOP_MARGIN: usize = 4096;
+/// The frame pointer of the compiled entry — the wrapper the code generator
+/// emits, which calls `kite_rt_startup` first — recorded there. Zero when no
+/// program is running, which makes the walk find nothing rather than guess.
+static mut ENTRY_FP: usize = 0;
 
 /// The current frame pointer, for starting a stack walk.
 #[inline(always)]
@@ -743,14 +832,29 @@ fn current_fp() -> usize {
     fp
 }
 
-/// Walk the frame-pointer chain and visit every stack-map slot.
+/// Walk the frame-pointer chain and gather every stack-map slot.
 ///
 /// A frame record holds the caller's frame pointer and the return address
-/// into the caller; on both x86-64 and AArch64 the caller's stack pointer at
-/// the moment of the call is the record's address plus 16, which is exactly
-/// what the stack-map offsets are relative to. Frames whose return address is
+/// into the caller. When that return address is a registered safepoint, the
+/// caller is a compiled Kite frame, and its map says how far below *its own*
+/// frame pointer each live reference was spilled — so the slots are found
+/// from the caller's frame pointer, which the record holds, and nothing is
+/// assumed about the callee's frame at all. Frames whose return address is
 /// not a registered safepoint — this crate's own frames, and every compiled
 /// frame with nothing live — are skipped rather than scanned.
+///
+/// That independence is the point. The callee is usually a Rust function in
+/// this crate, and where Rust puts its frame record inside its own frame is
+/// the platform's business: at the top on x86-64 and Apple AArch64, but on
+/// AArch64 Linux *below* the callee-saved registers, so the caller's stack
+/// pointer is the record plus 16 plus however many registers that function
+/// happened to save. An earlier version of this walk assumed "record plus 16"
+/// everywhere, which read every slot 32 to 80 bytes too low on AArch64 Linux —
+/// updating saved registers as if they were references, and missing the real
+/// ones. A compiled frame's layout, by contrast, is Cranelift's and is known
+/// when the code is generated: its frame record sits at the top of the frame,
+/// and the distance from it to each spill slot is what the code generator
+/// registers.
 ///
 /// **This requires every frame between here and the program's entry to keep a
 /// frame pointer**, and that is not a default: Cranelift is told to
@@ -761,51 +865,94 @@ fn current_fp() -> usize {
 /// Linux and Windows: `rbp` there was an ordinary callee-saved register
 /// holding whatever the optimiser put in it, and the walk read it as a frame.
 ///
-/// The walk is bounded at both ends rather than trusted. It stops at
-/// `STACK_TOP` — the program's own entry — because nothing above that can
-/// hold a Kite reference; it requires the chain to climb, so a repeated or
-/// descending pointer ends it; and it ignores a frame whose recorded slots
-/// would fall outside the stack between here and there. A bad frame therefore
-/// costs a missed root at worst, and a missed root is a use-after-free, so it
-/// is *also* checked: a walk that reaches `STACK_TOP` without seeing the
-/// entry's own frame would mean the chain broke, and the debug assertion
-/// below says so on the build where anyone is looking.
+/// So the chain is checked rather than trusted, and a chain that fails a
+/// check is a trap. The walk must climb — a repeated or descending pointer is
+/// not a frame — and it must arrive at *exactly* the entry's frame, which
+/// `kite_rt_startup` recorded; a chain that jumps past it or ends short of it
+/// broke somewhere, and a collection that carried on would be a collection
+/// with roots missing, which is a use-after-free. There is no cap on the
+/// number of frames: the chain is bounded by the entry, and a deep recursion
+/// is exactly where a program holds the most references on its stack.
 fn stack_root_slots() -> Vec<*mut u64> {
-    let top = unsafe { STACK_TOP };
-    let maps = &rt().stack_maps;
+    let entry = unsafe { ENTRY_FP };
     let mut slots = Vec::new();
-    let mut fp = current_fp();
-    let floor = fp;
-    let mut hops = 0;
     // Nothing has started, so nothing is rooted. Better to say that than to
     // walk an unbounded chain.
-    if top == 0 {
+    if entry == 0 {
         return slots;
     }
-    while fp != 0 && fp & 7 == 0 && fp < top && hops < 1_000_000 {
-        hops += 1;
-        let ret = unsafe { *((fp + 8) as *const usize) };
-        let caller_fp = unsafe { *(fp as *const usize) };
-        if let Ok(i) = maps.binary_search_by_key(&ret, |(pc, _)| *pc) {
-            let sp = fp + 16;
-            for off in &maps[i].1 {
-                let slot = sp + *off as usize;
-                // A slot outside the live stack is not a slot. This cannot
-                // happen with a well-formed chain, and silently skipping it
-                // is what keeps a malformed one from being fatal.
-                if slot >= floor && slot < top {
-                    slots.push(slot as *mut u64);
-                }
-            }
+    let maps = &rt().stack_maps;
+    // SAFETY: the walk starts at this frame, and `walk_frames` only reads a
+    // frame record whose address is above the previous one and below
+    // `entry` — memory between this frame and the program's entry, which is
+    // this thread's own live stack.
+    let walked = unsafe { walk_frames(current_fp(), entry, maps, &mut |s| slots.push(s)) };
+    if let Err(why) = walked {
+        trap(&format!(
+            "the collector could not find the program's roots: {}\n\
+             note: this is a bug in the native backend, not in the program",
+            why
+        ));
+    }
+    slots
+}
+
+/// The walk itself, over any chain of frame records — separated from where
+/// the chain comes from so the arithmetic can be tested against a stack laid
+/// out the way a platform this crate cannot run on lays it out.
+///
+/// `maps` is sorted by return address, each entry a distance below the
+/// calling frame's frame pointer.
+///
+/// # Safety
+///
+/// Every address in `[fp, entry)` must be readable, and `fp` must be a frame
+/// record or `entry` itself. The walk reads only records strictly above the
+/// previous one and strictly below `entry`, so it stays inside that range.
+unsafe fn walk_frames(
+    mut fp: usize,
+    entry: usize,
+    maps: &[(usize, Vec<u32>)],
+    visit: &mut dyn FnMut(*mut u64),
+) -> Result<(), String> {
+    while fp != entry {
+        if fp == 0 || fp & 7 != 0 || fp > entry {
+            return Err(format!(
+                "the frame-pointer chain left the stack at {:#x}, short of the entry at {:#x}",
+                fp, entry
+            ));
         }
+        let ret = *((fp + 8) as *const usize);
+        let caller_fp = *(fp as *const usize);
         // The chain must climb; a repeated or descending pointer means the
         // walk has left well-formed frames behind.
         if caller_fp <= fp {
-            break;
+            return Err(format!(
+                "the frame-pointer chain stopped climbing at {:#x}, short of the entry at {:#x}",
+                fp, entry
+            ));
+        }
+        if let Ok(i) = maps.binary_search_by_key(&ret, |(pc, _)| *pc) {
+            for below in &maps[i].1 {
+                let slot = caller_fp.wrapping_sub(*below as usize);
+                // The caller's frame is everything from its stack pointer up
+                // to its frame record, and the callee's record lies below that
+                // stack pointer — so a slot is above the callee's record and
+                // below the caller's. A slot anywhere else means the map and
+                // the frame disagree, and visiting it would be writing to a
+                // word that is not a reference.
+                if slot < fp + 16 || slot >= caller_fp {
+                    return Err(format!(
+                        "a stack map put a slot at {:#x}, outside the frame between {:#x} and {:#x}",
+                        slot, fp, caller_fp
+                    ));
+                }
+                visit(slot as *mut u64);
+            }
         }
         fp = caller_fp;
     }
-    slots
+    Ok(())
 }
 
 /// Evacuate one nursery object to the old generation, leaving a forwarding
@@ -836,7 +983,7 @@ fn evac_slot(s: *mut u64, queue: &mut Vec<*mut u8>) {
 /// collection — the simplest generational policy, and an honest one: objects
 /// that die young never get copied at all, which is the bet a nursery makes.
 fn collect_minor() {
-    GC_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    rt().minor_collections += 1;
     let mut queue: Vec<*mut u8> = Vec::new();
 
     // Roots: compiled frames via the stack maps, the runtime's own registered
@@ -876,6 +1023,7 @@ fn collect_minor() {
 /// so everything reachable is old and nothing moves — the old generation is
 /// non-moving by design, which is what spares the runtime a read barrier.
 fn collect_major() {
+    rt().major_collections += 1;
     let mut stack: Vec<*mut u8> = Vec::new();
     let mark_slot = |s: *mut u64, stack: &mut Vec<*mut u8>| {
         let v = unsafe { *s };
@@ -927,22 +1075,8 @@ fn collect_major() {
     }
     rt_.old = live;
     rt_.old_bytes = live_bytes;
-    rt_.threshold = (2 * live_bytes).max(DEFAULT_THRESHOLD);
+    rt_.threshold = (2 * live_bytes).max(rt_.min_threshold);
 }
-
-/// How many minor collections have run — for the collector's own tests, which
-/// must fail if the GC they mean to exercise never actually ran.
-#[no_mangle]
-pub extern "C" fn kite_rt_gc_count() -> i64 {
-    GC_COUNT.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// [`kite_rt_gc_count`], for Rust callers. Cumulative across runs.
-pub fn gc_runs() -> i64 {
-    kite_rt_gc_count()
-}
-
-static GC_COUNT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -1498,13 +1632,40 @@ unsafe fn str_str<'a>(s: u64) -> &'a str {
     std::str::from_utf8_unchecked(str_bytes(s))
 }
 
+/// A string's length as its header records it, or `None` past what 32 bits
+/// can say.
+fn str_len_field(len: usize) -> Option<u32> {
+    u32::try_from(len).ok()
+}
+
+/// The first header word of a string of `len` bytes — or a trap, before
+/// anything is allocated, when the length does not fit.
+///
+/// The length lives in the header's upper 32 bits, and the collector sizes
+/// the object from it. A truncated length would not be a shorter string: it
+/// would be an object the collector copies short and the renderer reads
+/// short, with the rest of the bytes still sitting in memory the allocator
+/// believes is free. The VM has no such limit, so a program can reach it only
+/// here, and saying so is the honest answer.
+fn str_word0(len: usize) -> u64 {
+    match str_len_field(len) {
+        Some(n) => word0(obj::STR, n),
+        None => trap(&format!(
+            "string too long: {} bytes, and a native string holds at most {}",
+            len,
+            u32::MAX
+        )),
+    }
+}
+
 fn make_str(bytes: &[u8]) -> u64 {
     // The bytes must not point into the heap — every caller below builds them
     // in Rust-owned memory first, precisely so this allocation cannot move
     // its own input.
+    let header = str_word0(bytes.len());
     let p = alloc(HEADER + round8(bytes.len()));
     unsafe {
-        *(p as *mut u64) = word0(obj::STR, bytes.len() as u32);
+        *(p as *mut u64) = header;
         *(p as *mut u64).add(1) = 0;
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), p.add(HEADER), bytes.len());
     }
@@ -1522,12 +1683,13 @@ pub extern "C" fn kite_rt_str_concat(a: u64, b: u64) -> u64 {
     let mut b = b;
     unsafe {
         let total = str_bytes(a).len() + str_bytes(b).len();
+        let header = str_word0(total);
         root(&mut a);
         root(&mut b);
         let p = alloc(HEADER + round8(total));
         unroot(2);
         let (abytes, bbytes) = (str_bytes(a), str_bytes(b));
-        *(p as *mut u64) = word0(obj::STR, total as u32);
+        *(p as *mut u64) = header;
         *(p as *mut u64).add(1) = 0;
         std::ptr::copy_nonoverlapping(abytes.as_ptr(), p.add(HEADER), abytes.len());
         std::ptr::copy_nonoverlapping(
@@ -1575,10 +1737,11 @@ pub extern "C" fn kite_rt_str_trim(s: u64) -> u64 {
         // Offsets survive a collection; borrows into the heap do not.
         let start = trimmed.as_ptr() as usize - text.as_ptr() as usize;
         let len = trimmed.len();
+        let header = str_word0(len);
         root(&mut s);
         let p = alloc(HEADER + round8(len));
         unroot(1);
-        *(p as *mut u64) = word0(obj::STR, len as u32);
+        *(p as *mut u64) = header;
         *(p as *mut u64).add(1) = 0;
         std::ptr::copy_nonoverlapping(str_bytes(s).as_ptr().add(start), p.add(HEADER), len);
         p as u64
@@ -1604,10 +1767,11 @@ pub extern "C" fn kite_rt_str_slice(s: u64, from: i64, to: i64) -> u64 {
         let start = byte_at(from_c);
         let end = byte_at(to_c);
         let len = end - start;
+        let header = str_word0(len);
         root(&mut s);
         let p = alloc(HEADER + round8(len));
         unroot(1);
-        *(p as *mut u64) = word0(obj::STR, len as u32);
+        *(p as *mut u64) = header;
         *(p as *mut u64).add(1) = 0;
         std::ptr::copy_nonoverlapping(str_bytes(s).as_ptr().add(start), p.add(HEADER), len);
         p as u64
@@ -2186,25 +2350,209 @@ pub extern "C" fn kite_rt_require(cond: u8, message: u64) {
 }
 
 // ---------------------------------------------------------------------------
-// The host boundary
+// The host boundary — `kite-driver`'s host for the VM, transcribed
 // ---------------------------------------------------------------------------
+//
+// A native program is its own host, and the one namespace a command-line
+// program needs and a browser cannot have is `std/fs`. So this answers
+// `@host("fs")` with the same six functions the bytecode VM's host answers,
+// with the same semantics and the same failure encoding — `kite-driver`'s
+// `host.rs` is the specification, and a difference here is a difference
+// between `kitec run` and `kitec run --native`. Every other namespace — the
+// DOM, the network — is the trap the VM gives without an embedder, because
+// there is nothing here to supply it.
+//
+// # Declared signatures
+//
+// A host function is matched by name, and the name is whatever the program
+// declared: nothing stops a program writing
+// `@host("fs") extern fn read_text(path: int) -> str`. The VM finds out when it
+// looks at the value it was handed, and traps. Here the value is a bare word,
+// and reading an integer as a string would be reading memory at an address
+// the program chose. So the code generator registers each extern's declared
+// signature — one byte per parameter, then `:`, then one for the result: `s`
+// a `str`, `i` an `int`, `f` a `float`, `b` a `bool`, `u` unit, `r` any other
+// reference — and a declaration that does not match what the host implements
+// traps before any word is read as anything.
 
-/// A call across the declared host boundary. The native runtime is its own
-/// host and supplies nothing beyond the builtins — no DOM, no network — so
-/// reaching one of these is a statement about where the program is running,
-/// exactly as it is on the bytecode VM with no embedder.
+/// Marks a returned string as a failure. Must match `fs.FAILURE_MARK` in
+/// `std/fs.kite`, and the VM's host.
+const HOST_FAILURE: char = '\u{1}';
+
+/// The host functions this runtime implements: the name, the signature a
+/// declaration must have, and the name the VM's type-confusion trap uses for
+/// it — so a mismatched argument is reported in the VM's words.
+const HOST_FUNCTIONS: &[(&str, &[u8], &str)] = &[
+    ("fs.read_text", b"s:s", "fs.read"),
+    ("fs.write_text", b"ss:s", "fs.write"),
+    ("fs.list_dir", b"s:s", "fs.list"),
+    ("fs.remove_path", b"s:s", "fs.remove"),
+    ("fs.path_kind", b"s:i", "fs.kind"),
+    ("fs.temp_path", b":s", "fs.temp_path"),
+];
+
+/// A host function's answer, before it becomes a word.
+enum HostAnswer {
+    Str(String),
+    Int(i64),
+}
+
+fn host_failure(message: impl std::fmt::Display) -> HostAnswer {
+    HostAnswer::Str(format!("{}{}", HOST_FAILURE, message))
+}
+
+/// Answer one call. `args` are the declared parameters, already copied out of
+/// the heap and already checked against the signature, so indexing them is
+/// safe for every name matched here.
+fn host_call(name: &str, args: &[String]) -> HostAnswer {
+    match name {
+        "fs.read_text" => match std::fs::read(&args[0]) {
+            // Not `read_to_string`, so that "this file is not text" is a
+            // message rather than a panic — and not lossy decoding, which
+            // turns a binary file into plausible-looking rubbish.
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => HostAnswer::Str(text),
+                Err(_) => host_failure("not valid UTF-8"),
+            },
+            Err(e) => host_failure(e),
+        },
+        "fs.write_text" => match std::fs::write(&args[0], &args[1]) {
+            Ok(()) => HostAnswer::Str(String::new()),
+            Err(e) => host_failure(e),
+        },
+        "fs.list_dir" => match std::fs::read_dir(&args[0]) {
+            Ok(entries) => {
+                let mut names = String::new();
+                for entry in entries {
+                    match entry {
+                        Ok(e) => {
+                            names.push_str(&e.file_name().to_string_lossy());
+                            names.push('\n');
+                        }
+                        Err(e) => return host_failure(e),
+                    }
+                }
+                HostAnswer::Str(names)
+            }
+            Err(e) => host_failure(e),
+        },
+        "fs.remove_path" => {
+            let meta = match std::fs::symlink_metadata(&args[0]) {
+                Ok(m) => m,
+                Err(e) => return host_failure(e),
+            };
+            // `remove_dir`, never `remove_dir_all`: deleting a tree is not
+            // something a standard library should make a one-liner.
+            let result = if meta.is_dir() {
+                std::fs::remove_dir(&args[0])
+            } else {
+                std::fs::remove_file(&args[0])
+            };
+            match result {
+                Ok(()) => HostAnswer::Str(String::new()),
+                Err(e) => host_failure(e),
+            }
+        }
+        // 0 missing, 1 file, 2 directory — matching `fs.Kind`.
+        "fs.path_kind" => HostAnswer::Int(match std::fs::metadata(&args[0]) {
+            Ok(m) if m.is_dir() => 2,
+            Ok(_) => 1,
+            Err(_) => 0,
+        }),
+        "fs.temp_path" => {
+            // Whatever this platform calls it, without a trailing separator,
+            // so a caller joins with one and never gets two.
+            let dir = std::env::temp_dir();
+            let text = dir.to_string_lossy();
+            HostAnswer::Str(text.trim_end_matches(['/', '\\']).to_string())
+        }
+        other => unreachable!("`{}` passed the host table and has no body", other),
+    }
+}
+
+/// A signature's parameters and result, either side of the `:`.
+fn split_sig(sig: &[u8]) -> (&[u8], &[u8]) {
+    match sig.iter().position(|b| *b == b':') {
+        Some(i) => (&sig[..i], &sig[i + 1..]),
+        None => (sig, &[]),
+    }
+}
+
+/// Check a declaration against what the host implements, trapping on a
+/// mismatch, and hand back how many parameters the host reads.
+fn host_params(name: &str, declared: &[u8], wants: &[u8], op: &str) -> usize {
+    let (want_params, want_ret) = split_sig(wants);
+    let (have_params, have_ret) = split_sig(declared);
+    // A parameter the host reads must be declared, and declared as what the
+    // host reads it as — the VM's check, in the VM's words. Extra declared
+    // parameters are ignored there, and so here.
+    for (i, want) in want_params.iter().enumerate() {
+        if have_params.get(i) != Some(want) {
+            trap(&format!("`{}` received a `not a {}`", op, sig_type_name(*want)));
+        }
+    }
+    // The VM would hand back a value of the host's type whatever the
+    // declaration said, and trap wherever the program next used it as the
+    // other thing. A word has no type to check later, so this checks now.
+    if have_ret != want_ret {
+        trap(&format!(
+            "`{}` is declared to return {}, and the host returns {}",
+            name,
+            sig_type_name(have_ret.first().copied().unwrap_or(b'u')),
+            sig_type_name(want_ret.first().copied().unwrap_or(b'u'))
+        ));
+    }
+    want_params.len()
+}
+
+fn sig_type_name(code: u8) -> &'static str {
+    match code {
+        b's' => "str",
+        b'i' => "int",
+        b'f' => "float",
+        b'b' => "bool",
+        b'u' => "()",
+        _ => "reference",
+    }
+}
+
+/// A call across the declared host boundary: the arguments are the first
+/// `argc` words of the staging window, and the answer comes back as a word.
+///
+/// Every argument is copied out of the heap before the host runs and before
+/// the answer is allocated, so no heap reference is held across the one
+/// allocation here. That is the discipline `make_str` states, and it is
+/// what makes the staged arguments safe to leave unrooted: after the copy
+/// nothing reads them, so a collection that moves what they pointed at leaves
+/// nothing stale behind.
 #[no_mangle]
-pub extern "C" fn kite_rt_call_extern(index: u64, _argc: u64) -> u64 {
-    let name = rt()
-        .shapes
+pub extern "C" fn kite_rt_call_extern(index: u64, argc: u64) -> u64 {
+    let shapes = &rt().shapes;
+    let name = shapes
         .externs
         .get(index as usize)
         .cloned()
         .unwrap_or_else(|| "?".to_string());
-    trap(&format!(
-        "`{}` is a host function, and this runtime supplies no host",
-        name
-    ));
+    let Some(&(_, wants, op)) = HOST_FUNCTIONS.iter().find(|(n, _, _)| *n == name) else {
+        trap(&format!(
+            "`{}` is a host function, and this runtime supplies no host",
+            name
+        ));
+    };
+    let declared = shapes.extern_sigs.get(index as usize).cloned().unwrap_or_default();
+    let params = host_params(&name, &declared, wants, op);
+    // SAFETY: the signature check guarantees the program declared at least
+    // this many parameters, each a `str`; the code generator staged one word
+    // per declared parameter, and the checker has proved each of those words
+    // is a live string. Nothing has allocated since they were staged.
+    debug_assert!(params <= argc as usize);
+    let args: Vec<String> = (0..params)
+        .map(|i| unsafe { str_str(*stage_slot(i)).to_string() })
+        .collect();
+    match host_call(&name, &args) {
+        HostAnswer::Str(text) => make_str(text.as_bytes()),
+        HostAnswer::Int(n) => n as u64,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2302,9 +2650,12 @@ pub extern "C" fn kite_rt_drive() {
             }
         }
         if !polled {
-            // Everything is waiting. There is no host here, so the clock is
-            // the only thing that can move — and if nothing is waiting on it,
-            // nothing will ever happen.
+            // Everything is waiting. The VM gives its host a turn first; the
+            // host here, like the one `kite-driver` gives the VM, answers
+            // every call before returning and so never has anything
+            // outstanding — its turn is always "nothing happened", and the
+            // clock is the only thing that can move. If nothing is waiting on
+            // that either, nothing will ever happen.
             match rt().tasks.iter().filter_map(|t| t.wake_at).min() {
                 Some(next) if next > rt().clock => {
                     rt().clock = next;
@@ -2379,7 +2730,6 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         kite_rt_register_extern,
         kite_rt_register_vtable_method,
         kite_rt_register_stack_maps,
-        kite_rt_gc_count,
         kite_rt_struct_new,
         kite_rt_enum_new,
         kite_rt_tuple_new,
@@ -2449,6 +2799,7 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         kite_rt_text_height,
         kite_rt_require,
         kite_rt_call_extern,
+        kite_rt_register_extern_sig,
         kite_rt_task_spawn,
         kite_rt_task_wake_at,
         kite_rt_task_park,
@@ -2458,4 +2809,214 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
     ];
     v.push(("KITE_RT_STAGE", (&raw const KITE_RT_STAGE).cast::<u8>()));
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stack, laid out by hand, one word per slot. Addresses grow with the
+    /// index, as a real stack's do towards its base.
+    struct FakeStack {
+        words: Vec<u64>,
+    }
+
+    impl FakeStack {
+        fn new(len: usize) -> FakeStack {
+            FakeStack { words: vec![0; len] }
+        }
+        fn addr(&self, i: usize) -> usize {
+            self.words.as_ptr() as usize + 8 * i
+        }
+        /// A frame record at word `i`: the caller's frame pointer, then the
+        /// return address into the caller.
+        fn record(&mut self, i: usize, caller_fp: usize, ret: usize) {
+            self.words[i] = caller_fp as u64;
+            self.words[i + 1] = ret as u64;
+        }
+        fn walk(&self, start: usize, entry: usize, maps: &[(usize, Vec<u32>)]) -> Result<Vec<usize>, String> {
+            let mut seen = Vec::new();
+            // SAFETY: every record the chains below describe lies inside
+            // `words`, and the walk reads only between `start` and `entry`.
+            unsafe { walk_frames(start, entry, maps, &mut |s| seen.push(s as usize)) }.map(|()| seen)
+        }
+    }
+
+    /// The layout that broke the first version of the walk: AArch64 Linux,
+    /// where a Rust function's frame record sits *below* the registers it
+    /// saves, so its caller's stack pointer is not the record plus 16.
+    ///
+    /// Words, from the bottom: the runtime function's record, then the four
+    /// callee-saved registers it stored above it (`stp x29, x30, [sp, #-48]!;
+    /// stp x22, x21, [sp, #16]; stp x20, x19, [sp, #32]`), then the compiled
+    /// caller's frame — two spill slots at its stack pointer, then its frame
+    /// record — and the entry's frame above that.
+    #[test]
+    fn slots_are_found_from_the_callers_own_frame_pointer() {
+        let mut stack = FakeStack::new(16);
+        let ret = 0x1000_0040;
+        let (callee, caller, entry) = (0, 8, 12);
+        stack.record(callee, stack.addr(caller), ret);
+        for (i, saved) in (2..6).zip([0x2222, 0x2121, 0x2020, 0x1919]) {
+            stack.words[i] = saved;
+        }
+        // The caller's spills, at its stack pointer: word 6 and word 7.
+        stack.words[6] = 0xAAAA;
+        stack.words[7] = 0xBBBB;
+        stack.record(caller, stack.addr(entry), 0x2000_0000);
+        // Cranelift's map, as `collect_maps` records it: 16 and 8 bytes
+        // below the caller's frame pointer.
+        let maps = vec![(ret, vec![16, 8])];
+        let slots = stack.walk(stack.addr(callee), stack.addr(entry), &maps).unwrap();
+        assert_eq!(slots, vec![stack.addr(6), stack.addr(7)]);
+        // What "the callee's record plus 16" made of the same map: the
+        // caller's stack pointer taken to be word 2, so its slots at words 2
+        // and 3 — two of the callee's saved registers, which the collector
+        // rewrote while it lost the real references.
+        let span = 16;
+        let old: Vec<usize> = [16usize, 8]
+            .iter()
+            .map(|below| stack.addr(callee) + 16 + (span - below))
+            .collect();
+        assert_eq!(old, vec![stack.addr(2), stack.addr(3)]);
+    }
+
+    /// No cap on depth: the walk is bounded by the entry, not by a count, and
+    /// a root in the outermost frame of a very deep chain is still found.
+    #[test]
+    fn a_chain_of_any_depth_reaches_the_entry() {
+        const FRAMES: usize = 1_500_000;
+        let mut stack = FakeStack::new(2 * FRAMES + 4);
+        for f in 0..FRAMES - 1 {
+            stack.record(2 * f, stack.addr(2 * f + 2), 0x4000);
+        }
+        // The last record's caller is the entry itself, two words further up
+        // so that the word just below the entry's frame pointer is a slot of
+        // the outermost frame rather than part of the record.
+        let entry = stack.addr(2 * FRAMES + 2);
+        stack.record(2 * (FRAMES - 1), entry, 0x5000);
+        let maps = vec![(0x5000, vec![8])];
+        let slots = stack.walk(stack.addr(0), entry, &maps).unwrap();
+        assert_eq!(slots, vec![entry - 8]);
+    }
+
+    #[test]
+    fn a_chain_that_stops_climbing_is_an_error() {
+        let mut stack = FakeStack::new(8);
+        stack.record(0, stack.addr(2), 0);
+        stack.record(2, stack.addr(0), 0);
+        let why = stack.walk(stack.addr(0), stack.addr(6), &[]).unwrap_err();
+        assert!(why.contains("stopped climbing"), "{}", why);
+    }
+
+    #[test]
+    fn a_chain_that_misses_the_entry_is_an_error() {
+        let mut stack = FakeStack::new(8);
+        stack.record(0, stack.addr(6), 0);
+        let why = stack.walk(stack.addr(0), stack.addr(4), &[]).unwrap_err();
+        assert!(why.contains("left the stack"), "{}", why);
+    }
+
+    #[test]
+    fn a_slot_outside_its_frame_is_an_error() {
+        let mut stack = FakeStack::new(8);
+        let ret = 0x3000;
+        stack.record(0, stack.addr(4), ret);
+        stack.record(4, stack.addr(6), 0);
+        // 40 bytes below the caller's frame pointer is word -1: below the
+        // callee's own record, so not a slot of the caller's at all.
+        let maps = vec![(ret, vec![40])];
+        let why = stack.walk(stack.addr(0), stack.addr(6), &maps).unwrap_err();
+        assert!(why.contains("outside the frame"), "{}", why);
+    }
+
+    /// A run's settings are consumed by the run they were for, and its heap
+    /// is gone once it is over — not held until some later startup, which in
+    /// `kitec` never comes.
+    #[test]
+    fn a_finished_run_leaves_nothing_behind() {
+        let _lock = run_lock();
+        prepare_run(RunConfig { nursery_bytes: Some(4096), major_threshold: None }, true);
+        kite_rt_startup();
+        assert!(NEXT_RUN.lock().unwrap().is_none(), "startup left its settings for the next run");
+        assert_eq!(rt().nursery_size, 4096);
+        kite_rt_print_str(make_str(b"hello"));
+        let (captured, stats) = finish_run();
+        assert_eq!(captured, b"hello\n");
+        assert_eq!(stats, RunStats::default());
+        assert!(rt_if_started().is_none(), "the heap outlived the run");
+        assert_eq!(unsafe { ENTRY_FP }, 0);
+    }
+
+    /// Run this test's own binary again, filtered to `name`, with a variable
+    /// that tells it to do the thing that exits — the way to test a trap,
+    /// which ends the process rather than panicking.
+    fn in_a_child(name: &str) -> std::process::Output {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env("KITE_RT_TEST_CHILD", "1")
+            .output()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_string_past_four_gib_is_a_trap_not_a_truncation() {
+        assert_eq!(str_len_field(u32::MAX as usize), Some(u32::MAX));
+        assert_eq!(str_len_field(u32::MAX as usize + 1), None);
+        if std::env::var_os("KITE_RT_TEST_CHILD").is_some() {
+            str_word0(u32::MAX as usize + 1);
+            unreachable!("a string of 4 GiB and a byte got a header");
+        }
+        let out = in_a_child("tests::a_string_past_four_gib_is_a_trap_not_a_truncation");
+        assert_eq!(out.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("error: string too long: 4294967296 bytes"), "{}", stderr);
+    }
+
+    #[test]
+    fn a_host_declaration_that_does_not_match_is_a_trap() {
+        // Matching: nothing to say.
+        assert_eq!(host_params("fs.write_text", b"ss:s", b"ss:s", "fs.write"), 2);
+        // Extra declared parameters are ignored, as the VM ignores them.
+        assert_eq!(host_params("fs.temp_path", b"i:s", b":s", "fs.temp_path"), 0);
+        if std::env::var_os("KITE_RT_TEST_CHILD").is_some() {
+            host_params("fs.read_text", b"i:s", b"s:s", "fs.read");
+            unreachable!("an int was accepted as a path");
+        }
+        let out = in_a_child("tests::a_host_declaration_that_does_not_match_is_a_trap");
+        assert_eq!(out.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // The VM's words for the same mistake.
+        assert!(stderr.contains("error: `fs.read` received a `not a str`"), "{}", stderr);
+    }
+
+    /// The host's answers, and above all its failures, in the encoding
+    /// `std/fs` unwraps: a leading `\u{1}`, then the reason.
+    #[test]
+    fn the_host_answers_as_the_vms_host_does() {
+        let text = |a: HostAnswer| match a {
+            HostAnswer::Str(s) => s,
+            HostAnswer::Int(n) => panic!("expected a str, got {}", n),
+        };
+        let int = |a: HostAnswer| match a {
+            HostAnswer::Int(n) => n,
+            HostAnswer::Str(s) => panic!("expected an int, got {:?}", s),
+        };
+        let missing = text(host_call("fs.read_text", &["/definitely/not/here".to_string()]));
+        assert!(missing.starts_with(HOST_FAILURE), "{:?}", missing);
+
+        let dir = text(host_call("fs.temp_path", &[]));
+        assert!(!dir.ends_with('/') && !dir.ends_with('\\'), "{:?}", dir);
+        let file = format!("{}/kite-rt-host-test-{}.txt", dir, std::process::id());
+        assert_eq!(text(host_call("fs.write_text", &[file.clone(), "hello".to_string()])), "");
+        assert_eq!(text(host_call("fs.read_text", std::slice::from_ref(&file))), "hello");
+        assert_eq!(int(host_call("fs.path_kind", std::slice::from_ref(&file))), 1);
+        assert_eq!(int(host_call("fs.path_kind", std::slice::from_ref(&dir))), 2);
+        let listing = text(host_call("fs.list_dir", std::slice::from_ref(&dir)));
+        let name = format!("kite-rt-host-test-{}.txt", std::process::id());
+        assert!(listing.lines().any(|l| l == name), "{} is not in the listing", name);
+        assert_eq!(text(host_call("fs.remove_path", std::slice::from_ref(&file))), "");
+        assert_eq!(int(host_call("fs.path_kind", std::slice::from_ref(&file))), 0);
+        assert!(text(host_call("fs.remove_path", &[file])).starts_with(HOST_FAILURE));
+    }
 }
