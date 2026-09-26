@@ -27,12 +27,15 @@
 //! Two tokens mean two things, and both are decided by what came immediately
 //! before: `-` after an operator or an open bracket is a negation, and `|`
 //! where a value is expected opens a closure. A third, `<`, cannot be settled
-//! that way — `Option<int>` and `count < n` are the same three tokens — so it
-//! is decided by reading forward instead, in `opens_type_arguments`.
+//! that way — `Option<int>` and `count < n` are the same three tokens — so
+//! the parser, which knows, says which are type brackets. A file that does
+//! not parse is read forward from each `<` instead, in
+//! `opens_type_arguments`.
 
 use kite_diag::{DiagBag, Severity};
 use kite_lexer::{Comment, Token, TokenKind as T};
 use kite_span::{FileId, SourceMap, Span};
+use std::collections::HashSet;
 use std::fmt;
 
 /// Why a file was handed back unformatted.
@@ -89,6 +92,16 @@ pub fn format(src: &str) -> Result<String, FormatError> {
             col: at.col,
         });
     }
+    // The parser knows which `<` and `>` are type brackets and which `{`
+    // opens a struct literal; a file that does not parse falls back to
+    // reading the tokens around each one.
+    let (brackets, literal_braces) = match kite_parser::layout(FileId(0), src, &tokens) {
+        Some(layout) => (
+            layout.type_brackets.into_iter().collect(),
+            Some(layout.literal_braces.into_iter().collect()),
+        ),
+        None => (guessed_type_brackets(&tokens), None),
+    };
     let mut f = Formatter {
         src,
         out: String::with_capacity(src.len() + src.len() / 8),
@@ -97,12 +110,21 @@ pub fn format(src: &str) -> Result<String, FormatError> {
         depth: 0,
         line_started: false,
         closure_params: false,
-        type_depth: 0,
+        brackets,
+        literal_braces,
         prev: None,
         prev2: None,
+        prev_bracket: false,
+        prev_text: (0, 0),
         prev_end: 0,
     };
     f.run(&tokens);
+    // A byte-order mark is not a token, so the layout does not carry it. It
+    // goes back where it was: the formatter moves whitespace, and a mark the
+    // author's editor wrote is not its to take away.
+    if src.starts_with(kite_lexer::BYTE_ORDER_MARK) {
+        f.out.insert(0, kite_lexer::BYTE_ORDER_MARK);
+    }
     if !faithful(src, &tokens, &f.out) {
         return Err(FormatError::Unfaithful);
     }
@@ -160,6 +182,21 @@ fn faithful(src: &str, tokens: &[Token], out: &str) -> bool {
         })
 }
 
+/// Whether two tokens written with nothing between them would lex as
+/// something else — `-` and `=` as `-=`, `>` and `>` as `>>`, `.` and `..`
+/// as `...`.
+///
+/// Every rule that removes a space is written for code that parses, and a
+/// formatter runs on code that does not. Asking the lexer is the one check
+/// that holds for every pair, including ones no rule anticipated.
+fn glues(left: &str, left_kind: T, right: &str, right_kind: T) -> bool {
+    let joined = format!("{}{}", left, right);
+    let mut diags = DiagBag::new();
+    let tokens = kite_lexer::tokenize(FileId(0), &joined, &mut diags);
+    let kinds: Vec<T> = tokens.iter().map(|t| t.kind).filter(|k| *k != T::Eof).collect();
+    diags.has_errors() || kinds != [left_kind, right_kind]
+}
+
 struct Formatter<'a> {
     src: &'a str,
     out: String,
@@ -169,33 +206,68 @@ struct Formatter<'a> {
     line_started: bool,
     /// Between the two `|` of a closure's parameter list.
     closure_params: bool,
-    /// Open type-argument lists at this point. Set by the forward scan at
-    /// the `<`, so the tokens inside and the `>` that closes them do not
-    /// each have to work it out again.
-    type_depth: usize,
+    /// The byte offset of every `<` and `>` that brackets type arguments or
+    /// generic parameters, rather than comparing two values.
+    brackets: HashSet<u32>,
+    /// The byte offset of every `{` that opens a struct literal or a struct
+    /// pattern, when the file parsed and the parser could say.
+    literal_braces: Option<HashSet<u32>>,
     prev: Option<T>,
     /// The token before that. `{` needs it: `Point{` is a literal and
     /// `struct Point {` is a declaration, and only the token two back tells
     /// them apart.
     prev2: Option<T>,
+    /// Whether the previous token was a type bracket.
+    prev_bracket: bool,
+    /// Where the previous token's text is, for asking whether the next one
+    /// would glue to it.
+    prev_text: (u32, u32),
     prev_end: u32,
 }
 
+/// The type brackets of a file that does not parse, found by reading forward
+/// from each `<` after a name.
+///
+/// Only a parser really knows — `Option<int>` and `count < n` are the same
+/// three tokens — and for a file that parses, one does. This is the fallback
+/// for a file half written, where a guess that is right for ordinary code is
+/// what there is.
+fn guessed_type_brackets(tokens: &[Token]) -> HashSet<u32> {
+    let mut brackets = HashSet::new();
+    let mut depth = 0usize;
+    let mut prev: Option<T> = None;
+    for (i, token) in tokens.iter().enumerate() {
+        if token.kind == T::Newline {
+            continue;
+        }
+        if token.kind == T::Lt
+            && matches!(prev, Some(T::Ident) | Some(T::Impl))
+            && opens_type_arguments(&tokens[i + 1..])
+        {
+            brackets.insert(token.span.start);
+            depth += 1;
+        } else if depth > 0 {
+            match token.kind {
+                T::Gt | T::Ge => {
+                    brackets.insert(token.span.start);
+                    depth -= 1;
+                }
+                T::Shr => {
+                    brackets.insert(token.span.start);
+                    brackets.insert(token.span.start + 1);
+                    depth = depth.saturating_sub(2);
+                }
+                _ => {}
+            }
+        }
+        prev = Some(token.kind);
+    }
+    brackets
+}
+
 /// Whether the `<` just reached opens a type argument list rather than
-/// beginning a comparison.
-///
-/// This is the one genuine ambiguity in the token stream, and nothing behind
-/// the `<` settles it: `Option<int>` and `count < n` are an identifier, a `<`
-/// and an identifier either way. What settles it is what comes after — a type
-/// argument list closes on a `>` with nothing between but more type — so this
-/// reads forward until it finds the closing bracket or something that could
-/// not be in a type.
-///
-/// It replaced a rule that guessed from the text of the line so far, which was
-/// wrong in both directions: it spaced out `type Doc = Option<json.Json>`
-/// because a value supposedly begins after `=`, and it tightened
-/// `tone: if low > 0` into `low> 0` because the line held a `:` and a struct
-/// literal's field separator looks exactly like a type annotation's.
+/// beginning a comparison, judging by what follows it: a type argument list
+/// closes on a `>` with nothing between but more type.
 fn opens_type_arguments(ahead: &[Token]) -> bool {
     // Long enough for any real type, short enough that a `<` with no `>` after
     // it costs nothing. A comparison chain hits a disqualifying token within a
@@ -207,7 +279,8 @@ fn opens_type_arguments(ahead: &[Token]) -> bool {
             // Nesting. `>>` closes two at once, which is how `Box<Box<int>>`
             // reaches zero without a space in the middle.
             T::Lt => depth += 1,
-            T::Gt => {
+            // `>=` is a `>` against an `=`: `Option<int>= nil`.
+            T::Gt | T::Ge => {
                 depth -= 1;
                 if depth == 0 {
                     return true;
@@ -224,13 +297,15 @@ fn opens_type_arguments(ahead: &[Token]) -> bool {
                 depth -= 2;
             }
             // Everything a type is made of: names and paths, the brackets of
-            // `[T]`, `(A, B)` and `{K: V}`, the `,` between arguments, and the
-            // pieces of `fn(A) -> B`. `dyn` is in here too — the lexer hands
-            // it over as an identifier rather than a keyword of its own.
+            // `[T]`, `(A, B)` and `{K: V}`, the `,` between arguments, the
+            // pieces of `fn(A) -> B`, and the `+` between a generic
+            // parameter's bounds. `dyn` is in here too — the lexer hands it
+            // over as an identifier rather than a keyword of its own.
             T::Ident
             | T::Comma
             | T::Dot
             | T::Colon
+            | T::Plus
             | T::LBracket
             | T::RBracket
             | T::LParen
@@ -252,7 +327,7 @@ fn opens_type_arguments(ahead: &[Token]) -> bool {
 
 impl Formatter<'_> {
     fn run(&mut self, tokens: &[Token]) {
-        for (i, token) in tokens.iter().enumerate() {
+        for token in tokens {
             // The lexer emits a newline only where one separates statements.
             // The formatter wants every line break the author wrote — inside
             // an argument list too — so it reads them from the source gap
@@ -280,39 +355,32 @@ impl Formatter<'_> {
                 self.end_line();
                 // One blank line survives; more collapse. None is kept against
                 // a closing bracket, where it is padding rather than
-                // separation.
-                if gap.breaks > 1 && !closing {
+                // separation, and none at the top of the file, where it would
+                // be gone the second time round.
+                if gap.breaks > 1 && !closing && !self.out.is_empty() {
                     self.out.push('\n');
                 }
             }
 
             self.start_line();
-            let opens_types = token.kind == T::Lt
-                && matches!(self.prev, Some(T::Ident) | Some(T::Impl))
-                && opens_type_arguments(&tokens[i + 1..]);
-            if self.needs_space(token.kind, opens_types) {
+            let bracket = self.brackets.contains(&token.span.start);
+            let text = &self.src[token.span.start as usize..token.span.end as usize];
+            let space = self.needs_space(token.kind, bracket, token.span.start);
+            if space || self.would_glue(text, token.kind) {
                 self.out.push(' ');
             }
-            let text = &self.src[token.span.start as usize..token.span.end as usize];
             self.out.push_str(text);
 
             if matches!(token.kind, T::LBrace | T::LBracket | T::LParen) {
                 self.depth += 1;
-            }
-            if opens_types {
-                self.type_depth += 1;
-            } else if self.type_depth > 0 {
-                match token.kind {
-                    T::Gt => self.type_depth -= 1,
-                    T::Shr => self.type_depth = self.type_depth.saturating_sub(2),
-                    _ => {}
-                }
             }
             if token.kind == T::Pipe {
                 self.closure_params = !self.closure_params && self.is_value_position();
             }
             self.prev2 = self.prev;
             self.prev = Some(token.kind);
+            self.prev_bracket = bracket;
+            self.prev_text = (token.span.start, token.span.end);
             self.prev_end = token.span.end;
         }
         while self.out.ends_with('\n') {
@@ -323,16 +391,32 @@ impl Formatter<'_> {
         }
     }
 
+    /// Whether the token about to be written would run into the one before it
+    /// with no space between.
+    fn would_glue(&self, text: &str, kind: T) -> bool {
+        let Some(prev) = self.prev else { return false };
+        if !self.line_started || self.out.ends_with(' ') {
+            return false;
+        }
+        let (start, end) = self.prev_text;
+        glues(&self.src[start as usize..end as usize], prev, text, kind)
+    }
+
     // ---- spacing ------------------------------------------------------------
 
-    fn needs_space(&self, kind: T, opens_types: bool) -> bool {
+    /// `bracket` says the token is a `<` or `>` of a type argument list, and
+    /// `at` is where it starts.
+    fn needs_space(&self, kind: T, bracket: bool, at: u32) -> bool {
         let Some(prev) = self.prev else { return false };
         if !self.line_started {
             return false;
         }
+        // The `>` closing type arguments or generic parameters, and the `(`
+        // after `fn f<T>`, are part of the name they follow.
+        let after_type = self.prev_bracket && matches!(prev, T::Gt | T::Shr);
         // Nothing between a name and its argument list, its index, or a dot.
         if matches!(kind, T::LParen | T::LBracket)
-            && matches!(prev, T::Ident | T::RParen | T::RBracket | T::SelfKw | T::Gt)
+            && (matches!(prev, T::Ident | T::RParen | T::RBracket | T::SelfKw) || after_type)
         {
             return false;
         }
@@ -340,6 +424,15 @@ impl Formatter<'_> {
         // straight after `fn` is always a function type.
         if kind == T::LParen && prev == T::Fn {
             return false;
+        }
+        // `..` in a struct literal's base, `P{ ..p }`, and a struct pattern's
+        // rest, `P{ x, .. }`, stands apart like the fields around it. Only a
+        // range hugs its ends.
+        if kind == T::DotDot && matches!(prev, T::LBrace | T::Comma) {
+            return true;
+        }
+        if kind == T::RBrace && prev == T::DotDot {
+            return true;
         }
         if matches!(kind, T::Comma | T::Colon | T::Dot | T::DotDot | T::DotDotEq) {
             return false;
@@ -370,27 +463,30 @@ impl Formatter<'_> {
             return false;
         }
         // Type arguments are tight: `Option<int>`, `Box<Box<int>>`, and the
-        // parameter list of `impl<T>` or `fn f<T>`. Whether this `<` is one of
-        // those or the start of `a < b` was decided by `opens_type_arguments`,
-        // which read forward to find out; `type_depth` then carries the answer
-        // to the tokens inside and to the `>` that closes them.
-        if kind == T::Lt && opens_types {
+        // parameter list of `impl<T>` or `fn f<T>`. Which `<` and `>` those
+        // are is the parser's answer, or failing one, the forward scan's.
+        if bracket || (self.prev_bracket && prev == T::Lt) {
             return false;
         }
-        if self.type_depth > 0 && (prev == T::Lt || matches!(kind, T::Gt | T::Shr)) {
-            return false;
-        }
-        // `Point{ … }` is a literal and `struct Point {` is a declaration. The
-        // token two back is what tells them apart: a literal appears where a
-        // value does.
+        // `Point{ … }` is a literal and `struct Point {` is a declaration.
+        // The parser says which is which when the file parses — including a
+        // struct pattern opening a match arm, which has nothing before it on
+        // its line to go by. Otherwise what precedes the name decides: a
+        // literal appears where a value does.
         if kind == T::LBrace && matches!(prev, T::Ident | T::Gt) {
-            return !self.is_literal_head();
+            return match &self.literal_braces {
+                Some(literals) => !literals.contains(&at),
+                None => !self.is_literal_head(),
+            };
         }
         true
     }
 
     /// Whether a value could begin here, which is what makes a `-` a negation
     /// and a `|` a closure.
+    ///
+    /// `nil` and `_` are values too, in a pattern: `nil | _` is two
+    /// alternatives, and read as a closure opening it came out `nil |_`.
     fn is_value_position(&self) -> bool {
         !matches!(
             self.prev,
@@ -405,10 +501,15 @@ impl Formatter<'_> {
                 | Some(T::SelfKw)
                 | Some(T::True)
                 | Some(T::False)
+                | Some(T::Nil)
+                | Some(T::Underscore)
         )
     }
 
     /// Whether the `-` just written was a negation.
+    ///
+    /// A `}` ends a value as well as a block — `if a { 1 } else { 2 } - 3` —
+    /// and a `-` after one on the same line is a subtraction.
     fn minus_was_prefix(&self) -> bool {
         !matches!(
             self.prev2,
@@ -419,6 +520,7 @@ impl Formatter<'_> {
                 | Some(T::Char)
                 | Some(T::RParen)
                 | Some(T::RBracket)
+                | Some(T::RBrace)
                 | Some(T::SelfKw)
                 | Some(T::True)
                 | Some(T::False)
@@ -523,7 +625,9 @@ impl Formatter<'_> {
             self.out.push(' ');
         } else {
             self.end_line();
-            if gap.breaks > 1 {
+            // Blank lines above a comment are kept, except above the first
+            // thing in the file, where the second pass would not see them.
+            if gap.breaks > 1 && !self.out.is_empty() {
                 self.out.push('\n');
             }
             self.start_line();

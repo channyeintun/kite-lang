@@ -8,5 +8,8 @@ repository.workspace = true
 
 [dependencies]
 kite-lexer.workspace = true
+# Which `<` is a type bracket and which a comparison is a question only a
+# parser can answer.
+kite-parser.workspace = true
 kite-span.workspace = true
 kite-diag.workspace = true

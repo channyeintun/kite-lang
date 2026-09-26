@@ -133,22 +133,32 @@ pub fn parse(file: FileId, src: &str, tokens: &[Token], diags: &mut DiagBag) -> 
     Parser::new(file, src, tokens, diags).parse_source_file()
 }
 
-/// Where the type argument brackets are: the byte offset of every `<` that
-/// opens a type argument or generic parameter list, and of every `>` that
-/// closes one — including each half of a `>>` or a `>=` the parser split.
+/// What only a parser can tell a formatter about a file's layout.
 ///
-/// `Option<int>` and `count < n` are the same three tokens, and only a parser
-/// knows which is which. `kitec fmt` spaces a comparison and not a type, and
-/// used to guess by reading forward from the `<`, which could not tell
-/// `f(a < b, c > d)` from a type. `None` when the file does not parse: an
-/// answer from a parse that went wrong partway is not one to lay a file out
-/// by.
-pub fn type_brackets(file: FileId, src: &str, tokens: &[Token]) -> Option<Vec<u32>> {
+/// `Option<int>` and `count < n` are the same three tokens, and so are
+/// `Point{ x }` at the start of a match arm and a condition's last name before
+/// its block. `kitec fmt` spaces one of each and not the other, and used to
+/// guess which it had from the tokens around it — which could not tell
+/// `f(a < b, c > d)` from a type, nor a struct pattern from a block.
+#[derive(Default, Debug)]
+pub struct Layout {
+    /// The byte offset of every `<` that opens a type argument or generic
+    /// parameter list, and of every `>` that closes one — including each half
+    /// of a `>>` or a `>=` the parser split.
+    pub type_brackets: Vec<u32>,
+    /// The byte offset of every `{` that opens a struct literal or a struct
+    /// pattern, which is written against the type's name.
+    pub literal_braces: Vec<u32>,
+}
+
+/// The file's [`Layout`], or `None` when it does not parse: an answer from a
+/// parse that went wrong partway is not one to lay a file out by.
+pub fn layout(file: FileId, src: &str, tokens: &[Token]) -> Option<Layout> {
     let mut diags = DiagBag::new();
     let mut p = Parser::new(file, src, tokens, &mut diags);
     p.parse_source_file();
-    let brackets = std::mem::take(&mut p.type_brackets);
-    (!diags.has_errors()).then_some(brackets)
+    let layout = std::mem::take(&mut p.layout);
+    (!diags.has_errors()).then_some(layout)
 }
 
 struct Parser<'a> {
@@ -193,8 +203,8 @@ struct Parser<'a> {
     /// The token index of the last syntax error reported, so a construct
     /// found unclosed at a token that already has an error says nothing more.
     last_error_at: Option<usize>,
-    /// See [`type_brackets`].
-    type_brackets: Vec<u32>,
+    /// See [`layout`].
+    layout: Layout,
     /// How many levels of recursive descent are currently on the stack.
     ///
     /// Descent recursion means the nesting depth of the *file* is the native
@@ -254,7 +264,7 @@ impl<'a> Parser<'a> {
             unwinding: false,
             misaligned: None,
             last_error_at: None,
-            type_brackets: Vec::new(),
+            layout: Layout::default(),
             depth: 0,
             depth_reported: false,
         }
@@ -363,19 +373,19 @@ impl<'a> Parser<'a> {
         let t = self.tokens[self.pos];
         if self.split.is_none() && matches!(t.kind, T::Shr | T::Ge) {
             self.split = Some(if t.kind == T::Shr { T::Gt } else { T::Eq });
-            self.type_brackets.push(t.span.start);
+            self.layout.type_brackets.push(t.span.start);
             return Some(Span::new(t.span.file, t.span.start, t.span.start + 1));
         }
         let at = if self.split.is_some() { t.span.start + 1 } else { t.span.start };
         let span = self.expect(T::Gt)?;
-        self.type_brackets.push(at);
+        self.layout.type_brackets.push(at);
         Some(span)
     }
 
     /// Consume the `<` that opens a type argument or generic parameter list.
     fn bump_opening_lt(&mut self) {
         let t = self.bump();
-        self.type_brackets.push(t.span.start);
+        self.layout.type_brackets.push(t.span.start);
     }
 
     fn eat(&mut self, k: T) -> bool {
@@ -2053,7 +2063,8 @@ impl<'a> Parser<'a> {
                 }
 
                 if self.at(T::LBrace) {
-                    self.bump();
+                    let brace = self.bump().span;
+                    self.layout.literal_braces.push(brace.start);
                     let mut fields = Vec::new();
                     let mut rest = false;
                     self.skip_newlines();
@@ -2796,6 +2807,7 @@ impl<'a> Parser<'a> {
     fn parse_struct_literal(&mut self, path: TypePath) -> Option<StructLit> {
         let start = path.span;
         let brace = self.bump().span; // `{`
+        self.layout.literal_braces.push(brace.start);
         let mut open = self.open_brace(brace);
         self.skip_newlines();
 

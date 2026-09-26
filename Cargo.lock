@@ -406,6 +406,7 @@ version = "0.1.9"
 dependencies = [
  "kite-diag",
  "kite-lexer",
+ "kite-parser",
  "kite-span",
 ]
 

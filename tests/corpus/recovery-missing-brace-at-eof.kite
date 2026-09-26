@@ -1,9 +1,10 @@
 // Braces still open at the end of the file are one error, however many there
-// are, and it points at the one whose `}` the indentation says went missing.
+// are. (A brace missing before another declaration is the case that needs
+// indentation to find, and a file laid out that way is not one `kitec fmt`
+// leaves alone — those are in `crates/kite-driver/tests/corpus.rs`.)
 
-fn main() {
+fn main() { //~ ERROR E0101
     let x = 1
-    if x > 0 { //~ ERROR E0101
+    if x > 0 {
         io.print(x)
-
-}
+    }

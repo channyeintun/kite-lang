@@ -1009,9 +1009,9 @@ fn type_brackets_are_the_ones_the_parser_read_as_types() {
     let brackets = |src: &str| {
         let mut diags = DiagBag::new();
         let tokens = kite_lexer::tokenize(FileId(0), src, &mut diags);
-        let offsets = type_brackets(FileId(0), src, &tokens);
-        offsets.map(|o| {
-            o.iter().map(|&at| &src[at as usize..at as usize + 1]).collect::<String>()
+        layout(FileId(0), src, &tokens).map(|l| {
+            let at = l.type_brackets.iter();
+            at.map(|&at| &src[at as usize..at as usize + 1]).collect::<String>()
         })
     };
     assert_eq!(brackets("fn f<T: A + B>(x: Option<int>) {\n}\n").as_deref(), Some("<><>"));
@@ -1024,4 +1024,17 @@ fn type_brackets_are_the_ones_the_parser_read_as_types() {
     );
     // A file that does not parse answers nothing.
     assert_eq!(brackets("fn f( {\n"), None);
+}
+
+/// The braces written against a type's name: a struct literal's and a struct
+/// pattern's, and not a block's however the line before it ends.
+#[test]
+fn literal_braces_are_the_ones_the_parser_read_as_literals() {
+    let src = "fn f(p: P) {\n    match p {\n        P{ x, .. } => g(P{ x: 1 }),\n    }\n\
+               \x20   if a &&\n        b {\n    }\n}\n";
+    let mut diags = DiagBag::new();
+    let tokens = kite_lexer::tokenize(FileId(0), src, &mut diags);
+    let braces = layout(FileId(0), src, &tokens).expect("parses").literal_braces;
+    let before: Vec<&str> = braces.iter().map(|&at| &src[at as usize - 1..at as usize]).collect();
+    assert_eq!(before, vec!["P", "P"]);
 }

@@ -313,3 +313,99 @@ fn an_output_that_changes_the_tokens_is_refused() {
     let src = "let a = 1\nlet b = 2\n";
     assert!(!faithful(src, &lex(src), "let a = 1 let b = 2\n"));
 }
+
+/// Blank lines at the top of a file go on the first pass, not the second.
+/// They used to be collapsed to one there, and the second pass took that one
+/// away — `fmt --check` could not pass on its own output.
+#[test]
+fn leading_blank_lines_go_in_one_pass() {
+    assert_eq!(idempotent("\n\n\nfn main() {\n}\n"), "fn main() {\n}\n");
+    assert_eq!(idempotent("\n\n// a note\n\nfn main() {\n}\n"), "// a note\n\nfn main() {\n}\n");
+    assert_eq!(idempotent("// a note\nfn main() {\n}\n"), "// a note\nfn main() {\n}\n");
+}
+
+/// Which `<` and `>` are type brackets is the parser's answer, and a
+/// comparison keeps its spaces however much it looks like a type.
+#[test]
+fn a_comparison_that_looks_like_a_type_keeps_its_spaces() {
+    same("fn f() {\n    g(a < b, c > d)\n}\n");
+    same("fn f() {\n    let x = a > (b - 1)\n}\n");
+    same("fn f() {\n    if n as int < limit {\n    }\n}\n");
+    assert_eq!(fmt("fn f() {\n    g(a<b, c> d)\n}\n"), "fn f() {\n    g(a < b, c > d)\n}\n");
+    assert_eq!(fmt("fn f() {\n    let x = a >(b - 1)\n}\n"), "fn f() {\n    let x = a > (b - 1)\n}\n");
+    // And a type is tight wherever it is.
+    same("fn f<T: Show + Eq>(x: T) -> Option<T> {\n}\n");
+    assert_eq!(fmt("fn f < T: Show + Eq >(x: T) {\n}\n"), "fn f<T: Show + Eq>(x: T) {\n}\n");
+    same("fn f() {\n    let a: Option<int>= nil\n}\n");
+    same("type B = Box<Box<int>>\n");
+}
+
+/// A file that does not parse falls back to reading forward from each `<`,
+/// which knows a generic bound's `+` now.
+#[test]
+fn a_broken_file_still_spaces_its_types() {
+    let out = fmt("fn f<T: Show + Eq>(x: T) {\n    let y =\n}\n");
+    assert!(out.starts_with("fn f<T: Show + Eq>(x: T) {"), "{}", out);
+}
+
+/// `}` ends a value as well as a block: a `-` after one is a subtraction.
+#[test]
+fn a_minus_after_a_brace_is_a_subtraction() {
+    same("fn f() {\n    let x = if a { 1 } else { 2 } - 3\n}\n");
+    assert_eq!(
+        fmt("fn f() {\n    let x = if a { 1 } else { 2 } -3\n}\n"),
+        "fn f() {\n    let x = if a { 1 } else { 2 } - 3\n}\n"
+    );
+}
+
+/// `nil` and `_` are values in a pattern, so the `|` after one separates
+/// alternatives rather than opening a closure.
+#[test]
+fn a_pattern_alternative_after_nil_is_spaced() {
+    same("fn f() {\n    match x {\n        nil | _ => 1,\n    }\n}\n");
+    assert_eq!(
+        fmt("fn f() {\n    match x {\n        nil |_ => 1,\n    }\n}\n"),
+        "fn f() {\n    match x {\n        nil | _ => 1,\n    }\n}\n"
+    );
+}
+
+/// `..` in a struct literal's base and a struct pattern's rest stands apart
+/// like the fields around it, as §5.3 writes it. It hugged the brace.
+#[test]
+fn a_struct_base_and_rest_stand_apart() {
+    same("fn f() {\n    let q = Point{ ..p, y: 5 }\n}\n");
+    assert_eq!(
+        fmt("fn f() {\n    let q = Point{..p, y: 5 }\n}\n"),
+        "fn f() {\n    let q = Point{ ..p, y: 5 }\n}\n"
+    );
+    same("fn f() {\n    match p {\n        Point{ x, .. } => x,\n    }\n}\n");
+    // A range still hugs its ends, open or not.
+    same("fn f() {\n    let a = xs[1..3]\n    let b = xs[1..]\n    let c = xs[..2]\n}\n");
+}
+
+/// A tuple index after a tuple index stays two tokens: `t.0.1` lexes as the
+/// two it is, so writing `t.0 .1` tight no longer turns it into a float.
+#[test]
+fn a_tuple_index_chain_is_written_tight() {
+    assert_eq!(fmt("let y = t.0 .1\n"), "let y = t.0.1\n");
+    same("let y = t.0.1\n");
+}
+
+/// Wherever a rule would write two tokens with nothing between them, and they
+/// would lex as something else, a space stays. Rules are written for code
+/// that parses; this holds for every pair.
+#[test]
+fn no_two_tokens_are_glued_into_a_third() {
+    // Two type closers written apart are not a shift.
+    same("let x: Option<Option<int> > = nil\n");
+    // A closure with a space between its pipes is not `||`.
+    same("let f = | | 1\n");
+    // Nonsense, but the formatter runs on nonsense, and this was `-=`.
+    same("let x = - = 1\n");
+}
+
+/// A byte-order mark is kept: it is not the formatter's to take away.
+#[test]
+fn a_byte_order_mark_is_kept() {
+    assert_eq!(idempotent("\u{feff}fn main() {\nio.print(1)\n}\n"), "\u{feff}fn main() {\n    io.print(1)\n}\n");
+}
