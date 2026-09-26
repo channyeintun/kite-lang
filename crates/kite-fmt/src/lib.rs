@@ -30,15 +30,65 @@
 //! that way — `Option<int>` and `count < n` are the same three tokens — so it
 //! is decided by reading forward instead, in `opens_type_arguments`.
 
-use kite_diag::DiagBag;
+use kite_diag::{DiagBag, Severity};
 use kite_lexer::{Comment, Token, TokenKind as T};
-use kite_span::{FileId, Span};
+use kite_span::{FileId, SourceMap, Span};
+use std::fmt;
 
-/// Format a file's text. Never fails: a file that does not parse still has
-/// tokens, and a token stream is all this needs.
-pub fn format(src: &str) -> String {
+/// Why a file was handed back unformatted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FormatError {
+    /// The lexer could not read the whole file. `message` is the first thing
+    /// it could not read, at `line`:`col` (both 1-based).
+    Lexical { message: String, line: u32, col: u32 },
+    /// The layout came out holding different tokens from the ones that went
+    /// in. That is a bug in the formatter, and it is caught here rather than
+    /// written over someone's file.
+    Unfaithful,
+}
+
+impl fmt::Display for FormatError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FormatError::Lexical { message, line, col } => write!(
+                f,
+                "cannot format a file with lexical errors; the first is at {}:{}: {}",
+                line, col, message
+            ),
+            FormatError::Unfaithful => f.write_str(
+                "the formatter could not lay this file out without changing what it says; \
+                 it has been left as it was (this is a bug in `kitec fmt`)",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FormatError {}
+
+/// Format a file's text.
+///
+/// A file that does not *parse* still formats: tokens are all the layout
+/// needs, and a half-written file is exactly when someone reaches for this.
+/// A file that does not *lex* is refused. The lexer skips what it cannot read
+/// — a stray `$`, a `;`, the whole rest of the file after an unterminated
+/// `/*` — and a layout rebuilt from the tokens that survived is a layout with
+/// those bytes deleted. The formatter used to do exactly that and report
+/// success, so `let x = a ?? b` came back as `let x = a b`.
+pub fn format(src: &str) -> Result<String, FormatError> {
     let mut diags = DiagBag::new();
     let (tokens, comments) = kite_lexer::tokenize_with_comments(FileId(0), src, &mut diags);
+    if let Some(first) = diags.iter().find(|d| d.severity == Severity::Error) {
+        let mut map = SourceMap::new();
+        let file = map.add("", src);
+        let at = first.primary_span().map(|s| map.line_col(s)).unwrap_or_else(|| {
+            map.file(file).line_col(0)
+        });
+        return Err(FormatError::Lexical {
+            message: first.message.clone(),
+            line: at.line,
+            col: at.col,
+        });
+    }
     let mut f = Formatter {
         src,
         out: String::with_capacity(src.len() + src.len() / 8),
@@ -53,12 +103,61 @@ pub fn format(src: &str) -> String {
         prev_end: 0,
     };
     f.run(&tokens);
-    f.out
+    if !faithful(src, &tokens, &f.out) {
+        return Err(FormatError::Unfaithful);
+    }
+    Ok(f.out)
 }
 
-/// Whether formatting would change the file.
-pub fn is_formatted(src: &str) -> bool {
-    format(src) == src
+/// Whether formatting would change the file. A file that cannot be formatted
+/// answers with the reason instead.
+pub fn is_formatted(src: &str) -> Result<bool, FormatError> {
+    format(src).map(|out| out == src)
+}
+
+/// Whether `out` says what `src` says.
+///
+/// The formatter moves whitespace and nothing else, so two things have to
+/// hold, and both are checked because either alone lets a real mistake
+/// through:
+///
+/// * **With the whitespace taken out, the two texts are identical.** This is
+///   what catches a deletion — a comment dropped, a token skipped.
+/// * **The output lexes to the same tokens.** Whitespace is what separates
+///   tokens, so taking it out cannot see two of them glued into a third:
+///   `- ==` written as `-==`, or `t.0 .1` as `t.0.1`, which reads as a float.
+///   Line breaks count, since they end statements.
+///
+/// Any difference is a formatter bug. Refusing costs a file that stays as it
+/// was; not refusing costs a file that no longer means what its author wrote.
+fn faithful(src: &str, tokens: &[Token], out: &str) -> bool {
+    let squeeze = |s: &str| -> String { s.chars().filter(|c| !c.is_whitespace()).collect() };
+    if squeeze(src) != squeeze(out) {
+        return false;
+    }
+    let mut diags = DiagBag::new();
+    let again = kite_lexer::tokenize(FileId(0), out, &mut diags);
+    if diags.has_errors() {
+        return false;
+    }
+    // The one line break the formatter adds on purpose is the file's last,
+    // and a newline before the end of input separates nothing.
+    let meaningful = |tokens: &[Token]| -> Vec<Token> {
+        let mut kept: Vec<Token> = tokens.to_vec();
+        if let [.., newline, eof] = kept.as_slice() {
+            if newline.kind == T::Newline && eof.kind == T::Eof {
+                kept.remove(kept.len() - 2);
+            }
+        }
+        kept
+    };
+    let (before, after) = (meaningful(tokens), meaningful(&again));
+    before.len() == after.len()
+        && before.iter().zip(&after).all(|(a, b)| {
+            a.kind == b.kind
+                && src[a.span.start as usize..a.span.end as usize]
+                    == out[b.span.start as usize..b.span.end as usize]
+        })
 }
 
 struct Formatter<'a> {

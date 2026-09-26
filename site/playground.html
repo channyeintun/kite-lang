@@ -290,8 +290,15 @@ document.getElementById("check").onclick = () => {
   show(text === "" ? "ok" : text);
 };
 document.getElementById("format").onclick = () => {
-  load(playground.format(source.value));
-  show("formatted");
+  const before = source.value;
+  const after = playground.format(before);
+  load(after);
+  // A program the lexer cannot read comes back exactly as it went in, rather
+  // than laid out from the tokens that survived; Check says what is wrong.
+  if (after !== before) show("formatted");
+  else if (/error\[E000\d\]/.test(playground.check(before))) {
+    show("not formatted: fix the errors Check reports first");
+  } else show("already formatted");
 };
 document.getElementById("stage").onchange = (e) => {
   if (!e.target.value) return;

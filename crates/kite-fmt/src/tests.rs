@@ -1,13 +1,21 @@
 use super::*;
 
+/// Format a file the test expects to be formattable.
+fn fmt(src: &str) -> String {
+    match format(src) {
+        Ok(out) => out,
+        Err(e) => panic!("{}\n--- in ---\n{}", e, src),
+    }
+}
+
 fn same(src: &str) {
-    assert_eq!(format(src), src, "formatting changed an already-formatted file");
+    assert_eq!(fmt(src), src, "formatting changed an already-formatted file");
 }
 
 /// The property that matters most: formatting twice is formatting once.
 fn idempotent(src: &str) -> String {
-    let once = format(src);
-    let twice = format(&once);
+    let once = fmt(src);
+    let twice = fmt(&once);
     assert_eq!(once, twice, "formatting is not idempotent:\n{}", once);
     once
 }
@@ -45,7 +53,7 @@ fn nesting_compounds() {
 
 #[test]
 fn binary_operators_are_spaced_and_prefixes_are_not() {
-    let out = format("fn f() {\nlet x = 1+2*3\nlet y = -x\nlet z = !ok\n}\n");
+    let out = fmt("fn f() {\nlet x = 1+2*3\nlet y = -x\nlet z = !ok\n}\n");
     assert!(out.contains("let x = 1 + 2 * 3"), "{}", out);
     assert!(out.contains("let y = -x"), "{}", out);
     assert!(out.contains("let z = !ok"), "{}", out);
@@ -53,7 +61,7 @@ fn binary_operators_are_spaced_and_prefixes_are_not() {
 
 #[test]
 fn a_call_hugs_its_arguments() {
-    let out = format("fn f() {\nio.print( a , b )\n}\n");
+    let out = fmt("fn f() {\nio.print( a , b )\n}\n");
     assert!(out.contains("io.print(a, b)"), "{}", out);
 }
 
@@ -65,14 +73,14 @@ fn a_field_type_is_written_tight() {
 
 #[test]
 fn type_arguments_keep_no_spaces() {
-    let out = format("fn f(x: Option<int>) -> Option<str> {\n}\n");
+    let out = fmt("fn f(x: Option<int>) -> Option<str> {\n}\n");
     assert!(out.contains("Option<int>"), "{}", out);
     assert!(out.contains("-> Option<str>"), "{}", out);
 }
 
 #[test]
 fn a_comparison_keeps_its_spaces() {
-    let out = format("fn f() {\nif a < b {\nio.print(1)\n}\n}\n");
+    let out = fmt("fn f() {\nif a < b {\nio.print(1)\n}\n}\n");
     assert!(out.contains("if a < b {"), "{}", out);
 }
 
@@ -81,10 +89,10 @@ fn a_comparison_keeps_its_spaces() {
 #[test]
 fn a_comparison_before_a_block_is_not_a_struct_literal() {
     for op in ["<=", ">=", "==", "!="] {
-        let out = format(&format!("fn f() {{\nif a {} b {{\nio.print(1)\n}}\n}}\n", op));
+        let out = fmt(&format!("fn f() {{\nif a {} b {{\nio.print(1)\n}}\n}}\n", op));
         assert!(out.contains(&format!("if a {} b {{", op)), "{}", out);
     }
-    let literal = format("fn f() {\nlet p = Point{ x: 1 }\n}\n");
+    let literal = fmt("fn f() {\nlet p = Point{ x: 1 }\n}\n");
     assert!(literal.contains("Point{ x: 1 }"), "{}", literal);
 }
 
@@ -99,7 +107,7 @@ fn a_comparison_before_a_block_is_not_a_struct_literal() {
 #[test]
 fn arithmetic_before_a_block_is_not_a_struct_literal() {
     for op in ["+", "-", "*", "/"] {
-        let out = format(&format!(
+        let out = fmt(&format!(
             "fn f(a: float, b: float) {{\nif a < 0.5 {} b{{\nio.print(1)\n}}\n}}\n",
             op
         ));
@@ -109,7 +117,7 @@ fn arithmetic_before_a_block_is_not_a_struct_literal() {
     // any of the positions one really does appear in still hugs its brace.
     for head in ["let p = ", "return ", "check ", "f(", "[", "x: "] {
         let src = format!("fn f() {{\n{}Point{{ x: 1 }}\n}}\n", head);
-        assert!(format(&src).contains("Point{ x: 1 }"), "{}", src);
+        assert!(fmt(&src).contains("Point{ x: 1 }"), "{}", src);
     }
 }
 
@@ -161,22 +169,22 @@ fn a_closures_return_type_stays_tight() {
 
 #[test]
 fn a_closure_keeps_its_pipes_tight() {
-    let out = format("fn f() {\nlet double = map(xs, |x: int| x * 2)\n}\n");
+    let out = fmt("fn f() {\nlet double = map(xs, |x: int| x * 2)\n}\n");
     assert!(out.contains("|x: int| x * 2"), "{}", out);
 }
 
 #[test]
 fn a_file_ends_with_exactly_one_newline() {
-    assert!(format("fn main() {\n}\n\n\n").ends_with("}\n"));
-    assert!(!format("fn main() {\n}").ends_with("}\n\n"));
-    assert_eq!(format(""), "");
+    assert!(fmt("fn main() {\n}\n\n\n").ends_with("}\n"));
+    assert!(!fmt("fn main() {\n}").ends_with("}\n\n"));
+    assert_eq!(fmt(""), "");
 }
 
 /// A file that does not parse still formats: tokens are all this needs, which
 /// is exactly when someone reaches for a formatter.
 #[test]
 fn a_broken_file_still_formats() {
-    let out = format("fn main() {\nlet x =\n}\n");
+    let out = fmt("fn main() {\nlet x =\n}\n");
     assert!(out.contains("let x ="), "{}", out);
 }
 
@@ -189,8 +197,8 @@ fn already_formatted_files_are_left_alone() {
 
 #[test]
 fn is_formatted_agrees_with_format() {
-    assert!(is_formatted("fn main() {\n    io.print(1)\n}\n"));
-    assert!(!is_formatted("fn main() {\nio.print(1)\n}\n"));
+    assert_eq!(is_formatted("fn main() {\n    io.print(1)\n}\n"), Ok(true));
+    assert_eq!(is_formatted("fn main() {\nio.print(1)\n}\n"), Ok(false));
 }
 
 /// Every Kite file in the tree formats to something that still compiles, and
@@ -210,7 +218,7 @@ fn a_type_alias_is_a_type_on_both_sides() {
     assert_eq!(out, "type Nested = Box<Box<int>>\n");
     // And it repairs a file the old formatter already spaced out.
     assert_eq!(
-        format("pub type Doc = Option < json.Json >\n"),
+        fmt("pub type Doc = Option < json.Json >\n"),
         "pub type Doc = Option<json.Json>\n"
     );
 }
@@ -229,7 +237,7 @@ fn a_comparison_in_a_field_value_is_not_a_type_argument() {
     same("let m: Option<int> = nil\n");
     same("fn f(a: Map<str, int>) -> Option<Box<int>> {\n}\n");
     assert_eq!(
-        format("let t = Stat{ tone: if low> 0 { \"w\" } else { \"\" } }\n"),
+        fmt("let t = Stat{ tone: if low> 0 { \"w\" } else { \"\" } }\n"),
         "let t = Stat{ tone: if low > 0 { \"w\" } else { \"\" } }\n"
     );
 }
@@ -250,8 +258,58 @@ fn the_whole_tree_survives_formatting() {
     assert!(files.len() > 15, "only {} files found", files.len());
     for path in files {
         let src = std::fs::read_to_string(&path).expect("read");
-        let once = format(&src);
-        let twice = format(&once);
+        let once = fmt(&src);
+        let twice = fmt(&once);
         assert_eq!(once, twice, "formatting {} is not idempotent", path.display());
     }
+}
+
+/// A file the lexer cannot read is refused, not laid out from the tokens that
+/// survived. Each of these used to come back shorter than it went in, with
+/// `kitec fmt` reporting success.
+#[test]
+fn a_file_with_lexical_errors_is_refused() {
+    // An unterminated `/*` swallowed the rest of the file.
+    let err = format("fn main() {\n    let x = 1 /* not a comment\n    io.print(x)\n}\n")
+        .expect_err("a `/*` must be refused");
+    assert!(
+        matches!(&err, FormatError::Lexical { line: 2, col: 15, message } if message.contains("block comments")),
+        "{:?}",
+        err
+    );
+    assert!(err.to_string().contains("cannot format a file with lexical errors"), "{}", err);
+    // Characters that begin no token vanished from between the ones that did:
+    // `a ?? b` became `a b`, and two statements on one line ran together.
+    for src in [
+        "fn main() {\n    let x = a ?? b\n}\n",
+        "fn main() {\n    let x = 1; let y = 2\n}\n",
+        "fn main() {\n    let s = $x\n}\n",
+        "fn main() {\n    let s = #x\n}\n",
+        "fn main() {\n    let s = `x`\n}\n",
+        "fn main() {\n    let s = a\u{2026}b\n}\n",
+        "fn main() {\n    let s = \"never closed\n}\n",
+    ] {
+        match format(src) {
+            Err(FormatError::Lexical { line: 2, .. }) => {}
+            other => panic!("expected a refusal at line 2 for {:?}, got {:?}", src, other),
+        }
+        assert!(is_formatted(src).is_err(), "{:?}", src);
+    }
+}
+
+/// The last line of defence: an output that does not say what the input said
+/// is thrown away. Whitespace carries meaning in exactly one way — it keeps
+/// tokens apart — so gluing two together is as much a change as deleting one.
+#[test]
+fn an_output_that_changes_the_tokens_is_refused() {
+    let lex = |src: &str| kite_lexer::tokenize(FileId(0), src, &mut DiagBag::new());
+    let src = "let x = a - == b\n";
+    assert!(faithful(src, &lex(src), "let x = a - == b\n"));
+    // `-` and `==` glued into `-=` and `=`.
+    assert!(!faithful(src, &lex(src), "let x = a -== b\n"));
+    // A deleted token.
+    assert!(!faithful(src, &lex(src), "let x = a == b\n"));
+    // A line break removed, which joins two statements.
+    let src = "let a = 1\nlet b = 2\n";
+    assert!(!faithful(src, &lex(src), "let a = 1 let b = 2\n"));
 }

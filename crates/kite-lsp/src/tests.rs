@@ -189,6 +189,19 @@ fn formatting_an_already_formatted_file_changes_nothing() {
     assert_eq!(reply.result, Some(Json::Array(Vec::new())));
 }
 
+/// Formatting a document the lexer cannot read used to lay out whatever
+/// tokens survived — `a ?? b` came back as `a b`, and an unterminated `/*`
+/// took the rest of the file with it. A format-on-save editor applied that.
+#[test]
+fn formatting_a_document_with_lexical_errors_changes_nothing() {
+    let mut s = Server::new();
+    for text in ["fn main() {\nlet x = a ?? b\n}\n", "fn main() {\nlet x = 1 /* oops\nio.print(x)\n}\n"] {
+        open(&mut s, "file:///t.kite", text);
+        let reply = s.handle("textDocument/formatting", &at("file:///t.kite", 0, 0));
+        assert_eq!(reply.result, Some(Json::Array(Vec::new())), "{:?}", text);
+    }
+}
+
 #[test]
 fn a_change_republishes_diagnostics() {
     let mut s = Server::new();
