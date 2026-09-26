@@ -49,6 +49,7 @@ mod eq;
 mod glue;
 pub mod sourcemap;
 mod serve;
+mod slices;
 mod strings;
 mod support;
 pub use glue::{generate_api, generate_glue, generate_glue_with_hosts, generate_page};
@@ -523,8 +524,12 @@ struct TypeLayout {
     /// nullable reference to a one-field record, so `nil` is a null reference
     /// and the payload keeps its own type rather than being erased.
     option_box: std::collections::HashMap<TyId, u32>,
-    /// One array type per distinct slice element type.
+    /// One array type per distinct slice element type: a slice's storage.
     slice_array: std::collections::HashMap<TyId, u32>,
+    /// One header record per distinct slice element type, which is what a
+    /// slice value *is*: the storage and how much of it is in use. See
+    /// the `slices` module for why the two are separate.
+    slice_record: std::collections::HashMap<TyId, u32>,
     /// The error record: message, carried value, that value's type tag, and
     /// the error it wrapped. `nil` is a null reference, which is what makes
     /// `return value, nil` read the way it does.
@@ -567,6 +572,9 @@ struct TypeLayout {
     /// Per lifted function reached by a `ClosureNew`: the record holding its
     /// captures, and how many of its leading parameters they are.
     env_record: std::collections::HashMap<u32, (u32, usize)>,
+    /// The cell structural equality keeps a pending comparison in, when the
+    /// module compares aggregates at all. See `eq`.
+    eq_cell: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -618,8 +626,14 @@ impl TypeLayout {
         self.option_box.get(&payload).copied()
     }
 
+    /// The storage array for a slice of `elem`.
     fn slice_type(&self, elem: TyId) -> Option<u32> {
         self.slice_array.get(&elem).copied()
+    }
+
+    /// The header record a slice of `elem` is: `{buf, len}`.
+    fn slice_header(&self, elem: TyId) -> Option<u32> {
+        self.slice_record.get(&elem).copied()
     }
 
     fn pair_type(&self, value: TyId) -> Option<u32> {
@@ -850,11 +864,13 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
         enum_base,
         option_box: std::collections::HashMap::new(),
         slice_array: std::collections::HashMap::new(),
+        slice_record: std::collections::HashMap::new(),
         error_record: 0,
         str_array: 0,
         pair_record: std::collections::HashMap::new(),
         tuple_record: std::collections::HashMap::new(),
         map_record: std::collections::HashMap::new(),
+        eq_cell: 0,
     };
     let payloads = option_payloads(program, types);
     for p in &payloads {
@@ -864,7 +880,8 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
     let elements = slice_elements(program, types);
     for e in &elements {
         layout.slice_array.insert(*e, next);
-        next += 1;
+        layout.slice_record.insert(*e, next + 1);
+        next += 2;
     }
     layout.error_record = next;
     next += 1;
@@ -904,6 +921,13 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
     }
     for (func, count) in &envs {
         layout.env_record.insert(*func, (next, *count));
+        next += 1;
+    }
+    // Structural equality: one comparison for every aggregate type the
+    // program compares or keys a map by, and the cell it queues work in.
+    let eq_fns = eq::collect(program, types);
+    if !eq_fns.is_empty() {
+        layout.eq_cell = next;
         next += 1;
     }
     let aggregate_count = next - IMPORT_COUNT;
@@ -1003,8 +1027,11 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
             ));
         }
 
-        // One array per distinct element type. Kite slices are copy-on-write
-        // values, so the array is mutable and a mutation copies first.
+        // Per distinct element type, the storage array and the header a
+        // slice value is. The array is longer than the slice once `push` has
+        // grown it, which is why the length is a field of its own; both
+        // fields are mutable because a slice nothing else can see is changed
+        // in place. See the `slices` module for when that is.
         for e in &elements {
             group.push(SubType {
                 is_final: true,
@@ -1019,6 +1046,24 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
                     describes: None,
                 },
             });
+            let buf = layout.slice_array[e];
+            group.push(struct_subtype(
+                vec![
+                    FieldType {
+                        element_type: StorageType::Val(ValType::Ref(RefType {
+                            nullable: false,
+                            heap_type: HeapType::Concrete(buf),
+                        })),
+                        mutable: true,
+                    },
+                    FieldType {
+                        element_type: StorageType::Val(ValType::I32),
+                        mutable: true,
+                    },
+                ],
+                None,
+                true,
+            ));
         }
 
         // What an error carries: what it says, the value it was rendered
@@ -1192,6 +1237,10 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
             group.push(struct_subtype(fields, None, true));
         }
 
+        if !eq_fns.is_empty() {
+            group.push(eq::cell_subtype(layout.eq_cell));
+        }
+
         type_section.ty().rec(group);
     }
 
@@ -1205,7 +1254,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
     // indices it uses, so it has to be settled before any of them is handed
     // out. `eq::collect` is consulted because a generated deep-equality
     // function is one of the things that can reach `strings::eq`.
-    let string_needed = strings::needed(program, types, !eq::collect(program, types).is_empty());
+    let string_needed = strings::needed(program, types, !eq_fns.is_empty());
     let runtime_count = string_needed.count();
     let runtime_type_index =
         strings::add_types(&mut type_section, runtime_type_base, &layout, string_needed);
@@ -1237,23 +1286,22 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
     }
     // Which host functions the module declares decides where its own functions
     // start, so this has to be settled before any index is handed out.
-    let eq_fns = eq::collect(program, types);
     let hosts = used_imports(program, types);
     let string_runtime = strings::StringRuntime::new(hosts.base, string_needed);
     let fn_base = hosts.base + runtime_count;
     let dispatch_base = fn_base + program.fns.len() as u32;
 
-    // Structural equality: one generated function per aggregate type a program
-    // actually compares. They may call each other, so all are declared before
-    // any is emitted.
+    // Structural equality: one generated function comparing every aggregate
+    // type a program compares, when it compares any.
     let eq_base = dispatch_base + dispatchers.len() as u32;
+    let eq_count = u32::from(!eq_fns.is_empty());
 
     // One thunk per lifted function: it takes the environment as an `anyref`,
     // casts it back to that function's own record, and calls the lifted
     // function with the captures unpacked ahead of the arguments. This is what
     // lets every closure of one Kite type share a single call signature while
     // capturing different things.
-    let thunk_base = eq_base + eq_fns.len() as u32;
+    let thunk_base = eq_base + eq_count;
     let thunk_fns: Vec<u32> = envs.iter().map(|(f, _)| *f).collect();
 
     let mut fn_type_index = Vec::with_capacity(program.fns.len());
@@ -1267,7 +1315,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
         fn_type_index.push(fn_type_base + i as u32);
         type_section.ty().function(params, results);
     }
-    let mut extra_type_index = Vec::with_capacity(dispatchers.len() + eq_fns.len());
+    let mut extra_type_index = Vec::with_capacity(dispatchers.len() + 1);
     let mut next_fn_type = fn_type_base + program.fns.len() as u32;
     for d in &dispatchers {
         extra_type_index.push(next_fn_type);
@@ -1279,10 +1327,10 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
             .ty()
             .function(d.params.iter().copied(), results);
     }
-    for e in &eq_fns {
+    if eq_count == 1 {
         extra_type_index.push(next_fn_type);
         next_fn_type += 1;
-        let (params, results) = eq::signature(e.ty, types, &layout);
+        let (params, results) = eq::signature();
         type_section.ty().function(params, results);
     }
     // A thunk is declared with the shared signature of the type it serves,
@@ -1312,9 +1360,21 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
     let trampoline_index = fn_base
         + program.fns.len() as u32
         + dispatchers.len() as u32
-        + eq_fns.len() as u32
+        + eq_count
         + envs.len() as u32;
     let invoke_index = trampoline_index + if poll_trampoline { 1 } else { 0 };
+    // The slice helpers come last: one per element type and operation the
+    // program uses. See `slices`.
+    let slice_helpers = slices::SliceHelpers::collect(
+        program,
+        types,
+        invoke_index
+            + if invoke_trampoline {
+                invoke_shapes.len() as u32
+            } else {
+                0
+            },
+    );
     if poll_trampoline {
         extra_type_index.push(next_fn_type);
         next_fn_type += 1;
@@ -1336,6 +1396,9 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
                 .function(params, vec![EXTERN_REF_NULL]);
         }
     }
+    let helper_types = slice_helpers.add_types(&mut type_section, next_fn_type, types, &layout);
+    next_fn_type += helper_types.len() as u32;
+    extra_type_index.extend(helper_types);
     // Function types for the program's own host declarations, at the end of
     // the section: an import may name any type index, and appending here
     // shifts nothing that already exists.
@@ -1500,13 +1563,14 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
             &hosts,
             string_runtime,
             &invoke_shapes,
+            &slice_helpers,
         ));
     }
     for d in &dispatchers {
         code.function(&compile_dispatcher(d, &layout, fn_base));
     }
-    for e in &eq_fns {
-        code.function(&eq_builder.build(e.ty));
+    if eq_count == 1 {
+        code.function(&eq_builder.build());
     }
     for (func, count) in &envs {
         code.function(&compile_thunk(
@@ -1527,6 +1591,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
             ));
         }
     }
+    slice_helpers.emit(&mut code, &layout);
     // Where the first body lands in the module. A section is `id` (one byte),
     // then its payload length as a LEB128; the code section's payload then
     // opens with the function *count*, also a LEB128, and only then the
@@ -1758,7 +1823,7 @@ fn val_type_with(ty: TyId, types: &Types, layout: &TypeLayout) -> ValType {
             }),
             None => ValType::I32,
         },
-        TyKind::Slice(elem) => match layout.slice_type(*elem) {
+        TyKind::Slice(elem) => match layout.slice_header(*elem) {
             Some(idx) => ValType::Ref(RefType {
                 nullable: true,
                 heap_type: HeapType::Concrete(idx),
@@ -2068,6 +2133,7 @@ fn compile_fn(
     hosts: &Hosts,
     strings: strings::StringRuntime,
     invoke_shapes: &[TyId],
+    slice_helpers: &slices::SliceHelpers,
 ) -> Function {
     // Locals beyond the parameters, plus one synthetic program counter.
     let mut locals: Vec<(u32, ValType)> = Vec::new();
@@ -2091,28 +2157,69 @@ fn compile_fn(
     push_local(&mut locals, ValType::I32);
     let index_scratch = scratch + 1;
 
+    // Two more i32 registers: the second holds a new length or a scan's
+    // cursor, the third a count. All four are adjacent i32s, which the local
+    // declarations run-length encode, so the extra registers cost a function
+    // no bytes.
+    push_local(&mut locals, ValType::I32);
+    push_local(&mut locals, ValType::I32);
+    let mut next_local = index_scratch + 3;
+
+    // One "owned" flag per slice local the function writes into or pushes
+    // onto: whether the header in that local, and the buffer it points at,
+    // are reachable from nowhere else — so a write may go straight into them.
+    // See `Emitter::release`, which is what keeps the flag honest.
+    let mut owned: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    for b in &f.blocks {
+        for s in &b.stmts {
+            let target = match s {
+                mir::Inst::SlicePush { local, .. } => Some(local.0),
+                mir::Inst::SetIndex {
+                    base: mir::Operand::Local(l),
+                    ..
+                } => Some(l.0),
+                _ => None,
+            };
+            if let Some(l) = target {
+                if let std::collections::hash_map::Entry::Vacant(e) = owned.entry(l) {
+                    push_local(&mut locals, ValType::I32);
+                    e.insert(next_local);
+                    next_local += 1;
+                }
+            }
+        }
+    }
+
     // Two array registers per distinct map shape, so a map write can hold the
     // arrays it is building while `array.copy` consumes its operands.
-    push_local(&mut locals, ValType::I32);
     let mut map_scratch: std::collections::HashMap<TyId, (u32, u32)> =
         std::collections::HashMap::new();
-    let mut next_local = index_scratch + 2;
 
+    // One storage register per distinct slice element type in the function,
+    // so a copy has somewhere to hold the new array while `array.copy`
+    // consumes its operands. One per shape: a function handling `[int]` and
+    // `[str]` needs one of each.
     let mut slice_scratch: std::collections::HashMap<TyId, u32> = std::collections::HashMap::new();
     let mut slice_shapes: Vec<TyId> = Vec::new();
     for l in &f.locals {
-        if matches!(types.kind(l.ty), TyKind::Slice(_)) && !slice_shapes.contains(&l.ty) {
-            slice_shapes.push(l.ty);
+        if let TyKind::Slice(elem) = *types.kind(l.ty) {
+            if !slice_shapes.contains(&elem) {
+                slice_shapes.push(elem);
+            }
         }
     }
-    for shape in &slice_shapes {
-        push_local(&mut locals, val_type_with(*shape, types, layout));
-        let TyKind::Slice(elem) = *types.kind(*shape) else {
+    for elem in &slice_shapes {
+        let Some(idx) = layout.slice_type(*elem) else {
             continue;
         };
-        if let Some(idx) = layout.slice_type(elem) {
-            slice_scratch.insert(TyId(idx), next_local);
-        }
+        push_local(
+            &mut locals,
+            ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(idx),
+            }),
+        );
+        slice_scratch.insert(TyId(idx), next_local);
         next_local += 1;
     }
 
@@ -2190,6 +2297,25 @@ fn compile_fn(
         next_local += 2;
         (base, base + 1)
     });
+
+    // An i64 register for `.get()`'s index, checked against a slice's
+    // length before it is narrowed to the i32 an array takes.
+    let indexes = f.blocks.iter().any(|b| {
+        b.stmts.iter().any(|i| {
+            matches!(
+                i,
+                mir::Inst::Assign {
+                    value: mir::Rvalue::SliceGet { .. },
+                    ..
+                }
+            )
+        })
+    });
+    let index_wide = indexes.then(|| {
+        push_local(&mut locals, ValType::I64);
+        next_local += 1;
+        next_local - 1
+    });
     let _ = next_local;
 
     let mut func = Function::new(locals);
@@ -2235,6 +2361,9 @@ fn compile_fn(
             index_scratch,
             map_scratch: &map_scratch,
             slice_scratch: &slice_scratch,
+            owned: &owned,
+            slice_helpers,
+            index_wide,
             arith_scratch,
             range_scratch,
             invoke_shapes,
@@ -2281,10 +2410,10 @@ struct Emitter<'a> {
     /// construction takes its element type from there.
     current_dst: Option<u32>,
     pc: u32,
-    /// A local of array type, used to hold a copy while `array.copy` consumes
-    /// its operands.
+    /// An i32 register: a map literal's count of distinct keys.
     scratch: u32,
-    /// An i32 local for an index that has to be read twice.
+    /// An i32 local for an index that has to be read twice. The one after it
+    /// is a second (see [`Self::index_scratch2`]).
     index_scratch: u32,
     /// Per map shape, the two array registers a write builds into.
     map_scratch: &'a std::collections::HashMap<TyId, (u32, u32)>,
@@ -2292,6 +2421,14 @@ struct Emitter<'a> {
     /// Wasm type space rather than by Kite type — two Kite slices with the same
     /// element share an array type and may share the register.
     slice_scratch: &'a std::collections::HashMap<TyId, u32>,
+    /// Per slice local the function mutates, the i32 local saying whether its
+    /// header and buffer are this local's alone.
+    owned: &'a std::collections::HashMap<u32, u32>,
+    /// The functions `xs[i]`, `xs[i] = v` and `xs.push(v)` call.
+    slice_helpers: &'a slices::SliceHelpers,
+    /// An i64 register holding an index while `.get()` checks it, when the
+    /// function has one.
+    index_wide: Option<u32>,
     /// Three i64 registers for the debug-build overflow checks, when the
     /// function has arithmetic that needs them.
     arith_scratch: Option<(u32, u32, u32)>,
@@ -2322,6 +2459,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn stmt(&mut self, func: &mut Function, stmt: &mir::Inst) {
+        self.release(func, stmt);
         match stmt {
             mir::Inst::Assign { dst, value } => {
                 self.current_dst = Some(dst.0);
@@ -2330,6 +2468,19 @@ impl<'a> Emitter<'a> {
                 // the stack, so there is nothing to store.
                 if self.rvalue(func, value) {
                     func.instruction(&Instruction::LocalSet(dst.0));
+                }
+                // A slice made here is the destination's alone; one read from
+                // anywhere else may be shared with where it came from.
+                if let Some(&flag) = self.owned.get(&dst.0) {
+                    let fresh = matches!(
+                        value,
+                        mir::Rvalue::SliceNew { .. }
+                            | mir::Rvalue::SliceRange { .. }
+                            | mir::Rvalue::MapKeys { .. }
+                            | mir::Rvalue::MapValues { .. }
+                    );
+                    func.instruction(&Instruction::I32Const(i32::from(fresh)));
+                    func.instruction(&Instruction::LocalSet(flag));
                 }
             }
             // Aggregates are not lowered yet. The driver refuses these programs
@@ -2369,47 +2520,158 @@ impl<'a> Emitter<'a> {
                 self.map_drop(func, ml, &base, key, local.0, kreg, vreg);
             }
 
-            // Slices are copy-on-write *values*, so a mutation copies the
-            // array first and rebinds the local. The bytecode VM does the same
-            // thing lazily through `Rc::make_mut`; here it is unconditional,
-            // which is correct but not yet cheap.
+            // Slices are copy-on-write *values*: a write copies first unless
+            // the local's owned flag says nothing else can see the storage.
+            // The bytecode VM decides the same thing with a reference count
+            // through `Rc::make_mut`; see `release` for how it is decided
+            // here without one.
             mir::Inst::SetIndex { base, index, value } => {
-                let Some((idx, _)) = self.slice_of(base) else {
-                    func.instruction(&Instruction::Unreachable);
-                    return;
-                };
                 let Some(local) = self.local_of(base) else {
                     func.instruction(&Instruction::Unreachable);
                     return;
                 };
-                self.copy_array(func, idx, base, 0);
-                func.instruction(&Instruction::LocalSet(local));
-
-                func.instruction(&Instruction::LocalGet(local));
-                self.index_operand(func, index);
-                self.operand(func, value);
-                func.instruction(&Instruction::ArraySet(idx));
+                self.slice_write(func, local, slices::SliceOp::Set, &[index, value]);
             }
 
             mir::Inst::SlicePush { local, value } => {
-                let base = mir::Operand::Local(*local);
-                let Some((idx, _)) = self.slice_of(&base) else {
-                    func.instruction(&Instruction::Unreachable);
-                    return;
-                };
-                // One longer, contents copied, new element last.
-                self.copy_array(func, idx, &base, 1);
-                func.instruction(&Instruction::LocalSet(local.0));
-
-                func.instruction(&Instruction::LocalGet(local.0));
-                func.instruction(&Instruction::LocalGet(local.0));
-                func.instruction(&Instruction::ArrayLen);
-                func.instruction(&Instruction::I32Const(1));
-                func.instruction(&Instruction::I32Sub);
-                self.operand(func, value);
-                func.instruction(&Instruction::ArraySet(idx));
+                self.slice_write(func, local.0, slices::SliceOp::Push, &[value]);
             }
         }
+    }
+
+    /// Clear the owned flag of every mutated slice local this instruction
+    /// reads in a way that can keep the reference.
+    ///
+    /// This is the whole of the rule that lets a write skip the copy. A
+    /// slice's header and buffer start owned when this function made them —
+    /// a literal, a range, a copy of its own — and stop being owned the moment
+    /// the reference goes anywhere else: into another local, a call, a field,
+    /// a closure, a map, a box. What cannot keep it is a read of its length or
+    /// of an element, a comparison, or a range (which copies). A parameter, or
+    /// anything read out of somewhere else, starts unowned, so the first write
+    /// copies and the ones after it do not.
+    ///
+    /// The flag is a run-time local rather than a static fact because a loop
+    /// is exactly where the difference matters: the first `push` of a slice a
+    /// caller handed in copies, and the next hundred thousand go straight in.
+    fn release(&mut self, func: &mut Function, stmt: &mir::Inst) {
+        if self.owned.is_empty() {
+            return;
+        }
+        for o in slices::escaping_operands(stmt) {
+            if let mir::Operand::Local(l) = o {
+                if let Some(&flag) = self.owned.get(&l.0) {
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::LocalSet(flag));
+                }
+            }
+        }
+    }
+
+    /// `xs.push(v)` or `xs[i] = v`: a call to the element type's helper, which
+    /// writes in place when the local owns its slice and copies when it does
+    /// not, and answers the header the local keeps — which it then owns.
+    fn slice_write(
+        &mut self,
+        func: &mut Function,
+        local: u32,
+        op: slices::SliceOp,
+        args: &[&mir::Operand],
+    ) {
+        let base = mir::Operand::Local(mir::Local(local));
+        let (Some(parts), Some(&flag)) = (self.slice_of(&base), self.owned.get(&local)) else {
+            func.instruction(&Instruction::Unreachable);
+            return;
+        };
+        let Some(helper) = self.slice_helpers.index(parts.elem, op) else {
+            func.instruction(&Instruction::Unreachable);
+            return;
+        };
+        func.instruction(&Instruction::LocalGet(local));
+        func.instruction(&Instruction::LocalGet(flag));
+        for a in args {
+            self.operand(func, a);
+        }
+        func.instruction(&Instruction::Call(helper));
+        func.instruction(&Instruction::LocalSet(local));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::LocalSet(flag));
+    }
+
+    /// A slice's length, as the i32 the header holds.
+    fn slice_len(&mut self, func: &mut Function, base: &mir::Operand, parts: SliceParts) {
+        self.operand(func, base);
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: parts.header,
+            field_index: 1,
+        });
+    }
+
+    /// A slice's storage, which may be longer than the slice.
+    fn slice_buf(&mut self, func: &mut Function, base: &mir::Operand, parts: SliceParts) {
+        self.operand(func, base);
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: parts.header,
+            field_index: 0,
+        });
+    }
+
+    /// The register that holds a new array of this type while it is filled.
+    fn hold(&self, array: u32) -> Option<u32> {
+        self.slice_scratch.get(&TyId(array)).copied()
+    }
+
+    /// Push a fresh array of `array_type` holding `elems`.
+    ///
+    /// `array.new_fixed` takes its elements from the operand stack, and V8
+    /// refuses more than 10,000 of them when the module is *instantiated* —
+    /// after the validator has called it well-formed. So a long literal is
+    /// allocated at its full length and filled a chunk at a time, each chunk
+    /// a `new_fixed` copied into place: one extra copy of each element, and
+    /// no limit but memory.
+    fn fixed_array(
+        &mut self,
+        func: &mut Function,
+        array_type: u32,
+        elems: &[&mir::Operand],
+        hold: Option<u32>,
+    ) {
+        let hold = match hold {
+            Some(h) if elems.len() > STR_LITERAL_CHUNK => h,
+            _ => {
+                for e in elems {
+                    self.operand(func, e);
+                }
+                func.instruction(&Instruction::ArrayNewFixed {
+                    array_type_index: array_type,
+                    array_size: elems.len() as u32,
+                });
+                return;
+            }
+        };
+        func.instruction(&Instruction::I32Const(elems.len() as i32));
+        func.instruction(&Instruction::ArrayNewDefault(array_type));
+        func.instruction(&Instruction::LocalSet(hold));
+        for (i, chunk) in elems.chunks(STR_LITERAL_CHUNK).enumerate() {
+            func.instruction(&Instruction::LocalGet(hold));
+            func.instruction(&Instruction::I32Const((i * STR_LITERAL_CHUNK) as i32));
+            for e in chunk {
+                self.operand(func, e);
+            }
+            func.instruction(&Instruction::ArrayNewFixed {
+                array_type_index: array_type,
+                array_size: chunk.len() as u32,
+            });
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::I32Const(chunk.len() as i32));
+            func.instruction(&Instruction::ArrayCopy {
+                array_type_index_dst: array_type,
+                array_type_index_src: array_type,
+            });
+        }
+        // The register is nullable; the array in it, just allocated, is not.
+        func.instruction(&Instruction::LocalGet(hold));
+        func.instruction(&Instruction::RefAsNonNull);
     }
 
     /// Emit `value`, returning whether it left a result on the stack.
@@ -2449,10 +2711,12 @@ impl<'a> Emitter<'a> {
                     // Deep equality on an aggregate: a generated function per
                     // type, because Wasm has no instruction for it.
                     BinOp::EqValue | BinOp::NeValue => {
-                        match self.operand_ty(lhs).and_then(|t| self.eq.index_of(t)) {
-                            Some(i) => func.instruction(&Instruction::Call(i)),
-                            None => func.instruction(&Instruction::Unreachable),
-                        };
+                        match self.operand_ty(lhs) {
+                            Some(t) => self.eq.call(func, t),
+                            None => {
+                                func.instruction(&Instruction::Unreachable);
+                            }
+                        }
                         if matches!(op, BinOp::NeValue) {
                             func.instruction(&Instruction::I32Eqz);
                         }
@@ -2692,22 +2956,25 @@ impl<'a> Emitter<'a> {
                     func.instruction(&Instruction::Unreachable);
                     return true;
                 };
+                let Some(&(kreg, vreg)) = self
+                    .current_dst
+                    .and_then(|d| self.map_scratch.get(&self.f.locals[d as usize].ty))
+                else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
                 // Entries arrive flattened as key, value, key, value.
-                let pairs = entries.len() / 2;
-                for e in entries.iter().step_by(2) {
-                    self.operand(func, e);
+                let keys: Vec<&mir::Operand> = entries.iter().step_by(2).collect();
+                let values: Vec<&mir::Operand> = entries.iter().skip(1).step_by(2).collect();
+                self.fixed_array(func, ml.keys, &keys, Some(kreg));
+                func.instruction(&Instruction::LocalSet(kreg));
+                self.fixed_array(func, ml.values, &values, Some(vreg));
+                func.instruction(&Instruction::LocalSet(vreg));
+                if !distinct_constants(&keys, self.program) {
+                    self.map_dedup(func, ml, kreg, vreg, keys.len() as i32);
                 }
-                func.instruction(&Instruction::ArrayNewFixed {
-                    array_type_index: ml.keys,
-                    array_size: pairs as u32,
-                });
-                for e in entries.iter().skip(1).step_by(2) {
-                    self.operand(func, e);
-                }
-                func.instruction(&Instruction::ArrayNewFixed {
-                    array_type_index: ml.values,
-                    array_size: pairs as u32,
-                });
+                func.instruction(&Instruction::LocalGet(kreg));
+                func.instruction(&Instruction::LocalGet(vreg));
                 func.instruction(&Instruction::StructNew(ml.record));
                 return true;
             }
@@ -2749,7 +3016,13 @@ impl<'a> Emitter<'a> {
                 };
                 let elem = if keys { ml.key_ty } else { ml.value_ty };
                 let (src, field) = if keys { (ml.keys, 0) } else { (ml.values, 1) };
-                let Some(dst_ty) = self.layout.slice_type(elem) else {
+                let (Some(dst_ty), Some(header)) =
+                    (self.layout.slice_type(elem), self.layout.slice_header(elem))
+                else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                let Some(hold) = self.hold(dst_ty) else {
                     func.instruction(&Instruction::Unreachable);
                     return true;
                 };
@@ -2761,11 +3034,6 @@ impl<'a> Emitter<'a> {
                 });
                 func.instruction(&Instruction::ArrayLen);
                 func.instruction(&Instruction::ArrayNewDefault(dst_ty));
-                let hold = self
-                    .slice_scratch
-                    .get(&TyId(dst_ty))
-                    .copied()
-                    .unwrap_or(self.scratch);
                 func.instruction(&Instruction::LocalSet(hold));
                 // array.copy takes dest, dest_offset, src, src_offset, len.
                 func.instruction(&Instruction::LocalGet(hold));
@@ -2787,6 +3055,10 @@ impl<'a> Emitter<'a> {
                     array_type_index_src: src,
                 });
                 func.instruction(&Instruction::LocalGet(hold));
+                func.instruction(&Instruction::RefAsNonNull);
+                func.instruction(&Instruction::LocalGet(hold));
+                func.instruction(&Instruction::ArrayLen);
+                func.instruction(&Instruction::StructNew(header));
                 return true;
             }
 
@@ -2981,31 +3253,36 @@ impl<'a> Emitter<'a> {
             }
 
             mir::Rvalue::SliceNew { elems } => {
-                let Some(idx) = self.slice_array_for_result() else {
+                let Some(parts) = self.slice_for_result() else {
                     func.instruction(&Instruction::Unreachable);
                     return true;
                 };
-                for e in elems {
-                    self.operand(func, e);
-                }
-                func.instruction(&Instruction::ArrayNewFixed {
-                    array_type_index: idx,
-                    array_size: elems.len() as u32,
-                });
+                let elems: Vec<&mir::Operand> = elems.iter().collect();
+                let hold = self.hold(parts.array);
+                self.fixed_array(func, parts.array, &elems, hold);
+                func.instruction(&Instruction::I32Const(elems.len() as i32));
+                func.instruction(&Instruction::StructNew(parts.header));
                 return true;
             }
 
             // `array.get` traps when out of range, which is exactly Kite's
             // rule: an out-of-range index is a program bug, not a runtime
             // condition. `.get()` is the form for when it genuinely is one.
+            //
+            // The buffer may be longer than the slice, so the check is
+            // against the header's length rather than left to `array.get`,
+            // in the element type's `at` helper.
             mir::Rvalue::IndexGet { base, index } => {
-                let Some((idx, _)) = self.slice_of(base) else {
+                let Some(helper) = self
+                    .slice_of(base)
+                    .and_then(|p| self.slice_helpers.index(p.elem, slices::SliceOp::At))
+                else {
                     func.instruction(&Instruction::Unreachable);
                     return true;
                 };
                 self.operand(func, base);
-                self.index_operand(func, index);
-                func.instruction(&Instruction::ArrayGet(idx));
+                self.operand(func, index);
+                func.instruction(&Instruction::Call(helper));
                 return true;
             }
 
@@ -3013,28 +3290,28 @@ impl<'a> Emitter<'a> {
             // a runtime condition, so it bounds-checks and yields an optional
             // rather than trapping.
             mir::Rvalue::SliceGet { base, index } => {
-                let Some((idx, (result, wrap))) = self
-                    .slice_of(base)
-                    .and_then(|(idx, e)| Some((idx, self.optional_answer(e)?)))
-                else {
+                let (Some((parts, (result, wrap))), Some(wide)) = (
+                    self.slice_of(base)
+                        .and_then(|p| Some((p, self.optional_answer(p.elem)?))),
+                    self.index_wide,
+                ) else {
                     func.instruction(&Instruction::Unreachable);
                     return true;
                 };
 
-                self.index_operand(func, index);
-                func.instruction(&Instruction::LocalTee(self.index_scratch));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32GeS);
-                func.instruction(&Instruction::LocalGet(self.index_scratch));
-                self.operand(func, base);
-                func.instruction(&Instruction::ArrayLen);
-                func.instruction(&Instruction::I32LtU);
-                func.instruction(&Instruction::I32And);
+                // In range when the 64-bit index, read unsigned, is below the
+                // length: one comparison covers a negative index too.
+                self.operand(func, index);
+                func.instruction(&Instruction::LocalTee(wide));
+                self.slice_len(func, base, parts);
+                func.instruction(&Instruction::I64ExtendI32U);
+                func.instruction(&Instruction::I64LtU);
 
                 func.instruction(&Instruction::If(BlockType::Result(result)));
-                self.operand(func, base);
-                func.instruction(&Instruction::LocalGet(self.index_scratch));
-                func.instruction(&Instruction::ArrayGet(idx));
+                self.slice_buf(func, base, parts);
+                func.instruction(&Instruction::LocalGet(wide));
+                func.instruction(&Instruction::I32WrapI64);
+                func.instruction(&Instruction::ArrayGet(parts.array));
                 if let Some(box_idx) = wrap {
                     func.instruction(&Instruction::StructNew(box_idx));
                 }
@@ -3048,8 +3325,11 @@ impl<'a> Emitter<'a> {
             }
 
             mir::Rvalue::SliceLen { base } => {
-                self.operand(func, base);
-                func.instruction(&Instruction::ArrayLen);
+                let Some(parts) = self.slice_of(base) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                self.slice_len(func, base, parts);
                 func.instruction(&Instruction::I64ExtendI32U);
                 return true;
             }
@@ -3062,24 +3342,28 @@ impl<'a> Emitter<'a> {
             // where the whole tail was asked for. The bytecode VM defines the
             // answer; this reproduces it.
             mir::Rvalue::SliceRange { base, start, end } => {
-                let (Some((idx, _elem)), Some((lo, hi))) =
-                    (self.slice_of(base), self.range_scratch)
+                let (Some(parts), Some((lo, hi))) = (self.slice_of(base), self.range_scratch)
                 else {
                     func.instruction(&Instruction::Unreachable);
                     return true;
                 };
+                let Some(hold) = self.hold(parts.array) else {
+                    func.instruction(&Instruction::Unreachable);
+                    return true;
+                };
+                let idx = parts.array;
 
                 // lo = clamp(start, 0, len)
                 self.operand(func, start);
                 func.instruction(&Instruction::LocalSet(lo));
-                self.clamp_i64(func, lo, 0, base);
+                self.clamp_i64(func, lo, 0, base, parts);
 
                 // hi = clamp(end, lo, len). Clamping the low end at `lo`
                 // rather than at 0 is what makes a backwards range empty
                 // instead of a negative length the allocator would reject.
                 self.operand(func, end);
                 func.instruction(&Instruction::LocalSet(hi));
-                self.clamp_i64_local(func, hi, lo, base);
+                self.clamp_i64_local(func, hi, lo, base, parts);
 
                 // The destination, sized hi - lo.
                 func.instruction(&Instruction::LocalGet(hi));
@@ -3090,15 +3374,10 @@ impl<'a> Emitter<'a> {
 
                 // array.copy consumes its operands, so the destination is held
                 // in the register for this array shape while they are built.
-                let hold = self
-                    .slice_scratch
-                    .get(&TyId(idx))
-                    .copied()
-                    .unwrap_or(self.scratch);
                 func.instruction(&Instruction::LocalSet(hold));
                 func.instruction(&Instruction::LocalGet(hold));
                 func.instruction(&Instruction::I32Const(0));
-                self.operand(func, base);
+                self.slice_buf(func, base, parts);
                 func.instruction(&Instruction::LocalGet(lo));
                 func.instruction(&Instruction::I32WrapI64);
                 func.instruction(&Instruction::LocalGet(hi));
@@ -3110,6 +3389,12 @@ impl<'a> Emitter<'a> {
                     array_type_index_src: idx,
                 });
                 func.instruction(&Instruction::LocalGet(hold));
+                func.instruction(&Instruction::RefAsNonNull);
+                func.instruction(&Instruction::LocalGet(hi));
+                func.instruction(&Instruction::LocalGet(lo));
+                func.instruction(&Instruction::I64Sub);
+                func.instruction(&Instruction::I32WrapI64);
+                func.instruction(&Instruction::StructNew(parts.header));
                 return true;
             }
 
@@ -3591,7 +3876,14 @@ impl<'a> Emitter<'a> {
     }
 
     /// Clamp the i64 in `slot` to `low ..= base.len()`, in place.
-    fn clamp_i64(&mut self, func: &mut Function, slot: u32, low: i64, base: &mir::Operand) {
+    fn clamp_i64(
+        &mut self,
+        func: &mut Function,
+        slot: u32,
+        low: i64,
+        base: &mir::Operand,
+        parts: SliceParts,
+    ) {
         func.instruction(&Instruction::LocalGet(slot));
         func.instruction(&Instruction::I64Const(low));
         func.instruction(&Instruction::LocalGet(slot));
@@ -3599,11 +3891,18 @@ impl<'a> Emitter<'a> {
         func.instruction(&Instruction::I64GeS);
         func.instruction(&Instruction::Select);
         func.instruction(&Instruction::LocalSet(slot));
-        self.clamp_to_len(func, slot, base);
+        self.clamp_to_len(func, slot, base, parts);
     }
 
     /// The same, with the lower bound taken from another register.
-    fn clamp_i64_local(&mut self, func: &mut Function, slot: u32, low: u32, base: &mir::Operand) {
+    fn clamp_i64_local(
+        &mut self,
+        func: &mut Function,
+        slot: u32,
+        low: u32,
+        base: &mir::Operand,
+        parts: SliceParts,
+    ) {
         func.instruction(&Instruction::LocalGet(slot));
         func.instruction(&Instruction::LocalGet(low));
         func.instruction(&Instruction::LocalGet(slot));
@@ -3611,56 +3910,20 @@ impl<'a> Emitter<'a> {
         func.instruction(&Instruction::I64GeS);
         func.instruction(&Instruction::Select);
         func.instruction(&Instruction::LocalSet(slot));
-        self.clamp_to_len(func, slot, base);
+        self.clamp_to_len(func, slot, base, parts);
     }
 
     /// Cap the i64 in `slot` at `base`'s length.
-    fn clamp_to_len(&mut self, func: &mut Function, slot: u32, base: &mir::Operand) {
+    fn clamp_to_len(&mut self, func: &mut Function, slot: u32, base: &mir::Operand, parts: SliceParts) {
         func.instruction(&Instruction::LocalGet(slot));
-        self.operand(func, base);
-        func.instruction(&Instruction::ArrayLen);
+        self.slice_len(func, base, parts);
         func.instruction(&Instruction::I64ExtendI32U);
         func.instruction(&Instruction::LocalGet(slot));
-        self.operand(func, base);
-        func.instruction(&Instruction::ArrayLen);
+        self.slice_len(func, base, parts);
         func.instruction(&Instruction::I64ExtendI32U);
         func.instruction(&Instruction::I64LeS);
         func.instruction(&Instruction::Select);
         func.instruction(&Instruction::LocalSet(slot));
-    }
-
-    /// Leave a fresh array on the stack holding `base`'s contents, `extra`
-    /// elements longer.
-    fn copy_array(&mut self, func: &mut Function, idx: u32, base: &mir::Operand, extra: u32) {
-        // The destination, sized len + extra.
-        self.operand(func, base);
-        func.instruction(&Instruction::ArrayLen);
-        if extra > 0 {
-            func.instruction(&Instruction::I32Const(extra as i32));
-            func.instruction(&Instruction::I32Add);
-        }
-        func.instruction(&Instruction::ArrayNewDefault(idx));
-
-        // array.copy takes dest, dest_offset, src, src_offset, len — and the
-        // destination has to survive the call, so it is held in a register of
-        // its own array type rather than duplicated on the stack.
-        let hold = self
-            .slice_scratch
-            .get(&TyId(idx))
-            .copied()
-            .unwrap_or(self.scratch);
-        func.instruction(&Instruction::LocalSet(hold));
-        func.instruction(&Instruction::LocalGet(hold));
-        func.instruction(&Instruction::I32Const(0));
-        self.operand(func, base);
-        func.instruction(&Instruction::I32Const(0));
-        self.operand(func, base);
-        func.instruction(&Instruction::ArrayLen);
-        func.instruction(&Instruction::ArrayCopy {
-            array_type_index_dst: idx,
-            array_type_index_src: idx,
-        });
-        func.instruction(&Instruction::LocalGet(hold));
     }
 
     fn local_of(&self, o: &mir::Operand) -> Option<u32> {
@@ -4046,12 +4309,7 @@ impl<'a> Emitter<'a> {
             return;
         }
         if eq::needs_function(key_ty, self.types) {
-            match self.eq.index_of(key_ty) {
-                Some(i) => func.instruction(&Instruction::Call(i)),
-                // `eq::collect` closes over every map's key type, so this is
-                // a compiler bug rather than a program's.
-                None => func.instruction(&Instruction::Unreachable),
-            };
+            self.eq.call(func, key_ty);
             return;
         }
         let inst = match val_type_with(key_ty, self.types, self.layout) {
@@ -4155,34 +4413,150 @@ impl<'a> Emitter<'a> {
         self.layout.pair_type(v)
     }
 
-    /// The array type and element type of an operand holding a slice.
-    fn slice_of(&self, o: &mir::Operand) -> Option<(u32, TyId)> {
+    /// The storage, header and element type of an operand holding a slice.
+    fn slice_of(&self, o: &mir::Operand) -> Option<SliceParts> {
         let mir::Operand::Local(l) = o else {
             return None;
         };
-        let TyKind::Slice(elem) = *self.types.kind(self.f.locals[l.index()].ty) else {
-            return None;
-        };
-        self.layout.slice_type(elem).map(|idx| (idx, elem))
+        self.slice_parts(self.f.locals[l.index()].ty)
     }
 
-    /// The array type for the slice a `SliceNew` is producing.
-    ///
-    /// The destination local carries the slice type, and the emitter knows it
-    /// because MIR always assigns a construction into one.
-    fn slice_array_for_result(&self) -> Option<u32> {
-        self.current_dst.and_then(|d| {
-            let TyKind::Slice(elem) = *self.types.kind(self.f.locals[d as usize].ty) else {
-                return None;
-            };
-            self.layout.slice_type(elem)
+    fn slice_parts(&self, ty: TyId) -> Option<SliceParts> {
+        let TyKind::Slice(elem) = *self.types.kind(ty) else {
+            return None;
+        };
+        Some(SliceParts {
+            array: self.layout.slice_type(elem)?,
+            header: self.layout.slice_header(elem)?,
+            elem,
         })
     }
 
-    /// An index, narrowed from Kite's 64-bit `int` to the i32 Wasm arrays use.
-    fn index_operand(&mut self, func: &mut Function, o: &mir::Operand) {
-        self.operand(func, o);
-        func.instruction(&Instruction::I32WrapI64);
+    /// The slice a `SliceNew` is producing.
+    ///
+    /// The destination local carries the slice type, and the emitter knows it
+    /// because MIR always assigns a construction into one.
+    fn slice_for_result(&self) -> Option<SliceParts> {
+        self.current_dst
+            .and_then(|d| self.slice_parts(self.f.locals[d as usize].ty))
+    }
+
+    /// Collapse repeated keys in a map literal's arrays, in place, the way the
+    /// bytecode VM builds one: a key keeps the position it first appeared at
+    /// and takes the value it was last given. `{k: 1, "a": 2}` with `k == "a"`
+    /// is one entry, and was two here — with `len()` saying so.
+    ///
+    /// One pass over the entries, each scanned for among those already kept,
+    /// then a shrink to the kept count when anything was dropped. Emitted only
+    /// for a literal whose keys are not all distinct constants.
+    fn map_dedup(&mut self, func: &mut Function, ml: MapLayout, kreg: u32, vreg: u32, n: i32) {
+        let i = self.index_scratch;
+        let j = self.index_scratch2(func);
+        let kept = self.scratch;
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalSet(kept));
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalSet(i));
+        func.instruction(&Instruction::Block(BlockType::Empty));
+        func.instruction(&Instruction::Loop(BlockType::Empty));
+        func.instruction(&Instruction::LocalGet(i));
+        func.instruction(&Instruction::I32Const(n));
+        func.instruction(&Instruction::I32GeU);
+        func.instruction(&Instruction::BrIf(1));
+
+        // j = the kept entry with this key, or `kept` when there is none.
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalSet(j));
+        func.instruction(&Instruction::Block(BlockType::Empty));
+        func.instruction(&Instruction::Loop(BlockType::Empty));
+        func.instruction(&Instruction::LocalGet(j));
+        func.instruction(&Instruction::LocalGet(kept));
+        func.instruction(&Instruction::I32GeU);
+        func.instruction(&Instruction::BrIf(1));
+        func.instruction(&Instruction::LocalGet(kreg));
+        func.instruction(&Instruction::LocalGet(j));
+        func.instruction(&Instruction::ArrayGet(ml.keys));
+        func.instruction(&Instruction::LocalGet(kreg));
+        func.instruction(&Instruction::LocalGet(i));
+        func.instruction(&Instruction::ArrayGet(ml.keys));
+        self.key_equality(func, ml.key_ty);
+        func.instruction(&Instruction::BrIf(1));
+        func.instruction(&Instruction::LocalGet(j));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(j));
+        func.instruction(&Instruction::Br(0));
+        func.instruction(&Instruction::End);
+        func.instruction(&Instruction::End);
+
+        // A new key is kept at the end of what has been kept; either way the
+        // value is the latest one. `j <= i` throughout, so nothing unread is
+        // overwritten.
+        func.instruction(&Instruction::LocalGet(j));
+        func.instruction(&Instruction::LocalGet(kept));
+        func.instruction(&Instruction::I32Eq);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::LocalGet(kreg));
+        func.instruction(&Instruction::LocalGet(j));
+        func.instruction(&Instruction::LocalGet(kreg));
+        func.instruction(&Instruction::LocalGet(i));
+        func.instruction(&Instruction::ArrayGet(ml.keys));
+        func.instruction(&Instruction::ArraySet(ml.keys));
+        func.instruction(&Instruction::LocalGet(kept));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(kept));
+        func.instruction(&Instruction::End);
+        func.instruction(&Instruction::LocalGet(vreg));
+        func.instruction(&Instruction::LocalGet(j));
+        func.instruction(&Instruction::LocalGet(vreg));
+        func.instruction(&Instruction::LocalGet(i));
+        func.instruction(&Instruction::ArrayGet(ml.values));
+        func.instruction(&Instruction::ArraySet(ml.values));
+
+        func.instruction(&Instruction::LocalGet(i));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(i));
+        func.instruction(&Instruction::Br(0));
+        func.instruction(&Instruction::End);
+        func.instruction(&Instruction::End);
+
+        // A map's length is its arrays' length, so drop the tail. The long
+        // arrays are parked in a record in the destination — which the
+        // literal is about to overwrite anyway — while the short ones are
+        // built in their registers and filled from it.
+        let Some(dst) = self.current_dst else {
+            func.instruction(&Instruction::Unreachable);
+            return;
+        };
+        func.instruction(&Instruction::LocalGet(kept));
+        func.instruction(&Instruction::I32Const(n));
+        func.instruction(&Instruction::I32LtU);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::LocalGet(kreg));
+        func.instruction(&Instruction::LocalGet(vreg));
+        func.instruction(&Instruction::StructNew(ml.record));
+        func.instruction(&Instruction::LocalSet(dst));
+        for (field, array, reg) in [(0, ml.keys, kreg), (1, ml.values, vreg)] {
+            func.instruction(&Instruction::LocalGet(kept));
+            func.instruction(&Instruction::ArrayNewDefault(array));
+            func.instruction(&Instruction::LocalSet(reg));
+            func.instruction(&Instruction::LocalGet(reg));
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::LocalGet(dst));
+            func.instruction(&Instruction::StructGet {
+                struct_type_index: ml.record,
+                field_index: field,
+            });
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::LocalGet(kept));
+            func.instruction(&Instruction::ArrayCopy {
+                array_type_index_dst: array,
+                array_type_index_src: array,
+            });
+        }
+        func.instruction(&Instruction::End);
     }
 
     /// The box type for an operand about to be wrapped. The operand carries
@@ -4470,6 +4844,46 @@ impl<'a> Emitter<'a> {
         func.instruction(&Instruction::LocalSet(self.pc));
         func.instruction(&Instruction::Br(self.dispatch_depth() + extra));
     }
+}
+
+/// Where a slice's pieces live in the type space.
+#[derive(Clone, Copy)]
+struct SliceParts {
+    /// The storage array.
+    array: u32,
+    /// The `{buf, len}` record a slice value is.
+    header: u32,
+    elem: TyId,
+}
+
+/// Whether a map literal's keys are constants that are all different, so
+/// its arrays can be used as written. Anything else — a local, an aggregate —
+/// may repeat at run time and has to be collapsed.
+fn distinct_constants(keys: &[&mir::Operand], program: &mir::Program) -> bool {
+    #[derive(PartialEq)]
+    enum Key<'a> {
+        Int(i64),
+        Bool(bool),
+        Str(&'a str),
+    }
+    let mut seen: Vec<Key> = Vec::with_capacity(keys.len());
+    for k in keys {
+        let key = match k {
+            mir::Operand::Int(v) => Key::Int(*v),
+            mir::Operand::Bool(v) => Key::Bool(*v),
+            mir::Operand::Str(s) => Key::Str(&program.strings[s.0 as usize]),
+            _ => return false,
+        };
+        // Quadratic, but only in the size of a literal whose every key is a
+        // constant — and a long one is a table of distinct names, where
+        // the answer comes out true after one pass. Past a few thousand the
+        // scan is not worth it: the run-time pass is emitted instead.
+        if keys.len() > 4096 || seen.contains(&key) {
+            return false;
+        }
+        seen.push(key);
+    }
+    true
 }
 
 #[cfg(test)]

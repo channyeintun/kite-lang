@@ -478,7 +478,7 @@ and is the obvious later improvement.
 | `var` field | `(field $x (mut f64))` |
 | `enum E` | a base record holding an `i32` tag, and one subtype per variant carrying the tag and that variant's payload |
 | `Option<T>` | a nullable reference to a one-field box record, one per payload type: `nil` is null, and the payload keeps its own type |
-| `[T]` | `(array (mut T))`, one array type per element type, copy-on-write |
+| `[T]` | a header record `{buf: (mut (ref $arr)), len: (mut i32)}` over `(array (mut T))`, one pair per element type. The buffer may be longer than the slice |
 | `{K: V}` | a record holding two parallel arrays, keys and values, in insertion order |
 | `(A, B)` | one record per tuple shape |
 | `(T, error)` | one record per value type: the value slot, and the error |
@@ -493,11 +493,39 @@ per-field mutability flag is not a coincidence — the language was designed to
 line up with it. Immutable fields let the engine hoist and constant-fold loads
 without alias analysis.
 
-**A slice is a bare array, so `push` copies.** It allocates an array one element
-longer and copies the old contents across, which makes a loop of pushes
-quadratic on this target. A buffer with spare capacity and a separate length
-would make `push` amortised constant time; that change is in progress, and this
-row changes with it.
+**A slice is a header over a buffer with room to spare, written in place when
+nothing else can see it.** Slices are values — `let a = xs; xs.push(1)` leaves
+`a` alone — and the VM gets that from `Rc::make_mut`, which copies only when the
+reference count says the storage is shared. A GC target has no count, so the
+compiler keeps the fact instead: every slice local a function writes into has an
+`i32` *owned* flag beside it, set when the function made the header and buffer
+itself (a literal, a range, `keys()`, or its own copy) and cleared wherever the
+local is read in a way that can keep the reference — into another local, a call,
+a field, a map, a box, a closure. A length, an element, a comparison or a range
+(which copies) keeps nothing and clears nothing. A parameter, or anything read
+out of somewhere else, starts unowned.
+
+`push` and `xs[i] = v` call a small helper per element type with the header and
+the flag. Owned with room, `push` writes the next slot and bumps the length;
+otherwise it copies into a buffer twice as long plus four, and the local owns the
+result. So a loop of pushes is amortised constant time — a hundred thousand of
+them went from twenty seconds to a few milliseconds — and the first write to a
+slice someone handed in copies once rather than every time. An index is checked
+against the header's length as a 64-bit value, never against the buffer's, which
+may be longer. `tests/differential.rs` (`slices-are-values`) changes a slice
+after every way its reference can be kept and compares all three backends.
+
+### Structural equality
+
+`==` on an aggregate calls one generated function, `(anyref, anyref, kind) ->
+i32`, with a case per compared type. Scalars and strings are compared in place;
+a component that is itself an aggregate is pushed onto a list of pending pairs —
+a cons list of immutable cells — and the same loop takes it off again. The
+comparison therefore never recurses, and a value a million cells deep compares
+in bounded stack, as it does on the VM and natively; the first version generated
+a function per type that called its components' functions, and ended in the
+engine's `RangeError`. A map's keys are compared by the same function, so any
+type `==` accepts can key a map.
 
 ### Trait objects
 
