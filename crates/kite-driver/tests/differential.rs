@@ -2484,6 +2484,67 @@ async fn main() {
 }
 "#,
     ),
+    // `==` on two values of a type that mentions a parameter compares them
+    // structurally, as `==` on two `T` does, and was refused unless the type was
+    // a bare `T`. A map's key and value types count too.
+    (
+        "compared-inside-a-generic-type",
+        r#"struct Box<T> {
+    v: T
+}
+
+enum Pick<T> {
+    One(T)
+    Neither
+}
+
+fn opt_eq<T>(a: Option<T>, b: Option<T>) -> bool {
+    return a == b
+}
+
+fn slice_eq<T>(a: [T], b: [T]) -> bool {
+    return a == b
+}
+
+fn tuple_ne<T>(a: (T, T), b: (T, T)) -> bool {
+    return a != b
+}
+
+fn box_eq<T>(a: Box<T>, b: Box<T>) -> bool {
+    return a == b
+}
+
+fn pick_eq<T>(a: Pick<T>, b: Pick<T>) -> bool {
+    return a == b
+}
+
+fn map_eq<K, V>(a: { K: V }, b: { K: V }) -> bool {
+    return a == b
+}
+
+fn forward<T>(a: Option<T>, b: Option<T>) -> bool {
+    return opt_eq(a, b)
+}
+
+fn main() {
+    let o: Option<int> = 3
+    let n: Option<int> = nil
+    io.print(opt_eq(o, 3))
+    io.print(opt_eq(o, n))
+    io.print(opt_eq(n, nil))
+    io.print(slice_eq([1, 2], [1, 2]))
+    io.print(slice_eq(["a"], ["b"]))
+    io.print(tuple_ne((1, 2), (1, 2)))
+    io.print(tuple_ne(("a", "b"), ("a", "c")))
+    io.print(box_eq(Box{ v: [1.5] }, Box{ v: [1.5] }))
+    io.print(pick_eq(Pick.One("x"), Pick.One("x")))
+    io.print(pick_eq(Pick.One(1), Pick.Neither))
+    io.print(map_eq({ "a": 1 }, { "a": 1 }))
+    io.print(map_eq({ 1: "a" }, { 1: "b" }))
+    io.print(forward(o, o))
+}
+"#,
+    ),
 ];
 
 /// Programs above that need a rule of the checker's which may not have landed:

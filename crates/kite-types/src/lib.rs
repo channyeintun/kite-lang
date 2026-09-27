@@ -8089,7 +8089,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    #[allow(dead_code)]
     fn mentions_param(&self, ty: TyId) -> bool {
         match self.types.kind(ty) {
             TyKind::Param { .. } => true,
@@ -9740,21 +9739,24 @@ impl<'a> Checker<'a> {
             // Aggregates compare structurally, per the specification.
             (B::Eq, _) if self.types.is_equatable(t) => Some((H::EqValue, TyId::BOOL)),
             (B::Ne, _) if self.types.is_equatable(t) => Some((H::NeValue, TyId::BOOL)),
-            // Two values of the same type parameter. `Eq` is derived for
-            // every type structurally, so this holds for whatever the
-            // parameter turns out to be — and monomorphisation has replaced it
-            // with a concrete type long before any backend sees it.
+            // Two values of a type mentioning type parameters: a `T`, or an
+            // `Option<T>`, a `[T]`, a `(T, T)`, a `Box<T>`. `Eq` is derived
+            // for every type structurally, so this holds for whatever the
+            // parameters turn out to be — and monomorphisation has replaced
+            // them with concrete types long before any backend sees it.
             //
             // Every type but a function, a trait object and a host value, that
-            // is — so the comparison is written down, and each call is held to
-            // it once every body has been seen.
-            (B::Eq, _) if matches!(self.types.kind(t), TyKind::Param { .. }) => {
+            // is — so the comparison is written down against each parameter
+            // the type mentions, and each call is held to it once every body
+            // has been seen. Only a bare `T` used to be accepted, so
+            // `a == b` on two `Option<T>` was refused although the same
+            // comparison through `fn eq<T>(a: T, b: T)` was not.
+            (B::Eq | B::Ne, _)
+                if self.mentions_param(t)
+                    && equatable_given_params(self.types, t, &mut Vec::new()) =>
+            {
                 self.note_compared(t, span);
-                Some((H::EqValue, TyId::BOOL))
-            }
-            (B::Ne, _) if matches!(self.types.kind(t), TyKind::Param { .. }) => {
-                self.note_compared(t, span);
-                Some((H::NeValue, TyId::BOOL))
+                Some((if op == B::Eq { H::EqValue } else { H::NeValue }, TyId::BOOL))
             }
 
             _ => None,
@@ -11832,6 +11834,9 @@ fn equatable_given_params(types: &Types, ty: TyId, seen: &mut Vec<TyId>) -> bool
         TyKind::Param { .. } => true,
         TyKind::Slice(e) | TyKind::Optional(e) => equatable_given_params(types, e, seen),
         TyKind::Tuple(es) => es.iter().all(|e| equatable_given_params(types, *e, seen)),
+        TyKind::Map(k, v) => {
+            equatable_given_params(types, k, seen) && equatable_given_params(types, v, seen)
+        }
         TyKind::Struct(s) => {
             let fields: Vec<TyId> = types.struct_def(s).fields.iter().map(|f| f.ty).collect();
             fields.into_iter().all(|t| equatable_given_params(types, t, seen))
@@ -11845,8 +11850,8 @@ fn equatable_given_params(types: &Types, ty: TyId, seen: &mut Vec<TyId>) -> bool
                 .collect();
             fields.into_iter().all(|t| equatable_given_params(types, t, seen))
         }
-        // Whatever the arguments, a function or a map is compared by the
-        // rule for its kind, which a parameter inside it does not change.
+        // Whatever the arguments, a function is not compared, and neither is
+        // anything else that mentions a parameter but is not an aggregate.
         _ => false,
     };
     seen.pop();

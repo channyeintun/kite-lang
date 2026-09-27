@@ -1,0 +1,34 @@
+// `==` on two `Option<T>`, `[T]`, `(T, T)` or `Box<T>` is structural, like
+// `==` on two `T`, and holds each call to a `T` that can be compared (§5.2).
+// It used to be refused outright. A function type is never compared, whatever
+// its parameters are.
+
+trait Show {
+    fn show(self) -> str
+}
+
+struct P {
+    a: int
+}
+
+impl Show for P {
+    fn show(self) -> str {
+        return "p"
+    }
+}
+
+fn opt_eq<T>(a: Option<T>, b: Option<T>) -> bool {
+    return a == b
+}
+
+fn same_fn<T>(f: fn(T) -> T, g: fn(T) -> T) -> bool {
+    return f == g //~ ERROR E0201
+}
+
+fn main() {
+    let o: Option<int> = 3
+    io.print(opt_eq(o, 3))
+    let d: dyn Show = P{ a: 1 }
+    let od: Option<dyn Show> = d
+    io.print(opt_eq(od, od)) //~ ERROR E0201
+}
