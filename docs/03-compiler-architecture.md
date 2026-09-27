@@ -512,7 +512,13 @@ kilobytes.
 MIR is a control-flow graph and Wasm has structured control flow with no
 `goto`, so each function is a **dispatch loop**: one `loop` containing nested
 `block`s, entered through a `br_table` on a program-counter local. It handles an
-arbitrary graph, irreducible ones included, and engines optimise the shape well.
+arbitrary graph, irreducible ones included. The blocks are laid out in reverse
+postorder, so every jump goes forward but a loop's jump back to its head; a
+jump forward is a plain `br` out to the block holding its target, and only a
+jump back goes round the dispatch loop. Code without a loop is then nothing but
+blocks and forward branches. When every jump went round the loop, V8's
+optimising compiler merged every local at the loop's head from every block, and
+a chain of two thousand `||` took it gigabytes after the program had finished.
 A relooper that recovered `if` and `loop` structure would produce tighter code
 and is the obvious later improvement.
 
