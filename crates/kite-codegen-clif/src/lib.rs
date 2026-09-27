@@ -961,8 +961,17 @@ fn define_fn<M: Module>(
     let FnLower { b, .. } = lower;
     b.finalize(cfg);
 
-    cx.module.define_function(id, &mut ctx).map_err(|e| {
-        format!("compiling `{}`: {}", f.name, e)
+    cx.module.define_function(id, &mut ctx).map_err(|e| match e {
+        cranelift_module::ModuleError::Allocation { .. } => format!(
+            "`{}` is too large for the native JIT: the program's machine code does not fit \
+             in the {} MiB it reserves\n\
+             note: a function holding thousands of values across calls grows with the square \
+             of their number, since each call saves every one of them for the collector: \
+             split it, or keep fewer values alive at once",
+            f.name,
+            JIT_RESERVE >> 20
+        ),
+        e => format!("compiling `{}`: {}", f.name, e),
     })?;
     let maps = collect_maps(&ctx).map_err(|e| format!("compiling `{}`: {}", f.name, e))?;
     cx.module.clear_context(&mut ctx);
@@ -2195,6 +2204,10 @@ pub fn compile_object(program: &mir::Program, types: &Types) -> Result<Vec<u8>, 
 
 pub use kite_rt::{RunConfig, RunStats, MAX_FRAMES};
 
+/// The address space a JIT run reserves for its code and data: as much as a
+/// 32-bit PC-relative reference can span, less a little. See `run_jit_with`.
+const JIT_RESERVE: usize = (i32::MAX as usize) & !0xFFFF;
+
 /// Compile into this process and run to completion, collecting the program's
 /// output and writing it to `out` when the run is over. This is how the
 /// differential suite and the backend's own tests run programs without a
@@ -2241,6 +2254,16 @@ pub fn run_jit_with(
     );
     for (name, ptr) in kite_rt::jit_symbols() {
         builder.symbol(name, ptr);
+    }
+    // Code and data in one reserved range, so that every reference between
+    // them is within the ±2 GiB a PC-relative relocation can span. Mapped
+    // separately, as they were, a function of a gigabyte of machine code put
+    // the next mapping further away than that, and patching the reference
+    // panicked inside the JIT. Here the same program runs out of the range
+    // instead, and says so. Reserving address space commits no memory; where
+    // even that is refused, the separate mappings are what is left.
+    if let Ok(arena) = cranelift_jit::ArenaMemoryProvider::new_with_size(JIT_RESERVE) {
+        builder.memory_provider(Box::new(arena));
     }
     let mut module = cranelift_jit::JITModule::new(builder);
     let built = build(&mut module, program, types)

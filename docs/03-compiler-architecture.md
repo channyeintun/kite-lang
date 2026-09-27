@@ -441,7 +441,7 @@ expression trees:
 
 MIR is explicit basic blocks and terminators. It is **not** SSA: locals are
 numbered slots, which the bytecode backend maps straight onto registers, and
-nothing yet needs more. Lowering does two things beyond building the graph:
+nothing yet needs more. Lowering does three things beyond building the graph:
 
 - **Match lowering** — arms are tested in order, each falling through to the
   next on failure, and the block after the last arm is `unreachable`, because
@@ -455,6 +455,15 @@ nothing yet needs more. Lowering does two things beyond building the graph:
   frame and reloaded around each suspension rather than rewritten into frame
   fields everywhere; which ones are actually live across a suspension is not
   computed. After this, no backend knows `async` exists.
+- **Long literals** — a slice or map literal is evaluated item by item into
+  temporaries and then built, which for one of twenty thousand computed
+  elements was twenty thousand temporaries, all live at once: past every
+  target's frame, and natively a collector root each across every later call.
+  Past a window of 64 items, a literal whose remaining items need computing is
+  built as it goes instead: each element pushed, or each entry set, as soon as
+  it has been computed, into temporaries the one before it has finished with.
+  A key named twice ends where a literal puts it, at its first position with
+  its last value. A literal of constants stays one literal of any length.
 
 The native and bytecode backends skip blocks unreachable from the entry.
 
