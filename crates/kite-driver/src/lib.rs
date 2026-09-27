@@ -1364,72 +1364,78 @@ mod tests {
     /// function specialised at 4,200 types, all of which finish.
     #[test]
     fn a_finite_program_is_specialised_or_told_it_is_too_large() {
-        let run = |src: &str| {
-            let c = compile("t.kite", src, Emit::Check);
-            assert!(!c.failed(), "{}", c.render_diagnostics());
-            let mut out = Vec::new();
-            c.run(&mut out).expect("runs");
-            String::from_utf8(out).unwrap()
-        };
-        let fifty = format!(
-            "{}fn main() {{\n  let b = {}\n  io.print(b{})\n}}\n",
-            BOX,
-            nested("wrap", 50, "1"),
-            ".v".repeat(50)
-        );
-        assert_eq!(run(&fifty), "1\n");
+        // `kitec` and the language server run the compiler on a thread with
+        // `COMPILER_STACK` of stack, and so does this: a hundred nested calls
+        // cost some thirty kilobytes of stack each in a debug build, which a
+        // test thread's two megabytes does not hold on every toolchain.
+        on_compiler_stack(|| {
+            let run = |src: &str| {
+                let c = compile("t.kite", src, Emit::Check);
+                assert!(!c.failed(), "{}", c.render_diagnostics());
+                let mut out = Vec::new();
+                c.run(&mut out).expect("runs");
+                String::from_utf8(out).unwrap()
+            };
+            let fifty = format!(
+                "{}fn main() {{\n  let b = {}\n  io.print(b{})\n}}\n",
+                BOX,
+                nested("wrap", 50, "1"),
+                ".v".repeat(50)
+            );
+            assert_eq!(run(&fifty), "1\n");
 
-        let pairs = format!(
-            "fn pair<T>(x: T) -> (T, T) {{\n  return (x, x)\n}}\n\n\
-             fn main() {{\n  let p = {}\n  io.print(\"made\")\n}}\n",
-            nested("pair", 12, "1")
-        );
-        assert_eq!(run(&pairs), "made\n");
+            let pairs = format!(
+                "fn pair<T>(x: T) -> (T, T) {{\n  return (x, x)\n}}\n\n\
+                 fn main() {{\n  let p = {}\n  io.print(\"made\")\n}}\n",
+                nested("pair", 12, "1")
+            );
+            assert_eq!(run(&pairs), "made\n");
 
-        let mut many = String::from("fn ident<T>(x: T) -> T {\n  return x\n}\n\n");
-        let mut body = String::from("fn main() {\n  var t = 0\n");
-        for i in 0..4200 {
-            many.push_str(&format!("struct S{} {{\n  v: int\n}}\n\n", i));
-            body.push_str(&format!("  t = t + ident(S{}{{ v: 1 }}).v\n", i));
-        }
-        many.push_str(&body);
-        many.push_str("  io.print(t)\n}\n");
-        assert_eq!(run(&many), "4200\n");
+            let mut many = String::from("fn ident<T>(x: T) -> T {\n  return x\n}\n\n");
+            let mut body = String::from("fn main() {\n  var t = 0\n");
+            for i in 0..4200 {
+                many.push_str(&format!("struct S{} {{\n  v: int\n}}\n\n", i));
+                body.push_str(&format!("  t = t + ident(S{}{{ v: 1 }}).v\n", i));
+            }
+            many.push_str(&body);
+            many.push_str("  io.print(t)\n}\n");
+            assert_eq!(run(&many), "4200\n");
 
-        // Past the limits: one error, which says what it is, and nothing
-        // after it about the placeholder that stands in for the refused type.
-        let refused = |src: &str| {
-            let c = compile("t.kite", src, Emit::Check);
-            let errors: Vec<String> = c
-                .diags
-                .iter()
-                .filter(|d| d.severity == kite_diag::Severity::Error)
-                .map(|d| format!("{}: {}", d.code.map(|x| x.0).unwrap_or(""), d.message))
-                .collect();
-            assert_eq!(errors.len(), 1, "{:#?}", errors);
-            errors.into_iter().next().unwrap()
-        };
-        let three_hundred = format!(
-            "{}fn main() {{\n  let a = {}\n  let b = {}\n  let c = {}\n  io.print(c.v{})\n}}\n",
-            BOX,
-            nested("wrap", 100, "1"),
-            nested("wrap", 100, "a"),
-            nested("wrap", 100, "b"),
-            ".v".repeat(99)
-        );
-        assert_eq!(
-            refused(&three_hundred),
-            "E0220: the generic type `Box` is used at a type argument too large to specialise"
-        );
-        let pairs = format!(
-            "fn pair<T>(x: T) -> (T, T) {{\n  return (x, x)\n}}\n\n\
-             fn main() {{\n  let p = {}\n  io.print(\"made\")\n}}\n",
-            nested("pair", 17, "1")
-        );
-        assert_eq!(
-            refused(&pairs),
-            "E0220: the generic function `pair` is used at a type argument too large to specialise"
-        );
+            // Past the limits: one error, which says what it is, and nothing
+            // after it about the placeholder that stands in for the refused type.
+            let refused = |src: &str| {
+                let c = compile("t.kite", src, Emit::Check);
+                let errors: Vec<String> = c
+                    .diags
+                    .iter()
+                    .filter(|d| d.severity == kite_diag::Severity::Error)
+                    .map(|d| format!("{}: {}", d.code.map(|x| x.0).unwrap_or(""), d.message))
+                    .collect();
+                assert_eq!(errors.len(), 1, "{:#?}", errors);
+                errors.into_iter().next().unwrap()
+            };
+            let three_hundred = format!(
+                "{}fn main() {{\n  let a = {}\n  let b = {}\n  let c = {}\n  io.print(c.v{})\n}}\n",
+                BOX,
+                nested("wrap", 100, "1"),
+                nested("wrap", 100, "a"),
+                nested("wrap", 100, "b"),
+                ".v".repeat(99)
+            );
+            assert_eq!(
+                refused(&three_hundred),
+                "E0220: the generic type `Box` is used at a type argument too large to specialise"
+            );
+            let pairs = format!(
+                "fn pair<T>(x: T) -> (T, T) {{\n  return (x, x)\n}}\n\n\
+                 fn main() {{\n  let p = {}\n  io.print(\"made\")\n}}\n",
+                nested("pair", 17, "1")
+            );
+            assert_eq!(
+                refused(&pairs),
+                "E0220: the generic function `pair` is used at a type argument too large to specialise"
+            );
+        });
     }
 
     /// A value of more parts than the native staging window is still refused
