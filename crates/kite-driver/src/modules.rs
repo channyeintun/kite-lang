@@ -55,6 +55,36 @@ pub fn std_module(name: &str) -> Option<&'static str> {
     STD_MODULES.iter().find(|(n, _)| *n == name).map(|(_, src)| *src)
 }
 
+/// Whether a module name is the standard library's to spell (`E0403`): one of
+/// its modules, a module its builtins are reached through — `io`, `draw`,
+/// `ptr` — or `prelude`.
+fn reserved(name: &str) -> bool {
+    std_module(name).is_some()
+        || kite_resolve::BUILTIN_MODULES.contains(&name)
+        || name == kite_resolve::PRELUDE
+}
+
+/// The note for a reserved `name` a module may not take: what the name
+/// already is, and `remedy`.
+fn reserved_because(name: &str, remedy: &str) -> String {
+    if name == kite_resolve::PRELUDE {
+        format!(
+            "the prelude is the standard library's, and is in scope everywhere without a `use`; \
+             {} so the two cannot be confused",
+            remedy
+        )
+    } else if kite_resolve::BUILTIN_MODULES.contains(&name) {
+        format!(
+            "`{}.…` reaches the standard library in every file, `use` or not, so a module \
+             spelled `{}` would share the spelling with it and a name both declare would go to \
+             one of them silently; {}",
+            name, name, remedy
+        )
+    } else {
+        format!("`use std/{}` is that module; {} so the two cannot be confused", name, remedy)
+    }
+}
+
 /// The standard library module a `use std/…` names, with its name as the
 /// table spells it.
 fn std_entry(name: &str) -> Option<(&'static str, &'static str)> {
@@ -218,18 +248,32 @@ impl Files {
 
 /// Where a file is, asked of the filesystem: links followed and `..` taken
 /// where it really leads. A file that does not exist yet — an editor's buffer
-/// never saved — is its directory's real location and its own name.
+/// never saved — is where the nearest directory above it that does exist
+/// really is, and the rest of its path below that.
+///
+/// **The nearest that exists, not only its own directory.** Only the file's
+/// directory was asked, and a buffer in a directory not created yet fell back
+/// to its path as written. The loader asks about that directory itself, whose
+/// parent does exist and was followed — so under a symbolic link (a project
+/// opened as `/tmp/…` on macOS, or through a linked home directory) the two
+/// spellings of one place never met, and an unsaved directory module was
+/// `cannot find module` there while it compiled through the real path.
 pub fn located(path: &Path) -> PathBuf {
     if let Ok(real) = std::fs::canonicalize(path) {
         return real;
     }
-    match (path.parent(), path.file_name()) {
-        (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => match std::fs::canonicalize(dir) {
-            Ok(dir) => dir.join(name),
-            Err(_) => normalise(path),
-        },
-        _ => normalise(path),
+    for above in path.ancestors().skip(1) {
+        if above.as_os_str().is_empty() {
+            break;
+        }
+        if let Ok(real) = std::fs::canonicalize(above) {
+            // Nothing below `above` exists, so what is left is folded by
+            // reading it: there is no link down there to follow.
+            let rest = path.strip_prefix(above).unwrap_or(path);
+            return normalise(&real.join(rest));
+        }
     }
+    normalise(path)
 }
 
 /// `.` and `..` folded away by reading the path, not the disk.
@@ -305,6 +349,10 @@ struct Package {
     root: Option<PathBuf>,
     /// What its manifest declares, by name.
     dependencies: Rc<HashMap<String, PathBuf>>,
+    /// The directory of the manifest `dependencies` came from, when there is
+    /// one — so a `use` that finds nothing can say the manifest did not read,
+    /// which is the likelier reason when it did not.
+    manifest: Option<PathBuf>,
 }
 
 /// A package prefix and a `use` path's segments, joined the way a provided key
@@ -555,6 +603,9 @@ pub struct Loader {
     /// Each package's declared dependencies, by its directory, so a manifest
     /// is read — and a broken one reported — once.
     manifests: HashMap<PathBuf, Rc<HashMap<String, PathBuf>>>,
+    /// The manifests that did not read (`E0405`), by their directory as
+    /// `manifests` keys it.
+    unread: HashMap<PathBuf, PathBuf>,
     /// What the program's own manifest declares, which decides how a
     /// package's modules are named — see [`Loader::label`].
     direct: Rc<HashMap<String, PathBuf>>,
@@ -609,11 +660,7 @@ impl Loader {
     ) -> Loader {
         let mut loader = Loader { provided, files, ..Loader::default() };
         let package = match dir {
-            Some(dir) => Package {
-                label: String::new(),
-                root: Some(dir.to_path_buf()),
-                dependencies: loader.program_dependencies(dir, sources, diags),
-            },
+            Some(dir) => loader.program_package(dir, Some(dir.to_path_buf()), sources, diags),
             None => Package::default(),
         };
         loader.direct = package.dependencies.clone();
@@ -638,32 +685,74 @@ impl Loader {
             });
         }
         loader.visit_uses(entry, &scope, &mut stack, sources, diags);
-        // A derived `Encode` is written against `json.Json` whatever the
-        // module deriving it imported. The module is loaded for it here, and
-        // reachable only from the derived code: no spelling is recorded for
-        // any module that did not write one.
-        if loader.wants_json && !loader.seen.contains_key(&Origin::Std("json")) {
-            if let Some((name, src)) = std_entry("json") {
-                let found = Found::Std(name, src);
-                let at = Span::empty_at(FileId(0), 0);
-                loader.load_one(found, "json".to_string(), at, &mut stack, sources, diags);
-            }
-        }
+        loader.load_json_for_derives(&mut stack, sources, diags);
         loader
     }
 
-    /// The program's own dependencies: the manifest in the first directory at
-    /// or above the entry file that has one.
+    /// Load the directory `dir` as the module a `use` naming it loads — every
+    /// `.kite` file in it, as one namespace — and whatever those files import.
+    ///
+    /// For a caller asking about a directory module itself rather than about
+    /// a program: an editor renaming a private name declared in one of its
+    /// files, whose uses may be in any of the others. The editor compiles the
+    /// file it has open as a program, and a file compiled that way sees none
+    /// of its siblings. `entry` is the file the spans of what the loading
+    /// itself reports are placed in.
+    pub fn load_module(
+        dir: &Path,
+        entry: FileId,
+        files: Files,
+        sources: &mut SourceMap,
+        diags: &mut DiagBag,
+    ) -> Loader {
+        let mut loader = Loader { files, ..Loader::default() };
+        // Measured from the directory above, as a `use` written beside it
+        // would measure it, so the module is named by its own directory.
+        let root = dir.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf);
+        let package = loader.program_package(dir, root, sources, diags);
+        loader.direct = package.dependencies.clone();
+        let prefix = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let found = Found::Path { at: dir.to_path_buf(), is_dir: true, package, prefix };
+        let identity = found.identity();
+        let mut stack = Vec::new();
+        loader.load_one(found, identity, Span::empty_at(entry, 0), &mut stack, sources, diags);
+        loader.load_json_for_derives(&mut stack, sources, diags);
+        loader
+    }
+
+    /// A derived `Encode` is written against `json.Json` whatever the module
+    /// deriving it imported. The module is loaded for it here, and reachable
+    /// only from the derived code: no spelling is recorded for any module that
+    /// did not write one.
+    fn load_json_for_derives(
+        &mut self,
+        stack: &mut Vec<Frame>,
+        sources: &mut SourceMap,
+        diags: &mut DiagBag,
+    ) {
+        if self.wants_json && !self.seen.contains_key(&Origin::Std("json")) {
+            if let Some((name, src)) = std_entry("json") {
+                let found = Found::Std(name, src);
+                let at = Span::empty_at(FileId(0), 0);
+                self.load_one(found, "json".to_string(), at, stack, sources, diags);
+            }
+        }
+    }
+
+    /// The program's own package: its dependencies are those of the manifest
+    /// in the first directory at or above `dir` that has one.
     ///
     /// Looked for *upwards*, because a program is usually `src/main.kite` and
     /// the manifest is beside `src/`. Nothing is fetched here — `kitec pkg`
     /// does that, once, on purpose.
-    fn program_dependencies(
+    fn program_package(
         &mut self,
         dir: &Path,
+        root: Option<PathBuf>,
         sources: &mut SourceMap,
         diags: &mut DiagBag,
-    ) -> Rc<HashMap<String, PathBuf>> {
+    ) -> Package {
+        let mut package = Package { root, ..Package::default() };
         // From the absolute directory, so `kitec run main.kite` inside `src/`
         // finds the manifest beside `src/` exactly as `kitec run src/main.kite`
         // does from above it.
@@ -672,11 +761,20 @@ impl Loader {
         while let Some(directory) = here {
             if self.files.is_file(&directory.join("kite.toml")) {
                 self.vendor = Some(directory.join(VENDOR));
-                return self.package_dependencies(directory, sources, diags);
+                package.dependencies = self.package_dependencies(directory, sources, diags);
+                package.manifest = Some(directory.to_path_buf());
+                break;
             }
             here = directory.parent();
         }
-        Rc::default()
+        package
+    }
+
+    /// The manifest `package`'s dependencies were to come from, when it was
+    /// there and did not read.
+    fn unread_manifest(&self, package: &Package) -> Option<&PathBuf> {
+        let directory = package.manifest.as_ref()?;
+        self.unread.get(&self.files.canonical(directory))
     }
 
     /// What the manifest in `directory` declares, and nothing above it.
@@ -711,6 +809,7 @@ impl Loader {
             Err(e) => {
                 let (text, line, why) = unreadable(&path, e);
                 diags.push(manifest_error(&path, text, line, &why, sources));
+                self.unread.insert(key.clone(), path.clone());
                 None
             }
         };
@@ -733,6 +832,7 @@ impl Loader {
                 // declared — a diagnostic about the wrong file.
                 Err(error) => {
                     diags.push(manifest_error(&path, text, error.line, &error.message, sources));
+                    self.unread.insert(key.clone(), path.clone());
                 }
             }
         }
@@ -842,25 +942,37 @@ impl Loader {
             // the prelude is looked up by that name from everywhere, so its
             // declarations became every module's unqualified fallback.
             let is_std = segments.first() == Some(&"std");
-            if !is_std && (std_module(last).is_some() || last == kite_resolve::PRELUDE) {
-                let note = if last == kite_resolve::PRELUDE {
-                    "the prelude is the standard library's, and is in scope everywhere without a \
-                     `use`; rename this module so the two cannot be confused"
-                        .to_string()
-                } else {
-                    format!(
-                        "`use std/{}` is that module; rename this one so the two cannot be \
-                         confused",
-                        last
-                    )
-                };
+            if !is_std && reserved(last) {
                 diags.push(
                     Diagnostic::error(
                         codes::E0403,
                         format!("`{}` is the name of a standard library module", last),
                     )
                     .with_primary(u.span, "this name belongs to the standard library")
-                    .with_note(note),
+                    .with_note(reserved_because(last, "rename this module")),
+                );
+                continue;
+            }
+            // **And so is the spelling, not only the path.** The check above
+            // read the path's last segment and never the name after `as`, so
+            // `use util as errors` was accepted — and `errors` is in scope in
+            // every file without a `use`. One spelling then reached two
+            // modules: `errors.new` stayed the standard library's while
+            // `errors.only` reached `util`, and wherever both declared a name
+            // the standard library won, silently. A `std` module spelled as
+            // itself is the one spelling that is its own; without an `as`,
+            // the spelling is the last segment, which is checked above or is
+            // the `std` module's own.
+            let own = is_std && segments.get(1) == Some(&spelling.as_str());
+            if u.alias.is_some() && reserved(&spelling) && !own {
+                diags.push(
+                    Diagnostic::error(
+                        codes::E0403,
+                        format!("`{}` is the name of a standard library module", spelling),
+                    )
+                    .with_primary(u.span, "this spelling belongs to the standard library")
+                    .with_note(reserved_because(&spelling, "spell this module another way"))
+                    .with_note("`use … as …` takes any other name"),
                 );
                 continue;
             }
@@ -1007,8 +1119,12 @@ impl Loader {
                 } else {
                     Rc::default()
                 };
-                let package =
-                    Package { label: self.label(segments[0]), root: Some(root.clone()), dependencies };
+                let package = Package {
+                    label: self.label(segments[0]),
+                    root: Some(root.clone()),
+                    dependencies,
+                    manifest: Some(root.clone()),
+                };
                 (root.clone(), package, &segments[1..])
             }
             None => (base.clone(), scope.package.clone(), segments),
@@ -1031,11 +1147,20 @@ impl Loader {
             let prefix = within(&scope.prefix, &segments[..segments.len() - 1]);
             return Some(Found::Path { at: as_file, is_dir: false, package, prefix });
         }
-        diags.push(
-            Diagnostic::error(codes::E0400, format!("cannot find module `{}`", path))
-                .with_primary(span, "no such module")
-                .with_note(format!("looked for `{}` and `{}`", at.display(), as_file.display())),
-        );
+        let mut missing = Diagnostic::error(codes::E0400, format!("cannot find module `{}`", path))
+            .with_primary(span, "no such module")
+            .with_note(format!("looked for `{}` and `{}`", at.display(), as_file.display()));
+        // The manifest's own error is reported in the manifest, which is not
+        // the file anyone looking at this `use` has open — an editor shows a
+        // file's own diagnostics beside it. Said here as well, the reason is
+        // where the symptom is.
+        if let Some(manifest) = self.unread_manifest(&scope.package) {
+            missing = missing.with_note(format!(
+                "`{}` did not read (E0405), so no dependency it declares could be looked for",
+                manifest.display()
+            ));
+        }
+        diags.push(missing);
         None
     }
 

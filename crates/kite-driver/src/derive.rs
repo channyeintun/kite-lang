@@ -64,6 +64,18 @@ pub struct Derived {
 /// taken.
 const JSON_SPELLING: &str = "__json";
 
+/// The spelling derived code reaches the prelude's helpers by — `debug_str`,
+/// `hash_int` and the rest — for the same reason [`JSON_SPELLING`] exists.
+///
+/// They were called by their bare names, and a bare name is looked up in the
+/// module first and in the prelude last, which is what lets a program shadow
+/// a prelude name. So a module with a helper of its own called `debug_str` or
+/// `hash_int` — plausible names for exactly the helpers they are — had its
+/// derived `debug()` stop quoting strings and its derived `hash()` ignore
+/// every `int` field, with no diagnostic. Qualified, the call can only reach
+/// the prelude's.
+const PRELUDE_SPELLING: &str = "__prelude";
+
 /// The traits the compiler can write a body for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Derivable {
@@ -321,26 +333,28 @@ pub fn expand(
     // ([`Writer::avoid`]), but a spelling of the compiler's own cannot meet
     // one of the module's by construction.
     let mut json_spellings: HashMap<String, String> = HashMap::new();
+    // And the prelude, whose helpers a derived `Debug` and `Hash` call: see
+    // [`PRELUDE_SPELLING`].
+    let mut prelude_spellings: HashMap<String, String> = HashMap::new();
     let mut added: Vec<((String, String), String)> = Vec::new();
     for decl in &decls {
         let needs_json =
             decl.derives.iter().any(|(t, _)| matches!(t, Derivable::Encode | Derivable::Decode));
-        if !needs_json || json_spellings.contains_key(&decl.module) {
-            continue;
+        if needs_json && !json_spellings.contains_key(&decl.module) {
+            let spelling = fresh_spelling(aliases, &added, &decl.module, JSON_SPELLING);
+            added.push(((decl.module.clone(), spelling.clone()), "json".to_string()));
+            json_spellings.insert(decl.module.clone(), spelling);
         }
-        let mut n = 0;
-        let spelling = loop {
-            let candidate = match n {
-                0 => JSON_SPELLING.to_string(),
-                n => format!("{}{}", JSON_SPELLING, n),
-            };
-            if !aliases.contains_key(&(decl.module.clone(), candidate.clone())) {
-                added.push(((decl.module.clone(), candidate.clone()), "json".to_string()));
-                break candidate;
-            }
-            n += 1;
-        };
-        json_spellings.insert(decl.module.clone(), spelling);
+        let needs_prelude =
+            decl.derives.iter().any(|(t, _)| matches!(t, Derivable::Debug | Derivable::Hash));
+        if needs_prelude && !prelude_spellings.contains_key(&decl.module) {
+            let spelling = fresh_spelling(aliases, &added, &decl.module, PRELUDE_SPELLING);
+            added.push((
+                (decl.module.clone(), spelling.clone()),
+                kite_resolve::PRELUDE.to_string(),
+            ));
+            prelude_spellings.insert(decl.module.clone(), spelling);
+        }
     }
 
     let mut source = String::from(
@@ -353,7 +367,12 @@ pub fn expand(
         for (trait_, at) in decls[index].derives.clone() {
             let module = decls[index].module.clone();
             let json = json_spellings.get(&module).cloned().unwrap_or_else(|| "json".to_string());
-            let avoid = names_in(&module, aliases, &all_types, &json);
+            let prelude = prelude_spellings
+                .get(&module)
+                .cloned()
+                .unwrap_or_else(|| kite_resolve::PRELUDE.to_string());
+            let mut avoid = names_in(&module, aliases, &all_types, &json);
+            avoid.insert(prelude.clone());
             let mut w = Writer {
                 decls: &decls,
                 known: &known,
@@ -362,6 +381,7 @@ pub fn expand(
                 aliases,
                 by_hand: &by_hand,
                 json,
+                prelude,
                 lookup: module.clone(),
                 module,
                 followed: 0,
@@ -384,6 +404,29 @@ pub fn expand(
         return None;
     }
     Some(Derived { source, modules, aliases: added })
+}
+
+/// A spelling for a module the generated code reaches, beginning `stem`, that
+/// `module` has not already taken — neither by a `use` of its own nor by an
+/// earlier spelling handed out here.
+fn fresh_spelling(
+    aliases: &HashMap<(String, String), String>,
+    added: &[((String, String), String)],
+    module: &str,
+    stem: &str,
+) -> String {
+    let mut n = 0;
+    loop {
+        let candidate = match n {
+            0 => stem.to_string(),
+            n => format!("{}{}", stem, n),
+        };
+        let key = (module.to_string(), candidate.clone());
+        if !aliases.contains_key(&key) && !added.iter().any(|(k, _)| *k == key) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 /// Every name a module's generated code may need to mean what it means in
@@ -465,6 +508,8 @@ struct Writer<'a, 'd> {
     by_hand: &'a ByHand,
     /// How this module's generated code spells `std/json`.
     json: String,
+    /// How it spells the prelude, whose helpers it calls qualified.
+    prelude: String,
     /// The module whose spellings the type being walked was written with.
     /// The deriving type's own, except inside an alias declared somewhere
     /// else, whose target is written in *that* module's spellings.
@@ -650,7 +695,7 @@ impl<'a> Writer<'a, '_> {
         match ty {
             Type::Path(p) => match path_text(p).as_str() {
                 "int" | "float" | "bool" => format!("\"\\({})\"", expr),
-                "str" => format!("debug_str({})", expr),
+                "str" => format!("{}.debug_str({})", self.prelude, expr),
                 other => self.recurse(other, expr, ty),
             },
             Type::Optional { inner, .. } => {
@@ -737,14 +782,15 @@ impl<'a> Writer<'a, '_> {
     fn hash_item(&mut self, decl: &Decl) -> String {
         let mut body: Lines = Vec::new();
         let h = self.local("h");
-        body.push(format!("    var {} = hash_seed()", h));
+        let p = self.prelude.clone();
+        body.push(format!("    var {} = {p}.hash_seed()", h));
         match &decl.kind {
             Shape::Struct(s) => {
                 for f in &s.fields {
                     let bound = self.temp("field");
                     body.push(format!("    let {} = self.{}", bound, f.name.name));
                     let value = self.hash_of(&f.ty, &bound, 1, &mut body);
-                    body.push(format!("    {h} = hash_combine({h}, {})", value));
+                    body.push(format!("    {h} = {p}.hash_combine({h}, {})", value));
                 }
             }
             Shape::Enum(e) => {
@@ -754,12 +800,12 @@ impl<'a> Writer<'a, '_> {
                     body.push(format!("        {} => {{", head));
                     // The variant's position, so two variants with the same
                     // payload do not hash alike.
-                    body.push(format!("            {h} = hash_combine({h}, {})", index));
+                    body.push(format!("            {h} = {p}.hash_combine({h}, {})", index));
                     for (bind, ty, _) in &binds {
                         let mut inner: Lines = Vec::new();
                         let value = self.hash_of(ty, bind, 3, &mut inner);
                         body.extend(inner);
-                        body.push(format!("            {h} = hash_combine({h}, {})", value));
+                        body.push(format!("            {h} = {p}.hash_combine({h}, {})", value));
                     }
                     body.push("        }".to_string());
                 }
@@ -775,15 +821,16 @@ impl<'a> Writer<'a, '_> {
             return self.in_alias(module, ty, |w| w.hash_of(target, expr, depth, out));
         }
         let pad = "    ".repeat(depth);
+        let pre = self.prelude.clone();
         match ty {
             Type::Path(p) => match path_text(p).as_str() {
-                "int" => format!("hash_int({})", expr),
+                "int" => format!("{pre}.hash_int({})", expr),
                 // Through the rendered text, because that rendering is shared
                 // with `io.print` and interpolation and is therefore the one
                 // thing about a float both backends already agree on.
-                "float" => format!("hash_float({})", expr),
-                "bool" => format!("hash_bool({})", expr),
-                "str" => format!("hash_str({})", expr),
+                "float" => format!("{pre}.hash_float({})", expr),
+                "bool" => format!("{pre}.hash_bool({})", expr),
+                "str" => format!("{pre}.hash_str({})", expr),
                 other => self.recurse(other, expr, ty),
             },
             Type::Optional { inner, .. } => {
@@ -793,17 +840,17 @@ impl<'a> Writer<'a, '_> {
                 out.push(format!("{}var {} = 0", pad, acc));
                 out.push(format!("{}if {} != nil {{", pad, held));
                 let value = self.hash_of(inner, &held, depth + 1, out);
-                out.push(format!("{}    {} = hash_combine(1, {})", pad, acc, value));
+                out.push(format!("{}    {} = {pre}.hash_combine(1, {})", pad, acc, value));
                 out.push(format!("{}}}", pad));
                 acc
             }
             Type::Slice { elem, .. } => {
                 let acc = self.temp("h");
                 let item = self.temp("item");
-                out.push(format!("{}var {} = hash_seed()", pad, acc));
+                out.push(format!("{}var {} = {pre}.hash_seed()", pad, acc));
                 out.push(format!("{}for {} in {} {{", pad, item, expr));
                 let value = self.hash_of(elem, &item, depth + 1, out);
-                out.push(format!("{}    {} = hash_combine({}, {})", pad, acc, acc, value));
+                out.push(format!("{}    {} = {pre}.hash_combine({}, {})", pad, acc, acc, value));
                 out.push(format!("{}}}", pad));
                 acc
             }
@@ -814,21 +861,21 @@ impl<'a> Writer<'a, '_> {
                 // Insertion order is part of what a Kite map *is*, and two maps
                 // that differ in it are not `==`, so folding in order is right
                 // rather than merely convenient.
-                out.push(format!("{}var {} = hash_seed()", pad, acc));
+                out.push(format!("{}var {} = {pre}.hash_seed()", pad, acc));
                 out.push(format!("{}for ({}, {}) in {} {{", pad, k, v, expr));
                 let kh = self.hash_of(key, &k, depth + 1, out);
                 let vh = self.hash_of(value, &v, depth + 1, out);
-                out.push(format!("{}    {} = hash_combine({}, {})", pad, acc, acc, kh));
-                out.push(format!("{}    {} = hash_combine({}, {})", pad, acc, acc, vh));
+                out.push(format!("{}    {} = {pre}.hash_combine({}, {})", pad, acc, acc, kh));
+                out.push(format!("{}    {} = {pre}.hash_combine({}, {})", pad, acc, acc, vh));
                 out.push(format!("{}}}", pad));
                 acc
             }
             Type::Tuple { elems, .. } => {
                 let acc = self.temp("h");
-                out.push(format!("{}var {} = hash_seed()", pad, acc));
+                out.push(format!("{}var {} = {pre}.hash_seed()", pad, acc));
                 for (i, e) in elems.iter().enumerate() {
                     let value = self.hash_of(e, &format!("{}.{}", expr, i), depth, out);
-                    out.push(format!("{}{} = hash_combine({}, {})", pad, acc, acc, value));
+                    out.push(format!("{}{} = {pre}.hash_combine({}, {})", pad, acc, acc, value));
                 }
                 acc
             }

@@ -1142,3 +1142,220 @@ fn exit_without_shutdown_is_a_failure() {
     let mut output = Vec::new();
     assert_eq!(crate::serve(&mut std::io::Cursor::new(input), &mut output), 1);
 }
+
+// ---- a directory module's files share one namespace ---------------------------
+
+/// The edits a rename answered with, by URI, as the lines they start on.
+fn edited_lines(result: &Json) -> std::collections::BTreeMap<String, Vec<u32>> {
+    let Some(Json::Object(changes)) = result.get("changes") else {
+        panic!("no changes in {:?}", result);
+    };
+    changes
+        .iter()
+        .map(|(uri, edits)| {
+            let Json::Array(edits) = edits else { panic!("edits are a list") };
+            let lines = edits
+                .iter()
+                .map(|e| e.path("range.start.line").and_then(|l| l.as_u32()).expect("a line"))
+                .collect();
+            (uri.clone(), lines)
+        })
+        .collect()
+}
+
+/// A private function or constant of a directory module is used from the
+/// module's other files, unqualified, and a rename edits every one of them.
+/// It edited the file it was asked in alone, and every sibling that used the
+/// name stopped compiling.
+#[test]
+fn a_rename_in_a_directory_module_edits_every_file_of_it() {
+    let p = Project::new("rename-directory");
+    let load_text = "fn helper() -> int {\n    return 40\n}\n\nlet BASE: int = 2\n";
+    let load = p.file("config/load.kite", load_text);
+    let schema = p.file(
+        "config/schema.kite",
+        "pub fn port() -> int {\n    return helper() * BASE\n}\n",
+    );
+    p.file("main.kite", "use config\n\nfn main() {\n    io.print(config.port())\n}\n");
+    let mut s = Server::new();
+    open(&mut s, &load, load_text);
+    // `helper`, with its sibling closed: named by its path.
+    let reply = s.handle("textDocument/rename", &rename_at(&load, 0, 4, "helper2"));
+    assert_eq!(reply.error, None);
+    let edits = edited_lines(&reply.result.expect("an answer"));
+    assert_eq!(edits.get(&load), Some(&vec![0]), "{:?}", edits);
+    assert_eq!(edits.get(&schema), Some(&vec![1]), "{:?}", edits);
+    assert_eq!(edits.len(), 2, "{:?}", edits);
+    // `BASE`, with the sibling open and holding a use the disk does not: the
+    // buffer is what is edited.
+    let unsaved = "pub fn port() -> int {\n    return helper() * BASE\n}\n\n\
+                   pub fn twice() -> int {\n    return BASE * 2\n}\n";
+    open(&mut s, &schema, unsaved);
+    let reply = s.handle("textDocument/rename", &rename_at(&load, 4, 5, "BASE2"));
+    assert_eq!(reply.error, None);
+    let edits = edited_lines(&reply.result.expect("an answer"));
+    assert_eq!(edits.get(&load), Some(&vec![4]), "{:?}", edits);
+    assert_eq!(edits.get(&schema), Some(&vec![1, 5]), "{:?}", edits);
+    // A name a sibling already declares is taken.
+    let reply = s.handle("textDocument/rename", &rename_at(&load, 0, 4, "twice"));
+    assert!(reply.error.expect("a refusal").contains("already bound"));
+}
+
+/// A sibling that cannot be read may use the name, so the rename is refused
+/// rather than made in the files that can be — and so is one that does not
+/// parse, or that declares the name too.
+#[test]
+fn a_rename_in_a_directory_module_refuses_what_it_cannot_reach() {
+    let p = Project::new("rename-directory-refused");
+    let load_text = "fn helper() -> int {\n    return 40\n}\n";
+    let load = p.file("config/load.kite", load_text);
+    p.file("config/schema.kite", "pub fn port() -> int {\n    return helper()\n}\n");
+    let latin1 = p.dir.join("config/latin1.kite");
+    std::fs::write(&latin1, b"// caf\xe9\n".as_slice()).expect("written");
+    let mut s = Server::new();
+    open(&mut s, &load, load_text);
+    for request in ["textDocument/rename", "textDocument/prepareRename"] {
+        let reply = s.handle(request, &rename_at(&load, 0, 4, "helper2"));
+        assert_eq!(reply.result, None, "{}", request);
+        let why = reply.error.expect("a refusal");
+        assert!(why.contains("`latin1.kite`") && why.contains("cannot be read"), "{}", why);
+    }
+    std::fs::remove_file(&latin1).expect("removed");
+
+    p.file("config/broken.kite", "fn other() -> int {\n    return helper(\n}\n");
+    let reply = s.handle("textDocument/rename", &rename_at(&load, 0, 4, "helper2"));
+    let why = reply.error.expect("a refusal");
+    assert!(why.contains("`broken.kite`") && why.contains("syntax errors"), "{}", why);
+    std::fs::remove_file(p.dir.join("config/broken.kite")).expect("removed");
+
+    p.file("config/again.kite", "fn helper() -> int {\n    return 1\n}\n");
+    let reply = s.handle("textDocument/rename", &rename_at(&load, 0, 4, "helper2"));
+    let why = reply.error.expect("a refusal");
+    assert!(why.contains("`again.kite`"), "{}", why);
+}
+
+/// A file alone in its directory is its own module, and a rename there is
+/// the file's alone, as it always was.
+#[test]
+fn a_rename_in_a_file_alone_in_its_directory_edits_that_file() {
+    let p = Project::new("rename-alone");
+    let text = "fn helper() -> int {\n    return 1\n}\n\nfn main() {\n    io.print(helper())\n}\n";
+    let main = p.file("main.kite", text);
+    let mut s = Server::new();
+    open(&mut s, &main, text);
+    let reply = s.handle("textDocument/rename", &rename_at(&main, 0, 4, "helper2"));
+    let edits = edited_lines(&reply.result.expect("an answer"));
+    assert_eq!(edits.get(&main), Some(&vec![0, 5]), "{:?}", edits);
+    assert_eq!(edits.len(), 1, "{:?}", edits);
+}
+
+// ---- what an edit elsewhere republishes --------------------------------------
+
+/// An open buffer of a path dependency is what its importers read, so an edit
+/// to it, and closing it unsaved, republish them. Only files at or above the
+/// edited one were republished, and a path dependency is neither, so the
+/// importer kept diagnostics `kitec check` did not have.
+#[test]
+fn editing_or_closing_a_dependency_buffer_republishes_its_importers() {
+    let p = Project::new("dependency-republish");
+    p.file("lib/md/kite.toml", "[package]\nname = \"md\"\nversion = \"1.0.0\"\n");
+    let md_text = "pub fn render() -> str {\n    return \"x\"\n}\n";
+    let md = p.file("lib/md/md.kite", md_text);
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nmd = { path = \"../lib/md\" }\n",
+    );
+    let main_text = "use md\n\nfn main() {\n    let s: str = md.render()\n    io.print(s)\n}\n";
+    let main = p.file("app/main.kite", main_text);
+    let mut s = Server::new();
+    let published = open(&mut s, &main, main_text);
+    assert_eq!(codes_for(&published, &main), Some(Vec::new()), "{:?}", published);
+    open(&mut s, &md, md_text);
+    let published = change(&mut s, &md, "pub fn render() -> int {\n    return 1\n}\n");
+    assert_eq!(codes_for(&published, &main), Some(vec!["E0200".to_string()]), "{:?}", published);
+    let reply = s.handle("textDocument/didClose", &at(&md, 0, 0));
+    let published: Vec<Json> = reply.notifications.into_iter().map(|(_, p)| p).collect();
+    assert_eq!(codes_for(&published, &md), Some(Vec::new()));
+    assert_eq!(codes_for(&published, &main), Some(Vec::new()), "{:?}", published);
+}
+
+/// A file not yet saved, in a directory not yet created, is part of that
+/// directory's module when the project is opened through a symbolic link.
+/// Its buffer was keyed by the linked spelling and the directory was asked
+/// for by the real one, so the module was `cannot find module`.
+#[cfg(unix)]
+#[test]
+fn an_unsaved_directory_module_is_found_through_a_linked_project() {
+    let p = Project::new("linked-unsaved");
+    let main_text = "use newdir\n\nfn main() {\n    io.print(newdir.v())\n}\n";
+    p.file("main.kite", main_text);
+    let link = std::env::temp_dir().join(format!("kite-lsp-linked-{}", std::process::id()));
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&p.dir, &link).expect("a link");
+    let through = |name: &str| uri_of_path(&link.join(name).to_string_lossy());
+    let mut s = Server::new();
+    open(&mut s, &through("newdir/new.kite"), "pub fn v() -> int {\n    return 1\n}\n");
+    let main = through("main.kite");
+    let published = open(&mut s, &main, main_text);
+    let _ = std::fs::remove_file(&link);
+    assert_eq!(codes_for(&published, &main), Some(Vec::new()), "{:?}", published);
+}
+
+// ---- a manifest that does not read -------------------------------------------
+
+/// A manifest that does not read is shown in the manifest, as `kitec check`
+/// reports it, and the `use` it broke says so. The editor showed only
+/// `cannot find module`: the manifest's own error is in a file that is never
+/// an open Kite document, and only the open file's diagnostics were sent.
+#[test]
+fn a_manifest_that_does_not_read_is_published_under_its_own_uri() {
+    let p = Project::new("manifest-e0405");
+    p.file("a/a.kite", "pub fn hello() -> str {\n    return \"a\"\n}\n");
+    let manifest = p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [dependencies]\na = { path = \"../a\" }\n",
+    );
+    let main_text = "use a\n\nfn main() {\n    io.print(a.hello())\n}\n";
+    let main = p.file("app/main.kite", main_text);
+    let mut s = Server::new();
+    let published = open(&mut s, &main, main_text);
+    assert_eq!(
+        codes_for(&published, &manifest),
+        Some(vec!["E0405".to_string()]),
+        "{:?}",
+        published
+    );
+    // At the line that did not read.
+    let entry = published
+        .iter()
+        .find(|p| p.get("uri").and_then(|u| u.as_str()) == Some(manifest.as_str()))
+        .expect("the manifest is published");
+    let Some(Json::Array(items)) = entry.get("diagnostics") else {
+        panic!("no diagnostics for the manifest");
+    };
+    assert_eq!(items[0].path("range.start.line").and_then(|l| l.as_u32()), Some(3));
+    // The `use` it broke names it.
+    let said = messages_for(&mut s, &main).join("\n");
+    assert!(said.contains("kite.toml") && said.contains("E0405"), "{}", said);
+    // Opened in the editor, the manifest is not compiled as Kite: its list is
+    // what the files reading it report, and its buffer is what they read.
+    let broken = std::fs::read_to_string(p.dir.join("app/kite.toml")).expect("read");
+    let published = open(&mut s, &manifest, &broken);
+    assert_eq!(codes_for(&published, &manifest), Some(vec!["E0405".to_string()]));
+    let good = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+                [dependencies]\na = { path = \"../a\" }\n";
+    let published = change(&mut s, &manifest, good);
+    assert_eq!(codes_for(&published, &main), Some(Vec::new()), "{:?}", published);
+    assert_eq!(codes_for(&published, &manifest), Some(Vec::new()), "{:?}", published);
+    // Closed unsaved, the disk's manifest is what is read again.
+    let reply = s.handle("textDocument/didClose", &at(&manifest, 0, 0));
+    let published: Vec<Json> = reply.notifications.into_iter().map(|(_, p)| p).collect();
+    assert_eq!(codes_for(&published, &main).map(|c| c.len()), Some(2), "{:?}", published);
+    assert_eq!(codes_for(&published, &manifest), Some(vec!["E0405".to_string()]));
+    // Mended on disk, the manifest's list is cleared.
+    p.file("app/kite.toml", good);
+    let published = change(&mut s, &main, main_text);
+    assert_eq!(codes_for(&published, &main), Some(Vec::new()), "{:?}", published);
+    assert_eq!(codes_for(&published, &manifest), Some(Vec::new()), "{:?}", published);
+}

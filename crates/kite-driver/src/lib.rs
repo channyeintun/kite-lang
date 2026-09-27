@@ -536,7 +536,7 @@ pub fn compile_provided(
     release: bool,
     provided: std::collections::HashMap<String, String>,
 ) -> Compilation {
-    let input = Input { provided, files: modules::Files::Disk, tests: false };
+    let input = Input { provided, files: modules::Files::Disk, tests: false, module: None };
     compile_reading(path, src, emit, release, input)
 }
 
@@ -548,6 +548,7 @@ pub fn compile_tests(path: impl AsRef<Path>, src: &str, release: bool) -> Compil
         provided: std::collections::HashMap::new(),
         files: modules::Files::Disk,
         tests: true,
+        module: None,
     };
     compile_reading(path, src, Emit::Check, release, input)
 }
@@ -564,9 +565,32 @@ pub fn compile_files(
     release: bool,
     files: modules::Files,
 ) -> Compilation {
-    let input = Input { provided: std::collections::HashMap::new(), files, tests: false };
+    let input =
+        Input { provided: std::collections::HashMap::new(), files, tests: false, module: None };
     compile_reading(path, src, emit, release, input)
 }
+
+/// Check the directory `dir` as the module a `use` naming it loads: every
+/// `.kite` file in it, as one namespace, read through `files`.
+///
+/// For an editor. It compiles the file it has open as a program of its own,
+/// so a file of a directory module sees none of its siblings, and none of
+/// their uses of what it declares — which is what a rename of a name the
+/// module's files share has to reach. There is no entry file: the result's
+/// sources are the module's files and what they import.
+pub fn check_module(dir: impl AsRef<Path>, files: modules::Files) -> Compilation {
+    let input = Input {
+        provided: std::collections::HashMap::new(),
+        files,
+        tests: false,
+        module: Some(dir.as_ref().to_path_buf()),
+    };
+    compile_reading(MODULE_ENTRY, "", Emit::Check, false, input)
+}
+
+/// The name [`check_module`] gives the empty entry it compiles the module
+/// under — one no file on disk can have.
+const MODULE_ENTRY: &str = "<module>";
 
 /// Where a compilation reads its modules from, and what it is for.
 struct Input {
@@ -575,6 +599,9 @@ struct Input {
     files: modules::Files,
     /// Whether to keep every `test_…` the program declares through pruning.
     tests: bool,
+    /// A directory to load as a module in place of what the entry imports;
+    /// see [`check_module`].
+    module: Option<std::path::PathBuf>,
 }
 
 /// What a compilation learned on the way besides its artefact.
@@ -655,8 +682,10 @@ fn run_passes(
     // nothing asked for, which is what keeps a `hello world` from carrying the
     // standard library.
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
-    let mut loader =
-        modules::Loader::load_from(&ast, dir, input.provided, input.files, sources, diags);
+    let mut loader = match input.module {
+        Some(module) => modules::Loader::load_module(&module, file, input.files, sources, diags),
+        None => modules::Loader::load_from(&ast, dir, input.provided, input.files, sources, diags),
+    };
     found.inputs.append(&mut loader.inputs);
 
     // Every item's module, aligned with the merged item list. The program's own
@@ -1286,10 +1315,21 @@ fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Inde
         let binding = &mut index.bindings[b];
         // Compared as the resolver compared it: after NFC (§2.1), so `café`
         // spelled with a combining accent is a use a rename must rewrite too.
-        let same = text == binding.name || text.nfc().eq(binding.name.chars());
-        if same && !resolved.pinned.contains(at) {
+        //
+        // And by its name within its own module as well as its qualified one:
+        // inside `config`, `config.helper` is written `helper`, and the only
+        // place an unqualified name can reach a module's declaration from is
+        // that module's own files. Those uses were in no binding at all, so
+        // nothing asking about a directory module found its files' uses of
+        // the names they share.
+        let own = binding.name.rsplit('.').next().unwrap_or(&binding.name);
+        let same = |name: &str| text == name || text.nfc().eq(name.chars());
+        if (same(&binding.name) || same(own)) && !resolved.pinned.contains(at) {
             binding.uses.push(*at);
-        } else if resolved.pinned.contains(at) || text.starts_with(&format!("{}.", binding.name)) {
+        } else if resolved.pinned.contains(at)
+            || text.starts_with(&format!("{}.", binding.name))
+            || text.starts_with(&format!("{}.", own))
+        {
             binding.mentions.push(*at);
         }
         // Anything else — an unqualified variant, a use whose written form

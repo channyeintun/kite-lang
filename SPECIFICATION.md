@@ -1896,11 +1896,15 @@ Two rules, both errors rather than a silent choice:
 
 - **The standard library's names are its own.** A non-`std` module may not take
   one (`E0403`). The reserved names are `buffer`, `canvas`, `crypto`, `dom`,
-  `errors`, `fmt`, `fs`, `html`, `http`, `js`, `json`, `math`, `prelude`,
-  `socket`, `sync`, `task`, `test`, `text`, `time`, `toml` and `window`. Full
-  paths keep `dep/crypto` and `std/crypto` apart on their own, but a *sibling*
-  `crypto` would still be spelled `crypto` in the file that imported it and
-  shadow the standard library there.
+  `draw`, `errors`, `fmt`, `fs`, `html`, `http`, `io`, `js`, `json`, `math`,
+  `prelude`, `ptr`, `socket`, `sync`, `task`, `test`, `text`, `time`, `toml`
+  and `window` — its modules, the modules its builtins are reached through,
+  and the prelude. Full paths keep `dep/crypto` and `std/crypto` apart on their
+  own, but a *sibling* `crypto` would still be spelled `crypto` in the file
+  that imported it and shadow the standard library there. The name after `as`
+  is a spelling too, and may not be a reserved name either unless it is the
+  `std` module's own: `use util as errors` would make `errors.new` the
+  standard library's and every other `errors.…` this module's.
 - **One file may not spell two modules alike** (`E0404`). `use utils` followed
   by `use dep/utils` is refused, because every `utils.…` above the second line
   would quietly change meaning. Give one of them an alias.

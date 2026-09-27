@@ -930,6 +930,58 @@ fn a_manifest_that_does_not_read_is_reported_at_its_line() {
     assert!(said.contains("E0405"), "{}", said);
     assert!(said.contains("kite.toml:4"), "points at the line: {}", said);
     assert!(said.contains("has no `edition`"), "{}", said);
+    // And the `use` it broke says so, where an editor showing only the
+    // file's own diagnostics shows it.
+    assert!(said.contains("kite.toml` did not read (E0405)"), "{}", said);
+}
+
+/// A directory module checked on its own, as an editor renaming a name its
+/// files share asks for it: every file's uses of a private name are that
+/// name's, and they are found although no file of the module was the entry.
+#[test]
+fn a_directory_module_checked_whole_finds_every_files_uses() {
+    let p = Project::new("check-module");
+    let load = p.file(
+        "config/load.kite",
+        "use util\n\nfn helper() -> int {\n  return util.base()\n}\n",
+    );
+    let schema = p.file(
+        "config/schema.kite",
+        "pub fn port() -> int {\n  return helper() + helper()\n}\n",
+    );
+    p.file("config/util.kite", "pub fn base() -> int {\n  return 40\n}\n");
+    let c = kite_driver::check_module(p.dir.join("config"), kite_driver::modules::Files::Disk);
+    assert!(!c.failed(), "{}", c.render_diagnostics());
+    let helper = c
+        .index
+        .bindings
+        .iter()
+        .find(|b| b.name.ends_with(".helper"))
+        .expect("helper is a binding");
+    assert_eq!(c.sources.file(helper.declared_at.file).name, load);
+    let in_schema = helper.uses.iter().filter(|s| c.sources.file(s.file).name == schema).count();
+    assert_eq!(in_schema, 2, "{:?}", helper.uses);
+}
+
+/// A file not yet saved, in a directory not yet created, under a linked
+/// directory: the loader asks for the directory by where it really is, and
+/// the buffer is keyed the same way. The buffer was keyed by the linked
+/// spelling, the two never met, and the module was `cannot find module`.
+#[cfg(unix)]
+#[test]
+fn an_unsaved_directory_under_a_linked_directory_is_a_module() {
+    let p = Project::new("linked-unsaved");
+    let link = std::env::temp_dir().join(format!("kite-mod-linked-{}", std::process::id()));
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&p.dir, &link).expect("a link");
+    let files = kite_driver::modules::Files::edited(vec![(
+        link.join("fresh/new.kite"),
+        "pub fn v() -> int {\n  return 3\n}\n".to_string(),
+    )]);
+    let src = "use fresh\n\nfn main() {\n  io.print(fresh.v())\n}\n";
+    let c = kite_driver::compile_files(link.join("main.kite"), src, Emit::Check, false, files);
+    let _ = std::fs::remove_file(&link);
+    assert!(!c.failed(), "{}", c.render_diagnostics());
 }
 
 /// `prelude` is reserved like the standard library's names. A module of that
@@ -943,6 +995,48 @@ fn a_module_called_prelude_is_refused() {
     let main = p.file("main.kite", "use prelude\n\nfn main() {\n  io.print(sneaky())\n}\n");
     let said = p.run(&main).expect_err("reserved");
     assert!(said.contains("E0403"), "{}", said);
+}
+
+/// A module spelled like one the standard library puts in every file is
+/// refused. Only a path's last segment was checked, never the name after
+/// `as`, so `use util as errors` was accepted and one spelling reached two
+/// modules: `errors.new` stayed the standard library's, `errors.only` reached
+/// `util`, and `use util as io` left `io.print` the builtin with no word said.
+#[test]
+fn a_module_spelled_like_an_always_available_one_is_refused() {
+    let p = Project::new("reserved-spelling");
+    p.file(
+        "util.kite",
+        "pub fn new(s: str) -> str {\n  return \"mine \" + s\n}\n\n\
+         pub fn print(s: str) {\n}\n",
+    );
+    for (spelling, body) in [
+        ("errors", "io.print(errors.new(\"x\").message())"),
+        ("io", "io.print(\"which print?\")"),
+        ("prelude", "io.print(prelude.new(\"x\"))"),
+        ("json", "io.print(json.new(\"x\"))"),
+    ] {
+        let main = p.file(
+            &format!("main_{}.kite", spelling),
+            &format!("use util as {}\n\nfn main() {{\n  {}\n}}\n", spelling, body),
+        );
+        let said = p.run(&main).expect_err("reserved");
+        assert!(said.contains("E0403"), "{}: {}", spelling, said);
+        assert!(said.contains(&format!("`{}` is the name of", spelling)), "{}", said);
+    }
+    // And a sibling named after one, which the last segment was already
+    // checked for — `io` is one now too.
+    p.file("io.kite", "pub fn print(s: str) {\n}\n");
+    let main = p.file("main_io_file.kite", "use io\n\nfn main() {\n  io.print(\"x\")\n}\n");
+    assert!(p.run(&main).expect_err("reserved").contains("E0403"));
+    // A `std` module spelled as itself is its own spelling, and any other
+    // name is free.
+    let main = p.file(
+        "main_ok.kite",
+        "use std/errors as errors\nuse std/json as json\nuse util as mine\n\n\
+         fn main() {\n  io.print(json.stringify(json.Json.Null))\n  io.print(mine.new(\"x\"))\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "null\nmine x\n");
 }
 
 /// A standard module is `std/<name>`, exactly. Only the last segment used to
@@ -1076,6 +1170,31 @@ fn a_derive_binds_no_name_its_module_spells_a_module_by() {
             spelling
         );
     }
+}
+
+/// A derive inside a module reaches the prelude's helpers, not the module's
+/// own functions of the same names. It called them unqualified, and a bare
+/// name finds the module's own first.
+#[test]
+fn a_derive_in_a_module_reaches_the_prelude_past_its_own_helpers() {
+    let p = Project::new("derive-prelude-helpers");
+    p.file(
+        "shapes/shapes.kite",
+        "@derive(Debug, Hash)\npub struct P {\n  pub name: str\n  pub n: int\n}\n",
+    );
+    p.file(
+        "shapes/helpers.kite",
+        "fn debug_str(text: str) -> str {\n  return text\n}\n\n\
+         fn hash_int(value: int) -> int {\n  return 0\n}\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use shapes\n\nfn main() {\n\
+         \x20 io.print(shapes.P{ name: \"q\", n: 1 }.debug())\n\
+         \x20 io.print(shapes.P{ name: \"q\", n: 1 }.hash() == shapes.P{ name: \"q\", n: 2 }.hash())\n\
+         }\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "P{ name: \"q\", n: 1 }\nfalse\n");
 }
 
 // ---- a package the program never declared ------------------------------------

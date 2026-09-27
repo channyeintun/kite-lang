@@ -32,8 +32,8 @@ this directory into `~/.vscode/extensions/kite-lang` and reload the window.
 
 | Request | Answer |
 |---|---|
-| `textDocument/didOpen`, `didChange`, `didSave` | diagnostics for that file, and for the open files that import it |
-| `textDocument/didClose` | clears that file's diagnostics |
+| `textDocument/didOpen`, `didChange`, `didSave` | diagnostics for that file, for the open files that import it — a path dependency's importers included — and for a `kite.toml` that does not read |
+| `textDocument/didClose` | clears that file's diagnostics, and republishes the files that read its buffer |
 | `textDocument/hover` | the declaration a name resolves to |
 | `textDocument/definition` | where it was declared, in this file or one of the program's own modules |
 | `textDocument/references` | every place in this file the name is written |
@@ -55,13 +55,18 @@ A rename starts only when every place the name is written is one the edit
 reaches, and says why when it is not: a `pub` name is used by other files, a
 type is written in annotations the binding table does not record, a method's
 calls need the receiver's type, and a file that does not parse has code in it
-that was never resolved. A new name is compared as the compiler compares
-identifiers — after NFC — so `café` typed with a combining accent is the
-`café` already there.
+that was never resolved. A private function or constant declared in a file
+that shares its directory with other `.kite` files may be used from all of
+them — a directory is one module — so the rename edits every one of them,
+open or not, and is refused if one cannot be read or does not parse. A new
+name is compared as the compiler compares identifiers — after NFC — so `café`
+typed with a combining accent is the `café` already there.
 
 Diagnostics pointing into the standard library are not published: they belong
 to a file the user does not have open, and showing them against a line they do
-have open would be a lie about where the problem is.
+have open would be a lie about where the problem is. A `kite.toml` that does not
+read is the exception: its error is published under the manifest's own URI, as
+`kitec check` reports it there, and the `use` it broke names it.
 
 ## Highlighting without the server
 
