@@ -501,6 +501,23 @@ fn multiline_checks() -> [error] {
     }
     out.push(test.equal_str(text_of(crlf, "a"), "hello", "the CRLF after the opener is trimmed"))
     out.push(test.equal_str(text_of(crlf, "b"), "world", "in a literal string too"))
+    // A line-ending backslash folds away whitespace and line breaks, and
+    // nothing else: a `#` after it is the string's, not a comment. Skipping it
+    // as one lost the rest of the line, so the first of these read as `x y`
+    // and the second, whose closing quotes that line held, was refused.
+    let (hash, hash_err) = toml.parse("a = \"\"\"x \\\n  # kept\n  y\"\"\"\nb = \"\"\"x \\\n  # kept\"\"\"\n")
+    out.push(test.ok(hash_err, "a # after a line-ending backslash parses"))
+    if hash_err != nil {
+        return out
+    }
+    out.push(test.equal_str(text_of(hash, "a"), "x # kept\n  y", "and is kept, with the lines after it"))
+    out.push(test.equal_str(text_of(hash, "b"), "x # kept", "and with the closing quotes on its line"))
+    let (blank, blank_err) = toml.parse("a = \"\"\"x \\\r\n\r\n  \t\n  # kept\"\"\"\r\n")
+    out.push(test.ok(blank_err, "a fold across blank lines and CRLFs parses"))
+    if blank_err != nil {
+        return out
+    }
+    out.push(test.equal_str(text_of(blank, "a"), "x # kept", "and folds them all away"))
     return out
 }
 

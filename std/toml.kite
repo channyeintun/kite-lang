@@ -355,7 +355,7 @@ fn parse_multiline(input: str, at: int, closing: str, escapes: bool) -> (Text, e
             // source without wrapping in the value.
             let peek = i + 1
             if peek < input.len() && is_line_fold(input, peek) {
-                i = skip_blank(input, peek)
+                i = skip_folded(input, peek)
                 continue
             }
             let (piece, err) = parse_escape(input, i)
@@ -393,6 +393,30 @@ fn is_line_fold(input: str, at: int) -> bool {
         }
         i = i + 1
     }
+}
+
+/// Past the whitespace and line breaks a line-ending backslash folds away, to
+/// the next character that is part of the string.
+///
+/// Not `skip_blank`, which is for the space between values and so also skips
+/// a comment. Inside a string a `#` is content: `"""x \` then `  # kept` on the
+/// next line is `x # kept`. Skipping it as a comment dropped the text, and
+/// took a closing `"""` on the same line with it, so a valid document was
+/// refused as an unterminated string. A lone carriage return stops the skip,
+/// and the string itself then refuses it.
+fn skip_folded(input: str, at: int) -> int {
+    var i = at
+    for i < input.len() {
+        let c = input.slice(i, i + 1)
+        if c == " " || c == "\t" || c == "\n" {
+            i = i + 1
+        } else if is_crlf(input, i) {
+            i = i + 2
+        } else {
+            return i
+        }
+    }
+    return i
 }
 
 fn parse_escape(input: str, at: int) -> (Text, error) {
