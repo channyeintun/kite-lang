@@ -198,16 +198,20 @@ export default function kite(options = {}) {
   /// `api.js` that came back — while Vite itself refused `/@fs/` for the same
   /// file. The entry stub below imports its program by absolute path, and is
   /// a module.
+  ///
+  /// What it finds is spelled with forward slashes, as Vite spells an id: on
+  /// Windows `join` answers with backslashes, and a module whose id differs
+  /// from the one Vite records for the same file is a second module.
   async function locate(source, importer) {
     const exists = (path) => stat(path).then(() => true, () => false);
     if (source.startsWith("/") || isAbsolute(source)) {
       const fromRoot = join(root, source);
-      if (within(root, fromRoot) && (await exists(fromRoot))) return fromRoot;
-      if (fromModule(importer) && isAbsolute(source) && (await exists(source))) return source;
+      if (within(root, fromRoot) && (await exists(fromRoot))) return slash(fromRoot);
+      if (fromModule(importer) && isAbsolute(source) && (await exists(source))) return slash(source);
       return null;
     }
     const path = importer ? resolve(dirname(importer), source) : resolve(root, source);
-    return (await exists(path)) ? path : null;
+    return (await exists(path)) ? slash(path) : null;
   }
 
   /// Whether an import came from a module of the project's, rather than from
