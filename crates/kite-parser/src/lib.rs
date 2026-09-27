@@ -345,6 +345,12 @@ const MAX_DEPTH: u32 = 256;
 /// debug build with room to spare — and nothing the release compiler managed
 /// before there was a ceiling is refused.
 ///
+/// Every pass has to be in proportion to a chain this long, not only deep
+/// enough for it. Pruning after specialisation copied each block once for
+/// every block around it, and an `else if` chain is one block inside the
+/// next: 4,000 links took 6.5 GB to check, and 8,000 were killed for memory.
+/// A debug `kitec` now checks 8,000 in under half a second and 100 MB.
+///
 /// The compiler built for WebAssembly cannot choose its stack: a wasm call
 /// runs on the JavaScript engine's, about 1 MiB in Node and in a browser. A
 /// chain of 1,700 method calls, of 1,900 `+`, or 1,500 nested brackets ran it
