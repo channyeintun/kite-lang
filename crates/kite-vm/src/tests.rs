@@ -1601,6 +1601,77 @@ fn main() {
     assert_eq!(lines(src), ["true", "false", "true"]);
 }
 
+/// Every allocation this test binary makes, counted per thread, so a test can
+/// ask how many a piece of code made without a neighbour's counting too.
+struct Counting;
+
+thread_local! {
+    static ALLOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+// SAFETY: every call is passed straight to the system allocator; the count is
+// a `Cell` in a `const`-initialised thread local, which neither allocates nor
+// registers a destructor, so counting cannot recurse into this allocator.
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        ALLOCATIONS.with(|n| n.set(n.get() + 1));
+        std::alloc::System.alloc(layout)
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        std::alloc::System.dealloc(ptr, layout)
+    }
+}
+
+#[global_allocator]
+static COUNTING: Counting = Counting;
+
+fn allocations_in(f: impl FnOnce() -> bool) -> (bool, usize) {
+    let before = ALLOCATIONS.with(|n| n.get());
+    let answer = f();
+    (answer, ALLOCATIONS.with(|n| n.get()) - before)
+}
+
+/// `==` walks a worklist only once it has an aggregate to descend into. A
+/// map is a scan comparing its key with every entry's, and the worklist it
+/// once made for each pair of `int`s or `str`s there made map lookups six
+/// times slower — so a flat value, and an aggregate holding only flat values,
+/// compares without allocating at all.
+#[test]
+fn equality_of_flat_values_allocates_nothing() {
+    let s = |t: &str| Value::Str(Rc::from(t));
+    let point = |x: i64, name: &str| {
+        Value::Struct(Rc::new(StructValue {
+            struct_id: 0,
+            fields: RefCell::new(vec![Value::Int(x), Value::Float(0.5), s(name), Value::Nil]),
+        }))
+    };
+    let cases = [
+        (Value::Int(7), Value::Int(7), true),
+        (Value::Int(7), Value::Int(8), false),
+        (Value::Float(f64::NAN), Value::Float(f64::NAN), false),
+        (s("key 1234"), s("key 1234"), true),
+        (s("key 1234"), s("key 1235"), false),
+        (Value::Nil, Value::Nil, true),
+        (Value::Int(1), Value::Nil, false),
+        (point(1, "a"), point(1, "a"), true),
+        (point(1, "a"), point(1, "b"), false),
+        (
+            Value::Slice(Rc::new(vec![Value::Int(1), s("two")])),
+            Value::Slice(Rc::new(vec![Value::Int(1), s("two")])),
+            true,
+        ),
+    ];
+    for (a, b, want) in &cases {
+        let (answer, made) = allocations_in(|| a == b);
+        assert_eq!(answer, *want, "{:?} == {:?}", a, b);
+        assert_eq!(made, 0, "{:?} == {:?} allocated {} times", a, b, made);
+    }
+    // One level of nesting is where the worklist starts, and it still answers.
+    let nested = |x| Value::Tuple(Rc::new(vec![point(x, "a"), Value::Int(3)]));
+    assert!(nested(1) == nested(1));
+    assert!(nested(1) != nested(2));
+}
+
 /// Frames live on the heap, so depth is bounded by memory rather than by the
 /// host's stack. The limit was 2,048, and a recursion 3,000 deep trapped here
 /// and nowhere else.

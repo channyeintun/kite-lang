@@ -1322,21 +1322,33 @@ unsafe fn insert_staged(p: *mut u8, mut len: usize, pairs: usize, key_kind: u8) 
     for e in 0..pairs {
         let k = *stage_slot(2 * e);
         let v = *stage_slot(2 * e + 1);
-        let mut replaced = false;
-        for i in 0..len {
-            if value_eq(*slot(p, 2 * i), k, key_kind) {
-                *slot(p, 2 * i + 1) = v;
-                replaced = true;
-                break;
+        match find_key(p, len, k, key_kind) {
+            Some(i) => *slot(p, 2 * i + 1) = v,
+            None => {
+                *slot(p, 2 * len) = k;
+                *slot(p, 2 * len + 1) = v;
+                len += 1;
             }
-        }
-        if !replaced {
-            *slot(p, 2 * len) = k;
-            *slot(p, 2 * len + 1) = v;
-            len += 1;
         }
     }
     len
+}
+
+/// The position of the entry among the first `len` at `p` whose key is
+/// `key`, scanning in order.
+///
+/// Every map operation is this scan, so a key that is a number is compared
+/// as one here, in a loop the compiler can see through, rather than through
+/// a call to [`value_eq`] per entry that asks the key's kind each time.
+unsafe fn find_key(p: *const u8, len: usize, key: u64, key_kind: u8) -> Option<usize> {
+    match key_kind {
+        kind::REF => (0..len).find(|&i| value_eq(*slot(p, 2 * i), key, kind::REF)),
+        kind::FLOAT => {
+            let key = f64::from_bits(key);
+            (0..len).find(|&i| f64::from_bits(*slot(p, 2 * i)) == key)
+        }
+        _ => (0..len).find(|&i| *slot(p, 2 * i) == key),
+    }
 }
 
 #[no_mangle]
@@ -1666,17 +1678,17 @@ pub extern "C" fn kite_rt_map_get(m: u64, key: u64, key_kind: u64, wrap_kind: i6
     unsafe {
         let p = m as *mut u8;
         let len = obj_word1(p) as usize;
-        for i in 0..len {
-            if value_eq(*slot(p, 2 * i), key, key_kind as u8) {
+        match find_key(p, len, key, key_kind as u8) {
+            Some(i) => {
                 let v = *slot(p, 2 * i + 1);
-                return if wrap_kind < 0 {
+                if wrap_kind < 0 {
                     v
                 } else {
                     kite_rt_box_new(v, wrap_kind as u64)
-                };
+                }
             }
+            None => 0,
         }
-        0
     }
 }
 
@@ -1705,11 +1717,9 @@ pub extern "C" fn kite_rt_map_set(m: u64, key: u64, key_kind: u64, value: u64) -
         let p = alloc(HEADER + 16 * (len + 1));
         unroot(n);
         std::ptr::copy_nonoverlapping(m as *const u8, p, HEADER + 16 * len);
-        for i in 0..len {
-            if value_eq(*slot(p, 2 * i), key, key_kind as u8) {
-                *slot(p, 2 * i + 1) = value;
-                return p as u64;
-            }
+        if let Some(i) = find_key(p, len, key, key_kind as u8) {
+            *slot(p, 2 * i + 1) = value;
+            return p as u64;
         }
         *(p as *mut u64).add(1) = (len + 1) as u64;
         *slot(p, 2 * len) = key;
@@ -1728,16 +1738,9 @@ pub extern "C" fn kite_rt_map_remove(m: u64, key: u64, key_kind: u64) -> u64 {
     let mut m = m;
     unsafe {
         let len = obj_word1(m as *const u8) as usize;
-        let mut found = len;
-        for i in 0..len {
-            if value_eq(*slot(m as *const u8, 2 * i), key, key_kind as u8) {
-                found = i;
-                break;
-            }
-        }
-        if found == len {
+        let Some(found) = find_key(m as *const u8, len, key, key_kind as u8) else {
             return m;
-        }
+        };
         root(&mut m);
         let p = alloc(HEADER + 16 * (len - 1));
         unroot(1);
@@ -2082,20 +2085,67 @@ fn render_ref(p: u64, out: &mut String) {
 /// value can be as deep as the program makes it, and comparing two lists of a
 /// million cells recursed once per cell until the process aborted. The VM
 /// walks its values the same way, for the same reason.
+///
+/// The worklist is made only for two aggregates, though. A map is a scan that
+/// compares its key with each entry's, so this runs once per entry on every
+/// `get`, `set` and `remove`, and allocating a worklist for a `str` there —
+/// or copying a struct's shape to compare two of them — cost map-heavy
+/// programs several times their time. A scalar, a string, `nil`, a closure
+/// and a box of a scalar answer without one.
+#[inline]
 fn value_eq(a: u64, b: u64, k: u8) -> bool {
-    // A scalar needs no worklist, and a map keyed by numbers asks this once
-    // per entry on every lookup — or per pair of entries, building a literal.
-    match k {
-        kind::FLOAT => return f64::from_bits(a) == f64::from_bits(b),
-        kind::REF => {}
-        _ => return a == b,
+    match shallow_eq(a, b, k) {
+        Some(same) => same,
+        None => deep_eq(a, b),
     }
-    let mut work = vec![(a, b, k)];
+}
+
+/// The answer for a pair that needs no worklist, or `None` for two
+/// aggregates of one kind.
+#[inline]
+fn shallow_eq(a: u64, b: u64, k: u8) -> Option<bool> {
+    match k {
+        kind::FLOAT => return Some(f64::from_bits(a) == f64::from_bits(b)),
+        kind::REF => {}
+        _ => return Some(a == b),
+    }
+    if a == 0 || b == 0 {
+        return Some(a == b);
+    }
+    unsafe {
+        let (pa, pb) = (a as *const u8, b as *const u8);
+        let ka = obj_kind(pa);
+        if ka != obj_kind(pb) {
+            return Some(false);
+        }
+        match ka {
+            obj::STR => Some(str_bytes(a) == str_bytes(b)),
+            // An optional's box holding a scalar: the payload's comparison,
+            // which is one more step and no more.
+            obj::BOX if obj_aux(pa) as u8 != kind::REF => {
+                shallow_eq(*slot(pa, 0), *slot(pb, 0), obj_aux(pa) as u8)
+            }
+            // The VM's equality has no closure arm, so closures — even the
+            // same closure — compare unequal.
+            obj::CLOSURE => Some(false),
+            _ => None,
+        }
+    }
+}
+
+/// Two aggregates, compared without recursing. The worklist starts empty,
+/// which allocates nothing, and holds only pairs of aggregates: a struct of
+/// scalars, or a slice of them, compares without allocating at all.
+#[inline(never)]
+fn deep_eq(a: u64, b: u64) -> bool {
+    let mut work: Vec<(u64, u64, u8)> = Vec::new();
+    if !ref_eq(a, b, &mut work) {
+        return false;
+    }
     while let Some((a, b, k)) = work.pop() {
-        let same = match k {
-            kind::FLOAT => f64::from_bits(a) == f64::from_bits(b),
-            kind::REF => ref_eq(a, b, &mut work),
-            _ => a == b,
+        let same = match shallow_eq(a, b, k) {
+            Some(same) => same,
+            None => ref_eq(a, b, &mut work),
         };
         if !same {
             return false;
@@ -2104,79 +2154,65 @@ fn value_eq(a: u64, b: u64, k: u8) -> bool {
     true
 }
 
-/// Compare two references one level deep, queueing their contents.
-fn ref_eq(a: u64, b: u64, work: &mut Vec<(u64, u64, u8)>) -> bool {
-    if a == 0 || b == 0 {
-        return a == b;
+/// Compare two children, answering now if [`shallow_eq`] can and queueing
+/// them if they are aggregates.
+fn pair(work: &mut Vec<(u64, u64, u8)>, a: u64, b: u64, k: u8) -> bool {
+    match shallow_eq(a, b, k) {
+        Some(same) => same,
+        None => {
+            work.push((a, b, k));
+            true
+        }
     }
+}
+
+/// Compare two aggregates of one kind one level deep, queueing the children
+/// that are aggregates themselves.
+fn ref_eq(a: u64, b: u64, work: &mut Vec<(u64, u64, u8)>) -> bool {
     unsafe {
         let (pa, pb) = (a as *const u8, b as *const u8);
-        let (ka, kb) = (obj_kind(pa), obj_kind(pb));
-        if ka != kb {
-            return false;
-        }
-        let mut each = |kinds: &[u8]| {
-            for (i, k) in kinds.iter().enumerate() {
-                work.push((*slot(pa, i), *slot(pb, i), *k));
-            }
-            true
+        let each = |work: &mut Vec<(u64, u64, u8)>, kinds: &[u8]| {
+            kinds
+                .iter()
+                .enumerate()
+                .all(|(i, k)| pair(work, *slot(pa, i), *slot(pb, i), *k))
         };
-        match ka {
-            obj::STR => str_bytes(a) == str_bytes(b),
+        let shapes = &rt().shapes;
+        match obj_kind(pa) {
             obj::STRUCT => {
-                obj_aux(pa) == obj_aux(pb)
-                    && each(&rt().shapes.structs[obj_aux(pa) as usize].clone())
+                obj_aux(pa) == obj_aux(pb) && each(work, &shapes.structs[obj_aux(pa) as usize])
             }
             obj::ENUM => {
                 if obj_aux(pa) != obj_aux(pb) || obj_word1(pa) != obj_word1(pb) {
                     return false;
                 }
                 let variant = (obj_word1(pa) & 0xFFFF_FFFF) as usize;
-                each(&rt().shapes.enums[obj_aux(pa) as usize][variant].clone())
+                each(work, &shapes.enums[obj_aux(pa) as usize][variant])
             }
-            obj::TUPLE => each(&rt().shapes.tuples[obj_aux(pa) as usize].clone()),
+            obj::TUPLE => each(work, &shapes.tuples[obj_aux(pa) as usize]),
             // By length: two slices of equal contents are equal whatever room
             // each has spare.
             obj::SLICE => {
-                let (la, lb) = (slice_len(pa), slice_len(pb));
-                if la != lb {
-                    return false;
-                }
-                for i in 0..la {
-                    work.push((*slot(pa, i), *slot(pb, i), obj_aux(pa) as u8));
-                }
-                true
+                let (la, k) = (slice_len(pa), obj_aux(pa) as u8);
+                la == slice_len(pb) && (0..la).all(|i| pair(work, *slot(pa, i), *slot(pb, i), k))
             }
             obj::MAP => {
                 // In order: the VM compares the entry vectors directly, so two
                 // maps built in different orders are different values.
                 let (la, lb) = (obj_word1(pa) as usize, obj_word1(pb) as usize);
                 let (kk, vk) = ((obj_aux(pa) & 0xFF) as u8, ((obj_aux(pa) >> 8) & 0xFF) as u8);
-                if la != lb {
-                    return false;
-                }
-                for i in 0..la {
-                    work.push((*slot(pa, 2 * i), *slot(pb, 2 * i), kk));
-                    work.push((*slot(pa, 2 * i + 1), *slot(pb, 2 * i + 1), vk));
-                }
-                true
+                la == lb
+                    && (0..la).all(|i| {
+                        pair(work, *slot(pa, 2 * i), *slot(pb, 2 * i), kk)
+                            && pair(work, *slot(pa, 2 * i + 1), *slot(pb, 2 * i + 1), vk)
+                    })
             }
             obj::PAIR => {
-                work.push((*slot(pa, 0), *slot(pb, 0), obj_aux(pa) as u8));
-                work.push((*slot(pa, 1), *slot(pb, 1), kind::REF));
-                true
+                pair(work, *slot(pa, 0), *slot(pb, 0), obj_aux(pa) as u8)
+                    && pair(work, *slot(pa, 1), *slot(pb, 1), kind::REF)
             }
-            obj::ERR => {
-                work.push((*slot(pa, 0), *slot(pb, 0), kind::REF));
-                true
-            }
-            obj::BOX => {
-                work.push((*slot(pa, 0), *slot(pb, 0), obj_aux(pa) as u8));
-                true
-            }
-            // The VM's equality has no closure arm, so closures — even the
-            // same closure — compare unequal.
-            obj::CLOSURE => false,
+            obj::ERR => pair(work, *slot(pa, 0), *slot(pb, 0), kind::REF),
+            obj::BOX => pair(work, *slot(pa, 0), *slot(pb, 0), obj_aux(pa) as u8),
             other => unreachable!("comparing objects of kind {}", other),
         }
     }
@@ -3234,5 +3270,87 @@ mod tests {
         assert_eq!(text(host_call("fs.remove_path", std::slice::from_ref(&file))), "\u{2}");
         assert_eq!(int(host_call("fs.path_kind", std::slice::from_ref(&file))), 0);
         assert!(text(host_call("fs.remove_path", &[file])).starts_with(HOST_FAILURE));
+    }
+
+    /// Every allocation this test binary makes, counted per thread, so a
+    /// test can ask how many a piece of code made without a neighbour's
+    /// counting too.
+    struct Counting;
+
+    thread_local! {
+        static ALLOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    // SAFETY: every call is passed straight to the system allocator; the
+    // count is a `Cell` in a `const`-initialised thread local, which neither
+    // allocates nor registers a destructor, so counting cannot recurse into
+    // this allocator.
+    unsafe impl std::alloc::GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            ALLOCATIONS.with(|n| n.set(n.get() + 1));
+            std::alloc::System.alloc(layout)
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            std::alloc::System.dealloc(ptr, layout)
+        }
+    }
+
+    #[global_allocator]
+    static COUNTING: Counting = Counting;
+
+    /// `==` walks a worklist only once it has an aggregate to descend into.
+    /// A map is a scan comparing its key with every entry's, and the worklist
+    /// made for each pair of `str`s there — and the copy of a struct's shape
+    /// made to compare two structs — made map-heavy programs several times
+    /// slower. A flat value, and an aggregate holding only flat values,
+    /// compares without allocating at all.
+    #[test]
+    fn equality_of_flat_values_allocates_nothing() {
+        let _run = run_lock();
+        kite_rt_startup();
+        let kinds = [kind::INT, kind::FLOAT, kind::REF];
+        // SAFETY: `kinds` is three readable bytes.
+        unsafe { kite_rt_register_struct_shape(0, kinds.as_ptr(), 3) };
+        let point = |x: i64, name: &str| {
+            let name = make_str(name.as_bytes());
+            unsafe {
+                *stage_slot(0) = x as u64;
+                *stage_slot(1) = 0.5f64.to_bits();
+                *stage_slot(2) = name;
+            }
+            kite_rt_struct_new(0, 3)
+        };
+        let ints = |xs: &[i64]| {
+            for (i, x) in xs.iter().enumerate() {
+                unsafe { *stage_slot(i) = *x as u64 };
+            }
+            kite_rt_slice_new(kind::INT as u64, xs.len() as u64, xs.len() as u64)
+        };
+        let boxed = |x: u64| kite_rt_box_new(x, kind::INT as u64);
+        let cases = [
+            (make_str(b"key 1234"), make_str(b"key 1234"), true),
+            (make_str(b"key 1234"), make_str(b"key 1235"), false),
+            (make_str(b"key"), 0, false),
+            (boxed(7), boxed(7), true),
+            (boxed(7), boxed(8), false),
+            (point(1, "a"), point(1, "a"), true),
+            (point(1, "a"), point(1, "b"), false),
+            (point(1, "a"), point(2, "a"), false),
+            (ints(&[1, 2, 3]), ints(&[1, 2, 3]), true),
+            (ints(&[1, 2, 3]), ints(&[1, 2]), false),
+        ];
+        let mut failures = Vec::new();
+        for (i, (a, b, want)) in cases.iter().enumerate() {
+            let before = ALLOCATIONS.with(|n| n.get());
+            let answer = value_eq(*a, *b, kind::REF);
+            let made = ALLOCATIONS.with(|n| n.get()) - before;
+            if answer != *want || made != 0 {
+                failures.push(format!("case {}: answered {}, allocated {} times", i, answer, made));
+            }
+        }
+        let nan = f64::NAN.to_bits();
+        assert!(value_eq(7, 7, kind::INT) && !value_eq(nan, nan, kind::FLOAT));
+        finish_run();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

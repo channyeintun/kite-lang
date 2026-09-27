@@ -211,69 +211,106 @@ impl Drop for ErrorValue {
 /// their fields are. Reference identity is `ptr.same`, not `==`.
 ///
 /// Walked with a worklist of pairs still to compare, for the reason
-/// [`drop_iteratively`] gives. Both sides of each pair are cloned onto it,
-/// which for an aggregate is a reference count and nothing more.
+/// [`drop_iteratively`] gives — but only once there is an aggregate to
+/// descend into. A map is a scan comparing its key with each entry's, so
+/// `==` on two `int`s or two `str`s is what every lookup runs per entry; a
+/// worklist made and dropped for each of those made map-heavy programs six
+/// times slower. Scalars answer on the spot, at the top and wherever they
+/// appear as fields, and the worklist starts empty, which allocates nothing,
+/// so a struct of scalars compares without allocating either.
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
-        let mut work: Vec<(Value, Value)> = vec![(self.clone(), other.clone())];
-        while let Some((a, b)) = work.pop() {
-            let same = match (&a, &b) {
-                (Value::Unit, Value::Unit) => true,
-                (Value::Int(a), Value::Int(b)) => a == b,
-                (Value::Float(a), Value::Float(b)) => a == b,
-                (Value::Bool(a), Value::Bool(b)) => a == b,
-                (Value::Str(a), Value::Str(b)) => a == b,
-                (Value::Struct(a), Value::Struct(b)) => {
-                    let (fa, fb) = (a.fields.borrow(), b.fields.borrow());
-                    a.struct_id == b.struct_id && pairs(&mut work, &fa, &fb)
-                }
-                (Value::Enum(a), Value::Enum(b)) => {
-                    a.enum_id == b.enum_id
-                        && a.variant == b.variant
-                        && pairs(&mut work, &a.fields, &b.fields)
-                }
-                (Value::Slice(a), Value::Slice(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
-                    pairs(&mut work, a, b)
-                }
-                // In insertion order, which is part of what a map is.
-                (Value::Map(a), Value::Map(b)) => {
-                    if a.len() == b.len() {
-                        for ((ka, va), (kb, vb)) in a.iter().zip(b.iter()) {
-                            work.push((ka.clone(), kb.clone()));
-                            work.push((va.clone(), vb.clone()));
-                        }
-                    }
-                    a.len() == b.len()
-                }
-                (Value::Pair(a), Value::Pair(b)) => {
-                    work.push((a.0.clone(), b.0.clone()));
-                    work.push((a.1.clone(), b.1.clone()));
-                    true
-                }
-                // Two errors are equal when they say the same thing. What they
-                // carry is provenance rather than identity: a caller comparing
-                // errors is comparing failures, and two failures that read
-                // alike are alike.
-                (Value::Err(a), Value::Err(b)) => a.message == b.message,
-                (Value::Nil, Value::Nil) => true,
-                _ => false,
-            };
-            if !same {
-                return false;
-            }
+        match shallow_eq(self, other) {
+            Some(same) => same,
+            None => deep_eq(self, other),
         }
-        true
     }
 }
 
-/// Queue the element-wise comparisons of two sequences, answering whether
-/// their lengths allow them to be equal at all.
-fn pairs(work: &mut Vec<(Value, Value)>, a: &[Value], b: &[Value]) -> bool {
-    if a.len() != b.len() {
+/// The answer for a pair that needs no descent — scalars, strings, errors,
+/// and two values of different kinds — or `None` for two aggregates of one
+/// kind, whose contents decide.
+#[inline]
+fn shallow_eq(a: &Value, b: &Value) -> Option<bool> {
+    Some(match (a, b) {
+        (Value::Unit, Value::Unit) => true,
+        (Value::Int(a), Value::Int(b)) => a == b,
+        (Value::Float(a), Value::Float(b)) => a == b,
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::Str(a), Value::Str(b)) => a == b,
+        (Value::Nil, Value::Nil) => true,
+        // Two errors are equal when they say the same thing. What they carry
+        // is provenance rather than identity: a caller comparing errors is
+        // comparing failures, and two failures that read alike are alike.
+        (Value::Err(a), Value::Err(b)) => a.message == b.message,
+        (Value::Struct(_), Value::Struct(_))
+        | (Value::Enum(_), Value::Enum(_))
+        | (Value::Slice(_), Value::Slice(_))
+        | (Value::Tuple(_), Value::Tuple(_))
+        | (Value::Map(_), Value::Map(_))
+        | (Value::Pair(_), Value::Pair(_)) => return None,
+        _ => false,
+    })
+}
+
+/// Two aggregates of one kind, compared without recursing.
+#[inline(never)]
+fn deep_eq(a: &Value, b: &Value) -> bool {
+    let mut work: Vec<(Value, Value)> = Vec::new();
+    if !level(a, b, &mut work) {
         return false;
     }
-    work.extend(a.iter().cloned().zip(b.iter().cloned()));
+    while let Some((a, b)) = work.pop() {
+        if !level(&a, &b, &mut work) {
+            return false;
+        }
+    }
     true
+}
+
+/// Compare one level of two aggregates of one kind: their shapes, and each
+/// pair of children that is not itself an aggregate. The pairs that are go on
+/// the worklist, as clones — for an aggregate, a reference count.
+fn level(a: &Value, b: &Value, work: &mut Vec<(Value, Value)>) -> bool {
+    match (a, b) {
+        (Value::Struct(a), Value::Struct(b)) => {
+            let (fa, fb) = (a.fields.borrow(), b.fields.borrow());
+            a.struct_id == b.struct_id && pairs(work, &fa, &fb)
+        }
+        (Value::Enum(a), Value::Enum(b)) => {
+            a.enum_id == b.enum_id && a.variant == b.variant && pairs(work, &a.fields, &b.fields)
+        }
+        (Value::Slice(a), Value::Slice(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
+            pairs(work, a, b)
+        }
+        // In insertion order, which is part of what a map is.
+        (Value::Map(a), Value::Map(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|((ka, va), (kb, vb))| pair(work, ka, kb) && pair(work, va, vb))
+        }
+        (Value::Pair(a), Value::Pair(b)) => pair(work, &a.0, &b.0) && pair(work, &a.1, &b.1),
+        _ => shallow_eq(a, b).unwrap_or(false),
+    }
+}
+
+/// Compare two children, answering now if they are not aggregates and
+/// queueing them if they are.
+fn pair(work: &mut Vec<(Value, Value)>, a: &Value, b: &Value) -> bool {
+    match shallow_eq(a, b) {
+        Some(same) => same,
+        None => {
+            work.push((a.clone(), b.clone()));
+            true
+        }
+    }
+}
+
+/// Compare two sequences element by element, as [`pair`] does, answering
+/// whether they can still be equal.
+fn pairs(work: &mut Vec<(Value, Value)>, a: &[Value], b: &[Value]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| pair(work, x, y))
 }
 
 impl Value {
