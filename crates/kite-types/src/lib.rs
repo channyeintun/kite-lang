@@ -10528,6 +10528,11 @@ impl<'a> Checker<'a> {
         }
         let show = self.display_method(v.ty)?;
         let targs = self.receiver_args(v.ty);
+        // The call is the compiler's, not the program's, but it runs the same
+        // body `p.show()` would, so it is held to what that body compares as
+        // a written call is. `io.print(Box{ v: f })` otherwise reached a
+        // `self.v == self.v` on a function that `Box{ v: f }.show()` refused.
+        self.note_generic_call(show, &targs, span);
         Some(hir::Expr {
             kind: ExprKind::Call { callee: hir::FnId(show), args: vec![v], targs },
             ty: TyId::STR,
@@ -10606,6 +10611,10 @@ impl<'a> Checker<'a> {
                 let call = match self.error_method(e.ty) {
                     Some(message) => {
                         let targs = self.receiver_args(e.ty);
+                        // Held to what `message` compares, as `w.message()`
+                        // written out would be: the conversion runs that body
+                        // with the value's own type arguments.
+                        self.note_generic_call(message, &targs, span);
                         ExprKind::Call { callee: hir::FnId(message), args: vec![e], targs }
                     }
                     // A parameter bounded by `Error` has no `message` of its

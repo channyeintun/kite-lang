@@ -1,0 +1,80 @@
+// A generic type whose implementation compares its own `T` with `==` holds
+// every use to a `T` that can be compared. The compiler writes some of those
+// calls itself: `show` for `io.print(x)` and for `"\(x)"`, and `message` when
+// a value becomes an `error`. None of the three was held, so a function or a
+// trait object reached the comparison, and the backends disagreed about the
+// answer: the VM and native code printed one, and the Wasm module trapped.
+
+trait Show {
+    fn show(self) -> str
+}
+
+struct P {
+    a: int
+}
+
+impl Show for P {
+    fn show(self) -> str {
+        return "p"
+    }
+}
+
+struct Box<T> {
+    v: T
+}
+
+impl<T> Display for Box<T> {
+    fn show(self) -> str {
+        if self.v == self.v {
+            return "same"
+        }
+        return "diff"
+    }
+}
+
+struct W<T> {
+    v: T
+}
+
+impl<T> Error for W<T> {
+    fn message(self) -> str {
+        if self.v == self.v {
+            return "same"
+        }
+        return "diff"
+    }
+}
+
+fn fail(f: fn(int) -> int) -> error {
+    return W{ v: f } //~ ERROR E0201
+}
+
+fn fail_int(n: int) -> error {
+    return W{ v: n }
+}
+
+// A generic caller forwards its own `T`, so it is held in turn.
+fn shown<T>(x: T) -> str {
+    return "\(Box{ v: x })"
+}
+
+fn main() {
+    let d: dyn Show = P{ a: 1 }
+    let f = |x: int| -> int { return x }
+    io.print(Box{ v: d }) //~ ERROR E0201
+    io.print(Box{ v: f }) //~ ERROR E0201
+    let s = "\(Box{ v: f })" //~ ERROR E0201
+    io.print(s)
+    io.print(Box{ v: 3 })
+    io.print("\(Box{ v: "x" })")
+    io.print(shown(2))
+    io.print(shown(f)) //~ ERROR E0201
+    let e = fail(f)
+    if e != nil {
+        io.print(e.message())
+    }
+    let n = fail_int(1)
+    if n != nil {
+        io.print(n.message())
+    }
+}

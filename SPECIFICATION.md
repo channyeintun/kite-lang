@@ -670,7 +670,9 @@ generic function that passes its own parameter on to one that compares it. A
 trait's generic method called through a bound is held to what any of its
 implementations compares, and a generic type standing for a trait, for a bound
 or as a `dyn`, to what its implementation's methods compare of its own
-arguments.
+arguments. A call the compiler writes counts as one the program writes:
+`io.print(b)` and `"\(b)"` call `b`'s `show`, and a value becoming an `error`
+calls its `message`.
 
 Floating-point `==` follows IEEE-754, so `nan != nan`. The compiler emits a
 warning when both operands of `==` are statically known to be floats and neither
