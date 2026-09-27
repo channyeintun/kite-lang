@@ -727,7 +727,8 @@ fn a_missing_module_is_not_answered_by_another_of_the_same_spelling() {
     let said = p.run(&main).expect_err("`b` has no util");
     assert!(said.contains("E0400"), "{}", said);
     assert!(said.contains("cannot find module `util`"), "{}", said);
-    assert!(said.contains("b/b.kite"), "the error is at b's `use`: {}", said);
+    // A diagnostic names the file the way the platform spells its path.
+    assert!(said.replace('\\', "/").contains("b/b.kite"), "the error is at b's `use`: {}", said);
 }
 
 /// The same across a package boundary, which is the case Phase 28 set out to
