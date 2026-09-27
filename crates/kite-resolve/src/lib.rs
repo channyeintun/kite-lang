@@ -547,6 +547,19 @@ pub struct LocalInfo {
     pub synthetic: bool,
 }
 
+/// A trait's default method that no `impl` block takes, with the locals its
+/// body declares. See [`ResolveMap::defaults`].
+#[derive(Debug)]
+pub struct DefaultBody {
+    /// Index into [`ResolveMap::types`] for the trait.
+    pub trait_index: u32,
+    /// Index into `SourceFile::items` for the trait.
+    pub item_index: usize,
+    /// Position within the trait's method list.
+    pub method_index: usize,
+    pub locals: Vec<LocalInfo>,
+}
+
 /// A variant's name, with its enum's type index and its own position.
 type NamedVariant = (String, (u32, u32));
 
@@ -559,6 +572,12 @@ pub struct ResolveMap {
     pub modules: Modules,
     /// Per function, in the same order as `fns`.
     pub locals: Vec<Vec<LocalInfo>>,
+    /// A trait's default methods that no `impl` block takes, because the
+    /// trait has none or each writes its own. A default is otherwise a
+    /// function only as a copy per implementing block, so one nobody takes
+    /// has no entry in `fns`, and is resolved here, once, for its body to be
+    /// checked all the same.
+    pub defaults: Vec<DefaultBody>,
     /// Every resolved name, keyed by the span of its use. Spans are unique per
     /// source position, which makes them a serviceable node identity until a
     /// later phase introduces real node ids.
@@ -1197,9 +1216,16 @@ fn resolve_bodies(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) 
         r.expr(&c.value);
     }
 
+    // A default method's body is resolved once per block that takes it, and
+    // every copy is the same text in the same module, so what resolving one
+    // reports is the same as well: the first copy's is kept, and the rest
+    // would have said it again for each `impl`.
+    let mut taken: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
     for sig_index in 0..map.fns.len() {
         let decl_index = map.fns[sig_index].decl_index;
         let owner = map.fns[sig_index].owner;
+        let reported = diags.len();
+        let again = owner.is_some_and(|o| o.is_default && !taken.insert((o.impl_index, o.method_index)));
 
         // A body is resolved in the module that declares it, so a file in
         // `math` reaching for `abs` finds its own module's before anything
@@ -1233,7 +1259,34 @@ fn resolve_bodies(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) 
                 r.locals
             }
         };
+        if again {
+            diags.truncate(reported);
+        }
         map.locals.push(locals);
+    }
+
+    // A default no block takes was never resolved above, and so never
+    // checked: `let y: str = 5` in the body of a trait nobody implements
+    // compiled.
+    for trait_index in 0..map.types.len() {
+        let item_index = map.types[trait_index].decl_index;
+        let Item::Trait(tr) = &file.items[item_index] else { continue };
+        for (mi, m) in tr.methods.iter().enumerate() {
+            if m.body.is_none() || taken.contains(&(item_index, mi)) {
+                continue;
+            }
+            let module = map.modules.of(item_index).to_string();
+            let mut r = FnResolver::new(map, diags, module);
+            let var_self = m.self_param.as_ref().is_some_and(|s| s.is_var);
+            r.resolve_fn(&m.params, m.body.as_ref(), m.self_param.is_some(), var_self);
+            let locals = r.locals;
+            map.defaults.push(DefaultBody {
+                trait_index: trait_index as u32,
+                item_index,
+                method_index: mi,
+                locals,
+            });
+        }
     }
 }
 

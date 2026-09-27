@@ -513,12 +513,74 @@ pub fn check_recording(
     let const_table = consts::evaluate(file, resolved, sources, diags);
     check_const_annotations(file, resolved, &const_table, &type_ids, &mut types, diags);
 
+    // A default method no block takes is checked once all the same, against
+    // what every implementation has in common: `Self` is a parameter of its
+    // own, after the trait's and the method's, bounded by the trait. Its
+    // signature is numbered after every function's, as its locals are in
+    // `ResolveMap::defaults`. The signature was read already, where the
+    // trait's methods were; what it would report again is dropped.
+    for d in &resolved.defaults {
+        let ast::Item::Trait(tr) = &file.items[d.item_index] else {
+            unreachable!("a default body belongs to a trait")
+        };
+        let m = &tr.methods[d.method_index];
+        let module = resolved.module_of_item(d.item_index);
+        let tid = match type_ids.get(d.trait_index as usize) {
+            Some(Some(TypeTarget::Trait(t))) => Some(*t),
+            _ => None,
+        };
+        let mut defs = type_generics[d.trait_index as usize].clone();
+        if let Some(own) = tid.and_then(|t| trait_method_generics.get(&(t, d.method_index))) {
+            defs.extend(own.iter().cloned());
+        }
+        let self_ty = types.param_ty(defs.len() as u32, "Self");
+        defs.push(GenericDef {
+            name: "Self".to_string(),
+            ty: self_ty,
+            bounds: tid.into_iter().collect(),
+            span: tr.name.span,
+        });
+        let names: Vec<(String, TyId)> = defs.iter().map(|g| (g.name.clone(), g.ty)).collect();
+        let mut again = DiagBag::new();
+        let params = m
+            .params
+            .iter()
+            .map(|p| resolve_named_ty(&p.ty, resolved, module, &type_ids, &names, &mut types, &mut again))
+            .collect();
+        let value = match &m.ret {
+            None => TyId::UNIT,
+            Some(r) => resolve_named_ty(r.value_type(), resolved, module, &type_ids, &names, &mut types, &mut again),
+        };
+        let fallible = m.ret.as_ref().is_some_and(|r| r.is_fallible());
+        sigs.push(Signature {
+            params,
+            ret: if fallible { types.fallible_of(value) } else { value },
+            is_async: m.is_async,
+            fallible,
+            name_span: m.name.span,
+            self_ty: m.self_param.as_ref().map(|_| self_ty),
+            generics: defs,
+        });
+    }
+
     let mut facts = GenericFacts {
         compared: sigs.iter().map(|s| vec![None; s.generics.len()]).collect(),
         calls: Vec::new(),
         bound_calls: Vec::new(),
     };
-    for (i, sig) in resolved.fns.iter().enumerate() {
+    // What each default method's copies have reported, by the method. A
+    // default is checked once per block that takes it, `Self` being that
+    // block's type, and a mistake that is not about the type was reported
+    // once per `impl`.
+    let mut default_reports: std::collections::HashMap<(usize, usize), std::collections::HashSet<DiagKey>> =
+        std::collections::HashMap::new();
+    for i in 0..sigs.len() {
+        let unowned = i.checked_sub(resolved.fns.len()).map(|k| &resolved.defaults[k]);
+        let decl_index = match unowned {
+            Some(d) => d.item_index,
+            None => resolved.fns[i].decl_index,
+        };
+        let reported = diags.len();
         let mut checker = Checker {
             facts: &mut facts,
             type_generics: &type_generics,
@@ -527,7 +589,7 @@ pub fn check_recording(
             trait_impls: &trait_impls,
             consts: &const_table,
             resolved,
-            module: resolved.module_of_item(sig.decl_index).to_string(),
+            module: resolved.module_of_item(decl_index).to_string(),
             sigs: &sigs,
             lifted: Vec::new(),
             lifted_base: lifted.len(),
@@ -541,7 +603,7 @@ pub fn check_recording(
                 .generics
                 .iter()
                 .map(|g| (g.name.clone(), g.ty))
-                .chain(self_types[i].map(|t| ("Self".to_string(), t)))
+                .chain(self_types.get(i).copied().flatten().map(|t| ("Self".to_string(), t)))
                 .collect(),
             type_ids: &type_ids,
             types: &mut types,
@@ -563,6 +625,28 @@ pub fn check_recording(
             release,
             solved: &mut *solved,
         };
+        if let Some(d) = unowned {
+            let ast::Item::Trait(tr) = &file.items[d.item_index] else {
+                unreachable!("a default body belongs to a trait")
+            };
+            let m = &tr.methods[d.method_index];
+            let body_span = m.body.as_ref().map(|b| b.span).unwrap_or(m.span);
+            // Checked for what it reports, and then dropped with anything
+            // lifted out of it: nothing can call it.
+            let _ = checker.check_body(
+                &m.name.name,
+                m.is_pub,
+                m.is_async,
+                &m.params,
+                m.body.as_ref(),
+                body_span,
+                m.span,
+                &sigs[i],
+                m.self_param.is_some(),
+            );
+            continue;
+        }
+        let sig = &resolved.fns[i];
         if let ast::Item::Extern(e) = &file.items[sig.decl_index] {
             // A host function becomes an ordinary one whose whole body is the
             // call across the boundary. Nothing after this point needs to know
@@ -664,6 +748,10 @@ pub fn check_recording(
         // handed out assuming they land after every declared function, so they
         // are collected here and appended once all declarations are checked.
         lifted.append(&mut checker.lifted);
+        if let Some(o) = sig.owner.filter(|o| o.is_default) {
+            let seen = default_reports.entry((o.impl_index, o.method_index)).or_default();
+            keep_first_reports(diags, reported, seen);
+        }
     }
     fns.append(&mut lifted);
     check_compared_params(&mut facts, resolved, &sigs, &types, diags);
@@ -1210,6 +1298,28 @@ impl Flow {
 impl<'a> Checker<'a> {
     // ---- functions --------------------------------------------------------
 
+    /// The locals the resolver found in the body being checked: a
+    /// function's, or those of a default method no block takes, which are
+    /// numbered after every function's (`ResolveMap::defaults`).
+    fn local_infos(&self) -> &'a [kite_resolve::LocalInfo] {
+        match self.resolved.locals.get(self.fn_index) {
+            Some(infos) => infos,
+            None => &self.resolved.defaults[self.fn_index - self.resolved.fns.len()].locals,
+        }
+    }
+
+    /// The name of the function being checked, or of the trait whose default
+    /// method it is when no block takes that method.
+    fn body_name(&self) -> &'a str {
+        match self.resolved.fns.get(self.fn_index) {
+            Some(f) => &f.name,
+            None => {
+                let d = &self.resolved.defaults[self.fn_index - self.resolved.fns.len()];
+                &self.resolved.types[d.trait_index as usize].name
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn check_body(
         &mut self,
@@ -1223,7 +1333,7 @@ impl<'a> Checker<'a> {
         sig: &Signature,
         takes_self: bool,
     ) -> hir::Function {
-        let infos = &self.resolved.locals[self.fn_index];
+        let infos = self.local_infos();
 
         // Every local gets a slot up front. A method's `self` is local 0, so
         // its declared parameters are offset by one.
@@ -1297,7 +1407,7 @@ impl<'a> Checker<'a> {
         hir::Function {
             generic_count: sig.generics.len(),
             name: name.to_string(),
-            is_free: self.resolved.fns[self.fn_index].owner.is_none(),
+            is_free: self.resolved.fns.get(self.fn_index).is_some_and(|f| f.owner.is_none()),
             is_pub,
             is_async,
             param_count,
@@ -3523,7 +3633,7 @@ impl<'a> Checker<'a> {
             is_free: false,
             // Named per enclosing function, so two closures in different
             // functions do not both come out as `closure#0` in a dump.
-            name: format!("{}#closure{}", self.resolved.fns[self.fn_index].name, index),
+            name: format!("{}#closure{}", self.body_name(), index),
             // A closure written inside `f<T>` mentions `T`, so its lifted body
             // is a template exactly as `f` is.
             generic_count: self.generic_defs.len(),
@@ -11354,6 +11464,28 @@ fn check_impls(
     blocks
 }
 
+/// A diagnostic as far as saying it twice goes: its code, its message and
+/// where it points.
+type DiagKey = (Option<&'static str>, String, Option<Span>);
+
+/// Drop what a default method's copy reported after `from` that an earlier
+/// copy of the same method reported already, and remember the rest. A
+/// mistake that depends on the implementing type — `self.x` where one `impl`
+/// is for a type without an `x` — reads differently for each, and is kept.
+fn keep_first_reports(
+    diags: &mut DiagBag,
+    from: usize,
+    seen: &mut std::collections::HashSet<DiagKey>,
+) {
+    let all = diags.take();
+    for (i, d) in all.into_iter().enumerate() {
+        let key = (d.code.map(|c| c.0), d.message.clone(), d.primary_span());
+        if i < from || seen.insert(key) {
+            diags.push(d);
+        }
+    }
+}
+
 /// An `impl` is for its type at the block's own parameters, in order:
 /// `impl<A, B> Named for Pair<A, B>`, or a type without any.
 ///
@@ -12515,6 +12647,10 @@ fn check_compared_params(
             break;
         }
     }
+    // A default method's body is checked once per block that takes it, and
+    // each copy records the calls it makes: the same call, at the same place,
+    // choosing the same type, is one mistake however many copies made it.
+    let mut said: std::collections::HashSet<(Span, String)> = std::collections::HashSet::new();
     for call in &facts.calls {
         for (i, t) in call.targs.iter().enumerate() {
             let Some(at) = facts.compared[call.callee].get(i).copied().flatten() else {
@@ -12525,15 +12661,16 @@ fn check_compared_params(
             }
             let name = last_segment(&resolved.fns[call.callee].name).to_string();
             let param = sigs[call.callee].generics.get(i).map(|g| g.name.clone()).unwrap_or_default();
-            let mut d = Diagnostic::error(
-                codes::E0201,
-                format!(
-                    "`{}` compares its `{}` with `==`, and {} cannot be compared",
-                    name,
-                    param,
-                    types.with_article(*t)
-                ),
-            )
+            let message = format!(
+                "`{}` compares its `{}` with `==`, and {} cannot be compared",
+                name,
+                param,
+                types.with_article(*t)
+            );
+            if !said.insert((call.span, message.clone())) {
+                continue;
+            }
+            let mut d = Diagnostic::error(codes::E0201, message)
             .with_primary(call.span, format!("`{}` is {} here", param, types.with_article(*t)))
             .with_secondary(at, "compared here");
             d = if types.mentions_host_value(*t) {

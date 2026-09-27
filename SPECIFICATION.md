@@ -1427,6 +1427,13 @@ does. A generic method's type parameters may be bounded no more tightly than
 the trait's are (`E0208`): a caller through the trait meets the trait's bounds
 and no others.
 
+A default method's body is checked for each implementation that takes it, with
+`Self` read as that implementation's type, and a mistake in it is reported
+once, not once per implementation. A default no implementation takes — the
+trait has none yet, or each writes its own — is checked all the same, with
+`Self` standing for any implementation: what the trait declares is known of it,
+and nothing else.
+
 ### 10.2 Coherence
 
 A trait implementation is permitted only in the module that declares the trait or

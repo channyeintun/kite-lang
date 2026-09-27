@@ -2067,3 +2067,58 @@ fn a_result_where_a_written_tuple_is_wanted_says_what_to_write() {
     ok("fn g() -> (int, error) {\n  return 1, nil\n}\n\
         fn main() {\n  let p = g()\n  let (v, err) = p\n  if err != nil {\n    return\n  }\n  io.print(v)\n}\n");
 }
+
+/// A default method's body is checked once per block that takes it, so a
+/// mistake in it that is not about the implementing type was reported once
+/// per `impl`, by the resolver and by the checker alike. It is reported once.
+#[test]
+fn a_default_method_reports_each_mistake_once() {
+    let c = run("trait T {\n  fn a(self) -> int\n  fn b(self) -> int {\n    let y: str = 5\n    return self.a()\n  }\n\
+        \x20 fn c(self) -> int {\n    return nowhere\n  }\n}\n\
+        struct P {\n  n: int\n}\nstruct Q {\n  n: int\n}\n\
+        impl T for P {\n  fn a(self) -> int {\n    return 1\n  }\n}\n\
+        impl T for Q {\n  fn a(self) -> int {\n    return 2\n  }\n}\n\
+        fn main() {\n  io.print(P{ n: 1 }.b() + Q{ n: 2 }.c())\n}\n");
+    assert_eq!(c.codes(), vec!["E0111", "E0200"], "{}", c.render());
+    // A call the body makes is recorded by each copy too, and held to what
+    // its callee compares after every body is checked.
+    let c = run("fn eq<T>(a: T, b: T) -> bool {\n  return a == b\n}\n\
+        trait T {\n  fn a(self) -> int\n  fn b(self) -> bool {\n\
+        \x20   let f = |x: int| -> int { return x }\n    return eq(f, f)\n  }\n}\n\
+        struct P {\n  n: int\n}\nstruct Q {\n  n: int\n}\n\
+        impl T for P {\n  fn a(self) -> int {\n    return 1\n  }\n}\n\
+        impl T for Q {\n  fn a(self) -> int {\n    return 2\n  }\n}\n\
+        fn main() {\n  io.print(P{ n: 1 }.b() && Q{ n: 2 }.b())\n}\n");
+    assert_eq!(c.codes(), vec!["E0201"], "{}", c.render());
+}
+
+/// A default no block takes — the trait has no `impl`, or every one writes
+/// its own — was never checked, so a mistake in it compiled. It is checked
+/// once, with `Self` standing for any implementation: what the trait
+/// declares is known of it, and nothing else.
+#[test]
+fn a_default_method_no_block_takes_is_checked() {
+    let c = run("trait T {\n  fn a(self) -> int\n  fn b(self) -> int {\n    let x: Self = self\n\
+        \x20   let y: str = 5\n    return x.a()\n  }\n}\n\
+        fn main() {\n  io.print(1)\n}\n");
+    assert_eq!(c.codes(), vec!["E0200"], "{}", c.render());
+    let c = run("trait T {\n  fn a(self) -> int\n  fn b(self) -> int {\n    let s: str = self.a()\n    return 0\n  }\n}\n\
+        struct P {\n  n: int\n}\n\
+        impl T for P {\n  fn a(self) -> int {\n    return self.n\n  }\n  fn b(self) -> int {\n    return 2\n  }\n}\n\
+        fn main() {\n  io.print(P{ n: 1 }.b())\n}\n");
+    assert_eq!(c.codes(), vec!["E0200"], "{}", c.render());
+    let c = run("trait T {\n  fn a(self) -> int\n  fn b(self) -> int {\n    return missing\n  }\n}\n\
+        fn main() {\n  io.print(1)\n}\n");
+    assert_eq!(c.codes(), vec!["E0111"], "{}", c.render());
+    // What the trait declares is all a body may use of `Self`, and all of it
+    // may be: its other methods, `Self` itself, generics, closures.
+    ok("trait Cmp {\n  fn compare(self, other: Self) -> int\n\
+        \x20 fn less(self, other: Self) -> bool {\n    return self.compare(other) < 0\n  }\n\
+        \x20 fn pick<T>(self, a: T, b: T, other: Self) -> T {\n    let me: Self = self\n\
+        \x20   let f = |x: Self| -> bool { return me.less(x) }\n    if f(other) {\n      return a\n    }\n    return b\n  }\n}\n\
+        fn main() {\n  io.print(1)\n}\n");
+    // A field is not something every implementation has.
+    let c = run("trait T {\n  fn a(self) -> int\n  fn b(self) -> int {\n    return self.n\n  }\n}\n\
+        fn main() {\n  io.print(1)\n}\n");
+    assert_eq!(c.codes(), vec!["E0200"], "{}", c.render());
+}
