@@ -5177,14 +5177,7 @@ impl<'a> Checker<'a> {
             self.require_mutable_receiver(base, &name.name);
         }
 
-        self.check_member_visible(
-            self.resolved.module_of_fn(fn_index).to_string(),
-            self.resolved.fns[fn_index as usize].is_pub || owner.trait_index.is_some(),
-            "method",
-            &name.name,
-            name.span,
-            self.sigs[fn_index as usize].name_span,
-        );
+        self.check_method_visible(fn_index, "method", &name.name, name.span);
 
         // A method on a generic type is written once against the parameters
         // and specialised per receiver: its block's arguments come off the
@@ -5389,6 +5382,52 @@ impl<'a> Checker<'a> {
     /// names (§4.3), applied where a member is found, which is here: which
     /// field or method a `.name` means depends on the type of what is to its
     /// left, and only the checker knows that.
+    /// A method or associated function reached from outside its module must
+    /// be `pub` — or, for one implementing a trait, the trait must be: the
+    /// methods of a trait implementation are as visible as the trait (§4.3).
+    /// Treating every trait method as `pub` let another module call a
+    /// private trait's method, which it could not have named in a bound.
+    fn check_method_visible(&mut self, fn_index: u32, what: &str, name: &str, span: Span) -> bool {
+        let f = &self.resolved.fns[fn_index as usize];
+        let Some(tr) = f.owner.and_then(|o| o.trait_index) else {
+            return self.check_member_visible(
+                self.resolved.module_of_fn(fn_index).to_string(),
+                f.is_pub,
+                what,
+                name,
+                span,
+                self.sigs[fn_index as usize].name_span,
+            );
+        };
+        let decl = self.resolved.type_decl(tr);
+        let module = self.resolved.module_of_item(decl.decl_index).to_string();
+        if decl.is_pub || module == self.module {
+            return true;
+        }
+        let already = self
+            .diags
+            .iter()
+            .any(|d| d.code == Some(codes::E0401) && d.primary_span() == Some(span));
+        if already {
+            return false;
+        }
+        let trait_name = last_segment(&decl.name).to_string();
+        let trait_span = decl.span;
+        self.diags.push(
+            Diagnostic::error(
+                codes::E0401,
+                format!("{} `{}` is private to module `{}`", what, name, module),
+            )
+            .with_primary(span, "not visible here")
+            .with_secondary(trait_span, format!("it implements `{}`, which is not marked `pub`", trait_name))
+            .with_note(
+                "the methods of a trait's implementations are as visible as the trait; write \
+                 `pub trait` to export them",
+            ),
+        );
+        false
+    }
+
     fn check_member_visible(
         &mut self,
         decl_module: String,
@@ -5723,14 +5762,7 @@ impl<'a> Checker<'a> {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
 
-        self.check_member_visible(
-            self.resolved.module_of_fn(fn_index).to_string(),
-            self.resolved.fns[fn_index as usize].is_pub || owner.trait_index.is_some(),
-            "associated function",
-            &method_name,
-            p_span,
-            self.sigs[fn_index as usize].name_span,
-        );
+        self.check_method_visible(fn_index, "associated function", &method_name, p_span);
 
         // An associated function on a generic type has no receiver to take
         // arguments from, so they come from the type the result is used as —
