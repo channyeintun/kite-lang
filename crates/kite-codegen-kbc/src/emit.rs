@@ -21,6 +21,7 @@ pub fn compile(program: &mir::Program) -> Chunk {
             .iter()
             .map(|e| format!("{}.{}", e.host, e.name))
             .collect(),
+        extern_sigs: program.extern_sigs.clone(),
         strings: program.strings.iter().map(|s| Rc::from(s.as_str())).collect(),
         entry: program.entry.map(|e| e.0),
         vtables: program

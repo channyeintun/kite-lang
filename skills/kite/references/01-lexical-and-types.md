@@ -1008,7 +1008,9 @@ fn main() {
 number below `1e21` gets all its digits and `.0`: `3.0`, `1000000.0`,
 `10000000000.0` for `1e10`. Anything else is the shortest form that reads back,
 plain from `1e-7` up to `1e21` and in exponent form outside: `0.3333333333333333`,
-`0.30000000000000004` for `0.1 + 0.2`, `0.000001`, `1e-7`, `1e+21`. Overflow is
+`0.30000000000000004` for `0.1 + 0.2`, `0.000001`, `1e-7`, `1e+21`. When two
+shortest forms are exactly as close, the one ending in an even digit is
+written: `1125899906842624.25` prints as `1125899906842624.2`. Overflow is
 `inf` or `-inf`, `0.0 / 0.0` is `NaN`, and negative zero is `-0.0`.
 
 ## 15. Where the written sources are wrong

@@ -29,7 +29,8 @@
 // defines a table once, dotted keys cannot reopen a table a header defined,
 // and an inline table or an array written as a value is closed to anything
 // added later. `[a.b]` after `[[a]]` is a table in the last element of `a`.
-// A document breaking one of these is refused rather than merged.
+// A document breaking one of these is refused rather than merged, and so is
+// one nesting deeper than 128 levels — see `max_depth`.
 //
 // What is **not** here, and would be wrong to guess at: dates and times.
 // TOML's offset date-time, local date-time, date and time are four distinct
@@ -84,6 +85,24 @@ struct Header {
 
 // ---- reading ---------------------------------------------------------------
 
+/// How deeply one document may nest, counting each segment of a key or a
+/// header and each array or inline table a value sits inside.
+///
+/// A TOML document says how deep it is, and the parser recurses once per
+/// array or inline table and places a value by recursing once per key
+/// segment, so without a ceiling the document chooses how much stack to
+/// consume. Six kilobytes of `a = [[[…]]]` ran a WebAssembly host out of
+/// stack, which is a trap nothing can catch rather than a failed parse; a
+/// hundred thousand levels did the same to the VM and the native runtime.
+/// `std/json` stops at the same depth, for the same reason.
+fn max_depth() -> int {
+    return 128
+}
+
+fn too_deep(at: int) -> error {
+    return errors.new("toml: nested deeper than \(max_depth()) at \(at)")
+}
+
 /// The table a document holds, or an error saying where it went wrong.
 ///
 /// The top level of a TOML document is always a table, which is the one way it
@@ -111,6 +130,9 @@ pub fn parse(input: str) -> (Toml, error) {
         if c == "[" {
             let (header, err) = parse_header(input, at)
             check err
+            if header.path.len() > max_depth() {
+                return _, too_deep(at)
+            }
             at = header.next
             // A table dotted keys made is defined by them, and a header may
             // not define it again — not even one naming it from elsewhere.
@@ -138,9 +160,12 @@ pub fn parse(input: str) -> (Toml, error) {
         if eq >= input.len() || input.slice(eq, eq + 1) != "=" {
             return _, errors.new("toml: expected `=` at \(eq)")
         }
-        let (step, value_err) = parse_value(input, skip_inline(input, eq + 1))
-        check value_err
         let full = concat(section, key.path)
+        if full.len() > max_depth() {
+            return _, too_deep(at)
+        }
+        let (step, value_err) = parse_value(input, skip_inline(input, eq + 1), full.len())
+        check value_err
         let where = spots(root, full, flags)
         let allowed = assignment_allowed(where, section.len(), flags)
         check allowed
@@ -227,7 +252,8 @@ fn parse_key(input: str, at: int) -> (Key, error) {
     }
 }
 
-fn parse_value(input: str, at: int) -> (Step, error) {
+/// The value at `at`, `depth` levels into the document — see [`max_depth`].
+fn parse_value(input: str, at: int, depth: int) -> (Step, error) {
     if at >= input.len() {
         return _, errors.new("toml: expected a value at \(at)")
     }
@@ -237,11 +263,14 @@ fn parse_value(input: str, at: int) -> (Step, error) {
         check err
         return Step{ value: Toml.Text(text.text), next: text.next }, nil
     }
-    if c == "[" {
-        return parse_array(input, at)
-    }
-    if c == "{" {
-        return parse_inline_table(input, at)
+    if c == "[" || c == "{" {
+        if depth >= max_depth() {
+            return _, too_deep(at)
+        }
+        if c == "[" {
+            return parse_array(input, at, depth + 1)
+        }
+        return parse_inline_table(input, at, depth + 1)
     }
     return parse_scalar(input, at)
 }
@@ -418,7 +447,7 @@ fn parse_escape(input: str, at: int) -> (Text, error) {
     return _, errors.new("toml: unknown escape `\\\(c)` at \(at)")
 }
 
-fn parse_array(input: str, at: int) -> (Step, error) {
+fn parse_array(input: str, at: int, depth: int) -> (Step, error) {
     var items: [Toml] = []
     var i = skip_blank(input, at + 1)
     for {
@@ -428,7 +457,7 @@ fn parse_array(input: str, at: int) -> (Step, error) {
         if input.slice(i, i + 1) == "]" {
             return Step{ value: Toml.Array(items), next: i + 1 }, nil
         }
-        let (step, err) = parse_value(input, i)
+        let (step, err) = parse_value(input, i, depth)
         check err
         items.push(step.value)
         i = skip_blank(input, step.next)
@@ -443,7 +472,7 @@ fn parse_array(input: str, at: int) -> (Step, error) {
     }
 }
 
-fn parse_inline_table(input: str, at: int) -> (Step, error) {
+fn parse_inline_table(input: str, at: int, depth: int) -> (Step, error) {
     var table: { str: Toml } = { }
     // An inline table is its own little document: `{ a = { b = 1 }, a.c = 2 }`
     // extends a closed table just as a later line would.
@@ -459,7 +488,12 @@ fn parse_inline_table(input: str, at: int) -> (Step, error) {
         if eq >= input.len() || input.slice(eq, eq + 1) != "=" {
             return _, errors.new("toml: expected `=` at \(eq)")
         }
-        let (step, err) = parse_value(input, skip_inline(input, eq + 1))
+        // Each segment of a dotted key inside the table is a table deeper.
+        let inner = depth + key.path.len() - 1
+        if inner > max_depth() {
+            return _, too_deep(i)
+        }
+        let (step, err) = parse_value(input, skip_inline(input, eq + 1), inner)
         check err
         let where = spots(table, key.path, flags)
         let allowed = assignment_allowed(where, 0, flags)

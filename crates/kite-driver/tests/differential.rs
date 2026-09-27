@@ -1691,12 +1691,161 @@ fn main() {
 }
 ",
     ),
+    // A recursion a thousand frames deep, of a function holding a dozen
+    // values across its call, runs on every target — a WebAssembly host's
+    // stack included, which is the shallowest of the three and ends a few
+    // thousand frames of this down. Past each target's limit is a trap; see
+    // `a-recursion-past-the-limit-traps`.
+    (
+        "a-thousand-frames-deep-runs-everywhere",
+        "\
+struct P {
+  x: int
+  y: int
+  name: str
+}
+
+fn wide(n: int, acc: P) -> int {
+  if n == 0 {
+    return acc.x
+  }
+  let a = n * 2
+  let b = a + 3
+  let c = b * a
+  let d = \"\\(c)\"
+  let e = P{ x: acc.x + 1, y: b, name: d }
+  let f = [a, b, c]
+  let g = f.len() + e.y
+  let r = wide(n - 1, e)
+  return r + g - g + f[0] - a + d.len() - d.len()
+}
+
+fn even(n: int) -> bool {
+  if n == 0 {
+    return true
+  }
+  return odd(n - 1)
+}
+
+fn odd(n: int) -> bool {
+  if n == 0 {
+    return false
+  }
+  return even(n - 1)
+}
+
+fn main() {
+  io.print(wide(1000, P{ x: 0, y: 0, name: \"\" }))
+  io.print(even(1000))
+}
+",
+    ),
+    // A float exactly halfway between two shortest decimals. ECMAScript picks
+    // the even one, and Rust's `{:e}` the upper, so the VM and the native
+    // runtime printed `…624.3` where Wasm printed `…624.2` — at run time, in
+    // a constant folded at compile time (which Wasm then disagreed with
+    // itself about), and in a derived hash, which hashes the text.
+    (
+        "float-ties-go-to-the-even-digit",
+        "\
+fn f(x: float) -> float { return x }
+
+let TIE = \"\\(1125899906842624.25)\"
+
+@derive(Hash)
+struct F {
+  x: float
+}
+
+fn main() {
+  let n = 237061009
+  io.print(n as float / 8192.0)
+  io.print(f(1125899906842624.25))
+  io.print(f(1125899906842625.25))
+  io.print(f(1125899906842624.75))
+  io.print(f(577411599005501.25))
+  io.print(-f(577411599005501.25))
+  io.print(TIE)
+  io.print(TIE == \"\\(f(1125899906842624.25))\")
+  io.print(F{ x: 1125899906842624.25 }.hash() == F{ x: f(1125899906842624.2) }.hash())
+  var odd = 0
+  for i in 237060000..237060400 {
+    let s = \"\\(i as float / 8192.0)\"
+    let last = s.slice(s.len() - 1, s.len())
+    if last == \"3\" || last == \"7\" {
+      odd = odd + 1
+    }
+  }
+  io.print(odd)
+}
+",
+    ),
 ];
 
 /// Programs pinning down the WebAssembly target against the other two. Each
 /// one is here because Wasm once refused it, trapped on it, or answered
 /// differently.
 const WASM_TARGET: &[(&str, &str)] = &[
+    // A match arm binding what a `nil` arm leaves behind holds the payload,
+    // so the binding unwraps. At `T = Option<int>` the subject `Option<T>` is
+    // `Option<int>` and so is the binding, and the unwrap from a type to
+    // itself made a module the validator refused (E0900).
+    (
+        "a-generic-match-binding-at-an-optional",
+        r#"fn wrapit<T>(x: T) -> Option<T> {
+  return x
+}
+
+fn or_else<T>(x: T, d: T) -> T {
+  return match wrapit(x) {
+    nil => d,
+    v => v,
+  }
+}
+
+fn pick<T>(x: Option<T>, d: T) -> T {
+  return match x {
+    nil => d,
+    v => v,
+  }
+}
+
+fn first_or<T>(xs: [T], d: T) -> T {
+  return match xs.get(0) {
+    nil => d,
+    v => v,
+  }
+}
+
+fn main() {
+  let a: Option<int> = 5
+  let n: Option<int> = nil
+  let r = or_else(a, n)
+  if r != nil {
+    io.print(r)
+  }
+  io.print(or_else(n, a) == a)
+  let b: Option<int> = 3
+  let p: Option<int> = pick(b, n)
+  io.print(p == nil)
+  let q: Option<int> = pick(n, b)
+  io.print(q == b)
+  let s: Option<str> = "hi"
+  let none: Option<str> = nil
+  let t: Option<str> = pick(s, none)
+  io.print(t == "hi")
+  let u: Option<str> = pick(none, s)
+  io.print(u == nil)
+  let xs: [Option<int>] = [7, nil]
+  let first = first_or(xs, n)
+  if first != nil {
+    io.print(first)
+  }
+  io.print(first_or([1, 2], 9))
+  io.print(or_else(4, 9))
+}
+"#,
+    ),
     // A map key was compared with `i32.eq` unless it was a number or a string,
     // so a struct, enum, tuple, optional or slice key produced a module the
     // validator refused (E0900). The removal from a map built elsewhere is here
@@ -3459,6 +3608,28 @@ fn find_runtime_lib() -> Option<std::path::PathBuf> {
 /// trap, and the fact of the trap. What each backend *says* about the trap is
 /// not compared — Wasm says `unreachable` for everything.
 const TRAPPING: &[(&str, &str)] = &[
+    // A recursion deeper than a target allows ends in a trap on every one:
+    // the VM's at a hundred thousand frames, the native runtime's at the
+    // same call, and WebAssembly's wherever its host's stack ends, which is
+    // sooner. Natively it ran on to the machine stack's end and aborted
+    // there, and on Wasm the host's `RangeError` was not a trap at all.
+    (
+        "a-recursion-past-the-limit-traps",
+        "\
+fn depth(n: int) -> int {
+  if n == 0 {
+    return 0
+  }
+  return 1 + depth(n - 1)
+}
+
+fn main() {
+  io.print(depth(1000))
+  io.print(depth(200000))
+  io.print(\"after\")
+}
+",
+    ),
     // A write through a field or into a nested slice goes through a hidden
     // copy, and the bounds check has to survive the trip.
     (

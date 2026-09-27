@@ -394,7 +394,11 @@ expression trees:
    rather than boxing because the concrete type *is* known at the call site;
    runtime polymorphism is what `dyn Trait` is for. No backend ever sees a type
    parameter. A generic function that instantiates itself at an ever larger
-   type stops at 4096 instantiations rather than running forever.
+   type is recognised by its growth — its own template 64 times on the chain
+   of copies that asked for each other, or on that chain at all once the type
+   arguments pass the size limit — and refused with `E0220` rather than run
+   forever. The limits themselves (256 levels, 65,536 parts, 65,536 copies)
+   bound what a program that finishes may ask for, and are reported as that.
 2. **Pruning** — drop every function nothing can reach from the entry, the
    program's own `pub` functions, a closure's lifted body or a vtable.
    Reachability is exact, because a call names its target by index. This is
@@ -649,11 +653,23 @@ windows is one entry.
 Roots come from Cranelift's stack maps. Every reference-typed local is declared
 as needing one, so at each safepoint — a call — the live references sit in
 stack slots the maps record, and are reloaded afterwards, which is what lets
-the nursery move them. At collection time the runtime walks the frame-pointer
+the nursery move them. A local assigned once and read only later in the same
+block is carried as the value that defined it, declared as needing a map
+itself, rather than through a Cranelift variable: the SSA builder keeps a table
+per variable as long as the function has blocks, and a debug build splits a
+block at every checked `+`, so a variable per local made a function of tens of
+thousands of `let`s cost gigabytes to compile. At collection time the runtime walks the frame-pointer
 chain and visits the recorded slots of every frame whose return address is a
 registered safepoint. Because Kite has no `unsafe`, no pointer arithmetic, and
 no FFI that hands out raw addresses, every reference is known to the collector —
 conservative scanning is never required.
+
+A native program runs on a thread of its own, with a stack of 512 MB reserved
+rather than used (`kite_rt_run`, which the exported `main` calls), and every
+compiled function counts itself into `KITE_RT_DEPTH` on entry and out on
+return. The call past 100,000 traps with the VM's `call depth exceeded`, so the
+two backends end a deep recursion at the same call; before, the native one
+ran to the end of whatever stack it had been given and aborted there.
 
 That walk is also why there is no native backend on Windows: Cranelift's Win64
 prologue puts the frame record where the walk does not expect it, and

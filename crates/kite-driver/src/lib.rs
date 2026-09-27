@@ -708,8 +708,8 @@ fn run_passes(
     // A generic type that contains itself at a larger type has no finite
     // expansion. The arena stops making it past a cap rather than recursing
     // until the stack is gone, and says which declaration asked.
-    if let Some((name, span)) = hir.types.unbounded_instantiation() {
-        diags.push(unbounded_instantiation("type", name, span));
+    if let Some((name, span, why)) = hir.types.unbounded_instantiation() {
+        diags.push(unbounded_instantiation("type", name, span, why));
     }
 
     if emit == Emit::Hir {
@@ -754,11 +754,11 @@ fn run_passes(
     // level, forever; monomorphisation refuses rather than stopping partway
     // and handing on calls into copies it never made.
     if let Err(u) = kite_hir::mono::monomorphise(&mut hir) {
-        diags.push(unbounded_instantiation("function", &u.template, u.span));
+        diags.push(unbounded_instantiation("function", &u.template, u.span, u.why));
         return (String::new(), None, None, None, index);
     }
-    if let Some((name, span)) = hir.types.unbounded_instantiation() {
-        diags.push(unbounded_instantiation("type", name, span));
+    if let Some((name, span, why)) = hir.types.unbounded_instantiation() {
+        diags.push(unbounded_instantiation("type", name, span, why));
         return (String::new(), None, None, None, index);
     }
     // The prelude is in every program; without this a `hello world` would
@@ -864,6 +864,31 @@ fn run_passes(
             ret: None,
             generic: true,
         }));
+        // A function wider than an engine accepts is the program's size, not
+        // the compiler's mistake, and says so before the validator would.
+        if !module.too_wide.is_empty() {
+            for (function, span, locals) in &module.too_wide {
+                diags.push(
+                    Diagnostic::error(
+                        kite_diag::codes::E0902,
+                        format!("`{}` is too large for WebAssembly", function),
+                    )
+                    .with_primary(
+                        *span,
+                        format!(
+                            "{} locals, more than the {} an engine accepts in one function",
+                            locals,
+                            kite_codegen_wasm::MAX_LOCALS
+                        ),
+                    )
+                    .with_note(
+                        "every local and temporary is a Wasm local: split the function; \
+                         `--native` does not have this limit",
+                    ),
+                );
+            }
+            return (String::new(), None, None, None, index);
+        }
         // The last thing that can catch a bad lowering. Everything above this
         // line checks the program; this checks the compiler, and it is the only
         // check whose absence is invisible until a browser refuses the module.
@@ -901,8 +926,12 @@ fn run_passes(
                         )
                         .with_primary(gap.span, format!("used in `{}`", gap.function))
                         .with_note(
-                            "the bytecode target supports it: run without `--emit native`. \
-                             See docs/06-roadmap.md for the remaining lowering steps",
+                            // `run --native` and `--emit native` are one
+                            // request, and this cannot tell which was typed,
+                            // so it names both.
+                            "the bytecode target supports it: run without `--native` \
+                             (`--emit native`). See docs/06-roadmap.md for the remaining \
+                             lowering steps",
                         ),
                     );
                 }
@@ -928,9 +957,13 @@ fn run_passes(
                     format!("`{}` is too large for the bytecode VM", limit.function),
                 )
                 .with_primary(limit.span, limit.what)
+                // Each target's own limit, since the note once said the other
+                // two had none: WebAssembly counts locals, not the literal's
+                // staging, and refuses past fifty thousand of them.
                 .with_note(
                     "split the function, or build a large literal in a loop; \
-                     `--emit wasm` and `--native` do not have this limit",
+                     `--native` does not have this limit, and `--emit wasm` accepts a \
+                     literal of any length but at most 50000 locals in one function",
                 ),
             );
         }
@@ -944,20 +977,48 @@ fn run_passes(
     (String::new(), Some(chunk), None, None, index)
 }
 
-/// `E0220`: a generic `what` (a function or a type) named `name` asked for
-/// specialisations of itself without end.
-fn unbounded_instantiation(what: &str, name: &str, span: Span) -> Diagnostic {
-    Diagnostic::error(
-        kite_diag::codes::E0220,
-        format!("the generic {} `{}` instantiates itself without end", what, name),
-    )
-    .with_primary(span, "each copy asks for another at a larger type argument")
-    .with_note(
-        "generics are specialised: every set of type arguments gets its own copy, \
-         so recursion at `[T]` from inside `T` needs infinitely many — polymorphic \
-         recursion has no finite expansion",
-    )
-    .with_note("recurse at the same type, or hold the growing part in a type that does not grow")
+/// `E0220`: a generic `what` (a function or a type) named `name` could not
+/// be specialised — because it asks for copies of itself without end, or
+/// because what a finite program asks for is past what the compiler makes.
+/// Only the first is a claim about the program's recursion, so only it makes
+/// one.
+fn unbounded_instantiation(what: &str, name: &str, span: Span, why: kite_hir::Refusal) -> Diagnostic {
+    use kite_hir::Refusal;
+    let specialised = "generics are specialised: every set of type arguments gets its own copy";
+    match why {
+        Refusal::Runaway => Diagnostic::error(
+            kite_diag::codes::E0220,
+            format!("the generic {} `{}` instantiates itself without end", what, name),
+        )
+        .with_primary(span, "each copy asks for another at a larger type argument")
+        .with_note(format!(
+            "{}, so recursion at `[T]` from inside `T` needs infinitely many — \
+             polymorphic recursion has no finite expansion",
+            specialised
+        ))
+        .with_note("recurse at the same type, or hold the growing part in a type that does not grow"),
+        Refusal::TooLarge => Diagnostic::error(
+            kite_diag::codes::E0220,
+            format!("the generic {} `{}` is used at a type argument too large to specialise", what, name),
+        )
+        .with_primary(
+            span,
+            format!(
+                "a type argument nests deeper than {} levels or holds more than {} parts",
+                kite_hir::ty::MAX_TYPE_DEPTH,
+                kite_hir::ty::MAX_TYPE_SIZE
+            ),
+        )
+        .with_note(format!("{}, and each is named for its arguments", specialised))
+        .with_note("hold the value in a type that does not nest, or in a slice of it"),
+        Refusal::TooMany => Diagnostic::error(
+            kite_diag::codes::E0220,
+            format!("the program needs more than {} specialisations", kite_hir::mono::MAX_INSTANTIATIONS),
+        )
+        .with_primary(span, format!("the generic {} `{}` asked for the one past the limit", what, name))
+        .with_note(format!("{}, and each is compiled", specialised))
+        .with_note("take a `dyn` of a trait where one copy can serve every type"),
+    }
 }
 
 /// What an editor needs, from the resolution the checker already ran.
@@ -1228,6 +1289,140 @@ fn signature_text(sources: &SourceMap, at: Span, param_count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `wrap(wrap(…(x)))`, `depth` calls deep.
+    fn nested(call: &str, depth: usize, core: &str) -> String {
+        let mut s = core.to_string();
+        for _ in 0..depth {
+            s = format!("{}({})", call, s);
+        }
+        s
+    }
+
+    const BOX: &str = "struct Box<T> {\n  v: T\n}\n\n\
+                       fn wrap<T>(x: T) -> Box<T> {\n  return Box{ v: x }\n}\n\n";
+
+    /// Programs that finish are specialised however much they ask for within
+    /// the limits, and past them are told that they asked for too much —
+    /// not that they recurse without end, which is what `E0220` said of
+    /// `wrap` nested fifty deep, a pair of pairs eleven deep, and one
+    /// function specialised at 4,200 types, all of which finish.
+    #[test]
+    fn a_finite_program_is_specialised_or_told_it_is_too_large() {
+        let run = |src: &str| {
+            let c = compile("t.kite", src, Emit::Check);
+            assert!(!c.failed(), "{}", c.render_diagnostics());
+            let mut out = Vec::new();
+            c.run(&mut out).expect("runs");
+            String::from_utf8(out).unwrap()
+        };
+        let fifty = format!(
+            "{}fn main() {{\n  let b = {}\n  io.print(b{})\n}}\n",
+            BOX,
+            nested("wrap", 50, "1"),
+            ".v".repeat(50)
+        );
+        assert_eq!(run(&fifty), "1\n");
+
+        let pairs = format!(
+            "fn pair<T>(x: T) -> (T, T) {{\n  return (x, x)\n}}\n\n\
+             fn main() {{\n  let p = {}\n  io.print(\"made\")\n}}\n",
+            nested("pair", 12, "1")
+        );
+        assert_eq!(run(&pairs), "made\n");
+
+        let mut many = String::from("fn ident<T>(x: T) -> T {\n  return x\n}\n\n");
+        let mut body = String::from("fn main() {\n  var t = 0\n");
+        for i in 0..4200 {
+            many.push_str(&format!("struct S{} {{\n  v: int\n}}\n\n", i));
+            body.push_str(&format!("  t = t + ident(S{}{{ v: 1 }}).v\n", i));
+        }
+        many.push_str(&body);
+        many.push_str("  io.print(t)\n}\n");
+        assert_eq!(run(&many), "4200\n");
+
+        // Past the limits: one error, which says what it is, and nothing
+        // after it about the placeholder that stands in for the refused type.
+        let refused = |src: &str| {
+            let c = compile("t.kite", src, Emit::Check);
+            let errors: Vec<String> = c
+                .diags
+                .iter()
+                .filter(|d| d.severity == kite_diag::Severity::Error)
+                .map(|d| format!("{}: {}", d.code.map(|x| x.0).unwrap_or(""), d.message))
+                .collect();
+            assert_eq!(errors.len(), 1, "{:#?}", errors);
+            errors.into_iter().next().unwrap()
+        };
+        let three_hundred = format!(
+            "{}fn main() {{\n  let a = {}\n  let b = {}\n  let c = {}\n  io.print(c.v{})\n}}\n",
+            BOX,
+            nested("wrap", 100, "1"),
+            nested("wrap", 100, "a"),
+            nested("wrap", 100, "b"),
+            ".v".repeat(99)
+        );
+        assert_eq!(
+            refused(&three_hundred),
+            "E0220: the generic type `Box` is used at a type argument too large to specialise"
+        );
+        let pairs = format!(
+            "fn pair<T>(x: T) -> (T, T) {{\n  return (x, x)\n}}\n\n\
+             fn main() {{\n  let p = {}\n  io.print(\"made\")\n}}\n",
+            nested("pair", 17, "1")
+        );
+        assert_eq!(
+            refused(&pairs),
+            "E0220: the generic function `pair` is used at a type argument too large to specialise"
+        );
+    }
+
+    /// A value of more parts than the native staging window is still refused
+    /// natively, and the note says how to run it elsewhere with the flag
+    /// `kitec run` takes: it named only `--emit native`, to someone who had
+    /// typed `--native`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_native_refusal_names_the_flag_run_takes() {
+        let elems: Vec<String> = (0..4097).map(|i| i.to_string()).collect();
+        let src = format!("fn main() {{\n  let t = ({})\n  io.print(t.0)\n}}\n", elems.join(", "));
+        let c = compile("t.kite", &src, Emit::Native);
+        let text = c.render_diagnostics();
+        assert!(text.contains("E0204"), "{}", text);
+        assert!(text.contains("run without `--native`"), "{}", text);
+    }
+
+    /// A function past a target's size is a limit of that target, E0902, and
+    /// says what the other targets accept. Wasm reported one of 50,000
+    /// locals as an invalid module, E0900 — the compiler's own bug — and the
+    /// VM's note claimed Wasm had no limit at all.
+    #[test]
+    fn a_function_past_a_targets_limit_says_so() {
+        let mut src = String::from("fn main() {\n  let first = 111\n");
+        for i in 0..66_000 {
+            src.push_str(&format!("  let v{} = {} + 1\n", i, i));
+        }
+        src.push_str("  io.print(first)\n  io.print(v65999)\n}\n");
+        let codes = |c: &Compilation| -> Vec<&str> {
+            c.diags
+                .iter()
+                .filter(|d| d.severity == kite_diag::Severity::Error)
+                .map(|d| d.code.map(|x| x.0).unwrap_or(""))
+                .collect()
+        };
+
+        let wasm = compile("t.kite", &src, Emit::Wasm);
+        assert_eq!(codes(&wasm), ["E0902"], "{}", wasm.render_diagnostics());
+        let text = wasm.render_diagnostics();
+        assert!(text.contains("too large for WebAssembly"), "{}", text);
+        assert!(text.contains("more than the 50000 an engine accepts"), "{}", text);
+
+        let vm = compile("t.kite", &src, Emit::Kbc);
+        assert_eq!(codes(&vm), ["E0902"], "{}", vm.render_diagnostics());
+        let text = vm.render_diagnostics();
+        assert!(text.contains("at most 50000 locals"), "{}", text);
+        assert!(!text.contains("`--emit wasm` and `--native` do not have this limit"), "{}", text);
+    }
 
     #[test]
     fn every_emit_stage_produces_output_for_a_valid_program() {

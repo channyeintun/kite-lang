@@ -460,7 +460,21 @@ pub struct WasmModule {
     /// declared at. The driver turns these into a source map, because it is
     /// what holds the `SourceMap` a span is resolved through.
     pub source_spans: Vec<(usize, kite_span::Span)>,
+    /// Functions with more locals than an engine accepts, [`MAX_LOCALS`], by
+    /// name and declaration, with how many they have. A module with any is
+    /// not valid, and the program is refused as too large for this target
+    /// rather than reported as the compiler's mistake.
+    pub too_wide: Vec<(String, kite_span::Span, u32)>,
 }
+
+/// The most locals — parameters included — one function may have: the
+/// validator's limit, and V8's and SpiderMonkey's.
+///
+/// Every MIR local is a Wasm local here, plus a few registers of the
+/// backend's own, so a function of fifty thousand `let`s passed it and was
+/// reported as an invalid module (E0900), a bug in the compiler, when it is
+/// a program too large for the target.
+pub const MAX_LOCALS: u32 = 50_000;
 
 /// What the module's `sourceMappingURL` section names, and what the driver
 /// must write beside it.
@@ -1552,9 +1566,10 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
     // the payload itself ends up, which is not known until the section is
     // added to the module below.
     let mut body_offsets: Vec<usize> = Vec::with_capacity(program.fns.len());
+    let mut too_wide = Vec::new();
     for f in &program.fns {
         body_offsets.push(code.byte_len());
-        code.function(&compile_fn(
+        let (body, locals) = compile_fn(
             f,
             types,
             &fn_returns,
@@ -1570,7 +1585,11 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
             string_runtime,
             &invoke_shapes,
             &slice_helpers,
-        ));
+        );
+        if locals > MAX_LOCALS {
+            too_wide.push((f.name.clone(), f.span, locals));
+        }
+        code.function(&body);
     }
     for d in &dispatchers {
         code.function(&compile_dispatcher(d, &layout, fn_base));
@@ -1708,6 +1727,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
     WasmModule {
         bytes: module.finish(),
         source_spans,
+        too_wide,
         api,
         hosts: program
             .externs
@@ -2141,7 +2161,7 @@ fn compile_fn(
     strings: strings::StringRuntime,
     invoke_shapes: &[TyId],
     slice_helpers: &slices::SliceHelpers,
-) -> Function {
+) -> (Function, u32) {
     // Locals beyond the parameters, plus one synthetic program counter.
     let mut locals: Vec<(u32, ValType)> = Vec::new();
     for l in f.locals.iter().skip(f.param_count) {
@@ -2323,8 +2343,6 @@ fn compile_fn(
         next_local += 1;
         next_local - 1
     });
-    let _ = next_local;
-
     let mut func = Function::new(locals);
     let n = f.blocks.len() as u32;
 
@@ -2384,7 +2402,8 @@ fn compile_fn(
     func.instruction(&Instruction::End); // block $exit
     func.instruction(&Instruction::Unreachable);
     func.instruction(&Instruction::End); // function
-    func
+    // Every local's index, parameters first, is below this.
+    (func, next_local)
 }
 
 fn push_local(locals: &mut Vec<(u32, ValType)>, ty: ValType) {

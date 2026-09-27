@@ -198,6 +198,15 @@ the receiver is concrete and the vtable finds the right body — but the tag
 comparison is avoidable, and devirtualising after monomorphisation is a
 worthwhile follow-up.
 
+**Later: a runaway is told from a large program.** Specialisation stopped at
+absolute caps — arguments 48 levels deep or 1,024 nodes large, 4,096 copies in
+all — and called every one of them `E0220`, "instantiates itself without end",
+so `wrap(wrap(…))` fifty deep and one function used at 4,200 types were told
+they recursed. A runaway is recognised by its growth now: a declaration
+reached again from a chain of its own specialisations 64 times, or at arguments
+past the caps while on that chain. The caps remain, raised to 256 levels,
+65,536 nodes and 65,536 copies, as limits a finite program is told it passed.
+
 **Also done:** closures. The body is lifted into a function of its own whose
 leading parameters are what it captured, so nothing after the type checker
 knows closures exist. Captures are by value, taken when the closure is made —
@@ -1136,6 +1145,27 @@ of the native staging window was refused with `E0204` — a generated table that
 ran on the VM and in the browser did not build natively. It is built a window
 at a time now, and `literals_past_ten_thousand_elements_agree` compares all
 three backends where it compared two.
+
+**Later: the native runtime held to the VM at the edges.** A review of the
+backends against each other found five places where a valid program meant
+something different natively:
+
+- A recursion ran as deep as the stack the program was started on, past the
+  VM's 100,000 frames and then into a Rust stack overflow. Every compiled
+  function now counts itself against the VM's limit and the call past it traps
+  in the VM's words, on a 512 MB stack the runtime starts the program on. A
+  Wasm host's stack is shallower, and the glue makes its end a trap too.
+- `==` made a heap worklist for every comparison, two `int`s included, so a map
+  lookup — a scan comparing keys — ran several times slower on both runtimes.
+  A flat pair answers without one now.
+- A function of tens of thousands of `let`s took gigabytes to compile, because
+  the SSA builder's table per variable grows with the block count and a debug
+  build splits a block at every checked `+`. A local made and read within one
+  block is carried as a value.
+- A host function declared with the wrong result trapped here and ran on the
+  VM; the VM checks the declaration as the native host does.
+- A float exactly between two shortest decimals printed its upper neighbour,
+  where `Number#toString` — and so Wasm — prints the even one.
 
 ---
 

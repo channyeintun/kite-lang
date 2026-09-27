@@ -19,8 +19,12 @@ use std::rc::Rc;
 ///
 /// Frames live in a vector on the heap and a Kite call is not a Rust call, so
 /// this bounds memory rather than guarding the host's stack. It was 2,048,
-/// which made a recursion three thousand deep trap here and nowhere else; the
-/// native and Wasm backends go far deeper on an ordinary stack.
+/// which made a recursion three thousand deep trap here and nowhere else.
+///
+/// The native runtime counts its calls against the same number
+/// (`kite_rt::MAX_FRAMES`) and traps at the same call with the same words,
+/// which is what lets the two be compared at depth at all. A WebAssembly
+/// host's stack is shallower, and its end is a trap too; see §7.7.
 pub const MAX_FRAMES: usize = 100_000;
 
 #[derive(Clone, Debug)]
@@ -211,69 +215,106 @@ impl Drop for ErrorValue {
 /// their fields are. Reference identity is `ptr.same`, not `==`.
 ///
 /// Walked with a worklist of pairs still to compare, for the reason
-/// [`drop_iteratively`] gives. Both sides of each pair are cloned onto it,
-/// which for an aggregate is a reference count and nothing more.
+/// [`drop_iteratively`] gives — but only once there is an aggregate to
+/// descend into. A map is a scan comparing its key with each entry's, so
+/// `==` on two `int`s or two `str`s is what every lookup runs per entry; a
+/// worklist made and dropped for each of those made map-heavy programs six
+/// times slower. Scalars answer on the spot, at the top and wherever they
+/// appear as fields, and the worklist starts empty, which allocates nothing,
+/// so a struct of scalars compares without allocating either.
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
-        let mut work: Vec<(Value, Value)> = vec![(self.clone(), other.clone())];
-        while let Some((a, b)) = work.pop() {
-            let same = match (&a, &b) {
-                (Value::Unit, Value::Unit) => true,
-                (Value::Int(a), Value::Int(b)) => a == b,
-                (Value::Float(a), Value::Float(b)) => a == b,
-                (Value::Bool(a), Value::Bool(b)) => a == b,
-                (Value::Str(a), Value::Str(b)) => a == b,
-                (Value::Struct(a), Value::Struct(b)) => {
-                    let (fa, fb) = (a.fields.borrow(), b.fields.borrow());
-                    a.struct_id == b.struct_id && pairs(&mut work, &fa, &fb)
-                }
-                (Value::Enum(a), Value::Enum(b)) => {
-                    a.enum_id == b.enum_id
-                        && a.variant == b.variant
-                        && pairs(&mut work, &a.fields, &b.fields)
-                }
-                (Value::Slice(a), Value::Slice(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
-                    pairs(&mut work, a, b)
-                }
-                // In insertion order, which is part of what a map is.
-                (Value::Map(a), Value::Map(b)) => {
-                    if a.len() == b.len() {
-                        for ((ka, va), (kb, vb)) in a.iter().zip(b.iter()) {
-                            work.push((ka.clone(), kb.clone()));
-                            work.push((va.clone(), vb.clone()));
-                        }
-                    }
-                    a.len() == b.len()
-                }
-                (Value::Pair(a), Value::Pair(b)) => {
-                    work.push((a.0.clone(), b.0.clone()));
-                    work.push((a.1.clone(), b.1.clone()));
-                    true
-                }
-                // Two errors are equal when they say the same thing. What they
-                // carry is provenance rather than identity: a caller comparing
-                // errors is comparing failures, and two failures that read
-                // alike are alike.
-                (Value::Err(a), Value::Err(b)) => a.message == b.message,
-                (Value::Nil, Value::Nil) => true,
-                _ => false,
-            };
-            if !same {
-                return false;
-            }
+        match shallow_eq(self, other) {
+            Some(same) => same,
+            None => deep_eq(self, other),
         }
-        true
     }
 }
 
-/// Queue the element-wise comparisons of two sequences, answering whether
-/// their lengths allow them to be equal at all.
-fn pairs(work: &mut Vec<(Value, Value)>, a: &[Value], b: &[Value]) -> bool {
-    if a.len() != b.len() {
+/// The answer for a pair that needs no descent — scalars, strings, errors,
+/// and two values of different kinds — or `None` for two aggregates of one
+/// kind, whose contents decide.
+#[inline]
+fn shallow_eq(a: &Value, b: &Value) -> Option<bool> {
+    Some(match (a, b) {
+        (Value::Unit, Value::Unit) => true,
+        (Value::Int(a), Value::Int(b)) => a == b,
+        (Value::Float(a), Value::Float(b)) => a == b,
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::Str(a), Value::Str(b)) => a == b,
+        (Value::Nil, Value::Nil) => true,
+        // Two errors are equal when they say the same thing. What they carry
+        // is provenance rather than identity: a caller comparing errors is
+        // comparing failures, and two failures that read alike are alike.
+        (Value::Err(a), Value::Err(b)) => a.message == b.message,
+        (Value::Struct(_), Value::Struct(_))
+        | (Value::Enum(_), Value::Enum(_))
+        | (Value::Slice(_), Value::Slice(_))
+        | (Value::Tuple(_), Value::Tuple(_))
+        | (Value::Map(_), Value::Map(_))
+        | (Value::Pair(_), Value::Pair(_)) => return None,
+        _ => false,
+    })
+}
+
+/// Two aggregates of one kind, compared without recursing.
+#[inline(never)]
+fn deep_eq(a: &Value, b: &Value) -> bool {
+    let mut work: Vec<(Value, Value)> = Vec::new();
+    if !level(a, b, &mut work) {
         return false;
     }
-    work.extend(a.iter().cloned().zip(b.iter().cloned()));
+    while let Some((a, b)) = work.pop() {
+        if !level(&a, &b, &mut work) {
+            return false;
+        }
+    }
     true
+}
+
+/// Compare one level of two aggregates of one kind: their shapes, and each
+/// pair of children that is not itself an aggregate. The pairs that are go on
+/// the worklist, as clones — for an aggregate, a reference count.
+fn level(a: &Value, b: &Value, work: &mut Vec<(Value, Value)>) -> bool {
+    match (a, b) {
+        (Value::Struct(a), Value::Struct(b)) => {
+            let (fa, fb) = (a.fields.borrow(), b.fields.borrow());
+            a.struct_id == b.struct_id && pairs(work, &fa, &fb)
+        }
+        (Value::Enum(a), Value::Enum(b)) => {
+            a.enum_id == b.enum_id && a.variant == b.variant && pairs(work, &a.fields, &b.fields)
+        }
+        (Value::Slice(a), Value::Slice(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
+            pairs(work, a, b)
+        }
+        // In insertion order, which is part of what a map is.
+        (Value::Map(a), Value::Map(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|((ka, va), (kb, vb))| pair(work, ka, kb) && pair(work, va, vb))
+        }
+        (Value::Pair(a), Value::Pair(b)) => pair(work, &a.0, &b.0) && pair(work, &a.1, &b.1),
+        _ => shallow_eq(a, b).unwrap_or(false),
+    }
+}
+
+/// Compare two children, answering now if they are not aggregates and
+/// queueing them if they are.
+fn pair(work: &mut Vec<(Value, Value)>, a: &Value, b: &Value) -> bool {
+    match shallow_eq(a, b) {
+        Some(same) => same,
+        None => {
+            work.push((a.clone(), b.clone()));
+            true
+        }
+    }
+}
+
+/// Compare two sequences element by element, as [`pair`] does, answering
+/// whether they can still be equal.
+fn pairs(work: &mut Vec<(Value, Value)>, a: &[Value], b: &[Value]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| pair(work, x, y))
 }
 
 impl Value {
@@ -639,6 +680,20 @@ struct Vm<'a> {
 pub trait Host {
     fn call(&mut self, name: &str, args: &[Value]) -> Result<Value, Trap>;
 
+    /// What the function `name` reads and answers, in the encoding of
+    /// `kite_mir::Program::extern_sigs` (a code per parameter, `:`, a code
+    /// for the result), and the name a trap about it gives the call — or
+    /// `None`, and the program's declaration goes unchecked.
+    ///
+    /// A host that says is held to it before the call, as the native runtime
+    /// holds its own: a parameter the host reads must be declared as what it
+    /// reads it as, and the declared result must be what it answers. Without
+    /// that, `extern fn path_kind(path: str) -> bool` printed `2` as a `bool`
+    /// here and trapped natively.
+    fn signature(&self, _name: &str) -> Option<(&'static [u8], &'static str)> {
+        None
+    }
+
     /// Give the host a turn when every task is waiting on it.
     ///
     /// Returns whether anything happened. A host with nothing outstanding
@@ -646,6 +701,64 @@ pub trait Host {
     /// spinning — which is the truth: nothing was ever going to arrive.
     fn wait(&mut self) -> Result<bool, Trap> {
         Ok(false)
+    }
+}
+
+/// Hold a program's declaration of a host function to what the host says it
+/// reads and answers — `kite-rt`'s `host_params`, in the same order and the
+/// same words, so a wrong declaration traps alike on both backends.
+///
+/// Extra declared parameters are ignored, as they are there: a host reads
+/// what it reads.
+fn check_host_signature(name: &str, declared: &[u8], wants: &[u8], op: &'static str) -> Result<(), Trap> {
+    let split = |sig: &[u8]| -> (Vec<u8>, Option<u8>) {
+        match sig.iter().position(|c| *c == b':') {
+            Some(at) => (sig[..at].to_vec(), sig.get(at + 1).copied()),
+            None => (sig.to_vec(), None),
+        }
+    };
+    let (want_params, want_ret) = split(wants);
+    let (have_params, have_ret) = split(declared);
+    for (i, want) in want_params.iter().enumerate() {
+        if have_params.get(i) != Some(want) {
+            return Err(Trap::TypeConfusion { op, found: not_a(*want) });
+        }
+    }
+    if have_ret != want_ret {
+        return Err(Trap::Failed {
+            message: format!(
+                "`{}` is declared to return {}, and the host returns {}",
+                name,
+                type_name_of(have_ret.unwrap_or(b'u')),
+                type_name_of(want_ret.unwrap_or(b'u'))
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// A signature code as the type it stands for.
+fn type_name_of(code: u8) -> &'static str {
+    match code {
+        b's' => "str",
+        b'i' => "int",
+        b'f' => "float",
+        b'b' => "bool",
+        b'u' => "()",
+        _ => "reference",
+    }
+}
+
+/// What a trap says a wrongly declared parameter was — `kite-rt` writes
+/// `not a ` before the type's name, the way this VM's own checks do.
+fn not_a(code: u8) -> &'static str {
+    match code {
+        b's' => "not a str",
+        b'i' => "not a int",
+        b'f' => "not a float",
+        b'b' => "not a bool",
+        b'u' => "not a ()",
+        _ => "not a reference",
     }
 }
 
@@ -1240,7 +1353,13 @@ impl<'a> Vm<'a> {
                         .map(|i| self.regs[base + arg_base as usize + i].clone())
                         .collect();
                     let value = match self.host.as_mut() {
-                        Some(h) => h.call(&name, &args)?,
+                        Some(h) => {
+                            let declared = self.chunk.extern_sigs.get(index as usize);
+                            if let (Some(declared), Some((wants, op))) = (declared, h.signature(&name)) {
+                                check_host_signature(&name, declared, wants, op)?;
+                            }
+                            h.call(&name, &args)?
+                        }
                         None => return Err(Trap::NoHostFunction { name }),
                     };
                     self.set(base, dst, value);

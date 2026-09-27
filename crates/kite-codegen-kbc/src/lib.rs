@@ -287,6 +287,11 @@ pub struct Chunk {
     /// target has no host of its own: an embedder supplies these, and one that
     /// is asked for and not supplied is a trap naming it.
     pub externs: Vec<String>,
+    /// What the program declared each of them to take and return, by the
+    /// same index — `kite_mir::Program::extern_sigs`, carried through for a
+    /// host that says what it reads and answers, so the VM can refuse a
+    /// wrong declaration the way the native runtime does.
+    pub extern_sigs: Vec<Vec<u8>>,
     pub strings: Vec<Rc<str>>,
     pub entry: Option<u32>,
     /// Dispatch tables, one per trait used as an object.

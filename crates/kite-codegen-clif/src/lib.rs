@@ -118,6 +118,7 @@ const _: () = assert!(kite_rt::STAGE_WORDS % 2 == 0);
 #[rustfmt::skip]
 const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_startup", &[], None),
+    ("kite_rt_run", &[I64], Some(types::I32)),
     ("kite_rt_trap", &[I64, I64, I64], None),
     ("kite_rt_register_string", &[I64, I64, I64], None),
     ("kite_rt_register_struct_shape", &[I64, I64, I64], None),
@@ -218,6 +219,7 @@ mod trap_code {
     pub const OVERFLOW_SHL: i64 = 7;
     pub const OVERFLOW_SHR: i64 = 8;
     pub const UNREACHABLE: i64 = 10;
+    pub const CALL_DEPTH: i64 = 11;
 }
 
 /// Everything the per-function lowering needs from the module scan.
@@ -294,6 +296,8 @@ struct ModuleCx<'a, M: Module> {
     fns: Vec<FuncId>,
     thunks: HashMap<u32, FuncId>,
     stage: DataId,
+    /// `KITE_RT_DEPTH`, the count of calls in progress. See `kite_rt::MAX_FRAMES`.
+    depth: DataId,
     call_conv: CallConv,
 }
 
@@ -333,6 +337,9 @@ fn build<M: Module>(
     let stage = module
         .declare_data("KITE_RT_STAGE", Linkage::Import, true, false)
         .map_err(|e| e.to_string())?;
+    let depth = module
+        .declare_data("KITE_RT_DEPTH", Linkage::Import, true, false)
+        .map_err(|e| e.to_string())?;
 
     let mut cx = ModuleCx {
         module,
@@ -343,6 +350,7 @@ fn build<M: Module>(
         fns: Vec::new(),
         thunks: HashMap::new(),
         stage,
+        depth,
         call_conv,
     };
 
@@ -432,28 +440,6 @@ fn build<M: Module>(
     Ok(Artifacts { wrapper })
 }
 
-/// A host function's signature as the program declared it, in the encoding
-/// `kite-rt`'s host boundary checks before it reads a word: one byte per
-/// parameter, `:`, one for the result.
-///
-/// `str` gets its own letter rather than sharing "reference" with everything
-/// else because it is the distinction the host needs: every reference is a
-/// word here, and only a string is something the host can read as a path.
-fn extern_sig(e: &kite_hir::ExternDef, types: &Types) -> Vec<u8> {
-    let code = |ty: TyId| match types.kind(ty) {
-        TyKind::Str => b's',
-        TyKind::Int => b'i',
-        TyKind::Float => b'f',
-        TyKind::Bool => b'b',
-        TyKind::Unit | TyKind::Never | TyKind::Error => b'u',
-        _ => b'r',
-    };
-    let mut sig: Vec<u8> = e.params.iter().map(|t| code(*t)).collect();
-    sig.push(b':');
-    sig.push(code(e.ret));
-    sig
-}
-
 /// A named, read-only byte blob the registration function can point at.
 fn define_bytes<M: Module>(
     cx: &mut ModuleCx<M>,
@@ -533,7 +519,7 @@ fn define_init<M: Module>(
     let mut extern_names = Vec::new();
     for (i, e) in cx.program.externs.iter().enumerate() {
         let name = format!("{}.{}", e.host, e.name);
-        let sig = extern_sig(e, cx.types);
+        let sig = mir::extern_signature(e, cx.types);
         extern_names.push((
             define_bytes(cx, &format!("kite_extern_{}", i), name.as_bytes())?,
             name.len(),
@@ -670,6 +656,11 @@ fn define_init<M: Module>(
 /// The entry the outside world calls: start the runtime, register the
 /// program, run `main`, then drive the scheduler until nothing is left —
 /// because `main` returning is not the program ending.
+///
+/// That is a local function, `kite_program`; the exported `main` hands it to
+/// `kite_rt_run`, which runs it on a stack of the runtime's own, so every
+/// frame the program makes and the collector walks is on a stack deep enough
+/// for `kite_rt::MAX_FRAMES` calls.
 fn define_wrapper<M: Module>(
     cx: &mut ModuleCx<M>,
     fbcx: &mut FunctionBuilderContext,
@@ -677,12 +668,12 @@ fn define_wrapper<M: Module>(
 ) -> Result<FuncId, String> {
     let cfg = cx.module.target_config();
     let sig = make_sig(cx.call_conv, &[], Some(types::I32));
-    let id = cx
+    let program = cx
         .module
-        .declare_function("main", Linkage::Export, &sig)
+        .declare_function("kite_program", Linkage::Local, &sig)
         .map_err(|e| e.to_string())?;
     let mut ctx = cx.module.make_context();
-    ctx.func.signature = sig;
+    ctx.func.signature = sig.clone();
     let mut b = FunctionBuilder::new(&mut ctx.func, fbcx);
     let entry = b.create_block();
     b.append_block_params_for_function_params(entry);
@@ -703,6 +694,28 @@ fn define_wrapper<M: Module>(
     b.ins().call(f, &[]);
     let zero = b.ins().iconst(types::I32, 0);
     b.ins().return_(&[zero]);
+    b.finalize(cfg);
+    cx.module.define_function(program, &mut ctx).map_err(|e| e.to_string())?;
+    cx.module.clear_context(&mut ctx);
+
+    // `main` hands the program to the runtime, which runs it on a stack deep
+    // enough for `kite_rt::MAX_FRAMES` calls and answers what it answered.
+    let id = cx
+        .module
+        .declare_function("main", Linkage::Export, &sig)
+        .map_err(|e| e.to_string())?;
+    ctx.func.signature = sig;
+    let mut b = FunctionBuilder::new(&mut ctx.func, fbcx);
+    let entry = b.create_block();
+    b.switch_to_block(entry);
+    b.seal_block(entry);
+    let program_ref = cx.module.declare_func_in_func(program, b.func);
+    let address = b.ins().func_addr(I64, program_ref);
+    let run = cx.rt("kite_rt_run");
+    let run_ref = cx.module.declare_func_in_func(run, b.func);
+    let call = b.ins().call(run_ref, &[address]);
+    let status = b.inst_results(call)[0];
+    b.ins().return_(&[status]);
     b.finalize(cfg);
     cx.module.define_function(id, &mut ctx).map_err(|e| e.to_string())?;
     cx.module.clear_context(&mut ctx);
@@ -821,6 +834,11 @@ struct FnLower<'a, 'b, M: Module> {
     fn_index: usize,
     b: FunctionBuilder<'a>,
     vars: Vec<Variable>,
+    /// By local index: whether the local is carried as the value that
+    /// defined it rather than through its variable. See [`direct_locals`].
+    direct: Vec<bool>,
+    /// The value each direct local was given, once it has been.
+    values: Vec<Option<Value>>,
     /// One `i8` owned flag per slice local the function writes into, by
     /// local index: whether nothing but that local can reach its slice, so a
     /// write may go straight in. See the `slices` module.
@@ -846,12 +864,14 @@ fn define_fn<M: Module>(
 
     // One variable per MIR local. A reference-typed local is declared as
     // needing a stack map, which is the whole precise-roots story: Cranelift
-    // spills it at each safepoint, records where, and reloads after.
+    // spills it at each safepoint, records where, and reloads after. A direct
+    // local's value is declared so itself, when it is made.
+    let direct = direct_locals(f);
     let mut vars = Vec::with_capacity(f.locals.len());
-    for l in &f.locals {
+    for (l, is_direct) in f.locals.iter().zip(&direct) {
         let ty = cl_type(l.ty, cx.types);
         let var = b.declare_var(ty);
-        if kind_of(l.ty, cx.types) == kite_rt::kind::REF {
+        if !is_direct && kind_of(l.ty, cx.types) == kite_rt::kind::REF {
             b.declare_var_needs_stack_map(var);
         }
         vars.push(var);
@@ -868,8 +888,12 @@ fn define_fn<M: Module>(
     }
     // Every other local starts as its type's all-zero value — `nil`, 0, 0.0 —
     // so a use on a path the checker knows is impossible still reads a value
-    // of the right type rather than tripping the SSA builder.
+    // of the right type rather than tripping the SSA builder. A direct local
+    // has no such path: it is read only after it is made.
     for (i, l) in f.locals.iter().enumerate().skip(f.param_count) {
+        if direct[i] {
+            continue;
+        }
         let ty = cl_type(l.ty, cx.types);
         let zero = if ty == types::F64 {
             b.ins().f64const(0.0)
@@ -887,7 +911,6 @@ fn define_fn<M: Module>(
         b.def_var(flag, clear);
         owned.insert(l.index(), flag);
     }
-    b.ins().jump(blocks[0], &[]);
 
     let mut lower = FnLower {
         cx,
@@ -895,12 +918,25 @@ fn define_fn<M: Module>(
         fn_index,
         b,
         vars,
+        values: vec![None; direct.len()],
+        direct,
         owned,
         blocks,
         rt_refs: HashMap::new(),
         fn_refs: HashMap::new(),
         stage_base: None,
     };
+    // This call is one more in progress, and the one past the VM's limit
+    // traps as the VM's does. Counted out again at every `return`.
+    let depth = lower.count_depth(1);
+    let limit = lower.b.ins().icmp_imm_u(
+        cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThan,
+        depth,
+        kite_rt::MAX_FRAMES as i64,
+    );
+    lower.trap_if(limit, trap_code::CALL_DEPTH, 0, 0);
+    let first = lower.blocks[0];
+    lower.b.ins().jump(first, &[]);
 
     let reachable = mir::reachable_blocks(f);
     for (i, block) in f.blocks.iter().enumerate() {
@@ -931,6 +967,74 @@ fn define_fn<M: Module>(
     let maps = collect_maps(&ctx).map_err(|e| format!("compiling `{}`: {}", f.name, e))?;
     cx.module.clear_context(&mut ctx);
     Ok(maps)
+}
+
+/// The locals a function may carry as the SSA value that defined them, with
+/// no Cranelift variable in between: each is assigned once, in one block, and
+/// read only later in that same block.
+///
+/// Cranelift's SSA builder keeps, for every variable, a table indexed by
+/// block number, grown to the highest block the variable is defined or read
+/// in. A debug build splits a block at every checked `+`, so a function of
+/// twenty thousand `let v = i + 1` had forty thousand blocks and twenty
+/// thousand variables defined across them: 1.5 GB to compile, and 52,000 of
+/// them ran out of memory. Almost every local in such a function is a value
+/// made and used on the spot, which needs no variable at all; everything the
+/// checks split off from a block is dominated by what came before in it, so
+/// the value that defined the local is valid wherever it is read. Anything
+/// else — a parameter, a local assigned twice or written in place, one read
+/// in another block, or before it is assigned on some path — keeps its
+/// variable.
+fn direct_locals(f: &mir::Function) -> Vec<bool> {
+    let mut direct = vec![true; f.locals.len()];
+    let mut defined: Vec<Option<(usize, usize)>> = vec![None; f.locals.len()];
+    for d in direct.iter_mut().take(f.param_count) {
+        *d = false;
+    }
+    for (bi, block) in f.blocks.iter().enumerate() {
+        for (si, stmt) in block.stmts.iter().enumerate() {
+            let written = match stmt {
+                mir::Inst::Assign { dst, .. } => {
+                    if defined[dst.index()].is_some() {
+                        direct[dst.index()] = false;
+                    }
+                    defined[dst.index()] = Some((bi, si));
+                    continue;
+                }
+                mir::Inst::SlicePush { local, .. }
+                | mir::Inst::MapSet { local, .. }
+                | mir::Inst::MapRemove { local, .. } => *local,
+                mir::Inst::SetIndex { base: mir::Operand::Local(l), .. } => *l,
+                mir::Inst::SetIndex { .. } | mir::Inst::SetField { .. } => continue,
+            };
+            direct[written.index()] = false;
+        }
+    }
+    for (i, d) in defined.iter().enumerate() {
+        if d.is_none() {
+            direct[i] = false;
+        }
+    }
+    // A read counts at its statement, and a terminator's after all of them.
+    let mut read = |o: &mir::Operand, at: (usize, usize)| {
+        if let mir::Operand::Local(l) = o {
+            match defined[l.index()] {
+                Some((bi, si)) if bi == at.0 && si < at.1 => {}
+                _ => direct[l.index()] = false,
+            }
+        }
+    };
+    for (bi, block) in f.blocks.iter().enumerate() {
+        for (si, stmt) in block.stmts.iter().enumerate() {
+            for o in stmt.operands() {
+                read(o, (bi, si));
+            }
+        }
+        if let Some(o) = block.term.operand() {
+            read(o, (bi, usize::MAX));
+        }
+    }
+    direct
 }
 
 impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
@@ -970,6 +1074,17 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
         v
     }
 
+    /// Add `by` to the count of calls in progress, answering the new count.
+    fn count_depth(&mut self, by: i64) -> Value {
+        let gv = self.cx.module.declare_data_in_func(self.cx.depth, self.b.func);
+        let at = self.b.ins().symbol_value(I64, gv);
+        let flags = MemFlagsData::trusted();
+        let now = self.b.ins().load(I64, flags, at, 0);
+        let next = self.b.ins().iadd_imm_s(now, by);
+        self.b.ins().store(flags, next, at, 0);
+        next
+    }
+
     fn iconst(&mut self, v: i64) -> Value {
         self.b.ins().iconst(I64, v)
     }
@@ -1003,6 +1118,12 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
 
     fn operand(&mut self, o: &mir::Operand) -> Value {
         match o {
+            mir::Operand::Local(l) if self.direct[l.index()] => match self.values[l.index()] {
+                Some(v) => v,
+                // Read before it is made only in a block nothing reaches,
+                // which is never lowered; a zero is what a variable held.
+                None => self.zero(self.local_ty(*l)),
+            },
             mir::Operand::Local(l) => self.b.use_var(self.vars[l.index()]),
             mir::Operand::Int(v) => self.b.ins().iconst(I64, *v),
             mir::Operand::Float(v) => self.b.ins().f64const(*v),
@@ -1055,6 +1176,20 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
         }
     }
 
+    /// Give a local its value: a direct local keeps it, and any other defines
+    /// its variable.
+    fn set_local(&mut self, dst: mir::Local, v: Value) {
+        let i = dst.index();
+        if self.direct[i] {
+            if self.kind(self.f.locals[i].ty) == kite_rt::kind::REF {
+                self.b.declare_value_needs_stack_map(v);
+            }
+            self.values[i] = Some(v);
+        } else {
+            self.b.def_var(self.vars[i], v);
+        }
+    }
+
     fn def(&mut self, dst: mir::Local, v: Value) {
         // Whatever the shape of the producing expression, the local's own
         // type decides its representation.
@@ -1073,17 +1208,22 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
         } else {
             v
         };
-        self.b.def_var(self.vars[dst.index()], v);
+        self.set_local(dst, v);
     }
 
     fn def_zero(&mut self, dst: mir::Local) {
-        let ty = cl_type(self.local_ty(dst), self.cx.types);
-        let v = if ty == F64 {
+        let v = self.zero(self.local_ty(dst));
+        self.set_local(dst, v);
+    }
+
+    /// The all-zero value of a type: `nil`, 0, 0.0.
+    fn zero(&mut self, ty: TyId) -> Value {
+        let ty = cl_type(ty, self.cx.types);
+        if ty == F64 {
             self.b.ins().f64const(0.0)
         } else {
             self.b.ins().iconst(ty, 0)
-        };
-        self.b.def_var(self.vars[dst.index()], v);
+        }
     }
 
     /// Write operands into the staging window, for a variadic construction.
@@ -1970,6 +2110,7 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 self.b.ins().brif(c, tb, &[], eb, &[]);
             }
             mir::Terminator::Return(v) => {
+                self.count_depth(-1);
                 if self.f.ret == TyId::UNIT {
                     self.b.ins().return_(&[]);
                 } else {
@@ -2052,7 +2193,7 @@ pub fn compile_object(program: &mir::Program, types: &Types) -> Result<Vec<u8>, 
     module.finish().emit().map_err(|e| e.to_string())
 }
 
-pub use kite_rt::{RunConfig, RunStats};
+pub use kite_rt::{RunConfig, RunStats, MAX_FRAMES};
 
 /// Compile into this process and run to completion, collecting the program's
 /// output and writing it to `out` when the run is over. This is how the

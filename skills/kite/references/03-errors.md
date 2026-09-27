@@ -832,7 +832,11 @@ handler, no unwinding. This is a deliberate rejection of Go's second, invisible
 propagation channel.
 
 What traps: slice index out of range, integer division by zero, a failed
-`assert`, a failed `require`. The runtime prints e.g.
+`assert`, a failed `require`, and a call chain deeper than the target allows —
+100,000 frames on the VM and natively (`call depth exceeded 100000 frames`),
+and the host's stack on WebAssembly, which is a few thousand frames of an
+ordinary function. A recursion whose depth comes from input should bound it
+and return an `error`. The runtime prints e.g.
 
 ```
 error: index 10 is out of range for a slice of length 3

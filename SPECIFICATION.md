@@ -449,7 +449,10 @@ one at run time, so `let LABEL = "max \(1e21)"` is `"max 1e+21"` everywhere:
 - Anything else is the shortest decimal that reads back as the same value,
   written plainly from `1e-7` up to `1e21` and in exponent form outside it:
   `0.30000000000000004`, `0.000001`, `1e-7`, `1.5e-7`, `1e+21`, `5e-324`,
-  `1.7976931348623157e+308`. Every one is a valid float literal.
+  `1.7976931348623157e+308`. Every one is a valid float literal. Of two
+  shortest decimals, the closer is written, and of two exactly as close, the
+  one whose last digit is even: `1125899906842624.25` is
+  `1125899906842624.2`.
 
 This is also the text of `io.print(x)` and `"\(x)"` for any `float`, on every
 target: ECMAScript's `Number#toString` with Kite's own spelling for the three
@@ -1156,6 +1159,15 @@ catchable. There is no `recover`, no panic handler, and no unwinding.
 `assert(cond, msg)` traps when `cond` is false. It is compiled out in release
 builds; `require(cond, msg)` is the always-on variant.
 
+A call chain deeper than the target allows traps too, with `call depth
+exceeded`. The bytecode VM and the native target allow 100,000 frames, and
+agree to the call. A WebAssembly program's frames are its host's stack, which
+in a browser or Node holds a few thousand frames of an ordinary function —
+fewer the more values each holds across its call — and running out of it ends
+the program as a trap, not as the host's `RangeError`. A recursion whose depth
+input decides, such as a parser's, should bound it and fail with an `error`
+instead, as `std/json` and `std/toml` do past 128 levels.
+
 This is a deliberate rejection of Go's `panic`/`recover`, which creates a second,
 invisible error-propagation channel alongside the visible one.
 
@@ -1572,6 +1584,13 @@ same code when the operations are all reference moves) are merged into one
 function. Where folding is not possible and the instantiation count is large, the
 compiler emits a size warning naming the function, and `dyn` is the suggested
 remedy.
+
+A generic function that calls itself at a larger type — `depth([x], n - 1)`
+inside `depth<T>` — or a generic type that holds itself at one needs a copy per
+level without end, and is [E0220](#16-diagnostics). So, in its own words, is a
+program that finishes but asks for more than the compiler makes: a type argument
+nested more than 256 levels deep or holding more than 65,536 parts, or more than
+65,536 specialisations in all.
 
 Bounds are trait names, and a parameter satisfies one by implementing it. That
 is the whole of the system: a generic function is a function whose parameter
@@ -2056,6 +2075,12 @@ Direct, monomorphic, and checked at the call. It is how `std/fs`, `std/http`,
 anything it calls often enough for a name lookup to matter. Drawing does not use
 it at all: the drawing calls are compiler builtins, so a program that paints
 needs no `extern`.
+
+A runtime that answers a host function itself — the bytecode VM and the native
+runtime both answer `@host("fs")` — holds the declaration to what it reads and
+returns. A parameter declared as other than what the host reads, or a result
+declared as other than what it answers, is a trap before the call is made, in
+the same words on both.
 
 **`std/js` declares nothing.** It is a fixed set of about twenty primitives
 through which any host object can be reached:

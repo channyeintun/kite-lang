@@ -1581,7 +1581,10 @@ arrays, inline tables. TOML 1.0's rules about tables are enforced: a table is
 defined once, an inline table or a `[…]` array is closed, and dotted keys do not
 reopen a table a header defined. **Dates and times are not implemented** — a
 date is checked to be one of TOML's four forms and parses as the string it was
-written as, losslessly, rather than being half-mapped onto `std/time`.
+written as, losslessly, rather than being half-mapped onto `std/time`. A
+document nesting deeper than 128 levels — each key segment, array and inline
+table counting one — is refused with an error, as `std/json` refuses one, so
+that input cannot choose how much stack a parse uses.
 
 ```kite
 use std/toml
