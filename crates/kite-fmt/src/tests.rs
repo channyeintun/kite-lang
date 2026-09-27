@@ -242,23 +242,43 @@ fn a_comparison_in_a_field_value_is_not_a_type_argument() {
     );
 }
 
+/// Every `.kite` file in the tree is formatted already, and formatting it
+/// again changes nothing — what CI's `kitec fmt --check` asks of each file,
+/// asked here too so that `cargo test` sees it. The recovery corpus is in
+/// here: its files are broken on purpose, and formatting has to leave them
+/// broken the same way.
+///
+/// This walked four directories, not the tree, and only asked that
+/// formatting be idempotent — so a file could drift from the formatter's
+/// layout, and the corpus, the site and two examples were never looked at.
 #[test]
 fn the_whole_tree_survives_formatting() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut files = Vec::new();
-    for dir in ["std", "examples", "tests/std", "examples/inventory"] {
-        let Ok(entries) = std::fs::read_dir(root.join(dir)) else { continue };
+    fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|e| e == "kite") {
+            let name = entry.file_name();
+            // What a build or a package manager put there is not the tree's.
+            if ["node_modules", "dist", "target", ".kite"].iter().any(|n| name == *n) {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, files);
+            } else if path.extension().is_some_and(|e| e == "kite") {
                 files.push(path);
             }
         }
     }
-    assert!(files.len() > 15, "only {} files found", files.len());
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = Vec::new();
+    for dir in ["std", "examples", "tests", "site"] {
+        walk(&root.join(dir), &mut files);
+    }
+    assert!(files.len() > 150, "only {} files found", files.len());
     for path in files {
         let src = std::fs::read_to_string(&path).expect("read");
         let once = fmt(&src);
+        assert!(once == src, "{} is not formatted", path.display());
         let twice = fmt(&once);
         assert_eq!(once, twice, "formatting {} is not idempotent", path.display());
     }
@@ -389,6 +409,41 @@ fn a_struct_base_and_rest_stand_apart() {
 fn a_tuple_index_chain_is_written_tight() {
     assert_eq!(fmt("let y = t.0 .1\n"), "let y = t.0.1\n");
     same("let y = t.0.1\n");
+}
+
+/// An index or a call after a tuple's element is written against it, as
+/// after any other name. `t.0[0]` came out `t.0 [0]`.
+#[test]
+fn an_index_after_a_tuple_element_is_tight() {
+    same("let x = t.0[0]\n");
+    same("let x = t.0.1[0][1]\n");
+    same("let x = t.1(2)\n");
+    assert_eq!(fmt("let x = t.0 [0]\n"), "let x = t.0[0]\n");
+    assert_eq!(fmt("let x = t.0.1 [0] [1]\n"), "let x = t.0.1[0][1]\n");
+    // A number that is not an element is not a name: nothing indexes `1`,
+    // and a slice literal after one is on a line of its own anyway.
+    same("let x = [1, 2]\n");
+}
+
+/// A declaration that does not parse is laid out by the fallback, and
+/// nothing else is. One broken declaration at the end of a file — the state
+/// format-on-save sees mid-edit — cost every comparison above it its spacing:
+/// `io.print(a < b, b > a)` was written `io.print(a<b, b> a)`.
+#[test]
+fn a_broken_declaration_costs_only_itself_its_layout() {
+    let good = "fn f(a: int, b: int) -> Option<int> {\n    io.print(a < b, b > a)\n\
+                \x20   let e = g(a < b, b >= a)\n    let p = P{ x: 1 }\n    return nil\n}\n";
+    same(good);
+    let broken = format!("{}\nfn broken( {{\n}}\n", good);
+    let out = fmt(&broken);
+    assert!(out.starts_with(good), "{}", out);
+    // And one broken in the middle, with good ones on either side. (Its
+    // brackets balance: brackets left open indent what follows, which is
+    // the formatter's one rule for indentation, broken file or not.)
+    let after = good.replace("fn f(", "fn h(");
+    let middle = format!("{}\nfn broken() {{\n    let = a < b\n}}\n\n{}", good, after);
+    let out = fmt(&middle);
+    assert!(out.ends_with(&after), "{}", out);
 }
 
 /// Wherever a rule would write two tokens with nothing between them, and they

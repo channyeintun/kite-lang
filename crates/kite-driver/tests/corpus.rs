@@ -179,6 +179,23 @@ fn a_brace_missing_before_a_declaration_is_one_diagnostic() {
              fn main() {\n    io.print(P{ n: 1 }.get())\n}\n",
             5,
         ),
+        // A method's body: the methods after it are still the `impl`'s, so
+        // calling one is not a second error.
+        (
+            "struct Counter {\n    n: int\n}\n\nimpl Counter {\n    fn get(self) -> int {\n\
+             \x20       if self.n > 0 {\n            return self.n\n        }\n        return 0\n\n\
+             \x20   fn twice(self) -> int {\n        return self.get() * 2\n    }\n}\n\n\
+             fn main() {\n    let c = Counter{ n: 2 }\n    io.print(c.twice())\n}\n",
+            6,
+        ),
+        // A method's, before a function at the margin: that function is not
+        // one more method of the `impl`, and neither is `main`.
+        (
+            "struct P {\n    n: int\n}\n\nimpl P {\n    fn get(self) -> int {\n        return self.n\n\n}\n\n\
+             fn helper() -> int {\n    return 2\n}\n\n\
+             fn main() {\n    io.print(P{ n: 1 }.get() + helper())\n}\n",
+            6,
+        ),
     ];
     for (src, line) in cases {
         let result = compile(Path::new("t.kite"), src, Emit::Check);
@@ -194,4 +211,117 @@ fn a_brace_missing_before_a_declaration_is_one_diagnostic() {
             result.render_diagnostics()
         );
     }
+}
+
+/// A list missing its closing bracket, or a comma between two arguments, is
+/// one diagnostic from the parser through the type checker.
+///
+/// Here rather than in `tests/corpus` for the reason above: `kitec fmt`
+/// indents what follows an unclosed bracket.
+#[test]
+fn one_mistake_in_a_list_is_one_diagnostic() {
+    let cases = [
+        // A `)` missing at the end of a line: the lines after it are not more
+        // arguments, and the statements on them are read.
+        (
+            "fn main() {\n    var xs = [1]\n    xs.push(2\n    xs.push(3)\n    io.print(xs.len())\n}\n",
+            4,
+        ),
+        // A struct literal's `}`: the binding stays, and so does the
+        // function's own `}`.
+        (
+            "struct P {\n    x: int\n}\n\nfn main() {\n    let p = P{ x: 1\n    io.print(p.x)\n}\n\n\
+             fn other() -> int {\n    return 2\n}\n",
+            7,
+        ),
+        // A map literal's.
+        ("fn main() {\n    let m = {\"a\": 1\n    io.print(m)\n}\n", 3),
+        // A comma between two arguments is a guess, and the call it would
+        // guess is not checked against the function: `f` takes one.
+        (
+            "fn f(x: int) -> int {\n    return x\n}\n\nfn main() {\n    let a = 1\n    let b = 2\n\
+             \x20   io.print(f(a b))\n}\n",
+            8,
+        ),
+        ("fn main() {\n    let name = \"x\"\n    io.print(\"hello \" name)\n}\n", 3),
+    ];
+    for (src, line) in cases {
+        let result = compile(Path::new("t.kite"), src, Emit::Check);
+        let errors: Vec<(u32, String)> = actual(&result)
+            .into_iter()
+            .flat_map(|(line, codes)| codes.into_iter().map(move |c| (line, c)))
+            .collect();
+        assert_eq!(
+            errors,
+            vec![(line, "E0100".to_string())],
+            "{}\n{}",
+            src,
+            result.render_diagnostics()
+        );
+    }
+}
+
+/// What the parser has already refused, the checker does not find fault
+/// with a second time, on the same line.
+///
+/// The corpus cannot say this: it asks for a code on a line and for nothing
+/// on a line that did not ask, and each of these was a second code on the
+/// line that did.
+#[test]
+fn a_construct_the_parser_refused_is_not_checked_as_well() {
+    let cases = [
+        // A chained range as an index: indexing with it was typed as an
+        // element, and `.len()` on that was `int` has no methods; on a string
+        // it was a `str` that cannot be indexed, and in a loop an `int` that
+        // cannot be iterated.
+        ("fn main() {\n    let xs = [1, 2, 3]\n    io.print(xs[1..2..3].len())\n}\n", vec!["E0100"]),
+        ("fn main() {\n    let s = \"hello\"\n    io.print(s[0..1..2].len())\n}\n", vec!["E0100"]),
+        (
+            "fn main() {\n    let xs = [1, 2, 3]\n    for x in xs[0..1..2] {\n        io.print(x)\n    }\n}\n",
+            vec!["E0100"],
+        ),
+        // Braces an interpolation ends inside: what was written of the
+        // literal, the `match` or the `if` was checked as the whole of it —
+        // `P` with no text form, a match with no arms, a block with no value.
+        ("struct P {\n    x: int\n}\n\nfn main() {\n    io.print(\"\\(P{ x: 1)\")\n}\n", vec!["E0101"]),
+        ("fn main() {\n    let a = true\n    io.print(\"\\(match a {)\")\n}\n", vec!["E0101"]),
+        (
+            "fn main() {\n    let a = true\n    io.print(\"\\(if a { 1 } else { 2)\")\n}\n",
+            vec!["E0101"],
+        ),
+        (
+            "fn main() {\n    let a = true\n    io.print(\"\\(match a { true => 1, false => )\")\n}\n",
+            vec!["E0100"],
+        ),
+        // And the same braces cut short by the end of a file: the arms not
+        // yet written were not missing, and nor was a closure's value.
+        ("fn main() {\n    let a = true\n    match a {\n        true => io.print(1)\n", vec!["E0101"]),
+        (
+            "fn main() {\n    let f = |x: int| {\n        return x\n\nfn other() {\n}\n",
+            vec!["E0101"],
+        ),
+    ];
+    for (src, want) in cases {
+        let result = compile(Path::new("t.kite"), src, Emit::Check);
+        let codes: Vec<&str> = result
+            .diags
+            .iter()
+            .filter(|d| d.severity == kite_diag::Severity::Error)
+            .filter_map(|d| d.code.map(|c| c.0))
+            .collect();
+        assert_eq!(codes, want, "{}\n{}", src, result.render_diagnostics());
+    }
+}
+
+/// A body cut short by a missing `}` ends in the parser's error statement,
+/// and after a `return` that is not unreachable code: nobody wrote it. It was
+/// reported as E0116 beside the E0101, at the next method's `pub`.
+#[test]
+fn a_body_cut_short_after_a_return_is_not_unreachable_code() {
+    let src = "struct B {\n    v: int\n}\n\nimpl B {\n    pub fn get(self) -> int {\n        return self.v\n\n\
+               \x20   pub fn put(self, v: int) -> B {\n        return B{ v: v }\n    }\n}\n\n\
+               fn main() {\n    io.print(B{ v: 1 }.put(2).get())\n}\n";
+    let result = compile(Path::new("t.kite"), src, Emit::Check);
+    let codes: Vec<&str> = result.diags.iter().filter_map(|d| d.code.map(|c| c.0)).collect();
+    assert_eq!(codes, vec!["E0101"], "{}", result.render_diagnostics());
 }

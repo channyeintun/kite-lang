@@ -29,6 +29,52 @@ pub fn native_supported_here() -> Result<(), String> {
     kite_codegen_clif::supported_here()
 }
 
+/// How much stack [`on_compiler_stack`] gives the compiler.
+///
+/// Every pass after the parser walks the syntax tree by recursion, and a long
+/// chain — `a + b + …`, `x.f().g()…`, `else if` after `else if` — builds a
+/// tree as deep as it is long. On the 8 MiB a main thread gets, a release
+/// build ran out at about 1,900 method calls in one chain and a debug build at
+/// under 300; the type checker spends some four kilobytes of stack a call in
+/// release and thirty in debug. The parser refuses a chain past 8,192 links
+/// (E0102) — 4,096 method calls, each a `.f` and a call — and this is about
+/// four times what a debug build needs for that many, and thirty times what a
+/// release build does.
+///
+/// It is address space set aside, not memory used: a page of it is only
+/// taken when the recursion reaches it, which an ordinary program never
+/// does.
+pub const COMPILER_STACK: usize = 512 << 20;
+
+/// Run `f` on a thread with [`COMPILER_STACK`] of stack, and hand back what
+/// it returns. `kitec` runs each command this way, and the language server
+/// its whole session.
+///
+/// Where no such thread can be had — a system that will not reserve the
+/// address space — `f` runs here instead, on whatever stack this thread has,
+/// which is what it did before this existed. A panic in `f` goes on
+/// unwinding from here.
+pub fn on_compiler_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+    // Held where both this thread and the new one can reach it, so a thread
+    // that could not be started has not taken `f` with it.
+    let job = std::sync::Arc::new(std::sync::Mutex::new(Some(f)));
+    let theirs = job.clone();
+    let spawned = std::thread::Builder::new().stack_size(COMPILER_STACK).spawn(move || {
+        let f = theirs.lock().unwrap_or_else(|e| e.into_inner()).take();
+        f.map(|f| f())
+    });
+    match spawned {
+        Ok(handle) => match handle.join() {
+            Ok(out) => out.expect("the thread that started took the job"),
+            Err(panic) => std::panic::resume_unwind(panic),
+        },
+        Err(_) => {
+            let f = job.lock().unwrap_or_else(|e| e.into_inner()).take();
+            f.expect("a thread that never started took nothing")()
+        }
+    }
+}
+
 /// How far to run the pipeline, and what to hand back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Emit {

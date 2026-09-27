@@ -1358,6 +1358,21 @@ fn main() {
          \x20 io.print(s.code_at(99))\n  io.print(hash_str(\"abc\") == hash_str(\"abc\"))\n\
          \x20 io.print(hash_str(\"abc\") == hash_str(\"abd\"))\n}\n",
     ),
+    // Members at the margin of braces whose other members are indented. Kite's
+    // indentation means nothing (§2.5); the parser's search for a missing `}`
+    // once took each of these for one.
+    (
+        "members-at-the-margin",
+        "struct Foo {\n    v: int\npub w: int\n}\n\n\
+         impl Foo {\n    fn a(self) -> int {\n        return self.v\n    }\n\
+         fn b(self) -> int {\n    return self.w + 1\n}\n\
+         pub fn make(v: int) -> Foo {\n    return Foo{ v: v, w: v * 10 }\n}\n}\n\n\
+         trait Named {\n    fn name(self) -> str\nfn loud(self) -> str\n}\n\n\
+         impl Named for Foo {\n    fn name(self) -> str {\n        return \"foo\"\n    }\n\
+         fn loud(self) -> str {\n    return \"FOO\"\n}\n}\n\n\
+         fn main() {\n    let f = Foo.make(2)\n    io.print(f.a() + f.b())\n\
+         \x20   io.print(f.name() + f.loud())\n}\n",
+    ),
 ];
 
 /// Programs pinning down what the middle of the compiler — HIR, MIR and the
@@ -3516,6 +3531,56 @@ fn literals_past_ten_thousand_elements_agree() {
         std::fs::create_dir_all(&dir).expect("create work directory");
         let wasm = run_on_wasm(name, &src, &dir);
         let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(wasm, vm, "wasm");
+    }
+}
+
+/// Long chains compile and agree: a table of three hundred `else if`, a text
+/// of two thousand pieces joined with `+`, three hundred `||` and three
+/// hundred method calls in a row. The parser once charged each link against
+/// the 256 levels nesting may go, and refused every one of these — programs
+/// the compiler had always compiled.
+///
+/// Compiled on the stack `kitec` gives the compiler: every pass recurses as
+/// deep as a chain is long, and a debug build's type checker spends thirty
+/// kilobytes a method call, which no test thread has.
+#[test]
+fn long_chains_agree_across_backends() {
+    let mut branches = String::from("  if c == 0 {\n    io.print(0)\n  }");
+    for i in 1..300 {
+        branches.push_str(&format!(" else if c == {} {{\n    io.print({})\n  }}", i, i));
+    }
+    let pieces: Vec<String> = (0..2000).map(|i| format!("\"{},\"", i)).collect();
+    let terms: Vec<String> = (0..300).map(|i| format!("c == {}", 1000 + i)).collect();
+    let src = format!(
+        "struct Tally {{\n  n: int\n}}\n\nimpl Tally {{\n  fn up(self) -> Tally {{\n\
+         \x20   return Tally{{ n: self.n + 1 }}\n  }}\n}}\n\n\
+         fn main() {{\n  let c = 150\n{}\n  let s = {}\n  io.print(s.len())\n\
+         \x20 let far = {}\n  io.print(far)\n  let t = Tally{{ n: 0 }}{}\n  io.print(t.n)\n}}\n",
+        branches,
+        pieces.join(" + "),
+        terms.join(" || "),
+        ".up()".repeat(300)
+    );
+    let name = "long-chains";
+    let outputs = kite_driver::on_compiler_stack(move || {
+        let vm = run_on_vm(name, &src);
+        let native = native_available().then(|| run_on_native(name, &src));
+        let wasm = node_available().then(|| {
+            let dir = std::env::temp_dir().join(format!("kite-chains-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("create work directory");
+            let out = run_on_wasm(name, &src, &dir);
+            let _ = std::fs::remove_dir_all(&dir);
+            out
+        });
+        (vm, native, wasm)
+    });
+    let (vm, native, wasm) = outputs;
+    assert_eq!(vm, "150\n8890\nfalse\n300\n");
+    if let Some(native) = native {
+        assert_eq!(native, vm, "native");
+    }
+    if let Some(wasm) = wasm {
         assert_eq!(wasm, vm, "wasm");
     }
 }

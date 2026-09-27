@@ -273,7 +273,10 @@ impl<'a> Lexer<'a> {
                     self.diags.push(
                         Diagnostic::error(codes::E0005, "block comments are not supported")
                             .with_primary(span, "`/*` is not a comment in Kite")
-                            .with_note("use `//` for line comments and `///` for documentation"),
+                            .with_note(
+                                "use `//` for a comment, `///` to document a declaration and \
+                                 `//!` to document the module",
+                            ),
                     );
                 }
                 _ => return,

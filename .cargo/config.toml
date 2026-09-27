@@ -38,10 +38,12 @@ rustflags = ["-C", "force-frame-pointers=yes"]
 # at a thousand. It ran out as `memory access out of bounds` rather than as a
 # diagnostic, and the instance it happened in was broken for every call after
 # it — one such file took down a Vite dev server until it was restarted. The
-# parser has since learned to refuse a chain past 256 links (E0102), so that
-# input is a diagnostic now; the margin stays for the recursion nothing
-# bounds yet. The stack is linear memory the instance reserves, not bytes in
-# the module.
+# parser has since learned to refuse a chain past 1,024 links in this build
+# (E0102), so that input is a diagnostic now. With 16 MiB here, what runs out
+# first is the JavaScript engine's own stack, which a wasm call also runs on
+# and nothing in the module can enlarge: in Node about 1,900 links of `+`
+# exhausted it, which is what that ceiling is set by. The stack is linear
+# memory the instance reserves, not bytes in the module.
 #
 # A target's `rustflags` *replace* `[build] rustflags` rather than adding to
 # them, so the frame-pointer flag above is repeated here. No Wasm frame walk

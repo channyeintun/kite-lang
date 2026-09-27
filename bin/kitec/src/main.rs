@@ -47,6 +47,14 @@ An option a command does not take is an error, not something ignored.
 ";
 
 fn main() -> ExitCode {
+    // The compiler's passes recurse over the syntax tree, and a long chain in
+    // the source is a deep tree. The stack a main thread comes with ran out at
+    // under two thousand method calls in one chain; this one does not run out
+    // below the parser's ceiling.
+    kite_driver::on_compiler_stack(command)
+}
+
+fn command() -> ExitCode {
     // This binary may *be* a Kite program: `kitec bundle` copies the compiler
     // and appends the source to it. Running that copy runs the program, and
     // everything below is unreachable there.
@@ -584,6 +592,23 @@ fn fix_file(path: &str, src: &str) -> ExitCode {
         .iter()
         .find(|(_, name)| name == path)
         .map(|(id, _)| id);
+    // A file the lexer could not read whole is refused, as `kitec fmt`
+    // refuses it. Its diagnostics are about the tokens that survived — a `$`
+    // dropped from between `1` and `2` reads as a comma left out, and `1, $ 2`
+    // was the edit — so an edit made from them is made to a different file
+    // from the one on disk.
+    let lexical = result.diags.iter().find(|d| {
+        d.severity == kite_diag::Severity::Error
+            && d.code.is_some_and(|c| c.is_lexical())
+            && d.primary_span().is_some_and(|s| Some(s.file) == file)
+    });
+    if lexical.is_some() {
+        eprint!("{}", result.render_diagnostics());
+        return fail(&format!(
+            "cannot fix `{}`, which has lexical errors; they come first, and by hand",
+            path
+        ));
+    }
     for d in result.diags.iter() {
         for edit in d.fixes.iter().flat_map(|f| f.edits.iter()) {
             if Some(edit.span.file) != file {

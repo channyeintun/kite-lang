@@ -28,9 +28,9 @@
 //! before: `-` after an operator or an open bracket is a negation, and `|`
 //! where a value is expected opens a closure. A third, `<`, cannot be settled
 //! that way — `Option<int>` and `count < n` are the same three tokens — so
-//! the parser, which knows, says which are type brackets. A file that does
-//! not parse is read forward from each `<` instead, in
-//! `opens_type_arguments`.
+//! the parser, which knows, says which are type brackets. Inside a
+//! declaration that does not parse it is read forward from each `<` instead,
+//! in `opens_type_arguments`.
 
 use kite_diag::{DiagBag, Severity};
 use kite_lexer::{Comment, Token, TokenKind as T};
@@ -93,15 +93,20 @@ pub fn format(src: &str) -> Result<String, FormatError> {
         });
     }
     // The parser knows which `<` and `>` are type brackets and which `{`
-    // opens a struct literal; a file that does not parse falls back to
-    // reading the tokens around each one.
-    let (brackets, literal_braces) = match kite_parser::layout(FileId(0), src, &tokens) {
-        Some(layout) => (
-            layout.type_brackets.into_iter().collect(),
-            Some(layout.literal_braces.into_iter().collect()),
-        ),
-        None => (guessed_type_brackets(&tokens), None),
-    };
+    // opens a struct literal. Inside a declaration that does not parse, the
+    // tokens around each one are read instead — there and only there, so a
+    // mistake being typed at the end of a file costs the rest of it nothing.
+    let mut layout = kite_parser::layout(FileId(0), src, &tokens);
+    let mut brackets: HashSet<u32> = std::mem::take(&mut layout.type_brackets)
+        .into_iter()
+        .filter(|&at| layout.answers_for(at))
+        .collect();
+    for &(start, end) in &layout.unparsed {
+        let from = tokens.partition_point(|t| t.span.start < start);
+        let to = tokens.partition_point(|t| t.span.start < end);
+        brackets.extend(guessed_type_brackets(&tokens[from..to]));
+    }
+    let literal_braces = std::mem::take(&mut layout.literal_braces).into_iter().collect();
     let mut f = Formatter {
         src,
         out: String::with_capacity(src.len() + src.len() / 8),
@@ -112,6 +117,7 @@ pub fn format(src: &str) -> Result<String, FormatError> {
         closure_params: false,
         brackets,
         literal_braces,
+        layout,
         prev: None,
         prev2: None,
         prev_bracket: false,
@@ -212,8 +218,12 @@ struct Formatter<'a> {
     /// generic parameters, rather than comparing two values.
     brackets: HashSet<u32>,
     /// The byte offset of every `{` that opens a struct literal or a struct
-    /// pattern, when the file parsed and the parser could say.
-    literal_braces: Option<HashSet<u32>>,
+    /// pattern, where the parser could say.
+    literal_braces: HashSet<u32>,
+    /// The parser's layout with its answers taken out into the two sets
+    /// above: what is left says which declarations it could not read, where
+    /// those answers are not to be taken.
+    layout: kite_parser::Layout,
     prev: Option<T>,
     /// The token before that. `{` needs it: `Point{` is a literal and
     /// `struct Point {` is a declaration, and only the token two back tells
@@ -231,13 +241,13 @@ struct Formatter<'a> {
     prev_end: u32,
 }
 
-/// The type brackets of a file that does not parse, found by reading forward
-/// from each `<` after a name.
+/// The type brackets among tokens that do not parse, found by reading
+/// forward from each `<` after a name.
 ///
 /// Only a parser really knows — `Option<int>` and `count < n` are the same
-/// three tokens — and for a file that parses, one does. This is the fallback
-/// for a file half written, where a guess that is right for ordinary code is
-/// what there is.
+/// three tokens — and for a declaration that parses, one does. This is the
+/// fallback for one half written, where a guess that is right for ordinary
+/// code is what there is.
 fn guessed_type_brackets(tokens: &[Token]) -> HashSet<u32> {
     let mut brackets = HashSet::new();
     let mut depth = 0usize;
@@ -421,8 +431,13 @@ impl Formatter<'_> {
         // after `fn f<T>`, are part of the name they follow.
         let after_type = self.prev_bracket && matches!(prev, T::Gt | T::Shr);
         // Nothing between a name and its argument list, its index, or a dot.
+        // A tuple's element is a name too, though it is spelled as a number:
+        // `t.0[0]`, `t.0.1(x)`.
+        let element = prev == T::Int && self.prev2 == Some(T::Dot);
         if matches!(kind, T::LParen | T::LBracket)
-            && (matches!(prev, T::Ident | T::RParen | T::RBracket | T::SelfKw) || after_type)
+            && (matches!(prev, T::Ident | T::RParen | T::RBracket | T::SelfKw)
+                || after_type
+                || element)
         {
             return false;
         }
@@ -490,9 +505,10 @@ impl Formatter<'_> {
         // its line to go by. Otherwise what precedes the name decides: a
         // literal appears where a value does.
         if kind == T::LBrace && matches!(prev, T::Ident | T::Gt) {
-            return match &self.literal_braces {
-                Some(literals) => !literals.contains(&at),
-                None => !self.is_literal_head(),
+            return if self.layout.answers_for(at) {
+                !self.literal_braces.contains(&at)
+            } else {
+                !self.is_literal_head()
             };
         }
         true

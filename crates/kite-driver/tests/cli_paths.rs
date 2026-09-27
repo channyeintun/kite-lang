@@ -186,6 +186,59 @@ fn an_option_the_command_does_not_take_is_refused() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---- `kitec fix` makes only the edits it is sure of --------------------------
+
+/// `kitec fix` applies a fix only where the fix is certain, and not at all to
+/// a file the lexer could not read.
+///
+/// A `)` missing at the end of a line made every line after it an argument
+/// short of a comma, each with a fix, and `kitec fix` wrote `xs.push(2,` and
+/// `xs.push(3),`. A `$` dropped from `f(1 $ 2)` left `1 2`, and the fix wrote
+/// `f(1, $ 2)`.
+#[test]
+fn kitec_fix_edits_only_what_it_is_sure_of() {
+    let unclosed = "fn main() {\n    var xs = [1]\n    xs.push(2\n    xs.push(3)\n    io.print(xs.len())\n}\n";
+    let dir = scratch("fix-unclosed", "t.kite", unclosed);
+    let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };
+    assert!(ok, "{}", err);
+    assert!(err.contains("nothing to fix"), "{}", err);
+    assert_eq!(std::fs::read_to_string(dir.join("t.kite")).expect("read"), unclosed);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // A comma between arguments is a guess, so it is said and not written.
+    let guess = "fn main() {\n    let n = 1\n    io.print(\"n is \" n)\n}\n";
+    let dir = scratch("fix-guess", "t.kite", guess);
+    let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };
+    assert!(ok, "{}", err);
+    assert!(err.contains("nothing to fix"), "{}", err);
+    assert_eq!(std::fs::read_to_string(dir.join("t.kite")).expect("read"), guess);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // A file with a lexical error is refused whole, even for the fix it
+    // would otherwise have had.
+    let lexical = "fn f(a: int b: int) -> int {\n    return a + b\n}\n\n\
+                   fn main() {\n    io.print(f(1 $ 2))\n}\n";
+    let dir = scratch("fix-lexical", "t.kite", lexical);
+    let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };
+    assert!(!ok, "a file with lexical errors is refused:\n{}", err);
+    assert!(err.contains("lexical errors"), "{}", err);
+    assert_eq!(std::fs::read_to_string(dir.join("t.kite")).expect("read"), lexical);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // A comma between parameters is certain, and is written.
+    let signature = "fn add(a: int b: int) -> int {\n    return a + b\n}\n\n\
+                     fn main() {\n    io.print(add(1, 2))\n}\n";
+    let dir = scratch("fix-signature", "t.kite", signature);
+    let Some((ok, _, err)) = kitec_in(&dir, &["fix", "t.kite"]) else { return };
+    assert!(ok, "{}", err);
+    let fixed = std::fs::read_to_string(dir.join("t.kite")).expect("read");
+    assert!(fixed.starts_with("fn add(a: int, b: int) -> int {"), "{}", fixed);
+    let Some((ok, out, err)) = kitec_in(&dir, &["run", "t.kite"]) else { return };
+    assert!(ok, "{}", err);
+    assert_eq!(out, "3\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---- the source map names what a browser can find ---------------------------
 
 /// A source map names each source relative to the directory it is written

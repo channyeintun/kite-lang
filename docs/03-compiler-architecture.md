@@ -185,20 +185,46 @@ anything else counts, and a declaration beginning a line always stops it. A
 missing closing brace produces **one** diagnostic: a declaration keyword at the
 indentation of an open `{`, in braces whose members are indented past it, is
 where the author thought the braces had closed, and the report points at the
-first `{` whose `}` was indented for an outer block. A comma missing between
-parameters is supplied, and a comma between struct fields read as a line
-break, so the declaration survives for the code that uses it.
+first `{` whose `}` was indented for an outer block. Only a declaration those
+braces cannot hold says so. A method at the margin of an `impl`, or a `pub`
+field at the margin of a struct, is a member laid out unusually — indentation
+means nothing to Kite — and the braces that do hold it are where unwinding from
+a method body's missing `}` stops. A method there that takes no `self` could
+also be a function of its own; it is remembered, and if the declaration then
+turns out to have a brace missing from before it, the declaration is read
+again, ending there. A comma missing between parameters is supplied, and a
+comma between struct fields read as a line break, so the declaration survives
+for the code that uses it. One missing between two arguments on a line is
+reported without a fix — `f("sum " n)` wanted a `+` — and the call becomes an
+`Error` node rather than a call with a guessed number of arguments; after a
+line break it is the `)` that is missing, and that is what is reported. A bracket whose closer was reported missing
+counts as closed from then on, so recovery resumes at the next line instead of
+taking the function's `}` for the literal's, and a binding whose value did not
+parse is kept, with an `Error` for a value. A struct literal, a `match`, a
+value `if` or a closure cut short by a missing `}` becomes an `Error` node
+too, rather than being checked as though what was written so far were the
+whole of it; a declaration cut short is kept, because the rest of the program
+names it. An index the parser already refused, such as `xs[a..b..c]`, makes
+the whole indexing an `Error`.
 
-Recursion depth is bounded (`E0102`), and a left-deep chain — `a + b + …`,
-`x.f().g()…` — counts a level per link, because every later pass recurses over
-the tree it builds.
+Recursion depth is bounded (`E0102`): brackets, blocks and prefix operators
+may nest 256 levels. A left-deep chain — `a + b + …`, `x.f().g()…`, `else if`
+— is read by a loop, but every later pass recurses over the tree it builds, so
+its links are counted too, against a ceiling of their own: 8,192, or 1,024 in
+the compiler built for WebAssembly, whose stack is the JavaScript engine's.
+`kitec` and the language server give the compiler a 512 MiB stack
+(`kite_driver::on_compiler_stack`), reserved rather than used, which a debug
+build needs for a chain that long; on a main thread's 8 MiB a release build ran
+out at under two thousand method calls.
 
 The AST keeps a span on every node and stores no literal values; the source is
 the single truth, and a pass that wants a value reads it through the span. It
 is not a lossless tree — comments and blank lines are gone — which is exactly
 why `kitec fmt` works on tokens instead: a formatter that rebuilt a program
 from this tree would delete them. `kitec fix` does not need the tree at all. It
-applies the text edits that diagnostics carry.
+applies the text edits that diagnostics carry — and, as `kitec fmt` does,
+refuses a file with lexical errors, whose diagnostics describe the tokens that
+survived rather than the text on disk.
 
 ### 3.3 Modules
 

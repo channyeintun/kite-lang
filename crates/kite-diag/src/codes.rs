@@ -32,6 +32,14 @@ impl fmt::Display for Code {
     }
 }
 
+impl Code {
+    /// Whether the lexer reports this (E0000–E0099): the file could not be
+    /// read as tokens whole, and what did not lex is missing from them.
+    pub fn is_lexical(self) -> bool {
+        self.0.len() == 5 && self.0.starts_with("E00")
+    }
+}
+
 macro_rules! codes {
     ($($name:ident = $code:literal, $short:literal, $explain:literal;)*) => {
         $(pub const $name: Code = Code($code);)*
@@ -90,9 +98,11 @@ codes! {
          written on purpose comes near it.";
 
     E0005 = "E0005", "block comments are not supported",
-        "Kite has line comments (//) and doc comments (///) only. Nested block \
-         comments are a recurring source of lexer bugs and every editor has \
-         supported toggling line comments for decades.";
+        "Kite's comments are line comments: `//` for a comment, `///` for the \
+         documentation of the declaration that follows, and `//!` for the \
+         module's own, at the top of its file. There is no block comment. \
+         Nested block comments are a recurring source of lexer bugs and every \
+         editor has supported toggling line comments for decades.";
 
     // ---- syntax and bindings ---------------------------------------------
     E0100 = "E0100", "unexpected token",
@@ -110,10 +120,14 @@ codes! {
          abort, not a panic, so nothing can catch it. A ceiling turns that \
          into this diagnostic. The bytecode VM has bounded call depth for the \
          same reason; this is the same rule applied to the front end.\n\n\
-         A long chain counts too: each `+` of `a + b + c + …`, each call of \
-         `x.f().g()…`, each `else if`, each prefix `-`. The parser reads a \
-         chain in a loop, but the tree it builds is as deep as the chain is \
-         long, and every pass after the parser walks that tree by recursion.";
+         There are two ceilings. Brackets, blocks, types, patterns and prefix \
+         operators such as `-` and `!` may nest 256 levels deep. A chain — \
+         each `+` of `a + b + c + …`, each `.f` and each call of \
+         `x.f().g()…`, each `else if` — is counted apart, and may be 8,192 \
+         links long, 1,024 in the compiler built for WebAssembly, which runs \
+         on the JavaScript engine's stack. The parser reads a chain in a \
+         loop, but the tree it builds is as deep as the chain is long, and \
+         every pass after the parser walks that tree by recursion.";
 
     E0110 = "E0110", "use of possibly-uninitialised binding",
         "A `let` binding may be assigned after declaration, but only if the \

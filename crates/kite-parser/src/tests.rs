@@ -816,21 +816,27 @@ fn a_block_string_with_holes_is_dedented() {
 
 // ---- depth -------------------------------------------------------------------
 
-/// Parse on a thread with the main thread's stack, which is what `kitec` and
-/// the language server run on; a test thread has a quarter of it.
-fn parse_deep(src: String) -> Vec<&'static str> {
+/// Run `f` on a thread with a main thread's stack; a test thread has a
+/// quarter of it. The parser itself runs in far less, but a tree as deep as
+/// the ceilings allow is dropped by recursion.
+fn on_a_main_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
     std::thread::Builder::new()
         .stack_size(8 << 20)
-        .spawn(move || parse_src(&src).codes())
+        .spawn(f)
         .expect("spawn")
         .join()
         .expect("the parser did not survive")
 }
 
+fn parse_deep(src: String) -> Vec<&'static str> {
+    on_a_main_stack(move || parse_src(&src).codes())
+}
+
 /// Every one of these aborted the process, in the parser or in a pass after
-/// it. Recursion through a prefix operator or an `else if` now counts toward
-/// the ceiling, and so does each link of a left-deep chain, since the tree it
-/// builds is as deep as a nest.
+/// it. Recursion through a prefix operator counts toward the nesting
+/// ceiling, and each link of a left-deep chain — an `else if` among them —
+/// toward the chain ceiling, since the tree a chain builds is as deep as a
+/// nest.
 #[test]
 fn deep_input_is_one_diagnostic_not_an_abort() {
     let body = |expr: String| format!("fn main() {{\n    let x = {}\n}}\n", expr);
@@ -841,7 +847,7 @@ fn deep_input_is_one_diagnostic_not_an_abort() {
             "fn main() {{\n    if a {{\n    }}{}\n}}\n",
             " else if a {\n    }".repeat(15_000)
         ),
-        body(format!("a{}", ".a".repeat(5_000))),
+        body(format!("a{}", ".a".repeat(10_000))),
         body(format!("{}1", "1 + ".repeat(20_000))),
         body(format!("1{}", " as int".repeat(20_000))),
         body(format!("f{}", "(1)".repeat(100_000))),
@@ -850,9 +856,77 @@ fn deep_input_is_one_diagnostic_not_an_abort() {
         let codes = parse_deep(src);
         assert_eq!(codes, vec!["E0102"]);
     }
-    // Well short of the ceiling, a chain parses.
-    let codes = parse_deep(body(format!("{}1", "1 + ".repeat(200))));
-    assert!(codes.is_empty(), "{:?}", codes);
+}
+
+/// A chain is counted apart from nesting, against a ceiling of its own far
+/// above anything written or generated in earnest. Charged against the
+/// nesting ceiling of 256, a table of three hundred `else if`, or a text
+/// joined with three hundred `+`, was refused — programs the compiler had
+/// always compiled.
+#[test]
+fn a_long_chain_is_not_a_deep_nest() {
+    let body = |expr: String| format!("fn main() {{\n    let x = {}\n}}\n", expr);
+    let links = MAX_CHAIN as usize;
+    let chains = [
+        format!(
+            "fn main() {{\n    if a {{\n    }}{}\n}}\n",
+            " else if a {\n    }".repeat(300)
+        ),
+        body(format!("{}1", "1 + ".repeat(300))),
+        body(format!("a{}", " || a".repeat(300))),
+        body(format!("s{}", ".trim()".repeat(300))),
+        // The longest chain there may be, of each kind: its links, and not
+        // one more.
+        body(format!("{}1", "1 + ".repeat(links))),
+        body(format!("s{}", ".f()".repeat(links / 2))),
+        format!(
+            "fn main() {{\n    if a {{\n    }}{}\n}}\n",
+            " else if a {\n    }".repeat(links)
+        ),
+    ];
+    for src in chains {
+        let codes = parse_deep(src);
+        assert!(codes.is_empty(), "{:?}", codes);
+    }
+    // One link more is the one diagnostic, saying which ceiling it is.
+    let src = body(format!("{}1", "1 + ".repeat(links + 1)));
+    let (codes, out) = on_a_main_stack(move || {
+        let p = parse_src(&src);
+        (p.codes(), p.render())
+    });
+    assert_eq!(codes, vec!["E0102"], "{}", out);
+    assert!(out.contains(&format!("at most {} links long", links)), "{}", out);
+    // The two ceilings are apart: a nest does not spend a chain's links, nor a
+    // chain a nest's levels.
+    let (open, close) = ("(".repeat(200), ")".repeat(200));
+    let nested = format!("{}{}1{}", open, "1 + ".repeat(links - 10), close);
+    assert!(parse_deep(body(nested)).is_empty());
+}
+
+/// A binding whose value is refused is still a binding, so nothing that uses
+/// it is reported again as naming nothing.
+#[test]
+fn a_binding_whose_value_is_refused_is_still_declared() {
+    let links = MAX_CHAIN as usize;
+    let src = format!(
+        "fn main() {{\n    let s = {}1\n    var t = * 2\n    io.print(s)\n}}\n",
+        "1 + ".repeat(links + 1)
+    );
+    let (codes, kept) = on_a_main_stack(move || {
+        let p = parse_src(&src);
+        let body = &p.fns()[0].body.stmts;
+        let kept = matches!(&body[0], Stmt::Let(LetStmt { init: Some(Expr::Error(_)), .. }))
+            && matches!(&body[1], Stmt::Var(VarStmt { init: Expr::Error(_), .. }))
+            && matches!(&body[2], Stmt::Expr(Expr::Call { .. }));
+        (p.codes(), kept)
+    });
+    assert_eq!(codes, vec!["E0102", "E0100"]);
+    assert!(kept, "the `let` and the `var` are kept, and the line after them read");
+    // And at module level.
+    let p = parse_src("let LIMIT: int = 1 +\n\nfn main() {\n    io.print(LIMIT)\n}\n");
+    assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+    assert!(matches!(&p.file.items[0], Item::Const(c) if matches!(c.value, Expr::Error(_))));
+    assert_eq!(p.fns().len(), 1);
 }
 
 // ---- recovery: one diagnostic per cause -------------------------------------
@@ -930,6 +1004,108 @@ fn unindented_code_is_not_mistaken_for_a_missing_brace() {
     assert_eq!(i.methods.len(), 2);
 }
 
+/// A member written at the margin of braces whose other members are indented
+/// is still a member: indentation means nothing to Kite (§2.5), and each of
+/// these compiled before the parser learned to find a missing brace by it —
+/// then each was refused as one.
+#[test]
+fn a_member_at_the_margin_is_still_a_member() {
+    let methods = |p: &Parsed| -> Vec<usize> {
+        p.file
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Impl(i) => Some(i.methods.len()),
+                Item::Trait(t) => Some(t.methods.len()),
+                _ => None,
+            })
+            .collect()
+    };
+    let p = ok("impl Foo {\n    fn a(self) -> int {\n        return self.v\n    }\n\
+                fn b(self) -> int {\n    return self.v + 1\n}\n}\n");
+    assert_eq!(methods(&p), vec![2]);
+    let p = ok("impl Foo {\n    fn a(self) -> int {\n        return self.v\n    }\n\
+                pub fn b(self) -> int {\n    return 1\n}\npub async fn c(self) {\n}\n}\n");
+    assert_eq!(methods(&p), vec![3]);
+    // An associated function has no `self` to tell it from a function of its
+    // own, and is still the `impl`'s when the `impl` closes after it.
+    let p = ok("impl Foo {\n    fn a(self) -> int {\n        return 1\n    }\n\
+                fn make() -> Foo {\n    return Foo{ v: 1 }\n}\n}\n");
+    assert_eq!(methods(&p), vec![2]);
+    assert_eq!(p.fns().len(), 0);
+    let p = ok("trait T {\n    fn a(self) -> int\nfn b(self) -> int\n}\n");
+    assert_eq!(methods(&p), vec![2]);
+    let p = ok("struct P {\n    x: int\npub y: int\n}\n");
+    assert!(matches!(&p.file.items[0], Item::Struct(s) if s.fields.len() == 2));
+}
+
+/// A method whose body lost its `}` is one error, and the methods after it
+/// are still the `impl`'s. The report used to close the `impl` too, so the
+/// next method was read as a function of its own — `fn twice(self)` was an
+/// error at `self`, and every call of it a method that did not exist.
+#[test]
+fn a_method_missing_its_brace_leaves_the_impl_open() {
+    let src = "\
+impl Counter {
+    fn get(self) -> int {
+        if self.n > 0 {
+            return self.n
+        return 0
+    }
+
+    fn twice(self) -> int {
+        return self.get() * 2
+    }
+}
+
+fn main() {
+}
+";
+    let p = parse_src(src);
+    assert_eq!(p.codes(), vec!["E0101"], "{}", p.render());
+    assert!(p.render().contains("3 │         if self.n > 0 {"), "{}", p.render());
+    let Item::Impl(i) = &p.file.items[0] else { panic!() };
+    let names: Vec<_> = i.methods.iter().map(|m| m.name.name.clone()).collect();
+    assert_eq!(names, vec!["get", "twice"]);
+    assert_eq!(p.fns().len(), 1);
+}
+
+/// A method's or an `impl`'s `}` missing before a function at the margin is
+/// found there, although a function at the margin of an `impl` could be a
+/// method: once the `impl` turns out to be unclosed, that is where it ended.
+#[test]
+fn a_brace_missing_before_a_function_at_the_margin_is_found_there() {
+    // The method's `}`: the one after it is indented for the `impl`.
+    let src = "impl Foo {\n    fn a(self) -> int {\n        return self.v\n\n}\n\n\
+               fn main() {\n    io.print(1)\n}\n";
+    let p = parse_src(src);
+    assert_eq!(p.codes(), vec!["E0101"], "{}", p.render());
+    assert!(p.render().contains("2 │     fn a(self) -> int {"), "{}", p.render());
+    let Item::Impl(i) = &p.file.items[0] else { panic!() };
+    assert_eq!(i.methods.len(), 1);
+    assert_eq!(p.fns().len(), 1);
+    // The `impl`'s own.
+    let src = "impl Foo {\n    fn a(self) -> int {\n        return 1\n    }\n\n\
+               fn helper() -> int {\n    return 2\n}\n\nfn main() {\n}\n";
+    let p = parse_src(src);
+    assert_eq!(p.codes(), vec!["E0101"], "{}", p.render());
+    assert!(p.render().contains("1 │ impl Foo {"), "{}", p.render());
+    let names: Vec<_> = p.fns().iter().map(|f| f.name.name.clone()).collect();
+    assert_eq!(names, vec!["helper", "main"]);
+    // A method at the margin that takes `self` cannot be a function of its
+    // own, and is not where the brace went: a brace missing after it is
+    // found where it is.
+    let src = "impl Foo {\n    fn a(self) -> int {\n        return 1\n    }\n\
+               fn b(self) -> int {\n    return 2\n}\n    fn c(self) -> int {\n        return 3\n\n\
+               fn main() {\n}\n";
+    let p = parse_src(src);
+    assert_eq!(p.codes(), vec!["E0101"], "{}", p.render());
+    assert!(p.render().contains("8 │     fn c(self) -> int {"), "{}", p.render());
+    let Item::Impl(i) = &p.file.items[0] else { panic!() };
+    assert_eq!(i.methods.len(), 3);
+    assert_eq!(p.fns().len(), 1);
+}
+
 /// A declaration inside a block is one error, and skipped whole.
 #[test]
 fn a_declaration_inside_a_block_is_one_error() {
@@ -988,6 +1164,87 @@ fn a_missing_comma_is_one_error() {
     assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
 }
 
+/// Between parameters a missing comma is certain, and comes with the fix
+/// `kitec fix` applies. Between arguments it is a guess — `io.print("sum "
+/// n)` wanted a `+` — so it comes with no fix, and the call it would have
+/// guessed is an error rather than a call with a guessed number of
+/// arguments, which the checker then reported as the wrong number.
+#[test]
+fn a_comma_is_only_supplied_where_it_is_certain() {
+    let fixes = |p: &Parsed| -> Vec<String> {
+        p.diags.iter().flat_map(|d| d.fixes.iter().map(|f| f.message.clone())).collect()
+    };
+    let p = parse_src("fn add(a: int b: int) -> int {\n    return a + b\n}\n");
+    assert_eq!(fixes(&p), vec!["add a comma"]);
+    let p = parse_src("fn main() {\n    let s = f(\"sum \" n)\n}\n");
+    assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+    assert!(fixes(&p).is_empty());
+    let main = p.fns()[0];
+    assert!(
+        matches!(&main.body.stmts[0], Stmt::Let(LetStmt { init: Some(Expr::Error(_)), .. })),
+        "{:?}",
+        main.body.stmts
+    );
+}
+
+/// A `)` missing at the end of a line is one error, where it was expected.
+/// The next line used to be read as one more argument with a comma missing
+/// before it, and so did every line after it up to the function's `}` —
+/// each an error of its own, each with a fix `kitec fix` applied, and the
+/// real cause reported last.
+#[test]
+fn a_paren_missing_at_the_end_of_a_line_is_one_error() {
+    let src = "\
+fn main() {
+    var xs = [1]
+    xs.push(2
+    xs.push(3)
+    xs.push(4)
+    io.print(xs.len())
+}
+";
+    let p = parse_src(src);
+    assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+    assert!(p.render().contains("expected `)`"), "{}", p.render());
+    assert!(p.render().contains("4 │     xs.push(3)"), "{}", p.render());
+    assert!(p.diags.iter().all(|d| d.fixes.is_empty()));
+    // The lines after it are read as the statements they are.
+    let main = p.fns()[0];
+    assert_eq!(main.body.stmts.len(), 5, "{:?}", main.body.stmts);
+    assert!(matches!(&main.body.stmts[1], Stmt::Error(_)));
+    assert!(matches!(&main.body.stmts[4], Stmt::Expr(Expr::Call { .. })));
+    // So is a `]` or a `)` of a group.
+    let p = parse_src("fn main() {\n    let v = [1, 2\n    let w = (1 + 2\n    io.print(v)\n}\n");
+    assert_eq!(p.codes(), vec!["E0100", "E0100"], "{}", p.render());
+    assert_eq!(p.fns()[0].body.stmts.len(), 3);
+}
+
+/// A struct or map literal missing its `}` is one error. Recovery used to
+/// count the literal's `{` as still open, take the function's `}` for its
+/// closer, and then report the function's `{` as never closed.
+#[test]
+fn a_literal_missing_its_brace_is_one_error() {
+    for literal in ["P{ x: 1", "{\"a\": 1"] {
+        let src = format!(
+            "fn main() {{\n    let p = {}\n    io.print(p)\n}}\n\nfn other() -> int {{\n    return 2\n}}\n",
+            literal
+        );
+        let p = parse_src(&src);
+        assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+        assert!(p.render().contains("expected `}`"), "{}", p.render());
+        // The binding is kept, the line after it read, and the function
+        // after that is still a function.
+        let main = p.fns()[0];
+        assert!(
+            matches!(&main.body.stmts[0], Stmt::Let(LetStmt { init: Some(Expr::Error(_)), .. })),
+            "{:?}",
+            main.body.stmts
+        );
+        assert_eq!(main.body.stmts.len(), 2);
+        assert_eq!(p.fns().len(), 2);
+    }
+}
+
 /// Struct fields and enum variants are separated by line breaks. A comma is
 /// reported once and read as one, rather than losing the member after it.
 #[test]
@@ -1018,7 +1275,8 @@ fn type_brackets_are_the_ones_the_parser_read_as_types() {
     let brackets = |src: &str| {
         let mut diags = DiagBag::new();
         let tokens = kite_lexer::tokenize(FileId(0), src, &mut diags);
-        layout(FileId(0), src, &tokens).map(|l| {
+        let l = layout(FileId(0), src, &tokens);
+        l.unparsed.is_empty().then(|| {
             let at = l.type_brackets.iter();
             at.map(|&at| &src[at as usize..at as usize + 1]).collect::<String>()
         })
@@ -1031,8 +1289,26 @@ fn type_brackets_are_the_ones_the_parser_read_as_types() {
         brackets("fn f() {\n    g(a < b, c > d)\n    let x = a > (b - 1)\n}\n").as_deref(),
         Some("")
     );
-    // A file that does not parse answers nothing.
+    // A declaration that does not parse answers nothing, and says so.
     assert_eq!(brackets("fn f( {\n"), None);
+}
+
+/// A declaration that does not parse is marked, so the formatter falls back
+/// to guessing there and nowhere else. The whole file used to be guessed at
+/// over one mistake in it.
+#[test]
+fn a_declaration_that_does_not_parse_is_the_only_one_marked() {
+    let src = "fn f(a: Option<int>) {\n    g(a < b, b > a)\n}\n\nfn broken( {\n}\n";
+    let mut diags = DiagBag::new();
+    let tokens = kite_lexer::tokenize(FileId(0), src, &mut diags);
+    let l = layout(FileId(0), src, &tokens);
+    let broken = src.find("fn broken").unwrap() as u32;
+    assert_eq!(l.unparsed, vec![(broken, src.len() as u32)]);
+    let lt = src.find("a < b").unwrap() as u32 + 2;
+    assert!(l.answers_for(lt) && !l.type_brackets.contains(&lt));
+    assert!(!l.answers_for(broken + 3));
+    let opens = src.find("Option<").unwrap() as u32 + 6;
+    assert!(l.type_brackets.contains(&opens));
 }
 
 /// The braces written against a type's name: a struct literal's and a struct
@@ -1043,7 +1319,9 @@ fn literal_braces_are_the_ones_the_parser_read_as_literals() {
                \x20   if a &&\n        b {\n    }\n}\n";
     let mut diags = DiagBag::new();
     let tokens = kite_lexer::tokenize(FileId(0), src, &mut diags);
-    let braces = layout(FileId(0), src, &tokens).expect("parses").literal_braces;
+    let layout = layout(FileId(0), src, &tokens);
+    assert!(layout.unparsed.is_empty());
+    let braces = layout.literal_braces;
     let before: Vec<&str> = braces.iter().map(|&at| &src[at as usize - 1..at as usize]).collect();
     assert_eq!(before, vec!["P", "P"]);
 }
