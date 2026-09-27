@@ -2726,7 +2726,9 @@ fn hangul_joins(before: LineBreak, here: LineBreak) -> bool {
 ///   the very end of the text does not start an empty line after it.
 /// - **Spaces at the end of a line hang.** They neither count toward the width
 ///   nor appear in the answer, which is UAX #14's treatment of a line end.
-///   Spaces at the start of a paragraph are kept: they are indentation.
+///   Spaces at the start of a paragraph are kept: they are indentation. When
+///   the first word does not fit after them, they end a line of their own —
+///   an empty one, since they hang — and the word starts the next.
 /// - **A run too wide for any line is broken between characters** rather than
 ///   left to overflow — what CSS calls `overflow-wrap: break-word`. The break
 ///   never falls before a combining mark, so an accent stays with its letter,
@@ -2762,11 +2764,15 @@ pub fn wrap(body: str, width: float, measure: fn(str) -> float) -> [str] {
             }
             continue
         }
-        // It does not fit. End the line before this run if the line holds
-        // anything, and look at the run again on a line of its own.
-        let held = visible_end(body, start, pos)
-        if held > start {
-            lines.push(body.slice(start, held))
+        // It does not fit. End the line before this run if an opportunity was
+        // passed on the way to it, and look at the run again on a line of its
+        // own. That is so even when all the line holds is a paragraph's
+        // indentation, which hangs there like any spaces at a line end and
+        // leaves an empty line: asking whether the line held anything
+        // *visible* sent the run, indentation and all, to be cut between
+        // characters, though it fits on a line by itself.
+        if pos > start {
+            lines.push(body.slice(start, visible_end(body, start, pos)))
             start = pos
             continue
         }

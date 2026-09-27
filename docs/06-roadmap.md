@@ -1738,7 +1738,9 @@ person doing a demolition would get wrong the same way:
   and a terminal alike, and it is tested on both backends in
   `tests/std/wrap_test.kite`. Writing it found that `CR LF` was reported as two
   breaks rather than one (LB5), which would have given every CRLF paragraph an
-  empty line per line.
+  empty line per line. A later review found that a paragraph's indentation,
+  which hangs, made its line count as empty, so a first word that did not fit
+  after it was cut between characters rather than moved to the next line.
 
 ---
 

@@ -153,6 +153,13 @@ fn checks() -> [error] {
     out.push(number("-2.5E+3", -2500.0))
     out.push(number("9223372036854775808", 9223372036854775808.0))
     out.push(number("0.30000000000000004", 0.1 + 0.2))
+    // Written back as the same number. The writer cast to an `int` to drop
+    // the `.0`, and the cast saturates: 2⁶³ came out as 9223372036854775807,
+    // which is a different number to anything reading it as an integer.
+    out.push(test.equal_str(roundtrip("9223372036854775808"), "9223372036854775808.0", "2^63 is written as itself"))
+    out.push(number(roundtrip("9223372036854775808"), 9223372036854775808.0))
+    out.push(test.equal_str(roundtrip("-9223372036854775808"), "-9223372036854775808", "-2^63 is a whole int"))
+    out.push(test.equal_str(roundtrip("9223372036854774784"), "9223372036854774784", "the largest float below 2^63"))
     let zero = or_else(json.number_of(parsed("-0")), 1.0)
     out.push(test.is_true(zero == 0.0 && 1.0 / zero < 0.0, "-0 keeps its sign"))
 

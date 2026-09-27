@@ -528,6 +528,26 @@ fn control_checks() -> [error] {
     out.push(refuses("a = \"\"\"x\u{0}y\"\"\"\n", "a raw control character in a multi-line string"))
     out.push(refuses("a = \"\"\"x\ry\"\"\"\n", "a carriage return not ending a line"))
     out.push(accepts("a = \"x\ty\"\nb = \"\"\"x\r\ny\"\"\"\n", "a tab, and a CRLF inside a multi-line string"))
+    // Whitespace is a space or a tab, and a carriage return belongs only to
+    // the CRLF that ends a line. A lone one was skipped as whitespace
+    // wherever whitespace was, so each of these parsed.
+    out.push(refuses("[a\r]\nx = 1\n", "a carriage return in a header"))
+    out.push(refuses("a = \r1\n", "a carriage return before a value"))
+    out.push(refuses("t = \r17:45:00\n", "a carriage return before a time"))
+    out.push(refuses("a\r= 1\n", "a carriage return before the equals sign"))
+    out.push(refuses("a = [1,\r2]\n", "a carriage return in an array"))
+    out.push(refuses("a = [1\r]\n", "a carriage return before an array closes"))
+    out.push(refuses("a = {b = 1,\rc = 2}\n", "a carriage return in an inline table"))
+    out.push(refuses("a = {\rb = 1}\n", "a carriage return after an inline table opens"))
+    out.push(refuses("a .\rb = 1\n", "a carriage return in a dotted key"))
+    out.push(refuses("a = 1\r# note\n", "a carriage return before a comment"))
+    out.push(refuses("a = \"\"\"x\\\r y\"\"\"\n", "a carriage return after a line-ending backslash"))
+    out.push(accepts("a = [\r\n  1,\r\n  2, # two\r\n]\r\nb = {c = 1}\r\n", "CRLF inside an array"))
+    let (folded, folded_err) = toml.parse("a = \"\"\"x \\\r\n   y\"\"\"\r\n")
+    out.push(test.ok(folded_err, "a line-ending backslash before a CRLF"))
+    if folded_err == nil {
+        out.push(test.equal_str(text_of(folded, "a"), "x y", "folds the line"))
+    }
     // What this writes, it reads: control characters go out as escapes.
     var table: { str: toml.Toml } = { }
     table["k"] = toml.Toml.Text("a\u{1}b\u{7f}c\u{8}")

@@ -34,6 +34,15 @@ fn space_checks() -> [error] {
     out.push(test.equal_str(shape("ab   ", 2.0), "ab", "and at the end of the text"))
     // Spaces at the start of a paragraph are indentation.
     out.push(test.equal_str(shape("  ab cd", 5.0), "  ab|cd", "indentation is kept"))
+    // Unless the first word does not fit after it. The line holding only the
+    // indentation counted as empty, so the word was cut between characters
+    // although it fits on a line of its own. The indentation ends a line
+    // there, and hangs as any spaces at a line end do.
+    out.push(test.equal_str(shape("  abcdefgh", 8.0), "|abcdefgh", "a word that fits is not cut after indentation"))
+    out.push(test.equal_str(shape("      abc", 4.0), "|abc", "not even when the indentation is wider than the line"))
+    out.push(test.equal_str(shape("x\n  abcdefgh", 8.0), "x||abcdefgh", "in a later paragraph too"))
+    out.push(test.equal_str(shape("  abcdefgh", 10.0), "  abcdefgh", "indentation stays when the word fits after it"))
+    out.push(test.equal_str(shape("  abcdefghij", 8.0), "|abcdefgh|ij", "a word too wide for any line is still cut"))
     return out
 }
 
