@@ -2047,3 +2047,23 @@ fn a_tuple_literal_is_typed_through_an_expected_optional() {
         fn g() -> Option<(Option<int>, int)> {\n  return (2, 3)\n}\n\
         fn main() {\n  io.print(f((4, 1)))\n  io.print(f(g()))\n}\n");
 }
+
+/// A written `(int, error)` is a tuple and a fallible call's result is a
+/// pair, and neither becomes the other. Both print as `(int, error)`, so the
+/// refusal read "expected `(int, error)`, found `(int, error)`"; it now names
+/// the difference and says what to write. What is accepted is unchanged.
+#[test]
+fn a_result_where_a_written_tuple_is_wanted_says_what_to_write() {
+    let c = run("fn g() -> (int, error) {\n  return 1, nil\n}\n\
+        fn main() {\n  let p: (int, error) = g()\n  let (v, err) = p\n  if err != nil {\n    return\n  }\n\
+        \x20 io.print(v)\n  let t: (int, error) = (2, nil)\n  var q = g()\n  let (w, e) = q\n\
+        \x20 if e != nil {\n    return\n  }\n  io.print(w)\n  q = t\n}\n");
+    assert_eq!(c.codes(), vec!["E0200", "E0200"], "{}", c.render());
+    let text = c.render();
+    assert!(!text.contains("expected `(int, error)`, found `(int, error)`"), "{}", text);
+    assert!(text.contains("expected the tuple `(int, error)`, found the result of a fallible call"), "{}", text);
+    assert!(text.contains("bind it whole without writing its type, `let p = …`"), "{}", text);
+    assert!(text.contains("expected the result of a fallible call, found the tuple `(int, error)`"), "{}", text);
+    ok("fn g() -> (int, error) {\n  return 1, nil\n}\n\
+        fn main() {\n  let p = g()\n  let (v, err) = p\n  if err != nil {\n    return\n  }\n  io.print(v)\n}\n");
+}

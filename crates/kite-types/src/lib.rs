@@ -10755,6 +10755,15 @@ impl<'a> Checker<'a> {
         if self.mentions_error(found) || self.mentions_error(expected) {
             return;
         }
+        // A `(T, error)` written as a type is a tuple, and a fallible call's
+        // result is a pair, which prints the same. The message both would
+        // give, "expected `(int, error)`, found `(int, error)`", named no
+        // difference at all; this one names it and says what to write.
+        let pair = |t: TyId| self.types.fallible_value(t).is_some();
+        if pair(found) != pair(expected) && self.types.name(found) == self.types.name(expected) {
+            self.pair_is_not_a_tuple(found, expected, span, because);
+            return;
+        }
         let mut d = Diagnostic::error(
             codes::E0200,
             format!("expected `{}`, found `{}`", self.types.name(expected), self.types.name(found)),
@@ -10792,6 +10801,50 @@ impl<'a> Checker<'a> {
                 self.types.name(expected)
             ));
         }
+        self.diags.push(d);
+    }
+
+    /// A fallible call's result where a written `(T, error)` is wanted, or
+    /// the other way round. The result is a pair whose value exists only once
+    /// its error is known to be nil (§7.3), and a tuple would let the value be
+    /// read without that, so neither becomes the other: a result is taken
+    /// apart, or bound whole under a name the checker follows (R7).
+    fn pair_is_not_a_tuple(&mut self, found: TyId, expected: TyId, span: Span, because: Option<Span>) {
+        let name = self.types.name(found);
+        let to_tuple = self.types.fallible_value(found).is_some();
+        let (headline, primary, required) = if to_tuple {
+            (
+                format!("expected the tuple `{}`, found the result of a fallible call", name),
+                "this is a result whose error has to be checked, not a tuple",
+                format!("a tuple `{}` required here", name),
+            )
+        } else {
+            (
+                format!("expected the result of a fallible call, found the tuple `{}`", name),
+                "this is a tuple, not a result",
+                format!("the result of a fallible call `{}` required here", self.types.name(expected)),
+            )
+        };
+        let mut d = Diagnostic::error(codes::E0200, headline).with_primary(span, primary);
+        if let Some(b) = because {
+            d = d.with_secondary(b, required);
+        }
+        d = d.with_note(format!(
+            "`{}` written as a type is a plain tuple, and the result of a fallible call is \
+             not one: neither becomes the other",
+            name
+        ));
+        d = if to_tuple {
+            d.with_note(
+                "take the result apart where it is made, `let (value, err) = …`, or bind it \
+                 whole without writing its type, `let p = …`",
+            )
+        } else {
+            d.with_note(
+                "a binding holding a whole result takes only another result; to keep the \
+                 tuple's parts, give them a binding of their own",
+            )
+        };
         self.diags.push(d);
     }
 

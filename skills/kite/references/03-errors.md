@@ -188,6 +188,9 @@ tuple, and they behave differently.** A pair is not a tuple —
 - it has no fields: `p.0` on a `(int, error)` is `E0200`;
 - it is not built with a tuple literal: `return (1, nil)` in a fallible function
   is `E0203` (*a fallible function returns two values … only one value returned*);
+- it has no type to write: `(int, error)` written as a type is a tuple, so
+  `let p: (int, error) = f()` is `E0200` (*expected the tuple …, found the
+  result of a fallible call*). Bind it whole as `let p = f()`, or take it apart;
 - it has exactly two components. `-> (int, str, error)` is not a fallible
   signature; `return 1, "a", nil` in it is `E0200` and then a parse error.
 - `-> error` alone is also a fallible signature, and is enough for `check`.
