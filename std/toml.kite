@@ -336,7 +336,7 @@ fn parse_multiline(input: str, at: int, closing: str, escapes: bool) -> (Text, e
             continue
         }
         let code = input.code_at(i)
-        if code == 13 && !(i + 1 < input.len() && input.code_at(i + 1) == 10) {
+        if code == 13 && !is_crlf(input, i) {
             return _, errors.new("toml: a carriage return not ending a line, at \(i)")
         }
         if code != 10 && code != 13 && is_control(code) {
@@ -347,7 +347,8 @@ fn parse_multiline(input: str, at: int, closing: str, escapes: bool) -> (Text, e
     }
 }
 
-/// Whether what follows a backslash is only whitespace up to a line break.
+/// Whether what follows a backslash is only whitespace up to a line break,
+/// which is `\n` or `\r\n`: a lone carriage return is not whitespace.
 fn is_line_fold(input: str, at: int) -> bool {
     var i = at
     for {
@@ -355,10 +356,10 @@ fn is_line_fold(input: str, at: int) -> bool {
             return false
         }
         let c = input.slice(i, i + 1)
-        if c == "\n" {
+        if c == "\n" || is_crlf(input, i) {
             return true
         }
-        if c != " " && c != "\t" && c != "\r" {
+        if c != " " && c != "\t" {
             return false
         }
         i = i + 1
@@ -483,6 +484,11 @@ fn parse_inline_table(input: str, at: int) -> (Step, error) {
 }
 
 /// A bare word: a boolean, a number, or something this subset does not read.
+///
+/// The word runs to whatever may follow a value, and a space inside it is
+/// kept, since `1979-05-27 07:32:00` is one date-time. Only spaces and tabs are
+/// trimmed from its ends. `trim()` takes every kind of whitespace, and taking
+/// a carriage return let `a = \r1` and `[1\r]` read as numbers.
 fn parse_scalar(input: str, at: int) -> (Step, error) {
     var word = ""
     var i = at
@@ -491,13 +497,18 @@ fn parse_scalar(input: str, at: int) -> (Step, error) {
             break
         }
         let c = input.slice(i, i + 1)
-        if c == "\n" || c == "," || c == "]" || c == "}" || c == "#" {
+        if c == "\n" || is_crlf(input, i) || c == "," || c == "]" || c == "}" || c == "#" {
             break
+        }
+        // Said here rather than as "`\r1` is not a number", which prints the
+        // carriage return and so hides it.
+        if is_control(input.code_at(i)) {
+            return _, errors.new("toml: unexpected control character at \(i)")
         }
         word = word + c
         i = i + 1
     }
-    let body = word.trim()
+    let body = trim_blank(word)
     if body.len() == 0 {
         return _, errors.new("toml: expected a value at \(at)")
     }
@@ -1124,6 +1135,11 @@ fn hex4(code: int) -> str {
 // ---- lexical helpers ---------------------------------------------------------
 
 /// Whitespace on this line only, and comments. Stops at a line break.
+///
+/// Whitespace is a space or a tab and nothing else. A carriage return is
+/// passed over only as the first half of a CRLF, which leaves the caller at
+/// the `\n` it looks for either way. Skipping a lone one as whitespace let
+/// `a = \r1` and `[a\r]` through, which TOML refuses.
 fn skip_inline(input: str, at: int) -> int {
     var i = at
     for {
@@ -1131,7 +1147,7 @@ fn skip_inline(input: str, at: int) -> int {
             return i
         }
         let c = input.slice(i, i + 1)
-        if c == " " || c == "\t" || c == "\r" {
+        if c == " " || c == "\t" || is_crlf(input, i) {
             i = i + 1
             continue
         }
@@ -1146,8 +1162,7 @@ fn skip_inline(input: str, at: int) -> int {
                 if i >= input.len() || input.slice(i, i + 1) == "\n" {
                     return i
                 }
-                let code = input.code_at(i)
-                if is_control(code) && !(code == 13 && i + 1 < input.len() && input.code_at(i + 1) == 10) {
+                if is_control(input.code_at(i)) && !is_crlf(input, i) {
                     return i
                 }
                 i = i + 1
@@ -1155,6 +1170,29 @@ fn skip_inline(input: str, at: int) -> int {
         }
         return i
     }
+}
+
+/// `s` without the spaces and tabs at either end, which are all TOML counts
+/// as whitespace.
+fn trim_blank(s: str) -> str {
+    var from = 0
+    var to = s.len()
+    for from < to && is_blank(s.code_at(from)) {
+        from += 1
+    }
+    for to > from && is_blank(s.code_at(to - 1)) {
+        to -= 1
+    }
+    return s.slice(from, to)
+}
+
+fn is_blank(code: int) -> bool {
+    return code == 32 || code == 9
+}
+
+/// Whether a CRLF line break starts at `i`.
+fn is_crlf(input: str, i: int) -> bool {
+    return i + 1 < input.len() && input.code_at(i) == 13 && input.code_at(i + 1) == 10
 }
 
 /// Whitespace, comments and line breaks alike.
