@@ -192,13 +192,12 @@ means nothing to Kite — and the braces that do hold it are where unwinding fro
 a method body's missing `}` stops. A method there that takes no `self` could
 also be a function of its own; it is remembered, and if the declaration then
 turns out to have a brace missing from before it, the declaration is read
-again, ending there. A comma missing between
-parameters is supplied, and a comma between struct fields read as a line
-break, so the declaration survives for the code that uses it. One missing
-between two arguments on a line is reported without a fix — `f("sum " n)`
-wanted a `+` — and the call becomes an `Error` node rather than a call with a
-guessed number of arguments; after a line break it is the `)` that is missing,
-and that is what is reported. A bracket whose closer was reported missing
+again, ending there. A comma missing between parameters is supplied, and a
+comma between struct fields read as a line break, so the declaration survives
+for the code that uses it. One missing between two arguments on a line is
+reported without a fix — `f("sum " n)` wanted a `+` — and the call becomes an
+`Error` node rather than a call with a guessed number of arguments; after a
+line break it is the `)` that is missing, and that is what is reported. A bracket whose closer was reported missing
 counts as closed from then on, so recovery resumes at the next line instead of
 taking the function's `}` for the literal's, and a binding whose value did not
 parse is kept, with an `Error` for a value. A struct literal, a `match`, a
