@@ -36,14 +36,14 @@ OPTIONS:
                       `run --emit native` is `run --native`
     --out <dir>       where `build --emit wasm`, `build --native` and `bundle`
                       write what they produce
-
-An option a command does not take is an error, not something ignored.
     --update          with `pkg`, allow `kite.lock` to change; without it, a
                       dependency whose bytes moved is an error rather than a
                       new lockfile
     --explain <CODE>  explain a diagnostic code, e.g. --explain E0301
     --version
     --help
+
+An option a command does not take is an error, not something ignored.
 ";
 
 fn main() -> ExitCode {

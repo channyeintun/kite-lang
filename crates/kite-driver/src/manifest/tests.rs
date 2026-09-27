@@ -375,10 +375,10 @@ fn tree(name: &str) -> PathBuf {
     dir
 }
 
-/// A path dependency is somebody's working tree. Its `.git`, its
-/// `node_modules` and its own `.kite/vendor` are not the package, and a link
-/// that cannot carry Kite — `node_modules/.bin` is a directory of them — used
-/// to make the whole dependency unhashable.
+/// A path dependency is somebody's working tree. Its `.git` and its own
+/// `.kite/vendor` are not the package, and a link that cannot carry Kite —
+/// `node_modules/.bin` is a directory of them — used to make the whole
+/// dependency unhashable.
 #[cfg(unix)]
 #[test]
 fn a_working_tree_hashes_as_its_kite_files() {
@@ -401,5 +401,35 @@ fn a_working_tree_hashes_as_its_kite_files() {
     std::fs::remove_file(dir.join("elsewhere")).expect("unlink");
     std::os::unix::fs::symlink("/etc/hostname", dir.join("sneaky.kite")).expect("link");
     assert!(hash_directory(&dir).is_err(), "a link named .kite");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What a `use` can reach, the hash covers. `node_modules` was skipped with
+/// `.git` and `.kite`, and unlike them it is an identifier: a dependency's
+/// `use node_modules/core` compiled bytes the lockfile never saw, and changing
+/// them left `kitec pkg` reporting the lockfile unchanged.
+#[cfg(unix)]
+#[test]
+fn what_a_use_can_reach_is_hashed() {
+    let dir = tree("reachable");
+    std::fs::write(dir.join("dep.kite"), "use node_modules/core\n").expect("write");
+    std::fs::create_dir_all(dir.join("node_modules/.bin")).expect("create");
+    std::fs::write(dir.join("node_modules/core.kite"), "pub fn f() {\n}\n").expect("write");
+    let before = hash_directory(&dir).expect("hashes");
+    std::fs::write(dir.join("node_modules/core.kite"), "pub fn f() {\n    io.print(1)\n}\n")
+        .expect("write");
+    assert_ne!(hash_directory(&dir).expect("hashes"), before, "the change was not seen");
+
+    // A link where no `use` can go is still left alone: `.bin` and `@scope`
+    // are not identifiers, and nothing below them is reachable either.
+    std::os::unix::fs::symlink("/tmp", dir.join("node_modules/.bin/tmp")).expect("link");
+    std::fs::create_dir_all(dir.join("node_modules/@scope")).expect("create");
+    std::os::unix::fs::symlink("/tmp", dir.join("node_modules/@scope/pkg")).expect("link");
+    std::os::unix::fs::symlink("/etc/hostname", dir.join("node_modules/@scope/x.kite"))
+        .expect("link");
+    hash_directory(&dir).expect("links out of reach are not followed");
+    // One a `use` could name is refused, inside `node_modules` as anywhere.
+    std::os::unix::fs::symlink("/tmp", dir.join("node_modules/lodash")).expect("link");
+    assert!(hash_directory(&dir).is_err(), "a reachable link to a directory");
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -231,8 +231,11 @@ survived rather than the text on disk.
 Loading is `kite-driver`'s, not the resolver's. Starting from the entry file's
 `use` lines, it finds each module — a sibling directory or a single `.kite`
 file, a dependency the package's `kite.toml` names, a standard library module,
-or a source a host handed over (the playground, a bundler, an editor's unsaved
-buffer) — and follows that module's own imports, reporting a cycle as `E0402`.
+or a source a host handed over (the playground, a bundler) — and follows that
+module's own imports, reporting a cycle as `E0402`. An editor's unsaved buffer
+is not handed over as a module: the files are found exactly as on disk, and
+only then is a file that is open read from its buffer, so a buffer stands in
+for the file it is a buffer of and for nothing else.
 Each module's declarations are then merged into one item list under their
 qualified names: `load` in module `config` is declared as `config.load`, which
 cannot be forged as an identifier and is exactly what an importer writes. The

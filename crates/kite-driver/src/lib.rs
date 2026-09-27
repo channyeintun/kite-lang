@@ -259,6 +259,15 @@ pub struct Binding {
     pub scope: Option<Span>,
 }
 
+/// An identifier in the form §2.1 compares it in: NFC, which is how every
+/// name the compiler read is held. For a name that did not come through the
+/// parser — one a person typed into a rename box — before it is compared
+/// with those.
+pub fn identifier_nfc(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    name.nfc().collect()
+}
+
 /// Something the checker worked out that the source never says, shown inline
 /// after the span it belongs to.
 pub struct Hint {

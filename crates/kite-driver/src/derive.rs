@@ -34,7 +34,7 @@
 use kite_ast::{EnumDecl, Item, StructDecl, Type, TypePath, VariantPayload};
 use kite_diag::{codes, DiagBag, Diagnostic};
 use kite_span::Span;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// What the expander produced: one file of Kite, and the module each of its
 /// items belongs to.
@@ -311,9 +311,15 @@ pub fn expand(
         }
     }
 
-    // How each module deriving `Encode` or `Decode` spells `std/json`: as it
-    // imported it if it did, and by a spelling of the compiler's own if it did
-    // not — never by whatever `json` happens to mean there.
+    // How each module deriving `Encode` or `Decode` spells `std/json` in
+    // what is generated for it: by a spelling of the compiler's own, never by
+    // one the module wrote. The module's own was used when it had one, and a
+    // module's spelling is whatever it chose — `use std/json as doc` made
+    // every `doc.field(doc, …)` in a derived `decode` mean the parameter
+    // `doc`, and the derive failed with errors inside `<derive>`. Every name
+    // the generated code binds is chosen to miss the module's spellings too
+    // ([`Writer::avoid`]), but a spelling of the compiler's own cannot meet
+    // one of the module's by construction.
     let mut json_spellings: HashMap<String, String> = HashMap::new();
     let mut added: Vec<((String, String), String)> = Vec::new();
     for decl in &decls {
@@ -322,28 +328,17 @@ pub fn expand(
         if !needs_json || json_spellings.contains_key(&decl.module) {
             continue;
         }
-        let mut own: Vec<&String> = aliases
-            .iter()
-            .filter(|((m, _), target)| *m == decl.module && target.as_str() == "json")
-            .map(|((_, spelling), _)| spelling)
-            .collect();
-        own.sort();
-        let spelling = match own.iter().find(|s| s.as_str() == "json").or(own.first()) {
-            Some(s) => s.to_string(),
-            None => {
-                let mut n = 0;
-                loop {
-                    let candidate = match n {
-                        0 => JSON_SPELLING.to_string(),
-                        n => format!("{}{}", JSON_SPELLING, n),
-                    };
-                    if !aliases.contains_key(&(decl.module.clone(), candidate.clone())) {
-                        added.push(((decl.module.clone(), candidate.clone()), "json".to_string()));
-                        break candidate;
-                    }
-                    n += 1;
-                }
+        let mut n = 0;
+        let spelling = loop {
+            let candidate = match n {
+                0 => JSON_SPELLING.to_string(),
+                n => format!("{}{}", JSON_SPELLING, n),
+            };
+            if !aliases.contains_key(&(decl.module.clone(), candidate.clone())) {
+                added.push(((decl.module.clone(), candidate.clone()), "json".to_string()));
+                break candidate;
             }
+            n += 1;
         };
         json_spellings.insert(decl.module.clone(), spelling);
     }
@@ -357,6 +352,8 @@ pub fn expand(
     for index in 0..decls.len() {
         for (trait_, at) in decls[index].derives.clone() {
             let module = decls[index].module.clone();
+            let json = json_spellings.get(&module).cloned().unwrap_or_else(|| "json".to_string());
+            let avoid = names_in(&module, aliases, &all_types, &json);
             let mut w = Writer {
                 decls: &decls,
                 known: &known,
@@ -364,12 +361,13 @@ pub fn expand(
                 type_aliases: &type_aliases,
                 aliases,
                 by_hand: &by_hand,
-                json: json_spellings.get(&module).cloned().unwrap_or_else(|| "json".to_string()),
+                json,
                 lookup: module.clone(),
                 module,
                 followed: 0,
                 trait_,
                 next: 0,
+                avoid,
                 diags,
                 failed: false,
             };
@@ -386,6 +384,35 @@ pub fn expand(
         return None;
     }
     Some(Derived { source, modules, aliases: added })
+}
+
+/// Every name a module's generated code may need to mean what it means in
+/// the module: its spellings for other modules, its own types, and its
+/// spelling of `std/json`.
+///
+/// A local the generated code binds shadows whatever the module meant by that
+/// name, and the generated code is full of locals — `doc`, `out`, `field_1`,
+/// `src_2`. With `use shapes as doc`, a derived `decode` asked the parameter
+/// `doc` for `doc.Circle.decode`, and the module's program failed to compile
+/// with errors in a file nobody wrote. So no local takes any of these.
+fn names_in(
+    module: &str,
+    aliases: &HashMap<(String, String), String>,
+    all_types: &[(String, String)],
+    json: &str,
+) -> HashSet<String> {
+    let mut names: HashSet<String> = aliases
+        .keys()
+        .filter(|(m, _)| m == module)
+        .map(|(_, spelling)| spelling.clone())
+        .collect();
+    for (qualified, owner) in all_types {
+        if owner == module {
+            names.insert(qualified.rsplit('.').next().unwrap_or(qualified).to_string());
+        }
+    }
+    names.insert(json.to_string());
+    names
 }
 
 /// `mod.Type<A>` as written.
@@ -448,6 +475,8 @@ struct Writer<'a, 'd> {
     followed: usize,
     trait_: Derivable,
     next: usize,
+    /// Names the generated code must not bind: see [`names_in`].
+    avoid: HashSet<String>,
     diags: &'d mut DiagBag,
     /// Set when a field could not be walked. The item is dropped rather than
     /// emitted half-written, so one bad field is one diagnostic and not a
@@ -460,8 +489,24 @@ type Lines = Vec<String>;
 
 impl<'a> Writer<'a, '_> {
     fn temp(&mut self, stem: &str) -> String {
-        self.next += 1;
-        format!("{}_{}", stem, self.next)
+        loop {
+            self.next += 1;
+            let name = format!("{}_{}", stem, self.next);
+            if !self.avoid.contains(&name) {
+                return name;
+            }
+        }
+    }
+
+    /// One of the generated code's fixed local names — `doc`, `out`, `h` —
+    /// or, where the module already means something by it, the same with
+    /// underscores until it does not.
+    fn local(&self, name: &str) -> String {
+        let mut name = name.to_string();
+        while self.avoid.contains(&name) {
+            name.push('_');
+        }
+        name
     }
 
     fn cannot(&mut self, at: Span, what: &str, why: &str) -> String {
@@ -563,7 +608,8 @@ impl<'a> Writer<'a, '_> {
                 body.push(format!("    return {}", parts.join(" + ")));
             }
             Shape::Enum(e) => {
-                body.push("    var out = \"\"".to_string());
+                let out = self.local("out");
+                body.push(format!("    var {} = \"\"", out));
                 body.push("    match self {".to_string());
                 for v in &e.variants {
                     let (head, binds) = self.variant_pattern(v);
@@ -585,11 +631,11 @@ impl<'a> Writer<'a, '_> {
                         }
                         parts.push(quote(")"));
                     }
-                    body.push(format!("            out = {}", parts.join(" + ")));
+                    body.push(format!("            {} = {}", out, parts.join(" + ")));
                     body.push("        }".to_string());
                 }
                 body.push("    }".to_string());
-                body.push("    return out".to_string());
+                body.push(format!("    return {}", out));
             }
         }
         wrap_impl(&decl.bare, Some("Debug"), "fn debug(self) -> str", &body)
@@ -690,14 +736,15 @@ impl<'a> Writer<'a, '_> {
 
     fn hash_item(&mut self, decl: &Decl) -> String {
         let mut body: Lines = Vec::new();
-        body.push("    var h = hash_seed()".to_string());
+        let h = self.local("h");
+        body.push(format!("    var {} = hash_seed()", h));
         match &decl.kind {
             Shape::Struct(s) => {
                 for f in &s.fields {
                     let bound = self.temp("field");
                     body.push(format!("    let {} = self.{}", bound, f.name.name));
                     let value = self.hash_of(&f.ty, &bound, 1, &mut body);
-                    body.push(format!("    h = hash_combine(h, {})", value));
+                    body.push(format!("    {h} = hash_combine({h}, {})", value));
                 }
             }
             Shape::Enum(e) => {
@@ -707,19 +754,19 @@ impl<'a> Writer<'a, '_> {
                     body.push(format!("        {} => {{", head));
                     // The variant's position, so two variants with the same
                     // payload do not hash alike.
-                    body.push(format!("            h = hash_combine(h, {})", index));
+                    body.push(format!("            {h} = hash_combine({h}, {})", index));
                     for (bind, ty, _) in &binds {
                         let mut inner: Lines = Vec::new();
                         let value = self.hash_of(ty, bind, 3, &mut inner);
                         body.extend(inner);
-                        body.push(format!("            h = hash_combine(h, {})", value));
+                        body.push(format!("            {h} = hash_combine({h}, {})", value));
                     }
                     body.push("        }".to_string());
                 }
                 body.push("    }".to_string());
             }
         }
-        body.push("    return h".to_string());
+        body.push(format!("    return {}", h));
         wrap_impl(&decl.bare, Some("Hash"), "fn hash(self) -> int", &body)
     }
 
@@ -809,14 +856,15 @@ impl<'a> Writer<'a, '_> {
         let mut body: Lines = Vec::new();
         match &decl.kind {
             Shape::Struct(s) => {
-                body.push(format!("    var fields: {{ str: {j}.Json }} = {{ }}"));
+                let fields = self.local("fields");
+                body.push(format!("    var {fields}: {{ str: {j}.Json }} = {{ }}"));
                 for f in &s.fields {
                     let bound = self.temp("field");
                     body.push(format!("    let {} = self.{}", bound, f.name.name));
                     let value = self.encode_of(&f.ty, &bound, 1, &mut body);
-                    body.push(format!("    fields[{}] = {}", quote(&f.name.name), value));
+                    body.push(format!("    {fields}[{}] = {}", quote(&f.name.name), value));
                 }
-                body.push(format!("    return {j}.Json.Object(fields)"));
+                body.push(format!("    return {j}.Json.Object({fields})"));
             }
             Shape::Enum(e) => {
                 // Externally tagged: a unit variant is its own name as text,
@@ -824,53 +872,56 @@ impl<'a> Writer<'a, '_> {
                 // and it is what every other language's JSON does — which
                 // matters more here than elegance, because the other end of
                 // this is not written in Kite.
-                body.push(format!("    var out = {j}.Json.Null"));
+                let out = self.local("out");
+                let payload = self.local("payload");
+                let wrapper = self.local("wrapper");
+                body.push(format!("    var {out} = {j}.Json.Null"));
                 body.push("    match self {".to_string());
                 for v in &e.variants {
                     let (head, binds) = self.variant_pattern(v);
                     body.push(format!("        {} => {{", head));
                     if binds.is_empty() {
                         body.push(format!(
-                            "            out = {j}.Json.Text({})",
+                            "            {out} = {j}.Json.Text({})",
                             quote(&v.name.name)
                         ));
                     } else if binds.iter().all(|(_, _, label)| label.is_some()) {
-                        body.push(format!("            var payload: {{ str: {j}.Json }} = {{ }}"));
+                        body.push(format!("            var {payload}: {{ str: {j}.Json }} = {{ }}"));
                         for (bind, ty, label) in &binds {
                             let mut inner: Lines = Vec::new();
                             let value = self.encode_of(ty, bind, 3, &mut inner);
                             body.extend(inner);
                             body.push(format!(
-                                "            payload[{}] = {}",
+                                "            {payload}[{}] = {}",
                                 quote(label.as_deref().unwrap_or("")),
                                 value
                             ));
                         }
-                        body.push(format!("            var wrapper: {{ str: {j}.Json }} = {{ }}"));
+                        body.push(format!("            var {wrapper}: {{ str: {j}.Json }} = {{ }}"));
                         body.push(format!(
-                            "            wrapper[{}] = {j}.Json.Object(payload)",
+                            "            {wrapper}[{}] = {j}.Json.Object({payload})",
                             quote(&v.name.name)
                         ));
-                        body.push(format!("            out = {j}.Json.Object(wrapper)"));
+                        body.push(format!("            {out} = {j}.Json.Object({wrapper})"));
                     } else {
-                        body.push(format!("            var payload: [{j}.Json] = []"));
+                        body.push(format!("            var {payload}: [{j}.Json] = []"));
                         for (bind, ty, _) in &binds {
                             let mut inner: Lines = Vec::new();
                             let value = self.encode_of(ty, bind, 3, &mut inner);
                             body.extend(inner);
-                            body.push(format!("            payload.push({})", value));
+                            body.push(format!("            {payload}.push({})", value));
                         }
-                        body.push(format!("            var wrapper: {{ str: {j}.Json }} = {{ }}"));
+                        body.push(format!("            var {wrapper}: {{ str: {j}.Json }} = {{ }}"));
                         body.push(format!(
-                            "            wrapper[{}] = {j}.Json.Array(payload)",
+                            "            {wrapper}[{}] = {j}.Json.Array({payload})",
                             quote(&v.name.name)
                         ));
-                        body.push(format!("            out = {j}.Json.Object(wrapper)"));
+                        body.push(format!("            {out} = {j}.Json.Object({wrapper})"));
                     }
                     body.push("        }".to_string());
                 }
                 body.push("    }".to_string());
-                body.push("    return out".to_string());
+                body.push(format!("    return {out}"));
             }
         }
         wrap_impl(
@@ -963,6 +1014,7 @@ impl<'a> Writer<'a, '_> {
 
     fn decode_item(&mut self, decl: &Decl) -> String {
         let j = self.json.clone();
+        let doc = self.local("doc");
         let mut body: Lines = Vec::new();
         match &decl.kind {
             Shape::Struct(s) => {
@@ -971,7 +1023,7 @@ impl<'a> Writer<'a, '_> {
                     let where_ = format!("{}.{}", decl.bare, f.name.name);
                     let value = self.decode_of(
                         &f.ty,
-                        &format!("{j}.field(doc, {})", quote(&f.name.name)),
+                        &format!("{j}.field({doc}, {})", quote(&f.name.name)),
                         &where_,
                         1,
                         &mut body,
@@ -987,7 +1039,7 @@ impl<'a> Writer<'a, '_> {
             Shape::Enum(e) => {
                 // A unit variant arrives as its own name.
                 let tag = self.temp("tag");
-                body.push(format!("    let {} = {j}.text(doc)", tag));
+                body.push(format!("    let {} = {j}.text({doc})", tag));
                 body.push(format!("    if {} != nil {{", tag));
                 for v in &e.variants {
                     if v.payload.is_empty() {
@@ -1007,7 +1059,7 @@ impl<'a> Writer<'a, '_> {
                     }
                     let held = self.temp("payload");
                     body.push(format!(
-                        "    let {} = {j}.field(doc, {})",
+                        "    let {} = {j}.field({doc}, {})",
                         held,
                         quote(&v.name.name)
                     ));
@@ -1065,7 +1117,7 @@ impl<'a> Writer<'a, '_> {
         wrap_impl(
             &decl.bare,
             None,
-            &format!("pub fn decode(doc: {j}.Json) -> ({}, error)", decl.bare),
+            &format!("pub fn decode({doc}: {j}.Json) -> ({}, error)", decl.bare),
             &body,
         )
     }

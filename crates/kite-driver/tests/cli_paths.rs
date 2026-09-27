@@ -239,6 +239,32 @@ fn kitec_fix_edits_only_what_it_is_sure_of() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Every option is listed under `OPTIONS:`, together. Two changes merged into
+/// the help at once left a sentence in the middle of the list, and `--update`,
+/// `--explain`, `--version` and `--help` below it, cut off from the rest.
+#[test]
+fn the_help_lists_every_option_under_options() {
+    let dir = scratch("help", "t.kite", "");
+    let Some((ok, out, _)) = kitec_in(&dir, &["--help"]) else { return };
+    assert!(ok);
+    let options: Vec<&str> = out
+        .lines()
+        .skip_while(|l| *l != "OPTIONS:")
+        .skip(1)
+        .take_while(|l| !l.is_empty())
+        .collect();
+    let listed = |flag: &str| options.iter().any(|l| l.trim_start().starts_with(flag));
+    for flag in ["--release", "--out", "--update", "--explain", "--version", "--help"] {
+        assert!(listed(flag), "`{}` is not under OPTIONS:\n{}", flag, out);
+    }
+    assert!(
+        options.iter().all(|l| l.starts_with("    ")),
+        "something that is not an option is in the list:\n{}",
+        out
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---- the source map names what a browser can find ---------------------------
 
 /// A source map names each source relative to the directory it is written

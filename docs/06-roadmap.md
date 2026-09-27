@@ -2719,6 +2719,32 @@ the implementation.
 fix — `tests/modules.rs`, `cli_paths.rs`, `bundle.rs`, and the unit tests of the
 loader, the derive, the solver, the manifest and `kitec pkg`.
 
+### A second pass over the same ground
+
+A second review checked this phase's fixes and found them partial:
+
+- **A package the program never declared took its name from the program.**
+  Dependency modules were identified by the package's name, so an
+  application's own `log.kite` and a `log` package only its `web` dependency
+  declared were both `log`, and whichever loaded second was `E0404`. Such a
+  package's modules are now `@log/…`; one the program declares keeps its name.
+- **An unsaved buffer answered `use` lines that were not about it.** The
+  language server handed every open buffer over as a provided module, and a
+  provided key is consulted first — so opening `md.kite` took `use md` from a
+  declared dependency, opening `config.kite` hid `config/`, and a dependency's
+  own `use util` was answered by the application's `md/util.kite`. The server
+  now reads through the disk with each buffer in place of its own file, and a
+  cycle back to the open file is reported in it rather than in a copy.
+- The lockfile hash skipped `node_modules`, which a `use` can name; a failed
+  `--update` fetch deleted the checkout it was replacing; a manifest that was
+  not UTF-8 was taken for none; and `@derive` bound locals — `doc`, `src_1` —
+  that shadowed the module's own spellings.
+- The server's rename edited a `pub` name's declaration and none of its
+  importers, took an NFD spelling of a bound name as a new one, and went ahead
+  in a file whose unparsed lines it could not see. Its framing panicked on a
+  huge `Content-Length` and overflowed the stack on deep JSON, and the VS Code
+  extension kept a dead server and never settled what it asked of it.
+
 ---
 
 ## Where the implementation actually stands
@@ -2760,9 +2786,9 @@ none.
 | 29 — Imports are the boundary | ✅ a qualified name resolves only in a module that imported it, and the entry file is reachable from nowhere. ❌ two sibling *directory* modules still cannot import each other by any spelling — exposed by this, not caused by it |
 | 30 — The boundary, reviewed | ✅ a module is where its source is; each package's dependencies are its own; the entry file and bare variants are gated too; `bundle`, `test`, `pkg` and the option parser do what they say. ❌ `pub` on an enum variant and `pub use`, which §4.3 names and nothing defines |
 
-834 tests: unit tests per crate, an annotated compile-fail corpus, a
-differential corpus that runs every program on **three** backends and compares,
-the standard library's own suite on two of them, the standard library's own
+More than a thousand tests: unit tests per crate, an annotated compile-fail
+corpus, a differential corpus that runs every program on **three** backends and
+compares, the standard library's own suite on two of them, the standard library's own
 documentation examples, the host boundary and a real socket under Node, both
 string representations compared against each other and against the VM, the
 source map's offsets checked against the module's real function bodies, every

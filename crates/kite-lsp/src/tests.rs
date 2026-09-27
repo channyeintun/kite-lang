@@ -605,6 +605,9 @@ impl Project {
     /// Write a file, and answer the URI an editor would name it by.
     fn file(&self, name: &str, text: &str) -> String {
         let path = self.dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("a directory for it");
+        }
         std::fs::write(&path, text).expect("written");
         format!("file://{}", path.display())
     }
@@ -813,6 +816,242 @@ fn rename_rewrites_every_spelling_of_the_name() {
     assert_eq!(edits.len(), 3, "{:?}", edits);
 }
 
+/// The diagnostics a file has now, as the messages the editor would show.
+fn messages_for(server: &mut Server, uri: &str) -> Vec<String> {
+    let reply = server.handle("textDocument/didSave", &at(uri, 0, 0));
+    let published: Vec<Json> = reply.notifications.into_iter().map(|(_, p)| p).collect();
+    let Some(Json::Array(items)) = published.first().and_then(|p| p.get("diagnostics")).cloned()
+    else {
+        panic!("nothing published for {}", uri);
+    };
+    items
+        .iter()
+        .map(|d| d.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string())
+        .collect()
+}
+
+// ---- an open buffer is the file it is a buffer of, and nothing else ----------
+//
+// The editor handed every open buffer over as a provided module, keyed by its
+// path below the file being compiled, and a provided key was consulted before
+// anything on disk. Merely opening a file changed what `use` lines meant, and
+// the editor showed errors `kitec check` did not have. In each of these the
+// buffers opened hold exactly what is on disk, so the editor and the build
+// must agree.
+
+/// A declared dependency is what `use md` reaches, however many files called
+/// `md.kite` are open beside the entry.
+#[test]
+fn an_open_sibling_does_not_take_a_declared_dependencys_name() {
+    let p = Project::new("dep-over-buffer");
+    p.file("lib/md/kite.toml", "[package]\nname = \"md\"\nversion = \"1.0.0\"\n");
+    let dependency =
+        p.file("lib/md/md.kite", "pub fn render() -> str {\n    return \"from dependency\"\n}\n");
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nmd = { path = \"../lib/md\" }\n",
+    );
+    let sibling_text = "pub fn render() -> int {\n    return 1\n}\n";
+    let sibling = p.file("app/md.kite", sibling_text);
+    let main_text = "use md\n\nfn main() {\n    let s: str = md.render()\n    io.print(s)\n}\n";
+    let main = p.file("app/main.kite", main_text);
+    let mut s = Server::new();
+    open(&mut s, &main, main_text);
+    open(&mut s, &sibling, sibling_text);
+    assert_eq!(messages_for(&mut s, &main), Vec::<String>::new());
+    // And definition goes where the build went.
+    let reply = s.handle("textDocument/definition", &at(&main, 3, 20));
+    let result = reply.result.expect("an answer");
+    assert_eq!(result.get("uri").and_then(|u| u.as_str()), Some(dependency.as_str()));
+}
+
+/// A dependency's own `use util` is its own `util`, not a buffer of the
+/// application's that happens to sit where the dependency's name would put
+/// it.
+#[test]
+fn a_dependencys_import_is_not_answered_by_an_application_buffer() {
+    let p = Project::new("dep-import-buffer");
+    p.file("md/kite.toml", "[package]\nname = \"md\"\nversion = \"1.0.0\"\n");
+    p.file("md/md.kite", "use util\n\npub fn render() -> util.Thing {\n    return util.make()\n}\n");
+    p.file(
+        "md/util.kite",
+        "pub struct Thing {\n    pub v: int\n}\n\npub fn make() -> Thing {\n    return Thing{ v: 7 }\n}\n",
+    );
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nmd = { path = \"../md\" }\n",
+    );
+    let stray_text = "pub struct Thing {\n    pub v: str\n}\n\n\
+                      pub fn make() -> Thing {\n    return Thing{ v: \"app\" }\n}\n";
+    let stray = p.file("app/md/util.kite", stray_text);
+    let main_text = "use md\n\nfn main() {\n    let n: int = md.render().v\n    io.print(n)\n}\n";
+    let main = p.file("app/main.kite", main_text);
+    let mut s = Server::new();
+    open(&mut s, &main, main_text);
+    open(&mut s, &stray, stray_text);
+    assert_eq!(messages_for(&mut s, &main), Vec::<String>::new());
+}
+
+/// Inside `a/`, `use x/y` is `a/x/y.kite`, whether or not an `x/y.kite`
+/// beside the entry is open.
+#[test]
+fn a_nested_modules_import_is_not_answered_by_an_entry_level_buffer() {
+    let p = Project::new("nested-import-buffer");
+    p.file("a/m.kite", "use x/y\n\npub fn f() -> y.Thing {\n    return y.make()\n}\n");
+    p.file(
+        "a/x/y.kite",
+        "pub struct Thing {\n    pub v: int\n}\n\npub fn make() -> Thing {\n    return Thing{ v: 5 }\n}\n",
+    );
+    let top_text = "pub struct Thing {\n    pub v: str\n}\n\n\
+                    pub fn make() -> Thing {\n    return Thing{ v: \"top\" }\n}\n";
+    let top = p.file("x/y.kite", top_text);
+    let main_text = "use a/m\n\nfn main() {\n    let n: int = m.f().v\n    io.print(n)\n}\n";
+    let main = p.file("main.kite", main_text);
+    let mut s = Server::new();
+    open(&mut s, &main, main_text);
+    open(&mut s, &top, top_text);
+    assert_eq!(messages_for(&mut s, &main), Vec::<String>::new());
+}
+
+/// `use config` is the directory `config/` when there is one (§13.1), and an
+/// open `config.kite` beside it does not change that.
+#[test]
+fn an_open_file_does_not_hide_a_directory_module() {
+    let p = Project::new("dir-over-buffer");
+    p.file("config/load.kite", "pub fn port() -> int {\n    return 80\n}\n");
+    let file_text = "pub fn other() -> int {\n    return 1\n}\n";
+    let file = p.file("config.kite", file_text);
+    let main_text = "use config\n\nfn main() {\n    io.print(config.port())\n}\n";
+    let main = p.file("main.kite", main_text);
+    let mut s = Server::new();
+    open(&mut s, &main, main_text);
+    open(&mut s, &file, file_text);
+    assert_eq!(messages_for(&mut s, &main), Vec::<String>::new());
+    let reply = s.handle("textDocument/definition", &at(&main, 3, 21));
+    let result = reply.result.expect("an answer");
+    let uri = result.get("uri").and_then(|u| u.as_str()).unwrap_or_default();
+    assert!(uri.ends_with("/config/load.kite"), "{}", uri);
+}
+
+/// An unsaved file in a directory module is part of the module, as it will
+/// be once saved — and an edit to it is what the module's importers see.
+#[test]
+fn an_unsaved_file_in_a_directory_module_is_part_of_it() {
+    let p = Project::new("dir-unsaved");
+    p.file("config/load.kite", "pub fn port() -> int {\n    return 80\n}\n");
+    let main_text = "use config\n\nfn main() {\n    io.print(config.port() + config.extra())\n}\n";
+    let main = p.file("main.kite", main_text);
+    let mut s = Server::new();
+    open(&mut s, &main, main_text);
+    assert_eq!(messages_for(&mut s, &main).len(), 1, "`extra` is nowhere yet");
+    let fresh = format!("file://{}", p.dir.join("config/extra.kite").display());
+    open(&mut s, &fresh, "pub fn extra() -> int {\n    return 1\n}\n");
+    assert_eq!(messages_for(&mut s, &main), Vec::<String>::new());
+}
+
+/// A cycle back to the open file is shown in it, as `kitec check` reports it.
+/// It was reported inside a second copy of the file, read as a module, and
+/// the editor — which shows only the file's own diagnostics — showed nothing.
+#[test]
+fn a_cycle_back_to_the_open_file_is_shown_in_it() {
+    let p = Project::new("cycle");
+    let a_text = "use b\n\npub fn fa() -> int {\n    return b.fb()\n}\n\nfn main() {\n    io.print(fa())\n}\n";
+    let a = p.file("a.kite", a_text);
+    p.file("b.kite", "use a\n\npub fn fb() -> int {\n    return 1\n}\n");
+    let mut s = Server::new();
+    let published = open(&mut s, &a, a_text);
+    assert_eq!(codes_for(&published, &a), Some(vec!["E0402".to_string()]), "{:?}", published);
+}
+
+/// Definition into a path dependency answers with the open buffer's URI. The
+/// loader names the file `app/../lib/md/md.kite`, which matched no open URI,
+/// and the editor opened the file a second time.
+#[test]
+fn definition_into_a_path_dependency_lands_in_its_open_buffer() {
+    let p = Project::new("dep-definition");
+    p.file("lib/md/kite.toml", "[package]\nname = \"md\"\nversion = \"1.0.0\"\n");
+    let dependency_text = "pub fn render() -> str {\n    return \"from dependency\"\n}\n";
+    let dependency = p.file("lib/md/md.kite", dependency_text);
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nmd = { path = \"../lib/md\" }\n",
+    );
+    let main_text = "use md\n\nfn main() {\n    io.print(md.render())\n}\n";
+    let main = p.file("app/main.kite", main_text);
+    let mut s = Server::new();
+    open(&mut s, &main, main_text);
+    // Closed, the URI is still the file's own path, folded.
+    let reply = s.handle("textDocument/definition", &at(&main, 3, 17));
+    let result = reply.result.expect("an answer");
+    assert_eq!(result.get("uri").and_then(|u| u.as_str()), Some(dependency.as_str()));
+    open(&mut s, &dependency, dependency_text);
+    let reply = s.handle("textDocument/definition", &at(&main, 3, 17));
+    let result = reply.result.expect("an answer");
+    assert_eq!(result.get("uri").and_then(|u| u.as_str()), Some(dependency.as_str()));
+}
+
+// ---- what a rename may touch -------------------------------------------------
+
+/// A `pub` name's importers are in other files, so a rename in its own file
+/// edited the declaration alone and broke every one of them.
+#[test]
+fn rename_refuses_a_pub_name() {
+    let p = Project::new("rename-pub");
+    let config_text = "pub fn port() -> int {\n    return 80\n}\n\npub let PORT = 80\n";
+    let config = p.file("config.kite", config_text);
+    let main_text = "use config\n\nfn main() {\n    io.print(config.port() + config.PORT)\n}\n";
+    let main = p.file("main.kite", main_text);
+    let mut s = Server::new();
+    open(&mut s, &config, config_text);
+    open(&mut s, &main, main_text);
+    for (line, character) in [(0, 8), (4, 9)] {
+        let reply = s.handle("textDocument/rename", &rename_at(&config, line, character, "p2"));
+        assert_eq!(reply.result, None);
+        let why = reply.error.expect("a refusal");
+        assert!(why.contains("`pub`"), "{}", why);
+        let refused = s.handle("textDocument/prepareRename", &at(&config, line, character));
+        assert!(refused.error.is_some());
+    }
+}
+
+/// §2.1 compares identifiers after NFC, so a new name that is an existing one
+/// spelled with a combining accent is that name. It was compared byte for
+/// byte, got through, and changed what the old uses resolved to.
+#[test]
+fn rename_refuses_a_name_already_bound_under_another_spelling() {
+    let mut s = Server::new();
+    let text = "fn main() {\n    let caf\u{e9} = 1\n    if true {\n        let x = 2\n        io.print(caf\u{e9} + x)\n    }\n}\n";
+    open(&mut s, "file:///t.kite", text);
+    for new in ["caf\u{e9}", "cafe\u{301}"] {
+        let reply = s.handle("textDocument/rename", &rename_at("file:///t.kite", 3, 12, new));
+        let why = reply.error.expect("a refusal");
+        assert!(why.contains("already bound"), "{:?}: {}", new, why);
+    }
+    // A name accepted is written in NFC, the form the compiler holds it in.
+    let reply = s.handle("textDocument/rename", &rename_at("file:///t.kite", 3, 12, "the\u{301}"));
+    let result = reply.result.expect("an answer");
+    let Some(Json::Array(edits)) = result.get("changes").and_then(|c| c.get("file:///t.kite"))
+    else {
+        panic!("no edits");
+    };
+    assert!(edits.iter().all(|e| e.get("newText").and_then(|t| t.as_str()) == Some("th\u{e9}")));
+}
+
+/// What the parser skipped to recover was never resolved, so an occurrence
+/// there is in no table: the rename edited the rest, and the leftover spelling
+/// meant something else once the line was mended.
+#[test]
+fn rename_refuses_while_the_file_does_not_parse() {
+    let mut s = Server::new();
+    let text = "fn helper(a: int) -> int {\n    return a + 1\n}\n\n\
+                fn main() {\n    let v = helper(1\n    io.print(helper(2))\n}\n";
+    open(&mut s, "file:///t.kite", text);
+    let reply = s.handle("textDocument/rename", &rename_at("file:///t.kite", 0, 4, "helper2"));
+    assert_eq!(reply.result, None);
+    let why = reply.error.expect("a refusal");
+    assert!(why.contains("syntax errors"), "{}", why);
+}
+
 fn frame(body: &str) -> String {
     format!("Content-Length: {}\r\n\r\n{}", body.len(), body)
 }
@@ -835,6 +1074,58 @@ fn a_malformed_message_is_answered_and_the_session_goes_on() {
     assert!(said.contains(r#""id":2"#), "{}", said);
     assert!(said.contains(r#""id":3"#), "{}", said);
     assert_eq!(code, 0);
+}
+
+/// The other ways a message could end the session: a length the server
+/// allocated before reading (a panic on the capacity, or an abort on the
+/// allocation), nesting it recursed into until the stack ran out, and a header
+/// line that was not UTF-8, which read as the stream closing. Each is answered,
+/// and the next message is read.
+#[test]
+fn no_malformed_message_ends_the_session() {
+    let deep = format!(
+        r#"{{"jsonrpc":"2.0","id":5,"method":"foo","params":{}{}}}"#,
+        "[".repeat(50_000),
+        "]".repeat(50_000)
+    );
+    let oversized = "Content-Length: 1000000000000\r\n\r\n{}";
+    let input = [
+        frame(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).into_bytes(),
+        frame(&deep).into_bytes(),
+        b"X-Junk: \xff\xfe\r\n".to_vec(),
+        frame(r#"{"jsonrpc":"2.0","id":7,"method":"shutdown"}"#).into_bytes(),
+        oversized.as_bytes().to_vec(),
+    ]
+    .concat();
+    let mut output = Vec::new();
+    // The stream ends inside the oversized body, which is the stream ending.
+    let code = crate::serve(&mut std::io::Cursor::new(input), &mut output);
+    let said = String::from_utf8(output).expect("utf-8");
+    assert!(said.contains(r#""id":1"#), "{}", said);
+    assert!(said.contains(r#""id":7"#), "the header did not end the session: {}", said);
+    assert_eq!(said.matches(r#""code":-32700"#).count(), 2, "{}", said);
+    assert!(said.contains("1000000000000 bytes"), "{}", said);
+    assert_eq!(code, 0);
+
+    // A length past the limit, followed by the body it states: the body is
+    // passed over and the session goes on.
+    let body = "x".repeat(70 << 20);
+    let input = [
+        format!("Content-Length: {}\r\n\r\n{}", body.len(), body),
+        frame(r#"{"jsonrpc":"2.0","id":3,"method":"shutdown"}"#),
+        frame(r#"{"jsonrpc":"2.0","method":"exit"}"#),
+    ]
+    .concat();
+    let mut output = Vec::new();
+    let code = crate::serve(&mut std::io::Cursor::new(input), &mut output);
+    let said = String::from_utf8(output).expect("utf-8");
+    assert!(said.contains(r#""id":3"#), "{}", said);
+    assert_eq!(code, 0);
+    // And one no buffer could hold, which panicked on the capacity.
+    let huge = "Content-Length: 18446744073709551615\r\n\r\n{}";
+    let mut output = Vec::new();
+    crate::serve(&mut std::io::Cursor::new(huge.as_bytes().to_vec()), &mut output);
+    assert!(String::from_utf8(output).expect("utf-8").contains("-32700"));
 }
 
 /// `exit` without a `shutdown` first is the editor stopping a server it did

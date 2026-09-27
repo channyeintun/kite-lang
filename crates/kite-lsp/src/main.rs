@@ -13,7 +13,7 @@ mod json;
 mod server;
 
 use json::Json;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -39,22 +39,27 @@ fn serve(input: &mut impl BufRead, output: &mut impl Write) -> u8 {
             // and the session with it, exiting as if asked to — the editor
             // saw its server vanish over a request it would have forgotten.
             Incoming::Malformed => {
+                write_message(output, &unreadable("the message is not valid JSON"));
+                continue;
+            }
+            // **Never allocated as stated.** The body buffer was made the size
+            // the header said, so `Content-Length: 18446744073709551615`
+            // panicked on the capacity and a trillion aborted on the
+            // allocation — the server gone over one header. The body is read
+            // and dropped instead, which keeps the stream framed the way the
+            // header framed it; a stream that ends first has ended.
+            Incoming::TooLarge(length) => {
                 write_message(
                     output,
-                    &Json::object(vec![
-                        ("jsonrpc", Json::str("2.0")),
-                        // The id is in the message that could not be read.
-                        ("id", Json::Null),
-                        (
-                            "error",
-                            Json::object(vec![
-                                ("code", Json::number(-32700)),
-                                ("message", Json::str("the message is not valid JSON")),
-                            ]),
-                        ),
-                    ]),
+                    &unreadable(&format!(
+                        "the message is {} bytes, and nothing this protocol sends is over {}",
+                        length, MAX_BODY
+                    )),
                 );
-                continue;
+                match std::io::copy(&mut input.by_ref().take(length), &mut std::io::sink()) {
+                    Ok(n) if n == length => continue,
+                    _ => return 0,
+                }
             }
             Incoming::Message(message) => message,
         };
@@ -121,29 +126,44 @@ enum Incoming {
     /// Framed, and not something this can read: not JSON, not UTF-8, or
     /// headers without a length. The next message is still readable.
     Malformed,
+    /// Framed with a length no message of this protocol has, and not yet read.
+    TooLarge(u64),
     /// The editor closed the stream, or it ended inside a message.
     Closed,
 }
+
+/// The largest body read into memory. The protocol's messages are a file's
+/// text and change at most, and a length past this is not one of them.
+const MAX_BODY: u64 = 64 << 20;
 
 /// Read one `Content-Length`-framed message.
 fn read_message(input: &mut impl BufRead) -> Incoming {
     let mut length = None;
     loop {
-        let mut line = String::new();
-        match input.read_line(&mut line) {
+        // Bytes, not a `String`: a header line that is not UTF-8 made
+        // `read_line` fail, which read as the editor closing the stream, and
+        // the session ended with no answer to anything. Headers are ASCII, so
+        // such a line is not `Content-Length` and is passed over like any
+        // other header this does not read.
+        let mut line = Vec::new();
+        match input.read_until(b'\n', &mut line) {
             Ok(0) | Err(_) => return Incoming::Closed,
             Ok(_) => {}
         }
+        let line = String::from_utf8_lossy(&line);
         let trimmed = line.trim_end();
         if trimmed.is_empty() {
             break;
         }
         if let Some(value) = trimmed.strip_prefix("Content-Length:") {
-            length = value.trim().parse::<usize>().ok();
+            length = value.trim().parse::<u64>().ok();
         }
     }
     let Some(length) = length else { return Incoming::Malformed };
-    let mut body = vec![0u8; length];
+    if length > MAX_BODY {
+        return Incoming::TooLarge(length);
+    }
+    let mut body = vec![0u8; length as usize];
     if input.read_exact(&mut body).is_err() {
         return Incoming::Closed;
     }
@@ -151,6 +171,19 @@ fn read_message(input: &mut impl BufRead) -> Incoming {
         Some(message) => Incoming::Message(message),
         None => Incoming::Malformed,
     }
+}
+
+/// The protocol's parse error, for a message that could not be read — whose
+/// id is in the part that could not be read.
+fn unreadable(why: &str) -> Json {
+    Json::object(vec![
+        ("jsonrpc", Json::str("2.0")),
+        ("id", Json::Null),
+        (
+            "error",
+            Json::object(vec![("code", Json::number(-32700)), ("message", Json::str(why))]),
+        ),
+    ])
 }
 
 fn write_message(output: &mut impl Write, message: &Json) {

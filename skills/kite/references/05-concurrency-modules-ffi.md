@@ -753,7 +753,8 @@ shortcut = "../shortcut"
 The program's manifest is looked for **upwards** from the entry file, so
 `src/main.kite` finds the `kite.toml` beside `src/`. A manifest that does not
 parse is `E0405` at its line, in `kitec run`/`check`/`build` as well as in
-`kitec pkg`.
+`kitec pkg` — and so is one that does not read at all: a single Latin-1 byte
+in a comment is reported at its line as not UTF-8, not taken for no manifest.
 
 ### Reaching a dependency
 
@@ -784,6 +785,13 @@ dependency any package declares is read from the program's
 package's unqualified `use helper` names the package's own `helper` and nothing
 else: without one it is `E0400`, never the application's.
 
+A package **only a dependency declares** does not take its name from the
+program. An application with its own `log.kite` may depend on a `web` package
+that depends on a `log` package: the application's `use log` is its own file
+and `web`'s `use log` is the package, in either order. A package the program
+*does* declare is one package everywhere — two manifests naming it from two
+places is `E0404`, as `kitec pkg` refuses it.
+
 ### `kitec pkg` and the lockfile
 
 ```
@@ -793,7 +801,10 @@ kitec pkg --offline         resolve only from what is already vendored
 ```
 
 The lockfile records a **SHA-256** over every `.kite` file in the dependency, by
-sorted name, each field length-prefixed:
+sorted name, each field length-prefixed. That includes `node_modules/`, whose
+name a `use` can write; only `.git` and `.kite/` are left out. A symbolic link a
+build would follow — a `.kite` file, or a directory a `use` can name — is
+refused:
 
 ```
 [[locked]]
@@ -817,7 +828,9 @@ note: run `kitec pkg --update` to accept the new bytes and rewrite the lockfile
 ```
 
 `--update` prints `kite.lock changed — a dependency is not what it was`, and
-fetches every git checkout again rather than trusting the one cached. Anything
+fetches every git checkout again rather than trusting the one cached — beside
+it, so a fetch that fails leaves the cached checkout, and `--offline`, as they
+were. Anything
 else that changed — a dependency added or removed, a new version because the
 manifest now asks for one, a new source — is a line of output (`added b 1.0.0`,
 `a 1.0.0 → 1.2.0`) and `kite.lock updated`, not an error.
