@@ -391,7 +391,11 @@ expression trees:
    rather than boxing because the concrete type *is* known at the call site;
    runtime polymorphism is what `dyn Trait` is for. No backend ever sees a type
    parameter. A generic function that instantiates itself at an ever larger
-   type stops at 4096 instantiations rather than running forever.
+   type is recognised by its growth — its own template 64 times on the chain
+   of copies that asked for each other, or on that chain at all once the type
+   arguments pass the size limit — and refused with `E0220` rather than run
+   forever. The limits themselves (256 levels, 65,536 parts, 65,536 copies)
+   bound what a program that finishes may ask for, and are reported as that.
 2. **Pruning** — drop every function nothing can reach from the entry, the
    program's own `pub` functions, a closure's lifted body or a vtable.
    Reachability is exact, because a call names its target by index. This is
