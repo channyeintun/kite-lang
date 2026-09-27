@@ -1691,6 +1691,46 @@ fn main() {
 }
 ",
     ),
+    // A float exactly halfway between two shortest decimals. ECMAScript picks
+    // the even one, and Rust's `{:e}` the upper, so the VM and the native
+    // runtime printed `…624.3` where Wasm printed `…624.2` — at run time, in
+    // a constant folded at compile time (which Wasm then disagreed with
+    // itself about), and in a derived hash, which hashes the text.
+    (
+        "float-ties-go-to-the-even-digit",
+        "\
+fn f(x: float) -> float { return x }
+
+let TIE = \"\\(1125899906842624.25)\"
+
+@derive(Hash)
+struct F {
+  x: float
+}
+
+fn main() {
+  let n = 237061009
+  io.print(n as float / 8192.0)
+  io.print(f(1125899906842624.25))
+  io.print(f(1125899906842625.25))
+  io.print(f(1125899906842624.75))
+  io.print(f(577411599005501.25))
+  io.print(-f(577411599005501.25))
+  io.print(TIE)
+  io.print(TIE == \"\\(f(1125899906842624.25))\")
+  io.print(F{ x: 1125899906842624.25 }.hash() == F{ x: f(1125899906842624.2) }.hash())
+  var odd = 0
+  for i in 237060000..237060400 {
+    let s = \"\\(i as float / 8192.0)\"
+    let last = s.slice(s.len() - 1, s.len())
+    if last == \"3\" || last == \"7\" {
+      odd = odd + 1
+    }
+  }
+  io.print(odd)
+}
+",
+    ),
 ];
 
 /// Programs pinning down the WebAssembly target against the other two. Each

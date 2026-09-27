@@ -447,7 +447,10 @@ one at run time, so `let LABEL = "max \(1e21)"` is `"max 1e+21"` everywhere:
 - Anything else is the shortest decimal that reads back as the same value,
   written plainly from `1e-7` up to `1e21` and in exponent form outside it:
   `0.30000000000000004`, `0.000001`, `1e-7`, `1.5e-7`, `1e+21`, `5e-324`,
-  `1.7976931348623157e+308`. Every one is a valid float literal.
+  `1.7976931348623157e+308`. Every one is a valid float literal. Of two
+  shortest decimals, the closer is written, and of two exactly as close, the
+  one whose last digit is even: `1125899906842624.25` is
+  `1125899906842624.2`.
 
 This is also the text of `io.print(x)` and `"\(x)"` for any `float`, on every
 target: ECMAScript's `Number#toString` with Kite's own spelling for the three
