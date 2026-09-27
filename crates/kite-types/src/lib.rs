@@ -3857,12 +3857,15 @@ impl<'a> Checker<'a> {
         // it. Seeding only ever fills a parameter that was unknown, so a call
         // that compiles without a context compiles the same way with one.
         let mut subst: Vec<Option<TyId>> = vec![None; generics.len()];
+        let mut hints = Vec::new();
         if !generics.is_empty() {
             if let Some(want) = expected {
-                self.seed_result(ret, want, self.sigs[id as usize].is_async, &generics, &mut subst, span);
+                let is_async = self.sigs[id as usize].is_async;
+                hints = self.seed_result(ret, want, is_async, &generics, &mut subst, span);
             }
         }
-        let hargs = self.check_args(&sig_params, &generics, &mut subst, args, Some(decl_span));
+        let hargs =
+            self.check_args(&sig_params, &generics, &mut subst, &hints, args, Some(decl_span));
 
         let targs = self.finish_subst(&generics, &subst, span);
         self.check_bounds(&generics, &targs, span);
@@ -3895,6 +3898,7 @@ impl<'a> Checker<'a> {
         sig_params: &[TyId],
         generics: &[GenericDef],
         subst: &mut Vec<Option<TyId>>,
+        hints: &[Option<TyId>],
         args: &[ast::Expr],
         decl_span: Option<Span>,
     ) -> Vec<hir::Expr> {
@@ -3910,7 +3914,18 @@ impl<'a> Checker<'a> {
             // An argument is checked against the parameter type only once that
             // type is fully known; until then it is checked on its own and used
             // to fill parameters in.
-            let want = declared.and_then(|d| self.apply_subst_opt(d, subst));
+            // A hint stands in for a parameter nothing has settled yet, so an
+            // argument is typed by it without the parameter being fixed.
+            let want = if hints.iter().any(Option::is_some) {
+                let hinted: Vec<Option<TyId>> = subst
+                    .iter()
+                    .zip(hints.iter().chain(std::iter::repeat(&None)))
+                    .map(|(s, h)| s.or(*h))
+                    .collect();
+                declared.and_then(|d| self.apply_subst_opt(d, &hinted))
+            } else {
+                declared.and_then(|d| self.apply_subst_opt(d, subst))
+            };
             let e = self.expr(a, want);
             let e = self.coerce(e, want);
             let e = match declared {
@@ -3937,6 +3952,11 @@ impl<'a> Checker<'a> {
                 self.require_share_captures(&e);
             }
             hargs.push(e);
+        }
+        for (slot, hint) in subst.iter_mut().zip(hints) {
+            if slot.is_none() {
+                *slot = *hint;
+            }
         }
         hargs
     }
@@ -4911,7 +4931,7 @@ impl<'a> Checker<'a> {
             self.arity_error(&name.name, args.len(), params.len(), span, None);
         }
         let mut lowered = vec![receiver];
-        lowered.extend(self.check_args(&params, &generics, &mut subst, args, None));
+        lowered.extend(self.check_args(&params, &generics, &mut subst, &[], args, None));
         let own = generics[before..].to_vec();
         let targs = self.finish_subst(&own, &subst[before..], span);
         self.check_bounds(&own, &targs, span);
@@ -5299,7 +5319,8 @@ impl<'a> Checker<'a> {
         let raw_ret = self.sigs[fn_index as usize].ret;
         let decl_span = self.sigs[fn_index as usize].name_span;
         let is_async = self.sigs[fn_index as usize].is_async;
-        self.seed_from_expected(raw_ret, expected, is_async, &generics, &mut subst, span);
+        let hints =
+            self.seed_from_expected(raw_ret, expected, is_async, &generics, &mut subst, span);
 
         if args.len() != raw_params.len() {
             self.arity_error(&name.name, args.len(), raw_params.len(), span, Some(decl_span));
@@ -5309,7 +5330,14 @@ impl<'a> Checker<'a> {
         // is stored: local 0.
         let receiver_ty = receiver.ty;
         let mut hargs = vec![receiver];
-        hargs.extend(self.check_args(&raw_params, &generics, &mut subst, args, Some(decl_span)));
+        hargs.extend(self.check_args(
+            &raw_params,
+            &generics,
+            &mut subst,
+            &hints,
+            args,
+            Some(decl_span),
+        ));
         let targs = self.finish_subst(&generics, &subst, span);
         // A bound on the block holds for the receiver as for anything else.
         // One the declaration itself carries was checked where the value was
@@ -5490,16 +5518,91 @@ impl<'a> Checker<'a> {
         generics: &[GenericDef],
         subst: &mut Vec<Option<TyId>>,
         span: Span,
-    ) {
+    ) -> Vec<Option<TyId>> {
         let want = if is_async {
             match self.types.task_payload(want) {
                 Some(value) => value,
-                None => return,
+                None => return Vec::new(),
             }
         } else {
             want
         };
+        let before = subst.clone();
         self.unify(ret, want, generics, subst, span);
+        self.soften_seeds(ret, want, &before, subst)
+    }
+
+    /// Take out of `subst` what the expected type settled only up to an
+    /// optional, to be handed back as hints.
+    ///
+    /// An optional of an optional is the optional (§3.3), so a declared
+    /// `Option<T>` against an expected `Option<int>` makes `T` an `int` or
+    /// an `Option<int>` alike, and only an argument can say which. Seeding
+    /// `T` as `int` refused the argument that said otherwise:
+    /// `let r: Option<Option<int>> = first(fs)`, with `fs: [Option<int>]`,
+    /// was "conflicting types for `T`". A hint still types an argument that
+    /// has nothing else to go on, such as an empty `[]`; a parameter no
+    /// argument settles takes it at the end.
+    fn soften_seeds(
+        &mut self,
+        ret: TyId,
+        want: TyId,
+        before: &[Option<TyId>],
+        subst: &mut [Option<TyId>],
+    ) -> Vec<Option<TyId>> {
+        let mut slots = Vec::new();
+        self.optional_ambiguity(ret, want, &mut slots);
+        let mut hints = vec![None; subst.len()];
+        for slot in slots {
+            if slot < subst.len() && before[slot].is_none() {
+                hints[slot] = subst[slot].take();
+            }
+        }
+        hints
+    }
+
+    /// The parameters a declared type holds directly inside an optional,
+    /// where the type it is matched against has an optional too.
+    fn optional_ambiguity(&self, declared: TyId, actual: TyId, out: &mut Vec<usize>) {
+        match (self.types.kind(declared).clone(), self.types.kind(actual).clone()) {
+            (TyKind::Optional(d), TyKind::Optional(a)) => match *self.types.kind(d) {
+                TyKind::Param { index, .. } => out.push(index as usize),
+                _ => self.optional_ambiguity(d, a, out),
+            },
+            (TyKind::Slice(d), TyKind::Slice(a)) => self.optional_ambiguity(d, a, out),
+            (TyKind::Map(dk, dv), TyKind::Map(ak, av)) => {
+                self.optional_ambiguity(dk, ak, out);
+                self.optional_ambiguity(dv, av, out);
+            }
+            (TyKind::Tuple(d), TyKind::Tuple(a)) if d.len() == a.len() => {
+                for (x, y) in d.iter().zip(&a) {
+                    self.optional_ambiguity(*x, *y, out);
+                }
+            }
+            (TyKind::Struct(d), TyKind::Struct(a)) => {
+                if let (Some((dt, da)), Some((at, aa))) =
+                    (self.types.struct_origin_of(d), self.types.struct_origin_of(a))
+                {
+                    if dt == at {
+                        for (x, y) in da.iter().zip(&aa) {
+                            self.optional_ambiguity(*x, *y, out);
+                        }
+                    }
+                }
+            }
+            (TyKind::Enum(d), TyKind::Enum(a)) => {
+                if let (Some((dt, da)), Some((at, aa))) =
+                    (self.types.enum_origin_of(d), self.types.enum_origin_of(a))
+                {
+                    if dt == at {
+                        for (x, y) in da.iter().zip(&aa) {
+                            self.optional_ambiguity(*x, *y, out);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn seed_from_expected(
@@ -5510,24 +5613,26 @@ impl<'a> Checker<'a> {
         generics: &[GenericDef],
         subst: &mut Vec<Option<TyId>>,
         span: Span,
-    ) {
-        let Some(want) = expected else { return };
+    ) -> Vec<Option<TyId>> {
+        let Some(want) = expected else { return Vec::new() };
         if subst.iter().all(|s| s.is_some()) {
-            return;
+            return Vec::new();
         }
         // An `async` method's call is the task of its result, as a function's
         // is; see `seed_result`.
         let want = if is_async {
             match self.types.task_payload(want) {
                 Some(value) => value,
-                None => return,
+                None => return Vec::new(),
             }
         } else {
             want
         };
         let mut scratch = DiagBag::new();
         std::mem::swap(self.diags, &mut scratch);
+        let before = subst.clone();
         self.unify(ret, want, generics, subst, span);
+        let hints = self.soften_seeds(ret, want, &before, subst);
         // A `T` is acceptable where an `Option<T>` is wanted, so an optional
         // context says what the value inside it is.
         if let TyKind::Optional(inner) = *self.types.kind(want) {
@@ -5536,6 +5641,7 @@ impl<'a> Checker<'a> {
             }
         }
         std::mem::swap(self.diags, &mut scratch);
+        hints
     }
 
     /// A method or associated function reached from outside its module must
@@ -5944,14 +6050,16 @@ impl<'a> Checker<'a> {
         let raw_ret = self.sigs[fn_index as usize].ret;
         let decl_span = self.sigs[fn_index as usize].name_span;
         let is_async = self.sigs[fn_index as usize].is_async;
-        self.seed_from_expected(raw_ret, expected, is_async, &generics, &mut subst, span);
+        let hints =
+            self.seed_from_expected(raw_ret, expected, is_async, &generics, &mut subst, span);
 
         if args.len() != raw_params.len() {
             let full = format!("{}.{}", type_name, method_name);
             self.arity_error(&full, args.len(), raw_params.len(), span, Some(decl_span));
         }
 
-        let hargs = self.check_args(&raw_params, &generics, &mut subst, args, Some(decl_span));
+        let hargs =
+            self.check_args(&raw_params, &generics, &mut subst, &hints, args, Some(decl_span));
         if subst.iter().take(block).any(|s| s.is_none()) {
             let names: Vec<&str> = generics.iter().take(block).map(|g| g.name.as_str()).collect();
             self.diags.push(

@@ -2888,6 +2888,60 @@ fn main() {
 }
 "#,
     ),
+    // An optional of an optional is the optional, so an expected `Option<int>`
+    // makes a declared `Option<T>`'s `T` an `int` or an `Option<int>`, and the
+    // arguments say which. The expected type used to fix `T` as `int` first, and
+    // every one of these was E0209 "conflicting types for `T`".
+    (
+        "an-expected-optional-leaves-t-to-the-arguments",
+        r#"struct Box<T> {
+    v: T
+}
+
+impl<T> Box<T> {
+    fn peek(self) -> Option<T> {
+        return self.v
+    }
+
+    fn of(v: T) -> Option<Box<T>> {
+        return Box{ v: v }
+    }
+}
+
+fn first<T>(xs: [T]) -> Option<T> {
+    return xs.get(0)
+}
+
+fn wrap<T>(x: T) -> Option<T> {
+    return x
+}
+
+fn head(fs: [Option<int>]) -> Option<int> {
+    return first(fs)
+}
+
+fn main() {
+    let a: Option<int> = 5
+    let fs: [Option<int>] = [a, nil]
+    let r: Option<Option<int>> = first(fs)
+    io.print(r == nil)
+    let s: Option<int> = first(fs)
+    io.print(s == 5)
+    let w: Option<int> = wrap(a)
+    io.print(w == 5)
+    let n: Option<int> = wrap(7)
+    io.print(n == 7)
+    let none: Option<int> = first([])
+    io.print(none == nil)
+    io.print(head([nil, a]) == nil)
+    let b = Box{ v: a }
+    let p: Option<int> = b.peek()
+    io.print(p == 5)
+    let q: Option<Box<Option<int>>> = Box.of(a)
+    io.print(q == nil)
+}
+"#,
+    ),
 ];
 
 /// Programs above that need a rule of the checker's which may not have landed:
