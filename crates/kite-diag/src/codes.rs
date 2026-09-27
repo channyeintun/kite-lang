@@ -512,6 +512,9 @@ codes! {
          thousands of elements — used to be emitted anyway, with register \
          numbers silently cut short, so that unrelated values shared a \
          register.\n\n\
-         Split the function, or build the large literal in a loop. The Wasm \
-         and native targets have limits of their own, but not this one.";
+         Split the function, or build the large literal in a loop.\n\n\
+         WebAssembly has a limit of its own: an engine accepts at most 50,000 \
+         locals in one function, parameters included, and every local and \
+         temporary is one — though a literal's elements are not, so a long \
+         literal is no trouble there. The native target has neither limit.";
 }

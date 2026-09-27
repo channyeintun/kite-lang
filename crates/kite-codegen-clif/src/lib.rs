@@ -799,6 +799,11 @@ struct FnLower<'a, 'b, M: Module> {
     fn_index: usize,
     b: FunctionBuilder<'a>,
     vars: Vec<Variable>,
+    /// By local index: whether the local is carried as the value that
+    /// defined it rather than through its variable. See [`direct_locals`].
+    direct: Vec<bool>,
+    /// The value each direct local was given, once it has been.
+    values: Vec<Option<Value>>,
     /// One `i8` owned flag per slice local the function writes into, by
     /// local index: whether nothing but that local can reach its slice, so a
     /// write may go straight in. See the `slices` module.
@@ -824,12 +829,14 @@ fn define_fn<M: Module>(
 
     // One variable per MIR local. A reference-typed local is declared as
     // needing a stack map, which is the whole precise-roots story: Cranelift
-    // spills it at each safepoint, records where, and reloads after.
+    // spills it at each safepoint, records where, and reloads after. A direct
+    // local's value is declared so itself, when it is made.
+    let direct = direct_locals(f);
     let mut vars = Vec::with_capacity(f.locals.len());
-    for l in &f.locals {
+    for (l, is_direct) in f.locals.iter().zip(&direct) {
         let ty = cl_type(l.ty, cx.types);
         let var = b.declare_var(ty);
-        if kind_of(l.ty, cx.types) == kite_rt::kind::REF {
+        if !is_direct && kind_of(l.ty, cx.types) == kite_rt::kind::REF {
             b.declare_var_needs_stack_map(var);
         }
         vars.push(var);
@@ -846,8 +853,12 @@ fn define_fn<M: Module>(
     }
     // Every other local starts as its type's all-zero value — `nil`, 0, 0.0 —
     // so a use on a path the checker knows is impossible still reads a value
-    // of the right type rather than tripping the SSA builder.
+    // of the right type rather than tripping the SSA builder. A direct local
+    // has no such path: it is read only after it is made.
     for (i, l) in f.locals.iter().enumerate().skip(f.param_count) {
+        if direct[i] {
+            continue;
+        }
         let ty = cl_type(l.ty, cx.types);
         let zero = if ty == types::F64 {
             b.ins().f64const(0.0)
@@ -873,6 +884,8 @@ fn define_fn<M: Module>(
         fn_index,
         b,
         vars,
+        values: vec![None; direct.len()],
+        direct,
         owned,
         blocks,
         rt_refs: HashMap::new(),
@@ -909,6 +922,74 @@ fn define_fn<M: Module>(
     let maps = collect_maps(&ctx).map_err(|e| format!("compiling `{}`: {}", f.name, e))?;
     cx.module.clear_context(&mut ctx);
     Ok(maps)
+}
+
+/// The locals a function may carry as the SSA value that defined them, with
+/// no Cranelift variable in between: each is assigned once, in one block, and
+/// read only later in that same block.
+///
+/// Cranelift's SSA builder keeps, for every variable, a table indexed by
+/// block number, grown to the highest block the variable is defined or read
+/// in. A debug build splits a block at every checked `+`, so a function of
+/// twenty thousand `let v = i + 1` had forty thousand blocks and twenty
+/// thousand variables defined across them: 1.5 GB to compile, and 52,000 of
+/// them ran out of memory. Almost every local in such a function is a value
+/// made and used on the spot, which needs no variable at all; everything the
+/// checks split off from a block is dominated by what came before in it, so
+/// the value that defined the local is valid wherever it is read. Anything
+/// else — a parameter, a local assigned twice or written in place, one read
+/// in another block, or before it is assigned on some path — keeps its
+/// variable.
+fn direct_locals(f: &mir::Function) -> Vec<bool> {
+    let mut direct = vec![true; f.locals.len()];
+    let mut defined: Vec<Option<(usize, usize)>> = vec![None; f.locals.len()];
+    for d in direct.iter_mut().take(f.param_count) {
+        *d = false;
+    }
+    for (bi, block) in f.blocks.iter().enumerate() {
+        for (si, stmt) in block.stmts.iter().enumerate() {
+            let written = match stmt {
+                mir::Inst::Assign { dst, .. } => {
+                    if defined[dst.index()].is_some() {
+                        direct[dst.index()] = false;
+                    }
+                    defined[dst.index()] = Some((bi, si));
+                    continue;
+                }
+                mir::Inst::SlicePush { local, .. }
+                | mir::Inst::MapSet { local, .. }
+                | mir::Inst::MapRemove { local, .. } => *local,
+                mir::Inst::SetIndex { base: mir::Operand::Local(l), .. } => *l,
+                mir::Inst::SetIndex { .. } | mir::Inst::SetField { .. } => continue,
+            };
+            direct[written.index()] = false;
+        }
+    }
+    for (i, d) in defined.iter().enumerate() {
+        if d.is_none() {
+            direct[i] = false;
+        }
+    }
+    // A read counts at its statement, and a terminator's after all of them.
+    let mut read = |o: &mir::Operand, at: (usize, usize)| {
+        if let mir::Operand::Local(l) = o {
+            match defined[l.index()] {
+                Some((bi, si)) if bi == at.0 && si < at.1 => {}
+                _ => direct[l.index()] = false,
+            }
+        }
+    };
+    for (bi, block) in f.blocks.iter().enumerate() {
+        for (si, stmt) in block.stmts.iter().enumerate() {
+            for o in stmt.operands() {
+                read(o, (bi, si));
+            }
+        }
+        if let Some(o) = block.term.operand() {
+            read(o, (bi, usize::MAX));
+        }
+    }
+    direct
 }
 
 impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
@@ -981,6 +1062,12 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
 
     fn operand(&mut self, o: &mir::Operand) -> Value {
         match o {
+            mir::Operand::Local(l) if self.direct[l.index()] => match self.values[l.index()] {
+                Some(v) => v,
+                // Read before it is made only in a block nothing reaches,
+                // which is never lowered; a zero is what a variable held.
+                None => self.zero(self.local_ty(*l)),
+            },
             mir::Operand::Local(l) => self.b.use_var(self.vars[l.index()]),
             mir::Operand::Int(v) => self.b.ins().iconst(I64, *v),
             mir::Operand::Float(v) => self.b.ins().f64const(*v),
@@ -1033,6 +1120,20 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
         }
     }
 
+    /// Give a local its value: a direct local keeps it, and any other defines
+    /// its variable.
+    fn set_local(&mut self, dst: mir::Local, v: Value) {
+        let i = dst.index();
+        if self.direct[i] {
+            if self.kind(self.f.locals[i].ty) == kite_rt::kind::REF {
+                self.b.declare_value_needs_stack_map(v);
+            }
+            self.values[i] = Some(v);
+        } else {
+            self.b.def_var(self.vars[i], v);
+        }
+    }
+
     fn def(&mut self, dst: mir::Local, v: Value) {
         // Whatever the shape of the producing expression, the local's own
         // type decides its representation.
@@ -1051,17 +1152,22 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
         } else {
             v
         };
-        self.b.def_var(self.vars[dst.index()], v);
+        self.set_local(dst, v);
     }
 
     fn def_zero(&mut self, dst: mir::Local) {
-        let ty = cl_type(self.local_ty(dst), self.cx.types);
-        let v = if ty == F64 {
+        let v = self.zero(self.local_ty(dst));
+        self.set_local(dst, v);
+    }
+
+    /// The all-zero value of a type: `nil`, 0, 0.0.
+    fn zero(&mut self, ty: TyId) -> Value {
+        let ty = cl_type(ty, self.cx.types);
+        if ty == F64 {
             self.b.ins().f64const(0.0)
         } else {
             self.b.ins().iconst(ty, 0)
-        };
-        self.b.def_var(self.vars[dst.index()], v);
+        }
     }
 
     /// Write operands into the staging window, for a variadic construction.

@@ -650,7 +650,12 @@ windows is one entry.
 Roots come from Cranelift's stack maps. Every reference-typed local is declared
 as needing one, so at each safepoint — a call — the live references sit in
 stack slots the maps record, and are reloaded afterwards, which is what lets
-the nursery move them. At collection time the runtime walks the frame-pointer
+the nursery move them. A local assigned once and read only later in the same
+block is carried as the value that defined it, declared as needing a map
+itself, rather than through a Cranelift variable: the SSA builder keeps a table
+per variable as long as the function has blocks, and a debug build splits a
+block at every checked `+`, so a variable per local made a function of tens of
+thousands of `let`s cost gigabytes to compile. At collection time the runtime walks the frame-pointer
 chain and visits the recorded slots of every frame whose return address is a
 registered safepoint. Because Kite has no `unsafe`, no pointer arithmetic, and
 no FFI that hands out raw addresses, every reference is known to the collector —

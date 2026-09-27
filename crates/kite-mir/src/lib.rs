@@ -306,7 +306,80 @@ pub enum Terminator {
     Unreachable,
 }
 
+impl Inst {
+    /// Every operand the instruction reads, the written local of an in-place
+    /// write (`SlicePush`, `MapSet`, `MapRemove`) not among them: that is a
+    /// write, whatever it reads on the way.
+    pub fn operands(&self) -> Vec<&Operand> {
+        match self {
+            Inst::Assign { value, .. } => value.operands(),
+            Inst::SetField { base, value, .. } => vec![base, value],
+            Inst::SetIndex { base, index, value } => vec![base, index, value],
+            Inst::SlicePush { value, .. } => vec![value],
+            Inst::MapSet { key, value, .. } => vec![key, value],
+            Inst::MapRemove { key, .. } => vec![key],
+        }
+    }
+}
+
+impl Rvalue {
+    /// Every operand the rvalue reads. Exhaustive, with no catch-all, so a new
+    /// form fails to compile here until someone says what it reads.
+    pub fn operands(&self) -> Vec<&Operand> {
+        use Rvalue as R;
+        match self {
+            R::Use(o)
+            | R::Unary { operand: o, .. }
+            | R::ToStr { operand: o, .. }
+            | R::Cast { operand: o, .. }
+            | R::FieldGet { base: o, .. }
+            | R::TagOf { base: o }
+            | R::VariantGet { base: o, .. }
+            | R::MapLen { base: o }
+            | R::MapKeys { base: o }
+            | R::MapValues { base: o }
+            | R::IsNil { value: o }
+            | R::Wrap { value: o }
+            | R::Unwrap { value: o }
+            | R::PairValue { base: o }
+            | R::PairError { base: o }
+            | R::ErrorMessage { base: o }
+            | R::ErrorCause { base: o }
+            | R::ErrorTag { base: o }
+            | R::ErrorAs { base: o, .. }
+            | R::SliceLen { base: o }
+            | R::Await { task: o } => vec![o],
+            R::Binary { lhs, rhs, .. } => vec![lhs, rhs],
+            R::MapGet { base, key } => vec![base, key],
+            R::IndexGet { base, index } | R::SliceGet { base, index } => vec![base, index],
+            R::SliceRange { base, start, end } => vec![base, start, end],
+            R::PairNew { value, error } => vec![value, error],
+            R::ErrorNew { message, value, tag, cause } => vec![message, value, tag, cause],
+            R::Call { args, .. }
+            | R::CallVirtual { args, .. }
+            | R::StrOp { args, .. }
+            | R::CallBuiltin { args, .. }
+            | R::CallExtern { args, .. } => args.iter().collect(),
+            R::ClosureNew { captures, .. } => captures.iter().collect(),
+            R::CallClosure { callee, args } => std::iter::once(callee).chain(args).collect(),
+            R::StructNew { fields, .. } | R::EnumNew { fields, .. } => fields.iter().collect(),
+            R::TupleNew { elems } | R::SliceNew { elems } => elems.iter().collect(),
+            R::MapNew { entries } => entries.iter().collect(),
+            R::Yield => Vec::new(),
+        }
+    }
+}
+
 impl Terminator {
+    /// The operand the terminator reads, if it reads one.
+    pub fn operand(&self) -> Option<&Operand> {
+        match self {
+            Terminator::Branch { cond, .. } => Some(cond),
+            Terminator::Return(value) => value.as_ref(),
+            Terminator::Goto(_) | Terminator::Unreachable => None,
+        }
+    }
+
     pub fn successors(&self) -> Vec<BlockId> {
         match self {
             Terminator::Goto(b) => vec![*b],

@@ -864,6 +864,31 @@ fn run_passes(
             ret: None,
             generic: true,
         }));
+        // A function wider than an engine accepts is the program's size, not
+        // the compiler's mistake, and says so before the validator would.
+        if !module.too_wide.is_empty() {
+            for (function, span, locals) in &module.too_wide {
+                diags.push(
+                    Diagnostic::error(
+                        kite_diag::codes::E0902,
+                        format!("`{}` is too large for WebAssembly", function),
+                    )
+                    .with_primary(
+                        *span,
+                        format!(
+                            "{} locals, more than the {} an engine accepts in one function",
+                            locals,
+                            kite_codegen_wasm::MAX_LOCALS
+                        ),
+                    )
+                    .with_note(
+                        "every local and temporary is a Wasm local: split the function; \
+                         `--native` does not have this limit",
+                    ),
+                );
+            }
+            return (String::new(), None, None, None, index);
+        }
         // The last thing that can catch a bad lowering. Everything above this
         // line checks the program; this checks the compiler, and it is the only
         // check whose absence is invisible until a browser refuses the module.
@@ -932,9 +957,13 @@ fn run_passes(
                     format!("`{}` is too large for the bytecode VM", limit.function),
                 )
                 .with_primary(limit.span, limit.what)
+                // Each target's own limit, since the note once said the other
+                // two had none: WebAssembly counts locals, not the literal's
+                // staging, and refuses past fifty thousand of them.
                 .with_note(
                     "split the function, or build a large literal in a loop; \
-                     `--emit wasm` and `--native` do not have this limit",
+                     `--native` does not have this limit, and `--emit wasm` accepts a \
+                     literal of any length but at most 50000 locals in one function",
                 ),
             );
         }
@@ -1361,6 +1390,38 @@ mod tests {
         let text = c.render_diagnostics();
         assert!(text.contains("E0204"), "{}", text);
         assert!(text.contains("run without `--native`"), "{}", text);
+    }
+
+    /// A function past a target's size is a limit of that target, E0902, and
+    /// says what the other targets accept. Wasm reported one of 50,000
+    /// locals as an invalid module, E0900 — the compiler's own bug — and the
+    /// VM's note claimed Wasm had no limit at all.
+    #[test]
+    fn a_function_past_a_targets_limit_says_so() {
+        let mut src = String::from("fn main() {\n  let first = 111\n");
+        for i in 0..66_000 {
+            src.push_str(&format!("  let v{} = {} + 1\n", i, i));
+        }
+        src.push_str("  io.print(first)\n  io.print(v65999)\n}\n");
+        let codes = |c: &Compilation| -> Vec<&str> {
+            c.diags
+                .iter()
+                .filter(|d| d.severity == kite_diag::Severity::Error)
+                .map(|d| d.code.map(|x| x.0).unwrap_or(""))
+                .collect()
+        };
+
+        let wasm = compile("t.kite", &src, Emit::Wasm);
+        assert_eq!(codes(&wasm), ["E0902"], "{}", wasm.render_diagnostics());
+        let text = wasm.render_diagnostics();
+        assert!(text.contains("too large for WebAssembly"), "{}", text);
+        assert!(text.contains("more than the 50000 an engine accepts"), "{}", text);
+
+        let vm = compile("t.kite", &src, Emit::Kbc);
+        assert_eq!(codes(&vm), ["E0902"], "{}", vm.render_diagnostics());
+        let text = vm.render_diagnostics();
+        assert!(text.contains("at most 50000 locals"), "{}", text);
+        assert!(!text.contains("`--emit wasm` and `--native` do not have this limit"), "{}", text);
     }
 
     #[test]
