@@ -1,10 +1,11 @@
 // std/task — the concurrency library.
 //
 // Kite has one concurrency concept: some operations take time, so mark them
-// `async` and `await` them. Calling an `async fn` *starts* it and yields a
-// `Task<T>`; awaiting is how the value comes out. Two calls and then two
-// awaits is how two things happen at once, and there is no second keyword for
-// spawning.
+// `async` and `await` them. Calling an `async fn` *queues* it and yields a
+// `Task<T>`: nothing in its body runs until something awaits a task or the
+// scheduler gets a turn, and awaiting is how the value comes out. Two calls and
+// then two awaits is how two things happen at once, and there is no second
+// keyword for spawning.
 //
 // Everything here is written in Kite. The compiler supplies seven primitives —
 // `task.yield`, `task.park`, `task.wake_at`, `task.wait_host`,
@@ -13,8 +14,9 @@
 
 /// Both results, once both tasks have produced one.
 ///
-/// The tasks were already running before this was called: awaiting one and
-/// then the other waits for the later of the two, not for the sum.
+/// Both tasks were queued before this was called, and the first `await` gives
+/// the scheduler its turn, so they run together: awaiting one and then the
+/// other waits for the later of the two, not for the sum.
 pub async fn both<A, B>(a: Task<A>, b: Task<B>) -> (A, B) {
     let first = await a
     let second = await b

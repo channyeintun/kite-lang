@@ -7,8 +7,9 @@
 //!
 //! WasmGC is why this is winnable. A linear-memory module ships its own
 //! allocator and often a chunk of runtime; a WasmGC module ships neither,
-//! because the collector belongs to the browser. Dead-code elimination and
-//! identical-code-folding do the rest.
+//! because the collector belongs to the browser. Dead-code elimination does
+//! most of the rest. (Identical-code-folding would do more, and is not built;
+//! see docs/03, "Not built".)
 //!
 //! It only *stays* winnable if it is measured, which is what this file is. The
 //! budgets below are generous against today's numbers on purpose: a gate that
