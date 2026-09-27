@@ -202,7 +202,7 @@ aliasing, no lifetimes.
 |---|---|
 | R1 | after `let (v, e) = f()`, `e` is **Unchecked** and `v` is **Tainted** |
 | R2 | reading a Tainted binding is `E0301` |
-| R3 | an Unchecked binding going out of scope is `E0302` — at the end of its block, and on the path of every `return`, `check`, `break` or `continue` that leaves it behind |
+| R3 | an Unchecked binding going out of scope is `E0302` — at the end of its block, on the path of every `return`, `check`, `break` or `continue` that leaves it behind, and at a write over it (`e = nil`, `e = other`, `e = g()`) |
 | R4 | on a path where `e == nil` is proved, `e` becomes Checked and `v` Clean |
 | R5 | on a path where `e != nil`, `e` becomes Checked and `v` stays Tainted **permanently** |
 | R6 | a bare-statement call whose type is `error` or `(T, error)` is `E0302` |
@@ -385,6 +385,24 @@ no methods (`E0205`), so destructure where you bind.
 The same holds however the failure got into a single binding — `var e = f()`,
 `let e = await f()`, `let e = if c { f() } else { g() }`: the binding has to be
 looked at. Only `nil` and a copy of another binding start out Checked.
+
+Writing over a binding that still holds an unchecked failure drops that
+failure, so it is `E0302` at the write, whatever is written:
+
+```kite fails
+fn f() -> error {
+    return errors.new("boom")
+}
+
+fn main() {
+    var e = f()
+    e = nil //~ E0302
+    io.print("dropped")
+}
+```
+
+Test it first, or pass it on with `e = errors.wrap(e, "…")`, which reads the
+old value and so carries its obligation into the new one.
 
 ## `check`
 

@@ -338,6 +338,7 @@ e out of scope while Unchecked  : E0302 — at the end of its block, and at
                                   a return, check, break or continue
                                   that leaves it behind
 e = call  (assigned later)      : e ← Unchecked
+e = …  while e is Unchecked     : E0302 at the write — it drops the old one
 test e (`e == nil`, `e != nil`) : e ← Clean
 path on which e is proved nil   : v ← Clean
 check e                         : v ← Clean after it — the other path returned

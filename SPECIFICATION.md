@@ -973,7 +973,8 @@ The rules:
 > A `return`, `check`, `break` or `continue` is a way out of scope for every
 > binding it leaves behind, on its own path: an error bound above
 > `if n > 0 { return 1 }` has to be checked before that `return` as well as
-> after it.
+> after it. So is a write over it: `var e = f()` then `e = nil`, `e = other` or
+> `e = g()` drops `f`'s failure, and is `E0302` at the write.
 >
 > **R4.** On any path where the compiler proves `e == nil`, `e` becomes Checked
 > and `v` becomes Clean.

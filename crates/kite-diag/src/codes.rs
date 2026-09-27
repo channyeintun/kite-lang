@@ -354,9 +354,11 @@ codes! {
          the branch where the error is nil, the value becomes readable.";
 
     E0302 = "E0302", "error is never checked",
-        "An `error` binding went out of scope without being inspected. Silently \
-         dropping errors is the single most common source of production \
-         failures in languages that permit it.\n\n\
+        "An `error` binding went out of scope without being inspected, or was \
+         written over while it still held a failure nobody had looked at: \
+         `var e = f()` then `e = nil` drops `f`'s failure as surely as leaving \
+         the block does. Silently dropping errors is the single most common \
+         source of production failures in languages that permit it.\n\n\
          To propagate, write `check`. To handle it where it happened, test \
          `err != nil`.";
 

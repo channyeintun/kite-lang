@@ -1686,7 +1686,20 @@ impl<'a> Checker<'a> {
         // as binding one is (R7): `var e: error = nil` then `e = f()`, or a
         // `let e: error` assigned in a branch, dropped `f`'s failure unseen.
         // `nil` and a copy of another binding stay checked, as in a `let`.
+        //
+        // That is the state of the value written, and says nothing about the
+        // one it replaces. A failure nobody has looked at is dropped by being
+        // written over exactly as by going out of scope (R3): `var e = f()`
+        // then `e = nil` lost `f`'s failure unseen. The right-hand side was
+        // checked first, so `e = errors.wrap(e, "…")` has read the old value
+        // and is not reported.
         if !compound && self.may_hold_failure(local_ty) {
+            if self.taint[slot] == Taint::Unchecked
+                && !self.locals[slot].synthetic
+                && self.reported_unchecked.insert(local_id)
+            {
+                self.overwritten_unchecked(&name, decl_span, a.span, local_ty);
+            }
             self.taint[slot] =
                 if produces_failure(&value.kind) { Taint::Unchecked } else { Taint::Clean };
         }
@@ -6907,6 +6920,35 @@ impl<'a> Checker<'a> {
             };
             self.diags.push(d);
         }
+    }
+
+    /// An error binding written over while it still held a failure nobody
+    /// had looked at: the write is where that failure is dropped (R3).
+    fn overwritten_unchecked(&mut self, name: &str, decl: Span, at: Span, ty: TyId) {
+        let pair = self.types.fallible_value(ty).is_some();
+        let d = Diagnostic::error(
+            codes::E0302,
+            format!("`{}` is overwritten before it is checked", name),
+        )
+        .with_primary(at, "the failure it may hold is dropped here, unseen")
+        .with_secondary(decl, "declared here")
+        .with_note(
+            "silently dropping errors is the single most common source of \
+             production failures in languages that permit it",
+        );
+        let d = if pair {
+            d.with_note(
+                "take the result apart before writing over it — `let (value, err) = …` — \
+                 and check `err`",
+            )
+        } else {
+            d.with_note(format!(
+                "test `{} != nil` or `check {}` before the write; to pass it on instead, \
+                 write `{} = errors.wrap({}, \"…\")`",
+                name, name, name, name
+            ))
+        };
+        self.diags.push(d);
     }
 
     fn synthetic_local(&mut self, name: &str, ty: TyId, span: Span) -> u32 {
