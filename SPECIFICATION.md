@@ -1855,7 +1855,8 @@ lockfile is **checked, not just written**: a dependency whose contents changed
 under the same version and source — a moved tag, a re-pushed repository —
 makes `kitec pkg` fail rather than quietly recording the new bytes. `--update`
 accepts a change, which is a decision someone makes rather than something a
-build does on its way past, and fetches every checkout again to make it.
+build does on its way past, and fetches every checkout again to make it —
+beside the one it replaces, so a fetch that fails leaves that one in place.
 Anything else that changed — a dependency added or removed, a new version
 because the manifest now asks for one — is reported rather than refused, and
 resolution tries the versions the lockfile records before any newer one.
@@ -1863,6 +1864,12 @@ resolution tries the versions the lockfile records before any newer one.
 The digest is cryptographic because the party it is checked against is the one
 who chooses the bytes. It was FNV-1a, which is invertible, so a dependency's
 author could have made any change land on the recorded hash.
+
+It covers every `.kite` file in the package a `use` could reach, `node_modules/`
+included — a directory whose name is an identifier is one a `use` can name.
+`.git` and `.kite/` are left out, and no `use` can name either. A symbolic link
+a build would follow — a `.kite` file, or a directory a `use` can name — is
+refused rather than hashed, since what it leads to is not the package's.
 
 `kitec pkg` is where that check happens, and it is the only place: `kitec build`,
 `run` and `test` compile whatever is in `.kite/vendor` without consulting

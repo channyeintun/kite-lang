@@ -793,7 +793,10 @@ kitec pkg --offline         resolve only from what is already vendored
 ```
 
 The lockfile records a **SHA-256** over every `.kite` file in the dependency, by
-sorted name, each field length-prefixed:
+sorted name, each field length-prefixed. That includes `node_modules/`, whose
+name a `use` can write; only `.git` and `.kite/` are left out. A symbolic link a
+build would follow — a `.kite` file, or a directory a `use` can name — is
+refused:
 
 ```
 [[locked]]
@@ -817,7 +820,9 @@ note: run `kitec pkg --update` to accept the new bytes and rewrite the lockfile
 ```
 
 `--update` prints `kite.lock changed — a dependency is not what it was`, and
-fetches every git checkout again rather than trusting the one cached. Anything
+fetches every git checkout again rather than trusting the one cached — beside
+it, so a fetch that fails leaves the cached checkout, and `--offline`, as they
+were. Anything
 else that changed — a dependency added or removed, a new version because the
 manifest now asks for one, a new source — is a line of output (`added b 1.0.0`,
 `a 1.0.0 → 1.2.0`) and `kite.lock updated`, not an error.

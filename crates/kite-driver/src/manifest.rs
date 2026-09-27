@@ -648,26 +648,41 @@ impl Sha256 {
 /// quietly leaving the file out would let a dependency change what it
 /// contains without changing what it hashes to.
 ///
-/// **Only a link that could carry Kite is refused**: one named `….kite`, or
-/// one that leads to a directory. A path dependency is somebody's working
-/// tree, and refusing every link in it refused `node_modules/.bin` — a
-/// directory of links to scripts, none of which a build reads. A link to any
-/// other file is not source and is left alone.
+/// **Only a link a build could follow is refused**: one named `….kite`, which
+/// a directory module reads, or one to a directory whose name a `use` can
+/// write. A path dependency is somebody's working tree, and refusing every
+/// link in it refused `node_modules/.bin` — a directory of links to scripts,
+/// none of which a build reads. A link to any other file is not source, and a
+/// link inside a directory no `use` can reach is never followed by a build.
 ///
-/// Three directories are not walked at all, because nothing in them is the
-/// package: `.git`, `node_modules`, and `.kite` — which holds the package's
-/// *own* vendored dependencies, and hashing them into it counted every one of
-/// them twice.
+/// Two directories are not walked at all, because nothing in them is the
+/// package: `.git`, and `.kite` — which holds the package's *own* vendored
+/// dependencies, and hashing them into it counted every one of them twice.
+/// Neither name is an identifier, so no `use` reaches either.
+///
+/// **`node_modules` is walked.** It was skipped with those two, and it is an
+/// identifier: a dependency could `use node_modules/core`, and the build
+/// compiled files the digest had never seen — changed under the same version,
+/// they passed `kitec pkg` with the lockfile "unchanged". What is hashed has to
+/// be at least what a build can read.
 fn collect_kite_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    collect_below(dir, true, out)
+}
+
+/// [`collect_kite_files`] for one directory. `reachable` is whether a `use`
+/// can name it: the package's root can, and so can a directory under a
+/// reachable one whose name is an identifier.
+fn collect_below(dir: &Path, reachable: bool, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let kind = entry.file_type()?;
         let path = entry.path();
         let name = entry.file_name();
         let is_kite = path.extension().is_some_and(|e| e == "kite");
+        let nameable = name.to_str().is_some_and(is_identifier);
         if kind.is_symlink() {
             let leads_to_dir = std::fs::metadata(&path).is_ok_and(|m| m.is_dir());
-            if is_kite || leads_to_dir {
+            if reachable && (is_kite || (leads_to_dir && nameable)) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!("`{}` is a symbolic link", path.display()),
@@ -676,15 +691,27 @@ fn collect_kite_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()>
             continue;
         }
         if kind.is_dir() {
-            if name == ".git" || name == "node_modules" || name == ".kite" {
+            if name == ".git" || name == ".kite" {
                 continue;
             }
-            collect_kite_files(&path, out)?;
+            collect_below(&path, reachable && nameable, out)?;
         } else if is_kite {
             out.push(path);
         }
     }
     Ok(())
+}
+
+/// Whether a directory's name can be a segment of a `use` path: one
+/// identifier, as the lexer reads one.
+fn is_identifier(name: &str) -> bool {
+    let mut scratch = kite_diag::DiagBag::new();
+    let tokens = kite_lexer::tokenize(kite_span::FileId(0), name, &mut scratch);
+    tokens.len() == 2
+        && tokens[0].kind == kite_lexer::TokenKind::Ident
+        && tokens[0].span.start == 0
+        && tokens[0].span.end as usize == name.len()
+        && !scratch.has_errors()
 }
 
 #[cfg(test)]

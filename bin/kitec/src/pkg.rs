@@ -429,11 +429,9 @@ impl Vendor {
         match fetch_plan(dir.exists(), self.update, self.refreshed.contains(dir), self.offline) {
             Fetch::Keep => return Ok(()),
             Fetch::Unavailable => return Err(self.not_vendored(name)),
-            Fetch::Replace => std::fs::remove_dir_all(dir)
-                .map_err(|e| format!("cannot clear `{}`: {}", dir.display(), e))?,
-            Fetch::Clone => {}
+            Fetch::Replace => replace_checkout(url, tag, dir)?,
+            Fetch::Clone => clone(url, Some(tag), &dir.to_path_buf())?,
         }
-        clone(url, Some(tag), &dir.to_path_buf())?;
         self.refreshed.insert(dir.to_path_buf());
         Ok(())
     }
@@ -795,6 +793,35 @@ fn describe_tag(dir: &Path) -> Option<String> {
     }
     let tag = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if tag.is_empty() { None } else { Some(tag) }
+}
+
+/// Fetch a checkout again, over the one already on disk.
+///
+/// **Into a fresh directory first.** The old checkout used to be removed and
+/// the clone started after it, so a fetch that failed — the network down, the
+/// remote gone — left nothing: the `--update` failed, and so did every
+/// `--offline` after it, over a checkout that had been there and worked. The
+/// clone lands beside the old one, and replaces it only once it exists.
+fn replace_checkout(url: &str, tag: &str, dir: &Path) -> Result<(), String> {
+    let mut fresh = dir.as_os_str().to_owned();
+    fresh.push(".fetching");
+    let fresh = PathBuf::from(fresh);
+    // Left over from a run that was interrupted, and never a checkout.
+    if fresh.exists() {
+        std::fs::remove_dir_all(&fresh)
+            .map_err(|e| format!("cannot clear `{}`: {}", fresh.display(), e))?;
+    }
+    if let Err(why) = clone(url, Some(tag), &fresh) {
+        let _ = std::fs::remove_dir_all(&fresh);
+        return Err(format!(
+            "{}\n\nnote: `{}` is left as it was, so `--offline` still has it",
+            why,
+            dir.display()
+        ));
+    }
+    std::fs::remove_dir_all(dir).map_err(|e| format!("cannot clear `{}`: {}", dir.display(), e))?;
+    std::fs::rename(&fresh, dir)
+        .map_err(|e| format!("cannot place `{}`: {}", dir.display(), e))
 }
 
 /// Whether the placed checkout already declares the chosen version.
@@ -1294,6 +1321,30 @@ mod tests {
         assert_eq!(fetch_plan(true, true, false, true), Fetch::Keep, "offline keeps what it has");
         assert_eq!(fetch_plan(false, false, false, false), Fetch::Clone);
         assert_eq!(fetch_plan(false, true, false, true), Fetch::Unavailable);
+    }
+
+    /// A refetch that fails leaves the checkout it would have replaced. The
+    /// old one was removed before the clone began, so a failed `--update`
+    /// took `--offline` down with it.
+    #[test]
+    fn a_failed_refetch_keeps_the_checkout_it_would_have_replaced() {
+        let dir = fixture("refetch");
+        let checkout = dir.join(".kite/vendor/a@1.0.0");
+        write(checkout.join("kite.toml"), "[package]\nname = \"a\"\nversion = \"1.0.0\"\n");
+        write(checkout.join("a.kite"), "pub fn v() -> str {\n    return \"1.0.0\"\n}\n");
+        let mut vendor = Vendor::new(&dir, false, true);
+        // A transport refused before `git` runs, so the fetch fails without a
+        // network to fail on.
+        let why = vendor
+            .checkout("a", "http://example.invalid/a", "v1.0.0", &checkout)
+            .expect_err("the fetch fails");
+        assert!(why.contains("left as it was"), "{}", why);
+        assert!(checkout.join("a.kite").is_file(), "the checkout is gone");
+        assert!(!dir.join(".kite/vendor/a@1.0.0.fetching").exists());
+        // And `--offline` still resolves from it.
+        let mut offline = Vendor::new(&dir, true, false);
+        offline.checkout("a", "http://example.invalid/a", "v1.0.0", &checkout).expect("kept");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A candidate the solver unwinds takes back what its manifest taught.
