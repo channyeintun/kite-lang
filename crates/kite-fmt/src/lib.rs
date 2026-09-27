@@ -431,6 +431,16 @@ impl Formatter<'_> {
         if kind == T::LParen && prev == T::Fn {
             return false;
         }
+        // `NotFound.as(err)`: after a `.`, `as` is a member's name (§7.2)
+        // and its arguments hug it as any name's do. It was spaced like the
+        // cast, `NotFound.as (err)`.
+        if kind == T::LParen
+            && prev == T::As
+            && self.prev_text.0 > 0
+            && self.src.as_bytes()[self.prev_text.0 as usize - 1] == b'.'
+        {
+            return false;
+        }
         // `..` in a struct literal's base, `P{ ..p }`, and a struct pattern's
         // rest, `P{ x, .. }`, stands apart like the fields around it. Only a
         // range hugs its ends.

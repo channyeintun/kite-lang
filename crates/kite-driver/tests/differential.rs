@@ -2942,6 +2942,65 @@ fn main() {
 }
 "#,
     ),
+    // `as` on a generic error type asks for the specialisation it is used as,
+    // inside a generic function too, where the tag it tests for is settled once
+    // the function is specialised. The declaration's tag answered `nil` for every
+    // one.
+    (
+        "a-generic-error-downcasts-to-its-specialisation",
+        r#"struct Wrapped<T> {
+    inner: T
+    why: str
+}
+
+impl<T> Error for Wrapped<T> {
+    fn message(self) -> str {
+        return "wrapped: " + self.why
+    }
+}
+
+struct Plain {
+    why: str
+}
+
+impl Error for Plain {
+    fn message(self) -> str {
+        return self.why
+    }
+}
+
+fn inner_of<T>(e: error) -> Option<T> {
+    let w: Option<Wrapped<T>> = Wrapped.as(e)
+    if w != nil {
+        return w.inner
+    }
+    return nil
+}
+
+fn main() {
+    let e: error = Wrapped{ inner: 5, why: "five" }
+    if e != nil {
+        io.print(e.message())
+    }
+    let w: Option<Wrapped<int>> = Wrapped.as(e)
+    if w != nil {
+        io.print(w.inner + 1)
+    } else {
+        io.print("not an int one")
+    }
+    let s: Option<Wrapped<str>> = Wrapped.as(e)
+    io.print(s == nil)
+    let n: Option<int> = inner_of(e)
+    io.print(n == 5)
+    let t: Option<str> = inner_of(e)
+    io.print(t == nil)
+    let p: error = Plain{ why: "plain" }
+    io.print(Plain.is(p))
+    let q: Option<Wrapped<int>> = Wrapped.as(p)
+    io.print(q == nil)
+}
+"#,
+    ),
 ];
 
 /// Programs above that need a rule of the checker's which may not have landed:

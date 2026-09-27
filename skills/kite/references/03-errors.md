@@ -715,6 +715,10 @@ fn main() {
 `T.as(err)` returns `Option<T>`, spelled `Option<T>` — there is no `?T` syntax;
 `?` is not even a Kite token. Narrow it with `if hit != nil { … }`.
 
+For a generic error type, each specialisation is its own type: write the one you
+want on the binding, `let w: Option<Wrapped<int>> = Wrapped.as(err)`. A bare
+`Wrapped.as(err)`, and `Wrapped.is(err)`, cannot say which, and are `E0209`.
+
 An enum works as well as a struct, and pairs nicely with `match`:
 
 ```kite

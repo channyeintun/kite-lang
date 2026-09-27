@@ -241,6 +241,18 @@ impl Mono<'_> {
                 tag.kind = ExprKind::Int(own.encode() as i64);
             }
         }
+        // `Wrapped.as(err)` asks for the specialisation it is used as, which
+        // inside a generic function may be a `Wrapped<T>`: the tag it tests
+        // for is that of its result's type, now concrete.
+        let result = match self.types.kind(e.ty) {
+            TyKind::Optional(inner) => Some(*inner),
+            _ => None,
+        };
+        if let (ExprKind::ErrorAs { tag, .. }, Some(inner)) = (&mut e.kind, result) {
+            if let Some((own, _, _)) = self.identity(inner) {
+                *tag = own.encode();
+            }
+        }
         // Both forms name a function by index, so both need the same treatment:
         // renumbered when it moved, specialised when it is a template.
         let target = match &mut e.kind {

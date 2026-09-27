@@ -5767,6 +5767,7 @@ impl<'a> Checker<'a> {
     /// message. `is` compares it; `as` compares it and, where it matches,
     /// hands back the value — so the cast is only ever reached on a path the
     /// comparison has already proved.
+    #[allow(clippy::too_many_arguments)]
     fn error_downcast(
         &mut self,
         ti: u32,
@@ -5775,6 +5776,7 @@ impl<'a> Checker<'a> {
         args: &[ast::Expr],
         p_span: Span,
         span: Span,
+        expected: Option<TyId>,
     ) -> hir::Expr {
         let Some(target) = self.type_ids[ti as usize] else {
             self.diags.push(
@@ -5805,6 +5807,57 @@ impl<'a> Checker<'a> {
                 );
                 return self.lit(ExprKind::Error, TyId::ERROR, span);
             }
+        };
+        // A generic type's values carry the tag of their specialisation, so
+        // there is no one tag for the declaration to be compared with: the
+        // test against the template's answered `false` for every `Wrapped<T>`
+        // an error ever held, and `as` gave back `nil` typed with a free `T`.
+        // `as` can be told which specialisation by the type it is used as,
+        // which is the one place a generic type's arguments can be written;
+        // `is` has nowhere to be told, and is refused.
+        let generic = match target {
+            TypeTarget::Struct(s) => self.types.struct_def(s).generic_count > 0,
+            TypeTarget::Enum(e) => self.types.enum_def(e).generic_count > 0,
+            _ => false,
+        };
+        let ty = if generic {
+            let wanted = expected.map(|w| self.types.present(w)).filter(|w| match *self.types.kind(*w) {
+                TyKind::Struct(s) => matches!(target, TypeTarget::Struct(t) if self.types.struct_template_of(s) == Some(t)),
+                TyKind::Enum(e) => matches!(target, TypeTarget::Enum(t) if self.types.enum_template_of(e) == Some(t)),
+                _ => false,
+            });
+            match wanted {
+                Some(w) if method_name == "as" => w,
+                _ => {
+                    let d = Diagnostic::error(
+                        codes::E0209,
+                        format!("`{}.{}` cannot tell which `{}` it asks about", type_name, method_name, type_name),
+                    )
+                    .with_primary(p_span, format!("`{}` is generic", type_name))
+                    .with_note(format!(
+                        "each specialisation of `{}` is its own type, and an error carries the \
+                         one it was made from",
+                        type_name
+                    ));
+                    let d = if method_name == "as" {
+                        d.with_note(format!(
+                            "say which by the type it is used as: `let w: Option<{}<int>> = \
+                             {}.as(err)`",
+                            type_name, type_name
+                        ))
+                    } else {
+                        d.with_note(format!(
+                            "ask with `as` where the type is written, and test that for `nil`: \
+                             `let w: Option<{}<int>> = {}.as(err)`",
+                            type_name, type_name
+                        ))
+                    };
+                    self.diags.push(d);
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
+                }
+            }
+        } else {
+            ty
         };
         let Some(tag) = self.type_tag_of(ty) else {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
@@ -5995,7 +6048,7 @@ impl<'a> Checker<'a> {
         if (method_name == "is" || method_name == "as")
             && self.resolved.method_on(ti, &method_name).is_none()
         {
-            return self.error_downcast(ti, &type_name, &method_name, args, p_span, span);
+            return self.error_downcast(ti, &type_name, &method_name, args, p_span, span, expected);
         }
 
         let Some(fn_index) = self.resolved.method_on(ti, &method_name) else {

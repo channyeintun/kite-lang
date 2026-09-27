@@ -921,6 +921,12 @@ if NotFound.is(err) {
 let missing = NotFound.as(err)      // Option<NotFound>
 ```
 
+Each specialisation of a generic type is its own type, and an error carries the
+one it was made from. So `as` on a generic type is told which by the type it is
+used as — `let w: Option<Wrapped<int>> = Wrapped.as(err)` — and `is`, which has
+nowhere to be told, is refused on one, as is an `as` nothing says the arguments
+of (`E0209`).
+
 **The type names itself.** [§11](#11-generics) has no turbofish, so
 `errors.is<T>(err)` — which this document used to promise — has nowhere to
 write its type argument. `NotFound.is(err)` says the same thing in a place the
