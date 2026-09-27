@@ -230,6 +230,39 @@ fn unicode_checks() -> [error] {
     return out
 }
 
+/// `n` copies of `s`, end to end.
+fn repeat(s: str, n: int) -> str {
+    var parts: [str] = []
+    for i in 0..n {
+        parts.push(s)
+    }
+    return join(parts, "")
+}
+
+/// A document chooses how deep it nests, and the parser recurses once per
+/// level: three thousand `[`, six kilobytes, ran a WebAssembly host out of
+/// stack, a trap rather than an error. Past 128 levels — each key segment,
+/// array and inline table one — a document is refused, as `std/json` refuses
+/// one.
+fn depth_checks() -> [error] {
+    var out: [error] = []
+    let (_, deep) = toml.parse("a = " + repeat("[", 3000) + repeat("]", 3000) + "\n")
+    out.push(test.failed(deep, "arrays nested three thousand deep are refused"))
+    if deep != nil {
+        out.push(test.is_true(deep.message().index_of("nested deeper than 128") >= 0, "and say why"))
+    }
+    out.push(refuses("a = " + repeat("{ b = ", 2000) + "1" + repeat(" }", 2000) + "\n", "inline tables two thousand deep"))
+    out.push(refuses(repeat("a.", 200) + "b = 1\n", "a key of two hundred segments"))
+    out.push(refuses("[" + repeat("a.", 200) + "b]\n", "a header of two hundred segments"))
+    out.push(refuses("[" + repeat("a.", 100) + "b]\n" + repeat("c.", 100) + "d = 1\n", "a header and a key deeper together"))
+    out.push(refuses("a = { " + repeat("b.", 200) + "c = 1 }\n", "a dotted key inside an inline table"))
+    // Up to the limit is a document like any other.
+    out.push(accepts("a = " + repeat("[", 127) + repeat("]", 127) + "\n", "arrays 127 deep under a key"))
+    out.push(refuses("a = " + repeat("[", 128) + repeat("]", 128) + "\n", "and one more"))
+    out.push(accepts(repeat("a.", 127) + "b = 1\n", "a key of 128 segments"))
+    return out
+}
+
 /// The cases where being lenient would be being wrong.
 fn refusal_checks() -> [error] {
     var out: [error] = []
@@ -526,6 +559,7 @@ fn main() {
     results = concat(results, array_of_tables_checks())
     results = concat(results, unicode_checks())
     results = concat(results, refusal_checks())
+    results = concat(results, depth_checks())
     var failed = 0
     for e in results {
         if e != nil {
