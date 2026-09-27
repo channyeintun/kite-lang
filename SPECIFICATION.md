@@ -1232,7 +1232,9 @@ Multiple `impl` blocks for the same type are permitted within a module, and a
 type has one method of each name across all of them (`E0112`). A type's
 inherent methods must be declared in the module that declares the type — there
 are no extension methods, so `x.foo()` can always be resolved by looking at where
-`x`'s type is defined. An `impl` block for another module's type is `E0406`.
+`x`'s type is defined. An `impl` block for another module's type is `E0406`,
+and one for anything but a struct or an enum — a trait, or an alias of `int` —
+is `E0204`.
 
 A method may declare type parameters of its own, after its block's:
 

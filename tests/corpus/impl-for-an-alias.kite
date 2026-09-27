@@ -3,7 +3,8 @@
 // the block was dropped in silence, and a call to its method was "no such
 // method". An alias of one instantiation of a generic type is that
 // instantiation written out, and refused as it is (E0208); one of anything
-// but a struct or an enum is not a type an `impl` is for.
+// but a struct or an enum is not a type an `impl` is for, and neither is a
+// trait, whose block was accepted and reached by nothing just the same.
 
 trait Named {
     fn name(self) -> str
@@ -27,6 +28,16 @@ type Id = int
 impl Named for Id { //~ ERROR E0204
     fn name(self) -> str {
         return "id"
+    }
+}
+
+trait Labelled {
+    fn label(self) -> str
+}
+
+impl Named for Labelled { //~ ERROR E0204
+    fn name(self) -> str {
+        return "labelled"
     }
 }
 

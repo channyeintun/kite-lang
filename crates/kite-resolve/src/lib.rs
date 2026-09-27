@@ -2221,19 +2221,28 @@ const SELF_OUTSIDE_AN_IMPL: &str = "`Self` names a type inside an `impl` block, 
      for; in a trait's default method it is whichever type implements the trait, which is \
      known only by the trait's methods, so reach it through one of those";
 
-/// An `impl` header naming an alias of something that is not a struct or an
-/// enum, such as `type Id = int`.
-fn not_for_an_alias(file: &SourceFile, map: &ResolveMap, alias: u32, header: &TypePath) -> Diagnostic {
-    let decl = &map.types[alias as usize];
-    let mut d = Diagnostic::error(
+/// An `impl` header naming something that is not a struct or an enum: an
+/// alias of one, such as `type Id = int`, or a trait. Either was accepted and
+/// its block never reached, since nothing has the alias or the trait itself
+/// as its type.
+fn not_for_an_alias(file: &SourceFile, map: &ResolveMap, named: u32, header: &TypePath) -> Diagnostic {
+    let decl = &map.types[named as usize];
+    let d = Diagnostic::error(
         codes::E0204,
         format!("`{}` is not a struct or an enum", header.text()),
     )
     .with_primary(header.span, "an `impl` is for a struct or an enum");
-    if let Item::TypeAlias(a) = &file.items[decl.decl_index] {
-        d = d.with_secondary(a.ty.span(), format!("`{}` names this", header.text()));
+    match &file.items[decl.decl_index] {
+        Item::TypeAlias(a) => d
+            .with_secondary(a.ty.span(), format!("`{}` names this", header.text()))
+            .with_note("to give it methods, wrap it in a struct of its own and implement those"),
+        _ => d.with_note(format!(
+            "`{}` is a {}; a method every implementation shares is a default method in the \
+             trait itself",
+            header.text(),
+            decl.kind.describe()
+        )),
     }
-    d.with_note("to give it methods, wrap it in a struct of its own and implement those")
 }
 
 /// A run of plain names, dotted. `None` for anything else, which is then an
