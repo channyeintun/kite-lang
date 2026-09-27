@@ -2122,3 +2122,22 @@ fn a_default_method_no_block_takes_is_checked() {
         fn main() {\n  io.print(1)\n}\n");
     assert_eq!(c.codes(), vec!["E0200"], "{}", c.render());
 }
+
+/// `Self` in an `impl` block's body names the block's type wherever a type's
+/// name is written, not only in an annotation: a literal, a pattern, an
+/// associated call and a variant. In a trait's default method it names none,
+/// and says why rather than suggesting `self`.
+#[test]
+fn self_names_the_blocks_type_in_a_literal_and_a_path() {
+    ok("struct P {\n  n: int\n}\n\
+        impl P {\n  fn make(n: int) -> Self {\n    return Self{ n: n }\n  }\n\
+        \x20 fn other() -> Self {\n    return Self.make(3)\n  }\n\
+        \x20 fn zero(self) -> bool {\n    return match self {\n      Self{ n: 0 } => true,\n      _ => false,\n    }\n  }\n}\n\
+        enum L {\n  On(int)\n  Off\n}\n\
+        impl L {\n  fn off(self) -> Self {\n    return Self.Off\n  }\n}\n\
+        fn main() {\n  io.print(P.other().n)\n  io.print(P.make(0).zero())\n  io.print(L.On(1).off() == L.Off)\n}\n");
+    let c = run("trait T {\n  fn a(self) -> int\n  fn b(self) -> int {\n    let q = Self{ n: 1 }\n    return 0\n  }\n}\n\
+        fn main() {\n  io.print(1)\n}\n");
+    assert_eq!(c.codes(), vec!["E0204"], "{}", c.render());
+    assert!(c.render().contains("known only by the trait's methods"), "{}", c.render());
+}

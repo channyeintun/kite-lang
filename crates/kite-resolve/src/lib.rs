@@ -1255,6 +1255,9 @@ fn resolve_bodies(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) 
                 };
                 let m = &methods[o.method_index];
                 let mut r = FnResolver::new(map, diags, module);
+                if matches!(file.items[o.impl_index], Item::Impl(_)) {
+                    r.self_type = Some(o.type_index);
+                }
                 r.resolve_fn(&m.params, m.body.as_ref(), o.takes_self, o.var_self);
                 r.locals
             }
@@ -1310,6 +1313,11 @@ struct FnResolver<'a> {
     or_bound: Vec<(String, u32)>,
     /// How many or-patterns are being resolved, one inside another.
     or_depth: usize,
+    /// The type `Self` names in this body: the one its `impl` block is for.
+    /// None in a free function, and in a trait's default method, where
+    /// `Self` is whichever type implements the trait and is known only by
+    /// the trait's methods.
+    self_type: Option<u32>,
 }
 
 impl<'a> FnResolver<'a> {
@@ -1328,12 +1336,19 @@ impl<'a> FnResolver<'a> {
             alternatives: Vec::new(),
             or_bound: Vec::new(),
             or_depth: 0,
+            self_type: None,
         }
     }
 
-    /// A type visible from the module being resolved.
+    /// A type visible from the module being resolved. Inside an `impl`
+    /// block, `Self` is the type the block is for (§8.2) wherever a body
+    /// writes a type's name: a literal `Self{ … }`, a pattern, the head of
+    /// `Self.make(…)` or `Self.Variant`.
     fn find_type(&self, name: &str) -> Option<u32> {
-        self.map.type_by_name_in(&self.module, name)
+        match self.self_type {
+            Some(ti) if name == "Self" => Some(ti),
+            _ => self.map.type_by_name_in(&self.module, name),
+        }
     }
 
     /// A free function visible from the module being resolved.
@@ -2009,7 +2024,9 @@ impl<'a> FnResolver<'a> {
                 let mut d =
                     Diagnostic::error(codes::E0204, format!("unknown type `{}`", path.name()))
                         .with_primary(path.span, "no such type in this module");
-                if let Some(near) = self.suggest_type(path.name()) {
+                if path.text() == "Self" {
+                    d = d.with_note(SELF_OUTSIDE_AN_IMPL);
+                } else if let Some(near) = self.suggest_type(path.name()) {
                     d = d.with_note(format!("a similar type is in scope: `{}`", near));
                 }
                 self.diags.push(d);
@@ -2095,7 +2112,9 @@ impl<'a> FnResolver<'a> {
 
         let mut d = Diagnostic::error(codes::E0111, format!("cannot find `{}`", name))
             .with_primary(p.span, "not found in this scope");
-        if let Some(sugg) = self.suggest(name) {
+        if name == "Self" {
+            d = d.with_note(SELF_OUTSIDE_AN_IMPL);
+        } else if let Some(sugg) = self.suggest(name) {
             d = d.with_note(format!("a similar name is in scope: `{}`", sugg));
         }
         self.diags.push(d);
@@ -2119,6 +2138,11 @@ impl<'a> FnResolver<'a> {
         nearest(name, &candidates)
     }
 }
+
+/// Why `Self` names no type where a body wrote one.
+const SELF_OUTSIDE_AN_IMPL: &str = "`Self` names a type inside an `impl` block, the one the block is \
+     for; in a trait's default method it is whichever type implements the trait, which is \
+     known only by the trait's methods, so reach it through one of those";
 
 /// A run of plain names, dotted. `None` for anything else, which is then an
 /// ordinary field access.

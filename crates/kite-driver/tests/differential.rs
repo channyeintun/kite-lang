@@ -3280,6 +3280,91 @@ fn main() {
 }
 "#,
     ),
+    // `Self` inside an `impl` block is the type the block is for wherever a
+    // body writes a type's name: a struct literal, a pattern, the head of an
+    // associated call or of a variant, for a generic type too. It was known
+    // to type annotations only, and `Self{ n: n }` was E0204.
+    (
+        "self-names-the-blocks-type-in-a-body",
+        r#"struct P {
+    n: int
+}
+
+impl P {
+    fn make(n: int) -> Self {
+        return Self{ n: n }
+    }
+    fn other() -> Self {
+        return Self.make(3)
+    }
+    fn bump(self) -> Self {
+        return Self{ n: self.n + 1 }
+    }
+    fn is_zero(self) -> bool {
+        return match self {
+            Self{ n: 0 } => true,
+            _ => false,
+        }
+    }
+}
+
+struct Box<T> {
+    v: T
+}
+
+impl<T> Box<T> {
+    fn of(v: T) -> Self {
+        return Self{ v: v }
+    }
+    fn again(self) -> Self {
+        return Self.of(self.v)
+    }
+}
+
+enum Light {
+    On(level: int)
+    Off
+}
+
+impl Light {
+    fn dim(self) -> Self {
+        return match self {
+            Self.On(level) => if level > 1 { Self.On(level - 1) } else { Self.Off },
+            Self.Off => Self.Off,
+        }
+    }
+    fn level(self) -> int {
+        return match self {
+            Self.On(level) => level,
+            Self.Off => 0,
+        }
+    }
+}
+
+trait Named {
+    fn name(self) -> str
+}
+
+impl Named for P {
+    fn name(self) -> str {
+        let q = Self{ n: self.n * 2 }
+        return "p\(q.n)"
+    }
+}
+
+fn main() {
+    io.print(P.make(1).n)
+    io.print(P.other().n)
+    io.print(P.make(4).bump().n)
+    io.print(P.make(0).is_zero())
+    io.print(P.make(2).is_zero())
+    io.print(Box.of("x").again().v)
+    io.print(Light.On(3).dim().level())
+    io.print(Light.On(1).dim().level())
+    io.print(P.make(5).name())
+}
+"#,
+    ),
 ];
 
 /// Programs above that need a rule of the checker's which may not have landed:

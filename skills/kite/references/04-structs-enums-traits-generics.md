@@ -242,7 +242,8 @@ fn main() {
 ```
 
 Several `impl` blocks for one type are allowed. `Self` names the type the block
-is for:
+is for, in a signature and wherever the body writes the type's name — a
+literal, a pattern, an associated call:
 
 ```kite
 struct P {
@@ -250,8 +251,12 @@ struct P {
 }
 
 impl P {
+    fn make(n: int) -> Self {
+        return Self{ n: n }
+    }
+
     fn twin(self) -> Self {
-        return P{ n: self.n }
+        return Self.make(self.n)
     }
 }
 
@@ -259,6 +264,9 @@ fn main() {
     io.print(P{ n: 1 }.twin().n)
 }
 ```
+
+In a trait's default method `Self` is whichever type implements the trait,
+known only by the trait's methods, so `Self{ … }` there is `E0204`.
 
 A method may introduce type parameters of its own, solved from its arguments:
 

@@ -1239,7 +1239,10 @@ impl<T> Box<T> {
 
 The block's parameters come from the receiver's type and the method's own from
 its arguments, as a generic function's do. `Self` inside an `impl` block is the
-type the block is for, in its body as in its signatures.
+type the block is for, in its body as in its signatures, and wherever a body
+writes the type's name: a literal `Self{ n: 1 }`, a pattern, `Self.make(3)`,
+`Self.Off`. In a trait's default method it is whichever type implements the
+trait, known only by the trait's methods, so it names no literal or path there.
 
 An `impl` block is for every instantiation of a generic type at once: its header
 names the type at the block's own parameters, in order — `impl<A, B> Pair<A,
