@@ -1278,7 +1278,8 @@ Coverage is decided through nested patterns, not just the outermost one:
 `On(true)`, `On(false)` and `Off` cover an `enum Light { On(bool) Off }`,
 `(true, _)` and `(false, _)` cover a `(bool, int)`, and `nil`, `A` and `B` cover
 an `Option<E>` — a pattern written against an optional is one for the value
-inside it, present. A missing case is named however deep it is: `Add(Num(_),
+inside it, present, whether a literal, a tuple, a struct or a variant of a
+generic enum. A missing case is named however deep it is: `Add(Num(_),
 _)`. Numbers and strings have no finite set of values, so a match on one needs a
 catch-all. A guarded arm counts towards nothing, since its guard may fail.
 

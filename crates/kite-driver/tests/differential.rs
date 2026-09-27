@@ -2814,6 +2814,80 @@ fn main() {
 }
 "#,
     ),
+    // A pattern against an optional is one for the value present: a tuple, and a
+    // variant or a struct of a generic type, were refused as the wrong type. An
+    // `Option<Msg<int>>` or `Option<[int]>` wanted also says what a `Stop` or an
+    // empty literal is.
+    (
+        "patterns-against-an-optional",
+        r#"enum Msg<T> {
+    Data(v: T)
+    Stop
+}
+
+struct G<T> {
+    x: T
+    y: T
+}
+
+fn tuple(o: Option<(int, str)>) -> str {
+    return match o {
+        nil => "none",
+        (0, s) => "zero " + s,
+        (n, _) => "n \(n)",
+    }
+}
+
+fn message(o: Option<Msg<int>>) -> str {
+    return match o {
+        Data(v) => "data \(v)",
+        Stop => "stop",
+        nil => "nil",
+    }
+}
+
+fn qualified<T>(o: Option<Msg<T>>) -> str {
+    return match o {
+        nil => "nil",
+        Msg.Data(_) => "data",
+        Msg.Stop => "stop",
+    }
+}
+
+fn grid(o: Option<G<int>>) -> str {
+    return match o {
+        nil => "nil",
+        G{ x: 0, y } => "on y \(y)",
+        G{ x, y } => "at \(x) \(y)",
+    }
+}
+
+fn main() {
+    io.print(tuple((0, "a")))
+    io.print(tuple((4, "b")))
+    io.print(tuple(nil))
+    io.print(message(Data(1)))
+    io.print(message(Stop))
+    io.print(message(nil))
+    let m: Msg<str> = Data("s")
+    io.print(qualified(m))
+    let none: Option<Msg<float>> = nil
+    io.print(qualified(none))
+    io.print(grid(G{ x: 0, y: 5 }))
+    io.print(grid(G{ x: 2, y: 3 }))
+    io.print(grid(nil))
+    let words: Option<{ str: int }> = { }
+    let nums: Option<[int]> = []
+    if words != nil {
+        if nums != nil {
+            io.print("\(words.len()) \(nums.len())")
+        }
+    }
+    let boxed: Option<G<str>> = G{ x: "a", y: "b" }
+    io.print(boxed == nil)
+}
+"#,
+    ),
 ];
 
 /// Programs above that need a rule of the checker's which may not have landed:

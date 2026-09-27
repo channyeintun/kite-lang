@@ -337,6 +337,15 @@ impl Types {
         self.intern(TyKind::Map(key, value))
     }
 
+    /// The value an optional holds when it is present, or the type itself
+    /// when it is not an optional.
+    pub fn present(&self, ty: TyId) -> TyId {
+        match self.kind(ty) {
+            TyKind::Optional(inner) => *inner,
+            _ => ty,
+        }
+    }
+
     pub fn optional_of(&mut self, inner: TyId) -> TyId {
         // `Option<Option<T>>` is just `Option<T>`; flattening keeps the
         // representation canonical.

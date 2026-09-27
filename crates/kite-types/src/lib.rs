@@ -3141,7 +3141,9 @@ impl<'a> Checker<'a> {
             ast::Expr::Match(m) => self.match_expr(m, expected),
 
             ast::Expr::Map { entries, span } => {
-                let hint = expected.and_then(|e| match self.types.kind(e) {
+                // Where an `Option<{K: V}>` is wanted, the map inside it is,
+                // so an empty `{}` takes its types from that too.
+                let hint = expected.and_then(|e| match self.types.kind(self.types.present(e)) {
                     TyKind::Map(k, v) => Some((*k, *v)),
                     _ => None,
                 });
@@ -5986,9 +5988,10 @@ impl<'a> Checker<'a> {
     ) -> Option<kite_hir::StructId> {
         let count = self.types.struct_def(template).generic_count;
 
-        // An annotation settles it outright: `let p: Pair<int, str> = Pair{..}`.
+        // An annotation settles it outright: `let p: Pair<int, str> = Pair{..}`,
+        // or an `Option<Pair<int, str>>` the value will be wrapped into.
         if let Some(want) = expected {
-            if let TyKind::Struct(s) = *self.types.kind(want) {
+            if let TyKind::Struct(s) = *self.types.kind(self.types.present(want)) {
                 if self.instance_of(s) == Some(template) {
                     return Some(s);
                 }
@@ -6754,7 +6757,8 @@ impl<'a> Checker<'a> {
         expected: Option<TyId>,
         span: Span,
     ) -> hir::Expr {
-        let hint = expected.and_then(|e| self.types.slice_elem(e));
+        // An `Option<[T]>` wanted is a `[T]` wanted, as for a map.
+        let hint = expected.and_then(|e| self.types.slice_elem(self.types.present(e)));
 
         if elems.is_empty() {
             let Some(elem) = hint else {
@@ -7621,8 +7625,10 @@ impl<'a> Checker<'a> {
     ) -> Option<kite_hir::EnumId> {
         let count = self.types.enum_def(template).generic_count;
 
+        // An `Option<Msg<int>>` wanted settles a `Msg` as surely as a
+        // `Msg<int>` does: the value will be wrapped into it.
         if let Some(want) = expected {
-            if let TyKind::Enum(e) = *self.types.kind(want) {
+            if let TyKind::Enum(e) = *self.types.kind(self.types.present(want)) {
                 if self.types.enum_template_of(e) == Some(template) {
                     return Some(e);
                 }
@@ -8781,7 +8787,7 @@ impl<'a> Checker<'a> {
                 };
                 // As for variants: the pattern names the declaration and the
                 // scrutinee says which specialisation.
-                let sid = match *self.types.kind(scrut) {
+                let sid = match *self.types.kind(self.types.present(scrut)) {
                     TyKind::Struct(actual)
                         if self.types.struct_template_of(actual) == Some(sid) =>
                     {
@@ -8940,7 +8946,11 @@ impl<'a> Checker<'a> {
             }
 
             ast::Pattern::Tuple { elems, span } => {
-                let TyKind::Tuple(element_tys) = self.types.kind(scrut).clone() else {
+                // Against an optional, a tuple pattern is one for the tuple
+                // present, as a literal or a variant is (§9.2); MIR tests for
+                // `nil` and unwraps before it looks at the elements.
+                let tuple = self.types.present(scrut);
+                let TyKind::Tuple(element_tys) = self.types.kind(tuple).clone() else {
                     if !self.types.is_poisoned(scrut) {
                         let found = self.types.with_article(scrut);
                         self.diags.push(
@@ -8973,7 +8983,7 @@ impl<'a> Checker<'a> {
                     .zip(&element_tys)
                     .map(|(p, ty)| self.pattern(p, *ty))
                     .collect();
-                hir::Pattern::Tuple { ty: scrut, elems: subs }
+                hir::Pattern::Tuple { ty: tuple, elems: subs }
             }
             ast::Pattern::Nil(span) => {
                 if !matches!(self.types.kind(scrut), TyKind::Optional(_))
@@ -9027,8 +9037,9 @@ impl<'a> Checker<'a> {
         };
         // A pattern names the declaration, not a specialisation: `Some(n)` is
         // written the same whatever the enum holds. The scrutinee says which
-        // specialisation is meant.
-        let eid = match *self.types.kind(scrut) {
+        // specialisation is meant — the value inside it, against an optional,
+        // since a pattern written against one is for the value present.
+        let eid = match *self.types.kind(self.types.present(scrut)) {
             TyKind::Enum(actual) if self.types.enum_template_of(actual) == Some(eid) => actual,
             _ => eid,
         };
