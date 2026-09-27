@@ -6,11 +6,12 @@
 //! this is fine and the build says it is not".
 
 use crate::json::Json;
-use kite_diag::Severity;
+use kite_diag::{Diagnostic, Severity};
 use kite_driver::modules::{located, normalise, Files};
 use kite_driver::{compile_files, Binding, Compilation, Emit};
 use kite_span::{FileId, Span};
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 /// Files the editor has open, by URI. The editor's copy is the truth while a
@@ -18,6 +19,22 @@ use std::path::{Path, PathBuf};
 #[derive(Default)]
 pub struct Server {
     open: HashMap<String, String>,
+    /// For each open file, where every file its last compilation read really
+    /// is ([`located`]): its modules' sources, a dependency's included, and
+    /// the manifests consulted.
+    ///
+    /// It is what says which open files an edit elsewhere can change. Only
+    /// the directories at and above a file were asked, which is everywhere a
+    /// `use` of the program's own reaches it from and nowhere a path
+    /// dependency is — so an edit to an open `../lib/md/md.kite` left the
+    /// importer's diagnostics as they were, and closing it unsaved left the
+    /// importer showing an error in a buffer that no longer existed.
+    read: RefCell<HashMap<String, Vec<PathBuf>>>,
+    /// What each open file's last check reported against a manifest, by the
+    /// open file's URI and then the manifest's.
+    manifest_reports: RefCell<HashMap<String, BTreeMap<String, Vec<Json>>>>,
+    /// What is published for each manifest now: the reports above, together.
+    manifests_shown: RefCell<BTreeMap<String, Vec<Json>>>,
     pub shutdown: bool,
 }
 
@@ -105,23 +122,30 @@ impl Server {
                 // The buffer was already the truth, so saving it changes
                 // nothing another file sees.
                 let uri = uri_of(message).unwrap_or_default();
-                Reply::notify(vec![self.diagnostics(&uri)])
+                Reply::notify(self.diagnostics(&uri))
             }
             "textDocument/didClose" => {
                 let uri = uri_of(message).unwrap_or_default();
                 self.open.remove(&uri);
+                self.manifest_reports.borrow_mut().remove(&uri);
                 // An empty list clears what was shown for the file. The files
                 // that import it read it from disk again, and the disk may not
                 // hold what the buffer that just went away did.
-                let mut notifications = vec![(
-                    "textDocument/publishDiagnostics".to_string(),
-                    Json::object(vec![
-                        ("uri", Json::str(uri.clone())),
-                        ("diagnostics", Json::Array(Vec::new())),
-                    ]),
-                )];
+                let mut notifications = Vec::new();
+                if !is_manifest(&uri) {
+                    notifications.push(published(&uri, Vec::new()));
+                }
                 for other in self.importers(&uri) {
-                    notifications.push(self.diagnostics(&other));
+                    notifications.extend(self.diagnostics(&other));
+                }
+                self.read.borrow_mut().remove(&uri);
+                // What the closed file alone said about a manifest goes with it.
+                notifications.extend(self.republish_manifests());
+                // A manifest's list is what the files reading it report, open
+                // in the editor or not.
+                if is_manifest(&uri) {
+                    let items = self.manifests_shown.borrow().get(&uri).cloned();
+                    notifications.push(published(&uri, items.unwrap_or_default()));
                 }
                 Reply::notify(notifications)
             }
@@ -158,6 +182,8 @@ impl Server {
         let path = path_of(uri);
         let compilation = compile_files(&path, &text, Emit::Check, false, self.edited());
         let own = file_of(&compilation, &path);
+        let read = compilation.inputs.iter().map(|(p, _)| located(p)).collect();
+        self.read.borrow_mut().insert(uri.to_string(), read);
         Compiled { uri: uri.to_string(), path, text, compilation, own }
     }
 
@@ -184,22 +210,29 @@ impl Server {
         )
     }
 
-    /// The other open files that could import `uri`: those in its directory or
-    /// above it, which is everywhere a `use` path reaches it from.
+    /// The other open files that could import `uri`: those whose last
+    /// compilation read it, wherever it is — a path dependency's file is
+    /// nowhere near its importer — and those in its directory or above it,
+    /// which is everywhere a `use` of the program's own reaches it from, and
+    /// catches a file a `use` could not find until this one existed.
     fn importers(&self, uri: &str) -> Vec<String> {
         if !uri.starts_with("file://") {
             return Vec::new();
         }
         let path = path_of(uri);
+        let here = located(Path::new(&path));
+        let read = self.read.borrow();
         let mut found: Vec<String> = self
             .open
             .keys()
             .filter(|other| *other != uri && other.starts_with("file://"))
             .filter(|other| {
+                let reads_it = read.get(*other).is_some_and(|paths| paths.contains(&here));
                 let other = path_of(other);
-                Path::new(&other).parent().is_some_and(|dir| {
-                    !dir.as_os_str().is_empty() && Path::new(&path).starts_with(dir)
-                })
+                reads_it
+                    || Path::new(&other).parent().is_some_and(|dir| {
+                        !dir.as_os_str().is_empty() && Path::new(&path).starts_with(dir)
+                    })
             })
             .cloned()
             .collect();
@@ -214,59 +247,97 @@ impl Server {
     /// import it — an edit here can break, or mend, a file the editor also
     /// shows.
     fn republish(&self, uri: &str) -> Reply {
-        let mut notifications = vec![self.diagnostics(uri)];
+        if is_manifest(uri) {
+            // What a manifest is published with comes from the files that
+            // read it, so they are checked first.
+            let mut notifications = Vec::new();
+            for other in self.importers(uri) {
+                notifications.extend(self.diagnostics(&other));
+            }
+            let said = |n: &(String, Json)| n.1.get("uri").and_then(|u| u.as_str()) == Some(uri);
+            if !notifications.iter().any(said) {
+                notifications.extend(self.diagnostics(uri));
+            }
+            return Reply::notify(notifications);
+        }
+        let mut notifications = self.diagnostics(uri);
         for other in self.importers(uri) {
-            notifications.push(self.diagnostics(&other));
+            notifications.extend(self.diagnostics(&other));
         }
         Reply::notify(notifications)
     }
 
-    fn diagnostics(&self, uri: &str) -> (String, Json) {
+    /// This file's diagnostics, first, and then those of any manifest whose
+    /// published list this check changed.
+    fn diagnostics(&self, uri: &str) -> Vec<(String, Json)> {
+        // A manifest an editor sends is TOML, not Kite, and compiling it
+        // reported `expected a declaration` at its first `[`. Its list is
+        // what the files that read it report; its buffer is what they read.
+        if is_manifest(uri) {
+            let items = self.manifests_shown.borrow().get(uri).cloned().unwrap_or_default();
+            return vec![published(uri, items)];
+        }
         let c = self.compile(uri);
         let mut items = Vec::new();
+        let mut manifests: BTreeMap<String, Vec<Json>> = BTreeMap::new();
         for d in c.compilation.diags.iter() {
             let Some(span) = d.primary_span() else { continue };
-            // Only what is in this file: a diagnostic pointing into the
-            // standard library is not something the editor can show against a
-            // line the user has open.
-            if Some(span.file) != c.own {
+            if Some(span.file) == c.own {
+                items.push(diagnostic_json(d, &c.text, span));
                 continue;
             }
-            let mut notes: Vec<String> = d.notes.clone();
-            for label in d.labels.iter().skip(1) {
-                notes.push(label.message.clone());
+            // A manifest that does not read (`E0405`) is reported in the
+            // manifest, which is never an open Kite document — so it was
+            // dropped with everything else outside this file, and the editor
+            // said `cannot find module` about a program `kitec check` said had
+            // a broken `kite.toml`. It is published under the manifest's own
+            // URI, as `kitec check` reports it at the manifest's line.
+            let name = &c.compilation.sources.file(span.file).name;
+            if name.file_name().is_some_and(|n| n == "kite.toml") {
+                let text = c.compilation.sources.text(span.file);
+                let item = diagnostic_json(d, text, span);
+                manifests.entry(self.uri_for(&c, name)).or_default().push(item);
             }
-            let mut message = d.message.clone();
-            if let Some(first) = d.labels.first() {
-                if !first.message.is_empty() {
-                    message.push_str(&format!("\n{}", first.message));
+            // Anything else is not in this file: a diagnostic pointing into
+            // the standard library is not something the editor can show
+            // against a line the user has open.
+        }
+        self.manifest_reports.borrow_mut().insert(uri.to_string(), manifests);
+        let mut notifications = vec![published(uri, items)];
+        notifications.extend(self.republish_manifests());
+        notifications
+    }
+
+    /// Each manifest's diagnostics, as every open file's last check reported
+    /// them together, where that differs from what was published — an empty
+    /// list for one no open file reports any more, which clears it.
+    fn republish_manifests(&self) -> Vec<(String, Json)> {
+        let reports = self.manifest_reports.borrow();
+        let mut owners: Vec<&String> = reports.keys().collect();
+        owners.sort();
+        let mut now: BTreeMap<String, Vec<Json>> = BTreeMap::new();
+        for owner in owners {
+            for (manifest, items) in &reports[owner] {
+                let all = now.entry(manifest.clone()).or_default();
+                for item in items {
+                    if !all.contains(item) {
+                        all.push(item.clone());
+                    }
                 }
             }
-            for note in notes {
-                message.push_str(&format!("\nnote: {}", note));
-            }
-            items.push(Json::object(vec![
-                ("range", range_of(&c.text, span)),
-                (
-                    "severity",
-                    Json::number(match d.severity {
-                        Severity::Error => 1,
-                        Severity::Warning => 2,
-                        Severity::Note => 3,
-                    }),
-                ),
-                ("code", Json::str(d.code.map(|c| c.0).unwrap_or(""))),
-                ("source", Json::str("kite")),
-                ("message", Json::str(message)),
-            ]));
         }
-        (
-            "textDocument/publishDiagnostics".to_string(),
-            Json::object(vec![
-                ("uri", Json::str(uri.to_string())),
-                ("diagnostics", Json::Array(items)),
-            ]),
-        )
+        let mut shown = self.manifests_shown.borrow_mut();
+        let mut out = Vec::new();
+        for (manifest, items) in &now {
+            if shown.get(manifest) != Some(items) {
+                out.push(published(manifest, items.clone()));
+            }
+        }
+        for manifest in shown.keys().filter(|m| !now.contains_key(*m)) {
+            out.push(published(manifest, Vec::new()));
+        }
+        *shown = now;
+        out
     }
 
     // ---- hover and definition ----------------------------------------------
@@ -337,13 +408,21 @@ impl Server {
         if name.to_string_lossy().starts_with('<') {
             return Json::Null;
         }
+        Json::object(vec![
+            ("uri", Json::str(self.uri_for(c, &name))),
+            ("range", range_of(c.compilation.sources.text(span.file), span)),
+        ])
+    }
+
+    /// The URI of a file a compilation read, by the name it was read under.
+    fn uri_for(&self, c: &Compiled, name: &Path) -> String {
         // A module is named by the path it was read from, which is joined
         // rather than resolved: a path dependency's file is
         // `app/../lib/md/md.kite`. Folded, so the URI is one an editor opens
         // as the file it is rather than as a second tab.
         let path = match Path::new(&c.path).parent() {
-            Some(dir) if name.is_relative() && Path::new(&c.path).is_absolute() => dir.join(&name),
-            _ => name,
+            Some(dir) if name.is_relative() && Path::new(&c.path).is_absolute() => dir.join(name),
+            _ => name.to_path_buf(),
         };
         let mut shown = normalise(&path).to_string_lossy().to_string();
         if cfg!(windows) {
@@ -352,17 +431,16 @@ impl Server {
         // The editor's own spelling of the URI when the file is open, so the
         // answer lands in the buffer it already has. Compared by where each
         // file really is, which is also how the buffer was matched to it.
-        let here = located(&path);
-        let uri = self
-            .open
+        self.open_uri(&path).unwrap_or_else(|| uri_of_path(&shown))
+    }
+
+    /// The URI the editor has `path` open under, if it has.
+    fn open_uri(&self, path: &Path) -> Option<String> {
+        let here = located(path);
+        self.open
             .keys()
             .find(|u| u.starts_with("file://") && located(Path::new(&path_of(u))) == here)
             .cloned()
-            .unwrap_or_else(|| uri_of_path(&shown));
-        Json::object(vec![
-            ("uri", Json::str(uri)),
-            ("range", range_of(c.compilation.sources.text(span.file), span)),
-        ])
     }
 
     // ---- completion and symbols --------------------------------------------
@@ -517,6 +595,11 @@ impl Server {
         match renameable(&c.compilation, c.own, offset) {
             Err(why) => Reply::refuse(why),
             Ok(binding) => {
+                // Refused now rather than once a name is typed, for a reason
+                // in another file of the module as much as one in this file.
+                if let Err(why) = self.shared(&c, binding) {
+                    return Reply::refuse(why);
+                }
                 // The occurrence under the cursor, so the editor selects
                 // exactly what is about to change.
                 let hit = std::iter::once(&binding.declared_at)
@@ -550,24 +633,207 @@ impl Server {
         let new = kite_driver::identifier_nfc(
             message.path("params.newName").and_then(|n| n.as_str()).unwrap_or(""),
         );
-        if let Some(why) = bad_new_name(&new, binding, &c.compilation) {
+        if let Some(why) = bad_new_name(&new, binding, &c.compilation, &[]) {
             return Reply::refuse(why);
         }
-        let mut spans = vec![binding.declared_at];
-        spans.extend(binding.uses.iter().filter(|s| Some(s.file) == own));
-        spans.sort_by_key(|s| s.start);
-        let edits: Vec<Json> = spans
-            .into_iter()
-            .map(|s| {
-                Json::object(vec![
-                    ("range", range_of(&c.text, s)),
-                    ("newText", Json::str(new.clone())),
-                ])
-            })
-            .collect();
-        let mut changes = std::collections::BTreeMap::new();
-        changes.insert(uri, Json::Array(edits));
+        let shared = match self.shared(&c, binding) {
+            Err(why) => return Reply::refuse(why),
+            Ok(shared) => shared,
+        };
+        let mut changes = BTreeMap::new();
+        let Some(module) = shared else {
+            let mut spans = vec![binding.declared_at];
+            spans.extend(binding.uses.iter().filter(|s| Some(s.file) == own));
+            changes.insert(uri, edits_of(&c.text, spans, &new));
+            return Reply::result(Json::object(vec![("changes", Json::Object(changes))]));
+        };
+        // Every file of the module, each under the URI the editor knows it
+        // by: an open one under its buffer's, so the edit lands in the text
+        // on screen, and a closed one under its path's.
+        let m = &module.compilation;
+        let found = &m.index.bindings[module.binding];
+        let own_files: Vec<FileId> = module.files.iter().map(|(id, _)| *id).collect();
+        if let Some(why) = bad_new_name(&new, found, m, &own_files) {
+            return Reply::refuse(why);
+        }
+        let mut by_file: BTreeMap<u32, Vec<Span>> = BTreeMap::new();
+        for span in std::iter::once(&found.declared_at).chain(found.uses.iter()) {
+            by_file.entry(span.file.0).or_default().push(*span);
+        }
+        for (file, spans) in by_file {
+            let Some((_, path)) = module.files.iter().find(|(id, _)| id.0 == file) else {
+                // Not one of the module's files, which a private name cannot
+                // be used from; nothing the rename could promise to reach.
+                return Reply::refuse(format!(
+                    "`{}` is used outside the files of its module, which a rename here \
+                     cannot account for",
+                    binding.name
+                ));
+            };
+            let target = if located(path) == located(Path::new(&c.path)) {
+                c.uri.clone()
+            } else {
+                self.open_uri(path).unwrap_or_else(|| uri_of_path(&path.to_string_lossy()))
+            };
+            changes.insert(target, edits_of(m.sources.text(FileId(file)), spans, &new));
+        }
         Reply::result(Json::object(vec![("changes", Json::Object(changes))]))
+    }
+
+    /// The directory module a rename of `binding` has to reach all of, when
+    /// its file may be one file of one — compiled whole, with the binding
+    /// found in it — or why the rename may not start.
+    ///
+    /// **Every `.kite` file in a directory shares one namespace** when the
+    /// directory is imported as a module (§13.1), so a private function or
+    /// constant declared in one file is used unqualified from the others. The
+    /// open file is compiled alone, and those uses are in no table of its
+    /// own: a rename edited the declaration and broke every sibling that
+    /// used it. Whether anything imports the directory as a module is not
+    /// something an open editor knows, so a directory with other `.kite`
+    /// files in it is taken to be one.
+    fn shared(&self, c: &Compiled, binding: &Binding) -> Result<Option<Shared>, String> {
+        // A local is its own function's, and a buffer that is not a file has
+        // no directory.
+        if binding.scope.is_some() || !c.uri.starts_with("file://") {
+            return Ok(None);
+        }
+        let path = Path::new(&c.path);
+        let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) else {
+            return Ok(None);
+        };
+        let here = located(path);
+        let siblings = self.siblings(dir, &here)?;
+        if siblings.is_empty() {
+            return Ok(None);
+        }
+        // Every sibling is read before anything is edited: one that cannot
+        // be may use the name, and a rename that edits the rest leaves it
+        // behind.
+        let shown = |p: &Path| -> String {
+            p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+        };
+        for sibling in &siblings {
+            if self.open_uri(sibling).is_some() {
+                continue;
+            }
+            if let Err(e) = std::fs::read_to_string(sibling) {
+                return Err(format!(
+                    "`{}` shares this file's directory, so it may be part of one module with \
+                     this file and use `{}` — but it cannot be read ({}), and a rename that \
+                     cannot see it could leave its uses behind",
+                    shown(sibling),
+                    binding.name,
+                    e
+                ));
+            }
+        }
+        let m = kite_driver::check_module(dir, self.edited());
+        let dir_here = located(dir);
+        let files: Vec<(FileId, PathBuf)> = m
+            .sources
+            .iter()
+            .map(|(id, _)| (id, m.sources.file(id).name.clone()))
+            .filter(|(_, name)| located(name).parent() == Some(dir_here.as_path()))
+            .collect();
+        // What did not parse is in no table, in a sibling as in this file.
+        if let Some((_, name)) = files.iter().find(|(id, _)| {
+            m.diags.iter().any(|d| {
+                d.severity == Severity::Error
+                    && d.code.is_some_and(|code| is_syntax(code.0))
+                    && d.primary_span().is_some_and(|s| s.file == *id)
+            })
+        }) {
+            return Err(format!(
+                "`{}` shares this file's directory and has syntax errors, and a use of `{}` in \
+                 code that did not parse is in no table a rename could edit — fix them first",
+                shown(name),
+                binding.name
+            ));
+        }
+        // The first copy of this file: the module's own. A file its siblings
+        // also import as a module of its own is read twice, and that copy is
+        // loaded after the module's.
+        let mine = files.iter().filter(|(_, name)| located(name) == here).map(|(id, _)| *id).min();
+        let at = binding.declared_at;
+        let path_of_file =
+            |id: FileId| files.iter().find(|(file, _)| *file == id).map(|(_, name)| name);
+        // Declared twice among the directory's files: as one module that is
+        // a duplicate, and as separate ones each has its own — either way,
+        // which use is whose is not something a rename can tell. A second
+        // copy of this very declaration, read again as a module of its own,
+        // is not a second one.
+        let bare = |b: &Binding| b.name.rsplit('.').next().unwrap_or(&b.name).to_string();
+        let twice = m.index.bindings.iter().find_map(|b| {
+            let name = path_of_file(b.declared_at.file)?;
+            let this = located(name) == here
+                && b.declared_at.start == at.start
+                && b.declared_at.end == at.end;
+            (b.scope.is_none() && !this && bare(b) == binding.name).then_some(name)
+        });
+        if let Some(name) = twice {
+            return Err(format!(
+                "`{}` is declared in `{}` too, beside this file, and which of the two each use \
+                 means depends on how the directory is imported — a rename cannot tell",
+                binding.name,
+                shown(name)
+            ));
+        }
+        let Some(index) = m.index.bindings.iter().position(|b| {
+            Some(b.declared_at.file) == mine
+                && b.declared_at.start == at.start
+                && b.declared_at.end == at.end
+        }) else {
+            return Err(format!(
+                "`{}` could not be found when this file's directory was checked as one module, \
+                 so where its other files use it is not known",
+                binding.name
+            ));
+        };
+        let found = &m.index.bindings[index];
+        if !found.mentions.is_empty() {
+            return Err(format!(
+                "`{}` is also written inside a longer name — a qualified path or a shorthand \
+                 field — which a rename cannot safely rewrite",
+                binding.name
+            ));
+        }
+        Ok(Some(Shared { compilation: m, binding: index, files }))
+    }
+
+    /// The `.kite` files in `dir` other than the one at `own`: on disk, and
+    /// open but not yet saved.
+    fn siblings(&self, dir: &Path, own: &Path) -> Result<Vec<PathBuf>, String> {
+        let is_kite = |p: &Path| p.extension().is_some_and(|e| e == "kite");
+        let mut found: Vec<PathBuf> = Vec::new();
+        match std::fs::read_dir(dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.map_err(|e| unlisted(dir, e))?;
+                    if is_kite(&entry.path()) {
+                        found.push(entry.path());
+                    }
+                }
+            }
+            // A buffer in a directory not created yet: its siblings are
+            // buffers too.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(unlisted(dir, e)),
+        }
+        let here = located(dir);
+        for uri in self.open.keys().filter(|u| u.starts_with("file://")) {
+            let path = PathBuf::from(path_of(uri));
+            let at = located(&path);
+            if is_kite(&path)
+                && at.parent() == Some(here.as_path())
+                && !found.iter().any(|f| located(f) == at)
+            {
+                found.push(path);
+            }
+        }
+        found.retain(|p| located(p) != own);
+        found.sort();
+        Ok(found)
     }
 
     fn inlay_hints(&self, message: &Json) -> Reply {
@@ -633,6 +899,88 @@ fn capabilities() -> Json {
             ]),
         ),
     ])
+}
+
+/// A directory module compiled whole, for a rename of a name its files share.
+struct Shared {
+    compilation: Compilation,
+    /// The binding being renamed, as an index into the compilation's.
+    binding: usize,
+    /// The module's files — its directory's — by their id in the compilation.
+    files: Vec<(FileId, PathBuf)>,
+}
+
+/// Why a rename cannot know a directory's files.
+fn unlisted(dir: &Path, e: std::io::Error) -> String {
+    format!(
+        "`{}` cannot be listed ({}), so which files share a module with this one is not known, \
+         and a rename could leave their uses behind",
+        dir.display(),
+        e
+    )
+}
+
+/// Whether a document is a package manifest, `kite.toml`, rather than Kite.
+fn is_manifest(uri: &str) -> bool {
+    uri.starts_with("file://")
+        && Path::new(&path_of(uri)).file_name().is_some_and(|n| n == "kite.toml")
+}
+
+/// The `publishDiagnostics` notification setting `uri`'s list.
+fn published(uri: &str, items: Vec<Json>) -> (String, Json) {
+    (
+        "textDocument/publishDiagnostics".to_string(),
+        Json::object(vec![
+            ("uri", Json::str(uri.to_string())),
+            ("diagnostics", Json::Array(items)),
+        ]),
+    )
+}
+
+/// One diagnostic as the protocol has it, at `span` in `text`: the message,
+/// its first label's message, and every other label and note beneath.
+fn diagnostic_json(d: &Diagnostic, text: &str, span: Span) -> Json {
+    let mut notes: Vec<String> = d.notes.clone();
+    for label in d.labels.iter().skip(1) {
+        notes.push(label.message.clone());
+    }
+    let mut message = d.message.clone();
+    if let Some(first) = d.labels.first() {
+        if !first.message.is_empty() {
+            message.push_str(&format!("\n{}", first.message));
+        }
+    }
+    for note in notes {
+        message.push_str(&format!("\nnote: {}", note));
+    }
+    Json::object(vec![
+        ("range", range_of(text, span)),
+        (
+            "severity",
+            Json::number(match d.severity {
+                Severity::Error => 1,
+                Severity::Warning => 2,
+                Severity::Note => 3,
+            }),
+        ),
+        ("code", Json::str(d.code.map(|c| c.0).unwrap_or(""))),
+        ("source", Json::str("kite")),
+        ("message", Json::str(message)),
+    ])
+}
+
+/// Edits replacing each of `spans` in `text` with `new`, in order.
+fn edits_of(text: &str, mut spans: Vec<Span>, new: &str) -> Json {
+    spans.sort_by_key(|s| s.start);
+    spans.dedup();
+    Json::Array(
+        spans
+            .into_iter()
+            .map(|s| {
+                Json::object(vec![("range", range_of(text, s)), ("newText", Json::str(new))])
+            })
+            .collect(),
+    )
 }
 
 fn uri_of(message: &Json) -> Option<String> {
@@ -902,7 +1250,16 @@ fn is_syntax(code: &str) -> bool {
 }
 
 /// Why `new` may not replace `binding`'s name, or nothing when it may.
-fn bad_new_name(new: &str, binding: &Binding, compiled: &Compilation) -> Option<String> {
+///
+/// `module` is the files of a directory module compiled whole, whose names
+/// are held qualified — `config.helper` — and written bare in those files, so
+/// a name declared in one of them is compared by its bare name.
+fn bad_new_name(
+    new: &str,
+    binding: &Binding,
+    compiled: &Compilation,
+    module: &[FileId],
+) -> Option<String> {
     // The lexer is the authority on what an identifier is: exactly one token,
     // of the right kind, consuming the whole candidate. Anything else — a
     // keyword, a literal, two words, trailing space — is refused here rather
@@ -926,8 +1283,15 @@ fn bad_new_name(new: &str, binding: &Binding, compiled: &Compilation) -> Option<
     // Conservative on purpose: a refusal costs a second attempt, and a rename
     // that quietly changed what other names resolve to costs a debugging
     // session.
+    let named = |other: &Binding| -> bool {
+        if module.contains(&other.declared_at.file) {
+            other.name.rsplit('.').next() == Some(new)
+        } else {
+            other.name == new
+        }
+    };
     let clash = compiled.index.bindings.iter().any(|other| {
-        other.name == new
+        named(other)
             && other.declared_at != binding.declared_at
             && match (&binding.scope, &other.scope) {
                 (Some(a), Some(b)) => a == b,

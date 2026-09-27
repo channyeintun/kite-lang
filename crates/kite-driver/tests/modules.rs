@@ -930,6 +930,37 @@ fn a_manifest_that_does_not_read_is_reported_at_its_line() {
     assert!(said.contains("E0405"), "{}", said);
     assert!(said.contains("kite.toml:4"), "points at the line: {}", said);
     assert!(said.contains("has no `edition`"), "{}", said);
+    // And the `use` it broke says so, where an editor showing only the
+    // file's own diagnostics shows it.
+    assert!(said.contains("kite.toml` did not read (E0405)"), "{}", said);
+}
+
+/// A directory module checked on its own, as an editor renaming a name its
+/// files share asks for it: every file's uses of a private name are that
+/// name's, and they are found although no file of the module was the entry.
+#[test]
+fn a_directory_module_checked_whole_finds_every_files_uses() {
+    let p = Project::new("check-module");
+    let load = p.file(
+        "config/load.kite",
+        "use util\n\nfn helper() -> int {\n  return util.base()\n}\n",
+    );
+    let schema = p.file(
+        "config/schema.kite",
+        "pub fn port() -> int {\n  return helper() + helper()\n}\n",
+    );
+    p.file("config/util.kite", "pub fn base() -> int {\n  return 40\n}\n");
+    let c = kite_driver::check_module(p.dir.join("config"), kite_driver::modules::Files::Disk);
+    assert!(!c.failed(), "{}", c.render_diagnostics());
+    let helper = c
+        .index
+        .bindings
+        .iter()
+        .find(|b| b.name.ends_with(".helper"))
+        .expect("helper is a binding");
+    assert_eq!(c.sources.file(helper.declared_at.file).name, load);
+    let in_schema = helper.uses.iter().filter(|s| c.sources.file(s.file).name == schema).count();
+    assert_eq!(in_schema, 2, "{:?}", helper.uses);
 }
 
 /// A file not yet saved, in a directory not yet created, under a linked

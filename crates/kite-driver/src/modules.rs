@@ -349,6 +349,10 @@ struct Package {
     root: Option<PathBuf>,
     /// What its manifest declares, by name.
     dependencies: Rc<HashMap<String, PathBuf>>,
+    /// The directory of the manifest `dependencies` came from, when there is
+    /// one — so a `use` that finds nothing can say the manifest did not read,
+    /// which is the likelier reason when it did not.
+    manifest: Option<PathBuf>,
 }
 
 /// A package prefix and a `use` path's segments, joined the way a provided key
@@ -599,6 +603,9 @@ pub struct Loader {
     /// Each package's declared dependencies, by its directory, so a manifest
     /// is read — and a broken one reported — once.
     manifests: HashMap<PathBuf, Rc<HashMap<String, PathBuf>>>,
+    /// The manifests that did not read (`E0405`), by their directory as
+    /// `manifests` keys it.
+    unread: HashMap<PathBuf, PathBuf>,
     /// What the program's own manifest declares, which decides how a
     /// package's modules are named — see [`Loader::label`].
     direct: Rc<HashMap<String, PathBuf>>,
@@ -653,11 +660,7 @@ impl Loader {
     ) -> Loader {
         let mut loader = Loader { provided, files, ..Loader::default() };
         let package = match dir {
-            Some(dir) => Package {
-                label: String::new(),
-                root: Some(dir.to_path_buf()),
-                dependencies: loader.program_dependencies(dir, sources, diags),
-            },
+            Some(dir) => loader.program_package(dir, Some(dir.to_path_buf()), sources, diags),
             None => Package::default(),
         };
         loader.direct = package.dependencies.clone();
@@ -682,32 +685,74 @@ impl Loader {
             });
         }
         loader.visit_uses(entry, &scope, &mut stack, sources, diags);
-        // A derived `Encode` is written against `json.Json` whatever the
-        // module deriving it imported. The module is loaded for it here, and
-        // reachable only from the derived code: no spelling is recorded for
-        // any module that did not write one.
-        if loader.wants_json && !loader.seen.contains_key(&Origin::Std("json")) {
-            if let Some((name, src)) = std_entry("json") {
-                let found = Found::Std(name, src);
-                let at = Span::empty_at(FileId(0), 0);
-                loader.load_one(found, "json".to_string(), at, &mut stack, sources, diags);
-            }
-        }
+        loader.load_json_for_derives(&mut stack, sources, diags);
         loader
     }
 
-    /// The program's own dependencies: the manifest in the first directory at
-    /// or above the entry file that has one.
+    /// Load the directory `dir` as the module a `use` naming it loads — every
+    /// `.kite` file in it, as one namespace — and whatever those files import.
+    ///
+    /// For a caller asking about a directory module itself rather than about
+    /// a program: an editor renaming a private name declared in one of its
+    /// files, whose uses may be in any of the others. The editor compiles the
+    /// file it has open as a program, and a file compiled that way sees none
+    /// of its siblings. `entry` is the file the spans of what the loading
+    /// itself reports are placed in.
+    pub fn load_module(
+        dir: &Path,
+        entry: FileId,
+        files: Files,
+        sources: &mut SourceMap,
+        diags: &mut DiagBag,
+    ) -> Loader {
+        let mut loader = Loader { files, ..Loader::default() };
+        // Measured from the directory above, as a `use` written beside it
+        // would measure it, so the module is named by its own directory.
+        let root = dir.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf);
+        let package = loader.program_package(dir, root, sources, diags);
+        loader.direct = package.dependencies.clone();
+        let prefix = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let found = Found::Path { at: dir.to_path_buf(), is_dir: true, package, prefix };
+        let identity = found.identity();
+        let mut stack = Vec::new();
+        loader.load_one(found, identity, Span::empty_at(entry, 0), &mut stack, sources, diags);
+        loader.load_json_for_derives(&mut stack, sources, diags);
+        loader
+    }
+
+    /// A derived `Encode` is written against `json.Json` whatever the module
+    /// deriving it imported. The module is loaded for it here, and reachable
+    /// only from the derived code: no spelling is recorded for any module that
+    /// did not write one.
+    fn load_json_for_derives(
+        &mut self,
+        stack: &mut Vec<Frame>,
+        sources: &mut SourceMap,
+        diags: &mut DiagBag,
+    ) {
+        if self.wants_json && !self.seen.contains_key(&Origin::Std("json")) {
+            if let Some((name, src)) = std_entry("json") {
+                let found = Found::Std(name, src);
+                let at = Span::empty_at(FileId(0), 0);
+                self.load_one(found, "json".to_string(), at, stack, sources, diags);
+            }
+        }
+    }
+
+    /// The program's own package: its dependencies are those of the manifest
+    /// in the first directory at or above `dir` that has one.
     ///
     /// Looked for *upwards*, because a program is usually `src/main.kite` and
     /// the manifest is beside `src/`. Nothing is fetched here — `kitec pkg`
     /// does that, once, on purpose.
-    fn program_dependencies(
+    fn program_package(
         &mut self,
         dir: &Path,
+        root: Option<PathBuf>,
         sources: &mut SourceMap,
         diags: &mut DiagBag,
-    ) -> Rc<HashMap<String, PathBuf>> {
+    ) -> Package {
+        let mut package = Package { root, ..Package::default() };
         // From the absolute directory, so `kitec run main.kite` inside `src/`
         // finds the manifest beside `src/` exactly as `kitec run src/main.kite`
         // does from above it.
@@ -716,11 +761,20 @@ impl Loader {
         while let Some(directory) = here {
             if self.files.is_file(&directory.join("kite.toml")) {
                 self.vendor = Some(directory.join(VENDOR));
-                return self.package_dependencies(directory, sources, diags);
+                package.dependencies = self.package_dependencies(directory, sources, diags);
+                package.manifest = Some(directory.to_path_buf());
+                break;
             }
             here = directory.parent();
         }
-        Rc::default()
+        package
+    }
+
+    /// The manifest `package`'s dependencies were to come from, when it was
+    /// there and did not read.
+    fn unread_manifest(&self, package: &Package) -> Option<&PathBuf> {
+        let directory = package.manifest.as_ref()?;
+        self.unread.get(&self.files.canonical(directory))
     }
 
     /// What the manifest in `directory` declares, and nothing above it.
@@ -755,6 +809,7 @@ impl Loader {
             Err(e) => {
                 let (text, line, why) = unreadable(&path, e);
                 diags.push(manifest_error(&path, text, line, &why, sources));
+                self.unread.insert(key.clone(), path.clone());
                 None
             }
         };
@@ -777,6 +832,7 @@ impl Loader {
                 // declared — a diagnostic about the wrong file.
                 Err(error) => {
                     diags.push(manifest_error(&path, text, error.line, &error.message, sources));
+                    self.unread.insert(key.clone(), path.clone());
                 }
             }
         }
@@ -1063,8 +1119,12 @@ impl Loader {
                 } else {
                     Rc::default()
                 };
-                let package =
-                    Package { label: self.label(segments[0]), root: Some(root.clone()), dependencies };
+                let package = Package {
+                    label: self.label(segments[0]),
+                    root: Some(root.clone()),
+                    dependencies,
+                    manifest: Some(root.clone()),
+                };
                 (root.clone(), package, &segments[1..])
             }
             None => (base.clone(), scope.package.clone(), segments),
@@ -1087,11 +1147,20 @@ impl Loader {
             let prefix = within(&scope.prefix, &segments[..segments.len() - 1]);
             return Some(Found::Path { at: as_file, is_dir: false, package, prefix });
         }
-        diags.push(
-            Diagnostic::error(codes::E0400, format!("cannot find module `{}`", path))
-                .with_primary(span, "no such module")
-                .with_note(format!("looked for `{}` and `{}`", at.display(), as_file.display())),
-        );
+        let mut missing = Diagnostic::error(codes::E0400, format!("cannot find module `{}`", path))
+            .with_primary(span, "no such module")
+            .with_note(format!("looked for `{}` and `{}`", at.display(), as_file.display()));
+        // The manifest's own error is reported in the manifest, which is not
+        // the file anyone looking at this `use` has open — an editor shows a
+        // file's own diagnostics beside it. Said here as well, the reason is
+        // where the symptom is.
+        if let Some(manifest) = self.unread_manifest(&scope.package) {
+            missing = missing.with_note(format!(
+                "`{}` did not read (E0405), so no dependency it declares could be looked for",
+                manifest.display()
+            ));
+        }
+        diags.push(missing);
         None
     }
 
