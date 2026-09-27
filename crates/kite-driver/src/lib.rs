@@ -352,6 +352,29 @@ impl Compilation {
     /// name. The standard library's modules are named under `kite-std/`, and
     /// every source's text travels in the map, so none of it has to be found.
     pub fn wasm_source_map(&self, beside: Option<&Path>) -> Option<String> {
+        self.source_map_naming(|file| source_name(file, beside))
+    }
+
+    /// The same map, for a caller with no filesystem to measure from — the
+    /// compiler built as WebAssembly — that knows where each file is itself:
+    /// a source whose name as compiled is a key of `names` is given that
+    /// name instead. Any other is named as [`Self::wasm_source_map`] names it
+    /// with no directory.
+    ///
+    /// Only the caller knows which directory the map goes into and where each
+    /// file it handed over came from, so `npx kitec build src/main.kite --out
+    /// dist` said `main.kite`, which a browser looked for in `dist/`.
+    pub fn wasm_source_map_renamed(
+        &self,
+        names: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
+        self.source_map_naming(|file| match names.get(file.to_string_lossy().as_ref()) {
+            Some(name) => name.clone(),
+            None => source_name(file, None),
+        })
+    }
+
+    fn source_map_naming(&self, name: impl Fn(&Path) -> String) -> Option<String> {
         use kite_codegen_wasm::sourcemap::{render, FunctionSpan, Source};
         let module = self.wasm.as_ref()?;
         // A release build carries no debug information, and a map with no
@@ -362,7 +385,7 @@ impl Compilation {
         let mut sources: Vec<Source> = Vec::new();
         let mut spans = Vec::with_capacity(module.source_spans.len());
         for (offset, span) in &module.source_spans {
-            let file = source_name(&self.sources.file(span.file).name, beside);
+            let file = name(&self.sources.file(span.file).name);
             let at = self.sources.line_col(*span);
             if !sources.iter().any(|s| s.name == file) {
                 sources.push(Source {

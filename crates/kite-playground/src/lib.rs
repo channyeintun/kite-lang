@@ -217,7 +217,7 @@ pub unsafe extern "C" fn kite_build(
         out.push(("api.js", api_js.into_bytes()));
         out.push(("api.d.ts", api_dts.into_bytes()));
     }
-    if let Some(map) = compiled.wasm_source_map(None) {
+    if let Some(map) = compiled.wasm_source_map_renamed(&module.source_names) {
         out.push((kite_driver::SOURCE_MAP_NAME, map.into_bytes()));
     }
     frame(&out)
@@ -303,13 +303,27 @@ struct ModuleInput {
     path: String,
     entry: String,
     siblings: std::collections::HashMap<String, String>,
+    /// What a source map should call each file, by the name it was compiled
+    /// under: the program's `path`, or a sibling's module name and `.kite`.
+    /// See [`SOURCE_NAMES`].
+    source_names: std::collections::HashMap<String, String>,
 }
+
+/// The entry of a frame that says where a source map should say each file
+/// is, rather than being a sibling: a line per file, its name as compiled, a
+/// tab, and its name relative to where the map is written. No module is
+/// called this, since no module name holds a `?`.
+///
+/// Only the caller knows where it will write the map and where each file it
+/// handed over came from; the compiler, with no filesystem, knows neither. A
+/// map naming each file by its bare name was looked for beside the map.
+const SOURCE_NAMES: &str = "?source-names";
 
 /// Read the framed input both [`kite_build`] and [`kite_check_module`] take.
 ///
 /// The first entry is the program and the rest are its siblings, by module
 /// name — because a Kite module is a directory and this side has no directory
-/// to read.
+/// to read — along with the [`SOURCE_NAMES`] a build may be given.
 ///
 /// # Safety
 /// `ptr` and `len` must describe a buffer the caller owns.
@@ -330,12 +344,22 @@ unsafe fn module_input(ptr: *const u8, len: usize) -> Result<ModuleInput, String
         return Err("error: the source is not valid UTF-8\n".to_string());
     };
     let mut siblings = std::collections::HashMap::new();
+    let mut source_names = std::collections::HashMap::new();
     for (name, body) in files.iter().skip(1) {
-        if let Ok(text) = std::str::from_utf8(body) {
+        let Ok(text) = std::str::from_utf8(body) else {
+            continue;
+        };
+        if name == SOURCE_NAMES {
+            for line in text.lines() {
+                if let Some((compiled, mapped)) = line.split_once('\t') {
+                    source_names.insert(compiled.to_string(), mapped.to_string());
+                }
+            }
+        } else {
             siblings.insert(name.clone(), text.to_string());
         }
     }
-    Ok(ModuleInput { path, entry: src.to_string(), siblings })
+    Ok(ModuleInput { path, entry: src.to_string(), siblings, source_names })
 }
 
 /// The framing described on [`kite_build`], read back.

@@ -46,6 +46,13 @@ export function compiler() {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+/**
+ * The frame entry `build`'s `sourceNames` travel in: a line per file, its
+ * name as compiled, a tab, and the name the source map gives it. No module is
+ * called this, since no module name holds a `?`.
+ */
+const SOURCE_NAMES = "?source-names";
+
 /** What a build produced, or why it produced nothing. */
 export class BuildFailed extends Error {
   /** @param {string} diagnostics Rendered exactly as a terminal renders them. */
@@ -119,11 +126,18 @@ class Compiler {
   /**
    * Compile a module the way `kitec build --emit wasm` does.
    *
+   * `sourceNames` says what the source map calls each file, by the name it
+   * is compiled under — `path` for the program, a sibling's module name and
+   * `.kite` for a sibling — as a path relative to where the map is written.
+   * The compiler has no filesystem to work that out from, and a file left
+   * out keeps its bare name.
+   *
    * @param {{
    *   entry: string,
    *   siblings?: Record<string, string>,
    *   release?: boolean,
    *   path?: string,
+   *   sourceNames?: Record<string, string>,
    * }} module
    * @returns {Record<string, Uint8Array>} `app.wasm` and `app.js`; `api.js`
    *   and `api.d.ts` when the program has a `pub fn` of its own; and
@@ -131,10 +145,13 @@ class Compiler {
    *   writes.
    * @throws {BuildFailed} with the diagnostics a terminal would have shown.
    */
-  build({ entry, siblings = {}, release = false, path }) {
+  build({ entry, siblings = {}, release = false, path, sourceNames = {} }) {
+    const names = Object.entries(sourceNames)
+      .map(([compiled, mapped]) => `${compiled}\t${mapped}\n`)
+      .join("");
     const answer = this.#call(
       "kite_build",
-      this.#frame(entry, siblings, path),
+      this.#frame(entry, names === "" ? siblings : { ...siblings, [SOURCE_NAMES]: names }, path),
       release ? 1 : 0,
     );
     const artefacts = unframe(answer);
