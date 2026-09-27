@@ -816,21 +816,27 @@ fn a_block_string_with_holes_is_dedented() {
 
 // ---- depth -------------------------------------------------------------------
 
-/// Parse on a thread with the main thread's stack, which is what `kitec` and
-/// the language server run on; a test thread has a quarter of it.
-fn parse_deep(src: String) -> Vec<&'static str> {
+/// Run `f` on a thread with a main thread's stack; a test thread has a
+/// quarter of it. The parser itself runs in far less, but a tree as deep as
+/// the ceilings allow is dropped by recursion.
+fn on_a_main_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
     std::thread::Builder::new()
         .stack_size(8 << 20)
-        .spawn(move || parse_src(&src).codes())
+        .spawn(f)
         .expect("spawn")
         .join()
         .expect("the parser did not survive")
 }
 
+fn parse_deep(src: String) -> Vec<&'static str> {
+    on_a_main_stack(move || parse_src(&src).codes())
+}
+
 /// Every one of these aborted the process, in the parser or in a pass after
-/// it. Recursion through a prefix operator or an `else if` now counts toward
-/// the ceiling, and so does each link of a left-deep chain, since the tree it
-/// builds is as deep as a nest.
+/// it. Recursion through a prefix operator counts toward the nesting
+/// ceiling, and each link of a left-deep chain — an `else if` among them —
+/// toward the chain ceiling, since the tree a chain builds is as deep as a
+/// nest.
 #[test]
 fn deep_input_is_one_diagnostic_not_an_abort() {
     let body = |expr: String| format!("fn main() {{\n    let x = {}\n}}\n", expr);
@@ -841,7 +847,7 @@ fn deep_input_is_one_diagnostic_not_an_abort() {
             "fn main() {{\n    if a {{\n    }}{}\n}}\n",
             " else if a {\n    }".repeat(15_000)
         ),
-        body(format!("a{}", ".a".repeat(5_000))),
+        body(format!("a{}", ".a".repeat(10_000))),
         body(format!("{}1", "1 + ".repeat(20_000))),
         body(format!("1{}", " as int".repeat(20_000))),
         body(format!("f{}", "(1)".repeat(100_000))),
@@ -850,9 +856,77 @@ fn deep_input_is_one_diagnostic_not_an_abort() {
         let codes = parse_deep(src);
         assert_eq!(codes, vec!["E0102"]);
     }
-    // Well short of the ceiling, a chain parses.
-    let codes = parse_deep(body(format!("{}1", "1 + ".repeat(200))));
-    assert!(codes.is_empty(), "{:?}", codes);
+}
+
+/// A chain is counted apart from nesting, against a ceiling of its own far
+/// above anything written or generated in earnest. Charged against the
+/// nesting ceiling of 256, a table of three hundred `else if`, or a text
+/// joined with three hundred `+`, was refused — programs the compiler had
+/// always compiled.
+#[test]
+fn a_long_chain_is_not_a_deep_nest() {
+    let body = |expr: String| format!("fn main() {{\n    let x = {}\n}}\n", expr);
+    let links = MAX_CHAIN as usize;
+    let chains = [
+        format!(
+            "fn main() {{\n    if a {{\n    }}{}\n}}\n",
+            " else if a {\n    }".repeat(300)
+        ),
+        body(format!("{}1", "1 + ".repeat(300))),
+        body(format!("a{}", " || a".repeat(300))),
+        body(format!("s{}", ".trim()".repeat(300))),
+        // The longest chain there may be, of each kind: its links, and not
+        // one more.
+        body(format!("{}1", "1 + ".repeat(links))),
+        body(format!("s{}", ".f()".repeat(links / 2))),
+        format!(
+            "fn main() {{\n    if a {{\n    }}{}\n}}\n",
+            " else if a {\n    }".repeat(links)
+        ),
+    ];
+    for src in chains {
+        let codes = parse_deep(src);
+        assert!(codes.is_empty(), "{:?}", codes);
+    }
+    // One link more is the one diagnostic, saying which ceiling it is.
+    let src = body(format!("{}1", "1 + ".repeat(links + 1)));
+    let (codes, out) = on_a_main_stack(move || {
+        let p = parse_src(&src);
+        (p.codes(), p.render())
+    });
+    assert_eq!(codes, vec!["E0102"], "{}", out);
+    assert!(out.contains(&format!("at most {} links long", links)), "{}", out);
+    // The two ceilings are apart: a nest does not spend a chain's links, nor a
+    // chain a nest's levels.
+    let (open, close) = ("(".repeat(200), ")".repeat(200));
+    let nested = format!("{}{}1{}", open, "1 + ".repeat(links - 10), close);
+    assert!(parse_deep(body(nested)).is_empty());
+}
+
+/// A binding whose value is refused is still a binding, so nothing that uses
+/// it is reported again as naming nothing.
+#[test]
+fn a_binding_whose_value_is_refused_is_still_declared() {
+    let links = MAX_CHAIN as usize;
+    let src = format!(
+        "fn main() {{\n    let s = {}1\n    var t = * 2\n    io.print(s)\n}}\n",
+        "1 + ".repeat(links + 1)
+    );
+    let (codes, kept) = on_a_main_stack(move || {
+        let p = parse_src(&src);
+        let body = &p.fns()[0].body.stmts;
+        let kept = matches!(&body[0], Stmt::Let(LetStmt { init: Some(Expr::Error(_)), .. }))
+            && matches!(&body[1], Stmt::Var(VarStmt { init: Expr::Error(_), .. }))
+            && matches!(&body[2], Stmt::Expr(Expr::Call { .. }));
+        (p.codes(), kept)
+    });
+    assert_eq!(codes, vec!["E0102", "E0100"]);
+    assert!(kept, "the `let` and the `var` are kept, and the line after them read");
+    // And at module level.
+    let p = parse_src("let LIMIT: int = 1 +\n\nfn main() {\n    io.print(LIMIT)\n}\n");
+    assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+    assert!(matches!(&p.file.items[0], Item::Const(c) if matches!(c.value, Expr::Error(_))));
+    assert_eq!(p.fns().len(), 1);
 }
 
 // ---- recovery: one diagnostic per cause -------------------------------------

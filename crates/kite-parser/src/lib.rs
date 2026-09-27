@@ -222,7 +222,10 @@ struct Parser<'a> {
     /// The VM has had the same protection since it was written
     /// (`kite_vm::MAX_FRAMES`); this is the front end catching up.
     depth: u32,
-    /// Whether the ceiling has already been reported, so one pathological file
+    /// How many links of left-deep chains enclose the token being parsed,
+    /// counted apart from `depth` and against [`MAX_CHAIN`].
+    chain: u32,
+    /// Whether a ceiling has already been reported, so one pathological file
     /// yields one diagnostic rather than one per level on the way out.
     depth_reported: bool,
 }
@@ -243,15 +246,47 @@ struct Parser<'a> {
 /// Still far past any program written on purpose. The standard library's
 /// deepest expression is nowhere near it.
 ///
-/// **A chain counts as well as a nest.** `a + b + c` and `x.f().g()` are
-/// parsed by a loop, not by recursion, so the parser itself would take any
-/// length — but each link wraps everything before it, so the tree comes out
-/// as deep as the chain is long, and every pass after this one recurses over
-/// the tree. Twenty thousand `1 +` parsed happily here and then aborted the
-/// type checker. Each link is charged one level for as long as the expression
-/// holding it is being parsed, so the depth of the tree, whether it grew by
-/// nesting or by chaining, is what the ceiling bounds.
+/// A chain is not counted here but against [`MAX_CHAIN`], which is far
+/// higher.
 const MAX_DEPTH: u32 = 256;
+
+/// How many links of left-deep chains may enclose one another.
+///
+/// `a + b + c`, `x.f().g()` and `if … else if …` are read by a loop, so the
+/// parser itself would take any length — but each link wraps everything
+/// before it, so the tree comes out as deep as the chain is long, and every
+/// pass after this one recurses over the tree. Twenty thousand `1 +` parsed
+/// happily here and then aborted the type checker. Each link is charged for as
+/// long as the expression holding it is being parsed, so the length of the
+/// longest path of links through the tree is what this bounds.
+///
+/// It is a ceiling of its own, and a high one, because long chains are what
+/// generated code is made of — a table as three hundred `else if`, a text as
+/// a thousand `+` — and a program the compiler handled has to go on being
+/// handled. Charged against [`MAX_DEPTH`], as they once were, three hundred
+/// links were an error.
+///
+/// Measured rather than guessed, on a release `kitec` with the ordinary 8 MiB
+/// of stack and no ceiling at all: a chain of method calls — two links each,
+/// the `.f` and the call — aborted between 1,800 and 2,000 calls, one of `+`
+/// or `||` between 6,000 and 8,000 links, and nesting between 2,000 and 3,000
+/// levels. A debug build aborted at under 300 method calls. The type checker
+/// is what runs out, at some four kilobytes of stack a method call in release
+/// and thirty in debug. So `kitec` and the language server run the compiler on
+/// a stack of its own (`kite_driver::on_compiler_stack`, 512 MiB, reserved
+/// rather than used), which holds a chain this long of the costliest kind in a
+/// debug build with room to spare — and nothing the release compiler managed
+/// before there was a ceiling is refused.
+///
+/// The compiler built for WebAssembly cannot choose its stack: a wasm call
+/// runs on the JavaScript engine's, about 1 MiB in Node and in a browser. A
+/// chain of 1,700 method calls, of 1,900 `+`, or 1,500 nested brackets ran it
+/// out there. Its ceiling is 1,024 links, which with the full 256 levels of
+/// nesting on top still compiles on half of Node's stack.
+#[cfg(not(target_family = "wasm"))]
+const MAX_CHAIN: u32 = 8192;
+#[cfg(target_family = "wasm")]
+const MAX_CHAIN: u32 = 1024;
 
 impl<'a> Parser<'a> {
     fn new(file: FileId, src: &'a str, tokens: &'a [Token], diags: &'a mut DiagBag) -> Self {
@@ -288,6 +323,7 @@ impl<'a> Parser<'a> {
             layout: Layout::default(),
             line_starts,
             depth: 0,
+            chain: 0,
             depth_reported: false,
         }
     }
@@ -302,15 +338,21 @@ impl<'a> Parser<'a> {
     /// `self.depth -= 1` on the way out.
     fn deeper(&mut self) -> Option<()> {
         if self.depth >= MAX_DEPTH {
-            self.too_deep();
+            self.too_deep(
+                "the nesting here is deeper than the parser will go",
+                format!(
+                    "at most {MAX_DEPTH} levels of brackets, blocks and prefix operators may \
+                     nest"
+                ),
+            );
             return None;
         }
         self.depth += 1;
         Some(())
     }
 
-    /// Report the depth ceiling, once.
-    fn too_deep(&mut self) {
+    /// Report a ceiling, once.
+    fn too_deep(&mut self, label: &str, note: String) {
         if self.depth_reported {
             return;
         }
@@ -318,24 +360,29 @@ impl<'a> Parser<'a> {
         let span = self.tokens[self.pos.min(self.tokens.len() - 1)].span;
         self.diags.push(
             Diagnostic::error(codes::E0102, "expression nested too deeply")
-                .with_primary(span, "the nesting here is deeper than the parser will go")
-                .with_note(format!(
-                    "at most {MAX_DEPTH} levels may nest, counting each link of a chain such as \
-                     `a + b + …` or `x.f().g()…` as one"
-                )),
+                .with_primary(span, label)
+                .with_note(note),
         );
     }
 
-    /// Charge one more link of a left-deep chain against the depth ceiling.
+    /// Charge one more link of a left-deep chain against [`MAX_CHAIN`].
     ///
     /// When this says no, the ceiling has been reported and the caller gives
     /// the expression up as one that did not parse. Either way the caller
-    /// hands the levels back through `links` once it is done, as
-    /// [`Parser::deeper`]'s callers do one at a time.
+    /// hands the links back through `links` once it is done.
     fn link(&mut self, links: &mut u32) -> bool {
-        if self.deeper().is_none() {
+        if self.chain >= MAX_CHAIN {
+            self.too_deep(
+                "the chain here is longer than the parser will go",
+                format!(
+                    "a chain such as `a + b + …`, `x.f().g()…` or `else if … else if …` may be \
+                     at most {MAX_CHAIN} links long, counting the links of any chain it is part \
+                     of"
+                ),
+            );
             return false;
         }
+        self.chain += 1;
         *links += 1;
         true
     }
@@ -1310,10 +1357,33 @@ impl<'a> Parser<'a> {
             self.expect_terminator();
             return Some(ConstDecl { is_pub, name, ty, value, span });
         }
-        let value = self.parse_expr()?;
+        let (value, ended) = self.initialiser();
         let span = start.to(self.prev_span());
-        self.expect_terminator();
+        if !ended {
+            self.expect_terminator();
+        }
         Some(ConstDecl { is_pub, name, ty, value, span })
+    }
+
+    /// The value a `let`, a `var` or a module-level constant is given, and
+    /// whether its line has been dealt with already.
+    ///
+    /// A value that does not parse is reported, the rest of its line is
+    /// skipped, and it comes back as an error rather than as nothing, so the
+    /// name is still declared. Throwing the declaration away with its value
+    /// made every later use of the name a second error — `cannot find` a name
+    /// the reader can see declared — which is what a chain past
+    /// [`MAX_CHAIN`] used to cost.
+    fn initialiser(&mut self) -> (Expr, bool) {
+        let from = self.pos;
+        if let Some(value) = self.parse_expr() {
+            return (value, false);
+        }
+        let at = self.tokens[from].span;
+        if !self.unwinding {
+            self.skip_rest(from, Resume::Line);
+        }
+        (Expr::Error(at), true)
     }
 
     /// A parameter list, after its `(` and up to its `)`.
@@ -1752,13 +1822,16 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        let init = if self.eat(T::Eq) {
-            Some(self.parse_expr()?)
+        let (init, ended) = if self.eat(T::Eq) {
+            let (value, ended) = self.initialiser();
+            (Some(value), ended)
         } else {
-            None
+            (None, false)
         };
         let span = start.to(self.prev_span());
-        self.expect_terminator();
+        if !ended {
+            self.expect_terminator();
+        }
         Some(Stmt::Let(LetStmt { binding, ty, init, span }))
     }
 
@@ -1788,9 +1861,11 @@ impl<'a> Parser<'a> {
             self.expect_terminator();
             return Some(Stmt::Var(VarStmt { name, ty, init, span }));
         }
-        let init = self.parse_expr()?;
-        let span = start.to(init.span());
-        self.expect_terminator();
+        let (init, ended) = self.initialiser();
+        let span = start.to(self.prev_span());
+        if !ended {
+            self.expect_terminator();
+        }
         Some(Stmt::Var(VarStmt { name, ty, init, span }))
     }
 
@@ -1856,36 +1931,53 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    /// `if … { … } else if … { … } else { … }`.
+    ///
+    /// An `else if` chain is read by a loop, as every other chain is, rather
+    /// than by this calling itself for each link: fifteen thousand of them
+    /// used to exhaust the parser's own stack. Each link still holds the rest
+    /// of the chain in the tree it builds, and the passes after this one
+    /// recurse over that, so each is charged against [`MAX_CHAIN`].
     fn parse_if(&mut self) -> Option<IfStmt> {
-        let start = self.span();
-        self.bump(); // `if`
+        let mut links = 0;
+        let out = self.parse_if_chain(&mut links);
+        self.chain -= links;
+        out
+    }
 
-        self.no_struct_literal += 1;
-        let cond = self.parse_expr();
-        self.no_struct_literal -= 1;
-        let cond = cond?;
-
-        let then = self.parse_block()?;
-
-        let else_ = if self.at(T::Else) {
-            self.bump();
-            if self.at(T::If) {
-                // An `else if` chain is recursion, one level per link, so it
-                // is charged against the same ceiling as any other nesting.
-                // Fifteen thousand of them used to abort the process.
-                self.deeper()?;
-                let chained = self.parse_if();
-                self.depth -= 1;
-                Some(Box::new(ElseBranch::If(chained?)))
-            } else {
-                Some(Box::new(ElseBranch::Block(self.parse_block()?)))
+    fn parse_if_chain(&mut self, links: &mut u32) -> Option<IfStmt> {
+        // Each `if` of the chain with its condition and block, in order.
+        let mut heads: Vec<(Span, Expr, Block)> = Vec::new();
+        let last = loop {
+            let start = self.span();
+            self.bump(); // `if`
+            self.no_struct_literal += 1;
+            let cond = self.parse_expr();
+            self.no_struct_literal -= 1;
+            let cond = cond?;
+            let then = self.parse_block()?;
+            heads.push((start, cond, then));
+            if !self.eat(T::Else) {
+                break None;
             }
-        } else {
-            None
+            if !self.at(T::If) {
+                break Some(Box::new(ElseBranch::Block(self.parse_block()?)));
+            }
+            if !self.link(links) {
+                return None;
+            }
         };
-
-        let span = start.to(self.prev_span());
-        Some(IfStmt { cond, then, else_, span })
+        // Folded from the last link back to the first, each `if` becoming the
+        // `else` of the one before. Every one of them ends where the chain
+        // does.
+        let end = self.prev_span();
+        let (start, cond, then) = heads.pop().expect("a chain has an `if`");
+        let mut stmt = IfStmt { cond, then, else_: last, span: start.to(end) };
+        while let Some((start, cond, then)) = heads.pop() {
+            let else_ = Some(Box::new(ElseBranch::If(stmt)));
+            stmt = IfStmt { cond, then, else_, span: start.to(end) };
+        }
+        Some(stmt)
     }
 
     fn parse_for(&mut self, label: Option<Ident>, start: Span) -> Option<ForStmt> {
@@ -2216,13 +2308,13 @@ impl<'a> Parser<'a> {
         let mut lhs = self.parse_prefix()?;
         let mut links = 0;
         let out = self.parse_infix(&mut lhs, min_bp, &mut links).map(|()| lhs);
-        self.depth -= links;
+        self.chain -= links;
         out
     }
 
     /// The operators after a left operand, for as long as they bind at
     /// `min_bp`. Each one wraps everything before it, so each is charged as
-    /// one level of depth in `links` (see [`MAX_DEPTH`]).
+    /// one link in `links` (see [`MAX_CHAIN`]).
     fn parse_infix(&mut self, lhs: &mut Expr, min_bp: u8, links: &mut u32) -> Option<()> {
         #[allow(clippy::while_let_loop)]
         loop {
@@ -2350,7 +2442,7 @@ impl<'a> Parser<'a> {
                 let primary = self.parse_primary()?;
                 let mut links = 0;
                 let out = self.parse_postfix(primary, &mut links);
-                self.depth -= links;
+                self.chain -= links;
                 out
             }
         }
@@ -2366,7 +2458,7 @@ impl<'a> Parser<'a> {
 
     /// The postfix chain after a primary: `.name`, `(args)`, `[index]` and
     /// `Type{ … }`. Each link wraps everything before it, so each is charged
-    /// as one level of depth in `links` (see [`MAX_DEPTH`]).
+    /// as one link in `links` (see [`MAX_CHAIN`]).
     fn parse_postfix(&mut self, mut expr: Expr, links: &mut u32) -> Option<Expr> {
         loop {
             let link = match self.peek() {
@@ -2827,6 +2919,7 @@ impl<'a> Parser<'a> {
         // stack, so the sub-parser continues the count rather than starting a
         // fresh one.
         sub.depth = self.depth;
+        sub.chain = self.chain;
         sub.depth_reported = self.depth_reported;
         let span = Span::new(self.file, start as u32, end as u32);
         let expr = match sub.parse_expr() {

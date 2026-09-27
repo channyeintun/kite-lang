@@ -2611,6 +2611,56 @@ fn literals_past_ten_thousand_elements_agree() {
     }
 }
 
+/// Long chains compile and agree: a table of three hundred `else if`, a text
+/// of two thousand pieces joined with `+`, three hundred `||` and three
+/// hundred method calls in a row. The parser once charged each link against
+/// the 256 levels nesting may go, and refused every one of these — programs
+/// the compiler had always compiled.
+///
+/// Compiled on the stack `kitec` gives the compiler: every pass recurses as
+/// deep as a chain is long, and a debug build's type checker spends thirty
+/// kilobytes a method call, which no test thread has.
+#[test]
+fn long_chains_agree_across_backends() {
+    let mut branches = String::from("  if c == 0 {\n    io.print(0)\n  }");
+    for i in 1..300 {
+        branches.push_str(&format!(" else if c == {} {{\n    io.print({})\n  }}", i, i));
+    }
+    let pieces: Vec<String> = (0..2000).map(|i| format!("\"{},\"", i)).collect();
+    let terms: Vec<String> = (0..300).map(|i| format!("c == {}", 1000 + i)).collect();
+    let src = format!(
+        "struct Tally {{\n  n: int\n}}\n\nimpl Tally {{\n  fn up(self) -> Tally {{\n\
+         \x20   return Tally{{ n: self.n + 1 }}\n  }}\n}}\n\n\
+         fn main() {{\n  let c = 150\n{}\n  let s = {}\n  io.print(s.len())\n\
+         \x20 let far = {}\n  io.print(far)\n  let t = Tally{{ n: 0 }}{}\n  io.print(t.n)\n}}\n",
+        branches,
+        pieces.join(" + "),
+        terms.join(" || "),
+        ".up()".repeat(300)
+    );
+    let name = "long-chains";
+    let outputs = kite_driver::on_compiler_stack(move || {
+        let vm = run_on_vm(name, &src);
+        let native = native_available().then(|| run_on_native(name, &src));
+        let wasm = node_available().then(|| {
+            let dir = std::env::temp_dir().join(format!("kite-chains-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("create work directory");
+            let out = run_on_wasm(name, &src, &dir);
+            let _ = std::fs::remove_dir_all(&dir);
+            out
+        });
+        (vm, native, wasm)
+    });
+    let (vm, native, wasm) = outputs;
+    assert_eq!(vm, "150\n8890\nfalse\n300\n");
+    if let Some(native) = native {
+        assert_eq!(native, vm, "native");
+    }
+    if let Some(wasm) = wasm {
+        assert_eq!(wasm, vm, "wasm");
+    }
+}
+
 /// The object-file path, through the system linker: one program built into a
 /// real executable and run. The JIT above covers the codegen; this covers the
 /// relocations, the symbol names and the `staticlib` runtime — the parts only

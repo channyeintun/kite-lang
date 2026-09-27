@@ -17,9 +17,14 @@ use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    ExitCode::from(serve(&mut stdin.lock(), &mut stdout.lock()))
+    // A document is compiled the moment it is opened, whatever it holds, and
+    // the compiler's passes recurse as deep as a chain in it is long: on a
+    // main thread's stack a chain the parser accepts could end the session.
+    ExitCode::from(kite_driver::on_compiler_stack(|| {
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        serve(&mut stdin.lock(), &mut stdout.lock())
+    }))
 }
 
 /// Answer messages until the editor says to stop or goes away, and say with

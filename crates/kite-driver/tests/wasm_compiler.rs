@@ -168,9 +168,11 @@ fn with_compiler(name: &str, compiler: &Path, script: &str) -> String {
 /// by `+` ran the compiler out of stack — `memory access out of bounds`, where
 /// the native compiler handled a thousand — and every call on that instance
 /// after it failed the same way, so one such file broke a Vite dev server
-/// until it was restarted. The parser now refuses a chain past 256 links
-/// (E0102) on every target, and the Wasm compiler has a 16 MiB stack besides,
-/// so a chain of two hundred — near the longest there is — builds here.
+/// until it was restarted. The Wasm compiler has a 16 MiB stack now, and past
+/// that a wasm call runs out of the JavaScript engine's own, which nothing in
+/// the module can enlarge — so its parser refuses a chain past 1,024 links
+/// (E0102). The longest chain it accepts builds here, and so does one of
+/// method calls, the costliest kind, inside the deepest nest it accepts.
 ///
 /// For the second half nothing ordinary traps any more, so a trap is
 /// supplied: the first instance's `kite_run` is made to throw the way a trap
@@ -187,6 +189,9 @@ const chain = (n) =>
   Array.from({ length: n }, (_, i) => `"line ${i}\\n"`).join(" +\n    ") +
   "\n  io.print(s.len())\n}\n";
 const hello = 'fn main() {\n  io.print("ok")\n}\n';
+const calls = (n) =>
+  'fn main() {\n  let s = ' + "(".repeat(250) + '" x "' + ".trim()".repeat(n) + ")".repeat(250) +
+  "\n  io.print(s)\n}\n";
 
 // The first instance's `kite_run` traps, and — as after a real trap, whose
 // memory is wherever it stopped — goes on trapping. Only a new instance works.
@@ -201,7 +206,14 @@ WebAssembly.instantiate = async (...args) => {
 };
 
 const c = await compiler();
-console.log("200 links: " + (c.build({ entry: chain(200) })["app.wasm"].length > 0));
+console.log("1024 links: " + (c.build({ entry: chain(1025) })["app.wasm"].length > 0));
+console.log("512 calls, 250 deep: " + (c.build({ entry: calls(512) })["app.wasm"].length > 0));
+try {
+  c.build({ entry: chain(1026) });
+  console.log("1025 links: built");
+} catch (e) {
+  console.log("1025 links: " + (e.name === "BuildFailed" && e.message.includes("E0102")));
+}
 try {
   c.build({ entry: chain(20000) });
   console.log("20000 links: built");
@@ -219,7 +231,8 @@ console.log("afterwards: " + JSON.stringify(c.run(hello)));
     let out = with_compiler("deep", &compiler, script);
     assert_eq!(
         out,
-        "200 links: true\n20000 links: refused\nthe trap: true\nafterwards: \"ok\\n\"\n",
+        "1024 links: true\n512 calls, 250 deep: true\n1025 links: true\n20000 links: refused\n\
+         the trap: true\nafterwards: \"ok\\n\"\n",
         "{}",
         out
     );

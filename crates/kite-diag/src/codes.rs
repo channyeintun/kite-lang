@@ -110,10 +110,14 @@ codes! {
          abort, not a panic, so nothing can catch it. A ceiling turns that \
          into this diagnostic. The bytecode VM has bounded call depth for the \
          same reason; this is the same rule applied to the front end.\n\n\
-         A long chain counts too: each `+` of `a + b + c + …`, each call of \
-         `x.f().g()…`, each `else if`, each prefix `-`. The parser reads a \
-         chain in a loop, but the tree it builds is as deep as the chain is \
-         long, and every pass after the parser walks that tree by recursion.";
+         There are two ceilings. Brackets, blocks, types, patterns and prefix \
+         operators such as `-` and `!` may nest 256 levels deep. A chain — \
+         each `+` of `a + b + c + …`, each `.f` and each call of \
+         `x.f().g()…`, each `else if` — is counted apart, and may be 8,192 \
+         links long, 1,024 in the compiler built for WebAssembly, which runs \
+         on the JavaScript engine's stack. The parser reads a chain in a \
+         loop, but the tree it builds is as deep as the chain is long, and \
+         every pass after the parser walks that tree by recursion.";
 
     E0110 = "E0110", "use of possibly-uninitialised binding",
         "A `let` binding may be assigned after declaration, but only if the \

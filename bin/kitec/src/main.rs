@@ -47,6 +47,14 @@ An option a command does not take is an error, not something ignored.
 ";
 
 fn main() -> ExitCode {
+    // The compiler's passes recurse over the syntax tree, and a long chain in
+    // the source is a deep tree. The stack a main thread comes with ran out at
+    // under two thousand method calls in one chain; this one does not run out
+    // below the parser's ceiling.
+    kite_driver::on_compiler_stack(command)
+}
+
+fn command() -> ExitCode {
     // This binary may *be* a Kite program: `kitec bundle` copies the compiler
     // and appends the source to it. Running that copy runs the program, and
     // everything below is unreachable there.

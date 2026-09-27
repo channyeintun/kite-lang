@@ -189,9 +189,15 @@ first `{` whose `}` was indented for an outer block. A comma missing between
 parameters is supplied, and a comma between struct fields read as a line
 break, so the declaration survives for the code that uses it.
 
-Recursion depth is bounded (`E0102`), and a left-deep chain — `a + b + …`,
-`x.f().g()…` — counts a level per link, because every later pass recurses over
-the tree it builds.
+Recursion depth is bounded (`E0102`): brackets, blocks and prefix operators
+may nest 256 levels. A left-deep chain — `a + b + …`, `x.f().g()…`, `else if`
+— is read by a loop, but every later pass recurses over the tree it builds, so
+its links are counted too, against a ceiling of their own: 8,192, or 1,024 in
+the compiler built for WebAssembly, whose stack is the JavaScript engine's.
+`kitec` and the language server give the compiler a 512 MiB stack
+(`kite_driver::on_compiler_stack`), reserved rather than used, which a debug
+build needs for a chain that long; on a main thread's 8 MiB a release build ran
+out at under two thousand method calls.
 
 The AST keeps a span on every node and stores no literal values; the source is
 the single truth, and a pass that wants a value reads it through the span. It

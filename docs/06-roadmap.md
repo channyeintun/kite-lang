@@ -162,6 +162,17 @@ Do the diagnostic rendering *now*, not later. Every subsequent phase is easier
 when errors are readable, and retrofitting spans into an IR that lacks them is
 miserable.
 
+*Reviewed later:* the depth ceiling (E0102), added so that a file could not
+exhaust the compiler's stack, counted each link of a chain — each `+`, each
+call of `x.f().g()`, each `else if` — as a level of nesting, against the same
+256. It refused a table of three hundred `else if` and a text joined from three
+hundred pieces, which had always compiled. Chains now have a ceiling of their
+own, 8,192 links (1,024 in the compiler built for WebAssembly, whose stack is
+the JavaScript engine's), and `kitec` and the language server give the
+compiler a 512 MiB stack, because every pass still recurses as deep as a chain
+is long: on a main thread's 8 MiB a release build had run out at under two
+thousand method calls, and a debug build at under three hundred.
+
 ---
 
 ## Phase 2 — The type system
