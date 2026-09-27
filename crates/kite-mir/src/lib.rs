@@ -56,6 +56,14 @@ pub struct Program {
     /// used one into an import and the glue declares it; the bytecode VM asks
     /// its embedder.
     pub externs: Vec<kite_hir::ExternDef>,
+    /// Each host function's declared signature, by the same index as
+    /// `externs`: a code per parameter, then `:` and a code for the result —
+    /// `s` for `str`, `i` `int`, `f` `float`, `b` `bool`, `u` nothing, and
+    /// `r` for anything else. What answers a host call checks what it reads
+    /// and returns against this before it runs, natively and on the VM alike,
+    /// so a program that declares a host function wrongly traps the same way
+    /// on both. See [`extern_signature`].
+    pub extern_sigs: Vec<Vec<u8>>,
     pub entry: Option<FnId>,
     /// Interned string constants, referenced by [`Operand::Str`].
     pub strings: Vec<String>,
@@ -66,6 +74,28 @@ pub struct Program {
     /// Non-empty means the program must not reach a backend; see
     /// [`internal_errors`].
     pub internal: Vec<Internal>,
+}
+
+/// A host function's declared signature, in the encoding
+/// [`Program::extern_sigs`] describes.
+///
+/// `str` gets its own letter rather than sharing "reference" with everything
+/// else because it is the distinction a host needs: every reference is a
+/// word natively, and only a string is something the host can read as a path.
+pub fn extern_signature(e: &kite_hir::ExternDef, types: &Types) -> Vec<u8> {
+    use kite_hir::TyKind;
+    let code = |ty: TyId| match types.kind(ty) {
+        TyKind::Str => b's',
+        TyKind::Int => b'i',
+        TyKind::Float => b'f',
+        TyKind::Bool => b'b',
+        TyKind::Unit | TyKind::Never | TyKind::Error => b'u',
+        _ => b'r',
+    };
+    let mut sig: Vec<u8> = e.params.iter().map(|t| code(*t)).collect();
+    sig.push(b':');
+    sig.push(code(e.ret));
+    sig
 }
 
 /// A bug in the compiler rather than in the program: something a stage found

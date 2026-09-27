@@ -18,6 +18,11 @@ pub fn lower(program: &hir::Program) -> Program {
         out.fns.push(lowered);
     }
     out.externs = program.externs.clone();
+    out.extern_sigs = program
+        .externs
+        .iter()
+        .map(|e| extern_signature(e, &program.types))
+        .collect();
     out.strings = strings.list;
     out.vtables = program.vtables.clone();
     out

@@ -2024,6 +2024,12 @@ anything it calls often enough for a name lookup to matter. Drawing does not use
 it at all: the drawing calls are compiler builtins, so a program that paints
 needs no `extern`.
 
+A runtime that answers a host function itself — the bytecode VM and the native
+runtime both answer `@host("fs")` — holds the declaration to what it reads and
+returns. A parameter declared as other than what the host reads, or a result
+declared as other than what it answers, is a trap before the call is made, in
+the same words on both.
+
 **`std/js` declares nothing.** It is a fixed set of about twenty primitives
 through which any host object can be reached:
 

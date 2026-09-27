@@ -676,6 +676,20 @@ struct Vm<'a> {
 pub trait Host {
     fn call(&mut self, name: &str, args: &[Value]) -> Result<Value, Trap>;
 
+    /// What the function `name` reads and answers, in the encoding of
+    /// `kite_mir::Program::extern_sigs` (a code per parameter, `:`, a code
+    /// for the result), and the name a trap about it gives the call — or
+    /// `None`, and the program's declaration goes unchecked.
+    ///
+    /// A host that says is held to it before the call, as the native runtime
+    /// holds its own: a parameter the host reads must be declared as what it
+    /// reads it as, and the declared result must be what it answers. Without
+    /// that, `extern fn path_kind(path: str) -> bool` printed `2` as a `bool`
+    /// here and trapped natively.
+    fn signature(&self, _name: &str) -> Option<(&'static [u8], &'static str)> {
+        None
+    }
+
     /// Give the host a turn when every task is waiting on it.
     ///
     /// Returns whether anything happened. A host with nothing outstanding
@@ -683,6 +697,64 @@ pub trait Host {
     /// spinning — which is the truth: nothing was ever going to arrive.
     fn wait(&mut self) -> Result<bool, Trap> {
         Ok(false)
+    }
+}
+
+/// Hold a program's declaration of a host function to what the host says it
+/// reads and answers — `kite-rt`'s `host_params`, in the same order and the
+/// same words, so a wrong declaration traps alike on both backends.
+///
+/// Extra declared parameters are ignored, as they are there: a host reads
+/// what it reads.
+fn check_host_signature(name: &str, declared: &[u8], wants: &[u8], op: &'static str) -> Result<(), Trap> {
+    let split = |sig: &[u8]| -> (Vec<u8>, Option<u8>) {
+        match sig.iter().position(|c| *c == b':') {
+            Some(at) => (sig[..at].to_vec(), sig.get(at + 1).copied()),
+            None => (sig.to_vec(), None),
+        }
+    };
+    let (want_params, want_ret) = split(wants);
+    let (have_params, have_ret) = split(declared);
+    for (i, want) in want_params.iter().enumerate() {
+        if have_params.get(i) != Some(want) {
+            return Err(Trap::TypeConfusion { op, found: not_a(*want) });
+        }
+    }
+    if have_ret != want_ret {
+        return Err(Trap::Failed {
+            message: format!(
+                "`{}` is declared to return {}, and the host returns {}",
+                name,
+                type_name_of(have_ret.unwrap_or(b'u')),
+                type_name_of(want_ret.unwrap_or(b'u'))
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// A signature code as the type it stands for.
+fn type_name_of(code: u8) -> &'static str {
+    match code {
+        b's' => "str",
+        b'i' => "int",
+        b'f' => "float",
+        b'b' => "bool",
+        b'u' => "()",
+        _ => "reference",
+    }
+}
+
+/// What a trap says a wrongly declared parameter was — `kite-rt` writes
+/// `not a ` before the type's name, the way this VM's own checks do.
+fn not_a(code: u8) -> &'static str {
+    match code {
+        b's' => "not a str",
+        b'i' => "not a int",
+        b'f' => "not a float",
+        b'b' => "not a bool",
+        b'u' => "not a ()",
+        _ => "not a reference",
     }
 }
 
@@ -1277,7 +1349,13 @@ impl<'a> Vm<'a> {
                         .map(|i| self.regs[base + arg_base as usize + i].clone())
                         .collect();
                     let value = match self.host.as_mut() {
-                        Some(h) => h.call(&name, &args)?,
+                        Some(h) => {
+                            let declared = self.chunk.extern_sigs.get(index as usize);
+                            if let (Some(declared), Some((wants, op))) = (declared, h.signature(&name)) {
+                                check_host_signature(&name, declared, wants, op)?;
+                            }
+                            h.call(&name, &args)?
+                        }
                         None => return Err(Trap::NoHostFunction { name }),
                     };
                     self.set(base, dst, value);

@@ -432,28 +432,6 @@ fn build<M: Module>(
     Ok(Artifacts { wrapper })
 }
 
-/// A host function's signature as the program declared it, in the encoding
-/// `kite-rt`'s host boundary checks before it reads a word: one byte per
-/// parameter, `:`, one for the result.
-///
-/// `str` gets its own letter rather than sharing "reference" with everything
-/// else because it is the distinction the host needs: every reference is a
-/// word here, and only a string is something the host can read as a path.
-fn extern_sig(e: &kite_hir::ExternDef, types: &Types) -> Vec<u8> {
-    let code = |ty: TyId| match types.kind(ty) {
-        TyKind::Str => b's',
-        TyKind::Int => b'i',
-        TyKind::Float => b'f',
-        TyKind::Bool => b'b',
-        TyKind::Unit | TyKind::Never | TyKind::Error => b'u',
-        _ => b'r',
-    };
-    let mut sig: Vec<u8> = e.params.iter().map(|t| code(*t)).collect();
-    sig.push(b':');
-    sig.push(code(e.ret));
-    sig
-}
-
 /// A named, read-only byte blob the registration function can point at.
 fn define_bytes<M: Module>(
     cx: &mut ModuleCx<M>,
@@ -533,7 +511,7 @@ fn define_init<M: Module>(
     let mut extern_names = Vec::new();
     for (i, e) in cx.program.externs.iter().enumerate() {
         let name = format!("{}.{}", e.host, e.name);
-        let sig = extern_sig(e, cx.types);
+        let sig = mir::extern_signature(e, cx.types);
         extern_names.push((
             define_bytes(cx, &format!("kite_extern_{}", i), name.as_bytes())?,
             name.len(),
