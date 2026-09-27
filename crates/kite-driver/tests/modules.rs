@@ -945,6 +945,48 @@ fn a_module_called_prelude_is_refused() {
     assert!(said.contains("E0403"), "{}", said);
 }
 
+/// A module spelled like one the standard library puts in every file is
+/// refused. Only a path's last segment was checked, never the name after
+/// `as`, so `use util as errors` was accepted and one spelling reached two
+/// modules: `errors.new` stayed the standard library's, `errors.only` reached
+/// `util`, and `use util as io` left `io.print` the builtin with no word said.
+#[test]
+fn a_module_spelled_like_an_always_available_one_is_refused() {
+    let p = Project::new("reserved-spelling");
+    p.file(
+        "util.kite",
+        "pub fn new(s: str) -> str {\n  return \"mine \" + s\n}\n\n\
+         pub fn print(s: str) {\n}\n",
+    );
+    for (spelling, body) in [
+        ("errors", "io.print(errors.new(\"x\").message())"),
+        ("io", "io.print(\"which print?\")"),
+        ("prelude", "io.print(prelude.new(\"x\"))"),
+        ("json", "io.print(json.new(\"x\"))"),
+    ] {
+        let main = p.file(
+            &format!("main_{}.kite", spelling),
+            &format!("use util as {}\n\nfn main() {{\n  {}\n}}\n", spelling, body),
+        );
+        let said = p.run(&main).expect_err("reserved");
+        assert!(said.contains("E0403"), "{}: {}", spelling, said);
+        assert!(said.contains(&format!("`{}` is the name of", spelling)), "{}", said);
+    }
+    // And a sibling named after one, which the last segment was already
+    // checked for — `io` is one now too.
+    p.file("io.kite", "pub fn print(s: str) {\n}\n");
+    let main = p.file("main_io_file.kite", "use io\n\nfn main() {\n  io.print(\"x\")\n}\n");
+    assert!(p.run(&main).expect_err("reserved").contains("E0403"));
+    // A `std` module spelled as itself is its own spelling, and any other
+    // name is free.
+    let main = p.file(
+        "main_ok.kite",
+        "use std/errors as errors\nuse std/json as json\nuse util as mine\n\n\
+         fn main() {\n  io.print(json.stringify(json.Json.Null))\n  io.print(mine.new(\"x\"))\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "null\nmine x\n");
+}
+
 /// A standard module is `std/<name>`, exactly. Only the last segment used to
 /// be read, so any path ending in `json` under `std` was `std/json`.
 #[test]

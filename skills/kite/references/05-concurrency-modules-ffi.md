@@ -19,8 +19,9 @@ The deltas that will catch you out, in the order you will hit them:
    the project root.
 6. **A module is where its source is**, so `util` inside `a/` and `util` inside
    `b/` are two modules, and so are `dep/utils` and `utils` — but the standard
-   library's twenty names and `prelude` are reserved on the *last* segment, so
-   `use dep/json` is `E0403`.
+   library's twenty names, `io`, `draw`, `ptr` and `prelude` are reserved on
+   the *last* segment, so `use dep/json` is `E0403`, and after `as`, so
+   `use util as errors` is too.
 7. **`Share` is a real bound you can write yourself**, and closures, `dyn`
    values, bare type parameters and `JsValue` all fail it.
 8. **Nothing is parallel on any target today.** `Share` is enforced anyway.
@@ -624,12 +625,14 @@ every program writes it. A standard module is exactly `std/<name>` —
 
 ### `E0403` — the standard library's names are reserved
 
-The twenty names in the compiler's `STD_MODULES` table, and `prelude`:
+The twenty names in the compiler's `STD_MODULES` table, the three other
+modules its builtins are reached through (`io.print`, `draw.rect`,
+`ptr.same`), and `prelude`:
 
 ```
 buffer  canvas  crypto  dom   errors  fmt   fs    html   http  js
 json    math    socket  sync  task    test  text  time   toml  window
-prelude
+io      draw    ptr     prelude
 ```
 
 A non-`std` module may not take one. `use crypto` naming a sibling directory is
@@ -640,6 +643,21 @@ module's unqualified fallback.
 
 ```kite fails
 use crypto //~ E0403
+
+fn main() {
+    io.print(1)
+}
+```
+
+**The name after `as` is checked too.** `io`, `errors`, `text`, `task`, `time`,
+`js`, `draw` and `ptr` are in scope in every file without a `use`, so a module
+spelled like one shared the spelling with it: under `use util as errors`,
+`errors.new` stayed the standard library's while `errors.only` reached `util`.
+Any reserved name after `as` is `E0403`, except a `std` module spelled as
+itself (`use std/json as json`):
+
+```kite fails
+use std/math as io //~ E0403
 
 fn main() {
     io.print(1)

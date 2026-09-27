@@ -55,6 +55,36 @@ pub fn std_module(name: &str) -> Option<&'static str> {
     STD_MODULES.iter().find(|(n, _)| *n == name).map(|(_, src)| *src)
 }
 
+/// Whether a module name is the standard library's to spell (`E0403`): one of
+/// its modules, a module its builtins are reached through — `io`, `draw`,
+/// `ptr` — or `prelude`.
+fn reserved(name: &str) -> bool {
+    std_module(name).is_some()
+        || kite_resolve::BUILTIN_MODULES.contains(&name)
+        || name == kite_resolve::PRELUDE
+}
+
+/// The note for a reserved `name` a module may not take: what the name
+/// already is, and `remedy`.
+fn reserved_because(name: &str, remedy: &str) -> String {
+    if name == kite_resolve::PRELUDE {
+        format!(
+            "the prelude is the standard library's, and is in scope everywhere without a `use`; \
+             {} so the two cannot be confused",
+            remedy
+        )
+    } else if kite_resolve::BUILTIN_MODULES.contains(&name) {
+        format!(
+            "`{}.…` reaches the standard library in every file, `use` or not, so a module \
+             spelled `{}` would share the spelling with it and a name both declare would go to \
+             one of them silently; {}",
+            name, name, remedy
+        )
+    } else {
+        format!("`use std/{}` is that module; {} so the two cannot be confused", name, remedy)
+    }
+}
+
 /// The standard library module a `use std/…` names, with its name as the
 /// table spells it.
 fn std_entry(name: &str) -> Option<(&'static str, &'static str)> {
@@ -842,25 +872,37 @@ impl Loader {
             // the prelude is looked up by that name from everywhere, so its
             // declarations became every module's unqualified fallback.
             let is_std = segments.first() == Some(&"std");
-            if !is_std && (std_module(last).is_some() || last == kite_resolve::PRELUDE) {
-                let note = if last == kite_resolve::PRELUDE {
-                    "the prelude is the standard library's, and is in scope everywhere without a \
-                     `use`; rename this module so the two cannot be confused"
-                        .to_string()
-                } else {
-                    format!(
-                        "`use std/{}` is that module; rename this one so the two cannot be \
-                         confused",
-                        last
-                    )
-                };
+            if !is_std && reserved(last) {
                 diags.push(
                     Diagnostic::error(
                         codes::E0403,
                         format!("`{}` is the name of a standard library module", last),
                     )
                     .with_primary(u.span, "this name belongs to the standard library")
-                    .with_note(note),
+                    .with_note(reserved_because(last, "rename this module")),
+                );
+                continue;
+            }
+            // **And so is the spelling, not only the path.** The check above
+            // read the path's last segment and never the name after `as`, so
+            // `use util as errors` was accepted — and `errors` is in scope in
+            // every file without a `use`. One spelling then reached two
+            // modules: `errors.new` stayed the standard library's while
+            // `errors.only` reached `util`, and wherever both declared a name
+            // the standard library won, silently. A `std` module spelled as
+            // itself is the one spelling that is its own; without an `as`,
+            // the spelling is the last segment, which is checked above or is
+            // the `std` module's own.
+            let own = is_std && segments.get(1) == Some(&spelling.as_str());
+            if u.alias.is_some() && reserved(&spelling) && !own {
+                diags.push(
+                    Diagnostic::error(
+                        codes::E0403,
+                        format!("`{}` is the name of a standard library module", spelling),
+                    )
+                    .with_primary(u.span, "this spelling belongs to the standard library")
+                    .with_note(reserved_because(&spelling, "spell this module another way"))
+                    .with_note("`use … as …` takes any other name"),
                 );
                 continue;
             }

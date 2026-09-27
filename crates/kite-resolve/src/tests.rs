@@ -174,3 +174,30 @@ fn edit_distance_is_correct() {
     assert_eq!(edit_distance("kitten", "sitting"), 3);
     assert_eq!(edit_distance("", "abc"), 3);
 }
+
+/// Every module a builtin is reached through is in [`BUILTIN_MODULES`], which
+/// is what the loader refuses a module's spelling against. A builtin under a
+/// new head that the list missed would be one a module could share a spelling
+/// with again. Read from `from_path` itself, so the list cannot drift from it.
+#[test]
+fn every_builtin_module_is_listed() {
+    let source = include_str!("lib.rs");
+    let table = source
+        .split("pub fn from_path(path: &str) -> Option<BuiltinFn> {")
+        .nth(1)
+        .and_then(|rest| rest.split("pub fn path(self)").next())
+        .expect("from_path is in lib.rs");
+    let mut heads = Vec::new();
+    for line in table.lines() {
+        let Some((path, _)) = line.trim().strip_prefix('"').and_then(|l| l.split_once('"')) else {
+            continue;
+        };
+        let head = path.split_once('.').map(|(head, _)| head);
+        heads.extend(head);
+        assert_eq!(BuiltinFn::from_path(path).map(|b| b.path()), Some(path), "{}", path);
+    }
+    assert!(heads.len() > 20, "found {:?}", heads);
+    for head in heads {
+        assert!(BUILTIN_MODULES.contains(&head), "`{}` is not in BUILTIN_MODULES", head);
+    }
+}

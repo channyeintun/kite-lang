@@ -279,6 +279,14 @@ pub enum BuiltinFn {
     JsFunc,
 }
 
+/// The modules a builtin is reached through: the head of every dotted path
+/// [`BuiltinFn::from_path`] answers. They are in scope in every file, `use` or
+/// not — `io.print` needs no import — so a module a file spells like one of
+/// them would share the spelling with it, and `io.print` would stay the
+/// builtin while `io.anything_else` reached the module. The loader refuses
+/// that spelling (`E0403`).
+pub const BUILTIN_MODULES: &[&str] = &["io", "errors", "draw", "text", "task", "time", "ptr", "js"];
+
 impl BuiltinFn {
     pub fn from_path(path: &str) -> Option<BuiltinFn> {
         match path {

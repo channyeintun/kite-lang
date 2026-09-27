@@ -383,8 +383,15 @@ codes! {
          over every `crypto.hash` call in the program with no diagnostic.\n\n\
          So the standard library's names belong to it, and so does `prelude`, \
          whose declarations are in scope everywhere without a `use`: a module \
-         of that name became every module's unqualified fallback. Rename the \
-         module.";
+         of that name became every module's unqualified fallback. So do `io`, \
+         `draw` and `ptr`, which its builtins are reached through.\n\n\
+         The name after `as` is a spelling too. `use util as errors` was \
+         accepted, and `errors` is in scope in every file without a `use`, so \
+         one spelling reached two modules: `errors.new` stayed the standard \
+         library's while every other `errors.…` reached `util`. A `std` module \
+         spelled as itself — `use std/json as json` — is the one spelling \
+         that is its own.\n\n\
+         Rename the module, or spell it another way with `use … as …`.";
 
     E0404 = "E0404", "two modules of the same name",
         "A module is identified by where its source is, and a use site writes \
