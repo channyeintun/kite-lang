@@ -1737,6 +1737,66 @@ fn main() {
 /// one is here because Wasm once refused it, trapped on it, or answered
 /// differently.
 const WASM_TARGET: &[(&str, &str)] = &[
+    // A match arm binding what a `nil` arm leaves behind holds the payload,
+    // so the binding unwraps. At `T = Option<int>` the subject `Option<T>` is
+    // `Option<int>` and so is the binding, and the unwrap from a type to
+    // itself made a module the validator refused (E0900).
+    (
+        "a-generic-match-binding-at-an-optional",
+        r#"fn wrapit<T>(x: T) -> Option<T> {
+  return x
+}
+
+fn or_else<T>(x: T, d: T) -> T {
+  return match wrapit(x) {
+    nil => d,
+    v => v,
+  }
+}
+
+fn pick<T>(x: Option<T>, d: T) -> T {
+  return match x {
+    nil => d,
+    v => v,
+  }
+}
+
+fn first_or<T>(xs: [T], d: T) -> T {
+  return match xs.get(0) {
+    nil => d,
+    v => v,
+  }
+}
+
+fn main() {
+  let a: Option<int> = 5
+  let n: Option<int> = nil
+  let r = or_else(a, n)
+  if r != nil {
+    io.print(r)
+  }
+  io.print(or_else(n, a) == a)
+  let b: Option<int> = 3
+  let p: Option<int> = pick(b, n)
+  io.print(p == nil)
+  let q: Option<int> = pick(n, b)
+  io.print(q == b)
+  let s: Option<str> = "hi"
+  let none: Option<str> = nil
+  let t: Option<str> = pick(s, none)
+  io.print(t == "hi")
+  let u: Option<str> = pick(none, s)
+  io.print(u == nil)
+  let xs: [Option<int>] = [7, nil]
+  let first = first_or(xs, n)
+  if first != nil {
+    io.print(first)
+  }
+  io.print(first_or([1, 2], 9))
+  io.print(or_else(4, 9))
+}
+"#,
+    ),
     // A map key was compared with `i32.eq` unless it was a number or a string,
     // so a struct, enum, tuple, optional or slice key produced a module the
     // validator refused (E0900). The removal from a map built elsewhere is here

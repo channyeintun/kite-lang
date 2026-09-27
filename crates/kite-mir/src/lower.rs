@@ -970,7 +970,16 @@ impl<'a> FnLowerer<'a> {
             hir::Pattern::Wildcard => self.terminate(Terminator::Goto(on_match)),
 
             hir::Pattern::Binding { local, unwrap } => {
-                let value = if *unwrap {
+                // The checker unwraps a binding whose arm proves an optional
+                // present; in a generic function specialised at `T =
+                // Option<int>`, the subject `Option<T>` is `Option<int>` and
+                // so is the binding, and there is nothing to take out. The
+                // VM and the native backend let an unwrap from a type to
+                // itself through, and Wasm, whose optional of an `int` is a
+                // box, emitted a module that did not validate — the same
+                // collapse `mono` already makes for a written unwrap.
+                let unwraps = *unwrap && self.locals[local.0 as usize].ty != subject_ty;
+                let value = if unwraps {
                     Rvalue::Unwrap { value: subject.clone() }
                 } else {
                     Rvalue::Use(subject.clone())
