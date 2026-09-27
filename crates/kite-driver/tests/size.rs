@@ -73,7 +73,7 @@ fn a_library_of_four_functions_stays_small() {
 /// A real island: five thousand rows, filtered, sorted and diffed on every
 /// keystroke.
 ///
-/// Today 30,566 bytes, against a budget that was 24,576. What got bigger,
+/// Today 27,933 bytes, against a budget that was 24,576. What got bigger,
 /// measured rather than estimated — each number is this test run at that
 /// commit:
 ///
@@ -96,6 +96,11 @@ fn a_library_of_four_functions_stays_small() {
 ///    and costs it these bytes. The budget did not move.
 /// 4. **923 bytes** (29,643 → 30,566) arrived with the standard library's
 ///    own round of fixes, merged after (3) and measured at the merge.
+/// 5. **2,633 bytes back** (30,566 → 27,933) from the last round's changes to
+///    the Wasm backend: a forward jump became a plain branch rather than a
+///    trip through the dispatch loop (→ 28,438), and then overflow checks and
+///    map writes became calls to shared helpers, and a local that lives within
+///    one block shares a slot with others of its type.
 ///
 /// `examples/page` attaches its own listeners through `std/dom` and uses none
 /// of (2), so it pays for the machinery without spending it. That is the
