@@ -201,7 +201,12 @@ guessed number of arguments; after a line break it is the `)` that is missing,
 and that is what is reported. A bracket whose closer was reported missing
 counts as closed from then on, so recovery resumes at the next line instead of
 taking the function's `}` for the literal's, and a binding whose value did not
-parse is kept, with an `Error` for a value.
+parse is kept, with an `Error` for a value. A struct literal, a `match`, a
+value `if` or a closure cut short by a missing `}` becomes an `Error` node
+too, rather than being checked as though what was written so far were the
+whole of it; a declaration cut short is kept, because the rest of the program
+names it. An index the parser already refused, such as `xs[a..b..c]`, makes
+the whole indexing an `Error`.
 
 Recursion depth is bounded (`E0102`): brackets, blocks and prefix operators
 may nest 256 levels. A left-deep chain — `a + b + …`, `x.f().g()…`, `else if`

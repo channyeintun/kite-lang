@@ -2001,6 +2001,12 @@ impl<'a> Parser<'a> {
             T::For => Some(Stmt::For(self.parse_for(None, start)?)),
             T::Match => {
                 let m = self.parse_match()?;
+                // Cut short by a missing `}`, it has arms the author never
+                // finished writing, and checking them as the whole of the
+                // match reported the ones not yet written as missing.
+                if self.unwinding {
+                    return Some(Stmt::Error(m.span));
+                }
                 Some(Stmt::Match(m))
             }
             T::Check => {
@@ -2627,6 +2633,22 @@ impl<'a> Parser<'a> {
         Some(())
     }
 
+    /// `expr`, or an error in its place if a missing `}` cut it short.
+    ///
+    /// The braces of a struct literal, a `match` or a closure found unclosed
+    /// hold what the author had written so far, and checking that as the
+    /// whole of it reported what was still to be written: a literal's missing
+    /// fields, a match's missing arms, a block with no value yet. The one
+    /// diagnostic is the unclosed brace. Declarations are kept, because the
+    /// rest of the program names them; an expression names nothing.
+    fn unless_cut_short(&self, expr: Expr) -> Expr {
+        if self.unwinding {
+            Expr::Error(expr.span())
+        } else {
+            expr
+        }
+    }
+
     /// `start..end` or `start..=end`, refusing one range as the start of
     /// another.
     ///
@@ -2810,10 +2832,14 @@ impl<'a> Parser<'a> {
                     let index = self.in_brackets(|p| p.parse_index())?;
                     let end = self.expect_closer(T::RBracket, opener)?;
                     let span = expr.span().to(end);
-                    expr = Expr::Index {
-                        base: Box::new(expr),
-                        index: Box::new(index),
-                        span,
+                    // An index that is already an error — `xs[1..2..3]` —
+                    // leaves nothing to say what the indexing produces, and
+                    // guessing an element made `.len()` after it `int` has
+                    // no methods.
+                    expr = if matches!(index, Expr::Error(_)) {
+                        Expr::Error(span)
+                    } else {
+                        Expr::Index { base: Box::new(expr), index: Box::new(index), span }
                     };
                 }
                 // `Point{ x: 1.0 }`. Suppressed inside an `if`/`for`/`match`
@@ -2827,7 +2853,8 @@ impl<'a> Parser<'a> {
                 // follows — which `link` above has already decided.
                 _ => {
                     let path = type_path_of(&expr)?;
-                    expr = Expr::StructLit(self.parse_struct_literal(path)?);
+                    let literal = self.parse_struct_literal(path)?;
+                    expr = self.unless_cut_short(Expr::StructLit(literal));
                 }
             }
         }
@@ -2923,6 +2950,9 @@ impl<'a> Parser<'a> {
             }
             T::If => {
                 let if_stmt = self.parse_if()?;
+                if self.unwinding {
+                    return Some(Expr::Error(if_stmt.span));
+                }
                 let Some(else_) = if_stmt.else_ else {
                     self.diags.push(
                         Diagnostic::error(codes::E0100, "`if` used as a value needs an `else`")
@@ -2981,9 +3011,15 @@ impl<'a> Parser<'a> {
                 let end = self.expect_closer(T::RBracket, opener)?;
                 Some(Expr::Slice { elems, span: span.to(end) })
             }
-            T::Match => Some(Expr::Match(self.parse_match()?)),
+            T::Match => {
+                let m = self.parse_match()?;
+                Some(self.unless_cut_short(Expr::Match(m)))
+            }
             T::LBrace if self.no_struct_literal == 0 => self.parse_map_literal(),
-            T::Pipe | T::PipePipe => Some(self.parse_closure()?),
+            T::Pipe | T::PipePipe => {
+                let closure = self.parse_closure()?;
+                Some(self.unless_cut_short(closure))
+            }
             _ => {
                 self.error_expected("an expression");
                 None
