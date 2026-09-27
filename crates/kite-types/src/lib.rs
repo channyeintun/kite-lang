@@ -10689,6 +10689,36 @@ fn check_impls(
             if let Some(declared) = trait_method_generics.get(&(tid, di)) {
                 for (d, g) in declared.iter().zip(&sig.generics[block..]) {
                     map.push((d.ty, g.ty));
+                    // A caller through a bound is checked against the trait's
+                    // bounds, and monomorphisation then hands its arguments
+                    // to this body. A bound the trait does not state is one
+                    // no such caller was held to: `u.show()` on an `int` ran
+                    // on every backend. A weaker one asks nothing of them.
+                    for b in &g.bounds {
+                        if d.bounds.contains(b) {
+                            continue;
+                        }
+                        let bound = types.trait_def(*b).name.clone();
+                        diags.push(
+                            Diagnostic::error(
+                                codes::E0208,
+                                format!(
+                                    "`{}` requires its `{}` to be `{}`, but the trait does not",
+                                    m.name.name,
+                                    g.name,
+                                    last_segment(&bound)
+                                ),
+                            )
+                            .with_primary(g.span, "a bound the trait does not declare")
+                            .with_secondary(d.span, format!("the trait declares `{}` here", d.name))
+                            .with_note(
+                                "a call through the trait is checked against the trait's \
+                                 bounds, so an implementation may ask no more of a type \
+                                 parameter than they do; add the bound to the trait's \
+                                 method instead",
+                            ),
+                        );
+                    }
                 }
             }
             let decl_params: Vec<TyId> =

@@ -1376,7 +1376,9 @@ agree about the receiver: a method the trait declares with `self` may not take
 `dyn` — sees only the trait's. For the same reason it must agree about whether
 the method can fail and whether it is `async`: a call through the trait yields
 what the declaration says, a `(T, error)` pair or a `Task`, as a direct call
-does.
+does. A generic method's type parameters may be bounded no more tightly than
+the trait's are (`E0208`): a caller through the trait meets the trait's bounds
+and no others.
 
 ### 10.2 Coherence
 
