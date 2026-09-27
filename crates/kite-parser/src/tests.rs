@@ -1285,6 +1285,134 @@ fn a_literal_missing_its_brace_is_one_error() {
     }
 }
 
+/// A mistake inside a struct or map literal is recovered from inside it, and
+/// the literal's own `}` closes the literal. The literal used to be given up
+/// on at the mistake, so its `}` closed the function around it: the lines
+/// after it were declarations gone wrong, or not read at all.
+#[test]
+fn a_typo_in_a_literal_is_recovered_inside_it() {
+    let body = |literal: &str| {
+        format!(
+            "fn main() {{\n    let p = {}\n    let q = p.x\n    io.print(q)\n}}\n\n\
+             fn later() -> int {{\n    return 3\n}}\n",
+            literal
+        )
+    };
+    let stmts = |p: &Parsed| p.fns()[0].body.stmts.len();
+    // Not a field: the literal is an error, and the binding still one.
+    let p = parse_src(&body("P{ x 1, y: 2 }"));
+    assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+    assert!(p.render().contains("expected `,` or `}`"), "{}", p.render());
+    let main = p.fns()[0];
+    assert!(
+        matches!(&main.body.stmts[0], Stmt::Let(LetStmt { init: Some(Expr::Error(_)), .. })),
+        "{:?}",
+        main.body.stmts
+    );
+    assert_eq!((stmts(&p), p.fns().len()), (3, 2));
+    // A `,` left out before a field or an entry: supplied, and the literal
+    // is the literal written.
+    for literal in ["P{ x: 1 y: 2 }", "{\"a\": 1 \"b\": 2}"] {
+        let p = parse_src(&body(literal));
+        assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+        assert!(p.render().contains("expected `,` between"), "{}", p.render());
+        let Stmt::Let(LetStmt { init: Some(init), .. }) = &p.fns()[0].body.stmts[0] else {
+            panic!("{:?}", p.fns()[0].body.stmts)
+        };
+        match init {
+            Expr::StructLit(lit) => assert_eq!(lit.fields.len(), 2),
+            Expr::Map { entries, .. } => assert_eq!(entries.len(), 2),
+            other => panic!("{:?}", other),
+        }
+        assert_eq!((stmts(&p), p.fns().len()), (3, 2));
+    }
+    // Inside a call, inside a block.
+    let p = parse_src(
+        "fn main() {\n    if true {\n        show(P{ x: 1 y: 2 })\n    }\n    io.print(1)\n}\n\n\
+         fn later() -> int {\n    return 3\n}\n",
+    );
+    assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+    assert_eq!((stmts(&p), p.fns().len()), (2, 2));
+    // A stray `)` in one is only stray.
+    let p = parse_src(&body("P{ x: f(a, b), y), z: 2 }"));
+    assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+    assert_eq!((stmts(&p), p.fns().len()), (3, 2));
+    // A condition's `)` left out reads its block as a literal. That is one
+    // mistake, and the block's `}` is still the block's.
+    let p = parse_src(
+        "fn main() {\n    if (a > b {\n        io.print(1)\n    }\n    io.print(a)\n}\n\n\
+         fn later() -> int {\n    return 3\n}\n",
+    );
+    assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+    assert_eq!((stmts(&p), p.fns().len()), (2, 2));
+}
+
+/// A `,` left out at the end of a line of a list laid out over several is
+/// one error, where it goes, and the list goes on as if it were there. The
+/// next line used to be taken for the next statement, which lost the one
+/// holding the list and read its `]` as the function's end.
+#[test]
+fn a_comma_missing_at_the_end_of_a_line_is_one_error() {
+    let lists = [
+        "[\n        1, 2,\n        3, 4\n        5, 6,\n    ]",
+        "add(\n        1,\n        2\n        3,\n    )",
+        "{\n        \"a\": 1,\n        \"b\": 2\n        \"c\": 3,\n    }",
+        "P{\n        x: 1\n        y: 2,\n    }",
+    ];
+    for list in lists {
+        let src = format!(
+            "fn main() {{\n    let v = {}\n    io.print(v)\n}}\n\nfn later() -> int {{\n    return 3\n}}\n",
+            list
+        );
+        let p = parse_src(&src);
+        assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+        let out = p.render();
+        assert!(out.contains("expected `,` between"), "{}", out);
+        assert!(out.contains("found a line break"), "{}", out);
+        assert!(p.diags.iter().all(|d| d.fixes.is_empty()));
+        assert_eq!(p.fns()[0].body.stmts.len(), 2, "{:?}", p.fns()[0].body.stmts);
+        assert_eq!(p.fns().len(), 2);
+        let Stmt::Let(LetStmt { init: Some(init), .. }) = &p.fns()[0].body.stmts[0] else {
+            panic!("{:?}", p.fns()[0].body.stmts)
+        };
+        match init {
+            Expr::Slice { elems, .. } => assert_eq!(elems.len(), 6),
+            Expr::Map { entries, .. } => assert_eq!(entries.len(), 3),
+            Expr::StructLit(lit) => assert_eq!(lit.fields.len(), 2),
+            // How many arguments a call has with a `,` supplied is a guess,
+            // as it is with one supplied on a line.
+            Expr::Error(_) => assert!(list.starts_with("add")),
+            other => panic!("{:?}", other),
+        }
+    }
+    // A line no further in than the list's own is the next statement, and
+    // it is the closer that is missing, as before.
+    let p = parse_src("fn main() {\n    let v = [1, 2\n    io.print(3)\n}\n");
+    assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+    assert!(p.render().contains("expected `]`"), "{}", p.render());
+    assert_eq!(p.fns()[0].body.stmts.len(), 2);
+}
+
+/// A value refused along with the rest of its block — its skip reached the
+/// block's `}` — leaves the block ending in an error, as a block a missing
+/// `}` cut short does. The `return` it went past used to leave the block
+/// ending in the binding, and the checker then reported that the function
+/// did not return.
+#[test]
+fn a_value_refused_with_the_rest_of_its_block_ends_it_in_an_error() {
+    let p = parse_src(
+        "fn doubled(xs: [int]) -> [int] {\n    var out: [int] = [\n    for x in xs {\n\
+         \x20       out.push(x * 2)\n    }\n    return out\n}\n",
+    );
+    assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+    let stmts = &p.fns()[0].body.stmts;
+    assert!(matches!(&stmts[0], Stmt::Var(VarStmt { init: Expr::Error(_), .. })), "{:?}", stmts);
+    assert!(matches!(stmts.last(), Some(Stmt::Error(_))), "{:?}", stmts);
+    // A value refused on its own line leaves the lines after it alone.
+    let p = parse_src("fn main() {\n    let v = [1, 2\n    io.print(3)\n}\n");
+    assert!(matches!(p.fns()[0].body.stmts.last(), Some(Stmt::Expr(_))));
+}
+
 /// Struct fields and enum variants are separated by line breaks. A comma is
 /// reported once and read as one, rather than losing the member after it.
 #[test]

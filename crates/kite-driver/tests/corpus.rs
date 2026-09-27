@@ -254,6 +254,35 @@ fn one_mistake_in_a_list_is_one_diagnostic() {
             8,
         ),
         ("fn main() {\n    let name = \"x\"\n    io.print(\"hello \" name)\n}\n", 3),
+        // What the parser could not read is not checked as well, nor what
+        // is made from it: a pair taken apart binds both names (they were
+        // E0110), and a generic function given it infers nothing (that was
+        // E0209, then `cannot print a `T``).
+        (
+            "fn pair(n: int) -> (int, int) {\n    return (n, n + 1)\n}\n\n\
+             fn main() {\n    let (a, b) = pair(1\n    io.print(a + b)\n}\n",
+            7,
+        ),
+        (
+            "fn first<T>(xs: [T]) -> T {\n    return xs[0]\n}\n\n\
+             fn main() {\n    let xs = [1, 2, 3\n    io.print(first(xs))\n    io.print(\"\\(first(xs))\")\n}\n",
+            7,
+        ),
+        // A value whose skip went past the `return` after it: the function
+        // is not also said not to return.
+        (
+            "fn doubled(xs: [int]) -> [int] {\n    var out: [int] = [\n    for x in xs {\n\
+             \x20       out.push(x * 2)\n    }\n    return out\n}\n\n\
+             fn main() {\n    io.print(doubled([1]).len())\n}\n",
+            3,
+        ),
+        // A condition's `)` left out reads its block as a literal: one
+        // mistake, and the block's `}` still closes the block.
+        (
+            "fn main() {\n    let a = 1\n    let b = 2\n    if (a > b {\n        io.print(1)\n    }\n\
+             \x20   io.print(a)\n}\n\nfn later() -> int {\n    return 3\n}\n",
+            5,
+        ),
     ];
     for (src, line) in cases {
         let result = compile(Path::new("t.kite"), src, Emit::Check);

@@ -1401,8 +1401,23 @@ impl<'a> Checker<'a> {
 
             ast::Stmt::Check { expr, span } => self.check_stmt(expr, *span, sig),
             ast::Stmt::Defer { expr, span } => self.defer_stmt(expr, *span),
-            ast::Stmt::Error(_) => None,
+            ast::Stmt::Error(_) => {
+                self.unread();
+                None
+            }
         }
+    }
+
+    /// Note that some of this body could not be read: the parser reported
+    /// it, and left an error in its place.
+    ///
+    /// Whether an error bound in the body was checked is then not known —
+    /// the `check`, or the call it was handed to, may be in what was not
+    /// read — so none is reported as unchecked (E0302). `f(err "…")` is an
+    /// error node, arguments and all, and it was E0302 at the next `return`
+    /// as well.
+    fn unread(&mut self) {
+        self.reported_unchecked.extend(0..self.locals.len() as u32);
     }
 
     fn let_stmt(&mut self, l: &ast::LetStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
@@ -2072,7 +2087,11 @@ impl<'a> Checker<'a> {
                 // only valid when its error is nil, and the caller's taint
                 // analysis is what enforces that, so nothing is lost by not
                 // taking it apart here.
-                if self.types.fallible_value(value.ty) == Some(inner) {
+                //
+                // A value that is already an error has been reported, and is
+                // a way out all the same: said to be one value short, and the
+                // function then not to return, it was the same mistake twice.
+                if self.types.fallible_value(value.ty) == Some(inner) || value.ty == TyId::ERROR {
                     let ret = hir::Stmt::Return { value: Some(value), span: r.span };
                     return Some((self.returning(ret, r.span), Flow::Diverges));
                 }
@@ -3249,7 +3268,10 @@ impl<'a> Checker<'a> {
             ast::Expr::Closure { params, ret, body, span } => {
                 self.closure(params, ret.as_deref(), body, expected, *span)
             }
-            ast::Expr::Error(span) => self.lit(ExprKind::Error, TyId::ERROR, *span),
+            ast::Expr::Error(span) => {
+                self.unread();
+                self.lit(ExprKind::Error, TyId::ERROR, *span)
+            }
         }
     }
 
@@ -3881,6 +3903,9 @@ impl<'a> Checker<'a> {
         }
         let hargs =
             self.check_args(&sig_params, &generics, &mut subst, &hints, args, Some(decl_span));
+        if self.unsolved_by_error(&hargs, &subst) {
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
 
         let targs = self.finish_subst(&generics, &subst, span);
         self.check_bounds(&generics, &targs, span);
@@ -5353,6 +5378,9 @@ impl<'a> Checker<'a> {
             args,
             Some(decl_span),
         ));
+        if self.unsolved_by_error(&hargs, &subst) {
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
         let targs = self.finish_subst(&generics, &subst, span);
         // A bound on the block holds for the receiver as for anything else.
         // One the declaration itself carries was checked where the value was
@@ -6128,6 +6156,9 @@ impl<'a> Checker<'a> {
 
         let hargs =
             self.check_args(&raw_params, &generics, &mut subst, &hints, args, Some(decl_span));
+        if self.unsolved_by_error(&hargs, &subst) {
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
         if subst.iter().take(block).any(|s| s.is_none()) {
             let names: Vec<&str> = generics.iter().take(block).map(|g| g.name.as_str()).collect();
             self.diags.push(
@@ -6455,6 +6486,20 @@ impl<'a> Checker<'a> {
         let checked = match checked {
             Some(value) if matches!(self.types.kind(value.ty), TyKind::Tuple(_)) => {
                 return self.let_tuple(elems, value, span);
+            }
+            // A value that is already an error — most often what the parser
+            // could not read — has been reported. Each name is still bound,
+            // to the error, or every use of it was E0110 as well.
+            Some(value) if value.ty == TyId::ERROR => {
+                for e in elems {
+                    if let ast::BindElem::Name(n) = e {
+                        if let Some(id) = self.resolved.lookup_binding(n.span) {
+                            self.locals[id as usize].ty = TyId::ERROR;
+                            self.init[id as usize] = Init::Assigned;
+                        }
+                    }
+                }
+                return None;
             }
             other => other,
         };
@@ -8414,6 +8459,30 @@ impl<'a> Checker<'a> {
             TyKind::Fn { params, ret } => {
                 params.iter().any(|p| self.mentions_param(*p)) || self.mentions_param(*ret)
             }
+            _ => false,
+        }
+    }
+
+    /// Whether a type parameter a call left unsolved was left so by an
+    /// argument that is already an error.
+    ///
+    /// That argument has been reported — most often it is something the
+    /// parser could not read — and it is what would have said what the
+    /// parameter is. The call is then an error too, and says nothing more:
+    /// `cannot infer T` was the same mistake again, and a result typed as the
+    /// bare `T` went on to be refused wherever it was used.
+    fn unsolved_by_error(&self, args: &[hir::Expr], subst: &[Option<TyId>]) -> bool {
+        subst.iter().any(Option::is_none) && args.iter().any(|a| self.made_of_error(a.ty))
+    }
+
+    /// Whether `ty` is the error type or is built from it, as the type of
+    /// `[P{ x 1 }]` is.
+    fn made_of_error(&self, ty: TyId) -> bool {
+        match self.types.kind(ty) {
+            TyKind::Error => true,
+            TyKind::Slice(e) | TyKind::Optional(e) | TyKind::Fallible(e) => self.made_of_error(*e),
+            TyKind::Map(k, v) => self.made_of_error(*k) || self.made_of_error(*v),
+            TyKind::Tuple(es) => es.iter().any(|e| self.made_of_error(*e)),
             _ => false,
         }
     }
