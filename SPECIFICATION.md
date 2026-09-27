@@ -1224,7 +1224,13 @@ impl<T> Box<T> {
 
 The block's parameters come from the receiver's type and the method's own from
 its arguments, as a generic function's do. `Self` inside an `impl` block is the
-type the block is for.
+type the block is for, in its body as in its signatures.
+
+An `impl` block is for every instantiation of a generic type at once: its header
+names the type at the block's own parameters, in order — `impl<A, B> Pair<A,
+B>`, `impl<T: Show> Display for Box<T>`. A header for one instantiation,
+`impl Display for Pair<int, str>`, or with the parameters reordered, is `E0208`;
+a bound on a parameter is how a block says which instantiations it covers.
 
 ---
 

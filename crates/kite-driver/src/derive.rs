@@ -492,7 +492,16 @@ impl<'a> Writer<'a, '_> {
                      one of them",
                     decl.bare
                 ))
-                .with_note("write the implementation by hand, once per instantiation or with a bound"),
+                // An `impl` is for every instantiation at once (E0208 refuses
+                // one for a single one), so the way in is a bound.
+                .with_note(format!(
+                    "write the implementation by hand, for every `{}` at once and with a bound: \
+                     `impl<T: {}> {} for {}<T>`",
+                    decl.bare,
+                    self.trait_.name(),
+                    self.trait_.name(),
+                    decl.bare
+                )),
             );
             return String::new();
         }

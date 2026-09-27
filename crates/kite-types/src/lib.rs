@@ -504,6 +504,7 @@ pub fn check_recording(
             }
         }
     }
+    let refused_blocks = check_impl_headers(file, resolved, &type_ids, &types, diags);
     let trait_impls = check_impls(file, resolved, &type_ids, &mut types, &sigs, &trait_method_generics, diags);
 
     // Constants are worked out before any body, because a body naming one gets
@@ -637,12 +638,20 @@ pub fn check_recording(
                 };
                 let m = &methods[owner.method_index];
                 let body_span = m.body.as_ref().map(|b| b.span).unwrap_or(m.span);
+                // A block whose header was refused types its bodies against
+                // a declaration it does not describe; what they would report
+                // is the header's mistake again.
+                let body = if refused_blocks.contains(&owner.block_index) {
+                    None
+                } else {
+                    m.body.as_ref()
+                };
                 checker.check_body(
                     &m.name.name,
                     m.is_pub,
                     m.is_async,
                     &m.params,
-                    m.body.as_ref(),
+                    body,
                     body_span,
                     m.span,
                     &sigs[i],
@@ -11205,6 +11214,93 @@ fn check_impls(
         }
     }
     blocks
+}
+
+/// An `impl` is for its type at the block's own parameters, in order:
+/// `impl<A, B> Named for Pair<A, B>`, or a type without any.
+///
+/// The type arguments of a header were never read. `impl Named for Pair<int,
+/// str>` was taken as `impl Named for Pair`: its bodies were typed with the
+/// declaration's `A` and `B`, it applied to a `Pair<str, int>` too, a second
+/// one for `Pair<str, int>` was "implemented more than once", and on Wasm
+/// every call was an invalid module. `impl<X, Y> Named for Pair<Y, X>` read
+/// `self.a` as an `X`. Until a header's arguments mean what they say, one
+/// that says anything else is refused; the blocks refused are returned.
+fn check_impl_headers(
+    file: &ast::SourceFile,
+    resolved: &ResolveMap,
+    type_ids: &[Option<TypeTarget>],
+    types: &Types,
+    diags: &mut DiagBag,
+) -> Vec<usize> {
+    let mut refused = Vec::new();
+    for (item_index, item) in file.items.iter().enumerate() {
+        let ast::Item::Impl(imp) = item else { continue };
+        let target = &imp.self_ty;
+        if target.args.is_empty() {
+            continue;
+        }
+        let module = resolved.module_of_item(item_index);
+        let Some(ti) = resolved.type_by_name_in(module, &target.text()) else { continue };
+        let count = match type_ids.get(ti as usize).copied().flatten() {
+            Some(TypeTarget::Struct(s)) => types.struct_def(s).generic_count,
+            Some(TypeTarget::Enum(e)) => types.enum_def(e).generic_count,
+            _ => continue,
+        };
+        let own: Vec<&str> = imp.generics.iter().map(|g| g.name.name.as_str()).collect();
+        let written: Vec<Option<&str>> = target
+            .args
+            .iter()
+            .map(|a| match a {
+                ast::Type::Path(p) if p.is_simple() => Some(p.name()),
+                _ => None,
+            })
+            .collect();
+        let exact = written.len() == count
+            && written.len() == own.len()
+            && written.iter().zip(&own).all(|(w, o)| *w == Some(*o));
+        if exact {
+            continue;
+        }
+        refused.push(item_index);
+        let decl = declared_param_names(file, resolved, ti);
+        let suggested = if decl.len() == count && count > 0 {
+            let params = decl.join(", ");
+            match &imp.trait_path {
+                Some(tp) => format!("impl<{}> {} for {}<{}>", params, tp.text(), target.text(), params),
+                None => format!("impl<{}> {}<{}>", params, target.text(), params),
+            }
+        } else {
+            String::new()
+        };
+        let mut d = Diagnostic::error(
+            codes::E0208,
+            format!("an `impl` is for every `{}`, at its own type parameters", target.text()),
+        )
+        .with_primary(target.span, "these type arguments must be the block's parameters, in order")
+        .with_note(
+            "an `impl` for one instantiation, or with its parameters reordered, is not \
+             supported: its methods would be typed as if written for the declaration",
+        );
+        if !suggested.is_empty() {
+            d = d.with_note(format!(
+                "write `{}`, and let a bound on a parameter say which instantiations it covers",
+                suggested
+            ));
+        }
+        diags.push(d);
+    }
+    refused
+}
+
+/// The names a generic type's declaration gives its parameters.
+fn declared_param_names(file: &ast::SourceFile, resolved: &ResolveMap, ti: u32) -> Vec<String> {
+    let generics = match &file.items[resolved.types[ti as usize].decl_index] {
+        ast::Item::Struct(s) => &s.generics,
+        ast::Item::Enum(e) => &e.generics,
+        _ => return Vec::new(),
+    };
+    generics.iter().map(|g| g.name.name.clone()).collect()
 }
 
 /// A trait is usable as an object only when every method can be called
