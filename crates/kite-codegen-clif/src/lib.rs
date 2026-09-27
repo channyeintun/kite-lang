@@ -656,6 +656,11 @@ fn define_init<M: Module>(
 /// The entry the outside world calls: start the runtime, register the
 /// program, run `main`, then drive the scheduler until nothing is left —
 /// because `main` returning is not the program ending.
+///
+/// That is a local function, `kite_program`; the exported `main` hands it to
+/// `kite_rt_run`, which runs it on a stack of the runtime's own, so every
+/// frame the program makes and the collector walks is on a stack deep enough
+/// for `kite_rt::MAX_FRAMES` calls.
 fn define_wrapper<M: Module>(
     cx: &mut ModuleCx<M>,
     fbcx: &mut FunctionBuilderContext,
