@@ -106,6 +106,7 @@ function start(path, context, retried = false) {
 
   self.on("error", (e) => {
     self.failed = true;
+    if (self === server) gone();
     cannotStart(path, e.message);
   });
   // Writing to a server that has gone is reported by `exit`; the pipe's own
@@ -115,8 +116,7 @@ function start(path, context, retried = false) {
   self.on("exit", (code, signal) => {
     if (stopping || self.failed || self !== server) return;
     diagnostics.clear();
-    for (const [, waiting] of pending) waiting.reject(new Error("the language server stopped"));
-    pending.clear();
+    gone();
     if (!self.heard) {
       cannotStart(path, `it exited with ${signal ?? code} before answering`);
       return;
@@ -139,6 +139,19 @@ function start(path, context, retried = false) {
 
   read(self);
   return true;
+}
+
+/// Forget a server that has stopped, and fail everything waiting on it.
+///
+/// `server` stayed set to the dead process — after a spawn that failed, one
+/// that exited before answering, and the second crash — so `request` wrote
+/// to a closed pipe and registered a promise nothing would ever settle. Hover,
+/// completion, definition and the rename box waited forever. With it cleared,
+/// `request` refuses at once, and a restart sets it again.
+function gone() {
+  server = undefined;
+  for (const [, waiting] of pending) waiting.reject(new Error("the language server stopped"));
+  pending.clear();
 }
 
 function initialize(path) {
