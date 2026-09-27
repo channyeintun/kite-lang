@@ -26,10 +26,29 @@ fn node_available() -> bool {
 }
 
 fn plugin() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../packages/vite-plugin-kite/index.js")
-        .canonicalize()
-        .expect("the plugin")
+    plain(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/vite-plugin-kite/index.js")
+            .canonicalize()
+            .expect("the plugin"),
+    )
+}
+
+/// A path as Node and a `file:` URL can take it.
+///
+/// `canonicalize` on Windows answers in the verbatim form, `\\?\D:\a\…` —
+/// which Rust's file APIs accept and a URL cannot carry: it became
+/// `file:////?/D:/a/…`, which Node refuses as not absolute. The prefix is
+/// dropped, and `\\?\UNC\server\share` goes back to `\\server\share`.
+fn plain(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{}", rest));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path
 }
 
 /// Module hooks: the compiler becomes a stand-in, and — for the Windows run —

@@ -10,7 +10,24 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("repository root")
+    plain(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("repository root"))
+}
+
+/// A path as Node and a `file:` URL can take it.
+///
+/// `canonicalize` on Windows answers in the verbatim form, `\\?\D:\a\…` —
+/// which Rust's file APIs accept and a URL cannot carry: it became
+/// `file:////?/D:/a/…`, which Node refuses as not absolute. The prefix is
+/// dropped, and `\\?\UNC\server\share` goes back to `\\server\share`.
+fn plain(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{}", rest));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path
 }
 
 fn kitec() -> PathBuf {
