@@ -24,6 +24,12 @@ fn zeros(n: int) -> str {
     return out
 }
 
+/// -0.0 and not 0.0, which compare equal: only dividing by one tells them
+/// apart.
+fn negative_zero(x: float) -> bool {
+    return x == 0.0 && 1.0 / x < 0.0
+}
+
 /// Within a few units in the last place.
 fn near(found: float, want: float) -> bool {
     return math.abs(found - want) <= math.abs(want) * 0.000000000000001
@@ -89,6 +95,13 @@ fn checks() -> [error] {
     // The cosine at zero was the sine's series summed at π/2.
     out.push(exactly(math.cos(0.0), 1.0, "cos(0)"))
     out.push(exactly(math.sin(0.0), 0.0, "sin(0)"))
+    // A zero keeps its sign, as in libm. The series added each term's +0.0 to
+    // -0.0, so sin(-0.0) was 0.0 and so was tan(-0.0).
+    out.push(test.is_true(negative_zero(math.sin(-0.0)), "sin(-0) is -0"))
+    out.push(test.is_true(negative_zero(math.tan(-0.0)), "tan(-0) is -0"))
+    out.push(test.is_true(!negative_zero(math.sin(0.0)), "sin(0) is +0"))
+    out.push(test.is_true(!negative_zero(math.tan(0.0)), "tan(0) is +0"))
+    out.push(exactly(math.sin(-5e-324), -5e-324, "sin of the smallest float below zero"))
     out.push(exactly(math.cos(math.pi()), -1.0, "cos(pi)"))
     out.push(exactly(math.sin(math.pi() / 2.0), 1.0, "sin(pi/2)"))
     out.push(test.is_true(near(math.sin(1.0), 0.8414709848078965), "sin(1)"))
@@ -183,6 +196,10 @@ fn checks() -> [error] {
     out.push(test.is_true(starts_with(tiny, "0.\(zeros(323))49406564584124654417"), "from its first"))
     out.push(test.is_true(ends_with(tiny, "197182655334472656250"), "to its last"))
     out.push(test.equal_str(fmt.fixed(0.0, 2), "0.00", "zero"))
+    // -0.0 is not below zero, so it lost its sign where a negative number
+    // rounding to zero kept it. `%.2f` writes `-0.00` for both.
+    out.push(test.equal_str(fmt.fixed(-0.0, 2), "-0.00", "-0.0 keeps its sign"))
+    out.push(test.equal_str(fmt.fixed(-0.0, 0), "-0", "with no places too"))
     // Past what an `int` holds once scaled: the cast saturated, and 1e20 came
     // out as 92233720368547758.07.
     out.push(test.equal_str(fmt.fixed(100000000000000000000.0, 2), "100000000000000000000.00", "fixed of 1e20"))

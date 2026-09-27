@@ -60,10 +60,15 @@ pub fn ellipsis(s: str, width: int) -> str {
 /// 100000000000000032, `0.49999999999999994 + 0.5` is already 1, and an
 /// `int` cannot hold the scaled value of `fixed(1e20, 2)` at all.
 ///
+/// A negative number keeps its sign when it rounds to zero, `-0.00`, and so
+/// does -0.0 itself, as `%.Nf` writes both. JavaScript's `toFixed` writes
+/// `-0` for the one and `0` for the other.
+///
 /// An infinity is written `inf` or `-inf`, and a NaN `nan`.
 pub fn fixed(x: float, places: int) -> str {
     let wanted = if places < 0 { 0 } else { places }
-    let negative = x < 0.0
+    // -0.0 is not below zero; only dividing by it tells it from 0.0.
+    let negative = x < 0.0 || (x == 0.0 && 1.0 / x < 0.0)
     let sign = if negative { "-" } else { "" }
     let size = absf(x)
     if !(size < size * 2.0) && size > 0.0 {

@@ -715,8 +715,14 @@ fn cos_split(r: float, tail: float) -> float {
 }
 
 pub fn sin(x: float) -> float {
+    // A zero is its own sine, and the sign is part of the answer: IEEE 754,
+    // C and JavaScript all give sin(-0) = -0, and `tan` divides it by one and
+    // keeps it. The series cannot, since it adds each term's +0.0 to the -0.0.
+    if x == 0.0 {
+        return x
+    }
     // Within π/4 there is nothing to take away, and `x` is its own remainder,
-    // exactly — the sign of a zero included.
+    // exactly.
     if abs(x) <= 0.7853981633974483 {
         return sin_near(x)
     }

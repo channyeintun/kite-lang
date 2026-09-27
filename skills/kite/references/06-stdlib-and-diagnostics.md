@@ -887,7 +887,8 @@ interpolation already renders. What it cannot do is *align*.
 `fixed` writes the float's own digits, as many places as asked for, and rounds
 its exact value half away from zero: `fixed(2.125, 2)` is `2.13`, and
 `fixed(2.005, 2)` is `2.00`, because the float written `2.005` is a little
-below it.
+below it. A negative number keeps its sign when it rounds to zero, and so does
+-0.0, as `%.Nf` writes them: `fixed(-0.0, 2)` is `-0.00`.
 
 ### fs — files and directories. **Not on the web**
 
