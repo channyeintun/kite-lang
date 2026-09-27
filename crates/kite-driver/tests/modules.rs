@@ -1078,6 +1078,31 @@ fn a_derive_binds_no_name_its_module_spells_a_module_by() {
     }
 }
 
+/// A derive inside a module reaches the prelude's helpers, not the module's
+/// own functions of the same names. It called them unqualified, and a bare
+/// name finds the module's own first.
+#[test]
+fn a_derive_in_a_module_reaches_the_prelude_past_its_own_helpers() {
+    let p = Project::new("derive-prelude-helpers");
+    p.file(
+        "shapes/shapes.kite",
+        "@derive(Debug, Hash)\npub struct P {\n  pub name: str\n  pub n: int\n}\n",
+    );
+    p.file(
+        "shapes/helpers.kite",
+        "fn debug_str(text: str) -> str {\n  return text\n}\n\n\
+         fn hash_int(value: int) -> int {\n  return 0\n}\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use shapes\n\nfn main() {\n\
+         \x20 io.print(shapes.P{ name: \"q\", n: 1 }.debug())\n\
+         \x20 io.print(shapes.P{ name: \"q\", n: 1 }.hash() == shapes.P{ name: \"q\", n: 2 }.hash())\n\
+         }\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "P{ name: \"q\", n: 1 }\nfalse\n");
+}
+
 // ---- a package the program never declared ------------------------------------
 
 /// The program's own module and a package only a dependency declares may

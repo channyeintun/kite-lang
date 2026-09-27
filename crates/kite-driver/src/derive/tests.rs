@@ -328,6 +328,50 @@ fn an_enum_may_share_variant_names_with_std_json() {
     assert_eq!(out, "Text(\"hi\")\n{\"Number\":[2]}\nNull\n");
 }
 
+/// A derived `Debug` and `Hash` reach the prelude's helpers whatever the
+/// module calls its own functions. They called `debug_str` and `hash_int` by
+/// their bare names, which a module's own function of that name shadows: the
+/// derived `debug()` stopped quoting strings, and the derived `hash()` ignored
+/// every `int` field, with no diagnostic.
+#[test]
+fn a_derive_reaches_the_prelude_helpers_past_a_module_function_of_the_same_name() {
+    let helpers = "fn debug_str(text: str) -> str {\n    return text\n}\n\n\
+                   fn hash_int(value: int) -> int {\n    return 0\n}\n\n\
+                   fn hash_seed() -> int {\n    return 0\n}\n\n\
+                   fn hash_combine(a: int, b: int) -> int {\n    return 0\n}\n\n";
+    let out = run(&format!(
+        "{}@derive(Debug, Hash)\n\
+         struct P {{\n    name: str\n    n: int\n}}\n\n\
+         @derive(Debug, Hash)\n\
+         enum E {{\n    A(str)\n    B\n}}\n\n\
+         fn main() {{\n\
+         \x20   io.print(P{{ name: \"a\\\"b\", n: 1 }}.debug())\n\
+         \x20   io.print(P{{ name: \"x\", n: 1 }}.hash() == P{{ name: \"x\", n: 2 }}.hash())\n\
+         \x20   io.print(E.A(\"q\").debug())\n\
+         \x20   io.print(E.A(\"q\").hash() == E.B.hash())\n\
+         \x20   io.print(debug_str(\"the module's own\"))\n\
+         }}\n",
+        helpers
+    ));
+    assert_eq!(out, "P{ name: \"a\\\"b\", n: 1 }\nfalse\nA(\"q\")\nfalse\nthe module's own\n");
+}
+
+/// The spelling the derived code reaches the prelude by is one the module has
+/// not already taken for a module of its own.
+#[test]
+fn a_derive_reaches_the_prelude_past_a_module_spelled_like_its_spelling() {
+    let out = run(
+        "use std/math as __prelude\n\n\
+         @derive(Debug)\n\
+         struct P {\n    name: str\n}\n\n\
+         fn main() {\n\
+         \x20   io.print(P{ name: \"a\" }.debug())\n\
+         \x20   io.print(__prelude.round_to(2.4))\n\
+         }\n",
+    );
+    assert_eq!(out, "P{ name: \"a\" }\n2\n");
+}
+
 #[test]
 fn a_derive_on_a_generic_type_says_why_not() {
     let text = errors_of("@derive(Debug)\nstruct Box<T> {\n    value: T\n}\nfn main() {\n}\n");
