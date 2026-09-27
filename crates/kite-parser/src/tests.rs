@@ -1275,7 +1275,8 @@ fn type_brackets_are_the_ones_the_parser_read_as_types() {
     let brackets = |src: &str| {
         let mut diags = DiagBag::new();
         let tokens = kite_lexer::tokenize(FileId(0), src, &mut diags);
-        layout(FileId(0), src, &tokens).map(|l| {
+        let l = layout(FileId(0), src, &tokens);
+        l.unparsed.is_empty().then(|| {
             let at = l.type_brackets.iter();
             at.map(|&at| &src[at as usize..at as usize + 1]).collect::<String>()
         })
@@ -1288,8 +1289,26 @@ fn type_brackets_are_the_ones_the_parser_read_as_types() {
         brackets("fn f() {\n    g(a < b, c > d)\n    let x = a > (b - 1)\n}\n").as_deref(),
         Some("")
     );
-    // A file that does not parse answers nothing.
+    // A declaration that does not parse answers nothing, and says so.
     assert_eq!(brackets("fn f( {\n"), None);
+}
+
+/// A declaration that does not parse is marked, so the formatter falls back
+/// to guessing there and nowhere else. The whole file used to be guessed at
+/// over one mistake in it.
+#[test]
+fn a_declaration_that_does_not_parse_is_the_only_one_marked() {
+    let src = "fn f(a: Option<int>) {\n    g(a < b, b > a)\n}\n\nfn broken( {\n}\n";
+    let mut diags = DiagBag::new();
+    let tokens = kite_lexer::tokenize(FileId(0), src, &mut diags);
+    let l = layout(FileId(0), src, &tokens);
+    let broken = src.find("fn broken").unwrap() as u32;
+    assert_eq!(l.unparsed, vec![(broken, src.len() as u32)]);
+    let lt = src.find("a < b").unwrap() as u32 + 2;
+    assert!(l.answers_for(lt) && !l.type_brackets.contains(&lt));
+    assert!(!l.answers_for(broken + 3));
+    let opens = src.find("Option<").unwrap() as u32 + 6;
+    assert!(l.type_brackets.contains(&opens));
 }
 
 /// The braces written against a type's name: a struct literal's and a struct
@@ -1300,7 +1319,9 @@ fn literal_braces_are_the_ones_the_parser_read_as_literals() {
                \x20   if a &&\n        b {\n    }\n}\n";
     let mut diags = DiagBag::new();
     let tokens = kite_lexer::tokenize(FileId(0), src, &mut diags);
-    let braces = layout(FileId(0), src, &tokens).expect("parses").literal_braces;
+    let layout = layout(FileId(0), src, &tokens);
+    assert!(layout.unparsed.is_empty());
+    let braces = layout.literal_braces;
     let before: Vec<&str> = braces.iter().map(|&at| &src[at as usize - 1..at as usize]).collect();
     assert_eq!(before, vec!["P", "P"]);
 }

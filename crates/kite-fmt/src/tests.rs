@@ -391,6 +391,41 @@ fn a_tuple_index_chain_is_written_tight() {
     same("let y = t.0.1\n");
 }
 
+/// An index or a call after a tuple's element is written against it, as
+/// after any other name. `t.0[0]` came out `t.0 [0]`.
+#[test]
+fn an_index_after_a_tuple_element_is_tight() {
+    same("let x = t.0[0]\n");
+    same("let x = t.0.1[0][1]\n");
+    same("let x = t.1(2)\n");
+    assert_eq!(fmt("let x = t.0 [0]\n"), "let x = t.0[0]\n");
+    assert_eq!(fmt("let x = t.0.1 [0] [1]\n"), "let x = t.0.1[0][1]\n");
+    // A number that is not an element is not a name: nothing indexes `1`,
+    // and a slice literal after one is on a line of its own anyway.
+    same("let x = [1, 2]\n");
+}
+
+/// A declaration that does not parse is laid out by the fallback, and
+/// nothing else is. One broken declaration at the end of a file — the state
+/// format-on-save sees mid-edit — cost every comparison above it its spacing:
+/// `io.print(a < b, b > a)` was written `io.print(a<b, b> a)`.
+#[test]
+fn a_broken_declaration_costs_only_itself_its_layout() {
+    let good = "fn f(a: int, b: int) -> Option<int> {\n    io.print(a < b, b > a)\n\
+                \x20   let e = g(a < b, b >= a)\n    let p = P{ x: 1 }\n    return nil\n}\n";
+    same(good);
+    let broken = format!("{}\nfn broken( {{\n}}\n", good);
+    let out = fmt(&broken);
+    assert!(out.starts_with(good), "{}", out);
+    // And one broken in the middle, with good ones on either side. (Its
+    // brackets balance: brackets left open indent what follows, which is
+    // the formatter's one rule for indentation, broken file or not.)
+    let after = good.replace("fn f(", "fn h(");
+    let middle = format!("{}\nfn broken() {{\n    let = a < b\n}}\n\n{}", good, after);
+    let out = fmt(&middle);
+    assert!(out.ends_with(&after), "{}", out);
+}
+
 /// Wherever a rule would write two tokens with nothing between them, and they
 /// would lex as something else, a space stays. Rules are written for code
 /// that parses; this holds for every pair.

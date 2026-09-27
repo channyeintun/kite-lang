@@ -175,16 +175,31 @@ pub struct Layout {
     /// The byte offset of every `{` that opens a struct literal or a struct
     /// pattern, which is written against the type's name.
     pub literal_braces: Vec<u32>,
+    /// Where the declarations that did not parse are, as byte ranges from
+    /// the first token of each to the first token after it. An answer from a
+    /// parse that went wrong partway is not one to lay out by, so nothing
+    /// above speaks for a token in one of these.
+    ///
+    /// It is by declaration rather than for the file as a whole because a
+    /// file being edited does not parse most of the time, and one mistake at
+    /// its end used to cost every comparison above it its spacing: a
+    /// formatter run on save wrote `a<b, b> a`.
+    pub unparsed: Vec<(u32, u32)>,
 }
 
-/// The file's [`Layout`], or `None` when it does not parse: an answer from a
-/// parse that went wrong partway is not one to lay a file out by.
-pub fn layout(file: FileId, src: &str, tokens: &[Token]) -> Option<Layout> {
+impl Layout {
+    /// Whether what the parser says about the token at byte `at` holds.
+    pub fn answers_for(&self, at: u32) -> bool {
+        !self.unparsed.iter().any(|&(start, end)| start <= at && at < end)
+    }
+}
+
+/// The file's [`Layout`].
+pub fn layout(file: FileId, src: &str, tokens: &[Token]) -> Layout {
     let mut diags = DiagBag::new();
     let mut p = Parser::new(file, src, tokens, &mut diags);
     p.parse_source_file();
-    let layout = std::mem::take(&mut p.layout);
-    (!diags.has_errors()).then_some(layout)
+    std::mem::take(&mut p.layout)
 }
 
 struct Parser<'a> {
@@ -1044,10 +1059,12 @@ impl<'a> Parser<'a> {
         self.skip_newlines();
 
         while self.at(T::Use) {
+            let (before, reported) = (self.pos, self.diags.len());
             if let Some(u) = self.parse_use() {
                 file.uses.push(u);
             }
             self.skip_newlines();
+            self.note_unparsed(before, reported);
         }
 
         while !self.at_end() {
@@ -1067,7 +1084,7 @@ impl<'a> Parser<'a> {
                 // A brace went missing before a method written at the margin
                 // of its `impl`: read the declaration again, ending there.
                 let cut = self.suspect.take();
-                self.restore(before, saved);
+                self.restore(before, &saved);
                 self.cut_at = cut;
                 item = self.parse_item();
                 self.cut_at = None;
@@ -1087,8 +1104,18 @@ impl<'a> Parser<'a> {
                 self.bump();
             }
             self.skip_newlines();
+            self.note_unparsed(before, saved.diags);
         }
         file
+    }
+
+    /// Record the tokens from `before` to here as a declaration that did not
+    /// parse, if anything has been reported since the bag held `reported`.
+    fn note_unparsed(&mut self, before: usize, reported: usize) {
+        if self.diags.len() > reported {
+            let start = self.tokens[before].span.start;
+            self.layout.unparsed.push((start, self.span().start));
+        }
     }
 
     /// What a second reading of a declaration has to start again from.
@@ -1105,7 +1132,7 @@ impl<'a> Parser<'a> {
 
     /// Go back to `pos`, forgetting what was reported and recorded since
     /// `saved`.
-    fn restore(&mut self, pos: usize, saved: Checkpoint) {
+    fn restore(&mut self, pos: usize, saved: &Checkpoint) {
         self.pos = pos;
         self.diags.truncate(saved.diags);
         self.abandoned.truncate(saved.abandoned);
