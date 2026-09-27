@@ -474,23 +474,206 @@ pub fn cbrt(x: float) -> float {
 /// 1: it used to be `sin(0 + π/2)`, and the sine's series summed at `π/2`
 /// gives 1.0000000000000002.
 ///
-/// `π/2` in two pieces, for the reason `exp` splits `ln2`: at `x = 100` the
-/// fold subtracts about 100.5, and a single rounded `π/2` has already lost the
-/// low bits of that product before the series sees the remainder. The high
-/// part here has its bottom thirty mantissa bits clear, so `k · hi` is *exact*
-/// for any `k` below 2³⁰ — a few hundred million turns — and the correction
-/// carries the rest. Past that the answer loses accuracy steadily.
+/// The remainder is `r + tail`, two floats, because it is the difference of
+/// two numbers that can agree in almost every bit: a float can lie within
+/// 2⁻⁶¹ of its own size of a multiple of `π/2`. Held in one float it would be
+/// rounded after the cancellation, which is the rounding that matters.
+///
+/// This used to subtract `π/2` in two pieces whose product with the count was
+/// exact below 2³⁰ quarter turns. It was wrong in the sixth digit by 1e10,
+/// and from 1e17 the remainder was no longer within `π/4` at all, so the series
+/// ran far outside its range: `sin(1e17)` answered 2.79 and `sin(1e20)` 7.8e62.
+/// Near and far are now two different reductions, as in every libm — see
+/// [`quarter_near`] and [`quarter_far`].
 struct Quarter {
     r: float
+    tail: float
     turns: int
 }
 
 fn quarter(x: float) -> Quarter {
-    let k = round(x / (pi() / 2.0))
-    let r = (x - k * 1.5707962512969970703125) - k * 7.549789954891882e-8
-    // Which quarter, 0 to 3. `%` keeps the sign of `k`, hence the second one.
-    let turns = ((round_to(k) % 4) + 4) % 4
-    return Quarter{ r: r, turns: turns }
+    let size = abs(x)
+    // 2¹⁹ · π/2, as far as a count of turns stays below 2²⁰.
+    let q = if size < 823550.0 { quarter_near(size) } else { quarter_far(size) }
+    if x < 0.0 {
+        return Quarter{ r: -q.r, tail: -q.tail, turns: (4 - q.turns) % 4 }
+    }
+    return q
+}
+
+/// The reduction below 2¹⁹ · π/2, where the count `n` of quarter turns is
+/// below 2²⁰: fdlibm's, with `π/2` in three 33-bit pieces.
+///
+/// Each piece times `n` fits in 53 bits and so is exact, and the first
+/// subtraction is exact because it takes two numbers within a factor of two
+/// of each other. A first remainder that has lost more than sixteen bits to
+/// cancellation is taken again with the second piece, and one that has lost
+/// more than forty-nine with the third, each time carrying what the
+/// subtraction rounded away into `w`. Three pieces are 151 bits of `π/2`,
+/// which covers the closest any float in this range comes to a multiple of
+/// it.
+fn quarter_near(size: float) -> Quarter {
+    let n = round(size * 0.6366197723675814)
+    var r = size - n * 1.5707963267341256
+    var w = n * 6.077100506506192e-11
+    var y = r - w
+    if abs(y) * 65536.0 < size {
+        let t = r
+        w = n * 6.077100506303966e-11
+        r = t - w
+        w = n * 2.0222662487959506e-21 - ((t - r) - w)
+        y = r - w
+        if abs(y) * 562949953421312.0 < size {
+            let u = r
+            w = n * 2.0222662487111665e-21
+            r = u - w
+            w = n * 8.4784276603689e-32 - ((u - r) - w)
+            y = r - w
+        }
+    }
+    return Quarter{ r: y, tail: (r - y) - w, turns: round_to(n) % 4 }
+}
+
+/// The reduction from 2¹⁹ · π/2 up, by Payne and Hanek's method: in integers,
+/// against as many bits of `2/π` as the size needs.
+///
+/// `size` is a whole number `m` below 2⁵³ times `2ᵉ`, and the number of
+/// quarter turns in it is `m · 2ᵉ · (2/π)`. Only that product's last two
+/// whole bits matter, since four quarter turns are a whole one, and its
+/// fraction is the remainder. So the bits of `2/π` that would only make
+/// multiples of four are skipped, and the next 240 are multiplied by `m`
+/// exactly, in 24-bit pieces where every product fits an `int`. What is left
+/// out below them is under 2⁻¹⁶⁰ of a quarter turn, and no float comes nearer
+/// a multiple of `π/2` than about 2⁻⁶¹, so the fraction is right to far
+/// more bits than a float holds. Only then is it multiplied by `π/2`.
+fn quarter_far(size: float) -> Quarter {
+    if !(size <= 1.7976931348623157e308) {
+        // An infinity or a NaN, which has no remainder.
+        return Quarter{ r: size - size, tail: 0.0, turns: 0 }
+    }
+    // Halving and doubling are exact, so `m` is the mantissa itself.
+    var m = size
+    var e = 0
+    for m >= 38685626227668133590597632.0 {
+        m = m / 4294967296.0
+        e += 32
+    }
+    for m >= 9007199254740992.0 {
+        m = m / 2.0
+        e += 1
+    }
+    for m < 4503599627370496.0 {
+        m = m * 2.0
+        e -= 1
+    }
+    let mantissa = m as int
+    let low = mantissa & 16777215
+    let middle = (mantissa >> 24) & 16777215
+    let high = mantissa >> 48
+    // Piece `i` of `2/π` is worth 2^(e − 24(i + 1)) once multiplied by `m`, a
+    // multiple of four for every piece before `first`.
+    let first = if e >= 26 { (e - 2) / 24 } else { 0 }
+    let window = 10
+    let pieces = two_over_pi()
+    // Three pieces of `m` times ten of `2/π` make thirteen of product.
+    var product: [int] = []
+    for i in 0..13 {
+        product.push(0)
+    }
+    // Least significant first: `j` counts up from the window's last piece.
+    for j in 0..window {
+        let piece = pieces[first + window - 1 - j]
+        product[j] = product[j] + low * piece
+        product[j + 1] = product[j + 1] + middle * piece
+        product[j + 2] = product[j + 2] + high * piece
+    }
+    var carry = 0
+    for i in 0..product.len() {
+        let t = product[i] + carry
+        product[i] = t & 16777215
+        carry = t >> 24
+    }
+    // The product is the count of quarter turns scaled by 2^point.
+    let point = 24 * (first + window) - e
+    var turns = bits_at(product, point, 2)
+    var fraction: [int] = []
+    var at = point - 24
+    for at >= 0 {
+        fraction.push(bits_at(product, at, 24))
+        at -= 24
+    }
+    // Rounded to the nearest turn: from a half up, the remainder is the next
+    // turn less what is left of this one, which is the fraction's complement.
+    let past_half = fraction[0] >= 8388608
+    if past_half {
+        turns = (turns + 1) % 4
+        for i in 0..fraction.len() {
+            fraction[i] = 16777215 - fraction[i]
+        }
+    }
+    var lead = 0
+    for lead < fraction.len() - 5 && fraction[lead] == 0 {
+        lead += 1
+    }
+    // The fraction as two floats: the first 48 bits from its leading piece,
+    // exactly, and the next 72 rounded, which is far below the first.
+    let top = ((fraction[lead] * 16777216 + fraction[lead + 1]) as float) * pow(0.5, 24 * (lead + 2))
+    let next = (fraction[lead + 2] as float) + (fraction[lead + 3] as float) * 5.960464477539063e-8 + (fraction[lead + 4] as float) * 3.552713678800501e-15
+    let rest = next * pow(0.5, 24 * (lead + 3))
+    let part = top + rest
+    let part_tail = rest - (part - top)
+    // Times `π/2`, whose float is 6.1e-17 short of it, keeping what the
+    // multiplication rounds away.
+    let pio2 = 1.5707963267948966
+    let turned = part * pio2
+    let lost = product_error(part, pio2, turned) + (part * 6.123233995736766e-17 + part_tail * pio2)
+    let r = turned + lost
+    let tail = lost - (r - turned)
+    if past_half {
+        return Quarter{ r: -r, tail: -tail, turns: turns }
+    }
+    return Quarter{ r: r, tail: tail, turns: turns }
+}
+
+/// `count` bits of a number held in 24-bit pieces, least significant first,
+/// from bit `from` up.
+fn bits_at(pieces: [int], from: int, count: int) -> int {
+    let at = from / 24
+    let shift = from % 24
+    var v = pieces[at] >> shift
+    if shift + count > 24 && at + 1 < pieces.len() {
+        v = v | (pieces[at + 1] << (24 - shift))
+    }
+    return v & ((1 << count) - 1)
+}
+
+/// What rounding `a · b` to `p` lost, exactly: Dekker's product, which needs
+/// no fused multiply-add. Each factor is split into halves of 26 bits, whose
+/// products are exact.
+fn product_error(a: float, b: float, p: float) -> float {
+    let a_high = high_half(a)
+    let a_low = a - a_high
+    let b_high = high_half(b)
+    let b_low = b - b_high
+    return (((a_high * b_high - p) + a_high * b_low) + a_low * b_high) + a_low * b_low
+}
+
+/// The top 26 bits of `x`, by Veltkamp's split.
+fn high_half(x: float) -> float {
+    let c = 134217729.0 * x
+    return c - (c - x)
+}
+
+/// The first 1200 bits of `2/π` after the point, 24 to a piece: enough for the
+/// window of ten pieces past the ones the largest float skips.
+fn two_over_pi() -> [int] {
+    return [
+        0xA2F983, 0x6E4E44, 0x1529FC, 0x2757D1, 0xF534DD, 0xC0DB62, 0x95993C, 0x439041, 0xFE5163, 0xABDEBB,
+        0xC561B7, 0x246E3A, 0x424DD2, 0xE00649, 0x2EEA09, 0xD1921C, 0xFE1DEB, 0x1CB129, 0xA73EE8, 0x8235F5,
+        0x2EBB44, 0x84E99C, 0x7026B4, 0x5F7E41, 0x3991D6, 0x398353, 0x39F49C, 0x845F8B, 0xBDF928, 0x3B1FF8,
+        0x97FFDE, 0x05980F, 0xEF2F11, 0x8B5A0A, 0x6D1F6D, 0x367ECF, 0x27CB09, 0xB74F46, 0x3F669E, 0x5FEA2D,
+        0x7527BA, 0xC7EBE5, 0xF17B3D, 0x0739F7, 0x8A5292, 0xEA6BFB, 0x5FB11F, 0x8D5D08, 0x560330, 0x46FC7B,
+    ]
 }
 
 /// The sine series, for `|r| ≤ π/4`.
@@ -519,32 +702,52 @@ fn cos_near(r: float) -> float {
     return sum
 }
 
+/// `sin(r + tail)` for a `tail` below half a unit in the last place of `r`:
+/// the tail's share is `tail · cos(r)`, and a cosine good to a percent is
+/// plenty for a correction that small.
+fn sin_split(r: float, tail: float) -> float {
+    return sin_near(r) + tail * (1.0 - r * r * 0.5)
+}
+
+/// `cos(r + tail)`, the same way: the tail's share is `−tail · sin(r)`.
+fn cos_split(r: float, tail: float) -> float {
+    return cos_near(r) - tail * r
+}
+
 pub fn sin(x: float) -> float {
+    // Within π/4 there is nothing to take away, and `x` is its own remainder,
+    // exactly — the sign of a zero included.
+    if abs(x) <= 0.7853981633974483 {
+        return sin_near(x)
+    }
     let q = quarter(x)
     if q.turns == 0 {
-        return sin_near(q.r)
+        return sin_split(q.r, q.tail)
     }
     if q.turns == 1 {
-        return cos_near(q.r)
+        return cos_split(q.r, q.tail)
     }
     if q.turns == 2 {
-        return -sin_near(q.r)
+        return -sin_split(q.r, q.tail)
     }
-    return -cos_near(q.r)
+    return -cos_split(q.r, q.tail)
 }
 
 pub fn cos(x: float) -> float {
+    if abs(x) <= 0.7853981633974483 {
+        return cos_near(x)
+    }
     let q = quarter(x)
     if q.turns == 0 {
-        return cos_near(q.r)
+        return cos_split(q.r, q.tail)
     }
     if q.turns == 1 {
-        return -sin_near(q.r)
+        return -sin_split(q.r, q.tail)
     }
     if q.turns == 2 {
-        return -cos_near(q.r)
+        return -cos_split(q.r, q.tail)
     }
-    return sin_near(q.r)
+    return sin_split(q.r, q.tail)
 }
 
 pub fn tan(x: float) -> float {

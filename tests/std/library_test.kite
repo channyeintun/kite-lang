@@ -96,6 +96,35 @@ fn checks() -> [error] {
     out.push(test.is_true(near(math.sin(-4.0), 0.7568024953079282), "sin(-4)"))
     out.push(test.is_true(math.abs(math.sin(math.pi())) < 0.000000000000001, "sin(pi) is near zero"))
 
+    // Far from zero. π/2 was subtracted in two pieces, exact only below 2³⁰
+    // quarter turns: sin(1e10) was wrong in the sixth digit, and from 1e17
+    // the answers were not sines at all — 2.79 for sin(1e17), 7.8e62 for
+    // sin(1e20), NaN for sin(1e300). Each is libm's answer.
+    out.push(test.is_true(near(math.sin(math.pi()), 1.2246467991473532e-16), "sin(pi) to the float's own error"))
+    out.push(test.is_true(near(math.sin(12345.678), -0.7040813137533816), "sin(12345.678)"))
+    out.push(test.is_true(near(math.cos(823549.0), 0.787174250682942), "cos just below the far range"))
+    out.push(test.is_true(near(math.sin(823550.0), 0.3291632977102722), "sin just inside it"))
+    out.push(test.is_true(near(math.sin(1000000.0), -0.34999350217129294), "sin(1e6)"))
+    out.push(test.is_true(near(math.sin(10000000000.0), -0.4875060250875107), "sin(1e10)"))
+    out.push(test.is_true(near(math.sin(4503599627370495.5), 0.9999756755637755), "sin(2^52 - 0.5)"))
+    out.push(test.is_true(near(math.sin(100000000000000000.0), -0.4645301048353727), "sin(1e17)"))
+    out.push(test.is_true(near(math.sin(-100000000000000000.0), 0.4645301048353727), "sin(-1e17)"))
+    out.push(test.is_true(near(math.cos(1000000000000000000.0), 0.11837199021871073), "cos(1e18)"))
+    out.push(test.is_true(near(math.sin(100000000000000000000.0), -0.6452512852657808), "sin(1e20)"))
+    out.push(test.is_true(near(math.cos(100000000000000000000.0), 0.7639704044417283), "cos(1e20)"))
+    out.push(test.is_true(near(math.tan(100000000000000000.0), 0.5245624309025501), "tan(1e17)"))
+    out.push(test.is_true(near(math.tan(1e22), -1.6287782256068988), "tan(1e22)"))
+    out.push(test.is_true(near(math.sin(1e300), -0.8178819121159085), "sin(1e300)"))
+    out.push(test.is_true(near(math.cos(1e300), -0.5753861119575491), "cos(1e300)"))
+    out.push(test.is_true(near(math.sin(1.7976931348623157e308), 0.004961954789184062), "sin of the largest float"))
+    // The double nearest a multiple of π/2 of all of them, 6381956970095103 ·
+    // 2⁷⁹⁷: its remainder is about 2⁻⁶¹ of it, so every bit of the reduction
+    // shows here. The answer is the exact remainder, 4.6871659242546276e-19,
+    // correctly rounded. The libm the rest were checked against says
+    // 4.68716592425462e-19, eight units away.
+    out.push(exactly(math.cos(5.319372648326541e255), -4.687165924254628e-19, "cos of the hardest case"))
+    out.push(exactly(math.sin(-5.319372648326541e255), -1.0, "and its sine"))
+
     // ---- integer overflow ----
     //
     // The two builds disagree about `a + b` at the boundary — debug traps,
