@@ -39,8 +39,10 @@ Declaration  = [ DeriveAttr ] [ "pub" ] ( FnDecl
                                        | TraitDecl
                                        | ImplDecl
                                        | TypeAlias
-                                       | ConstDecl
-                                       | ExternDecl ) ;
+                                       | ConstDecl )
+             | HostAttr [ "pub" ] ExternDecl ;     (* the attribute first:
+                                                      `pub @host(…)` is not
+                                                      a declaration *)
 
 (* A module-level constant. `let` only: there is no module `var`, because a
    mutable binding every function in the module can reach is state none of
@@ -124,7 +126,7 @@ MethodDecl   = [ "async" ] "fn" Ident [ Generics ]
                "(" [ SelfParam [ "," Params ] | Params ] ")"
                [ "->" ReturnType ] Block ;
 
-ExternDecl   = HostAttr "extern" "fn" Ident
+ExternDecl   = "extern" "fn" Ident
                "(" [ Params ] ")" [ "->" Type ] ;
 HostAttr     = "@" "host" "(" StringLit ")" ;
 
@@ -157,7 +159,7 @@ Binding      = Ident
 BindElem     = Ident | "_" ;
 
 AssignStmt   = LValue AssignOp Expr ;
-LValue       = Ident { "." Ident | "[" Expr "]" } ;
+LValue       = ( Ident | "self" ) { "." Ident | "[" Expr "]" } ;
 AssignOp     = "=" | "+=" | "-=" | "*=" | "/=" | "%=" ;
 
 (* `_ = f()` — the result is thrown away on purpose. Only `=`: a compound
@@ -202,10 +204,14 @@ OrPattern    = SinglePattern { "|" SinglePattern } ;
 SinglePattern
              = "_"                                      (* wildcard   *)
              | "nil"
-             | Literal
-             | Literal ".." [ "=" ] Literal              (* range      *)
+             | [ "-" ] Literal
+             | [ "-" ] Literal ( ".." | "..=" ) [ "-" ] Literal
+                                                         (* range      *)
              | Ident                                     (* binding    *)
-             | TypePath [ "(" PatternArgs ")" ]          (* variant    *)
+             | [ Ident "." ] TypePath [ "(" PatternArgs ")" ]
+                                                         (* variant: bare,
+                                                            `Enum.V`, or
+                                                            `module.Enum.V` *)
              | TypePath "{" FieldPatterns "}"            (* struct     *)
              | "(" Pattern { "," Pattern } ")" ;         (* tuple      *)
 

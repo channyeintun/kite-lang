@@ -56,7 +56,8 @@ npm error notsup Unsupported platform for @kite-lang/cli-darwin-arm64@0.1.9:
 ./build.sh path/to/release/   # every archive of a tagged release
 ```
 
-**Nothing is published yet**, and the order matters:
+**Publishing is by hand, and the order matters** — `RELEASING.md` §4 in the
+repository is the runbook:
 
 1. `git push` and tag a release, so CI builds all five targets reproducibly and
    signs the checksums. A compiler published from a laptop, built from source

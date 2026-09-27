@@ -724,9 +724,10 @@ return. The call past 100,000 traps with the VM's `call depth exceeded`, so the
 two backends end a deep recursion at the same call; before, the native one
 ran to the end of whatever stack it had been given and aborted there.
 
-That walk is also why there is no native backend on Windows: Cranelift's Win64
-prologue puts the frame record where the walk does not expect it, and
-`--native` refuses there rather than corrupting the heap.
+That walk is also why there is no native backend on Windows: nobody has shown
+the frame-pointer chain holds on Win64, where LLVM may point a frame pointer
+into the middle of a frame for its unwind tables, so `--native` refuses there
+rather than risk corrupting the heap.
 
 Cranelift's tradeoff is accepted deliberately: roughly 20% faster code generation
 than LLVM, less optimised output. For the programs Kite is for — where a build
@@ -812,7 +813,7 @@ changing the format is a reviewable change to a test rather than a drift.
 | Wasm validity | `wasmparser` over every emitted module |
 | Wasm runtime | Executed under Node — the differential, host, string and DOM suites. Skipped with a message where Node is absent. No browser runs the suite |
 | Diagnostics | The renderer's exact output; every code has an explanation |
-| Standard library | `tests/std/` programs run on the VM and on Wasm and compared; doc-comment code fences extracted and run |
+| Standard library | `tests/std/` programs run on the VM, on Wasm and natively, and compared; doc-comment code fences extracted and run |
 | Size | Four budgets in `size.rs`, and one for the site's own program |
 | Documents | Every example on the site, the specification's Appendix A, and every example in `skills/kite` |
 
