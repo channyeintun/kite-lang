@@ -444,6 +444,10 @@ fn digit(c: str) -> int {
 // ---- writing ---------------------------------------------------------------
 
 /// A value as compact JSON.
+///
+/// An infinity or a NaN is written `null`, as `JSON.stringify` writes it:
+/// JSON has no spelling for either, so the choice is between that and a
+/// document nothing can read back.
 pub fn stringify(value: Json) -> str {
     return match value {
         Null => "null",
@@ -473,7 +477,15 @@ fn pairs(entries: { str: Json }) -> [str] {
 /// the same float, and so passed a test of `as float`, but is a different
 /// number to a reader that keeps integers exact. Anything past the range is
 /// written as the float it is.
+///
+/// Except an infinity or a NaN, which is `null`. Interpolation spells them
+/// `inf`, `-inf` and `NaN`, none of which is JSON, so `json.parse` refused
+/// what `stringify` wrote, and so did every other reader.
 fn number(n: float) -> str {
+    // `n - n` is zero for every finite float and a NaN for the rest.
+    if !(n - n == 0.0) {
+        return "null"
+    }
     let whole = whole_number(n)
     if whole != nil {
         return "\(whole)"
