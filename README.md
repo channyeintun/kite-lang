@@ -349,9 +349,9 @@ Recorded here rather than left to be discovered:
   AUR account are decisions about identity and hosting, not code.
 - **No Argon2.** It is not in WebCrypto, so it waits on a runtime that has it.
 
-834 tests: unit tests per crate, an annotated compile-fail corpus, a
-differential corpus that runs every program on **three** backends and compares,
-the standard library's own suite on two of them, the host boundary and a real
+More than a thousand tests: unit tests per crate, an annotated compile-fail
+corpus, a differential corpus that runs every program on **three** backends and
+compares, the standard library's own suite on two of them, the host boundary and a real
 socket under Node, the DOM layer and the typed door driven under Node — with
 real `tsc` type-checking the generated declarations where it is installed — the
 one string representation compared against the VM and across the JavaScript
