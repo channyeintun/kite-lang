@@ -1373,7 +1373,10 @@ checked against the trait with `Self` read as its own type, so `Rect` writes
 `fn compare(self, other: Rect) -> int` or, equally, `other: Self`. It must also
 agree about the receiver: a method the trait declares with `self` may not take
 `var self`, and the reverse, because a call through the trait — a bound or a
-`dyn` — sees only the trait's.
+`dyn` — sees only the trait's. For the same reason it must agree about whether
+the method can fail and whether it is `async`: a call through the trait yields
+what the declaration says, a `(T, error)` pair or a `Task`, as a direct call
+does.
 
 ### 10.2 Coherence
 
@@ -1574,7 +1577,9 @@ pub async fn fetch_user(id: UserId) -> (User, error) {
 }
 ```
 
-An `async fn` returns a `Task<T>`. `await` suspends until it completes.
+An `async fn` returns a `Task<T>`. `await` suspends until it completes. A
+method or an associated function may be `async` too, and calling one yields
+its `Task` in the same way: `await conn.fetch()`.
 
 **Calling an `async fn` does not run its body.** It yields the `Task` and
 returns; the body runs when something drives it, which is `await`. Two calls

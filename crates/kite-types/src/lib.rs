@@ -232,20 +232,32 @@ pub fn check_recording(
                             resolve_named_ty(&p.ty, resolved, module, &type_ids, &names, &mut types, diags)
                         })
                         .collect();
-                    let ret = match &m.ret {
+                    let value = match &m.ret {
                         None => TyId::UNIT,
                         Some(r) => resolve_named_ty(
                             r.value_type(), resolved, module, &type_ids, &names, &mut types, diags,
                         ),
                     };
+                    // What a call through the trait yields, which is what a
+                    // backend types the dispatch by: the `(T, error)` pair of
+                    // a fallible method, and the task of an `async` one.
+                    let fallible = m.ret.as_ref().is_some_and(|r| r.is_fallible());
+                    let ret = if fallible { types.fallible_of(value) } else { value };
+                    let ret = if m.is_async {
+                        let task = types.task_of(ret, m.name.span);
+                        types.struct_ty(task)
+                    } else {
+                        ret
+                    };
                     methods.push(kite_hir::TraitMethodDef {
                         name: m.name.name.clone(),
                         params,
                         ret,
-                        fallible: m.ret.as_ref().is_some_and(|r| r.is_fallible()),
+                        fallible,
                         takes_self: m.self_param.is_some(),
                         var_self: m.self_param.as_ref().is_some_and(|s| s.is_var),
                         has_default: m.body.is_some(),
+                        is_async: m.is_async,
                         generic_count: own.len(),
                         span: m.name.span,
                     });
@@ -3759,7 +3771,7 @@ impl<'a> Checker<'a> {
         let mut subst: Vec<Option<TyId>> = vec![None; generics.len()];
         if !generics.is_empty() {
             if let Some(want) = expected {
-                self.unify(ret, want, &generics, &mut subst, span);
+                self.seed_result(ret, want, self.sigs[id as usize].is_async, &generics, &mut subst, span);
             }
         }
         let hargs = self.check_args(&sig_params, &generics, &mut subst, args, Some(decl_span));
@@ -3774,15 +3786,7 @@ impl<'a> Checker<'a> {
             self.solved.calls.push((callee_span, names.join(", ")));
         }
         let ret = self.apply_subst(ret, &subst);
-        // Calling an `async fn` starts it and yields the task. That is how
-        // concurrency is expressed: two calls then one `await` of each runs
-        // both at once, and there is no second keyword for it.
-        let ret = if self.sigs[id as usize].is_async {
-            let task = self.types.task_of(ret, span);
-            self.types.struct_ty(task)
-        } else {
-            ret
-        };
+        let ret = self.call_result(id, ret, span);
 
         hir::Expr {
             kind: ExprKind::Call { callee: hir::FnId(id), args: hargs, targs },
@@ -4783,6 +4787,9 @@ impl<'a> Checker<'a> {
             self.diags.push(d);
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         };
+        // `ret` is what the call yields, a fallible method's pair and an
+        // `async` one's task included; it used to be the bare value, so
+        // `let (v, err) = x.get()` through a bound or a `dyn` was refused.
         let (params, ret, var_self) = (method.params.clone(), method.ret, method.var_self);
         let method = index as u32;
         // The trait's receiver is the one every implementation agreed to, so
@@ -5192,7 +5199,8 @@ impl<'a> Checker<'a> {
         let raw_params = self.sigs[fn_index as usize].params.clone();
         let raw_ret = self.sigs[fn_index as usize].ret;
         let decl_span = self.sigs[fn_index as usize].name_span;
-        self.seed_from_expected(raw_ret, expected, &generics, &mut subst, span);
+        let is_async = self.sigs[fn_index as usize].is_async;
+        self.seed_from_expected(raw_ret, expected, is_async, &generics, &mut subst, span);
 
         if args.len() != raw_params.len() {
             self.arity_error(&name.name, args.len(), raw_params.len(), span, Some(decl_span));
@@ -5210,7 +5218,8 @@ impl<'a> Checker<'a> {
         let owned = self.block_bounds_to_check(ti, &generics, block);
         self.check_bounds(&owned, &targs, span);
         self.note_generic_call(fn_index, &targs, span);
-        let ret = self.apply_subst(raw_ret, &subst);
+        let value = self.apply_subst(raw_ret, &subst);
+        let ret = self.call_result(fn_index, value, span);
         let sig_params: Vec<TyId> =
             raw_params.iter().map(|p| self.apply_subst(*p, &subst)).collect();
 
@@ -5223,20 +5232,22 @@ impl<'a> Checker<'a> {
         // has.
         let shown_params: Vec<String> =
             sig_params.iter().map(|p| self.types.name(*p)).collect();
-        let shown = if ret == TyId::UNIT {
+        let shown = if value == TyId::UNIT {
             format!(
-                "fn {}.{}({})",
+                "{}fn {}.{}({})",
+                if is_async { "async " } else { "" },
                 self.types.name(receiver_ty),
                 name.name,
                 shown_params.join(", ")
             )
         } else {
             format!(
-                "fn {}.{}({}) -> {}",
+                "{}fn {}.{}({}) -> {}",
+                if is_async { "async " } else { "" },
                 self.types.name(receiver_ty),
                 name.name,
                 shown_params.join(", "),
-                self.types.name(ret)
+                self.types.name(value)
             )
         };
         self.solved.methods.push((name.span, shown));
@@ -5350,10 +5361,53 @@ impl<'a> Checker<'a> {
     ///
     /// A trial: any disagreement is reported by the argument or the use that
     /// has it, where it can be explained, rather than here.
+    /// What a call yields. Calling an `async fn` starts it and yields the
+    /// task — a method or an associated function as much as a free function
+    /// (§12.1). That is how concurrency is expressed: two calls then one
+    /// `await` of each runs both at once, and there is no second keyword for
+    /// it. Only free functions used to be wrapped, so `await p.later()` was
+    /// refused and `p.later() + 1` added to a task.
+    fn call_result(&mut self, callee: u32, ret: TyId, span: Span) -> TyId {
+        if !self.sigs[callee as usize].is_async {
+            return ret;
+        }
+        let task = self.types.task_of(ret, span);
+        self.types.struct_ty(task)
+    }
+
+    /// Solve a generic function's parameters from the type its call is used
+    /// as, before its arguments are checked.
+    ///
+    /// Calling an `async fn` yields a `Task` of what it returns, so for one
+    /// it is the task's payload that says what the declared return type is:
+    /// `let t: Task<int> = job(1)` makes `job`'s `T` an `int`. Unifying the
+    /// declared `T` with the whole `Task<int>` made the call a
+    /// `Task<Task<int>>`, and the argument a conflict.
+    fn seed_result(
+        &mut self,
+        ret: TyId,
+        want: TyId,
+        is_async: bool,
+        generics: &[GenericDef],
+        subst: &mut Vec<Option<TyId>>,
+        span: Span,
+    ) {
+        let want = if is_async {
+            match self.types.task_payload(want) {
+                Some(value) => value,
+                None => return,
+            }
+        } else {
+            want
+        };
+        self.unify(ret, want, generics, subst, span);
+    }
+
     fn seed_from_expected(
         &mut self,
         ret: TyId,
         expected: Option<TyId>,
+        is_async: bool,
         generics: &[GenericDef],
         subst: &mut Vec<Option<TyId>>,
         span: Span,
@@ -5362,6 +5416,16 @@ impl<'a> Checker<'a> {
         if subst.iter().all(|s| s.is_some()) {
             return;
         }
+        // An `async` method's call is the task of its result, as a function's
+        // is; see `seed_result`.
+        let want = if is_async {
+            match self.types.task_payload(want) {
+                Some(value) => value,
+                None => return,
+            }
+        } else {
+            want
+        };
         let mut scratch = DiagBag::new();
         std::mem::swap(self.diags, &mut scratch);
         self.unify(ret, want, generics, subst, span);
@@ -5375,13 +5439,6 @@ impl<'a> Checker<'a> {
         std::mem::swap(self.diags, &mut scratch);
     }
 
-    /// Reject reaching into another module for a member it did not mark
-    /// `pub` — a field, a method, an associated function.
-    ///
-    /// The same two levels of visibility the resolver enforces for top-level
-    /// names (§4.3), applied where a member is found, which is here: which
-    /// field or method a `.name` means depends on the type of what is to its
-    /// left, and only the checker knows that.
     /// A method or associated function reached from outside its module must
     /// be `pub` — or, for one implementing a trait, the trait must be: the
     /// methods of a trait implementation are as visible as the trait (§4.3).
@@ -5419,7 +5476,10 @@ impl<'a> Checker<'a> {
                 format!("{} `{}` is private to module `{}`", what, name, module),
             )
             .with_primary(span, "not visible here")
-            .with_secondary(trait_span, format!("it implements `{}`, which is not marked `pub`", trait_name))
+            .with_secondary(
+                trait_span,
+                format!("it implements `{}`, which is not marked `pub`", trait_name),
+            )
             .with_note(
                 "the methods of a trait's implementations are as visible as the trait; write \
                  `pub trait` to export them",
@@ -5428,6 +5488,13 @@ impl<'a> Checker<'a> {
         false
     }
 
+    /// Reject reaching into another module for a member it did not mark
+    /// `pub` — a field, a method, an associated function.
+    ///
+    /// The same two levels of visibility the resolver enforces for top-level
+    /// names (§4.3), applied where a member is found, which is here: which
+    /// field or method a `.name` means depends on the type of what is to its
+    /// left, and only the checker knows that.
     fn check_member_visible(
         &mut self,
         decl_module: String,
@@ -5777,7 +5844,8 @@ impl<'a> Checker<'a> {
         let raw_params = self.sigs[fn_index as usize].params.clone();
         let raw_ret = self.sigs[fn_index as usize].ret;
         let decl_span = self.sigs[fn_index as usize].name_span;
-        self.seed_from_expected(raw_ret, expected, &generics, &mut subst, span);
+        let is_async = self.sigs[fn_index as usize].is_async;
+        self.seed_from_expected(raw_ret, expected, is_async, &generics, &mut subst, span);
 
         if args.len() != raw_params.len() {
             let full = format!("{}.{}", type_name, method_name);
@@ -5801,6 +5869,7 @@ impl<'a> Checker<'a> {
         self.check_bounds(&generics, &targs, span);
         self.note_generic_call(fn_index, &targs, span);
         let ret = self.apply_subst(raw_ret, &subst);
+        let ret = self.call_result(fn_index, ret, span);
 
         hir::Expr {
             kind: ExprKind::Call { callee: hir::FnId(fn_index), args: hargs, targs },
@@ -10477,8 +10546,14 @@ fn check_impls(
                 );
                 continue;
             };
-            let (decl_params, decl_ret, decl_fallible, decl_span, decl_generics) =
-                (decl.params.clone(), decl.ret, decl.fallible, decl.span, decl.generic_count);
+            let (decl_params, decl_ret, decl_fallible, decl_span, decl_generics, decl_async) = (
+                decl.params.clone(),
+                decl.ret,
+                decl.fallible,
+                decl.span,
+                decl.generic_count,
+                decl.is_async,
+            );
 
             if decl.takes_self != m.self_param.is_some() {
                 diags.push(
@@ -10520,6 +10595,30 @@ fn check_impls(
                     .with_note(
                         "whether a method may modify its receiver is part of the signature \
                          every caller through the trait relies on, so the two must agree",
+                    ),
+                );
+            }
+
+            // A caller through the trait is typed from the declaration, so an
+            // implementation that returned a task where the trait promised a
+            // value, or the reverse, would hand it the wrong kind of thing.
+            if decl.is_async != m.is_async {
+                diags.push(
+                    Diagnostic::error(
+                        codes::E0200,
+                        format!(
+                            "`{}` is {}`async`, but the trait declares it {}`async`",
+                            m.name.name,
+                            if m.is_async { "" } else { "not " },
+                            if decl.is_async { "" } else { "not " },
+                        ),
+                    )
+                    .with_primary(m.sig_span, "signature does not match")
+                    .with_secondary(decl_span, "declared here")
+                    .with_note(
+                        "calling an `async fn` yields a `Task`, so whether a method is \
+                         `async` is part of the signature every caller through the trait \
+                         relies on",
                     ),
                 );
             }
@@ -10621,6 +10720,18 @@ fn check_impls(
                 );
             }
 
+            // The declaration's `ret` is what a call yields; an `async`
+            // method's own signature is the value its body returns, whose task
+            // the call yields, so the two are compared inside the task.
+            let decl_ret = match types.task_payload(decl_ret) {
+                Some(value) if decl_async => value,
+                _ => decl_ret,
+            };
+            let decl_ret = if decl_fallible {
+                types.fallible_value(decl_ret).unwrap_or(decl_ret)
+            } else {
+                decl_ret
+            };
             let got_ret = if sig.fallible {
                 types.fallible_value(sig.ret).unwrap_or(sig.ret)
             } else {

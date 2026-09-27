@@ -2321,6 +2321,169 @@ fn main() {
 }
 "#,
     ),
+    // Calling an `async fn` yields its task, and a method or an associated
+    // function is no exception (§12.1). Only free functions were wrapped, so
+    // `await p.later()` was "only a task can be awaited" and `p.later() + 1`
+    // added to a task: a trap on the VM, a pointer printed natively, an
+    // invalid module on Wasm. A generic `async fn` called where a `Task<T>` is
+    // expected made `T` the whole task.
+    (
+        "async-methods-yield-their-tasks",
+        r#"use std/task
+
+struct P {
+    a: int
+}
+
+impl P {
+    async fn later(self) -> int {
+        await task.sleep(1)
+        return self.a
+    }
+
+    async fn make(a: int) -> int {
+        await task.sleep(1)
+        return a * 2
+    }
+
+    async fn pair(self) -> (int, error) {
+        await task.sleep(1)
+        return self.a, nil
+    }
+}
+
+struct Box<T> {
+    v: T
+}
+
+impl<T> Box<T> {
+    async fn get(self) -> T {
+        await task.sleep(1)
+        return self.v
+    }
+
+    async fn wrap_later<U>(self, u: U) -> Box<U> {
+        await task.sleep(1)
+        return Box{ v: u }
+    }
+}
+
+async fn job<T>(x: T) -> T {
+    await task.sleep(1)
+    return x
+}
+
+async fn main() {
+    let p = P{ a: 3 }
+    let x = await p.later()
+    let y = await P.make(4)
+    io.print(x + y)
+    let t1 = p.later()
+    let t2 = P.make(5)
+    let both = await task.all([t1, t2])
+    io.print(both[0] + both[1])
+    let (v, err) = await p.pair()
+    if err != nil {
+        return
+    }
+    io.print(v)
+    let b = Box{ v: "boxed" }
+    io.print(await b.get())
+    let bb = await b.wrap_later(7)
+    io.print(bb.v)
+    let t: Task<int> = job(1)
+    io.print(await t)
+    let ts: [Task<str>] = [job("a"), job("b")]
+    let words = await task.all(ts)
+    io.print(words[0] + words[1])
+    let tb: Task<str> = b.get()
+    io.print(await tb)
+}
+"#,
+    ),
+    // A trait method's call through a bound or a `dyn` yields what a direct
+    // call does: a fallible one's pair, which could not be destructured, and
+    // an `async` one's task, which the Wasm dispatcher was typed without.
+    (
+        "trait-methods-yield-what-their-calls-yield",
+        r#"use std/task
+
+trait Source {
+    async fn get(self) -> int
+    fn probe(self) -> (int, error)
+    async fn fetch(self) -> (str, error)
+    async fn twice(self) -> int {
+        let a = await self.get()
+        return a * 2
+    }
+}
+
+struct P {
+    a: int
+}
+
+impl Source for P {
+    async fn get(self) -> int {
+        await task.sleep(1)
+        return self.a
+    }
+
+    fn probe(self) -> (int, error) {
+        if self.a > 5 {
+            return 0, errors.new("big")
+        }
+        return self.a, nil
+    }
+
+    async fn fetch(self) -> (str, error) {
+        await task.sleep(1)
+        if self.a > 3 {
+            return "", errors.new("far")
+        }
+        return "near", nil
+    }
+}
+
+async fn via<S: Source>(s: S) -> str {
+    let (v, err) = s.probe()
+    if err != nil {
+        return err.message()
+    }
+    let (w, ferr) = await s.fetch()
+    if ferr != nil {
+        return ferr.message()
+    }
+    let g = await s.get()
+    let t = await s.twice()
+    return "\(v) \(w) \(g) \(t)"
+}
+
+async fn via_dyn(s: dyn Source) -> str {
+    let (v, err) = s.probe()
+    if err != nil {
+        return err.message()
+    }
+    let (w, ferr) = await s.fetch()
+    if ferr != nil {
+        return ferr.message()
+    }
+    let g = await s.get()
+    let t = await s.twice()
+    return "\(v) \(w) \(g) \(t)"
+}
+
+async fn main() {
+    io.print(await via(P{ a: 3 }))
+    io.print(await via(P{ a: 9 }))
+    io.print(await via_dyn(P{ a: 4 }))
+    io.print(await via_dyn(P{ a: 8 }))
+    let p = P{ a: 2 }
+    let started = [p.get(), p.twice()]
+    let got = await task.all(started)
+    io.print(got[0] + got[1])
+}
+"#,
+    ),
 ];
 
 /// Programs above that need a rule of the checker's which may not have landed:
