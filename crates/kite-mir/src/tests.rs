@@ -452,3 +452,98 @@ fn every_block_the_transform_names_exists() {
         }
     }
 }
+
+/// The widest literal a function builds at once, in items, and how many
+/// locals it has.
+fn widest_literal_and_locals(f: &Function) -> (usize, usize) {
+    let widest = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.stmts)
+        .map(|s| match s {
+            Inst::Assign { value: Rvalue::SliceNew { elems }, .. } => elems.len(),
+            Inst::Assign { value: Rvalue::MapNew { entries }, .. } => entries.len(),
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0);
+    (widest, f.locals.len())
+}
+
+/// A long literal of computed elements costs the locals of its widest
+/// element, not a temporary per element.
+///
+/// Every element was a temporary of its own, all live until the literal was
+/// built: twenty thousand interpolated strings were sixty thousand locals,
+/// past what the VM and Wasm accept in a function, and natively twenty
+/// thousand collector roots live across twenty thousand calls, which made
+/// more machine code than the JIT could place. Past the first window each
+/// element is pushed as soon as it is computed, into temporaries the one
+/// before it has finished with.
+#[test]
+fn a_long_literal_of_computed_elements_reuses_its_temporaries() {
+    let n = 5000;
+    let elems: Vec<String> = (0..n).map(|i| format!("\"s\\(k + {})\"", i)).collect();
+    let entries: Vec<String> =
+        (0..n).map(|i| format!("\"k\\(k + {})\": [k, {}]", i % 700, i)).collect();
+    let b = build(&format!(
+        "fn main() {{\n  var k = 0\n  let xs = [{}]\n  let m = {{{}}}\n  io.print(xs.len() + m.len())\n}}\n",
+        elems.join(", "),
+        entries.join(", ")
+    ));
+    let f = b.main();
+    b.assert_well_formed(f);
+    let (widest, locals) = widest_literal_and_locals(f);
+    assert_eq!(widest, lower::LITERAL_WINDOW);
+    assert!(locals < 4 * lower::LITERAL_WINDOW, "{} locals for two literals of {}", locals, n);
+    let count = |want: fn(&Inst) -> bool| {
+        f.blocks.iter().flat_map(|blk| &blk.stmts).filter(|s| want(s)).count()
+    };
+    assert_eq!(count(|s| matches!(s, Inst::SlicePush { .. })), n - lower::LITERAL_WINDOW);
+    assert_eq!(count(|s| matches!(s, Inst::MapSet { .. })), n - lower::LITERAL_WINDOW / 2);
+}
+
+/// A long literal whose items need no temporary — constants and locals — is
+/// still one literal, which every backend builds a window at a time; and so
+/// is one no longer than the window, whatever its elements.
+#[test]
+fn a_long_literal_of_constants_is_still_one_literal() {
+    let n = 5000;
+    let consts: Vec<String> = (0..n).map(|i| i.to_string()).collect();
+    let short: Vec<String> = (0..lower::LITERAL_WINDOW).map(|i| format!("k + {}", i)).collect();
+    let b = build(&format!(
+        "fn main() {{\n  var k = 0\n  let xs = [{}, k]\n  let ys = [{}]\n  io.print(xs.len() + ys.len())\n}}\n",
+        consts.join(", "),
+        short.join(", ")
+    ));
+    let f = b.main();
+    let (widest, _) = widest_literal_and_locals(f);
+    assert_eq!(widest, n + 1);
+    let pushes = f.blocks.iter().flat_map(|blk| &blk.stmts);
+    assert!(!pushes.clone().any(|s| matches!(s, Inst::SlicePush { .. })), "{}", b.show());
+}
+
+/// Temporaries are reused only once an element is in: an element that is
+/// itself a long literal keeps its own under construction, and one that
+/// suspends keeps what it needs across the `await`.
+#[test]
+fn nested_and_suspending_long_literals_lower_well_formed() {
+    let n = lower::LITERAL_WINDOW + 40;
+    let inner: Vec<String> = (0..n).map(|i| format!("k + {}", i)).collect();
+    let row = format!("[{}]", inner.join(", "));
+    let rows: Vec<String> = (0..n).map(|_| row.clone()).collect();
+    let awaited: Vec<String> = (0..n).map(|i| format!("await f({})", i)).collect();
+    let (program, _types) = lower_async(&format!(
+        "async fn f(x: int) -> int {{\n  return x\n}}\n\
+         async fn main() {{\n  var k = 0\n  let grid = [{}]\n  let got = [{}]\n  io.print(grid.len() + got.len())\n}}\n",
+        rows.join(", "),
+        awaited.join(", ")
+    ));
+    for f in &program.fns {
+        for (i, b) in f.blocks.iter().enumerate() {
+            for s in b.term.successors() {
+                assert!(s.index() < f.blocks.len(), "`{}` block {} jumps to {:?}", f.name, i, s);
+            }
+        }
+    }
+}

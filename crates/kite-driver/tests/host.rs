@@ -1037,10 +1037,10 @@ const HANDLER_RUNNER: &str = "import { readFile } from \"node:fs/promises\";\n\
 /// state that outlives it.
 ///
 /// Three things at once, because they are one mechanism. The closure crosses as
-/// a reference the host cannot enter; `kite_invoke` is the export that can; and
-/// the state it updates is reached the only way this language allows — a `let`
-/// handle captured by value, mutated through a function taking `var`. A closure
-/// may not capture a `var`, and that rule is not weakened for events.
+/// a reference the host cannot enter; `$kite.invoke.N` is the export that can;
+/// and the state it updates is reached the only way this language allows — a
+/// `let` handle captured by value, mutated through a function taking `var`. A
+/// closure may not capture a `var`, and that rule is not weakened for events.
 #[test]
 fn the_host_calls_a_kite_closure_that_changes_state() {
     if !node_available() {

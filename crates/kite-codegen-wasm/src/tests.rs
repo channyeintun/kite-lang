@@ -44,7 +44,9 @@ fn build(src: &str) -> Built {
         diags.render_all(&sources)
     );
     kite_hir::mono::monomorphise(&mut hir).expect("specialisation terminates");
-    let mir = kite_mir::lower(&hir);
+    let mut mir = kite_mir::lower(&hir);
+    // As the driver does: a backend must never see an `await`.
+    kite_mir::asyncify(&mut mir, &mut hir.types);
     Built {
         module: compile(&mir, &hir.types),
     }
@@ -1106,6 +1108,119 @@ fn the_module_carries_a_source_mapping_url() {
         &bytes[after + 1..after + 1 + SOURCE_MAP_NAME.len()],
         SOURCE_MAP_NAME.as_bytes()
     );
+}
+
+/// The text of the function the name section calls `name`, as printed: its
+/// local declarations, then its body.
+fn function_text(b: &Built, name: &str) -> String {
+    let printed = wasmprinter::print_bytes(&b.module.bytes).unwrap();
+    let start = printed
+        .find(&format!("(func ${} ", name))
+        .unwrap_or_else(|| panic!("no function `{}`", name));
+    let rest = &printed[start..];
+    let end = rest[1..].find("\n  (").map(|e| e + 1).unwrap_or(rest.len());
+    rest[..end].to_string()
+}
+
+/// How many locals a printed function declares, parameters aside.
+fn declared_locals(text: &str) -> usize {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("(local "))
+        .map(|l| l.matches(" i32").count() + l.matches(" i64").count() + l.matches(" f64").count()
+            + l.matches(" (ref").count())
+        .sum()
+}
+
+/// A module's own entry points are spelled so no `pub fn` can take them.
+///
+/// They were `kite_poll` and `kite_invoke_0`, beside the program's exports,
+/// so a program naming a function either exported the name twice and the
+/// module was refused as invalid — reported as a bug in the compiler.
+#[test]
+fn a_pub_fn_cannot_collide_with_the_module_s_own_exports() {
+    let b = valid(
+        "pub fn kite_poll(n: int) -> int {\n  return n + 1\n}\n\
+         async fn later() -> int {\n  task.yield()\n  return kite_poll(1)\n}\n\
+         async fn main() {\n  io.print(await later())\n}\n",
+    );
+    let printed = wasmprinter::print_bytes(&b.module.bytes).unwrap();
+    assert!(printed.contains(&format!("(export \"{}\"", POLL_EXPORT)), "{}", printed);
+    assert!(printed.contains("(export \"kite_poll\""), "{}", printed);
+}
+
+/// A debug build's checked arithmetic is a call in the function doing it,
+/// not an `if` there.
+///
+/// V8's baseline compiler copies its record of every local at each `if`, and
+/// keeps the copies until the function is done: twenty thousand `let v = i + 1`
+/// were twenty thousand `if`s, and 9.3 GB to load.
+#[test]
+fn checked_arithmetic_leaves_its_caller_straight() {
+    let mut src = String::from("fn main() {\n  var k = 1\n");
+    for i in 0..500 {
+        src.push_str(&format!("  let v{} = k * {} + {} - k\n", i, i, i));
+    }
+    src.push_str("  io.print(v499 << 2 >> 1)\n  io.print(-k)\n}\n");
+    let b = valid(&src);
+    let main = function_text(&b, "main");
+    // The dispatch loop's own blocks aside, nothing in `main` branches.
+    assert!(!main.contains(" if "), "{}", &main[..main.len().min(2000)]);
+    assert!(!main.contains("\n      if"), "{}", &main[..main.len().min(2000)]);
+}
+
+/// A block's temporaries share the function's Wasm locals: a function of
+/// many `if` statements, each computing its condition from scratch, needs a
+/// few, not one per temporary.
+///
+/// V8's cost for a function grows with its locals times its branches, in
+/// both of its compilers: 1,500 such `if`s were 4,500 locals, and took over a
+/// minute and 2 GB to load, debug build or release.
+#[test]
+fn a_block_s_temporaries_share_locals() {
+    let mut src = String::from("fn main() {\n  var n = 0\n  var t = 0\n");
+    for i in 0..1500 {
+        src.push_str(&format!("  if (n + {}) % 3 == 0 {{\n    t = t + {}\n  }}\n", i, i));
+    }
+    src.push_str("  io.print(t)\n}\n");
+    let b = valid(&src);
+    let locals = declared_locals(&function_text(&b, "main"));
+    assert!(locals < 20, "{} locals", locals);
+}
+
+/// A long map literal of computed entries is a literal, then one `set` call
+/// per entry: no loop in the function it is in. Each `m[k] = v` looped over
+/// the keys inline, so a literal of nine thousand entries was a function of
+/// nine thousand hot loops, which the engine recompiled whole: minutes.
+#[test]
+fn a_map_write_is_a_call_not_a_loop_in_its_caller() {
+    let entries: Vec<String> = (0..2000).map(|i| format!("\"s{}\": [k, {}]", i, i)).collect();
+    let b = valid(&format!(
+        "fn main() {{\n  var k = 0\n  let m = {{{}}}\n  io.print(m.len())\n}}\n",
+        entries.join(", ")
+    ));
+    let main = function_text(&b, "main");
+    assert_eq!(main.matches("loop").count(), 1, "only the dispatch loop");
+}
+
+/// Constant keys are collapsed as the literal is compiled, at any length and
+/// repeated or not, so no run-time pass is emitted for them; a key read from
+/// a local gets one. The check gave up past 4,096 keys and ran the quadratic
+/// pass on a table of distinct names.
+#[test]
+fn constant_keys_are_collapsed_as_the_literal_is_compiled() {
+    let functions = |last: &str| {
+        let mut entries: Vec<String> = (0..5000).map(|i| format!("\"s{}\": {}", i, i)).collect();
+        entries.push(last.to_string());
+        let b = valid(&format!(
+            "fn main() {{\n  let k = \"s0\"\n  let m = {{{}}}\n  io.print(m.len())\n}}\n",
+            entries.join(", ")
+        ));
+        wasmprinter::print_bytes(&b.module.bytes).unwrap().matches("\n  (func ").count()
+    };
+    let distinct = functions("\"s5000\": 9");
+    assert_eq!(functions("\"s0\": 9"), distinct);
+    assert_eq!(functions("k: 9"), distinct + 1);
 }
 
 /// A stack frame gets a name, which is the half of §16 the map cannot do.

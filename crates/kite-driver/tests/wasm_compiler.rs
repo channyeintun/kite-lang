@@ -281,6 +281,60 @@ console.log(c.checkModule({ entry: "fn main() {\n  let x: int = \"s\"\n}\n", pat
     );
 }
 
+/// `npx kitec build --out DIR` names each source relative to `DIR`, as the
+/// native `kitec` does, and a sibling module too.
+///
+/// It named the entry by its bare file name whatever `--out` was, so the map
+/// in `dist/` said `main.kite`, which a debugger looked for in `dist/` and did
+/// not find. The compiler has no filesystem to measure from; the command
+/// tells it where each file is, relative to where the map goes.
+#[test]
+fn npx_kitec_build_names_sources_where_a_browser_finds_them() {
+    if wasm_compiler().is_none() {
+        return;
+    }
+    let dir = work_dir("npm-sourcemap");
+    std::fs::create_dir_all(dir.join("src")).expect("src");
+    std::fs::write(
+        dir.join("src/main.kite"),
+        "use helper\n\nfn main() {\n  io.print(helper.greet())\n}\n",
+    )
+    .expect("write");
+    std::fs::write(dir.join("src/helper.kite"), "pub fn greet() -> str {\n  return \"hi\"\n}\n")
+        .expect("write");
+    let bin = root().join("packages/kite-wasm/kitec.js");
+    let absolute = dir.join("src/main.kite");
+    for (entry, out) in [("src/main.kite", "dist"), (absolute.to_str().unwrap(), "web/dist")] {
+        let built = Command::new("node")
+            .args([bin.to_str().unwrap(), "build", entry, "--out", out])
+            .current_dir(&dir)
+            .output()
+            .expect("node runs");
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        let map = std::fs::read_to_string(dir.join(out).join("app.wasm.map")).expect("a map");
+        let up = "../".repeat(out.split('/').count());
+        let expected = format!("\"sources\":[\"{up}src/main.kite\",\"{up}src/helper.kite\"]");
+        assert!(map.contains(&expected), "built from {}: {}", entry, &map[..map.len().min(200)]);
+        let home = dir.to_string_lossy().replace('\\', "/");
+        assert!(!map.contains(&home), "the builder's path leaked into the map");
+    }
+    // Diagnostics still name the file as it was typed.
+    std::fs::write(dir.join("src/main.kite"), "fn main() {\n  let x: int = \"s\"\n}\n")
+        .expect("write");
+    let failed = Command::new("node")
+        .args([bin.to_str().unwrap(), "build", "src/main.kite", "--out", "dist"])
+        .current_dir(&dir)
+        .output()
+        .expect("node runs");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!failed.status.success());
+    assert!(
+        String::from_utf8_lossy(&failed.stderr).contains("src/main.kite:2"),
+        "{}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+}
+
 /// `npx kitec check` fails on an error and not on a warning, as the native
 /// `kitec` does — any output at all used to count as failure.
 #[test]

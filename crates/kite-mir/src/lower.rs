@@ -82,6 +82,13 @@ struct FnLowerer<'a> {
     /// Where this lowering found HIR an earlier stage promised it would never
     /// produce. See [`Internal`].
     internal: &'a mut Vec<Internal>,
+    /// Temporaries that are dead for good, by type, for [`Self::temp`] to hand
+    /// out again. Only a long literal frees any: see [`Self::long_literal`].
+    free: HashMap<Ty, Vec<Local>>,
+    /// While an element of a long literal is lowered, every temporary handed
+    /// out for it, innermost literal last, so that all of them can be freed
+    /// once the element is in.
+    handed: Vec<Vec<Local>>,
 }
 
 impl<'a> FnLowerer<'a> {
@@ -110,6 +117,8 @@ impl<'a> FnLowerer<'a> {
             sealed: false,
             loops: Vec::new(),
             internal,
+            free: HashMap::new(),
+            handed: Vec::new(),
         }
     }
 
@@ -184,9 +193,81 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn temp(&mut self, ty: TyId) -> Local {
-        let id = Local(self.locals.len() as u32);
-        self.locals.push(LocalDecl { ty, name: None });
+        let id = match self.free.get_mut(&ty).and_then(Vec::pop) {
+            Some(reused) => reused,
+            None => {
+                self.locals.push(LocalDecl { ty, name: None });
+                Local(self.locals.len() as u32 - 1)
+            }
+        };
+        if let Some(scope) = self.handed.last_mut() {
+            scope.push(id);
+        }
         id
+    }
+
+    /// Lower with every temporary `lower` asks for recorded, and free them all
+    /// afterwards. What it lowers must leave none of them live.
+    fn recycling<T>(&mut self, lower: impl FnOnce(&mut Self) -> T) -> T {
+        self.handed.push(Vec::new());
+        let out = lower(self);
+        for l in self.handed.pop().unwrap_or_default() {
+            let ty = self.locals[l.index()].ty;
+            self.free.entry(ty).or_default().push(l);
+        }
+        out
+    }
+
+    /// A slice or map literal too long to evaluate whole before it is built,
+    /// built as it goes instead: the first [`LITERAL_WINDOW`] items as a
+    /// literal, then each later element pushed, or each later entry set, as
+    /// soon as it has been computed. `per` is 1 for a slice's elements and 2
+    /// for a map's flattened entries. Answers the local holding the result, or
+    /// `None` for a literal that is lowered whole.
+    ///
+    /// Lowered whole, every element is a temporary of its own, and all of them
+    /// are live until the literal is built. Twenty thousand interpolated
+    /// strings were sixty thousand locals: a VM frame past its sixteen-bit
+    /// registers, a Wasm function past what an engine accepts, and natively
+    /// twenty thousand collector roots live across twenty thousand calls. The
+    /// stack maps for that are quadratic, and eight thousand elements made more
+    /// machine code than the JIT could place, which panicked; four thousand
+    /// took a gigabyte. Built as it goes, an element's temporaries are dead once
+    /// it is in and the next element reuses them, so a literal needs as many
+    /// locals as its widest element, whatever its length.
+    ///
+    /// `m[k] = v` on a key already present keeps its position and takes the
+    /// later value, which is the rule a literal that names a key twice follows
+    /// on every backend, so the map comes out the same either way. Items that
+    /// need no temporary, constants and locals, are left to the literal
+    /// itself however many there are: each backend already builds those a
+    /// window at a time.
+    fn long_literal(&mut self, e: &hir::Expr, items: &[hir::Expr], per: usize) -> Option<Local> {
+        if items.len() <= LITERAL_WINDOW || items[LITERAL_WINDOW..].iter().all(needs_no_temp) {
+            return None;
+        }
+        let built = self.temp(e.ty);
+        self.recycling(|me| {
+            let first = items[..LITERAL_WINDOW].iter().map(|a| me.operand(a)).collect();
+            let value = if per == 1 {
+                Rvalue::SliceNew { elems: first }
+            } else {
+                Rvalue::MapNew { entries: first }
+            };
+            me.assign(built, value);
+        });
+        for item in items[LITERAL_WINDOW..].chunks(per) {
+            self.recycling(|me| {
+                let ops: Vec<Operand> = item.iter().map(|a| me.operand(a)).collect();
+                let mut ops = ops.into_iter();
+                match (ops.next(), ops.next()) {
+                    (Some(value), None) => me.emit(Inst::SlicePush { local: built, value }),
+                    (Some(key), Some(value)) => me.emit(Inst::MapSet { local: built, key, value }),
+                    _ => {}
+                }
+            });
+        }
+        Some(built)
     }
 
     fn assign(&mut self, dst: Local, value: Rvalue) {
@@ -749,6 +830,9 @@ impl<'a> FnLowerer<'a> {
                 Rvalue::IsNil { value: v }
             }
             hir::ExprKind::MapNew { entries } => {
+                if let Some(built) = self.long_literal(e, entries, 2) {
+                    return Rvalue::Use(Operand::Local(built));
+                }
                 let entries = entries.iter().map(|a| self.operand(a)).collect();
                 Rvalue::MapNew { entries }
             }
@@ -774,6 +858,9 @@ impl<'a> FnLowerer<'a> {
                 Rvalue::TupleNew { elems }
             }
             hir::ExprKind::SliceNew { elems } => {
+                if let Some(built) = self.long_literal(e, elems, 1) {
+                    return Rvalue::Use(Operand::Local(built));
+                }
                 let elems = elems.iter().map(|a| self.operand(a)).collect();
                 Rvalue::SliceNew { elems }
             }
@@ -1255,6 +1342,31 @@ impl<'a> FnLowerer<'a> {
         self.resume_after(join, then_joins || else_joins);
         result
     }
+}
+
+/// How many items of a slice or map literal, counting a map's keys and values
+/// separately, are evaluated before it is built. Even, so a map's window ends
+/// between two entries. See [`FnLowerer::long_literal`].
+///
+/// Small, because what the window's items hold is live at once: a window of
+/// `if` expressions is that many locals live across as many branches, which
+/// is what a Wasm engine's work on a function grows with.
+pub const LITERAL_WINDOW: usize = 64;
+const _: () = assert!(LITERAL_WINDOW % 2 == 0);
+
+/// Whether lowering `e` as an operand makes no temporary: a constant, or a
+/// local read where it is.
+fn needs_no_temp(e: &hir::Expr) -> bool {
+    matches!(
+        e.kind,
+        hir::ExprKind::Int(_)
+            | hir::ExprKind::Float(_)
+            | hir::ExprKind::Bool(_)
+            | hir::ExprKind::Str(_)
+            | hir::ExprKind::Local(_)
+            | hir::ExprKind::Error
+            | hir::ExprKind::Nil
+    )
 }
 
 /// Whether evaluating an rvalue can trap, so that discarding its value must

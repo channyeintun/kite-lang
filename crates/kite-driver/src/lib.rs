@@ -352,6 +352,29 @@ impl Compilation {
     /// name. The standard library's modules are named under `kite-std/`, and
     /// every source's text travels in the map, so none of it has to be found.
     pub fn wasm_source_map(&self, beside: Option<&Path>) -> Option<String> {
+        self.source_map_naming(|file| source_name(file, beside))
+    }
+
+    /// The same map, for a caller with no filesystem to measure from — the
+    /// compiler built as WebAssembly — that knows where each file is itself:
+    /// a source whose name as compiled is a key of `names` is given that
+    /// name instead. Any other is named as [`Self::wasm_source_map`] names it
+    /// with no directory.
+    ///
+    /// Only the caller knows which directory the map goes into and where each
+    /// file it handed over came from, so `npx kitec build src/main.kite --out
+    /// dist` said `main.kite`, which a browser looked for in `dist/`.
+    pub fn wasm_source_map_renamed(
+        &self,
+        names: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
+        self.source_map_naming(|file| match names.get(file.to_string_lossy().as_ref()) {
+            Some(name) => name.clone(),
+            None => source_name(file, None),
+        })
+    }
+
+    fn source_map_naming(&self, name: impl Fn(&Path) -> String) -> Option<String> {
         use kite_codegen_wasm::sourcemap::{render, FunctionSpan, Source};
         let module = self.wasm.as_ref()?;
         // A release build carries no debug information, and a map with no
@@ -362,7 +385,7 @@ impl Compilation {
         let mut sources: Vec<Source> = Vec::new();
         let mut spans = Vec::with_capacity(module.source_spans.len());
         for (offset, span) in &module.source_spans {
-            let file = source_name(&self.sources.file(span.file).name, beside);
+            let file = name(&self.sources.file(span.file).name);
             let at = self.sources.line_col(*span);
             if !sources.iter().any(|s| s.name == file) {
                 sources.push(Source {
@@ -961,24 +984,23 @@ fn run_passes(
         // A function wider than an engine accepts is the program's size, not
         // the compiler's mistake, and says so before the validator would.
         if !module.too_wide.is_empty() {
-            for (function, span, locals) in &module.too_wide {
+            for large in &module.too_wide {
                 diags.push(
                     Diagnostic::error(
                         kite_diag::codes::E0902,
-                        format!("`{}` is too large for WebAssembly", function),
+                        format!("`{}` is too large for WebAssembly", large.function),
                     )
-                    .with_primary(
-                        *span,
-                        format!(
-                            "{} locals, more than the {} an engine accepts in one function",
-                            locals,
-                            kite_codegen_wasm::MAX_LOCALS
-                        ),
-                    )
-                    .with_note(
-                        "every local and temporary is a Wasm local: split the function; \
-                         `--native` does not have this limit",
-                    ),
+                    .with_primary(large.span, large.what.clone())
+                    .with_note(if large.locals {
+                        // What counts, since not every local does: one made
+                        // and used between two branches shares a Wasm local
+                        // with others like it.
+                        "a local that lives across a branch, or is held while other values \
+                         are computed, is a Wasm local of its own: split the function; \
+                         `--native` does not have this limit"
+                    } else {
+                        "split the function; `--native` does not have this limit"
+                    }),
                 );
             }
             return (String::new(), None, None, None, index);
@@ -1053,11 +1075,14 @@ fn run_passes(
                 .with_primary(limit.span, limit.what)
                 // Each target's own limit, since the note once said the other
                 // two had none: WebAssembly counts locals, not the literal's
-                // staging, and refuses past fifty thousand of them.
+                // staging, and refuses past fifty thousand of them. A literal
+                // is only this long here when its elements need no computing
+                // (constants and locals): past a short window, one computed
+                // element at a time is built into it.
                 .with_note(
-                    "split the function, or build a large literal in a loop; \
+                    "split the function, or build a large literal of constants in a loop; \
                      `--native` does not have this limit, and `--emit wasm` accepts a \
-                     literal of any length but at most 50000 locals in one function",
+                     literal of any length and up to 50000 locals in one function",
                 ),
             );
         }
@@ -1507,13 +1532,24 @@ mod tests {
     /// says what the other targets accept. Wasm reported one of 50,000
     /// locals as an invalid module, E0900 — the compiler's own bug — and the
     /// VM's note claimed Wasm had no limit at all.
+    ///
+    /// On Wasm only a local that lives across a branch has a Wasm local of
+    /// its own, so the same `let`s read in a branch are past its limit, and
+    /// read where they are made they are not: sixty-six thousand of those
+    /// share a few Wasm locals, and build.
     #[test]
     fn a_function_past_a_targets_limit_says_so() {
-        let mut src = String::from("fn main() {\n  let first = 111\n");
-        for i in 0..66_000 {
-            src.push_str(&format!("  let v{} = {} + 1\n", i, i));
+        let n = 66_000;
+        let mut lets = String::from("fn main() {\n  let first = 111\n");
+        for i in 0..n {
+            lets.push_str(&format!("  let v{} = {} + 1\n", i, i));
         }
-        src.push_str("  io.print(first)\n  io.print(v65999)\n}\n");
+        let mut src = lets.clone();
+        src.push_str("  if first > 0 {\n");
+        for i in 0..n {
+            src.push_str(&format!("    io.print(v{})\n", i));
+        }
+        src.push_str("  }\n}\n");
         let codes = |c: &Compilation| -> Vec<&str> {
             c.diags
                 .iter()
@@ -1527,12 +1563,18 @@ mod tests {
         let text = wasm.render_diagnostics();
         assert!(text.contains("too large for WebAssembly"), "{}", text);
         assert!(text.contains("more than the 50000 an engine accepts"), "{}", text);
+        assert!(text.contains("lives across a branch"), "{}", text);
 
         let vm = compile("t.kite", &src, Emit::Kbc);
         assert_eq!(codes(&vm), ["E0902"], "{}", vm.render_diagnostics());
         let text = vm.render_diagnostics();
-        assert!(text.contains("at most 50000 locals"), "{}", text);
+        assert!(text.contains("up to 50000 locals"), "{}", text);
         assert!(!text.contains("`--emit wasm` and `--native` do not have this limit"), "{}", text);
+
+        let straight = format!("{}  io.print(first)\n  io.print(v{})\n}}\n", lets, n - 1);
+        let wasm = compile("t.kite", &straight, Emit::Wasm);
+        assert!(!wasm.failed(), "{}", wasm.render_diagnostics());
+        assert_eq!(codes(&compile("t.kite", &straight, Emit::Kbc)), ["E0902"]);
     }
 
     #[test]

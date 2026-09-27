@@ -459,7 +459,7 @@ expression trees:
 
 MIR is explicit basic blocks and terminators. It is **not** SSA: locals are
 numbered slots, which the bytecode backend maps straight onto registers, and
-nothing yet needs more. Lowering does two things beyond building the graph:
+nothing yet needs more. Lowering does three things beyond building the graph:
 
 - **Match lowering** — arms are tested in order, each falling through to the
   next on failure, and the block after the last arm is `unreachable`, because
@@ -473,6 +473,15 @@ nothing yet needs more. Lowering does two things beyond building the graph:
   frame and reloaded around each suspension rather than rewritten into frame
   fields everywhere; which ones are actually live across a suspension is not
   computed. After this, no backend knows `async` exists.
+- **Long literals** — a slice or map literal is evaluated item by item into
+  temporaries and then built, which for one of twenty thousand computed
+  elements was twenty thousand temporaries, all live at once: past every
+  target's frame, and natively a collector root each across every later call.
+  Past a window of 64 items, a literal whose remaining items need computing is
+  built as it goes instead: each element pushed, or each entry set, as soon as
+  it has been computed, into temporaries the one before it has finished with.
+  A key named twice ends where a literal puts it, at its first position with
+  its last value. A literal of constants stays one literal of any length.
 
 The native and bytecode backends skip blocks unreachable from the entry.
 
@@ -649,6 +658,29 @@ the engine, so the first sign of one is a blank page and a `CompileError` naming
 caused it. Validating costs microseconds and it is the last point at which the
 compiler still knows what it was lowering. A failure is `E0900`, which says it
 is a bug in Kite rather than in the program.
+
+### Size limits
+
+An engine accepts at most 50,000 locals and 7,654,321 bytes of code in one
+function, and a function past either is the program's size rather than the
+compiler's mistake: it is refused before validation with `E0902`, which names
+the limit. The bytecode VM has its own, a frame of 65,536 registers, and the
+native backend counts neither.
+
+Not every MIR local is a Wasm local. One that lives within a single block,
+written there before anything reads it, shares a Wasm local of its type with
+others whose lives do not overlap; only a local that crosses a branch, or is
+held while other values are computed, has one of its own. This matters beyond
+the limit: V8's work on a function grows with its locals times its branches,
+in its baseline compiler and again when it recompiles a hot function, and
+1,500 `if` statements with a temporary per condition took over a minute to
+load. For the same reason a debug build's overflow checks are calls to small
+functions rather than an `if` in the function doing the arithmetic: the
+baseline compiler copies its record of every local at each `if`, and a
+function of twenty thousand checked `+` took 9.3 GB.
+
+A slice or map literal longer than a short window is built as it goes (see
+MIR, below), so its length costs no locals, only its widest element.
 
 ---
 

@@ -294,7 +294,7 @@ if (typeof exports.main !== "function") {{
   throw new Error("this module has no `main`");
 }}
 exports.main();
-if (typeof exports.kite_poll === "function") resident(exports);
+if (typeof exports["$kite.poll"] === "function") resident(exports);
 "#
     )
 }

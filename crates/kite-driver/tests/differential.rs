@@ -2229,6 +2229,109 @@ fn main() {
 }
 "#,
     ),
+    // The module's own exports were `kite_poll` and `kite_invoke_0`, beside
+    // the program's `pub fn`s, so an async program with a `pub fn kite_poll`
+    // exported that name twice and was refused as a bug in the compiler
+    // (E0900). They are spelled with a `$` now, which no Kite name holds.
+    (
+        "a-pub-fn-may-take-the-name-of-an-internal-export",
+        r#"use std/task
+
+pub fn kite_poll(n: int) -> int {
+    return n + 1
+}
+
+pub fn kite_invoke_0(s: str) -> str {
+    return s + "!"
+}
+
+async fn later() -> int {
+    await task.sleep(1)
+    return kite_poll(40)
+}
+
+async fn main() {
+    await task.sleep(1)
+    io.print(kite_poll(1))
+    io.print(kite_invoke_0("hi"))
+    io.print(await later())
+}
+"#,
+    ),
+    // `m[k] = v` and a literal's collapsing of repeated keys are helper
+    // functions of their own on Wasm, one per map type, rather than loops
+    // written out in the caller. Every key kind the equality they share
+    // distinguishes: a string, an int, a float with `-0.0` and a NaN that
+    // never finds itself, a bool, a struct and an optional.
+    (
+        "map-writes-and-repeated-literal-keys",
+        r#"struct K {
+    a: int
+    b: str
+}
+
+fn show(m: {str: int}) -> str {
+    var out = ""
+    for k in m.keys() {
+        let v = match m[k] {
+            nil => -1,
+            x => x,
+        }
+        out = out + k + "=\(v) "
+    }
+    return out
+}
+
+fn main() {
+    let a = "x"
+    let b = "y"
+    var m = {a: 1, b: 2, "x": 3, "z": 4, b: 5}
+    io.print(show(m))
+    m["y"] = 6
+    m["w"] = 7
+    m["x"] = 8
+    io.print(show(m))
+    var n: {int: str} = {1: "one"}
+    for i in 0..5 {
+        n[i % 3] = "v\(i)"
+    }
+    io.print(n.len())
+    for k in n.keys() {
+        match n[k] {
+            nil => io.print("missing"),
+            v => io.print("\(k) \(v)"),
+        }
+    }
+    let z = 0.0
+    var f: {float: int} = {z: 1, -z: 2}
+    f[0.0 / 0.0] = 3
+    f[0.0 / 0.0] = 4
+    io.print(f.len())
+    var t: {bool: int} = {true: 1}
+    t[false] = 2
+    t[true] = 3
+    io.print(t.len())
+    var s: {K: int} = {K{ a: 1, b: "p" }: 1, K{ a: 1, b: "p" }: 2}
+    s[K{ a: 2, b: "p" }] = 3
+    s[K{ a: 1, b: "p" }] = 4
+    io.print(s.len())
+    for k in s.keys() {
+        match s[k] {
+            nil => io.print("missing"),
+            v => io.print("\(k.a) \(k.b) \(v)"),
+        }
+    }
+    var o: {Option<int>: str} = {nil: "none"}
+    o[3] = "three"
+    o[nil] = "nothing"
+    io.print(o.len())
+    match o[nil] {
+        nil => io.print("missing"),
+        v => io.print(v),
+    }
+}
+"#,
+    ),
 ];
 
 /// Programs pinning down the native target against the other two. Each one is
@@ -3861,6 +3964,93 @@ fn literals_past_ten_thousand_elements_agree() {
     }
     if node_available() {
         let dir = std::env::temp_dir().join(format!("kite-biglit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create work directory");
+        let wasm = run_on_wasm(name, &src, &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(wasm, vm, "wasm");
+    }
+}
+
+/// Literals of elements computed at run time, longer than the window MIR
+/// evaluates before building one, agree on all three — natively under a
+/// collector made to run constantly too.
+///
+/// Each element was a temporary of its own, all of them live until the
+/// literal was built. Natively that was a collector root per element live
+/// across every later call, and the stack maps for it quadratic: four
+/// thousand interpolated strings took a gigabyte to compile, and eight
+/// thousand made more machine code than the JIT could place, which panicked.
+/// Past the window each element is pushed, or each entry set, as soon as it is
+/// computed, reusing the temporaries of the one before. That is `m[k] = v`
+/// for a map, so a key named twice must still be one entry at its first
+/// position with its last value; and an element may be an `if`, a struct, a
+/// literal of its own, or an `await` that suspends between two elements.
+#[test]
+fn computed_literals_past_a_window_agree() {
+    let n = 400;
+    let list = |f: &dyn Fn(usize) -> String| (0..n).map(f).collect::<Vec<_>>().join(", ");
+    let src = format!(
+        "use std/task\n\n\
+         struct P {{\n  a: int\n  b: str\n}}\n\n\
+         fn key(i: int) -> str {{\n  return \"k\\(i)\"\n}}\n\n\
+         fn build(n: int) {{\n\
+         \x20 let strs = [{}]\n\
+         \x20 io.print(\"\\(strs.len()) \\(strs[0]) \\(strs[{last}])\")\n\
+         \x20 let ps = [{}]\n\
+         \x20 io.print(\"\\(ps.len()) \\(ps[{last}].a) \\(ps[{last}].b)\")\n\
+         \x20 let picked = [{}]\n\
+         \x20 io.print(\"\\(picked[0]) \\(picked[1]) \\(picked[{last}])\")\n\
+         \x20 let grid = [{}]\n\
+         \x20 io.print(\"\\(grid.len()) \\(grid[{last}][1])\")\n\
+         \x20 let m = {{{}}}\n\
+         \x20 io.print(\"\\(m.len()) \\(m.keys()[0]) \\(m.values()[0]) \\(m.keys()[99])\")\n}}\n\n\
+         async fn later(i: int) -> int {{\n  task.yield()\n  return i * 2\n}}\n\n\
+         async fn waited() -> [int] {{\n  return [{}]\n}}\n\n\
+         async fn main() {{\n  build(0)\n  let w = await waited()\n\
+         \x20 var total = 0\n  for x in w {{\n    total = total + x\n  }}\n\
+         \x20 io.print(\"\\(w.len()) \\(total)\")\n}}\n",
+        list(&|i| format!("\"s\\(n + {})\"", i)),
+        list(&|i| format!("P{{ a: n + {}, b: key({}) }}", i, i)),
+        list(&|i| format!("if (n + {}) % 2 == 0 {{ key({}) }} else {{ \"odd\" }}", i, i)),
+        list(&|i| format!("[n + {}, n + {}]", i, i + 1)),
+        list(&|i| format!("\"k\\((n + {}) % 100)\": n + {}", i, i)),
+        (0..100).map(|i| format!("await later({})", i)).collect::<Vec<_>>().join(", "),
+        last = n - 1,
+    );
+    let name = "computed-literals-past-a-window";
+    let vm = run_on_vm(name, &src);
+    assert_eq!(vm, "400 s0 s399\n400 399 k399\nk0 odd odd\n400 400\n100 k0 300 k99\n100 9900\n");
+    if native_available() {
+        assert_eq!(run_on_native(name, &src), vm, "native");
+        let (paged, minor) = run_on_native_with(name, &src, PAGE_OF_NURSERY);
+        assert_eq!(paged, vm, "native, with a page of nursery");
+        assert!(minor > 10, "only {} collections: the nursery did not fill", minor);
+    }
+    if node_available() {
+        let dir = std::env::temp_dir().join(format!("kite-computed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create work directory");
+        let wasm = run_on_wasm(name, &src, &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(wasm, vm, "wasm");
+    }
+}
+
+/// A literal of twenty thousand interpolated strings compiles for the VM and
+/// for Wasm, and the two agree. As a temporary per element it needed a frame
+/// of 80,010 registers and a function of 60,015 locals, and both targets
+/// refused it (E0902). Natively it is the program above, longer.
+#[test]
+fn a_literal_past_either_frame_limit_compiles() {
+    let elems: Vec<String> = (0..20_000).map(|i| format!("\"s\\(n + {})\"", i)).collect();
+    let src = format!(
+        "fn main() {{\n  var n = 0\n  let xs = [{}]\n  io.print(\"\\(xs.len()) \\(xs[19999])\")\n}}\n",
+        elems.join(", ")
+    );
+    let name = "a-literal-past-either-frame-limit";
+    let vm = run_on_vm(name, &src);
+    assert_eq!(vm, "20000 s19999\n");
+    if node_available() {
+        let dir = std::env::temp_dir().join(format!("kite-wide-literal-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create work directory");
         let wasm = run_on_wasm(name, &src, &dir);
         let _ = std::fs::remove_dir_all(&dir);

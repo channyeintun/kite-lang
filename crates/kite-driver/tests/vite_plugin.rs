@@ -268,7 +268,9 @@ say("the glue is pointed at it too", glue.includes("__wasm") && !glue.includes('
 ///
 /// Only `type="module"` and `src="…"` in double quotes were recognised, so a
 /// page written `<script type=module src='/src/main.kite'>` loaded a program
-/// that never started, and nothing said so.
+/// that never started, and nothing said so. The pattern that fixed that ended
+/// every value at whitespace, quoted or not, and so left a quoted name with a
+/// space in it, `src="/src/my file.kite"`, alone in its turn.
 #[test]
 fn an_entry_is_found_however_it_is_quoted() {
     if !node_available() {
@@ -285,6 +287,11 @@ const html = [
   '<script src="/src/d.kite" type="module"></script>',
   '<script src="/src/e.kite"></script>',
   '<script type="module" src="/src/f.js"></script>',
+  '<script type="module" src="/src/my file.kite"></script>',
+  "<script type='module' src = '/src/our app.kite'></script>",
+  "<script type=\"module\" src='/src/say \"hi\".kite'></script>",
+  '<script type="module" src="/src/g.kite.js"></script>',
+  "<script type=module src=/src/h.kite/></script>",
 ].join("\n");
 console.log(p.transformIndexHtml.handler(html));
 "#;
@@ -296,7 +303,12 @@ console.log(p.transformIndexHtml.handler(html));
          <script type=module src=/src/c.kite?kite-entry></script>\n\
          <script src=\"/src/d.kite?kite-entry\" type=\"module\"></script>\n\
          <script src=\"/src/e.kite\"></script>\n\
-         <script type=\"module\" src=\"/src/f.js\"></script>\n",
+         <script type=\"module\" src=\"/src/f.js\"></script>\n\
+         <script type=\"module\" src=\"/src/my file.kite?kite-entry\"></script>\n\
+         <script type='module' src = '/src/our app.kite?kite-entry'></script>\n\
+         <script type=\"module\" src='/src/say \"hi\".kite?kite-entry'></script>\n\
+         <script type=\"module\" src=\"/src/g.kite.js\"></script>\n\
+         <script type=module src=/src/h.kite?kite-entry/></script>\n",
         "{}",
         out
     );
