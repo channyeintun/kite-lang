@@ -196,6 +196,16 @@ fn a_brace_missing_before_a_declaration_is_one_diagnostic() {
              fn main() {\n    io.print(P{ n: 1 }.get() + helper())\n}\n",
             6,
         ),
+        // The `impl`'s own, with an associated function at its margin and a
+        // method indented after that: the `impl` went on past the function,
+        // so `S.new` and `twice` are still its own.
+        (
+            "struct S {\n    v: int\n}\n\nimpl S {\n    fn get(self) -> int {\n        return self.v\n    }\n\
+             fn new(v: int) -> S {\n    return S{ v: v }\n}\n\
+             \x20   fn twice(self) -> int {\n        return self.v * 2\n    }\n\n\
+             fn main() {\n    let s = S.new(2)\n    io.print(s.twice())\n}\n",
+            5,
+        ),
     ];
     for (src, line) in cases {
         let result = compile(Path::new("t.kite"), src, Emit::Check);

@@ -951,6 +951,14 @@ impl<'a> Parser<'a> {
             return true;
         }
         if inside {
+            // A method indented as the others are, after one at the margin:
+            // the `impl` had not ended before that one after all, and if a
+            // brace turns out to be missing, it is missing later. Cut at the
+            // one at the margin, it was read as a function of its own, and
+            // this one too, `self` and all — three errors for one brace.
+            if member && open.holds == Holds::Methods {
+                self.suspect = None;
+            }
             return false;
         }
         if member {

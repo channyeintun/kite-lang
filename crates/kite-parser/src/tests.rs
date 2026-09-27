@@ -1106,6 +1106,46 @@ fn a_brace_missing_before_a_function_at_the_margin_is_found_there() {
     assert_eq!(p.fns().len(), 1);
 }
 
+/// An associated function at the margin of an `impl`, with an indented
+/// method after it, is not where the `impl` ended: a `}` missing later is
+/// found later. The cut used to be made at the function at the margin, which
+/// left the method after it outside the `impl` — an error at its `self` —
+/// and the function a function of its own, which `S.new` could not find.
+#[test]
+fn an_indented_method_after_one_at_the_margin_keeps_the_impl_open() {
+    let src = "\
+struct S {
+    v: int
+}
+
+impl S {
+    fn get(self) -> int {
+        return self.v
+    }
+fn new(v: int) -> S {
+    return S{ v: v }
+}
+    fn twice(self) -> int {
+        return self.v * 2
+    }
+
+fn main() {
+    let s = S.new(2)
+    io.print(s.twice())
+}
+";
+    let p = parse_src(src);
+    assert_eq!(p.codes(), vec!["E0101"], "{}", p.render());
+    let out = p.render();
+    assert!(out.contains("5 │ impl S {"), "{}", out);
+    assert!(out.contains("16 │ fn main() {"), "{}", out);
+    let Some(Item::Impl(i)) = p.file.items.get(1) else { panic!("{:?}", p.file.items) };
+    let names: Vec<_> = i.methods.iter().map(|m| m.name.name.clone()).collect();
+    assert_eq!(names, vec!["get", "new", "twice"]);
+    let fns: Vec<_> = p.fns().iter().map(|f| f.name.name.clone()).collect();
+    assert_eq!(fns, vec!["main"]);
+}
+
 /// A declaration inside a block is one error, and skipped whole.
 #[test]
 fn a_declaration_inside_a_block_is_one_error() {
