@@ -451,7 +451,17 @@ fn source_name(file: &Path, beside: Option<&Path>) -> String {
     };
     let relative = beside.and_then(|dir| {
         let (from, to) = (absolute(dir)?, absolute(file)?);
-        relative_path(&normalise(&from), &normalise(&to))
+        // Through the filesystem when both can be asked, because the same
+        // directory may be reached by two spellings: on macOS the temporary
+        // directory is `/var/…` by one and `/private/var/…` by the other,
+        // and comparing them lexically climbed to the root and down again.
+        // Both or neither, so a resolved path is never measured against an
+        // unresolved one — on Windows they do not even share a prefix.
+        let (from, to) = match (std::fs::canonicalize(&from), std::fs::canonicalize(&to)) {
+            (Ok(from), Ok(to)) => (from, to),
+            _ => (normalise(&from), normalise(&to)),
+        };
+        relative_path(&from, &to)
     });
     match relative {
         Some(r) => r,

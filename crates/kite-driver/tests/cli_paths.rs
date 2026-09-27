@@ -309,3 +309,33 @@ fn a_source_map_names_sources_where_a_browser_finds_them() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A source reached through a symbolic link is named relative to the map as
+/// it really is on disk.
+///
+/// macOS's temporary directory is `/var/…` by one spelling and
+/// `/private/var/…` by the other, and a process's working directory comes
+/// back as the second. Comparing an input path given as the first with an
+/// output directory resolved as the second climbed to the root and down
+/// again: `../../../../../../../../var/folders/…/src/main.kite`. A link makes
+/// the same two spellings anywhere, so this holds on every Unix, not only on
+/// the one where it was found.
+#[cfg(unix)]
+#[test]
+fn a_source_reached_through_a_link_is_named_as_it_is_on_disk() {
+    let dir = scratch("sourcemap-link", "unused.kite", "");
+    std::fs::create_dir_all(dir.join("real/src")).expect("src");
+    std::fs::write(dir.join("real/src/main.kite"), "fn main() {\n    io.print(1)\n}\n").expect("write");
+    std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).expect("link");
+    let through_link = dir.join("link/src/main.kite");
+    let Some((ok, _, err)) = kitec_in(
+        &dir.join("real"),
+        &["build", through_link.to_str().unwrap(), "--emit", "wasm", "--out", "dist"],
+    ) else {
+        return;
+    };
+    assert!(ok, "{}", err);
+    let map = std::fs::read_to_string(dir.join("real/dist/app.wasm.map")).expect("a map");
+    assert!(map.contains("\"sources\":[\"../src/main.kite\""), "{}", &map[..map.len().min(200)]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
