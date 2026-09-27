@@ -2184,8 +2184,8 @@ JavaScript file, and nobody ships three hundred kilobytes for that.
 
 WasmGC is the reason this is winnable. A linear-memory module ships its own
 allocator and a chunk of runtime; a WasmGC module ships neither, because the
-collector belongs to the browser. The existing dead-code elimination and
-identical-code-folding do the rest.
+collector belongs to the browser. The existing dead-code elimination does the
+rest.
 
 But it only stays winnable if it is measured from the start, which is why this
 is numbered here and not last. A budget adopted after the fact is a budget that
@@ -2776,7 +2776,7 @@ none.
 | 3 — Error handling | ✅ complete |
 | 4 — WebAssembly backend | ✅ every construct the language has; `str` is a language-owned WasmGC Unicode-scalar array with bounded JavaScript boundary conversion |
 | 5 — Concurrency | ✅ `async`/`await`, the state machine, `Task<T>`, the combinators, `Share`. ❌ real parallelism on any target — the platform forbids it today |
-| 6 — Standard library | ✅ thirteen modules written in Kite, tested on both backends, and `@derive(Debug, Hash, Encode, Decode)` as a source-to-source expansion |
+| 6 — Standard library | ✅ twenty modules written in Kite, tested on all three backends, and `@derive(Debug, Hash, Encode, Decode)` as a source-to-source expansion |
 | 7 — Layout and DOM renderer | ⬛ built, then removed at Phase 16. The renderer painted positioned elements, which is what made a Kite application unstylable by anyone else's CSS |
 | 8 — Canvas renderer | ⬛ partly removed at Phase 16. Drawing, the glyph atlas and `std/text` stay; canvas as a whole-application renderer, with its parallel accessibility tree and damage tracking, does not |
 | 9 — Native backend | ✅ Cranelift AOT and JIT on macOS and Linux, with a precise generational collector over Cranelift's stack maps; three backends compared. ❌ Windows, which the collector's frame walk cannot read yet and which is refused rather than left to corrupt |
@@ -2788,12 +2788,12 @@ none.
 | 15 — Distribution | 🟡 CI, cross-compiled builds, Sigstore signing, Homebrew/Scoop/AUR manifests rendered from the release's own checksums, `kitec.wasm` as an artefact. Tagged releases, v0.1.1 through v0.1.9, on GitHub, and the compiler on npm. ❌ the three manifests are not submitted: no tap, no bucket, no AUR package |
 | 16 — Demolition | ✅ complete — 19,700 lines out; build and tests green with nothing rendering |
 | 17 — `JsValue` / `externref` | ✅ complete — crosses, is held, survives an `await`, refused off the web. ❌ collection asserted, which needs a heap snapshot |
-| 18 — `std/js` primitives | ✅ complete — 23 primitives, a fixed ~90-line host block, throws caught as errors. `js.func` moved to 20, `js.await` to 21 |
+| 18 — `std/js` primitives | ✅ complete — about thirty primitives, a fixed host block of about a hundred lines, throws caught as errors. `js.func` moved to 20, `js.await` to 21 |
 | 19 — Resident runtime, real clock | ✅ complete — `resident` beside `drive`, real clock, zero timers when idle |
 | 20 — `std/dom` | ✅ complete — no externs, `Option` for absence, events with cancel, and a real page in `examples/page` |
 | 21 — Rejections as errors | ✅ complete, and the phase was rescoped: promises never needed language support. The straight-line `await` form is open, and marked as comfort |
 | 22 — Interop backwards | ✅ `api.js` and `api.d.ts` from `kitec build`, verified with real `tsc`, and a Vite plugin that compiles a `.kite` import through the compiler-as-Wasm. `@export` proved unnecessary |
-| 23 — Size gate | ✅ complete — four budgets in CI; 388 B for hello world, 2 KB for a DOM change, 5.7 KB for the island |
+| 23 — Size gate | ✅ complete — four budgets in `size.rs`: hello world under 1 KB, a four-function library under 2 KB, a DOM class change under 4 KB, and the `examples/page` island under 32 KB |
 | 24 — Concrete error types | ✅ complete — an error carries the value it was made from, its type tag and the error it wrapped, on all three backends. `err.cause()`, `errors.chain`, `errors.root`, and `NotFound.is(err)` / `NotFound.as(err)` — the type names itself, because §11 has no turbofish |
 | 25 — `std/html` | ✅ complete — descriptions, a keyed diff that writes only what changed, and `examples/page` written against it |
 | 26 — Specification gaps | ✅ subslices, `enumerate` and pair-destructuring over a slice, doc-comment tests, a name section and source map, `js.func` at any shape, `check` in a bare-`error` function, a calling convention for any function-typed value, errors that carry their value, modules identified by their whole path; `[N]T` struck from the specification and `--a11y` removed |
@@ -2804,9 +2804,9 @@ none.
 
 More than a thousand tests: unit tests per crate, an annotated compile-fail
 corpus, a differential corpus that runs every program on **three** backends and
-compares, the standard library's own suite on two of them, the standard library's own
-documentation examples, the host boundary and a real socket under Node, both
-string representations compared against each other and against the VM, the
+compares, the standard library's own suite on all three, the standard library's own
+documentation examples, the host boundary and a real socket under Node, the one
+string representation compared against the VM and across the JavaScript boundary, the
 source map's offsets checked against the module's real function bodies, every
 example on the site, size budgets, and the specification's own Appendix A.
 

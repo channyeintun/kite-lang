@@ -462,8 +462,10 @@ one at run time, so `let LABEL = "max \(1e21)"` is `"max 1e+21"` everywhere:
   `1125899906842624.2`.
 
 This is also the text of `io.print(x)` and `"\(x)"` for any `float`, on every
-target: ECMAScript's `Number#toString` with Kite's own spelling for the three
-values it writes differently. It was not always: the bytecode VM and the
+target. It is ECMAScript's `Number#toString` except for Kite's own spellings —
+`inf`, `-inf` and `-0.0` — and a whole number below `1e21`, which is written
+with its exact digits and `.0` (`123456789012345683968.0` where JavaScript
+writes `123456789012345680000`). It was not always: the bytecode VM and the
 native runtime once wrote `inf`, `-0.0` and `0.0000001` where the browser wrote
 `Infinity`, `0.0` and `1e-7`, and a float in a constant was refused because
 folding it would have had to pick one.
@@ -556,10 +558,15 @@ is `30000` — and a wrapper around an `int` would buy nothing the name does not
 
 ```kite
 let double = |x: int| -> int { return x * 2 }
-let double = |x| x * 2                       // types inferred, expression body
+let triple: fn(int) -> int = |x| x * 3       // types from the annotation, expression body
 
-let total = items.fold(0, |acc, item| acc + item.price)
+let total = fold(items, 0, |acc, item| acc + item.price)   // types from `fold`'s other arguments
 ```
+
+A closure's parameter types come from the place it is used: an annotated
+binding, or the parameter it is passed to once the other arguments have fixed
+that parameter's type. Where nothing fixes them, `|x| x * 2` is
+[E0211](#16-diagnostics), and the parameter is annotated instead.
 
 **Closures capture by value, taken when the closure is made.** Because `let`
 bindings are immutable, the vast majority of captures are trivially safe: the
@@ -1051,22 +1058,31 @@ fn broken(document: str) -> str {
 }
 ```
 
+The `return` leaves `err` behind unchecked (R3) and reads `parsed` while it is
+still tainted (R2), so there are two errors:
+
 ```
-error[E0301]: `parsed` is used before `err` has been checked
-   ┌─ titles.kite:3:31
-   │
- 2 │     let (parsed, err) = json.parse(document)
-   │          ------  --- this error is never checked
-   │          │
-   │          `parsed` is only valid when `err` is nil
- 3 │     return json.text_or(parsed, "title", "untitled")
-   │                         ^^^^^^ used here while still tainted
-   │
-help: check the error first
-   │
- 3 │     check err
- 4 │     return json.text_or(parsed, "title", "untitled"), nil
-   │
+error[E0302]: `err` is not checked before this `return`
+  ┌─ titles.kite:3:5
+  │
+2 │     let (parsed, err) = json.parse(document)
+  │                  --- bound here
+3 │     return json.text_or(parsed, "title", "untitled")
+  │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `err` goes out of scope here unchecked
+  │
+  = note: silently dropping errors is the single most common source of production failures in languages that permit it
+  = note: to propagate, write `check` on its own line; to handle it here, test `err != nil`
+
+error[E0301]: `parsed` is used before its error is checked
+  ┌─ titles.kite:3:25
+  │
+2 │     let (parsed, err) = json.parse(document)
+  │          ------ this value is only valid when the error is nil
+3 │     return json.text_or(parsed, "title", "untitled")
+  │                         ^^^^^^ used here while still tainted
+  │
+  = note: check it first: write `check err`, or test `err != nil`
+  = note: in Go the value on a failure path is the zero value and flows onward looking valid; in Kite there is no value on that path at all
 ```
 
 ### 7.4 The `check` keyword
@@ -1304,13 +1320,13 @@ let description = match shape {
 missing variants:
 
 ```
-error[E0210]: non-exhaustive match
-   ┌─ shapes.kite:4:22
-   │
- 4 │     let d = match shape {
-   │                   ^^^^^ variants `Point` and `Rect` not covered
-   │
-help: add the missing arms, or a catch-all `_ =>`
+error[E0210]: non-exhaustive match: `Rect(_, _)`, `Point` not covered
+  ┌─ shapes.kite:4:19
+  │
+4 │     let d = match shape {
+  │                   ^^^^^ this value is not fully matched
+  │
+  = note: exhaustiveness is what makes adding a variant safe: the compiler shows you every place that must change
 ```
 
 Exhaustiveness is what makes adding an enum variant safe: the compiler shows you
@@ -1391,6 +1407,14 @@ The alternatives of an alternation may bind names, and then each must bind the
 same names with the same types (`E0200`): the arm runs whichever one matched,
 and reads each name as that one bound it. `Circle(r) | Square(r) => r * r`
 binds one `r`, not two.
+
+A variant pattern may be written bare, `Circle(r)`, or qualified,
+`Shape.Circle(r)`, and the two name the same variant; another module's is
+qualified by its module as well, `shapes.Shape.Circle(r)` (§13.1). A bare unit
+pattern is looked up among the scrutinee's variants, so two enums may each
+declare `Slow`. A bare pattern with a payload is looked up by name, as a bare
+constructor is, so once two enums in scope declare `Circle`, `Circle(r)` is
+`E0111` and is written `Shape.Circle(r)`.
 
 ---
 
@@ -1602,13 +1626,14 @@ Generics are **monomorphised**: each distinct instantiation produces its own
 specialised code. This gives static dispatch and full inlining, at the cost of
 binary size when a generic function is instantiated at many types.
 
-Because binary size is a first-order concern on the web, the compiler applies
-**identical-code-folding** after monomorphisation: instantiations whose generated
-Wasm bodies are byte-identical (very common — `[User]` and `[Post]` produce the
-same code when the operations are all reference moves) are merged into one
-function. Where folding is not possible and the instantiation count is large, the
-compiler emits a size warning naming the function, and `dyn` is the suggested
-remedy.
+Because binary size is a first-order concern on the web, that cost is measured
+rather than hidden: a WebAssembly build reports the module's size, and CI holds
+a set of programs to a size budget. Identical-code-folding — merging
+instantiations whose generated bodies are byte-identical, as `[User]` and
+`[Post]` often are when every operation is a reference move — is not built yet
+([docs/03 §6](docs/03-compiler-architecture.md#not-built)), and there is no
+per-function size warning. Where a generic function is instantiated at many
+types, `dyn` is the remedy.
 
 A generic function that calls itself at a larger type — `depth([x], n - 1)`
 inside `depth<T>` — or a generic type that holds itself at one needs a copy per
@@ -1674,8 +1699,10 @@ check err
 // Concurrent — 100ms total
 let ta = fetch_user(1)
 let tb = fetch_user(2)
-let ((a, ea), (b, eb)) = await task.both(ta, tb)
+let (ra, rb) = await task.both(ta, tb)
+let (a, ea) = ra
 check ea
+let (b, eb) = rb
 check eb
 ```
 
@@ -1883,8 +1910,8 @@ package's declared dependencies roots there instead, so `use markdown/render`
 reaches inside the package.
 
 What a use site writes is a **spelling**, and by default it is the last
-segment. A spelling belongs to the module that writes it, so two files may
-spell different modules the same way; what one file may not do is spell two
+segment. A spelling belongs to the module that writes it, so two modules may
+spell different modules the same way; what one module may not do is spell two
 modules the same way:
 
 ```kite
@@ -1899,14 +1926,16 @@ Two rules, both errors rather than a silent choice:
   `draw`, `errors`, `fmt`, `fs`, `html`, `http`, `io`, `js`, `json`, `math`,
   `prelude`, `ptr`, `socket`, `sync`, `task`, `test`, `text`, `time`, `toml`
   and `window` — its modules, the modules its builtins are reached through,
-  and the prelude. Full paths keep `dep/crypto` and `std/crypto` apart on their
-  own, but a *sibling* `crypto` would still be spelled `crypto` in the file
-  that imported it and shadow the standard library there. The name after `as`
-  is a spelling too, and may not be a reserved name either unless it is the
-  `std` module's own: `use util as errors` would make `errors.new` the
-  standard library's and every other `errors.…` this module's.
-- **One file may not spell two modules alike** (`E0404`). `use utils` followed
-  by `use dep/utils` is refused, because every `utils.…` above the second line
+  and the prelude. The check is on the last segment of the path, alias or
+  not, so `use dep/crypto` is refused as a sibling `crypto` is: a module named
+  `crypto` is spelled `crypto` by default, and would shadow the standard
+  library in the file that imported it. The name after `as` is a spelling
+  too, and may not be a reserved name either unless it is the `std` module's
+  own: `use util as errors` would make `errors.new` the standard library's
+  and every other `errors.…` this module's.
+- **One module may not spell two modules alike** (`E0404`). The files of a
+  directory module share their imports, so `use utils` followed by
+  `use dep/utils` — in one file or in two — is refused, because every `utils.…`
   would quietly change meaning. Give one of them an alias.
 
 ### 13.2 Manifest
@@ -2006,9 +2035,11 @@ viable before WasmGC reached cross-browser baseline in Safari 18.2.
   Kite has no `&x.field`, so this is unobservable.
 - **No unboxed aggregates inside arrays.** `[Point]` is an array of references to
   `Point` objects, not a flat buffer of `(f64, f64)`. For numeric work where the
-  layout matters, `buffer.F64` provides a flat typed buffer over linear memory,
-  which is the escape hatch for anything holding a great many numbers — a
-  simulation, a signal, a mesh.
+  layout matters, `buffer.F64` provides a flat typed buffer, which is the escape
+  hatch for anything holding a great many numbers — a simulation, a signal, a
+  mesh. It is a `[float]` with the record's shape written down beside it, so
+  WasmGC stores the numbers themselves in one `f64` array. It is not over
+  linear memory, which the Wasm backend does not have.
 - **No weak references or finalizers.** A `Cache` that must not retain its
   entries uses an explicit eviction policy rather than weak keys.
 
@@ -2126,7 +2157,7 @@ returns. A parameter declared as other than what the host reads, or a result
 declared as other than what it answers, is a trap before the call is made, in
 the same words on both.
 
-**`std/js` declares nothing.** It is a fixed set of about twenty primitives
+**`std/js` declares nothing.** It is a fixed set of about thirty primitives
 through which any host object can be reached:
 
 | | |
@@ -2344,9 +2375,9 @@ impl Display for Task {
     }
 }
 
-// `Absent` rather than `Missing`: a pattern names a variant without its enum,
-// so two enums in scope may not share a variant name — and `std/fs` already has
-// a `Missing`. The rule is in §9.3, and this is what it looks like in practice.
+// A bare variant names one of this module's own enums or the prelude's (§13.1),
+// so `std/fs`'s `Missing` could not be taken for one here. A pattern may also be
+// written qualified, `LoadError.Absent(path)` (§9.3).
 pub enum LoadError {
     Absent(path: str)
     Malformed(path: str, detail: str)

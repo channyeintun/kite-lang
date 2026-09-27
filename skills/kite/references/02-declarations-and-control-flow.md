@@ -29,8 +29,9 @@ Everything below is checked against `target/release/kitec`, not against the pros
   among themselves (also unlike C), so they group left to right.
 - **Struct declaration fields are newline-separated, not comma-separated** — and a field is
   immutable unless the field itself says `var`, whatever the binding says.
-- **An enum variant pattern that binds a payload must be written bare** — `Circle(r)`,
-  never `Shape.Circle(r)` — see the trap at the end of the `match` section.
+- **A variant pattern may be bare or qualified** — `Circle(r)` and `Shape.Circle(r)` are
+  the same pattern. When two enums in scope share a payload variant's name, the bare
+  pattern is `E0111`: write it qualified. See the end of the `match` section.
 - **`assert(cond, msg)` always takes two arguments** and is a builtin, not a value.
 
 ---
@@ -1114,11 +1115,13 @@ fn main() {
 }
 ```
 
-Which enum an unqualified pattern names is decided by the scrutinee, so two enums may each
-declare `Slow` without ambiguity — and a name that matches a variant of the scrutinee is
-that variant, not a fresh binding. A *constructor* has no scrutinee to go on: once two
-enums share a variant name, the bare `Slow` is `E0111`, "cannot find `Slow`", and the call
-has to say `A.Slow` — which a pattern may say too.
+Which enum an unqualified *unit* pattern names is decided by the scrutinee, so two enums
+may each declare `Slow` without ambiguity — and a name that matches a variant of the
+scrutinee is that variant, not a fresh binding. A payload pattern is looked up by name
+across every enum in scope, so two enums declaring `Circle` make `Circle(r)` `E0111` even
+against a `Shape` — write `Shape.Circle(r)`. A *constructor* has no scrutinee to go on:
+once two enums share a variant name, the bare `Slow` is `E0111`, "cannot find `Slow`", and
+the call has to say `A.Slow` — which a pattern may say too.
 
 ---
 

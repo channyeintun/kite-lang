@@ -38,8 +38,10 @@ repository says otherwise, the compiler won.
 - **`str` has exactly five methods** — `len`, `slice`, `index_of`, `trim`,
   `code_at`. `contains`, `starts_with`, `split`, `replace`, `lower`, `upper`
   are prelude functions taking the string as the first argument.
-- **Web-only modules are `dom`, `window`, `html` and `js`.** They compile
-  everywhere and trap at run time off the web. `fs` is the mirror image: native
+- **Web-only modules are `dom`, `window`, `html` and `js`.** They type-check
+  everywhere. Under `kitec run` they trap at run time; natively (`--native`,
+  `--emit native`) they are refused at compile time with `E0204`, because a
+  `JsValue` has nothing to refer to there. `fs` is the mirror image: native
   only.
 - **`kitec run` supplies exactly one host group, `fs`.** A program calling
   `std/http`, `std/socket`, `std/crypto` or `std/js` type-checks and then traps

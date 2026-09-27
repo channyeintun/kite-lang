@@ -55,7 +55,7 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 | **Errors are values, and the compiler enforces it** | Go's `(T, error)` shape, but a value returned alongside an unchecked error is *unreadable* until the error is checked. Go's single biggest flaw, removed, without changing how the code looks. |
 | **Immutable by default** | `let` and struct fields are immutable unless marked `var`. This maps directly onto WasmGC's per-field mutability flag, and makes most types automatically safe to share across tasks. |
 | **No pointers, no references, no lifetimes** | Structs are GC-managed reference types. There is no `*T`, no `&T`, and no value/pointer receiver distinction. |
-| **One concurrency concept, not two** | `async`/`await`. No goroutines, no channels, no mutex-by-default. Calling an `async fn` starts it; `await` is how the value comes out. |
+| **One concurrency concept, not two** | `async`/`await`. No goroutines, no channels, no mutex-by-default. Calling an `async fn` queues it rather than running it, and hands back a `Task`; `await` is how the value comes out. |
 | **Wasm is the reference target** | The semantics are chosen so that lowering to WasmGC is direct. |
 | **HTML and CSS keep their jobs** | Kite replaces JavaScript, and nothing else. A program creates real elements with real class names, so somebody else's stylesheet — Tailwind, Bootstrap, a design system you already own — works on it unchanged. The browser lays out. Canvas is a `<canvas>` you draw into. |
 | **Adoptable one file at a time** | Every `pub fn` is a real export, and `kitec build --emit wasm` writes `api.js` and `api.d.ts` beside the module. A TypeScript project imports it and type-checks against it, with none of the calling convention visible. That is how TypeScript itself spread. |
@@ -161,7 +161,7 @@ fn load(path: str) -> ([Task], error) {
 
 **A standard library, in Kite.** `math`, `time`, `errors`, `fmt`, `json`,
 `toml`, `text`, `test`, `buffer`, `task`, `sync`, `fs`, `http`, `socket`,
-`crypto`, `canvas`, `js`, `dom`, `window`, `html`. Its own tests are ordinary Kite programs that run on *both*
+`crypto`, `canvas`, `js`, `dom`, `window`, `html`. Its own tests are ordinary Kite programs that run on all three
 backends and must agree.
 
 **Bodies the compiler writes.** `@derive(Debug, Hash, Encode, Decode)` in front
@@ -172,7 +172,10 @@ because `==` is already structural on every value.
 
 ```kite
 @derive(Encode, Decode)
-struct User { name: str, age: int }
+struct User {
+    name: str
+    age: int
+}
 
 let (doc, err) = json.parse(text)
 check err
@@ -223,7 +226,7 @@ and the glue cannot drift from it.
 
 **The browser, without writing JavaScript.** `std/js` is about thirty
 primitives — `get`, `set`, `call`, `new`, `func`, conversions — and its host
-block is a fixed sixty-five lines that does not grow however much of the platform a
+block is a fixed hundred-odd lines that does not grow however much of the platform a
 program reaches. `std/dom` is written over it in ordinary Kite with no `extern`
 in it at all, which is what makes the primitives a real answer to *the standard
 library never wrapped the thing I need* rather than a promise. A host object is
@@ -351,7 +354,7 @@ Recorded here rather than left to be discovered:
 
 More than a thousand tests: unit tests per crate, an annotated compile-fail
 corpus, a differential corpus that runs every program on **three** backends and
-compares, the standard library's own suite on two of them, the host boundary and a real
+compares, the standard library's own suite on all three, the host boundary and a real
 socket under Node, the DOM layer and the typed door driven under Node — with
 real `tsc` type-checking the generated declarations where it is installed — the
 one string representation compared against the VM and across the JavaScript

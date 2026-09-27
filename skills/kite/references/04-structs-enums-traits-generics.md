@@ -333,8 +333,9 @@ fn main() {
 }
 ```
 
-One gap worth knowing, because the compiler is silent about it: an inherent
-method shadows a derived one of the same name.
+A derive writes methods of its own, and an inherent method may not share a name
+with one: `@derive(Debug)` beside a hand-written `fn debug` is `E0701` (see
+"What does not derive").
 
 ### `pub`, and how far it reaches
 
@@ -1468,10 +1469,13 @@ fn main() {
 }
 ```
 
-Inference does not flow *into* a closure literal from a generic parameter type.
-A `fn(T) -> U` parameter takes a named function, or a closure whose own
-parameters are annotated; a bare `|n| …` leaves `T` unsolved and reports
-``expected `fn(int) -> str`, found `fn(<error>) -> str` ``.
+A closure's parameter types come from the parameter it is passed to, once that
+parameter's type is fully known. `fold(items, 0, |acc, item| acc + item.price)`
+and `filter(xs, |n| n > 0)` need no annotation, because every type parameter in
+the function type is fixed by the other arguments. When the closure is the only
+thing that could fix one — `U` in `fn(T) -> U` — a bare `|n| …` is `E0211`,
+"cannot infer the type of `n`", even though `T` is known. Annotate the
+parameter, or pass a named function.
 
 ```kite
 fn apply<T, U>(items: [T], f: fn(T) -> U) -> [U] {
@@ -1506,7 +1510,7 @@ fn apply<T, U>(items: [T], f: fn(T) -> U) -> [U] {
 }
 
 fn main() {
-    for s in apply([1, 2, 3], |n| "n\(n)") { //~ E0200
+    for s in apply([1, 2, 3], |n| "n\(n)") { //~ E0211
         io.print(s)
     }
 }
@@ -1938,8 +1942,9 @@ fn main() {
 ```
 
 Deriving a trait the type also implements by hand is `E0701`
-("`U` already implements `Debug`"). An *inherent* method of the same name is not
-caught, and silently shadows the derived one.
+("`U` already implements `Debug`"), and so is an inherent method with the name
+the derive writes: `@derive(Debug)` beside `impl U { fn debug(self) -> str }` is
+`E0701`, "`U` already has a `debug`".
 
 ---
 
@@ -1956,7 +1961,3 @@ Two spec omissions worth knowing: `@derive(Encode)`/`@derive(Decode)` silently
 require `use std/json` in the deriving file, and `Decode` is emitted as an
 inherent associated function rather than a trait implementation, so there is no
 `Decode` trait to name in a bound.
-
-The specification never writes a qualified pattern; the compiler accepts one
-(`Enum.Variant(…)`) as the same variant the unqualified spelling names, and it is
-the way to match a payload variant two enums share (§3).

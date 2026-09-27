@@ -79,12 +79,12 @@ handed to the module, and the only question is how those functions are written.
     └───────┬───────┘   ordinary Kite — no extern declarations
             ▼
     ┌───────────────┐
-    │  std/js       │   ~15 primitives, fixed forever
+    │  std/js       │   ~30 primitives, fixed forever
     └───────┬───────┘   every call returns (JsValue, error)
             ▼
       the host, and
-      about 40 lines
-      of JavaScript
+      about a hundred
+      lines of JavaScript
 ```
 
 **`std/js`** is the floor: `global`, `get`, `set`, `at`, `length`,
