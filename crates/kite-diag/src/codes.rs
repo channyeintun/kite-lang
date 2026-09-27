@@ -98,9 +98,11 @@ codes! {
          written on purpose comes near it.";
 
     E0005 = "E0005", "block comments are not supported",
-        "Kite has line comments (//) and doc comments (///) only. Nested block \
-         comments are a recurring source of lexer bugs and every editor has \
-         supported toggling line comments for decades.";
+        "Kite's comments are line comments: `//` for a comment, `///` for the \
+         documentation of the declaration that follows, and `//!` for the \
+         module's own, at the top of its file. There is no block comment. \
+         Nested block comments are a recurring source of lexer bugs and every \
+         editor has supported toggling line comments for decades.";
 
     // ---- syntax and bindings ---------------------------------------------
     E0100 = "E0100", "unexpected token",

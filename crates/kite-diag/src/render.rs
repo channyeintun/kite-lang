@@ -494,4 +494,15 @@ error[E0200]: mismatched types
             );
         }
     }
+
+    /// §2.3 has three comment forms, and E0005's explanation named two of
+    /// them as the only ones there are: `//!` module documentation was left
+    /// out after the lexer learned it.
+    #[test]
+    fn e0005_names_every_comment_form() {
+        let (_, text) = codes::explain("E0005").expect("E0005 is explained");
+        for form in ["`//`", "`///`", "`//!`"] {
+            assert!(text.contains(form), "{} is missing from: {}", form, text);
+        }
+    }
 }
