@@ -1010,6 +1010,35 @@ fn a_json_derive_in_a_module_uses_that_modules_spelling() {
     assert_eq!(p.run(&main).expect("compiles"), "{\"x\":1}\n");
 }
 
+/// A derived body binds no name the module spells a module by. A derived
+/// `decode` takes a parameter `doc` and names nested types by the module's
+/// spelling, so under `use g as doc` it asked the parameter for `doc.Id`.
+#[test]
+fn a_derive_binds_no_name_its_module_spells_a_module_by() {
+    let p = Project::new("derive-local-spelling");
+    p.file("g/g.kite", "@derive(Debug, Encode, Decode)\npub struct Id {\n  pub n: int\n}\n");
+    for spelling in ["doc", "src_1", "tag_1"] {
+        let main = p.file(
+            &format!("main_{}.kite", spelling),
+            &format!(
+                "use g as {s}\n\n\
+                 @derive(Debug, Encode, Decode)\nenum E {{\n  A\n  B(id: {s}.Id)\n}}\n\n\
+                 @derive(Debug, Encode, Decode)\nstruct P {{\n  id: {s}.Id\n  e: E\n}}\n\n\
+                 fn main() {{\n\
+                 \x20 let (p, err) = P.decode(P{{ id: {s}.Id{{ n: 1 }}, e: E.B(id: {s}.Id{{ n: 2 }}) }}.encode())\n\
+                 \x20 if err == nil {{\n    io.print(p.debug())\n  }}\n}}\n",
+                s = spelling
+            ),
+        );
+        assert_eq!(
+            p.run(&main).expect("compiles"),
+            "P{ id: Id{ n: 1 }, e: B(id: Id{ n: 2 }) }\n",
+            "spelled `{}`",
+            spelling
+        );
+    }
+}
+
 /// A syntax error in an imported module is one diagnostic. The loader parsed
 /// the file to find its imports and the driver parsed it again to merge it,
 /// and both reported.

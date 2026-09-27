@@ -1352,6 +1352,26 @@ fn main() {
          \x20 let (bad, berr) = Palette.decode(json.Json.Null)\n\
          \x20 io.print(if berr == nil { \"?\" } else { berr.message() })\n}\n",
     ),
+    // `std/json` spelled like a name the derived code binds. The derive wrote
+    // the module's own spelling into a `decode` whose parameter is `doc`, so
+    // `doc.field(doc, …)` asked the parameter for a method, and the program
+    // failed to compile with errors in `<derive>`.
+    (
+        "derived-json-spelled-like-its-parameter",
+        "use std/json as doc\n\
+         @derive(Encode, Decode, Debug)\n\
+         enum Mark {\n  Plain\n  At(line: int, col: int)\n}\n\
+         @derive(Encode, Decode, Debug)\n\
+         struct P {\n  x: int\n  marks: [Mark]\n  note: Option<str>\n}\n\
+         fn main() {\n\
+         \x20 let p = P{ x: 3, marks: [Mark.Plain, Mark.At(line: 1, col: 2)], note: \"n\" }\n\
+         \x20 let text = doc.stringify(p.encode())\n\
+         \x20 io.print(text)\n\
+         \x20 let (tree, err) = doc.parse(text)\n\
+         \x20 if err != nil {\n    return\n  }\n\
+         \x20 let (back, berr) = P.decode(tree)\n\
+         \x20 if berr == nil {\n    io.print(back.debug())\n  }\n}\n",
+    ),
     (
         "code-at-reads-a-character",
         "fn main() {\n  let s = \"h\\u{e9}llo\"\n  io.print(s.code_at(0))\n  io.print(s.code_at(1))\n\
