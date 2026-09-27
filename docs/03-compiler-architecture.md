@@ -305,7 +305,10 @@ value bound from a fallible call whose error is not yet known to be nil), or
 let (v, e) = call               : v ← Tainted, e ← Unchecked
 let e = call  (bare `error`)    : e ← Unchecked
 read v  while Tainted           : E0301
-e out of scope while Unchecked  : E0302
+e out of scope while Unchecked  : E0302 — at the end of its block, and at
+                                  a return, check, break or continue
+                                  that leaves it behind
+e = call  (assigned later)      : e ← Unchecked
 test e (`e == nil`, `e != nil`) : e ← Clean
 path on which e is proved nil   : v ← Clean
 check e                         : v ← Clean after it — the other path returned

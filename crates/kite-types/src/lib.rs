@@ -1039,10 +1039,10 @@ struct Checker<'a> {
     /// answers by not letting the call be written until the error is known to
     /// be present.
     error_nonnil: std::collections::HashSet<u32>,
-    /// The loops enclosing the statement being checked, innermost last. A
-    /// closure starts with none: a loop around the place it is written is
-    /// not one its body runs in.
-    loops: Vec<Span>,
+    /// The loops enclosing the statement being checked, innermost last, with
+    /// their labels. A closure starts with none: a loop around the place it
+    /// is written is not one its body runs in.
+    loops: Vec<(Span, Option<String>)>,
     /// While a loop's body is checked on trial to learn which narrowings
     /// survive it: per such loop, innermost last, every local a write in the
     /// body may have made nil.
@@ -1171,7 +1171,7 @@ struct Enclosing {
     narrowed: std::collections::HashMap<u32, TyId>,
     error_nonnil: std::collections::HashSet<u32>,
     defers: Option<u32>,
-    loops: Vec<Span>,
+    loops: Vec<(Span, Option<String>)>,
     sig: Option<Signature>,
     ret_unknown: Option<Span>,
 }
@@ -1349,14 +1349,23 @@ impl<'a> Checker<'a> {
                 Some((hir::Stmt::Expr(e), flow))
             }
 
-            ast::Stmt::Break { label, span } => Some((
-                hir::Stmt::Break { label: label.as_ref().map(|l| l.name.clone()), span: *span },
-                Flow::Diverges,
-            )),
-            ast::Stmt::Continue { label, span } => Some((
-                hir::Stmt::Continue { label: label.as_ref().map(|l| l.name.clone()), span: *span },
-                Flow::Diverges,
-            )),
+            ast::Stmt::Break { label, span } => {
+                self.leave_loop(label.as_ref().map(|l| l.name.as_str()), *span, "break");
+                Some((
+                    hir::Stmt::Break { label: label.as_ref().map(|l| l.name.clone()), span: *span },
+                    Flow::Diverges,
+                ))
+            }
+            ast::Stmt::Continue { label, span } => {
+                self.leave_loop(label.as_ref().map(|l| l.name.as_str()), *span, "continue");
+                Some((
+                    hir::Stmt::Continue {
+                        label: label.as_ref().map(|l| l.name.clone()),
+                        span: *span,
+                    },
+                    Flow::Diverges,
+                ))
+            }
 
             ast::Stmt::Expr(e) => {
                 self.inert_closure(e);
@@ -1639,7 +1648,7 @@ impl<'a> Checker<'a> {
                     let in_loop = self
                         .loops
                         .last()
-                        .is_some_and(|l| !self.declared_inside(local_id, *l));
+                        .is_some_and(|(l, _)| !self.declared_inside(local_id, *l));
                     if in_loop {
                         self.diags.push(
                             Diagnostic::error(
@@ -1658,6 +1667,14 @@ impl<'a> Checker<'a> {
             }
         }
         self.init[slot] = Init::Assigned;
+        // Writing a new failure into an error binding is a new obligation,
+        // as binding one is (R7): `var e: error = nil` then `e = f()`, or a
+        // `let e: error` assigned in a branch, dropped `f`'s failure unseen.
+        // `nil` and a copy of another binding stay checked, as in a `let`.
+        if !compound && self.may_hold_failure(local_ty) {
+            self.taint[slot] =
+                if produces_failure(&value.kind) { Taint::Unchecked } else { Taint::Clean };
+        }
 
         // A write replaces the value every earlier test was about. `x != nil`
         // said nothing about what `x = nil` put there, and a narrowing kept
@@ -1900,6 +1917,11 @@ impl<'a> Checker<'a> {
     /// would be evaluated after the deferred stack had run, and a deferred
     /// mutation could change the answer.
     fn returning(&mut self, ret: hir::Stmt, span: Span) -> hir::Stmt {
+        // Every error still unchecked here goes out of scope on this path,
+        // whatever the path that falls through goes on to do with it (R3).
+        // A closure's `return` leaves only what the closure declared.
+        let region = self.closure_span;
+        self.report_unchecked_errors_at(region, Some((span, "return")));
         if self.defers.is_none() {
             return ret;
         }
@@ -2226,7 +2248,7 @@ impl<'a> Checker<'a> {
     }
 
     fn for_stmt(&mut self, f: &ast::ForStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
-        self.loops.push(f.span);
+        self.loops.push((f.span, f.label.as_ref().map(|l| l.name.clone())));
 
         // A loop body may run zero times, so nothing it assigns can be assumed
         // assigned afterwards, and it may run more than once, so a write in it
@@ -6636,7 +6658,30 @@ impl<'a> Checker<'a> {
     /// locals declared inside `region`, wherever the state that knows about
     /// them is about to be discarded: at the end of a closure's body, and
     /// after a branch that never reaches the join.
+    /// A `break` or a `continue` leaves the body of the loop it names, and
+    /// every error declared inside that loop and still unchecked goes out of
+    /// scope on the way (R3). An error declared before the loop is still in
+    /// scope after it, where it can be checked.
+    fn leave_loop(&mut self, label: Option<&str>, span: Span, how: &'static str) {
+        let region = match label {
+            None => self.loops.last().map(|(s, _)| *s),
+            Some(l) => self.loops.iter().rev().find(|(_, n)| n.as_deref() == Some(l)).map(|(s, _)| *s),
+        };
+        if let Some(region) = region {
+            self.report_unchecked_errors_at(Some(region), Some((span, how)));
+        }
+    }
+
     fn report_unchecked_errors(&mut self, region: Option<Span>) {
+        self.report_unchecked_errors_at(region, None);
+    }
+
+    /// Report every unchecked error declared inside `region` — anywhere, for
+    /// `None`. With an `exit`, they are left behind by that `return`, `break`
+    /// or `continue`, which is where the report points: the path that falls
+    /// through may check them, and it was the early exits that dropped an
+    /// error bound above them in silence.
+    fn report_unchecked_errors_at(&mut self, region: Option<Span>, exit: Option<(Span, &str)>) {
         let mut pending: Vec<(String, Span, bool)> = Vec::new();
         for (i, state) in self.taint.iter().enumerate() {
             if *state == Taint::Unchecked
@@ -6650,11 +6695,21 @@ impl<'a> Checker<'a> {
             }
         }
         for (name, span, pair) in pending {
-            let d = Diagnostic::error(codes::E0302, format!("`{}` is never checked", name));
-            let d = if pair {
-                d.with_primary(span, "the error in this result goes out of scope uninspected")
-            } else {
-                d.with_primary(span, "this error goes out of scope uninspected")
+            let d = match exit {
+                Some((at, how)) => Diagnostic::error(
+                    codes::E0302,
+                    format!("`{}` is not checked before this `{}`", name, how),
+                )
+                .with_primary(at, format!("`{}` goes out of scope here unchecked", name))
+                .with_secondary(span, "bound here"),
+                None => {
+                    let d = Diagnostic::error(codes::E0302, format!("`{}` is never checked", name));
+                    if pair {
+                        d.with_primary(span, "the error in this result goes out of scope uninspected")
+                    } else {
+                        d.with_primary(span, "this error goes out of scope uninspected")
+                    }
+                }
             };
             let d = d.with_note(
                 "silently dropping errors is the single most common source of \

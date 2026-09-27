@@ -959,6 +959,10 @@ The rules:
 > **R2.** Reading a Tainted binding is a compile error (`E0301`).
 >
 > **R3.** An Unchecked binding going out of scope is a compile error (`E0302`).
+> A `return`, `check`, `break` or `continue` is a way out of scope for every
+> binding it leaves behind, on its own path: an error bound above
+> `if n > 0 { return 1 }` has to be checked before that `return` as well as
+> after it.
 >
 > **R4.** On any path where the compiler proves `e == nil`, `e` becomes Checked
 > and `v` becomes Clean.
@@ -974,7 +978,8 @@ The rules:
 > **R7.** An `error`, or a whole `(T, error)`, bound to a single name makes
 > that binding Unchecked — by `let` or by `var`, whether it came straight from
 > a call or through `await`, a branch of a value `if`, or anything else that
-> can hold a new failure. Only `nil` and a copy of another binding, which
+> can hold a new failure. Assigning one to an existing binding, `e = f()`,
+> does the same. Only `nil` and a copy of another binding, which
 > carries its own obligation, leave it Checked. Reading it — testing it,
 > checking it, returning it, taking it apart — inspects it, and R3 applies
 > otherwise. Binding everything under one name is not a way out either.
