@@ -1110,7 +1110,7 @@ function imports() {{
       // A queue of live tasks is mutable state, and Kite has none, so the
       // scheduler lives here. What crosses the boundary is a resume closure
       // the host cannot look inside: it is handed back through the module's
-      // own `kite_poll` export, which is the only thing that can enter it.
+      // own `$kite.poll` export, which is the only thing that can enter it.
       task_spawn: (poll) => {{
         TASKS.push({{ poll, wakeAt: null, parked: false, waitingOnHost: false }});
         // A task started from inside an event handler has nothing else to
@@ -1259,7 +1259,7 @@ function halt(e) {{
 /// Poll one task, turning a trap into the end of the program.
 function poll(exports, task) {{
   try {{
-    return exports.kite_poll(task.poll) !== 0;
+    return exports["$kite.poll"](task.poll) !== 0;
   }} catch (e) {{
     throw halt(e);
   }}
@@ -1505,10 +1505,10 @@ export function wake() {{
 /// happens, and when something does, `wake` brings it back.
 /// Call a Kite closure the host is holding.
 ///
-/// `kite_invoke` is the module's own export and the only thing that can enter a
-/// closure. It is looked up on whichever module was handed to a driver, which
-/// is why a program using `js.func` has to be run rather than merely
-/// instantiated.
+/// `$kite.invoke.N` is the module's own export, and the only thing that can
+/// enter a closure. It is looked up on whichever module was handed to a
+/// driver, which is why a program using `js.func` has to be run rather than
+/// merely instantiated.
 let invokeExports = null;
 
 /// Enter a Kite closure the host is holding.
@@ -1528,7 +1528,7 @@ function invoke(shape, handler, args) {{
 
 function trampolineFor(shape) {{
   const trampoline =
-    invokeExports === null ? null : invokeExports["kite_invoke_" + shape];
+    invokeExports === null ? null : invokeExports["$kite.invoke." + shape];
   if (typeof trampoline !== "function") {{
     throw new Error(
       "a handler fired before the module was given to a driver: call `run` or `resident`",
@@ -1614,7 +1614,7 @@ export async function run(source) {{
   }}
   // `main` returning is not the program ending: a task it started is still
   // the program's work, and dropping it would make `async` silently lossy.
-  if (typeof exports.kite_poll === "function") {{
+  if (typeof exports["$kite.poll"] === "function") {{
     await drive(exports);
   }}
   return result;
@@ -2621,7 +2621,7 @@ pub fn generate_page(title: &str) -> String {
     // `main` returning is not the program ending, and in a page the program
     // does not end at all: `resident` keeps the tasks alive on a real clock,
     // costing nothing while there is nothing to do.
-    if (typeof exports.kite_poll === "function") resident(exports);
+    if (typeof exports["$kite.poll"] === "function") resident(exports);
   }}
 </script>
 "#,

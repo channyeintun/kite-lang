@@ -449,7 +449,7 @@ fn repeated_and_differently_cased_headers_survive() {
 /// polled the accept loop some nine hundred times a second while nothing
 /// arrived, and whose clock did not move while a task waited on the host — a
 /// task that slept before closing the server never woke. The count is taken
-/// by wrapping the module's `kite_poll` before the adapter loads it.
+/// by wrapping the module's `$kite.poll` before the adapter loads it.
 #[test]
 fn an_idle_server_costs_nothing_and_its_timers_still_run() {
     if !node_available() {
@@ -476,17 +476,17 @@ fn an_idle_server_costs_nothing_and_its_timers_still_run() {
          \x20   if rerr != nil {\n        io.print(rerr.message())\n        return\n    }\n\
          \x20   io.print(\"answered \\(answered)\")\n\
          }\n";
-    // The adapter is imported in this process, after `kite_poll` has been
+    // The adapter is imported in this process, after `$kite.poll` has been
     // wrapped, so the polls can be counted.
     let client = r#"import { fileURLToPath } from "node:url";
 const original = WebAssembly.instantiate;
 let polls = 0;
 WebAssembly.instantiate = async (...args) => {
   const result = await original(...args);
-  if (!result.instance || !result.instance.exports.kite_poll) return result;
+  if (!result.instance || !result.instance.exports["$kite.poll"]) return result;
   const exports = { ...result.instance.exports };
-  const poll = result.instance.exports.kite_poll;
-  exports.kite_poll = (task) => { polls += 1; return poll(task); };
+  const poll = result.instance.exports["$kite.poll"];
+  exports["$kite.poll"] = (task) => { polls += 1; return poll(task); };
   return { instance: { exports }, module: result.module };
 };
 const lines = [];

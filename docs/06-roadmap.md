@@ -1776,7 +1776,7 @@ protocol, no ownership rules, no release calls.
 
 The plumbing exists already: `JsValue` is an `externref`, and `task_spawn`
 passes a Kite closure to the host as a reference and receives it back through
-`kite_poll`.
+`$kite.poll`.
 
 **Exit criterion:** a Kite program holds an element across an await point, drops
 it, and the browser collects it.

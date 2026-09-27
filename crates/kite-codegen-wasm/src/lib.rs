@@ -46,10 +46,13 @@ use wasm_encoder::{
 };
 
 mod eq;
+mod arith;
 mod glue;
+mod maps;
 pub mod sourcemap;
 mod serve;
 mod slices;
+mod slots;
 mod strings;
 mod support;
 pub use glue::{generate_api, generate_glue, generate_glue_with_hosts, generate_page, has_api};
@@ -110,7 +113,7 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 31] = [
     ("draw_unclip", &[], &[]),
     // The scheduler lives in the host, because a queue of live tasks is
     // mutable state and Kite has none. What crosses is a closure the host
-    // cannot look inside: it hands the reference back through `kite_poll`,
+    // cannot look inside: it hands the reference back through `$kite.poll`,
     // which is the module's own trampoline.
     ("task_spawn", &[ANY_REF], &[]),
     ("task_wake_at", &[ValType::I64], &[]),
@@ -205,7 +208,7 @@ const IMPORTS: [(&str, &[ValType], &[ValType]); 31] = [
     // A Kite closure the host can call.
     //
     // The mirror of `task_spawn`: what crosses is a reference the host cannot
-    // enter, and it comes back through the module's own `kite_invoke`
+    // enter, and it comes back through the module's own `$kite.invoke.N`
     // trampoline. What is different is the argument — a handler is given the
     // host value that caused it, so the trampoline takes two references rather
     // than one.
@@ -460,25 +463,52 @@ pub struct WasmModule {
     /// declared at. The driver turns these into a source map, because it is
     /// what holds the `SourceMap` a span is resolved through.
     pub source_spans: Vec<(usize, kite_span::Span)>,
-    /// Functions with more locals than an engine accepts, [`MAX_LOCALS`], by
-    /// name and declaration, with how many they have. A module with any is
-    /// not valid, and the program is refused as too large for this target
-    /// rather than reported as the compiler's mistake.
-    pub too_wide: Vec<(String, kite_span::Span, u32)>,
+    /// Functions past a limit an engine sets on one function — more locals
+    /// than [`MAX_LOCALS`], or more code than [`MAX_BODY_BYTES`]. A module
+    /// with any is not valid, and the program is refused as too large for
+    /// this target rather than reported as the compiler's mistake.
+    pub too_wide: Vec<TooLarge>,
+}
+
+/// A function too large for an engine to accept.
+#[derive(Debug)]
+pub struct TooLarge {
+    /// The function, as named in MIR.
+    pub function: String,
+    pub span: kite_span::Span,
+    /// Past [`MAX_LOCALS`] rather than [`MAX_BODY_BYTES`].
+    pub locals: bool,
+    /// Which limit, and by how much.
+    pub what: String,
 }
 
 /// The most locals — parameters included — one function may have: the
 /// validator's limit, and V8's and SpiderMonkey's.
 ///
-/// Every MIR local is a Wasm local here, plus a few registers of the
-/// backend's own, so a function of fifty thousand `let`s passed it and was
-/// reported as an invalid module (E0900), a bug in the compiler, when it is
-/// a program too large for the target.
+/// Every MIR local that lives across a branch is a Wasm local of its own
+/// here, and so is every value held while others are computed, plus a few
+/// registers of the backend's own (see `slots`). A function of fifty thousand
+/// of them passed the limit and was reported as an invalid module (E0900), a
+/// bug in the compiler, when it is a program too large for the target.
 pub const MAX_LOCALS: u32 = 50_000;
+
+/// The most bytes of code one function may have: the validator's limit, and
+/// V8's. Past it a module was refused as invalid (E0900), a bug in the
+/// compiler, when it is a program too large for the target.
+pub const MAX_BODY_BYTES: usize = 7_654_321;
 
 /// What the module's `sourceMappingURL` section names, and what the driver
 /// must write beside it.
 pub const SOURCE_MAP_NAME: &str = "app.wasm.map";
+
+/// The export that runs one step of a task, in an async program: what the
+/// glue's scheduler polls. No Kite identifier holds a `$`, so no `pub fn`
+/// can take the name.
+pub const POLL_EXPORT: &str = "$kite.poll";
+
+/// The exports that enter a Kite closure the host holds, one per handler
+/// shape, each this followed by the shape's index.
+pub const INVOKE_EXPORT: &str = "$kite.invoke.";
 
 /// How many bytes a LEB128 unsigned integer takes.
 fn uleb_len(mut value: u64) -> usize {
@@ -1368,7 +1398,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
     let poll_trampoline = hosts.declared(host::TASK_SPAWN);
     // The same arrangement for a handler: the host holds a closure it cannot
     // enter, and this is the export that can. It takes the host value the
-    // handler was called with, which is the whole difference from `kite_poll`.
+    // handler was called with, which is the whole difference from `$kite.poll`.
     // One trampoline per distinct handler shape `js.func` is given, because
     // `call_ref` needs the closure's exact type index and a two-argument
     // handler is not the same type as a one-argument one. The host is told
@@ -1418,7 +1448,19 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
     }
     let helper_types = slice_helpers.add_types(&mut type_section, next_fn_type, types, &layout);
     next_fn_type += helper_types.len() as u32;
+    // Then the map helpers: one per map type and operation. See `maps`.
+    let map_helpers =
+        maps::MapHelpers::collect(program, types, slice_helpers.base + helper_types.len() as u32);
     extra_type_index.extend(helper_types);
+    let map_types = map_helpers.add_types(&mut type_section, next_fn_type, types, &layout);
+    let map_count = map_types.len() as u32;
+    next_fn_type += map_types.len() as u32;
+    extra_type_index.extend(map_types);
+    // And last the debug build's checked arithmetic. See `arith`.
+    let arith_helpers = arith::ArithHelpers::collect(program, map_helpers.base + map_count);
+    let arith_types = arith_helpers.add_types(&mut type_section, next_fn_type);
+    next_fn_type += u32::from(!arith_types.is_empty());
+    extra_type_index.extend(arith_types);
     // Function types for the program's own host declarations, at the end of
     // the section: an import may name any type index, and appending here
     // shifts nothing that already exists.
@@ -1507,8 +1549,13 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
             exports.export(&f.name, ExportKind::Func, fn_base + i as u32);
         }
     }
+    // The module's own entry points are spelled with a `$` and a `.`, which no
+    // Kite identifier can hold, beside the `pub fn`s that share this section.
+    // They were `kite_poll` and `kite_invoke_0`, which a program may name a
+    // function: an async program with a `pub fn kite_poll` exported that name
+    // twice, and the module was refused as a bug in the compiler.
     if poll_trampoline {
-        exports.export("kite_poll", ExportKind::Func, trampoline_index);
+        exports.export(POLL_EXPORT, ExportKind::Func, trampoline_index);
     }
     if invoke_trampoline {
         // One export per shape, named by its index. The glue's table is
@@ -1516,7 +1563,7 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
         // reach for a trampoline the module does not have.
         for (i, _) in invoke_shapes.iter().enumerate() {
             exports.export(
-                &format!("kite_invoke_{}", i),
+                &format!("{}{}", INVOKE_EXPORT, i),
                 ExportKind::Func,
                 invoke_index + i as u32,
             );
@@ -1585,9 +1632,31 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
             string_runtime,
             &invoke_shapes,
             &slice_helpers,
+            &map_helpers,
+            &arith_helpers,
         );
         if locals > MAX_LOCALS {
-            too_wide.push((f.name.clone(), f.span, locals));
+            too_wide.push(TooLarge {
+                function: f.name.clone(),
+                span: f.span,
+                locals: true,
+                what: format!(
+                    "{} locals, more than the {} an engine accepts in one function",
+                    locals, MAX_LOCALS
+                ),
+            });
+        }
+        if body.byte_len() > MAX_BODY_BYTES {
+            too_wide.push(TooLarge {
+                function: f.name.clone(),
+                span: f.span,
+                locals: false,
+                what: format!(
+                    "{} bytes of code, more than the {} an engine accepts in one function",
+                    body.byte_len(),
+                    MAX_BODY_BYTES
+                ),
+            });
         }
         code.function(&body);
     }
@@ -1617,6 +1686,16 @@ pub fn compile_with(program: &mir::Program, types: &Types, debug_info: bool) -> 
         }
     }
     slice_helpers.emit(&mut code, &layout);
+    map_helpers.emit(
+        &mut code,
+        maps::KeyEquality {
+            types,
+            layout: &layout,
+            strings: string_runtime,
+            eq: &eq_builder,
+        },
+    );
+    arith_helpers.emit(&mut code);
     // Where the first body lands in the module. A section is `id` (one byte),
     // then its payload length as a LEB128; the code section's payload then
     // opens with the function *count*, also a LEB128, and only then the
@@ -1934,7 +2013,7 @@ fn compile_thunk(
     f
 }
 
-/// `kite_poll(task) -> i32`: run one step of a task and say whether it is done.
+/// `$kite.poll(task) -> i32`: run one step of a task and say whether it is done.
 ///
 /// The host's scheduler holds resume closures it cannot enter. This casts one
 /// back to the record a `fn() -> bool` closure is, takes the environment and
@@ -2019,7 +2098,7 @@ fn handler_shape_of(ty: TyId, types: &Types) -> (usize, bool) {
     }
 }
 
-/// `kite_invoke(handler, value)`: call a Kite closure the host is holding.
+/// `$kite.invoke.N(handler, value)`: call a Kite closure the host is holding.
 ///
 /// The mirror of [`compile_poll_trampoline`], and it exists for the same reason:
 /// a closure is a GC struct, JavaScript cannot enter one, and the module has to
@@ -2161,31 +2240,27 @@ fn compile_fn(
     strings: strings::StringRuntime,
     invoke_shapes: &[TyId],
     slice_helpers: &slices::SliceHelpers,
+    map_helpers: &maps::MapHelpers,
+    arith: &arith::ArithHelpers,
 ) -> (Function, u32) {
-    // Locals beyond the parameters, plus one synthetic program counter.
+    // Locals beyond the parameters, a block's temporaries sharing where their
+    // lives allow (see `slots`), plus one synthetic program counter.
+    let slots = slots::assign(f, types, layout);
     let mut locals: Vec<(u32, ValType)> = Vec::new();
-    for l in f.locals.iter().skip(f.param_count) {
-        push_local(&mut locals, val_type_with(l.ty, types, layout));
+    for vt in &slots.declared {
+        push_local(&mut locals, *vt);
     }
     push_local(&mut locals, ValType::I32); // $pc
-    let pc = f.locals.len() as u32;
-
-    // One scratch local per distinct slice type in the function, so a
-    // copy-on-write mutation has somewhere to hold the new array while
-    // `array.copy` consumes its operands. One register per distinct slice
-    // shape: a function handling `[int]` and `[str]` needs one of each, and a
-    // single shared register was only ever right while a function used one.
-    let scratch = pc + 1;
-    push_local(&mut locals, ValType::I32);
+    let pc = (f.param_count + slots.declared.len()) as u32;
 
     // A dedicated index register. This used to alias `$pc`, which happened to
     // work because a terminator always rewrites the program counter before
     // branching — but a scan clobbering it is not something to rely on.
     push_local(&mut locals, ValType::I32);
-    let index_scratch = scratch + 1;
+    let index_scratch = pc + 1;
 
     // Two more i32 registers: the second holds a new length or a scan's
-    // cursor, the third a count. All four are adjacent i32s, which the local
+    // cursor, the third a count. All of them are adjacent i32s, which the local
     // declarations run-length encode, so the extra registers cost a function
     // no bytes.
     push_local(&mut locals, ValType::I32);
@@ -2278,36 +2353,7 @@ fn compile_fn(
         next_local += 2;
     }
 
-    // Three registers for the debug-build overflow checks, allocated only for
-    // a function that has one: the check has to hold both operands and the
-    // wrapped result to decide whether the sign came out impossible.
-    let checked_arith = f.blocks.iter().any(|b| {
-        b.stmts.iter().any(|i| {
-            matches!(
-                i,
-                mir::Inst::Assign {
-                    value: mir::Rvalue::Binary {
-                        op: BinOp::AddInt | BinOp::SubInt | BinOp::MulInt | BinOp::Shl | BinOp::Shr,
-                        ..
-                    },
-                    ..
-                } | mir::Inst::Assign {
-                    value: mir::Rvalue::Unary { op: UnOp::NegInt, .. },
-                    ..
-                }
-            )
-        })
-    });
-    let arith_scratch = checked_arith.then(|| {
-        for _ in 0..3 {
-            push_local(&mut locals, ValType::I64);
-        }
-        let base = next_local;
-        next_local += 3;
-        (base, base + 1, base + 2)
-    });
-
-    // Two registers for `xs[a..b]`, again only for a function that has one.
+    // Two registers for `xs[a..b]`, only for a function that has one.
     // The bounds are clamped as 64-bit values before they are narrowed to the
     // i32 an array index is, which is what makes a bound past `i32::MAX` clamp
     // to the length rather than wrap round to a small one.
@@ -2381,15 +2427,16 @@ fn compile_fn(
             strings,
             layout,
             current_dst: None,
+            slots: &slots.of,
             pc,
-            scratch,
             index_scratch,
             map_scratch: &map_scratch,
             slice_scratch: &slice_scratch,
             owned: &owned,
             slice_helpers,
+            map_helpers,
             index_wide,
-            arith_scratch,
+            arith,
             range_scratch,
             invoke_shapes,
             block_index: i,
@@ -2435,9 +2482,9 @@ struct Emitter<'a> {
     /// The local a rvalue is being assigned into, when there is one. A slice
     /// construction takes its element type from there.
     current_dst: Option<u32>,
+    /// The Wasm local each MIR local lives in. See `slots`.
+    slots: &'a [u32],
     pc: u32,
-    /// An i32 register: a map literal's count of distinct keys.
-    scratch: u32,
     /// An i32 local for an index that has to be read twice. The one after it
     /// is a second (see [`Self::index_scratch2`]).
     index_scratch: u32,
@@ -2452,12 +2499,13 @@ struct Emitter<'a> {
     owned: &'a std::collections::HashMap<u32, u32>,
     /// The functions `xs[i]`, `xs[i] = v` and `xs.push(v)` call.
     slice_helpers: &'a slices::SliceHelpers,
+    /// The functions `m[k] = v` and a map literal's collapsing call.
+    map_helpers: &'a maps::MapHelpers,
     /// An i64 register holding an index while `.get()` checks it, when the
     /// function has one.
     index_wide: Option<u32>,
-    /// Three i64 registers for the debug-build overflow checks, when the
-    /// function has arithmetic that needs them.
-    arith_scratch: Option<(u32, u32, u32)>,
+    /// The functions a debug build's checked integer arithmetic calls.
+    arith: &'a arith::ArithHelpers,
     /// Two i64 registers holding the clamped bounds of `xs[a..b]`.
     range_scratch: Option<(u32, u32)>,
     /// Handler shapes given to `js.func`, in the order the trampolines and the
@@ -2493,7 +2541,7 @@ impl<'a> Emitter<'a> {
                 // call still happens. A unit-returning call leaves nothing on
                 // the stack, so there is nothing to store.
                 if self.rvalue(func, value) {
-                    func.instruction(&Instruction::LocalSet(dst.0));
+                    func.instruction(&Instruction::LocalSet(self.slots[dst.index()]));
                 }
                 // A slice made here is the destination's alone; one read from
                 // anywhere else may be shared with where it came from.
@@ -2523,16 +2571,19 @@ impl<'a> Emitter<'a> {
                     field_index: *index + self.layout.struct_shift(sid),
                 });
             }
+            // A call to the map type's `set` helper, which answers the map
+            // the local keeps. See `maps`.
             mir::Inst::MapSet { local, key, value } => {
-                let base = mir::Operand::Local(*local);
                 let map_ty = self.f.locals[local.index()].ty;
-                let (Some(ml), Some(&(kreg, vreg))) =
-                    (self.map_of(&base), self.map_scratch.get(&map_ty))
-                else {
+                let Some(helper) = self.map_helpers.index(map_ty, maps::MapOp::Set) else {
                     func.instruction(&Instruction::Unreachable);
                     return;
                 };
-                self.map_write(func, ml, &base, key, value, local.0, kreg, vreg);
+                func.instruction(&Instruction::LocalGet(self.slots[local.index()]));
+                self.operand(func, key);
+                self.operand(func, value);
+                func.instruction(&Instruction::Call(helper));
+                func.instruction(&Instruction::LocalSet(self.slots[local.index()]));
             }
             mir::Inst::MapRemove { local, key } => {
                 let base = mir::Operand::Local(*local);
@@ -2543,7 +2594,7 @@ impl<'a> Emitter<'a> {
                     func.instruction(&Instruction::Unreachable);
                     return;
                 };
-                self.map_drop(func, ml, &base, key, local.0, kreg, vreg);
+                self.map_drop(func, ml, &base, key, self.slots[local.index()], kreg, vreg);
             }
 
             // Slices are copy-on-write *values*: a write copies first unless
@@ -2613,13 +2664,13 @@ impl<'a> Emitter<'a> {
             func.instruction(&Instruction::Unreachable);
             return;
         };
-        func.instruction(&Instruction::LocalGet(local));
+        func.instruction(&Instruction::LocalGet(self.slots[local as usize]));
         func.instruction(&Instruction::LocalGet(flag));
         for a in args {
             self.operand(func, a);
         }
         func.instruction(&Instruction::Call(helper));
-        func.instruction(&Instruction::LocalSet(local));
+        func.instruction(&Instruction::LocalSet(self.slots[local as usize]));
         func.instruction(&Instruction::I32Const(1));
         func.instruction(&Instruction::LocalSet(flag));
     }
@@ -2990,18 +3041,31 @@ impl<'a> Emitter<'a> {
                     return true;
                 };
                 // Entries arrive flattened as key, value, key, value.
-                let keys: Vec<&mir::Operand> = entries.iter().step_by(2).collect();
-                let values: Vec<&mir::Operand> = entries.iter().skip(1).step_by(2).collect();
+                let mut keys: Vec<&mir::Operand> = entries.iter().step_by(2).collect();
+                let mut values: Vec<&mir::Operand> = entries.iter().skip(1).step_by(2).collect();
+                // Constant keys are collapsed here, and the arrays are then the
+                // map as written. Anything else may repeat at run time, and is
+                // collapsed by the map type's `dedup` helper. See `maps`.
+                let collapsed = maps::constant_entries(&keys, self.program);
+                if let Some(kept) = &collapsed {
+                    values = kept.iter().map(|&(_, v)| values[v]).collect();
+                    keys = kept.iter().map(|&(k, _)| keys[k]).collect();
+                }
                 self.fixed_array(func, ml.keys, &keys, Some(kreg));
                 func.instruction(&Instruction::LocalSet(kreg));
                 self.fixed_array(func, ml.values, &values, Some(vreg));
                 func.instruction(&Instruction::LocalSet(vreg));
-                if !distinct_constants(&keys, self.program) {
-                    self.map_dedup(func, ml, kreg, vreg, keys.len() as i32);
-                }
                 func.instruction(&Instruction::LocalGet(kreg));
                 func.instruction(&Instruction::LocalGet(vreg));
-                func.instruction(&Instruction::StructNew(ml.record));
+                if collapsed.is_some() {
+                    func.instruction(&Instruction::StructNew(ml.record));
+                } else {
+                    let ty = self.f.locals[self.current_dst.unwrap_or_default() as usize].ty;
+                    match self.map_helpers.index(ty, maps::MapOp::Dedup) {
+                        Some(helper) => func.instruction(&Instruction::Call(helper)),
+                        None => func.instruction(&Instruction::Unreachable),
+                    };
+                }
                 return true;
             }
 
@@ -3719,7 +3783,7 @@ impl<'a> Emitter<'a> {
             }
             // The closure goes over as a reference and the host hands back the
             // function it wrapped it in. Nothing is unpacked here: entering a
-            // closure is a `kite_invoke_…` trampoline's job, and one of those
+            // closure is a `$kite.invoke.…` trampoline's job, and one of those
             // is the only thing that can.
             //
             // The shape index goes with it, because the host has to build a
@@ -3825,7 +3889,7 @@ impl<'a> Emitter<'a> {
     fn operand(&mut self, func: &mut Function, o: &mir::Operand) {
         match o {
             mir::Operand::Local(l) => {
-                func.instruction(&Instruction::LocalGet(l.0));
+                func.instruction(&Instruction::LocalGet(self.slots[l.index()]));
             }
             mir::Operand::Int(v) => {
                 func.instruction(&Instruction::I64Const(*v));
@@ -4006,109 +4070,7 @@ impl<'a> Emitter<'a> {
         };
     }
 
-    /// `m[k] = v`.
-    ///
-    /// Maps are copy-on-write values, so this builds new arrays and rebinds the
-    /// local rather than mutating in place. One code path covers both replacing
-    /// an existing key and appending a new one: the scan yields the key's index
-    /// or, when absent, the current length, and the new arrays are one longer
-    /// only in the second case.
-    #[allow(clippy::too_many_arguments)]
-    fn map_write(
-        &mut self,
-        func: &mut Function,
-        ml: MapLayout,
-        base: &mir::Operand,
-        key: &mir::Operand,
-        value: &mir::Operand,
-        dst: u32,
-        kreg: u32,
-        vreg: u32,
-    ) {
-        let pos = self.index_scratch;
-
-        // Scan for the key, leaving `pos` at its index or at the length.
-        func.instruction(&Instruction::I32Const(0));
-        func.instruction(&Instruction::LocalSet(pos));
-        func.instruction(&Instruction::Block(BlockType::Empty));
-        func.instruction(&Instruction::Loop(BlockType::Empty));
-        func.instruction(&Instruction::LocalGet(pos));
-        self.map_field(func, ml, base, 0);
-        func.instruction(&Instruction::ArrayLen);
-        func.instruction(&Instruction::I32GeU);
-        func.instruction(&Instruction::BrIf(1));
-        self.map_field(func, ml, base, 0);
-        func.instruction(&Instruction::LocalGet(pos));
-        func.instruction(&Instruction::ArrayGet(ml.keys));
-        self.operand(func, key);
-        self.key_equality(func, ml.key_ty);
-        func.instruction(&Instruction::BrIf(1));
-        func.instruction(&Instruction::LocalGet(pos));
-        func.instruction(&Instruction::I32Const(1));
-        func.instruction(&Instruction::I32Add);
-        func.instruction(&Instruction::LocalSet(pos));
-        func.instruction(&Instruction::Br(0));
-        func.instruction(&Instruction::End); // loop
-        func.instruction(&Instruction::End); // block
-
-        // The new length: one longer only when the key was absent.
-        self.map_field(func, ml, base, 0);
-        func.instruction(&Instruction::ArrayLen);
-        func.instruction(&Instruction::LocalGet(pos));
-        func.instruction(&Instruction::I32Const(1));
-        func.instruction(&Instruction::I32Add);
-        self.map_field(func, ml, base, 0);
-        func.instruction(&Instruction::ArrayLen);
-        func.instruction(&Instruction::LocalGet(pos));
-        func.instruction(&Instruction::I32GtU);
-        func.instruction(&Instruction::Select);
-        func.instruction(&Instruction::LocalSet(self.index_scratch2(func)));
-
-        // Keys.
-        func.instruction(&Instruction::LocalGet(self.index_scratch2(func)));
-        func.instruction(&Instruction::ArrayNewDefault(ml.keys));
-        func.instruction(&Instruction::LocalSet(kreg));
-        func.instruction(&Instruction::LocalGet(kreg));
-        func.instruction(&Instruction::I32Const(0));
-        self.map_field(func, ml, base, 0);
-        func.instruction(&Instruction::I32Const(0));
-        self.map_field(func, ml, base, 0);
-        func.instruction(&Instruction::ArrayLen);
-        func.instruction(&Instruction::ArrayCopy {
-            array_type_index_dst: ml.keys,
-            array_type_index_src: ml.keys,
-        });
-        func.instruction(&Instruction::LocalGet(kreg));
-        func.instruction(&Instruction::LocalGet(pos));
-        self.operand(func, key);
-        func.instruction(&Instruction::ArraySet(ml.keys));
-
-        // Values.
-        func.instruction(&Instruction::LocalGet(self.index_scratch2(func)));
-        func.instruction(&Instruction::ArrayNewDefault(ml.values));
-        func.instruction(&Instruction::LocalSet(vreg));
-        func.instruction(&Instruction::LocalGet(vreg));
-        func.instruction(&Instruction::I32Const(0));
-        self.map_field(func, ml, base, 1);
-        func.instruction(&Instruction::I32Const(0));
-        self.map_field(func, ml, base, 1);
-        func.instruction(&Instruction::ArrayLen);
-        func.instruction(&Instruction::ArrayCopy {
-            array_type_index_dst: ml.values,
-            array_type_index_src: ml.values,
-        });
-        func.instruction(&Instruction::LocalGet(vreg));
-        func.instruction(&Instruction::LocalGet(pos));
-        self.operand(func, value);
-        func.instruction(&Instruction::ArraySet(ml.values));
-
-        func.instruction(&Instruction::LocalGet(kreg));
-        func.instruction(&Instruction::LocalGet(vreg));
-        func.instruction(&Instruction::StructNew(ml.record));
-        func.instruction(&Instruction::LocalSet(dst));
-    }
-
-    /// A second i32 register, for the new length.
+    /// A second i32 register, for a new length.
     fn index_scratch2(&self, _func: &Function) -> u32 {
         self.index_scratch + 1
     }
@@ -4123,9 +4085,9 @@ impl<'a> Emitter<'a> {
     /// tombstone being left, because insertion order is part of what a Kite
     /// map is, and `keys()` walks the array directly.
     ///
-    /// Eight parameters, matching `map_write` beside it: the layout, the two
-    /// scratch registers and the destination are all worked out by the caller,
-    /// which is the one that has the `MapLayout` and the scratch table.
+    /// Eight parameters: the layout, the two scratch registers and the
+    /// destination are all worked out by the caller, which is the one that has
+    /// the `MapLayout` and the scratch table.
     #[allow(clippy::too_many_arguments)]
     fn map_drop(
         &mut self,
@@ -4141,7 +4103,7 @@ impl<'a> Emitter<'a> {
         let len = self.index_scratch2(func);
 
         // Scan for the key, leaving `pos` at its index or at the length. The
-        // same walk `map_write` opens with.
+        // same walk the `set` helper opens with (see `maps`).
         func.instruction(&Instruction::I32Const(0));
         func.instruction(&Instruction::LocalSet(pos));
         func.instruction(&Instruction::Block(BlockType::Empty));
@@ -4324,32 +4286,20 @@ impl<'a> Emitter<'a> {
         });
     }
 
-    /// Compare two keys already on the stack, leaving an `i32`.
-    ///
-    /// A key is compared the way `==` compares it, so an aggregate key — a
-    /// struct, an enum, a tuple, an optional, a slice — goes through the same
-    /// generated function `==` on that type calls. This used to fall through
-    /// to `i32.eq` for anything that was not a number or a string, which is
-    /// not an instruction a reference can be given, and every map keyed by a
-    /// struct produced a module the validator refused.
+    /// Compare two keys already on the stack, leaving an `i32`: the same
+    /// comparison the map helpers make. See [`maps::key_equality`].
     fn key_equality(&mut self, func: &mut Function, key_ty: TyId) {
-        if matches!(self.types.kind(key_ty), TyKind::Str) {
-            func.instruction(&Instruction::Call(self.strings.eq()));
-            return;
+        maps::key_equality(func, key_ty, self.keys());
+    }
+
+    /// What comparing two keys needs, from this function's context.
+    fn keys(&self) -> maps::KeyEquality<'a> {
+        maps::KeyEquality {
+            types: self.types,
+            layout: self.layout,
+            strings: self.strings,
+            eq: self.eq,
         }
-        if eq::needs_function(key_ty, self.types) {
-            self.eq.call(func, key_ty);
-            return;
-        }
-        let inst = match val_type_with(key_ty, self.types, self.layout) {
-            ValType::I64 => Instruction::I64Eq,
-            ValType::F64 => Instruction::F64Eq,
-            ValType::I32 => Instruction::I32Eq,
-            // A host value or a function has no `==`, and the checker refuses
-            // both as a key (E0201). Nothing reaches here.
-            _ => Instruction::Unreachable,
-        };
-        func.instruction(&inst);
     }
 
     /// What a lookup that may miss answers with, for a payload of `payload`:
@@ -4470,124 +4420,6 @@ impl<'a> Emitter<'a> {
             .and_then(|d| self.slice_parts(self.f.locals[d as usize].ty))
     }
 
-    /// Collapse repeated keys in a map literal's arrays, in place, the way the
-    /// bytecode VM builds one: a key keeps the position it first appeared at
-    /// and takes the value it was last given. `{k: 1, "a": 2}` with `k == "a"`
-    /// is one entry, and was two here — with `len()` saying so.
-    ///
-    /// One pass over the entries, each scanned for among those already kept,
-    /// then a shrink to the kept count when anything was dropped. Emitted only
-    /// for a literal whose keys are not all distinct constants.
-    fn map_dedup(&mut self, func: &mut Function, ml: MapLayout, kreg: u32, vreg: u32, n: i32) {
-        let i = self.index_scratch;
-        let j = self.index_scratch2(func);
-        let kept = self.scratch;
-        func.instruction(&Instruction::I32Const(0));
-        func.instruction(&Instruction::LocalSet(kept));
-        func.instruction(&Instruction::I32Const(0));
-        func.instruction(&Instruction::LocalSet(i));
-        func.instruction(&Instruction::Block(BlockType::Empty));
-        func.instruction(&Instruction::Loop(BlockType::Empty));
-        func.instruction(&Instruction::LocalGet(i));
-        func.instruction(&Instruction::I32Const(n));
-        func.instruction(&Instruction::I32GeU);
-        func.instruction(&Instruction::BrIf(1));
-
-        // j = the kept entry with this key, or `kept` when there is none.
-        func.instruction(&Instruction::I32Const(0));
-        func.instruction(&Instruction::LocalSet(j));
-        func.instruction(&Instruction::Block(BlockType::Empty));
-        func.instruction(&Instruction::Loop(BlockType::Empty));
-        func.instruction(&Instruction::LocalGet(j));
-        func.instruction(&Instruction::LocalGet(kept));
-        func.instruction(&Instruction::I32GeU);
-        func.instruction(&Instruction::BrIf(1));
-        func.instruction(&Instruction::LocalGet(kreg));
-        func.instruction(&Instruction::LocalGet(j));
-        func.instruction(&Instruction::ArrayGet(ml.keys));
-        func.instruction(&Instruction::LocalGet(kreg));
-        func.instruction(&Instruction::LocalGet(i));
-        func.instruction(&Instruction::ArrayGet(ml.keys));
-        self.key_equality(func, ml.key_ty);
-        func.instruction(&Instruction::BrIf(1));
-        func.instruction(&Instruction::LocalGet(j));
-        func.instruction(&Instruction::I32Const(1));
-        func.instruction(&Instruction::I32Add);
-        func.instruction(&Instruction::LocalSet(j));
-        func.instruction(&Instruction::Br(0));
-        func.instruction(&Instruction::End);
-        func.instruction(&Instruction::End);
-
-        // A new key is kept at the end of what has been kept; either way the
-        // value is the latest one. `j <= i` throughout, so nothing unread is
-        // overwritten.
-        func.instruction(&Instruction::LocalGet(j));
-        func.instruction(&Instruction::LocalGet(kept));
-        func.instruction(&Instruction::I32Eq);
-        func.instruction(&Instruction::If(BlockType::Empty));
-        func.instruction(&Instruction::LocalGet(kreg));
-        func.instruction(&Instruction::LocalGet(j));
-        func.instruction(&Instruction::LocalGet(kreg));
-        func.instruction(&Instruction::LocalGet(i));
-        func.instruction(&Instruction::ArrayGet(ml.keys));
-        func.instruction(&Instruction::ArraySet(ml.keys));
-        func.instruction(&Instruction::LocalGet(kept));
-        func.instruction(&Instruction::I32Const(1));
-        func.instruction(&Instruction::I32Add);
-        func.instruction(&Instruction::LocalSet(kept));
-        func.instruction(&Instruction::End);
-        func.instruction(&Instruction::LocalGet(vreg));
-        func.instruction(&Instruction::LocalGet(j));
-        func.instruction(&Instruction::LocalGet(vreg));
-        func.instruction(&Instruction::LocalGet(i));
-        func.instruction(&Instruction::ArrayGet(ml.values));
-        func.instruction(&Instruction::ArraySet(ml.values));
-
-        func.instruction(&Instruction::LocalGet(i));
-        func.instruction(&Instruction::I32Const(1));
-        func.instruction(&Instruction::I32Add);
-        func.instruction(&Instruction::LocalSet(i));
-        func.instruction(&Instruction::Br(0));
-        func.instruction(&Instruction::End);
-        func.instruction(&Instruction::End);
-
-        // A map's length is its arrays' length, so drop the tail. The long
-        // arrays are parked in a record in the destination — which the
-        // literal is about to overwrite anyway — while the short ones are
-        // built in their registers and filled from it.
-        let Some(dst) = self.current_dst else {
-            func.instruction(&Instruction::Unreachable);
-            return;
-        };
-        func.instruction(&Instruction::LocalGet(kept));
-        func.instruction(&Instruction::I32Const(n));
-        func.instruction(&Instruction::I32LtU);
-        func.instruction(&Instruction::If(BlockType::Empty));
-        func.instruction(&Instruction::LocalGet(kreg));
-        func.instruction(&Instruction::LocalGet(vreg));
-        func.instruction(&Instruction::StructNew(ml.record));
-        func.instruction(&Instruction::LocalSet(dst));
-        for (field, array, reg) in [(0, ml.keys, kreg), (1, ml.values, vreg)] {
-            func.instruction(&Instruction::LocalGet(kept));
-            func.instruction(&Instruction::ArrayNewDefault(array));
-            func.instruction(&Instruction::LocalSet(reg));
-            func.instruction(&Instruction::LocalGet(reg));
-            func.instruction(&Instruction::I32Const(0));
-            func.instruction(&Instruction::LocalGet(dst));
-            func.instruction(&Instruction::StructGet {
-                struct_type_index: ml.record,
-                field_index: field,
-            });
-            func.instruction(&Instruction::I32Const(0));
-            func.instruction(&Instruction::LocalGet(kept));
-            func.instruction(&Instruction::ArrayCopy {
-                array_type_index_dst: array,
-                array_type_index_src: array,
-            });
-        }
-        func.instruction(&Instruction::End);
-    }
-
     /// The box type for an operand about to be wrapped. The operand carries
     /// the *payload*, so the box is found by its own type.
     fn option_box_for(&self, o: &mir::Operand) -> Option<u32> {
@@ -4668,122 +4500,28 @@ impl<'a> Emitter<'a> {
         func.instruction(&Instruction::Call(self.strings.from_host()));
     }
 
-    /// A debug-build `+`, `-` or `*` on integers: wrap, then trap if the sign
-    /// of the answer proves the true result did not fit.
-    ///
-    /// Wasm has no overflow-checking arithmetic, so the check is written out.
-    /// The alternative — leaving Wasm to wrap while the VM and the native
-    /// backend trap — is the same program deciding differently by target.
+    /// A debug-build `+`, `-`, `*`, `<<` or `>>` on integers, with both
+    /// operands on the stack: a call to the check. See `arith`.
     fn checked_int(&mut self, func: &mut Function, op: BinOp) -> bool {
-        let Some((a, b, r)) = self.arith_scratch else {
-            return false;
-        };
-        // Operands are on the stack, left then right.
-        func.instruction(&Instruction::LocalSet(b));
-        func.instruction(&Instruction::LocalTee(a));
-        func.instruction(&Instruction::LocalGet(b));
-        match op {
-            BinOp::AddInt => {
-                func.instruction(&Instruction::I64Add);
-                func.instruction(&Instruction::LocalSet(r));
-                // Overflow when both operands differ in sign from the result:
-                // `(a ^ r) & (b ^ r) < 0`.
-                func.instruction(&Instruction::LocalGet(a));
-                func.instruction(&Instruction::LocalGet(r));
-                func.instruction(&Instruction::I64Xor);
-                func.instruction(&Instruction::LocalGet(b));
-                func.instruction(&Instruction::LocalGet(r));
-                func.instruction(&Instruction::I64Xor);
-                func.instruction(&Instruction::I64And);
+        match self.arith.index(op) {
+            Some(helper) => {
+                func.instruction(&Instruction::Call(helper));
+                true
             }
-            BinOp::SubInt => {
-                func.instruction(&Instruction::I64Sub);
-                func.instruction(&Instruction::LocalSet(r));
-                // `(a ^ b) & (a ^ r) < 0`: the operands differed in sign and
-                // the result took the wrong one.
-                func.instruction(&Instruction::LocalGet(a));
-                func.instruction(&Instruction::LocalGet(b));
-                func.instruction(&Instruction::I64Xor);
-                func.instruction(&Instruction::LocalGet(a));
-                func.instruction(&Instruction::LocalGet(r));
-                func.instruction(&Instruction::I64Xor);
-                func.instruction(&Instruction::I64And);
-            }
-            BinOp::MulInt => {
-                func.instruction(&Instruction::I64Mul);
-                func.instruction(&Instruction::LocalSet(r));
-                // Division is the check, but it needs two guards of its own:
-                // dividing by zero traps, and `MIN / -1` overflows. Zero never
-                // overflows, and the `MIN * -1` pair always does.
-                func.instruction(&Instruction::LocalGet(a));
-                func.instruction(&Instruction::I64Const(0));
-                func.instruction(&Instruction::I64Eq);
-                func.instruction(&Instruction::If(BlockType::Empty));
-                // a == 0: the product is 0 and cannot have overflowed.
-                func.instruction(&Instruction::Else);
-                func.instruction(&Instruction::LocalGet(a));
-                func.instruction(&Instruction::I64Const(-1));
-                func.instruction(&Instruction::I64Eq);
-                func.instruction(&Instruction::LocalGet(b));
-                func.instruction(&Instruction::I64Const(i64::MIN));
-                func.instruction(&Instruction::I64Eq);
-                func.instruction(&Instruction::I32And);
-                func.instruction(&Instruction::If(BlockType::Empty));
-                func.instruction(&Instruction::Unreachable);
-                func.instruction(&Instruction::Else);
-                func.instruction(&Instruction::LocalGet(r));
-                func.instruction(&Instruction::LocalGet(a));
-                func.instruction(&Instruction::I64DivS);
-                func.instruction(&Instruction::LocalGet(b));
-                func.instruction(&Instruction::I64Ne);
-                func.instruction(&Instruction::If(BlockType::Empty));
-                func.instruction(&Instruction::Unreachable);
-                func.instruction(&Instruction::End);
-                func.instruction(&Instruction::End);
-                func.instruction(&Instruction::End);
-                func.instruction(&Instruction::LocalGet(r));
-                return true;
-            }
-            // A count outside `0..=63` traps, where the instruction alone
-            // would take it modulo 64. Compared unsigned, so a negative count
-            // is out of range with the rest.
-            BinOp::Shl | BinOp::Shr => {
-                // Both operands are back on the stack; the test reads the
-                // count from its register and leaves them where they are.
-                func.instruction(&Instruction::LocalGet(b));
-                func.instruction(&Instruction::I64Const(64));
-                func.instruction(&Instruction::I64GeU);
-                func.instruction(&Instruction::If(BlockType::Empty));
-                func.instruction(&Instruction::Unreachable);
-                func.instruction(&Instruction::End);
-                func.instruction(&if op == BinOp::Shl {
-                    Instruction::I64Shl
-                } else {
-                    Instruction::I64ShrS
-                });
-                return true;
-            }
-            _ => return false,
+            None => false,
         }
-        func.instruction(&Instruction::I64Const(0));
-        func.instruction(&Instruction::I64LtS);
-        func.instruction(&Instruction::If(BlockType::Empty));
-        func.instruction(&Instruction::Unreachable);
-        func.instruction(&Instruction::End);
-        func.instruction(&Instruction::LocalGet(r));
-        true
     }
 
     fn binop(&mut self, func: &mut Function, op: BinOp) {
         use BinOp::*;
-        // The checked forms are several instructions, not one, so they are
+        // The checked forms are a call, not an instruction, so they are
         // emitted before the single-instruction table is consulted.
         if matches!(op, AddInt | SubInt | MulInt | Shl | Shr) && self.checked_int(func, op) {
             return;
         }
         let inst = match op {
-            // Reached only when the function had no scratch registers to check
-            // with, which cannot happen: the allocation scans for these ops.
+            // Reached only when the program had no helper for the check, which
+            // cannot happen: the helpers are collected by scanning for these.
             AddInt | AddIntWrap => Instruction::I64Add,
             SubInt | SubIntWrap => Instruction::I64Sub,
             MulInt | MulIntWrap => Instruction::I64Mul,
@@ -4883,36 +4621,6 @@ struct SliceParts {
     /// The `{buf, len}` record a slice value is.
     header: u32,
     elem: TyId,
-}
-
-/// Whether a map literal's keys are constants that are all different, so
-/// its arrays can be used as written. Anything else — a local, an aggregate —
-/// may repeat at run time and has to be collapsed.
-fn distinct_constants(keys: &[&mir::Operand], program: &mir::Program) -> bool {
-    #[derive(PartialEq)]
-    enum Key<'a> {
-        Int(i64),
-        Bool(bool),
-        Str(&'a str),
-    }
-    let mut seen: Vec<Key> = Vec::with_capacity(keys.len());
-    for k in keys {
-        let key = match k {
-            mir::Operand::Int(v) => Key::Int(*v),
-            mir::Operand::Bool(v) => Key::Bool(*v),
-            mir::Operand::Str(s) => Key::Str(&program.strings[s.0 as usize]),
-            _ => return false,
-        };
-        // Quadratic, but only in the size of a literal whose every key is a
-        // constant — and a long one is a table of distinct names, where
-        // the answer comes out true after one pass. Past a few thousand the
-        // scan is not worth it: the run-time pass is emitted instead.
-        if keys.len() > 4096 || seen.contains(&key) {
-            return false;
-        }
-        seen.push(key);
-    }
-    true
 }
 
 #[cfg(test)]
