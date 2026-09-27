@@ -202,11 +202,11 @@ aliasing, no lifetimes.
 |---|---|
 | R1 | after `let (v, e) = f()`, `e` is **Unchecked** and `v` is **Tainted** |
 | R2 | reading a Tainted binding is `E0301` |
-| R3 | an Unchecked binding going out of scope is `E0302` |
+| R3 | an Unchecked binding going out of scope is `E0302` — at the end of its block, and on the path of every `return`, `check`, `break` or `continue` that leaves it behind |
 | R4 | on a path where `e == nil` is proved, `e` becomes Checked and `v` Clean |
 | R5 | on a path where `e != nil`, `e` becomes Checked and `v` stays Tainted **permanently** |
 | R6 | a bare-statement call whose type is `error` or `(T, error)` is `E0302` |
-| R7 | an `error` or a whole `(T, error)` bound to one name — `let` or `var`, from a call, `await`, a value `if` — is **Unchecked**; only `nil` and a copy of another binding are not |
+| R7 | an `error` or a whole `(T, error)` bound to one name — `let` or `var`, from a call, `await`, a value `if`, or assigned later with `e = f()` — is **Unchecked**; only `nil` and a copy of another binding are not |
 
 R2 in practice:
 
@@ -311,6 +311,32 @@ fn touch() -> error {
 fn main() {
     let e = touch() //~ E0302
     io.print("dropped")
+}
+```
+
+**An early exit leaves an error behind.** Checking it on the path that falls
+through is not enough when a `return`, `break` or `continue` above the test
+takes another way out. Check each error before the next exit, which in practice
+means right after the call:
+
+```kite fails
+fn touch() -> error {
+    return errors.new("no")
+}
+
+fn run(n: int) -> int {
+    let e = touch()
+    if n > 0 {
+        return 1 //~ E0302
+    }
+    if e != nil {
+        return -1
+    }
+    return 0
+}
+
+fn main() {
+    io.print(run(1))
 }
 ```
 
@@ -688,6 +714,10 @@ fn main() {
 
 `T.as(err)` returns `Option<T>`, spelled `Option<T>` — there is no `?T` syntax;
 `?` is not even a Kite token. Narrow it with `if hit != nil { … }`.
+
+For a generic error type, each specialisation is its own type: write the one you
+want on the binding, `let w: Option<Wrapped<int>> = Wrapped.as(err)`. A bare
+`Wrapped.as(err)`, and `Wrapped.is(err)`, cannot say which, and are `E0209`.
 
 An enum works as well as a struct, and pairs nicely with `match`:
 

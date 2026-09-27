@@ -1,0 +1,40 @@
+// Calling an `async fn` yields its task, a method's as much as a function's
+// (§12.1). A method's call was typed as its bare result, so this added one
+// to a task. Whether a method is `async` is part of what a trait declares:
+// a caller through the trait is typed from the declaration.
+
+use std/task
+
+trait Source {
+    fn get(self) -> int
+}
+
+struct P {
+    a: int
+}
+
+impl P {
+    async fn later(self) -> int {
+        await task.sleep(1)
+        return self.a
+    }
+
+    async fn make(a: int) -> int {
+        return a
+    }
+}
+
+impl Source for P {
+    async fn get(self) -> int { //~ ERROR E0200
+        return self.a
+    }
+}
+
+async fn main() {
+    let p = P{ a: 3 }
+    let v = p.later()
+    io.print(v + 1) //~ ERROR E0201
+    let w = P.make(4)
+    io.print(w + 1) //~ ERROR E0201
+    io.print(await p.later())
+}

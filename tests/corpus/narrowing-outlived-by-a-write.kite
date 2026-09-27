@@ -25,6 +25,34 @@ fn across_a_back_edge() {
     }
 }
 
+// A write that cannot store a nil keeps the narrowing, in a loop as in
+// straight-line code. The loop used to drop it for every local it wrote.
+fn kept_across_a_back_edge() {
+    var x: Option<int> = 5
+    if x == nil {
+        return
+    }
+    for i in 0..3 {
+        io.print("\(x + 1)")
+        x = i
+    }
+}
+
+// `x = z` keeps `x` present only while `z` is, and the loop's `z = nil` ends
+// that on the next pass.
+fn lost_through_another() {
+    var x: Option<int> = 5
+    var z: Option<int> = 6
+    if x == nil || z == nil {
+        return
+    }
+    for i in 0..3 {
+        io.print("\(x + 1)") //~ ERROR E0201
+        x = z
+        z = nil
+    }
+}
+
 fn in_one_branch() {
     var x: Option<int> = 5
     if x == nil {
@@ -47,6 +75,8 @@ fn an_error_too() {
 fn main() {
     after_a_write()
     across_a_back_edge()
+    kept_across_a_back_edge()
+    lost_through_another()
     in_one_branch()
     an_error_too()
 }

@@ -175,10 +175,10 @@ fn http_fetches_concurrently() {
          \x20 let b = http.get(\"data:text/plain,second\")\n\
          \x20 let c = http.get(\"data:text/plain,third\")\n\
          \x20 let (ra, ea) = await a\n\
-         \x20 let (rb, eb) = await b\n\
-         \x20 let (rc, ec) = await c\n\
          \x20 if ea != nil { return }\n\
+         \x20 let (rb, eb) = await b\n\
          \x20 if eb != nil { return }\n\
+         \x20 let (rc, ec) = await c\n\
          \x20 if ec != nil { return }\n\
          \x20 io.print(\"\\(ra.status) \\(ra.body)\")\n\
          \x20 io.print(\"\\(rb.status) \\(rb.body)\")\n\
@@ -206,12 +206,12 @@ fn every_method_reaches_the_server_including_query() {
          async fn main() {{\n\
          \x20 let at = \"http://127.0.0.1:{port}/\"\n\
          \x20 let (q, qe) = await http.query(at, \"{{}}\")\n\
-         \x20 let (p, pe) = await http.patch(at, \"{{}}\")\n\
-         \x20 let (o, oe) = await http.options(at)\n\
-         \x20 let (h, he) = await http.head(at)\n\
          \x20 if qe != nil {{ return }}\n\
+         \x20 let (p, pe) = await http.patch(at, \"{{}}\")\n\
          \x20 if pe != nil {{ return }}\n\
+         \x20 let (o, oe) = await http.options(at)\n\
          \x20 if oe != nil {{ return }}\n\
+         \x20 let (h, he) = await http.head(at)\n\
          \x20 if he != nil {{ return }}\n\
          \x20 io.print(q.body)\n\
          \x20 io.print(p.body)\n\

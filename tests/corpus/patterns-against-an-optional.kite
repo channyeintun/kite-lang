@@ -1,0 +1,28 @@
+// A pattern written against an optional is one for the value inside it,
+// present (§9.2): a tuple pattern, and a variant or struct of a generic type,
+// as much as a literal. They were refused as the wrong type; now they are
+// accepted, and a match of them is still held to covering `nil` and every
+// variant.
+
+enum Msg<T> {
+    Data(v: T)
+    Stop
+}
+
+fn tuple(o: Option<(int, str)>) -> str {
+    return match o { //~ ERROR E0210
+        (n, _) => "n \(n)",
+    }
+}
+
+fn message(o: Option<Msg<int>>) -> str {
+    return match o { //~ ERROR E0210
+        Data(v) => "data \(v)",
+        nil => "nil",
+    }
+}
+
+fn main() {
+    io.print(tuple(nil))
+    io.print(message(nil))
+}

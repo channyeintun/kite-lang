@@ -520,6 +520,11 @@ pub struct MethodOwner {
     /// Index into `SourceFile::items` for the block holding the body — an
     /// `impl`, or the `trait` itself when this is an inherited default.
     pub impl_index: usize,
+    /// Index into `SourceFile::items` for the `impl` block that gives the
+    /// method to its type. The same as `impl_index` but for an inherited
+    /// default, whose body is the trait's while its type parameters — the
+    /// `T` of `impl<T> Show for Box<T>` — are the block's.
+    pub block_index: usize,
     /// Position within that block's method list.
     pub method_index: usize,
     pub takes_self: bool,
@@ -1121,6 +1126,7 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                         owner: Some(MethodOwner {
                             type_index,
                             impl_index: i,
+                            block_index: i,
                             method_index: mi,
                             takes_self: m.self_param.is_some(),
                             var_self: m.self_param.as_ref().is_some_and(|s| s.is_var),
@@ -1155,6 +1161,7 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                                 owner: Some(MethodOwner {
                                     type_index,
                                     impl_index: trait_item,
+                                    block_index: i,
                                     method_index: mi,
                                     takes_self: m.self_param.is_some(),
                                     var_self: m.self_param.as_ref().is_some_and(|s| s.is_var),
@@ -1240,6 +1247,16 @@ struct FnResolver<'a> {
     /// The module this body was declared in. Its own names win over everything
     /// but locals.
     module: String,
+    /// While an or-pattern's later alternatives are resolved: the names its
+    /// first alternative bound, each with its local, and the names this
+    /// alternative has bound so far. Innermost last.
+    alternatives: Vec<(HashMap<String, u32>, Vec<String>)>,
+    /// Every name a pattern bound while inside an or-pattern, in order, so
+    /// the or-pattern can tell what its first alternative bound — including
+    /// names that alternative took from an enclosing or-pattern's first.
+    or_bound: Vec<(String, u32)>,
+    /// How many or-patterns are being resolved, one inside another.
+    or_depth: usize,
 }
 
 impl<'a> FnResolver<'a> {
@@ -1255,6 +1272,9 @@ impl<'a> FnResolver<'a> {
             loop_depth: 0,
             labels: Vec::new(),
             module,
+            alternatives: Vec::new(),
+            or_bound: Vec::new(),
+            or_depth: 0,
         }
     }
 
@@ -1368,6 +1388,48 @@ impl<'a> FnResolver<'a> {
     /// It is safe because each `err` gets its own local slot, so the taint
     /// analysis still reports the earlier one if it was never checked.
     fn declare_maybe_shadowing(
+        &mut self,
+        name: &Ident,
+        mutable: bool,
+        synthetic: bool,
+        allow_shadow: bool,
+    ) -> u32 {
+        // A later alternative of an or-pattern binds the first one's names:
+        // whichever alternative matched, the arm reads one local per name.
+        // Declaring each alternative's `x` afresh in the one arm scope made
+        // `A(x) | B(x)` "already declared", so no or-pattern could bind.
+        let shared = self
+            .alternatives
+            .iter()
+            .rev()
+            .find_map(|(first, _)| first.get(&name.name).copied());
+        if let Some(id) = shared {
+            let (_, seen) = self.alternatives.last_mut().unwrap();
+            if seen.contains(&name.name) {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0112,
+                        format!("`{}` is already declared in this scope", name.name),
+                    )
+                    .with_primary(name.span, "bound twice in this alternative"),
+                );
+            } else {
+                seen.push(name.name.clone());
+            }
+            self.map.bindings.insert(name.span, id);
+            if self.or_depth > 0 {
+                self.or_bound.push((name.name.clone(), id));
+            }
+            return id;
+        }
+        let id = self.declare_in_scope(name, mutable, synthetic, allow_shadow);
+        if self.or_depth > 0 {
+            self.or_bound.push((name.name.clone(), id));
+        }
+        id
+    }
+
+    fn declare_in_scope(
         &mut self,
         name: &Ident,
         mutable: bool,
@@ -1637,10 +1699,22 @@ impl<'a> FnResolver<'a> {
             }
 
             // Every alternative must bind the same names; the checker verifies
-            // that once it knows the types.
+            // that once it knows the types. The first alternative declares
+            // them, and each later one binds the same locals by name.
             Pattern::Or { alts, .. } => {
-                for x in alts {
-                    self.pattern(x);
+                let Some((first, rest)) = alts.split_first() else { return };
+                self.or_depth += 1;
+                let start = self.or_bound.len();
+                self.pattern(first);
+                let bound: HashMap<String, u32> = self.or_bound[start..].iter().cloned().collect();
+                for alt in rest {
+                    self.alternatives.push((bound.clone(), Vec::new()));
+                    self.pattern(alt);
+                    self.alternatives.pop();
+                }
+                self.or_depth -= 1;
+                if self.or_depth == 0 {
+                    self.or_bound.clear();
                 }
             }
         }

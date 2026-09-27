@@ -7,7 +7,15 @@ let BIG = 9223372036854775807
 let OVER = BIG + 1 //~ ERROR E0118
 let SHIFTED = 1 << 64 //~ ERROR E0118
 
+// `min / -1` overflows, but `min % -1` is 0 in both builds (§3.1): the
+// answer fits. The folder once refused the remainder with the quotient.
+let LEAST = -9223372036854775808
+let QUOTIENT = LEAST / -1 //~ ERROR E0118
+let REMAINDER = LEAST % -1
+
 fn main() {
     io.print(OVER)
     io.print(SHIFTED)
+    io.print(QUOTIENT)
+    io.print(REMAINDER)
 }

@@ -984,6 +984,46 @@ fn main() {
 }
 ```
 
+An or-pattern may bind names when every alternative binds the same ones, with the same
+types; the arm reads each name from whichever alternative matched.
+
+```kite
+enum Shape {
+    Circle(r: int)
+    Square(side: int)
+    Dot
+}
+
+fn size(s: Shape) -> int {
+    return match s {
+        Circle(n) | Square(n) => n,
+        Dot => 0,
+    }
+}
+
+fn main() {
+    io.print(size(Square(side: 4)))
+    io.print(match (0, 7) {
+        (0, x) | (x, 0) => x,
+        _ => -1,
+    })
+}
+```
+
+```kite fails
+enum Shape {
+    Circle(r: int)
+    Dot
+}
+
+fn main() {
+    let s = Circle(r: 1)
+    io.print(match s {
+        Circle(n) | Dot => n, //~ E0200
+    })
+}
+```
+
 **A block arm holding a single expression is still that value; a block that holds a
 statement is `()`.** `0 => { 1 }` is an `int` arm, exactly as `0 => 1` is. Add one line
 above the expression and the arm becomes `()`, and the `match` with it.

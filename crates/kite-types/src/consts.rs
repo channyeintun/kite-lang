@@ -367,6 +367,11 @@ impl<'a> Eval<'a> {
                 return None;
             }
             (Div, Int(x), Int(y)) => return self.int_result(x.checked_div(*y), "/", span),
+            // A remainder by -1 is 0 for every `int`, `min` included: the
+            // answer fits, so it is not an overflow (§3.1), and every backend
+            // gives 0 at run time. `checked_rem` refuses `min % -1` only
+            // because the quotient it would compute on the way overflows.
+            (Rem, Int(_), Int(-1)) => Some(Int(0)),
             (Rem, Int(x), Int(y)) => return self.int_result(x.checked_rem(*y), "%", span),
             (BitAnd, Int(x), Int(y)) => Some(Int(x & y)),
             (BitOr, Int(x), Int(y)) => Some(Int(x | y)),

@@ -194,6 +194,44 @@ fn a_member_is_private_to_the_module_of_its_type() {
     assert!(!err.contains("host_name"), "a `pub` method was refused:\n{}", err);
 }
 
+/// The methods of a trait implementation are as visible as the trait (§4.3).
+/// Every trait method used to count as `pub`, so another module could call a
+/// private trait's method — a default one included — although naming the
+/// trait in a bound was refused.
+#[test]
+fn a_private_traits_methods_are_private_to_its_module() {
+    let p = Project::new("private-trait-methods");
+    p.file(
+        "lib/lib.kite",
+        "trait Secret {\n  fn reveal(self) -> str\n  fn twice(self) -> str {\n    return self.reveal() + self.reveal()\n  }\n}\n\n\
+         pub trait Open {\n  fn show(self) -> str\n}\n\n\
+         pub struct Thing {\n  pub n: int\n}\n\n\
+         impl Secret for Thing {\n  fn reveal(self) -> str {\n    return \"revealed \\(self.n)\"\n  }\n}\n\n\
+         impl Open for Thing {\n  fn show(self) -> str {\n    return self.twice()\n  }\n}\n",
+    );
+    let main = p.file(
+        "main.kite",
+        "use lib\n\n\
+         fn main() {\n\
+         \x20 let t = lib.Thing{ n: 2 }\n\
+         \x20 io.print(t.show())\n\
+         \x20 io.print(t.reveal())\n\
+         \x20 io.print(t.twice())\n\
+         }\n",
+    );
+    let err = p.run(&main).expect_err("a private trait's methods are private");
+    assert!(err.contains("method `reveal` is private to module `lib`"), "{}", err);
+    assert!(err.contains("method `twice` is private to module `lib`"), "{}", err);
+    assert!(err.contains("which is not marked `pub`"), "{}", err);
+    assert!(!err.contains("`show`"), "a `pub` trait's method was refused:\n{}", err);
+
+    let fine = p.file(
+        "fine.kite",
+        "use lib\n\nfn main() {\n  io.print(lib.Thing{ n: 2 }.show())\n}\n",
+    );
+    assert_eq!(p.run(&fine).expect("a pub trait's method is callable"), "revealed 2revealed 2\n");
+}
+
 /// The standard library's opaque handles are private for a reason: a key
 /// built from an `int` is a key to whatever that number names.
 #[test]

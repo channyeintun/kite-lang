@@ -2244,11 +2244,770 @@ async fn main() {
     ),
 ];
 
+/// Programs the type checker once refused, or accepted and then typed in a
+/// way the backends could not agree about.
+const TYPE_CHECKER: &[(&str, &str)] = &[
+    // A `T: Error` is an `Error`, so it stands where an `error` is wanted, as
+    // a concrete type implementing `Error` does (§7.2, §11). It was E0200
+    // "expected `error`, found `T`". The message is found through the bound,
+    // and the tag `is` and `as` read is the concrete type's once the
+    // function is specialised.
+    (
+        "a-bounded-error-parameter-is-an-error",
+        r#"struct MyErr {
+    m: str
+}
+
+impl Error for MyErr {
+    fn message(self) -> str {
+        return self.m
+    }
+}
+
+struct Other {
+    code: int
+}
+
+impl Error for Other {
+    fn message(self) -> str {
+        return "other \(self.code)"
+    }
+}
+
+fn to_err<T: Error>(x: T) -> error {
+    return x
+}
+
+fn fail<T: Error>(x: T) -> (int, error) {
+    return 0, x
+}
+
+fn describe(e: error) -> str {
+    if e != nil {
+        return e.message()
+    }
+    return "none"
+}
+
+fn pass<T: Error>(x: T) -> str {
+    return describe(x)
+}
+
+fn wrap<T: Error>(x: T) -> error {
+    let e: error = x
+    return e
+}
+
+fn main() {
+    let a = to_err(MyErr{ m: "mine" })
+    io.print(describe(a))
+    io.print(MyErr.is(a))
+    io.print(Other.is(a))
+    let b = wrap(Other{ code: 7 })
+    io.print(describe(b))
+    io.print(Other.is(b))
+    let o = Other.as(b)
+    if o != nil {
+        io.print(o.code)
+    }
+    let (v, err) = fail(MyErr{ m: "pair" })
+    if err != nil {
+        io.print(describe(err))
+        io.print(MyErr.is(err))
+    } else {
+        io.print(v)
+    }
+    io.print(pass(Other{ code: 3 }))
+}
+"#,
+    ),
+    // Calling an `async fn` yields its task, and a method or an associated
+    // function is no exception (§12.1). Only free functions were wrapped, so
+    // `await p.later()` was "only a task can be awaited" and `p.later() + 1`
+    // added to a task: a trap on the VM, a pointer printed natively, an
+    // invalid module on Wasm. A generic `async fn` called where a `Task<T>` is
+    // expected made `T` the whole task.
+    (
+        "async-methods-yield-their-tasks",
+        r#"use std/task
+
+struct P {
+    a: int
+}
+
+impl P {
+    async fn later(self) -> int {
+        await task.sleep(1)
+        return self.a
+    }
+
+    async fn make(a: int) -> int {
+        await task.sleep(1)
+        return a * 2
+    }
+
+    async fn pair(self) -> (int, error) {
+        await task.sleep(1)
+        return self.a, nil
+    }
+}
+
+struct Box<T> {
+    v: T
+}
+
+impl<T> Box<T> {
+    async fn get(self) -> T {
+        await task.sleep(1)
+        return self.v
+    }
+
+    async fn wrap_later<U>(self, u: U) -> Box<U> {
+        await task.sleep(1)
+        return Box{ v: u }
+    }
+}
+
+async fn job<T>(x: T) -> T {
+    await task.sleep(1)
+    return x
+}
+
+async fn main() {
+    let p = P{ a: 3 }
+    let x = await p.later()
+    let y = await P.make(4)
+    io.print(x + y)
+    let t1 = p.later()
+    let t2 = P.make(5)
+    let both = await task.all([t1, t2])
+    io.print(both[0] + both[1])
+    let (v, err) = await p.pair()
+    if err != nil {
+        return
+    }
+    io.print(v)
+    let b = Box{ v: "boxed" }
+    io.print(await b.get())
+    let bb = await b.wrap_later(7)
+    io.print(bb.v)
+    let t: Task<int> = job(1)
+    io.print(await t)
+    let ts: [Task<str>] = [job("a"), job("b")]
+    let words = await task.all(ts)
+    io.print(words[0] + words[1])
+    let tb: Task<str> = b.get()
+    io.print(await tb)
+}
+"#,
+    ),
+    // A trait method's call through a bound or a `dyn` yields what a direct
+    // call does: a fallible one's pair, which could not be destructured, and
+    // an `async` one's task, which the Wasm dispatcher was typed without.
+    (
+        "trait-methods-yield-what-their-calls-yield",
+        r#"use std/task
+
+trait Source {
+    async fn get(self) -> int
+    fn probe(self) -> (int, error)
+    async fn fetch(self) -> (str, error)
+    async fn twice(self) -> int {
+        let a = await self.get()
+        return a * 2
+    }
+}
+
+struct P {
+    a: int
+}
+
+impl Source for P {
+    async fn get(self) -> int {
+        await task.sleep(1)
+        return self.a
+    }
+
+    fn probe(self) -> (int, error) {
+        if self.a > 5 {
+            return 0, errors.new("big")
+        }
+        return self.a, nil
+    }
+
+    async fn fetch(self) -> (str, error) {
+        await task.sleep(1)
+        if self.a > 3 {
+            return "", errors.new("far")
+        }
+        return "near", nil
+    }
+}
+
+async fn via<S: Source>(s: S) -> str {
+    let (v, err) = s.probe()
+    if err != nil {
+        return err.message()
+    }
+    let (w, ferr) = await s.fetch()
+    if ferr != nil {
+        return ferr.message()
+    }
+    let g = await s.get()
+    let t = await s.twice()
+    return "\(v) \(w) \(g) \(t)"
+}
+
+async fn via_dyn(s: dyn Source) -> str {
+    let (v, err) = s.probe()
+    if err != nil {
+        return err.message()
+    }
+    let (w, ferr) = await s.fetch()
+    if ferr != nil {
+        return ferr.message()
+    }
+    let g = await s.get()
+    let t = await s.twice()
+    return "\(v) \(w) \(g) \(t)"
+}
+
+async fn main() {
+    io.print(await via(P{ a: 3 }))
+    io.print(await via(P{ a: 9 }))
+    io.print(await via_dyn(P{ a: 4 }))
+    io.print(await via_dyn(P{ a: 8 }))
+    let p = P{ a: 2 }
+    let started = [p.get(), p.twice()]
+    let got = await task.all(started)
+    io.print(got[0] + got[1])
+}
+"#,
+    ),
+    // `==` on two values of a type that mentions a parameter compares them
+    // structurally, as `==` on two `T` does, and was refused unless the type was
+    // a bare `T`. A map's key and value types count too.
+    (
+        "compared-inside-a-generic-type",
+        r#"struct Box<T> {
+    v: T
+}
+
+enum Pick<T> {
+    One(T)
+    Neither
+}
+
+fn opt_eq<T>(a: Option<T>, b: Option<T>) -> bool {
+    return a == b
+}
+
+fn slice_eq<T>(a: [T], b: [T]) -> bool {
+    return a == b
+}
+
+fn tuple_ne<T>(a: (T, T), b: (T, T)) -> bool {
+    return a != b
+}
+
+fn box_eq<T>(a: Box<T>, b: Box<T>) -> bool {
+    return a == b
+}
+
+fn pick_eq<T>(a: Pick<T>, b: Pick<T>) -> bool {
+    return a == b
+}
+
+fn map_eq<K, V>(a: { K: V }, b: { K: V }) -> bool {
+    return a == b
+}
+
+fn forward<T>(a: Option<T>, b: Option<T>) -> bool {
+    return opt_eq(a, b)
+}
+
+fn main() {
+    let o: Option<int> = 3
+    let n: Option<int> = nil
+    io.print(opt_eq(o, 3))
+    io.print(opt_eq(o, n))
+    io.print(opt_eq(n, nil))
+    io.print(slice_eq([1, 2], [1, 2]))
+    io.print(slice_eq(["a"], ["b"]))
+    io.print(tuple_ne((1, 2), (1, 2)))
+    io.print(tuple_ne(("a", "b"), ("a", "c")))
+    io.print(box_eq(Box{ v: [1.5] }, Box{ v: [1.5] }))
+    io.print(pick_eq(Pick.One("x"), Pick.One("x")))
+    io.print(pick_eq(Pick.One(1), Pick.Neither))
+    io.print(map_eq({ "a": 1 }, { "a": 1 }))
+    io.print(map_eq({ 1: "a" }, { 1: "b" }))
+    io.print(forward(o, o))
+}
+"#,
+    ),
+    // An or-pattern's alternatives bind one local per name, in variants, nested
+    // inside a variant, in tuples and in struct patterns against an optional. The
+    // resolver declared each alternative's names afresh, so every one of these
+    // was E0112 and no or-pattern could bind anything.
+    (
+        "or-pattern-alternatives-share-their-names",
+        r#"enum E {
+    A(int)
+    B(int)
+    C
+}
+
+enum M {
+    S(E)
+    N
+}
+
+struct P {
+    x: int
+    y: int
+}
+
+fn f(e: E) -> int {
+    return match e {
+        A(x) | B(x) => x,
+        C => 0,
+    }
+}
+
+fn g(m: M) -> int {
+    return match m {
+        S(A(y) | B(y)) => y,
+        S(C) => -1,
+        N => 0,
+    }
+}
+
+fn h(t: (int, int)) -> int {
+    return match t {
+        (0, x) | (x, 0) => x,
+        _ => -1,
+    }
+}
+
+fn k(p: Option<P>) -> str {
+    return match p {
+        P{ x: 0, y } | P{ x: y, y: 0 } => "axis \(y)",
+        nil => "none",
+        _ => "off",
+    }
+}
+
+fn main() {
+    io.print("\(f(E.A(1))) \(f(E.B(2))) \(f(E.C))")
+    io.print("\(g(M.S(E.A(3)))) \(g(M.S(E.B(4)))) \(g(M.S(E.C))) \(g(M.N))")
+    io.print("\(h((0, 5))) \(h((6, 0))) \(h((1, 1)))")
+    io.print(k(P{ x: 0, y: 7 }))
+    io.print(k(P{ x: 8, y: 0 }))
+    io.print(k(P{ x: 1, y: 1 }))
+    io.print(k(nil))
+}
+"#,
+    ),
+    // A trait's default method, inherited by `impl<T> Show for Box<T>`, is a
+    // method of `Box<T>` and has the block's `T`. It had none: a default calling
+    // another method on `self` was E0209 "cannot infer `T`", even never called,
+    // and one that compiled took the template `Box`, which Wasm refused to
+    // validate against the `Box<int>` it was handed.
+    (
+        "default-methods-of-a-generic-impl",
+        r#"trait Show {
+    fn show(self) -> str
+    fn twice(self) -> str {
+        return self.show() + self.show()
+    }
+    fn tag(self) -> str {
+        return "tag"
+    }
+    fn loud(self) -> str {
+        return self.twice() + "!"
+    }
+}
+
+trait Comparable {
+    fn compare(self, other: Self) -> int
+    fn less_than(self, other: Self) -> bool {
+        return self.compare(other) < 0
+    }
+}
+
+struct Box<T> {
+    v: T
+}
+
+enum Maybe<T> {
+    Some(T)
+    Nothing
+}
+
+struct Wrap<T> {
+    n: int
+    v: T
+}
+
+impl<T> Show for Box<T> {
+    fn show(self) -> str {
+        return "B"
+    }
+}
+
+impl<T> Show for Maybe<T> {
+    fn show(self) -> str {
+        return match self {
+            Some(_) => "S",
+            Nothing => "N",
+        }
+    }
+}
+
+impl<T> Comparable for Wrap<T> {
+    fn compare(self, other: Wrap<T>) -> int {
+        return self.n - other.n
+    }
+}
+
+fn via<S: Show>(s: S) -> str {
+    return s.loud() + s.tag()
+}
+
+fn smaller<C: Comparable>(a: C, b: C) -> C {
+    if a.less_than(b) {
+        return a
+    }
+    return b
+}
+
+fn main() {
+    io.print(Box{ v: 1 }.twice())
+    io.print(Box{ v: "s" }.tag())
+    io.print(via(Box{ v: 2.5 }))
+    io.print(via(Maybe.Some(3)))
+    let m: Maybe<str> = Maybe.Nothing
+    io.print(m.loud())
+    let xs: [dyn Show] = [Box{ v: 1 }, Box{ v: "s" }, Maybe.Some(true)]
+    for x in xs {
+        io.print(x.tag() + x.twice())
+    }
+    let a = Wrap{ n: 1, v: "a" }
+    let b = Wrap{ n: 2, v: "b" }
+    io.print(a.less_than(b))
+    io.print(smaller(b, a).v)
+}
+"#,
+    ),
+    // `Self` names the same type in a method's body as in its signature: in an
+    // annotation, a slice of it, a closure's parameter, an associated function,
+    // and a trait's default method. It was E0204 "unknown type `Self`" in a body.
+    (
+        "self-names-the-type-in-a-body",
+        r#"struct P {
+    n: int
+}
+
+struct Box<T> {
+    v: T
+}
+
+impl P {
+    fn twin(self) -> Self {
+        let y: Self = self
+        let ys: [Self] = [y]
+        return ys[0]
+    }
+
+    fn make(n: int) -> Self {
+        let p: Self = P{ n: n }
+        return p
+    }
+}
+
+impl<T> Box<T> {
+    fn same(self) -> Self {
+        let b: Self = self
+        let keep = |x: Self| -> T { return x.v }
+        return Box{ v: keep(b) }
+    }
+}
+
+trait Merge {
+    fn merge(self, other: Self) -> Self
+    fn thrice(self) -> Self {
+        let f = |x: Self| -> Self { return x.merge(self) }
+        return f(f(self))
+    }
+    fn dup(self) -> [Self] {
+        let me: Self = self
+        return [me, me]
+    }
+}
+
+impl Merge for P {
+    fn merge(self, other: Self) -> Self {
+        return P{ n: self.n + other.n }
+    }
+}
+
+impl<T> Merge for Box<T> {
+    fn merge(self, other: Self) -> Self {
+        return other
+    }
+}
+
+fn main() {
+    io.print(P{ n: 1 }.twin().n)
+    io.print(P.make(4).n)
+    io.print(Box{ v: "b" }.same().v)
+    io.print(P{ n: 2 }.thrice().n)
+    io.print(P{ n: 2 }.dup().len())
+    io.print(Box{ v: 3 }.thrice().v)
+    io.print(Box{ v: 3.5 }.dup()[1].v)
+}
+"#,
+    ),
+    // A narrowing survives a loop whose every write to the local stores a value
+    // that cannot be nil, as it survives the same writes in straight-line code.
+    // The loop dropped it for any local it wrote, so each of these was E0201.
+    (
+        "a-loop-keeps-a-narrowing-its-writes-keep",
+        r#"fn guard() {
+    var x: Option<int> = 5
+    if x == nil {
+        return
+    }
+    for i in 0..3 {
+        io.print(x + 1)
+        x = i
+    }
+}
+
+fn inside() {
+    var x: Option<int> = 5
+    if x != nil {
+        for i in 0..3 {
+            x = i * 10
+            io.print(x + 1)
+        }
+    }
+}
+
+fn nested() {
+    var x: Option<int> = 1
+    if x == nil {
+        return
+    }
+    for i in 0..2 {
+        for j in 0..2 {
+            x = x + i + j
+        }
+        io.print(x)
+    }
+}
+
+fn main() {
+    guard()
+    inside()
+    nested()
+}
+"#,
+    ),
+    // A pattern against an optional is one for the value present: a tuple, and a
+    // variant or a struct of a generic type, were refused as the wrong type. An
+    // `Option<Msg<int>>` or `Option<[int]>` wanted also says what a `Stop` or an
+    // empty literal is.
+    (
+        "patterns-against-an-optional",
+        r#"enum Msg<T> {
+    Data(v: T)
+    Stop
+}
+
+struct G<T> {
+    x: T
+    y: T
+}
+
+fn tuple(o: Option<(int, str)>) -> str {
+    return match o {
+        nil => "none",
+        (0, s) => "zero " + s,
+        (n, _) => "n \(n)",
+    }
+}
+
+fn message(o: Option<Msg<int>>) -> str {
+    return match o {
+        Data(v) => "data \(v)",
+        Stop => "stop",
+        nil => "nil",
+    }
+}
+
+fn qualified<T>(o: Option<Msg<T>>) -> str {
+    return match o {
+        nil => "nil",
+        Msg.Data(_) => "data",
+        Msg.Stop => "stop",
+    }
+}
+
+fn grid(o: Option<G<int>>) -> str {
+    return match o {
+        nil => "nil",
+        G{ x: 0, y } => "on y \(y)",
+        G{ x, y } => "at \(x) \(y)",
+    }
+}
+
+fn main() {
+    io.print(tuple((0, "a")))
+    io.print(tuple((4, "b")))
+    io.print(tuple(nil))
+    io.print(message(Data(1)))
+    io.print(message(Stop))
+    io.print(message(nil))
+    let m: Msg<str> = Data("s")
+    io.print(qualified(m))
+    let none: Option<Msg<float>> = nil
+    io.print(qualified(none))
+    io.print(grid(G{ x: 0, y: 5 }))
+    io.print(grid(G{ x: 2, y: 3 }))
+    io.print(grid(nil))
+    let words: Option<{ str: int }> = { }
+    let nums: Option<[int]> = []
+    if words != nil {
+        if nums != nil {
+            io.print("\(words.len()) \(nums.len())")
+        }
+    }
+    let boxed: Option<G<str>> = G{ x: "a", y: "b" }
+    io.print(boxed == nil)
+}
+"#,
+    ),
+    // An optional of an optional is the optional, so an expected `Option<int>`
+    // makes a declared `Option<T>`'s `T` an `int` or an `Option<int>`, and the
+    // arguments say which. The expected type used to fix `T` as `int` first, and
+    // every one of these was E0209 "conflicting types for `T`".
+    (
+        "an-expected-optional-leaves-t-to-the-arguments",
+        r#"struct Box<T> {
+    v: T
+}
+
+impl<T> Box<T> {
+    fn peek(self) -> Option<T> {
+        return self.v
+    }
+
+    fn of(v: T) -> Option<Box<T>> {
+        return Box{ v: v }
+    }
+}
+
+fn first<T>(xs: [T]) -> Option<T> {
+    return xs.get(0)
+}
+
+fn wrap<T>(x: T) -> Option<T> {
+    return x
+}
+
+fn head(fs: [Option<int>]) -> Option<int> {
+    return first(fs)
+}
+
+fn main() {
+    let a: Option<int> = 5
+    let fs: [Option<int>] = [a, nil]
+    let r: Option<Option<int>> = first(fs)
+    io.print(r == nil)
+    let s: Option<int> = first(fs)
+    io.print(s == 5)
+    let w: Option<int> = wrap(a)
+    io.print(w == 5)
+    let n: Option<int> = wrap(7)
+    io.print(n == 7)
+    let none: Option<int> = first([])
+    io.print(none == nil)
+    io.print(head([nil, a]) == nil)
+    let b = Box{ v: a }
+    let p: Option<int> = b.peek()
+    io.print(p == 5)
+    let q: Option<Box<Option<int>>> = Box.of(a)
+    io.print(q == nil)
+}
+"#,
+    ),
+    // `as` on a generic error type asks for the specialisation it is used as,
+    // inside a generic function too, where the tag it tests for is settled once
+    // the function is specialised. The declaration's tag answered `nil` for every
+    // one.
+    (
+        "a-generic-error-downcasts-to-its-specialisation",
+        r#"struct Wrapped<T> {
+    inner: T
+    why: str
+}
+
+impl<T> Error for Wrapped<T> {
+    fn message(self) -> str {
+        return "wrapped: " + self.why
+    }
+}
+
+struct Plain {
+    why: str
+}
+
+impl Error for Plain {
+    fn message(self) -> str {
+        return self.why
+    }
+}
+
+fn inner_of<T>(e: error) -> Option<T> {
+    let w: Option<Wrapped<T>> = Wrapped.as(e)
+    if w != nil {
+        return w.inner
+    }
+    return nil
+}
+
+fn main() {
+    let e: error = Wrapped{ inner: 5, why: "five" }
+    if e != nil {
+        io.print(e.message())
+    }
+    let w: Option<Wrapped<int>> = Wrapped.as(e)
+    if w != nil {
+        io.print(w.inner + 1)
+    } else {
+        io.print("not an int one")
+    }
+    let s: Option<Wrapped<str>> = Wrapped.as(e)
+    io.print(s == nil)
+    let n: Option<int> = inner_of(e)
+    io.print(n == 5)
+    let t: Option<str> = inner_of(e)
+    io.print(t == nil)
+    let p: error = Plain{ why: "plain" }
+    io.print(Plain.is(p))
+    let q: Option<Wrapped<int>> = Wrapped.as(p)
+    io.print(q == nil)
+}
+"#,
+    ),
+];
+
 /// Programs above that need a rule of the checker's which may not have landed:
 /// they are skipped while the checker still refuses them, and compared the
-/// moment it accepts them. `A(x) | B(x)` is lowered correctly already; until
-/// the checker admits two alternatives binding one name, it is `E0112`.
-const AWAITING_THE_CHECKER: &[&str] = &["or-pattern-binds-through-the-alternative-that-matched"];
+/// moment it accepts them. Empty now that `A(x) | B(x)` is admitted, the last
+/// program that waited here.
+const AWAITING_THE_CHECKER: &[&str] = &[];
 
 fn run_on_vm(name: &str, src: &str) -> String {
     run_on_vm_at(&format!("{}.kite", name), name, src)
@@ -2468,6 +3227,7 @@ fn all_backends_agree() {
         .chain(MIDDLE_END)
         .chain(WASM_TARGET)
         .chain(NATIVE_TARGET)
+        .chain(TYPE_CHECKER)
     {
         if AWAITING_THE_CHECKER.contains(name)
             && compile(format!("{}.kite", name), src, Emit::Check).failed()

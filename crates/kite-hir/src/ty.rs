@@ -200,6 +200,9 @@ pub struct TraitMethodDef {
     pub var_self: bool,
     /// Whether the trait supplied a body.
     pub has_default: bool,
+    /// Declared `async`: a call yields the `Task` of `ret`, through the trait
+    /// as directly.
+    pub is_async: bool,
     /// How many type parameters the method declares of its own: `fn map<U>`
     /// has one. A generic method has a body per argument, so a `dyn` has no
     /// single one to dispatch to.
@@ -332,6 +335,15 @@ impl Types {
 
     pub fn map_of(&mut self, key: TyId, value: TyId) -> TyId {
         self.intern(TyKind::Map(key, value))
+    }
+
+    /// The value an optional holds when it is present, or the type itself
+    /// when it is not an optional.
+    pub fn present(&self, ty: TyId) -> TyId {
+        match self.kind(ty) {
+            TyKind::Optional(inner) => *inner,
+            _ => ty,
+        }
     }
 
     pub fn optional_of(&mut self, inner: TyId) -> TyId {

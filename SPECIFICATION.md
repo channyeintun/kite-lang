@@ -336,7 +336,9 @@ match maybe {
 optional against `nil` narrows it to the unwrapped type on the branch where it
 cannot be absent — in the `else` of `x == nil`, and in the `then` of `x != nil`.
 The same narrowing applies in a `match` arm once an earlier arm has covered
-`nil`.
+`nil`. A write to a `var` ends its narrowing unless the value written cannot be
+nil either; inside a loop, that holds for every write the loop's body makes,
+since the body runs again after each of them.
 
 ### 3.4 Type declarations
 
@@ -661,7 +663,11 @@ compare, a trait object is a record made where it was converted, and a host
 object has no structure Kite can see. A map compares its keys, so the same three
 cannot be keys. A generic function that compares its `T` with `==` is held to
 that at every call — `T` may not be chosen as one of the three — and so is a
-generic function that passes its own parameter on to one that compares it.
+generic function that passes its own parameter on to one that compares it. A
+trait's generic method called through a bound is held to what any of its
+implementations compares, and a generic type standing for a trait, for a bound
+or as a `dyn`, to what its implementation's methods compare of its own
+arguments.
 
 Floating-point `==` follows IEEE-754, so `nan != nan`. The compiler emits a
 warning when both operands of `==` are statically known to be floats and neither
@@ -915,6 +921,12 @@ if NotFound.is(err) {
 let missing = NotFound.as(err)      // Option<NotFound>
 ```
 
+Each specialisation of a generic type is its own type, and an error carries the
+one it was made from. So `as` on a generic type is told which by the type it is
+used as — `let w: Option<Wrapped<int>> = Wrapped.as(err)` — and `is`, which has
+nowhere to be told, is refused on one, as is an `as` nothing says the arguments
+of (`E0209`).
+
 **The type names itself.** [§11](#11-generics) has no turbofish, so
 `errors.is<T>(err)` — which this document used to promise — has nowhere to
 write its type argument. `NotFound.is(err)` says the same thing in a place the
@@ -953,6 +965,10 @@ The rules:
 > **R2.** Reading a Tainted binding is a compile error (`E0301`).
 >
 > **R3.** An Unchecked binding going out of scope is a compile error (`E0302`).
+> A `return`, `check`, `break` or `continue` is a way out of scope for every
+> binding it leaves behind, on its own path: an error bound above
+> `if n > 0 { return 1 }` has to be checked before that `return` as well as
+> after it.
 >
 > **R4.** On any path where the compiler proves `e == nil`, `e` becomes Checked
 > and `v` becomes Clean.
@@ -968,7 +984,8 @@ The rules:
 > **R7.** An `error`, or a whole `(T, error)`, bound to a single name makes
 > that binding Unchecked — by `let` or by `var`, whether it came straight from
 > a call or through `await`, a branch of a value `if`, or anything else that
-> can hold a new failure. Only `nil` and a copy of another binding, which
+> can hold a new failure. Assigning one to an existing binding, `e = f()`,
+> does the same. Only `nil` and a copy of another binding, which
 > carries its own obligation, leave it Checked. Reading it — testing it,
 > checking it, returning it, taking it apart — inspects it, and R3 applies
 > otherwise. Binding everything under one name is not a way out either.
@@ -1207,7 +1224,13 @@ impl<T> Box<T> {
 
 The block's parameters come from the receiver's type and the method's own from
 its arguments, as a generic function's do. `Self` inside an `impl` block is the
-type the block is for.
+type the block is for, in its body as in its signatures.
+
+An `impl` block is for every instantiation of a generic type at once: its header
+names the type at the block's own parameters, in order — `impl<A, B> Pair<A,
+B>`, `impl<T: Show> Display for Box<T>`. A header for one instantiation,
+`impl Display for Pair<int, str>`, or with the parameters reordered, is `E0208`;
+a bound on a parameter is how a block says which instantiations it covers.
 
 ---
 
@@ -1267,7 +1290,8 @@ Coverage is decided through nested patterns, not just the outermost one:
 `On(true)`, `On(false)` and `Off` cover an `enum Light { On(bool) Off }`,
 `(true, _)` and `(false, _)` cover a `(bool, int)`, and `nil`, `A` and `B` cover
 an `Option<E>` — a pattern written against an optional is one for the value
-inside it, present. A missing case is named however deep it is: `Add(Num(_),
+inside it, present, whether a literal, a tuple, a struct or a variant of a
+generic enum. A missing case is named however deep it is: `Add(Num(_),
 _)`. Numbers and strings have no finite set of values, so a match on one needs a
 catch-all. A guarded arm counts towards nothing, since its guard may fail.
 
@@ -1333,6 +1357,11 @@ match pair {
 Bindings introduced by patterns are immutable. There is no `ref` or `mut` in
 patterns because there are no references to bind.
 
+The alternatives of an alternation may bind names, and then each must bind the
+same names with the same types (`E0200`): the arm runs whichever one matched,
+and reads each name as that one bound it. `Circle(r) | Square(r) => r * r`
+binds one `r`, not two.
+
 ---
 
 ## 10. Traits
@@ -1373,7 +1402,12 @@ checked against the trait with `Self` read as its own type, so `Rect` writes
 `fn compare(self, other: Rect) -> int` or, equally, `other: Self`. It must also
 agree about the receiver: a method the trait declares with `self` may not take
 `var self`, and the reverse, because a call through the trait — a bound or a
-`dyn` — sees only the trait's.
+`dyn` — sees only the trait's. For the same reason it must agree about whether
+the method can fail and whether it is `async`: a call through the trait yields
+what the declaration says, a `(T, error)` pair or a `Task`, as a direct call
+does. A generic method's type parameters may be bounded no more tightly than
+the trait's are (`E0208`): a caller through the trait meets the trait's bounds
+and no others.
 
 ### 10.2 Coherence
 
@@ -1574,7 +1608,9 @@ pub async fn fetch_user(id: UserId) -> (User, error) {
 }
 ```
 
-An `async fn` returns a `Task<T>`. `await` suspends until it completes.
+An `async fn` returns a `Task<T>`. `await` suspends until it completes. A
+method or an associated function may be `async` too, and calling one yields
+its `Task` in the same way: `await conn.fetch()`.
 
 **Calling an `async fn` does not run its body.** It yields the `Task` and
 returns; the body runs when something drives it, which is `await`. Two calls

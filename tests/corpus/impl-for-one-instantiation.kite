@@ -1,0 +1,42 @@
+// An `impl` is for its type at the block's own parameters, in order. Type
+// arguments in a header were never read: `impl Named for Pair<int, str>` was
+// taken as `impl Named for Pair`, applied to a `Pair<str, int>` too, typed
+// its bodies with the declaration's `A` and `B`, and was an invalid module on
+// Wasm. Until a header's arguments mean what they say, anything else is
+// refused, once, at the header.
+
+trait Named {
+    fn name(self) -> str
+}
+
+struct Pair<A, B> {
+    a: A
+    b: B
+}
+
+struct Box<T> {
+    v: T
+}
+
+impl Named for Pair<int, str> { //~ ERROR E0208
+    fn name(self) -> str {
+        return "\(self.a)-\(self.b)"
+    }
+}
+
+impl<T> Named for Box<T> {
+    fn name(self) -> str {
+        return "box"
+    }
+}
+
+impl<X, Y> Pair<Y, X> { //~ ERROR E0208
+    fn first(self) -> Y {
+        return self.a
+    }
+}
+
+fn main() {
+    io.print(Pair{ a: 1, b: "x" }.name())
+    io.print(Box{ v: 2 }.name())
+}

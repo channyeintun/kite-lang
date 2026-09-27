@@ -404,6 +404,15 @@ fn no_two_tokens_are_glued_into_a_third() {
     same("let x = - = 1\n");
 }
 
+/// `as` after a `.` is the downcast's name, `NotFound.as(err)`, and its
+/// arguments hug it; the cast keeps its spaces.
+#[test]
+fn a_member_named_as_is_called_like_any_other() {
+    same("let w = NotFound.as(err)\n");
+    same("let f = n as float\n");
+    assert_eq!(fmt("let w = NotFound.as (err)\n"), "let w = NotFound.as(err)\n");
+}
+
 /// A byte-order mark is kept: it is not the formatter's to take away.
 #[test]
 fn a_byte_order_mark_is_kept() {

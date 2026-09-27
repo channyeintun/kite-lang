@@ -25,10 +25,11 @@ async fn through_await() {
     io.print("dropped")
 }
 
+// Reported at the `return` that leaves it behind.
 fn in_a_branch_that_leaves(c: bool) {
     if c {
-        let e = fails() //~ ERROR E0302
-        return
+        let e = fails()
+        return //~ ERROR E0302
     }
     io.print("kept going")
 }
