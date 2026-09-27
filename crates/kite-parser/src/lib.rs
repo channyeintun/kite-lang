@@ -67,7 +67,6 @@ enum Holds {
 /// Where a declaration began, for reading it a second time.
 struct Checkpoint {
     diags: usize,
-    abandoned: usize,
     type_brackets: usize,
     literal_braces: usize,
     last_error_at: Option<usize>,
@@ -264,7 +263,11 @@ struct Parser<'a> {
     /// recovery that counted its bracket as still open looked for the closer
     /// the author never wrote, and took whatever `}` came next — the one
     /// closing the function.
-    abandoned: Vec<usize>,
+    ///
+    /// A set rather than a list because recovery asks it of every bracket it
+    /// steps over, and a file of nothing but mistakes is still a file the
+    /// language server has to read.
+    abandoned: std::collections::BTreeSet<usize>,
     /// Where the last of those closers was expected.
     abandoned_at: Option<usize>,
     /// See [`layout`].
@@ -387,7 +390,7 @@ impl<'a> Parser<'a> {
             suspect: None,
             rewind: false,
             cut_at: None,
-            abandoned: Vec::new(),
+            abandoned: std::collections::BTreeSet::new(),
             abandoned_at: None,
             layout: Layout::default(),
             line_starts,
@@ -570,7 +573,7 @@ impl<'a> Parser<'a> {
             return Some(self.bump().span);
         }
         self.error_expected(&format!("`{}`", close.text()));
-        self.abandoned.push(opener);
+        self.abandoned.insert(opener);
         self.abandoned_at = Some(self.pos);
         None
     }
@@ -1122,7 +1125,6 @@ impl<'a> Parser<'a> {
     fn checkpoint(&self) -> Checkpoint {
         Checkpoint {
             diags: self.diags.len(),
-            abandoned: self.abandoned.len(),
             type_brackets: self.layout.type_brackets.len(),
             literal_braces: self.layout.literal_braces.len(),
             last_error_at: self.last_error_at,
@@ -1135,7 +1137,8 @@ impl<'a> Parser<'a> {
     fn restore(&mut self, pos: usize, saved: &Checkpoint) {
         self.pos = pos;
         self.diags.truncate(saved.diags);
-        self.abandoned.truncate(saved.abandoned);
+        // Everything given up on since was opened since.
+        self.abandoned.split_off(&pos);
         self.abandoned_at = None;
         self.layout.type_brackets.truncate(saved.type_brackets);
         self.layout.literal_braces.truncate(saved.literal_braces);
