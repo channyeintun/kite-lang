@@ -233,6 +233,14 @@ impl Mono<'_> {
         if let ExprKind::ToDyn { value, trait_id } = &e.kind {
             self.dispatch_row(*trait_id, value.ty);
         }
+        // A value converted into an `error` carries its type's tag. Inside a
+        // generic function the value may be a `T: Error`, whose tag the
+        // checker could not know; now it is concrete, so the tag is its own.
+        if let ExprKind::ErrorNew { value, tag, .. } = &mut e.kind {
+            if let Some((own, _, _)) = self.identity(value.ty) {
+                tag.kind = ExprKind::Int(own.encode() as i64);
+            }
+        }
         // Both forms name a function by index, so both need the same treatment:
         // renumbered when it moved, specialised when it is a template.
         let target = match &mut e.kind {

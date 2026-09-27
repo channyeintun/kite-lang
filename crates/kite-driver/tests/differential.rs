@@ -2244,6 +2244,85 @@ async fn main() {
     ),
 ];
 
+/// Programs the type checker once refused, or accepted and then typed in a
+/// way the backends could not agree about.
+const TYPE_CHECKER: &[(&str, &str)] = &[
+    // A `T: Error` is an `Error`, so it stands where an `error` is wanted, as
+    // a concrete type implementing `Error` does (§7.2, §11). It was E0200
+    // "expected `error`, found `T`". The message is found through the bound,
+    // and the tag `is` and `as` read is the concrete type's once the
+    // function is specialised.
+    (
+        "a-bounded-error-parameter-is-an-error",
+        r#"struct MyErr {
+    m: str
+}
+
+impl Error for MyErr {
+    fn message(self) -> str {
+        return self.m
+    }
+}
+
+struct Other {
+    code: int
+}
+
+impl Error for Other {
+    fn message(self) -> str {
+        return "other \(self.code)"
+    }
+}
+
+fn to_err<T: Error>(x: T) -> error {
+    return x
+}
+
+fn fail<T: Error>(x: T) -> (int, error) {
+    return 0, x
+}
+
+fn describe(e: error) -> str {
+    if e != nil {
+        return e.message()
+    }
+    return "none"
+}
+
+fn pass<T: Error>(x: T) -> str {
+    return describe(x)
+}
+
+fn wrap<T: Error>(x: T) -> error {
+    let e: error = x
+    return e
+}
+
+fn main() {
+    let a = to_err(MyErr{ m: "mine" })
+    io.print(describe(a))
+    io.print(MyErr.is(a))
+    io.print(Other.is(a))
+    let b = wrap(Other{ code: 7 })
+    io.print(describe(b))
+    io.print(Other.is(b))
+    let o = Other.as(b)
+    if o != nil {
+        io.print(o.code)
+    }
+    let (v, err) = fail(MyErr{ m: "pair" })
+    if err != nil {
+        io.print(describe(err))
+        io.print(MyErr.is(err))
+    } else {
+        io.print(v)
+    }
+    io.print(pass(Other{ code: 3 }))
+}
+"#,
+    ),
+];
+
 /// Programs above that need a rule of the checker's which may not have landed:
 /// they are skipped while the checker still refuses them, and compared the
 /// moment it accepts them. `A(x) | B(x)` is lowered correctly already; until
@@ -2468,6 +2547,7 @@ fn all_backends_agree() {
         .chain(MIDDLE_END)
         .chain(WASM_TARGET)
         .chain(NATIVE_TARGET)
+        .chain(TYPE_CHECKER)
     {
         if AWAITING_THE_CHECKER.contains(name)
             && compile(format!("{}.kite", name), src, Emit::Check).failed()

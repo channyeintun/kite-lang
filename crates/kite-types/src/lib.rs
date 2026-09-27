@@ -9931,9 +9931,26 @@ impl<'a> Checker<'a> {
         self.resolved.trait_method(type_index, trait_index, "message")
     }
 
+    /// The prelude's `Error` trait, found by name as `error_method` finds it.
+    fn error_trait(&self) -> Option<hir::TraitId> {
+        let trait_index = self.resolved.type_by_name("Error")?;
+        match self.type_ids.get(trait_index as usize)? {
+            Some(TypeTarget::Trait(t)) => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// A type parameter bounded by `Error`, which is an `Error` exactly as a
+    /// bounded parameter is anything its bounds say (§11).
+    fn param_is_error(&self, ty: TyId) -> bool {
+        let TyKind::Param { index, .. } = *self.types.kind(ty) else { return false };
+        let Some(tr) = self.error_trait() else { return false };
+        self.generic_defs.get(index as usize).is_some_and(|d| d.bounds.contains(&tr))
+    }
+
     /// Whether a value of this type may stand where an `error` is wanted.
     fn coerces_to_error(&self, found: TyId) -> bool {
-        found != TyId::ERR && self.error_method(found).is_some()
+        found != TyId::ERR && (self.error_method(found).is_some() || self.param_is_error(found))
     }
 
     /// The "carries nothing" operand, for an error slot with no value or no
@@ -10099,18 +10116,33 @@ impl<'a> Checker<'a> {
             // than matching on the text.
             TyKind::Err if self.coerces_to_error(e.ty) => {
                 let span = e.span;
-                let message = self.error_method(e.ty).expect("checked");
-                let targs = self.receiver_args(e.ty);
                 let tag = self.type_tag_of(e.ty).unwrap_or(0);
                 // The value is read twice — once to render it, once to keep it
                 // — so it goes into a local first. Rendering may run arbitrary
                 // Kite, and evaluating the operand twice would run it twice.
                 let carried = e.clone();
-                let rendered = hir::Expr {
-                    kind: ExprKind::Call { callee: hir::FnId(message), args: vec![e], targs },
-                    ty: TyId::STR,
-                    span,
+                let call = match self.error_method(e.ty) {
+                    Some(message) => {
+                        let targs = self.receiver_args(e.ty);
+                        ExprKind::Call { callee: hir::FnId(message), args: vec![e], targs }
+                    }
+                    // A parameter bounded by `Error` has no `message` of its
+                    // own until it is specialised: the call goes through the
+                    // bound, and monomorphisation makes it the concrete
+                    // type's, and gives the tag (zero here) the concrete
+                    // type's too.
+                    None => {
+                        let tr = self.error_trait().expect("the parameter's bound");
+                        let method = self.types.trait_def(tr).method("message").map(|(i, _)| i);
+                        ExprKind::CallVirtual {
+                            trait_id: tr,
+                            method: method.expect("`Error` declares `message`") as u32,
+                            args: vec![e],
+                            targs: Vec::new(),
+                        }
+                    }
                 };
+                let rendered = hir::Expr { kind: call, ty: TyId::STR, span };
                 hir::Expr {
                     kind: ExprKind::ErrorNew {
                         message: Box::new(rendered),
