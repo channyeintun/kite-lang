@@ -467,9 +467,15 @@ fn pairs(entries: { str: Json }) -> [str] {
 
 /// A number without a trailing `.0`: JSON has one numeric type, and `1.0` and
 /// `1` mean the same thing to everything that reads it.
+///
+/// Only a number that fits an `int` is written as one. The cast saturates, so
+/// asking it about 2⁶³ answered 9223372036854775807 — which converts back to
+/// the same float, and so passed a test of `as float`, but is a different
+/// number to a reader that keeps integers exact. Anything past the range is
+/// written as the float it is.
 fn number(n: float) -> str {
-    let whole = n as int
-    if (whole as float) == n {
+    let whole = whole_number(n)
+    if whole != nil {
         return "\(whole)"
     }
     return "\(n)"
