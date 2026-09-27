@@ -1039,6 +1039,124 @@ fn a_derive_binds_no_name_its_module_spells_a_module_by() {
     }
 }
 
+// ---- a package the program never declared ------------------------------------
+
+/// The program's own module and a package only a dependency declares may
+/// share a name. Both were identified as `b`, so whichever loaded second was
+/// refused as a second package of one name — the application's `use b`, or
+/// the dependency's, depending on the order of the program's `use` lines.
+#[test]
+fn a_program_module_may_share_a_name_with_a_package_it_never_declared() {
+    let p = Project::new("undeclared-package-name");
+    p.file(
+        "a/kite.toml",
+        "[package]\nname = \"a\"\nversion = \"1.0.0\"\n\n[dependencies]\nb = { path = \"../b\" }\n",
+    );
+    p.file("a/a.kite", "use b\n\npub fn hello() -> str {\n  return \"a+\" + b.name()\n}\n");
+    p.file("b/kite.toml", "[package]\nname = \"b\"\nversion = \"1.0.0\"\n");
+    p.file("b/b.kite", "use util\n\npub fn name() -> str {\n  return util.who()\n}\n");
+    p.file("b/util.kite", "pub fn who() -> str {\n  return \"from b\"\n}\n");
+    let manifest =
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\na = { path = \"../a\" }\n";
+    p.file("app/kite.toml", manifest);
+    p.file("app/b.kite", "pub fn mine() -> str {\n  return \"the app's own b\"\n}\n");
+    let body = "fn main() {\n  io.print(a.hello())\n  io.print(b.mine())\n}\n";
+    for (name, uses) in [("main.kite", "use a\nuse b\n"), ("main2.kite", "use b\nuse a\n")] {
+        let main = p.file(&format!("app/{}", name), &format!("{}\n{}", uses, body));
+        assert_eq!(p.run(&main).expect("compiles"), "a+from b\nthe app's own b\n", "{}", name);
+    }
+    // The same for a nested path: the application's `b/util` and the
+    // package's `util`, which it named `b/util` too.
+    p.file("nested/kite.toml", manifest);
+    p.file("nested/b/util.kite", "pub fn who() -> str {\n  return \"the app's b/util\"\n}\n");
+    let main = p.file(
+        "nested/main.kite",
+        "use a\nuse b/util\n\nfn main() {\n  io.print(a.hello())\n  io.print(util.who())\n}\n",
+    );
+    assert_eq!(p.run(&main).expect("compiles"), "a+from b\nthe app's b/util\n");
+}
+
+/// And a package the program *does* declare is still the one name: the
+/// program and its dependency naming it from two places is refused, as
+/// `kitec pkg` refuses it.
+#[test]
+fn a_package_the_program_declares_is_one_package_everywhere() {
+    let p = Project::new("declared-package-name");
+    for (dir, who) in [("b1", "first"), ("b2", "second")] {
+        p.file(&format!("{}/kite.toml", dir), "[package]\nname = \"b\"\nversion = \"1.0.0\"\n");
+        p.file(
+            &format!("{}/b.kite", dir),
+            &format!("pub fn who() -> str {{\n  return \"{}\"\n}}\n", who),
+        );
+    }
+    p.file(
+        "a/kite.toml",
+        "[package]\nname = \"a\"\nversion = \"1.0.0\"\n\n[dependencies]\nb = { path = \"../b2\" }\n",
+    );
+    p.file("a/a.kite", "use b\n\npub fn go() -> str {\n  return b.who()\n}\n");
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\na = { path = \"../a\" }\nb = { path = \"../b1\" }\n",
+    );
+    let main = p.file(
+        "app/main.kite",
+        "use b\nuse a\n\nfn main() {\n  io.print(b.who())\n  io.print(a.go())\n}\n",
+    );
+    let said = p.run(&main).expect_err("`b` is two packages");
+    assert!(said.contains("`b` is already the name of another module"), "{}", said);
+}
+
+// ---- cycles through the entry file -------------------------------------------
+
+/// A cycle back to the entry file is reported in the entry file.
+///
+/// The entry is not loaded as a module, so it was not on the stack a cycle is
+/// found against: it was read a second time, as module `a`, and the cycle
+/// reported inside that copy — under another file's identity, so an editor
+/// checking `a.kite`, which shows only `a.kite`'s own diagnostics, showed the
+/// program as clean.
+#[test]
+fn a_cycle_back_to_the_entry_is_reported_in_the_entry() {
+    let p = Project::new("entry-cycle");
+    p.file("b.kite", "use a\n\npub fn fb() -> int {\n  return 1\n}\n");
+    let src = "use b\n\npub fn fa() -> int {\n  return b.fb()\n}\n\nfn main() {\n  io.print(fa())\n}\n";
+    let main = p.file("a.kite", src);
+    let c = compile(&main, src, Emit::Check);
+    let cycle = c
+        .diags
+        .iter()
+        .find(|d| d.code.map(|c| c.0) == Some("E0402"))
+        .expect("the cycle is reported");
+    let entry = c.sources.iter().find(|(_, name)| Path::new(name) == main.as_path()).map(|(id, _)| id);
+    assert_eq!(cycle.primary_span().map(|s| s.file), entry, "{}", c.render_diagnostics());
+    // And the entry is not compiled twice to report it.
+    let copies = c.sources.iter().filter(|(_, name)| name.ends_with("a.kite")).count();
+    assert_eq!(copies, 1, "{}", c.render_diagnostics());
+}
+
+/// A manifest that is there and does not read — here one Latin-1 byte in a
+/// comment — is reported where it stops reading, rather than taken for no
+/// manifest and every dependency reported missing.
+#[test]
+fn a_manifest_that_is_not_utf8_is_reported_rather_than_ignored() {
+    let p = Project::new("latin1-manifest");
+    p.file("a/a.kite", "pub fn hello() -> str {\n  return \"a\"\n}\n");
+    std::fs::create_dir_all(p.dir.join("app")).expect("create");
+    std::fs::write(
+        p.dir.join("app/kite.toml"),
+        b"[package]\nname = \"app\"\nversion = \"0.1.0\"\n# caf\xe9\n\n\
+          [dependencies]\na = { path = \"../a\" }\n"
+            .as_slice(),
+    )
+    .expect("write");
+    let main = p.file("app/main.kite", "use a\n\nfn main() {\n  io.print(a.hello())\n}\n");
+    let said = p.run(&main).expect_err("the manifest does not read");
+    assert!(said.contains("E0405"), "{}", said);
+    assert!(said.contains("kite.toml:4"), "points at the line: {}", said);
+    assert!(said.contains("not UTF-8"), "{}", said);
+}
+
 /// A syntax error in an imported module is one diagnostic. The loader parsed
 /// the file to find its imports and the driver parsed it again to merge it,
 /// and both reported.

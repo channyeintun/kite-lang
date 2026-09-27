@@ -1848,7 +1848,15 @@ declared for itself. A `path` is relative to the manifest that writes it; a
 puts every package in the graph. A name — package or dependency — is an
 identifier, because it is written in a `use`. A key the manifest does not
 define is an error rather than something ignored, and a manifest that does not
-parse is `E0405` in every command that reads it.
+parse — or does not read at all, as one that is not UTF-8 — is `E0405` in every
+command that reads it.
+
+A package name means one thing across the whole program: two manifests naming
+one package from two places is an error. It does not take the name from the
+program's own modules, though. A package only a dependency declares may share
+its name with one of the program's files — the program's `use log` is its own
+`log.kite`, and the dependency's `use log` is the package it declared — because
+a module is where its source is.
 
 Dependencies are resolved to a lockfile of **SHA-256** content hashes, and the
 lockfile is **checked, not just written**: a dependency whose contents changed

@@ -42,7 +42,7 @@ pub fn run(dir: &Path, offline: bool, update: bool) -> ExitCode {
 /// passes — install what was resolved and write the lockfile.
 fn sync(dir: &Path, offline: bool, update: bool) -> Result<Manifest, String> {
     let manifest_path = dir.join("kite.toml");
-    let Ok(text) = std::fs::read_to_string(&manifest_path) else {
+    let Some(text) = read_package_file(&manifest_path)? else {
         return Err(format!(
             "no `kite.toml` in {}\n\nnote: a package is a directory with a manifest in it",
             dir.display()
@@ -54,7 +54,19 @@ fn sync(dir: &Path, offline: bool, update: bool) -> Result<Manifest, String> {
     // resolution, so the versions it records are preferred over newer ones
     // nobody asked for, and compared entry by entry afterwards.
     let lock_path = dir.join("kite.lock");
-    let previous_text = std::fs::read_to_string(&lock_path).ok();
+    // Unreadable is not absent here either: a lockfile that is not UTF-8 was
+    // read as no lockfile, and written over as though this were the first run
+    // — which is the record of what was agreed to, replaced without a word.
+    let previous_text = match read_package_file(&lock_path) {
+        Ok(text) => text,
+        Err(_) if update => Some(String::new()),
+        Err(why) => {
+            return Err(format!(
+                "{}\n\nnote: `kitec pkg --update` writes it again from what resolution finds",
+                why
+            ))
+        }
+    };
     let previous = match &previous_text {
         None => Vec::new(),
         Some(text) => match manifest::parse_lockfile(text) {
@@ -396,7 +408,8 @@ impl Vendor {
     /// Read and parse a dependency's manifest.
     fn read_manifest(&self, name: &str, dir: &Path) -> Result<Manifest, String> {
         let path = dir.join("kite.toml");
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let Some(text) = read_package_file(&path).map_err(|why| format!("`{}`: {}", name, why))?
+        else {
             return Err(format!(
                 "`{}` has no kite.toml at {} — resolution reads a dependency's manifest for \
                  its version and its own dependencies",
@@ -656,6 +669,33 @@ impl Registry for Vendor {
             self.origins.remove(&dep);
             self.versions.remove(&dep);
         }
+    }
+}
+
+/// A manifest's or a lockfile's text: `None` when there is no file, and an
+/// error saying why when there is one that does not read.
+///
+/// **There and unreadable is not absent.** Any failure to read used to be
+/// reported as no manifest at all, so a `kite.toml` with one Latin-1 byte in a
+/// comment was "no `kite.toml` in ." — about a file sitting right there.
+fn read_package_file(path: &Path) -> Result<Option<String>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => Ok(Some(text)),
+            Err(bad) => {
+                let at = bad.utf8_error().valid_up_to();
+                let line = bad.as_bytes()[..at].iter().filter(|b| **b == b'\n').count() + 1;
+                Err(format!(
+                    "{}:{}: byte {} of the file is not UTF-8\n\nnote: `kite.toml` and `kite.lock` \
+                     are UTF-8 text — save it in that encoding",
+                    path.display(),
+                    line,
+                    at
+                ))
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("cannot read `{}`: {}", path.display(), e)),
     }
 }
 
@@ -1344,6 +1384,22 @@ mod tests {
         // And `--offline` still resolves from it.
         let mut offline = Vendor::new(&dir, true, false);
         offline.checkout("a", "http://example.invalid/a", "v1.0.0", &checkout).expect("kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A manifest that is there and not UTF-8 is not "no `kite.toml`".
+    #[test]
+    fn an_unreadable_manifest_is_not_a_missing_one() {
+        let dir = fixture("latin1");
+        std::fs::write(
+            dir.join("kite.toml"),
+            b"[package]\nname = \"app\"\nversion = \"0.1.0\"\n# caf\xe9\n".as_slice(),
+        )
+        .expect("write");
+        let why = sync(&dir, true, false).expect_err("it does not read");
+        assert!(why.contains("kite.toml:4"), "{}", why);
+        assert!(why.contains("not UTF-8"), "{}", why);
+        assert!(!why.contains("no `kite.toml`"), "{}", why);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

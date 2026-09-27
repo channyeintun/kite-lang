@@ -2378,6 +2378,52 @@ fn run_on_wasm_at(path: &str, name: &str, src: &str, dir: &std::path::Path) -> S
     String::from_utf8(output.stdout).expect("output is valid UTF-8")
 }
 
+/// A program whose own `log` module shares its name with a package only one of
+/// its dependencies declares. Both were identified as `log`, so the second to
+/// load was refused as a second package of one name — on every backend, and
+/// in whichever file the order of the `use` lines put it. It runs the same on
+/// all three now, in either order.
+#[test]
+fn an_undeclared_package_and_a_program_module_of_one_name_agree() {
+    let root = std::env::temp_dir().join(format!("kite-diff-names-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let write = |rel: &str, text: &str| {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().expect("a directory")).expect("create");
+        std::fs::write(path, text).expect("write");
+    };
+    write("libl/kite.toml", "[package]\nname = \"log\"\nversion = \"1.0.0\"\n");
+    write("libl/log.kite", "pub fn tag() -> str {\n  return \"dep-log\"\n}\n");
+    write(
+        "dep/kite.toml",
+        "[package]\nname = \"web\"\nversion = \"1.0.0\"\n\n[dependencies]\nlog = { path = \"../libl\" }\n",
+    );
+    write("dep/web.kite", "use log\n\npub fn get() -> str {\n  return \"http:\" + log.tag()\n}\n");
+    write(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nweb = { path = \"../dep\" }\n",
+    );
+    write("app/log.kite", "pub fn mine() -> str {\n  return \"app-log\"\n}\n");
+    let body = "\nfn main() {\n  io.print(web.get())\n  io.print(log.mine())\n}\n";
+    for (name, uses) in [("main", "use web\nuse log\n"), ("main2", "use log\nuse web\n")] {
+        let src = format!("{}{}", uses, body);
+        let path = root.join(format!("app/{}.kite", name));
+        std::fs::write(&path, &src).expect("write");
+        let full = path.to_string_lossy().to_string();
+        let expected = "http:dep-log\napp-log\n";
+        assert_eq!(run_on_vm_at(&full, name, &src), expected, "{} on the VM", name);
+        if native_available() {
+            assert_eq!(run_on_native_at(&full, name, &src), expected, "{} natively", name);
+        }
+        if node_available() {
+            let dir = root.join(format!("wasm-{}", name));
+            std::fs::create_dir_all(&dir).expect("create");
+            assert_eq!(run_on_wasm_at(&full, name, &src, &dir), expected, "{} on wasm", name);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Every shipped example must also agree, which is what stops the examples and
 /// the backends drifting apart.
 #[test]

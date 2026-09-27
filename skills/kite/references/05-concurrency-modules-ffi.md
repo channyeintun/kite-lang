@@ -753,7 +753,8 @@ shortcut = "../shortcut"
 The program's manifest is looked for **upwards** from the entry file, so
 `src/main.kite` finds the `kite.toml` beside `src/`. A manifest that does not
 parse is `E0405` at its line, in `kitec run`/`check`/`build` as well as in
-`kitec pkg`.
+`kitec pkg` — and so is one that does not read at all: a single Latin-1 byte
+in a comment is reported at its line as not UTF-8, not taken for no manifest.
 
 ### Reaching a dependency
 
@@ -783,6 +784,13 @@ dependency any package declares is read from the program's
 `.kite/vendor/<name>`, where `kitec pkg` puts every package in the graph. A
 package's unqualified `use helper` names the package's own `helper` and nothing
 else: without one it is `E0400`, never the application's.
+
+A package **only a dependency declares** does not take its name from the
+program. An application with its own `log.kite` may depend on a `web` package
+that depends on a `log` package: the application's `use log` is its own file
+and `web`'s `use log` is the package, in either order. A package the program
+*does* declare is one package everywhere — two manifests naming it from two
+places is `E0404`, as `kitec pkg` refuses it.
 
 ### `kitec pkg` and the lockfile
 
