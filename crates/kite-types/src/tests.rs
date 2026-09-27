@@ -2032,3 +2032,18 @@ fn an_impl_note_for_a_generic_type_names_its_own_parameters() {
     assert!(text.contains("write `impl<T> Show for One<T>` to use it here"), "{}", text);
     assert!(text.contains("write `impl<T> Error for One<T> {"), "{}", text);
 }
+
+/// A tuple literal where an `Option<(…)>` is wanted is typed against the
+/// tuple inside it, as a slice or a map literal is, so its elements convert
+/// as they would for the bare tuple. It was E0200 `expected
+/// Option<(Option<int>, int)>, found (int, int)`.
+#[test]
+fn a_tuple_literal_is_typed_through_an_expected_optional() {
+    ok_body(
+        "  let a: Option<(Option<int>, int)> = (4, 1)\n  io.print(a == nil)\n\
+         \x20 let b: Option<(Option<int>, str)> = (nil, \"x\")\n  io.print(b == nil)",
+    );
+    ok("fn f(p: Option<(Option<int>, int)>) -> bool {\n  return p == nil\n}\n\
+        fn g() -> Option<(Option<int>, int)> {\n  return (2, 3)\n}\n\
+        fn main() {\n  io.print(f((4, 1)))\n  io.print(f(g()))\n}\n");
+}

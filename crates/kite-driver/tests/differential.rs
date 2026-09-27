@@ -3232,6 +3232,54 @@ fn main() {
 }
 "#,
     ),
+    // Where an `Option<(…)>` is wanted, a tuple literal is typed against the
+    // tuple inside it, as a slice or a map literal is: `(4, 1)` for an
+    // `Option<(Option<int>, int)>` wraps the `4`, and then the whole. It was
+    // E0200, although the bare tuple was accepted and a `T` stands where an
+    // `Option<T>` is wanted.
+    (
+        "a-tuple-literal-is-typed-through-an-optional",
+        r#"fn first(p: Option<(Option<int>, str)>) -> str {
+    if p == nil {
+        return "none"
+    }
+    let (a, s) = p
+    if a == nil {
+        return "nil \(s)"
+    }
+    return "\(a) \(s)"
+}
+
+fn make(n: int) -> Option<(Option<int>, str)> {
+    if n < 0 {
+        return nil
+    }
+    if n == 0 {
+        return (nil, "zero")
+    }
+    return (n, "n")
+}
+
+fn main() {
+    let a: (Option<int>, int) = (4, 1)
+    io.print(a.1)
+    let b: Option<(Option<int>, int)> = (4, 1)
+    io.print(b == nil)
+    if b != nil {
+        io.print(b.0 == 4)
+    }
+    let c: Option<[Option<int>]> = [1, 2]
+    io.print(c == nil)
+    let d: Option<{str: Option<int>}> = {"a": 1}
+    io.print(d == nil)
+    io.print(first((7, "x")))
+    io.print(first(nil))
+    io.print(first(make(0)))
+    io.print(first(make(3)))
+    io.print(first(make(-1)))
+}
+"#,
+    ),
 ];
 
 /// Programs above that need a rule of the checker's which may not have landed:

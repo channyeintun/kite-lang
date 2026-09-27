@@ -3237,8 +3237,12 @@ impl<'a> Checker<'a> {
                 }
                 // The expected type steers each element, which is what lets a
                 // tuple literal supply a `(int, str)` without annotation.
+                // Where an `Option<(…)>` is wanted, the tuple inside it is,
+                // as for a slice or a map literal: `(4, 1)` for an
+                // `Option<(Option<int>, int)>` wraps its `4` as it would for
+                // the bare tuple, and the whole is wrapped after.
                 let hint: Option<Vec<TyId>> = expected.and_then(|e| {
-                    match self.types.kind(e) {
+                    match self.types.kind(self.types.present(e)) {
                         TyKind::Tuple(ts) if ts.len() == elems.len() => Some(ts.clone()),
                         _ => None,
                     }
