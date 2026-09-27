@@ -4869,8 +4869,8 @@ impl<'a> Checker<'a> {
                                 ),
                             )
                             .with_note(format!(
-                                "write `impl Display for {} {{ fn show(self) -> str {{ … }} }}`",
-                                self.types.name(e.ty)
+                                "write `{} {{ fn show(self) -> str {{ … }} }}`",
+                                self.impl_to_write("Display", e.ty)
                             )),
                         );
                     }
@@ -8488,6 +8488,30 @@ impl<'a> Checker<'a> {
         out
     }
 
+    /// The header of the `impl` a note tells the reader to write, so that
+    /// `ty` implements `trait_name`.
+    ///
+    /// A generic type's is for every instantiation at once, at its
+    /// declaration's own parameters, because a header for the one in hand is
+    /// E0208 (§8.2): a `One<int>` gets `impl<T> Display for One<T>`, not the
+    /// `impl Display for One<int>` these notes used to advise. The prelude's
+    /// traits are written unqualified, as a program names them.
+    fn impl_to_write(&self, trait_name: &str, ty: TyId) -> String {
+        let trait_name = trait_name.strip_prefix("prelude.").unwrap_or(trait_name);
+        let shown = self.types.name(ty);
+        let params: Vec<&str> = self
+            .type_index_of(ty)
+            .and_then(|ti| self.type_generics.get(ti as usize))
+            .map(|defs| defs.iter().map(|g| g.name.as_str()).collect())
+            .unwrap_or_default();
+        if params.is_empty() {
+            return format!("impl {} for {}", trait_name, shown);
+        }
+        let base = shown.split('<').next().unwrap_or(&shown);
+        let params = params.join(", ");
+        format!("impl<{}> {} for {}<{}>", params, trait_name, base, params)
+    }
+
     /// Every bound must hold for the type chosen.
     fn check_bounds(&mut self, generics: &[GenericDef], targs: &[TyId], span: Span) {
         for (g, t) in generics.iter().zip(targs.iter()) {
@@ -8554,7 +8578,7 @@ impl<'a> Checker<'a> {
                         self.types.trait_def(tr).name
                     )),
                     _ if self.type_index_of(*t).is_some() => {
-                        d.with_note(format!("write `impl {} for {}`", bn, tn))
+                        d.with_note(format!("write `{}`", self.impl_to_write(&bn, *t)))
                     }
                     _ => d.with_note(format!(
                         "an `impl` is written for a struct or an enum, so {} cannot \
@@ -10526,8 +10550,8 @@ impl<'a> Checker<'a> {
                 self.types.with_article(v.ty)
             )),
             _ => d.with_note(format!(
-                "write `impl Display for {} {{ fn show(self) -> str {{ … }} }}`",
-                name
+                "write `{} {{ fn show(self) -> str {{ … }} }}`",
+                self.impl_to_write("Display", v.ty)
             )),
         };
         self.diags.push(d);
@@ -10740,9 +10764,10 @@ impl<'a> Checker<'a> {
             if self.type_index_of(found).is_some() {
                 let (tn, fname) =
                     (self.types.trait_def(tr).name.clone(), self.types.name(found));
+                let header = self.impl_to_write(&tn, found);
                 d = d.with_note(format!(
-                    "`{}` does not implement `{}`; write `impl {} for {}` to use it here",
-                    fname, tn, tn, fname
+                    "`{}` does not implement `{}`; write `{}` to use it here",
+                    fname, tn, header
                 ));
             }
         }
@@ -10750,11 +10775,10 @@ impl<'a> Checker<'a> {
         // slot is almost always a type that meant to be an error and has not
         // said so yet.
         if expected == TyId::ERR && self.type_index_of(found).is_some() {
-            let name = self.types.name(found);
             d = d.with_note(format!(
                 "a type may stand here once it implements `Error`: write \
-                 `impl Error for {} {{ fn message(self) -> str {{ … }} }}`",
-                name
+                 `{} {{ fn message(self) -> str {{ … }} }}`",
+                self.impl_to_write("Error", found)
             ));
             d = d.with_note("or build one from text with `errors.new(\"…\")`");
         }

@@ -2012,3 +2012,23 @@ fn a_bound_note_suggests_an_impl_only_where_one_can_be_written() {
     assert!(text.contains("Take a `dyn Show` parameter instead"), "{}", text);
     assert!(text.contains("write `impl Show for Q`"), "{}", text);
 }
+
+/// A note telling the reader to write an `impl` for a generic type gives the
+/// header §8.2 accepts, for every instantiation at once. Each of these used
+/// to advise `impl Display for One<int>`, and following it was E0208.
+#[test]
+fn an_impl_note_for_a_generic_type_names_its_own_parameters() {
+    let c = run("trait Display {\n  fn show(self) -> str\n}\ntrait Show {\n  fn show(self) -> str\n}\n\
+        struct One<T> {\n  v: T\n}\n\
+        fn f<T: Show>(x: T) -> str {\n  return x.show()\n}\n\
+        fn fail() -> error {\n  return One{ v: 1 }\n}\n\
+        fn main() {\n  let o = One{ v: 5 }\n  io.print(o)\n  io.print(\"\\(o)\")\n\
+        \x20 io.print(f(o))\n  let d: dyn Show = o\n  io.print(d.show())\n\
+        \x20 let e = fail()\n  if e != nil {\n    io.print(e.message())\n  }\n}\n");
+    let text = c.render();
+    assert!(!text.contains("for One<int>"), "{}", text);
+    assert_eq!(text.matches("write `impl<T> Display for One<T> {").count(), 2, "{}", text);
+    assert!(text.contains("write `impl<T> Show for One<T>`\n"), "{}", text);
+    assert!(text.contains("write `impl<T> Show for One<T>` to use it here"), "{}", text);
+    assert!(text.contains("write `impl<T> Error for One<T> {"), "{}", text);
+}
