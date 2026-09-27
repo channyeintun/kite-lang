@@ -461,6 +461,29 @@ fn unreadable(path: &Path, error: std::io::Error) -> (String, usize, String) {
     }
 }
 
+/// A manifest read the way every command that compiles reads one: `Ok(None)`
+/// when there is no file, and for one that is there and does not read or
+/// does not parse, its `E0405`, rendered.
+///
+/// For `kitec pkg`, which reads the manifest without compiling anything. It
+/// reported the same failure as a bare `error:` line with no code, where every
+/// other command said `E0405` and pointed at the line.
+pub fn read_manifest(path: &Path) -> Result<Option<crate::manifest::Manifest>, String> {
+    let mut sources = SourceMap::new();
+    let failure = match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            let (text, line, why) = unreadable(path, e);
+            manifest_error(path, text, line, &why, &mut sources)
+        }
+        Ok(text) => match crate::manifest::parse(&text) {
+            Ok(parsed) => return Ok(Some(parsed)),
+            Err(error) => manifest_error(path, text, error.line, &error.message, &mut sources),
+        },
+    };
+    Err(failure.render(&sources))
+}
+
 /// One module being loaded, on the stack of those whose imports are still
 /// being followed — which is what an import cycle is found against.
 struct Frame {
