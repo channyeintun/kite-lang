@@ -388,6 +388,16 @@ fn rt_if_started() -> Option<&'static mut Rt> {
 const DEFAULT_NURSERY: usize = 1 << 20;
 const DEFAULT_THRESHOLD: usize = 8 << 20;
 
+/// The least and the most a nursery may be. The least is one page, which is
+/// what a stress test asks for; the most is far past any use for one — a
+/// nursery is collected when full, and a larger one only collects less often
+/// — and keeps an unchecked number from `KITE_NURSERY_BYTES` well inside what
+/// a `Layout` can describe. `18446744073709551615` there was a panic about a
+/// `LayoutError`, and a few terabytes an assertion, both inside the runtime,
+/// where a trap is the only way out that says what happened.
+const MIN_NURSERY: usize = 4096;
+const MAX_NURSERY: usize = 1 << 30;
+
 /// Initialise — or fully reset — the runtime. The wrapper the code generator
 /// emits calls this before anything else, which is also what makes a second
 /// JIT run in one process start clean.
@@ -431,10 +441,14 @@ pub extern "C" fn kite_rt_startup() {
                     .and_then(|v| v.parse().ok())
             })
             .unwrap_or(DEFAULT_NURSERY)
-            .max(4096);
+            .clamp(MIN_NURSERY, MAX_NURSERY);
         let threshold = config.major_threshold.unwrap_or(DEFAULT_THRESHOLD);
-        let nursery = sys_alloc(Layout::from_size_align(nursery_size, 16).unwrap());
-        assert!(!nursery.is_null(), "cannot allocate the nursery");
+        let layout = Layout::from_size_align(nursery_size, 16)
+            .expect("a nursery of at most a gigabyte is a valid layout");
+        let nursery = sys_alloc(layout);
+        if nursery.is_null() {
+            trap(&format!("cannot allocate a nursery of {} bytes", nursery_size));
+        }
         let capture = if capture { Some(Vec::new()) } else { None };
         RT = Box::into_raw(Box::new(Rt {
             nursery,
@@ -3270,6 +3284,21 @@ mod tests {
         assert_eq!(text(host_call("fs.remove_path", std::slice::from_ref(&file))), "\u{2}");
         assert_eq!(int(host_call("fs.path_kind", std::slice::from_ref(&file))), 0);
         assert!(text(host_call("fs.remove_path", &[file])).starts_with(HOST_FAILURE));
+    }
+
+    /// A nursery size is a number from outside — `KITE_NURSERY_BYTES`, or a
+    /// harness — and one too large for a `Layout` panicked inside the
+    /// runtime, where nothing can report it. Past a gigabyte it is a
+    /// gigabyte, and under a page a page.
+    #[test]
+    fn a_nursery_size_out_of_range_is_brought_into_it() {
+        let _run = run_lock();
+        for (asked, got) in [(usize::MAX, MAX_NURSERY), (100_000_000_000_000, MAX_NURSERY), (0, MIN_NURSERY)] {
+            prepare_run(RunConfig { nursery_bytes: Some(asked), major_threshold: None }, false);
+            kite_rt_startup();
+            assert_eq!(rt().nursery_size, got, "asked for {}", asked);
+            finish_run();
+        }
     }
 
     /// Every allocation this test binary makes, counted per thread, so a
