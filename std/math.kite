@@ -772,6 +772,12 @@ pub fn tan(x: float) -> float {
 /// series directly at `x = 1` — where it is Leibniz's series for π/4 — would
 /// need thousands of terms.
 pub fn atan(x: float) -> float {
+    // A zero is its own arctangent, sign and all, as in libm — and `asin`,
+    // which comes here, keeps it too. -0.0 is not below zero, so it reached
+    // the series and came back +0.0.
+    if x == 0.0 {
+        return x
+    }
     if x < 0.0 {
         return -atan(-x)
     }
