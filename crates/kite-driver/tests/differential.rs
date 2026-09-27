@@ -2768,6 +2768,52 @@ fn main() {
 }
 "#,
     ),
+    // A narrowing survives a loop whose every write to the local stores a value
+    // that cannot be nil, as it survives the same writes in straight-line code.
+    // The loop dropped it for any local it wrote, so each of these was E0201.
+    (
+        "a-loop-keeps-a-narrowing-its-writes-keep",
+        r#"fn guard() {
+    var x: Option<int> = 5
+    if x == nil {
+        return
+    }
+    for i in 0..3 {
+        io.print(x + 1)
+        x = i
+    }
+}
+
+fn inside() {
+    var x: Option<int> = 5
+    if x != nil {
+        for i in 0..3 {
+            x = i * 10
+            io.print(x + 1)
+        }
+    }
+}
+
+fn nested() {
+    var x: Option<int> = 1
+    if x == nil {
+        return
+    }
+    for i in 0..2 {
+        for j in 0..2 {
+            x = x + i + j
+        }
+        io.print(x)
+    }
+}
+
+fn main() {
+    guard()
+    inside()
+    nested()
+}
+"#,
+    ),
 ];
 
 /// Programs above that need a rule of the checker's which may not have landed:

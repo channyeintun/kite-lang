@@ -554,6 +554,7 @@ pub fn check_recording(
             narrowed: std::collections::HashMap::new(),
             error_nonnil: std::collections::HashSet::new(),
             loops: Vec::new(),
+            loop_writes: Vec::new(),
             closure_sig: None,
             closure_ret_unknown: None,
             reported_unchecked: std::collections::HashSet::new(),
@@ -1042,6 +1043,10 @@ struct Checker<'a> {
     /// closure starts with none: a loop around the place it is written is
     /// not one its body runs in.
     loops: Vec<Span>,
+    /// While a loop's body is checked on trial to learn which narrowings
+    /// survive it: per such loop, innermost last, every local a write in the
+    /// body may have made nil.
+    loop_writes: Vec<Vec<u32>>,
     /// The signature of the closure being checked, which is what a `return`
     /// inside it answers to — not the function the closure is written in.
     closure_sig: Option<Signature>,
@@ -1664,6 +1669,9 @@ impl<'a> Checker<'a> {
         );
         if !keeps_narrowing {
             self.narrowed.remove(&local_id);
+            for writes in &mut self.loop_writes {
+                writes.push(local_id);
+            }
         }
         self.error_nonnil.remove(&local_id);
 
@@ -2246,8 +2254,39 @@ impl<'a> Checker<'a> {
                 }
             });
         }
+        // A write of a value that cannot be nil keeps a narrowing, in a loop
+        // as in straight-line code, but which writes those are is known only
+        // once the body is checked. So a body writing a narrowed local is
+        // checked on trial with the narrowing kept, and it is dropped for the
+        // real check where a write there may have stored a nil. Dropping one
+        // can make another write nil-able — `x = z` once `z` is no longer
+        // proved present — so the trial is repeated until nothing more is
+        // dropped; each round drops at least one, or is the last.
+        let mut kept: Vec<u32> =
+            assigned.iter().copied().filter(|id| self.narrowed.contains_key(id)).collect();
+        loop {
+            for id in &assigned {
+                if !kept.contains(id) {
+                    self.narrowed.remove(id);
+                }
+            }
+            if kept.is_empty() {
+                break;
+            }
+            let defers = self.defers;
+            self.loop_writes.push(Vec::new());
+            let trial = self.begin_trial();
+            let _ = self.loop_parts(f, sig);
+            self.end_trial(trial);
+            self.defers = defers;
+            let writes = self.loop_writes.pop().unwrap_or_default();
+            let before = kept.len();
+            kept.retain(|id| !writes.contains(id));
+            if kept.len() == before {
+                break;
+            }
+        }
         for id in &assigned {
-            self.narrowed.remove(id);
             self.error_nonnil.remove(id);
         }
         let entry_narrowed = self.narrowed.clone();

@@ -336,7 +336,9 @@ match maybe {
 optional against `nil` narrows it to the unwrapped type on the branch where it
 cannot be absent — in the `else` of `x == nil`, and in the `then` of `x != nil`.
 The same narrowing applies in a `match` arm once an earlier arm has covered
-`nil`.
+`nil`. A write to a `var` ends its narrowing unless the value written cannot be
+nil either; inside a loop, that holds for every write the loop's body makes,
+since the body runs again after each of them.
 
 ### 3.4 Type declarations
 
