@@ -51,6 +51,14 @@ are sent to the server: the copy
 of a file a diff view or source control shows is also Kite, and compiling it
 would report an old version's problems.
 
+A rename starts only when every place the name is written is one the edit
+reaches, and says why when it is not: a `pub` name is used by other files, a
+type is written in annotations the binding table does not record, a method's
+calls need the receiver's type, and a file that does not parse has code in it
+that was never resolved. A new name is compared as the compiler compares
+identifiers — after NFC — so `café` typed with a combining accent is the
+`café` already there.
+
 Diagnostics pointing into the standard library are not published: they belong
 to a file the user does not have open, and showing them against a line they do
 have open would be a lie about where the problem is.

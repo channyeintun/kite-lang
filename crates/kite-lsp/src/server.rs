@@ -543,11 +543,13 @@ impl Server {
             Err(why) => return Reply::refuse(why),
             Ok(b) => b,
         };
-        let new = message
-            .path("params.newName")
-            .and_then(|n| n.as_str())
-            .unwrap_or("")
-            .to_string();
+        // In NFC, which is how §2.1 compares identifiers and how every name
+        // the compiler read is held. Compared as typed, `café` with a
+        // combining accent was no clash with the `café` already bound, and the
+        // rename that went through changed what the old uses meant.
+        let new = kite_driver::identifier_nfc(
+            message.path("params.newName").and_then(|n| n.as_str()).unwrap_or(""),
+        );
         if let Some(why) = bad_new_name(&new, binding, &c.compilation) {
             return Reply::refuse(why);
         }
@@ -810,16 +812,34 @@ fn binding_at(bindings: &[Binding], own: Option<FileId>, offset: u32) -> Option<
 ///
 /// The rule is the table's own coverage: a rename starts only when every
 /// occurrence is recorded and every recorded occurrence is editable. That
-/// admits locals, constants and this file's own functions — and refuses
-/// keywords and literals (no binding), prelude and module names (declared
-/// elsewhere), types (annotations are not in the table), methods (call sites
-/// need the receiver's type), and host functions (the name is the host's
-/// contract).
+/// admits locals, and this file's own private functions and constants — and
+/// refuses keywords and literals (no binding), prelude and module names
+/// (declared elsewhere), `pub` names (their importers' uses are in other
+/// files), types (annotations are not in the table), methods (call sites need
+/// the receiver's type), host functions (the name is the host's contract), and
+/// anything at all in a file that did not parse (what was skipped is in no
+/// table).
 fn renameable(
     compiled: &Compilation,
     own: Option<FileId>,
     offset: u32,
 ) -> Result<&Binding, String> {
+    // What the parser skipped to recover was never resolved, so an occurrence
+    // there is in no table: renaming `count` while `io.print(count +)` did not
+    // parse left that `count` behind, to resolve to something else — or to
+    // nothing — once the line was mended.
+    let unparsed = compiled.diags.iter().any(|d| {
+        d.severity == Severity::Error
+            && d.code.is_some_and(|c| is_syntax(c.0))
+            && d.primary_span().is_some_and(|s| Some(s.file) == own)
+    });
+    if unparsed {
+        return Err(
+            "this file has syntax errors, and a name in code that did not parse is in no table \
+             a rename could edit — fix them first"
+                .to_string(),
+        );
+    }
     let Some(binding) = binding_at(&compiled.index.bindings, own, offset) else {
         return Err("nothing renameable here — only a declared name has uses to rename".to_string());
     };
@@ -860,7 +880,25 @@ fn renameable(
             binding.name
         ));
     }
+    // A `pub` name is for other modules, and their `config.port` is in *their*
+    // tables, not this file's — so the rename edited the declaration alone,
+    // and every importer stopped compiling. Which files import this one is
+    // not something an open editor knows: an importer need not be open.
+    let exported = compiled.index.symbols.iter().any(|s| s.at == binding.declared_at && s.is_pub);
+    if exported {
+        return Err(format!(
+            "`{}` is `pub`, so other modules may use it, and their uses are not in this file — \
+             a rename here would edit the declaration and leave them behind",
+            binding.name
+        ));
+    }
     Ok(binding)
+}
+
+/// Whether a diagnostic code is the lexer's or the parser's: something wrong
+/// with the text itself, which the parser recovers from by skipping ahead.
+fn is_syntax(code: &str) -> bool {
+    code.starts_with("E00") || matches!(code, "E0100" | "E0101" | "E0102")
 }
 
 /// Why `new` may not replace `binding`'s name, or nothing when it may.
@@ -912,7 +950,7 @@ fn bad_new_name(new: &str, binding: &Binding, compiled: &Compilation) -> Option<
             .text(u.at.file)
             .get(u.at.start as usize..u.at.end as usize)
             .and_then(|t| t.contains('.').then(|| t.split('.').next()).flatten())
-            == Some(new)
+            .is_some_and(|head| kite_driver::identifier_nfc(head) == new)
     });
     if shadows_module {
         return Some(format!(

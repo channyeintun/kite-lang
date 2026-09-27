@@ -990,6 +990,68 @@ fn definition_into_a_path_dependency_lands_in_its_open_buffer() {
     assert_eq!(result.get("uri").and_then(|u| u.as_str()), Some(dependency.as_str()));
 }
 
+// ---- what a rename may touch -------------------------------------------------
+
+/// A `pub` name's importers are in other files, so a rename in its own file
+/// edited the declaration alone and broke every one of them.
+#[test]
+fn rename_refuses_a_pub_name() {
+    let p = Project::new("rename-pub");
+    let config_text = "pub fn port() -> int {\n    return 80\n}\n\npub let PORT = 80\n";
+    let config = p.file("config.kite", config_text);
+    let main_text = "use config\n\nfn main() {\n    io.print(config.port() + config.PORT)\n}\n";
+    let main = p.file("main.kite", main_text);
+    let mut s = Server::new();
+    open(&mut s, &config, config_text);
+    open(&mut s, &main, main_text);
+    for (line, character) in [(0, 8), (4, 9)] {
+        let reply = s.handle("textDocument/rename", &rename_at(&config, line, character, "p2"));
+        assert_eq!(reply.result, None);
+        let why = reply.error.expect("a refusal");
+        assert!(why.contains("`pub`"), "{}", why);
+        let refused = s.handle("textDocument/prepareRename", &at(&config, line, character));
+        assert!(refused.error.is_some());
+    }
+}
+
+/// §2.1 compares identifiers after NFC, so a new name that is an existing one
+/// spelled with a combining accent is that name. It was compared byte for
+/// byte, got through, and changed what the old uses resolved to.
+#[test]
+fn rename_refuses_a_name_already_bound_under_another_spelling() {
+    let mut s = Server::new();
+    let text = "fn main() {\n    let caf\u{e9} = 1\n    if true {\n        let x = 2\n        io.print(caf\u{e9} + x)\n    }\n}\n";
+    open(&mut s, "file:///t.kite", text);
+    for new in ["caf\u{e9}", "cafe\u{301}"] {
+        let reply = s.handle("textDocument/rename", &rename_at("file:///t.kite", 3, 12, new));
+        let why = reply.error.expect("a refusal");
+        assert!(why.contains("already bound"), "{:?}: {}", new, why);
+    }
+    // A name accepted is written in NFC, the form the compiler holds it in.
+    let reply = s.handle("textDocument/rename", &rename_at("file:///t.kite", 3, 12, "the\u{301}"));
+    let result = reply.result.expect("an answer");
+    let Some(Json::Array(edits)) = result.get("changes").and_then(|c| c.get("file:///t.kite"))
+    else {
+        panic!("no edits");
+    };
+    assert!(edits.iter().all(|e| e.get("newText").and_then(|t| t.as_str()) == Some("th\u{e9}")));
+}
+
+/// What the parser skipped to recover was never resolved, so an occurrence
+/// there is in no table: the rename edited the rest, and the leftover spelling
+/// meant something else once the line was mended.
+#[test]
+fn rename_refuses_while_the_file_does_not_parse() {
+    let mut s = Server::new();
+    let text = "fn helper(a: int) -> int {\n    return a + 1\n}\n\n\
+                fn main() {\n    let v = helper(1\n    io.print(helper(2))\n}\n";
+    open(&mut s, "file:///t.kite", text);
+    let reply = s.handle("textDocument/rename", &rename_at("file:///t.kite", 0, 4, "helper2"));
+    assert_eq!(reply.result, None);
+    let why = reply.error.expect("a refusal");
+    assert!(why.contains("syntax errors"), "{}", why);
+}
+
 fn frame(body: &str) -> String {
     format!("Content-Length: {}\r\n\r\n{}", body.len(), body)
 }
