@@ -515,10 +515,9 @@ path roots there instead (§5).
 
 Every file in a module directory shares the module's imports and aliases. One
 file writing `use config` is enough for its siblings to write `config.load`.
-SPECIFICATION.md §13.1 says "one *file* may not spell two modules alike"; the
-compiler's granularity is the module — two different files in one directory
-importing `utils` and `dep/utils` is `E0404`, and the message reads "already
-names another module **here**".
+So the rule against spelling two modules alike (SPECIFICATION.md §13.1) is per
+module: two different files in one directory importing `utils` and `dep/utils`
+is `E0404`, and the message reads "already names another module **here**".
 
 ### A module reaches only what it imports
 
@@ -646,10 +645,9 @@ fn main() {
 }
 ```
 
-One correction to SPECIFICATION.md §13.1 here: **the check is on the last
-segment regardless of depth**, so `use dep/crypto` is *also* `E0403`, although
-the spec says "full paths keep `dep/crypto` and `std/crypto` apart on their
-own". A dependency whose module is named after any of the reserved names is
+**The check is on the last segment regardless of depth** (SPECIFICATION.md
+§13.1), so `use dep/crypto` is *also* `E0403`, with or without an alias. A
+dependency whose module is named after any of the reserved names is
 unreachable; rename it. (`use std/prelude` is `E0400`: the prelude is ambient,
 not a module you import.)
 
@@ -871,9 +869,8 @@ Three consequences of WasmGC's shape, accepted deliberately:
 - **No unboxed aggregates inside arrays.** `[Point]` is an array of references
   to `Point` objects, not a flat `(f64, f64)` buffer. `std/buffer` is the escape
   hatch — but note that `buffer.F64` is **implemented over a `[float]` slice**,
-  not over linear memory as SPECIFICATION.md §14 claims; the Wasm backend has no
-  linear memory today. Its `values` field is `pub var`, which also means
-  `buffer.F64` is not `Share`.
+  not over linear memory; the Wasm backend has no linear memory today. Its
+  `values` field is `pub var`, which also means `buffer.F64` is not `Share`.
 - **No weak references and no finalizers.** A cache that must not retain its
   entries needs an explicit eviction policy.
 

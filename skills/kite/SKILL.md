@@ -33,6 +33,10 @@ rationale, not a restatement of the message. Also `kitec run`, `kitec test`
 a `use`d module's tests are invisible to it), `kitec fmt`, `kitec fix`,
 `kitec build --emit wasm --out dist`. Write, check, fix, check again.
 
+`--explain`, `test` and `fix` belong to the native `kitec` — this repo's build,
+or `npm install --save-dev @kite-lang/cli`. The WebAssembly `kitec` that `npx`
+fetches has `run`, `check`, `build`, `fmt` and `doc` only.
+
 For a **web page** a project reaches for `vite-plugin-kite` rather than `kitec`:
 `<script type="module" src="/src/main.kite">` in the project's own `index.html`
 is the entire wiring. It hands the compiler the `.kite` files beside the entry
@@ -126,7 +130,7 @@ fn main() {
 | `let f: float = 3` | `E0200`. No implicit conversion anywhere, not even for literals. Write `3.0`, or `n as float`; `as` converts int↔float and nothing else. |
 | `if x { }` on a non-bool | No truthiness. A condition is exactly `bool` (`E0202`). |
 | `a & b == c` parses as `a & (b == c)` | Bitwise binds **tighter** than comparison. And comparison does not chain: `a < b < c` is `E0100`. |
-| `[3]int`, `xs[..2]`, `let r = 0..n` | No fixed-length arrays, no open-ended ranges, and a range is not a value — it is syntax for a `for` header and an index. Write both ends. |
+| `[3]int`, `let r = 0..n`, `for i in 0..` | No fixed-length arrays, and a range is not a value (`E0200`) — it is syntax for a `for` header and an index. An index may leave out either end (`xs[..2]`, `xs[1..]`, `xs[..]`, `s[6..]`); a `for` header may not (`0..` is `E0100`). |
 | `m[key]` yields a `V`; `xs[i]` yields nil when missing | `m[key]` and `xs.get(i)` are always `Option<V>`. `xs[i]` **traps** out of range; `xs[a..b]` **clamps**. |
 | `for k in someMap` | A map needs a pair binding: `for (k, v) in m`. One binding is `E0200`. |
 | `s[0]`, `s.split(",")` | `str` is not indexable and has exactly five methods: `len` `slice` `index_of` `trim` `code_at`. `split`, `join`, `contains`, `replace`, `lower` are prelude *functions*. Slices have only `len` `get` `push`; maps only `len` `keys` `values` `remove`. |

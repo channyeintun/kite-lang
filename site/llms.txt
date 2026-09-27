@@ -12,7 +12,10 @@ works in a sandbox:
 npx --yes --package=@kite-lang/compiler-wasm kitec check program.kite
 ```
 
-`kitec --explain E0302` prints the reasoning behind any diagnostic code.
+`kitec --explain E0302` prints the reasoning behind any diagnostic code — with
+the native `kitec` (`npm install --save-dev @kite-lang/cli`, or
+https://kite-lang.dev/install.html). The WebAssembly `kitec` above has `run`,
+`check`, `build`, `fmt` and `doc` only.
 
 ## Start here
 

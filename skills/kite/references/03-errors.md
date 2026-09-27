@@ -814,8 +814,6 @@ fn main() {
 ```kite
 use std/errors
 
-struct Filler { z: int }
-
 struct NotFound { id: str }
 
 impl Error for NotFound {
@@ -836,14 +834,6 @@ fn main() {
     }
 }
 ```
-
-**Compiler bug, verified:** the type tag is the struct's id and the *first struct
-declared in the program's root file* gets id 0 — which is also the tag meaning
-"this error carries no typed value". If your `Error` struct is the first struct in
-the file, `T.is(err)` answers `true` for every error, including `errors.new(…)`
-results and `nil`, and `T.as` still correctly answers absent. Declaring any other
-struct ahead of it (the `Filler` above) restores correct behaviour. Enums are
-unaffected — their tags are offset by `0x8000_0000`.
 
 ## Unrecoverable failures
 
