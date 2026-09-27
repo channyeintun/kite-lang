@@ -300,6 +300,9 @@ pub fn check_recording(
     // it to one diagnostic rather than one per method.
     let mut impl_generics: std::collections::HashMap<usize, Vec<GenericDef>> =
         std::collections::HashMap::new();
+    // Per function, the type `Self` names inside it: a method's or an
+    // associated function's own type, at its block's parameters.
+    let mut self_types: Vec<Option<TyId>> = Vec::with_capacity(resolved.fns.len());
     for sig in &resolved.fns {
         let module = resolved.module_of_item(sig.decl_index);
         // A function's own type parameters are in scope for its signature. A
@@ -315,11 +318,17 @@ pub fn check_recording(
                 _ => Vec::new(),
             },
             Some(owner) => {
+                // The block's parameters are the `impl`'s, for a default
+                // method the trait supplied as much as for one written in the
+                // block: a default reached with no `T` of its own could not
+                // call another method on a `Box<T>`, and took a `Box` its
+                // callers' `Box<int>` was not.
+                let module_of_block = resolved.module_of_item(owner.block_index);
                 let mut defs = impl_generics
-                    .entry(owner.impl_index)
-                    .or_insert_with(|| match &file.items[owner.impl_index] {
+                    .entry(owner.block_index)
+                    .or_insert_with(|| match &file.items[owner.block_index] {
                         ast::Item::Impl(i) => declare_generics(
-                            &i.generics, &[], resolved, module, &type_ids, &mut types, diags,
+                            &i.generics, &[], resolved, module_of_block, &type_ids, &mut types, diags,
                         ),
                         _ => Vec::new(),
                     })
@@ -338,7 +347,7 @@ pub fn check_recording(
         // block's own parameters — `Box<T>` inside `impl<T> Box<T>`.
         let owner_ty = sig.owner.map(|owner| {
             let own: Vec<TyId> = impl_generics
-                .get(&owner.impl_index)
+                .get(&owner.block_index)
                 .map(|defs| defs.iter().map(|g| g.ty).collect())
                 .unwrap_or_default();
             match type_ids[owner.type_index as usize] {
@@ -353,6 +362,7 @@ pub fn check_recording(
                 other => named_ty(other, &mut types),
             }
         });
+        self_types.push(owner_ty);
         let mut named: Vec<(String, TyId)> =
             generic_defs.iter().map(|g| (g.name.clone(), g.ty)).collect();
         if let Some(ty) = owner_ty {
@@ -523,7 +533,15 @@ pub fn check_recording(
             closure_span: None,
             captures: Vec::new(),
             generic_defs: sigs[i].generics.clone(),
-            generics: sigs[i].generics.iter().map(|g| (g.name.clone(), g.ty)).collect(),
+            // `Self` names the same type in a body as in the signature (§8.2,
+            // §10.1): `let y: Self = self`, or a closure's `|x: Self|`. It was
+            // known only to the signature, so a body naming it was E0204.
+            generics: sigs[i]
+                .generics
+                .iter()
+                .map(|g| (g.name.clone(), g.ty))
+                .chain(self_types[i].map(|t| ("Self".to_string(), t)))
+                .collect(),
             type_ids: &type_ids,
             types: &mut types,
             sources,
@@ -5209,7 +5227,7 @@ impl<'a> Checker<'a> {
         // receiver's own type. Its own parameters, if it has any, are solved
         // from its arguments exactly as a generic function's are.
         let generics = self.sigs[fn_index as usize].generics.clone();
-        let block = self.block_generic_count(owner.impl_index);
+        let block = self.block_generic_count(owner.block_index);
         let mut subst: Vec<Option<TyId>> = vec![None; generics.len()];
         for (slot, t) in subst.iter_mut().zip(self.receiver_args(receiver.ty)).take(block) {
             *slot = Some(t);
@@ -5856,7 +5874,7 @@ impl<'a> Checker<'a> {
         // `Stack<int>`. Its own parameters, if it has any, come from the
         // arguments too.
         let generics = self.sigs[fn_index as usize].generics.clone();
-        let block = self.block_generic_count(owner.impl_index);
+        let block = self.block_generic_count(owner.block_index);
         let mut subst: Vec<Option<TyId>> = vec![None; generics.len()];
 
         let raw_params = self.sigs[fn_index as usize].params.clone();

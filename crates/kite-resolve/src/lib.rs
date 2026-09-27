@@ -520,6 +520,11 @@ pub struct MethodOwner {
     /// Index into `SourceFile::items` for the block holding the body — an
     /// `impl`, or the `trait` itself when this is an inherited default.
     pub impl_index: usize,
+    /// Index into `SourceFile::items` for the `impl` block that gives the
+    /// method to its type. The same as `impl_index` but for an inherited
+    /// default, whose body is the trait's while its type parameters — the
+    /// `T` of `impl<T> Show for Box<T>` — are the block's.
+    pub block_index: usize,
     /// Position within that block's method list.
     pub method_index: usize,
     pub takes_self: bool,
@@ -1121,6 +1126,7 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                         owner: Some(MethodOwner {
                             type_index,
                             impl_index: i,
+                            block_index: i,
                             method_index: mi,
                             takes_self: m.self_param.is_some(),
                             var_self: m.self_param.as_ref().is_some_and(|s| s.is_var),
@@ -1155,6 +1161,7 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                                 owner: Some(MethodOwner {
                                     type_index,
                                     impl_index: trait_item,
+                                    block_index: i,
                                     method_index: mi,
                                     takes_self: m.self_param.is_some(),
                                     var_self: m.self_param.as_ref().is_some_and(|s| s.is_var),

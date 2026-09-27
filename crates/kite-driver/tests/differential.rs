@@ -2608,6 +2608,166 @@ fn main() {
 }
 "#,
     ),
+    // A trait's default method, inherited by `impl<T> Show for Box<T>`, is a
+    // method of `Box<T>` and has the block's `T`. It had none: a default calling
+    // another method on `self` was E0209 "cannot infer `T`", even never called,
+    // and one that compiled took the template `Box`, which Wasm refused to
+    // validate against the `Box<int>` it was handed.
+    (
+        "default-methods-of-a-generic-impl",
+        r#"trait Show {
+    fn show(self) -> str
+    fn twice(self) -> str {
+        return self.show() + self.show()
+    }
+    fn tag(self) -> str {
+        return "tag"
+    }
+    fn loud(self) -> str {
+        return self.twice() + "!"
+    }
+}
+
+trait Comparable {
+    fn compare(self, other: Self) -> int
+    fn less_than(self, other: Self) -> bool {
+        return self.compare(other) < 0
+    }
+}
+
+struct Box<T> {
+    v: T
+}
+
+enum Maybe<T> {
+    Some(T)
+    Nothing
+}
+
+struct Wrap<T> {
+    n: int
+    v: T
+}
+
+impl<T> Show for Box<T> {
+    fn show(self) -> str {
+        return "B"
+    }
+}
+
+impl<T> Show for Maybe<T> {
+    fn show(self) -> str {
+        return match self {
+            Some(_) => "S",
+            Nothing => "N",
+        }
+    }
+}
+
+impl<T> Comparable for Wrap<T> {
+    fn compare(self, other: Wrap<T>) -> int {
+        return self.n - other.n
+    }
+}
+
+fn via<S: Show>(s: S) -> str {
+    return s.loud() + s.tag()
+}
+
+fn smaller<C: Comparable>(a: C, b: C) -> C {
+    if a.less_than(b) {
+        return a
+    }
+    return b
+}
+
+fn main() {
+    io.print(Box{ v: 1 }.twice())
+    io.print(Box{ v: "s" }.tag())
+    io.print(via(Box{ v: 2.5 }))
+    io.print(via(Maybe.Some(3)))
+    let m: Maybe<str> = Maybe.Nothing
+    io.print(m.loud())
+    let xs: [dyn Show] = [Box{ v: 1 }, Box{ v: "s" }, Maybe.Some(true)]
+    for x in xs {
+        io.print(x.tag() + x.twice())
+    }
+    let a = Wrap{ n: 1, v: "a" }
+    let b = Wrap{ n: 2, v: "b" }
+    io.print(a.less_than(b))
+    io.print(smaller(b, a).v)
+}
+"#,
+    ),
+    // `Self` names the same type in a method's body as in its signature: in an
+    // annotation, a slice of it, a closure's parameter, an associated function,
+    // and a trait's default method. It was E0204 "unknown type `Self`" in a body.
+    (
+        "self-names-the-type-in-a-body",
+        r#"struct P {
+    n: int
+}
+
+struct Box<T> {
+    v: T
+}
+
+impl P {
+    fn twin(self) -> Self {
+        let y: Self = self
+        let ys: [Self] = [y]
+        return ys[0]
+    }
+
+    fn make(n: int) -> Self {
+        let p: Self = P{ n: n }
+        return p
+    }
+}
+
+impl<T> Box<T> {
+    fn same(self) -> Self {
+        let b: Self = self
+        let keep = |x: Self| -> T { return x.v }
+        return Box{ v: keep(b) }
+    }
+}
+
+trait Merge {
+    fn merge(self, other: Self) -> Self
+    fn thrice(self) -> Self {
+        let f = |x: Self| -> Self { return x.merge(self) }
+        return f(f(self))
+    }
+    fn dup(self) -> [Self] {
+        let me: Self = self
+        return [me, me]
+    }
+}
+
+impl Merge for P {
+    fn merge(self, other: Self) -> Self {
+        return P{ n: self.n + other.n }
+    }
+}
+
+impl<T> Merge for Box<T> {
+    fn merge(self, other: Self) -> Self {
+        return other
+    }
+}
+
+fn main() {
+    io.print(P{ n: 1 }.twin().n)
+    io.print(P.make(4).n)
+    io.print(Box{ v: "b" }.same().v)
+    io.print(P{ n: 2 }.thrice().n)
+    io.print(P{ n: 2 }.dup().len())
+    io.print(Box{ v: 3 }.thrice().v)
+    io.print(Box{ v: 3.5 }.dup()[1].v)
+}
+"#,
+    ),
 ];
 
 /// Programs above that need a rule of the checker's which may not have landed:
