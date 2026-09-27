@@ -207,6 +207,54 @@ fn stage_slot(i: usize) -> *mut u64 {
     unsafe { (&raw mut KITE_RT_STAGE).cast::<u64>().add(i) }
 }
 
+/// How deep a chain of calls may go: the bytecode VM's `MAX_FRAMES`.
+///
+/// The two must agree, because a recursion one of them finishes and the
+/// other traps on is a program that means two things. Natively the chain
+/// used to be as deep as the stack allowed — past a hundred thousand frames
+/// where the VM trapped, and then a Rust stack overflow and an abort rather
+/// than a trap. Every compiled function counts itself into
+/// [`KITE_RT_DEPTH`] on entry and out on return, and the call past this one
+/// traps with the VM's message; the program runs on a stack
+/// ([`PROGRAM_STACK`]) that holds that many frames of any ordinary size.
+pub const MAX_FRAMES: u64 = 100_000;
+
+/// How many compiled Kite calls are in progress. See [`MAX_FRAMES`].
+#[no_mangle]
+pub static mut KITE_RT_DEPTH: u64 = 0;
+
+/// The stack a program runs on: [`MAX_FRAMES`] frames of five kilobytes.
+///
+/// The thread that starts a program has what its host gave it — eight
+/// megabytes for a process's main thread on Linux, which a recursion of a
+/// function with a few dozen values live across its call outgrew at a few
+/// tens of thousands of frames. The memory is reserved, not used: what a
+/// program does not recurse into is never touched.
+const PROGRAM_STACK: usize = 512 << 20;
+
+/// Run a compiled program's entry on a stack of [`PROGRAM_STACK`] and answer
+/// what it answers. The exported `main` of every build calls this with the
+/// function that starts the runtime and runs the program, so the frame
+/// pointer [`kite_rt_startup`] records, and every frame the collector walks,
+/// is on that stack.
+///
+/// A host that will not make such a thread still runs the program, on the
+/// stack it has, which is how things were before.
+#[no_mangle]
+pub extern "C" fn kite_rt_run(program: extern "C" fn() -> i32) -> i32 {
+    let spawned = std::thread::Builder::new()
+        .name("kite".to_string())
+        .stack_size(PROGRAM_STACK)
+        .spawn(move || program());
+    match spawned {
+        // A panic cannot cross the `extern "C"` functions it would start in,
+        // so it aborts the process there; a thread that nonetheless ended in
+        // one ends the program the way a trap does.
+        Ok(thread) => thread.join().unwrap_or(1),
+        Err(_) => program(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Runtime state
 // ---------------------------------------------------------------------------
@@ -418,6 +466,7 @@ pub extern "C" fn kite_rt_startup() {
     // readable stack memory holding the caller's frame pointer.
     unsafe {
         ENTRY_FP = *(current_fp() as *const usize);
+        KITE_RT_DEPTH = 0;
     }
     unsafe {
         if !RT.is_null() {
@@ -526,6 +575,8 @@ pub extern "C" fn kite_rt_trap(code: i64, a: i64, b: i64) {
     match code {
         1 => trap("divide by zero"),
         2..=8 => trap(&format!("integer overflow in `{}`", op(code))),
+        // The VM's words, for the reason `MAX_FRAMES` gives.
+        11 => trap(&format!("call depth exceeded {} frames", MAX_FRAMES)),
         _ => {
             let name = rt()
                 .shapes
@@ -2983,6 +3034,7 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
     }
     let mut v: Vec<(&'static str, *const u8)> = syms![
         kite_rt_startup,
+        kite_rt_run,
         kite_rt_trap,
         kite_rt_register_string,
         kite_rt_register_struct_shape,
@@ -3073,6 +3125,7 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         kite_rt_drive,
     ];
     v.push(("KITE_RT_STAGE", (&raw const KITE_RT_STAGE).cast::<u8>()));
+    v.push(("KITE_RT_DEPTH", (&raw const KITE_RT_DEPTH).cast::<u8>()));
     v
 }
 

@@ -1225,9 +1225,27 @@ export function stopped() {{
   return halted;
 }}
 
+/// Whether `e` is the host's stack running out: V8's and JavaScriptCore's
+/// `RangeError`, or SpiderMonkey's `InternalError: too much recursion`.
+const stackExhausted = (e) =>
+  (e instanceof RangeError && /call stack/i.test(e.message)) ||
+  (e !== null && typeof e === "object" && e.name === "InternalError" && /recursion/i.test(e.message));
+
 /// End the program because of `e`, and hand `e` back to be thrown. Only the
 /// first trap is reported; after it nothing runs that could trap again.
+///
+/// A recursion deeper than the host's stack ends the program as a trap, as
+/// it does on the other targets — the VM and the native runtime trap past a
+/// hundred thousand frames with "call depth exceeded" — rather than as a
+/// `RangeError` a page or a harness cannot tell from its own. The depth is
+/// the host's to decide: a few thousand frames of an ordinary function in a
+/// browser or Node.
 function halt(e) {{
+  if (stackExhausted(e)) {{
+    const trap = new WebAssembly.RuntimeError("call depth exceeded: the host's stack is full");
+    trap.cause = e;
+    e = trap;
+  }}
   if (halted === null) halted = e;
   TASKS.length = 0;
   if (timer !== null) {{

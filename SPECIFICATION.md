@@ -1142,6 +1142,15 @@ catchable. There is no `recover`, no panic handler, and no unwinding.
 `assert(cond, msg)` traps when `cond` is false. It is compiled out in release
 builds; `require(cond, msg)` is the always-on variant.
 
+A call chain deeper than the target allows traps too, with `call depth
+exceeded`. The bytecode VM and the native target allow 100,000 frames, and
+agree to the call. A WebAssembly program's frames are its host's stack, which
+in a browser or Node holds a few thousand frames of an ordinary function —
+fewer the more values each holds across its call — and running out of it ends
+the program as a trap, not as the host's `RangeError`. A recursion whose depth
+input decides, such as a parser's, should bound it and fail with an `error`
+instead, as `std/json` and `std/toml` do past 128 levels.
+
 This is a deliberate rejection of Go's `panic`/`recover`, which creates a second,
 invisible error-propagation channel alongside the visible one.
 

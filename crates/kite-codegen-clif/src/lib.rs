@@ -118,6 +118,7 @@ const _: () = assert!(kite_rt::STAGE_WORDS % 2 == 0);
 #[rustfmt::skip]
 const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_startup", &[], None),
+    ("kite_rt_run", &[I64], Some(types::I32)),
     ("kite_rt_trap", &[I64, I64, I64], None),
     ("kite_rt_register_string", &[I64, I64, I64], None),
     ("kite_rt_register_struct_shape", &[I64, I64, I64], None),
@@ -218,6 +219,7 @@ mod trap_code {
     pub const OVERFLOW_SHL: i64 = 7;
     pub const OVERFLOW_SHR: i64 = 8;
     pub const UNREACHABLE: i64 = 10;
+    pub const CALL_DEPTH: i64 = 11;
 }
 
 /// Everything the per-function lowering needs from the module scan.
@@ -294,6 +296,8 @@ struct ModuleCx<'a, M: Module> {
     fns: Vec<FuncId>,
     thunks: HashMap<u32, FuncId>,
     stage: DataId,
+    /// `KITE_RT_DEPTH`, the count of calls in progress. See `kite_rt::MAX_FRAMES`.
+    depth: DataId,
     call_conv: CallConv,
 }
 
@@ -333,6 +337,9 @@ fn build<M: Module>(
     let stage = module
         .declare_data("KITE_RT_STAGE", Linkage::Import, true, false)
         .map_err(|e| e.to_string())?;
+    let depth = module
+        .declare_data("KITE_RT_DEPTH", Linkage::Import, true, false)
+        .map_err(|e| e.to_string())?;
 
     let mut cx = ModuleCx {
         module,
@@ -343,6 +350,7 @@ fn build<M: Module>(
         fns: Vec::new(),
         thunks: HashMap::new(),
         stage,
+        depth,
         call_conv,
     };
 
@@ -655,12 +663,12 @@ fn define_wrapper<M: Module>(
 ) -> Result<FuncId, String> {
     let cfg = cx.module.target_config();
     let sig = make_sig(cx.call_conv, &[], Some(types::I32));
-    let id = cx
+    let program = cx
         .module
-        .declare_function("main", Linkage::Export, &sig)
+        .declare_function("kite_program", Linkage::Local, &sig)
         .map_err(|e| e.to_string())?;
     let mut ctx = cx.module.make_context();
-    ctx.func.signature = sig;
+    ctx.func.signature = sig.clone();
     let mut b = FunctionBuilder::new(&mut ctx.func, fbcx);
     let entry = b.create_block();
     b.append_block_params_for_function_params(entry);
@@ -681,6 +689,28 @@ fn define_wrapper<M: Module>(
     b.ins().call(f, &[]);
     let zero = b.ins().iconst(types::I32, 0);
     b.ins().return_(&[zero]);
+    b.finalize(cfg);
+    cx.module.define_function(program, &mut ctx).map_err(|e| e.to_string())?;
+    cx.module.clear_context(&mut ctx);
+
+    // `main` hands the program to the runtime, which runs it on a stack deep
+    // enough for `kite_rt::MAX_FRAMES` calls and answers what it answered.
+    let id = cx
+        .module
+        .declare_function("main", Linkage::Export, &sig)
+        .map_err(|e| e.to_string())?;
+    ctx.func.signature = sig;
+    let mut b = FunctionBuilder::new(&mut ctx.func, fbcx);
+    let entry = b.create_block();
+    b.switch_to_block(entry);
+    b.seal_block(entry);
+    let program_ref = cx.module.declare_func_in_func(program, b.func);
+    let address = b.ins().func_addr(I64, program_ref);
+    let run = cx.rt("kite_rt_run");
+    let run_ref = cx.module.declare_func_in_func(run, b.func);
+    let call = b.ins().call(run_ref, &[address]);
+    let status = b.inst_results(call)[0];
+    b.ins().return_(&[status]);
     b.finalize(cfg);
     cx.module.define_function(id, &mut ctx).map_err(|e| e.to_string())?;
     cx.module.clear_context(&mut ctx);
@@ -876,7 +906,6 @@ fn define_fn<M: Module>(
         b.def_var(flag, clear);
         owned.insert(l.index(), flag);
     }
-    b.ins().jump(blocks[0], &[]);
 
     let mut lower = FnLower {
         cx,
@@ -892,6 +921,17 @@ fn define_fn<M: Module>(
         fn_refs: HashMap::new(),
         stage_base: None,
     };
+    // This call is one more in progress, and the one past the VM's limit
+    // traps as the VM's does. Counted out again at every `return`.
+    let depth = lower.count_depth(1);
+    let limit = lower.b.ins().icmp_imm_u(
+        cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThan,
+        depth,
+        kite_rt::MAX_FRAMES as i64,
+    );
+    lower.trap_if(limit, trap_code::CALL_DEPTH, 0, 0);
+    let first = lower.blocks[0];
+    lower.b.ins().jump(first, &[]);
 
     let reachable = mir::reachable_blocks(f);
     for (i, block) in f.blocks.iter().enumerate() {
@@ -1027,6 +1067,17 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
         let v = self.b.ins().symbol_value(I64, gv);
         self.stage_base = Some(v);
         v
+    }
+
+    /// Add `by` to the count of calls in progress, answering the new count.
+    fn count_depth(&mut self, by: i64) -> Value {
+        let gv = self.cx.module.declare_data_in_func(self.cx.depth, self.b.func);
+        let at = self.b.ins().symbol_value(I64, gv);
+        let flags = MemFlagsData::trusted();
+        let now = self.b.ins().load(I64, flags, at, 0);
+        let next = self.b.ins().iadd_imm_s(now, by);
+        self.b.ins().store(flags, next, at, 0);
+        next
     }
 
     fn iconst(&mut self, v: i64) -> Value {
@@ -2054,6 +2105,7 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 self.b.ins().brif(c, tb, &[], eb, &[]);
             }
             mir::Terminator::Return(v) => {
+                self.count_depth(-1);
                 if self.f.ret == TyId::UNIT {
                     self.b.ins().return_(&[]);
                 } else {
@@ -2136,7 +2188,7 @@ pub fn compile_object(program: &mir::Program, types: &Types) -> Result<Vec<u8>, 
     module.finish().emit().map_err(|e| e.to_string())
 }
 
-pub use kite_rt::{RunConfig, RunStats};
+pub use kite_rt::{RunConfig, RunStats, MAX_FRAMES};
 
 /// Compile into this process and run to completion, collecting the program's
 /// output and writing it to `out` when the run is over. This is how the

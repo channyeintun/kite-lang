@@ -256,21 +256,22 @@ fn major_collections_sweep_the_dead_and_keep_the_live() {
     );
 }
 
-/// A root more than a million frames up the stack is still a root.
+/// A root the whole depth of the stack up is still a root.
 ///
 /// The walk used to give up after a million frames, so a reference held by
 /// `main` while a deep recursion collected was never updated: the nursery was
-/// reset under it, and the next allocations wrote over the string. Recursion
-/// that deep is not exotic natively — the machine stack is the only bound —
-/// and it is exactly where a program holds the most references on its stack.
-/// The VM traps at 2048 frames, so there is no oracle to compare with; the
-/// program's answer is computed here instead.
+/// reset under it, and the next allocations wrote over the string. A native
+/// recursion now stops where the VM's does, at `MAX_FRAMES` calls, so this
+/// goes as deep as a program can — every frame but `main`'s and `churn`'s is
+/// a `down` — collects at the bottom, and holds the VM to the same answer.
 #[test]
-fn a_root_above_a_million_frames_survives() {
+fn a_root_at_the_top_of_the_deepest_stack_survives() {
     if unsupported_here() {
         return;
     }
-    const DEPTH: usize = 1_100_000;
+    assert_eq!(kite_codegen_clif::MAX_FRAMES as usize, kite_vm::MAX_FRAMES, "the two limits differ");
+    // `main`, then `down` from DEPTH to zero, then `churn`.
+    let depth = kite_vm::MAX_FRAMES - 3;
     let src = format!(
         "fn churn() -> int {{\n  var n = 0\n\
          \x20 for i in 0..2000 {{\n    let s = \"garbage \\(i)\"\n    n = n + s.len()\n  }}\n\
@@ -278,21 +279,14 @@ fn a_root_above_a_million_frames_survives() {
          fn down(d: int) -> int {{\n  if d == 0 {{\n    return churn()\n  }}\n\
          \x20 return down(d - 1) + 1\n}}\n\
          fn main() {{\n  let keep = \"kept \\(7)\"\n  io.print(down({}))\n  io.print(keep)\n}}\n",
-        DEPTH
+        depth
     );
     let churned: usize = (0..2000).map(|i| format!("garbage {}", i).len()).sum();
-    // A native frame here is a few words, so a million of them is tens of
-    // megabytes: more than a test thread's default stack, and far less than
-    // this one reserves — which costs address space, not memory.
-    let (out, stats) = std::thread::Builder::new()
-        .stack_size(1 << 30)
-        .spawn(move || {
-            let config = RunConfig { nursery_bytes: Some(SMALL_NURSERY), ..RunConfig::default() };
-            common::run_native_with(&src, config)
-        })
-        .expect("a thread with a large stack")
-        .join()
-        .expect("the deep run finishes");
-    assert_eq!(out, format!("{}\nkept 7\n", DEPTH + churned));
+    // The runtime runs the program on a stack of its own, deep enough for
+    // every frame the limit allows; the test's thread needs none of its own.
+    let config = RunConfig { nursery_bytes: Some(SMALL_NURSERY), ..RunConfig::default() };
+    let (out, stats) = common::run_native_with(&src, config);
+    assert_eq!(out, format!("{}\nkept 7\n", depth + churned));
     assert!(stats.minor_collections > 0, "the bottom of the recursion never collected");
+    assert_eq!(common::run_vm(&src), out, "the VM and the native backend disagree at the limit");
 }

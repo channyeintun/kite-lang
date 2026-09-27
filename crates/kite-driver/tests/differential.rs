@@ -1691,6 +1691,55 @@ fn main() {
 }
 ",
     ),
+    // A recursion a thousand frames deep, of a function holding a dozen
+    // values across its call, runs on every target — a WebAssembly host's
+    // stack included, which is the shallowest of the three and ends a few
+    // thousand frames of this down. Past each target's limit is a trap; see
+    // `a-recursion-past-the-limit-traps`.
+    (
+        "a-thousand-frames-deep-runs-everywhere",
+        "\
+struct P {
+  x: int
+  y: int
+  name: str
+}
+
+fn wide(n: int, acc: P) -> int {
+  if n == 0 {
+    return acc.x
+  }
+  let a = n * 2
+  let b = a + 3
+  let c = b * a
+  let d = \"\\(c)\"
+  let e = P{ x: acc.x + 1, y: b, name: d }
+  let f = [a, b, c]
+  let g = f.len() + e.y
+  let r = wide(n - 1, e)
+  return r + g - g + f[0] - a + d.len() - d.len()
+}
+
+fn even(n: int) -> bool {
+  if n == 0 {
+    return true
+  }
+  return odd(n - 1)
+}
+
+fn odd(n: int) -> bool {
+  if n == 0 {
+    return false
+  }
+  return even(n - 1)
+}
+
+fn main() {
+  io.print(wide(1000, P{ x: 0, y: 0, name: \"\" }))
+  io.print(even(1000))
+}
+",
+    ),
     // A float exactly halfway between two shortest decimals. ECMAScript picks
     // the even one, and Rust's `{:e}` the upper, so the VM and the native
     // runtime printed `…624.3` where Wasm printed `…624.2` — at run time, in
@@ -2799,6 +2848,28 @@ fn find_runtime_lib() -> Option<std::path::PathBuf> {
 /// trap, and the fact of the trap. What each backend *says* about the trap is
 /// not compared — Wasm says `unreachable` for everything.
 const TRAPPING: &[(&str, &str)] = &[
+    // A recursion deeper than a target allows ends in a trap on every one:
+    // the VM's at a hundred thousand frames, the native runtime's at the
+    // same call, and WebAssembly's wherever its host's stack ends, which is
+    // sooner. Natively it ran on to the machine stack's end and aborted
+    // there, and on Wasm the host's `RangeError` was not a trap at all.
+    (
+        "a-recursion-past-the-limit-traps",
+        "\
+fn depth(n: int) -> int {
+  if n == 0 {
+    return 0
+  }
+  return 1 + depth(n - 1)
+}
+
+fn main() {
+  io.print(depth(1000))
+  io.print(depth(200000))
+  io.print(\"after\")
+}
+",
+    ),
     // A write through a field or into a nested slice goes through a hidden
     // copy, and the bounds check has to survive the trip.
     (

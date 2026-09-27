@@ -661,6 +661,13 @@ registered safepoint. Because Kite has no `unsafe`, no pointer arithmetic, and
 no FFI that hands out raw addresses, every reference is known to the collector —
 conservative scanning is never required.
 
+A native program runs on a thread of its own, with a stack of 512 MB reserved
+rather than used (`kite_rt_run`, which the exported `main` calls), and every
+compiled function counts itself into `KITE_RT_DEPTH` on entry and out on
+return. The call past 100,000 traps with the VM's `call depth exceeded`, so the
+two backends end a deep recursion at the same call; before, the native one
+ran to the end of whatever stack it had been given and aborted there.
+
 That walk is also why there is no native backend on Windows: Cranelift's Win64
 prologue puts the frame record where the walk does not expect it, and
 `--native` refuses there rather than corrupting the heap.

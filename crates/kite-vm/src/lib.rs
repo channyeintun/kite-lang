@@ -19,8 +19,12 @@ use std::rc::Rc;
 ///
 /// Frames live in a vector on the heap and a Kite call is not a Rust call, so
 /// this bounds memory rather than guarding the host's stack. It was 2,048,
-/// which made a recursion three thousand deep trap here and nowhere else; the
-/// native and Wasm backends go far deeper on an ordinary stack.
+/// which made a recursion three thousand deep trap here and nowhere else.
+///
+/// The native runtime counts its calls against the same number
+/// (`kite_rt::MAX_FRAMES`) and traps at the same call with the same words,
+/// which is what lets the two be compared at depth at all. A WebAssembly
+/// host's stack is shallower, and its end is a trap too; see §7.7.
 pub const MAX_FRAMES: usize = 100_000;
 
 #[derive(Clone, Debug)]
