@@ -592,6 +592,23 @@ fn fix_file(path: &str, src: &str) -> ExitCode {
         .iter()
         .find(|(_, name)| name == path)
         .map(|(id, _)| id);
+    // A file the lexer could not read whole is refused, as `kitec fmt`
+    // refuses it. Its diagnostics are about the tokens that survived — a `$`
+    // dropped from between `1` and `2` reads as a comma left out, and `1, $ 2`
+    // was the edit — so an edit made from them is made to a different file
+    // from the one on disk.
+    let lexical = result.diags.iter().find(|d| {
+        d.severity == kite_diag::Severity::Error
+            && d.code.is_some_and(|c| c.is_lexical())
+            && d.primary_span().is_some_and(|s| Some(s.file) == file)
+    });
+    if lexical.is_some() {
+        eprint!("{}", result.render_diagnostics());
+        return fail(&format!(
+            "cannot fix `{}`, which has lexical errors; they come first, and by hand",
+            path
+        ));
+    }
     for d in result.diags.iter() {
         for edit in d.fixes.iter().flat_map(|f| f.edits.iter()) {
             if Some(edit.span.file) != file {

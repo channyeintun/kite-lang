@@ -42,6 +42,8 @@ enum Resume {
 /// recognised and reported where it was opened.
 struct Open {
     brace: Span,
+    /// The `{`'s index among the tokens.
+    token: usize,
     /// How far in the line holding the `{` is indented.
     indent: usize,
     /// How far in the first member that begins a line is indented.
@@ -65,6 +67,7 @@ enum Holds {
 /// Where a declaration began, for reading it a second time.
 struct Checkpoint {
     diags: usize,
+    abandoned: usize,
     type_brackets: usize,
     literal_braces: usize,
     last_error_at: Option<usize>,
@@ -241,6 +244,14 @@ struct Parser<'a> {
     rewind: bool,
     /// On that second reading, the token at which the braces end.
     cut_at: Option<usize>,
+    /// The opening brackets whose closing one was reported missing, by token
+    /// index. A construct that fails at its own closer has been dealt with:
+    /// recovery that counted its bracket as still open looked for the closer
+    /// the author never wrote, and took whatever `}` came next — the one
+    /// closing the function.
+    abandoned: Vec<usize>,
+    /// Where the last of those closers was expected.
+    abandoned_at: Option<usize>,
     /// See [`layout`].
     layout: Layout,
     /// The byte offset each line of the file starts at. Finding a line's start
@@ -361,6 +372,8 @@ impl<'a> Parser<'a> {
             suspect: None,
             rewind: false,
             cut_at: None,
+            abandoned: Vec::new(),
+            abandoned_at: None,
             layout: Layout::default(),
             line_starts,
             depth: 0,
@@ -534,6 +547,19 @@ impl<'a> Parser<'a> {
         None
     }
 
+    /// The bracket closing a list or a pair of braces, whose opening one is
+    /// token `opener`. When it is not there, it is reported, and the opener
+    /// is given up on: see [`Parser::abandoned`].
+    fn expect_closer(&mut self, close: T, opener: usize) -> Option<Span> {
+        if self.at(close) {
+            return Some(self.bump().span);
+        }
+        self.error_expected(&format!("`{}`", close.text()));
+        self.abandoned.push(opener);
+        self.abandoned_at = Some(self.pos);
+        None
+    }
+
     fn error_expected(&mut self, what: &str) {
         if self.panicking || self.unwinding {
             return;
@@ -569,8 +595,11 @@ impl<'a> Parser<'a> {
     /// last.
     fn opened_since(&self, from: usize) -> Vec<T> {
         let mut open = Vec::new();
-        for t in &self.tokens[from.min(self.pos)..self.pos] {
+        let from = from.min(self.pos);
+        for (i, t) in self.tokens[from..self.pos].iter().enumerate() {
             match t.kind {
+                // Its closer was reported missing: it closed where that was.
+                T::LParen | T::LBracket | T::LBrace if self.abandoned.contains(&(from + i)) => {}
                 T::LParen | T::LBracket | T::LBrace => open.push(t.kind),
                 T::RParen | T::RBracket | T::RBrace => {
                     if let Some(i) = open.iter().rposition(|&o| o == opener_of(t.kind)) {
@@ -601,6 +630,16 @@ impl<'a> Parser<'a> {
         let mut open = self.opened_since(from);
         self.panicking = false;
         self.split = None;
+        // A closer missing at the end of a line — `xs.push(2` — was expected
+        // at the start of the next, and that line is the next statement,
+        // not more of this one.
+        if matches!(resume, Resume::Line)
+            && open.is_empty()
+            && self.abandoned_at == Some(self.pos)
+            && self.starts_line(self.pos)
+        {
+            return;
+        }
         loop {
             let k = self.peek();
             if k == T::Eof || self.declaration_starts_line() {
@@ -715,6 +754,14 @@ impl<'a> Parser<'a> {
             }
             T::RBrace | T::Eof => {}
             _ if self.unwinding => {}
+            // After a `(` whose `)` was reported missing, the lexer goes on
+            // reading the lines after it as the inside of that bracket, where
+            // a line break separates nothing, so none arrives here — until
+            // some `)` or `}` closes it in the lexer's eyes. The line itself
+            // still says where the statement ends. Without an error before
+            // it, a line that begins without a line break before it is
+            // always a continuation the parser has already read on through.
+            _ if !self.abandoned.is_empty() && self.starts_line(self.pos) => {}
             _ => {
                 self.error_expected("a line break");
                 self.skip_rest(self.pos, Resume::Line);
@@ -769,7 +816,10 @@ impl<'a> Parser<'a> {
 
     /// A `{` that has just been consumed, whose members are about to be read.
     fn open_brace(&self, brace: Span) -> Open {
-        Open { brace, indent: self.line_indent(brace.start), members: None, holds: Holds::Nothing }
+        // The `{` is the token just consumed.
+        let token = self.pos - 1;
+        let indent = self.line_indent(brace.start);
+        Open { brace, token, indent, members: None, holds: Holds::Nothing }
     }
 
     /// Note where a member of `open` begins, before parsing it.
@@ -955,7 +1005,7 @@ impl<'a> Parser<'a> {
         if self.unwinding {
             return Some(self.prev_span());
         }
-        let end = self.expect(T::RBrace)?;
+        let end = self.expect_closer(T::RBrace, open.token)?;
         if self.misaligned.is_none()
             && self.starts_line(self.pos - 1)
             && self.line_indent(end.start) != open.indent
@@ -1045,6 +1095,7 @@ impl<'a> Parser<'a> {
     fn checkpoint(&self) -> Checkpoint {
         Checkpoint {
             diags: self.diags.len(),
+            abandoned: self.abandoned.len(),
             type_brackets: self.layout.type_brackets.len(),
             literal_braces: self.layout.literal_braces.len(),
             last_error_at: self.last_error_at,
@@ -1057,6 +1108,8 @@ impl<'a> Parser<'a> {
     fn restore(&mut self, pos: usize, saved: Checkpoint) {
         self.pos = pos;
         self.diags.truncate(saved.diags);
+        self.abandoned.truncate(saved.abandoned);
+        self.abandoned_at = None;
         self.layout.type_brackets.truncate(saved.type_brackets);
         self.layout.literal_braces.truncate(saved.literal_braces);
         self.last_error_at = saved.last_error_at;
@@ -1587,24 +1640,34 @@ impl<'a> Parser<'a> {
             if !another {
                 break;
             }
-            self.missing_comma("parameters");
+            self.missing_comma("parameters", true);
         }
         Some(params)
     }
 
     /// Report a `,` missing before the current token, which is the start of
     /// the list's next element, and carry on as if it had been written.
-    fn missing_comma(&mut self, between: &str) {
+    ///
+    /// Between parameters the comma is certain — nothing else can come
+    /// between `a: int` and `b: int` — and it comes with a fix `kitec fix`
+    /// applies. Between arguments it is only likely: `io.print("sum " n)`
+    /// wanted a `+`. So there it is said, not applied.
+    fn missing_comma(&mut self, between: &str, certain: bool) {
         if self.panicking || self.unwinding {
             return;
         }
         self.last_error_at = Some(self.pos);
         let after = self.prev_span();
-        self.diags.push(
-            Diagnostic::error(codes::E0100, format!("expected `,` between {}", between))
-                .with_primary(self.span(), format!("found {}", self.peek().describe()))
-                .with_fix(Fix::replace("add a comma", Span::empty_at(self.file, after.end), ",")),
-        );
+        let d = Diagnostic::error(codes::E0100, format!("expected `,` between {}", between))
+            .with_primary(self.span(), format!("found {}", self.peek().describe()));
+        self.diags.push(if certain {
+            d.with_fix(Fix::replace("add a comma", Span::empty_at(self.file, after.end), ","))
+        } else {
+            d.with_note(
+                "a comma separates two arguments; two values that belong together — two \
+                 strings, say — need an operator between them",
+            )
+        });
     }
 
     /// `@host("net")`, or `@derive(Debug, Hash)`.
@@ -2679,9 +2742,13 @@ impl<'a> Parser<'a> {
                     expr = Expr::Field { base: Box::new(expr), name, span };
                 }
                 T::LParen => {
+                    let opener = self.pos;
                     self.bump();
                     let mut args = Vec::new();
                     let mut arg_names = Vec::new();
+                    // Whether a `,` missing between two arguments was
+                    // supplied, which leaves the call's meaning a guess.
+                    let mut guessed = false;
                     self.skip_newlines();
                     while !self.at(T::RParen) && !self.at_end() {
                         // `Circle(radius: 2.0)` names its payload field. A
@@ -2702,31 +2769,46 @@ impl<'a> Parser<'a> {
                         }
                         // `f(a b)`: a second argument where the `,` should
                         // be. Only a token that can begin an expression and
-                        // cannot continue one says so.
-                        if !matches!(
-                            self.peek(),
-                            T::Ident
-                                | T::Int
-                                | T::Float
-                                | T::Str
-                                | T::Char
-                                | T::True
-                                | T::False
-                                | T::Nil
-                                | T::SelfKw
-                        ) {
+                        // cannot continue one says so — and only on the same
+                        // line. After a line break it is the `)` that is
+                        // missing: `xs.push(2` above `xs.push(3)` read every
+                        // line after it as one more argument.
+                        if self.starts_line(self.pos)
+                            || !matches!(
+                                self.peek(),
+                                T::Ident
+                                    | T::Int
+                                    | T::Float
+                                    | T::Str
+                                    | T::Char
+                                    | T::True
+                                    | T::False
+                                    | T::Nil
+                                    | T::SelfKw
+                            )
+                        {
                             break;
                         }
-                        self.missing_comma("arguments");
+                        self.missing_comma("arguments", false);
+                        guessed = true;
                     }
-                    let end = self.expect(T::RParen)?;
+                    let end = self.expect_closer(T::RParen, opener)?;
                     let span = expr.span().to(end);
-                    expr = Expr::Call { callee: Box::new(expr), args, arg_names, span };
+                    // With a comma guessed, how many arguments there are is a
+                    // guess too, and checking the call against its function
+                    // only reported the guess wrong: `f(a b)` for a one-argument
+                    // `f` was an arity error as well.
+                    expr = if guessed {
+                        Expr::Error(span)
+                    } else {
+                        Expr::Call { callee: Box::new(expr), args, arg_names, span }
+                    };
                 }
                 T::LBracket => {
+                    let opener = self.pos;
                     self.bump();
                     let index = self.in_brackets(|p| p.parse_index())?;
-                    let end = self.expect(T::RBracket)?;
+                    let end = self.expect_closer(T::RBracket, opener)?;
                     let span = expr.span().to(end);
                     expr = Expr::Index {
                         base: Box::new(expr),
@@ -2857,6 +2939,7 @@ impl<'a> Parser<'a> {
                 })
             }
             T::LParen => {
+                let opener = self.pos;
                 self.bump();
                 self.skip_newlines();
                 if self.at(T::RParen) {
@@ -2876,13 +2959,14 @@ impl<'a> Parser<'a> {
                         }
                         self.skip_newlines();
                     }
-                    let end = self.expect(T::RParen)?;
+                    let end = self.expect_closer(T::RParen, opener)?;
                     return Some(Expr::Tuple { elems, span: span.to(end) });
                 }
-                let end = self.expect(T::RParen)?;
+                let end = self.expect_closer(T::RParen, opener)?;
                 Some(Expr::Paren { inner: Box::new(first), span: span.to(end) })
             }
             T::LBracket => {
+                let opener = self.pos;
                 self.bump();
                 let mut elems = Vec::new();
                 self.skip_newlines();
@@ -2894,7 +2978,7 @@ impl<'a> Parser<'a> {
                     }
                     self.skip_newlines();
                 }
-                let end = self.expect(T::RBracket)?;
+                let end = self.expect_closer(T::RBracket, opener)?;
                 Some(Expr::Slice { elems, span: span.to(end) })
             }
             T::Match => Some(Expr::Match(self.parse_match()?)),
@@ -3173,6 +3257,7 @@ impl<'a> Parser<'a> {
     /// expression position is unambiguously a map.
     fn parse_map_literal(&mut self) -> Option<Expr> {
         let start = self.span();
+        let opener = self.pos;
         self.bump(); // `{`
         let mut entries = Vec::new();
         self.skip_newlines();
@@ -3187,7 +3272,7 @@ impl<'a> Parser<'a> {
             }
             self.skip_newlines();
         }
-        let end = self.expect(T::RBrace)?;
+        let end = self.expect_closer(T::RBrace, opener)?;
         Some(Expr::Map { entries, span: start.to(end) })
     }
 

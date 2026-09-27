@@ -32,6 +32,14 @@ impl fmt::Display for Code {
     }
 }
 
+impl Code {
+    /// Whether the lexer reports this (E0000–E0099): the file could not be
+    /// read as tokens whole, and what did not lex is missing from them.
+    pub fn is_lexical(self) -> bool {
+        self.0.len() == 5 && self.0.starts_with("E00")
+    }
+}
+
 macro_rules! codes {
     ($($name:ident = $code:literal, $short:literal, $explain:literal;)*) => {
         $(pub const $name: Code = Code($code);)*

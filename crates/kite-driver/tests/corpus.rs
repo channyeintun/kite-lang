@@ -213,6 +213,54 @@ fn a_brace_missing_before_a_declaration_is_one_diagnostic() {
     }
 }
 
+/// A list missing its closing bracket, or a comma between two arguments, is
+/// one diagnostic from the parser through the type checker.
+///
+/// Here rather than in `tests/corpus` for the reason above: `kitec fmt`
+/// indents what follows an unclosed bracket.
+#[test]
+fn one_mistake_in_a_list_is_one_diagnostic() {
+    let cases = [
+        // A `)` missing at the end of a line: the lines after it are not more
+        // arguments, and the statements on them are read.
+        (
+            "fn main() {\n    var xs = [1]\n    xs.push(2\n    xs.push(3)\n    io.print(xs.len())\n}\n",
+            4,
+        ),
+        // A struct literal's `}`: the binding stays, and so does the
+        // function's own `}`.
+        (
+            "struct P {\n    x: int\n}\n\nfn main() {\n    let p = P{ x: 1\n    io.print(p.x)\n}\n\n\
+             fn other() -> int {\n    return 2\n}\n",
+            7,
+        ),
+        // A map literal's.
+        ("fn main() {\n    let m = {\"a\": 1\n    io.print(m)\n}\n", 3),
+        // A comma between two arguments is a guess, and the call it would
+        // guess is not checked against the function: `f` takes one.
+        (
+            "fn f(x: int) -> int {\n    return x\n}\n\nfn main() {\n    let a = 1\n    let b = 2\n\
+             \x20   io.print(f(a b))\n}\n",
+            8,
+        ),
+        ("fn main() {\n    let name = \"x\"\n    io.print(\"hello \" name)\n}\n", 3),
+    ];
+    for (src, line) in cases {
+        let result = compile(Path::new("t.kite"), src, Emit::Check);
+        let errors: Vec<(u32, String)> = actual(&result)
+            .into_iter()
+            .flat_map(|(line, codes)| codes.into_iter().map(move |c| (line, c)))
+            .collect();
+        assert_eq!(
+            errors,
+            vec![(line, "E0100".to_string())],
+            "{}\n{}",
+            src,
+            result.render_diagnostics()
+        );
+    }
+}
+
 /// A body cut short by a missing `}` ends in the parser's error statement,
 /// and after a `return` that is not unreachable code: nobody wrote it. It was
 /// reported as E0116 beside the E0101, at the next method's `pub`.

@@ -1164,6 +1164,87 @@ fn a_missing_comma_is_one_error() {
     assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
 }
 
+/// Between parameters a missing comma is certain, and comes with the fix
+/// `kitec fix` applies. Between arguments it is a guess — `io.print("sum "
+/// n)` wanted a `+` — so it comes with no fix, and the call it would have
+/// guessed is an error rather than a call with a guessed number of
+/// arguments, which the checker then reported as the wrong number.
+#[test]
+fn a_comma_is_only_supplied_where_it_is_certain() {
+    let fixes = |p: &Parsed| -> Vec<String> {
+        p.diags.iter().flat_map(|d| d.fixes.iter().map(|f| f.message.clone())).collect()
+    };
+    let p = parse_src("fn add(a: int b: int) -> int {\n    return a + b\n}\n");
+    assert_eq!(fixes(&p), vec!["add a comma"]);
+    let p = parse_src("fn main() {\n    let s = f(\"sum \" n)\n}\n");
+    assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+    assert!(fixes(&p).is_empty());
+    let main = p.fns()[0];
+    assert!(
+        matches!(&main.body.stmts[0], Stmt::Let(LetStmt { init: Some(Expr::Error(_)), .. })),
+        "{:?}",
+        main.body.stmts
+    );
+}
+
+/// A `)` missing at the end of a line is one error, where it was expected.
+/// The next line used to be read as one more argument with a comma missing
+/// before it, and so did every line after it up to the function's `}` —
+/// each an error of its own, each with a fix `kitec fix` applied, and the
+/// real cause reported last.
+#[test]
+fn a_paren_missing_at_the_end_of_a_line_is_one_error() {
+    let src = "\
+fn main() {
+    var xs = [1]
+    xs.push(2
+    xs.push(3)
+    xs.push(4)
+    io.print(xs.len())
+}
+";
+    let p = parse_src(src);
+    assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+    assert!(p.render().contains("expected `)`"), "{}", p.render());
+    assert!(p.render().contains("4 │     xs.push(3)"), "{}", p.render());
+    assert!(p.diags.iter().all(|d| d.fixes.is_empty()));
+    // The lines after it are read as the statements they are.
+    let main = p.fns()[0];
+    assert_eq!(main.body.stmts.len(), 5, "{:?}", main.body.stmts);
+    assert!(matches!(&main.body.stmts[1], Stmt::Error(_)));
+    assert!(matches!(&main.body.stmts[4], Stmt::Expr(Expr::Call { .. })));
+    // So is a `]` or a `)` of a group.
+    let p = parse_src("fn main() {\n    let v = [1, 2\n    let w = (1 + 2\n    io.print(v)\n}\n");
+    assert_eq!(p.codes(), vec!["E0100", "E0100"], "{}", p.render());
+    assert_eq!(p.fns()[0].body.stmts.len(), 3);
+}
+
+/// A struct or map literal missing its `}` is one error. Recovery used to
+/// count the literal's `{` as still open, take the function's `}` for its
+/// closer, and then report the function's `{` as never closed.
+#[test]
+fn a_literal_missing_its_brace_is_one_error() {
+    for literal in ["P{ x: 1", "{\"a\": 1"] {
+        let src = format!(
+            "fn main() {{\n    let p = {}\n    io.print(p)\n}}\n\nfn other() -> int {{\n    return 2\n}}\n",
+            literal
+        );
+        let p = parse_src(&src);
+        assert_eq!(p.codes(), vec!["E0100"], "{}", p.render());
+        assert!(p.render().contains("expected `}`"), "{}", p.render());
+        // The binding is kept, the line after it read, and the function
+        // after that is still a function.
+        let main = p.fns()[0];
+        assert!(
+            matches!(&main.body.stmts[0], Stmt::Let(LetStmt { init: Some(Expr::Error(_)), .. })),
+            "{:?}",
+            main.body.stmts
+        );
+        assert_eq!(main.body.stmts.len(), 2);
+        assert_eq!(p.fns().len(), 2);
+    }
+}
+
 /// Struct fields and enum variants are separated by line breaks. A comma is
 /// reported once and read as one, rather than losing the member after it.
 #[test]
