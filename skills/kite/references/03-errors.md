@@ -58,10 +58,25 @@ Three things to read off it: `_` in the value slot of a `return` means *no value
 (it is not a zero value); `check err` propagates; and `err` may be rebound in the
 same scope, which no other binding may be.
 
-`_` is not checked against the error you return beside it. `return _, nil`
-compiles, and the caller — holding a nil, Checked error — is then allowed to read
-the hole and gets whatever the slot holds: an `int` renders as `nil`, a `str`
-traps at first use. Write `_` only beside an error you know is non-nil.
+`_` is only allowed beside an error that is not nil: `return _, nil` is `E0200`,
+because the caller would be allowed to read a value that does not exist. An error
+the compiler cannot prove present, such as `return _, lookup()` where `lookup`
+returns `error`, is tested when the `return` runs: if it is nil, the program traps
+there, with the same message on every backend. `if err != nil { return _, err }`
+and `return _, errors.new("…")` are proved present and never trap.
+
+```kite fails
+fn count() -> (int, error) {
+    return _, nil //~ E0200
+}
+
+fn main() {
+    let (n, err) = count()
+    if err == nil {
+        io.print(n)
+    }
+}
+```
 
 ## The `error` type
 
@@ -916,5 +931,4 @@ knows.
   `errors.root`.
 - Undocumented: `err.message()` requires the error to be proved non-nil (`E0301`);
   `error` is not printable by `io.print`; `let (v, _) = f()` has its own `E0302`
-  wording; `-> error` alone satisfies `check`; and `return _, nil` is accepted,
-  handing the caller a hole it is allowed to read.
+  wording; and `-> error` alone satisfies `check`.

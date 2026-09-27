@@ -929,6 +929,14 @@ struct Signature {
 /// sides — and every one costs a trampoline in the module.
 pub const JS_FUNC_MAX_ARITY: usize = 4;
 
+/// What `return _, err` traps with when `err` turns out nil at run time.
+///
+/// It is a `require` the checker writes in front of the `return`, so every
+/// backend reports it through the one path they already share, and says the
+/// same thing. Written only where the checker cannot prove the error present.
+pub const NIL_FAILURE: &str = "`return _, err` was handed a nil error: `_` stands for no value, \
+                                so the error beside it must be a failure";
+
 /// One declared type parameter.
 #[derive(Clone, Debug)]
 struct GenericDef {
@@ -2304,10 +2312,92 @@ impl<'a> Checker<'a> {
                     );
                     return None;
                 }
+                // `return _, nil` is neither a value nor a failure. It used to
+                // compile, and the caller — holding a nil error — was allowed
+                // to read the hole: the VM trapped, native code printed a zero
+                // or crashed, and Wasm printed a zero or dereferenced null.
+                // The statement is still built below, so the one mistake is
+                // not also reported as a missing return.
+                let mut literal = error;
+                while let ast::Expr::Paren { inner, .. } = literal {
+                    literal = inner;
+                }
+                if let ast::Expr::Nil(nil) = literal {
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0200,
+                            "`_` stands for no value, so the error beside it must be a failure",
+                        )
+                        .with_primary(*nil, "this error is nil")
+                        .with_note(
+                            "a caller that finds the error nil is allowed to read the value, \
+                             and `_` has none to give it",
+                        )
+                        .with_note(
+                            "return a value with `return value, nil`, or a failure with \
+                             `return _, errors.new(\"…\")`",
+                        ),
+                    );
+                }
                 let e = self.expr(error, Some(TyId::ERR));
                 let e = self.coerce(e, Some(TyId::ERR));
                 self.expect_ty(e.ty, TyId::ERR, e.span, None);
                 self.mark_checked(error);
+                // An error that is not the literal `nil` may still be nil when
+                // it runs: `let e = lookup()` then `return _, e`. That is a
+                // trap here, at the `return`, and the same one on every
+                // backend, rather than a hole the caller reads later. An error
+                // built on the spot, or one control flow has proved present —
+                // `if err != nil { return _, err }`, the shape nearly every one
+                // of these has — needs no test.
+                let present = match &e.kind {
+                    ExprKind::ErrorNew { .. } => true,
+                    ExprKind::Local(hir::LocalId(id)) => self.error_nonnil.contains(id),
+                    _ => false,
+                };
+                let mut claim = Vec::new();
+                let e = if present || e.ty != TyId::ERR {
+                    e
+                } else {
+                    let at = e.span;
+                    let id = self.synthetic_local("failure", TyId::ERR, *span);
+                    let read = hir::Expr {
+                        kind: ExprKind::Local(hir::LocalId(id)),
+                        ty: TyId::ERR,
+                        span: at,
+                    };
+                    claim.push(hir::Stmt::Let {
+                        local: hir::LocalId(id),
+                        init: Some(e),
+                        span: *span,
+                    });
+                    let is_failure = hir::Expr {
+                        kind: ExprKind::Unary {
+                            op: hir::UnOp::Not,
+                            operand: Box::new(hir::Expr {
+                                kind: ExprKind::IsNil { value: Box::new(read.clone()) },
+                                ty: TyId::BOOL,
+                                span: at,
+                            }),
+                        },
+                        ty: TyId::BOOL,
+                        span: at,
+                    };
+                    let message = hir::Expr {
+                        kind: ExprKind::Str(NIL_FAILURE.to_string()),
+                        ty: TyId::STR,
+                        span: at,
+                    };
+                    claim.push(hir::Stmt::Expr(hir::Expr {
+                        kind: ExprKind::CallBuiltin {
+                            builtin: Builtin::Require,
+                            args: vec![is_failure, message],
+                        },
+                        ty: TyId::UNIT,
+                        span: *span,
+                    }));
+                    read
+                };
                 let ret = hir::Stmt::Return {
                     value: Some(hir::Expr {
                         kind: ExprKind::PairNew {
@@ -2323,7 +2413,12 @@ impl<'a> Checker<'a> {
                     }),
                     span: r.span,
                 };
-                Some((self.returning(ret, r.span), Flow::Diverges))
+                let ret = self.returning(ret, r.span);
+                if claim.is_empty() {
+                    return Some((ret, Flow::Diverges));
+                }
+                claim.push(ret);
+                Some((hir::Stmt::Block(hir::Block { stmts: claim }), Flow::Diverges))
             }
         }
     }

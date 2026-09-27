@@ -631,10 +631,12 @@ chain of `br_on_cast`; the code does not.
 
 `(T, error)` is one GC record, so a function returns both halves at once. On
 the failure path, `return _, err` still has to put bits in the value slot, so a
-default of the value's type goes there — unobservable, because the taint
-analysis has proved nothing can read it. The error path allocates the pair and
-the error. (The first design claimed it would emit no value at all; a record
-with a slot cannot do that.)
+default of the value's type goes there — never read, because `_` is only
+accepted beside an error that is not nil. `return _, nil` is refused, and an
+error the checker cannot prove present is tested by a `require` it writes in
+front of the `return`, so a nil one traps there, alike on every backend. The
+error path allocates the pair and the error. (The first design claimed it would
+emit no value at all; a record with a slot cannot do that.)
 
 ### Validation
 
