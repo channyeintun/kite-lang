@@ -926,6 +926,31 @@ fn main() {
 }
 ```
 
+An alias of a struct or an enum stands for it wherever its name is written — a
+literal, a variant, an associated call, an `impl` header:
+
+```kite
+struct Point {
+    x: int
+}
+
+type Pt = Point
+
+impl Pt {
+    fn origin() -> Pt {
+        return Pt{ x: 0 }
+    }
+}
+
+fn main() {
+    io.print(Pt.origin().x)
+}
+```
+
+An `impl` for an alias of one instantiation, `type IntBox = Box<int>`, is the
+refused `impl … for Box<int>` (`E0208`), and one for an alias of anything else,
+`type UserId = int`, is `E0204`.
+
 A struct literal may not appear in the condition position of `if` / `for` /
 `match` without parentheses — the same rule Go and Rust have. Write
 `if (Point{x: 1.0, y: 2.0}).is_origin() { … }`.

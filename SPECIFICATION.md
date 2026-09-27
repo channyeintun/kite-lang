@@ -362,7 +362,14 @@ pub enum Status {
 An alias is *replaced* by the type it names before anything else is checked, so
 the two are the same type everywhere — a `UserId` adds no safety over an `int`,
 and is not a way to get one. Aliases may name each other and may be declared in
-any order.
+any order. An alias of a struct or an enum stands for it where its name is
+written in a body or a header too: `type Pt = Point` makes `Pt{ x: 1.0, y: 2.0 }`,
+`impl Display for Pt` and, for an enum, `S.Active` mean what `Point` and
+`Status` would. An alias of one instantiation of a generic type,
+`type Ints = Box<int>`, names a concrete type for `Ints.is(err)` and
+`Ints.as(err)`; as an `impl` header it is that instantiation written out, and
+`E0208` ([§8.2](#82-methods)). An alias of anything else, `impl Display for
+UserId`, is no type an `impl` is for (`E0204`).
 
 Two forms are rejected, both because the replacement is the whole feature. A
 circular alias (`type A = B` with `type B = A`) names nothing to be replaced

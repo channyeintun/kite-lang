@@ -5933,8 +5933,16 @@ impl<'a> Checker<'a> {
         let ty = match target {
             TypeTarget::Struct(s) => self.types.struct_ty(s),
             TypeTarget::Enum(e) => self.types.enum_ty(e),
-            // A trait or an alias has no run-time identity of its own to
-            // compare a tag against; only a concrete type does.
+            // An alias of one instantiation of a generic type,
+            // `type IntWrapped = Wrapped<int>`, names a concrete type, and
+            // asks about it as `Wrapped.as` used as a `Wrapped<int>` does.
+            TypeTarget::Alias(ty)
+                if matches!(*self.types.kind(ty), TyKind::Struct(_) | TyKind::Enum(_)) =>
+            {
+                ty
+            }
+            // A trait or any other alias has no run-time identity of its own
+            // to compare a tag against; only a concrete type does.
             _ => {
                 self.diags.push(
                     Diagnostic::error(
@@ -6152,12 +6160,15 @@ impl<'a> Checker<'a> {
                 }
                 d
             }
-            Some(TypeTarget::Alias(_)) => Diagnostic::error(
+            // An alias of a plain enum is the enum, and was resolved as it;
+            // this is one of something else, or of one instantiation of a
+            // generic enum, whose variants are reached through the enum.
+            Some(TypeTarget::Alias(ty)) => Diagnostic::error(
                 codes::E0111,
                 format!("`{}` is a type alias, not an enum", owner),
             )
             .with_primary(span, "no such variant")
-            .with_secondary(decl_span, "declared here"),
+            .with_secondary(decl_span, format!("an alias of `{}`", self.types.name(ty))),
             _ => return false,
         };
         self.diags.push(d);
@@ -11120,9 +11131,11 @@ fn check_impls(
         // an implementation nothing checked was one a `dyn` call could reach
         // with the wrong signature.
         let module = resolved.module_of_item(item_index);
+        // A header naming an alias of a plain struct or enum is for that type,
+        // as the resolver registered it.
         let (Some(ti), Some(target)) = (
             resolved.type_by_name_in(module, &tp.text()),
-            resolved.type_by_name_in(module, &imp.self_ty.text()),
+            resolved.type_by_name_in(module, &imp.self_ty.text()).and_then(|t| resolved.aliased_type(file, t)),
         ) else {
             continue;
         };
@@ -11515,7 +11528,35 @@ fn check_impl_headers(
         let ast::Item::Impl(imp) = item else { continue };
         let target = &imp.self_ty;
         let module = resolved.module_of_item(item_index);
-        let Some(ti) = resolved.type_by_name_in(module, &target.text()) else { continue };
+        let Some(written) = resolved.type_by_name_in(module, &target.text()) else { continue };
+        let Some(ti) = resolved.aliased_type(file, written) else { continue };
+        // An alias of one instantiation, `type IntStr = Pair<int, str>`, is
+        // that instantiation's header written out, and is never the block's
+        // own parameters.
+        if resolved.nominal(written) != ti {
+            refused.push(item_index);
+            let generic = resolved.type_decl(ti).name.clone();
+            let params = declared_param_names(file, resolved, ti).join(", ");
+            let header = match &imp.trait_path {
+                Some(tp) => format!("impl<{}> {} for {}<{}>", params, tp.text(), generic, params),
+                None => format!("impl<{}> {}<{}>", params, generic, params),
+            };
+            diags.push(
+                Diagnostic::error(
+                    codes::E0208,
+                    format!("an `impl` is for every `{}`, at its own type parameters", generic),
+                )
+                .with_primary(
+                    target.span,
+                    format!("`{}` is one instantiation of `{}`", target.text(), generic),
+                )
+                .with_note(format!(
+                    "write `{}`, and let a bound on a parameter say which instantiations it covers",
+                    header
+                )),
+            );
+            continue;
+        }
         let count = match type_ids.get(ti as usize).copied().flatten() {
             Some(TypeTarget::Struct(s)) => types.struct_def(s).generic_count,
             Some(TypeTarget::Enum(e)) => types.enum_def(e).generic_count,

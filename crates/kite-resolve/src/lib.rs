@@ -578,6 +578,12 @@ pub struct ResolveMap {
     /// has no entry in `fns`, and is resolved here, once, for its body to be
     /// checked all the same.
     pub defaults: Vec<DefaultBody>,
+    /// For a type alias naming a struct or an enum that takes no type
+    /// arguments, `type Pt = Point`, the type it names, through any aliases
+    /// of aliases. An alias is the type it names everywhere (§3.4), and where
+    /// a type is found by name — an `impl` header, a literal, a pattern, a
+    /// path's head — that is this. See [`ResolveMap::nominal`].
+    pub alias_of: HashMap<u32, u32>,
     /// Every resolved name, keyed by the span of its use. Spans are unique per
     /// source position, which makes them a serviceable node identity until a
     /// later phase introduces real node ids.
@@ -754,6 +760,31 @@ impl ResolveMap {
         self.types.iter().position(|t| t.name == name).map(|i| i as u32)
     }
 
+    /// The struct or enum a type found by name stands for: the type itself,
+    /// or the one an alias names ([`ResolveMap::alias_of`]).
+    pub fn nominal(&self, type_index: u32) -> u32 {
+        self.alias_of.get(&type_index).copied().unwrap_or(type_index)
+    }
+
+    /// The struct or enum an `impl` header naming this type is for: as
+    /// [`Self::nominal`], and for an alias of one instantiation of a generic
+    /// type, `type IntStr = Pair<int, str>`, that generic type, whose header
+    /// the checker then refuses as it refuses `Pair<int, str>` written out
+    /// (E0208). `None` for an alias of anything else.
+    pub fn aliased_type(&self, file: &SourceFile, type_index: u32) -> Option<u32> {
+        let mut at = self.nominal(type_index);
+        for _ in 0..self.types.len() {
+            let decl = &self.types[at as usize];
+            if decl.kind != TypeKind::Alias {
+                return matches!(decl.kind, TypeKind::Struct | TypeKind::Enum).then_some(at);
+            }
+            let Item::TypeAlias(a) = &file.items[decl.decl_index] else { return None };
+            let Type::Path(p) = &a.ty else { return None };
+            at = self.nominal(self.type_by_name_in(self.modules.of(decl.decl_index), &p.text())?);
+        }
+        None
+    }
+
     /// The module an item was declared in.
     pub fn module_of_item(&self, decl_index: usize) -> &str {
         self.modules.of(decl_index)
@@ -877,6 +908,7 @@ pub fn resolve_modules(file: &SourceFile, modules: Modules, diags: &mut DiagBag)
     let mut map = ResolveMap { modules, ..ResolveMap::default() };
 
     collect_types(file, &mut map, diags);
+    index_aliases(file, &mut map);
     index_variants(file, &mut map);
     collect_functions(file, &mut map, diags);
     resolve_bodies(file, &mut map, diags);
@@ -917,6 +949,44 @@ fn collect_types(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) {
             span: name.span,
             is_pub,
         });
+    }
+}
+
+/// Record what each alias of a plain struct or enum names
+/// ([`ResolveMap::alias_of`]). An alias of a generic type's instantiation,
+/// `type IntBox = Box<int>`, is not recorded: `Box` found in its place would
+/// lose the `int`. A cycle is left for the checker, which reports it where
+/// it expands aliases.
+fn index_aliases(file: &SourceFile, map: &mut ResolveMap) {
+    for index in 0..map.types.len() {
+        if map.types[index].kind != TypeKind::Alias {
+            continue;
+        }
+        let mut at = index;
+        for _ in 0..map.types.len() {
+            let decl = &map.types[at];
+            let named = match (&decl.kind, &file.items[decl.decl_index]) {
+                (TypeKind::Alias, Item::TypeAlias(a)) => match &a.ty {
+                    Type::Path(p) if p.args.is_empty() && a.generics.is_empty() => {
+                        map.type_by_name_in(map.modules.of(decl.decl_index), &p.text())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            match named {
+                Some(next) => at = next as usize,
+                None => break,
+            }
+        }
+        let plain = match &file.items[map.types[at].decl_index] {
+            Item::Struct(st) => st.generics.is_empty(),
+            Item::Enum(e) => e.generics.is_empty(),
+            _ => false,
+        };
+        if plain && map.types[at].kind != TypeKind::Alias {
+            map.alias_of.insert(index as u32, at as u32);
+        }
     }
 }
 
@@ -1037,12 +1107,19 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                 let module = map.modules.of(i).to_string();
                 let target = imp.self_ty.text();
                 let _ = &seen;
-                let Some(type_index) = map.type_by_name_in(&module, &target) else {
+                let Some(written) = map.type_by_name_in(&module, &target) else {
                     diags.push(
                         Diagnostic::error(codes::E0204, format!("unknown type `{}`", target))
                             .with_primary(imp.self_ty.span, "no such type in this module")
                             .with_note("an `impl` block needs a type declared in this module"),
                     );
+                    continue;
+                };
+                // An alias is the type it names, so the block is for that
+                // type. It was taken as a type of its own that nothing could
+                // reach, and the block was dropped unseen.
+                let Some(type_index) = map.aliased_type(file, written) else {
+                    diags.push(not_for_an_alias(file, map, written, &imp.self_ty));
                     continue;
                 };
 
@@ -1347,7 +1424,7 @@ impl<'a> FnResolver<'a> {
     fn find_type(&self, name: &str) -> Option<u32> {
         match self.self_type {
             Some(ti) if name == "Self" => Some(ti),
-            _ => self.map.type_by_name_in(&self.module, name),
+            _ => self.map.type_by_name_in(&self.module, name).map(|ti| self.map.nominal(ti)),
         }
     }
 
@@ -2143,6 +2220,21 @@ impl<'a> FnResolver<'a> {
 const SELF_OUTSIDE_AN_IMPL: &str = "`Self` names a type inside an `impl` block, the one the block is \
      for; in a trait's default method it is whichever type implements the trait, which is \
      known only by the trait's methods, so reach it through one of those";
+
+/// An `impl` header naming an alias of something that is not a struct or an
+/// enum, such as `type Id = int`.
+fn not_for_an_alias(file: &SourceFile, map: &ResolveMap, alias: u32, header: &TypePath) -> Diagnostic {
+    let decl = &map.types[alias as usize];
+    let mut d = Diagnostic::error(
+        codes::E0204,
+        format!("`{}` is not a struct or an enum", header.text()),
+    )
+    .with_primary(header.span, "an `impl` is for a struct or an enum");
+    if let Item::TypeAlias(a) = &file.items[decl.decl_index] {
+        d = d.with_secondary(a.ty.span(), format!("`{}` names this", header.text()));
+    }
+    d.with_note("to give it methods, wrap it in a struct of its own and implement those")
+}
 
 /// A run of plain names, dotted. `None` for anything else, which is then an
 /// ordinary field access.

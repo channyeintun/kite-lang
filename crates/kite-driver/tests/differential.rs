@@ -3365,6 +3365,93 @@ fn main() {
 }
 "#,
     ),
+    // An alias of a struct or an enum is that type where its name is written:
+    // an `impl` header, a literal, a variant, an associated call, a pattern,
+    // through an alias of an alias. The header's block was dropped unseen, and
+    // the rest were refused as "a type alias, not an enum". An alias of one
+    // instantiation, `Wrapped<int>`, asks `is` and `as` about that.
+    (
+        "an-alias-is-its-type-where-its-name-is-written",
+        r#"trait Named {
+    fn name(self) -> str
+}
+
+struct Point {
+    x: int
+}
+
+type Pt = Point
+
+type Spot = Pt
+
+impl Named for Pt {
+    fn name(self) -> str {
+        return "pt \(self.x)"
+    }
+}
+
+impl Spot {
+    fn origin() -> Spot {
+        return Spot{ x: 0 }
+    }
+}
+
+enum Color {
+    Red
+    Green(int)
+}
+
+type C = Color
+
+fn shade(c: C) -> int {
+    return match c {
+        C.Red => 0,
+        C.Green(n) => n,
+    }
+}
+
+struct Wrapped<T> {
+    inner: T
+    why: str
+}
+
+impl<T> Error for Wrapped<T> {
+    fn message(self) -> str {
+        return "wrapped: " + self.why
+    }
+}
+
+type IntWrapped = Wrapped<int>
+
+fn via<T: Named>(x: T) -> str {
+    return x.name()
+}
+
+fn main() {
+    let p: Pt = Point{ x: 1 }
+    io.print(p.name())
+    io.print(Pt{ x: 2 }.name())
+    io.print(via(Spot.origin()))
+    let d: dyn Named = Spot{ x: 3 }
+    io.print(d.name())
+    io.print(shade(C.Red) + shade(C.Green(4)))
+    io.print(C.Green(2) == Color.Green(2))
+    let e: error = Wrapped{ inner: 5, why: "five" }
+    if e == nil {
+        return
+    }
+    io.print(IntWrapped.is(e))
+    let w = IntWrapped.as(e)
+    if w != nil {
+        io.print(w.inner + 1)
+    }
+    let s: error = Wrapped{ inner: "s", why: "str" }
+    if s != nil {
+        io.print(IntWrapped.is(s))
+    }
+}
+"#,
+    ),
 ];
 
 /// Programs above that need a rule of the checker's which may not have landed:

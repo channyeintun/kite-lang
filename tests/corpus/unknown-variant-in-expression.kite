@@ -23,5 +23,9 @@ fn main() {
     let s = Shape.Square(1.0) //~ ERROR E0111
     let j = json.Json.Nope //~ ERROR E0111
     let k = json.Json.Nope(1) //~ ERROR E0111
-    let h = Hue.Red //~ ERROR E0111
+    // An alias of an enum is the enum (§3.4), so it reaches its variants and
+    // misses the ones it does not have.
+    let h = Hue.Red
+    io.print(h == Color.Red)
+    let b = Hue.Blue //~ ERROR E0111
 }
