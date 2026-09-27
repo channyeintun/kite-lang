@@ -1142,3 +1142,27 @@ fn exit_without_shutdown_is_a_failure() {
     let mut output = Vec::new();
     assert_eq!(crate::serve(&mut std::io::Cursor::new(input), &mut output), 1);
 }
+
+// ---- what an edit elsewhere republishes --------------------------------------
+
+/// A file not yet saved, in a directory not yet created, is part of that
+/// directory's module when the project is opened through a symbolic link.
+/// Its buffer was keyed by the linked spelling and the directory was asked
+/// for by the real one, so the module was `cannot find module`.
+#[cfg(unix)]
+#[test]
+fn an_unsaved_directory_module_is_found_through_a_linked_project() {
+    let p = Project::new("linked-unsaved");
+    let main_text = "use newdir\n\nfn main() {\n    io.print(newdir.v())\n}\n";
+    p.file("main.kite", main_text);
+    let link = std::env::temp_dir().join(format!("kite-lsp-linked-{}", std::process::id()));
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&p.dir, &link).expect("a link");
+    let through = |name: &str| uri_of_path(&link.join(name).to_string_lossy());
+    let mut s = Server::new();
+    open(&mut s, &through("newdir/new.kite"), "pub fn v() -> int {\n    return 1\n}\n");
+    let main = through("main.kite");
+    let published = open(&mut s, &main, main_text);
+    let _ = std::fs::remove_file(&link);
+    assert_eq!(codes_for(&published, &main), Some(Vec::new()), "{:?}", published);
+}

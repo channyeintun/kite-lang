@@ -248,18 +248,32 @@ impl Files {
 
 /// Where a file is, asked of the filesystem: links followed and `..` taken
 /// where it really leads. A file that does not exist yet — an editor's buffer
-/// never saved — is its directory's real location and its own name.
+/// never saved — is where the nearest directory above it that does exist
+/// really is, and the rest of its path below that.
+///
+/// **The nearest that exists, not only its own directory.** Only the file's
+/// directory was asked, and a buffer in a directory not created yet fell back
+/// to its path as written. The loader asks about that directory itself, whose
+/// parent does exist and was followed — so under a symbolic link (a project
+/// opened as `/tmp/…` on macOS, or through a linked home directory) the two
+/// spellings of one place never met, and an unsaved directory module was
+/// `cannot find module` there while it compiled through the real path.
 pub fn located(path: &Path) -> PathBuf {
     if let Ok(real) = std::fs::canonicalize(path) {
         return real;
     }
-    match (path.parent(), path.file_name()) {
-        (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => match std::fs::canonicalize(dir) {
-            Ok(dir) => dir.join(name),
-            Err(_) => normalise(path),
-        },
-        _ => normalise(path),
+    for above in path.ancestors().skip(1) {
+        if above.as_os_str().is_empty() {
+            break;
+        }
+        if let Ok(real) = std::fs::canonicalize(above) {
+            // Nothing below `above` exists, so what is left is folded by
+            // reading it: there is no link down there to follow.
+            let rest = path.strip_prefix(above).unwrap_or(path);
+            return normalise(&real.join(rest));
+        }
     }
+    normalise(path)
 }
 
 /// `.` and `..` folded away by reading the path, not the disk.

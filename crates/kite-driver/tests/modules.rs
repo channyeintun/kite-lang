@@ -932,6 +932,27 @@ fn a_manifest_that_does_not_read_is_reported_at_its_line() {
     assert!(said.contains("has no `edition`"), "{}", said);
 }
 
+/// A file not yet saved, in a directory not yet created, under a linked
+/// directory: the loader asks for the directory by where it really is, and
+/// the buffer is keyed the same way. The buffer was keyed by the linked
+/// spelling, the two never met, and the module was `cannot find module`.
+#[cfg(unix)]
+#[test]
+fn an_unsaved_directory_under_a_linked_directory_is_a_module() {
+    let p = Project::new("linked-unsaved");
+    let link = std::env::temp_dir().join(format!("kite-mod-linked-{}", std::process::id()));
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&p.dir, &link).expect("a link");
+    let files = kite_driver::modules::Files::edited(vec![(
+        link.join("fresh/new.kite"),
+        "pub fn v() -> int {\n  return 3\n}\n".to_string(),
+    )]);
+    let src = "use fresh\n\nfn main() {\n  io.print(fresh.v())\n}\n";
+    let c = kite_driver::compile_files(link.join("main.kite"), src, Emit::Check, false, files);
+    let _ = std::fs::remove_file(&link);
+    assert!(!c.failed(), "{}", c.render_diagnostics());
+}
+
 /// `prelude` is reserved like the standard library's names. A module of that
 /// name was accepted, and since the prelude is found by its name from
 /// everywhere, its declarations became every module's unqualified fallback —
