@@ -1,0 +1,52 @@
+// Every alternative of an or-pattern binds the same names, with the same
+// types, and the arm reads one local per name whichever alternative matched.
+// The resolver declared each alternative's names afresh in the arm's scope,
+// so `A(x) | B(x)`, the one form the rule allows, was "already declared".
+
+enum E {
+    A(int)
+    B(int)
+    Two(int, int)
+    T(str)
+    C
+}
+
+fn fine(e: E) -> int {
+    return match e {
+        A(x) | B(x) => x,
+        Two(x, _) | Two(_, x) => x,
+        _ => 0,
+    }
+}
+
+fn missing(e: E) -> int {
+    return match e {
+        A(x) | C => x, //~ ERROR E0200
+        _ => 0,
+    }
+}
+
+fn later_only(e: E) -> int {
+    return match e {
+        C | B(y) => y, //~ ERROR E0200
+        _ => 0,
+    }
+}
+
+fn two_types(e: E) -> int {
+    return match e {
+        A(x) | T(x) => 1, //~ ERROR E0200
+        _ => 0,
+    }
+}
+
+fn twice(e: E) -> int {
+    return match e {
+        A(x) | Two(x, x) => x, //~ ERROR E0112
+        _ => 0,
+    }
+}
+
+fn main() {
+    io.print(fine(E.A(1)) + missing(E.C) + later_only(E.C) + two_types(E.C) + twice(E.C))
+}

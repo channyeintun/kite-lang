@@ -2545,13 +2545,76 @@ fn main() {
 }
 "#,
     ),
+    // An or-pattern's alternatives bind one local per name, in variants, nested
+    // inside a variant, in tuples and in struct patterns against an optional. The
+    // resolver declared each alternative's names afresh, so every one of these
+    // was E0112 and no or-pattern could bind anything.
+    (
+        "or-pattern-alternatives-share-their-names",
+        r#"enum E {
+    A(int)
+    B(int)
+    C
+}
+
+enum M {
+    S(E)
+    N
+}
+
+struct P {
+    x: int
+    y: int
+}
+
+fn f(e: E) -> int {
+    return match e {
+        A(x) | B(x) => x,
+        C => 0,
+    }
+}
+
+fn g(m: M) -> int {
+    return match m {
+        S(A(y) | B(y)) => y,
+        S(C) => -1,
+        N => 0,
+    }
+}
+
+fn h(t: (int, int)) -> int {
+    return match t {
+        (0, x) | (x, 0) => x,
+        _ => -1,
+    }
+}
+
+fn k(p: Option<P>) -> str {
+    return match p {
+        P{ x: 0, y } | P{ x: y, y: 0 } => "axis \(y)",
+        nil => "none",
+        _ => "off",
+    }
+}
+
+fn main() {
+    io.print("\(f(E.A(1))) \(f(E.B(2))) \(f(E.C))")
+    io.print("\(g(M.S(E.A(3)))) \(g(M.S(E.B(4)))) \(g(M.S(E.C))) \(g(M.N))")
+    io.print("\(h((0, 5))) \(h((6, 0))) \(h((1, 1)))")
+    io.print(k(P{ x: 0, y: 7 }))
+    io.print(k(P{ x: 8, y: 0 }))
+    io.print(k(P{ x: 1, y: 1 }))
+    io.print(k(nil))
+}
+"#,
+    ),
 ];
 
 /// Programs above that need a rule of the checker's which may not have landed:
 /// they are skipped while the checker still refuses them, and compared the
-/// moment it accepts them. `A(x) | B(x)` is lowered correctly already; until
-/// the checker admits two alternatives binding one name, it is `E0112`.
-const AWAITING_THE_CHECKER: &[&str] = &["or-pattern-binds-through-the-alternative-that-matched"];
+/// moment it accepts them. Empty now that `A(x) | B(x)` is admitted, the last
+/// program that waited here.
+const AWAITING_THE_CHECKER: &[&str] = &[];
 
 fn run_on_vm(name: &str, src: &str) -> String {
     run_on_vm_at(&format!("{}.kite", name), name, src)

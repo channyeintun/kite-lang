@@ -1337,6 +1337,11 @@ match pair {
 Bindings introduced by patterns are immutable. There is no `ref` or `mut` in
 patterns because there are no references to bind.
 
+The alternatives of an alternation may bind names, and then each must bind the
+same names with the same types (`E0200`): the arm runs whichever one matched,
+and reads each name as that one bound it. `Circle(r) | Square(r) => r * r`
+binds one `r`, not two.
+
 ---
 
 ## 10. Traits

@@ -8719,30 +8719,38 @@ impl<'a> Checker<'a> {
             }
 
             ast::Pattern::Or { alts, .. } => {
-                let pats: Vec<hir::Pattern> = alts.iter().map(|a| self.pattern(a, scrut)).collect();
+                // A name repeated across alternatives is one local — the
+                // resolver gives the later ones the first one's — so each
+                // alternative's type for it is read as that alternative is
+                // checked, before the next one sets it again.
+                let mut pats = Vec::with_capacity(alts.len());
+                let mut names: Vec<Vec<(String, u32, TyId)>> = Vec::with_capacity(alts.len());
+                for a in alts {
+                    let p = self.pattern(a, scrut);
+                    let mut ids = Vec::new();
+                    pattern_bindings(&p, &mut ids);
+                    let mut named: Vec<(String, u32, TyId)> = ids
+                        .into_iter()
+                        .map(|id| {
+                            let l = &self.locals[id as usize];
+                            (l.name.clone(), id, l.ty)
+                        })
+                        .collect();
+                    named.sort();
+                    names.push(named);
+                    pats.push(p);
+                }
                 // Whichever alternative matched, the arm runs with every name
                 // the pattern binds — so every alternative has to bind them.
                 // `A(x) | B => x + 1` reached `B` with `x` never written, and
                 // the arm read a register nothing had put a value in.
-                let names: Vec<Vec<(String, u32)>> = pats
-                    .iter()
-                    .map(|p| {
-                        let mut ids = Vec::new();
-                        pattern_bindings(p, &mut ids);
-                        let mut named: Vec<(String, u32)> = ids
-                            .into_iter()
-                            .map(|id| (self.locals[id as usize].name.clone(), id))
-                            .collect();
-                        named.sort();
-                        named
-                    })
-                    .collect();
+                //
                 // One missing name explains the pattern; listing every name it
                 // affects would be the same mistake again.
-                let missing = names.iter().flatten().find_map(|(name, id)| {
+                let missing = names.iter().flatten().find_map(|(name, id, _)| {
                     names
                         .iter()
-                        .position(|other| !other.iter().any(|(n, _)| n == name))
+                        .position(|other| !other.iter().any(|(n, _, _)| n == name))
                         .map(|j| (name.clone(), *id, j))
                 });
                 if let Some((name, id, j)) = missing {
@@ -8762,23 +8770,43 @@ impl<'a> Checker<'a> {
                 // Where two alternatives bind the same name, the types have to
                 // agree as well, or the arm would read one slot two ways.
                 if let Some(first) = names.first() {
-                    for other in &names[1..] {
-                        for (name, id) in other {
-                            let Some((_, want)) = first.iter().find(|(n, _)| n == name) else {
+                    for (j, other) in names.iter().enumerate().skip(1) {
+                        for (name, id, b) in other {
+                            let Some(&(_, want, a)) = first.iter().find(|(n, _, _)| n == name) else {
                                 continue;
                             };
-                            let (a, b) = (self.locals[*want as usize].ty, self.locals[*id as usize].ty);
-                            if a != b && !self.types.is_poisoned(a) && !self.types.is_poisoned(b) {
-                                let (an, bn) = (self.types.name(a), self.types.name(b));
+                            if a != *b && !self.types.is_poisoned(a) && !self.types.is_poisoned(*b) {
+                                let (an, bn) = (self.types.name(a), self.types.name(*b));
+                                let region = alts[j].span();
+                                let here = self
+                                    .resolved
+                                    .bindings
+                                    .iter()
+                                    .filter(|(sp, i)| {
+                                        **i == *id
+                                            && sp.file == region.file
+                                            && sp.start >= region.start
+                                            && sp.end <= region.end
+                                    })
+                                    .map(|(sp, _)| *sp)
+                                    .next()
+                                    .unwrap_or(region);
                                 self.diags.push(
                                     Diagnostic::error(
                                         codes::E0200,
                                         format!("`{}` is bound with two different types", name),
                                     )
-                                    .with_primary(self.locals[*id as usize].span, format!("a `{}` here", bn))
-                                    .with_secondary(self.locals[*want as usize].span, format!("a `{}` here", an)),
+                                    .with_primary(here, format!("a `{}` here", bn))
+                                    .with_secondary(self.locals[want as usize].span, format!("a `{}` here", an)),
                                 );
                             }
+                        }
+                    }
+                    // The arm reads the local as the first alternative bound
+                    // it, whatever a later one that disagreed set it to.
+                    for &(_, id, ty) in first {
+                        if let Some(l) = self.locals.get_mut(id as usize) {
+                            l.ty = ty;
                         }
                     }
                 }
