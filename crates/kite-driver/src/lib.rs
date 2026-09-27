@@ -901,8 +901,12 @@ fn run_passes(
                         )
                         .with_primary(gap.span, format!("used in `{}`", gap.function))
                         .with_note(
-                            "the bytecode target supports it: run without `--emit native`. \
-                             See docs/06-roadmap.md for the remaining lowering steps",
+                            // `run --native` and `--emit native` are one
+                            // request, and this cannot tell which was typed,
+                            // so it names both.
+                            "the bytecode target supports it: run without `--native` \
+                             (`--emit native`). See docs/06-roadmap.md for the remaining \
+                             lowering steps",
                         ),
                     );
                 }
@@ -1342,6 +1346,21 @@ mod tests {
             refused(&pairs),
             "E0220: the generic function `pair` is used at a type argument too large to specialise"
         );
+    }
+
+    /// A value of more parts than the native staging window is still refused
+    /// natively, and the note says how to run it elsewhere with the flag
+    /// `kitec run` takes: it named only `--emit native`, to someone who had
+    /// typed `--native`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_native_refusal_names_the_flag_run_takes() {
+        let elems: Vec<String> = (0..4097).map(|i| i.to_string()).collect();
+        let src = format!("fn main() {{\n  let t = ({})\n  io.print(t.0)\n}}\n", elems.join(", "));
+        let c = compile("t.kite", &src, Emit::Native);
+        let text = c.render_diagnostics();
+        assert!(text.contains("E0204"), "{}", text);
+        assert!(text.contains("run without `--native`"), "{}", text);
     }
 
     #[test]
