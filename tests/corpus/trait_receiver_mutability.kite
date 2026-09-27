@@ -1,0 +1,48 @@
+// `var self` is part of a method's signature, and a call through a trait —
+// a `dyn`, or a bound — sees the trait's receiver and nothing else. An
+// implementation may not quietly take `var self` where the trait promised
+// `self`, and a call through the trait needs a binding that may change when
+// the trait says the method changes its receiver.
+
+trait Bump {
+    fn bump(self)
+}
+
+trait Grow {
+    fn grow(var self)
+}
+
+struct C {
+    var n: int
+}
+
+impl Bump for C {
+    fn bump(var self) { //~ ERROR E0200
+        self.n = self.n + 1
+    }
+}
+
+impl Grow for C {
+    fn grow(var self) {
+        self.n = self.n + 10
+    }
+}
+
+fn poke<T: Grow>(x: T) {
+    x.grow() //~ ERROR E0114
+}
+
+fn prod<T: Grow>(var x: T) {
+    x.grow()
+}
+
+fn main() {
+    let c = C{ n: 0 }
+    let d: dyn Grow = c
+    d.grow() //~ ERROR E0114
+    var e: dyn Grow = C{ n: 1 }
+    e.grow()
+    poke(c)
+    prod(c)
+    io.print(c.n)
+}

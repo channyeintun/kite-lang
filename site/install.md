@@ -99,14 +99,20 @@ the artefact where *trusting trust* is not hypothetical.
 | Target | State |
 |---|---|
 | `aarch64-apple-darwin` | Built and tested |
-| `x86_64-apple-darwin` | Built and tested |
-| `x86_64-unknown-linux-musl` | Built and tested, statically linked |
-| `aarch64-unknown-linux-musl` | Built and tested, statically linked |
+| `x86_64-apple-darwin` | Built, cross-compiled on an Apple-silicon runner |
+| `x86_64-unknown-linux-musl` | Built, statically linked; the suite runs on the glibc build of the same architecture |
+| `aarch64-unknown-linux-musl` | Built, cross-compiled and statically linked |
 | `x86_64-pc-windows-msvc` | Built and tested; `--emit native` is refused there and says why |
 
-The native backend finds garbage-collection roots by walking frame pointers,
-and Cranelift's Win64 prologue puts the frame record where that walk does not
-expect it. Rather than corrupt the heap, `--native` refuses on Windows. The
+*Tested* means the whole suite runs on that target for every commit. The
+other three are built by the release workflow from the same source, and
+nothing runs them before they are published — so a report from one of them is
+worth more than it looks.
+
+The native backend finds garbage-collection roots by walking the
+frame-pointer chain, and nobody has yet shown that chain holds on Win64, where
+LLVM may point a frame pointer into the middle of a frame. Rather than risk
+corrupting the heap, `--native` refuses on Windows. The
 WebAssembly and bytecode targets work there in full, which is every part of
 Kite the web is about.
 

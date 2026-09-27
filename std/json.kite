@@ -11,9 +11,17 @@
 // is escaped on the way out. Neither used to be true: `caf\u00e9` decoded to
 // `cafu00e9` — silently, so a name simply came out wrong — and a carriage
 // return went out raw, which is not JSON and which `JSON.parse` refuses with
-// `Bad control character in string literal`. The decoding needed
-// `text.from_code`, which was added for this and for `std/toml`; only
-// `std/toml` picked it up.
+// `Bad control character in string literal`. The decoding is `text.from_code`,
+// which `std/toml` uses for the same purpose.
+//
+// **What is read is RFC 8259, and nothing looser.** A leading zero (`01`), a
+// point or an exponent with no digits after it (`1.`, `1e`), an escape the
+// RFC does not list (`\x`) and a raw control character inside a string are
+// each refused with an error saying where, rather than read as whatever they
+// looked closest to. A document this accepts is one every other parser
+// accepts too. Numbers are read by the prelude's `parse_float`, so each is the
+// float nearest what the document wrote — `0.3` is 0.3 — and one too large
+// for a float is an error.
 
 /// A JSON value.
 ///
@@ -198,6 +206,11 @@ fn parse_string(input: str, at: int) -> (Text, error) {
         if c == 34 {
             return Text{ text: out + input.slice(run, i), next: i + 1 }, nil
         }
+        // RFC 8259 §7: a control character inside a string must be escaped.
+        // Reading a raw one would accept a document no other parser does.
+        if c < 32 {
+            return _, errors.new("json: a control character must be escaped, at \(i)")
+        }
         // `\` ends the run: what follows is not itself.
         if c == 92 {
             out = out + input.slice(run, i)
@@ -223,9 +236,14 @@ fn parse_string(input: str, at: int) -> (Text, error) {
                                     check uerr
                                     out = out + decoded.text
                                     width = decoded.width
-                                } else {
-                                    // `\"`, `\\`, `\/` — each is itself.
+                                } else if e == "\"" || e == "\\" || e == "/" {
+                                    // Each of these is itself.
                                     out = out + e
+                                } else {
+                                    // `\x` used to read as `x`. The RFC lists
+                                    // eight escapes and `\u`; anything else
+                                    // is not JSON.
+                                    return _, errors.new("json: unknown escape `\\\(e)` at \(i)")
                                 }
                             }
                         }
@@ -306,128 +324,85 @@ fn hex_digit(c: str) -> int {
     return -1
 }
 
+/// A number, as RFC 8259 §6 writes one: `-? (0 | [1-9][0-9]*) (. [0-9]+)?
+/// ([eE] [+-]? [0-9]+)?`, and nothing looser — `01`, `1.`, `.5`, `1e` and `+1`
+/// are each an error, as they are to every other JSON parser.
+///
+/// The grammar is checked here and the value is the prelude's `parse_float`,
+/// which gives the float nearest the decimal written. Summing digit values as
+/// floats, as this once did, made `0.3` read as 0.30000000000000004 and
+/// `9223372036854775808` as 9223372036854777856.
 fn parse_number(input: str, at: int) -> (Step, error) {
     var i = at
-    var negative = false
     if peek(input, i) == "-" {
-        negative = true
         i = i + 1
     }
-    let start = i
-    var value = 0.0
-    for i < input.len() {
-        let d = digit(peek(input, i))
-        if d < 0 {
-            break
-        }
-        value = value * 10.0 + (d as float)
-        i = i + 1
-    }
-    if i == start {
+    let first = digit_at(input, i)
+    if first < 0 {
         return _, errors.new("json: expected a number at \(at)")
+    }
+    i = i + 1
+    if first == 0 {
+        if digit_at(input, i) >= 0 {
+            return _, errors.new("json: a number may not start with a zero, at \(at)")
+        }
+    } else {
+        i = past_digits(input, i)
     }
     if peek(input, i) == "." {
         i = i + 1
-        var scale = 1.0
-        for i < input.len() {
-            let d = digit(peek(input, i))
-            if d < 0 {
-                break
-            }
-            scale = scale / 10.0
-            value = value + (d as float) * scale
-            i = i + 1
+        if digit_at(input, i) < 0 {
+            return _, errors.new("json: expected a digit after the point at \(i)")
         }
+        i = past_digits(input, i)
     }
     let marker = peek(input, i)
-    if marker == "e" {
-        let (scale, next) = exponent(input, i + 1)
-        value = value * scale
-        i = next
-    }
-    if marker == "E" {
-        let (scale, next) = exponent(input, i + 1)
-        value = value * scale
-        i = next
-    }
-    if negative {
-        value = 0.0 - value
+    if marker == "e" || marker == "E" {
+        i = i + 1
+        let sign = peek(input, i)
+        if sign == "+" || sign == "-" {
+            i = i + 1
+        }
+        if digit_at(input, i) < 0 {
+            return _, errors.new("json: expected a digit in the exponent at \(i)")
+        }
+        i = past_digits(input, i)
     }
     // A number JSON cannot express is a parse error, not a value.
     //
-    // Bounding the exponent loop stopped the document choosing how long the
-    // parser ran, but it left `1e999999999999` *succeeding*, with an infinity
-    // in the tree — and `stringify` then wrote the bare token `inf`, which no
-    // JSON parser reads back. A document that cannot survive a round trip
-    // through this module has not been parsed, so it says so here.
-    //
-    // `std/toml` already takes this position for a literal `inf` ("has no
-    // value in Kite"); this is the same rule for the spelling that reaches one
-    // by arithmetic. Underflow is untouched: `1e-999999999999` is zero, which
-    // is what IEEE says and a number JSON can hold.
-    if infinite(value) {
+    // `1e999999999999` would be an infinity, and `stringify` would write it
+    // back as the bare token `inf`, which no JSON parser reads. A document
+    // that cannot survive a round trip through this module has not been
+    // parsed, so it says so here. `std/toml` takes the same position for a
+    // literal `inf` ("has no value in Kite"). Underflow is untouched:
+    // `1e-999999999999` is zero, which is what IEEE says and a number JSON
+    // can hold.
+    let value = parse_float(input.slice(at, i))
+    if value == nil {
         return _, errors.new("json: the number at \(at) is out of range for a float")
     }
     return Step{ value: Json.Number(value), next: i }, nil
 }
 
-/// Whether a float is an infinity.
-///
-/// Kite has no literal for one and no `is_infinite`, so this tests the
-/// property itself: doubling a finite number changes it and doubling an
-/// infinity does not. Zero is the other fixed point of that, which is why it
-/// is excluded rather than handled apart. A NaN fails the equality and is not
-/// reported here, which is correct — this parser cannot produce one.
-fn infinite(v: float) -> bool {
-    return v != 0.0 && v == v * 2.0
+/// Where a run of decimal digits starting at `at` ends.
+fn past_digits(input: str, at: int) -> int {
+    var i = at
+    for digit_at(input, i) >= 0 {
+        i = i + 1
+    }
+    return i
 }
 
-/// The multiplier an exponent stands for, and where it ended.
-fn exponent(input: str, at: int) -> (float, int) {
-    var i = at
-    var negative = false
-    let sign = peek(input, i)
-    if sign == "-" {
-        negative = true
-        i = i + 1
+/// The decimal digit at `at`, or -1 for anything else or past the end.
+fn digit_at(input: str, at: int) -> int {
+    if at < 0 || at >= input.len() {
+        return -1
     }
-    if sign == "+" {
-        i = i + 1
+    let d = input.code_at(at) - 48
+    if d < 0 || d > 9 {
+        return -1
     }
-    // The digits are the document's, and so is their count. Accumulating them
-    // unchecked overflows the int and traps — which is not catchable, so a
-    // handful of bytes would end the process rather than the parse. Stop
-    // accumulating once the value is already past anything a float can mean,
-    // but keep consuming digits so `i` still lands after the exponent.
-    var power = 0
-    for i < input.len() {
-        let d = digit(peek(input, i))
-        if d < 0 {
-            break
-        }
-        if power <= 9999 {
-            power = power * 10 + d
-        }
-        i = i + 1
-    }
-    // A float reaches infinity a little past 1e308 and zero a little past
-    // 1e-324, and stays there. Beyond that the trip count changes nothing
-    // about the answer, so bounding it costs no accuracy — and leaving it
-    // unbounded let a twelve-byte document spin the scheduler forever, since
-    // this loop has no `task.yield()` in it.
-    var steps = power
-    if steps > 400 {
-        steps = 400
-    }
-    var scale = 1.0
-    for n in 0..steps {
-        if negative {
-            scale = scale / 10.0
-        } else {
-            scale = scale * 10.0
-        }
-    }
-    return (scale, i)
+    return d
 }
 
 fn skip_space(input: str, at: int) -> int {
@@ -469,6 +444,10 @@ fn digit(c: str) -> int {
 // ---- writing ---------------------------------------------------------------
 
 /// A value as compact JSON.
+///
+/// An infinity or a NaN is written `null`, as `JSON.stringify` writes it:
+/// JSON has no spelling for either, so the choice is between that and a
+/// document nothing can read back.
 pub fn stringify(value: Json) -> str {
     return match value {
         Null => "null",
@@ -492,9 +471,23 @@ fn pairs(entries: { str: Json }) -> [str] {
 
 /// A number without a trailing `.0`: JSON has one numeric type, and `1.0` and
 /// `1` mean the same thing to everything that reads it.
+///
+/// Only a number that fits an `int` is written as one. The cast saturates, so
+/// asking it about 2⁶³ answered 9223372036854775807 — which converts back to
+/// the same float, and so passed a test of `as float`, but is a different
+/// number to a reader that keeps integers exact. Anything past the range is
+/// written as the float it is.
+///
+/// Except an infinity or a NaN, which is `null`. Interpolation spells them
+/// `inf`, `-inf` and `NaN`, none of which is JSON, so `json.parse` refused
+/// what `stringify` wrote, and so did every other reader.
 fn number(n: float) -> str {
-    let whole = n as int
-    if (whole as float) == n {
+    // `n - n` is zero for every finite float and a NaN for the rest.
+    if !(n - n == 0.0) {
+        return "null"
+    }
+    let whole = whole_number(n)
+    if whole != nil {
         return "\(whole)"
     }
     return "\(n)"
@@ -599,12 +592,11 @@ fn spaces(depth: int) -> str {
 
 // ---- taking a value apart ---------------------------------------------------
 //
-// `json.decode<T>` — a document straight into a user's own struct — needs
-// compile-time derivation, which is the same machinery `Eq`, `Hash` and
-// `Debug` derivation want, and none of it exists yet. Until it does a program
-// takes a document apart with these, which is more typing and no less safe:
-// each yields an optional, so a missing or mistyped field is a value to handle
-// rather than a surprise.
+// A document straight into a program's own struct is `@derive(Decode)`, which
+// writes `User.decode(doc)` from the fields — in terms of these. A program
+// can also take a document apart with them by hand, which is more typing and
+// no less safe: each yields an optional, so a missing or mistyped field is a
+// value to handle rather than a surprise.
 
 /// A field of an object.
 ///
@@ -657,14 +649,34 @@ pub fn number_of(value: Option<Json>) -> Option<float> {
     }
 }
 
+/// A whole number, or nil — for anything that is not a number, and for a
+/// number that is not whole or does not fit in an `int`.
+///
+/// The cast this used to be truncated `3.7` to 3 and saturated `1e30` to the
+/// largest `int`, and `@derive(Decode)` reads an `int` field through this, so
+/// a decoder that promises "expected a whole number" accepted both. JSON's one
+/// number type is a float, so `3.0` is the whole number 3.
 pub fn int_of(value: Option<Json>) -> Option<int> {
     if value == nil {
         return nil
     }
     return match value {
-        Number(n) => n as int,
+        Number(n) => whole_number(n),
         other => nil,
     }
+}
+
+fn whole_number(n: float) -> Option<int> {
+    // [-2⁶³, 2⁶³): both ends are floats exactly, and every float between them
+    // converts to an `int` without saturating. A NaN fails both comparisons.
+    if !(n >= -9223372036854775808.0 && n < 9223372036854775808.0) {
+        return nil
+    }
+    let whole = n as int
+    if (whole as float) != n {
+        return nil
+    }
+    return whole
 }
 
 pub fn bool_of(value: Option<Json>) -> Option<bool> {

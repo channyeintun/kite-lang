@@ -1,0 +1,80 @@
+// An `impl` is for its type at the block's own parameters, in order. Type
+// arguments in a header were never read: `impl Named for Pair<int, str>` was
+// taken as `impl Named for Pair`, applied to a `Pair<str, int>` too, typed
+// its bodies with the declaration's `A` and `B`, and was an invalid module on
+// Wasm. Until a header's arguments mean what they say, anything else is
+// refused, once, at the header.
+
+trait Named {
+    fn name(self) -> str
+}
+
+struct Pair<A, B> {
+    a: A
+    b: B
+}
+
+struct Box<T> {
+    v: T
+}
+
+impl Named for Pair<int, str> { //~ ERROR E0208
+    fn name(self) -> str {
+        return "\(self.a)-\(self.b)"
+    }
+}
+
+impl<T> Named for Box<T> {
+    fn name(self) -> str {
+        return "box"
+    }
+}
+
+impl<X, Y> Pair<Y, X> { //~ ERROR E0208
+    fn first(self) -> Y {
+        return self.a
+    }
+}
+
+// A generic type written with no arguments stands for itself at the block's
+// own parameters, so a block that declares none, or too few, is refused as
+// well: `impl Named for Cell` was an `impl` for every `Cell`, typed against the
+// declaration's `T`, and on Wasm an invalid module too.
+struct Cell<T> {
+    v: T
+}
+
+impl Named for Cell { //~ ERROR E0208
+    fn name(self) -> str {
+        return "cell"
+    }
+}
+
+struct Trio<A, B, C> {
+    a: A
+    b: B
+    c: C
+}
+
+impl<A, B> Display for Trio { //~ ERROR E0208
+    fn show(self) -> str {
+        return "trio"
+    }
+}
+
+struct Wrap<T> {
+    v: T
+}
+
+impl<T> Named for Wrap {
+    fn name(self) -> str {
+        return "wrap"
+    }
+}
+
+fn main() {
+    io.print(Pair{ a: 1, b: "x" }.name())
+    io.print(Box{ v: 2 }.name())
+    io.print(Cell{ v: 3 }.name())
+    io.print(Wrap{ v: 4 }.name())
+}

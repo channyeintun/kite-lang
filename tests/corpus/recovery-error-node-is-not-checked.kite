@@ -1,0 +1,43 @@
+// What the parser could not read is an error node, which the checker types
+// as an error and says nothing more about — nor about anything made from it.
+// Each of these was a second or third diagnostic for the one mistake.
+
+fn divide(a: int, b: int) -> (int, error) {
+    if b == 0 {
+        return _, errors.new("division by zero")
+    }
+    return a / b, nil
+}
+
+fn first<T>(xs: [T]) -> T {
+    return xs[0]
+}
+
+// Destructured, it still binds both names: they were E0110, never assigned.
+fn ratio(a: int, b: int) -> (int, error) {
+    let (q, err) = divide(a b) //~ ERROR E0100
+    check err
+    return q, nil
+}
+
+// Returned, it is a way out: it was "a fallible function returns two
+// values", and then "not every path returns a value".
+fn halve(a: int) -> (int, error) {
+    return divide(a 2) //~ ERROR E0100
+}
+
+fn main() {
+    let (r, err) = ratio(10, 2)
+    if err == nil {
+        io.print(r)
+    }
+    let (h, e) = halve(4)
+    if e == nil {
+        io.print(h)
+    }
+    // Passed to a generic function, it leaves nothing to infer `T` from:
+    // that was "cannot infer `T`", then "cannot print a `T`".
+    let xs = [1 2] //~ ERROR E0100
+    io.print(first(xs))
+    io.print("\(first(xs))")
+}

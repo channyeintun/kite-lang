@@ -1,0 +1,42 @@
+// A call through a bound is checked against the trait's declaration, and then
+// reaches the implementation. An implementation's method that asked more of
+// its type parameter than the trait did was accepted, so `go` passed an `int`
+// to a body that called `show` on it: a trap on the VM, a crash natively, an
+// invalid module on Wasm. The same bound on both sides, or a weaker one on
+// the implementation, is fine.
+
+trait Show {
+    fn show(self) -> str
+}
+
+trait Teller {
+    fn tell<U>(self, u: U) -> str
+    fn shown<V: Show>(self, v: V) -> str
+    fn either<W: Show>(self, w: W) -> str
+}
+
+struct N {
+    k: int
+}
+
+impl Teller for N {
+    fn tell<U: Show>(self, u: U) -> str { //~ ERROR E0208
+        return u.show()
+    }
+
+    fn shown<V: Show>(self, v: V) -> str {
+        return v.show()
+    }
+
+    fn either<W>(self, w: W) -> str {
+        return "any"
+    }
+}
+
+fn go<T: Teller>(t: T) -> str {
+    return t.tell(5)
+}
+
+fn main() {
+    io.print(go(N{ k: 1 }))
+}

@@ -49,9 +49,9 @@ fn main() {
     io.print("close enough: \(approx_eq(sum_of_thirds, 0.3, 0.000001))")
 
     let readings = [
-        Reading { sensor: "north", celsius: 21.5, ok: true },
-        Reading { sensor: "south", celsius: 48.0, ok: false },
-        Reading { sensor: "east", celsius: 19.0, ok: true },
+        Reading{ sensor: "north", celsius: 21.5, ok: true },
+        Reading{ sensor: "south", celsius: 48.0, ok: false },
+        Reading{ sensor: "east", celsius: 19.0, ok: true },
     ]
     let working = filter(readings, |r: Reading| r.ok)
     io.print("working sensors: \(working.len())")

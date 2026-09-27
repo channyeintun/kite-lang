@@ -1,22 +1,31 @@
 //! Structural equality on aggregates.
 //!
 //! The specification says two structs are equal when their fields are, and the
-//! same for tuples, slices, enums and optionals. Reference identity is a
+//! same for tuples, slices, maps, enums and optionals. Reference identity is a
 //! separate operation, spelled `ptr.same`.
 //!
-//! Wasm has no deep-equality instruction, so each aggregate type that is
-//! compared gets a generated function. They may call each other — a struct
-//! holding a slice of itself is legal — which is why every one is declared
-//! before any body is emitted.
+//! Wasm has no deep-equality instruction, so the module carries one generated
+//! function that compares any aggregate the program compares. It takes the two
+//! values as `anyref` and a *kind* — which of those types they are — and works
+//! through a list of pairs still to compare rather than calling itself.
 //!
-//! The functions are emitted only for types a program actually compares. A
-//! program that never writes `==` on an aggregate gets none of them.
+//! That list is the point. The first version generated a function per type
+//! that called the function for each component, so comparing two lists of a
+//! million cells nested a million Wasm frames and ended in the engine's
+//! `RangeError`, where the VM and the native runtime — which both walk a
+//! worklist — answered `true`. Here a component that needs a comparison of its
+//! own is pushed as a cell `{a, b, kind, next}` and taken off again by the same
+//! loop, so the depth a comparison can reach is bounded by memory rather than
+//! by the stack. Numbers, booleans and strings are compared where they stand
+//! and never pushed; a struct of scalars allocates nothing.
+//!
+//! The function is emitted only when a program compares an aggregate, or keys
+//! a map by one. A program that does neither gets none of it.
 
 use crate::*;
 use std::collections::HashSet;
 
-/// A generated comparison, in emission order. The function index is
-/// `base + position`.
+/// A compared type, in kind order: its kind is its position.
 pub struct EqFn {
     pub ty: TyId,
 }
@@ -30,6 +39,14 @@ pub fn collect(program: &mir::Program, types: &Types) -> Vec<EqFn> {
     let mut wanted: HashSet<TyId> = HashSet::new();
 
     for f in &program.fns {
+        // A map compares its keys with `==` on every read, write and removal,
+        // so a key type that needs a generated comparison needs it whether or
+        // not the program ever writes `==` itself.
+        for l in &f.locals {
+            if let TyKind::Map(k, _) = types.kind(l.ty) {
+                close_over(*k, types, &mut wanted);
+            }
+        }
         for block in &f.blocks {
             for stmt in &block.stmts {
                 let mir::Inst::Assign {
@@ -79,6 +96,10 @@ fn close_over(ty: TyId, types: &Types, out: &mut HashSet<TyId>) {
         }
         TyKind::Slice(elem) => close_over(*elem, types, out),
         TyKind::Optional(inner) => close_over(*inner, types, out),
+        TyKind::Map(k, v) => {
+            close_over(*k, types, out);
+            close_over(*v, types, out);
+        }
         _ => {}
     }
 }
@@ -92,327 +113,455 @@ pub fn needs_function(ty: TyId, types: &Types) -> bool {
             | TyKind::Enum(_)
             | TyKind::Tuple(_)
             | TyKind::Slice(_)
+            | TyKind::Map(..)
             | TyKind::Optional(_)
             | TyKind::Err
     )
 }
 
-/// The signature of a comparison: two values of the type, an `i32` verdict.
-pub fn signature(ty: TyId, types: &Types, layout: &TypeLayout) -> (Vec<ValType>, Vec<ValType>) {
-    let v = val_type_with(ty, types, layout);
-    (vec![v, v], vec![ValType::I32])
+/// The comparison's signature: the two values as `anyref`, their kind, and an
+/// `i32` verdict. Every aggregate is a GC reference and so an `anyref`; the
+/// kind is what says which record to cast them back to.
+pub fn signature() -> (Vec<ValType>, Vec<ValType>) {
+    (vec![ANY_REF, ANY_REF, ValType::I32], vec![ValType::I32])
 }
 
-/// Emit one comparison function.
+/// The record one pending comparison waits in: two values, their kind, and
+/// the comparison pending before it. Immutable, like everything a cons list is
+/// made of: a push allocates one, a pop reads one and lets it go.
+pub fn cell_subtype(cell: u32) -> SubType {
+    let field = |t: ValType| FieldType {
+        element_type: StorageType::Val(t),
+        mutable: false,
+    };
+    struct_subtype(
+        vec![
+            field(ANY_REF),
+            field(ANY_REF),
+            field(ValType::I32),
+            field(ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(cell),
+            })),
+        ],
+        None,
+        true,
+    )
+}
+
+/// Emit the comparison, and calls to it.
 pub struct EqBuilder<'a> {
     pub types: &'a Types,
     pub layout: &'a TypeLayout,
     /// String equality is part of the language runtime, not a host call.
     pub strings: strings::StringRuntime,
-    /// Where the generated comparisons start in the function index space.
+    /// The comparison's function index.
     pub base: u32,
     pub fns: &'a [EqFn],
 }
 
+// Parameters and fixed locals of the comparison.
+const A: u32 = 0;
+const B: u32 = 1;
+const KIND: u32 = 2;
+/// The pending list: a `(ref null $cell)`, null when nothing is pending.
+const TOP: u32 = 3;
+/// A cursor and a length, for slices and maps.
+const I: u32 = 4;
+const N: u32 = 5;
+
 impl EqBuilder<'_> {
-    /// The function index comparing `ty`.
-    pub fn index_of(&self, ty: TyId) -> Option<u32> {
-        self.fns
-            .iter()
-            .position(|e| e.ty == ty)
-            .map(|i| self.base + i as u32)
-    }
-
-    pub fn build(&self, ty: TyId) -> Function {
-        match self.types.kind(ty) {
-            TyKind::Struct(s) => self.struct_eq(*s),
-            TyKind::Tuple(_) => self.tuple_eq(ty),
-            TyKind::Enum(e) => self.enum_eq(*e),
-            TyKind::Slice(elem) => self.slice_eq(ty, *elem),
-            TyKind::Optional(inner) => self.optional_eq(ty, *inner),
-            TyKind::Err => self.error_eq(),
-            // `collect` only ever asks for the kinds above.
-            _ => {
-                let mut f = Function::new(Vec::new());
-                f.instruction(&Instruction::Unreachable);
-                f.instruction(&Instruction::End);
-                f
-            }
-        }
-    }
-
-    /// Compare one field of two records already in locals 0 and 1, and return
-    /// `false` from the enclosing function if they differ.
-    ///
-    /// Emitting an early return per field rather than folding with `and` is
-    /// what makes comparison short-circuit: a mismatch in the first field of a
-    /// large struct does not read the rest.
-    fn compare_fields(
-        &self,
-        f: &mut Function,
-        pairs: &[(TyId, u32, u32)],
-        load: impl Fn(&mut Function, u32, u32, u32),
-    ) {
-        for (ty, record, field) in pairs {
-            load(f, 0, *record, *field);
-            load(f, 1, *record, *field);
-            self.compare_values(f, *ty);
-            f.instruction(&Instruction::I32Eqz);
-            f.instruction(&Instruction::If(BlockType::Empty));
-            f.instruction(&Instruction::I32Const(0));
-            f.instruction(&Instruction::Return);
-            f.instruction(&Instruction::End);
-        }
+    /// The kind `ty` is compared as.
+    fn kind_of(&self, ty: TyId) -> Option<u32> {
+        self.fns.iter().position(|e| e.ty == ty).map(|i| i as u32)
     }
 
     /// Compare two values of `ty` already on the stack, leaving an `i32`.
-    fn compare_values(&self, f: &mut Function, ty: TyId) {
-        match self.types.kind(ty) {
-            TyKind::Int => f.instruction(&Instruction::I64Eq),
-            TyKind::Float => f.instruction(&Instruction::F64Eq),
-            TyKind::Bool => f.instruction(&Instruction::I32Eq),
-            TyKind::Str => f.instruction(&Instruction::Call(self.strings.eq())),
-            _ => match self.index_of(ty) {
-                Some(i) => f.instruction(&Instruction::Call(i)),
-                // Unreachable: `collect` closed over every component.
-                None => f.instruction(&Instruction::Unreachable),
-            },
-        };
-    }
-
-    fn struct_eq(&self, s: kite_hir::StructId) -> Function {
-        let mut f = Function::new(Vec::new());
-        let record = self.layout.struct_type(s);
-        let shift = self.layout.struct_shift(s);
-        let pairs: Vec<(TyId, u32, u32)> = self
-            .types
-            .struct_def(s)
-            .fields
-            .iter()
-            .enumerate()
-            .map(|(i, fd)| (fd.ty, record, i as u32 + shift))
-            .collect();
-        self.compare_fields(&mut f, &pairs, struct_get);
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::End);
-        f
-    }
-
-    fn tuple_eq(&self, ty: TyId) -> Function {
-        let mut f = Function::new(Vec::new());
-        let TyKind::Tuple(elems) = self.types.kind(ty) else {
-            unreachable!("tuple_eq is only called for a tuple")
-        };
-        match self.layout.tuple_type(ty) {
-            Some(record) => {
-                let pairs: Vec<(TyId, u32, u32)> = elems
-                    .iter()
-                    .enumerate()
-                    .map(|(i, e)| (*e, record, i as u32))
-                    .collect();
-                self.compare_fields(&mut f, &pairs, struct_get);
-                f.instruction(&Instruction::I32Const(1));
+    pub fn call(&self, f: &mut Function, ty: TyId) {
+        match self.kind_of(ty) {
+            Some(kind) => {
+                f.instruction(&Instruction::I32Const(kind as i32));
+                f.instruction(&Instruction::Call(self.base));
             }
+            // `collect` closed over every type that reaches here, so a miss
+            // is a compiler bug rather than a program's.
             None => {
                 f.instruction(&Instruction::Unreachable);
             }
         }
+    }
+
+    /// The comparison: a loop over pending pairs, one case per kind.
+    ///
+    /// ```text
+    /// loop $next
+    ///   block $done
+    ///     block $kind_n … block $kind_0
+    ///       br_table on $kind          ;; default: unreachable
+    ///     end  <compare kind 0; push components; br $done>
+    ///     …
+    ///   end
+    ///   nothing pending -> return 1
+    ///   pop into $a, $b, $kind ; br $next
+    /// end
+    /// ```
+    ///
+    /// A mismatch anywhere returns 0 at once, dropping whatever is pending.
+    pub fn build(&self) -> Function {
+        let cell = self.layout.eq_cell;
+        let n = self.fns.len() as u32;
+
+        // Two typed registers per slice kind and four per map kind, so a loop
+        // over elements casts its operands once rather than per element.
+        let mut locals: Vec<(u32, ValType)> = vec![
+            (
+                1,
+                ValType::Ref(RefType {
+                    nullable: true,
+                    heap_type: HeapType::Concrete(cell),
+                }),
+            ),
+            (2, ValType::I32),
+        ];
+        let mut arrays: Vec<u32> = Vec::with_capacity(self.fns.len());
+        let mut next = N + 1;
+        for e in self.fns {
+            arrays.push(next);
+            let want: Vec<u32> = match self.types.kind(e.ty) {
+                TyKind::Slice(elem) => self.layout.slice_type(*elem).into_iter().collect(),
+                TyKind::Map(..) => self
+                    .layout
+                    .map_layout(e.ty)
+                    .map(|ml| vec![ml.keys, ml.values])
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            for array in want {
+                locals.push((
+                    2,
+                    ValType::Ref(RefType {
+                        nullable: true,
+                        heap_type: HeapType::Concrete(array),
+                    }),
+                ));
+                next += 2;
+            }
+        }
+        let mut f = Function::new(locals);
+
+        f.instruction(&Instruction::Loop(BlockType::Empty)); // $next
+        f.instruction(&Instruction::Block(BlockType::Empty)); // $done
+        for _ in 0..n {
+            f.instruction(&Instruction::Block(BlockType::Empty));
+        }
+        f.instruction(&Instruction::Block(BlockType::Empty)); // bad kind
+        f.instruction(&Instruction::LocalGet(KIND));
+        let targets: Vec<u32> = (1..=n).collect();
+        f.instruction(&Instruction::BrTable(targets.into(), 0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Unreachable);
+
+        for (j, e) in self.fns.iter().enumerate() {
+            f.instruction(&Instruction::End);
+            // From here the blocks still open are the later kinds and $done.
+            let done = n - 1 - j as u32;
+            let case = Case {
+                builder: self,
+                done,
+                regs: arrays[j],
+            };
+            case.body(&mut f, e.ty);
+            f.instruction(&Instruction::Br(done));
+        }
+        f.instruction(&Instruction::End); // $done
+
+        // Take the next pending pair, or answer: nothing left means nothing
+        // differed.
+        f.instruction(&Instruction::LocalGet(TOP));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        for (field, local) in [(0, A), (1, B), (2, KIND), (3, TOP)] {
+            f.instruction(&Instruction::LocalGet(TOP));
+            f.instruction(&Instruction::StructGet {
+                struct_type_index: cell,
+                field_index: field,
+            });
+            f.instruction(&Instruction::LocalSet(local));
+        }
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End); // $next
+        f.instruction(&Instruction::Unreachable);
         f.instruction(&Instruction::End);
         f
     }
+}
+
+/// One kind's case in the comparison.
+struct Case<'a, 'b> {
+    builder: &'a EqBuilder<'b>,
+    /// Branch depth from the case body to `$done`.
+    done: u32,
+    /// The first of this kind's typed array registers.
+    regs: u32,
+}
+
+impl Case<'_, '_> {
+    fn types(&self) -> &Types {
+        self.builder.types
+    }
+
+    fn layout(&self) -> &TypeLayout {
+        self.builder.layout
+    }
+
+    fn body(&self, f: &mut Function, ty: TyId) {
+        match self.types().kind(ty) {
+            TyKind::Struct(s) => {
+                let record = self.layout().struct_type(*s);
+                let shift = self.layout().struct_shift(*s);
+                for (i, fd) in self.types().struct_def(*s).fields.iter().enumerate() {
+                    self.component(f, fd.ty, record, i as u32 + shift);
+                }
+            }
+            TyKind::Tuple(elems) => {
+                let Some(record) = self.layout().tuple_type(ty) else {
+                    f.instruction(&Instruction::Unreachable);
+                    return;
+                };
+                for (i, e) in elems.iter().enumerate() {
+                    self.component(f, *e, record, i as u32);
+                }
+            }
+            TyKind::Enum(e) => self.enum_body(f, *e),
+            TyKind::Optional(inner) => {
+                let Some(boxed) = self.layout().option_type(*inner) else {
+                    f.instruction(&Instruction::Unreachable);
+                    return;
+                };
+                self.presence(f);
+                self.component(f, *inner, boxed, 0);
+            }
+            // Two errors are equal when their messages are.
+            TyKind::Err => {
+                self.presence(f);
+                self.component(f, TyId::STR, self.layout().error_record, 0);
+            }
+            TyKind::Slice(elem) => self.slice_body(f, *elem),
+            TyKind::Map(..) => self.map_body(f, ty),
+            // `collect` only ever asks for the kinds above.
+            _ => {
+                f.instruction(&Instruction::Unreachable);
+            }
+        }
+    }
+
+    /// `nil == nil` is equal and `nil == x` is not; two present values fall
+    /// through to have their contents compared.
+    fn presence(&self, f: &mut Function) {
+        f.instruction(&Instruction::LocalGet(A));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::LocalGet(B));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::I32Ne);
+        differ(f);
+        f.instruction(&Instruction::LocalGet(A));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::BrIf(self.done));
+    }
+
+    /// Compare field `field` of `record` on both sides.
+    fn component(&self, f: &mut Function, ty: TyId, record: u32, field: u32) {
+        self.compare(f, ty, |f, side| {
+            f.instruction(&Instruction::LocalGet(side));
+            f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(record)));
+            f.instruction(&Instruction::StructGet {
+                struct_type_index: record,
+                field_index: field,
+            });
+        });
+    }
+
+    /// Compare two values of `ty`, each put on the stack by `load` given the
+    /// side it is from: in place for a scalar or a string, returning 0 when
+    /// they differ; pushed for later when they are an aggregate.
+    fn compare(&self, f: &mut Function, ty: TyId, load: impl Fn(&mut Function, u32)) {
+        load(f, A);
+        load(f, B);
+        if let Some(kind) = self.builder.kind_of(ty) {
+            f.instruction(&Instruction::I32Const(kind as i32));
+            f.instruction(&Instruction::LocalGet(TOP));
+            f.instruction(&Instruction::StructNew(self.layout().eq_cell));
+            f.instruction(&Instruction::LocalSet(TOP));
+            return;
+        }
+        match self.types().kind(ty) {
+            TyKind::Str => {
+                f.instruction(&Instruction::Call(self.builder.strings.eq()));
+                f.instruction(&Instruction::I32Eqz);
+            }
+            _ => {
+                f.instruction(&match val_type_with(ty, self.types(), self.layout()) {
+                    ValType::I64 => Instruction::I64Ne,
+                    // `NaN` differs from itself here as it does under `==`.
+                    ValType::F64 => Instruction::F64Ne,
+                    ValType::I32 => Instruction::I32Ne,
+                    // A host value, a function or a trait object has no `==`,
+                    // and the checker refuses a type containing one.
+                    _ => Instruction::Unreachable,
+                });
+            }
+        }
+        differ(f);
+    }
 
     /// Different variants are never equal; the same variant compares payloads.
-    fn enum_eq(&self, e: kite_hir::EnumId) -> Function {
-        let mut f = Function::new(Vec::new());
-        let base = self.layout.enum_base_type(e);
-        let shift = self.layout.enum_shift(e);
-
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::StructGet {
-            struct_type_index: base,
-            field_index: shift,
-        });
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::StructGet {
-            struct_type_index: base,
-            field_index: shift,
-        });
-        f.instruction(&Instruction::I32Ne);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
-
-        // The tags now agree, so each arm may cast both sides to its variant.
-        for (v, variant) in self.types.enum_def(e).variants.iter().enumerate() {
-            if variant.fields.is_empty() {
-                continue;
-            }
-            let record = self.layout.variant_type(e, v as u32);
-            f.instruction(&Instruction::LocalGet(0));
+    fn enum_body(&self, f: &mut Function, e: kite_hir::EnumId) {
+        let base = self.layout().enum_base_type(e);
+        let shift = self.layout().enum_shift(e);
+        let tag = |f: &mut Function, side: u32| {
+            f.instruction(&Instruction::LocalGet(side));
+            f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(base)));
             f.instruction(&Instruction::StructGet {
                 struct_type_index: base,
                 field_index: shift,
             });
+        };
+        tag(f, A);
+        tag(f, B);
+        f.instruction(&Instruction::I32Ne);
+        differ(f);
+
+        // The tags agree, so each arm may cast both sides to its variant.
+        for (v, variant) in self.types().enum_def(e).variants.iter().enumerate() {
+            if variant.fields.is_empty() {
+                continue;
+            }
+            let record = self.layout().variant_type(e, v as u32);
+            tag(f, A);
             f.instruction(&Instruction::I32Const(v as i32));
             f.instruction(&Instruction::I32Eq);
             f.instruction(&Instruction::If(BlockType::Empty));
-            let pairs: Vec<(TyId, u32, u32)> = variant
-                .fields
-                .iter()
-                .enumerate()
-                .map(|(i, fd)| (fd.ty, record, i as u32 + 1 + shift))
-                .collect();
-            self.compare_fields(&mut f, &pairs, cast_then_get);
+            for (i, fd) in variant.fields.iter().enumerate() {
+                self.component(f, fd.ty, record, i as u32 + 1 + shift);
+            }
             f.instruction(&Instruction::End);
         }
-
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::End);
-        f
     }
 
-    /// Equal lengths, then equal elements. The loop stops at the first
-    /// difference, which matters for the long slices this is worth using on.
-    fn slice_eq(&self, ty: TyId, elem: TyId) -> Function {
-        let Some(array) = self.layout.slice_type(elem) else {
-            let mut f = Function::new(Vec::new());
+    /// Equal lengths, then equal elements. Only the slices' own lengths are
+    /// read — the storage behind them may be longer.
+    fn slice_body(&self, f: &mut Function, elem: TyId) {
+        let (Some(array), Some(header)) = (
+            self.layout().slice_type(elem),
+            self.layout().slice_header(elem),
+        ) else {
             f.instruction(&Instruction::Unreachable);
-            f.instruction(&Instruction::End);
-            return f;
+            return;
         };
-        let _ = ty;
-        // One local: the cursor.
-        let mut f = Function::new(vec![(1, ValType::I32)]);
-        let i = 2;
+        let (xa, xb) = (self.regs, self.regs + 1);
+        for (side, reg) in [(A, xa), (B, xb)] {
+            f.instruction(&Instruction::LocalGet(side));
+            f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(header)));
+            f.instruction(&Instruction::StructGet {
+                struct_type_index: header,
+                field_index: 0,
+            });
+            f.instruction(&Instruction::LocalSet(reg));
+        }
+        let len = |f: &mut Function, side: u32| {
+            f.instruction(&Instruction::LocalGet(side));
+            f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(header)));
+            f.instruction(&Instruction::StructGet {
+                struct_type_index: header,
+                field_index: 1,
+            });
+        };
+        len(f, A);
+        f.instruction(&Instruction::LocalTee(N));
+        len(f, B);
+        f.instruction(&Instruction::I32Ne);
+        differ(f);
+        self.each(f, |case, f| {
+            case.compare(f, elem, |f, side| {
+                f.instruction(&Instruction::LocalGet(if side == A { xa } else { xb }));
+                f.instruction(&Instruction::LocalGet(I));
+                f.instruction(&Instruction::ArrayGet(array));
+            });
+        });
+    }
 
-        f.instruction(&Instruction::LocalGet(0));
+    /// Equal lengths, then equal entries position by position: the same keys
+    /// with equal values, inserted in the same order. Insertion order is part
+    /// of what a Kite map is — iteration, `keys()` and a derived `hash()` all
+    /// observe it — so two maps that differ in it are different values. The
+    /// other two backends compare their entry vectors the same way.
+    fn map_body(&self, f: &mut Function, ty: TyId) {
+        let Some(ml) = self.layout().map_layout(ty) else {
+            f.instruction(&Instruction::Unreachable);
+            return;
+        };
+        // Keys in the first two registers, values in the next two.
+        for (field, first) in [(0, self.regs), (1, self.regs + 2)] {
+            for (side, reg) in [(A, first), (B, first + 1)] {
+                f.instruction(&Instruction::LocalGet(side));
+                f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(ml.record)));
+                f.instruction(&Instruction::StructGet {
+                    struct_type_index: ml.record,
+                    field_index: field,
+                });
+                f.instruction(&Instruction::LocalSet(reg));
+            }
+        }
+        f.instruction(&Instruction::LocalGet(self.regs));
         f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalTee(N));
+        f.instruction(&Instruction::LocalGet(self.regs + 1));
         f.instruction(&Instruction::ArrayLen);
         f.instruction(&Instruction::I32Ne);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
+        differ(f);
+        self.each(f, |case, f| {
+            for (first, array, elem) in [
+                (case.regs, ml.keys, ml.key_ty),
+                (case.regs + 2, ml.values, ml.value_ty),
+            ] {
+                case.compare(f, elem, |f, side| {
+                    f.instruction(&Instruction::LocalGet(if side == A { first } else { first + 1 }));
+                    f.instruction(&Instruction::LocalGet(I));
+                    f.instruction(&Instruction::ArrayGet(array));
+                });
+            }
+        });
+    }
 
+    /// Run `body` for each index `0..$n`, in `$i`.
+    fn each(&self, f: &mut Function, body: impl Fn(&Self, &mut Function)) {
         f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalSet(i));
+        f.instruction(&Instruction::LocalSet(I));
         f.instruction(&Instruction::Block(BlockType::Empty));
         f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(i));
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalGet(I));
+        f.instruction(&Instruction::LocalGet(N));
         f.instruction(&Instruction::I32GeU);
         f.instruction(&Instruction::BrIf(1));
-
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(i));
-        f.instruction(&Instruction::ArrayGet(array));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::LocalGet(i));
-        f.instruction(&Instruction::ArrayGet(array));
-        self.compare_values(&mut f, elem);
-        f.instruction(&Instruction::I32Eqz);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
-
-        f.instruction(&Instruction::LocalGet(i));
+        body(self, f);
+        f.instruction(&Instruction::LocalGet(I));
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(i));
+        f.instruction(&Instruction::LocalSet(I));
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::End);
-        f
-    }
-
-    /// `nil == nil` is true, `nil == x` is false, and two present values
-    /// compare by their payloads.
-    fn optional_eq(&self, ty: TyId, inner: TyId) -> Function {
-        let mut f = Function::new(Vec::new());
-        let Some(boxed) = self.layout.option_type(inner) else {
-            f.instruction(&Instruction::Unreachable);
-            f.instruction(&Instruction::End);
-            return f;
-        };
-        let _ = ty;
-
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::RefIsNull);
-        // Different presence: not equal. Both absent: equal.
-        f.instruction(&Instruction::I32Ne);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
-
-        struct_get(&mut f, 0, boxed, 0);
-        struct_get(&mut f, 1, boxed, 0);
-        self.compare_values(&mut f, inner);
-        f.instruction(&Instruction::End);
-        f
-    }
-
-    /// Two errors are equal when their messages are. `nil` is the no-error
-    /// value, so presence is compared first.
-    fn error_eq(&self) -> Function {
-        let mut f = Function::new(Vec::new());
-        let record = self.layout.error_record;
-
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::I32Ne);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
-
-        struct_get(&mut f, 0, record, 0);
-        struct_get(&mut f, 1, record, 0);
-        f.instruction(&Instruction::Call(self.strings.eq()));
-        f.instruction(&Instruction::End);
-        f
     }
 }
 
-/// Read a field of the record in `local`.
-fn struct_get(f: &mut Function, local: u32, record: u32, field: u32) {
-    f.instruction(&Instruction::LocalGet(local));
-    f.instruction(&Instruction::StructGet {
-        struct_type_index: record,
-        field_index: field,
-    });
-}
-
-/// Read a field of a variant, casting first. The tag has already been tested,
-/// so the cast cannot fail.
-fn cast_then_get(f: &mut Function, local: u32, record: u32, field: u32) {
-    f.instruction(&Instruction::LocalGet(local));
-    f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(record)));
-    f.instruction(&Instruction::StructGet {
-        struct_type_index: record,
-        field_index: field,
-    });
+/// With an `i32` on the stack that is nonzero when two things differ: return
+/// 0 from the comparison if it is.
+fn differ(f: &mut Function) {
+    f.instruction(&Instruction::If(BlockType::Empty));
+    f.instruction(&Instruction::I32Const(0));
+    f.instruction(&Instruction::Return);
+    f.instruction(&Instruction::End);
 }

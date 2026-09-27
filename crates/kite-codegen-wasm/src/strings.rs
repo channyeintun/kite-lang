@@ -164,15 +164,6 @@ impl StringRuntime {
     }
 }
 
-/// Whether an operand is a `str`, for deciding how a map compares its keys.
-fn operand_is_str(f: &mir::Function, o: &mir::Operand) -> bool {
-    match o {
-        mir::Operand::Str(_) => true,
-        mir::Operand::Local(l) => f.locals[l.index()].ty == TyId::STR,
-        _ => false,
-    }
-}
-
 /// Which runtime functions the module must contain.
 ///
 /// `from_host` and `to_host` are unconditional: the glue exports `str` and
@@ -203,14 +194,18 @@ pub fn needed(program: &mir::Program, types: &Types, has_eq_fns: bool) -> Needed
     }
 
     for f in &program.fns {
+        // A map keyed by `str` compares keys with `eq` on every lookup, write
+        // and removal. Asked of the map's type rather than of each operation,
+        // because a removal from a map built elsewhere was once the one
+        // operation this did not look at.
+        if f.locals
+            .iter()
+            .any(|l| matches!(types.kind(l.ty), TyKind::Map(k, _) if *k == TyId::STR))
+        {
+            needed.mark(EQ);
+        }
         for b in &f.blocks {
             for s in &b.stmts {
-                if let mir::Inst::MapSet { local, key, .. } = s {
-                    let _ = local;
-                    if operand_is_str(f, key) {
-                        needed.mark(EQ);
-                    }
-                }
                 let mir::Inst::Assign { value, .. } = s else {
                     continue;
                 };
@@ -235,23 +230,11 @@ pub fn needed(program: &mir::Program, types: &Types, has_eq_fns: bool) -> Needed
                             needed.mark(FROM_CODE);
                         }
                     }
-                    // A map compares its keys on every read and every write.
-                    mir::Rvalue::MapGet { key, .. } => {
-                        if operand_is_str(f, key) {
-                            needed.mark(EQ);
-                        }
-                    }
-                    mir::Rvalue::MapNew { entries }
-                        if entries.iter().step_by(2).any(|k| operand_is_str(f, k)) =>
-                    {
-                        needed.mark(EQ);
-                    }
                     _ => {}
                 }
             }
         }
     }
-    let _ = types;
 
     // `trim` is the one runtime function that calls another.
     if needed.has(TRIM) {

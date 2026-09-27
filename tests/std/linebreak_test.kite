@@ -37,6 +37,22 @@ fn class_checks() -> [error] {
     out.push(test.is_true(text.line_break_class(0xAC00) == text.LineBreak.H2, "가 is H2"))
     // An unassigned code point is AL, which is UAX #14's own rule LB1.
     out.push(test.is_true(text.line_break_class(0xE0000) == text.LineBreak.AL, "unknown is AL"))
+    // Entries the table had wrong or did not have.
+    out.push(test.is_true(text.line_break_class(0x0009) == text.LineBreak.BA, "a tab is BA"))
+    out.push(test.is_true(text.line_break_class(0x00AD) == text.LineBreak.BA, "a soft hyphen is BA"))
+    out.push(test.is_true(text.line_break_class(0x3000) == text.LineBreak.BA, "the ideographic space is BA"))
+    out.push(test.is_true(text.line_break_class(0x2009) == text.LineBreak.BA, "a thin space is BA"))
+    out.push(test.is_true(text.line_break_class(0x00A2) == text.LineBreak.PO, "the cent sign is PO"))
+    out.push(test.is_true(text.line_break_class(0x30FC) == text.LineBreak.NS, "the prolonged sound mark is CJ, so NS"))
+    out.push(test.is_true(text.line_break_class(0x0663) == text.LineBreak.NU, "an Arabic-Indic digit is NU"))
+    out.push(test.is_true(text.line_break_class(0x0967) == text.LineBreak.NU, "a Devanagari digit is NU"))
+    out.push(test.is_true(text.line_break_class(0x2026) == text.LineBreak.IN, "an ellipsis is IN"))
+    out.push(test.is_true(text.line_break_class(0x05D0) == text.LineBreak.HL, "alef is HL"))
+    out.push(test.is_true(text.line_break_class(0x1F1FA) == text.LineBreak.RI, "a regional indicator is RI"))
+    out.push(test.is_true(text.line_break_class(0x1F44D) == text.LineBreak.EB, "thumbs up is EB"))
+    out.push(test.is_true(text.line_break_class(0x1F3FD) == text.LineBreak.EM, "a skin tone is EM"))
+    out.push(test.is_true(text.line_break_class(0x200D) == text.LineBreak.ZWJ, "the joiner is ZWJ"))
+    out.push(test.is_true(text.line_break_class(0x201E) == text.LineBreak.OP, "a low quotation mark opens"))
     return out
 }
 
@@ -117,10 +133,62 @@ fn mark_checks() -> [error] {
     return out
 }
 
+/// Rules that were missing or applied in the wrong order.
+fn rule_checks() -> [error] {
+    var out: [error] = []
+    let nbsp = text.from_code(0x00A0)
+    let acute = text.from_code(0x0301)
+    // LB12a: glue after something that is not a space, a break-after or a
+    // hyphen does not break — and after one of those, the later rules
+    // decide, where it used to break outright. LB14 keeps `( ` with the glue.
+    out.push(test.equal_str(shape("( \(nbsp)x"), "....", "LB14 before LB12a's exception"))
+    out.push(test.equal_str(shape("x \(nbsp)y"), "..|.", "a space before glue still breaks"))
+    // LB9: no break before a mark, whatever the pair rules would say about
+    // the character it attaches to.
+    out.push(test.equal_str(shape("中\(acute)"), "..", "a mark stays with an ideograph"))
+    out.push(test.equal_str(shape("\u{1f600}\u{fe0f}"), "..", "and a variation selector with an emoji"))
+    // LB8a and LB30b: a joined sequence and a skin tone hold together.
+    out.push(test.equal_str(shape("\u{1f468}\u{200d}\u{1f469}"), "...", "a zero-width joiner joins"))
+    out.push(test.equal_str(shape("\u{1f44d}\u{1f3fd}"), "..", "a skin tone stays with its emoji"))
+    // LB30a: a flag is two regional indicators, and two flags may part.
+    out.push(test.equal_str(shape("\u{1f1fa}\u{1f1f8}\u{1f1ec}\u{1f1e7}"), "..|.", "flags pair off"))
+    // LB8: after a zero-width space, even across spaces.
+    out.push(test.equal_str(shape("a\u{200b} }"), "...|", "a break after a zero-width space and spaces"))
+    // LB21 with the corrected classes.
+    out.push(test.equal_str(shape("a\u{ad}b"), "..|", "a soft hyphen breaks after itself"))
+    out.push(test.equal_str(shape("a\tb"), "..|", "and so does a tab"))
+    out.push(test.equal_str(shape("a\u{3000}b"), "..|", "and the ideographic space"))
+    // LB22: never before an ellipsis.
+    out.push(test.equal_str(shape("中…"), "..", "an ellipsis stays with what it follows"))
+    // LB23a: a currency sign or a percent stays with an ideograph.
+    out.push(test.equal_str(shape("$中"), "..", "a prefix before an ideograph"))
+    out.push(test.equal_str(shape("中%"), "..", "a postfix after one"))
+    // LB25: a number keeps its postfix across a closing bracket, and a
+    // solidus only joins a number that follows a number.
+    out.push(test.equal_str(shape("(10)%"), ".....", "a percent after a bracketed number"))
+    out.push(test.equal_str(shape("1/2"), "...", "a fraction holds together"))
+    out.push(test.equal_str(shape("a/2"), "..|", "a solidus after a letter still breaks"))
+    // LB24 and LB27.
+    out.push(test.equal_str(shape("a$"), "..", "a letter and a prefix"))
+    out.push(test.equal_str(shape("%a"), "..", "a postfix and a letter"))
+    out.push(test.equal_str(shape("가%"), "..", "a Hangul syllable and a postfix"))
+    out.push(test.equal_str(shape("$가"), "..", "a prefix and a Hangul syllable"))
+    // LB21a: a hyphen after a Hebrew letter stays with what follows.
+    out.push(test.equal_str(shape("\u{5d0}-\u{5d1}"), "...", "a Hebrew hyphen does not break after"))
+    out.push(test.equal_str(shape("a-b"), "..|", "a Latin one does"))
+    // LB30: a fullwidth bracket after a letter may break, as the rule says.
+    out.push(test.equal_str(shape("ab\u{ff08}\u{30af}"), "..|.", "a fullwidth opener may start a line"))
+    out.push(test.equal_str(shape("ab("), "...", "an ASCII one may not"))
+    return out
+}
+
 fn mandatory_checks() -> [error] {
     var out: [error] = []
     out.push(test.equal_str(shape("a\nb"), "..|", "a newline is a break after it"))
     out.push(test.equal_str(shape("a\n"), "..", "and before it, never"))
+    // LB5: a carriage return and its line feed are one break, not two.
+    out.push(test.equal_str(shape("a\r\nb"), "...|", "CRLF breaks once, after the LF"))
+    out.push(test.equal_str(shape("a\rb"), "..|", "a lone CR breaks after itself"))
     return out
 }
 
@@ -135,6 +203,7 @@ fn main() {
     results = concat(results, cjk_checks())
     results = concat(results, mark_checks())
     results = concat(results, mandatory_checks())
+    results = concat(results, rule_checks())
     var failed = 0
     for e in results {
         if e != nil {

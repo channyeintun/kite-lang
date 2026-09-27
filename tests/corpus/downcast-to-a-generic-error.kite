@@ -1,0 +1,24 @@
+// An error carries the tag of the specialisation it was made from, so a
+// generic type's `is` compared it with the declaration's and answered `false`
+// for every one, and `as` gave `nil` typed with a free `T`. `as` is told
+// which specialisation by the type it is used as; without one, and for `is`,
+// there is no answer to give.
+
+struct Wrapped<T> {
+    inner: T
+    why: str
+}
+
+impl<T> Error for Wrapped<T> {
+    fn message(self) -> str {
+        return "wrapped: " + self.why
+    }
+}
+
+fn main() {
+    let e: error = Wrapped{ inner: 5, why: "five" }
+    io.print(Wrapped.is(e)) //~ ERROR E0209
+    let w = Wrapped.as(e) //~ ERROR E0209
+    let v: Option<Wrapped<int>> = Wrapped.as(e)
+    io.print(v == nil)
+}

@@ -31,15 +31,17 @@ repository says otherwise, the compiler won.
   `map(xs, |n| n * 2)` is `E0209`. Write `map(xs, |n: int| n * 2)`.
 - **Slices and maps have almost no methods.** A slice has exactly `len`, `get`
   (bounds-checked, `-> Option<T>`) and `push`; `xs[i]` traps out of range. A map
-  has `len`, `keys`, `values`, and is read with `m[k]` (an optional) and written
-  with `m[k] = v` — and a key cannot be removed at all. Everything else is a
+  has `len`, `keys`, `values` and `remove`, and is read with `m[k]` (an
+  optional) and written with `m[k] = v`. Everything else is a
   prelude *function*, because Kite has no extension methods and a slice takes
   methods only from the compiler.
 - **`str` has exactly five methods** — `len`, `slice`, `index_of`, `trim`,
   `code_at`. `contains`, `starts_with`, `split`, `replace`, `lower`, `upper`
   are prelude functions taking the string as the first argument.
-- **Web-only modules are `dom`, `window`, `html` and `js`.** They compile
-  everywhere and trap at run time off the web. `fs` is the mirror image: native
+- **Web-only modules are `dom`, `window`, `html` and `js`.** They type-check
+  everywhere. Under `kitec run` they trap at run time; natively (`--native`,
+  `--emit native`) they are refused at compile time with `E0204`, because a
+  `JsValue` has nothing to refer to there. `fs` is the mirror image: native
   only.
 - **`kitec run` supplies exactly one host group, `fs`.** A program calling
   `std/http`, `std/socket`, `std/crypto` or `std/js` type-checks and then traps
@@ -48,7 +50,7 @@ repository says otherwise, the compiler won.
   `http.open`, `net.socket_open` for `socket.connect`, `crypto.digest_start` for
   `crypto.sha256`, `crypto.random_hex` for `crypto.random`, `js.js_global` for
   anything over `std/js`. Those need `--emit wasm` and the generated glue.
-- **`--explain` knows 48 codes.** The ranges leave room for a thousand; the
+- **`--explain` knows 55 codes.** The ranges leave room for a thousand; the
   gaps are real, and a code nobody can provoke is deleted rather than kept to be
   explained. Any unknown code — `kitec --explain E0999` — prints the whole list.
 
@@ -69,8 +71,8 @@ functions are dropped before code generation.
 
 The four derivable traits are `Debug`, `Hash`, `Encode` and `Decode`.
 `Encode` is `json.Encode` and needs `use std/json`; `Decode` becomes an
-*associated function* `T.decode(doc) -> (T, error)`, because a trait method
-cannot return `Self`.
+*associated function* `T.decode(doc) -> (T, error)` rather than a trait method,
+so it is called on the type and cannot be named in a bound.
 
 ```kite
 use std/json
@@ -171,44 +173,42 @@ fn main() {
 ### Maps
 
 The prelude has nothing for them. No `merge`, no `get_or`, no `map_values` — a
-map's whole surface is three methods and the index: `len`, `keys`, `values`,
-`m[k]` (an `Option<V>`) and `m[k] = v`.
+map's whole surface is four methods and the index: `len`, `keys`, `values`,
+`remove`, `m[k]` (an `Option<V>`) and `m[k] = v`.
 
-**A key cannot be removed.** `m.remove(k)` is `E0205`, whose note is the
-surface list above; there is no `delete` statement; and `m[k] = nil` is `E0200`
-because `nil` is not a value of `V`.
+**A key goes with `m.remove(k)`**, on a `var` binding, a `var` field or an
+element of a `var` slice, and a key that is not there is not an error. There is no `delete` statement, and `m[k] = nil` is
+`E0200` because `nil` is not a value of `V`. `01-lexical-and-types.md` has the
+details.
 
 ```kite fails
 fn main() {
     var counts = { "a": 1, "b": 2 }
-    counts.remove("a")   //~ E0205
+    counts["a"] = nil   //~ E0200
     io.print("\(counts.len())")
 }
 ```
 
-Removal is a rebuild, and the copy is visible in the code rather than hidden in
-a method:
+Anything more is a loop you write, and the copy is visible in the code rather
+than hidden in a function:
 
 ```kite
-fn without(m: { str: int }, key: str) -> { str: int } {
+fn merged(a: { str: int }, b: { str: int }) -> { str: int } {
     var out: { str: int } = {}
-    for k in m.keys() {
-        if k == key {
-            continue
-        }
-        let v = m[k]
-        if v == nil {
-            continue
-        }
+    for (k, v) in a {
+        out[k] = v
+    }
+    for (k, v) in b {
         out[k] = v
     }
     return out
 }
 
 fn main() {
-    let counts = { "a": 1, "b": 2, "c": 3 }
-    let fewer = without(counts, "b")
-    io.print("\(counts.len()) \(fewer.len()) \(or_else(fewer["a"], 0))")
+    var counts = { "a": 1, "b": 2, "c": 3 }
+    counts.remove("b")
+    let both = merged(counts, { "d": 4 })
+    io.print("\(counts.len()) \(both.len()) \(or_else(both["d"], 0))")
 }
 ```
 
@@ -239,8 +239,12 @@ are **ASCII only** and say so.
 `or_else<T>(Option<T>, T) -> T` · `is_some<T>(Option<T>) -> bool` ·
 `parse_int(str) -> Option<int>` · `parse_float(str) -> Option<float>`
 
-`parse_int` accepts a leading `-` and digits, nothing else. `parse_float` has
-no exponent — that is `std/json`'s job.
+`parse_int` accepts a leading `-` and digits, nothing else, and is nil past the
+range of an `int` rather than trapping. `parse_float` accepts a leading `-`,
+digits with an optional fraction and an optional exponent (`2.5`, `.5`,
+`6.02e23`) — no `+`, no `inf` — and is **correctly rounded**: the nearest
+float to the decimal written, as `std/json` and `std/toml` also read numbers.
+Past the largest float it is nil; `-0` keeps its sign.
 
 ### Hashing and debug helpers
 
@@ -882,13 +886,21 @@ interpolation already renders. What it cannot do is *align*.
 `pad(s, width)` `pad_left` `centre` `ellipsis(s, width)` `fixed(x, places)`
 `percent(part, whole)` `grouped(n)` `row(cells, widths)`
 
+`fixed` writes the float's own digits, as many places as asked for, and rounds
+its exact value half away from zero: `fixed(2.125, 2)` is `2.13`, and
+`fixed(2.005, 2)` is `2.00`, because the float written `2.005` is a little
+below it. A negative number keeps its sign when it rounds to zero, and so does
+-0.0, as `%.Nf` writes them: `fixed(-0.0, 2)` is `-0.00`.
+
 ### fs — files and directories. **Not on the web**
 
 Every fallible call returns `(T, error)`; there is no errno.
 `read(path) -> (str, error)` `write(path, body) -> error`
 `list(path) -> ([str], error)` `remove(path) -> error`
-`kind(path) -> Kind` (`File` | `Dir` | `Missing`) `exists` `is_file` `is_dir`
-`temp_dir() -> str`.
+`kind(path) -> Kind` (`File` | `Directory` | `Missing`) `exists` `is_file`
+`is_dir` `temp_dir() -> str`. A file may begin with any character: the host
+marks failures and successes alike, so its answer is never confused with the
+file's first character.
 
 This is the one host group `kitec run` supplies, so the block below actually
 runs.
@@ -914,7 +926,7 @@ fn main() {
     }
     io.print(body)
     match fs.kind("/etc") {
-        Dir => io.print("dir"),
+        Directory => io.print("dir"),
         File => io.print("file"),
         Missing => io.print("missing"),
     }
@@ -942,7 +954,7 @@ per-row state.
 **Write the handler where the control is.** It closes over what is in scope
 there, so nothing has to be encoded into `data-` attributes and parsed back:
 
-```kite
+```kite ignore
 html.txt("button", [html.class("primary"), html.click(|e: dom.Event| {
     settle(app, bill.id)
 })], "Split it")
@@ -1029,13 +1041,27 @@ Client, all async `-> (Response, error)`: `get` `post` `put` `delete` `patch`
 Helpers: `ok(body)` `not_found()` `status(code, body)` `succeeded(r)`
 `header(r, name)`.
 
+A `Response` carries the headers it arrived with, so `header` can be asked at
+any time and the host lets a request go the moment its body is read — the
+glue's `requestsHeld()` counts what it still holds, and a program that has read
+every response leaves none. `header` answers as `fetch`'s `headers.get` does:
+the name ignores ASCII case, a header that came more than once is its values
+joined by `, ` (`Set-Cookie` included), and one that is absent — or any header
+of a response built in Kite, by `ok`, `not_found` or `status` — is `""`.
+
 **Cookies need `send_with`.** `send` cannot say whether credentials go out, and
 a page may not set a `Cookie` header itself — so an app that signs in with a
 cookie uses `send_with(method, url, body, Options)`:
 
 ```kite
-let signed_in = http.Options{ ..http.sending(), credentials: http.Credentials.Include }
-let (res, err) = await http.send_with("POST", url, body, signed_in)
+use std/http
+
+async fn sign_in(url: str, body: str) -> (http.Response, error) {
+    let signed_in = http.Options{ ..http.sending(), credentials: http.Credentials.Include }
+    let (res, err) = await http.send_with("POST", url, body, signed_in)
+    check err
+    return res, nil
+}
 ```
 
 `Options{ headers, credentials, redirect }`, built from `sending()` (the
@@ -1044,17 +1070,27 @@ defaults: `Credentials.SameOrigin`, `Redirect.Follow`) or `sending_with(headers)
 `Manual`. There is no `mode`: its only interesting value is `no-cors`, which
 returns a response you cannot read.
 
-Routing, all synchronous and testable with no port:
+**Headers as text are unsafe for a value from elsewhere.** `send`'s headers
+and `sending_with(headers)` are `name: value` lines, so a newline inside an
+interpolated value becomes a header of its own. Use
+`sending_pairs([Header]) -> (Options, error)`, which refuses a line break in a
+value and a name that is not a token, as `respond` does for responses.
+
+Routing, all synchronous and testable with no port. Matching looks at the path
+alone — a `?query` or `#fragment` after it takes no part:
 `route(method, pattern, fn(Request) -> Response)` ·
 `serve([Route], Request) -> Response` · `matches(pattern, path)` ·
-`parameter(pattern, path, name) -> Option<str>` ·
-`request_header(request, name) -> Option<str>`.
+`parameter(pattern, path, name) -> Option<str>` (still percent-encoded) ·
+`query_parameter(request, name) -> Option<str>` (decoded as a form is: `+` is a
+space, `%XX` UTF-8 bytes) · `request_header(request, name) -> Option<str>`.
 
 Server: `open(port) -> (Server, error)` async (port 0 asks the host to choose),
 `port_of` · `accept(server) -> (Incoming, error)` async ·
 `respond(incoming, response, [Header]) -> error` — headers as **pairs, not
 text**, because a newline in a value would otherwise become a separator ·
-`run(server, [Route]) -> (int, error)` · `serve_closed` · `shut`.
+`run(server, [Route]) -> (int, error)` · `serve_closed` · `shut`. Once a
+server is `shut` and nothing is waiting, `accept` answers with an error and
+`run` returns the count it answered.
 
 Server-sent events: `events(url)` / `events_named(url, names)` ·
 `listen(stream, name)` · `receive(stream) -> (Event, error)` · `pending` ·
@@ -1177,6 +1213,14 @@ navigation `field(v, key)` `at(v, index)` `items(v) -> [Json]`
 The navigation functions take `Option<Json>` and return `Option<Json>`, so they
 chain without unwrapping and a `Json` passes where an `Option<Json>` is wanted.
 
+`parse` reads RFC 8259 and nothing looser — `01`, `1.`, `\x` and a raw control
+character in a string are errors — and each number is the float nearest what
+was written. `int_of` is nil unless the number is whole and fits an `int`, so
+`@derive(Decode)` refuses `3.7` for an `int` field. `stringify` writes a number
+that is whole and fits an `int` without a `.0`, and any other finite one as the
+float it is: 2⁶³ is `9223372036854775808.0`. JSON cannot spell an infinity or
+a NaN, so each is written `null`, as JavaScript's `JSON.stringify` does.
+
 ```kite
 use std/json
 
@@ -1208,8 +1252,14 @@ constants as functions: `pi()` `e()` `tau()` `ln2()` ·
 integers: `max_int()` `min_int()` `checked_add(a, b) -> Option<int>`
 `wrapping_add(a, b) -> int`.
 
-There is no `math.approx_eq` despite what the float-equality warning says —
-the prelude's `approx_eq` is the one that exists.
+`sqrt` is correctly rounded over the whole range; `trunc`, `floor`, `ceil` and
+`round` hand back a float that is already whole (anything from 2⁵²) rather than
+casting it through `int`. `sin`, `cos` and `tan` take whole quarter turns off
+an argument exactly however large it is, so `sin(1e300)` is right to a few
+units in the last place.
+
+There is no `math.approx_eq`: the prelude's `approx_eq(a, b, tolerance)` is
+the one that exists, and it is what the float-equality warning suggests.
 
 ### socket — WebSocket, client side
 
@@ -1380,22 +1430,25 @@ pub async fn main() {
 
 ### test — assertions as values
 
-A test is a `pub fn` whose name starts with `test_`. The runner will happily
-call a `test_` of any shape, but write `-> (int, error)` — that is the shape
-`check` needs, and the only one that can report a failure rather than pass
-silently. `kitec test file.kite` finds them, runs each, and also runs every
-` ```kite ` doc example. No assertion traps: a failure reports and the rest
-still run.
+A test is a function whose name starts with `test_` and that takes no
+arguments. Write `-> (int, error)` — that is the shape `check` needs, and the
+only one that can report a failure rather than pass silently. `kitec test
+file.kite` finds them, runs each, and also runs every ` ```kite ` doc example.
+No assertion traps: a failure reports and the rest still run.
 
-Discovery walks the *compiled* functions and matches `test_` against the name
-each one ended up with, which has two consequences worth knowing before you
-lay a project out.
+`pub` is not needed: a private test is kept for the run and runs. An `async fn
+test_…` is driven to completion and its answer read out of its task. A `test_`
+function that takes arguments is a helper, and is named in a note rather than
+called. A closure written inside a test is not a test of its own.
 
-`pub` is load-bearing, because an unreached private function has already been
-dropped and is not there to be found. Put a `pub` and a private `test_` in one
-file and the runner reports `1 passed`.
+Doc examples are always compiled as a debug build, `--release` or not — an
+example fails by trapping on an `assert`, which a release build drops. A
+` ```kite ` fence may start with `use` lines; they go to the top of the file.
 
-**And `kitec test` is entry-file-only.** A function that arrived through `use`
+Discovery reads the entry file's own declarations, which has one consequence
+worth knowing before you lay a project out.
+
+**`kitec test` is entry-file-only.** A function that arrived through `use`
 is compiled under its *qualified* name — `money.test_double` — which does not
 start with `test_`, so it is never a test, even when it is in the binary
 because `main` calls it. Doc examples are worse: they are extracted from the
@@ -1404,7 +1457,7 @@ entry file's text, and a module's are never read at all.
 ```
 $ kitec test proj/src/main.kite          # main calls money.test_double()
 no tests in `proj/src/main.kite`
-note: a test is a `pub fn test_…() -> (int, error)`, or a ```kite fence in a doc comment
+note: a test is a `fn test_…() -> (int, error)`, or a ```kite fence in a doc comment
 ```
 
 Pointing `kitec test` at the module file instead recompiles that file alone, so
@@ -1468,11 +1521,20 @@ stated.
 `bidi_runs(line) -> [Run]` (a `Run` has `body` and `rtl` — no offsets) ·
 `bidi_runs_with(line, base)` · `bidi_levels` · `bidi_visual` ·
 `is_combining(code)` · `join_arabic(run) -> str` ·
-`line_break_class(code) -> LineBreak` · `break_opportunities(body) -> [bool]`.
+`line_break_class(code) -> LineBreak` · `break_opportunities(body) -> [bool]` ·
+`wrap(body, width: float, measure: fn(str) -> float) -> [str]` — greedy lines
+over those opportunities, measured by the caller (`canvas.width_of` on a
+canvas, a character count in a terminal); trailing spaces hang, a mandatory
+break ends a line, and a run wider than the line is cut between characters. A
+paragraph's indentation is kept, unless the first word does not fit after it:
+then the indentation ends a line of its own, empty since spaces hang, rather
+than the word being cut.
 
 UAX #9 rules P2–P3, X1–X10, W1–W7, N0–N2, I1–I2, L1–L2 (not L3, L4, HL1–HL6);
-UAX #14 LB1–LB31 with SA treated as AL and CB unimplemented; Arabic joining to
-Presentation Forms-B with the lam-alef ligature, not HarfBuzz.
+UAX #14 as of Unicode 15.0, LB1–LB31, with SA treated as AL, CB unimplemented,
+the later LB15a–d, LB20a and LB28a not implemented, and East Asian Width read
+only for LB30's openers; Arabic joining to Presentation Forms-B with the
+lam-alef ligature, not HarfBuzz.
 
 ```kite
 use std/text
@@ -1485,6 +1547,8 @@ fn main() {
     }
     io.print("\(text.bidi_levels(line).len()) \(text.bidi_visual(line).len())")
     io.print("\(count(text.break_opportunities("a b c"), |b| b))")
+    let chars = |s: str| -> float { return s.len() as float }
+    io.print(join(text.wrap("the quick brown fox", 10.0, chars), "|"))
     io.print("\(text.join_arabic("\u{0628}\u{0627}")) \(text.is_combining(0x0301))")
     match text.bidi_class(65) {
         L => io.print("left"),
@@ -1526,11 +1590,18 @@ Same shape as `std/json`. `enum Toml`, `parse(input) -> (Toml, error)`,
 `text_at(doc, path, fallback)`, `int_at`, `float_at`, `bool_at`.
 
 The subset is named: comments, bare/quoted/dotted keys, `[table]` and
-`[[array.of.tables]]`, basic and literal and multi-line strings, integers with
-`_` separators, floats with exponents (`inf` and `nan` are refused), booleans,
-arrays, inline tables. **Dates and times are not implemented** — a date parses
-as the string it was written as, losslessly, rather than being half-mapped onto
-`std/time`.
+`[[array.of.tables]]` (with `[a.b]` and `[[a.b]]` inside an element), basic and
+literal and multi-line strings, integers with `_` separators and `0x`/`0o`/`0b`
+prefixes, floats with exponents (`inf` and `nan` are refused), booleans,
+arrays, inline tables. TOML 1.0's rules about tables are enforced: a table is
+defined once, an inline table or a `[…]` array is closed, and dotted keys do not
+reopen a table a header defined. Whitespace is a space or a tab, and a carriage
+return is accepted only in the CRLF that ends a line. **Dates and times are not
+implemented** — a date is checked to be one of TOML's four forms and parses as
+the string it was written as, losslessly, rather than being half-mapped onto
+`std/time`. A document nesting deeper than 128 levels — each key segment, array
+and inline table counting one — is refused with an error, as `std/json` refuses
+one, so that input cannot choose how much stack a parse uses.
 
 ```kite
 use std/toml
@@ -1643,7 +1714,7 @@ help: make the binding mutable
 | E0800–E0899 | exclusivity |
 | E0900–E0999 | the compiler failing, rather than the program |
 
-### All 48 codes `--explain` knows
+### All 55 codes `--explain` knows
 
 `kitec --explain E0301` prints the rationale for the rule, not just the
 message. An unknown code prints the whole list. This table is the whole of
@@ -1653,22 +1724,25 @@ cannot emit.
 | | | | |
 |---|---|---|---|
 | E0001 unterminated string literal | E0002 invalid character in source | E0003 invalid escape sequence | E0004 invalid number literal |
-| E0005 block comments are not supported | E0006 interpolation nested too deeply | E0100 unexpected token | E0101 unclosed delimiter |
+| E0005 block comments are not supported | E0006 string interpolation nested too deeply | E0100 unexpected token | E0101 unclosed delimiter |
 | E0102 expression nested too deeply | E0110 use of possibly-uninitialised binding | E0111 unknown name | E0112 duplicate definition |
-| E0113 wrong number of arguments | E0114 cannot assign to immutable binding | E0115 `break`/`continue` outside a loop | E0116 unreachable code |
-| E0117 statement has no effect | E0200 type mismatch | E0201 cannot apply operator to these types | E0202 condition must be `bool` |
-| E0203 missing return value | E0204 unknown type | E0205 no such method, function, or callable value | E0206 trait cannot be a trait object |
-| E0207 value cannot be interpolated | E0208 invalid type parameter | E0209 type argument cannot be inferred | E0210 non-exhaustive match |
-| E0211 invalid closure | E0212 invalid cast | E0213 type has no identity | E0214 invalid type alias |
-| E0301 value used before its error was checked | E0302 error is never checked | E0303 `check` outside a fallible function | E0400 module not found |
-| E0401 private item | E0402 module cycle | E0403 module name reserved by the standard library | E0404 two modules of the same name |
-| E0520 type cannot be moved to another task | E0521 `await` outside an async function | E0600 comparing a secret with `==` | E0700 malformed `@derive` |
-| E0701 nothing derives that | E0702 a field the derive cannot write | E0800 one object under two argument names | E0900 the compiler emitted an invalid module |
+| E0113 wrong number of arguments | E0114 cannot assign to immutable binding | E0115 `break` or `continue` outside a loop | E0116 unreachable code |
+| E0117 statement has no effect | E0118 module-level binding is not a constant | E0119 constant defined in terms of itself | E0200 type mismatch |
+| E0201 cannot apply operator to these types | E0202 condition must be `bool` | E0203 missing return value | E0204 unknown type |
+| E0205 no such method, function, or callable value | E0206 trait cannot be a trait object | E0207 value cannot be interpolated | E0208 invalid type parameter |
+| E0209 type argument cannot be inferred | E0210 non-exhaustive match | E0211 invalid closure | E0212 invalid cast |
+| E0213 type has no identity | E0214 invalid type alias | E0220 generic instantiation does not terminate | E0301 value used before its error was checked |
+| E0302 error is never checked | E0303 `check` outside a fallible function | E0400 module not found | E0401 private item |
+| E0402 module cycle | E0403 module name is reserved by the standard library | E0404 two modules of the same name | E0405 a `kite.toml` that does not read |
+| E0406 implementation outside its type's module | E0520 type cannot be moved to another task | E0521 `await` outside an async function | E0600 comparing a secret with `==` |
+| E0700 malformed `@derive` | E0701 nothing derives that | E0702 a field the derive cannot write | E0800 one object under two argument names |
+| E0900 the compiler emitted an invalid module | E0901 internal compiler error | E0902 the program exceeds a limit of this target |  |
 
 ### Warnings, not errors
 
-`E0116` (unreachable code), `E0600` (secret compared with `==`) and `E0201` in
-its float-equality form are **warnings**: `kitec check` still exits 0. The
+`E0116` (unreachable code, and a `match` arm no value can reach), `E0600`
+(secret compared with `==`) and `E0201` in its float-equality form are
+**warnings**: `kitec check` still exits 0. The
 float lint deliberately does not fire when either operand is a literal, because
 `x == 0.0` is the guard written before a division and a tolerance would answer
 a different question.
@@ -1779,7 +1853,10 @@ A name section and a source map (`app.wasm.map`, pointed at by a
 files and lines. **One entry per function** — a frame resolves to the line the
 function was declared on, not the line that trapped. Both are dropped by
 `--release`, which is observable: the release output directory has no
-`app.wasm.map`.
+`app.wasm.map`. The map names a source relative to the directory it is written
+into (`../src/main.kite` for `--out dist`), the standard library's modules as
+`kite-std/<name>.kite`, and carries every source's text in `sourcesContent`, so
+DevTools shows the line without fetching anything.
 
 ## The toolchain
 
@@ -1801,12 +1878,16 @@ kitec pkg    [directory]     resolve dependency versions, write `kite.lock`
 | `--offline` | with `pkg`, resolve only from what is already vendored |
 | `--check` | with `fmt`, report rather than rewrite (exit 1 if unformatted) |
 | `--all` | with `doc`, include what is not `pub` |
-| `--native` | with `run`, execute machine code under the JIT — no linker |
-| `--emit <stage>` | `check`, `ast`, `hir`, `mir`, `kbc`, `wasm`, `native` |
-| `--out <dir>` | where `--emit wasm` and `--emit native` write |
+| `--native` | with `run`, execute machine code under the JIT — no linker; with `build`, write and link an object file |
+| `--emit <stage>` | with `run`, `check` or `build`: `check`, `ast`, `hir`, `mir`, `kbc` print that stage and stop; `wasm` and `native` are `build`'s (`run --emit native` is `run --native`) |
+| `--out <dir>` | where `build --emit wasm`, `build --native` and `bundle` write |
 | `--update` | with `pkg`, allow `kite.lock` to change; without it a dependency whose bytes moved is an error |
 | `--explain <CODE>` | the rationale for a diagnostic |
 | `--version`, `--help` | |
+
+An option a command does not take is an error, not something ignored or quietly
+obeyed: `kitec test --native`, `kitec check --emit wasm` and `kitec fmt
+--release` all refuse, naming the commands the option is for.
 
 Notes worth having:
 
@@ -1828,11 +1909,17 @@ Notes worth having:
   `<pre id="out">` and nothing else, so a DOM program building into an empty
   directory finds no mount point — put your own `index.html` there first and it
   is left alone.
-- **`--emit ast|hir|mir|kbc`** dumps that stage to stdout. Useful for
-  confirming what the compiler actually did.
-- **`kitec test`** runs `pub fn test_*() -> (int, error)` and every ` ```kite `
-  doc comment example, reporting both — **in the entry file only**. A `use`d
-  module's tests and doc examples are invisible to it; see `### test`.
+- **`--emit ast|hir|mir|kbc`** dumps that stage to stdout and exits — with
+  `run` too, which does not then run the program. Useful for confirming what
+  the compiler actually did.
+- **`kitec test`** runs every `fn test_*() -> (int, error)` — `pub` or not,
+  `async` or not — and every ` ```kite ` doc comment example, reporting both —
+  **in the entry file only**. A `use`d module's tests and doc examples are
+  invisible to it; see `### test`.
+- **`kitec bundle`** carries every file the build read — the entry, its
+  modules, the manifests and the dependencies they name — so a bundle with
+  `use` lines runs with none of its sources beside it. It keeps the build mode
+  it was made with: `assert` fires in a bundle made without `--release`.
 - **`kitec doc`** reads signatures from the parse, so it cannot describe a
   function that is not there.
 - **`kitec pkg`** needs a `kite.toml`; without one it says so. It resolves path
@@ -1901,9 +1988,6 @@ several files, which `kitec` reads whole, is not handed over at all and its
   because "no Kite target has yet" got them.** It is stale: `http.open`,
   `accept`, `respond`, `run`, `shut` and `Server`/`Incoming` are all there, over
   the `net` host, and `--emit wasm` writes a `serve.mjs` for them.
-- **The float-equality warning, and specification §16's line about it, point at
-  `math.approx_eq`.** No such function exists. The prelude's
-  `approx_eq(a, b, tolerance)` is the real one, and it is unqualified.
 - **The specification never enumerates the builtin dotted paths.** They are only
   in `crates/kite-resolve/src/lib.rs`, which is why `io.println` and
   `use std/io` are the two mistakes a model makes first.

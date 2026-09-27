@@ -1,0 +1,121 @@
+// `text.wrap` — the greedy half of line breaking, over a caller's measurement.
+//
+// Every case measures one per character, so the expected lines can be read off
+// the source. What is being tested is where lines end, not how wide a glyph
+// is: that is the caller's, and a canvas answers it with `canvas.width_of`.
+
+use std/test
+use std/text
+
+fn chars(s: str) -> float {
+    return s.len() as float
+}
+
+/// The lines, joined with `|`, so a failure reads as a picture of the answer.
+fn shape(body: str, width: float) -> str {
+    return join(text.wrap(body, width, chars), "|")
+}
+
+fn greedy_checks() -> [error] {
+    var out: [error] = []
+    out.push(test.equal_str(shape("the quick brown fox", 10.0), "the quick|brown fox", "fills each line"))
+    out.push(test.equal_str(shape("the quick brown fox", 9.0), "the quick|brown fox", "a line may be exactly full"))
+    out.push(test.equal_str(shape("the quick brown fox", 8.0), "the|quick|brown|fox", "and never over"))
+    out.push(test.equal_str(shape("the quick brown fox", 100.0), "the quick brown fox", "one line when it fits"))
+    out.push(test.equal_str(shape("a b c d e", 3.0), "a b|c d|e", "short words pair up"))
+    out.push(test.is_true(text.wrap("", 10.0, chars).len() == 0, "nothing is no lines"))
+    return out
+}
+
+fn space_checks() -> [error] {
+    var out: [error] = []
+    // Spaces at a line end hang: not counted, not kept.
+    out.push(test.equal_str(shape("ab    cd", 4.0), "ab|cd", "spaces at a break hang"))
+    out.push(test.equal_str(shape("ab   ", 2.0), "ab", "and at the end of the text"))
+    // Spaces at the start of a paragraph are indentation.
+    out.push(test.equal_str(shape("  ab cd", 5.0), "  ab|cd", "indentation is kept"))
+    // Unless the first word does not fit after it. The line holding only the
+    // indentation counted as empty, so the word was cut between characters
+    // although it fits on a line of its own. The indentation ends a line
+    // there, and hangs as any spaces at a line end do.
+    out.push(test.equal_str(shape("  abcdefgh", 8.0), "|abcdefgh", "a word that fits is not cut after indentation"))
+    out.push(test.equal_str(shape("      abc", 4.0), "|abc", "not even when the indentation is wider than the line"))
+    out.push(test.equal_str(shape("x\n  abcdefgh", 8.0), "x||abcdefgh", "in a later paragraph too"))
+    out.push(test.equal_str(shape("  abcdefgh", 10.0), "  abcdefgh", "indentation stays when the word fits after it"))
+    out.push(test.equal_str(shape("  abcdefghij", 8.0), "|abcdefgh|ij", "a word too wide for any line is still cut"))
+    return out
+}
+
+fn mandatory_checks() -> [error] {
+    var out: [error] = []
+    out.push(test.equal_str(shape("ab\ncd", 10.0), "ab|cd", "a newline ends a line"))
+    out.push(test.equal_str(shape("ab\r\ncd", 10.0), "ab|cd", "CRLF is one break"))
+    out.push(test.equal_str(shape("ab\rcd", 10.0), "ab|cd", "and so is a lone CR"))
+    out.push(test.equal_str(shape("ab\n\ncd", 10.0), "ab||cd", "two make an empty line"))
+    out.push(test.equal_str(shape("ab\n", 10.0), "ab", "one at the end starts nothing"))
+    out.push(test.equal_str(shape("hello world\nx", 5.0), "hello|world|x", "wrapping and a newline together"))
+    return out
+}
+
+fn overlong_checks() -> [error] {
+    var out: [error] = []
+    // A run wider than the line is cut between characters.
+    out.push(test.equal_str(shape("abcdefgh", 3.0), "abc|def|gh", "a long word is cut"))
+    out.push(test.equal_str(shape("ab abcdefgh cd", 4.0), "ab|abcd|efgh|cd", "and only the long one"))
+    // Never before a combining mark: `é` here is `e` and U+0301.
+    let acute = text.from_code(0x0301)
+    out.push(test.equal_str(shape("ae\(acute)b", 1.0), "a|e\(acute)|b", "a mark is not cut from its letter"))
+    // Nor from an ideograph. LB9 was not enforced, so the break the pair
+    // rules allowed before any ideograph was allowed before its mark too, and
+    // the mark went to a line of its own.
+    out.push(test.equal_str(shape("中中\(acute)", 2.0), "中|中\(acute)", "a mark is not cut from an ideograph"))
+    // A width nothing fits in still makes progress, one character a line.
+    out.push(test.equal_str(shape("abc", 0.0), "a|b|c", "zero width takes a character a line"))
+    out.push(test.equal_str(shape("ab cd", 1.0), "a|b|c|d", "and drops the spaces between"))
+    return out
+}
+
+fn script_checks() -> [error] {
+    var out: [error] = []
+    // Ideographs break between any two, so CJK fills a line without spaces.
+    out.push(test.equal_str(shape("中文字中文", 2.0), "中文|字中|文", "CJK wraps between characters"))
+    // A URL breaks after its solidus rather than being one enormous word.
+    out.push(test.equal_str(shape("see a/very/long", 7.0), "see a/|very/|long", "a URL breaks at its solidi"))
+    // A no-break space holds its neighbours together.
+    let nbsp = text.from_code(0x00A0)
+    out.push(test.equal_str(shape("x 10\(nbsp)kg", 5.0), "x|10\(nbsp)kg", "a no-break space does not break"))
+    return out
+}
+
+fn measured_checks() -> [error] {
+    var out: [error] = []
+    // Any measurement at all: here an `m` is twice as wide as anything else.
+    let wide = |s: str| -> float {
+        var w = 0.0
+        for i in 0..s.len() {
+            w += if s.code_at(i) == 0x6D { 2.0 } else { 1.0 }
+        }
+        return w
+    }
+    out.push(test.equal_str(shape("aa mm aa", 6.0), "aa mm|aa", "one per character"))
+    out.push(test.equal_str(join(text.wrap("aa mm aa", 6.0, wide), "|"), "aa|mm|aa", "the measurement decides"))
+    return out
+}
+
+fn main() {
+    var results: [error] = []
+    results = concat(results, greedy_checks())
+    results = concat(results, space_checks())
+    results = concat(results, mandatory_checks())
+    results = concat(results, overlong_checks())
+    results = concat(results, script_checks())
+    results = concat(results, measured_checks())
+    var failed = 0
+    for e in results {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("wrap: \(results.len() - failed) passed, \(failed) failed")
+}

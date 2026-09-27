@@ -1,0 +1,34 @@
+// A mistake inside a struct or map literal is recovered from inside it. The
+// literal used to be given up on at the mistake, so its own `}` closed the
+// function around it, and the rest of the function was read as declarations:
+// seven errors for one missing `:`.
+
+struct P {
+    x: int
+    y: int
+}
+
+fn show(p: P) {
+    io.print(p.x)
+}
+
+fn main() {
+    // A `:` left out: the literal is an error, and `p` still a binding.
+    let p = P{ x 1, y: 2 } //~ ERROR E0100
+    let q = p.x
+    io.print(q)
+    // A `,` left out before a field: supplied, and the call is still one.
+    show(P{ x: 1 y: 2 }) //~ ERROR E0100
+    if true {
+        show(P{ x: 3 y: 4 }) //~ ERROR E0100
+    }
+    // And before a map's entry.
+    let m = { "a": 1 "b": 2 } //~ ERROR E0100
+    io.print(m.len())
+    let r = p.y
+    io.print(r)
+}
+
+fn later() -> int {
+    return 3
+}

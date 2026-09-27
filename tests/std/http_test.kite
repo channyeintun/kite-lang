@@ -1,0 +1,114 @@
+// std/http's own tests: the parts that need no network.
+//
+// Routing, the query string, and building a request's headers are ordinary
+// functions of text, so they are tested here on both backends. Answering over
+// a real socket is `crates/kite-driver/tests/serve.rs`.
+
+use std/test
+use std/http
+
+fn home(r: http.Request) -> http.Response {
+    return http.ok("home")
+}
+
+fn user(r: http.Request) -> http.Response {
+    return http.ok("user \(or_else(http.parameter("/users/:id", r.path, "id"), "?"))")
+}
+
+fn get(path: str) -> http.Request {
+    return http.Request{ method: "GET", path: path, body: "", headers: "" }
+}
+
+fn served(path: str) -> str {
+    let routes = [http.route("GET", "/", home), http.route("GET", "/users/:id", user)]
+    let res = http.serve(routes, get(path))
+    return "\(res.status) \(res.body)"
+}
+
+fn query(path: str, name: str) -> str {
+    return or_else(http.query_parameter(get(path), name), "<nil>")
+}
+
+fn checks() -> [error] {
+    var out: [error] = []
+
+    // ---- routing ignores the query and the fragment ----
+    //
+    // The server hands a handler the target as the client sent it, so a link
+    // with `?utm=1` on it was a 404 and `/users/7?tab=posts` captured
+    // `7?tab=posts`.
+    out.push(test.equal_str(served("/"), "200 home", "the root"))
+    out.push(test.equal_str(served("/?utm=1"), "200 home", "the root with a query"))
+    out.push(test.equal_str(served("/users/7"), "200 user 7", "a capture"))
+    out.push(test.equal_str(served("/users/7?tab=posts"), "200 user 7", "a capture with a query"))
+    out.push(test.equal_str(served("/users/7#top"), "200 user 7", "a capture with a fragment"))
+    out.push(test.equal_str(served("/users/7/x?a=b"), "404 not found", "a longer path is still no match"))
+    out.push(test.is_true(http.matches("/users/:id", "/users/7?x=/a/b"), "a slash in the query is not a segment"))
+    out.push(test.equal_str(
+            or_else(http.parameter("/users/:id", "/users/a%20b", "id"), "?"),
+            "a%20b",
+            "a capture is as written",
+        ))
+
+    // ---- the query string ----
+    out.push(test.equal_str(query("/search?q=kite", "q"), "kite", "a parameter"))
+    out.push(test.equal_str(query("/search?q=kite+lang", "q"), "kite lang", "a plus is a space"))
+    out.push(test.equal_str(query("/search?q=a%2Bb%26c%3Dd", "q"), "a+b&c=d", "escapes are decoded"))
+    out.push(test.equal_str(query("/search?q=caf%C3%A9", "q"), "café", "as UTF-8"))
+    out.push(test.equal_str(query("/search?q=%F0%9F%98%80", "q"), "😀", "four bytes"))
+    out.push(test.equal_str(query("/search?q=%C3", "q"), "\u{fffd}", "a sequence cut short"))
+    out.push(test.equal_str(query("/search?q=%C3%28", "q"), "\u{fffd}(", "a bad continuation is read again"))
+    out.push(test.equal_str(query("/search?q=%FF", "q"), "\u{fffd}", "a byte that never starts one"))
+    out.push(test.equal_str(query("/search?q=%zz%", "q"), "%zz%", "a percent that is not an escape"))
+    out.push(test.equal_str(query("/search?a=1&b=2&a=3", "a"), "1", "the first of a repeated name"))
+    out.push(test.equal_str(query("/search?a=1&b=2", "b"), "2", "a later parameter"))
+    out.push(test.equal_str(query("/search?flag&b=2", "flag"), "", "a parameter with no value"))
+    out.push(test.equal_str(query("/search?x=1=2", "x"), "1=2", "only the first `=` separates"))
+    out.push(test.equal_str(query("/search?my+name=ada", "my name"), "ada", "the name is decoded too"))
+    out.push(test.equal_str(query("/search?q=1#frag", "q"), "1", "the fragment is not the query"))
+    out.push(test.equal_str(query("/search#frag?q=1", "q"), "<nil>", "a `?` inside the fragment"))
+    out.push(test.equal_str(query("/search", "q"), "<nil>", "no query at all"))
+    out.push(test.equal_str(query("/search?", "q"), "<nil>", "an empty query"))
+    out.push(test.equal_str(query("/search?qq=1", "q"), "<nil>", "a name is not a prefix"))
+
+    // ---- response headers ----
+    //
+    // A response built here carries none, and says so with "" rather than by
+    // asking a host — so `header` answers the same on every backend, host or
+    // no host.
+    out.push(test.equal_str(http.header(http.ok("x"), "content-type"), "", "a built response has no headers"))
+    out.push(test.equal_str(http.header(http.status(301, ""), "Location"), "", "not even a redirect's"))
+
+    // ---- request headers ----
+    //
+    // As pairs, a value that came from elsewhere cannot add a header of its
+    // own. The text form cannot tell, which its documentation says.
+    let pairs = [http.Header{ name: "x-user", value: "ada" }, http.Header{ name: "accept", value: "text/plain" }]
+    let (opts, err) = http.sending_pairs(pairs)
+    out.push(test.ok(err, "well-formed pairs"))
+    if err == nil {
+        out.push(test.equal_str(opts.headers, "x-user: ada\naccept: text/plain", "are joined as lines"))
+    }
+    let (_, smuggled) = http.sending_pairs([http.Header{ name: "x-user", value: "ada\nauthorization: Bearer stolen" }])
+    out.push(test.failed(smuggled, "a newline in a value is refused"))
+    let (_, returned) = http.sending_pairs([http.Header{ name: "x-user", value: "ada\r" }])
+    out.push(test.failed(returned, "and a carriage return"))
+    let (_, spaced) = http.sending_pairs([http.Header{ name: "x user", value: "ada" }])
+    out.push(test.failed(spaced, "a name that is not a token"))
+    let (_, colon) = http.sending_pairs([http.Header{ name: "x-user: ada\nx", value: "y" }])
+    out.push(test.failed(colon, "a name carrying a line"))
+    let (_, empty) = http.sending_pairs([http.Header{ name: "", value: "y" }])
+    out.push(test.failed(empty, "an empty name"))
+    return out
+}
+
+fn main() {
+    var failed = 0
+    for e in checks() {
+        if e != nil {
+            io.print("FAILED \(e.message())")
+            failed += 1
+        }
+    }
+    io.print("http: \(checks().len() - failed) passed, \(failed) failed")
+}

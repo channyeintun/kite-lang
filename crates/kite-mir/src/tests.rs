@@ -325,6 +325,113 @@ fn a_resume_function_takes_a_frame_and_returns_whether_it_finished() {
 }
 
 /// Every block a rewritten terminator names must exist. This is the invariant
+/// A `break` with no loop to leave — the checker's to refuse, as it does for
+/// one inside a closure whose body sits in a loop — used to be dropped, so the
+/// closure ran on as if it were not there. Lowering now records it as the
+/// compiler's error, and the block traps.
+#[test]
+fn a_break_with_no_loop_is_an_internal_error_not_a_silence() {
+    let span = kite_span::Span::new(kite_span::FileId(0), 0, 0);
+    let program = kite_hir::Program {
+        fns: vec![kite_hir::Function {
+            name: "lifted".into(),
+            is_free: false,
+            generic_count: 0,
+            is_pub: false,
+            is_async: false,
+            param_count: 0,
+            locals: Vec::new(),
+            ret: TyId::UNIT,
+            body: kite_hir::Block {
+                stmts: vec![kite_hir::Stmt::Break { label: None, span }],
+            },
+            span,
+        }],
+        ..Default::default()
+    };
+    let mir = lower(&program);
+    let found = internal_errors(&mir);
+    assert_eq!(found.len(), 1, "{:?}", found);
+    assert_eq!(found[0].function, "lifted");
+    assert!(found[0].what.contains("`break`"), "{}", found[0].what);
+    assert!(matches!(mir.fns[0].blocks[0].term, Terminator::Unreachable));
+}
+
+/// An `await` in a function the state-machine transform did not rewrite — a
+/// closure's lifted body, which is never `async` — reached every backend, and
+/// each panicked on it. It is reported before any backend is asked.
+#[test]
+fn an_await_the_transform_left_is_an_internal_error() {
+    let span = kite_span::Span::new(kite_span::FileId(0), 0, 0);
+    let mut program = Program::default();
+    program.fns.push(Function {
+        name: "main#closure0".into(),
+        is_async: false,
+        exportable: false,
+        param_count: 1,
+        locals: vec![
+            LocalDecl { ty: TyId::INT, name: None },
+            LocalDecl { ty: TyId::INT, name: None },
+        ],
+        ret: TyId::UNIT,
+        blocks: vec![BasicBlock {
+            stmts: vec![Inst::Assign {
+                dst: Local(1),
+                value: Rvalue::Await { task: Operand::Local(Local(0)) },
+            }],
+            term: Terminator::Return(None),
+        }],
+        span,
+    });
+    let found = internal_errors(&program);
+    assert_eq!(found.len(), 1, "{:?}", found);
+    assert_eq!(found[0].function, "main#closure0");
+
+    // Everything the driver lowers passes, async included.
+    let (lowered, _) = lower_async("async fn work() -> int {\n  return 1\n}\nasync fn main() {\n  io.print(await work())\n}\n");
+    assert!(internal_errors(&lowered).is_empty());
+}
+
+/// `for i in a..=max` stopped only once the counter passed the bound, and the
+/// increment that would pass `int`'s maximum overflowed. The step now leaves
+/// when the counter equals the bound, before incrementing.
+#[test]
+fn an_inclusive_range_leaves_before_incrementing_past_its_bound() {
+    let b = main_only("  for i in 0..=3 {\n    io.print(i)\n  }");
+    let f = b.main();
+    b.assert_well_formed(f);
+    let leaves_on_equal = f.blocks.iter().any(|blk| {
+        blk.stmts.iter().any(|s| {
+            matches!(s, Inst::Assign { value: Rvalue::Binary { op: BinOp::EqInt, .. }, .. })
+        }) && matches!(blk.term, Terminator::Branch { .. })
+    });
+    assert!(leaves_on_equal, "no equality test before the increment:\n{}", b.show());
+}
+
+/// A discarded value still has to be computed when computing it can trap.
+#[test]
+fn a_discarded_index_or_division_is_still_evaluated() {
+    let b = build(
+        "fn id(x: int) -> int {\n  return x\n}\n\
+         fn main() {\n  let xs = [1, 2, 3]\n  _ = xs[10]\n  _ = id(1) / id(0)\n  xs[5]\n}\n",
+    );
+    let f = b.main();
+    let count = |want: fn(&Rvalue) -> bool| {
+        f.blocks
+            .iter()
+            .flat_map(|blk| &blk.stmts)
+            .filter(|s| matches!(s, Inst::Assign { value, .. } if want(value)))
+            .count()
+    };
+    assert_eq!(count(|v| matches!(v, Rvalue::IndexGet { .. })), 2, "{}", b.show());
+    assert_eq!(
+        count(|v| matches!(v, Rvalue::Binary { op: BinOp::DivInt, .. })),
+        1,
+        "{}",
+        b.show()
+    );
+}
+
 /// most easily broken by the block arithmetic, so it is asserted directly.
 #[test]
 fn every_block_the_transform_names_exists() {
@@ -341,6 +448,101 @@ fn every_block_the_transform_names_exists() {
                     i,
                     s
                 );
+            }
+        }
+    }
+}
+
+/// The widest literal a function builds at once, in items, and how many
+/// locals it has.
+fn widest_literal_and_locals(f: &Function) -> (usize, usize) {
+    let widest = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.stmts)
+        .map(|s| match s {
+            Inst::Assign { value: Rvalue::SliceNew { elems }, .. } => elems.len(),
+            Inst::Assign { value: Rvalue::MapNew { entries }, .. } => entries.len(),
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0);
+    (widest, f.locals.len())
+}
+
+/// A long literal of computed elements costs the locals of its widest
+/// element, not a temporary per element.
+///
+/// Every element was a temporary of its own, all live until the literal was
+/// built: twenty thousand interpolated strings were sixty thousand locals,
+/// past what the VM and Wasm accept in a function, and natively twenty
+/// thousand collector roots live across twenty thousand calls, which made
+/// more machine code than the JIT could place. Past the first window each
+/// element is pushed as soon as it is computed, into temporaries the one
+/// before it has finished with.
+#[test]
+fn a_long_literal_of_computed_elements_reuses_its_temporaries() {
+    let n = 5000;
+    let elems: Vec<String> = (0..n).map(|i| format!("\"s\\(k + {})\"", i)).collect();
+    let entries: Vec<String> =
+        (0..n).map(|i| format!("\"k\\(k + {})\": [k, {}]", i % 700, i)).collect();
+    let b = build(&format!(
+        "fn main() {{\n  var k = 0\n  let xs = [{}]\n  let m = {{{}}}\n  io.print(xs.len() + m.len())\n}}\n",
+        elems.join(", "),
+        entries.join(", ")
+    ));
+    let f = b.main();
+    b.assert_well_formed(f);
+    let (widest, locals) = widest_literal_and_locals(f);
+    assert_eq!(widest, lower::LITERAL_WINDOW);
+    assert!(locals < 4 * lower::LITERAL_WINDOW, "{} locals for two literals of {}", locals, n);
+    let count = |want: fn(&Inst) -> bool| {
+        f.blocks.iter().flat_map(|blk| &blk.stmts).filter(|s| want(s)).count()
+    };
+    assert_eq!(count(|s| matches!(s, Inst::SlicePush { .. })), n - lower::LITERAL_WINDOW);
+    assert_eq!(count(|s| matches!(s, Inst::MapSet { .. })), n - lower::LITERAL_WINDOW / 2);
+}
+
+/// A long literal whose items need no temporary — constants and locals — is
+/// still one literal, which every backend builds a window at a time; and so
+/// is one no longer than the window, whatever its elements.
+#[test]
+fn a_long_literal_of_constants_is_still_one_literal() {
+    let n = 5000;
+    let consts: Vec<String> = (0..n).map(|i| i.to_string()).collect();
+    let short: Vec<String> = (0..lower::LITERAL_WINDOW).map(|i| format!("k + {}", i)).collect();
+    let b = build(&format!(
+        "fn main() {{\n  var k = 0\n  let xs = [{}, k]\n  let ys = [{}]\n  io.print(xs.len() + ys.len())\n}}\n",
+        consts.join(", "),
+        short.join(", ")
+    ));
+    let f = b.main();
+    let (widest, _) = widest_literal_and_locals(f);
+    assert_eq!(widest, n + 1);
+    let pushes = f.blocks.iter().flat_map(|blk| &blk.stmts);
+    assert!(!pushes.clone().any(|s| matches!(s, Inst::SlicePush { .. })), "{}", b.show());
+}
+
+/// Temporaries are reused only once an element is in: an element that is
+/// itself a long literal keeps its own under construction, and one that
+/// suspends keeps what it needs across the `await`.
+#[test]
+fn nested_and_suspending_long_literals_lower_well_formed() {
+    let n = lower::LITERAL_WINDOW + 40;
+    let inner: Vec<String> = (0..n).map(|i| format!("k + {}", i)).collect();
+    let row = format!("[{}]", inner.join(", "));
+    let rows: Vec<String> = (0..n).map(|_| row.clone()).collect();
+    let awaited: Vec<String> = (0..n).map(|i| format!("await f({})", i)).collect();
+    let (program, _types) = lower_async(&format!(
+        "async fn f(x: int) -> int {{\n  return x\n}}\n\
+         async fn main() {{\n  var k = 0\n  let grid = [{}]\n  let got = [{}]\n  io.print(grid.len() + got.len())\n}}\n",
+        rows.join(", "),
+        awaited.join(", ")
+    ));
+    for f in &program.fns {
+        for (i, b) in f.blocks.iter().enumerate() {
+            for s in b.term.successors() {
+                assert!(s.index() < f.blocks.len(), "`{}` block {} jumps to {:?}", f.name, i, s);
             }
         }
     }

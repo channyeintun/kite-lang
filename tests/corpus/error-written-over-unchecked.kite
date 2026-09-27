@@ -1,0 +1,122 @@
+// A write over an error binding that still holds a failure nobody has looked
+// at drops that failure, as going out of scope does (R3), whatever is written:
+// `nil`, a copy of another binding, or a second failure. The state after the
+// write is the new value's (R7). The first two used to compile, because the
+// write set the binding's state from the new value alone.
+
+use std/errors
+
+fn f(n: int) -> error {
+    if n > 0 {
+        return errors.new("boom \(n)")
+    }
+    return nil
+}
+
+fn g(n: int) -> (int, error) {
+    if n > 0 {
+        return 0, errors.new("bad")
+    }
+    return n, nil
+}
+
+fn with_nil() {
+    var e = f(1)
+    e = nil //~ ERROR E0302
+    io.print("dropped")
+}
+
+fn with_a_copy() {
+    let ok: error = nil
+    var e = f(1)
+    e = ok //~ ERROR E0302
+    io.print("dropped")
+}
+
+fn with_another_failure() {
+    var e = f(1)
+    e = f(2) //~ ERROR E0302
+    if e != nil {
+        io.print(e.message())
+    }
+}
+
+fn a_whole_pair() {
+    var p = g(1)
+    p = g(2) //~ ERROR E0302
+    let (v, err) = p
+    if err != nil {
+        return
+    }
+    io.print(v)
+}
+
+// Reported once where it is dropped on a branch: the path that skipped the
+// write carries the same failure out of scope, and that is the same mistake.
+fn on_one_branch(c: bool) {
+    var e = f(1)
+    if c {
+        e = nil //~ ERROR E0302
+    }
+    io.print("maybe dropped")
+}
+
+// Already reported where an early exit left it behind, so the write that
+// follows is the same mistake and is not reported again: one binding, one
+// diagnostic, as at the end of a body.
+fn after_an_exit(c: bool) {
+    var e = f(1)
+    if c {
+        return //~ ERROR E0302
+    }
+    e = nil
+    io.print("dropped")
+}
+
+// Checked first, wrapped, or never holding a failure: nothing is dropped.
+fn checked_first() {
+    var e = f(1)
+    if e != nil {
+        io.print(e.message())
+    }
+    e = nil
+    e = f(2)
+    if e != nil {
+        io.print(e.message())
+    }
+}
+
+fn wrapped() -> error {
+    var e = f(1)
+    e = errors.wrap(e, "context")
+    return e
+}
+
+fn starts_nil() {
+    var e: error = nil
+    e = nil
+    for i in 0..3 {
+        e = f(i)
+        if e != nil {
+            break
+        }
+    }
+    if e != nil {
+        io.print(e.message())
+    }
+}
+
+fn main() {
+    with_nil()
+    with_a_copy()
+    with_another_failure()
+    a_whole_pair()
+    on_one_branch(true)
+    after_an_exit(false)
+    checked_first()
+    let w = wrapped()
+    if w != nil {
+        io.print(w.message())
+    }
+    starts_nil()
+}

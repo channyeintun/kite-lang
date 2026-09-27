@@ -17,7 +17,7 @@ unchecked Kite is not.
 
 ```bash
 # in this repo
-/Users/channyeintun/Desktop/may/target/release/kitec check file.kite
+./target/release/kitec check file.kite
 
 # anywhere, nothing installed
 npx --yes --package=@kite-lang/compiler-wasm kitec check file.kite
@@ -29,9 +29,13 @@ passes `kitec` as the *subcommand* and fails.
 Every diagnostic carries a code, and the code explains itself. Run
 `kitec --explain E0302` for any code you see — it prints the rule and its
 rationale, not a restatement of the message. Also `kitec run`, `kitec test`
-(`pub fn test_*` **and** every doc-comment example, **in the entry file only** —
+(`fn test_*` **and** every doc-comment example, **in the entry file only** —
 a `use`d module's tests are invisible to it), `kitec fmt`, `kitec fix`,
 `kitec build --emit wasm --out dist`. Write, check, fix, check again.
+
+`--explain`, `test` and `fix` belong to the native `kitec` — this repo's build,
+or `npm install --save-dev @kite-lang/cli`. The WebAssembly `kitec` that `npx`
+fetches has `run`, `check`, `build`, `fmt` and `doc` only.
 
 For a **web page** a project reaches for `vite-plugin-kite` rather than `kitec`:
 `<script type="module" src="/src/main.kite">` in the project's own `index.html`
@@ -119,14 +123,14 @@ fn main() {
 | The reflex | Kite |
 |---|---|
 | `;` ends a statement | `;` is not a token — `E0002`. Newlines terminate statements. |
-| Continue a line by starting the next one with `\|\|`, `+`, `-` | Continuation is decided by the **last** token of a line. A leading `\|\|` is a zero-argument closure, built and discarded (`E0117`); a leading `-` is a fresh statement with **no diagnostic** and a silently wrong answer. Put the operator at the end of the line it continues. `>` and `>>` never continue. |
+| Continue a line by starting the next one with `\|\|`, `+`, `-` | Continuation is decided by the **last** token of a line. A leading `\|\|` is a zero-argument closure, built and discarded (`E0117`); a leading `-` is a fresh statement with **no diagnostic** and a silently wrong answer. Put the operator at the end of the line it continues (`>` and `>>` included; the `>` closing `Option<int>` does not continue). |
 | `/* … */` | Only `//`, `///`, `//!`. |
 | A ` ```kite ` fence in a `///` comment is prose | It is a test. `kitec test` appends it to **its own module** — everything the comment documents is already in scope, no import — and runs it. Mark an illustration ` ```kite ignore `. |
 | `'a'` is a char; `42i64`; `1.0f32` | No `char` type (a code point is an `int`, via `s.code_at(i)`), one `int`, one `float`, no literal suffixes. |
 | `let f: float = 3` | `E0200`. No implicit conversion anywhere, not even for literals. Write `3.0`, or `n as float`; `as` converts int↔float and nothing else. |
 | `if x { }` on a non-bool | No truthiness. A condition is exactly `bool` (`E0202`). |
 | `a & b == c` parses as `a & (b == c)` | Bitwise binds **tighter** than comparison. And comparison does not chain: `a < b < c` is `E0100`. |
-| `[3]int`, `xs[..2]`, `let r = 0..n` | No fixed-length arrays, no open-ended ranges, and a range is not a value — it is syntax for a `for` header and an index. Write both ends. |
+| `[3]int`, `let r = 0..n`, `for i in 0..` | No fixed-length arrays, and a range is not a value (`E0200`) — it is syntax for a `for` header and an index. An index may leave out either end (`xs[..2]`, `xs[1..]`, `xs[..]`, `s[6..]`); a `for` header may not (`0..` is `E0100`). |
 | `m[key]` yields a `V`; `xs[i]` yields nil when missing | `m[key]` and `xs.get(i)` are always `Option<V>`. `xs[i]` **traps** out of range; `xs[a..b]` **clamps**. |
 | `for k in someMap` | A map needs a pair binding: `for (k, v) in m`. One binding is `E0200`. |
 | `s[0]`, `s.split(",")` | `str` is not indexable and has exactly five methods: `len` `slice` `index_of` `trim` `code_at`. `split`, `join`, `contains`, `replace`, `lower` are prelude *functions*. Slices have only `len` `get` `push`; maps only `len` `keys` `values` `remove`. |
@@ -136,7 +140,8 @@ fn main() {
 | Struct fields separated by commas | **Declarations** are newline-separated (a comma is `E0100`); commas belong to literals and patterns. |
 | `P{ x: 1, ..base }` | `..base` comes **first**: `P{ ..base, x: 1 }`. Opposite of Rust. |
 | Overloading, default arguments, named arguments, turbofish | None exist (`E0112`, `E0113`, `E0209`). Where a type cannot be inferred it names itself at the front: `Book.decode(doc)`, `NotFound.is(err)`, `let s: Stack<int> = Stack.empty()`. Many optional inputs → take a struct. |
-| `Self`; `fn method<T>(self, …)` | No `Self` type, no method-level type parameters (`E0204`). Name the concrete type; put `<T>` on a free function or on the `impl` header. |
+| `impl` for another module's type | `E0406`: no extension methods and no orphan impls. An `impl` lives with its type, or with its trait — implement a trait of your own for an imported type, or write a function taking it. |
+| Reading another module's unmarked field or method | `E0401`, like an unmarked function: fields, methods and associated functions are private unless `pub`, and a struct with a private field cannot be built — `..base` included — outside its module. |
 | `let x = if c { let y = 1  y } else { 0 }` | A value-`if` branch is exactly **one expression** — no statements, no tail expression. A `match` block arm holding more than one statement is `()`. Arms that need statements `return` instead. |
 | Re-`let` the same name in one block | `E0112`; only a nested scope shadows. The one exception is rebinding an error that is already checked. |
 | `println!` / `console.log`; deriving `Display` | `io.print(v)`. A user type needs a hand-written `impl Display` — `Display` never derives. `@derive` covers `Debug`, `Hash`, `Encode`, `Decode` only (and `Encode`/`Decode` need `use std/json` in the file). |
@@ -151,7 +156,7 @@ fn main() {
 | Files in one directory see each other | Only in a directory some `use` **names** — those files share one namespace and never import each other. **The file you hand `kitec` is a one-file module, and the directory it sits in is not a module at all**: a sibling `words.kite` is invisible until `use words`, then it is `words.greeting()`. `kitec` compiles the entry plus what its `use`s reach, transitively, and nothing else in the tree. |
 | Calling an `async fn` starts running it | It only **queues**. Nothing in the body runs until something awaits the `Task<T>`. Concurrency is two calls, then two awaits. |
 | `map(xs, \|n\| n * 2)` | `E0209` — nothing fixes `map`'s result type. Annotate: `map(xs, \|n: int\| n * 2)`. `filter` needs no annotation. |
-| `match s { Shape.Circle(r) => … }` | A **qualified** pattern silently becomes a wildcard that matches everything and satisfies exhaustiveness alone, with no diagnostic. Patterns are written bare: `Circle(r)`. |
+| `match s { Shape(r) => … }` | Naming the **enum** where a variant belongs is `E0200`. Write the variant, bare or qualified: `Circle(r)` and `Shape.Circle(r)` are the same pattern, and a qualified name the enum does not have is `E0111`. |
 | `fn main(args: [str])`, `os.args()`, `env.get` | **There are no command-line arguments at all.** The whole input surface is `io.read_line()`, and at end of input it returns `""` and goes on returning it — a `for` loop over it never ends unless you break on `""`. Words after `kitec run f.kite` are the compiler's. |
 | A failed run exits non-zero | **There is no exit status and no `exit(code)`.** A trap exits 1; `io.error(msg)` then `return` exits 0, which a shell cannot tell from success. |
 | `--emit wasm` writes a page that works | The generated `index.html` is a `<canvas id="stage">` and a `<pre id="out">`, nothing else. A DOM program finds no mount point, `dom.find("#app")` is nil, the `== nil` guard returns, and **no one reports anything**. Put your own `index.html` in `--out` first — it is left alone — or mount into `dom.body()`, an `Option` that needs narrowing. **Your page must also load the module**, or it is still blank: see below. |
@@ -187,9 +192,9 @@ the compiler and they say where SPECIFICATION.md is wrong.
 | `references/03-errors.md` | anything with an `error` in it: the taint analysis, `check`, `errors.wrap`, typed errors and `T.is`/`T.as` |
 | `references/04-structs-enums-traits-generics.md` | structs, methods, enums and how variant names resolve, traits, `dyn`, generics and inference, `@derive` |
 | `references/05-concurrency-modules-ffi.md` | `async`/`await`/`Task<T>`, `Share`, modules, `kite.toml` and `kitec pkg`, memory and `E0800`, `JsValue`, `extern`/`@host`, `std/js` |
-| `references/06-stdlib-and-diagnostics.md` | what a function is *called*: the prelude, the builtin dotted paths, the twenty `std/` modules, all 48 diagnostic codes, the `kitec` CLI |
+| `references/06-stdlib-and-diagnostics.md` | what a function is *called*: the prelude, the builtin dotted paths, the twenty `std/` modules, all 55 diagnostic codes, the `kitec` CLI |
 
-Three worked projects sit in `/Users/channyeintun/Desktop/may/examples/`, and they are the three
+Three worked projects sit in the repository's `examples/`, and they are the three
 shapes usually asked for: `page/` — hand-written `index.html` with `--emit wasm`
 built into that same directory; `vite-starter/` — `vite-plugin-kite`, one file
 per module; `inventory/` — a module directory whose two files share a namespace.

@@ -13,10 +13,11 @@ The deltas that will break your assumptions, in the order you will hit them:
    error unless the function's second return component is `error`.
 2. **On the failure path there is no value at all.** Not a zero value, not `nil`
    — the value slot is unreadable, and reading it is `E0301`.
-3. **An error cannot be dropped**, except two ways the analysis cannot see. An
-   uninspected `err` from a destructuring, `_` in the error slot, and a bare call
-   statement are all `E0302`; binding a bare `-> error` result, or a whole pair,
-   to a single name is not caught. See *An error cannot be dropped* below.
+3. **An error cannot be dropped** by accident. An uninspected `err` from a
+   destructuring, `_` in the error slot, a bare call statement, and a call's
+   `error` or whole `(T, error)` bound to one name and never read are all
+   `E0302`; `_ = f()` is the one deliberate way. See *An error cannot be
+   dropped* below.
 4. **`check err` is a statement, not a postfix `?`.** It is greppable and it
    occupies its own line, by design.
 5. **`err.message()` needs a proof that `err` is not nil.** An untested `error`
@@ -57,10 +58,25 @@ Three things to read off it: `_` in the value slot of a `return` means *no value
 (it is not a zero value); `check err` propagates; and `err` may be rebound in the
 same scope, which no other binding may be.
 
-`_` is not checked against the error you return beside it. `return _, nil`
-compiles, and the caller — holding a nil, Checked error — is then allowed to read
-the hole and gets whatever the slot holds: an `int` renders as `nil`, a `str`
-traps at first use. Write `_` only beside an error you know is non-nil.
+`_` is only allowed beside an error that is not nil: `return _, nil` is `E0200`,
+because the caller would be allowed to read a value that does not exist. An error
+the compiler cannot prove present, such as `return _, lookup()` where `lookup`
+returns `error`, is tested when the `return` runs: if it is nil, the program traps
+there, with the same message on every backend. `if err != nil { return _, err }`
+and `return _, errors.new("…")` are proved present and never trap.
+
+```kite fails
+fn count() -> (int, error) {
+    return _, nil //~ E0200
+}
+
+fn main() {
+    let (n, err) = count()
+    if err == nil {
+        io.print(n)
+    }
+}
+```
 
 ## The `error` type
 
@@ -112,9 +128,23 @@ fn main() {
 }
 ```
 
-The proof is tracked per *binding*. A call result used directly —
-`errors.new("x").message()` — is not tracked and compiles; on a nil call result
-that yields an empty string at runtime rather than a diagnostic. Bind it.
+The proof is tracked per *binding*, so an error reached any other way — a
+field (`r.err.message()`), a call (`err.cause().message()`), an element — is
+`E0301` until it is bound and tested. The one exception is an error built on the
+spot, `errors.new("x").message()`, which is never nil.
+
+```kite fails
+fn main() {
+    let err = errors.new("outer")
+    if err != nil {
+        io.print(err.cause().message()) //~ E0301
+        let cause = err.cause()
+        if cause != nil {
+            io.print(cause.message())
+        }
+    }
+}
+```
 
 ### `error` is not printable
 
@@ -173,6 +203,9 @@ tuple, and they behave differently.** A pair is not a tuple —
 - it has no fields: `p.0` on a `(int, error)` is `E0200`;
 - it is not built with a tuple literal: `return (1, nil)` in a fallible function
   is `E0203` (*a fallible function returns two values … only one value returned*);
+- it has no type to write: `(int, error)` written as a type is a tuple, so
+  `let p: (int, error) = f()` is `E0200` (*expected the tuple …, found the
+  result of a fallible call*). Bind it whole as `let p = f()`, or take it apart;
 - it has exactly two components. `-> (int, str, error)` is not a fallible
   signature; `return 1, "a", nil` in it is `E0200` and then a parse error.
 - `-> error` alone is also a fallible signature, and is enough for `check`.
@@ -185,12 +218,13 @@ aliasing, no lifetimes.
 
 | | rule |
 |---|---|
-| R1 | after `let (v, e) = f()`, `e` is **Unchecked** and `v` is **Tainted**. A destructuring is the *only* thing that makes a binding Unchecked — `let e = f()` on a `-> error` function makes none |
+| R1 | after `let (v, e) = f()`, `e` is **Unchecked** and `v` is **Tainted** |
 | R2 | reading a Tainted binding is `E0301` |
-| R3 | an Unchecked binding going out of scope is `E0302` |
+| R3 | an Unchecked binding going out of scope is `E0302` — at the end of its block, on the path of every `return`, `check`, `break` or `continue` that leaves it behind, and at a write over it (`e = nil`, `e = other`, `e = g()`) |
 | R4 | on a path where `e == nil` is proved, `e` becomes Checked and `v` Clean |
 | R5 | on a path where `e != nil`, `e` becomes Checked and `v` stays Tainted **permanently** |
 | R6 | a bare-statement call whose type is `error` or `(T, error)` is `E0302` |
+| R7 | an `error` or a whole `(T, error)` bound to one name — `let` or `var`, from a call, `await`, a value `if`, or assigned later with `e = f()` — is **Unchecked**; only `nil` and a copy of another binding are not |
 
 R2 in practice:
 
@@ -235,7 +269,7 @@ fn main() {
 
 ## An error cannot be dropped
 
-Six spellings of "drop it": three rejected, one deliberate, two holes.
+Six spellings of "drop it": five rejected, and one deliberate.
 
 **Never inspected** (R3) — the error slot of a destructuring:
 
@@ -282,6 +316,48 @@ fn main() {
 }
 ```
 
+**A bare `error` bound to a name and never looked at.** `let e =
+dom.set_text(…)` is exactly what you write by habit, and naming the result does
+not buy silence: a lone `error` binding is watched like the error slot of a
+destructuring. Test it, or write `_ = …` and mean it.
+
+```kite fails
+fn touch() -> error {
+    return errors.new("no")
+}
+
+fn main() {
+    let e = touch() //~ E0302
+    io.print("dropped")
+}
+```
+
+**An early exit leaves an error behind.** Checking it on the path that falls
+through is not enough when a `return`, `break` or `continue` above the test
+takes another way out. Check each error before the next exit, which in practice
+means right after the call:
+
+```kite fails
+fn touch() -> error {
+    return errors.new("no")
+}
+
+fn run(n: int) -> int {
+    let e = touch()
+    if n > 0 {
+        return 1 //~ E0302
+    }
+    if e != nil {
+        return -1
+    }
+    return 0
+}
+
+fn main() {
+    io.print(run(1))
+}
+```
+
 **`_ = …`, which is allowed** — the one way to throw an error away, chosen so
 that it is a line a reader sees and `grep` finds:
 
@@ -305,40 +381,51 @@ Note the asymmetry: `_ = f()` discards the *whole* call and is fine; `_` standin
 in for the error inside a destructuring is not. `_ = …` takes only `=` — there is
 no `_ +=`, since that would read the hole.
 
-### The two holes
+**A whole `(T, error)` bound to one name.** Nothing is destructured, so R1
+never marks an `err` — the binding itself is marked instead, exactly as a lone
+`error` binding is, and leaving scope unread is `E0302` (R7).
 
-Both are cases where nothing is destructured, so R1 never makes an Unchecked
-binding and R3 has nothing to fire on. **Neither is a diagnostic — this compiles
-and silently throws two failures away:**
-
-```kite
-fn touch() -> error {
-    return errors.new("no")
-}
-
+```kite fails
 fn load() -> (int, error) {
     return 1, nil
 }
 
 fn main() {
-    let e = touch()     // a lone `error` binding is never Unchecked
-    let p = load()      // the whole pair under one name
-    io.print("both errors are gone")
+    let p = load() //~ E0302
+    io.print("dropped")
 }
 ```
 
-The first is the dangerous one, because `let e = dom.set_text(…)` is exactly what
-you write by habit and `std/dom` answers with a bare `error` nearly everywhere.
-Only the *statement* form `dom.set_text(…)` is caught (R6); naming the result
-buys silence. Bind it and test it, or write `_ = …` and mean it.
+Taking it apart, `let (v, err) = p`, re-enters the normal rules, and returning
+it passes it on; either clears the mark. `p` itself has no fields (`E0200`) and
+no methods (`E0205`), so destructure where you bind.
 
-The second binding is close to useless anyway — `p` has no fields (`E0200`) and
-no methods (`E0205`) — and `let (v, e) = p` afterwards re-enters the normal
-rules. Do not reach for either.
+The same holds however the failure got into a single binding — `var e = f()`,
+`let e = await f()`, `let e = if c { f() } else { g() }`: the binding has to be
+looked at. Only `nil` and a copy of another binding start out Checked.
+
+Writing over a binding that still holds an unchecked failure drops that
+failure, so it is `E0302` at the write, whatever is written:
+
+```kite fails
+fn f() -> error {
+    return errors.new("boom")
+}
+
+fn main() {
+    var e = f()
+    e = nil //~ E0302
+    io.print("dropped")
+}
+```
+
+Test it first, or pass it on with `e = errors.wrap(e, "…")`, which reads the
+old value and so carries its obligation into the new one.
 
 ## `check`
 
-`check err` is exactly, in a `-> (T, error)` function:
+`check err` is exactly, in a `-> (T, error)` function — and so it runs what was
+`defer`red on the way out, like any other `return`:
 
 ```kite ignore
 if err != nil {
@@ -495,9 +582,10 @@ fn main() {
 
 ## Handling a failure in place
 
-**The specification's example for this (§7.5) does not compile.** It writes
+Test the error: in the branch where it is nil the value is readable, in an `if`
+used as a value exactly as in an `if` statement.
 
-```kite fails
+```kite
 fn get_int(k: str) -> (int, error) {
     if k == "port" {
         return 8080, nil
@@ -507,13 +595,14 @@ fn get_int(k: str) -> (int, error) {
 
 fn main() {
     let (p, err) = get_int("prt")
-    let port = if err != nil { 80 } else { p } //~ E0301
+    let port = if err != nil { 80 } else { p }
     io.print(port)
 }
 ```
 
-The taint states are joined at statement granularity, so the `else` arm of an
-`if`-*expression* does not see `p` as Clean. Use a statement `if`/`else`:
+The value stays unreadable in the branch where the error is *not* nil, and after
+the `if`. Bind it under a name of its own — `p` here — because a second `let port`
+in the same scope is `E0112`. The statement form does the same work:
 
 ```kite
 fn get_int(k: str) -> (int, error) {
@@ -564,8 +653,11 @@ fn main() {
 ## Adding context
 
 `errors.wrap(err, context)` returns nil for nil, so it composes with `check` on
-one line. It is built on `errors.because`, so it **keeps** what it wrapped rather
-than flattening it into text.
+one line — and passing that `check` cleans the value `err` guards, because
+`wrap` answers nil *only* for nil. That is known of `errors.wrap` alone: `check`
+of what your own function returned proves nothing about the error it was handed.
+It is built on `errors.because`, so it **keeps** what it wrapped rather than
+flattening it into text.
 
 ```kite
 use std/errors
@@ -659,6 +751,10 @@ fn main() {
 `T.as(err)` returns `Option<T>`, spelled `Option<T>` — there is no `?T` syntax;
 `?` is not even a Kite token. Narrow it with `if hit != nil { … }`.
 
+For a generic error type, each specialisation is its own type: write the one you
+want on the binding, `let w: Option<Wrapped<int>> = Wrapped.as(err)`. A bare
+`Wrapped.as(err)`, and `Wrapped.is(err)`, cannot say which, and are `E0209`.
+
 An enum works as well as a struct, and pairs nicely with `match`:
 
 ```kite
@@ -733,8 +829,6 @@ fn main() {
 ```kite
 use std/errors
 
-struct Filler { z: int }
-
 struct NotFound { id: str }
 
 impl Error for NotFound {
@@ -756,14 +850,6 @@ fn main() {
 }
 ```
 
-**Compiler bug, verified:** the type tag is the struct's id and the *first struct
-declared in the program's root file* gets id 0 — which is also the tag meaning
-"this error carries no typed value". If your `Error` struct is the first struct in
-the file, `T.is(err)` answers `true` for every error, including `errors.new(…)`
-results and `nil`, and `T.as` still correctly answers absent. Declaring any other
-struct ahead of it (the `Filler` above) restores correct behaviour. Enums are
-unaffected — their tags are offset by `0x8000_0000`.
-
 ## Unrecoverable failures
 
 Some conditions are bugs, not errors, and they **trap**: `unreachable` on the Wasm
@@ -772,7 +858,11 @@ handler, no unwinding. This is a deliberate rejection of Go's second, invisible
 propagation channel.
 
 What traps: slice index out of range, integer division by zero, a failed
-`assert`, a failed `require`. The runtime prints e.g.
+`assert`, a failed `require`, and a call chain deeper than the target allows —
+100,000 frames on the VM and natively (`call depth exceeded 100000 frames`),
+and the host's stack on WebAssembly, which is a few thousand frames of an
+ordinary function. A recursion whose depth comes from input should bound it
+and return an `error`. The runtime prints e.g.
 
 ```
 error: index 10 is out of range for a slice of length 3
@@ -822,10 +912,6 @@ knows.
 
 ## Where the specification is wrong or incomplete
 
-- §7.5's in-place-handling example (`let port = if err != nil { 8080 } else { port }`)
-  does not compile: two same-scope `let port` bindings is `E0112`, and reading the
-  value from the `else` arm of an `if`-*expression* is `E0301` even when the error
-  was tested in its condition. Use a statement `if`/`else` or an early return.
 - §7.3 implies `-> (int, int)` is refused. It is accepted, as a tuple type; only
   the two-value `return a, b` statement inside it is refused.
 - §7.6 says `errors.wrap` "keeps what it wrapped", which is true of the cause
@@ -833,11 +919,6 @@ knows.
   own, so `T.is` must be applied to `errors.root(err)`, never the wrapper. The
   spec never says this, and its own §7.6 example is correct only because it uses
   `errors.root`.
-- §7.3's R3 ("an Unchecked binding going out of scope is a compile error") reads
-  as though it covers every error binding. Only a destructured `e` is ever
-  Unchecked: `let e = touch()` on a `-> error` function compiles and drops the
-  failure, and so does `let p = load()` on a pair.
 - Undocumented: `err.message()` requires the error to be proved non-nil (`E0301`);
   `error` is not printable by `io.print`; `let (v, _) = f()` has its own `E0302`
-  wording; `-> error` alone satisfies `check`; and `return _, nil` is accepted,
-  handing the caller a hole it is allowed to read.
+  wording; and `-> error` alone satisfies `check`.

@@ -19,8 +19,9 @@
 use kite_ast::{Item, SourceFile};
 use kite_diag::{codes, DiagBag, Diagnostic};
 use kite_span::{FileId, SourceMap, Span};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Component, Path, PathBuf};
+use std::rc::Rc;
 
 /// The standard library's modules, compiled into the binary.
 ///
@@ -54,33 +55,551 @@ pub fn std_module(name: &str) -> Option<&'static str> {
     STD_MODULES.iter().find(|(n, _)| *n == name).map(|(_, src)| *src)
 }
 
-/// One loaded module: its canonical name and the files that make it up.
+/// Whether a module name is the standard library's to spell (`E0403`): one of
+/// its modules, a module its builtins are reached through — `io`, `draw`,
+/// `ptr` — or `prelude`.
+fn reserved(name: &str) -> bool {
+    std_module(name).is_some()
+        || kite_resolve::BUILTIN_MODULES.contains(&name)
+        || name == kite_resolve::PRELUDE
+}
+
+/// The note for a reserved `name` a module may not take: what the name
+/// already is, and `remedy`.
+fn reserved_because(name: &str, remedy: &str) -> String {
+    if name == kite_resolve::PRELUDE {
+        format!(
+            "the prelude is the standard library's, and is in scope everywhere without a `use`; \
+             {} so the two cannot be confused",
+            remedy
+        )
+    } else if kite_resolve::BUILTIN_MODULES.contains(&name) {
+        format!(
+            "`{}.…` reaches the standard library in every file, `use` or not, so a module \
+             spelled `{}` would share the spelling with it and a name both declare would go to \
+             one of them silently; {}",
+            name, name, remedy
+        )
+    } else {
+        format!("`use std/{}` is that module; {} so the two cannot be confused", name, remedy)
+    }
+}
+
+/// The standard library module a `use std/…` names, with its name as the
+/// table spells it.
+fn std_entry(name: &str) -> Option<(&'static str, &'static str)> {
+    STD_MODULES.iter().find(|(n, _)| *n == name).copied()
+}
+
+/// Where `kitec pkg` puts a git dependency, relative to the program's
+/// manifest.
+const VENDOR: &str = ".kite/vendor";
+
+/// One loaded module: its identity, and the files that make it up, parsed.
+///
+/// **Parsed once, here.** The driver used to parse every file a second time
+/// when it merged them, so a syntax error in an imported module was reported
+/// twice — once from each parse. What the loader read is what it hands over.
 pub struct Loaded {
     pub name: String,
-    pub files: Vec<FileId>,
+    pub files: Vec<(FileId, SourceFile)>,
+}
+
+/// Where the loader reads a program's files from.
+///
+/// The disk, normally. A bundle carries the files its build read and hands
+/// them back as [`Files::Memory`], so a bundled program resolves every `use`
+/// through this same code rather than through a second resolver that agrees
+/// with this one only by effort.
+#[derive(Default)]
+pub enum Files {
+    #[default]
+    Disk,
+    /// Path to contents. Paths are compared after `.` and `..` are folded
+    /// away, because there is no filesystem here to ask what they mean.
+    Memory(BTreeMap<PathBuf, String>),
+    /// The disk, with some files' contents given: an editor's open buffers.
+    /// Build it with [`Files::edited`].
+    ///
+    /// **A buffer stands in for exactly the file it is a buffer of.** The
+    /// editor used to hand its buffers over as provided modules, keyed by
+    /// their path below the entry file — and a provided key is consulted
+    /// before a directory module, before a declared dependency and before the
+    /// importer's own directory. So opening `md.kite` beside the entry took
+    /// `use md` away from the dependency of that name, opening `config.kite`
+    /// hid the directory `config/`, and a dependency's own `use util` was
+    /// answered by the application's open `md/util.kite`. Merely opening a
+    /// file changed what the program meant, and the editor reported errors
+    /// `kitec check` did not have. Here every `use` resolves exactly as it does
+    /// on disk, and only then is the file it found read from the buffer.
+    ///
+    /// Keyed by [`located`], so two spellings of one file are one buffer.
+    Edited(BTreeMap<PathBuf, String>),
+}
+
+impl Files {
+    /// The disk, read through the given buffers: each path's contents replace
+    /// that file's, and a buffer for a file not yet saved is a file there.
+    pub fn edited(buffers: impl IntoIterator<Item = (PathBuf, String)>) -> Files {
+        Files::Edited(buffers.into_iter().map(|(path, text)| (located(&path), text)).collect())
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+        match self {
+            Files::Disk => path.is_dir(),
+            Files::Memory(files) => {
+                let path = normalise(path);
+                files.keys().any(|k| *k != path && k.starts_with(&path))
+            }
+            Files::Edited(buffers) => {
+                path.is_dir() || {
+                    let path = located(path);
+                    buffers.keys().any(|k| *k != path && k.starts_with(&path))
+                }
+            }
+        }
+    }
+
+    fn is_file(&self, path: &Path) -> bool {
+        match self {
+            Files::Disk => path.is_file(),
+            Files::Memory(files) => files.contains_key(&normalise(path)),
+            Files::Edited(buffers) => path.is_file() || buffers.contains_key(&located(path)),
+        }
+    }
+
+    fn read(&self, path: &Path) -> std::io::Result<String> {
+        match self {
+            Files::Disk => std::fs::read_to_string(path),
+            Files::Memory(files) => files.get(&normalise(path)).cloned().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "not among the bundled files")
+            }),
+            Files::Edited(buffers) => match buffers.get(&located(path)) {
+                Some(text) => Ok(text.clone()),
+                None => std::fs::read_to_string(path),
+            },
+        }
+    }
+
+    /// The `.kite` files directly inside a directory, sorted, so a module's
+    /// meaning does not depend on the order a filesystem hands them back.
+    fn kite_files(&self, dir: &Path) -> Vec<PathBuf> {
+        let on_disk = |dir: &Path| -> Vec<PathBuf> {
+            std::fs::read_dir(dir)
+                .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
+                .unwrap_or_default()
+        };
+        let mut found: Vec<PathBuf> = match self {
+            Files::Disk => on_disk(dir),
+            Files::Memory(files) => {
+                let folded = normalise(dir);
+                files
+                    .keys()
+                    .filter(|k| k.parent() == Some(folded.as_path()))
+                    .filter_map(|k| k.file_name().map(|name| dir.join(name)))
+                    .collect()
+            }
+            // A buffer not yet saved is part of its directory's module, as it
+            // will be once it is saved.
+            Files::Edited(buffers) => {
+                let mut found = on_disk(dir);
+                let here = located(dir);
+                for key in buffers.keys().filter(|k| k.parent() == Some(here.as_path())) {
+                    if let Some(name) = key.file_name() {
+                        let path = dir.join(name);
+                        if !found.contains(&path) {
+                            found.push(path);
+                        }
+                    }
+                }
+                found
+            }
+        };
+        found.retain(|p| p.extension().is_some_and(|e| e == "kite"));
+        found.sort();
+        found
+    }
+
+    /// What a path is, where the filesystem can say: two spellings of one
+    /// directory are one module, not two.
+    fn canonical(&self, path: &Path) -> PathBuf {
+        match self {
+            Files::Disk => std::fs::canonicalize(path).unwrap_or_else(|_| normalise(path)),
+            Files::Memory(_) => normalise(path),
+            Files::Edited(_) => located(path),
+        }
+    }
+
+    /// A path made absolute by reading it, without resolving links — so the
+    /// directories above it are the ones it was written under, and a bundle
+    /// can lay the same tree out again.
+    fn absolute(&self, path: &Path) -> PathBuf {
+        match self {
+            Files::Disk | Files::Edited(_) if path.is_relative() => {
+                match std::env::current_dir() {
+                    Ok(here) => normalise(&here.join(path)),
+                    Err(_) => normalise(path),
+                }
+            }
+            _ => normalise(path),
+        }
+    }
+}
+
+/// Where a file is, asked of the filesystem: links followed and `..` taken
+/// where it really leads. A file that does not exist yet — an editor's buffer
+/// never saved — is where the nearest directory above it that does exist
+/// really is, and the rest of its path below that.
+///
+/// **The nearest that exists, not only its own directory.** Only the file's
+/// directory was asked, and a buffer in a directory not created yet fell back
+/// to its path as written. The loader asks about that directory itself, whose
+/// parent does exist and was followed — so under a symbolic link (a project
+/// opened as `/tmp/…` on macOS, or through a linked home directory) the two
+/// spellings of one place never met, and an unsaved directory module was
+/// `cannot find module` there while it compiled through the real path.
+pub fn located(path: &Path) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    for above in path.ancestors().skip(1) {
+        if above.as_os_str().is_empty() {
+            break;
+        }
+        if let Ok(real) = std::fs::canonicalize(above) {
+            // Nothing below `above` exists, so what is left is folded by
+            // reading it: there is no link down there to follow.
+            let rest = path.strip_prefix(above).unwrap_or(path);
+            return normalise(&real.join(rest));
+        }
+    }
+    normalise(path)
+}
+
+/// `.` and `..` folded away by reading the path, not the disk.
+pub fn normalise(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                // `/..` is `/`.
+                Some(Component::RootDir) | Some(Component::Prefix(_)) => {}
+                _ => out.push(".."),
+            },
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Where a module's source came from — which is what a module *is*.
+///
+/// It used to be keyed by its `use` path as the importer wrote it, so `use
+/// util` inside `a/` and `use util` inside `b/` were one module to the loader:
+/// the second was reported as a collision, or — when one of the two did not
+/// exist at all — silently answered by the other. A dependency's `use helper`
+/// reached the application's `helper` that way whenever the application had
+/// imported one first. Two `use` lines reach the same module exactly when they
+/// reach the same source.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+enum Origin {
+    /// The standard library's own copy of one module.
+    Std(&'static str),
+    /// Handed over by the host rather than found on a filesystem — a bundler,
+    /// or an editor holding an unsaved buffer. The key is carried, because two
+    /// entries are two sources however alike their names look.
+    Provided(String),
+    /// A directory, or a single file, canonicalised.
+    Path(PathBuf),
+}
+
+impl Origin {
+    /// How to name this in a diagnostic.
+    fn describe(&self) -> String {
+        match self {
+            Origin::Std(_) => "the standard library".to_string(),
+            Origin::Provided(key) => {
+                format!("the host, which supplied `{}` directly", key)
+            }
+            Origin::Path(p) => format!("`{}`", p.display()),
+        }
+    }
+}
+
+/// A package: what module identities inside it are measured from, and what
+/// its own manifest declares.
+///
+/// **Each package's dependencies are its own.** There used to be one table,
+/// read from the program's manifest, and every module in the program resolved
+/// against it — so a dependency could not use what *it* declared, and could
+/// use whatever the program declared without declaring it. That is transitive
+/// hoisting, which §13.2 says there is none of.
+#[derive(Clone, Default)]
+struct Package {
+    /// How identities inside the package begin: empty for the program's own,
+    /// the dependency's name — `@` and its name for one the program does not
+    /// declare — otherwise.
+    label: String,
+    /// The directory a module path inside it is measured from: the entry
+    /// file's for the program, the dependency's own for a dependency.
+    root: Option<PathBuf>,
+    /// What its manifest declares, by name.
+    dependencies: Rc<HashMap<String, PathBuf>>,
+    /// The directory of the manifest `dependencies` came from, when there is
+    /// one — so a `use` that finds nothing can say the manifest did not read,
+    /// which is the likelier reason when it did not.
+    manifest: Option<PathBuf>,
+}
+
+/// A package prefix and a `use` path's segments, joined the way a provided key
+/// is spelled.
+fn within(prefix: &str, segments: &[&str]) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if !prefix.is_empty() {
+        parts.push(prefix);
+    }
+    parts.extend_from_slice(segments);
+    parts.join("/")
+}
+
+/// What a module's own `use` lines resolve against.
+#[derive(Clone, Default)]
+struct Scope {
+    /// Its directory, for a module on a filesystem.
+    dir: Option<PathBuf>,
+    /// The package a provided module came from — see [`Loader::provided_key`].
+    prefix: String,
+    package: Package,
+}
+
+/// Where a `use` leads, once found.
+enum Found {
+    Std(&'static str, &'static str),
+    /// Handed over by the host. `dir` and `package` are where the file would
+    /// have been read from when there is a filesystem too: an editor hands
+    /// over the buffers it holds unsaved, not every module those import, and
+    /// the rest are still on disk beside them.
+    Provided { key: String, dir: Option<PathBuf>, package: Package },
+    /// `prefix` is the package prefix the module's own handed-over imports
+    /// resolve under — its directory, spelled the way a provided key spells
+    /// it. Without it a module in `dep/` that imports `helper` would be handed
+    /// an editor's unsaved `helper.kite` from beside the entry file rather
+    /// than the `dep/helper.kite` it reads from disk.
+    Path { at: PathBuf, is_dir: bool, package: Package, prefix: String },
+}
+
+impl Found {
+    fn origin(&self, files: &Files) -> Origin {
+        match self {
+            Found::Std(name, _) => Origin::Std(name),
+            Found::Provided { key, .. } => Origin::Provided(key.clone()),
+            Found::Path { at, .. } => Origin::Path(files.canonical(at)),
+        }
+    }
+
+    /// The module's identity: the name its declarations are qualified under.
+    ///
+    /// **It is where the module is, not how it was reached.** A file module is
+    /// its path within its package without the extension — `a/util` for
+    /// `a/util.kite` beside the entry file — and a module inside a dependency
+    /// is the dependency's name followed by the same, `md/util` — or `@md/util`
+    /// when only another package declares `md` ([`Loader::label`]). Nobody
+    /// writes an identity: a use site writes a spelling, and the spelling is
+    /// rewritten to this. Neither `/` nor `@` can appear in an identifier, so
+    /// it is unforgeable.
+    ///
+    /// The standard library is the exception: `use std/json` is `json`,
+    /// because that is how every program spells it and `E0403` reserves the
+    /// name.
+    fn identity(&self) -> String {
+        match self {
+            Found::Std(name, _) => name.to_string(),
+            Found::Provided { key, .. } => key.clone(),
+            Found::Path { at, is_dir, package, .. } => {
+                let stem = if *is_dir { at.clone() } else { at.with_extension("") };
+                let within = match &package.root {
+                    Some(root) if root != at => stem
+                        .strip_prefix(root)
+                        .map(|rel| {
+                            rel.components()
+                                .filter_map(|part| match part {
+                                    Component::Normal(s) => Some(s.to_string_lossy().to_string()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("/")
+                        })
+                        .unwrap_or_default(),
+                    _ => String::new(),
+                };
+                let identity = match (package.label.is_empty(), within.is_empty()) {
+                    (true, _) => within,
+                    (false, true) => package.label.clone(),
+                    (false, false) => format!("{}/{}", package.label, within),
+                };
+                // Never empty: the empty name is the entry file's.
+                if identity.is_empty() {
+                    return stem
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "module".to_string());
+                }
+                identity
+            }
+        }
+    }
+}
+
+/// The `E0405` for a manifest that does not read: `message`'s first line at
+/// `line`, and any further lines as notes.
+fn manifest_error(
+    path: &Path,
+    text: String,
+    line: usize,
+    message: &str,
+    sources: &mut SourceMap,
+) -> Diagnostic {
+    let mut lines = message.lines();
+    let first = lines.next().unwrap_or("").to_string();
+    let id = sources.add(path, text);
+    let file = sources.file(id);
+    let line = (line as u32).max(1);
+    let start = file.line_start(line);
+    let end = start + file.line_text(line).len() as u32;
+    let mut d = Diagnostic::error(
+        codes::E0405,
+        format!("`{}` is not a manifest this compiler can read", path.display()),
+    )
+    .with_primary(Span::new(id, start, end), first);
+    for rest in lines {
+        d = d.with_note(rest.trim().to_string());
+    }
+    d.with_note(
+        "the manifest says where this package's dependencies are, so nothing it declares can be \
+         found until it reads",
+    )
+}
+
+/// What can be shown of a manifest that exists and did not read: its text as
+/// far as it goes, the line it stops at, and why.
+fn unreadable(path: &Path, error: std::io::Error) -> (String, usize, String) {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(_) => return (String::new(), 1, format!("it cannot be read: {}", error)),
+    };
+    match std::str::from_utf8(&bytes) {
+        Ok(text) => (text.to_string(), 1, format!("it cannot be read: {}", error)),
+        Err(bad) => {
+            let at = bad.valid_up_to();
+            let line = bytes[..at].iter().filter(|b| **b == b'\n').count() + 1;
+            (
+                String::from_utf8_lossy(&bytes).to_string(),
+                line,
+                format!(
+                    "byte {} of the file is not UTF-8\na manifest is UTF-8 text — save it in that \
+                     encoding",
+                    at
+                ),
+            )
+        }
+    }
+}
+
+/// A manifest read the way every command that compiles reads one: `Ok(None)`
+/// when there is no file, and for one that is there and does not read or
+/// does not parse, its `E0405`, rendered.
+///
+/// For `kitec pkg`, which reads the manifest without compiling anything. It
+/// reported the same failure as a bare `error:` line with no code, where every
+/// other command said `E0405` and pointed at the line.
+pub fn read_manifest(path: &Path) -> Result<Option<crate::manifest::Manifest>, String> {
+    let mut sources = SourceMap::new();
+    let failure = match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            let (text, line, why) = unreadable(path, e);
+            manifest_error(path, text, line, &why, &mut sources)
+        }
+        Ok(text) => match crate::manifest::parse(&text) {
+            Ok(parsed) => return Ok(Some(parsed)),
+            Err(error) => manifest_error(path, text, error.line, &error.message, &mut sources),
+        },
+    };
+    Err(failure.render(&sources))
+}
+
+/// One module being loaded, on the stack of those whose imports are still
+/// being followed — which is what an import cycle is found against.
+struct Frame {
+    origin: Origin,
+    /// Its identity; `""` for the entry file, which has none.
+    identity: String,
+    /// The `use` that began loading it, in the file of the frame below.
+    entered: Span,
+}
+
+/// The `E0402` for a `use` at `closing` that leads back to `stack[at]`.
+///
+/// Reported where the closing import is, except when the cycle leads back to
+/// the entry file: then it is reported at the entry's own `use` that began
+/// it, which is in the file being compiled. The closing import is in another
+/// file, and a check of the entry — an editor's, which shows only the entry's
+/// diagnostics — would otherwise say nothing about a program the build
+/// refuses.
+fn cycle(stack: &[Frame], at: usize, identity: &str, closing: Span, sources: &SourceMap) -> Diagnostic {
+    let named = |frames: &[Frame]| -> Vec<String> {
+        frames.iter().filter(|f| !f.identity.is_empty()).map(|f| f.identity.clone()).collect()
+    };
+    if at == 0 && stack[0].identity.is_empty() && stack.len() > 1 {
+        let entry = sources
+            .file(stack[1].entered.file)
+            .name
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "the entry file".to_string());
+        let mut chain = named(&stack[1..]);
+        chain.push(entry);
+        return Diagnostic::error(
+            codes::E0402,
+            format!("module `{}` is part of an import cycle", stack[1].identity),
+        )
+        .with_primary(stack[1].entered, "this import begins a cycle back to this file")
+        .with_secondary(closing, "and this one closes it")
+        .with_note(format!(
+            "the chain is {} — extract the shared part into a third module",
+            chain.join(" → ")
+        ));
+    }
+    Diagnostic::error(codes::E0402, format!("module `{}` is part of an import cycle", identity))
+        .with_primary(closing, "this import closes the cycle")
+        .with_note(format!(
+            "the chain is {} — extract the shared part into a third module",
+            named(stack).join(" → ")
+        ))
 }
 
 /// Everything the driver needs to merge modules into one item list.
 #[derive(Default)]
 pub struct Loader {
     pub loaded: Vec<Loaded>,
-    /// Use-site spellings that are not the module's own name, keyed by the
-    /// module that wrote them.
+    /// Use-site spellings, keyed by the module that wrote them.
     ///
-    /// The key is `(declaring module, alias)`. It used to be just the alias,
-    /// in one flat table shared by the whole program — so `use leak as crypto`
-    /// written anywhere, including inside a dependency, rewrote `crypto.hash`
-    /// everywhere, including in the source of the program that trusted it. An
-    /// alias is a convenience for the file that writes it and has no business
-    /// being visible outside the module that does.
+    /// The key is `(declaring module, spelling)`. It used to be just the
+    /// alias, in one flat table shared by the whole program — so `use leak as
+    /// crypto` written anywhere, including inside a dependency, rewrote
+    /// `crypto.hash` everywhere, including in the source of the program that
+    /// trusted it. A spelling is a convenience for the file that writes it and
+    /// has no business being visible outside the module that does.
     pub aliases: HashMap<(String, String), String>,
-    /// Where a user module's files live, for resolving its own imports.
-    roots: HashMap<String, PathBuf>,
-    /// Dependencies from the package's `kite.toml`, by name. A `use` that
-    /// names one of these reaches the dependency rather than a sibling —
-    /// which is what makes a package's dependencies its own rather than
-    /// whatever happens to sit next to the entry file.
-    dependencies: HashMap<String, PathBuf>,
+    /// Every file read through [`Files`] — each module's sources and each
+    /// manifest consulted — with its contents, in the order read. It is what
+    /// `kitec bundle` carries, so the program can be loaded again, the same
+    /// way, with nothing on disk.
+    pub inputs: Vec<(PathBuf, String)>,
     /// Modules handed over rather than found: module path to source.
     ///
     /// A host without a filesystem still has the files — a bundler read them,
@@ -98,116 +617,28 @@ pub struct Loader {
     /// build that is not a filesystem. Single-segment keys still work and mean
     /// what they always did: a sibling of the entry file.
     provided: HashMap<String, String>,
-    /// Every module loaded so far, and where its source came from.
-    ///
-    /// The origin is kept because the name alone is not an identity: two
-    /// directories may each hold a `utils`, and the loader would take the
-    /// first and silently drop the second. See [`Origin`].
-    seen: HashMap<String, Origin>,
-}
-
-/// Where a `use` path looks for its files.
-///
-/// **Every segment counts.** `use dep/utils` is `dep/utils` relative to the
-/// importing module, not `utils` — the leading segments used to be dropped, so
-/// `dep/utils` and `utils` found the same directory and the path said
-/// something the loader did not honour.
-///
-/// A first segment naming a declared dependency roots there instead, so
-/// `use markdown/render` reaches inside the package rather than beside the
-/// entry file.
-fn module_dir(base: &Path, segments: &[&str], dependencies: &HashMap<String, PathBuf>) -> PathBuf {
-    let mut parts = segments;
-    let mut path = match segments.first().and_then(|first| dependencies.get(*first)) {
-        Some(root) => {
-            parts = &segments[1..];
-            root.clone()
-        }
-        None => base.to_path_buf(),
-    };
-    for p in parts {
-        path = path.join(p);
-    }
-    path
-}
-
-/// A module's identity: its whole `use` path.
-///
-/// `dep/utils` and `utils` are therefore two modules rather than one, which is
-/// what §13.1 says is the right answer. A `/` cannot appear in an identifier,
-/// so an identity is unforgeable in the same way a qualified item name is —
-/// and it is never written by a user, who writes the spelling instead.
-///
-/// The standard library is the exception: `use std/json` is `json`, because
-/// that is how every program spells it and `E0403` reserves the name.
-fn identity(segments: &[&str]) -> String {
-    if segments.first() == Some(&"std") {
-        return segments.last().expect("a use path is never empty").to_string();
-    }
-    segments.join("/")
-}
-
-/// Where a module's source came from, for telling two of the same identity
-/// apart — which now means one path resolving two ways rather than two paths
-/// sharing a last segment.
-#[derive(Clone, PartialEq, Eq, Debug)]
-enum Origin {
-    /// The standard library's own copy.
-    Std,
-    /// Handed over by the host rather than found on a filesystem — a bundler,
-    /// or an editor holding an unsaved buffer. The key is carried, because two
-    /// entries are two sources however alike their names look.
-    Provided(String),
-    /// A directory, or a single file.
-    Path(PathBuf),
-    /// Nothing was found. Recorded so that a `use` which failed to resolve is
-    /// never reported as colliding with anything: it has no source to differ
-    /// from, and E0400 has already said so.
-    Missing,
-}
-
-impl Origin {
-    /// How to name this in a diagnostic.
-    fn describe(&self) -> String {
-        match self {
-            Origin::Std => "the standard library".to_string(),
-            Origin::Provided(key) => {
-                format!("the host, which supplied `{}` directly", key)
-            }
-            Origin::Path(p) => format!("`{}`", p.display()),
-            Origin::Missing => "nowhere".to_string(),
-        }
-    }
-}
-
-/// The dependencies a package declares, if the file being compiled is in one.
-///
-/// The manifest is looked for *upwards* from the entry file, because a program
-/// is usually `src/main.kite` and the manifest is beside `src/`. Nothing is
-/// fetched here — `kitec pkg` does that, once, on purpose.
-pub fn dependencies_near(dir: &Path) -> HashMap<String, PathBuf> {
-    let mut out = HashMap::new();
-    let mut here = Some(dir);
-    while let Some(directory) = here {
-        let manifest = directory.join("kite.toml");
-        if let Ok(text) = std::fs::read_to_string(&manifest) {
-            if let Ok(parsed) = crate::manifest::parse(&text) {
-                for dependency in &parsed.dependencies {
-                    let path = match &dependency.source {
-                        crate::manifest::Source::Path(p) => directory.join(p),
-                        // A git dependency lives where `kitec pkg` put it.
-                        crate::manifest::Source::Git { .. } => {
-                            directory.join(".kite/vendor").join(&dependency.name)
-                        }
-                    };
-                    out.insert(dependency.name.clone(), path);
-                }
-            }
-            break;
-        }
-        here = directory.parent();
-    }
-    out
+    files: Files,
+    /// Every module loaded so far, by where its source came from, with the
+    /// identity it was given.
+    seen: HashMap<Origin, String>,
+    /// The other direction, so that no identity is handed to two sources.
+    taken: HashMap<String, Origin>,
+    /// Each package's declared dependencies, by its directory, so a manifest
+    /// is read — and a broken one reported — once.
+    manifests: HashMap<PathBuf, Rc<HashMap<String, PathBuf>>>,
+    /// The manifests that did not read (`E0405`), by their directory as
+    /// `manifests` keys it.
+    unread: HashMap<PathBuf, PathBuf>,
+    /// What the program's own manifest declares, which decides how a
+    /// package's modules are named — see [`Loader::label`].
+    direct: Rc<HashMap<String, PathBuf>>,
+    /// Where a git dependency lives: `.kite/vendor` beside the program's
+    /// manifest, which is the one place `kitec pkg` puts them all — including
+    /// those a dependency declared.
+    vendor: Option<PathBuf>,
+    /// Whether any file derives `Encode` or `Decode`, whose bodies are written
+    /// against `std/json` whether or not the module deriving them imported it.
+    wants_json: bool,
 }
 
 impl Loader {
@@ -223,7 +654,7 @@ impl Loader {
         sources: &mut SourceMap,
         diags: &mut DiagBag,
     ) -> Loader {
-        Loader::load_with(entry, dir, HashMap::new(), sources, diags)
+        Loader::load_from(entry, dir, HashMap::new(), Files::Disk, sources, diags)
     }
 
     /// The same, with some modules given rather than looked for.
@@ -238,14 +669,199 @@ impl Loader {
         sources: &mut SourceMap,
         diags: &mut DiagBag,
     ) -> Loader {
-        let mut loader = Loader {
-            dependencies: dir.map(dependencies_near).unwrap_or_default(),
-            provided,
-            ..Loader::default()
+        Loader::load_from(entry, dir, provided, Files::Disk, sources, diags)
+    }
+
+    /// The same again, reading directories and files through `files`.
+    pub fn load_from(
+        entry: &SourceFile,
+        dir: Option<&Path>,
+        provided: HashMap<String, String>,
+        files: Files,
+        sources: &mut SourceMap,
+        diags: &mut DiagBag,
+    ) -> Loader {
+        let mut loader = Loader { provided, files, ..Loader::default() };
+        let package = match dir {
+            Some(dir) => loader.program_package(dir, Some(dir.to_path_buf()), sources, diags),
+            None => Package::default(),
         };
-        let mut stack: Vec<String> = Vec::new();
-        loader.visit_uses(entry, dir, "", &mut stack, sources, diags);
+        loader.direct = package.dependencies.clone();
+        let scope = Scope { dir: dir.map(Path::to_path_buf), prefix: String::new(), package };
+        loader.note_derives(entry);
+        // **The entry file is on the stack from the start.** It is not loaded
+        // as a module, so it never was — and a module importing it back was
+        // not seen as closing a cycle there: the entry was read a second time
+        // as a module of its own, and the cycle reported inside that copy. The
+        // report was at the right line of the right file and under another
+        // file's identity, so an editor checking the entry, which shows only
+        // what is in the entry, showed a program `kitec check` refuses as
+        // clean. Only a file with a `use` can close a cycle, and its first one
+        // says which file it is.
+        let mut stack = Vec::new();
+        if let Some(first) = entry.uses.first() {
+            let path = sources.file(first.span.file).name.clone();
+            stack.push(Frame {
+                origin: Origin::Path(loader.files.canonical(&path)),
+                identity: String::new(),
+                entered: Span::empty_at(first.span.file, 0),
+            });
+        }
+        loader.visit_uses(entry, &scope, &mut stack, sources, diags);
+        loader.load_json_for_derives(&mut stack, sources, diags);
         loader
+    }
+
+    /// Load the directory `dir` as the module a `use` naming it loads — every
+    /// `.kite` file in it, as one namespace — and whatever those files import.
+    ///
+    /// For a caller asking about a directory module itself rather than about
+    /// a program: an editor renaming a private name declared in one of its
+    /// files, whose uses may be in any of the others. The editor compiles the
+    /// file it has open as a program, and a file compiled that way sees none
+    /// of its siblings. `entry` is the file the spans of what the loading
+    /// itself reports are placed in.
+    pub fn load_module(
+        dir: &Path,
+        entry: FileId,
+        files: Files,
+        sources: &mut SourceMap,
+        diags: &mut DiagBag,
+    ) -> Loader {
+        let mut loader = Loader { files, ..Loader::default() };
+        // Measured from the directory above, as a `use` written beside it
+        // would measure it, so the module is named by its own directory.
+        let root = dir.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf);
+        let package = loader.program_package(dir, root, sources, diags);
+        loader.direct = package.dependencies.clone();
+        let prefix = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let found = Found::Path { at: dir.to_path_buf(), is_dir: true, package, prefix };
+        let identity = found.identity();
+        let mut stack = Vec::new();
+        loader.load_one(found, identity, Span::empty_at(entry, 0), &mut stack, sources, diags);
+        loader.load_json_for_derives(&mut stack, sources, diags);
+        loader
+    }
+
+    /// A derived `Encode` is written against `json.Json` whatever the module
+    /// deriving it imported. The module is loaded for it here, and reachable
+    /// only from the derived code: no spelling is recorded for any module that
+    /// did not write one.
+    fn load_json_for_derives(
+        &mut self,
+        stack: &mut Vec<Frame>,
+        sources: &mut SourceMap,
+        diags: &mut DiagBag,
+    ) {
+        if self.wants_json && !self.seen.contains_key(&Origin::Std("json")) {
+            if let Some((name, src)) = std_entry("json") {
+                let found = Found::Std(name, src);
+                let at = Span::empty_at(FileId(0), 0);
+                self.load_one(found, "json".to_string(), at, stack, sources, diags);
+            }
+        }
+    }
+
+    /// The program's own package: its dependencies are those of the manifest
+    /// in the first directory at or above `dir` that has one.
+    ///
+    /// Looked for *upwards*, because a program is usually `src/main.kite` and
+    /// the manifest is beside `src/`. Nothing is fetched here — `kitec pkg`
+    /// does that, once, on purpose.
+    fn program_package(
+        &mut self,
+        dir: &Path,
+        root: Option<PathBuf>,
+        sources: &mut SourceMap,
+        diags: &mut DiagBag,
+    ) -> Package {
+        let mut package = Package { root, ..Package::default() };
+        // From the absolute directory, so `kitec run main.kite` inside `src/`
+        // finds the manifest beside `src/` exactly as `kitec run src/main.kite`
+        // does from above it.
+        let start = self.files.absolute(dir);
+        let mut here = Some(start.as_path());
+        while let Some(directory) = here {
+            if self.files.is_file(&directory.join("kite.toml")) {
+                self.vendor = Some(directory.join(VENDOR));
+                package.dependencies = self.package_dependencies(directory, sources, diags);
+                package.manifest = Some(directory.to_path_buf());
+                break;
+            }
+            here = directory.parent();
+        }
+        package
+    }
+
+    /// The manifest `package`'s dependencies were to come from, when it was
+    /// there and did not read.
+    fn unread_manifest(&self, package: &Package) -> Option<&PathBuf> {
+        let directory = package.manifest.as_ref()?;
+        self.unread.get(&self.files.canonical(directory))
+    }
+
+    /// What the manifest in `directory` declares, and nothing above it.
+    ///
+    /// A dependency's manifest is read only where the dependency is: looking
+    /// further up would find whatever package it happens to be vendored
+    /// inside, which is the program depending on it. A `path` is relative to
+    /// the manifest writing it; a `git` dependency is wherever `kitec pkg` put
+    /// it, which is the program's `.kite/vendor` for every package in the
+    /// graph.
+    fn package_dependencies(
+        &mut self,
+        directory: &Path,
+        sources: &mut SourceMap,
+        diags: &mut DiagBag,
+    ) -> Rc<HashMap<String, PathBuf>> {
+        let key = self.files.canonical(directory);
+        if let Some(known) = self.manifests.get(&key) {
+            return known.clone();
+        }
+        let path = directory.join("kite.toml");
+        let mut out = HashMap::new();
+        let text = match self.files.read(&path) {
+            Ok(text) => Some(text),
+            // No manifest: a directory of `.kite` files with no dependencies.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            // **There, and unreadable, is not absent.** A manifest that was
+            // not UTF-8 — one Latin-1 byte in a comment — or that could not be
+            // opened was treated as no manifest, which is the mistake the
+            // parse errors below were once made: every dependency it declared
+            // was `cannot find module`, and nothing named the file at fault.
+            Err(e) => {
+                let (text, line, why) = unreadable(&path, e);
+                diags.push(manifest_error(&path, text, line, &why, sources));
+                self.unread.insert(key.clone(), path.clone());
+                None
+            }
+        };
+        if let Some(text) = text {
+            self.inputs.push((path.clone(), text.clone()));
+            match crate::manifest::parse(&text) {
+                Ok(parsed) => {
+                    let vendor = self.vendor.clone().unwrap_or_else(|| directory.join(VENDOR));
+                    for dependency in &parsed.dependencies {
+                        let at = match &dependency.source {
+                            crate::manifest::Source::Path(p) => directory.join(p),
+                            crate::manifest::Source::Git { .. } => vendor.join(&dependency.name),
+                        };
+                        out.insert(dependency.name.clone(), at);
+                    }
+                }
+                // **Reported, not skipped.** A manifest that did not parse
+                // used to be treated as no manifest, so a typo in `[package]`
+                // surfaced as `cannot find module` for every dependency it
+                // declared — a diagnostic about the wrong file.
+                Err(error) => {
+                    diags.push(manifest_error(&path, text, error.line, &error.message, sources));
+                    self.unread.insert(key.clone(), path.clone());
+                }
+            }
+        }
+        let out = Rc::new(out);
+        self.manifests.insert(key, out.clone());
+        out
     }
 
     /// Which `provided` entry a `use` reaches, if any.
@@ -278,6 +894,27 @@ impl Loader {
         None
     }
 
+    /// What a dependency's module identities begin with.
+    ///
+    /// Its name, when the program's own manifest declares it — which is how
+    /// the program spells it, so that is how a diagnostic names it. A package
+    /// only some dependency declares is `@` and its name instead. The
+    /// program's own modules are identified by bare paths, and a package the
+    /// program never declared is free to share a name with one of them: an
+    /// application with a `log.kite` of its own may depend on a web package
+    /// that depends on a `log` package. Both were `log`, the second to load
+    /// was refused as a second package of one name, and which of the two was
+    /// refused depended on the order of the `use` lines. A package the
+    /// program *does* declare cannot meet one of the program's own modules at
+    /// all: its name, written first in a `use`, reaches the package.
+    fn label(&self, name: &str) -> String {
+        if self.direct.contains_key(name) {
+            name.to_string()
+        } else {
+            format!("@{}", name)
+        }
+    }
+
     /// The package a module's own imports resolve under, given the key its
     /// source came from: everything before the last segment.
     fn package_of(key: &str) -> String {
@@ -287,34 +924,91 @@ impl Loader {
         }
     }
 
+    /// Note whether a file derives something written against `std/json`.
+    fn note_derives(&mut self, file: &SourceFile) {
+        let wants = file.items.iter().any(|item| {
+            let derives = match item {
+                Item::Struct(s) => &s.derives,
+                Item::Enum(e) => &e.derives,
+                _ => return false,
+            };
+            derives.iter().any(|d| d.name == "Encode" || d.name == "Decode")
+        });
+        self.wants_json |= wants;
+    }
+
     fn visit_uses(
         &mut self,
         file: &SourceFile,
-        dir: Option<&Path>,
-        prefix: &str,
-        stack: &mut Vec<String>,
+        scope: &Scope,
+        stack: &mut Vec<Frame>,
         sources: &mut SourceMap,
         diags: &mut DiagBag,
     ) {
         // Which module's files these `use` lines are in. The entry file is
         // `""`, matching how its items are recorded.
-        let owner = stack.last().cloned().unwrap_or_default();
+        let owner = stack.last().map(|frame| frame.identity.clone()).unwrap_or_default();
         for u in &file.uses {
             let segments: Vec<&str> = u.path.iter().map(|s| s.name.as_str()).collect();
-            let last = (*segments.last().expect("a use path is never empty")).to_string();
-            // **A module is its whole path.** `dep/utils` and `utils` are two
-            // modules, not one, and the last segment is only how a use site
-            // *spells* whichever of them that file imported.
-            //
-            // The standard library keeps its bare name, because `json.parse`
-            // is how every program writes it and `E0403` already stops a user
-            // module from taking one.
-            let name = identity(&segments);
+            let last = *segments.last().expect("a use path is never empty");
             // Every import records its spelling, aliased or not. That is what
             // makes two modules with the same last segment coexist: the
             // rewrite is per importing module, so `utils.foo` means whichever
             // `utils` *this* file imported.
-            let spelling = u.alias.as_ref().map(|a| a.name.clone()).unwrap_or(last);
+            let spelling = u.alias.as_ref().map(|a| a.name.clone()).unwrap_or(last.to_string());
+
+            // The standard library's names are its own, and so is the
+            // prelude's. A module identified by where it is already keeps
+            // `dep/crypto` and `std/crypto` apart, but a *sibling* `crypto`
+            // would still be spelled `crypto` in the file that imported it and
+            // shadow `std/crypto` there. A module called `prelude` was worse:
+            // the prelude is looked up by that name from everywhere, so its
+            // declarations became every module's unqualified fallback.
+            let is_std = segments.first() == Some(&"std");
+            if !is_std && reserved(last) {
+                diags.push(
+                    Diagnostic::error(
+                        codes::E0403,
+                        format!("`{}` is the name of a standard library module", last),
+                    )
+                    .with_primary(u.span, "this name belongs to the standard library")
+                    .with_note(reserved_because(last, "rename this module")),
+                );
+                continue;
+            }
+            // **And so is the spelling, not only the path.** The check above
+            // read the path's last segment and never the name after `as`, so
+            // `use util as errors` was accepted — and `errors` is in scope in
+            // every file without a `use`. One spelling then reached two
+            // modules: `errors.new` stayed the standard library's while
+            // `errors.only` reached `util`, and wherever both declared a name
+            // the standard library won, silently. A `std` module spelled as
+            // itself is the one spelling that is its own; without an `as`,
+            // the spelling is the last segment, which is checked above or is
+            // the `std` module's own.
+            let own = is_std && segments.get(1) == Some(&spelling.as_str());
+            if u.alias.is_some() && reserved(&spelling) && !own {
+                diags.push(
+                    Diagnostic::error(
+                        codes::E0403,
+                        format!("`{}` is the name of a standard library module", spelling),
+                    )
+                    .with_primary(u.span, "this spelling belongs to the standard library")
+                    .with_note(reserved_because(&spelling, "spell this module another way"))
+                    .with_note("`use … as …` takes any other name"),
+                );
+                continue;
+            }
+
+            let Some(found) = self.locate(scope, &segments, u.span, sources, diags) else {
+                continue;
+            };
+            let origin = found.origin(&self.files);
+            let identity = match self.seen.get(&origin) {
+                Some(known) => known.clone(),
+                None => found.identity(),
+            };
+
             // Recorded whether or not it differs from the identity. A plain
             // `use utils` claims the spelling `utils` in this module, and it
             // has to, or a later `use dep/utils` would take the spelling from
@@ -322,7 +1016,7 @@ impl Loader {
             if let Some(first) = self
                 .aliases
                 .get(&(owner.clone(), spelling.clone()))
-                .filter(|first| **first != name)
+                .filter(|first| **first != identity)
                 .cloned()
             {
                 diags.push(
@@ -339,28 +1033,17 @@ impl Loader {
                 );
                 continue;
             }
-            self.aliases.insert((owner.clone(), spelling.clone()), name.clone());
-            if stack.contains(&name) {
-                diags.push(
-                    Diagnostic::error(
-                        codes::E0402,
-                        format!("module `{}` is part of an import cycle", name),
-                    )
-                    .with_primary(u.span, "this import closes the cycle")
-                    .with_note(format!(
-                        "the chain is {} — extract the shared part into a third module",
-                        stack.join(" → ")
-                    )),
-                );
-                continue;
-            }
-            if let Some(first) = self.seen.get(&name).cloned() {
-                // The same identity reached twice is the ordinary case — two
-                // files importing one module — and needs nothing. Two
-                // *different* sources answering to one identity is still worth
-                // reporting: it means a path resolved somewhere unexpected.
-                let found = self.origin_of(prefix, &name, &segments, dir);
-                if first != found && first != Origin::Missing && found != Origin::Missing {
+            // Two *different* sources that would take one identity. Within one
+            // package that cannot happen — an identity is a path — and the
+            // program's own modules cannot meet a package's, since those are
+            // named by a package name; so this is two packages of one name,
+            // which `kitec pkg` refuses for the same reason: a name means one
+            // thing. The `@` of a package the program never declared is how an
+            // identity is kept apart from the program's own, not part of the
+            // name anyone wrote, so the message leaves it out.
+            if !self.seen.contains_key(&origin) {
+                if let Some(other) = self.taken.get(&identity) {
+                    let name = identity.trim_start_matches('@');
                     diags.push(
                         Diagnostic::error(
                             codes::E0404,
@@ -368,164 +1051,176 @@ impl Loader {
                         )
                         .with_primary(u.span, "this module never loads")
                         .with_note(format!(
-                            "`{}` was already loaded from {}, so every `{}.…` reaches that \
-                             one",
+                            "`{}` was loaded from {}, and this one is {}",
                             name,
-                            first.describe(),
-                            name
+                            other.describe(),
+                            origin.describe()
                         ))
-                        .with_note("rename one, or import it by a path that tells them apart"),
+                        .with_note(
+                            "a package's name means one thing across the whole program — the \
+                             manifests naming it must agree on where it is",
+                        ),
                     );
+                    continue;
                 }
+            }
+            self.aliases.insert((owner.clone(), spelling.clone()), identity.clone());
+
+            if let Some(at) = stack.iter().position(|frame| frame.origin == origin) {
+                diags.push(cycle(stack, at, &identity, u.span, sources));
                 continue;
             }
-            self.load_one(prefix, &name, &segments, u.span, dir, stack, sources, diags);
+            // The same source reached twice is the ordinary case — two files
+            // importing one module — and needs nothing more.
+            if self.seen.contains_key(&origin) {
+                continue;
+            }
+            self.load_one(found, identity, u.span, stack, sources, diags);
         }
     }
 
-    /// Where a `use` of this name would find its source.
+    /// Find what a `use` path names, or say why nothing answers.
     ///
-    /// The same order of preference [`Self::load_one`] applies, and it is a
-    /// function so that the two cannot drift: what gets recorded and what gets
-    /// compared against are the same answer.
-    ///
-    /// Paths are canonicalised where the filesystem will do it, so a module
-    /// reached as `../lib/utils` from one importer and `utils` from another is
-    /// one module rather than a reported collision. Where it will not — a
-    /// wasm host has no filesystem — the path stands for itself, and the worst
-    /// that costs is a collision going unreported on a host that had no two
-    /// directories to confuse in the first place.
-    /// Where a module's source came from.
-    ///
-    /// A provided module is identified by the key that answered, so two `use`
-    /// paths reaching two different entries are two different origins — which
-    /// is what the collision check below needs to be able to say.
-    fn origin_of(
-        &self,
-        prefix: &str,
-        name: &str,
-        segments: &[&str],
-        dir: Option<&Path>,
-    ) -> Origin {
-        if segments.first() == Some(&"std") {
-            return Origin::Std;
-        }
-        if let Some(key) = self.provided_key(prefix, name) {
-            return Origin::Provided(key);
-        }
-        let Some(base) = dir else {
-            return Origin::Missing;
-        };
-        let settle = |p: PathBuf| Origin::Path(std::fs::canonicalize(&p).unwrap_or(p));
-        let as_dir = module_dir(base, segments, &self.dependencies);
-        if as_dir.is_dir() {
-            return settle(as_dir);
-        }
-        let as_file = as_dir.with_extension("kite");
-        if as_file.is_file() {
-            return settle(as_file);
-        }
-        Origin::Missing
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn load_one(
+    /// **A `use` that finds nothing is always `E0400`.** It used to be
+    /// compared against whatever had already been loaded under the same
+    /// spelling first, and a match there answered it — so a module whose own
+    /// `util` was missing silently got another module's, private one.
+    fn locate(
         &mut self,
-        prefix: &str,
-        name: &str,
+        scope: &Scope,
         segments: &[&str],
         span: Span,
-        dir: Option<&Path>,
-        stack: &mut Vec<String>,
+        sources: &mut SourceMap,
+        diags: &mut DiagBag,
+    ) -> Option<Found> {
+        let path = segments.join("/");
+        if segments.first() == Some(&"std") {
+            // Exactly `std/<name>`. Only the last segment used to be read, so
+            // `use std/anything/at/all/json` was `std/json`.
+            if let [_, name] = segments {
+                if let Some((name, src)) = std_entry(name) {
+                    return Some(Found::Std(name, src));
+                }
+            }
+            diags.push(
+                Diagnostic::error(codes::E0400, format!("no standard module `{}`", path))
+                    .with_primary(span, "not part of the standard library")
+                    .with_note(format!(
+                        "the standard library is: {}",
+                        STD_MODULES
+                            .iter()
+                            .map(|(n, _)| format!("std/{}", n))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )),
+            );
+            return None;
+        }
+        let provided = self.provided_key(&scope.prefix, &path);
+        let Some(base) = &scope.dir else {
+            if let Some(key) = provided {
+                return Some(Found::Provided { key, dir: None, package: Package::default() });
+            }
+            diags.push(
+                Diagnostic::error(codes::E0400, format!("cannot find module `{}`", path))
+                    .with_primary(span, "no such module")
+                    .with_note("a module is a sibling file or directory of the importer"),
+            );
+            return None;
+        };
+
+        // **Every segment counts.** `use dep/utils` is `dep/utils` relative to
+        // the importing module, not `utils`. A first segment naming one of this
+        // package's declared dependencies roots there instead, so `use
+        // markdown/render` reaches inside the package rather than beside the
+        // entry file — and a dependency wins over a sibling of the same name,
+        // because what a package depends on is what it said.
+        let (mut at, package, rest) = match scope.package.dependencies.get(segments[0]) {
+            Some(root) => {
+                let dependencies = if self.files.is_dir(root) {
+                    self.package_dependencies(root, sources, diags)
+                } else {
+                    Rc::default()
+                };
+                let package = Package {
+                    label: self.label(segments[0]),
+                    root: Some(root.clone()),
+                    dependencies,
+                    manifest: Some(root.clone()),
+                };
+                (root.clone(), package, &segments[1..])
+            }
+            None => (base.clone(), scope.package.clone(), segments),
+        };
+        for part in rest {
+            at = at.join(part);
+        }
+        if let Some(key) = provided {
+            let dir = at.parent().map(Path::to_path_buf);
+            return Some(Found::Provided { key, dir, package });
+        }
+        // A directory is the canonical form; a single file is the same thing
+        // with one file in it, and is what most modules start as.
+        if self.files.is_dir(&at) {
+            let prefix = within(&scope.prefix, segments);
+            return Some(Found::Path { at, is_dir: true, package, prefix });
+        }
+        let as_file = at.with_extension("kite");
+        if self.files.is_file(&as_file) {
+            let prefix = within(&scope.prefix, &segments[..segments.len() - 1]);
+            return Some(Found::Path { at: as_file, is_dir: false, package, prefix });
+        }
+        let mut missing = Diagnostic::error(codes::E0400, format!("cannot find module `{}`", path))
+            .with_primary(span, "no such module")
+            .with_note(format!("looked for `{}` and `{}`", at.display(), as_file.display()));
+        // The manifest's own error is reported in the manifest, which is not
+        // the file anyone looking at this `use` has open — an editor shows a
+        // file's own diagnostics beside it. Said here as well, the reason is
+        // where the symptom is.
+        if let Some(manifest) = self.unread_manifest(&scope.package) {
+            missing = missing.with_note(format!(
+                "`{}` did not read (E0405), so no dependency it declares could be looked for",
+                manifest.display()
+            ));
+        }
+        diags.push(missing);
+        None
+    }
+
+    fn load_one(
+        &mut self,
+        found: Found,
+        identity: String,
+        span: Span,
+        stack: &mut Vec<Frame>,
         sources: &mut SourceMap,
         diags: &mut DiagBag,
     ) {
-        let is_std = segments.first() == Some(&"std");
-        let last = *segments.last().expect("a use path is never empty");
-
-        // The standard library's names are its own. A module identified by its
-        // whole path already keeps `dep/crypto` and `std/crypto` apart, but a
-        // *sibling* `crypto` would still be spelled `crypto` in the file that
-        // imported it and shadow `std/crypto` there. Reserving the names is
-        // cheaper than making `std` a prefix threaded through the compiler.
-        if !is_std && std_module(last).is_some() {
-            diags.push(
-                Diagnostic::error(
-                    codes::E0403,
-                    format!("`{}` is the name of a standard library module", name),
-                )
-                .with_primary(span, "this name belongs to the standard library")
-                .with_note(format!(
-                    "`use std/{}` is that module; rename this one so the two cannot be confused",
-                    name
-                )),
-            );
-            return;
-        }
-
+        let origin = found.origin(&self.files);
         let mut files = Vec::new();
-        // Where this module's *own* imports resolve from — its directory, or
-        // the package it was handed over inside. Every branch below sets both,
-        // and that is the point: leaving them at the importer's is how a
-        // one-file module used to read its imports out of somebody else's
-        // directory.
-        let own_dir: Option<PathBuf>;
-        let mut own_prefix = prefix.to_string();
-
-        if is_std {
-            let Some(src) = std_module(last) else {
-                diags.push(
-                    Diagnostic::error(codes::E0400, format!("no standard module `{}`", name))
-                        .with_primary(span, "not part of the standard library")
-                        .with_note(format!(
-                            "the standard library is: {}",
-                            STD_MODULES
-                                .iter()
-                                .map(|(n, _)| format!("std/{}", n))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )),
-                );
-                return;
-            };
-            files.push(sources.add(format!("<std/{}>", last), src));
-            own_dir = None;
-            own_prefix = String::new();
-        } else if let Some(key) = self.provided_key(prefix, name) {
-            let text = self.provided.get(&key).cloned().expect("the key just matched");
-            files.push(sources.add(format!("{}.kite", key), &text));
-            own_dir = None;
-            own_prefix = Loader::package_of(&key);
-        } else {
-            let Some(base) = dir else {
-                diags.push(
-                    Diagnostic::error(codes::E0400, format!("cannot find module `{}`", name))
-                        .with_primary(span, "no such module")
-                        .with_note("a module is a sibling file or directory of the importer"),
-                );
-                return;
-            };
-            // A directory is the canonical form; a single file is the same
-            // thing with one file in it, and is what most modules start as.
-            // A dependency the manifest declares wins over a sibling of the
-            // same name: what a package depends on is what it said, not what
-            // happens to be lying next to it.
-            let as_dir = module_dir(base, segments, &self.dependencies);
-            let as_file = as_dir.with_extension("kite");
-            if as_dir.is_dir() {
-                let mut entries: Vec<PathBuf> = std::fs::read_dir(&as_dir)
-                    .map(|rd| {
-                        rd.filter_map(|e| e.ok().map(|e| e.path()))
-                            .filter(|p| p.extension().is_some_and(|e| e == "kite"))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                // Sorted, so a module's meaning does not depend on the order
-                // the file system happens to hand its files back.
-                entries.sort();
-                for path in entries {
-                    match std::fs::read_to_string(&path) {
-                        Ok(text) => files.push(sources.add(&path, &text)),
+        // Where this module's *own* imports resolve from — its directory and
+        // its package, or the package it was handed over inside. Every branch
+        // sets it, and that is the point: leaving any of it at the importer's
+        // is how a one-file module used to read its imports out of somebody
+        // else's directory.
+        let own = match found {
+            Found::Std(name, src) => {
+                files.push(sources.add(format!("<std/{}>", name), src));
+                Scope::default()
+            }
+            Found::Provided { key, dir, package } => {
+                let text = self.provided.get(&key).cloned().expect("the key just matched");
+                files.push(sources.add(format!("{}.kite", key), &text));
+                Scope { dir, prefix: Loader::package_of(&key), package }
+            }
+            Found::Path { at, is_dir, package, prefix } => {
+                let paths = if is_dir { self.files.kite_files(&at) } else { vec![at.clone()] };
+                for path in paths {
+                    match self.files.read(&path) {
+                        Ok(text) => {
+                            self.inputs.push((path.clone(), text.clone()));
+                            files.push(sources.add(&path, &text));
+                        }
                         Err(e) => diags.push(
                             Diagnostic::error(
                                 codes::E0400,
@@ -535,51 +1230,34 @@ impl Loader {
                         ),
                     }
                 }
-                own_dir = Some(as_dir);
-            } else if let Ok(text) = std::fs::read_to_string(&as_file) {
-                files.push(sources.add(&as_file, &text));
-                // **Its own directory, not the importer's.** This used to be
-                // left alone, so a one-file module resolved its imports from
-                // wherever it happened to be imported *from*. For a sibling
-                // that is accidentally the same directory and nothing showed;
-                // across a package boundary it meant a dependency's `use
-                // helper` reached the application's `helper.kite` — a
-                // dependency reading the program that depends on it, silently
-                // and with no diagnostic.
-                own_dir = as_file.parent().map(|p| p.to_path_buf());
-            } else {
-                diags.push(
-                    Diagnostic::error(codes::E0400, format!("cannot find module `{}`", name))
-                        .with_primary(span, "no such module")
-                        .with_note(format!(
-                            "looked for `{}` and `{}`",
-                            as_dir.display(),
-                            as_file.display()
-                        )),
-                );
-                return;
+                // **Its own directory, not the importer's.** A one-file module
+                // once resolved its imports from wherever it happened to be
+                // imported *from*, so across a package boundary a dependency's
+                // `use helper` reached the application's `helper.kite`.
+                let dir = if is_dir { Some(at) } else { at.parent().map(Path::to_path_buf) };
+                Scope { dir, prefix, package }
             }
-        }
+        };
 
-        // Recorded through the same resolver the collision check reads, so the
-        // two cannot answer differently about where a module came from.
-        self.seen.insert(name.to_string(), self.origin_of(prefix, name, segments, dir));
-        stack.push(name.to_string());
+        self.seen.insert(origin.clone(), identity.clone());
+        self.taken.insert(identity.clone(), origin.clone());
+        stack.push(Frame { origin, identity: identity.clone(), entered: span });
         // A module's own imports are loaded before it is recorded, so a
         // dependency is always earlier in the list than its dependent.
-        for id in files.clone() {
+        let mut parsed = Vec::with_capacity(files.len());
+        for id in files {
             let text = sources.text(id).to_string();
             let tokens = kite_lexer::tokenize(id, &text, diags);
-            let parsed = kite_parser::parse(id, &text, &tokens, diags);
-            self.visit_uses(&parsed, own_dir.as_deref(), &own_prefix, stack, sources, diags);
+            let file = kite_parser::parse(id, &text, &tokens, diags);
+            self.note_derives(&file);
+            self.visit_uses(&file, &own, stack, sources, diags);
+            parsed.push((id, file));
         }
         stack.pop();
-        if let Some(d) = own_dir {
-            self.roots.insert(name.to_string(), d);
-        }
-        self.loaded.push(Loaded { name: name.to_string(), files });
+        self.loaded.push(Loaded { name: identity, files: parsed });
     }
 }
+
 
 /// Rewrite a module's declarations to their qualified form.
 ///

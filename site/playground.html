@@ -35,7 +35,7 @@
       <button id="run" class="primary" disabled>Run</button>
       <button id="check" disabled>Check</button>
       <button id="format" disabled>Format</button>
-      <select id="stage">
+      <select id="stage" disabled>
         <option value="">Show a stage…</option>
         <option value="ast">AST</option>
         <option value="hir">HIR</option>
@@ -276,7 +276,7 @@ playground
   .load()
   .then(() => {
     status.textContent = "ready — nothing here talks to a server";
-    for (const id of ["run", "check", "format"]) {
+    for (const id of ["run", "check", "format", "stage"]) {
       document.getElementById(id).disabled = false;
     }
   })
@@ -290,8 +290,15 @@ document.getElementById("check").onclick = () => {
   show(text === "" ? "ok" : text);
 };
 document.getElementById("format").onclick = () => {
-  load(playground.format(source.value));
-  show("formatted");
+  const before = source.value;
+  const after = playground.format(before);
+  load(after);
+  // A program the lexer cannot read comes back exactly as it went in, rather
+  // than laid out from the tokens that survived; Check says what is wrong.
+  if (after !== before) show("formatted");
+  else if (/error\[E000\d\]/.test(playground.check(before))) {
+    show("not formatted: fix the errors Check reports first");
+  } else show("already formatted");
 };
 document.getElementById("stage").onchange = (e) => {
   if (!e.target.value) return;

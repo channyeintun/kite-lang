@@ -1,0 +1,27 @@
+// `check errors.wrap(err, …)` proves `err` nil when it falls through, because
+// `wrap` answers nil exactly for nil. An arbitrary function does not: this
+// `ignore` answers nil for everything, so falling past the `check` says
+// nothing about `err`, and the value it guards is still unreadable.
+
+fn fails() -> (int, error) {
+    return _, errors.new("boom")
+}
+
+fn ignore(e: error) -> error {
+    return nil
+}
+
+fn g() -> (int, error) {
+    let (v, err) = fails()
+    check ignore(err)
+    return v + 1, nil //~ ERROR E0301
+}
+
+fn main() {
+    let (v, err) = g()
+    if err != nil {
+        io.print(err.message())
+    } else {
+        io.print("\(v)")
+    }
+}

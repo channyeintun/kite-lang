@@ -46,8 +46,12 @@ extern fn fetch_status(id: int) -> int
 @host("net")
 extern fn fetch_body(id: int) -> str
 
+/// Every header of a response that arrived, as `name: value` lines — read
+/// once, beside the status, and carried by the `Response` from then on. A
+/// header read back from the host by handle, whenever the program asked,
+/// meant the host could never let a request go.
 @host("net")
-extern fn fetch_header(id: int, name: str) -> str
+extern fn fetch_headers(id: int) -> str
 
 @host("net")
 extern fn fetch_error(id: int) -> str
@@ -90,7 +94,7 @@ extern fn sse_pending(id: int) -> int
 /// Take the oldest event and answer its `data`.
 ///
 /// The name and the id of that same event are read back with the two
-/// functions below, the way a response's headers are read back from its
+/// functions below, the way a response's status is read back from its
 /// handle. Data crosses on its own because data is the part that can contain
 /// anything, newlines included, and a `name: value` encoding would mangle it.
 @host("net")
@@ -126,20 +130,23 @@ pub struct Request {
 pub struct Response {
     pub status: int
     pub body: str
-    /// The handle the response came from, for reading a header back.
-    id: int
+    /// The headers it arrived with, as `name: value` lines, and "" for a
+    /// response built in Kite. Taken when the response arrived rather than
+    /// asked of the host by handle later: a handle the program might still
+    /// ask with was a request the host could never let go.
+    headers: str
 }
 
 pub fn ok(body: str) -> Response {
-    return Response{ status: 200, body: body, id: -1 }
+    return Response{ status: 200, body: body, headers: "" }
 }
 
 pub fn not_found() -> Response {
-    return Response{ status: 404, body: "not found", id: -1 }
+    return Response{ status: 404, body: "not found", headers: "" }
 }
 
 pub fn status(code: int, body: str) -> Response {
-    return Response{ status: code, body: body, id: -1 }
+    return Response{ status: code, body: body, headers: "" }
 }
 
 /// Whether the status is in the 2xx range.
@@ -147,13 +154,29 @@ pub fn succeeded(r: Response) -> bool {
     return r.status >= 200 && r.status < 300
 }
 
-/// A header of a response that came from the host. A response built in Kite
-/// carries no headers, and answers with an empty string.
+/// A header of a response that came from the host, answered as `fetch`'s own
+/// `headers.get` answers it: the name is compared ignoring ASCII case, and a
+/// header that arrived more than once answers with every value, in order,
+/// joined by `, `. A header the response did not carry answers with an empty
+/// string, and so does every header of a response built in Kite, which
+/// carries none.
 pub fn header(r: Response, name: str) -> str {
-    if r.id < 0 {
-        return ""
+    var values: [str] = []
+    for line in split(r.headers, "\n") {
+        let at = line.index_of(":")
+        if at > 0 && equal_ignoring_case(line.slice(0, at), name) {
+            // The one space the host writes after the colon, and not `trim`:
+            // the host has already stripped what HTTP counts as whitespace,
+            // and `trim` would also take a no-break space that is part of the
+            // value.
+            var from = at + 1
+            if from < line.len() && line.code_at(from) == 32 {
+                from += 1
+            }
+            values.push(line.slice(from, line.len()))
+        }
     }
-    return fetch_header(r.id, name)
+    return join(values, ", ")
 }
 
 // ---- what a request carries besides its body --------------------------------
@@ -217,9 +240,90 @@ pub fn sending() -> Options {
     }
 }
 
-/// The same, carrying the caller's headers.
+/// The same, carrying the caller's headers as `name: value` lines.
+///
+/// **Not for a value that came from outside the program.** The lines are
+/// split on the newline on the way to `fetch`, so a newline inside a value
+/// stops being data and starts a header of its own: `"x-user: \(name)"`, with
+/// a name someone else chose, is one newline away from sending whatever
+/// `Authorization` they wrote. That cannot be told from two headers the
+/// program meant — the joined text is all there is — so it is not refused
+/// here, and [`sending_pairs`] is the form to use instead. What *can* be told
+/// is refused when the request is sent: a line that is not `name: value`, or
+/// a carriage return inside one.
 pub fn sending_with(headers: str) -> Options {
-    return Options{..sending(), headers: headers }
+    return Options{ ..sending(), headers: headers }
+}
+
+/// The same, with headers given as pairs — the form to use whenever a value
+/// came from somewhere else.
+///
+/// Joined here from parts that arrive separately, which is what makes "the
+/// program meant two headers" and "a value added one" decidable, as it is for
+/// [`respond`]. A name that is not an HTTP token, or a value carrying a line
+/// break, is refused rather than stripped: there is no escaping that keeps
+/// the meaning.
+///
+/// ```kite ignore
+/// let (opts, err) = http.sending_pairs([http.Header{ name: "x-user", value: name }])
+/// check err
+/// let (res, rerr) = await http.send_with("GET", url, "", opts)
+/// ```
+pub fn sending_pairs(headers: [Header]) -> (Options, error) {
+    var lines: [str] = []
+    for h in headers {
+        if !is_token(h.name) {
+            return _, errors.new("http: `\(h.name)` is not a header name")
+        }
+        if breaks_a_line(h.value) {
+            return _, errors.new("http: the value of `\(h.name)` contains a line break")
+        }
+        lines.push("\(h.name): \(h.value)")
+    }
+    return sending_with(join(lines, "\n")), nil
+}
+
+/// Whether `name` is an HTTP token (RFC 9110 §5.6.2): what a header name is
+/// made of, and nothing — no space, no colon, no line break — that could end
+/// it early.
+fn is_token(name: str) -> bool {
+    if name.len() == 0 {
+        return false
+    }
+    for i in 0..name.len() {
+        let c = name.code_at(i)
+        let letter = (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+        let digit = c >= 48 && c <= 57
+        if !letter && !digit && "!#$%&'*+-.^_`|~".index_of(name.slice(i, i + 1)) < 0 {
+            return false
+        }
+    }
+    return true
+}
+
+/// Why a block of `name: value` lines cannot go out, or nil.
+///
+/// The host drops a line with no colon without a word, so a value carrying a
+/// newline and then something that is not a header vanished rather than
+/// failing. A line break at the very end of a line is allowed, since `\r\n`
+/// between lines is a habit worth tolerating; one anywhere else is not.
+fn header_lines_error(text: str) -> error {
+    var n = 0
+    for raw in split(text, "\n") {
+        n += 1
+        var line = raw
+        if ends_with(line, "\r") {
+            line = line.slice(0, line.len() - 1)
+        }
+        if line.trim().len() == 0 {
+            continue
+        }
+        let at = line.index_of(":")
+        if line.index_of("\r") >= 0 || at <= 0 || !is_token(line.slice(0, at).trim()) {
+            return errors.new("http: header line \(n) is not `name: value`")
+        }
+    }
+    return nil
 }
 
 /// The word `fetch` knows this by.
@@ -310,6 +414,10 @@ pub async fn send_with(
     body: str,
     options: Options,
 ) -> (Response, error) {
+    let bad = header_lines_error(options.headers)
+    if bad != nil {
+        return _, errors.new("http \(method) \(url): \(bad.message())")
+    }
     let id = fetch_start(
         method,
         url,
@@ -325,7 +433,12 @@ pub async fn send_with(
     if fetch_state(id) == 2 {
         return _, errors.new("http \(method) \(url): \(fetch_error(id))")
     }
-    return Response{ status: fetch_status(id), body: fetch_body(id), id: id }, nil
+    // The body last: reading it is what lets the host forget the request, so
+    // the status and the headers are taken before it, and travel with the
+    // `Response` from here on.
+    let code = fetch_status(id)
+    let headers = fetch_headers(id)
+    return Response{ status: code, body: fetch_body(id), headers: headers }, nil
 }
 
 // ---- server-sent events -----------------------------------------------------
@@ -445,6 +558,10 @@ pub fn route(method: str, pattern: str, handle: fn(Request) -> Response) -> Rout
 }
 
 /// The first route that matches, or a 404.
+///
+/// Matched on the path alone: a query string or a fragment after it takes no
+/// part, so `/?utm=1` is `/` and `/users/7?tab=posts` is `/users/:id`. Read
+/// the query with [`query_parameter`].
 pub fn serve(routes: [Route], request: Request) -> Response {
     for r in routes {
         if r.method == request.method {
@@ -457,9 +574,14 @@ pub fn serve(routes: [Route], request: Request) -> Response {
 }
 
 /// Whether a path matches a pattern, where `:name` stands for one segment.
+///
+/// `path` may be a whole request target: whatever follows a `?` or a `#` is
+/// not part of the path, and is not compared. The server hands a handler the
+/// target as the client sent it, query and all, and routing on that made a
+/// link with `?utm=1` on it a 404.
 pub fn matches(pattern: str, path: str) -> bool {
     let want = split(pattern, "/")
-    let found = split(path, "/")
+    let found = split(path_part(path), "/")
     if want.len() != found.len() {
         return false
     }
@@ -475,9 +597,13 @@ pub fn matches(pattern: str, path: str) -> bool {
 }
 
 /// The value a `:name` segment captured, or nil.
+///
+/// As it appears in the path — still percent-encoded, so `/users/a%20b`
+/// captures `a%20b` — and without the query: `/users/7?tab=posts` captures
+/// `7`, where it used to capture `7?tab=posts`.
 pub fn parameter(pattern: str, path: str, name: str) -> Option<str> {
     let want = split(pattern, "/")
-    let found = split(path, "/")
+    let found = split(path_part(path), "/")
     if want.len() != found.len() {
         return nil
     }
@@ -487,6 +613,187 @@ pub fn parameter(pattern: str, path: str, name: str) -> Option<str> {
         }
     }
     return nil
+}
+
+/// A request target without its query or fragment: the part a route matches.
+fn path_part(target: str) -> str {
+    var end = target.len()
+    let question = target.index_of("?")
+    if question >= 0 {
+        end = question
+    }
+    let hash = target.index_of("#")
+    if hash >= 0 && hash < end {
+        end = hash
+    }
+    return target.slice(0, end)
+}
+
+/// The value of a query-string parameter, or nil when the request has none by
+/// that name.
+///
+/// Decoded as the URL Standard decodes `application/x-www-form-urlencoded`,
+/// which is what a form and `URLSearchParams` send: `+` is a space, `%XX` is a
+/// byte, and the bytes are read as UTF-8, with U+FFFD for a sequence that is
+/// not. The name is decoded the same way before it is compared. A parameter
+/// written with no `=` has the value "", and when a name repeats the first one
+/// answers.
+///
+/// ```kite
+/// let r = Request{ method: "GET", path: "/search?q=kite+lang&page=2", body: "", headers: "" }
+/// assert(or_else(query_parameter(r, "q"), "") == "kite lang", "a plus is a space")
+/// assert(or_else(query_parameter(r, "page"), "") == "2", "the second parameter")
+/// assert(query_parameter(r, "sort") == nil, "one that is not there")
+/// ```
+pub fn query_parameter(r: Request, name: str) -> Option<str> {
+    let target = r.path
+    let question = target.index_of("?")
+    if question < 0 {
+        return nil
+    }
+    let hash = target.index_of("#")
+    if hash >= 0 && hash < question {
+        // The `?` is inside the fragment, which is not a query.
+        return nil
+    }
+    var query = target.slice(question + 1, target.len())
+    let end = query.index_of("#")
+    if end >= 0 {
+        query = query.slice(0, end)
+    }
+    for piece in split(query, "&") {
+        if piece.len() > 0 {
+            let eq = piece.index_of("=")
+            var key = piece
+            var value = ""
+            if eq >= 0 {
+                key = piece.slice(0, eq)
+                value = piece.slice(eq + 1, piece.len())
+            }
+            if form_decoded(key) == name {
+                return form_decoded(value)
+            }
+        }
+    }
+    return nil
+}
+
+/// `application/x-www-form-urlencoded` text decoded: `+` is a space, `%XX` a
+/// byte, and a `%` not followed by two hex digits is itself.
+fn form_decoded(text: str) -> str {
+    var out = ""
+    var bytes: [int] = []
+    var i = 0
+    for i < text.len() {
+        let c = text.code_at(i)
+        if c == 37 {
+            let high = hex_value(text, i + 1)
+            let low = hex_value(text, i + 2)
+            if high >= 0 && low >= 0 {
+                bytes.push(high * 16 + low)
+                i += 3
+                continue
+            }
+        }
+        if bytes.len() > 0 {
+            out = out + utf8_decoded(bytes)
+            bytes = []
+        }
+        if c == 43 {
+            out = out + " "
+        } else {
+            out = out + text.slice(i, i + 1)
+        }
+        i += 1
+    }
+    if bytes.len() > 0 {
+        out = out + utf8_decoded(bytes)
+    }
+    return out
+}
+
+fn hex_value(text: str, at: int) -> int {
+    if at >= text.len() {
+        return -1
+    }
+    let c = text.code_at(at)
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    return -1
+}
+
+/// Bytes as UTF-8, the way the Encoding Standard decodes them: each maximal
+/// run that cannot begin or continue a character becomes one U+FFFD, and the
+/// byte that broke a sequence is read again as the start of the next.
+fn utf8_decoded(bytes: [int]) -> str {
+    var out = ""
+    var i = 0
+    for i < bytes.len() {
+        let b = bytes[i]
+        if b < 128 {
+            out = out + text.from_code(b)
+            i += 1
+            continue
+        }
+        var need = 0
+        var code = 0
+        var lower = 128
+        var upper = 191
+        if b >= 194 && b <= 223 {
+            need = 1
+            code = b & 31
+        } else if b >= 224 && b <= 239 {
+            need = 2
+            code = b & 15
+            if b == 224 {
+                lower = 160
+            }
+            if b == 237 {
+                upper = 159
+            }
+        } else if b >= 240 && b <= 244 {
+            need = 3
+            code = b & 7
+            if b == 240 {
+                lower = 144
+            }
+            if b == 244 {
+                upper = 143
+            }
+        } else {
+            out = out + text.from_code(65533)
+            i += 1
+            continue
+        }
+        var j = i + 1
+        var whole = true
+        for k in 0..need {
+            if whole {
+                if j >= bytes.len() || bytes[j] < lower || bytes[j] > upper {
+                    whole = false
+                } else {
+                    code = (code << 6) | (bytes[j] & 63)
+                    lower = 128
+                    upper = 191
+                    j += 1
+                }
+            }
+        }
+        if whole {
+            out = out + text.from_code(code)
+        } else {
+            out = out + text.from_code(65533)
+        }
+        i = j
+    }
+    return out
 }
 
 /// A header's value out of the `name: value` lines a request carries.
@@ -612,11 +919,19 @@ pub fn port_of(server: Server) -> int {
 /// is being waited for is the host rather than another task, and saying so is
 /// what lets the runtime hand the event loop back instead of spinning through
 /// a queue that cannot fill while it holds the thread.
+///
+/// A server that has been [`shut`] with nothing waiting answers with an error
+/// rather than waiting: nothing will ever arrive, and a loop around this used
+/// to hang there for good. Requests that arrived before the shut are still
+/// handed out first.
 pub async fn accept(server: Server) -> (Incoming, error) {
     for serve_pending(server.id) == 0 {
         let failure = serve_error(server.id)
         if failure != "" {
             return _, errors.new("http.accept: \(failure)")
+        }
+        if serve_closed(server) {
+            return _, errors.new("http.accept: the server is shut")
         }
         task.wait_host()
         task.yield()
@@ -692,22 +1007,30 @@ fn breaks_a_line(text: str) -> bool {
 /// into a response, and it did so before anything could listen — which is why
 /// a handler was testable by calling it long before this existed, and stays
 /// that way.
+///
+/// Shutting the server is how this ends well: once it is shut and every
+/// request that arrived before has been answered, the count of answered
+/// requests comes back with no error.
 pub async fn run(server: Server, routes: [Route]) -> (int, error) {
     var answered = 0
     for {
+        if serve_closed(server) && serve_pending(server.id) == 0 {
+            return answered, nil
+        }
         let (incoming, err) = await accept(server)
-        check err
+        if err != nil {
+            // Shut while this was waiting, which is the ordinary way to stop.
+            if serve_closed(server) && serve_pending(server.id) == 0 {
+                return answered, nil
+            }
+            return _, err
+        }
         let none: [Header] = []
         let failed = respond(incoming, serve(routes, incoming.request), none)
         if failed != nil {
             return _, failed
         }
         answered = answered + 1
-        if serve_pending(server.id) == 0 {
-            if serve_closed(server) {
-                return answered, nil
-            }
-        }
     }
 }
 

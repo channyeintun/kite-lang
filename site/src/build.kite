@@ -16,6 +16,7 @@
 //! `std/fs`, the string primitives and the same library the browser would have
 //! used — with nothing shipped to the reader.
 
+use std/errors
 use std/fs
 use markdown
 use highlight
@@ -28,12 +29,12 @@ struct Document {
 
 fn documents() -> [Document] {
     return [
-        Document { source: "SPECIFICATION.md", page: "specification" },
-        Document { source: "README.md", page: "readme" },
-        Document { source: "docs/01-platform-research.md", page: "01-platform-research" },
-        Document { source: "docs/02-concurrency.md", page: "02-concurrency" },
-        Document { source: "docs/03-compiler-architecture.md", page: "03-compiler-architecture" },
-        Document { source: "docs/04-the-web.md", page: "04-the-web" },
+        Document{ source: "SPECIFICATION.md", page: "specification" },
+        Document{ source: "README.md", page: "readme" },
+        Document{ source: "docs/01-platform-research.md", page: "01-platform-research" },
+        Document{ source: "docs/02-concurrency.md", page: "02-concurrency" },
+        Document{ source: "docs/03-compiler-architecture.md", page: "03-compiler-architecture" },
+        Document{ source: "docs/04-the-web.md", page: "04-the-web" },
     ]
 }
 
@@ -189,30 +190,30 @@ fn build_reference(template: str, out_dir: str) -> error {
 /// Paths are relative to where it is run, which is what `site/build.sh` does —
 /// a build step that has to be run from one directory is a build step, and one
 /// that guesses is a bug waiting for somebody's checkout.
+///
+/// A failure traps, because a trap is how a Kite program exits with a status
+/// other than 0. It used to print the error and return, which exited 0 — so
+/// `site/build.sh`, and CI after it, carried on with whatever part of the site
+/// had been written before the failure.
 pub fn main() {
-    let out_dir = "site"
-    let (template, err) = fs.read("\(out_dir)/template.html")
+    let err = build("site")
     if err != nil {
-        io.error("no page template: \(err.message())")
-        return
+        require(false, err.message())
     }
+}
+
+fn build(out_dir: str) -> error {
+    let (template, err) = fs.read("\(out_dir)/template.html")
+    check errors.wrap(err, "no page template")
 
     io.print("rendering the documents…")
     let rderr = build_root_documents(template, out_dir)
-    if rderr != nil {
-        io.error(rderr.message())
-        return
-    }
+    check rderr
     let derr = build_documents(template, out_dir)
-    if derr != nil {
-        io.error(derr.message())
-        return
-    }
+    check derr
 
     io.print("rendering the reference…")
     let rerr = build_reference(template, out_dir)
-    if rerr != nil {
-        io.error(rerr.message())
-        return
-    }
+    check rerr
+    return nil
 }

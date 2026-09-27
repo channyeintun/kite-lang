@@ -351,19 +351,25 @@ it reads `releases/latest`.
 
 ---
 
-## The three copies of the compiler
+## The other copies of the compiler
 
-Changing the compiler leaves three checked-in WebAssembly builds of it behind,
-and one of them fails the suite until it is rebuilt:
+Changing the compiler leaves two WebAssembly builds of it behind. Neither is
+checked in — `.gitignore` names both — but a stale one on disk is still a
+compiler that disagrees with this one, and one of them fails the suite until it
+is rebuilt:
 
-- `packages/kite-wasm/kite-compiler.wasm` — what `vite-plugin-kite` depends on.
+- `packages/kite-wasm/kite-compiler.wasm` — what `vite-plugin-kite` depends on,
+  built by `./packages/kite-wasm/build.sh`.
   `crates/kite-driver/tests/wasm_compiler.rs` builds `examples/vite-starter`
   with the native `kitec` *and* with this module and compares the artefacts byte
-  for byte. Any compiler change fails that test until
-  `./packages/kite-wasm/build.sh` is rerun. That is the intended behaviour: the
-  plugin's whole claim is that it is not a second compiler.
+  for byte, so any compiler change fails that test until the module is rebuilt.
+  (With no module on disk the test skips rather than fails.) That is the
+  intended behaviour: the plugin's whole claim is that it is not a second
+  compiler.
 - `site/kite_playground.wasm` — rebuilt by `site/build.sh`.
-- `~/Documents/next-editor` — a separate repository holding its own copy.
+
+A project elsewhere that vendors `@kite-lang/compiler-wasm` holds a third copy,
+and it moves when that package is published, not when this repository changes.
 
 A practical note that costs a confusing half hour: **do not run `cargo build`
 while `cargo test --workspace` is running.** It invalidates artefacts mid-run

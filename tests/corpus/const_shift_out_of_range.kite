@@ -1,0 +1,11 @@
+// A shift count outside 0..=63 traps in a debug build and is taken modulo 64
+// in a release one. A constant is the same in both builds, so neither answer
+// is right for it, and it is refused where it is written.
+
+let WIDE = 1 << 64 //~ ERROR E0118
+let NEGATIVE = 8 >> -1 //~ ERROR E0118
+let FITS = 1 << 63
+
+fn main() {
+    io.print(FITS)
+}

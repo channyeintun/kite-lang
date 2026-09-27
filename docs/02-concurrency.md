@@ -61,8 +61,9 @@ pub async fn fetch_user(id: UserId) -> (User, error) {
 }
 ```
 
-Calling an `async fn` **without** `await` starts it and hands back a `Task<T>`.
-That is the whole concurrency primitive:
+Calling an `async fn` **without** `await` queues it and hands back a `Task<T>`;
+nothing in its body runs until something awaits the task or the scheduler gets a
+turn. That is the whole concurrency primitive:
 
 ```kite
 // Sequential: 200ms
@@ -72,10 +73,12 @@ let (b, err) = await fetch_user(2)
 check err
 
 // Concurrent: 100ms
-let ta = fetch_user(1)          // starts now
-let tb = fetch_user(2)          // starts now
-let ((a, ea), (b, eb)) = await task.both(ta, tb)
+let ta = fetch_user(1)          // queued, not yet run
+let tb = fetch_user(2)          // queued, not yet run
+let (ra, rb) = await task.both(ta, tb)
+let (a, ea) = ra
 check ea
+let (b, eb) = rb
 check eb
 ```
 
@@ -87,6 +90,8 @@ task.both(ta, tb)               // -> Task<(A, B)>   two of different types
 task.race([t1, t2])             // -> Task<T>        first to finish wins
 task.timeout(t, time.seconds(5))
 task.parallel(items, |item| …)  // -> Task<[U]>      CPU-bound fan-out
+task.scope([t1, t2])            // -> Task<[T]>      waits for every task in the group
+task.sleep(ms)                  // -> Task<()>       a deadline on the clock
 ```
 
 **There is no channel type.** A `Task<T>` *is* a one-shot result channel; you
@@ -151,11 +156,11 @@ another thread or isolate."*
 
 A type is `Share` when:
 
-- it is a primitive (`int`, `float`, `bool`, `char`, sized numerics), or
+- it is a primitive (`int`, `float`, `bool`), or
 - it is a `str`, or
 - it is a struct or enum whose fields are **all `Share`** and **none is `var`**, or
 - it is a slice, map, or tuple whose elements are `Share`, or
-- it is explicitly synchronised: `sync.Mutex<T>`, `sync.Atomic<T>`.
+- it is explicitly synchronised: `sync.Mutex<T>`, `sync.Atomic`.
 
 A type is **not** `Share` when it has a `var` field anywhere in its transitive
 structure, or holds a host reference (DOM node, canvas context, file handle,
@@ -281,8 +286,10 @@ describe a `scope.cancel()` that never existed.
 
 ## 7. Function colouring, and what it buys
 
-The honest cost: `async` colours functions. A synchronous function cannot call an
-async one without becoming async itself.
+The honest cost: `async` colours functions. A synchronous function may call an
+`async fn` and hold, store or return the `Task<T>` it gets, but only an `async`
+function can `await` one — so a function that needs the value becomes `async`
+itself.
 
 Three alternatives were considered:
 

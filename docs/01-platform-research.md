@@ -135,11 +135,14 @@ references. It is a **draft**. It has not shipped.
 
 **Consequence — and the key forward-compatibility bet:** Kite's `async`/`await`
 surface says nothing about thread count. The `Share` marker
-([spec §12.4](../SPECIFICATION.md#124-the-share-marker)) enforces the exact
-invariant shared-everything-threads will require, starting in v1. Native and
-bytecode targets get a real work-stealing pool immediately. The web target gets
-isolate-based parallelism now and **true shared-heap parallelism with no source
-change** when the proposal ships.
+([spec §12.3](../SPECIFICATION.md#123-the-share-marker)) enforces the exact
+invariant shared-everything-threads will require, starting in v1. No target runs
+on two cores yet — every one, native and bytecode included, has a cooperative
+loop on one thread, and `task.parallel` walks its input in order
+([spec §12.2](../SPECIFICATION.md#122-parallelism-the-surface-is-thread-agnostic)).
+What the marker buys is that the day a runtime gains a pool, or the proposal
+ships on the web, the same source becomes **shared-heap parallel with no source
+change**.
 
 Sources: [shared-everything-threads](https://github.com/WebAssembly/shared-everything-threads) ·
 [Kotlin/Wasm and web workers](https://marchuk.io/kotlin-wasm/) ·

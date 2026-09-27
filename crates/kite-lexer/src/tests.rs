@@ -116,6 +116,54 @@ fn malformed_numbers_report_e0004() {
     assert!(d.iter().any(|x| x.code == Some(codes::E0004)));
 }
 
+/// One rule for a digit separator in every radix and every part of a
+/// literal: it sits between two digits. `0xFF_`, `0x__F` and `0b_1` used to
+/// be accepted while `1_` was not.
+#[test]
+fn a_separator_sits_between_two_digits() {
+    for src in [
+        "1_000", "0xFF_FF", "0o7_5_5", "0b1010_1101", "1_0.0_1", "1.5e1_0", "1_2e3",
+    ] {
+        let (_, d) = lex(src);
+        assert!(!d.has_errors(), "{} was refused", src);
+    }
+    for src in [
+        "1_", "1__0", "0xFF_", "0x__F", "0x_F", "0b_1", "0o_7", "0b1__0", "1_.5", "1.5_",
+        "1.5_e3", "1e5_",
+    ] {
+        let (_, d) = lex(src);
+        let hits = d.iter().filter(|x| x.code == Some(codes::E0004)).count();
+        assert_eq!(hits, 1, "{} should be one E0004", src);
+    }
+}
+
+/// An oversized `int` is an error, and so is an oversized `float`: `1e999`
+/// used to become infinity without a word.
+#[test]
+fn a_float_too_large_to_be_finite_is_refused() {
+    let (_, d) = lex("1e999");
+    assert!(d.iter().any(|x| x.code == Some(codes::E0004)), "1e999 was accepted");
+    let (_, d) = lex("123.0e400");
+    assert!(d.iter().any(|x| x.code == Some(codes::E0004)));
+    // The largest finite value is fine, and so is a value too small to be
+    // anything but zero, which is what every language makes of it.
+    assert!(!lex("1.7976931348623157e308").1.has_errors());
+    assert!(!lex("1e-999").1.has_errors());
+}
+
+/// After a `.` a number is a tuple index, so `t.0.1` is two of them rather
+/// than `t` followed by the float `0.1`.
+#[test]
+fn a_number_after_a_dot_is_an_index() {
+    assert_eq!(bare("t.0.1"), vec![T::Ident, T::Dot, T::Int, T::Dot, T::Int]);
+    assert_eq!(bare("t.0.1.2"), vec![T::Ident, T::Dot, T::Int, T::Dot, T::Int, T::Dot, T::Int]);
+    assert_eq!(bare("t.10"), vec![T::Ident, T::Dot, T::Int]);
+    // Only straight after a `.`: a float is still a float, and a range after
+    // an index is still a range.
+    assert_eq!(bare("x = 0.1"), vec![T::Ident, T::Eq, T::Float]);
+    assert_eq!(bare("t.0..3"), vec![T::Ident, T::Dot, T::Int, T::DotDot, T::Int]);
+}
+
 // ---- strings --------------------------------------------------------------
 
 #[test]
@@ -162,6 +210,27 @@ fn line_and_doc_comments_are_trivia() {
     assert_eq!(bare("/// doc\nfn f()"), vec![T::Fn, T::Ident, T::LParen, T::RParen]);
 }
 
+/// `//!` is the module's own documentation, and says so.
+#[test]
+fn comments_say_what_they_document() {
+    let mut diags = DiagBag::new();
+    let src = "//! the module\n/// the function\n// neither\nfn f() {\n}\n";
+    let (_, comments) = tokenize_with_comments(kite_span::FileId(0), src, &mut diags);
+    let kinds: Vec<(bool, bool)> = comments.iter().map(|c| (c.module, c.doc)).collect();
+    assert_eq!(kinds, vec![(true, false), (false, true), (false, false)]);
+}
+
+/// A byte-order mark is an encoding signature, not text: skipped at the
+/// start of a file, and an invalid character anywhere else, as it always was.
+#[test]
+fn a_leading_byte_order_mark_is_not_a_token() {
+    let (k, d) = lex("\u{feff}fn main() {\n}\n");
+    assert!(!d.has_errors(), "a leading BOM was refused");
+    assert_eq!(k[0], T::Fn);
+    let (_, d) = lex("let x = 1\u{feff}\n");
+    assert!(d.iter().any(|x| x.code == Some(codes::E0002)));
+}
+
 #[test]
 fn block_comment_reports_e0005_once() {
     let (_, d) = lex("/* a */ let x = 1");
@@ -184,6 +253,17 @@ fn trailing_operator_continues_the_line() {
     assert_eq!(
         kinds("let a = 1 +\n2"),
         vec![T::Let, T::Ident, T::Eq, T::Int, T::Plus, T::Int]
+    );
+}
+
+/// `return` can end a statement on its own, so a line ending in it ends
+/// there. It used to continue, which turned `return` followed by a line of
+/// dead code into a return *of* that code.
+#[test]
+fn return_ends_its_line() {
+    assert_eq!(
+        kinds("return\nlog(1)"),
+        vec![T::Return, T::Newline, T::Ident, T::LParen, T::Int, T::RParen]
     );
 }
 

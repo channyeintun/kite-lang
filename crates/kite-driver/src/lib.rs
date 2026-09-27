@@ -6,7 +6,7 @@
 use kite_diag::{DiagBag, Diagnostic};
 use kite_span::{FileId, SourceMap, Span};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub mod derive;
 pub mod doctest;
@@ -18,7 +18,7 @@ pub mod solve;
 
 pub use kite_codegen_wasm::{
     generate_api, generate_glue, generate_glue_with_hosts, generate_page, generate_server,
-    listens, SOURCE_MAP_NAME,
+    has_api, listens, SOURCE_MAP_NAME,
 };
 pub use kite_vm::Trap;
 
@@ -27,6 +27,52 @@ pub use kite_vm::Trap;
 #[cfg(not(target_arch = "wasm32"))]
 pub fn native_supported_here() -> Result<(), String> {
     kite_codegen_clif::supported_here()
+}
+
+/// How much stack [`on_compiler_stack`] gives the compiler.
+///
+/// Every pass after the parser walks the syntax tree by recursion, and a long
+/// chain — `a + b + …`, `x.f().g()…`, `else if` after `else if` — builds a
+/// tree as deep as it is long. On the 8 MiB a main thread gets, a release
+/// build ran out at about 1,900 method calls in one chain and a debug build at
+/// under 300; the type checker spends some four kilobytes of stack a call in
+/// release and thirty in debug. The parser refuses a chain past 8,192 links
+/// (E0102) — 4,096 method calls, each a `.f` and a call — and this is about
+/// four times what a debug build needs for that many, and thirty times what a
+/// release build does.
+///
+/// It is address space set aside, not memory used: a page of it is only
+/// taken when the recursion reaches it, which an ordinary program never
+/// does.
+pub const COMPILER_STACK: usize = 512 << 20;
+
+/// Run `f` on a thread with [`COMPILER_STACK`] of stack, and hand back what
+/// it returns. `kitec` runs each command this way, and the language server
+/// its whole session.
+///
+/// Where no such thread can be had — a system that will not reserve the
+/// address space — `f` runs here instead, on whatever stack this thread has,
+/// which is what it did before this existed. A panic in `f` goes on
+/// unwinding from here.
+pub fn on_compiler_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+    // Held where both this thread and the new one can reach it, so a thread
+    // that could not be started has not taken `f` with it.
+    let job = std::sync::Arc::new(std::sync::Mutex::new(Some(f)));
+    let theirs = job.clone();
+    let spawned = std::thread::Builder::new().stack_size(COMPILER_STACK).spawn(move || {
+        let f = theirs.lock().unwrap_or_else(|e| e.into_inner()).take();
+        f.map(|f| f())
+    });
+    match spawned {
+        Ok(handle) => match handle.join() {
+            Ok(out) => out.expect("the thread that started took the job"),
+            Err(panic) => std::panic::resume_unwind(panic),
+        },
+        Err(_) => {
+            let f = job.lock().unwrap_or_else(|e| e.into_inner()).take();
+            f.expect("a thread that never started took nothing")()
+        }
+    }
 }
 
 /// How far to run the pipeline, and what to hand back.
@@ -93,10 +139,29 @@ impl NativeProgram {
         kite_codegen_clif::compile_object(&self.mir, &self.types)
     }
 
-    /// Compile into this process and run to completion — `kitec run
-    /// --native`, with no linker anywhere.
+    /// Compile into this process and run to completion, with no linker
+    /// anywhere, collecting what the program prints into `out` — for a
+    /// harness comparing output. Nothing is written until the program ends.
     pub fn run(&self, out: &mut dyn Write) -> Result<(), String> {
         kite_codegen_clif::run_jit(&self.mir, &self.types, out)
+    }
+
+    /// The same run, with the collector configured and what it did reported
+    /// back — for a test that means to make it work.
+    pub fn run_with(
+        &self,
+        config: kite_codegen_clif::RunConfig,
+        out: &mut dyn Write,
+    ) -> Result<kite_codegen_clif::RunStats, String> {
+        kite_codegen_clif::run_jit_with(&self.mir, &self.types, config, Some(out))
+    }
+
+    /// Run printing straight to standard output as the program goes — `kitec
+    /// run --native`, which behaves like the executable `--emit native`
+    /// links: output in order with standard error, and none of it lost if
+    /// the program crashes or never ends.
+    pub fn run_to_stdout(&self) -> Result<(), String> {
+        kite_codegen_clif::run_jit_stdout(&self.mir, &self.types)
     }
 }
 
@@ -116,6 +181,24 @@ pub struct Compilation {
     /// language server that re-derives its own answers is a second compiler
     /// that disagrees with the first one.
     pub index: Index,
+    /// Every file the program was compiled from — the entry, each module's
+    /// sources and each manifest consulted — with its contents. What `kitec
+    /// bundle` carries, so the program loads again the same way with nothing
+    /// on disk.
+    pub inputs: Vec<(std::path::PathBuf, String)>,
+    /// Every `test_…` function the program's own file declares.
+    test_fns: Vec<TestFn>,
+}
+
+/// A function named like a test, and what the runner needs to know to call it.
+pub struct TestFn {
+    pub name: String,
+    /// How many arguments it takes. A test takes none; one that takes some is
+    /// a helper that happens to be named like a test, and is not called.
+    pub params: usize,
+    /// Called by name, an `async fn` answers with its task rather than with
+    /// what it returns, so the runner has to drive it and read the task.
+    pub is_async: bool,
 }
 
 /// Where names are, for an editor.
@@ -146,6 +229,9 @@ pub struct Symbol {
     pub at: Span,
     pub kind: &'static str,
     pub label: String,
+    /// Declared `pub`. Another module's private item is not a name its
+    /// importer can write, so an editor should not offer it.
+    pub is_pub: bool,
 }
 
 /// One name and every place it is written.
@@ -171,6 +257,15 @@ pub struct Binding {
     /// top-level name has none. Two locals can only collide inside one scope,
     /// which is what a rename checks before inventing a clash.
     pub scope: Option<Span>,
+}
+
+/// An identifier in the form §2.1 compares it in: NFC, which is how every
+/// name the compiler read is held. For a name that did not come through the
+/// parser — one a person typed into a rename box — before it is compared
+/// with those.
+pub fn identifier_nfc(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    name.nfc().collect()
 }
 
 /// Something the checker worked out that the source never says, shown inline
@@ -220,14 +315,24 @@ impl Compilation {
     /// A test is a function whose name starts with `test_`. There is no
     /// attribute syntax in Kite and there is not going to be one: a naming
     /// convention needs no machinery, and `grep test_` finds every test.
+    ///
+    /// **Read from the declarations, not from the compiled functions.** It
+    /// used to be every compiled function whose name began `test_`, which
+    /// took in a closure lifted out of a test (`test_x#closure0`), the resume
+    /// half of an `async` one (`test_x$resume`), and a helper that takes an
+    /// argument — each then called with nothing and reported as a trap or a
+    /// pass — while a private test, pruned as unreachable, was silently not
+    /// there at all. [`compile_tests`] keeps a private one.
     pub fn tests(&self) -> Vec<String> {
-        let Some(chunk) = &self.chunk else { return Vec::new() };
-        chunk
-            .functions
-            .iter()
-            .filter(|f| f.name.starts_with("test_"))
-            .map(|f| f.name.clone())
-            .collect()
+        if self.chunk.is_none() {
+            return Vec::new();
+        }
+        self.test_fns.iter().filter(|t| t.params == 0).map(|t| t.name.clone()).collect()
+    }
+
+    /// Functions named like tests that take arguments, so are not called.
+    pub fn not_tests(&self) -> Vec<&TestFn> {
+        self.test_fns.iter().filter(|t| t.params > 0).collect()
     }
 
     /// The source map for the compiled WebAssembly module, if there is one.
@@ -237,29 +342,65 @@ impl Compilation {
     /// map "so browser stack traces name `.kite` files and lines"; what it
     /// carries is one entry per function, pointing at the line the function
     /// was declared on. A MIR instruction has no span to do better with.
-    pub fn wasm_source_map(&self) -> Option<String> {
+    ///
+    /// A source is named relative to `beside`, the directory the map is
+    /// written into: a browser resolves a source against the map's own URL,
+    /// so `src/main.kite` as given on the command line, written into `dist/`,
+    /// was looked for at `dist/src/main.kite`. An absolute input path is made
+    /// relative the same way rather than published, since it names the
+    /// builder's machine. With no directory, a source keeps only its file
+    /// name. The standard library's modules are named under `kite-std/`, and
+    /// every source's text travels in the map, so none of it has to be found.
+    pub fn wasm_source_map(&self, beside: Option<&Path>) -> Option<String> {
+        self.source_map_naming(|file| source_name(file, beside))
+    }
+
+    /// The same map, for a caller with no filesystem to measure from — the
+    /// compiler built as WebAssembly — that knows where each file is itself:
+    /// a source whose name as compiled is a key of `names` is given that
+    /// name instead. Any other is named as [`Self::wasm_source_map`] names it
+    /// with no directory.
+    ///
+    /// Only the caller knows which directory the map goes into and where each
+    /// file it handed over came from, so `npx kitec build src/main.kite --out
+    /// dist` said `main.kite`, which a browser looked for in `dist/`.
+    pub fn wasm_source_map_renamed(
+        &self,
+        names: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
+        self.source_map_naming(|file| match names.get(file.to_string_lossy().as_ref()) {
+            Some(name) => name.clone(),
+            None => source_name(file, None),
+        })
+    }
+
+    fn source_map_naming(&self, name: impl Fn(&Path) -> String) -> Option<String> {
+        use kite_codegen_wasm::sourcemap::{render, FunctionSpan, Source};
         let module = self.wasm.as_ref()?;
         // A release build carries no debug information, and a map with no
         // entries is a file that exists only to be fetched and found useless.
         if module.source_spans.is_empty() {
             return None;
         }
-        let mut sources: Vec<String> = Vec::new();
+        let mut sources: Vec<Source> = Vec::new();
         let mut spans = Vec::with_capacity(module.source_spans.len());
         for (offset, span) in &module.source_spans {
-            let file = self.sources.file(span.file).name.display().to_string();
+            let file = name(&self.sources.file(span.file).name);
             let at = self.sources.line_col(*span);
-            if !sources.contains(&file) {
-                sources.push(file.clone());
+            if !sources.iter().any(|s| s.name == file) {
+                sources.push(Source {
+                    name: file.clone(),
+                    content: self.sources.text(span.file).to_string(),
+                });
             }
-            spans.push(kite_codegen_wasm::sourcemap::FunctionSpan {
+            spans.push(FunctionSpan {
                 offset: *offset,
                 file,
                 line: at.line,
                 column: at.col,
             });
         }
-        Some(kite_codegen_wasm::sourcemap::render(&spans, &sources))
+        Some(render(&spans, &sources))
     }
 
     /// Run one named function that takes nothing and answers with nothing.
@@ -280,7 +421,26 @@ impl Compilation {
     pub fn run_test(&self, name: &str, out: &mut dyn Write) -> Result<Option<String>, Trap> {
         let Some(chunk) = &self.chunk else { return Ok(None) };
         let value = kite_vm::run_function(chunk, name, out)?;
-        Ok(kite_vm::failure_message(&value))
+        let is_async = self.test_fns.iter().any(|t| t.name == name && t.is_async);
+        if !is_async {
+            return Ok(kite_vm::failure_message(&value));
+        }
+        // An `async` test answered with its task, and `run_function` has
+        // already driven the scheduler until nothing was left. What the test
+        // returned is in the task — reading the task itself as the answer
+        // reported every async test as passing.
+        let kite_vm::Value::Struct(task) = &value else {
+            return Ok(Some("an async test did not answer with a task".to_string()));
+        };
+        let fields = task.fields.borrow();
+        let done = matches!(
+            fields.get(kite_mir::TASK_DONE as usize),
+            Some(kite_vm::Value::Bool(true))
+        );
+        if !done {
+            return Ok(Some("the test's task never finished".to_string()));
+        }
+        Ok(fields.get(kite_mir::TASK_VALUE as usize).and_then(kite_vm::failure_message))
     }
 }
 
@@ -294,6 +454,75 @@ impl Compilation {
 /// `map`, `filter`, `Display`. Everything else is a module, reached through
 /// `use` and written qualified at every use site.
 pub const PRELUDE: &str = include_str!("../../../std/prelude.kite");
+
+/// What a source map calls a file: relative to the directory the map is
+/// written into, with forward slashes, which is what a URL is made of.
+fn source_name(file: &Path, beside: Option<&Path>) -> String {
+    let text = file.to_string_lossy();
+    // `<prelude>` and `<std/http>` are the names the loader gives the
+    // library's own text. Not paths, and not anything a browser could fetch.
+    if let Some(inner) = text.strip_prefix('<').and_then(|t| t.strip_suffix('>')) {
+        let inner = inner.strip_prefix("std/").unwrap_or(inner);
+        return format!("kite-std/{}.kite", inner);
+    }
+    let absolute = |p: &Path| -> Option<PathBuf> {
+        if p.is_absolute() {
+            Some(p.to_path_buf())
+        } else {
+            std::env::current_dir().ok().map(|d| d.join(p))
+        }
+    };
+    let relative = beside.and_then(|dir| {
+        let (from, to) = (absolute(dir)?, absolute(file)?);
+        // Through the filesystem when both can be asked, because the same
+        // directory may be reached by two spellings: on macOS the temporary
+        // directory is `/var/…` by one and `/private/var/…` by the other,
+        // and comparing them lexically climbed to the root and down again.
+        // Both or neither, so a resolved path is never measured against an
+        // unresolved one — on Windows they do not even share a prefix.
+        let (from, to) = match (std::fs::canonicalize(&from), std::fs::canonicalize(&to)) {
+            (Ok(from), Ok(to)) => (from, to),
+            _ => (normalise(&from), normalise(&to)),
+        };
+        relative_path(&from, &to)
+    });
+    match relative {
+        Some(r) => r,
+        None => file
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| text.to_string()),
+    }
+}
+
+/// `a/./b/../c` as `a/c`, without asking the filesystem.
+fn normalise(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// The path from directory `from` to `to`, joined with `/`. `None` when the
+/// two share no root — two drives on Windows — and no relative path exists.
+fn relative_path(from: &Path, to: &Path) -> Option<String> {
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    if from.first() != to.first() {
+        return None;
+    }
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut parts: Vec<String> = vec!["..".to_string(); from.len() - common];
+    parts.extend(to[common..].iter().map(|c| c.as_os_str().to_string_lossy().to_string()));
+    Some(parts.join("/"))
+}
 
 /// Compile one file's text, for a debug build.
 pub fn compile(path: impl AsRef<Path>, src: &str, emit: Emit) -> Compilation {
@@ -330,6 +559,87 @@ pub fn compile_provided(
     release: bool,
     provided: std::collections::HashMap<String, String>,
 ) -> Compilation {
+    let input = Input { provided, files: modules::Files::Disk, tests: false, module: None };
+    compile_reading(path, src, emit, release, input)
+}
+
+/// Compile for `kitec test`: to bytecode, with every `test_…` the file
+/// declares kept — a private one included, which nothing calls and which
+/// pruning would otherwise remove before the runner could find it.
+pub fn compile_tests(path: impl AsRef<Path>, src: &str, release: bool) -> Compilation {
+    let input = Input {
+        provided: std::collections::HashMap::new(),
+        files: modules::Files::Disk,
+        tests: true,
+        module: None,
+    };
+    compile_reading(path, src, Emit::Check, release, input)
+}
+
+/// Compile with every module read from `files` rather than from disk.
+///
+/// For a bundle, which carries the files its build read: the program loads
+/// through the same resolution the build used, so a `use` means in the
+/// bundle exactly what it meant beside the source.
+pub fn compile_files(
+    path: impl AsRef<Path>,
+    src: &str,
+    emit: Emit,
+    release: bool,
+    files: modules::Files,
+) -> Compilation {
+    let input =
+        Input { provided: std::collections::HashMap::new(), files, tests: false, module: None };
+    compile_reading(path, src, emit, release, input)
+}
+
+/// Check the directory `dir` as the module a `use` naming it loads: every
+/// `.kite` file in it, as one namespace, read through `files`.
+///
+/// For an editor. It compiles the file it has open as a program of its own,
+/// so a file of a directory module sees none of its siblings, and none of
+/// their uses of what it declares — which is what a rename of a name the
+/// module's files share has to reach. There is no entry file: the result's
+/// sources are the module's files and what they import.
+pub fn check_module(dir: impl AsRef<Path>, files: modules::Files) -> Compilation {
+    let input = Input {
+        provided: std::collections::HashMap::new(),
+        files,
+        tests: false,
+        module: Some(dir.as_ref().to_path_buf()),
+    };
+    compile_reading(MODULE_ENTRY, "", Emit::Check, false, input)
+}
+
+/// The name [`check_module`] gives the empty entry it compiles the module
+/// under — one no file on disk can have.
+const MODULE_ENTRY: &str = "<module>";
+
+/// Where a compilation reads its modules from, and what it is for.
+struct Input {
+    /// Modules handed over by the host; see [`modules::Loader`].
+    provided: std::collections::HashMap<String, String>,
+    files: modules::Files,
+    /// Whether to keep every `test_…` the program declares through pruning.
+    tests: bool,
+    /// A directory to load as a module in place of what the entry imports;
+    /// see [`check_module`].
+    module: Option<std::path::PathBuf>,
+}
+
+/// What a compilation learned on the way besides its artefact.
+struct Found {
+    inputs: Vec<(std::path::PathBuf, String)>,
+    tests: Vec<TestFn>,
+}
+
+fn compile_reading(
+    path: impl AsRef<Path>,
+    src: &str,
+    emit: Emit,
+    release: bool,
+    input: Input,
+) -> Compilation {
     let mut sources = SourceMap::new();
     // The prelude is added first, so its spans and the user's never collide and
     // a diagnostic inside it says which file it came from.
@@ -337,11 +647,22 @@ pub fn compile_provided(
     let path = path.as_ref().to_path_buf();
     let file = sources.add(&path, src);
     let mut diags = DiagBag::new();
+    let mut found = Found { inputs: vec![(path.clone(), src.to_string())], tests: Vec::new() };
     let (output, chunk, wasm, native, index) = run_passes(
-        prelude, file, &path, &mut sources, emit, release, provided, &mut diags,
+        prelude,
+        file,
+        &path,
+        &mut sources,
+        emit,
+        release,
+        input,
+        &mut found,
+        &mut diags,
     );
 
-    let mut c = Compilation { sources, diags, output, chunk, wasm, native, index };
+    let Found { inputs, tests: test_fns } = found;
+    let mut c =
+        Compilation { sources, diags, output, chunk, wasm, native, index, inputs, test_fns };
     // The standard library's own advice is not the user's to act on.
     let library: Vec<FileId> = c
         .sources
@@ -362,7 +683,8 @@ fn run_passes(
     sources: &mut SourceMap,
     emit: Emit,
     release: bool,
-    provided: std::collections::HashMap<String, String>,
+    input: Input,
+    found: &mut Found,
     diags: &mut DiagBag,
 ) -> (
     String,
@@ -383,7 +705,11 @@ fn run_passes(
     // nothing asked for, which is what keeps a `hello world` from carrying the
     // standard library.
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
-    let loader = modules::Loader::load_with(&ast, dir, provided, sources, diags);
+    let mut loader = match input.module {
+        Some(module) => modules::Loader::load_module(&module, file, input.files, sources, diags),
+        None => modules::Loader::load_from(&ast, dir, input.provided, input.files, sources, diags),
+    };
+    found.inputs.append(&mut loader.inputs);
 
     // Every item's module, aligned with the merged item list. The program's own
     // items and the prelude's are the root module.
@@ -409,12 +735,11 @@ fn run_passes(
 
     // Each module's declarations are merged qualified, so `load` in module
     // `config` is declared as `config.load` — unforgeable as an identifier,
-    // and exactly what an importer writes.
-    for module in &loader.loaded {
-        for id in &module.files {
-            let text = sources.text(*id).to_string();
-            let tokens = kite_lexer::tokenize(*id, &text, diags);
-            let mut parsed = kite_parser::parse(*id, &text, &tokens, diags);
+    // and exactly what an importer writes. The loader already parsed them,
+    // and parsing again here reported every syntax error in an imported
+    // module twice.
+    for module in std::mem::take(&mut loader.loaded) {
+        for (_, mut parsed) in module.files {
             modules::qualify_items(&module.name, &mut parsed.items);
             item_modules.extend(std::iter::repeat_n(module.name.clone(), parsed.items.len()));
             ast.items.extend(parsed.items);
@@ -426,7 +751,8 @@ fn run_passes(
     // produces is ordinary Kite, parsed here like anything else — so nothing
     // after this point knows derivation happened, and `--emit hir` shows what
     // actually ran.
-    if let Some(derived) = derive::expand(&ast.items, &item_modules, diags) {
+    let mut aliases = std::mem::take(&mut loader.aliases);
+    if let Some(derived) = derive::expand(&ast.items, &item_modules, &aliases, diags) {
         let id = sources.add("<derive>", &derived.source);
         let text = sources.text(id).to_string();
         let tokens = kite_lexer::tokenize(id, &text, diags);
@@ -438,15 +764,14 @@ fn run_passes(
             item_modules.push(derived.modules.get(i).cloned().unwrap_or_default());
             ast.items.push(item);
         }
+        // And it spells `std/json` its own way where its module wrote none.
+        aliases.extend(derived.aliases);
     }
 
     // Resolution and checking still run after a syntax error — the parser
     // recovers, so later passes can report their own findings on the parts that
     // did parse. Code generation does not, because its input would be poisoned.
-    let module_map = kite_resolve::Modules {
-        of_item: item_modules,
-        aliases: loader.aliases.clone(),
-    };
+    let module_map = kite_resolve::Modules { of_item: item_modules, aliases };
     let resolved = kite_resolve::resolve_modules(&ast, module_map, diags);
     let mut solved = kite_types::Solved::default();
     let mut hir = kite_types::check_recording(&ast, &resolved, sources, diags, release, &mut solved);
@@ -497,6 +822,13 @@ fn run_passes(
         index.uses.push(Use { at, declared_at: at, label: signature, kind: "method" });
     }
 
+    // A generic type that contains itself at a larger type has no finite
+    // expansion. The arena stops making it past a cap rather than recursing
+    // until the stack is gone, and says which declaration asked.
+    if let Some((name, span, why)) = hir.types.unbounded_instantiation() {
+        diags.push(unbounded_instantiation("type", name, span, why));
+    }
+
     if emit == Emit::Hir {
         return (hir.to_string(), None, None, None, index);
     }
@@ -504,12 +836,56 @@ fn run_passes(
         return (String::new(), None, None, None, index);
     }
 
+    // The program's own `test_…` functions, read while the declarations are
+    // still what was written: a closure lifted out of a test and the resume
+    // half of an `async` one are functions too, and are neither free nor
+    // named by anyone.
+    let is_test = |f: &kite_hir::Function| {
+        f.is_free
+            && f.generic_count == 0
+            && f.name.starts_with("test_")
+            && !f.name.contains(['.', '#', '$'])
+    };
+    found.tests = hir
+        .fns
+        .iter()
+        .filter(|f| is_test(f))
+        .map(|f| TestFn { name: f.name.clone(), params: f.param_count, is_async: f.is_async })
+        .collect();
+
+    // The program's own generic `pub fn`s, named while they are still
+    // generic. Monomorphisation replaces each with a copy per type it is used
+    // at, none of them exported, so without this a generic function vanished
+    // from `api.js` without the note that says why a function is missing.
+    let generic_exports: Vec<String> = hir
+        .fns
+        .iter()
+        .filter(|f| f.is_pub && f.is_free && f.generic_count > 0 && !f.name.contains(['.', '#', '$']))
+        .map(|f| f.name.clone())
+        .collect();
+
     // Specialise generic functions before lowering, so no backend ever sees a
     // type parameter. Nothing after this point knows generics exist.
-    kite_hir::mono::monomorphise(&mut hir);
+    //
+    // A function that calls itself at an ever larger type asks for a copy per
+    // level, forever; monomorphisation refuses rather than stopping partway
+    // and handing on calls into copies it never made.
+    if let Err(u) = kite_hir::mono::monomorphise(&mut hir) {
+        diags.push(unbounded_instantiation("function", &u.template, u.span, u.why));
+        return (String::new(), None, None, None, index);
+    }
+    if let Some((name, span, why)) = hir.types.unbounded_instantiation() {
+        diags.push(unbounded_instantiation("type", name, span, why));
+        return (String::new(), None, None, None, index);
+    }
     // The prelude is in every program; without this a `hello world` would
-    // carry every helper it never mentions.
-    kite_hir::mono::prune(&mut hir);
+    // carry every helper it never mentions. Compiling for tests keeps every
+    // test that can be called, `pub` or not.
+    if input.tests {
+        kite_hir::mono::prune_keeping(&mut hir, |f| is_test(f) && f.param_count == 0);
+    } else {
+        kite_hir::mono::prune(&mut hir);
+    }
     // `==` inside a generic function was checked as a structural comparison,
     // because nothing was known about the type. Now that specialisation has
     // made it concrete, a primitive gets the primitive's own comparison.
@@ -519,6 +895,26 @@ fn run_passes(
     // `async fn` becomes a starter and a resume function here, once, so both
     // backends see ordinary functions and neither knows concurrency exists.
     kite_mir::asyncify(&mut mir, &mut hir.types);
+    // What lowering found that the checker promised it never would — a
+    // `break` with no loop, an `await` the transform could not reach. Each
+    // once went silently wrong or crashed a backend; now each is named.
+    let internal = kite_mir::internal_errors(&mir);
+    if !internal.is_empty() {
+        for i in internal {
+            diags.push(
+                Diagnostic::error(
+                    kite_diag::codes::E0901,
+                    format!("internal compiler error in `{}`", i.function),
+                )
+                .with_primary(i.span, i.what)
+                .with_note(
+                    "this is a bug in Kite, not in this program — please report it, \
+                     with the program if it can be shared",
+                ),
+            );
+        }
+        return (String::new(), None, None, None, index);
+    }
     if emit == Emit::Mir {
         return (mir.render(&hir.types).to_string(), None, None, None, index);
     }
@@ -578,7 +974,37 @@ fn run_passes(
             }
             return (String::new(), None, None, None, index);
         }
-        let module = kite_codegen_wasm::compile_with(&mir, &hir.types, !release);
+        let mut module = kite_codegen_wasm::compile_with(&mir, &hir.types, !release);
+        module.api.extend(generic_exports.into_iter().map(|name| kite_codegen_wasm::Export {
+            name,
+            params: Vec::new(),
+            ret: None,
+            generic: true,
+        }));
+        // A function wider than an engine accepts is the program's size, not
+        // the compiler's mistake, and says so before the validator would.
+        if !module.too_wide.is_empty() {
+            for large in &module.too_wide {
+                diags.push(
+                    Diagnostic::error(
+                        kite_diag::codes::E0902,
+                        format!("`{}` is too large for WebAssembly", large.function),
+                    )
+                    .with_primary(large.span, large.what.clone())
+                    .with_note(if large.locals {
+                        // What counts, since not every local does: one made
+                        // and used between two branches shares a Wasm local
+                        // with others like it.
+                        "a local that lives across a branch, or is held while other values \
+                         are computed, is a Wasm local of its own: split the function; \
+                         `--native` does not have this limit"
+                    } else {
+                        "split the function; `--native` does not have this limit"
+                    }),
+                );
+            }
+            return (String::new(), None, None, None, index);
+        }
         // The last thing that can catch a bad lowering. Everything above this
         // line checks the program; this checks the compiler, and it is the only
         // check whose absence is invisible until a browser refuses the module.
@@ -616,8 +1042,12 @@ fn run_passes(
                         )
                         .with_primary(gap.span, format!("used in `{}`", gap.function))
                         .with_note(
-                            "the bytecode target supports it: run without `--emit native`. \
-                             See docs/06-roadmap.md for the remaining lowering steps",
+                            // `run --native` and `--emit native` are one
+                            // request, and this cannot tell which was typed,
+                            // so it names both.
+                            "the bytecode target supports it: run without `--native` \
+                             (`--emit native`). See docs/06-roadmap.md for the remaining \
+                             lowering steps",
                         ),
                     );
                 }
@@ -632,12 +1062,82 @@ fn run_passes(
         return (String::new(), None, None, Some(native), index);
     }
 
+    // A frame wider than a register index can address was once emitted with
+    // its indices silently cut short, so two values shared a register.
+    let limits = kite_codegen_kbc::limits(&mir);
+    if !limits.is_empty() {
+        for limit in limits {
+            diags.push(
+                Diagnostic::error(
+                    kite_diag::codes::E0902,
+                    format!("`{}` is too large for the bytecode VM", limit.function),
+                )
+                .with_primary(limit.span, limit.what)
+                // Each target's own limit, since the note once said the other
+                // two had none: WebAssembly counts locals, not the literal's
+                // staging, and refuses past fifty thousand of them. A literal
+                // is only this long here when its elements need no computing
+                // (constants and locals): past a short window, one computed
+                // element at a time is built into it.
+                .with_note(
+                    "split the function, or build a large literal of constants in a loop; \
+                     `--native` does not have this limit, and `--emit wasm` accepts a \
+                     literal of any length and up to 50000 locals in one function",
+                ),
+            );
+        }
+        return (String::new(), None, None, None, index);
+    }
     let chunk = kite_codegen_kbc::compile(&mir);
     if emit == Emit::Kbc {
         return (chunk.to_string(), Some(chunk), None, None, index);
     }
 
     (String::new(), Some(chunk), None, None, index)
+}
+
+/// `E0220`: a generic `what` (a function or a type) named `name` could not
+/// be specialised — because it asks for copies of itself without end, or
+/// because what a finite program asks for is past what the compiler makes.
+/// Only the first is a claim about the program's recursion, so only it makes
+/// one.
+fn unbounded_instantiation(what: &str, name: &str, span: Span, why: kite_hir::Refusal) -> Diagnostic {
+    use kite_hir::Refusal;
+    let specialised = "generics are specialised: every set of type arguments gets its own copy";
+    match why {
+        Refusal::Runaway => Diagnostic::error(
+            kite_diag::codes::E0220,
+            format!("the generic {} `{}` instantiates itself without end", what, name),
+        )
+        .with_primary(span, "each copy asks for another at a larger type argument")
+        .with_note(format!(
+            "{}, so recursion at `[T]` from inside `T` needs infinitely many — \
+             polymorphic recursion has no finite expansion",
+            specialised
+        ))
+        .with_note("recurse at the same type, or hold the growing part in a type that does not grow"),
+        Refusal::TooLarge => Diagnostic::error(
+            kite_diag::codes::E0220,
+            format!("the generic {} `{}` is used at a type argument too large to specialise", what, name),
+        )
+        .with_primary(
+            span,
+            format!(
+                "a type argument nests deeper than {} levels or holds more than {} parts",
+                kite_hir::ty::MAX_TYPE_DEPTH,
+                kite_hir::ty::MAX_TYPE_SIZE
+            ),
+        )
+        .with_note(format!("{}, and each is named for its arguments", specialised))
+        .with_note("hold the value in a type that does not nest, or in a slice of it"),
+        Refusal::TooMany => Diagnostic::error(
+            kite_diag::codes::E0220,
+            format!("the program needs more than {} specialisations", kite_hir::mono::MAX_INSTANTIATIONS),
+        )
+        .with_primary(span, format!("the generic {} `{}` asked for the one past the limit", what, name))
+        .with_note(format!("{}, and each is compiled", specialised))
+        .with_note("take a `dyn` of a trait where one copy can serve every type"),
+    }
 }
 
 /// What an editor needs, from the resolution the checker already ran.
@@ -670,6 +1170,7 @@ fn host_types_used(program: &kite_mir::Program, types: &kite_hir::Types) -> Vec<
 fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Index {
     use kite_resolve::Res;
     use std::collections::HashMap;
+    use unicode_normalization::UnicodeNormalization;
     let mut index = Index::default();
 
     for (i, f) in resolved.fns.iter().enumerate() {
@@ -685,6 +1186,7 @@ fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Inde
             at: f.span,
             kind: if f.is_extern { "host function" } else { "function" },
             label,
+            is_pub: f.is_pub,
         });
         let _ = i;
     }
@@ -694,6 +1196,7 @@ fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Inde
             at: t.span,
             kind: t.kind.describe(),
             label: format!("{} {}", t.kind.describe(), t.name),
+            is_pub: t.is_pub,
         });
     }
     for c in &resolved.consts {
@@ -702,6 +1205,7 @@ fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Inde
             at: c.span,
             kind: "constant",
             label: format!("constant {}", c.name),
+            is_pub: c.is_pub,
         });
     }
 
@@ -834,9 +1338,23 @@ fn build_index(resolved: &kite_resolve::ResolveMap, sources: &SourceMap) -> Inde
             .get(at.start as usize..at.end as usize)
             .unwrap_or("");
         let binding = &mut index.bindings[b];
-        if text == binding.name && !resolved.pinned.contains(at) {
+        // Compared as the resolver compared it: after NFC (§2.1), so `café`
+        // spelled with a combining accent is a use a rename must rewrite too.
+        //
+        // And by its name within its own module as well as its qualified one:
+        // inside `config`, `config.helper` is written `helper`, and the only
+        // place an unqualified name can reach a module's declaration from is
+        // that module's own files. Those uses were in no binding at all, so
+        // nothing asking about a directory module found its files' uses of
+        // the names they share.
+        let own = binding.name.rsplit('.').next().unwrap_or(&binding.name);
+        let same = |name: &str| text == name || text.nfc().eq(name.chars());
+        if (same(&binding.name) || same(own)) && !resolved.pinned.contains(at) {
             binding.uses.push(*at);
-        } else if resolved.pinned.contains(at) || text.starts_with(&format!("{}.", binding.name)) {
+        } else if resolved.pinned.contains(at)
+            || text.starts_with(&format!("{}.", binding.name))
+            || text.starts_with(&format!("{}.", own))
+        {
             binding.mentions.push(*at);
         }
         // Anything else — an unqualified variant, a use whose written form
@@ -901,6 +1419,163 @@ fn signature_text(sources: &SourceMap, at: Span, param_count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `wrap(wrap(…(x)))`, `depth` calls deep.
+    fn nested(call: &str, depth: usize, core: &str) -> String {
+        let mut s = core.to_string();
+        for _ in 0..depth {
+            s = format!("{}({})", call, s);
+        }
+        s
+    }
+
+    const BOX: &str = "struct Box<T> {\n  v: T\n}\n\n\
+                       fn wrap<T>(x: T) -> Box<T> {\n  return Box{ v: x }\n}\n\n";
+
+    /// Programs that finish are specialised however much they ask for within
+    /// the limits, and past them are told that they asked for too much —
+    /// not that they recurse without end, which is what `E0220` said of
+    /// `wrap` nested fifty deep, a pair of pairs eleven deep, and one
+    /// function specialised at 4,200 types, all of which finish.
+    #[test]
+    fn a_finite_program_is_specialised_or_told_it_is_too_large() {
+        // `kitec` and the language server run the compiler on a thread with
+        // `COMPILER_STACK` of stack, and so does this: a hundred nested calls
+        // cost some thirty kilobytes of stack each in a debug build, which a
+        // test thread's two megabytes does not hold on every toolchain.
+        on_compiler_stack(|| {
+            let run = |src: &str| {
+                let c = compile("t.kite", src, Emit::Check);
+                assert!(!c.failed(), "{}", c.render_diagnostics());
+                let mut out = Vec::new();
+                c.run(&mut out).expect("runs");
+                String::from_utf8(out).unwrap()
+            };
+            let fifty = format!(
+                "{}fn main() {{\n  let b = {}\n  io.print(b{})\n}}\n",
+                BOX,
+                nested("wrap", 50, "1"),
+                ".v".repeat(50)
+            );
+            assert_eq!(run(&fifty), "1\n");
+
+            let pairs = format!(
+                "fn pair<T>(x: T) -> (T, T) {{\n  return (x, x)\n}}\n\n\
+                 fn main() {{\n  let p = {}\n  io.print(\"made\")\n}}\n",
+                nested("pair", 12, "1")
+            );
+            assert_eq!(run(&pairs), "made\n");
+
+            let mut many = String::from("fn ident<T>(x: T) -> T {\n  return x\n}\n\n");
+            let mut body = String::from("fn main() {\n  var t = 0\n");
+            for i in 0..4200 {
+                many.push_str(&format!("struct S{} {{\n  v: int\n}}\n\n", i));
+                body.push_str(&format!("  t = t + ident(S{}{{ v: 1 }}).v\n", i));
+            }
+            many.push_str(&body);
+            many.push_str("  io.print(t)\n}\n");
+            assert_eq!(run(&many), "4200\n");
+
+            // Past the limits: one error, which says what it is, and nothing
+            // after it about the placeholder that stands in for the refused type.
+            let refused = |src: &str| {
+                let c = compile("t.kite", src, Emit::Check);
+                let errors: Vec<String> = c
+                    .diags
+                    .iter()
+                    .filter(|d| d.severity == kite_diag::Severity::Error)
+                    .map(|d| format!("{}: {}", d.code.map(|x| x.0).unwrap_or(""), d.message))
+                    .collect();
+                assert_eq!(errors.len(), 1, "{:#?}", errors);
+                errors.into_iter().next().unwrap()
+            };
+            let three_hundred = format!(
+                "{}fn main() {{\n  let a = {}\n  let b = {}\n  let c = {}\n  io.print(c.v{})\n}}\n",
+                BOX,
+                nested("wrap", 100, "1"),
+                nested("wrap", 100, "a"),
+                nested("wrap", 100, "b"),
+                ".v".repeat(99)
+            );
+            assert_eq!(
+                refused(&three_hundred),
+                "E0220: the generic type `Box` is used at a type argument too large to specialise"
+            );
+            let pairs = format!(
+                "fn pair<T>(x: T) -> (T, T) {{\n  return (x, x)\n}}\n\n\
+                 fn main() {{\n  let p = {}\n  io.print(\"made\")\n}}\n",
+                nested("pair", 17, "1")
+            );
+            assert_eq!(
+                refused(&pairs),
+                "E0220: the generic function `pair` is used at a type argument too large to specialise"
+            );
+        });
+    }
+
+    /// A value of more parts than the native staging window is still refused
+    /// natively, and the note says how to run it elsewhere with the flag
+    /// `kitec run` takes: it named only `--emit native`, to someone who had
+    /// typed `--native`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_native_refusal_names_the_flag_run_takes() {
+        let elems: Vec<String> = (0..4097).map(|i| i.to_string()).collect();
+        let src = format!("fn main() {{\n  let t = ({})\n  io.print(t.0)\n}}\n", elems.join(", "));
+        let c = compile("t.kite", &src, Emit::Native);
+        let text = c.render_diagnostics();
+        assert!(text.contains("E0204"), "{}", text);
+        assert!(text.contains("run without `--native`"), "{}", text);
+    }
+
+    /// A function past a target's size is a limit of that target, E0902, and
+    /// says what the other targets accept. Wasm reported one of 50,000
+    /// locals as an invalid module, E0900 — the compiler's own bug — and the
+    /// VM's note claimed Wasm had no limit at all.
+    ///
+    /// On Wasm only a local that lives across a branch has a Wasm local of
+    /// its own, so the same `let`s read in a branch are past its limit, and
+    /// read where they are made they are not: sixty-six thousand of those
+    /// share a few Wasm locals, and build.
+    #[test]
+    fn a_function_past_a_targets_limit_says_so() {
+        let n = 66_000;
+        let mut lets = String::from("fn main() {\n  let first = 111\n");
+        for i in 0..n {
+            lets.push_str(&format!("  let v{} = {} + 1\n", i, i));
+        }
+        let mut src = lets.clone();
+        src.push_str("  if first > 0 {\n");
+        for i in 0..n {
+            src.push_str(&format!("    io.print(v{})\n", i));
+        }
+        src.push_str("  }\n}\n");
+        let codes = |c: &Compilation| -> Vec<&str> {
+            c.diags
+                .iter()
+                .filter(|d| d.severity == kite_diag::Severity::Error)
+                .map(|d| d.code.map(|x| x.0).unwrap_or(""))
+                .collect()
+        };
+
+        let wasm = compile("t.kite", &src, Emit::Wasm);
+        assert_eq!(codes(&wasm), ["E0902"], "{}", wasm.render_diagnostics());
+        let text = wasm.render_diagnostics();
+        assert!(text.contains("too large for WebAssembly"), "{}", text);
+        assert!(text.contains("more than the 50000 an engine accepts"), "{}", text);
+        assert!(text.contains("lives across a branch"), "{}", text);
+
+        let vm = compile("t.kite", &src, Emit::Kbc);
+        assert_eq!(codes(&vm), ["E0902"], "{}", vm.render_diagnostics());
+        let text = vm.render_diagnostics();
+        assert!(text.contains("up to 50000 locals"), "{}", text);
+        assert!(!text.contains("`--emit wasm` and `--native` do not have this limit"), "{}", text);
+
+        let straight = format!("{}  io.print(first)\n  io.print(v{})\n}}\n", lets, n - 1);
+        let wasm = compile("t.kite", &straight, Emit::Wasm);
+        assert!(!wasm.failed(), "{}", wasm.render_diagnostics());
+        assert_eq!(codes(&compile("t.kite", &straight, Emit::Kbc)), ["E0902"]);
+    }
 
     #[test]
     fn every_emit_stage_produces_output_for_a_valid_program() {

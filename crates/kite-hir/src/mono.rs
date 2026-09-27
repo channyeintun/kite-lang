@@ -14,20 +14,51 @@
 //! Substituting here is one pass over expression trees, rather than a
 //! substitution threaded through every step of lowering.
 
-use crate::{BinOp, Block, EnumId, Expr, ExprKind, FnId, Function, Local, Pattern, Program, Stmt,
-            StructId, TyId, TyKind, Types};
+use crate::{BinOp, Block, EnumId, Expr, ExprKind, FnId, Function, Local, Pattern, Program, Refusal,
+            Stmt, StructId, TraitId, TyId, TyKind, TypeTag, Types, VTable, VTableEntry};
+use crate::ty::MAX_NESTING;
 use std::collections::HashMap;
 
-/// A generic function that instantiates itself with a larger type on each call
-/// never terminates. The cap is far above any real program and low enough that
-/// a runaway stops in well under a second.
-const MAX_INSTANTIATIONS: usize = 4096;
+/// How many specialisations a program may make in all.
+///
+/// Not the test for a runaway — [`MAX_NESTING`] is that, and stops one in a
+/// few dozen copies — but a bound on the work a program can ask for: a
+/// runaway that branches makes copies faster than it nests. It counts
+/// specialisations made, not functions walked: a program of five thousand
+/// ordinary functions and one generic one is not a runaway, and used to be
+/// treated as one. It was 4,096, which a program passing 4,200 structs to
+/// one `fn ident<T>` reached, and was told it recursed without end.
+pub const MAX_INSTANTIATIONS: usize = 1 << 16;
+
+/// A generic function monomorphisation refused to specialise, and why.
+#[derive(Clone, Debug)]
+pub struct Unbounded {
+    /// The template, by its source name.
+    pub template: String,
+    pub span: kite_span::Span,
+    pub why: Refusal,
+}
 
 /// Specialise every generic function for the argument sets its callers use, and
 /// drop the templates.
-pub fn monomorphise(program: &mut Program) {
+///
+/// Fails when a generic function recurses at an ever larger type — `depth([x],
+/// n - 1)` inside `depth<T>` — which has no finite set of copies. The program
+/// is left half-rewritten then, and must not be lowered.
+pub fn monomorphise(program: &mut Program) -> Result<(), Unbounded> {
+    // A trait a `dyn` cannot hold is reached only through bounds, and every
+    // call through a bound is a direct call by the end of this pass. Its
+    // table would be dead weight at best; at worst a backend would type a
+    // dispatcher for a method that mentions `Self`, which has no one type.
+    let dispatchable: Vec<TraitId> = program
+        .vtables
+        .iter()
+        .map(|v| v.trait_id)
+        .filter(|t| program.types.is_object_safe(*t))
+        .collect();
     if program.fns.iter().all(|f| f.generic_count == 0) {
-        return;
+        program.vtables.retain(|v| dispatchable.contains(&v.trait_id));
+        return Ok(());
     }
     let Program { types, fns, entry, vtables, externs: _ } = program;
 
@@ -43,14 +74,17 @@ pub fn monomorphise(program: &mut Program) {
     }
 
     let mut made: HashMap<(u32, Vec<TyId>), u32> = HashMap::new();
+    // For each function made, the template it is a copy of and the function
+    // whose body first asked for it; nothing, for one that was written.
+    let mut lineage: Vec<Option<(u32, usize)>> = vec![None; out.len()];
     let mut pending: Vec<usize> = (0..out.len()).collect();
-    let mut budget = MAX_INSTANTIATIONS;
+    let mut unbounded: Option<Unbounded> = None;
+    let mut rows: Vec<(TraitId, VTableEntry)> = Vec::new();
 
     while let Some(index) = pending.pop() {
-        if budget == 0 {
-            break;
+        if let Some(u) = unbounded {
+            return Err(u);
         }
-        budget -= 1;
         // Take the body so the walk does not borrow `out` while `out` grows.
         let mut body = std::mem::take(&mut out[index].body);
         {
@@ -60,11 +94,19 @@ pub fn monomorphise(program: &mut Program) {
                 moved: &moved,
                 made: &mut made,
                 out: &mut out,
+                lineage: &mut lineage,
+                current: index,
                 pending: &mut pending,
+                unbounded: &mut unbounded,
+                vtables,
+                rows: &mut rows,
             };
             m.block(&mut body);
         }
         out[index].body = body;
+    }
+    if let Some(u) = unbounded {
+        return Err(u);
     }
 
     if let Some(e) = entry {
@@ -72,9 +114,14 @@ pub fn monomorphise(program: &mut Program) {
             *e = FnId(*new);
         }
     }
-    // A trait method is never generic today, so every vtable entry is a moved
-    // original rather than an instantiation.
+    // A row the checker wrote names the declared methods. Those of a generic
+    // type's `impl` are templates, and are gone: the type is dispatched to
+    // through the rows made above for each specialisation of it that became
+    // a `dyn`. Every other row names moved originals.
+    vtables.retain(|v| dispatchable.contains(&v.trait_id));
     for v in vtables.iter_mut() {
+        v.entries
+            .retain(|row| row.methods.iter().all(|m| fns[m.index()].generic_count == 0));
         for row in &mut v.entries {
             for m in &mut row.methods {
                 if let Some(new) = moved.get(&m.0) {
@@ -83,8 +130,15 @@ pub fn monomorphise(program: &mut Program) {
             }
         }
     }
+    for (trait_id, row) in rows {
+        if let Some(v) = vtables.iter_mut().find(|v| v.trait_id == trait_id) {
+            v.entries.push(row);
+            v.entries.sort_by_key(|e| e.tag);
+        }
+    }
 
     *fns = out;
+    Ok(())
 }
 
 struct Mono<'a> {
@@ -94,7 +148,20 @@ struct Mono<'a> {
     moved: &'a HashMap<u32, u32>,
     made: &'a mut HashMap<(u32, Vec<TyId>), u32>,
     out: &'a mut Vec<Function>,
+    /// By index into `out`: the template each copy was made from, and the
+    /// function whose body asked for it.
+    lineage: &'a mut Vec<Option<(u32, usize)>>,
+    /// The function whose body is being walked, which asks for whatever is
+    /// made now.
+    current: usize,
     pending: &'a mut Vec<usize>,
+    /// Set by the first specialisation refused; the walk stops there.
+    unbounded: &'a mut Option<Unbounded>,
+    /// The tables the checker built, over the declared functions.
+    vtables: &'a [VTable],
+    /// Rows for specialisations of generic types that became a `dyn`, over
+    /// the functions made here.
+    rows: &'a mut Vec<(TraitId, VTableEntry)>,
 }
 
 impl Mono<'_> {
@@ -105,10 +172,36 @@ impl Mono<'_> {
         if let Some(&existing) = self.made.get(&key) {
             return existing;
         }
+        // A copy asked for from a chain of copies that already holds this
+        // template MAX_NESTING times is polymorphic recursion, for the reason
+        // MAX_NESTING gives, and so is one at arguments too large while the
+        // template is on the chain at all. Arguments too large otherwise, or
+        // too many copies, are limits on a program that would finish. Either
+        // way the template is named and nothing more is made; the index handed
+        // back is never lowered, because the caller stops at the error.
+        let repeats = self.repeats(template);
+        let refused = if repeats >= MAX_NESTING {
+            Some(Refusal::Runaway)
+        } else if self.types.too_large(targs) {
+            Some(if repeats > 0 { Refusal::Runaway } else { Refusal::TooLarge })
+        } else if self.made.len() >= MAX_INSTANTIATIONS {
+            Some(Refusal::TooMany)
+        } else {
+            None
+        };
+        if let Some(why) = refused {
+            if self.unbounded.is_none() {
+                let source = &self.fns[template as usize];
+                *self.unbounded =
+                    Some(Unbounded { template: source.name.clone(), span: source.span, why });
+            }
+            return template;
+        }
         let index = self.out.len() as u32;
         // Claim the slot before the body is built, so a recursive call to the
         // same instantiation finds it instead of making a second one.
         self.made.insert(key, index);
+        self.lineage.push(Some((template, self.current)));
 
         let source = &self.fns[template as usize];
         let mut copy = Function {
@@ -137,6 +230,20 @@ impl Mono<'_> {
         index
     }
 
+    /// How many copies of `template` are on the chain that asked for the
+    /// function being walked, that function included.
+    fn repeats(&self, template: u32) -> usize {
+        let mut count = 0;
+        let mut at = self.lineage[self.current];
+        while let Some((made_from, asked_by)) = at {
+            if made_from == template {
+                count += 1;
+            }
+            at = self.lineage[asked_by];
+        }
+        count
+    }
+
     fn block(&mut self, b: &mut Block) {
         for s in &mut b.stmts {
             self.stmt(s);
@@ -153,6 +260,38 @@ impl Mono<'_> {
     }
 
     fn expr(&mut self, e: &mut Expr) {
+        // A call through a bound, now its receiver's type is known, is a call
+        // to that type's method — and becomes one here, before the forms
+        // below renumber or specialise it like any other.
+        if let ExprKind::CallVirtual { trait_id, method, args, targs } = &mut e.kind {
+            if let Some((callee, all)) = self.devirtualise(*trait_id, *method, args, targs) {
+                let args = std::mem::take(args);
+                e.kind = ExprKind::Call { callee, args, targs: all };
+            }
+        }
+        if let ExprKind::ToDyn { value, trait_id } = &e.kind {
+            self.dispatch_row(*trait_id, value.ty);
+        }
+        // A value converted into an `error` carries its type's tag. Inside a
+        // generic function the value may be a `T: Error`, whose tag the
+        // checker could not know; now it is concrete, so the tag is its own.
+        if let ExprKind::ErrorNew { value, tag, .. } = &mut e.kind {
+            if let Some((own, _, _)) = self.identity(value.ty) {
+                tag.kind = ExprKind::Int(own.encode() as i64);
+            }
+        }
+        // `Wrapped.as(err)` asks for the specialisation it is used as, which
+        // inside a generic function may be a `Wrapped<T>`: the tag it tests
+        // for is that of its result's type, now concrete.
+        let result = match self.types.kind(e.ty) {
+            TyKind::Optional(inner) => Some(*inner),
+            _ => None,
+        };
+        if let (ExprKind::ErrorAs { tag, .. }, Some(inner)) = (&mut e.kind, result) {
+            if let Some((own, _, _)) = self.identity(inner) {
+                *tag = own.encode();
+            }
+        }
         // Both forms name a function by index, so both need the same treatment:
         // renumbered when it moved, specialised when it is a template.
         let target = match &mut e.kind {
@@ -176,6 +315,87 @@ impl Mono<'_> {
         for b in expr_blocks(&mut e.kind) {
             self.block(b);
         }
+    }
+}
+
+impl Mono<'_> {
+    /// The run-time identity of a nominal type, its declaration's, and the
+    /// arguments it was specialised with.
+    fn identity(&self, ty: TyId) -> Option<(TypeTag, TypeTag, Vec<TyId>)> {
+        match *self.types.kind(ty) {
+            TyKind::Struct(s) => {
+                let (template, args) = self.types.struct_origin_of(s).unwrap_or((s, Vec::new()));
+                Some((TypeTag::Struct(s), TypeTag::Struct(template), args))
+            }
+            TyKind::Enum(x) => {
+                let (template, args) = self.types.enum_origin_of(x).unwrap_or((x, Vec::new()));
+                Some((TypeTag::Enum(x), TypeTag::Enum(template), args))
+            }
+            _ => None,
+        }
+    }
+
+    /// The declared function a trait's method runs for a type's declaration.
+    fn declared_method(&self, trait_id: TraitId, template: TypeTag, method: u32) -> Option<FnId> {
+        let table = self.vtables.iter().find(|v| v.trait_id == trait_id)?;
+        let row = table.entries.iter().find(|r| r.tag == template)?;
+        row.methods.get(method as usize).copied()
+    }
+
+    /// The direct call a call through a bound becomes, once the receiver's
+    /// type is concrete: the implementing function, with the receiver's own
+    /// type arguments ahead of the method's.
+    fn devirtualise(
+        &self,
+        trait_id: TraitId,
+        method: u32,
+        args: &[Expr],
+        targs: &[TyId],
+    ) -> Option<(FnId, Vec<TyId>)> {
+        let receiver = args.first()?;
+        let (_, template, own) = self.identity(receiver.ty)?;
+        let callee = self.declared_method(trait_id, template, method)?;
+        // A method's parameters are its block's, which the receiver's type
+        // supplies, then its own, which the call solved.
+        let block = self.fns[callee.index()].generic_count.checked_sub(targs.len())?;
+        if own.len() < block {
+            return None;
+        }
+        let mut all: Vec<TyId> = own[..block].to_vec();
+        all.extend_from_slice(targs);
+        Some((callee, all))
+    }
+
+    /// Make sure a specialisation of a generic type has a row in a trait's
+    /// table once a value of it becomes that trait's `dyn`.
+    ///
+    /// The checker's rows are per declaration and name the methods as
+    /// written — templates, for a generic type — while a value carries the
+    /// tag of its specialisation. Rows are made only for what actually
+    /// becomes a `dyn`, which is also what the checker proved satisfies the
+    /// `impl`'s bounds.
+    fn dispatch_row(&mut self, trait_id: TraitId, ty: TyId) {
+        let Some((tag, template, args)) = self.identity(ty) else { return };
+        if tag == template || self.rows.iter().any(|(t, r)| *t == trait_id && r.tag == tag) {
+            return;
+        }
+        let Some(table) = self.vtables.iter().find(|v| v.trait_id == trait_id) else { return };
+        let Some(row) = table.entries.iter().find(|r| r.tag == template) else { return };
+        let declared = row.methods.clone();
+        let mut methods = Vec::with_capacity(declared.len());
+        for m in declared {
+            let count = self.fns[m.index()].generic_count;
+            let made = if count == 0 {
+                self.moved.get(&m.0).copied()
+            } else if args.len() >= count {
+                Some(self.instantiate(m.0, &args[..count]))
+            } else {
+                None
+            };
+            let Some(made) = made else { return };
+            methods.push(FnId(made));
+        }
+        self.rows.push((trait_id, VTableEntry { tag, methods }));
     }
 }
 
@@ -221,7 +441,9 @@ fn substitute_expr(e: &mut Expr, targs: &[TyId], types: &mut Types) {
         // A nested generic call's own type arguments may mention this
         // function's parameters — `f<T>` calling `g<[T]>` — so they substitute
         // too, before the call is instantiated.
-        ExprKind::Call { targs: inner, .. } | ExprKind::ClosureNew { targs: inner, .. } => {
+        ExprKind::Call { targs: inner, .. }
+        | ExprKind::ClosureNew { targs: inner, .. }
+        | ExprKind::CallVirtual { targs: inner, .. } => {
             for t in inner.iter_mut() {
                 *t = subst(*t, targs, types);
             }
@@ -238,6 +460,20 @@ fn substitute_expr(e: &mut Expr, targs: &[TyId], types: &mut Types) {
     }
     for b in expr_blocks(&mut e.kind) {
         substitute_block(b, targs, types);
+    }
+    // `Option<Option<T>>` is `Option<T>`, so a `T` wrapped into an optional
+    // in a template needs no wrapping in a copy where `T` is already one —
+    // and wrapping it anyway boxes a value that is already boxed, which the
+    // Wasm backend's types do not admit. Unwrapping it is the same no-op
+    // from the other side.
+    if let ExprKind::Wrap { value } | ExprKind::Unwrap { value } = &mut e.kind {
+        if value.ty == e.ty {
+            let inner = std::mem::replace(
+                &mut **value,
+                Expr { kind: ExprKind::Error, ty: e.ty, span: e.span },
+            );
+            *e = inner;
+        }
     }
 }
 
@@ -566,6 +802,15 @@ fn renumber_pattern(p: &mut Pattern, map: &HashMap<u32, u32>) {
 /// index, a closure names its lifted body, and a trait object can reach any
 /// method in its vtable. There is nothing else that can enter a function.
 pub fn prune(program: &mut Program) {
+    prune_keeping(program, |_| false);
+}
+
+/// The same, keeping every function `keep` answers true for as a way in too.
+///
+/// For `kitec test`, which calls the program's `test_…` functions by name —
+/// including a private one, which nothing else calls and which pruning would
+/// otherwise have removed before the runner went looking for it.
+pub fn prune_keeping(program: &mut Program, keep: impl Fn(&Function) -> bool) {
     let Program { fns, entry, vtables, .. } = program;
 
     let mut roots: Vec<u32> = Vec::new();
@@ -591,7 +836,7 @@ pub fn prune(program: &mut Program) {
     // "declared here". That is what keeps a `hello world` from carrying the
     // prelude it never mentions.
     for (i, f) in fns.iter().enumerate() {
-        if f.is_pub && f.is_free && !f.name.contains('.') {
+        if (f.is_pub && f.is_free && !f.name.contains('.')) || keep(f) {
             roots.push(i as u32);
         }
     }
@@ -613,7 +858,7 @@ pub fn prune(program: &mut Program) {
             continue;
         }
         *seen = true;
-        collect_callees(&fns[i as usize].body, &mut queue);
+        collect_callees(&mut fns[i as usize].body, &mut queue);
     }
 
     if reachable.iter().all(|r| *r) {
@@ -648,10 +893,16 @@ pub fn prune(program: &mut Program) {
     *fns = kept;
 }
 
-fn collect_callees(b: &Block, out: &mut Vec<u32>) {
-    // The walks take `&mut`, and this only reads; cloning a body to reuse them
-    // would cost more than the second walk.
-    let mut b = b.clone();
+/// Every function `b` names, pushed onto `out`.
+///
+/// It only reads, but takes the block mutably because the walks it shares
+/// with the passes that write do. It used to take a shared reference and
+/// walk a copy — made again at each level, so every block was copied once
+/// for each block around it. An `else if` chain is one block inside the
+/// next, and one of four thousand links copied gigabytes here, in a pass
+/// that looks at each call once: `kitec check` was killed for memory on a
+/// chain the parser accepts.
+fn collect_callees(b: &mut Block, out: &mut Vec<u32>) {
     for s in &mut b.stmts {
         for e in stmt_exprs(s) {
             collect_expr_callees(e, out);
@@ -753,7 +1004,7 @@ mod tests {
         p.fns.push(main);
         p.entry = Some(FnId(1));
 
-        monomorphise(&mut p);
+        monomorphise(&mut p).unwrap();
 
         // `main` plus two specialisations; the template itself is gone.
         assert_eq!(p.fns.len(), 3);
@@ -779,7 +1030,7 @@ mod tests {
         p.fns.push(template("b", 0, TyId::INT));
         p.entry = Some(FnId(1));
 
-        monomorphise(&mut p);
+        monomorphise(&mut p).unwrap();
 
         assert_eq!(p.fns.len(), 2);
         assert_eq!(p.fns[0].name, "a");
@@ -830,6 +1081,82 @@ mod tests {
 
         assert_eq!(p.fns.len(), 2, "a vtable method is reachable");
         assert_eq!(p.vtables[0].entries[0].methods[0], FnId(0));
+    }
+
+    /// Many ordinary functions and one generic one is not a runaway. The budget
+    /// once counted every function walked, so past four thousand of them the
+    /// walk stopped, leaving calls into functions that had moved.
+    #[test]
+    fn a_large_program_is_specialised_completely() {
+        let mut p = Program::default();
+        let param = p.types.param_ty(0, "T");
+        p.fns.push(template("id", 1, param));
+        for i in 0..5000 {
+            let mut f = template(&format!("f{}", i), 0, TyId::UNIT);
+            f.body.stmts = vec![Stmt::Expr(call(0, vec![TyId::INT]))];
+            p.fns.push(f);
+        }
+        p.entry = Some(FnId(5000));
+
+        monomorphise(&mut p).unwrap();
+
+        assert_eq!(p.fns.len(), 5001);
+        assert_eq!(p.entry, Some(FnId(4999)));
+        let copy = p.fns.iter().position(|f| f.name == "id<int>").expect("a copy") as u32;
+        for f in &p.fns[..5000] {
+            let Stmt::Expr(e) = &f.body.stmts[0] else { panic!("expected a call") };
+            let ExprKind::Call { callee, targs, .. } = &e.kind else { panic!("expected a call") };
+            assert_eq!(callee.0, copy, "{} still calls the template", f.name);
+            assert!(targs.is_empty());
+        }
+    }
+
+    /// `f<T>` calling `f<[T]>` needs a copy at every depth. That is refused,
+    /// by name, rather than cut off partway without a word.
+    #[test]
+    fn polymorphic_recursion_is_refused() {
+        let mut p = Program::default();
+        let param = p.types.param_ty(0, "T");
+        let slice_of_t = p.types.slice_of(param);
+        let mut depth = template("depth", 1, TyId::UNIT);
+        depth.body.stmts = vec![Stmt::Expr(call(0, vec![slice_of_t]))];
+        p.fns.push(depth);
+        let mut main = template("main", 0, TyId::UNIT);
+        main.body.stmts = vec![Stmt::Expr(call(0, vec![TyId::INT]))];
+        p.fns.push(main);
+        p.entry = Some(FnId(1));
+
+        let err = monomorphise(&mut p).expect_err("an unbounded instantiation");
+        assert_eq!(err.template, "depth");
+        assert_eq!(err.why, Refusal::Runaway);
+    }
+
+    /// A program that specialises one function thousands of times, or at an
+    /// argument nested a hundred deep, finishes — and was once told that the
+    /// function instantiated itself without end, past 4,096 copies or 48
+    /// levels.
+    #[test]
+    fn a_large_finite_specialisation_is_not_a_runaway() {
+        let mut p = Program::default();
+        let param = p.types.param_ty(0, "T");
+        p.fns.push(template("id", 1, param));
+        let mut main = template("main", 0, TyId::UNIT);
+        let span = kite_span::Span::new(kite_span::FileId(0), 0, 0);
+        for i in 0..5000 {
+            let s = p.types.declare_struct(format!("S{}", i), true, span);
+            let ty = p.types.struct_ty(s);
+            main.body.stmts.push(Stmt::Expr(call(0, vec![ty])));
+        }
+        let mut deep = TyId::INT;
+        for _ in 0..100 {
+            deep = p.types.slice_of(deep);
+        }
+        main.body.stmts.push(Stmt::Expr(call(0, vec![deep])));
+        p.fns.push(main);
+        p.entry = Some(FnId(1));
+
+        monomorphise(&mut p).unwrap();
+        assert_eq!(p.fns.len(), 5002);
     }
 
     /// Substitution rebuilds composite types around the parameter rather than

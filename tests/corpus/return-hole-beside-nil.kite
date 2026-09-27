@@ -1,0 +1,48 @@
+// `_` in a return's value slot stands for no value, so the error beside it
+// has to be a failure. `return _, nil` used to compile, and the caller,
+// finding the error nil, was allowed to read the hole: the VM trapped, native
+// code printed a zero or crashed, and Wasm printed a zero or dereferenced null.
+
+fn count() -> (int, error) {
+    return _, nil //~ ERROR E0200
+}
+
+fn name(ok: bool) -> (str, error) {
+    if ok {
+        return "kite", nil
+    }
+    return _, (nil) //~ ERROR E0200
+}
+
+// Any other error is accepted. One proved present needs nothing more; one
+// that may be nil traps at the `return` if it is, the same way everywhere.
+fn relay(e: error) -> (int, error) {
+    if e != nil {
+        return _, e
+    }
+    return _, errors.new("nothing to relay")
+}
+
+fn pass(e: error) -> (int, error) {
+    return _, e
+}
+
+fn main() {
+    let (n, err) = count()
+    if err != nil {
+        return
+    }
+    io.print(n)
+    let (s, serr) = name(false)
+    check_or_print(serr)
+    let (r, rerr) = relay(nil)
+    check_or_print(rerr)
+    let (p, perr) = pass(errors.new("passed"))
+    check_or_print(perr)
+}
+
+fn check_or_print(e: error) {
+    if e != nil {
+        io.print(e.message())
+    }
+}

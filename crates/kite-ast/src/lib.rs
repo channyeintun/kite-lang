@@ -246,6 +246,8 @@ pub struct MethodDecl {
     pub is_pub: bool,
     pub is_async: bool,
     pub name: Ident,
+    /// The method's own type parameters, after those of its `impl`.
+    pub generics: Vec<GenericParam>,
     /// Absent for an associated function such as `Rect.square(2.0)`.
     pub self_param: Option<SelfParam>,
     pub params: Vec<Param>,
@@ -627,6 +629,12 @@ pub enum StrPart {
 #[derive(Debug)]
 pub enum Expr {
     Int(Span),
+    /// An integer the parser supplied rather than one the source spelled:
+    /// the bound an open-ended slice range leaves out, `0` for `xs[..b]` and
+    /// the largest `int` for `xs[a..]`. A range index clamps, so those are
+    /// what a missing end means. The span is empty, at the side of the `..`
+    /// it fills in.
+    ImpliedInt { value: i64, span: Span },
     Float(Span),
     /// Span covers the quotes. A literal with no `\(...)` in it.
     Str(Span),
@@ -819,6 +827,7 @@ impl Expr {
             | Expr::SelfExpr(s)
             | Expr::Error(s) => *s,
             Expr::Bool { span, .. }
+            | Expr::ImpliedInt { span, .. }
             | Expr::Interpolated { span, .. }
             | Expr::Unary { span, .. }
             | Expr::Binary { span, .. }
@@ -853,7 +862,7 @@ impl Expr {
     /// A short rendering for diagnostics.
     pub fn describe(&self) -> &'static str {
         match self {
-            Expr::Int(_) => "an integer literal",
+            Expr::Int(_) | Expr::ImpliedInt { .. } => "an integer literal",
             Expr::Float(_) => "a float literal",
             Expr::Str(_) => "a string literal",
             Expr::Char(_) => "a character literal",

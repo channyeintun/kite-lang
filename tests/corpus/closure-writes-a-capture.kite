@@ -1,0 +1,18 @@
+// A closure holds copies of what it captures, so a write inside it would
+// change the copy and nothing else. The lifted body has no slot for a local it
+// never read, and the write used to land wherever that number pointed.
+
+fn main() {
+    let first: int
+    let set = || {
+        first = 1 //~ ERROR E0211
+    }
+    set()
+
+    var total = 0
+    let add = |n: int| {
+        total = n //~ ERROR E0211
+    }
+    add(5)
+    io.print("\(total)")
+}

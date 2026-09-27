@@ -32,6 +32,14 @@ impl fmt::Display for Code {
     }
 }
 
+impl Code {
+    /// Whether the lexer reports this (E0000–E0099): the file could not be
+    /// read as tokens whole, and what did not lex is missing from them.
+    pub fn is_lexical(self) -> bool {
+        self.0.len() == 5 && self.0.starts_with("E00")
+    }
+}
+
 macro_rules! codes {
     ($($name:ident = $code:literal, $short:literal, $explain:literal;)*) => {
         $(pub const $name: Code = Code($code);)*
@@ -64,9 +72,15 @@ codes! {
         "Recognised escapes are \\n \\t \\r \\0 \\\\ \\\" \\' and \\u{...}.";
 
     E0004 = "E0004", "invalid number literal",
-        "A numeric literal is malformed. Digit separators may appear between \
-         digits but not at either end, and a float must have digits on both \
+        "A numeric literal is malformed. A digit separator `_` sits between two \
+         digits, in every radix and every part of a literal — `1_000`, \
+         `0xFF_FF`, `1.5e1_0` — so it cannot end the digits, follow a radix \
+         prefix, double up, or touch a `.` or an exponent: `1_`, `0x_F`, \
+         `1__0` and `1_.5` are all refused. A float must have digits on both \
          sides of the point.\n\n\
+         A literal too large for its type is refused too: an `int` above \
+         9223372036854775807, and a `float` too large to be finite, such as \
+         `1e999`, which would otherwise become infinity without a word.\n\n\
          A type suffix — `42i32`, `2.5f32` — is also refused. Kite has one \
          integer type and one float, so a suffix names nothing. It used to be \
          consumed and thrown away, which made `300i8` read as a width the \
@@ -84,9 +98,11 @@ codes! {
          written on purpose comes near it.";
 
     E0005 = "E0005", "block comments are not supported",
-        "Kite has line comments (//) and doc comments (///) only. Nested block \
-         comments are a recurring source of lexer bugs and every editor has \
-         supported toggling line comments for decades.";
+        "Kite's comments are line comments: `//` for a comment, `///` for the \
+         documentation of the declaration that follows, and `//!` for the \
+         module's own, at the top of its file. There is no block comment. \
+         Nested block comments are a recurring source of lexer bugs and every \
+         editor has supported toggling line comments for decades.";
 
     // ---- syntax and bindings ---------------------------------------------
     E0100 = "E0100", "unexpected token",
@@ -103,7 +119,15 @@ codes! {
          the moment it is opened — and exhausting the stack is a guard-page \
          abort, not a panic, so nothing can catch it. A ceiling turns that \
          into this diagnostic. The bytecode VM has bounded call depth for the \
-         same reason; this is the same rule applied to the front end.";
+         same reason; this is the same rule applied to the front end.\n\n\
+         There are two ceilings. Brackets, blocks, types, patterns and prefix \
+         operators such as `-` and `!` may nest 256 levels deep. A chain — \
+         each `+` of `a + b + c + …`, each `.f` and each call of \
+         `x.f().g()…`, each `else if` — is counted apart, and may be 8,192 \
+         links long, 1,024 in the compiler built for WebAssembly, which runs \
+         on the JavaScript engine's stack. The parser reads a chain in a \
+         loop, but the tree it builds is as deep as the chain is long, and \
+         every pass after the parser walks that tree by recursion.";
 
     E0110 = "E0110", "use of possibly-uninitialised binding",
         "A `let` binding may be assigned after declaration, but only if the \
@@ -135,7 +159,12 @@ codes! {
         "These statements are only meaningful inside a `for` loop.";
 
     E0116 = "E0116", "unreachable code",
-        "This statement follows one that always diverges, so it can never run.";
+        "This statement follows one that always diverges, so it can never run.\n\n\
+         The same holds for a `match` arm whose every value is taken by the arms \
+         above it. The commonest cause is a name meant as a variant that is not \
+         one — `Dir` where the enum says `Directory` — which is a binding: it \
+         matches everything, and every arm after it is dead. A guarded arm \
+         shadows nothing, because its guard may fail.";
 
     E0117 = "E0117", "statement has no effect",
         "A closure written as a statement is built and thrown away. Nothing \
@@ -162,6 +191,10 @@ codes! {
          evaluation order, and which functions are available to it becomes a \
          language rule nobody can predict — so there is one evaluation order \
          here, and it is the one that already exists.\n\n\
+         Arithmetic on constants is done while compiling, so an operation \
+         with no `int` result — dividing by zero, overflowing, shifting by a \
+         negative amount or by 64 or more — is reported here rather than \
+         trapping in one build and wrapping in another.\n\n\
          There is no module-level `var` at all. A mutable binding two \
          functions can both reach is shared state neither signature mentions, \
          which is what `Share` and the closure capture rule exist to prevent. \
@@ -204,11 +237,16 @@ codes! {
          not known where the call is written.";
 
     E0206 = "E0206", "trait cannot be a trait object",
-        "A `dyn Trait` dispatches by looking at the value it holds, so every \
-         method must take `self`. A method without a receiver has nothing to \
-         dispatch on.\n\n\
-         Either give the method a `self` parameter, or accept the concrete \
-         type instead of the trait object.";
+        "A `dyn Trait` dispatches by looking at the value it holds, and the \
+         call has to make sense whichever type that turns out to be. So every \
+         method must take `self` — a method without a receiver has nothing to \
+         dispatch on — must not be generic, because a generic method has a body \
+         per type argument rather than one to call, and must not mention \
+         `Self`, which is a different type behind every `dyn`.\n\n\
+         Such a trait is still a perfectly good bound: `fn f<T: Trait>(x: T)` \
+         knows the type, so every method is callable. Take a type parameter \
+         instead of the trait object, or move what a `dyn` needs into a trait \
+         of its own.";
 
     E0207 = "E0207", "value cannot be interpolated",
         "String interpolation renders `int`, `float`, `bool` and `str`. Any \
@@ -242,7 +280,13 @@ codes! {
          Captures are by value and taken when the closure is made, so a `var` \
          cannot be captured: later writes to it would not be seen, and code \
          reading it as if they were is a bug waiting to happen. Copy it into a \
-         `let`, or pass it as a parameter.";
+         `let`, or pass it as a parameter. For the same reason a closure may \
+         not assign to anything it captures: the write would land on its copy \
+         and nowhere else.\n\n\
+         A closure's body is a function of its own. Its `return` answers to the \
+         closure's `-> T`, and where the body is an expression and nothing \
+         states that type, a `return` inside it has nothing to be checked \
+         against — write the type.";
 
     E0212 = "E0212", "invalid cast",
         "`as` converts between `int` and `float`. There is no conversion \
@@ -278,6 +322,26 @@ codes! {
          and enums already have. Kite has one. Write the generic type itself, \
          or a struct that wraps it.";
 
+    E0220 = "E0220", "generic instantiation does not terminate",
+        "Kite specialises generics: every set of type arguments a program uses \
+         gets a copy of its own, made at compile time. A generic function that \
+         calls itself at a larger type — `depth([x], n - 1)` inside \
+         `depth<T>(x: T, …)` — or a generic type that contains itself at a \
+         larger one — `inner: Option<Nested<[T]>>` inside `Nested<T>` — asks \
+         for a new copy at every level, forever.\n\n\
+         Languages that box their generics can run this, because a boxed \
+         generic is one copy whatever the argument. Kite cannot, and says so \
+         rather than giving up partway and emitting a program with calls into \
+         copies that were never made.\n\n\
+         Recurse at the same type, or hold the growing part in something whose \
+         type does not grow — a slice of the original type, say, rather than a \
+         nesting of slices.\n\n\
+         The same code, in other words, reports a program that does finish but \
+         asks for more than the compiler makes: a type argument nested more \
+         than 256 levels deep or holding more than 65,536 parts, or more than \
+         65,536 specialisations in all. The message says which, and only a \
+         runaway is said to instantiate itself without end.";
+
     // ---- error handling ---------------------------------------------------
     E0301 = "E0301", "value used before its error was checked",
         "A function returning `(T, error)` returns a correlated pair. The \
@@ -290,9 +354,11 @@ codes! {
          the branch where the error is nil, the value becomes readable.";
 
     E0302 = "E0302", "error is never checked",
-        "An `error` binding went out of scope without being inspected. Silently \
-         dropping errors is the single most common source of production \
-         failures in languages that permit it.\n\n\
+        "An `error` binding went out of scope without being inspected, or was \
+         written over while it still held a failure nobody had looked at: \
+         `var e = f()` then `e = nil` drops `f`'s failure as surely as leaving \
+         the block does. Silently dropping errors is the single most common \
+         source of production failures in languages that permit it.\n\n\
          To propagate, write `check`. To handle it where it happened, test \
          `err != nil`.";
 
@@ -309,36 +375,63 @@ codes! {
          module.";
 
     E0403 = "E0403", "module name is reserved by the standard library",
-        "A module is known by the last segment of its `use` path, so `use \
-         std/crypto` and `use crypto` both name a module called `crypto` — and \
-         whichever was loaded first won, silently, for the whole program.\n\n\
-         That made the standard library replaceable by any module that got \
-         there first: a dependency shipping a `crypto` directory, imported \
-         anywhere before the first `use std/crypto`, took over every \
-         `crypto.hash` call in the program with no diagnostic. Since `std` is \
-         not part of a module's identity, nothing afterwards could tell the \
-         two apart.\n\n\
-         So the standard library's names belong to it. Rename the module.";
+        "A use site spells a module by the last segment of its `use` path, so \
+         `use crypto` naming a sibling would be spelled `crypto` in the file \
+         that imported it — and shadow `std/crypto` there. It was worse when a \
+         module was *known* by that segment: a dependency shipping a `crypto` \
+         directory, imported anywhere before the first `use std/crypto`, took \
+         over every `crypto.hash` call in the program with no diagnostic.\n\n\
+         So the standard library's names belong to it, and so does `prelude`, \
+         whose declarations are in scope everywhere without a `use`: a module \
+         of that name became every module's unqualified fallback. So do `io`, \
+         `draw` and `ptr`, which its builtins are reached through.\n\n\
+         The name after `as` is a spelling too. `use util as errors` was \
+         accepted, and `errors` is in scope in every file without a `use`, so \
+         one spelling reached two modules: `errors.new` stayed the standard \
+         library's while every other `errors.…` reached `util`. A `std` module \
+         spelled as itself — `use std/json as json` — is the one spelling \
+         that is its own.\n\n\
+         Rename the module, or spell it another way with `use … as …`.";
 
     E0404 = "E0404", "two modules of the same name",
-        "A module is known by the last segment of its `use` path, so two \
-         modules in different directories with the same final name are one \
-         module as far as the rest of the compiler is concerned — and the one \
-         loaded first won, for the whole program.\n\n\
-         Which one that is depends on the order of the `use` lines in the \
-         entry file, and nothing was reported either way. A dependency \
-         shipping a `utils` directory could therefore answer every \
-         `utils.…` call in the importing program's own source, with no \
-         diagnostic and nothing changed in that program. `E0403` reserves the \
-         standard library's names for the same reason; this is the general \
-         case.\n\n\
-         Rename one of them. Full paths as identities — so `dep/utils` and \
-         `utils` are two modules rather than a collision — is the better \
-         answer and is not what this compiler does yet.";
+        "A module is identified by where its source is, and a use site writes \
+         a *spelling* — the last segment of the path, or the name after `as`. \
+         A spelling belongs to the file that writes it, so two files may spell \
+         different modules alike; what one file may not do is spell two \
+         modules alike, because every `utils.…` above the second `use` would \
+         quietly change meaning. Give one of them a name of its own with \
+         `use … as …`.\n\n\
+         The same code reports two packages of one name reached from two \
+         different places. A package's name means one thing across the whole \
+         program — `kitec pkg` refuses the same manifests for the same \
+         reason — so the manifests naming it must agree on where it is.";
+
+    E0405 = "E0405", "a `kite.toml` that does not read",
+        "The manifest is what says where a package's dependencies are, so a \
+         build reads it before it can find any of them. One that does not \
+         parse used to be treated as no manifest at all, and the error a \
+         typo in `[package]` produced was `cannot find module` at every `use` \
+         of a dependency — a diagnostic about the wrong file. The manifest is \
+         reported instead, at the line that did not read.";
 
     E0402 = "E0402", "module cycle",
         "Modules may not depend on each other cyclically. Extract the shared \
          part into a third module.";
+
+    E0406 = "E0406", "implementation outside its type's module",
+        "An `impl` block belongs to the module that declares its type — or, \
+         for a trait implementation, to the module that declares the trait.\n\n\
+         There are no extension methods (§8.2). Every method a type has is \
+         declared where the type is, so `x.foo()` is answered by looking in one \
+         place, and nobody else's module can add to a type or read its private \
+         fields from outside.\n\n\
+         A trait is implemented for a type at most once, by one of the two \
+         modules that own them (§10.2, the orphan rule). Were a third module \
+         allowed, two of them could each write the same `impl`, and which one \
+         a call reached would depend on which happened to be loaded.\n\n\
+         To give another module's type new behaviour, write a function that \
+         takes it, or declare a trait of your own and implement that for it \
+         here.";
 
     // ---- concurrency ------------------------------------------------------
     E0520 = "E0520", "type cannot be moved to another task",
@@ -418,4 +511,33 @@ codes! {
          with the program if it can be shared: the validator's message \
          identifies the function, which is usually enough to find the bad \
          lowering.";
+
+    E0901 = "E0901", "internal compiler error",
+        "This is a bug in Kite, not in the program being compiled. A stage of \
+         the compiler found something an earlier stage promised it would never \
+         see — a `break` with no loop to leave, an `await` the state-machine \
+         transform did not remove — and stopped rather than guess.\n\n\
+         Guessing is what it used to do. The `break` was dropped and the \
+         program ran on as if it had not been written; the `await` crashed \
+         the compiler. Stopping with this names the function, which is \
+         usually enough to find the stage at fault.\n\n\
+         There is no source change that is the right fix, though rewriting the \
+         construct the note points at may avoid it. Please report it, with \
+         the program if it can be shared.";
+
+    E0902 = "E0902", "the program exceeds a limit of this target",
+        "The program is valid Kite, and the target it is being compiled for \
+         cannot represent it.\n\n\
+         The bytecode VM addresses a frame's registers with sixteen bits, so \
+         one function may use at most 65,536 of them: one per local and \
+         temporary, plus the widest call or literal it builds. A function \
+         past that — tens of thousands of locals, or a literal with tens of \
+         thousands of elements — used to be emitted anyway, with register \
+         numbers silently cut short, so that unrelated values shared a \
+         register.\n\n\
+         Split the function, or build the large literal in a loop.\n\n\
+         WebAssembly has a limit of its own: an engine accepts at most 50,000 \
+         locals in one function, parameters included, and every local and \
+         temporary is one — though a literal's elements are not, so a long \
+         literal is no trouble there. The native target has neither limit.";
 }

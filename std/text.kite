@@ -21,12 +21,15 @@
 //   character — which is what both of ours do — will not honour an override
 //   that contradicts the letters. Higher-level protocols (HL1–HL6) are not
 //   implemented at all.
-// - `break_opportunities` is UAX #14, the line breaking algorithm: rules
-//   LB1–LB31 over a Line_Break class table. Two departures, both of which the
-//   annex itself names: SA (Thai, Lao, Khmer, and Burmese syllable breaking)
-//   is treated as AL, which §5.1 prescribes in the absence of a dictionary,
-//   and CB is not implemented because nothing can be embedded in a run of Kite
-//   text to break around.
+// - `break_opportunities` is UAX #14, the line breaking algorithm, as of
+//   Unicode 15.0: rules LB1–LB31 over a Line_Break class table that covers
+//   the scripts named in its section rather than every code point. Two
+//   departures, both of which the annex itself names: SA (Thai, Lao, Khmer,
+//   and Burmese syllable breaking) is treated as AL, which §5.1 prescribes in
+//   the absence of a dictionary, and CB is not implemented because nothing
+//   can be embedded in a run of Kite text to break around. The rules later
+//   revisions added — LB15a–LB15d, LB20a, LB28a — are not here, and East
+//   Asian Width is read only where LB30 needs it; the section says which.
 // - `join_arabic` is the joining half of Arabic shaping: Joining_Type over
 //   the Arabic block's own letters, mapped to Arabic Presentation Forms-B,
 //   with the mandatory lam-alef ligature. It is **not HarfBuzz-quality
@@ -893,7 +896,8 @@ fn resolve_weak(classes: [BidiClass], original: [BidiClass], seq: [int], sos_r: 
     let n = seq.len()
     // From here on an isolate initiator or PDI takes part as a neutral.
     for k in 0..n {
-        if is_isolate_initiator(original[seq[k]]) || original[seq[k]] == BidiClass.PDI {
+        // Unless an override already made it L or R (X5a–X5c, X6a).
+        if cls[seq[k]] == original[seq[k]] && (is_isolate_initiator(original[seq[k]]) || original[seq[k]] == BidiClass.PDI) {
             cls[seq[k]] = BidiClass.ON
         }
     }
@@ -1339,8 +1343,10 @@ fn analyse(codes: [int], base: int) -> Analysis {
             continue
         }
         let level = levels[seq[0]]
-        let sos_r = boundary_before(seq, levels, x.removed, base)
-        let eos_r = boundary_after(seq, levels, x.removed, original, base, iso)
+        // X10 compares *embedding* levels; `levels` has already been raised
+        // by I1–I2 for the sequences resolved before this one.
+        let sos_r = boundary_before(seq, x.levels, x.removed, base)
+        let eos_r = boundary_after(seq, x.levels, x.removed, original, base, iso)
         cls = resolve_weak(cls, original, seq, sos_r)
         cls = resolve_brackets(codes, cls, original, seq, level, sos_r)
         cls = resolve_neutrals(cls, seq, level, sos_r, eos_r)
@@ -1750,12 +1756,17 @@ pub fn join_arabic(run: str) -> str {
         }
         let before = prev_base(codes, i)
         let joined_before = before >= 0 && connects_forwards(codes[before])
-        if code == 0x0644 && i + 1 < n && is_lam_alef(codes[i + 1]) {
-            out = out + lam_alef(codes[i + 1], joined_before)
-            i += 2
+        let after = next_base(codes, i)
+        // The ligature holds across marks too: a lam with a fatha on it is
+        // still a lam before an alef, and the ligature is still mandatory.
+        // Looking only at the very next character missed it, and drew the
+        // two letters apart. The marks follow the ligature, which carries
+        // them as the lam did.
+        if code == 0x0644 && after >= 0 && is_lam_alef(codes[after]) {
+            out = out + lam_alef(codes[after], joined_before) + run.slice(i + 1, after)
+            i = after + 1
             continue
         }
-        let after = next_base(codes, i)
         let joined_after = forms.len() == 4 && after >= 0 && connects_backwards(codes[after])
         var index = 0
         if joined_before && joined_after {
@@ -1775,9 +1786,9 @@ pub fn join_arabic(run: str) -> str {
 //
 // Where a line *may* break, as opposed to where it *must* fit. The two are
 // different questions and only the second needs a font: this decides the
-// opportunities, and a caller with `canvas.width_of` decides which of them to
-// take. Nothing in the standard library does that second half — see the
-// README's list of what is not done.
+// opportunities, and `wrap`, at the end of this section, takes them: the
+// greedy half, with the measurement handed in by the caller — `canvas.width_of`
+// on a canvas, one per character in a terminal.
 //
 // **The subset, named.** The Line_Break property is a table of every assigned
 // code point, and what is here covers the classes that occur in the scripts the
@@ -1798,10 +1809,33 @@ pub fn join_arabic(run: str) -> str {
 //     around: `Content` holds text or a picture, never text with a picture
 //     inside it.
 //
-// The pair rules are LB2–LB31 with the tailorable ones at their defaults. What
-// this buys over breaking at spaces: a URL breaks after its slashes, a
+// **The revision is Unicode 15.0** (UAX #14 revision 49): rules LB2 to LB31
+// as that revision numbers them, with the tailorable ones at their defaults —
+// `CJ` resolves to `NS`, and LB25 is the regular-expression form. What this
+// buys over breaking at spaces: a URL breaks after its slashes, a
 // non-breaking space does not break, `(a)` keeps its brackets, a number is not
-// split from its sign or its percent, and a closing quote does not start a line.
+// split from its sign or its percent, a closing quote does not start a line,
+// a flag stays one flag and an emoji keeps its skin tone.
+//
+// What is **not** implemented, besides SA and CB above:
+//
+//   * **LB15a–LB15d, LB20a and LB28a**, which arrived in Unicode 15.1 and
+//     later: quotation marks told apart by their general category (`Pi`,
+//     `Pf`), a hyphen at the start of a word, and the Aksara classes (`AK`,
+//     `AP`, `AS`, `VI`, `VF`) of the Brahmic scripts that use them. This
+//     module's LB15 is 15.0's single `QU SP* × OP`, and Aksara letters are AL.
+//   * **East Asian Width is read only in LB30**, and only for the opening
+//     brackets this table knows: a fullwidth `（` may break after a letter,
+//     as the rule says. `AI` resolves to AL, as LB1 prescribes by default.
+//   * **Extended_Pictographic is not tracked**, so LB30b's second half — an
+//     unassigned pictographic code point before an emoji modifier — is not
+//     applied. `EB × EM` is.
+//
+// Measured against the Unicode 18.0 `LineBreakTest.txt`, which is newer than
+// the rules here, about one line in sixteen disagrees, and each of them falls
+// in one of those families or is a code point this table has no range for —
+// a spacing mark (`Mc`), a pictographic code point not yet assigned, one of a
+// few rare scripts' letters — and so reads as AL.
 
 /// The Line_Break classes this module distinguishes.
 pub enum LineBreak {
@@ -1862,6 +1896,19 @@ pub enum LineBreak {
     JL
     JV
     JT
+    /// Inseparable: an ellipsis, which does not start a line (LB22).
+    IN
+    /// A Hebrew letter: alphabetic, and LB21a keeps a hyphen after one
+    /// attached to what follows.
+    HL
+    /// Regional indicator: two of them are a flag, and LB30a keeps the pair.
+    RI
+    /// Emoji base and emoji modifier: a skin tone stays with its emoji (LB30b).
+    EB
+    EM
+    /// Zero-width joiner: never a break after it (LB8a), and like a combining
+    /// mark before it (LB9).
+    ZWJ
 }
 
 /// The Line_Break class of a code point.
@@ -1889,6 +1936,19 @@ pub fn line_break_class(code: int) -> LineBreak {
     if code == 0x200B {
         return LineBreak.ZW
     }
+    if code == 0x200D {
+        return LineBreak.ZWJ
+    }
+    // A tab, a soft hyphen and a vertical line all permit a break after.
+    if code == 0x0009 || code == 0x00AD || code == 0x007C {
+        return LineBreak.BA
+    }
+    // Every other control character is CM — it attaches to what precedes it,
+    // as the Line_Break property has it — so a stray one does not open a
+    // break of its own.
+    if code < 0x0020 || within(code, 0x007F, 0x009F) {
+        return LineBreak.CM
+    }
     if code == 0x2060 || code == 0xFEFF {
         return LineBreak.WJ
     }
@@ -1907,14 +1967,29 @@ pub fn line_break_class(code: int) -> LineBreak {
     if code == 0x007D {
         return LineBreak.CL
     }
+    // The low quotation marks open, like a bracket; the rest are QU.
+    if code == 0x201A || code == 0x201E {
+        return LineBreak.OP
+    }
     if code == 0x0022 || code == 0x0027 || code == 0x00AB || code == 0x00BB {
         return LineBreak.QU
     }
-    if code >= 0x2018 && code <= 0x201F {
+    if (code >= 0x2018 && code <= 0x201F) || code == 0x2039 || code == 0x203A {
         return LineBreak.QU
     }
-    if code == 0x0021 || code == 0x003F {
+    if code == 0x0021 || code == 0x003F || code == 0x061F || code == 0x061B || code == 0x06D4 {
         return LineBreak.EX
+    }
+    if code == 0xFE15 || code == 0xFE16 || code == 0xFE56 || code == 0xFE57 {
+        return LineBreak.EX
+    }
+    // An ellipsis and its one- and two-dot relatives.
+    if (code >= 0x2024 && code <= 0x2026) || code == 0x22EF || code == 0xFE19 {
+        return LineBreak.IN
+    }
+    // A double exclamation, a question-exclamation: no break before either.
+    if code == 0x203C || code == 0x203D || (code >= 0x2047 && code <= 0x2049) {
+        return LineBreak.NS
     }
     if code == 0x002C || code == 0x002E || code == 0x003A || code == 0x003B {
         return LineBreak.IS
@@ -1928,27 +2003,71 @@ pub fn line_break_class(code: int) -> LineBreak {
     if code == 0x2014 {
         return LineBreak.B2
     }
-    // En dash, and the spaces that permit a break after themselves.
-    if code == 0x2013 || code == 0x2010 || code == 0x2012 || code == 0x058A {
+    // En dash, and the spaces that permit a break after themselves — every
+    // one of U+2000 to U+200A but the figure space, which is glue, and the
+    // ideographic space.
+    if code == 0x2013 || code == 0x2010 || code == 0x2012 || code == 0x058A || code == 0x2027 {
         return LineBreak.BA
     }
-    if code >= 0x2000 && code <= 0x2006 {
+    if (code >= 0x2000 && code <= 0x200A) || code == 0x3000 {
         return LineBreak.BA
     }
     if code == 0x00B4 || code == 0x1FFD {
         return LineBreak.BB
     }
-    // Currency signs before a number, percent and degree after one.
-    if code == 0x0024 || code == 0x00A3 || code == 0x00A5 || code == 0x20AC || code == 0x00A2 {
+    // Signs that go after a number: percent, per mille, degrees, primes, the
+    // cent sign, and a handful of currencies written after the amount.
+    if code == 0x0025 || code == 0x00A2 || code == 0x00B0 || (code >= 0x2030 && code <= 0x2037) {
+        return LineBreak.PO
+    }
+    if code == 0x2103 || code == 0x2109 || code == 0x066A || code == 0xFF05 || code == 0xFFE0 || code == 0xFE6A {
+        return LineBreak.PO
+    }
+    if code == 0x20A7 || code == 0x20B6 || code == 0x20BB || code == 0x20BE || code == 0x20C0 {
+        return LineBreak.PO
+    }
+    // Signs that go before one: currencies, plus and minus, the numero sign.
+    if code == 0x0024 || code == 0x002B || code == 0x005C || code == 0x00B1 {
         return LineBreak.PR
     }
-    if code == 0x0025 || code == 0x00B0 || code == 0x2030 {
-        return LineBreak.PO
+    if (code >= 0x00A3 && code <= 0x00A5) || (code >= 0x20A0 && code <= 0x20CF) {
+        return LineBreak.PR
+    }
+    if code == 0x2116 || code == 0x2212 || code == 0x2213 || code == 0xFE69 || code == 0xFF04 {
+        return LineBreak.PR
+    }
+    if code == 0xFFE1 || code == 0xFFE5 || code == 0xFFE6 {
+        return LineBreak.PR
     }
 
     // ---- numbers and letters ----
     if code >= 0x0030 && code <= 0x0039 {
         return LineBreak.NU
+    }
+    // The decimal digits of the scripts this table covers: Arabic-Indic and
+    // its eastern form, N'Ko, the ten Indic scripts from Devanagari to
+    // Sinhala — which all put theirs at 0x66 in a 0x80 block — Thai, Lao,
+    // Tibetan, Myanmar, Khmer and Mongolian.
+    if within(code, 0x0660, 0x0669) || within(code, 0x066B, 0x066C) || within(code, 0x06F0, 0x06F9) {
+        return LineBreak.NU
+    }
+    if within(code, 0x07C0, 0x07C9) || (within(code, 0x0900, 0x0DFF) && within(code % 128, 0x66, 0x6F)) {
+        return LineBreak.NU
+    }
+    if within(code, 0x0E50, 0x0E59) || within(code, 0x0ED0, 0x0ED9) || within(code, 0x0F20, 0x0F29) {
+        return LineBreak.NU
+    }
+    if within(code, 0x1040, 0x1049) || within(code, 0x1090, 0x1099) || within(code, 0x17E0, 0x17E9) || within(code, 0x1810, 0x1819) {
+        return LineBreak.NU
+    }
+    // Hebrew letters, and the presentation forms that are letters.
+    if within(code, 0x05D0, 0x05EA) || within(code, 0x05EF, 0x05F2) || code == 0xFB1D {
+        return LineBreak.HL
+    }
+    if within(code, 0xFB1F, 0xFB4F) && code != 0xFB29 && code != 0xFB37 && code != 0xFB3D {
+        if code != 0xFB3F && code != 0xFB42 && code != 0xFB45 {
+            return LineBreak.HL
+        }
     }
 
     // ---- combining marks ----
@@ -1981,11 +2100,22 @@ pub fn line_break_class(code: int) -> LineBreak {
         }
         return LineBreak.H3
     }
-    // Small kana and the middle dots, which may not start a line.
+    // Small kana and the middle dots, which may not start a line — and the
+    // prolonged sound mark and the halfwidth small katakana, which are CJ
+    // and resolve to NS as LB1 prescribes by default.
     if code == 0x3005 || code == 0x303B || code == 0x309D || code == 0x309E {
         return LineBreak.NS
     }
     if code == 0x30FB || code == 0xFF65 || code == 0x30FD || code == 0x30FE {
+        return LineBreak.NS
+    }
+    if code == 0x30FC || code == 0x301C || code == 0x309B || code == 0x309C || code == 0x30A0 {
+        return LineBreak.NS
+    }
+    if within(code, 0x31F0, 0x31FF) || within(code, 0xFF67, 0xFF70) || code == 0xFF9E || code == 0xFF9F {
+        return LineBreak.NS
+    }
+    if code == 0xFF1A || code == 0xFF1B || code == 0xFE54 || code == 0xFE55 {
         return LineBreak.NS
     }
     if code >= 0x3041 && code <= 0x3096 {
@@ -2021,6 +2151,12 @@ pub fn line_break_class(code: int) -> LineBreak {
     if code == 0x3010 || code == 0x3014 || code == 0x3016 || code == 0xFF08 {
         return LineBreak.OP
     }
+    if code == 0x3018 || code == 0x301A || code == 0x301D || code == 0xFF3B || code == 0xFF5B || code == 0xFF5F || code == 0xFF62 {
+        return LineBreak.OP
+    }
+    if code == 0x2329 || code == 0x2308 || code == 0x230A || code == 0xFE59 || code == 0xFE5B || code == 0xFE5D {
+        return LineBreak.OP
+    }
     if code == 0x3009 || code == 0x300B || code == 0x300D || code == 0x300F {
         return LineBreak.CL
     }
@@ -2030,17 +2166,96 @@ pub fn line_break_class(code: int) -> LineBreak {
     if code == 0x3001 || code == 0x3002 || code == 0xFF0C || code == 0xFF0E {
         return LineBreak.CL
     }
+    if code == 0x3019 || code == 0x301B || code == 0x301E || code == 0x301F || code == 0xFF3D || code == 0xFF5D {
+        return LineBreak.CL
+    }
+    if within(code, 0xFF60, 0xFF61) || within(code, 0xFF63, 0xFF64) || code == 0x232A || code == 0x2309 || code == 0x230B {
+        return LineBreak.CL
+    }
+    if within(code, 0xFE10, 0xFE12) || code == 0xFE50 || code == 0xFE52 || code == 0xFE5A || code == 0xFE5C || code == 0xFE5E {
+        return LineBreak.CL
+    }
     if code == 0xFF01 || code == 0xFF1F {
         return LineBreak.EX
     }
-    // An emoji, which breaks like an ideograph rather than like a letter.
-    if code >= 0x1F300 && code <= 0x1FAFF {
+    // A flag is two regional indicators.
+    if within(code, 0x1F1E6, 0x1F1FF) {
+        return LineBreak.RI
+    }
+    // An emoji, which breaks like an ideograph rather than like a letter —
+    // unless it is a skin tone, or an emoji a skin tone may follow.
+    if within(code, 0x1F3FB, 0x1F3FF) {
+        return LineBreak.EM
+    }
+    if emoji_base(code) {
+        return LineBreak.EB
+    }
+    if within(code, 0x1F300, 0x1FAFF) || within(code, 0x1F000, 0x1F0FF) || within(code, 0x1F200, 0x1F2FF) {
+        return LineBreak.ID
+    }
+    if within(code, 0x2300, 0x27FF) && symbol_ideograph(code) {
         return LineBreak.ID
     }
 
     // Everything else — every letter of every alphabet, and every code point
     // this table has never heard of. UAX #14 rule LB1: XX becomes AL.
     return LineBreak.AL
+}
+
+/// Emoji_Modifier_Base: the emoji a skin tone may follow.
+fn emoji_base(code: int) -> bool {
+    if code < 0x1F385 {
+        return code == 0x261D || code == 0x26F9 || within(code, 0x270A, 0x270D)
+    }
+    if code == 0x1F385 || within(code, 0x1F3C2, 0x1F3C4) || code == 0x1F3C7 || within(code, 0x1F3CA, 0x1F3CC) {
+        return true
+    }
+    if within(code, 0x1F442, 0x1F443) || within(code, 0x1F446, 0x1F450) || within(code, 0x1F466, 0x1F478) {
+        return true
+    }
+    if code == 0x1F47C || within(code, 0x1F481, 0x1F483) || within(code, 0x1F485, 0x1F487) || code == 0x1F48F {
+        return true
+    }
+    if code == 0x1F491 || code == 0x1F4AA || within(code, 0x1F574, 0x1F575) || code == 0x1F57A || code == 0x1F590 {
+        return true
+    }
+    if within(code, 0x1F595, 0x1F596) || within(code, 0x1F645, 0x1F647) || within(code, 0x1F64B, 0x1F64F) {
+        return true
+    }
+    if code == 0x1F6A3 || within(code, 0x1F6B4, 0x1F6B6) || code == 0x1F6C0 || code == 0x1F6CC || code == 0x1F90C {
+        return true
+    }
+    if code == 0x1F90F || within(code, 0x1F918, 0x1F91F) || code == 0x1F926 || within(code, 0x1F930, 0x1F939) {
+        return true
+    }
+    if within(code, 0x1F93C, 0x1F93E) || code == 0x1F977 || within(code, 0x1F9B5, 0x1F9B6) || within(code, 0x1F9B8, 0x1F9B9) {
+        return true
+    }
+    if code == 0x1F9BB || within(code, 0x1F9CD, 0x1F9CF) || within(code, 0x1F9D1, 0x1F9DD) {
+        return true
+    }
+    return within(code, 0x1FAC3, 0x1FAC5) || within(code, 0x1FAF0, 0x1FAFA)
+}
+
+/// The symbols below U+2800 that break like ideographs: the ones drawn as
+/// emoji — a watch, a sun, a football, a heart.
+fn symbol_ideograph(code: int) -> bool {
+    if within(code, 0x231A, 0x231B) || within(code, 0x23F0, 0x23F3) || within(code, 0x2600, 0x2603) {
+        return true
+    }
+    if within(code, 0x2614, 0x2615) || code == 0x2618 || within(code, 0x261A, 0x261C) || within(code, 0x261E, 0x261F) {
+        return true
+    }
+    if within(code, 0x2639, 0x263B) || code == 0x2668 || code == 0x267F || within(code, 0x26BD, 0x26C8) || code == 0x26CD {
+        return true
+    }
+    if within(code, 0x26CF, 0x26D1) || within(code, 0x26D3, 0x26D4) || within(code, 0x26D8, 0x26D9) || code == 0x26DC {
+        return true
+    }
+    if within(code, 0x26DF, 0x26E1) || code == 0x26EA || within(code, 0x26F1, 0x26F5) || within(code, 0x26F7, 0x26F8) {
+        return true
+    }
+    return code == 0x26FA || within(code, 0x26FD, 0x2704) || within(code, 0x2708, 0x2709) || code == 0x2764
 }
 
 /// The small kana, which are non-starters: they may not begin a line.
@@ -2091,6 +2306,12 @@ fn is_mandatory(c: LineBreak) -> bool {
         JL => false
         JV => false
         JT => false
+        IN => false
+        HL => false
+        RI => false
+        EB => false
+        EM => false
+        ZWJ => false
     }
 }
 
@@ -2118,12 +2339,17 @@ pub fn break_opportunities(body: str) -> [bool] {
     for code in codes {
         classes.push(line_break_class(code))
     }
-    // LB9: `X CM* → X`. A mark takes the class of the character it attaches
-    // to, so a run of marks after a letter is part of that letter. A mark with
-    // nothing before it is AL (LB10), which is the case a line beginning with
-    // one falls into.
+    var absorbed: [bool] = []
+    for code in codes {
+        absorbed.push(false)
+    }
+    // LB9: `X (CM | ZWJ)* → X`. A mark takes the class of the character it
+    // attaches to, so a run of marks after a letter is part of that letter —
+    // and no break is allowed before one. A mark with nothing before it is AL
+    // (LB10), which is the case a line beginning with one falls into.
+    let original = classes
     for i in 0..classes.len() {
-        if classes[i] == LineBreak.CM {
+        if classes[i] == LineBreak.CM || classes[i] == LineBreak.ZWJ {
             if i == 0 {
                 classes[i] = LineBreak.AL
             } else {
@@ -2135,6 +2361,7 @@ pub fn break_opportunities(body: str) -> [bool] {
                     classes[i] = LineBreak.AL
                 } else {
                     classes[i] = before
+                    absorbed[i] = true
                 }
             }
         }
@@ -2144,9 +2371,33 @@ pub fn break_opportunities(body: str) -> [bool] {
     // LB2: never break at the start.
     out.push(false)
     for i in 1..classes.len() {
-        out.push(may_break(classes, i))
+        out.push(!absorbed[i] && may_break(Classes{ now: classes, was: original, absorbed: absorbed, codes: codes }, i))
     }
     return out
+}
+
+/// What the pair rules read: the classes after LB9 and LB10, the classes as
+/// the table gave them, which positions LB9 folded into the character before,
+/// and the code points themselves.
+///
+/// Most rules need only `now`. LB8a needs to know a joiner was there after LB9
+/// has made it part of its base; LB21a, LB25 and LB30a look further back than
+/// one character, past any marks; and LB30 reads a bracket's width.
+struct Classes {
+    now: [LineBreak]
+    was: [LineBreak]
+    absorbed: [bool]
+    codes: [int]
+}
+
+/// The position of the character at or before `k` that a mark attached to —
+/// `k` itself unless LB9 folded it into what came before.
+fn base_at(c: Classes, k: int) -> int {
+    var at = k
+    for at > 0 && c.absorbed[at] {
+        at -= 1
+    }
+    return at
 }
 
 /// Whether a break is allowed before position `i`.
@@ -2154,10 +2405,16 @@ pub fn break_opportunities(body: str) -> [bool] {
 /// The rules are tried in their numbered order and the first that applies
 /// decides, which is how UAX #14 is specified: a later rule never overrides an
 /// earlier one.
-fn may_break(classes: [LineBreak], i: int) -> bool {
+fn may_break(c: Classes, i: int) -> bool {
+    let classes = c.now
     let before = classes[i - 1]
     let here = classes[i]
 
+    // LB5: `CR × LF`. A carriage return and the line feed after it are one
+    // break, not two, or every CRLF file would grow an empty line per line.
+    if before == LineBreak.CR && here == LineBreak.LF {
+        return false
+    }
     // LB4, LB5: always break after a mandatory break. LB6: never before one.
     if is_mandatory(before) {
         return true
@@ -2170,8 +2427,13 @@ fn may_break(classes: [LineBreak], i: int) -> bool {
         return false
     }
     // LB8: always after a zero-width space, even across spaces.
-    if before == LineBreak.ZW {
+    if looking_back(classes, i) == LineBreak.ZW {
         return true
+    }
+    // LB8a: never after a zero-width joiner, which is joining whatever
+    // follows it — an emoji sequence, most often — to what came before.
+    if c.was[i - 1] == LineBreak.ZWJ {
+        return false
     }
     // LB11: never either side of a word joiner.
     if here == LineBreak.WJ || before == LineBreak.WJ {
@@ -2182,13 +2444,7 @@ fn may_break(classes: [LineBreak], i: int) -> bool {
     if before == LineBreak.GL {
         return false
     }
-    if here == LineBreak.GL {
-        if before == LineBreak.SP || before == LineBreak.BA {
-            return true
-        }
-        if before == LineBreak.HY {
-            return true
-        }
+    if here == LineBreak.GL && before != LineBreak.SP && before != LineBreak.BA && before != LineBreak.HY {
         return false
     }
 
@@ -2238,40 +2494,82 @@ fn may_break(classes: [LineBreak], i: int) -> bool {
     if here == LineBreak.BA || here == LineBreak.HY {
         return false
     }
+    // LB21a: a hyphen after a Hebrew letter stays with what follows it.
+    if before == LineBreak.HY || before == LineBreak.BA {
+        let hyphen = base_at(c, i - 1)
+        if hyphen > 0 && classes[base_at(c, hyphen - 1)] == LineBreak.HL {
+            return false
+        }
+    }
     if here == LineBreak.NS {
         return false
     }
     if before == LineBreak.BB {
         return false
     }
-    // LB22: never before an ellipsis-like non-starter — folded into LB21 here,
-    // the class having been resolved already.
+    // LB21b: never between a solidus and a Hebrew letter.
+    if before == LineBreak.SY && here == LineBreak.HL {
+        return false
+    }
+    // LB22: never before an ellipsis.
+    if here == LineBreak.IN {
+        return false
+    }
 
     // LB23: never between a letter and a number, either way round.
-    if before == LineBreak.AL && here == LineBreak.NU {
+    if letter(before) && here == LineBreak.NU {
         return false
     }
-    if before == LineBreak.NU && here == LineBreak.AL {
+    if before == LineBreak.NU && letter(here) {
         return false
     }
-    // LB23a, LB24, LB25: numbers keep their prefixes, postfixes, separators
-    // and internal punctuation. `$1,000.00%` is one unbreakable run.
+    // LB23a: a currency sign stays with an ideograph or an emoji after it,
+    // and a percent with one before it — `¥中` and `中%` are one unit.
+    if before == LineBreak.PR && pictorial(here) {
+        return false
+    }
+    if pictorial(before) && here == LineBreak.PO {
+        return false
+    }
+    // LB24, LB25: numbers keep their prefixes, postfixes, separators and
+    // internal punctuation. `$1,000.00%` is one unbreakable run.
     if before == LineBreak.PR && here == LineBreak.NU {
         return false
     }
     if before == LineBreak.NU && here == LineBreak.PO {
         return false
     }
-    if before == LineBreak.PR && here == LineBreak.AL {
-        return false
-    }
-    if before == LineBreak.AL && here == LineBreak.PO {
-        return false
-    }
     if before == LineBreak.IS && here == LineBreak.NU {
         return false
     }
-    if before == LineBreak.SY && here == LineBreak.NU {
+    if before == LineBreak.SY && here == LineBreak.NU && number_before(c, i - 1) {
+        return false
+    }
+    // LB24: prefixes and postfixes hold to letters on either side.
+    if (before == LineBreak.PR || before == LineBreak.PO) && letter(here) {
+        return false
+    }
+    if letter(before) && (here == LineBreak.PR || here == LineBreak.PO) {
+        return false
+    }
+    // LB25: `NU (SY | IS)* (CL | CP)? × (PO | PR)`, and `PO × NU`. The closer
+    // is what keeps `(10)%` whole.
+    if here == LineBreak.PR || here == LineBreak.PO {
+        if before == LineBreak.NU || number_before(c, i) {
+            return false
+        }
+        if (before == LineBreak.CL || before == LineBreak.CP) && number_before(c, base_at(c, i - 1)) {
+            return false
+        }
+    }
+    if before == LineBreak.PO && here == LineBreak.NU {
+        return false
+    }
+    // LB27: a Hangul syllable takes a postfix after it and a prefix before it.
+    if is_hangul(before) && here == LineBreak.PO {
+        return false
+    }
+    if before == LineBreak.PR && is_hangul(here) {
         return false
     }
     if before == LineBreak.HY && here == LineBreak.NU {
@@ -2285,28 +2583,84 @@ fn may_break(classes: [LineBreak], i: int) -> bool {
         return false
     }
     // LB28: never between two letters — this is what keeps a word whole.
-    if before == LineBreak.AL && here == LineBreak.AL {
+    if letter(before) && letter(here) {
         return false
     }
     // LB29: never between a separator and a letter.
-    if before == LineBreak.IS && here == LineBreak.AL {
+    if before == LineBreak.IS && letter(here) {
         return false
     }
     // LB30: never between a letter or number and an opener, nor between a
-    // closing parenthesis and a letter or number.
-    if before == LineBreak.AL || before == LineBreak.NU {
-        if here == LineBreak.OP {
+    // closing parenthesis and a letter or number. A fullwidth or wide opener
+    // is the exception the rule names, so `abc（` may break before the
+    // bracket, as CJK text around Latin expects.
+    if letter(before) || before == LineBreak.NU {
+        if here == LineBreak.OP && !wide(c.codes[i]) {
             return false
         }
     }
     if before == LineBreak.CP {
-        if here == LineBreak.AL || here == LineBreak.NU {
+        if letter(here) || here == LineBreak.NU {
             return false
         }
+    }
+    // LB30a: regional indicators pair off, so a flag is never split — but two
+    // flags side by side may be.
+    if before == LineBreak.RI && here == LineBreak.RI {
+        var count = 0
+        var k = base_at(c, i - 1)
+        for k >= 0 && classes[k] == LineBreak.RI {
+            count += 1
+            k = if k == 0 { -1 } else { base_at(c, k - 1) }
+        }
+        if count % 2 == 1 {
+            return false
+        }
+    }
+    // LB30b: a skin tone stays with its emoji.
+    if before == LineBreak.EB && here == LineBreak.EM {
+        return false
     }
     // LB31: everything else may break — which is what makes CJK break between
     // any two ideographs, and a solidus break after itself.
     return true
+}
+
+/// Whether the characters before position `i` end in `NU (SY | IS)*`,
+/// looking past the marks LB9 attached to them.
+fn number_before(c: Classes, i: int) -> bool {
+    if i <= 0 {
+        return false
+    }
+    var k = base_at(c, i - 1)
+    for c.now[k] == LineBreak.SY || c.now[k] == LineBreak.IS {
+        if k == 0 {
+            return false
+        }
+        k = base_at(c, k - 1)
+    }
+    return c.now[k] == LineBreak.NU
+}
+
+/// ID, EB or EM: what LB23a keeps with a prefix before it or a postfix after.
+fn pictorial(c: LineBreak) -> bool {
+    return c == LineBreak.ID || c == LineBreak.EB || c == LineBreak.EM
+}
+
+/// AL or HL: a letter, as the rules from LB23 on read one.
+fn letter(c: LineBreak) -> bool {
+    return c == LineBreak.AL || c == LineBreak.HL
+}
+
+/// Whether an opening bracket is East Asian Wide or Fullwidth, which LB30
+/// exempts: every opener from U+2E80 on in this table, and the angle bracket
+/// U+2329.
+fn wide(code: int) -> bool {
+    return code >= 0x2E80 || code == 0x2329
+}
+
+fn is_hangul(c: LineBreak) -> bool {
+    return c == LineBreak.JL || c == LineBreak.JV || c == LineBreak.JT || c == LineBreak.H2 || c == LineBreak.H3
 }
 
 /// The class before position `i`, looking through spaces.
@@ -2350,4 +2704,134 @@ fn hangul_joins(before: LineBreak, here: LineBreak) -> bool {
         }
     }
     return false
+}
+
+// ---- wrapping ---------------------------------------------------------------
+
+/// A paragraph set into lines no wider than `width`, as `measure` counts width.
+///
+/// The half of line breaking that needs a measurement: `break_opportunities`
+/// says where a line *may* end, and this ends each line at the last of them
+/// that still fits — greedy first fit, which is what a browser does. The
+/// measurement is the caller's, so the same function wraps for a canvas
+/// (`canvas.width_of`), for a terminal (one per character), or for anything
+/// else with a notion of width, and gives the same lines on every backend for
+/// the same measurements.
+///
+/// Three things a caller should know:
+///
+/// - **A mandatory break always ends a line.** `\n`, `\r\n`, `\r` and the
+///   Unicode line and paragraph separators each end the line they are on, and
+///   are not part of it. Two in a row make an empty line between them; one at
+///   the very end of the text does not start an empty line after it.
+/// - **Spaces at the end of a line hang.** They neither count toward the width
+///   nor appear in the answer, which is UAX #14's treatment of a line end.
+///   Spaces at the start of a paragraph are kept: they are indentation. When
+///   the first word does not fit after them, they end a line of their own —
+///   an empty one, since they hang — and the word starts the next.
+/// - **A run too wide for any line is broken between characters** rather than
+///   left to overflow — what CSS calls `overflow-wrap: break-word`. The break
+///   never falls before a combining mark, so an accent stays with its letter,
+///   and every line holds at least one character, so a width too narrow for
+///   anything still makes progress rather than looping.
+///
+/// ```kite
+/// let chars = |s: str| -> float { return s.len() as float }
+/// let lines = wrap("the quick brown fox", 10.0, chars)
+/// assert(lines.len() == 2, "two lines")
+/// assert(lines[0] == "the quick", "as much as fits on the first")
+/// assert(lines[1] == "brown fox", "and the rest on the second")
+/// ```
+pub fn wrap(body: str, width: float, measure: fn(str) -> float) -> [str] {
+    var lines: [str] = []
+    let n = body.len()
+    let allowed = break_opportunities(body)
+    // The line being set is `body[start..pos]`, and all of it is known to fit.
+    // `pos` only ever stops at an opportunity, or mid-run after a forced break.
+    var start = 0
+    var pos = 0
+    for pos < n {
+        var next = pos + 1
+        for next < n && !allowed[next] {
+            next += 1
+        }
+        let seen = visible_end(body, start, next)
+        if seen == start || measure(body.slice(start, seen)) <= width {
+            pos = next
+            if is_mandatory(line_break_class(body.code_at(next - 1))) {
+                lines.push(body.slice(start, seen))
+                start = next
+            }
+            continue
+        }
+        // It does not fit. End the line before this run if an opportunity was
+        // passed on the way to it, and look at the run again on a line of its
+        // own. That is so even when all the line holds is a paragraph's
+        // indentation, which hangs there like any spaces at a line end and
+        // leaves an empty line: asking whether the line held anything
+        // *visible* sent the run, indentation and all, to be cut between
+        // characters, though it fits on a line by itself.
+        if pos > start {
+            lines.push(body.slice(start, visible_end(body, start, pos)))
+            start = pos
+            continue
+        }
+        // The run is wider than a whole line: break inside it.
+        let cut = split_point(body, start, seen, width, measure)
+        lines.push(body.slice(start, cut))
+        if cut >= seen {
+            // All of it went, and what is left of the run is the spaces that
+            // hang after it — or the break that ends its paragraph.
+            start = next
+            pos = next
+        } else {
+            start = cut
+            pos = cut
+        }
+    }
+    if start < n {
+        lines.push(body.slice(start, visible_end(body, start, n)))
+    }
+    return lines
+}
+
+/// Where `body[from..to]` ends once the spaces and the mandatory break that
+/// hang off its end are set aside.
+fn visible_end(body: str, from: int, to: int) -> int {
+    var end = to
+    for end > from && hangs(body.code_at(end - 1)) {
+        end -= 1
+    }
+    return end
+}
+
+/// Whether a character at the end of a line takes no room on it.
+fn hangs(code: int) -> bool {
+    let c = line_break_class(code)
+    return c == LineBreak.SP || is_mandatory(c)
+}
+
+/// The longest prefix of `body[start..end]` that fits, cut between characters
+/// and never before a combining mark — and never shorter than one character,
+/// so that a line too narrow for anything still takes something.
+fn split_point(body: str, start: int, end: int, width: float, measure: fn(str) -> float) -> int {
+    var best = next_cluster(body, start, end)
+    var m = next_cluster(body, best, end)
+    for m < end {
+        if measure(body.slice(start, m)) > width {
+            return best
+        }
+        best = m
+        m = next_cluster(body, m, end)
+    }
+    return best
+}
+
+/// The position after the character at `i` and any marks attached to it.
+fn next_cluster(body: str, i: int, end: int) -> int {
+    var k = i + 1
+    for k < end && is_combining(body.code_at(k)) {
+        k += 1
+    }
+    return k
 }

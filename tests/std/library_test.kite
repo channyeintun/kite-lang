@@ -11,6 +11,30 @@ fn fails() -> (int, error) {
     return _, errors.new("no such file")
 }
 
+/// The same float, bit for bit: a tolerance of zero.
+fn exactly(found: float, want: float, what: str) -> error {
+    return test.equal_float(found, want, 0.0, what)
+}
+
+fn zeros(n: int) -> str {
+    var out = ""
+    for i in 0..n {
+        out = out + "0"
+    }
+    return out
+}
+
+/// -0.0 and not 0.0, which compare equal: only dividing by one tells them
+/// apart.
+fn negative_zero(x: float) -> bool {
+    return x == 0.0 && 1.0 / x < 0.0
+}
+
+/// Within a few units in the last place.
+fn near(found: float, want: float) -> bool {
+    return math.abs(found - want) <= math.abs(want) * 0.000000000000001
+}
+
 fn checks() -> [error] {
     var out: [error] = []
 
@@ -28,6 +52,95 @@ fn checks() -> [error] {
     out.push(test.equal_float(math.hypot(3.0, 4.0), 5.0, 0.0001, "hypot"))
     out.push(test.equal_float(math.lerp(0.0, 10.0, 0.25), 2.5, 0.0001, "lerp"))
     out.push(test.equal_int(math.sign(-3.0), -1, "sign"))
+
+    // The square root, across the whole range and not only near one: from the
+    // guess `x` with an absolute tolerance, `sqrt(1e12)` was 1279996.5.
+    out.push(exactly(math.sqrt(1000000000000.0), 1000000.0, "sqrt(1e12)"))
+    out.push(exactly(math.sqrt(0.000000000001), 0.000001, "sqrt(1e-12)"))
+    out.push(exactly(math.sqrt(10000000000000000.0), 100000000.0, "sqrt(1e16)"))
+    out.push(exactly(math.sqrt(0.25), 0.5, "sqrt(0.25)"))
+    // Correctly rounded, which Newton in floating point alone is not: it gave
+    // 1.414213562373095, one unit short.
+    out.push(test.equal_str("\(math.sqrt(2.0))", "1.4142135623730951", "sqrt(2) is correctly rounded"))
+    out.push(exactly(math.sqrt(5e-324), 2.2227587494850775e-162, "sqrt of the smallest float"))
+    out.push(exactly(math.sqrt(1.7976931348623157e308), 1.3407807929942596e154, "sqrt of the largest float"))
+    out.push(exactly(math.sqrt(-4.0), 0.0, "sqrt of a negative is zero"))
+    out.push(exactly(math.hypot(3000000.0, 4000000.0), 5000000.0, "hypot(3e6, 4e6)"))
+    out.push(test.is_true(near(math.hypot(3e200, 4e200), 5e200), "hypot does not overflow"))
+    out.push(test.is_true(near(math.hypot(3e-200, 4e-200), 5e-200), "hypot does not underflow"))
+    out.push(exactly(math.hypot(0.0, 0.0), 0.0, "hypot at the origin"))
+
+    // Every float from 2⁵² up is whole, and most are past what an `int` holds:
+    // the cast saturated, so `floor(1e20)` was 9223372036854775808.
+    out.push(exactly(math.floor(100000000000000000000.0), 100000000000000000000.0, "floor(1e20)"))
+    out.push(exactly(math.ceil(-100000000000000000000.0), -100000000000000000000.0, "ceil(-1e20)"))
+    out.push(exactly(math.trunc(1e300), 1e300, "trunc(1e300)"))
+    out.push(exactly(math.round(10000000000000000000.0), 10000000000000000000.0, "round(1e19)"))
+    out.push(exactly(math.round(4503599627370497.0), 4503599627370497.0, "round above 2^52"))
+    // `floor(x + 0.5)` rounded the addition first.
+    out.push(exactly(math.round(0.49999999999999994), 0.0, "round just below a half"))
+    out.push(exactly(math.round(-0.49999999999999994), 0.0, "round just above minus a half"))
+    out.push(exactly(math.round(0.5), 1.0, "round a half"))
+    out.push(exactly(math.round(-1.5), -2.0, "round minus one and a half"))
+    out.push(exactly(math.floor(-0.5), -1.0, "floor(-0.5)"))
+
+    // `exp` near both ends of its range: the power of two overflowed first.
+    out.push(test.is_true(near(math.exp(709.7), 1.6549840276802644e308), "exp(709.7)"))
+    out.push(test.is_true(near(math.exp(-700.0), 9.85967654375977e-305), "exp(-700)"))
+    out.push(test.is_true(math.exp(-740.0) > 0.0, "exp(-740) is not zero"))
+    out.push(exactly(math.exp(710.0), 1.7976931348623157e308, "exp(710) saturates"))
+    out.push(exactly(math.exp(-746.0), 0.0, "exp(-746) is zero"))
+    out.push(exactly(math.exp(0.0), 1.0, "exp(0)"))
+
+    // The cosine at zero was the sine's series summed at π/2.
+    out.push(exactly(math.cos(0.0), 1.0, "cos(0)"))
+    out.push(exactly(math.sin(0.0), 0.0, "sin(0)"))
+    // A zero keeps its sign, as in libm. The series added each term's +0.0 to
+    // -0.0, so sin(-0.0) was 0.0 and so was tan(-0.0).
+    out.push(test.is_true(negative_zero(math.sin(-0.0)), "sin(-0) is -0"))
+    out.push(test.is_true(negative_zero(math.tan(-0.0)), "tan(-0) is -0"))
+    out.push(test.is_true(!negative_zero(math.sin(0.0)), "sin(0) is +0"))
+    out.push(test.is_true(!negative_zero(math.tan(0.0)), "tan(0) is +0"))
+    out.push(test.is_true(negative_zero(math.atan(-0.0)), "atan(-0) is -0"))
+    out.push(test.is_true(negative_zero(math.asin(-0.0)), "asin(-0) is -0"))
+    out.push(test.is_true(!negative_zero(math.atan(0.0)), "atan(0) is +0"))
+    out.push(test.is_true(!negative_zero(math.asin(0.0)), "asin(0) is +0"))
+    out.push(exactly(math.sin(-5e-324), -5e-324, "sin of the smallest float below zero"))
+    out.push(exactly(math.cos(math.pi()), -1.0, "cos(pi)"))
+    out.push(exactly(math.sin(math.pi() / 2.0), 1.0, "sin(pi/2)"))
+    out.push(test.is_true(near(math.sin(1.0), 0.8414709848078965), "sin(1)"))
+    out.push(test.is_true(near(math.cos(100.0), 0.8623188722876839), "cos(100)"))
+    out.push(test.is_true(near(math.sin(-4.0), 0.7568024953079282), "sin(-4)"))
+    out.push(test.is_true(math.abs(math.sin(math.pi())) < 0.000000000000001, "sin(pi) is near zero"))
+
+    // Far from zero. π/2 was subtracted in two pieces, exact only below 2³⁰
+    // quarter turns: sin(1e10) was wrong in the sixth digit, and from 1e17
+    // the answers were not sines at all — 2.79 for sin(1e17), 7.8e62 for
+    // sin(1e20), NaN for sin(1e300). Each is libm's answer.
+    out.push(test.is_true(near(math.sin(math.pi()), 1.2246467991473532e-16), "sin(pi) to the float's own error"))
+    out.push(test.is_true(near(math.sin(12345.678), -0.7040813137533816), "sin(12345.678)"))
+    out.push(test.is_true(near(math.cos(823549.0), 0.787174250682942), "cos just below the far range"))
+    out.push(test.is_true(near(math.sin(823550.0), 0.3291632977102722), "sin just inside it"))
+    out.push(test.is_true(near(math.sin(1000000.0), -0.34999350217129294), "sin(1e6)"))
+    out.push(test.is_true(near(math.sin(10000000000.0), -0.4875060250875107), "sin(1e10)"))
+    out.push(test.is_true(near(math.sin(4503599627370495.5), 0.9999756755637755), "sin(2^52 - 0.5)"))
+    out.push(test.is_true(near(math.sin(100000000000000000.0), -0.4645301048353727), "sin(1e17)"))
+    out.push(test.is_true(near(math.sin(-100000000000000000.0), 0.4645301048353727), "sin(-1e17)"))
+    out.push(test.is_true(near(math.cos(1000000000000000000.0), 0.11837199021871073), "cos(1e18)"))
+    out.push(test.is_true(near(math.sin(100000000000000000000.0), -0.6452512852657808), "sin(1e20)"))
+    out.push(test.is_true(near(math.cos(100000000000000000000.0), 0.7639704044417283), "cos(1e20)"))
+    out.push(test.is_true(near(math.tan(100000000000000000.0), 0.5245624309025501), "tan(1e17)"))
+    out.push(test.is_true(near(math.tan(1e22), -1.6287782256068988), "tan(1e22)"))
+    out.push(test.is_true(near(math.sin(1e300), -0.8178819121159085), "sin(1e300)"))
+    out.push(test.is_true(near(math.cos(1e300), -0.5753861119575491), "cos(1e300)"))
+    out.push(test.is_true(near(math.sin(1.7976931348623157e308), 0.004961954789184062), "sin of the largest float"))
+    // The double nearest a multiple of π/2 of all of them, 6381956970095103 ·
+    // 2⁷⁹⁷: its remainder is about 2⁻⁶¹ of it, so every bit of the reduction
+    // shows here. The answer is the exact remainder, 4.6871659242546276e-19,
+    // correctly rounded. The libm the rest were checked against says
+    // 4.68716592425462e-19, eight units away.
+    out.push(exactly(math.cos(5.319372648326541e255), -4.687165924254628e-19, "cos of the hardest case"))
+    out.push(exactly(math.sin(-5.319372648326541e255), -1.0, "and its sine"))
 
     // ---- integer overflow ----
     //
@@ -59,8 +172,52 @@ fn checks() -> [error] {
     out.push(test.equal_str(fmt.ellipsis("abcdef", 4), "abc…", "ellipsis"))
     out.push(test.equal_str(fmt.ellipsis("abc", 4), "abc", "ellipsis leaves short text alone"))
     out.push(test.equal_str(fmt.fixed(3.14159, 2), "3.14", "fixed"))
-    out.push(test.equal_str(fmt.fixed(2.005, 2), "2.01", "fixed rounds"))
+    out.push(test.equal_str(fmt.fixed(2.125, 2), "2.13", "fixed rounds a half away from zero"))
     out.push(test.equal_str(fmt.fixed(-1.25, 1), "-1.3", "fixed keeps the sign"))
+    // The float written `2.005` is 2.00499999999999989…, below the half, as
+    // `1.005` is. Rounding the scaled product in floating point made 200.5 of
+    // it and so rounded one up and not the other.
+    out.push(test.equal_str(fmt.fixed(2.005, 2), "2.00", "fixed rounds the float's own value"))
+    out.push(test.equal_str(fmt.fixed(1.005, 2), "1.00", "the same for 1.005"))
+    // Between 2⁵³ and 9e18 units of the last place, the scaled product was
+    // rounded to a float before being split, and `+ 0.5` rounded again.
+    out.push(test.equal_str(fmt.fixed(1000000000000000.25, 2), "1000000000000000.25", "a quarter past 2^53 units"))
+    out.push(test.equal_str(fmt.fixed(123456789.123, 10), "123456789.1229999959", "ten places of a float's digits"))
+    out.push(test.equal_str(fmt.fixed(0.49999999999999994, 0), "0", "the float below a half rounds down"))
+    out.push(test.equal_str(fmt.fixed(-0.49999999999999994, 0), "-0", "and keeps its sign"))
+    out.push(test.equal_str(fmt.fixed(4503599627370497.0, 0), "4503599627370497", "a whole number is itself"))
+    out.push(test.equal_str(fmt.fixed(-4503599627370497.0, 1), "-4503599627370497.0", "with places too"))
+    out.push(test.equal_str(fmt.fixed(4503599627370495.5, 0), "4503599627370496", "a half below 2^52 rounds up"))
+    out.push(test.equal_str(fmt.fixed(90071992547409.93, 2), "90071992547409.94", "two places near 2^53 units"))
+    out.push(test.equal_str(fmt.fixed(9.995, 2), "9.99", "no carry when the float is below the half"))
+    out.push(test.equal_str(fmt.fixed(9.9999, 2), "10.00", "a carry into a new digit"))
+    // Past seventeen significant digits the float's own, as `%.20f` writes
+    // them, where this once wrote zeros.
+    out.push(test.equal_str(fmt.fixed(0.1, 20), "0.10000000000000000555", "twenty places of 0.1"))
+    out.push(test.equal_str(fmt.fixed(5e-324, 3), "0.000", "the smallest float"))
+    let tiny = fmt.fixed(5e-324, 1075)
+    out.push(test.equal_int(tiny.len(), 1077, "every digit of the smallest float"))
+    out.push(test.is_true(starts_with(tiny, "0.\(zeros(323))49406564584124654417"), "from its first"))
+    out.push(test.is_true(ends_with(tiny, "197182655334472656250"), "to its last"))
+    out.push(test.equal_str(fmt.fixed(0.0, 2), "0.00", "zero"))
+    // -0.0 is not below zero, so it lost its sign where a negative number
+    // rounding to zero kept it. `%.2f` writes `-0.00` for both.
+    out.push(test.equal_str(fmt.fixed(-0.0, 2), "-0.00", "-0.0 keeps its sign"))
+    out.push(test.equal_str(fmt.fixed(-0.0, 0), "-0", "with no places too"))
+    // Past what an `int` holds once scaled: the cast saturated, and 1e20 came
+    // out as 92233720368547758.07.
+    out.push(test.equal_str(fmt.fixed(100000000000000000000.0, 2), "100000000000000000000.00", "fixed of 1e20"))
+    out.push(test.equal_str(fmt.fixed(-100000000000000000000.0, 1), "-100000000000000000000.0", "and its negative"))
+    out.push(test.equal_str(fmt.fixed(12345678901234.5, 6), "12345678901234.500000", "a fraction past 9e18 units"))
+    out.push(test.equal_str(fmt.fixed(0.5, 0), "1", "no places rounds half away from zero"))
+    out.push(test.equal_str(
+            fmt.fixed(1.7976931348623157e308, 0),
+            "179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368",
+            "the largest float, every digit",
+        ))
+    // Nineteen places overflowed ten to the nineteenth and trapped.
+    out.push(test.equal_str(fmt.fixed(1.5, 19), "1.5000000000000000000", "nineteen places"))
+    out.push(test.equal_str(fmt.fixed(2.0, -1), "2", "a negative count of places is none"))
     out.push(test.equal_str(fmt.grouped(1234567), "1,234,567", "grouped"))
     out.push(test.equal_str(fmt.grouped(-12), "-12", "grouped keeps the sign"))
     out.push(test.equal_str(fmt.percent(1.0, 4.0), "25.0%", "percent"))

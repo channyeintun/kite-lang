@@ -94,11 +94,17 @@ impl TokenKind {
     /// This is the specification's rule: operators, open delimiters, and
     /// commas continue a statement.
     ///
-    /// `>` and `>>` are the exceptions. They read as operators but far more
+    /// `>` and `>>` are not decided here. They read as operators but far more
     /// often close a type argument list — `pub width: Option<float>` ends a
-    /// field — and a line genuinely ending in a comparison is a line whose
-    /// right-hand side is missing. Treating them as continuations made every
-    /// generic field swallow the line after it.
+    /// field — and treating them as continuations made every generic field
+    /// swallow the line after it. The lexer cannot tell the two apart and the
+    /// parser can: it skips the line break after any operator it has consumed
+    /// as binary, so `a >` at the end of a line continues exactly as `a <`
+    /// does, while the `>` that closes `Option<float>` still ends its line.
+    ///
+    /// `return` is not here either. It is the one keyword that can end a
+    /// statement on its own, and reading it as a continuation turned
+    /// `return` followed by a line of dead code into a return *of* that code.
     pub fn continues_line(self) -> bool {
         use TokenKind::*;
         matches!(
@@ -114,8 +120,8 @@ impl TokenKind {
             | PlusEq | MinusEq | StarEq | SlashEq | PercentEq
             | Bang
             | Dot | DotDot | DotDotEq
-            // a keyword that cannot end a statement
-            | Return | As | In | Check | Await | Else
+            // keywords that cannot end a statement
+            | As | In | Check | Await | Else
         )
     }
 

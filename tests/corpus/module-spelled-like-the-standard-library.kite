@@ -1,0 +1,17 @@
+// A module may not be spelled like one of the standard library's. The check
+// read a path's last segment and never the name after `as`, so `use … as
+// errors` was accepted — and `errors` is in scope in every file without a
+// `use`, so `errors.new` stayed the standard library's while every other
+// `errors.…` reached this module. A `std` module spelled as itself is fine.
+
+use std/json as errors //~ ERROR E0403
+use std/math as io //~ ERROR E0403
+use std/text as fmt //~ ERROR E0403
+use std/fmt as fmt
+use std/time as clock
+
+fn main() {
+    io.print(errors.new("still the standard library's").message())
+    io.print(fmt.pad_left("x", 2))
+    io.print(clock.seconds(1))
+}

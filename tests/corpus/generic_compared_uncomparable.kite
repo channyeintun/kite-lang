@@ -1,0 +1,35 @@
+// `==` on a type parameter is sound for every type but a function, a trait
+// object and a host value. A generic body that compares its `T` holds every
+// caller to that — including a caller that only forwards its own parameter,
+// which is then held to it in turn.
+
+trait Show {
+    fn show(self) -> str
+}
+
+struct P {
+    a: int
+}
+
+impl Show for P {
+    fn show(self) -> str {
+        return "p"
+    }
+}
+
+fn eq<T>(a: T, b: T) -> bool {
+    return a == b
+}
+
+fn forward<U>(a: U, b: U) -> bool {
+    return eq(a, b)
+}
+
+fn main() {
+    io.print(eq(1, 2))
+    io.print(eq(P{ a: 1 }, P{ a: 1 }))
+    let f = |x: int| x + 1
+    io.print(eq(f, f)) //~ ERROR E0201
+    let d: dyn Show = P{ a: 1 }
+    io.print(forward(d, d)) //~ ERROR E0201
+}

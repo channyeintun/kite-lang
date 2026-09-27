@@ -18,7 +18,7 @@
 //! manifest that needs more than that is a manifest that has grown a
 //! programming language, which is what this is avoiding.
 
-use crate::semver::Requirement;
+use crate::semver::{Requirement, Version};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -105,7 +105,17 @@ pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
                     check_name("package", &name, line_number)?;
                     manifest.name = name;
                 }
-                "version" => manifest.version = unquote(value, line_number)?,
+                // Checked here, where the line is known. It used to be read
+                // only when this package was somebody's dependency, so a
+                // program's own `version = "banana"` passed every command.
+                "version" => {
+                    let version = unquote(value, line_number)?;
+                    Version::parse(&version).map_err(|message| ManifestError {
+                        line: line_number,
+                        message,
+                    })?;
+                    manifest.version = version;
+                }
                 other => {
                     return Err(ManifestError {
                         line: line_number,
@@ -115,6 +125,7 @@ pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
             },
             "targets" => {
                 let fields = inline_table(value, line_number)?;
+                only_keys(&fields, &["entry", "renderer"], &format!("target `{}`", key), line_number)?;
                 let Some(entry) = fields.get("entry") else {
                     return Err(ManifestError {
                         line: line_number,
@@ -128,10 +139,31 @@ pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
             }
             "dependencies" => {
                 check_name("dependency", key, line_number)?;
+                if manifest.dependencies.iter().any(|d| d.name == key) {
+                    return Err(ManifestError {
+                        line: line_number,
+                        message: format!("dependency `{}` is declared twice", key),
+                    });
+                }
                 let (source, version) = if value.starts_with('"') {
                     (Source::Path(unquote(value, line_number)?), None)
                 } else {
                     let fields = inline_table(value, line_number)?;
+                    // A key nothing reads is refused rather than dropped:
+                    // `verison = "^2"` otherwise resolved as "any version",
+                    // and `branch = "main"` as whatever the default branch was.
+                    let what = format!("dependency `{}`", key);
+                    only_keys(&fields, &["path", "git", "tag", "version"], &what, line_number)?;
+                    if fields.contains_key("path") && fields.contains_key("tag") {
+                        return Err(ManifestError {
+                            line: line_number,
+                            message: format!(
+                                "dependency `{}` has a `tag` and a `path`; a tag names a commit \
+                                 in a repository, and a path is a directory as it is",
+                                key
+                            ),
+                        });
+                    }
                     let version = match fields.get("version") {
                         None => None,
                         Some(text) => {
@@ -216,24 +248,47 @@ pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
 /// This is the guarantee `kitec pkg` is built on: the module's own header
 /// claims the npm supply-chain surface is removed *by construction*, and a
 /// name that can reach outside its directory would have put it back.
+///
+/// **And it is an identifier**, because it is written in a `use`. `-` and a
+/// leading digit used to be allowed, so `kite-md` was a package nobody could
+/// import: `use kite-md` does not parse.
 fn check_name(what: &str, name: &str, line: usize) -> Result<(), ManifestError> {
-    let ok = !name.is_empty()
-        && name.len() <= 64
-        && !name.starts_with('-')
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    let ok = name.len() <= 64
+        && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     if ok {
         return Ok(());
     }
     Err(ManifestError {
         line,
         message: format!(
-            "`{}` is not a {} name\n  a name is ASCII letters, digits, `-` and `_`, at most 64 \
-             of them, because it becomes a directory under `.kite/vendor` and a name in a `use`",
+            "`{}` is not a {} name\n  a name is ASCII letters, digits and `_`, not starting with \
+             a digit, at most 64 of them, because it is written in a `use` and becomes a \
+             directory under `.kite/vendor`",
             name, what
         ),
     })
+}
+
+/// Refuse a key in an inline table that nothing reads.
+fn only_keys(
+    fields: &BTreeMap<String, String>,
+    known: &[&str],
+    what: &str,
+    line: usize,
+) -> Result<(), ManifestError> {
+    match fields.keys().find(|k| !known.contains(&k.as_str())) {
+        None => Ok(()),
+        Some(unknown) => Err(ManifestError {
+            line,
+            message: format!(
+                "{} has no `{}`; it takes {}",
+                what,
+                unknown,
+                known.iter().map(|k| format!("`{}`", k)).collect::<Vec<_>>().join(", ")
+            ),
+        }),
+    }
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -344,6 +399,62 @@ pub fn lockfile(entries: &[Locked]) -> String {
         ));
     }
     out
+}
+
+/// Read a lockfile back.
+///
+/// It is written for a person, and read here because it is also an *input*:
+/// `kitec pkg` compares each entry against what resolution found — so a
+/// dependency whose bytes moved under the same version is refused while one
+/// that was added, removed or moved to a new version is only reported — and
+/// prefers the recorded versions over newer ones nobody asked for.
+pub fn parse_lockfile(text: &str) -> Result<Vec<Locked>, ManifestError> {
+    let mut out = Vec::new();
+    let mut entry: Option<(usize, BTreeMap<String, String>)> = None;
+    let finish = |entry: Option<(usize, BTreeMap<String, String>)>,
+                  out: &mut Vec<Locked>|
+     -> Result<(), ManifestError> {
+        let Some((line, mut fields)) = entry else { return Ok(()) };
+        let mut take = |key: &str| {
+            fields.remove(key).ok_or_else(|| ManifestError {
+                line,
+                message: format!("a `[[locked]]` entry has no `{}`", key),
+            })
+        };
+        out.push(Locked {
+            name: take("name")?,
+            version: take("version")?,
+            source: take("source")?,
+            hash: take("hash")?,
+        });
+        Ok(())
+    };
+    for (i, raw) in text.lines().enumerate() {
+        let line = strip_comment(raw).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line == "[[locked]]" {
+            finish(entry.take(), &mut out)?;
+            entry = Some((i + 1, BTreeMap::new()));
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(ManifestError {
+                line: i + 1,
+                message: format!("expected `key = value`, found `{}`", line),
+            });
+        };
+        let Some((_, fields)) = entry.as_mut() else {
+            return Err(ManifestError {
+                line: i + 1,
+                message: "a key outside any `[[locked]]` entry".to_string(),
+            });
+        };
+        fields.insert(key.trim().to_string(), unquote(value, i + 1)?);
+    }
+    finish(entry, &mut out)?;
+    Ok(out)
 }
 
 /// A content hash over a dependency's directory.
@@ -536,24 +647,71 @@ impl Sha256 {
 /// outside the directory it names is not a digest of that directory, and
 /// quietly leaving the file out would let a dependency change what it
 /// contains without changing what it hashes to.
+///
+/// **Only a link a build could follow is refused**: one named `….kite`, which
+/// a directory module reads, or one to a directory whose name a `use` can
+/// write. A path dependency is somebody's working tree, and refusing every
+/// link in it refused `node_modules/.bin` — a directory of links to scripts,
+/// none of which a build reads. A link to any other file is not source, and a
+/// link inside a directory no `use` can reach is never followed by a build.
+///
+/// Two directories are not walked at all, because nothing in them is the
+/// package: `.git`, and `.kite` — which holds the package's *own* vendored
+/// dependencies, and hashing them into it counted every one of them twice.
+/// Neither name is an identifier, so no `use` reaches either.
+///
+/// **`node_modules` is walked.** It was skipped with those two, and it is an
+/// identifier: a dependency could `use node_modules/core`, and the build
+/// compiled files the digest had never seen — changed under the same version,
+/// they passed `kitec pkg` with the lockfile "unchanged". What is hashed has to
+/// be at least what a build can read.
 fn collect_kite_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    collect_below(dir, true, out)
+}
+
+/// [`collect_kite_files`] for one directory. `reachable` is whether a `use`
+/// can name it: the package's root can, and so can a directory under a
+/// reachable one whose name is an identifier.
+fn collect_below(dir: &Path, reachable: bool, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let kind = entry.file_type()?;
         let path = entry.path();
+        let name = entry.file_name();
+        let is_kite = path.extension().is_some_and(|e| e == "kite");
+        let nameable = name.to_str().is_some_and(is_identifier);
         if kind.is_symlink() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("`{}` is a symbolic link", path.display()),
-            ));
+            let leads_to_dir = std::fs::metadata(&path).is_ok_and(|m| m.is_dir());
+            if reachable && (is_kite || (leads_to_dir && nameable)) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("`{}` is a symbolic link", path.display()),
+                ));
+            }
+            continue;
         }
         if kind.is_dir() {
-            collect_kite_files(&path, out)?;
-        } else if path.extension().is_some_and(|e| e == "kite") {
+            if name == ".git" || name == ".kite" {
+                continue;
+            }
+            collect_below(&path, reachable && nameable, out)?;
+        } else if is_kite {
             out.push(path);
         }
     }
     Ok(())
+}
+
+/// Whether a directory's name can be a segment of a `use` path: one
+/// identifier, as the lexer reads one.
+fn is_identifier(name: &str) -> bool {
+    let mut scratch = kite_diag::DiagBag::new();
+    let tokens = kite_lexer::tokenize(kite_span::FileId(0), name, &mut scratch);
+    tokens.len() == 2
+        && tokens[0].kind == kite_lexer::TokenKind::Ident
+        && tokens[0].span.start == 0
+        && tokens[0].span.end as usize == name.len()
+        && !scratch.has_errors()
 }
 
 #[cfg(test)]

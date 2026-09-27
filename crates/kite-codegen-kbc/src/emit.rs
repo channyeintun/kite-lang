@@ -21,6 +21,7 @@ pub fn compile(program: &mir::Program) -> Chunk {
             .iter()
             .map(|e| format!("{}.{}", e.host, e.name))
             .collect(),
+        extern_sigs: program.extern_sigs.clone(),
         strings: program.strings.iter().map(|s| Rc::from(s.as_str())).collect(),
         entry: program.entry.map(|e| e.0),
         vtables: program
@@ -40,10 +41,58 @@ pub fn compile(program: &mir::Program) -> Chunk {
     }
 }
 
-fn compile_fn(func: &mir::Function, traits: &[u32]) -> FnProto {
-    // Registers: one per MIR local, then a window wide enough for the largest
-    // call in the body.
-    let max_args = func
+/// Registers a frame may have: a register index is a [`Reg`], so one past
+/// the largest.
+pub const MAX_REGISTERS: usize = Reg::MAX as usize + 1;
+
+/// Scratch registers above the argument window: the most constant operands
+/// one instruction stages at once, which is an error's four.
+const SCRATCH: usize = 4;
+
+/// Something in a program the bytecode encoding cannot represent.
+#[derive(Clone, Debug)]
+pub struct Limit {
+    /// The function it is in, as named in MIR.
+    pub function: String,
+    pub span: kite_span::Span,
+    pub what: String,
+}
+
+/// Every function whose frame would not fit the register encoding.
+///
+/// A register index is sixteen bits, and a frame holds every MIR local, then
+/// the widest argument window the body stages, then a little scratch. A frame
+/// wider than that used to be emitted anyway, with each index silently cut to
+/// sixteen bits — so one local aliased another and the VM read a register that
+/// was not there. The driver asks this first, and reports what it finds as a
+/// diagnostic rather than emitting bytecode that means something else.
+///
+/// The argument window is also where a literal's elements are staged, so this
+/// bounds a slice, map or struct literal too: a count is as wide as a
+/// register index, and a literal with more elements than a frame has
+/// registers would not fit either.
+pub fn limits(program: &mir::Program) -> Vec<Limit> {
+    let mut found = Vec::new();
+    for func in &program.fns {
+        let needed = func.locals.len() + widest_window(func) + SCRATCH;
+        if needed > MAX_REGISTERS {
+            found.push(Limit {
+                function: func.name.clone(),
+                span: func.span,
+                what: format!(
+                    "a frame of {} registers, more than the {} the bytecode can address",
+                    needed, MAX_REGISTERS
+                ),
+            });
+        }
+    }
+    found
+}
+
+/// The most consecutive registers any one instruction in the body stages:
+/// the arguments of the widest call, or the elements of the widest literal.
+fn widest_window(func: &mir::Function) -> usize {
+    func
         .blocks
         .iter()
         .flat_map(|b| &b.stmts)
@@ -63,7 +112,22 @@ fn compile_fn(func: &mir::Function, traits: &[u32]) -> FnProto {
             _ => 0,
         })
         .max()
-        .unwrap_or(0);
+        .unwrap_or(0)
+}
+
+fn compile_fn(func: &mir::Function, traits: &[u32]) -> FnProto {
+    // Registers: one per MIR local, then a window wide enough for the largest
+    // call in the body.
+    let max_args = widest_window(func);
+    // `limits` is asked first, so reaching here with a frame too wide to
+    // address is a driver that skipped it — a compiler bug, and one that must
+    // not become registers silently aliasing each other.
+    assert!(
+        func.locals.len() + max_args + SCRATCH <= MAX_REGISTERS,
+        "`{}` needs more registers than the bytecode can address; \
+         `kite_codegen_kbc::limits` reports this before compiling",
+        func.name
+    );
 
     let mut e = Emitter {
         func,
@@ -175,10 +239,11 @@ impl<'a> Emitter<'a> {
 
         match value {
             // Both are replaced by the state-machine transform before any
-            // backend sees them.
-            mir::Rvalue::Await { .. } | mir::Rvalue::Yield => {
-                unreachable!("`await` survived the state-machine transform")
-            }
+            // backend sees them, and the driver reports one that was not
+            // (`kite_mir::internal_errors`) before asking for bytecode. An
+            // embedder that skipped the question gets a trap here, not a
+            // compiler that panics.
+            mir::Rvalue::Await { .. } | mir::Rvalue::Yield => self.code.push(Op::Unreachable),
             mir::Rvalue::Use(o) => self.load_into(dst, o),
 
             mir::Rvalue::Binary { op, lhs, rhs } => {
@@ -203,7 +268,7 @@ impl<'a> Emitter<'a> {
                     dst,
                     func: callee.0,
                     base: self.arg_base,
-                    argc: args.len() as u8,
+                    argc: width(args.len()),
                 });
             }
 
@@ -213,7 +278,7 @@ impl<'a> Emitter<'a> {
                     dst,
                     func: func.0,
                     base: self.arg_base,
-                    count: captures.len() as u8,
+                    count: width(captures.len()),
                 });
             }
 
@@ -224,7 +289,7 @@ impl<'a> Emitter<'a> {
                     dst,
                     callee: c,
                     base: self.arg_base,
-                    argc: args.len() as u8,
+                    argc: width(args.len()),
                 });
             }
 
@@ -245,7 +310,7 @@ impl<'a> Emitter<'a> {
                     dst,
                     op: *op,
                     base: self.arg_base,
-                    argc: args.len() as u8,
+                    argc: width(args.len()),
                 });
             }
 
@@ -261,7 +326,7 @@ impl<'a> Emitter<'a> {
                     table: self.vtable_index(*trait_id),
                     method: *method,
                     base: self.arg_base,
-                    argc: args.len() as u8,
+                    argc: width(args.len()),
                 });
             }
 
@@ -271,7 +336,7 @@ impl<'a> Emitter<'a> {
                     dst,
                     native: Native::from_builtin(*builtin),
                     base: self.arg_base,
-                    argc: args.len() as u8,
+                    argc: width(args.len()),
                 });
             }
 
@@ -283,7 +348,7 @@ impl<'a> Emitter<'a> {
                     dst,
                     struct_id: struct_id.0,
                     base: self.arg_base,
-                    count: fields.len() as u8,
+                    count: width(fields.len()),
                 });
             }
 
@@ -303,7 +368,7 @@ impl<'a> Emitter<'a> {
                     enum_id: enum_id.0,
                     variant: *variant,
                     base: self.arg_base,
-                    count: fields.len() as u8,
+                    count: width(fields.len()),
                 });
             }
 
@@ -365,7 +430,7 @@ impl<'a> Emitter<'a> {
                 self.code.push(Op::NewMap {
                     dst,
                     base: self.arg_base,
-                    count: entries.len() as u8,
+                    count: width(entries.len()),
                 });
             }
             mir::Rvalue::MapGet { base, key } => {
@@ -383,7 +448,7 @@ impl<'a> Emitter<'a> {
                     dst,
                     index: *index,
                     base: self.arg_base,
-                    argc: args.len() as u8,
+                    argc: width(args.len()),
                 });
             }
             mir::Rvalue::MapKeys { base } => {
@@ -399,7 +464,7 @@ impl<'a> Emitter<'a> {
                 self.code.push(Op::NewTuple {
                     dst,
                     base: self.arg_base,
-                    count: elems.len() as u8,
+                    count: width(elems.len()),
                 });
             }
 
@@ -408,7 +473,7 @@ impl<'a> Emitter<'a> {
                 self.code.push(Op::NewSlice {
                     dst,
                     base: self.arg_base,
-                    count: elems.len() as u8,
+                    count: width(elems.len()),
                 });
             }
             mir::Rvalue::IndexGet { base, index } => {
@@ -514,6 +579,56 @@ impl<'a> Emitter<'a> {
 }
 
 fn reg(l: mir::Local) -> Reg {
-    debug_assert!(l.0 <= Reg::MAX as u32, "register index overflows u16");
-    l.0 as Reg
+    // `limits` has bounded the frame, so this cannot fail on a program the
+    // driver let through.
+    Reg::try_from(l.0).expect("register index overflows u16")
+}
+
+/// An element or argument count, which is as wide as a register index.
+fn width(n: usize) -> u16 {
+    u16::try_from(n).expect("a count wider than a frame; `limits` reports this")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kite_hir::TyId;
+
+    fn function(locals: usize) -> mir::Function {
+        let span = kite_span::Span::new(kite_span::FileId(0), 0, 0);
+        mir::Function {
+            name: "wide".into(),
+            is_async: false,
+            exportable: false,
+            param_count: 0,
+            locals: (0..locals)
+                .map(|_| mir::LocalDecl { ty: TyId::INT, name: None })
+                .collect(),
+            ret: TyId::UNIT,
+            blocks: vec![mir::BasicBlock {
+                stmts: vec![mir::Inst::Assign {
+                    dst: mir::Local(locals as u32 - 1),
+                    value: mir::Rvalue::Use(mir::Operand::Int(1)),
+                }],
+                term: mir::Terminator::Return(None),
+            }],
+            span,
+        }
+    }
+
+    /// A register index is sixteen bits. A frame wider than that was emitted
+    /// with its indices cut short, so the last local here landed on top of an
+    /// early one; now it is reported before anything is emitted.
+    #[test]
+    fn a_frame_too_wide_to_address_is_reported() {
+        let program = mir::Program { fns: vec![function(70_000)], ..Default::default() };
+        let found = limits(&program);
+        assert_eq!(found.len(), 1, "{:?}", found);
+        assert_eq!(found[0].function, "wide");
+
+        let fits = mir::Program { fns: vec![function(1_000)], ..Default::default() };
+        assert!(limits(&fits).is_empty());
+        let chunk = compile(&fits);
+        assert!(chunk.functions[0].frame_size <= MAX_REGISTERS);
+    }
 }

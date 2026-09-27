@@ -14,8 +14,8 @@ use std::fmt;
 pub mod mono;
 pub mod ty;
 pub use ty::{
-    EnumDef, EnumId, FieldDef, StructDef, StructId, TraitDef, TraitId, TraitMethodDef, TyId,
-    TyKind, Types, VariantDef,
+    EnumDef, EnumId, FieldDef, Refusal, StructDef, StructId, TraitDef, TraitId, TraitMethodDef,
+    TyId, TyKind, Types, VariantDef,
 };
 
 // ---------------------------------------------------------------------------
@@ -87,11 +87,30 @@ pub enum TypeTag {
 impl TypeTag {
     /// A single integer identifying the type at run time. Enums are shifted
     /// clear of structs so the two id spaces cannot collide.
+    ///
+    /// **No type encodes to zero.** Zero is the tag an error carries when it
+    /// carries nothing — a plain `errors.new` — and the tag every backend
+    /// reads off a nil error, which is what lets `T.is(err)` be a single
+    /// comparison with no nil test in front of it. Structs are therefore
+    /// counted from one: encoding the first struct declared as zero made
+    /// `NotFound.is(errors.new("x"))` true, and `NotFound.as` of it hand back
+    /// a value that was never there.
     pub fn encode(self) -> u32 {
         match self {
-            TypeTag::Struct(s) => s.0,
-            TypeTag::Enum(e) => 0x8000_0000 | e.0,
+            TypeTag::Struct(s) => Self::struct_tag(s.0),
+            TypeTag::Enum(e) => Self::enum_tag(e.0),
         }
+    }
+
+    /// The tag of struct number `id`, for a backend that has the raw id from
+    /// a run-time value rather than a [`StructId`].
+    pub fn struct_tag(id: u32) -> u32 {
+        id + 1
+    }
+
+    /// The tag of enum number `id`.
+    pub fn enum_tag(id: u32) -> u32 {
+        0x8000_0000 | id
     }
 }
 
@@ -177,7 +196,10 @@ pub enum Stmt {
     /// `xs[i] = v`
     SetIndex { base: Expr, index: Expr, value: Expr, span: Span },
     /// `xs.push(v)`. Slices are copy-on-write values, so this mutates the
-    /// binding, which must therefore be `var`.
+    /// binding, which must therefore be `var`. A slice held anywhere else —
+    /// `b.cells.push(v)` — is copied into a hidden local that this pushes to,
+    /// and the checker writes it back; so this, `SetIndex`, `MapSet` and
+    /// `MapRemove` only ever change a local.
     SlicePush { local: LocalId, value: Expr, span: Span },
     /// `m[k] = v`. Maps are copy-on-write values too.
     MapSet { local: LocalId, key: Expr, value: Expr, span: Span },
@@ -239,7 +261,12 @@ pub enum ExprKind {
     Call { callee: FnId, args: Vec<Expr>, targs: Vec<TyId> },
     /// A call through a trait object. `args[0]` is the receiver; which function
     /// runs is decided at run time from its concrete type.
-    CallVirtual { trait_id: TraitId, method: u32, args: Vec<Expr> },
+    ///
+    /// Also a call through a bound, whose receiver is a type parameter.
+    /// Monomorphisation turns that into a direct call once the parameter is
+    /// known, which is what lets such a method mention `Self` or be generic:
+    /// `targs` are its own type arguments, empty for every other method.
+    CallVirtual { trait_id: TraitId, method: u32, args: Vec<Expr>, targs: Vec<TyId> },
     /// A concrete value standing where a `dyn Trait` is wanted. Explicit so the
     /// representation change is visible in the IR.
     ToDyn { value: Box<Expr>, trait_id: TraitId },
@@ -614,8 +641,15 @@ pub enum BinOp {
     BitAnd,
     BitOr,
     BitXor,
+    /// A shift count outside `0..=63` traps, the way overflow does in a debug
+    /// build: there is no bit pattern that is the right answer to `1 << 64`.
     Shl,
     Shr,
+    /// The release-build forms, which take the count modulo 64 — its low six
+    /// bits — as the hardware does. Chosen by the checker for the reason the
+    /// `…IntWrap` forms are.
+    ShlWrap,
+    ShrWrap,
     EqInt,
     NeInt,
     LtInt,
@@ -657,7 +691,11 @@ impl BinOp {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum UnOp {
+    /// `-x`, which overflows for exactly one input: `int`'s minimum has no
+    /// positive counterpart. Traps there, as a debug build's `+` does.
     NegInt,
+    /// The release-build form, which wraps: `-min` is `min`.
+    NegIntWrap,
     NegFloat,
     Not,
 }
@@ -801,7 +839,7 @@ impl Program {
                 let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();
                 format!("fn{}({})", callee.0, a.join(", "))
             }
-            ExprKind::CallVirtual { trait_id, method, args } => {
+            ExprKind::CallVirtual { trait_id, method, args, .. } => {
                 let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();
                 format!(
                     "virtual {}#{}({})",

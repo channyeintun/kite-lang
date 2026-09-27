@@ -30,9 +30,9 @@ struct Line {
 
 fn starting_lines() -> [Line] {
     return [
-        Line { what: "Keyboard", price: 8999, quantity: 1 },
-        Line { what: "Cable", price: 450, quantity: 3 },
-        Line { what: "Stand", price: 2075, quantity: 1 },
+        Line{ what: "Keyboard", price: 8999, quantity: 1 },
+        Line{ what: "Cable", price: 450, quantity: 3 },
+        Line{ what: "Stand", price: 2075, quantity: 1 },
     ]
 }
 
@@ -101,9 +101,7 @@ fn set_percent(var model: View, text: str) {
 }
 
 fn add_line(var model: View, what: str, price: int) {
-    var lines = model.lines
-    lines.push(Line{ what: what, price: price, quantity: 1 })
-    model.lines = lines
+    model.lines.push(Line{ what: what, price: price, quantity: 1 })
 }
 
 fn note(id: str, body: str, bad: bool) {

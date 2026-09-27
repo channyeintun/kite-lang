@@ -365,3 +365,240 @@ try {
         out
     );
 }
+
+/// Start the adapter in a child, wait for "listening <port>", run `body` (a
+/// string of JavaScript with `port`, `server` and `buffered` in scope), and
+/// stop the child however that ends.
+fn client_with(body: &str) -> String {
+    format!(
+        r#"import {{ spawn }} from "node:child_process";
+import {{ fileURLToPath }} from "node:url";
+
+const server = spawn(process.execPath, [fileURLToPath(new URL("./serve.mjs", import.meta.url))], {{
+  stdio: ["ignore", "pipe", "inherit"],
+}});
+const stop = () => {{ try {{ server.kill("SIGKILL"); }} catch {{}} }};
+process.on("exit", stop);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+try {{
+  let buffered = "";
+  server.stdout.on("data", (chunk) => {{ buffered += chunk; }});
+  const port = await new Promise((resolve, reject) => {{
+    const timer = setTimeout(() => reject(new Error("never listened:\n" + buffered)), 15000);
+    const look = () => {{
+      const match = buffered.match(/listening (\d+)/);
+      if (match) {{
+        clearTimeout(timer);
+        resolve(Number(match[1]));
+      }} else {{
+        setTimeout(look, 10);
+      }}
+    }};
+    look();
+  }});
+{body}
+}} finally {{
+  stop();
+}}
+"#,
+        body = body
+    )
+}
+
+/// Two headers of one name both reach the wire, and a program's own content
+/// type is the only one sent, however it capitalised the name.
+///
+/// The adapter gathered headers into an object, one slot per name: the first
+/// of two `Set-Cookie`s was dropped, and `Content-type` beside the default
+/// `content-type` sent the response out with two types.
+#[test]
+fn repeated_and_differently_cased_headers_survive() {
+    if !node_available() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let src = "use std/http\n\
+         async fn main() {\n\
+         \x20   let (server, err) = await http.open(0)\n\
+         \x20   if err != nil {\n        io.print(err.message())\n        return\n    }\n\
+         \x20   io.print(\"listening \\(http.port_of(server))\")\n\
+         \x20   let (incoming, aerr) = await http.accept(server)\n\
+         \x20   if aerr != nil {\n        return\n    }\n\
+         \x20   let headers = [\n\
+         \x20       http.Header{ name: \"Set-Cookie\", value: \"a=1\" },\n\
+         \x20       http.Header{ name: \"Set-Cookie\", value: \"b=2\" },\n\
+         \x20       http.Header{ name: \"Content-type\", value: \"application/json\" },\n\
+         \x20   ]\n\
+         \x20   let rerr = http.respond(incoming, http.ok(\"{}\"), headers)\n\
+         \x20   if rerr != nil {\n        io.print(rerr.message())\n    }\n\
+         }\n";
+    let client = client_with(
+        r#"  const r = await fetch(`http://127.0.0.1:${port}/`);
+  console.log("cookies " + r.headers.getSetCookie().join(" "));
+  console.log("type " + r.headers.get("content-type"));"#,
+    );
+    let out = serve_under_node("headers", src, &client);
+    assert_eq!(out, "cookies a=1 b=2\ntype application/json\n", "{}", out);
+}
+
+/// While a server waits for requests it costs nothing, and a task's sleep
+/// still comes due.
+///
+/// The adapter ran the program to completion with the batch driver, which
+/// polled the accept loop some nine hundred times a second while nothing
+/// arrived, and whose clock did not move while a task waited on the host — a
+/// task that slept before closing the server never woke. The count is taken
+/// by wrapping the module's `$kite.poll` before the adapter loads it.
+#[test]
+fn an_idle_server_costs_nothing_and_its_timers_still_run() {
+    if !node_available() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let src = "use std/http\n\
+         use std/task\n\
+         fn hello(request: http.Request) -> http.Response {\n\
+         \x20   return http.ok(\"hello\")\n\
+         }\n\
+         async fn later() -> int {\n\
+         \x20   await task.sleep(300)\n\
+         \x20   io.print(\"slept\")\n\
+         \x20   return 0\n\
+         }\n\
+         async fn main() {\n\
+         \x20   let (server, err) = await http.open(0)\n\
+         \x20   if err != nil {\n        io.print(err.message())\n        return\n    }\n\
+         \x20   io.print(\"listening \\(http.port_of(server))\")\n\
+         \x20   let t = later()\n\
+         \x20   let routes = [http.route(\"GET\", \"/hello\", hello)]\n\
+         \x20   let (answered, rerr) = await http.run(server, routes)\n\
+         \x20   if rerr != nil {\n        io.print(rerr.message())\n        return\n    }\n\
+         \x20   io.print(\"answered \\(answered)\")\n\
+         }\n";
+    // The adapter is imported in this process, after `$kite.poll` has been
+    // wrapped, so the polls can be counted.
+    let client = r#"import { fileURLToPath } from "node:url";
+const original = WebAssembly.instantiate;
+let polls = 0;
+WebAssembly.instantiate = async (...args) => {
+  const result = await original(...args);
+  if (!result.instance || !result.instance.exports["$kite.poll"]) return result;
+  const exports = { ...result.instance.exports };
+  const poll = result.instance.exports["$kite.poll"];
+  exports["$kite.poll"] = (task) => { polls += 1; return poll(task); };
+  return { instance: { exports }, module: result.module };
+};
+const lines = [];
+const write = process.stdout.write.bind(process.stdout);
+process.stdout.write = (chunk) => { lines.push(String(chunk)); return true; };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+await import(new URL("./serve.mjs", import.meta.url));
+// The sleeper wakes while the accept loop waits on the host; after that the
+// program has nothing to do until a request comes.
+const started = Date.now();
+while (!lines.join("").includes("slept") && Date.now() - started < 5000) await sleep(10);
+const slept = lines.join("").includes("slept");
+await sleep(50);
+const before = polls;
+await sleep(500);
+const idle = polls - before;
+const port = Number(lines.join("").match(/listening (\d+)/)[1]);
+const r = await fetch(`http://127.0.0.1:${port}/hello`);
+const text = await r.text();
+write("slept while waiting: " + slept + "\n");
+write("idle polls: " + idle + "\n");
+write(r.status + " " + text + "\n");
+process.exit(0);
+"#;
+    let out = serve_under_node("idle", src, client);
+    assert_eq!(
+        out,
+        "slept while waiting: true\nidle polls: 0\n200 hello\n",
+        "{}",
+        out
+    );
+}
+
+/// A shut server stops: `run` returns what it answered, and `accept` says the
+/// server is shut rather than waiting for a request that cannot come.
+///
+/// Both used to wait for good. `accept` looped on "nothing pending" and never
+/// asked whether anything ever could be, and `run` only noticed the shut
+/// after answering a request — so a server shut while idle, which is the
+/// ordinary way to stop one, never let `run` return.
+///
+/// The program is its own client, as in the test above, and also checks the
+/// two routing cases a query string used to break and a header block that is
+/// not `name: value` lines being refused rather than silently dropped.
+#[test]
+fn a_shut_server_stops_accepting_and_run_returns() {
+    if !node_available() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let src = r##"use std/http
+
+fn index(r: http.Request) -> http.Response {
+    return http.ok("q=\(or_else(http.query_parameter(r, "q"), "-"))")
+}
+
+fn user(r: http.Request) -> http.Response {
+    return http.ok("user \(or_else(http.parameter("/users/:id", r.path, "id"), "-"))")
+}
+
+async fn main() {
+    let (server, err) = await http.open(0)
+    if err != nil {
+        io.print(err.message())
+        return
+    }
+    let port = http.port_of(server)
+    let routes = [http.route("GET", "/", index), http.route("GET", "/users/:id", user)]
+    let running = http.run(server, routes)
+    for path in ["/?q=a+b%21", "/users/7?tab=posts"] {
+        let (res, gerr) = await http.get("http://127.0.0.1:\(port)\(path)")
+        if gerr != nil {
+            io.print("get failed: \(gerr.message())")
+        } else {
+            io.print("\(path) -> \(res.status) \(res.body)")
+        }
+    }
+    let (_, lerr) = await http.send("GET", "http://127.0.0.1:\(port)/", "", "x-user: ada\nnot a header")
+    io.print("a line that is not a header is refused: \(lerr != nil)")
+    http.shut(server)
+    let (answered, rerr) = await running
+    if rerr != nil {
+        io.print("run failed: \(rerr.message())")
+        return
+    }
+    io.print("run returned after \(answered)")
+    let (_, aerr) = await http.accept(server)
+    io.print("accept after shut: \(if aerr == nil { "a request" } else { aerr.message() })")
+}
+"##;
+    let client = r#"import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const server = spawn(process.execPath, [fileURLToPath(new URL("./serve.mjs", import.meta.url))], {
+  stdio: ["ignore", "pipe", "inherit"],
+});
+let out = "";
+server.stdout.on("data", (chunk) => { out += chunk; });
+// A server that never stops is the failure this is about, so it is given a
+// deadline rather than trusted to exit.
+const timer = setTimeout(() => { try { server.kill("SIGKILL"); } catch {} }, 15000);
+const code = await new Promise((resolve) => server.on("exit", resolve));
+clearTimeout(timer);
+process.stdout.write(out + (code === 0 ? "" : "exited with " + code + "\n"));
+"#;
+    let out = serve_under_node("shut", src, client);
+    assert_eq!(
+        out,
+        "/?q=a+b%21 -> 200 q=a b!\n\
+         /users/7?tab=posts -> 200 user 7\n\
+         a line that is not a header is refused: true\n\
+         run returned after 2\n\
+         accept after shut: http.accept: the server is shut\n"
+    );
+}

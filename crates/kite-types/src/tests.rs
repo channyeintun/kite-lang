@@ -22,6 +22,12 @@ impl Ctx {
 }
 
 fn run(src: &str) -> Ctx {
+    run_in(src, false)
+}
+
+/// Check in a named build mode: a few rules, such as how `-` on an `int` is
+/// lowered, differ in a release build, and what they feed must not.
+fn run_in(src: &str, release: bool) -> Ctx {
     let mut sources = SourceMap::new();
     let f = sources.add("t.kite", src);
     let mut diags = DiagBag::new();
@@ -33,7 +39,7 @@ fn run(src: &str) -> Ctx {
         diags.render_all(&sources)
     );
     let resolved = kite_resolve::resolve(&ast, &mut diags);
-    let program = check(&ast, &resolved, &sources, &mut diags);
+    let program = check_with(&ast, &resolved, &sources, &mut diags, release);
     Ctx { program, diags, sources }
 }
 
@@ -983,6 +989,122 @@ fn implementing_an_unknown_trait_is_reported() {
     assert!(c.has("E0204"), "{}", c.render());
 }
 
+// ---- generics, conversions and coherence ----------------------------------
+
+/// Two arguments disagreeing about a parameter is one mistake. The conflict
+/// names both sides; a mismatch on top of it would say the same thing again.
+#[test]
+fn a_conflicting_argument_is_reported_once() {
+    let c = run(
+        "fn same<T>(a: T, b: T) -> T {\n  return a\n}\n\
+         fn main() {\n  let x = same(1, \"two\")\n}\n",
+    );
+    assert_eq!(c.codes(), vec!["E0209"], "{}", c.render());
+}
+
+/// A value converted where a generic parameter is solved only by a later
+/// argument: `x: Option<T>` learns `T` is `int` after `7` was checked, and
+/// the `7` must still be wrapped.
+#[test]
+fn an_argument_is_converted_once_its_parameter_is_solved() {
+    let c = ok(
+        "fn get<T>(x: Option<T>, d: T) -> T {\n  if x == nil {\n    return d\n  }\n  return x\n}\n\
+         fn main() {\n  io.print(get(7, 3))\n}\n",
+    );
+    let main = &c.program.fns[1];
+    let text = format!("{:?}", main.body);
+    assert!(text.contains("Wrap"), "the argument was not wrapped: {}", text);
+}
+
+/// A unit variant says nothing about a generic enum's arguments; the
+/// annotation it is bound under does.
+#[test]
+fn an_annotation_settles_a_bare_unit_variant() {
+    ok("enum Maybe<T> {\n  None\n  Some(T)\n}\n\
+        fn main() {\n  let m: Maybe<str> = None\n  let n: Maybe<int> = Maybe.None\n}\n");
+}
+
+/// Inside `outer<T: Show>`, `T` is a `Show`, and may be handed to anything
+/// that asks for one — `Share` included.
+#[test]
+fn a_bounded_parameter_meets_its_own_bound() {
+    ok("trait Show {\n  fn show(self) -> str\n}\ntrait Share {\n}\n\
+        fn inner<T: Show>(x: T) -> str {\n  return x.show()\n}\n\
+        fn outer<T: Show>(x: T) -> str {\n  return inner(x)\n}\n\
+        fn send<T: Share>(v: T) -> T {\n  return v\n}\n\
+        fn pass<T: Share>(v: T) -> [T] {\n  return [send(v)]\n}\n\
+        fn main() {\n  io.print(pass(1).len())\n}\n");
+}
+
+/// An unbounded parameter is not known to be anything, and the fix is to say
+/// more about it where it is declared.
+#[test]
+fn an_unbounded_parameter_does_not_meet_a_bound() {
+    let c = run(
+        "trait Show {\n  fn show(self) -> str\n}\n\
+         fn inner<T: Show>(x: T) -> str {\n  return x.show()\n}\n\
+         fn outer<T>(x: T) -> str {\n  return inner(x)\n}\n\
+         fn main() {\n}\n",
+    );
+    assert!(c.has("E0208"), "{}", c.render());
+    assert!(c.render().contains("add the bound: `T: Show`"), "{}", c.render());
+}
+
+/// `Display` is how anything but a primitive becomes text, and a bound or a
+/// trait object says a value has it just as an `impl` does.
+#[test]
+fn a_display_bound_or_object_interpolates() {
+    ok("trait Display {\n  fn show(self) -> str\n}\n\
+        fn say<T: Display>(x: T) -> str {\n  return \"<\\(x)>\"\n}\n\
+        fn tell(d: dyn Display) -> str {\n  return \"\\(d)\"\n}\n\
+        fn main() {\n}\n");
+}
+
+/// A name meant as a variant that is not one is a binding: it takes every
+/// value, and each arm after it is dead — which is said, with the variant it
+/// was probably meant to be.
+#[test]
+fn an_arm_after_a_misspelt_variant_is_unreachable() {
+    let c = ok("enum Kind {\n  Missing\n  File\n  Directory\n}\n\
+                fn f(k: Kind) -> int {\n  return match k {\n\
+                \x20   Dir => 1,\n    File => 2,\n    Missing => 3,\n  }\n}\n\
+                fn main() {\n  io.print(f(Kind.File))\n}\n");
+    let warnings: Vec<&kite_diag::Diagnostic> = c
+        .diags
+        .iter()
+        .filter(|d| d.code == Some(codes::E0116))
+        .collect();
+    assert_eq!(warnings.len(), 2, "{}", c.render());
+    assert!(c.render().contains("did you mean `Directory`?"), "{}", c.render());
+}
+
+/// Matches exhaustive only through their nested patterns.
+#[test]
+fn nested_patterns_make_a_match_exhaustive() {
+    ok("enum Light {\n  On(bool)\n  Off\n}\n\
+        fn f(l: Light, p: (bool, int)) -> int {\n\
+        \x20 let a = match l {\n    On(true) => 1,\n    On(false) => 2,\n    Off => 3,\n  }\n\
+        \x20 let b = match p {\n    (true, _) => 1,\n    (false, _) => 2,\n  }\n\
+        \x20 return a + b\n}\n\
+        fn main() {\n  io.print(f(Light.Off, (true, 1)))\n}\n");
+}
+
+/// A method may be generic in its own right, after its block's parameters.
+#[test]
+fn a_method_solves_its_own_type_parameters() {
+    let c = ok(
+        "struct Box<T> {\n  v: T\n}\n\
+         impl<T> Box<T> {\n\
+         \x20 fn map<U>(self, f: fn(T) -> U) -> Box<U> {\n    return Box{ v: f(self.v) }\n  }\n}\n\
+         fn main() {\n\
+         \x20 let b = Box{ v: 5 }\n\
+         \x20 let c = b.map(|x: int| x > 2)\n}\n",
+    );
+    let main = c.program.fns.iter().find(|f| f.name == "main").expect("main");
+    let c_ty = main.locals.iter().find(|l| l.name == "c").expect("c").ty;
+    assert_eq!(c.program.types.name(c_ty), "Box<bool>");
+}
+
 // ---- slices and optionals -------------------------------------------------
 
 #[test]
@@ -1168,13 +1290,17 @@ fn a_non_diverging_error_branch_does_not_clean_the_value() {
     assert!(c.has("E0301"), "{}", c.render());
 }
 
-/// The wrapping form the specification and `std/errors` both show. A wrapper
-/// answers nil exactly when what it wrapped was nil, so passing the `check`
-/// proves the wrapped error nil and its value readable.
+/// Passing a `check` of `errors.wrap(err, …)` proves `err` nil, because that
+/// wrapper answers nil exactly when what it wrapped was nil — which is why
+/// only it is looked through. A function of the program's own may answer nil
+/// for anything, even one called `wrap`, so passing a `check` of what it
+/// returned says nothing about the error it was handed. (The standard
+/// library's `wrap` needs `std/errors`, so the differential corpus is where
+/// the cleaning form is exercised.)
 #[test]
-fn checking_a_wrapped_error_cleans_the_value() {
-    let c = run("fn load() -> (int, error) {\n  return 1, nil\n}\nfn wrap(e: error, c: str) -> error {\n  return e\n}\nfn f() -> (int, error) {\n  let (v, err) = load()\n  check wrap(err, \"while loading\")\n  return v, nil\n}\nfn main() {\n}\n");
-    assert!(!c.diags.has_errors(), "{}", c.render());
+fn checking_what_an_arbitrary_function_returned_does_not_clean_the_value() {
+    let c = run("fn load() -> (int, error) {\n  return 1, nil\n}\nfn wrap(e: error, c: str) -> error {\n  return nil\n}\nfn f() -> (int, error) {\n  let (v, err) = load()\n  check wrap(err, \"while loading\")\n  return v, nil\n}\nfn main() {\n}\n");
+    assert!(c.has("E0301"), "{}", c.render());
 }
 
 /// Only the error arguments count: a call that happens to return an error
@@ -1698,4 +1824,320 @@ fn an_alias_naming_itself_is_rejected() {
 fn a_generic_alias_is_rejected() {
     let c = run("type Pair<T> = (T, T)\nfn main() {\n  io.print(1)\n}\n");
     assert!(c.has("E0214"), "{}", c.render());
+}
+
+// ---- flow through closures, branches and loops ----------------------------
+
+/// A `let` declared inside a loop is a fresh binding on every iteration, so
+/// its one assignment is not a second one — in a loop, or in a closure
+/// written inside one.
+#[test]
+fn a_let_declared_inside_a_loop_may_be_assigned_there() {
+    ok_body(
+        "  for i in 0..3 {\n\
+         \x20   let x: int\n\
+         \x20   if i > 1 {\n      x = 1\n    } else {\n      x = 2\n    }\n\
+         \x20   io.print(x)\n\
+         \x20   let f = |n: int| -> int {\n      let y: int\n      y = n * 2\n      return y\n    }\n\
+         \x20   io.print(f(i))\n  }",
+    );
+}
+
+/// Every arm of an exhaustive `match` assigning is every path assigning.
+#[test]
+fn a_match_whose_every_arm_assigns_definitely_assigns() {
+    ok("enum C {\n  A\n  B\n}\n\
+        fn main() {\n  let c = C.A\n  let x: int\n\
+        \x20 match c {\n    A => {\n      x = 1\n    },\n    B => {\n      x = 2\n    },\n  }\n\
+        \x20 io.print(x)\n}\n");
+}
+
+/// §7.5's own example: the `else` of a value `if` testing the error sees the
+/// value it guards as checked, and the context types both branches.
+#[test]
+fn a_value_if_cleans_and_is_typed_by_its_context() {
+    ok("fn get(k: str) -> (int, error) {\n  return 80, nil\n}\n\
+        fn main() {\n  let (value, err) = get(\"port\")\n\
+        \x20 let port = if err != nil { 8080 } else { value }\n\
+        \x20 let c = true\n  let x: Option<int> = if c { 5 } else { nil }\n\
+        \x20 io.print(port)\n  io.print(x == nil)\n}\n");
+}
+
+/// What the first test of an `else if` chain proved holds in the rest of it.
+#[test]
+fn narrowing_reaches_an_else_if() {
+    ok_body(
+        "  let x: Option<int> = 5\n  let c = true\n\
+         \x20 if x == nil {\n    io.print(0)\n  } else if c {\n    io.print(x + 1)\n  }",
+    );
+}
+
+/// A write of a value that is not optional keeps the local narrowed.
+#[test]
+fn assigning_a_present_value_keeps_a_narrowing() {
+    ok_body(
+        "  var x: Option<int> = 5\n  if x == nil {\n    return\n  }\n\
+         \x20 x = 6\n  io.print(x + 1)",
+    );
+}
+
+/// `-> (T, error)` on a closure is the fallible form, as on a declaration.
+#[test]
+fn a_closure_may_be_fallible() {
+    ok("fn main() {\n\
+        \x20 let f = |x: int| -> (int, error) {\n\
+        \x20   if x < 0 {\n      return _, errors.new(\"neg\")\n    }\n\
+        \x20   return x, nil\n  }\n\
+        \x20 let (v, err) = f(3)\n\
+        \x20 if err != nil {\n    io.print(err.message())\n  } else {\n    io.print(v)\n  }\n}\n");
+}
+
+/// A test around a closure still holds inside it: its captures were taken
+/// there.
+#[test]
+fn a_closure_sees_what_was_proved_where_it_was_made() {
+    ok_body(
+        "  let x: Option<int> = 5\n  if x != nil {\n    let f = || x + 1\n    io.print(f())\n  }",
+    );
+}
+
+/// A negative bound is a negated literal, and a range folds it as the
+/// literal pattern does — in a release build too, where the negation is the
+/// wrapping one and was once not recognised as a bound at all.
+#[test]
+fn a_range_pattern_takes_negative_bounds() {
+    let src = "fn main() {\n  let n = -3\n  let s = match n {\n    -5..=-1 => \"neg\",\n\
+               \x20   -7 => \"minus seven\",\n    _ => \"other\",\n  }\n  io.print(s)\n}\n";
+    for release in [false, true] {
+        let c = run_in(src, release);
+        assert!(c.diags.is_empty(), "release: {}\n{}", release, c.render());
+    }
+}
+
+/// `Color.Red` is the qualified spelling of `Red`, and a qualified pattern
+/// is still exhaustive only with every variant.
+#[test]
+fn a_qualified_variant_pattern_is_that_variant() {
+    ok("enum Color {\n  Red\n  Green\n}\n\
+        fn name(c: Color) -> str {\n\
+        \x20 return match c {\n    Color.Red => \"red\",\n    Color.Green => \"green\",\n  }\n}\n\
+        fn main() {\n  io.print(name(Color.Green))\n}\n");
+    let c = run("enum Color {\n  Red\n  Green\n}\n\
+        fn name(c: Color) -> str {\n  return match c {\n    Color.Red => \"red\",\n  }\n}\n\
+        fn main() {\n  io.print(name(Color.Green))\n}\n");
+    assert!(c.has("E0210"), "{}", c.render());
+}
+
+/// Every `defer` in a function is run from one stack, so an exit knows about
+/// the calls registered on earlier iterations of a loop — even an exit
+/// written above the `defer`.
+#[test]
+fn every_exit_runs_the_defer_stack() {
+    let c = ok("fn note(s: str) {\n  io.print(s)\n}\n\
+        fn early() {\n  for i in 0..3 {\n    if i == 1 {\n      return\n    }\n\
+        \x20   defer note(\"registered\")\n  }\n}\n\
+        fn main() {\n  early()\n}\n");
+    let early = c.program.fns.iter().find(|f| f.name == "early").expect("early");
+    let text = format!("{:?}", early.body);
+    assert!(
+        text.matches("CallClosure").count() >= 2,
+        "the `return` and the end of the body should both run the stack:\n{}",
+        text
+    );
+}
+
+/// A tuple binding's initialiser is checked once, whichever of its two
+/// meanings the binding turns out to have — a mistake in it used to be
+/// reported by each.
+#[test]
+fn a_tuple_bindings_initialiser_is_checked_once() {
+    let c = run("fn f(n: int) -> (int, error) {\n  return n, nil\n}\n\
+        fn main() {\n  let (v, err) = f(1 + \"a\")\n  if err != nil {\n    return\n  }\n  io.print(v)\n}\n");
+    let reported = c.codes().iter().filter(|code| **code == "E0201").count();
+    assert_eq!(reported, 1, "{}", c.render());
+}
+
+/// A generic call inside a generic struct literal or variant payload is
+/// checked twice, once on trial to solve the literal's type arguments. The
+/// trial's record of the call was kept, so a comparison it broke was
+/// reported once per pass.
+#[test]
+fn a_call_checked_on_trial_is_held_to_its_comparisons_once() {
+    let c = run("trait Show {\n  fn show(self) -> str\n}\nstruct P {\n  a: int\n}\n\
+        impl Show for P {\n  fn show(self) -> str {\n    return \"p\"\n  }\n}\n\
+        struct Box<T> {\n  v: T\n}\nenum Maybe<T> {\n  Some(T)\n  None\n}\n\
+        fn eq<T>(a: T, b: T) -> bool {\n  return a == b\n}\n\
+        fn main() {\n  let d: dyn Show = P{ a: 1 }\n  let b = Box{ v: eq(d, d) }\n\
+        \x20 let m = Maybe.Some(eq(d, d))\n  io.print(b.v)\n}\n");
+    assert_eq!(c.codes(), vec!["E0201", "E0201"], "{}", c.render());
+}
+
+/// A pattern refused — by the resolver for naming no variant, or here for
+/// the wrong shape — was lowered as a wildcard and so covered everything:
+/// each later arm drew "unreachable", and a variant left uncovered went
+/// unmentioned, for one mistake already reported.
+#[test]
+fn a_refused_pattern_covers_nothing_and_is_the_one_diagnostic() {
+    let c = run("enum Color {\n  Red\n  Green\n}\n\
+        fn name(c: Color) -> str {\n  return match c {\n    Color.Red => \"red\",\n\
+        \x20   Color.Purple => \"purple\",\n    Color.Green => \"green\",\n  }\n}\n\
+        fn main() {\n  io.print(name(Color.Green))\n}\n");
+    assert_eq!(c.codes(), vec!["E0111"], "{}", c.render());
+    let c = body(
+        "  let f = 2.5\n  let s = match f {\n    1..=5 => \"in\",\n    2.5 => \"exact\",\n\
+         \x20   _ => \"out\",\n  }\n  io.print(s)",
+    );
+    assert_eq!(c.codes(), vec!["E0200"], "{}", c.render());
+    let c = run("enum Color {\n  Red\n  Green\n}\n\
+        fn name(c: Color) -> str {\n  return match c {\n    Color.Red => \"red\",\n\
+        \x20   Color.Purple => \"purple\",\n  }\n}\n\
+        fn main() {\n  io.print(name(Color.Green))\n}\n");
+    assert_eq!(c.codes(), vec!["E0111"], "{}", c.render());
+}
+
+/// A bound's note suggests an `impl` only for a type one can be written for.
+/// It told the reader of a `dyn Show` passed for `T: Show` to write
+/// `impl Show for dyn Show`, which does not parse.
+#[test]
+fn a_bound_note_suggests_an_impl_only_where_one_can_be_written() {
+    let c = run("trait Show {\n  fn show(self) -> str\n}\nstruct P {\n  a: int\n}\nstruct Q {\n  a: int\n}\n\
+        impl Show for P {\n  fn show(self) -> str {\n    return \"P\"\n  }\n}\n\
+        fn show_it<T: Show>(x: T) -> str {\n  return x.show()\n}\n\
+        fn main() {\n  let d: dyn Show = P{ a: 9 }\n  io.print(show_it(d))\n\
+        \x20 io.print(show_it([1]))\n  io.print(show_it(Q{ a: 1 }))\n}\n");
+    assert_eq!(c.codes(), vec!["E0208", "E0208", "E0208"], "{}", c.render());
+    let text = c.render();
+    assert!(!text.contains("impl Show for dyn"), "{}", text);
+    assert!(!text.contains("impl Show for [int]"), "{}", text);
+    assert!(text.contains("Take a `dyn Show` parameter instead"), "{}", text);
+    assert!(text.contains("write `impl Show for Q`"), "{}", text);
+}
+
+/// A note telling the reader to write an `impl` for a generic type gives the
+/// header §8.2 accepts, for every instantiation at once. Each of these used
+/// to advise `impl Display for One<int>`, and following it was E0208.
+#[test]
+fn an_impl_note_for_a_generic_type_names_its_own_parameters() {
+    let c = run("trait Display {\n  fn show(self) -> str\n}\ntrait Show {\n  fn show(self) -> str\n}\n\
+        struct One<T> {\n  v: T\n}\n\
+        fn f<T: Show>(x: T) -> str {\n  return x.show()\n}\n\
+        fn fail() -> error {\n  return One{ v: 1 }\n}\n\
+        fn main() {\n  let o = One{ v: 5 }\n  io.print(o)\n  io.print(\"\\(o)\")\n\
+        \x20 io.print(f(o))\n  let d: dyn Show = o\n  io.print(d.show())\n\
+        \x20 let e = fail()\n  if e != nil {\n    io.print(e.message())\n  }\n}\n");
+    let text = c.render();
+    assert!(!text.contains("for One<int>"), "{}", text);
+    assert_eq!(text.matches("write `impl<T> Display for One<T> {").count(), 2, "{}", text);
+    assert!(text.contains("write `impl<T> Show for One<T>`\n"), "{}", text);
+    assert!(text.contains("write `impl<T> Show for One<T>` to use it here"), "{}", text);
+    assert!(text.contains("write `impl<T> Error for One<T> {"), "{}", text);
+}
+
+/// A tuple literal where an `Option<(…)>` is wanted is typed against the
+/// tuple inside it, as a slice or a map literal is, so its elements convert
+/// as they would for the bare tuple. It was E0200 `expected
+/// Option<(Option<int>, int)>, found (int, int)`.
+#[test]
+fn a_tuple_literal_is_typed_through_an_expected_optional() {
+    ok_body(
+        "  let a: Option<(Option<int>, int)> = (4, 1)\n  io.print(a == nil)\n\
+         \x20 let b: Option<(Option<int>, str)> = (nil, \"x\")\n  io.print(b == nil)",
+    );
+    ok("fn f(p: Option<(Option<int>, int)>) -> bool {\n  return p == nil\n}\n\
+        fn g() -> Option<(Option<int>, int)> {\n  return (2, 3)\n}\n\
+        fn main() {\n  io.print(f((4, 1)))\n  io.print(f(g()))\n}\n");
+}
+
+/// A written `(int, error)` is a tuple and a fallible call's result is a
+/// pair, and neither becomes the other. Both print as `(int, error)`, so the
+/// refusal read "expected `(int, error)`, found `(int, error)`"; it now names
+/// the difference and says what to write. What is accepted is unchanged.
+#[test]
+fn a_result_where_a_written_tuple_is_wanted_says_what_to_write() {
+    let c = run("fn g() -> (int, error) {\n  return 1, nil\n}\n\
+        fn main() {\n  let p: (int, error) = g()\n  let (v, err) = p\n  if err != nil {\n    return\n  }\n\
+        \x20 io.print(v)\n  let t: (int, error) = (2, nil)\n  var q = g()\n  let (w, e) = q\n\
+        \x20 if e != nil {\n    return\n  }\n  io.print(w)\n  q = t\n}\n");
+    assert_eq!(c.codes(), vec!["E0200", "E0200"], "{}", c.render());
+    let text = c.render();
+    assert!(!text.contains("expected `(int, error)`, found `(int, error)`"), "{}", text);
+    assert!(text.contains("expected the tuple `(int, error)`, found the result of a fallible call"), "{}", text);
+    assert!(text.contains("bind it whole without writing its type, `let p = …`"), "{}", text);
+    assert!(text.contains("expected the result of a fallible call, found the tuple `(int, error)`"), "{}", text);
+    ok("fn g() -> (int, error) {\n  return 1, nil\n}\n\
+        fn main() {\n  let p = g()\n  let (v, err) = p\n  if err != nil {\n    return\n  }\n  io.print(v)\n}\n");
+}
+
+/// A default method's body is checked once per block that takes it, so a
+/// mistake in it that is not about the implementing type was reported once
+/// per `impl`, by the resolver and by the checker alike. It is reported once.
+#[test]
+fn a_default_method_reports_each_mistake_once() {
+    let c = run("trait T {\n  fn a(self) -> int\n  fn b(self) -> int {\n    let y: str = 5\n    return self.a()\n  }\n\
+        \x20 fn c(self) -> int {\n    return nowhere\n  }\n}\n\
+        struct P {\n  n: int\n}\nstruct Q {\n  n: int\n}\n\
+        impl T for P {\n  fn a(self) -> int {\n    return 1\n  }\n}\n\
+        impl T for Q {\n  fn a(self) -> int {\n    return 2\n  }\n}\n\
+        fn main() {\n  io.print(P{ n: 1 }.b() + Q{ n: 2 }.c())\n}\n");
+    assert_eq!(c.codes(), vec!["E0111", "E0200"], "{}", c.render());
+    // A call the body makes is recorded by each copy too, and held to what
+    // its callee compares after every body is checked.
+    let c = run("fn eq<T>(a: T, b: T) -> bool {\n  return a == b\n}\n\
+        trait T {\n  fn a(self) -> int\n  fn b(self) -> bool {\n\
+        \x20   let f = |x: int| -> int { return x }\n    return eq(f, f)\n  }\n}\n\
+        struct P {\n  n: int\n}\nstruct Q {\n  n: int\n}\n\
+        impl T for P {\n  fn a(self) -> int {\n    return 1\n  }\n}\n\
+        impl T for Q {\n  fn a(self) -> int {\n    return 2\n  }\n}\n\
+        fn main() {\n  io.print(P{ n: 1 }.b() && Q{ n: 2 }.b())\n}\n");
+    assert_eq!(c.codes(), vec!["E0201"], "{}", c.render());
+}
+
+/// A default no block takes — the trait has no `impl`, or every one writes
+/// its own — was never checked, so a mistake in it compiled. It is checked
+/// once, with `Self` standing for any implementation: what the trait
+/// declares is known of it, and nothing else.
+#[test]
+fn a_default_method_no_block_takes_is_checked() {
+    let c = run("trait T {\n  fn a(self) -> int\n  fn b(self) -> int {\n    let x: Self = self\n\
+        \x20   let y: str = 5\n    return x.a()\n  }\n}\n\
+        fn main() {\n  io.print(1)\n}\n");
+    assert_eq!(c.codes(), vec!["E0200"], "{}", c.render());
+    let c = run("trait T {\n  fn a(self) -> int\n  fn b(self) -> int {\n    let s: str = self.a()\n    return 0\n  }\n}\n\
+        struct P {\n  n: int\n}\n\
+        impl T for P {\n  fn a(self) -> int {\n    return self.n\n  }\n  fn b(self) -> int {\n    return 2\n  }\n}\n\
+        fn main() {\n  io.print(P{ n: 1 }.b())\n}\n");
+    assert_eq!(c.codes(), vec!["E0200"], "{}", c.render());
+    let c = run("trait T {\n  fn a(self) -> int\n  fn b(self) -> int {\n    return missing\n  }\n}\n\
+        fn main() {\n  io.print(1)\n}\n");
+    assert_eq!(c.codes(), vec!["E0111"], "{}", c.render());
+    // What the trait declares is all a body may use of `Self`, and all of it
+    // may be: its other methods, `Self` itself, generics, closures.
+    ok("trait Cmp {\n  fn compare(self, other: Self) -> int\n\
+        \x20 fn less(self, other: Self) -> bool {\n    return self.compare(other) < 0\n  }\n\
+        \x20 fn pick<T>(self, a: T, b: T, other: Self) -> T {\n    let me: Self = self\n\
+        \x20   let f = |x: Self| -> bool { return me.less(x) }\n    if f(other) {\n      return a\n    }\n    return b\n  }\n}\n\
+        fn main() {\n  io.print(1)\n}\n");
+    // A field is not something every implementation has.
+    let c = run("trait T {\n  fn a(self) -> int\n  fn b(self) -> int {\n    return self.n\n  }\n}\n\
+        fn main() {\n  io.print(1)\n}\n");
+    assert_eq!(c.codes(), vec!["E0200"], "{}", c.render());
+}
+
+/// `Self` in an `impl` block's body names the block's type wherever a type's
+/// name is written, not only in an annotation: a literal, a pattern, an
+/// associated call and a variant. In a trait's default method it names none,
+/// and says why rather than suggesting `self`.
+#[test]
+fn self_names_the_blocks_type_in_a_literal_and_a_path() {
+    ok("struct P {\n  n: int\n}\n\
+        impl P {\n  fn make(n: int) -> Self {\n    return Self{ n: n }\n  }\n\
+        \x20 fn other() -> Self {\n    return Self.make(3)\n  }\n\
+        \x20 fn zero(self) -> bool {\n    return match self {\n      Self{ n: 0 } => true,\n      _ => false,\n    }\n  }\n}\n\
+        enum L {\n  On(int)\n  Off\n}\n\
+        impl L {\n  fn off(self) -> Self {\n    return Self.Off\n  }\n}\n\
+        fn main() {\n  io.print(P.other().n)\n  io.print(P.make(0).zero())\n  io.print(L.On(1).off() == L.Off)\n}\n");
+    let c = run("trait T {\n  fn a(self) -> int\n  fn b(self) -> int {\n    let q = Self{ n: 1 }\n    return 0\n  }\n}\n\
+        fn main() {\n  io.print(1)\n}\n");
+    assert_eq!(c.codes(), vec!["E0204"], "{}", c.render());
+    assert!(c.render().contains("known only by the trait's methods"), "{}", c.render());
 }

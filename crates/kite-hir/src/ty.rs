@@ -32,6 +32,9 @@ def_id!(StructId, "A declared struct.");
 def_id!(EnumId, "A declared enum.");
 def_id!(TraitId, "A declared trait.");
 
+/// The parameter index `Self` has inside a trait. See [`Types::self_param`].
+pub const SELF_INDEX: u32 = u32::MAX;
+
 impl TyId {
     // Primitives occupy fixed ids so they need no lookup.
     pub const UNIT: TyId = TyId(0);
@@ -192,8 +195,18 @@ pub struct TraitMethodDef {
     pub ret: TyId,
     pub fallible: bool,
     pub takes_self: bool,
+    /// Declared `var self`: the method may modify its receiver, so a call
+    /// through the trait needs a receiver that may change.
+    pub var_self: bool,
     /// Whether the trait supplied a body.
     pub has_default: bool,
+    /// Declared `async`: a call yields the `Task` of `ret`, through the trait
+    /// as directly.
+    pub is_async: bool,
+    /// How many type parameters the method declares of its own: `fn map<U>`
+    /// has one. A generic method has a body per argument, so a `dyn` has no
+    /// single one to dispatch to.
+    pub generic_count: usize,
     pub span: Span,
 }
 
@@ -223,7 +236,73 @@ pub struct Types {
     enum_origin: HashMap<EnumId, (EnumId, Vec<TyId>)>,
     /// The `Task<T>` template, declared the first time a task is needed.
     task_template: Option<StructId>,
+    /// The first generic declaration refused a specialisation, and why: a
+    /// type that contains itself at a larger type, which has no finite
+    /// expansion, or one asked for at arguments past [`MAX_TYPE_DEPTH`] or
+    /// [`MAX_TYPE_SIZE`]. Reported by the driver as `E0220`.
+    unbounded: Option<(String, Span, Refusal)>,
+    /// The templates whose specialisations are being made right now, as the
+    /// fields of one ask for another: the chain a runaway grows along.
+    expanding: Vec<TypeTemplate>,
 }
+
+/// A generic struct or enum declaration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum TypeTemplate {
+    Struct(StructId),
+    Enum(EnumId),
+}
+
+/// Why a specialisation was refused. Each is `E0220`, in its own words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// A declaration asked, through its own fields or its own body, for a
+    /// copy of itself at a larger type — and each such copy asks for the
+    /// next. That has no finite expansion.
+    Runaway,
+    /// The type arguments are past [`MAX_TYPE_DEPTH`] or [`MAX_TYPE_SIZE`],
+    /// though nothing asked for them from inside the declaration itself: a
+    /// finite program, and one too large to specialise.
+    TooLarge,
+    /// More specialisations in all than [`crate::mono::MAX_INSTANTIATIONS`].
+    TooMany,
+}
+
+/// A refused specialisation's fields: the template's, by name, each of the
+/// error type, which the checker says nothing further about.
+fn poisoned(fields: &[FieldDef]) -> Vec<FieldDef> {
+    fields.iter().map(|f| FieldDef { ty: TyId::ERROR, ..f.clone() }).collect()
+}
+
+/// How many times one declaration may appear in a chain of specialisations
+/// each asked for by the last: the fields of `Nested<int>` asking for
+/// `Nested<[int]>`, whose fields ask for `Nested<[[int]]>`, or a function's
+/// copy calling another copy of itself.
+///
+/// This is how a runaway is told from a large program. In a program that
+/// terminates, a declaration that reaches itself again does so at a type
+/// that does not grow, and so finds the copy it is already making; one that
+/// reaches itself at a larger type does so again from there, forever. A
+/// finite chain can repeat a declaration only once per distinct call path
+/// that leads back to it with a fixed type, which no program has dozens of.
+pub const MAX_NESTING: usize = 64;
+
+/// How deeply a specialisation's type arguments may nest.
+///
+/// A resource limit rather than a test for a runaway: [`MAX_NESTING`] is
+/// that, and stops `Nested<[T]>` long before this. It is what keeps a finite
+/// but absurd argument — a `Box<Box<…>>` built two hundred levels deep —
+/// from outgrowing the compiler's own stack, since every walk over a type
+/// recurses on its depth. It was 48, and a program nesting `wrap(wrap(…))`
+/// fifty levels deep, which terminates, was told it instantiated itself
+/// without end.
+pub const MAX_TYPE_DEPTH: usize = 256;
+
+/// How many nodes a specialisation's type arguments may hold between them.
+/// The depth cap alone would let `P<(T, T)>` double at every step, and naming
+/// that specialisation renders every node. It was 1,024, which a pair nested
+/// eleven levels deep in the source reached.
+pub const MAX_TYPE_SIZE: usize = 1 << 16;
 
 impl Default for Types {
     fn default() -> Self {
@@ -276,6 +355,8 @@ impl Types {
             struct_origin: HashMap::new(),
             enum_origin: HashMap::new(),
             task_template: None,
+            unbounded: None,
+            expanding: Vec::new(),
         }
     }
 
@@ -301,6 +382,15 @@ impl Types {
 
     pub fn map_of(&mut self, key: TyId, value: TyId) -> TyId {
         self.intern(TyKind::Map(key, value))
+    }
+
+    /// The value an optional holds when it is present, or the type itself
+    /// when it is not an optional.
+    pub fn present(&self, ty: TyId) -> TyId {
+        match self.kind(ty) {
+            TyKind::Optional(inner) => *inner,
+            _ => ty,
+        }
     }
 
     pub fn optional_of(&mut self, inner: TyId) -> TyId {
@@ -469,6 +559,21 @@ impl Types {
         if let Some(&existing) = self.struct_instances.get(&key) {
             return existing;
         }
+        if let Some(why) = self.refusal(TypeTemplate::Struct(template), args) {
+            let def = &self.structs[template.index()];
+            let (name, is_pub, span) = (def.name.clone(), def.is_pub, def.span);
+            // A placeholder with no origin, so nothing expands it further —
+            // neither substitution nor `refresh_instances`. The program never
+            // runs: the driver reports the refusal. It has the template's
+            // fields, each of the error type, so that `b.v` on one is not a
+            // second error after the refusal: it had no fields, and was.
+            self.unbounded.get_or_insert((name.clone(), span, why));
+            let fields = poisoned(&self.structs[template.index()].fields);
+            let id = self.declare_struct(format!("{}<…>", name), is_pub, span);
+            self.structs[id.index()].fields = fields;
+            self.struct_instances.insert(key, id);
+            return id;
+        }
         let def = &self.structs[template.index()];
         let name = format!("{}<{}>", def.name, self.arg_names(args));
         let (is_pub, span) = (def.is_pub, def.span);
@@ -478,10 +583,12 @@ impl Types {
         // itself — `struct Node<T> { next: Option<Node<T>> }` — terminates.
         self.struct_instances.insert(key, id);
         self.struct_origin.insert(id, (template, args.to_vec()));
+        self.expanding.push(TypeTemplate::Struct(template));
         let fields: Vec<FieldDef> = fields
             .into_iter()
             .map(|f| FieldDef { ty: self.substitute(f.ty, args), ..f })
             .collect();
+        self.expanding.pop();
         self.structs[id.index()].fields = fields;
         id
     }
@@ -492,6 +599,21 @@ impl Types {
         if let Some(&existing) = self.enum_instances.get(&key) {
             return existing;
         }
+        if let Some(why) = self.refusal(TypeTemplate::Enum(template), args) {
+            let def = &self.enums[template.index()];
+            let (name, is_pub, span) = (def.name.clone(), def.is_pub, def.span);
+            // A placeholder, for the reasons `instantiate_struct` gives.
+            self.unbounded.get_or_insert((name.clone(), span, why));
+            let variants: Vec<VariantDef> = self.enums[template.index()]
+                .variants
+                .iter()
+                .map(|v| VariantDef { fields: poisoned(&v.fields), ..v.clone() })
+                .collect();
+            let id = self.declare_enum(format!("{}<…>", name), is_pub, span);
+            self.enums[id.index()].variants = variants;
+            self.enum_instances.insert(key, id);
+            return id;
+        }
         let def = &self.enums[template.index()];
         let name = format!("{}<{}>", def.name, self.arg_names(args));
         let (is_pub, span) = (def.is_pub, def.span);
@@ -499,6 +621,7 @@ impl Types {
         let id = self.declare_enum(name, is_pub, span);
         self.enum_instances.insert(key, id);
         self.enum_origin.insert(id, (template, args.to_vec()));
+        self.expanding.push(TypeTemplate::Enum(template));
         let variants: Vec<VariantDef> = variants
             .into_iter()
             .map(|v| VariantDef {
@@ -510,8 +633,74 @@ impl Types {
                 ..v
             })
             .collect();
+        self.expanding.pop();
         self.enums[id.index()].variants = variants;
         id
+    }
+
+    /// Whether a new specialisation of `template` at `args` is refused, and
+    /// why. A declaration already being specialised further up this chain
+    /// [`MAX_NESTING`] times is a runaway; so is one whose arguments are too
+    /// large while it is being specialised further up, since that is how a
+    /// runaway that doubles at each step shows itself first. Arguments too
+    /// large for any other reason are only that.
+    fn refusal(&self, template: TypeTemplate, args: &[TyId]) -> Option<Refusal> {
+        let repeats = self.expanding.iter().filter(|t| **t == template).count();
+        if repeats >= MAX_NESTING {
+            return Some(Refusal::Runaway);
+        }
+        if self.too_large(args) {
+            return Some(if repeats > 0 { Refusal::Runaway } else { Refusal::TooLarge });
+        }
+        None
+    }
+
+    /// The generic type whose specialisation was refused, where it is
+    /// declared, and why, if any was.
+    pub fn unbounded_instantiation(&self) -> Option<(&str, Span, Refusal)> {
+        self.unbounded.as_ref().map(|(name, span, why)| (name.as_str(), *span, *why))
+    }
+
+    /// Whether a set of type arguments is past what any program writes on
+    /// purpose: nested deeper than [`MAX_TYPE_DEPTH`], or holding more than
+    /// [`MAX_TYPE_SIZE`] nodes between them. A specialisation asked for at
+    /// such arguments is a runaway, and is refused rather than made.
+    ///
+    /// The walk goes through a specialisation's own arguments but never its
+    /// fields, which may be recursive: `List<int>` is two nodes however long
+    /// a list is.
+    pub fn too_large(&self, args: &[TyId]) -> bool {
+        let mut budget = MAX_TYPE_SIZE;
+        args.iter()
+            .any(|a| !self.fits(*a, MAX_TYPE_DEPTH, &mut budget))
+    }
+
+    fn fits(&self, ty: TyId, depth: usize, budget: &mut usize) -> bool {
+        if depth == 0 || *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        let depth = depth - 1;
+        match self.kind(ty) {
+            TyKind::Slice(t) | TyKind::Optional(t) | TyKind::Fallible(t) => {
+                self.fits(*t, depth, budget)
+            }
+            TyKind::Map(k, v) => self.fits(*k, depth, budget) && self.fits(*v, depth, budget),
+            TyKind::Tuple(elems) => elems.iter().all(|e| self.fits(*e, depth, budget)),
+            TyKind::Fn { params, ret } => {
+                params.iter().all(|p| self.fits(*p, depth, budget))
+                    && self.fits(*ret, depth, budget)
+            }
+            TyKind::Struct(s) => match self.struct_origin.get(s) {
+                Some((_, own)) => own.iter().all(|a| self.fits(*a, depth, budget)),
+                None => true,
+            },
+            TyKind::Enum(e) => match self.enum_origin.get(e) {
+                Some((_, own)) => own.iter().all(|a| self.fits(*a, depth, budget)),
+                None => true,
+            },
+            _ => true,
+        }
     }
 
     /// The generic declaration a specialisation came from.
@@ -681,6 +870,61 @@ impl Types {
         self.traits.len()
     }
 
+    /// `Self` inside a trait declaration: the type implementing it, which the
+    /// declaration cannot name.
+    ///
+    /// A parameter at an index no declaration reaches, so substituting a
+    /// declaration's own arguments never touches it; only something that
+    /// knows the implementing type replaces it.
+    pub fn self_param(&mut self) -> TyId {
+        self.param_ty(SELF_INDEX, "Self")
+    }
+
+    /// Whether a type mentions a trait's `Self`.
+    pub fn mentions_self(&self, id: TyId) -> bool {
+        match self.kind(id) {
+            TyKind::Param { index, .. } => *index == SELF_INDEX,
+            TyKind::Slice(t) | TyKind::Optional(t) | TyKind::Fallible(t) => self.mentions_self(*t),
+            TyKind::Map(k, v) => self.mentions_self(*k) || self.mentions_self(*v),
+            TyKind::Tuple(es) => es.iter().any(|e| self.mentions_self(*e)),
+            TyKind::Fn { params, ret } => {
+                params.iter().any(|p| self.mentions_self(*p)) || self.mentions_self(*ret)
+            }
+            TyKind::Struct(s) => self
+                .struct_origin
+                .get(s)
+                .is_some_and(|(_, args)| args.iter().any(|a| self.mentions_self(*a))),
+            TyKind::Enum(e) => self
+                .enum_origin
+                .get(e)
+                .is_some_and(|(_, args)| args.iter().any(|a| self.mentions_self(*a))),
+            _ => false,
+        }
+    }
+
+    /// Why a trait's method cannot be called through a `dyn`, if it cannot.
+    ///
+    /// A call through a trait object reaches a body chosen at run time, so
+    /// the call has to be typable without knowing which: it needs a receiver
+    /// to dispatch on, one body rather than one per type argument, and no
+    /// `Self` — which would be a different type for every row of the table.
+    pub fn not_dispatchable(&self, m: &TraitMethodDef) -> Option<&'static str> {
+        if !m.takes_self {
+            Some("takes no `self`, so there is no receiver to dispatch on")
+        } else if m.generic_count > 0 {
+            Some("is generic, so there is a body per type argument rather than one to call")
+        } else if m.params.iter().any(|p| self.mentions_self(*p)) || self.mentions_self(m.ret) {
+            Some("mentions `Self`, which is a different type behind every `dyn`")
+        } else {
+            None
+        }
+    }
+
+    /// Whether `dyn Trait` is a type: every method can be called through one.
+    pub fn is_object_safe(&self, id: TraitId) -> bool {
+        self.trait_def(id).methods.iter().all(|m| self.not_dispatchable(m).is_none())
+    }
+
     // ---- queries ----------------------------------------------------------
 
     /// Whether a value of type `found` is acceptable where `expected` is
@@ -718,25 +962,45 @@ impl Types {
     }
 
     /// Whether `==` and `!=` are defined. Structural for aggregates, per the
-    /// specification: two structs are equal when their fields are.
+    /// specification: two structs are equal when their fields are, two maps
+    /// when their entries are.
     pub fn is_equatable(&self, id: TyId) -> bool {
-        match self.kind(id) {
+        self.is_equatable_inner(id, &mut Vec::new())
+    }
+
+    /// The walk behind [`Self::is_equatable`]. A recursive type — `enum List
+    /// { Cons(h: int, t: List) }`, `struct Node { children: [Node] }` — reaches
+    /// itself, and following that edge again recursed until the checker's own
+    /// stack ran out. On the back edge the answer is yes: the type is
+    /// equatable exactly when nothing else in it disqualifies it, and the rest
+    /// of the walk decides that. The same rule [`Self::is_share`] follows.
+    fn is_equatable_inner(&self, id: TyId, visiting: &mut Vec<TyId>) -> bool {
+        if visiting.contains(&id) {
+            return true;
+        }
+        visiting.push(id);
+        let result = match self.kind(id) {
             TyKind::Int | TyKind::Float | TyKind::Bool | TyKind::Str | TyKind::Err => true,
-            TyKind::Optional(inner) => self.is_equatable(*inner),
-            TyKind::Slice(elem) => self.is_equatable(*elem),
-            TyKind::Tuple(elems) => elems.iter().all(|e| self.is_equatable(*e)),
+            TyKind::Optional(inner) => self.is_equatable_inner(*inner, visiting),
+            TyKind::Slice(elem) => self.is_equatable_inner(*elem, visiting),
+            TyKind::Map(k, v) => {
+                self.is_equatable_inner(*k, visiting) && self.is_equatable_inner(*v, visiting)
+            }
+            TyKind::Tuple(elems) => elems.iter().all(|e| self.is_equatable_inner(*e, visiting)),
             TyKind::Struct(s) => self
                 .struct_def(*s)
                 .fields
                 .iter()
-                .all(|f| self.is_equatable(f.ty)),
+                .all(|f| self.is_equatable_inner(f.ty, visiting)),
             TyKind::Enum(e) => self
                 .enum_def(*e)
                 .variants
                 .iter()
-                .all(|v| v.fields.iter().all(|f| self.is_equatable(f.ty))),
+                .all(|v| v.fields.iter().all(|f| self.is_equatable_inner(f.ty, visiting))),
             _ => false,
-        }
+        };
+        visiting.pop();
+        result
     }
 
     /// Whether this type is, or contains, a host object.
@@ -889,7 +1153,14 @@ impl Types {
             // synchronised" is exactly the claim a type system should not
             // accept on trust. Two names the standard library owns is the
             // smaller hole.
-            TyKind::Struct(s) if is_synchronised(&self.struct_def(*s).name) => true,
+            //
+            // A lock serialises access, which settles races and nothing else:
+            // a `JsValue` inside one still belongs to the isolate that made
+            // it (§12.3), so a mutex holding a host reference is no more
+            // `Share` than the reference.
+            TyKind::Struct(s) if is_synchronised(&self.struct_def(*s).name) => {
+                !self.mentions_host_value(id)
+            }
             TyKind::Struct(s) => self
                 .struct_def(*s)
                 .fields
@@ -1170,6 +1441,108 @@ mod tests {
         let f = t.fn_of(vec![], TyId::UNIT);
         let with_fn = struct_with(&mut t, "Handler", vec![("f", f, false)]);
         assert!(!t.is_equatable(with_fn), "functions have no equality");
+    }
+
+    /// A type that contains itself must end the walk rather than recurse until
+    /// the checker's stack runs out — `==` on a tree or a linked list is the
+    /// ordinary case, not a corner of one.
+    #[test]
+    fn a_recursive_type_is_equatable() {
+        let mut t = Types::new();
+        let id = t.declare_struct("Node", true, span());
+        let node_ty = t.struct_ty(id);
+        let children = t.slice_of(node_ty);
+        t.set_struct_fields(
+            id,
+            vec![
+                FieldDef { name: "value".into(), ty: TyId::INT, mutable: false, is_pub: true, span: span() },
+                FieldDef { name: "children".into(), ty: children, mutable: false, is_pub: true, span: span() },
+            ],
+        );
+        assert!(t.is_equatable(node_ty));
+
+        // The back edge is not a pass: a function elsewhere in the type still
+        // disqualifies it.
+        let f = t.fn_of(vec![], TyId::UNIT);
+        let bad = t.declare_struct("Bad", true, span());
+        let bad_ty = t.struct_ty(bad);
+        let more = t.slice_of(bad_ty);
+        t.set_struct_fields(
+            bad,
+            vec![
+                FieldDef { name: "more".into(), ty: more, mutable: false, is_pub: true, span: span() },
+                FieldDef { name: "f".into(), ty: f, mutable: false, is_pub: true, span: span() },
+            ],
+        );
+        assert!(!t.is_equatable(bad_ty));
+    }
+
+    /// Section 5.2 makes `==` structural for every type, maps included.
+    #[test]
+    fn maps_are_equatable_when_their_entries_are() {
+        let mut t = Types::new();
+        let m = t.map_of(TyId::STR, TyId::INT);
+        assert!(t.is_equatable(m));
+        let f = t.fn_of(vec![], TyId::UNIT);
+        let of_fns = t.map_of(TyId::STR, f);
+        assert!(!t.is_equatable(of_fns));
+    }
+
+    /// `struct Nested<T> { inner: Option<Nested<[T]>> }` contains itself at a
+    /// larger type, so specialising it asks for another specialisation at
+    /// every level. That recursed until the checker's stack ran out; now the
+    /// specialisation past the cap is refused and the template named.
+    #[test]
+    fn a_type_that_grows_as_it_recurses_is_refused() {
+        let mut t = Types::new();
+        let nested = t.declare_struct("Nested", true, span());
+        t.set_struct_generics(nested, 1);
+        let param = t.param_ty(0, "T");
+        let bigger = t.slice_of(param);
+        let inner = t.instantiate_struct(nested, &[bigger]);
+        let inner_ty = t.struct_ty(inner);
+        let field = t.optional_of(inner_ty);
+        t.set_struct_fields(
+            nested,
+            vec![
+                FieldDef { name: "value".into(), ty: param, mutable: false, is_pub: true, span: span() },
+                FieldDef { name: "inner".into(), ty: field, mutable: false, is_pub: true, span: span() },
+            ],
+        );
+        // Filling in the declaration's own `Nested<[T]>` is already the
+        // runaway: the type has no finite expansion whatever it is used at.
+        t.refresh_instances();
+        t.instantiate_struct(nested, &[TyId::INT]);
+        let (name, _, why) = t.unbounded_instantiation().expect("the runaway is reported");
+        assert_eq!(why, Refusal::Runaway);
+        assert_eq!(name, "Nested");
+    }
+
+    /// An ordinary generic type, however recursive its fields, is nowhere
+    /// near the cap: the walk measures arguments, not values.
+    #[test]
+    fn a_recursive_generic_type_is_not_a_runaway() {
+        let mut t = Types::new();
+        let list = t.declare_struct("List", true, span());
+        t.set_struct_generics(list, 1);
+        let param = t.param_ty(0, "T");
+        let same = t.instantiate_struct(list, &[param]);
+        let same_ty = t.struct_ty(same);
+        let next = t.optional_of(same_ty);
+        t.set_struct_fields(
+            list,
+            vec![
+                FieldDef { name: "head".into(), ty: param, mutable: false, is_pub: true, span: span() },
+                FieldDef { name: "tail".into(), ty: next, mutable: false, is_pub: true, span: span() },
+            ],
+        );
+        t.refresh_instances();
+        let of_ints = t.instantiate_struct(list, &[TyId::INT]);
+        let slices = t.slice_of(TyId::INT);
+        let of_slices = t.map_of(TyId::STR, slices);
+        t.instantiate_struct(list, &[of_slices]);
+        assert!(t.unbounded_instantiation().is_none());
+        assert_eq!(t.struct_def(of_ints).fields.len(), 2);
     }
 
     /// Structs alias on assignment; slices do not, because they are

@@ -20,6 +20,9 @@ kite-mir.workspace = true
 kite-codegen-kbc.workspace = true
 kite-codegen-wasm.workspace = true
 kite-vm.workspace = true
+# Rename compares a use's spelling with its binding's name the way §2.1
+# compares identifiers: after NFC normalisation.
+unicode-normalization = "0.1"
 
 # The native backend can only exist where native code can run: the playground
 # compiles this crate to wasm32, where Cranelift has nothing to emit for.

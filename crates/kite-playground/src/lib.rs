@@ -116,13 +116,20 @@ pub unsafe extern "C" fn kite_emit(
     }))
 }
 
-/// The program, laid out the one way.
+/// The program, laid out the one way — or, for a program the formatter will
+/// not touch, the program exactly as it was.
+///
+/// The answer replaces the editor's contents, so it has to be source either
+/// way: an error message handed back here would be pasted over the program.
+/// `kite_check` is where a lexical error is explained.
 ///
 /// # Safety
 /// As [`kite_run`].
 #[no_mangle]
 pub unsafe extern "C" fn kite_format(ptr: *const u8, len: usize) -> *mut u8 {
-    answer(with_source(ptr, len, kite_fmt::format))
+    answer(with_source(ptr, len, |src| {
+        kite_fmt::format(src).unwrap_or_else(|_| src.to_string())
+    }))
 }
 
 /// The program's reference, from its doc comments.
@@ -183,7 +190,7 @@ pub unsafe extern "C" fn kite_build(
         Err(message) => return frame(&[("diagnostics", message.into_bytes())]),
     };
     let compiled = kite_driver::compile_provided(
-        "main.kite",
+        &module.path,
         &module.entry,
         kite_driver::Emit::Wasm,
         release != 0,
@@ -192,17 +199,28 @@ pub unsafe extern "C" fn kite_build(
     if compiled.failed() {
         return frame(&[("diagnostics", compiled.render_diagnostics().into_bytes())]);
     }
-    let Some(module) = compiled.wasm.as_ref() else {
+    let Some(wasm) = compiled.wasm.as_ref() else {
         return frame(&[("diagnostics", b"error: no module was produced\n".to_vec())]);
     };
-    let glue = kite_driver::generate_glue_with_hosts("app.wasm", &module.hosts);
-    let (api_js, api_dts) = kite_driver::generate_api(&module.api, "app.wasm");
-    frame(&[
-        ("app.wasm", module.bytes.clone()),
+    let glue = kite_driver::generate_glue_with_hosts("app.wasm", &wasm.hosts);
+    let mut out: Vec<(&str, Vec<u8>)> = vec![
+        ("app.wasm", wasm.bytes.clone()),
         ("app.js", glue.into_bytes()),
-        ("api.js", api_js.into_bytes()),
-        ("api.d.ts", api_dts.into_bytes()),
-    ])
+    ];
+    // The files `kitec build` writes, and only those: a wrapper when the
+    // program has an interface of its own, and the map the module's
+    // `sourceMappingURL` names whenever it names one — which it does in every
+    // debug build, so a dev server served a module pointing at a map that was
+    // never written.
+    if kite_driver::has_api(&wasm.api) {
+        let (api_js, api_dts) = kite_driver::generate_api(&wasm.api, "app.wasm");
+        out.push(("api.js", api_js.into_bytes()));
+        out.push(("api.d.ts", api_dts.into_bytes()));
+    }
+    if let Some(map) = compiled.wasm_source_map_renamed(&module.source_names) {
+        out.push((kite_driver::SOURCE_MAP_NAME, map.into_bytes()));
+    }
+    frame(&out)
 }
 
 /// Run a whole module, the way [`kite_build`] compiles one.
@@ -222,7 +240,7 @@ pub unsafe extern "C" fn kite_run_module(ptr: *const u8, len: usize) -> *mut u8 
         Err(message) => return answer(message),
     };
     let compiled = kite_driver::compile_provided(
-        "main.kite",
+        &module.path,
         &module.entry,
         kite_driver::Emit::Check,
         false,
@@ -266,7 +284,7 @@ pub unsafe extern "C" fn kite_check_module(ptr: *const u8, len: usize) -> *mut u
         Err(message) => return answer(message),
     };
     let compiled = kite_driver::compile_provided(
-        "main.kite",
+        &module.path,
         &module.entry,
         kite_driver::Emit::Check,
         false,
@@ -275,17 +293,37 @@ pub unsafe extern "C" fn kite_check_module(ptr: *const u8, len: usize) -> *mut u
     answer(compiled.render_diagnostics())
 }
 
-/// A framed module: the program, and its siblings by module name.
+/// A framed module: the program, what to call it, and its siblings by module
+/// name.
 struct ModuleInput {
+    /// The name diagnostics give the program's file. The first entry's name
+    /// when it is a `.kite` path — which is how a caller says which file it
+    /// read — and `main.kite` otherwise, which is what every diagnostic used
+    /// to say whatever the file was called.
+    path: String,
     entry: String,
     siblings: std::collections::HashMap<String, String>,
+    /// What a source map should call each file, by the name it was compiled
+    /// under: the program's `path`, or a sibling's module name and `.kite`.
+    /// See [`SOURCE_NAMES`].
+    source_names: std::collections::HashMap<String, String>,
 }
+
+/// The entry of a frame that says where a source map should say each file
+/// is, rather than being a sibling: a line per file, its name as compiled, a
+/// tab, and its name relative to where the map is written. No module is
+/// called this, since no module name holds a `?`.
+///
+/// Only the caller knows where it will write the map and where each file it
+/// handed over came from; the compiler, with no filesystem, knows neither. A
+/// map naming each file by its bare name was looked for beside the map.
+const SOURCE_NAMES: &str = "?source-names";
 
 /// Read the framed input both [`kite_build`] and [`kite_check_module`] take.
 ///
 /// The first entry is the program and the rest are its siblings, by module
 /// name — because a Kite module is a directory and this side has no directory
-/// to read.
+/// to read — along with the [`SOURCE_NAMES`] a build may be given.
 ///
 /// # Safety
 /// `ptr` and `len` must describe a buffer the caller owns.
@@ -294,19 +332,34 @@ unsafe fn module_input(ptr: *const u8, len: usize) -> Result<ModuleInput, String
     let Some(files) = unframe(bytes) else {
         return Err("error: the input is malformed\n".to_string());
     };
-    let Some((_, entry)) = files.first() else {
+    let Some((name, entry)) = files.first() else {
         return Err("error: no program was given\n".to_string());
+    };
+    let path = if name.ends_with(".kite") {
+        name.clone()
+    } else {
+        "main.kite".to_string()
     };
     let Ok(src) = std::str::from_utf8(entry) else {
         return Err("error: the source is not valid UTF-8\n".to_string());
     };
     let mut siblings = std::collections::HashMap::new();
+    let mut source_names = std::collections::HashMap::new();
     for (name, body) in files.iter().skip(1) {
-        if let Ok(text) = std::str::from_utf8(body) {
+        let Ok(text) = std::str::from_utf8(body) else {
+            continue;
+        };
+        if name == SOURCE_NAMES {
+            for line in text.lines() {
+                if let Some((compiled, mapped)) = line.split_once('\t') {
+                    source_names.insert(compiled.to_string(), mapped.to_string());
+                }
+            }
+        } else {
             siblings.insert(name.clone(), text.to_string());
         }
     }
-    Ok(ModuleInput { entry: src.to_string(), siblings })
+    Ok(ModuleInput { path, entry: src.to_string(), siblings, source_names })
 }
 
 /// The framing described on [`kite_build`], read back.

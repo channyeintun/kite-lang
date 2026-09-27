@@ -23,7 +23,7 @@ fn exec(src: &str) -> Result<String, Trap> {
         diags.render_all(&sources)
     );
 
-    kite_hir::mono::monomorphise(&mut hir);
+    kite_hir::mono::monomorphise(&mut hir).expect("specialisation terminates");
     let mir = kite_mir::lower(&hir);
     let chunk = kite_codegen_kbc::compile(&mir);
 
@@ -48,7 +48,7 @@ fn exec_release(src: &str) -> Result<String, Trap> {
         diags.render_all(&sources)
     );
 
-    kite_hir::mono::monomorphise(&mut hir);
+    kite_hir::mono::monomorphise(&mut hir).expect("specialisation terminates");
     let mir = kite_mir::lower(&hir);
     let chunk = kite_codegen_kbc::compile(&mir);
 
@@ -623,6 +623,57 @@ fn main() {
 }
 ";
     assert_eq!(exec_release(src).unwrap().trim(), "-9223372036854775808");
+}
+
+/// Negation overflows for one input, and follows the same rule: a trap in a
+/// debug build, a wrap in a release one. There was no release form, so a
+/// release build trapped on the VM and natively and wrapped on Wasm.
+#[test]
+fn negating_the_minimum_traps_in_debug_and_wraps_in_release() {
+    let src = "\
+fn id(x: int) -> int {
+    return x
+}
+fn main() {
+    io.print(-id(-9223372036854775807 - 1))
+}
+";
+    assert_eq!(exec(src), Err(Trap::IntegerOverflow("-")));
+    assert_eq!(exec_release(src).unwrap().trim(), "-9223372036854775808");
+}
+
+/// A shift count outside `0..=63` traps in a debug build and is taken modulo
+/// 64 in a release one. The VM trapped in both, Wasm masked in both.
+#[test]
+fn an_out_of_range_shift_traps_in_debug_and_masks_in_release() {
+    let src = "\
+fn id(x: int) -> int {
+    return x
+}
+fn main() {
+    io.print(id(1) << id(65))
+    io.print(id(-16) >> id(-63))
+}
+";
+    assert_eq!(exec(src), Err(Trap::IntegerOverflow("<<")));
+    assert_eq!(exec_release(src).unwrap(), "2\n-8\n");
+}
+
+/// `min % -1` is 0, which fits, so unlike `min / -1` it is no overflow. The
+/// VM and the native backend trapped on it and Wasm answered 0.
+#[test]
+fn the_remainder_of_the_minimum_by_minus_one_is_zero() {
+    let src = "\
+fn id(x: int) -> int {
+    return x
+}
+fn main() {
+    io.print(id(-9223372036854775807 - 1) % id(-1))
+    io.print(-9223372036854775808)
+}
+";
+    assert_eq!(exec(src).unwrap(), "0\n-9223372036854775808\n");
+    assert_eq!(exec(&src.replace('%', "/")), Err(Trap::IntegerOverflow("/")));
 }
 
 #[test]
@@ -1493,4 +1544,289 @@ fn maps_have_value_semantics() {
                   \x20 let av = a[\"k\"]\n  io.print(if av == nil { -1 } else { av })"),
         vec!["1"]
     );
+}
+
+// ---- counts wider than a byte -----------------------------------------------
+
+/// An element or argument count was one byte wide, so a 300-element literal
+/// was 44 elements long on this backend alone, a 130-entry map had two
+/// entries, and a call passing 300 arguments passed 44 of them.
+#[test]
+fn counts_wider_than_a_byte_survive() {
+    let elems: Vec<String> = (0..300).map(|i| i.to_string()).collect();
+    let entries: Vec<String> = (0..130).map(|i| format!("\"k{}\": {}", i, i)).collect();
+    let params: Vec<String> = (0..300).map(|i| format!("a{}: int", i)).collect();
+    let src = format!(
+        "fn last({}) -> int {{\n  return a299 - a0\n}}\n\
+         fn main() {{\n  let xs = [{}]\n  io.print(xs.len())\n  io.print(xs[299])\n\
+         \x20 let m = {{{}}}\n  io.print(m.len())\n  io.print(last({}))\n}}\n",
+        params.join(", "),
+        elems.join(", "),
+        entries.join(", "),
+        elems.join(", "),
+    );
+    assert_eq!(lines(&src), ["300", "299", "130", "299"]);
+}
+
+// ---- deep values and deep calls -------------------------------------------------
+
+/// A list of a few hundred thousand cells is an ordinary value, and dropping
+/// or comparing one used to recurse once per cell on the Rust stack until the
+/// VM aborted — not a trap, a crash of the process. The tests here run on a
+/// test thread's small stack, which makes the old failure come early.
+#[test]
+fn a_deep_value_is_dropped_and_compared_without_recursing() {
+    let src = "\
+enum List {
+    Cons(head: int, tail: List)
+    Empty
+}
+fn build(n: int) -> List {
+    var l = Empty
+    for i in 0..n {
+        l = Cons(i, l)
+    }
+    return l
+}
+fn main() {
+    let a = build(200000)
+    let b = build(200000)
+    io.print(a == b)
+    io.print(a == build(199999))
+    var c = build(200000)
+    c = Empty
+    io.print(c == Empty)
+}
+";
+    assert_eq!(lines(src), ["true", "false", "true"]);
+}
+
+/// Every allocation this test binary makes, counted per thread, so a test can
+/// ask how many a piece of code made without a neighbour's counting too.
+struct Counting;
+
+thread_local! {
+    static ALLOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+// SAFETY: every call is passed straight to the system allocator; the count is
+// a `Cell` in a `const`-initialised thread local, which neither allocates nor
+// registers a destructor, so counting cannot recurse into this allocator.
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        ALLOCATIONS.with(|n| n.set(n.get() + 1));
+        std::alloc::System.alloc(layout)
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        std::alloc::System.dealloc(ptr, layout)
+    }
+}
+
+#[global_allocator]
+static COUNTING: Counting = Counting;
+
+fn allocations_in(f: impl FnOnce() -> bool) -> (bool, usize) {
+    let before = ALLOCATIONS.with(|n| n.get());
+    let answer = f();
+    (answer, ALLOCATIONS.with(|n| n.get()) - before)
+}
+
+/// `==` walks a worklist only once it has an aggregate to descend into. A
+/// map is a scan comparing its key with every entry's, and the worklist it
+/// once made for each pair of `int`s or `str`s there made map lookups six
+/// times slower — so a flat value, and an aggregate holding only flat values,
+/// compares without allocating at all.
+#[test]
+fn equality_of_flat_values_allocates_nothing() {
+    let s = |t: &str| Value::Str(Rc::from(t));
+    let point = |x: i64, name: &str| {
+        Value::Struct(Rc::new(StructValue {
+            struct_id: 0,
+            fields: RefCell::new(vec![Value::Int(x), Value::Float(0.5), s(name), Value::Nil]),
+        }))
+    };
+    let cases = [
+        (Value::Int(7), Value::Int(7), true),
+        (Value::Int(7), Value::Int(8), false),
+        (Value::Float(f64::NAN), Value::Float(f64::NAN), false),
+        (s("key 1234"), s("key 1234"), true),
+        (s("key 1234"), s("key 1235"), false),
+        (Value::Nil, Value::Nil, true),
+        (Value::Int(1), Value::Nil, false),
+        (point(1, "a"), point(1, "a"), true),
+        (point(1, "a"), point(1, "b"), false),
+        (
+            Value::Slice(Rc::new(vec![Value::Int(1), s("two")])),
+            Value::Slice(Rc::new(vec![Value::Int(1), s("two")])),
+            true,
+        ),
+    ];
+    for (a, b, want) in &cases {
+        let (answer, made) = allocations_in(|| a == b);
+        assert_eq!(answer, *want, "{:?} == {:?}", a, b);
+        assert_eq!(made, 0, "{:?} == {:?} allocated {} times", a, b, made);
+    }
+    // One level of nesting is where the worklist starts, and it still answers.
+    let nested = |x| Value::Tuple(Rc::new(vec![point(x, "a"), Value::Int(3)]));
+    assert!(nested(1) == nested(1));
+    assert!(nested(1) != nested(2));
+}
+
+/// Frames live on the heap, so depth is bounded by memory rather than by the
+/// host's stack. The limit was 2,048, and a recursion 3,000 deep trapped here
+/// and nowhere else.
+#[test]
+fn a_deep_recursion_runs_on_the_heap() {
+    let src = "\
+fn sum(n: int) -> int {
+    if n == 0 {
+        return 0
+    }
+    return n + sum(n - 1)
+}
+fn main() {
+    io.print(sum(50000))
+}
+";
+    assert_eq!(lines(src), ["1250025000"]);
+}
+
+// ---- or-patterns --------------------------------------------------------------
+
+/// `match s { Circle(n) | Square(n) => n, Dot => 0 }`, built as HIR directly.
+///
+/// Lowering bound an or-pattern's names through its first alternative
+/// whichever one matched, so a `Square` read its payload as a `Circle`'s — or,
+/// where the first alternative bound nothing, left the name unwritten. The
+/// program is built by hand because it is MIR's half of the rule being tested:
+/// the checker's half, that every alternative binds the same names, is what
+/// admits this source form.
+#[test]
+fn an_or_pattern_binds_through_the_alternative_that_matched() {
+    use kite_hir::{self as hir, Expr, ExprKind, FieldDef, LocalId, Pattern, TyId, VariantDef};
+    let span = kite_span::Span::new(kite_span::FileId(0), 0, 0);
+    let mut types = hir::Types::new();
+    let shape = types.declare_enum("Shape", true, span);
+    let payload = |name: &str| FieldDef {
+        name: name.into(),
+        ty: TyId::INT,
+        mutable: false,
+        is_pub: true,
+        span,
+    };
+    let variant = |name: &str, fields: Vec<FieldDef>| VariantDef {
+        name: name.into(),
+        named: !fields.is_empty(),
+        fields,
+        span,
+    };
+    types.set_enum_variants(
+        shape,
+        vec![
+            variant("Circle", vec![payload("r")]),
+            // A second field ahead of the bound one, so reading `Square`'s
+            // payload at `Circle`'s position would find the wrong value.
+            variant("Square", vec![payload("colour"), payload("side")]),
+            variant("Dot", Vec::new()),
+        ],
+    );
+    let shape_ty = types.enum_ty(shape);
+    let expr = |kind: ExprKind, ty: TyId| Expr { kind, ty, span };
+    let n = || Pattern::Binding { local: LocalId(1), unwrap: false };
+    let local = |name: &str, ty: TyId| hir::Local {
+        name: name.into(),
+        ty,
+        mutable: false,
+        span,
+        synthetic: false,
+    };
+
+    let arms = vec![
+        hir::MatchArm {
+            pattern: Pattern::Or(vec![
+                Pattern::Variant { enum_id: shape, variant: 0, fields: vec![n()] },
+                Pattern::Variant { enum_id: shape, variant: 1, fields: vec![Pattern::Wildcard, n()] },
+            ]),
+            guard: None,
+            body: expr(ExprKind::Local(LocalId(1)), TyId::INT),
+            span,
+        },
+        hir::MatchArm {
+            pattern: Pattern::Variant { enum_id: shape, variant: 2, fields: Vec::new() },
+            guard: None,
+            body: expr(ExprKind::Int(0), TyId::INT),
+            span,
+        },
+    ];
+    let subject = expr(ExprKind::Local(LocalId(0)), shape_ty);
+    let pick = hir::Function {
+        name: "pick".into(),
+        is_free: true,
+        generic_count: 0,
+        is_pub: false,
+        is_async: false,
+        param_count: 1,
+        locals: vec![local("s", shape_ty), local("n", TyId::INT)],
+        ret: TyId::INT,
+        body: hir::Block {
+            stmts: vec![hir::Stmt::Return {
+                value: Some(expr(
+                    ExprKind::Match { scrutinee: Box::new(subject), arms },
+                    TyId::INT,
+                )),
+                span,
+            }],
+        },
+        span,
+    };
+
+    let print_pick = |variant: u32, fields: Vec<i64>| {
+        let value = expr(
+            ExprKind::EnumNew {
+                enum_id: shape,
+                variant,
+                fields: fields.into_iter().map(|v| expr(ExprKind::Int(v), TyId::INT)).collect(),
+            },
+            shape_ty,
+        );
+        let call = expr(
+            ExprKind::Call { callee: hir::FnId(0), args: vec![value], targs: Vec::new() },
+            TyId::INT,
+        );
+        hir::Stmt::Expr(expr(
+            ExprKind::CallBuiltin { builtin: hir::Builtin::IoPrint, args: vec![call] },
+            TyId::UNIT,
+        ))
+    };
+    let main = hir::Function {
+        name: "main".into(),
+        is_free: true,
+        generic_count: 0,
+        is_pub: false,
+        is_async: false,
+        param_count: 0,
+        locals: Vec::new(),
+        ret: TyId::UNIT,
+        body: hir::Block {
+            stmts: vec![
+                print_pick(1, vec![99, 7]),
+                print_pick(0, vec![3]),
+                print_pick(2, Vec::new()),
+            ],
+        },
+        span,
+    };
+
+    let program = hir::Program {
+        types,
+        externs: Vec::new(),
+        fns: vec![pick, main],
+        entry: Some(hir::FnId(1)),
+        vtables: Vec::new(),
+    };
+    let mir = kite_mir::lower(&program);
+    let chunk = kite_codegen_kbc::compile(&mir);
+    let mut out = Vec::new();
+    run(&chunk, &mut out).expect("the program runs");
+    assert_eq!(String::from_utf8(out).unwrap(), "7\n3\n0\n");
 }

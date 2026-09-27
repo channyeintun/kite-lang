@@ -61,9 +61,15 @@ pub fn infix_binding_power(op: InfixOp) -> (u8, u8) {
         // Non-associative; the parser reports chaining rather than encoding it
         // in the binding powers, so the message can explain the fix.
         InfixOp::Binary(o) if o.is_comparison() => (10, 11),
-        InfixOp::Binary(B::BitOr) => (12, 13),
-        InfixOp::Binary(B::BitXor) => (14, 15),
-        InfixOp::Binary(B::BitAnd) => (16, 17),
+        // One level, left-associative, as §5.1 and the grammar's `BitExpr`
+        // have always said. These were once layered the way C layers them —
+        // `&` over `^` over `|` — so `a | b & c` was `a | (b & c)` here and
+        // `(a | b) & c` in the specification. A reader cannot hold a
+        // precedence difference between three operators that look alike, and
+        // one level makes the grouping the order they are written in.
+        InfixOp::Binary(B::BitOr) | InfixOp::Binary(B::BitXor) | InfixOp::Binary(B::BitAnd) => {
+            (12, 13)
+        }
         InfixOp::Binary(B::Shl) | InfixOp::Binary(B::Shr) => (18, 19),
         InfixOp::Binary(B::Add) | InfixOp::Binary(B::Sub) => (20, 21),
         InfixOp::Binary(B::Mul) | InfixOp::Binary(B::Div) | InfixOp::Binary(B::Rem) => (22, 23),
@@ -82,6 +88,17 @@ mod tests {
         let (and_l, _) = infix_binding_power(InfixOp::Binary(BinaryOp::BitAnd));
         let (eq_l, _) = infix_binding_power(InfixOp::Binary(BinaryOp::Eq));
         assert!(and_l > eq_l, "a & b == c must group as (a & b) == c");
+    }
+
+    /// §5.1 level 7: `&`, `^` and `|` share one level.
+    #[test]
+    fn the_bitwise_operators_share_a_level() {
+        let power = |op| infix_binding_power(InfixOp::Binary(op));
+        assert_eq!(power(BinaryOp::BitAnd), power(BinaryOp::BitOr));
+        assert_eq!(power(BinaryOp::BitXor), power(BinaryOp::BitOr));
+        let (shl, _) = power(BinaryOp::Shl);
+        let (or, _) = power(BinaryOp::BitOr);
+        assert!(shl > or, "a shift binds tighter than a bitwise operator");
     }
 
     #[test]

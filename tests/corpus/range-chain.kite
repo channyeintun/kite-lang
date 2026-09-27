@@ -1,0 +1,8 @@
+// A range is non-associative (SPECIFICATION §5.1): `a..b..c` has no meaning to
+// give, and is refused where it is written.
+
+fn main() {
+    for i in 0..3..5 { //~ ERROR E0100
+        io.print(i)
+    }
+}

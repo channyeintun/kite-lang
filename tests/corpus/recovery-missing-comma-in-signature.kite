@@ -1,0 +1,12 @@
+// A comma missing between two parameters is supplied rather than the whole
+// function thrown away — which made the call in `main` an error of its own,
+// and the body more.
+
+fn add(a: int b: int) -> int { //~ ERROR E0100
+    let c = a + b
+    return c
+}
+
+fn main() {
+    io.print(add(1, 2))
+}

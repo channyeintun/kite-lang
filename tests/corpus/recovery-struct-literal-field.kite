@@ -1,0 +1,22 @@
+// A bad value in a multi-line struct literal is that one mistake. Recovery
+// used to start from the mistake itself, so the literal's own `}` was taken
+// for the end of `main`, and what followed was read at the wrong depth.
+
+struct Point {
+    x: int
+    y: int
+}
+
+fn main() {
+    let p = Point{
+        x: 1,
+        y: = 2, //~ ERROR E0100
+    }
+    io.print(p.x)
+    let q = 3
+    io.print(q)
+}
+
+fn other() -> int {
+    return 1
+}

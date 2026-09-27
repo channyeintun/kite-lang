@@ -16,20 +16,30 @@
 //   * basic strings with the standard escapes including `\uXXXX` and
 //     `\UXXXXXXXX`, and literal `'…'` strings
 //   * multi-line `"""…"""` and `'''…'''` strings
-//   * integers, including `+`/`-` signs and `_` separators
-//   * floats, including exponents. `inf` and `nan` are refused: Kite has no
-//     literal for either, and dividing to reach one is a trap
+//   * integers, including `+`/`-` signs, `_` separators, and hexadecimal,
+//     octal and binary — `0xDEAD_BEEF`, `0o755`, `0b1101`
+//   * floats, including exponents, each the float nearest what was written.
+//     `inf` and `nan` are refused: Kite has no literal for either, and
+//     dividing to reach one is a trap
 //   * booleans
 //   * arrays, which may span lines and may hold anything
 //   * inline tables — `{ a = 1, b = 2 }`
 //
+// The rules about how a table comes to exist are TOML 1.0's too: a header
+// defines a table once, dotted keys cannot reopen a table a header defined,
+// and an inline table or an array written as a value is closed to anything
+// added later. `[a.b]` after `[[a]]` is a table in the last element of `a`.
+// A document breaking one of these is refused rather than merged, and so is
+// one nesting deeper than 128 levels — see `max_depth`.
+//
 // What is **not** here, and would be wrong to guess at: dates and times.
 // TOML's offset date-time, local date-time, date and time are four distinct
-// types, and Kite has `time.Instant` and `time.Date` to map two of them onto —
-// so the mapping is a decision about `std/time`'s surface rather than about
-// parsing, and it is left undone rather than half-done. A date in a document
-// parses as the string it was written as, which is lossless and honest, and is
-// stated here so nobody discovers it from a wrong answer.
+// types, and `std/time` has none of them — it counts milliseconds since the
+// epoch and breaks them into a `time.Civil` — so how the four map onto it is
+// a decision about `std/time`'s surface rather than about parsing, and it is
+// left undone rather than half-done. A date in a document parses as the
+// string it was written as, which is lossless and honest, and is stated here
+// so nobody discovers it from a wrong answer.
 
 use std/errors
 use std/math
@@ -75,6 +85,24 @@ struct Header {
 
 // ---- reading ---------------------------------------------------------------
 
+/// How deeply one document may nest, counting each segment of a key or a
+/// header and each array or inline table a value sits inside.
+///
+/// A TOML document says how deep it is, and the parser recurses once per
+/// array or inline table and places a value by recursing once per key
+/// segment, so without a ceiling the document chooses how much stack to
+/// consume. Six kilobytes of `a = [[[…]]]` ran a WebAssembly host out of
+/// stack, which is a trap nothing can catch rather than a failed parse; a
+/// hundred thousand levels did the same to the VM and the native runtime.
+/// `std/json` stops at the same depth, for the same reason.
+fn max_depth() -> int {
+    return 128
+}
+
+fn too_deep(at: int) -> error {
+    return errors.new("toml: nested deeper than \(max_depth()) at \(at)")
+}
+
 /// The table a document holds, or an error saying where it went wrong.
 ///
 /// The top level of a TOML document is always a table, which is the one way it
@@ -82,11 +110,16 @@ struct Header {
 pub fn parse(input: str) -> (Toml, error) {
     var root: { str: Toml } = { }
     // The table that bare `key = value` lines currently belong to. `[a.b]`
-    // moves it; the top of the document starts at the root.
-    var path: [str] = []
-    // Whether the current header was `[[doubled]]`, in which case assignments
-    // belong to the last element of an array rather than to a table.
-    var in_array = false
+    // moves it; the top of the document starts at the root. When the path
+    // passes through an array of tables it means that array's last element,
+    // which is what [`change`] and [`spots`] both read it as.
+    var section: [str] = []
+    // What the parser knows about how each table came to exist, by the id
+    // [`spots`] gives it — `defined()` and `closed()` — and the tables dotted
+    // keys created or passed through in the current section, which become
+    // defined when it ends.
+    var flags: { str: int } = { }
+    var pending: [str] = []
     var at = 0
     for {
         at = skip_blank(input, at)
@@ -97,25 +130,28 @@ pub fn parse(input: str) -> (Toml, error) {
         if c == "[" {
             let (header, err) = parse_header(input, at)
             check err
-            path = header.path
-            at = header.next
-            if header.repeated {
-                // `[[a.b]]` starts a *new element*. Everything assigned until
-                // the next header goes into it, so the index is remembered
-                // alongside the path — a key path alone cannot say "the third
-                // one".
-                let (grown, grow_err) = push_table(root, path)
-                check grow_err
-                root = grown
-                in_array = true
-                continue
+            if header.path.len() > max_depth() {
+                return _, too_deep(at)
             }
-            // A header creates the table even when nothing is assigned in it,
-            // which is what makes an empty `[section]` mean something.
-            in_array = false
-            let (seeded, seed_err) = ensure_table(root, path)
-            check seed_err
-            root = seeded
+            at = header.next
+            // A table dotted keys made is defined by them, and a header may
+            // not define it again — not even one naming it from elsewhere.
+            for id in pending {
+                flags[id] = flag_of(flags, id) | defined()
+            }
+            pending = []
+            let where = spots(root, header.path, flags)
+            let allowed = header_allowed(where, header, flags)
+            check allowed
+            let op = if header.repeated { push_op() } else { open_op() }
+            let (changed, change_err) = change(root, header.path, 0, op, Toml.Bool(false))
+            check change_err
+            root = changed
+            if !header.repeated {
+                let target = where[where.len() - 1]
+                flags[target.inner] = flag_of(flags, target.inner) | defined()
+            }
+            section = header.path
             continue
         }
         let (key, key_err) = parse_key(input, at)
@@ -124,16 +160,25 @@ pub fn parse(input: str) -> (Toml, error) {
         if eq >= input.len() || input.slice(eq, eq + 1) != "=" {
             return _, errors.new("toml: expected `=` at \(eq)")
         }
-        let (step, value_err) = parse_value(input, skip_inline(input, eq + 1))
+        let full = concat(section, key.path)
+        if full.len() > max_depth() {
+            return _, too_deep(at)
+        }
+        let (step, value_err) = parse_value(input, skip_inline(input, eq + 1), full.len())
         check value_err
-        if in_array {
-            let (into, into_err) = assign_in_last(root, path, key.path, step.value)
-            check into_err
-            root = into
-        } else {
-            let (placed, place_err) = assign(root, concat(path, key.path), step.value)
-            check place_err
-            root = placed
+        let where = spots(root, full, flags)
+        let allowed = assignment_allowed(where, section.len(), flags)
+        check allowed
+        let (placed, place_err) = change(root, full, 0, set_op(), step.value)
+        check place_err
+        root = placed
+        let last = full.len() - 1
+        let first = section.len()
+        for k in first..last {
+            pending.push(where[k].inner)
+        }
+        if is_closed_value(step.value) {
+            flags[where[last].id] = closed()
         }
         at = step.next
         let (after, line_err) = end_of_line(input, at)
@@ -172,6 +217,9 @@ fn parse_key(input: str, at: int) -> (Key, error) {
         }
         let c = input.slice(i, i + 1)
         if c == "\"" || c == "'" {
+            if i + 3 <= input.len() && input.slice(i, i + 3) == c + c + c {
+                return _, errors.new("toml: a multi-line string cannot be a key, at \(i)")
+            }
             let (text, err) = parse_string(input, i)
             check err
             path.push(text.text)
@@ -204,7 +252,8 @@ fn parse_key(input: str, at: int) -> (Key, error) {
     }
 }
 
-fn parse_value(input: str, at: int) -> (Step, error) {
+/// The value at `at`, `depth` levels into the document — see [`max_depth`].
+fn parse_value(input: str, at: int, depth: int) -> (Step, error) {
     if at >= input.len() {
         return _, errors.new("toml: expected a value at \(at)")
     }
@@ -214,11 +263,14 @@ fn parse_value(input: str, at: int) -> (Step, error) {
         check err
         return Step{ value: Toml.Text(text.text), next: text.next }, nil
     }
-    if c == "[" {
-        return parse_array(input, at)
-    }
-    if c == "{" {
-        return parse_inline_table(input, at)
+    if c == "[" || c == "{" {
+        if depth >= max_depth() {
+            return _, too_deep(at)
+        }
+        if c == "[" {
+            return parse_array(input, at, depth + 1)
+        }
+        return parse_inline_table(input, at, depth + 1)
     }
     return parse_scalar(input, at)
 }
@@ -252,25 +304,49 @@ fn parse_string(input: str, at: int) -> (Text, error) {
         if c == "\n" {
             return _, errors.new("toml: newline in a single-line string at \(i)")
         }
+        if is_control(input.code_at(i)) {
+            return _, errors.new("toml: a control character in a string must be escaped, at \(i)")
+        }
         out = out + c
         i = i + 1
     }
+}
+
+/// A control character TOML forbids raw inside a string: everything below a
+/// space but the tab, and DEL. A multi-line string's line breaks are allowed
+/// by its own reader before this is asked.
+fn is_control(code: int) -> bool {
+    return (code < 32 && code != 9) || code == 127
 }
 
 fn parse_multiline(input: str, at: int, closing: str, escapes: bool) -> (Text, error) {
     var out = ""
     var i = at
     // A newline immediately after the opening delimiter is trimmed, which is
-    // what lets the content start on its own line.
+    // what lets the content start on its own line — `\r\n` as much as `\n`,
+    // or a file saved on Windows keeps a carriage return at the front.
     if i < input.len() && input.slice(i, i + 1) == "\n" {
         i = i + 1
+    } else if i + 2 <= input.len() && input.slice(i, i + 2) == "\r\n" {
+        i = i + 2
     }
+    let quote = closing.slice(0, 1)
     for {
         if i >= input.len() {
             return _, errors.new("toml: unterminated multi-line string at \(at)")
         }
         if i + 3 <= input.len() && input.slice(i, i + 3) == closing {
-            return Text{ text: out, next: i + 3 }, nil
+            // One or two quotes may end the content right against the
+            // delimiter: `"""x""""` is `x"`. Taking the first three as the
+            // close refused a valid document over the fourth.
+            var extra = 0
+            for extra < 2 && i + 3 + extra < input.len() && input.slice(i + 3 + extra, i + 4 + extra) == quote {
+                extra += 1
+            }
+            for k in 0..extra {
+                out = out + quote
+            }
+            return Text{ text: out, next: i + 3 + extra }, nil
         }
         let c = input.slice(i, i + 1)
         if c == "\\" && escapes {
@@ -279,7 +355,7 @@ fn parse_multiline(input: str, at: int, closing: str, escapes: bool) -> (Text, e
             // source without wrapping in the value.
             let peek = i + 1
             if peek < input.len() && is_line_fold(input, peek) {
-                i = skip_blank(input, peek)
+                i = skip_folded(input, peek)
                 continue
             }
             let (piece, err) = parse_escape(input, i)
@@ -288,12 +364,20 @@ fn parse_multiline(input: str, at: int, closing: str, escapes: bool) -> (Text, e
             i = piece.next
             continue
         }
+        let code = input.code_at(i)
+        if code == 13 && !is_crlf(input, i) {
+            return _, errors.new("toml: a carriage return not ending a line, at \(i)")
+        }
+        if code != 10 && code != 13 && is_control(code) {
+            return _, errors.new("toml: a control character in a string must be escaped, at \(i)")
+        }
         out = out + c
         i = i + 1
     }
 }
 
-/// Whether what follows a backslash is only whitespace up to a line break.
+/// Whether what follows a backslash is only whitespace up to a line break,
+/// which is `\n` or `\r\n`: a lone carriage return is not whitespace.
 fn is_line_fold(input: str, at: int) -> bool {
     var i = at
     for {
@@ -301,14 +385,38 @@ fn is_line_fold(input: str, at: int) -> bool {
             return false
         }
         let c = input.slice(i, i + 1)
-        if c == "\n" {
+        if c == "\n" || is_crlf(input, i) {
             return true
         }
-        if c != " " && c != "\t" && c != "\r" {
+        if c != " " && c != "\t" {
             return false
         }
         i = i + 1
     }
+}
+
+/// Past the whitespace and line breaks a line-ending backslash folds away, to
+/// the next character that is part of the string.
+///
+/// Not `skip_blank`, which is for the space between values and so also skips
+/// a comment. Inside a string a `#` is content: `"""x \` then `  # kept` on the
+/// next line is `x # kept`. Skipping it as a comment dropped the text, and
+/// took a closing `"""` on the same line with it, so a valid document was
+/// refused as an unterminated string. A lone carriage return stops the skip,
+/// and the string itself then refuses it.
+fn skip_folded(input: str, at: int) -> int {
+    var i = at
+    for i < input.len() {
+        let c = input.slice(i, i + 1)
+        if c == " " || c == "\t" || c == "\n" {
+            i = i + 1
+        } else if is_crlf(input, i) {
+            i = i + 2
+        } else {
+            return i
+        }
+    }
+    return i
 }
 
 fn parse_escape(input: str, at: int) -> (Text, error) {
@@ -364,7 +472,7 @@ fn parse_escape(input: str, at: int) -> (Text, error) {
     return _, errors.new("toml: unknown escape `\\\(c)` at \(at)")
 }
 
-fn parse_array(input: str, at: int) -> (Step, error) {
+fn parse_array(input: str, at: int, depth: int) -> (Step, error) {
     var items: [Toml] = []
     var i = skip_blank(input, at + 1)
     for {
@@ -374,7 +482,7 @@ fn parse_array(input: str, at: int) -> (Step, error) {
         if input.slice(i, i + 1) == "]" {
             return Step{ value: Toml.Array(items), next: i + 1 }, nil
         }
-        let (step, err) = parse_value(input, i)
+        let (step, err) = parse_value(input, i, depth)
         check err
         items.push(step.value)
         i = skip_blank(input, step.next)
@@ -389,8 +497,11 @@ fn parse_array(input: str, at: int) -> (Step, error) {
     }
 }
 
-fn parse_inline_table(input: str, at: int) -> (Step, error) {
+fn parse_inline_table(input: str, at: int, depth: int) -> (Step, error) {
     var table: { str: Toml } = { }
+    // An inline table is its own little document: `{ a = { b = 1 }, a.c = 2 }`
+    // extends a closed table just as a later line would.
+    var flags: { str: int } = { }
     var i = skip_inline(input, at + 1)
     if i < input.len() && input.slice(i, i + 1) == "}" {
         return Step{ value: Toml.Table(table), next: i + 1 }, nil
@@ -402,11 +513,22 @@ fn parse_inline_table(input: str, at: int) -> (Step, error) {
         if eq >= input.len() || input.slice(eq, eq + 1) != "=" {
             return _, errors.new("toml: expected `=` at \(eq)")
         }
-        let (step, err) = parse_value(input, skip_inline(input, eq + 1))
+        // Each segment of a dotted key inside the table is a table deeper.
+        let inner = depth + key.path.len() - 1
+        if inner > max_depth() {
+            return _, too_deep(i)
+        }
+        let (step, err) = parse_value(input, skip_inline(input, eq + 1), inner)
         check err
-        let (placed, place_err) = assign(table, key.path, step.value)
+        let where = spots(table, key.path, flags)
+        let allowed = assignment_allowed(where, 0, flags)
+        check allowed
+        let (placed, place_err) = change(table, key.path, 0, set_op(), step.value)
         check place_err
         table = placed
+        if is_closed_value(step.value) {
+            flags[where[where.len() - 1].id] = closed()
+        }
         i = skip_inline(input, step.next)
         if i < input.len() && input.slice(i, i + 1) == "," {
             i = skip_inline(input, i + 1)
@@ -420,6 +542,11 @@ fn parse_inline_table(input: str, at: int) -> (Step, error) {
 }
 
 /// A bare word: a boolean, a number, or something this subset does not read.
+///
+/// The word runs to whatever may follow a value, and a space inside it is
+/// kept, since `1979-05-27 07:32:00` is one date-time. Only spaces and tabs are
+/// trimmed from its ends. `trim()` takes every kind of whitespace, and taking
+/// a carriage return let `a = \r1` and `[1\r]` read as numbers.
 fn parse_scalar(input: str, at: int) -> (Step, error) {
     var word = ""
     var i = at
@@ -428,13 +555,18 @@ fn parse_scalar(input: str, at: int) -> (Step, error) {
             break
         }
         let c = input.slice(i, i + 1)
-        if c == "\n" || c == "," || c == "]" || c == "}" || c == "#" {
+        if c == "\n" || is_crlf(input, i) || c == "," || c == "]" || c == "}" || c == "#" {
             break
+        }
+        // Said here rather than as "`\r1` is not a number", which prints the
+        // carriage return and so hides it.
+        if is_control(input.code_at(i)) {
+            return _, errors.new("toml: unexpected control character at \(i)")
         }
         word = word + c
         i = i + 1
     }
-    let body = word.trim()
+    let body = trim_blank(word)
     if body.len() == 0 {
         return _, errors.new("toml: expected a value at \(at)")
     }
@@ -447,17 +579,14 @@ fn parse_scalar(input: str, at: int) -> (Step, error) {
     // A date or a time is recognised well enough to be kept as text rather
     // than misread as a number: `1979-05-27` is not the integer 1979.
     if looks_like_date(body) {
+        if !is_date_time(body) {
+            return _, errors.new("toml: `\(body)` is not a date or a time TOML can write")
+        }
         return Step{ value: Toml.Text(body), next: i }, nil
     }
-    let cleaned = without_underscores(body)
-    if is_float_text(cleaned) {
-        let (f, err) = float_of(cleaned)
-        check err
-        return Step{ value: Toml.Float(f), next: i }, nil
-    }
-    let (n, err) = int_of(cleaned)
+    let (number, err) = parse_number(body)
     check err
-    return Step{ value: Toml.Int(n), next: i }, nil
+    return Step{ value: number, next: i }, nil
 }
 
 // ---- placing values in tables -----------------------------------------------
@@ -529,149 +658,271 @@ fn is_table(value: Toml) -> bool {
     return out
 }
 
-/// Append a fresh table to the array at `path`, creating the array if it is not
-/// there yet.
+/// What a table's id may carry in `flags`.
 ///
-/// This is what `[[a.b]]` does: every occurrence adds an element, and the keys
-/// after it fill that element. The tables *above* the last segment are ordinary
-/// tables — only the last is an array.
-fn push_table(root: { str: Toml }, path: [str]) -> ({ str: Toml }, error) {
-    if path.len() == 0 {
-        return _, errors.new("toml: `[[]]` names nothing")
+/// **Defined**: a header named it, or dotted keys made or passed through it in
+/// a section that has ended. A header may not name it again, and dotted keys
+/// may not add to it.
+fn defined() -> int {
+    return 1
+}
+
+/// **Closed**: an inline table or an array written as a value. Nothing is
+/// added to it afterwards, by a header or by a dotted key.
+fn closed() -> int {
+    return 2
+}
+
+fn flag_of(flags: { str: int }, id: str) -> int {
+    let found = flags[id]
+    if found == nil {
+        return 0
     }
-    if path.len() == 1 {
-        var here = root
-        let head = path[0]
-        var items: [Toml] = []
-        let existing = here[head]
-        if existing != nil {
-            let held = as_array(existing)
-            if held == nil {
-                return _, errors.new("toml: `\(head)` is already a value, not an array of tables")
+    return found
+}
+
+fn has(flags: { str: int }, id: str, flag: int) -> bool {
+    return (flag_of(flags, id) & flag) != 0
+}
+
+fn is_closed_value(value: Toml) -> bool {
+    return is_table(value) || as_array(value) != nil
+}
+
+/// One step of a path through the document as it stands.
+///
+/// `id` names the key — the path so far, each segment prefixed by its length,
+/// so no two paths share one — and `inner` the table a walk continues into:
+/// the key's own table, or for an array of tables its last element, whose id
+/// carries its index. So `[fruit.physical]` under the second `[[fruit]]` is a
+/// different table from the one under the first, as it should be.
+struct Spot {
+    name: str
+    id: str
+    inner: str
+    kind: int
+}
+
+/// Nothing there yet.
+fn absent() -> int {
+    return 0
+}
+
+fn a_table() -> int {
+    return 1
+}
+
+fn tables() -> int {
+    return 2
+}
+
+/// A value, or a closed inline table or array.
+fn a_value() -> int {
+    return 3
+}
+
+/// Where each segment of `path` leads, read without changing anything.
+fn spots(root: { str: Toml }, path: [str], flags: { str: int }) -> [Spot] {
+    var out: [Spot] = []
+    var here = root
+    var id = ""
+    var walking = true
+    for segment in path {
+        let key = id + "/\(segment.len()):" + segment
+        id = key
+        if !walking {
+            out.push(Spot{ name: segment, id: key, inner: key, kind: absent() })
+            continue
+        }
+        let held = here[segment]
+        if held == nil {
+            walking = false
+            out.push(Spot{ name: segment, id: key, inner: key, kind: absent() })
+            continue
+        }
+        if has(flags, key, closed()) {
+            walking = false
+            out.push(Spot{ name: segment, id: key, inner: key, kind: a_value() })
+            continue
+        }
+        if is_table(held) {
+            here = as_table(held)
+            out.push(Spot{ name: segment, id: key, inner: key, kind: a_table() })
+            continue
+        }
+        let items = as_array(held)
+        if items != nil {
+            if items.len() > 0 {
+                // An array that is not closed is one `[[…]]` made.
+                let inner = key + "#\(items.len() - 1)"
+                here = as_table(items[items.len() - 1])
+                id = inner
+                out.push(Spot{ name: segment, id: key, inner: inner, kind: tables() })
+                continue
             }
-            items = held
         }
-        items.push(Toml.Table({ }))
-        here[head] = Toml.Array(items)
-        return here, nil
-    }
-    // Walk down, rebuilding: a map is a value, so an inner table has to be put
-    // back into the one above it.
-    var here = root
-    let head = path[0]
-    let existing = here[head]
-    var inner: { str: Toml } = { }
-    if existing != nil {
-        if !is_table(existing) {
-            return _, errors.new("toml: `\(head)` is already a value, not a table")
-        }
-        inner = as_table(existing)
-    }
-    let (filled, err) = push_table(inner, tail(path))
-    check err
-    here[head] = Toml.Table(filled)
-    return here, nil
-}
-
-/// Set `key` inside the last element of the array of tables at `path`.
-fn assign_in_last(
-    root: { str: Toml },
-    path: [str],
-    key: [str],
-    value: Toml,
-) -> ({ str: Toml }, error) {
-    if path.len() == 0 {
-        return _, errors.new("toml: no array of tables is open")
-    }
-    var here = root
-    let head = path[0]
-    let existing = here[head]
-    if existing == nil {
-        return _, errors.new("toml: `\(head)` was never opened")
-    }
-    if path.len() == 1 {
-        let items = as_array(existing)
-        if items == nil {
-            return _, errors.new("toml: `\(head)` is not an array of tables")
-        }
-        if items.len() == 0 {
-            return _, errors.new("toml: `\(head)` has no element to fill")
-        }
-        var elements = items
-        let last = elements.len() - 1
-        let (filled, err) = assign(as_table(elements[last]), key, value)
-        check err
-        elements[last] = Toml.Table(filled)
-        here[head] = Toml.Array(elements)
-        return here, nil
-    }
-    if !is_table(existing) {
-        return _, errors.new("toml: `\(head)` is not a table")
-    }
-    let (filled, err) = assign_in_last(as_table(existing), tail(path), key, value)
-    check err
-    here[head] = Toml.Table(filled)
-    return here, nil
-}
-
-/// A table with `path` present, creating the tables along the way.
-fn ensure_table(root: { str: Toml }, path: [str]) -> ({ str: Toml }, error) {
-    if path.len() == 0 {
-        return root, nil
-    }
-    let head = path[0]
-    let rest = tail(path)
-    var here = root
-    let existing = here[head]
-    var inner: { str: Toml } = { }
-    if existing != nil {
-        inner = as_table(existing)
-        let is_table = is_table(existing)
-        if !is_table {
-            return _, errors.new("toml: `\(head)` is already a value, not a table")
-        }
-    }
-    let (filled, err) = ensure_table(inner, rest)
-    check err
-    here[head] = Toml.Table(filled)
-    return here, nil
-}
-
-/// The same table with `path` set to `value`.
-fn assign(root: { str: Toml }, path: [str], value: Toml) -> ({ str: Toml }, error) {
-    if path.len() == 0 {
-        return _, errors.new("toml: a value needs a key")
-    }
-    let head = path[0]
-    var here = root
-    if path.len() == 1 {
-        if here[head] != nil {
-            return _, errors.new("toml: `\(head)` is set twice")
-        }
-        here[head] = value
-        return here, nil
-    }
-    let existing = here[head]
-    var inner: { str: Toml } = { }
-    if existing != nil {
-        let ok = is_table(existing)
-        if !ok {
-            return _, errors.new("toml: `\(head)` is already a value, not a table")
-        }
-        inner = as_table(existing)
-    }
-    let (filled, err) = assign(inner, tail(path), value)
-    check err
-    here[head] = Toml.Table(filled)
-    return here, nil
-}
-
-fn tail(path: [str]) -> [str] {
-    var out: [str] = []
-    for i in 1..path.len() {
-        out.push(path[i])
+        walking = false
+        out.push(Spot{ name: segment, id: key, inner: key, kind: a_value() })
     }
     return out
+}
+
+/// Whether a header may name the path `where` describes.
+///
+/// Every table along the way may be walked through, whoever made it — the
+/// specification's own example adds `[fruit.apple.texture]` under a table
+/// dotted keys defined. Only the last segment is being defined, so only it is
+/// held to "once".
+fn header_allowed(where: [Spot], header: Header, flags: { str: int }) -> error {
+    let name = join_dots(header.path)
+    let last = where.len() - 1
+    for k in 0..last {
+        if where[k].kind == a_value() {
+            return errors.new("toml: `\(join_dots(take(header.path, k + 1)))` is already a value, not a table")
+        }
+    }
+    let target = where[last]
+    if header.repeated {
+        if target.kind == a_table() {
+            return errors.new("toml: `\(name)` is a table, not an array of tables")
+        }
+        if target.kind == a_value() {
+            return errors.new("toml: `\(name)` is already a value; an array written with `[…]` cannot be appended to")
+        }
+        return nil
+    }
+    if target.kind == tables() {
+        return errors.new("toml: `\(name)` is an array of tables, not a table")
+    }
+    if target.kind == a_value() {
+        return errors.new("toml: `\(name)` is already a value, not a table")
+    }
+    if target.kind == a_table() && has(flags, target.inner, defined()) {
+        return errors.new("toml: `[\(name)]` defines a table that is already defined")
+    }
+    return nil
+}
+
+/// Whether `key = value` may be placed where `where` describes, the first
+/// `section` segments being the current header's.
+///
+/// The tables a dotted key passes through are being added to, so each must be
+/// one dotted keys may add to: not a value, not an array of tables, and not a
+/// table a header — or dotted keys in an earlier section — already defined.
+fn assignment_allowed(where: [Spot], section: int, flags: { str: int }) -> error {
+    let last = where.len() - 1
+    for k in section..last {
+        let spot = where[k]
+        if spot.kind == a_table() && has(flags, spot.inner, defined()) {
+            return errors.new("toml: `\(spot.name)` is a table defined already; a dotted key cannot add to it")
+        }
+        if spot.kind == a_value() {
+            return errors.new("toml: `\(spot.name)` is already a value, not a table")
+        }
+        if spot.kind == tables() {
+            return errors.new("toml: `\(spot.name)` is an array of tables; a dotted key cannot add to it")
+        }
+    }
+    if where[last].kind != absent() {
+        return errors.new("toml: `\(where[last].name)` is set twice")
+    }
+    return nil
+}
+
+fn open_op() -> int {
+    return 0
+}
+
+fn push_op() -> int {
+    return 1
+}
+
+fn set_op() -> int {
+    return 2
+}
+
+/// `here` with the path from `path[at]` on changed: a table made to exist
+/// (`open_op`), a fresh element appended to an array of tables (`push_op`),
+/// or `value` set (`set_op`). Tables that are not there yet are created on
+/// the way, and a walk through an array of tables goes into its last element.
+///
+/// A map is a value, so each table on the way is rebuilt and put back into
+/// the one above it. What is allowed was decided by [`spots`] beforehand; the
+/// errors here are for a shape that should have been refused already.
+fn change(here: { str: Toml }, path: [str], at: int, op: int, value: Toml) -> ({ str: Toml }, error) {
+    var table = here
+    let key = path[at]
+    let held = table[key]
+    if at == path.len() - 1 {
+        if op == open_op() {
+            if held == nil {
+                table[key] = Toml.Table({ })
+            }
+            return table, nil
+        }
+        if op == push_op() {
+            var items: [Toml] = []
+            if held != nil {
+                let existing = as_array(held)
+                if existing == nil {
+                    return _, errors.new("toml: `\(key)` is already a value, not an array of tables")
+                }
+                items = existing
+            }
+            items.push(Toml.Table({ }))
+            table[key] = Toml.Array(items)
+            return table, nil
+        }
+        if held != nil {
+            return _, errors.new("toml: `\(key)` is set twice")
+        }
+        table[key] = value
+        return table, nil
+    }
+    var inner: { str: Toml } = { }
+    if held != nil {
+        let into = walk_into(held)
+        if into == nil {
+            return _, errors.new("toml: `\(key)` is already a value, not a table")
+        }
+        inner = into
+    }
+    let (filled, err) = change(inner, path, at + 1, op, value)
+    check err
+    if held == nil {
+        table[key] = Toml.Table(filled)
+    } else {
+        table[key] = put_back(held, filled)
+    }
+    return table, nil
+}
+
+/// The table a walk continues into from `held`: a table itself, or the last
+/// element of an array of tables. Nil for anything else.
+fn walk_into(held: Toml) -> Option<{ str: Toml }> {
+    if is_table(held) {
+        return as_table(held)
+    }
+    let items = as_array(held)
+    if items != nil {
+        if items.len() > 0 && is_table(items[items.len() - 1]) {
+            return as_table(items[items.len() - 1])
+        }
+    }
+    return nil
+}
+
+/// `held` with `inner` put back where [`walk_into`] found it.
+fn put_back(held: Toml, inner: { str: Toml }) -> Toml {
+    let items = as_array(held)
+    if items != nil {
+        if items.len() > 0 {
+            var elements = items
+            elements[elements.len() - 1] = Toml.Table(inner)
+            return Toml.Array(elements)
+        }
+    }
+    return Toml.Table(inner)
 }
 
 // ---- reading a document ------------------------------------------------------
@@ -786,32 +1037,19 @@ fn split_dots(path: str) -> [str] {
 /// key emitted after one would be read back into the wrong place. Emitting in
 /// this order is what makes `parse(emit(doc))` give back `doc`.
 pub fn emit(doc: Toml) -> str {
-    return emit_table(doc, [])
+    return emit_section(as_table(doc), [], "")
 }
 
-/// The scalar assignments of a table, with no header of its own.
+/// A table under its header: its own keys, then each sub-table under a
+/// `[header]` of its own, and each array of tables as one `[[header]]` per
+/// element — every element in full, sub-tables and nested arrays included.
 ///
-/// An array-of-tables element needs this: the loop above has already written
-/// its `[[header]]`, and writing a second one here would nest it under itself.
-fn emit_table_body(table: { str: Toml }) -> str {
-    var out = ""
-    for key in keys_of(table) {
-        let held = table[key]
-        if held != nil {
-            if !is_table(held) && !all_tables(held) {
-                out = out + "\(emit_key(key)) = \(emit_value(held))\n"
-            }
-        }
-    }
-    return out
-}
-
-fn emit_table(value: Toml, path: [str]) -> str {
-    let table = as_table(value)
-    var out = ""
-    if path.len() > 0 {
-        out = out + "[\(join_dots(path))]\n"
-    }
+/// An element's tables used to be skipped, so `[[a]]` with `b = { c = 1 }`
+/// or `b.c = 1` in it emitted as a bare `[[a]]` and the data was gone. Under
+/// `[[a]]`, `[a.b]` means the last `a`'s `b`, so an element's sub-tables are
+/// written after it with the full path and read back into it.
+fn emit_section(table: { str: Toml }, path: [str], header: str) -> str {
+    var out = header
     // Scalars.
     for key in keys_of(table) {
         let held = table[key]
@@ -826,14 +1064,14 @@ fn emit_table(value: Toml, path: [str]) -> str {
     for key in keys_of(table) {
         let held = table[key]
         if held != nil {
+            let inner = concat(path, [key])
             if is_table(held) {
-                out = out + "\n" + emit_table(held, concat(path, [key]))
+                out = out + "\n" + emit_section(as_table(held), inner, "[\(join_dots(inner))]\n")
             } else if all_tables(held) {
                 let items = as_array(held)
                 if items != nil {
                     for element in items {
-                        out = out + "\n[[\(join_dots(concat(path, [key])))]]\n"
-                        out = out + emit_table_body(as_table(element))
+                        out = out + "\n" + emit_section(as_table(element), inner, "[[\(join_dots(inner))]]\n")
                     }
                 }
             }
@@ -928,6 +1166,10 @@ fn emit_string(body: str) -> str {
             out = out + "\\t"
         } else if c == "\r" {
             out = out + "\\r"
+        } else if is_control(c.code_at(0)) {
+            // Any other control character is written as an escape: raw, it
+            // is not TOML, and this module's own reader refuses it.
+            out = out + "\\u" + hex4(c.code_at(0))
         } else {
             out = out + c
         }
@@ -935,9 +1177,27 @@ fn emit_string(body: str) -> str {
     return out + "\""
 }
 
+/// Four uppercase hex digits.
+fn hex4(code: int) -> str {
+    let digits = "0123456789ABCDEF"
+    var out = ""
+    var shift = 12
+    for shift >= 0 {
+        let d = (code >> shift) & 15
+        out = out + digits.slice(d, d + 1)
+        shift -= 4
+    }
+    return out
+}
+
 // ---- lexical helpers ---------------------------------------------------------
 
 /// Whitespace on this line only, and comments. Stops at a line break.
+///
+/// Whitespace is a space or a tab and nothing else. A carriage return is
+/// passed over only as the first half of a CRLF, which leaves the caller at
+/// the `\n` it looks for either way. Skipping a lone one as whitespace let
+/// `a = \r1` and `[a\r]` through, which TOML refuses.
 fn skip_inline(input: str, at: int) -> int {
     var i = at
     for {
@@ -945,15 +1205,22 @@ fn skip_inline(input: str, at: int) -> int {
             return i
         }
         let c = input.slice(i, i + 1)
-        if c == " " || c == "\t" || c == "\r" {
+        if c == " " || c == "\t" || is_crlf(input, i) {
             i = i + 1
             continue
         }
         if c == "#" {
             // A comment runs to the end of the line, and the line break itself
             // is left for the caller — it is a separator, not whitespace.
+            //
+            // A control character other than a tab may not appear in one. The
+            // comment ends before it instead, which leaves it where the caller
+            // expected a line break, and the caller reports it as unexpected.
             for {
                 if i >= input.len() || input.slice(i, i + 1) == "\n" {
+                    return i
+                }
+                if is_control(input.code_at(i)) && !is_crlf(input, i) {
                     return i
                 }
                 i = i + 1
@@ -961,6 +1228,29 @@ fn skip_inline(input: str, at: int) -> int {
         }
         return i
     }
+}
+
+/// `s` without the spaces and tabs at either end, which are all TOML counts
+/// as whitespace.
+fn trim_blank(s: str) -> str {
+    var from = 0
+    var to = s.len()
+    for from < to && is_blank(s.code_at(from)) {
+        from += 1
+    }
+    for to > from && is_blank(s.code_at(to - 1)) {
+        to -= 1
+    }
+    return s.slice(from, to)
+}
+
+fn is_blank(code: int) -> bool {
+    return code == 32 || code == 9
+}
+
+/// Whether a CRLF line break starts at `i`.
+fn is_crlf(input: str, i: int) -> bool {
+    return i + 1 < input.len() && input.code_at(i) == 13 && input.code_at(i + 1) == 10
 }
 
 /// Whitespace, comments and line breaks alike.
@@ -1019,11 +1309,11 @@ fn hex_of(c: str) -> int {
     return -1
 }
 
-fn without_underscores(body: str) -> str {
+fn without(body: str, drop: str) -> str {
     var out = ""
     for i in 0..body.len() {
         let c = body.slice(i, i + 1)
-        if c != "_" {
+        if c != drop {
             out = out + c
         }
     }
@@ -1041,11 +1331,112 @@ fn without_underscores(body: str) -> str {
 /// a configuration file's number silently stopped being one. It went unseen
 /// because it fails quietly and because nothing tested it — every exponent in
 /// the suite was positive. It also hid a second bug behind it, since an
-/// exponent that never reached `power_of_ten` could not overflow there.
+/// exponent that never reached the number reader could not overflow it.
 ///
 /// The exception cannot let a date through: a date is digits, `-`, `.`, `:`,
 /// `+`, and `T`/`Z` in either case, so no `-` in one is ever preceded by an
 /// `e`. `1979-05-27` is still a date; `1e-5` is a float.
+/// Whether a word is one of TOML's four date and time forms: a date
+/// `1979-05-27`, a time `07:32:00` with an optional fraction of a second, the
+/// two joined by `T` or a space, and that with `Z` or an offset `-07:00`.
+///
+/// Checked in full, down to the calendar, because what passes is kept as text
+/// and never looked at again: `2006-01-50`, `1987-7-05` and a time with no
+/// seconds were all being kept as dates.
+fn is_date_time(body: str) -> bool {
+    let n = body.len()
+    if !is_date_at(body, 0) {
+        return time_end(body, 0) == n
+    }
+    if n == 10 {
+        return true
+    }
+    let sep = body.slice(10, 11)
+    if sep != "T" && sep != "t" && sep != " " {
+        return false
+    }
+    let end = time_end(body, 11)
+    if end < 0 {
+        return false
+    }
+    if end == n {
+        return true
+    }
+    let zone = body.slice(end, n)
+    if zone == "Z" || zone == "z" {
+        return true
+    }
+    if n - end != 6 || (zone.slice(0, 1) != "+" && zone.slice(0, 1) != "-") || zone.slice(3, 4) != ":" {
+        return false
+    }
+    let hours = two_digits(zone, 1)
+    let minutes = two_digits(zone, 4)
+    return hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59
+}
+
+/// Whether `yyyy-mm-dd`, a real day of a real month, starts at `at`.
+fn is_date_at(body: str, at: int) -> bool {
+    if body.len() < at + 10 || body.slice(at + 4, at + 5) != "-" || body.slice(at + 7, at + 8) != "-" {
+        return false
+    }
+    let high = two_digits(body, at)
+    let low = two_digits(body, at + 2)
+    let month = two_digits(body, at + 5)
+    let day = two_digits(body, at + 8)
+    if high < 0 || low < 0 || month < 1 || month > 12 || day < 1 {
+        return false
+    }
+    let year = high * 100 + low
+    var days = 31
+    if month == 4 || month == 6 || month == 9 || month == 11 {
+        days = 30
+    }
+    if month == 2 {
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+        days = if leap { 29 } else { 28 }
+    }
+    return day <= days
+}
+
+/// Where `hh:mm:ss`, with an optional fraction, starting at `at` ends — or -1.
+fn time_end(body: str, at: int) -> int {
+    if body.len() < at + 8 || body.slice(at + 2, at + 3) != ":" || body.slice(at + 5, at + 6) != ":" {
+        return -1
+    }
+    let hour = two_digits(body, at)
+    let minute = two_digits(body, at + 3)
+    // 60 is a leap second, which TOML's RFC 3339 allows.
+    let second = two_digits(body, at + 6)
+    if hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60 {
+        return -1
+    }
+    var i = at + 8
+    if i < body.len() && body.slice(i, i + 1) == "." {
+        i = i + 1
+        let from = i
+        for i < body.len() && digit_in(body.slice(i, i + 1), 10) >= 0 {
+            i = i + 1
+        }
+        if i == from {
+            return -1
+        }
+    }
+    return i
+}
+
+/// Two decimal digits at `at` as a number, or -1.
+fn two_digits(body: str, at: int) -> int {
+    if at + 2 > body.len() {
+        return -1
+    }
+    let tens = digit_in(body.slice(at, at + 1), 10)
+    let ones = digit_in(body.slice(at + 1, at + 2), 10)
+    if tens < 0 || ones < 0 {
+        return -1
+    }
+    return tens * 10 + ones
+}
+
 fn looks_like_date(body: str) -> bool {
     for i in 0..body.len() {
         let c = body.slice(i, i + 1)
@@ -1062,122 +1453,148 @@ fn looks_like_date(body: str) -> bool {
     return false
 }
 
-fn is_float_text(body: str) -> bool {
-    if body == "inf" || body == "+inf" || body == "-inf" || body == "nan" {
-        return true
-    }
-    for i in 0..body.len() {
-        let c = body.slice(i, i + 1)
-        if c == "." || c == "e" || c == "E" {
-            return true
-        }
-    }
-    return false
-}
-
-fn float_of(body: str) -> (float, error) {
-    if body == "inf" || body == "+inf" || body == "-inf" || body == "nan" {
+/// A bare word that is a number as TOML 1.0 writes one, or an error saying
+/// why it is not.
+///
+/// The spelling is checked before anything is converted, because the rules
+/// are about the spelling rather than the value: an underscore sits between
+/// two digits (`1__2`, `_1` and `1_` are not numbers), a decimal integer does
+/// not start with a zero (`007` is not seven), a point has digits on both
+/// sides (`1.` and `.5` are not floats), and only a decimal carries a sign.
+/// Each of those used to be read as the number it looked closest to.
+///
+/// `0x`, `0o` and `0b` are integers in base 16, 8 and 2. `0xDEADBEEF` was
+/// read as a float, for the `E` in it, and refused.
+fn parse_number(body: str) -> (Toml, error) {
+    if body == "inf" || body == "+inf" || body == "-inf" || body == "nan" || body == "+nan" || body == "-nan" {
         // Kite has no literal for either and dividing to reach one is a trap,
         // so these are refused rather than approximated. A configuration file
         // containing them is rare; one silently holding a very large number
         // where it said `inf` would be a bug nobody could find.
         return _, errors.new("toml: `\(body)` has no value in Kite")
     }
-    var whole = 0.0
-    var fraction = 0.0
-    var scale = 1.0
-    var seen_point = false
-    var negative = false
+    let n = body.len()
+    if n > 2 && body.slice(0, 1) == "0" {
+        let marker = body.slice(1, 2)
+        if marker == "x" {
+            return radix_int(body, 16)
+        }
+        if marker == "o" {
+            return radix_int(body, 8)
+        }
+        if marker == "b" {
+            return radix_int(body, 2)
+        }
+    }
     var i = 0
-    var digits = 0
-    if body.len() > 0 {
-        let first = body.slice(0, 1)
-        if first == "-" {
-            negative = true
-            i = 1
-        } else if first == "+" {
-            i = 1
-        }
+    if body.slice(0, 1) == "+" || body.slice(0, 1) == "-" {
+        i = 1
     }
-    for {
-        if i >= body.len() {
-            break
-        }
-        let c = body.slice(i, i + 1)
-        if c == "e" || c == "E" {
-            let (exp, err) = int_of(body.slice(i + 1, body.len()))
-            check err
-            var value = whole + fraction
-            if negative {
-                value = -value
-            }
-            return value * power_of_ten(exp), nil
-        }
-        if c == "." {
-            if seen_point {
-                return _, errors.new("toml: two decimal points in `\(body)`")
-            }
-            seen_point = true
-            i = i + 1
-            continue
-        }
-        let digit = c.code_at(0) - 0x30
-        if digit < 0 || digit > 9 {
-            return _, errors.new("toml: `\(body)` is not a number")
-        }
-        digits = digits + 1
-        if seen_point {
-            scale = scale * 10.0
-            fraction = fraction + (digit as float) / scale
-        } else {
-            whole = whole * 10.0 + (digit as float)
-        }
-        i = i + 1
-    }
-    if digits == 0 {
+    let whole = digit_run(body, i, 10)
+    if whole < 0 {
         return _, errors.new("toml: `\(body)` is not a number")
     }
-    var value = whole + fraction
-    if negative {
-        value = -value
+    if body.slice(i, i + 1) == "0" && whole > i + 1 {
+        return _, errors.new("toml: `\(body)` starts with a zero, which only `0` itself may")
     }
-    return value, nil
+    var at = whole
+    var is_float = false
+    if at < n && body.slice(at, at + 1) == "." {
+        let fraction = digit_run(body, at + 1, 10)
+        if fraction < 0 {
+            return _, errors.new("toml: `\(body)` needs a digit after its point")
+        }
+        at = fraction
+        is_float = true
+    }
+    if at < n && (body.slice(at, at + 1) == "e" || body.slice(at, at + 1) == "E") {
+        var from = at + 1
+        if from < n && (body.slice(from, from + 1) == "+" || body.slice(from, from + 1) == "-") {
+            from += 1
+        }
+        let power = digit_run(body, from, 10)
+        if power < 0 {
+            return _, errors.new("toml: `\(body)` needs digits in its exponent")
+        }
+        at = power
+        is_float = true
+    }
+    if at != n {
+        return _, errors.new("toml: `\(body)` is not a number")
+    }
+    var cleaned = without(body, "_")
+    if cleaned.slice(0, 1) == "+" {
+        cleaned = cleaned.slice(1, cleaned.len())
+    }
+    if is_float {
+        // The prelude's reader, which `std/json` shares: the float nearest
+        // the decimal written, where adding up digit values was a unit or
+        // two out — `1e-7`, `0.035` and `5e-324` among them.
+        let f = parse_float(cleaned)
+        if f == nil {
+            return _, errors.new("toml: `\(body)` is out of range for a float")
+        }
+        return Toml.Float(f), nil
+    }
+    let (value, err) = int_of(cleaned)
+    check err
+    return Toml.Int(value), nil
 }
 
-fn power_of_ten(exp: int) -> float {
-    // A float reaches infinity a little past 1e308 and zero a little past
-    // 1e-324, and stays there, so beyond that the trip count changes nothing
-    // about the answer — clamping it costs no accuracy. Left unclamped, the
-    // document chose how long this ran, and the scheduler is cooperative:
-    // `x = 1e2000000000` never handed the loop back.
-    //
-    // Clamped before the negation rather than after, because the exponent is
-    // the document's and `min_int()` is one of the values it may be — and
-    // `0 - min_int()` is the one negation an `int` cannot perform, so
-    // `x = 1e-9223372036854775808` would end the process in a checked build
-    // and quietly change scale in a release one. Bringing the value into
-    // range first means nothing is ever negated that has no negative.
-    var steps = exp
-    if steps > 400 {
-        steps = 400
+/// Where a run of digits in `radix` from `at` ends, single underscores allowed
+/// between two digits — or -1 when there is no digit at `at` or an underscore
+/// is not between two.
+fn digit_run(body: str, at: int, radix: int) -> int {
+    if at >= body.len() || digit_in(body.slice(at, at + 1), radix) < 0 {
+        return -1
     }
-    if steps < -400 {
-        steps = -400
-    }
-    if steps < 0 {
-        steps = 0 - steps
-    }
-    var out = 1.0
-    if exp >= 0 {
-        for i in 0..steps {
-            out = out * 10.0
+    var i = at + 1
+    for i < body.len() {
+        let c = body.slice(i, i + 1)
+        if c == "_" {
+            if i + 1 >= body.len() || digit_in(body.slice(i + 1, i + 2), radix) < 0 {
+                return -1
+            }
+            i += 2
+            continue
         }
-        return out
+        if digit_in(c, radix) < 0 {
+            return i
+        }
+        i += 1
     }
-    for i in 0..steps {
-        out = out / 10.0
+    return i
+}
+
+fn digit_in(c: str, radix: int) -> int {
+    let d = hex_of(c)
+    if d < 0 || d >= radix {
+        return -1
     }
-    return out
+    return d
+}
+
+/// `0x…`, `0o…` or `0b…`: no sign, which TOML does not allow on these, and no
+/// more than an `int` holds.
+fn radix_int(body: str, radix: int) -> (Toml, error) {
+    if digit_run(body, 2, radix) != body.len() {
+        return _, errors.new("toml: `\(body)` is not a number")
+    }
+    var value = 0
+    for i in 2..body.len() {
+        let c = body.slice(i, i + 1)
+        if c != "_" {
+            let d = digit_in(c, radix)
+            // `value * radix + d <= max_int()`, rearranged so asking cannot
+            // overflow.
+            let room = (math.max_int() - d) / radix
+            if value > room {
+                return _, errors.new("toml: `\(body)` does not fit in an int")
+            }
+            value = value * radix + d
+        }
+    }
+    return Toml.Int(value), nil
 }
 
 fn int_of(body: str) -> (int, error) {

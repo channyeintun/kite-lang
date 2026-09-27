@@ -139,9 +139,14 @@ fn link_href(href: str) -> str {
 /// `06-roadmap.html`, which is what makes a link written for GitHub work here
 /// without being written twice.
 ///
-/// Everything else is left exactly as written. An external link, and a link
-/// already pointing at a page, are not this renderer's business.
+/// An external link is left exactly as written, and so is a link already
+/// pointing at a page.
 fn link_target(href: str) -> str {
+    // Another site's `guide.md` is another site's page. Rewriting it into a
+    // local `guide.html` sent the reader to a 404.
+    if href.index_of("://") >= 0 {
+        return href
+    }
     // The anchor comes off first. `…/06-roadmap.md#phase-24` does not *end*
     // in `.md`, and testing that before splitting is how every cross-reference
     // carrying a section survived as a link to a raw file.
@@ -149,19 +154,43 @@ fn link_target(href: str) -> str {
     let path = if hash < 0 { href } else { href.slice(0, hash) }
     let anchor = if hash < 0 { "" } else { href.slice(hash, href.len()) }
     if !ends_with(path, ".md") {
-        return href
+        return site_file(path, anchor, href)
     }
     let page = lower(base_name(path))
-    // The roadmap is the one document other documents cite that this site does
-    // not render. It is a record of how the language was built, and the site is
-    // for the language as it is — but a citation is still worth following, so
-    // it goes where the document actually lives instead of to a page that would
-    // answer 404. The anchors are GitHub's already, because that is where every
-    // one of these links was written to work.
+    // Documents other documents cite that this site does not render: the
+    // roadmap, a record of how the language was built where the site is for
+    // the language as it is, and the release procedure. A citation is still
+    // worth following, so it goes where the document actually lives instead of
+    // to a page that would answer 404. The anchors are GitHub's already,
+    // because that is where every one of these links was written to work.
     if page == "06-roadmap" {
-        return "https://github.com/channyeintun/kite-lang/blob/main/docs/06-roadmap.md\(anchor)"
+        return "\(repository())/docs/06-roadmap.md\(anchor)"
+    }
+    if page == "releasing" {
+        return "\(repository())/RELEASING.md\(anchor)"
     }
     return "\(page).html\(anchor)"
+}
+
+fn repository() -> str {
+    return "https://github.com/channyeintun/kite-lang/blob/main"
+}
+
+/// A file the site serves, named the way a document written for GitHub names
+/// it: by where it sits in the repository.
+///
+/// `site/brand.html` is the site's `brand.html`, and `docs/05-grammar.ebnf`
+/// is served at `docs/` too. Every rendered document is one directory below
+/// the root, and `..` at the root is still the root, so `../` reaches both from
+/// any page. Anything else is left as written.
+fn site_file(path: str, anchor: str, href: str) -> str {
+    if starts_with(path, "site/") {
+        return "../\(path.slice(5, path.len()))\(anchor)"
+    }
+    if starts_with(path, "docs/") {
+        return "../\(path)\(anchor)"
+    }
+    return href
 }
 
 /// The last segment of a path, without its `.md`.
@@ -354,18 +383,38 @@ fn is_rule(line: str) -> bool {
     return seen_dash
 }
 
+/// A row's cells, split at every `|` that is not escaped.
+///
+/// `\|` is how a cell holds a pipe — an operator table is full of `\|\|` —
+/// and splitting at every `|` cut such a cell in two and pushed the rest of
+/// the row a column to the right. The escape comes off here, as it does on
+/// GitHub, code spans included.
 fn cells_of(line: str) -> [str] {
     var body = without_indent(line).trim()
     if starts_with(body, "|") {
         body = body.slice(1, body.len())
     }
-    if ends_with(body, "|") {
+    if ends_with(body, "|") && !ends_with(body, "\\|") {
         body = body.slice(0, body.len() - 1)
     }
     var out: [str] = []
-    for cell in split(body, "|") {
-        out.push(cell.trim())
+    var cell = ""
+    var i = 0
+    for i < body.len() {
+        let c = body.code_at(i)
+        if c == 92 && i + 1 < body.len() && body.code_at(i + 1) == 124 {
+            cell = cell + "|"
+            i += 2
+        } else if c == 124 {
+            out.push(cell.trim())
+            cell = ""
+            i += 1
+        } else {
+            cell = cell + body.slice(i, i + 1)
+            i += 1
+        }
     }
+    out.push(cell.trim())
     return out
 }
 
@@ -433,7 +482,62 @@ fn starts_block(line: str) -> bool {
     starts_with(line, ">") ||
     bullet_width(line) > 0 ||
     number_width(line) > 0 ||
-    is_row(line)
+    is_row(line) ||
+    image_line(line).len() > 0
+}
+
+// ---- images -----------------------------------------------------------------
+
+/// A line that is one `<img>` tag and nothing else, as an image — or the
+/// empty string for any other line.
+///
+/// README.md opens with the Kite mark written that way, because Markdown's
+/// own image has no width, and GitHub passes the tag through. This escaped
+/// it, so the README page opened with the tag as a line of text. Only this one
+/// tag is recognised, and only its `src`, `alt`, `width` and `height` are
+/// kept: each written again rather than passed through, with `src` sent where
+/// a link would be, because passing a document's markup through would pass
+/// through whatever else it held.
+fn image_line(line: str) -> str {
+    let tag = line.trim()
+    if !starts_with(tag, "<img ") || !ends_with(tag, ">") || tag.slice(1, tag.len()).index_of("<") >= 0 {
+        return ""
+    }
+    let src = attribute(tag, "src")
+    if src.len() == 0 {
+        return ""
+    }
+    var out = "<img src=\"\(link_href(src))\" alt=\"\(escape_attr(attribute(tag, "alt")))\""
+    for name in ["width", "height"] {
+        let value = attribute(tag, name)
+        if value.len() > 0 && all_digits(value) {
+            out = out + " \(name)=\"\(value)\""
+        }
+    }
+    return out + ">"
+}
+
+/// The value of `name="…"` in a tag, or the empty string.
+fn attribute(tag: str, name: str) -> str {
+    let at = tag.index_of(" \(name)=\"")
+    if at < 0 {
+        return ""
+    }
+    let rest = tag.slice(at + name.len() + 3, tag.len())
+    let end = rest.index_of("\"")
+    if end < 0 {
+        return ""
+    }
+    return rest.slice(0, end)
+}
+
+fn all_digits(text: str) -> bool {
+    for i in 0..text.len() {
+        if !is_digit_at(text, i) {
+            return false
+        }
+    }
+    return true
 }
 
 /// A document as HTML.
@@ -441,6 +545,11 @@ pub fn render(text: str) -> str {
     let lines = lines_of(text)
     var out: [str] = []
     var i = 0
+    // How many headings have taken each id. The second `## kind` is
+    // `kind-1`, the third `kind-2`: GitHub's numbering, and the one `kitec
+    // doc` writes its table of contents against. Every repeat was `kind`
+    // here, so the contents' `#kind-1` went nowhere.
+    var ids: { str: int } = { }
 
     for i < lines.len() {
         let line = lines[i]
@@ -467,7 +576,23 @@ pub fn render(text: str) -> str {
         let level = heading_level(line)
         if level > 0 {
             let title = line.slice(level + 1, line.len())
-            out.push("<h\(level) id=\"\(slug(title))\">\(inline(title))</h\(level)>")
+            let base = slug(title)
+            var id = base
+            let taken = ids[base]
+            if taken != nil {
+                id = "\(base)-\(taken)"
+                ids[base] = taken + 1
+            } else {
+                ids[base] = 1
+            }
+            out.push("<h\(level) id=\"\(id)\">\(inline(title))</h\(level)>")
+            i += 1
+            continue
+        }
+
+        let image = image_line(line)
+        if image.len() > 0 {
+            out.push("<p>\(image)</p>")
             i += 1
             continue
         }

@@ -29,18 +29,32 @@ OPTIONS:
     --offline         with `pkg`, resolve only from what is already vendored
     --check           with `fmt`, report rather than rewrite
     --all             with `doc`, include what is not `pub`
-    --native          with `run`, execute machine code under the JIT — no linker
-    --emit <stage>    check, ast, hir, mir, kbc, wasm, native
-    --out <dir>       where `--emit wasm` and `--emit native` write artefacts
+    --native          with `run`, execute machine code under the JIT — no linker;
+                      with `build`, write an object file and link it
+    --emit <stage>    with `run`, `check` or `build`: check, ast, hir, mir, kbc
+                      print that stage; wasm and native are `build`'s, and
+                      `run --emit native` is `run --native`
+    --out <dir>       where `build --emit wasm`, `build --native` and `bundle`
+                      write what they produce
     --update          with `pkg`, allow `kite.lock` to change; without it, a
                       dependency whose bytes moved is an error rather than a
                       new lockfile
     --explain <CODE>  explain a diagnostic code, e.g. --explain E0301
     --version
     --help
+
+An option a command does not take is an error, not something ignored.
 ";
 
 fn main() -> ExitCode {
+    // The compiler's passes recurse over the syntax tree, and a long chain in
+    // the source is a deep tree. The stack a main thread comes with ran out at
+    // under two thousand method calls in one chain; this one does not run out
+    // below the parser's ceiling.
+    kite_driver::on_compiler_stack(command)
+}
+
+fn command() -> ExitCode {
     // This binary may *be* a Kite program: `kitec bundle` copies the compiler
     // and appends the source to it. Running that copy runs the program, and
     // everything below is unreachable there.
@@ -51,12 +65,10 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
-        print!("{}", USAGE);
-        return ExitCode::SUCCESS;
+        return answer(USAGE);
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("kitec {}", env!("CARGO_PKG_VERSION"));
-        return ExitCode::SUCCESS;
+        return answer(&format!("kitec {}\n", env!("CARGO_PKG_VERSION")));
     }
 
     if let Some(i) = args.iter().position(|a| a == "--explain") {
@@ -76,6 +88,8 @@ fn main() -> ExitCode {
     let mut offline = false;
     let mut update = false;
     let mut native = false;
+    // Every option written, so each can be checked against the command.
+    let mut given: Vec<&'static str> = Vec::new();
     let mut i = 0;
 
     while i < args.len() {
@@ -96,6 +110,7 @@ fn main() -> ExitCode {
                     ));
                 };
                 emit = Some(e);
+                given.push("--emit");
                 i += 2;
             }
             "--out" => {
@@ -103,30 +118,37 @@ fn main() -> ExitCode {
                     return fail("`--out` needs a directory");
                 };
                 out_dir = Some(v.clone());
+                given.push("--out");
                 i += 2;
             }
             "--check" => {
                 check_only = true;
+                given.push("--check");
                 i += 1;
             }
             "--all" => {
                 include_private = true;
+                given.push("--all");
                 i += 1;
             }
             "--release" => {
                 release = true;
+                given.push("--release");
                 i += 1;
             }
             "--native" => {
                 native = true;
+                given.push("--native");
                 i += 1;
             }
             "--offline" => {
                 offline = true;
+                given.push("--offline");
                 i += 1;
             }
             "--update" => {
                 update = true;
+                given.push("--update");
                 i += 1;
             }
             "run" | "check" | "build" | "test" | "fmt" | "doc" | "fix" | "bundle" | "pkg"
@@ -147,6 +169,15 @@ fn main() -> ExitCode {
     }
 
     let command = command.unwrap_or_else(|| "run".to_string());
+
+    // A flag the command does not take is refused rather than obeyed. They
+    // used to be read before the command was, so `kitec test --native` wrote
+    // an object file and never ran a test, `kitec check --native` did the
+    // same, and `kitec run --emit hir` printed the stage and then failed for
+    // want of the `main` it had never been going to run.
+    if let Some(problem) = misplaced_flags(&command, &given, emit, native, out_dir.is_some()) {
+        return fail(&problem);
+    }
 
     // `pkg` takes a directory rather than a file, and defaults to this one.
     if command == "pkg" {
@@ -190,8 +221,7 @@ fn main() -> ExitCode {
             .and_then(|s| s.to_str())
             .unwrap_or("module");
         let docs = kite_doc::extract(name, &src);
-        print!("{}", kite_doc::markdown(&docs, !include_private));
-        return ExitCode::SUCCESS;
+        return answer(&kite_doc::markdown(&docs, !include_private));
     }
 
     if command == "fix" {
@@ -215,7 +245,13 @@ fn main() -> ExitCode {
             return fail(&why);
         }
     }
-    let result = kite_driver::compile_with(&path, &src, emit, release);
+    // A test run keeps every `test_…` the file declares, a private one
+    // included, which an ordinary build prunes as unreachable.
+    let result = if command == "test" {
+        kite_driver::compile_tests(&path, &src, release)
+    } else {
+        kite_driver::compile_with(&path, &src, emit, release)
+    };
 
     if !result.diags.is_empty() {
         eprint!("{}", result.render_diagnostics());
@@ -225,7 +261,14 @@ fn main() -> ExitCode {
     }
 
     if !result.output.is_empty() {
-        print!("{}", result.output);
+        if let Err(end) = say(&result.output) {
+            return end;
+        }
+    }
+    // A stage that prints is the whole answer: `run --emit hir` asked to see
+    // the program, not to run it.
+    if matches!(emit, Emit::Ast | Emit::Hir | Emit::Mir | Emit::Kbc) {
+        return ExitCode::SUCCESS;
     }
 
     // `--emit wasm` writes artefacts rather than printing them.
@@ -247,7 +290,7 @@ fn main() -> ExitCode {
         // has to be beside it or a browser asks for something that is not
         // there. §16 is what requires it: a trap in a Kite island should name
         // a `.kite` file rather than `wasm-function[37]`.
-        if let Some(map) = result.wasm_source_map() {
+        if let Some(map) = result.wasm_source_map(Some(std::path::Path::new(dir))) {
             let map_path = format!("{}/{}", dir, kite_driver::SOURCE_MAP_NAME);
             if let Err(e) = std::fs::write(&map_path, map) {
                 return fail(&format!("cannot write `{}`: {}", map_path, e));
@@ -273,7 +316,7 @@ fn main() -> ExitCode {
         let (api_js, api_dts) = kite_driver::generate_api(&module.api, "app.wasm");
         let api_js_path = format!("{}/api.js", dir);
         let api_dts_path = format!("{}/api.d.ts", dir);
-        let has_api = module.api.iter().any(|e| e.name != "main");
+        let has_api = kite_driver::has_api(&module.api);
         if has_api {
             if let Err(e) = std::fs::write(&api_js_path, api_js) {
                 return fail(&format!("cannot write `{}`: {}", api_js_path, e));
@@ -346,11 +389,13 @@ fn main() -> ExitCode {
                     path
                 ));
             }
-            let stdout = io::stdout();
-            let mut out = stdout.lock();
-            return match program.run(&mut out) {
+            // Streamed, not collected: a line the program prints reaches the
+            // terminal when it is printed — before a prompt waits for input,
+            // in order with standard error, and whether or not the program
+            // ever finishes.
+            return match program.run_to_stdout() {
                 Ok(()) => {
-                    let _ = out.flush();
+                    let _ = io::stdout().flush();
                     ExitCode::SUCCESS
                 }
                 Err(e) => fail(&e),
@@ -370,7 +415,7 @@ fn main() -> ExitCode {
             eprintln!("compiled `{}` to bytecode", path);
             ExitCode::SUCCESS
         }
-        "test" => run_tests(&result, &path, &src, release),
+        "test" => run_tests(&result, &path, &src),
 
         "run" => {
             if !result.is_runnable() {
@@ -404,17 +449,23 @@ fn main() -> ExitCode {
 /// A failure is an error *value* with a message, not a trap, so one failing
 /// test does not stop the rest — which is the whole reason `std/test`'s
 /// assertions return errors rather than asserting.
-fn run_tests(
-    result: &kite_driver::Compilation,
-    path: &str,
-    src: &str,
-    release: bool,
-) -> ExitCode {
+fn run_tests(result: &kite_driver::Compilation, path: &str, src: &str) -> ExitCode {
     let tests = result.tests();
     let docs = kite_driver::doctest::extract(src, path);
+    // Named like a test and takes arguments: a helper, not a test. Said
+    // rather than skipped in silence, because the other reading — a test
+    // somebody expected to run — is the one that costs something.
+    for helper in result.not_tests() {
+        eprintln!(
+            "note: `{}` takes {} argument{}, so it is not run as a test",
+            helper.name,
+            helper.params,
+            if helper.params == 1 { "" } else { "s" }
+        );
+    }
     if tests.is_empty() && docs.is_empty() {
         eprintln!(
-            "no tests in `{}`\n\nnote: a test is a `pub fn test_…() -> (int, error)`, or a \
+            "no tests in `{}`\n\nnote: a test is a `fn test_…() -> (int, error)`, or a \
              ```kite fence in a doc comment",
             path
         );
@@ -450,7 +501,7 @@ fn run_tests(
 
     let mut ran = tests.len();
     if !docs.is_empty() {
-        let (doc_failed, doc_ran) = run_doc_tests(&mut out, path, src, &docs, release);
+        let (doc_failed, doc_ran) = run_doc_tests(&mut out, path, src, &docs);
         failed += doc_failed;
         ran += doc_ran;
     }
@@ -480,10 +531,14 @@ fn run_doc_tests(
     path: &str,
     src: &str,
     docs: &[kite_driver::doctest::DocTest],
-    release: bool,
 ) -> (usize, usize) {
     let (augmented, names) = kite_driver::doctest::augment(src, docs);
-    let compiled = kite_driver::compile_with(path, &augmented, Emit::Kbc, release);
+    // **Never a release build**, whatever `--release` said. An example fails
+    // by trapping — an `assert` that did not hold — and a release build drops
+    // `assert`, so under `--release` every example with a wrong claim in it
+    // passed. `--release` still applies to the `test_…` functions, which fail
+    // by returning an error rather than by asserting.
+    let compiled = kite_driver::compile_with(path, &augmented, Emit::Kbc, false);
     if compiled.failed() {
         // The diagnostics point into the augmented source, whose line numbers
         // are not the file's past the first fence. So the fences are named by
@@ -536,6 +591,23 @@ fn fix_file(path: &str, src: &str) -> ExitCode {
         .iter()
         .find(|(_, name)| name == path)
         .map(|(id, _)| id);
+    // A file the lexer could not read whole is refused, as `kitec fmt`
+    // refuses it. Its diagnostics are about the tokens that survived — a `$`
+    // dropped from between `1` and `2` reads as a comma left out, and `1, $ 2`
+    // was the edit — so an edit made from them is made to a different file
+    // from the one on disk.
+    let lexical = result.diags.iter().find(|d| {
+        d.severity == kite_diag::Severity::Error
+            && d.code.is_some_and(|c| c.is_lexical())
+            && d.primary_span().is_some_and(|s| Some(s.file) == file)
+    });
+    if lexical.is_some() {
+        eprint!("{}", result.render_diagnostics());
+        return fail(&format!(
+            "cannot fix `{}`, which has lexical errors; they come first, and by hand",
+            path
+        ));
+    }
     for d in result.diags.iter() {
         for edit in d.fixes.iter().flat_map(|f| f.edits.iter()) {
             if Some(edit.span.file) != file {
@@ -597,29 +669,45 @@ fn write_native(
         .and_then(|s| s.to_str())
         .unwrap_or("app");
     let exe_path = format!("{}/{}", dir, stem);
-    let Some(runtime) = find_runtime_lib() else {
-        eprintln!(
-            "wrote {} ({} bytes)\n\
-             note: `libkite_rt.a` was not found, so no executable was linked; \
-             set KITE_RT_LIB to its path, or link the object yourself",
-            obj_path,
-            object.len()
-        );
-        return ExitCode::SUCCESS;
+    let runtime = match runtime_lib() {
+        Ok(Some(runtime)) => runtime,
+        Ok(None) => {
+            eprintln!(
+                "wrote {} ({} bytes)\n\
+                 note: this `kitec` was built without the native runtime, and `libkite_rt.a` \
+                 was not found, so no executable was linked; set KITE_RT_LIB to its path, or \
+                 link the object yourself",
+                obj_path,
+                object.len()
+            );
+            return ExitCode::SUCCESS;
+        }
+        Err(e) => return fail(&e),
     };
-    let linked = std::process::Command::new("cc")
-        .arg(&obj_path)
-        .arg(&runtime)
+    let mut cc = std::process::Command::new("cc");
+    // On a Mac, `cc` builds for its own architecture, which is not
+    // necessarily this binary's: an Intel `kitec` under Rosetta wrote an
+    // x86-64 object, and the runtime it carries is x86-64 too.
+    if cfg!(target_os = "macos") {
+        cc.args(["-arch", if cfg!(target_arch = "aarch64") { "arm64" } else { "x86_64" }]);
+    }
+    cc.arg(&obj_path)
+        .arg(&runtime.path)
+        .args(&runtime.libs)
         .arg("-o")
-        .arg(&exe_path)
-        .output();
+        .arg(&exe_path);
+    let linked = cc.output();
+    runtime.clean_up();
     match linked {
         Ok(o) if o.status.success() => {
             eprintln!("wrote {} ({} bytes) and {}", obj_path, object.len(), exe_path);
             ExitCode::SUCCESS
         }
         Ok(o) => fail(&format!(
-            "`cc` could not link `{}`:\n{}",
+            "`cc` could not link `{}`:\n{}\n\
+             note: KITE_RT_LIB names a `libkite_rt.a` to link against instead of the one \
+             this `kitec` carries — built for this machine with \
+             `cargo build --release -p kite-rt`",
             obj_path,
             String::from_utf8_lossy(&o.stderr)
         )),
@@ -639,30 +727,83 @@ fn write_native(
     }
 }
 
-/// Where the runtime's static library is. Next to this binary in a
-/// development tree, or wherever `KITE_RT_LIB` says in an installed one.
-fn find_runtime_lib() -> Option<std::path::PathBuf> {
-    if let Ok(p) = std::env::var("KITE_RT_LIB") {
-        let p = std::path::PathBuf::from(p);
-        return p.exists().then_some(p);
-    }
-    let exe = std::env::current_exe().ok()?;
-    let mut dir = exe.parent()?.to_path_buf();
-    // `target/debug/kitec` sits beside `libkite_rt.a`; a test binary sits one
-    // level further down, in `deps/`.
-    for _ in 0..3 {
-        let candidate = dir.join("libkite_rt.a");
-        if candidate.exists() {
-            return Some(candidate);
+/// The runtime archive `build.rs` compiled for this `kitec` from the same
+/// source its code generator was written against — empty when it could not,
+/// which that file explains.
+static EMBEDDED_RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libkite_rt.a"));
+
+/// What that archive needs from the system when it is linked, as `rustc`
+/// reported it: `-lc` and its neighbours, or frameworks on a Mac.
+static EMBEDDED_RUNTIME_LIBS: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/kite_rt_link_args.txt"));
+
+/// A runtime archive to link against.
+struct RuntimeLib {
+    path: std::path::PathBuf,
+    /// System libraries to name after it, when they are known.
+    libs: Vec<String>,
+    /// The directory the embedded archive was written into, for removal once
+    /// the link is done.
+    scratch: Option<std::path::PathBuf>,
+}
+
+impl RuntimeLib {
+    fn clean_up(&self) {
+        if let Some(dir) = &self.scratch {
+            let _ = std::fs::remove_dir_all(dir);
         }
-        dir = dir.parent()?.to_path_buf();
     }
-    None
+}
+
+/// The runtime to link against: the one `KITE_RT_LIB` names, when it names
+/// one; otherwise the one this binary carries, written out for the linker;
+/// otherwise an archive next to this binary, for a `kitec` built without it.
+fn runtime_lib() -> Result<Option<RuntimeLib>, String> {
+    if let Ok(p) = std::env::var("KITE_RT_LIB") {
+        let path = std::path::PathBuf::from(&p);
+        if !path.exists() {
+            return Err(format!("KITE_RT_LIB names `{}`, which does not exist", p));
+        }
+        return Ok(Some(RuntimeLib { path, libs: Vec::new(), scratch: None }));
+    }
+    if !EMBEDDED_RUNTIME.is_empty() {
+        // A directory of its own, so two builds at once never share a file,
+        // and so removing it cannot touch anything else.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("kitec-rt-{}-{}", std::process::id(), stamp));
+        let path = dir.join("libkite_rt.a");
+        std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(&path, EMBEDDED_RUNTIME))
+            .map_err(|e| format!("cannot write the native runtime to `{}`: {}", path.display(), e))?;
+        let libs = EMBEDDED_RUNTIME_LIBS.split_whitespace().map(String::from).collect();
+        return Ok(Some(RuntimeLib { path, libs, scratch: Some(dir) }));
+    }
+    let Ok(exe) = std::env::current_exe() else { return Ok(None) };
+    let mut dir = exe.parent().map(|d| d.to_path_buf());
+    // `target/debug/kitec` sits beside `libkite_rt.a` when the workspace was
+    // built whole; a test binary sits one level further down, in `deps/`.
+    for _ in 0..3 {
+        let Some(d) = dir else { break };
+        let candidate = d.join("libkite_rt.a");
+        if candidate.exists() {
+            return Ok(Some(RuntimeLib { path: candidate, libs: Vec::new(), scratch: None }));
+        }
+        dir = d.parent().map(|p| p.to_path_buf());
+    }
+    Ok(None)
 }
 
 /// `kitec fmt` — rewrite a file, or say whether it would change.
 fn format_file(path: &str, src: &str, check_only: bool) -> ExitCode {
-    let formatted = kite_fmt::format(src);
+    // A file the formatter will not touch fails `--check` too: "not
+    // formatted" is the honest answer for a file that cannot be.
+    let formatted = match kite_fmt::format(src) {
+        Ok(formatted) => formatted,
+        Err(e) => return fail(&format!("`{}`: {}", path, e)),
+    };
     if formatted == src {
         if !check_only {
             eprintln!("{} is already formatted", path);
@@ -685,11 +826,7 @@ fn format_file(path: &str, src: &str, check_only: bool) -> ExitCode {
 fn explain(code: &str) -> ExitCode {
     let code = code.to_uppercase();
     match kite_diag::codes::explain(&code) {
-        Some((summary, body)) => {
-            println!("{}: {}\n", code, summary);
-            println!("{}", body);
-            ExitCode::SUCCESS
-        }
+        Some((summary, body)) => answer(&format!("{}: {}\n\n{}\n", code, summary, body)),
         None => {
             eprintln!("error: `{}` is not a known diagnostic code", code);
             let known: Vec<&str> = kite_diag::codes::all().iter().map(|(c, _)| *c).collect();
@@ -699,7 +836,100 @@ fn explain(code: &str) -> ExitCode {
     }
 }
 
+/// Which commands take each option.
+const TAKES: &[(&str, &[&str])] = &[
+    ("--release", &["run", "check", "build", "test", "bundle"]),
+    ("--offline", &["pkg"]),
+    ("--update", &["pkg"]),
+    ("--check", &["fmt"]),
+    ("--all", &["doc"]),
+    ("--native", &["run", "build"]),
+    ("--emit", &["run", "check", "build"]),
+    ("--out", &["build", "bundle"]),
+];
+
+/// Why the options written do not fit the command, if they do not.
+///
+/// An option the command has no use for is an error rather than something
+/// quietly obeyed or quietly ignored: either way the command did something
+/// other than what was asked, and exited 0 while doing it.
+fn misplaced_flags(
+    command: &str,
+    given: &[&str],
+    emit: Option<Emit>,
+    native: bool,
+    out: bool,
+) -> Option<String> {
+    for flag in given {
+        let takes = TAKES.iter().find(|(f, _)| f == flag).map(|(_, c)| *c).unwrap_or(&[]);
+        if !takes.contains(&command) {
+            let which: Vec<String> = takes.iter().map(|c| format!("`kitec {}`", c)).collect();
+            return Some(format!(
+                "`{}` does not apply to `kitec {}`\n\nnote: `{}` is for {}",
+                flag,
+                command,
+                flag,
+                which.join(", ")
+            ));
+        }
+    }
+    if native && emit.is_some_and(|e| e != Emit::Native) {
+        return Some(
+            "`--native` is `--emit native`, which is not the stage `--emit` asked for — give \
+             one of them"
+                .to_string(),
+        );
+    }
+    match (command, emit) {
+        ("check", Some(Emit::Wasm | Emit::Native)) => {
+            return Some(
+                "`kitec check` writes nothing\n\nnote: `kitec build --emit …` is what writes an \
+                 artefact"
+                    .to_string(),
+            )
+        }
+        ("run", Some(Emit::Wasm)) => {
+            return Some(
+                "`kitec run` runs the program, and a WebAssembly module needs a host to run \
+                 in\n\nnote: `kitec build --emit wasm` writes one"
+                    .to_string(),
+            )
+        }
+        _ => {}
+    }
+    let writes = native || matches!(emit, Some(Emit::Wasm | Emit::Native));
+    if command == "build" && out && !writes {
+        return Some(
+            "`--out` says where `--emit wasm` or `--native` writes, and this build writes \
+             nothing"
+                .to_string(),
+        );
+    }
+    None
+}
+
 fn fail(message: &str) -> ExitCode {
     eprintln!("error: {}", message);
     ExitCode::FAILURE
+}
+
+/// Write the command's own answer to standard output: `Err` with how the
+/// command ends when it has to end here.
+///
+/// `print!` panics when the reader has gone — `kitec --explain E0302 | head`
+/// — and a compiler that panics reads as a broken compiler. A reader that
+/// stopped reading has had what it wanted, so that ends the command cleanly;
+/// any other failure to write is an error, said as one.
+fn say(text: &str) -> Result<(), ExitCode> {
+    let mut out = io::stdout().lock();
+    match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Err(ExitCode::SUCCESS),
+        Err(e) => Err(fail(&format!("cannot write to standard output: {}", e))),
+    }
+}
+
+/// [`say`], as the whole of a command.
+fn answer(text: &str) -> ExitCode {
+    say(text).err().unwrap_or(ExitCode::SUCCESS)
 }

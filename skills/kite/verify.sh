@@ -11,7 +11,10 @@
 #                      the standard library's own doc comments use.
 #   ```kite fails      a program that must NOT compile. The line that should be
 #                      rejected carries `//~ E0302`, as `tests/corpus` does,
-#                      and the code must appear in the diagnostics.
+#                      and the compiler must report that code: a header
+#                      `error[E0302]` or `warning[E0302]`. The code appearing
+#                      anywhere else is not enough — a diagnostic quotes its
+#                      source line, and that line carries the marker itself.
 #
 # Usage: verify.sh <file.md>...    exit 0 when every block behaved as marked.
 
@@ -59,14 +62,15 @@ for doc in "$@"; do
         bad=$((bad + 1))
         continue
       fi
-      # Every `//~ E0nnn` marker in the block must appear in the diagnostics.
+      # Every `//~ E0nnn` marker in the block must name a code the compiler
+      # reported. Matching the bare code would pass on the echoed source line.
       while read -r code; do
         case "$said" in
-          *"$code"*) ;;
+          *"error[$code]"*|*"warning[$code]"*) ;;
           *) echo "FAIL $doc:$line — expected $code, got: $(echo "$said" | head -1)"
              bad=$((bad + 1)) ;;
         esac
-      done < <(grep -o "E0[0-9][0-9][0-9]" "$path" | sort -u)
+      done < <(grep -o "//~ *E0[0-9][0-9][0-9]" "$path" | grep -o "E0[0-9][0-9][0-9]" | sort -u)
     else
       if [ $ok -ne 0 ]; then
         echo "FAIL $doc:$line — does not compile:"

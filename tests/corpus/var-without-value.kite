@@ -1,0 +1,11 @@
+// Each of these is one error, and the name is still declared. Returning
+// nothing from the parser added a missing `=` to each, and then an unknown
+// name at every use.
+
+let LIMIT: int //~ ERROR E0118
+
+fn main() {
+    var x: int //~ ERROR E0110
+    x = 1
+    io.print(x + LIMIT)
+}

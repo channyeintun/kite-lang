@@ -1,7 +1,8 @@
 # Kite for Visual Studio Code
 
-Highlighting, diagnostics as you type, hover, go to definition, completion,
-document symbols, and format on save.
+Highlighting, diagnostics as you type, hover, go to definition, find
+references, rename, inlay hints, completion, document symbols, and format on
+save.
 
 Everything but the highlighting comes from **`kite-lsp`**, which runs the same
 passes the compiler runs. That is the whole point of the arrangement: an
@@ -11,16 +12,12 @@ in one editor, and one that eventually disagrees with the build.
 ## The icon
 
 `icon.svg` is the brand sheet's extension tile: the mark at 72 on a 112 x 112
-rounded ground. The Marketplace only accepts a PNG, so packaging rasterises it
-rather than keeping a second drawing:
-
-```bash
-rsvg-convert -w 128 -h 128 icon.svg -o icon.png   # or any SVG rasteriser
-```
-
-`icon.png` is not committed, and `package.json` gains its `icon` field at that
-point. The shapes inside `icon.svg` are copied from `site/kite-mark.svg`, and
-`cargo test --test brand_assets` fails if the copy stops matching.
+rounded ground. The Marketplace only accepts a PNG, so `icon.png` — committed,
+256 x 256, and named by the `icon` field in `package.json` — is a rendering of
+it rather than a second drawing. `render-icon.sh` regenerates it when the mark
+changes. The shapes inside `icon.svg` are copied from `site/kite-mark.svg`,
+and `cargo test --test brand_assets` fails if the copy, or the PNG, stops
+matching.
 
 ## Installing
 
@@ -35,16 +32,41 @@ this directory into `~/.vscode/extensions/kite-lang` and reload the window.
 
 | Request | Answer |
 |---|---|
-| `textDocument/didOpen`, `didChange`, `didSave` | diagnostics for that file |
+| `textDocument/didOpen`, `didChange`, `didSave` | diagnostics for that file, for the open files that import it — a path dependency's importers included — and for a `kite.toml` that does not read |
+| `textDocument/didClose` | clears that file's diagnostics, and republishes the files that read its buffer |
 | `textDocument/hover` | the declaration a name resolves to |
-| `textDocument/definition` | where it was declared |
-| `textDocument/completion` | keywords, and every name in scope |
+| `textDocument/definition` | where it was declared, in this file or one of the program's own modules |
+| `textDocument/references` | every place in this file the name is written |
+| `textDocument/prepareRename`, `rename` | the edit, or the reason it is refused |
+| `textDocument/inlayHint` | the type a bare `let` was given, and the type arguments a generic call solved |
+| `textDocument/completion` | keywords, and every name this file can write |
 | `textDocument/documentSymbol` | the file's declarations |
 | `textDocument/formatting` | the file, laid out by `kitec fmt` |
 
+A file that imports another open file sees the editor's copy of it, saved or
+not — and only of that file. The server resolves every `use` exactly as
+`kitec check` would with every open buffer saved, so opening a file never
+changes which module a `use` reaches. Only files on disk and unsaved buffers
+are sent to the server: the copy
+of a file a diff view or source control shows is also Kite, and compiling it
+would report an old version's problems.
+
+A rename starts only when every place the name is written is one the edit
+reaches, and says why when it is not: a `pub` name is used by other files, a
+type is written in annotations the binding table does not record, a method's
+calls need the receiver's type, and a file that does not parse has code in it
+that was never resolved. A private function or constant declared in a file
+that shares its directory with other `.kite` files may be used from all of
+them — a directory is one module — so the rename edits every one of them,
+open or not, and is refused if one cannot be read or does not parse. A new
+name is compared as the compiler compares identifiers — after NFC — so `café`
+typed with a combining accent is the `café` already there.
+
 Diagnostics pointing into the standard library are not published: they belong
 to a file the user does not have open, and showing them against a line they do
-have open would be a lie about where the problem is.
+have open would be a lie about where the problem is. A `kite.toml` that does not
+read is the exception: its error is published under the manifest's own URI, as
+`kitec check` reports it there, and the `use` it broke names it.
 
 ## Highlighting without the server
 

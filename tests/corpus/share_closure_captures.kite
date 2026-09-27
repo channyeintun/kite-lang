@@ -1,0 +1,35 @@
+// A function handed to another task takes what it captured along with it, so
+// every capture must be `Share` exactly as the items are (§4.5, §12.3). A
+// lock serialises access, which settles a race and nothing else: a mutex
+// holding a host reference is no more `Share` than the reference.
+use std/task
+use std/sync
+
+struct Counter {
+    var n: int
+}
+
+fn bump(var c: Counter) -> int {
+    c.n = c.n + 1
+    return c.n
+}
+
+@host("js")
+extern fn global(name: str) -> JsValue
+
+async fn main() {
+    let c = Counter{ n: 0 }
+    let r = await task.parallel([1, 2, 3], |x: int| -> int { return bump(c) + x }) //~ ERROR E0520
+    let doc = global("document")
+    let s = await task.parallel([1, 2], |x: int| -> int { //~ ERROR E0520
+            let d = doc
+            return x
+        })
+    let base = 10
+    let ok = await task.parallel([1, 2], |x: int| x + base)
+    let f = |x: int| x + base
+    let g = await task.parallel([1, 2], f) //~ ERROR E0520
+    let held = [sync.mutex(global("window"))]
+    let h = await task.parallel(held, |m: sync.Mutex<JsValue>| 1) //~ ERROR E0520
+    io.print(ok.len())
+}

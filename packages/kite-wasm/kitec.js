@@ -13,8 +13,9 @@
 // scripts reach for.
 
 import { readFile, writeFile, readdir } from "node:fs/promises";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { compiler, BuildFailed } from "./compiler.js";
 
@@ -46,20 +47,26 @@ server and native execution live there. https://kite-lang.dev/install
  * so `use markdown/render` reaches inside the package. Nothing is fetched:
  * this reads a `path =` dependency where it is and a git one out of
  * `.kite/vendor`, which `kitec pkg` filled.
+ *
+ * `origins` is filled with where each one was read from, by the name the
+ * compiler gives it — its key and `.kite` — for a source map to name it by.
  */
-async function siblingsOf(file) {
+async function siblingsOf(file, origins = {}) {
   const dir = dirname(resolve(file));
   const self = basename(file);
   const siblings = {};
+  const add = async (key, at) => {
+    siblings[key] = await readFile(at, "utf8");
+    origins[`${key}.kite`] = at;
+  };
   for (const name of await readdir(dir)) {
     if (name === self || extname(name) !== ".kite") continue;
-    siblings[basename(name, ".kite")] = await readFile(join(dir, name), "utf8");
+    await add(basename(name, ".kite"), join(dir, name));
   }
   for (const [name, from] of await dependencyDirs(file)) {
     for (const entry of await readdir(from).catch(() => [])) {
       if (extname(entry) !== ".kite") continue;
-      siblings[`${name}/${basename(entry, ".kite")}`] =
-        await readFile(join(from, entry), "utf8");
+      await add(`${name}/${basename(entry, ".kite")}`, join(from, entry));
     }
   }
   return siblings;
@@ -126,7 +133,10 @@ const outDir = outIndex === -1 ? null : argv[outIndex + 1];
 const files = positional.filter((a) => a !== outDir);
 
 if (flags.has("--version") || command === "--version") {
-  const here = dirname(new URL(import.meta.url).pathname);
+  // `fileURLToPath`, not `.pathname`: the path of a URL is percent-encoded,
+  // so an install directory with a space in it was not found, and on Windows
+  // it is `/C:/…`, which is not a path at all.
+  const here = dirname(fileURLToPath(import.meta.url));
   const { version } = JSON.parse(await readFile(join(here, "package.json"), "utf8"));
   process.stdout.write(`kitec ${version} (WebAssembly)\n`);
   process.exit(0);
@@ -149,6 +159,7 @@ switch (command) {
     const output = kite.runModule({
       entry: await readFile(file, "utf8"),
       siblings: await siblingsOf(file),
+      path: file,
     });
     process.stdout.write(output);
     // Diagnostics are rendered into the same answer, so a failed compile is
@@ -160,9 +171,12 @@ switch (command) {
     const diagnostics = kite.checkModule({
       entry: await readFile(file, "utf8"),
       siblings: await siblingsOf(file),
+      path: file,
     });
     process.stdout.write(diagnostics);
-    process.exit(diagnostics.trim() === "" ? 0 : 1);
+    // An error fails the check; a warning is said and does not, as with the
+    // native `kitec`. Any output at all used to count as failure.
+    process.exit(/^error(\[|:)/m.test(diagnostics) ? 1 : 0);
   }
 
   case "doc": {
@@ -191,20 +205,36 @@ switch (command) {
   }
 
   case "build": {
+    const out = outDir ?? dirname(resolve(file));
+    const { mkdir, realpath } = await import("node:fs/promises");
+    await mkdir(out, { recursive: true });
+    // The source map names each file relative to where it is written, as the
+    // native `kitec` does: a browser looks a source up against the map's own
+    // URL, so the bare `main.kite` it used to say was looked for in `out`.
+    // Measured between the real paths, as there, so a directory reached
+    // through a link is not climbed out of and back into. Diagnostics still
+    // name the file as it was typed.
+    const origins = { [file]: resolve(file) };
+    const siblings = await siblingsOf(file, origins);
+    const real = async (path) => realpath(path).catch(() => resolve(path));
+    const from = await real(out);
+    const sourceNames = {};
+    for (const [name, at] of Object.entries(origins)) {
+      sourceNames[name] = relative(from, await real(at)).replaceAll("\\", "/");
+    }
     let artefacts;
     try {
       artefacts = kite.build({
         entry: await readFile(file, "utf8"),
-        siblings: await siblingsOf(file),
+        siblings,
         release: flags.has("--release"),
+        path: file,
+        sourceNames,
       });
     } catch (error) {
       if (error instanceof BuildFailed) fail(error.diagnostics);
       throw error;
     }
-    const out = outDir ?? dirname(resolve(file));
-    const { mkdir } = await import("node:fs/promises");
-    await mkdir(out, { recursive: true });
     for (const [name, body] of Object.entries(artefacts)) {
       await writeFile(join(out, name), body);
       process.stdout.write(`wrote ${join(out, name)} (${body.length} bytes)\n`);

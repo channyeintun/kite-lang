@@ -6,11 +6,21 @@ A small, explicit programming language for the web.
 WebAssembly is the primary target, not an afterthought.
 
 ```kite
+use config
+
 fn main() {
+    let err = serve()
+    if err != nil {
+        io.print("cannot start: \(err.message())")
+    }
+}
+
+fn serve() -> error {
     let (cfg, err) = config.load("app.toml")
     check err
 
     io.print("listening on \(cfg.port)")
+    return nil
 }
 ```
 
@@ -45,10 +55,10 @@ terseness. Boilerplate is not the enemy. Hidden control flow is.
 | **Errors are values, and the compiler enforces it** | Go's `(T, error)` shape, but a value returned alongside an unchecked error is *unreadable* until the error is checked. Go's single biggest flaw, removed, without changing how the code looks. |
 | **Immutable by default** | `let` and struct fields are immutable unless marked `var`. This maps directly onto WasmGC's per-field mutability flag, and makes most types automatically safe to share across tasks. |
 | **No pointers, no references, no lifetimes** | Structs are GC-managed reference types. There is no `*T`, no `&T`, and no value/pointer receiver distinction. |
-| **One concurrency concept, not two** | `async`/`await`. No goroutines, no channels, no mutex-by-default. Calling an `async fn` starts it; `await` is how the value comes out. |
+| **One concurrency concept, not two** | `async`/`await`. No goroutines, no channels, no mutex-by-default. Calling an `async fn` queues it rather than running it, and hands back a `Task`; `await` is how the value comes out. |
 | **Wasm is the reference target** | The semantics are chosen so that lowering to WasmGC is direct. |
 | **HTML and CSS keep their jobs** | Kite replaces JavaScript, and nothing else. A program creates real elements with real class names, so somebody else's stylesheet — Tailwind, Bootstrap, a design system you already own — works on it unchanged. The browser lays out. Canvas is a `<canvas>` you draw into. |
-| **Adoptable one file at a time** | Every `pub fn` is a real export, and `kitec build` writes `api.js` and `api.d.ts` beside the module. A TypeScript project imports it and type-checks against it, with none of the calling convention visible. That is how TypeScript itself spread. |
+| **Adoptable one file at a time** | Every `pub fn` is a real export, and `kitec build --emit wasm` writes `api.js` and `api.d.ts` beside the module. A TypeScript project imports it and type-checks against it, with none of the calling convention visible. That is how TypeScript itself spread. |
 | **It lives inside a page, not instead of one** | A Kite program owns the parts of a page that need real logic, rather than owning the page. Attaching to `<body>` is still available; making it the only option is what puts a Wasm download in front of the first paint of everything. |
 
 ## Install
@@ -126,7 +136,10 @@ let (first, second) = await task.both(a, b)   // 100ms, not 150
 
 **Errors that are types.** `impl Error for MyType` makes a concrete type
 usable wherever an `error` is expected — the conversion happens at that point
-and is an ordinary call in the IR, so nothing about it is hidden.
+and is an ordinary call in the IR, so nothing about it is hidden. The error
+keeps the value it was made from and whatever it wrapped, so a caller four
+layers up can still ask `LoadError.is(errors.root(err))`, take the value back
+out with `LoadError.as(…)`, or read the whole story with `errors.chain(err)`.
 
 ```kite
 pub enum LoadError {
@@ -148,7 +161,7 @@ fn load(path: str) -> ([Task], error) {
 
 **A standard library, in Kite.** `math`, `time`, `errors`, `fmt`, `json`,
 `toml`, `text`, `test`, `buffer`, `task`, `sync`, `fs`, `http`, `socket`,
-`crypto`, `canvas`, `js`, `dom`, `window`, `html`. Its own tests are ordinary Kite programs that run on *both*
+`crypto`, `canvas`, `js`, `dom`, `window`, `html`. Its own tests are ordinary Kite programs that run on all three
 backends and must agree.
 
 **Bodies the compiler writes.** `@derive(Debug, Hash, Encode, Decode)` in front
@@ -159,7 +172,10 @@ because `==` is already structural on every value.
 
 ```kite
 @derive(Encode, Decode)
-struct User { name: str, age: int }
+struct User {
+    name: str
+    age: int
+}
 
 let (doc, err) = json.parse(text)
 check err
@@ -210,7 +226,7 @@ and the glue cannot drift from it.
 
 **The browser, without writing JavaScript.** `std/js` is about thirty
 primitives — `get`, `set`, `call`, `new`, `func`, conversions — and its host
-block is a fixed sixty-five lines that does not grow however much of the platform a
+block is a fixed hundred-odd lines that does not grow however much of the platform a
 program reaches. `std/dom` is written over it in ordinary Kite with no `extern`
 in it at all, which is what makes the primitives a real answer to *the standard
 library never wrapped the thing I need* rather than a promise. A host object is
@@ -241,7 +257,7 @@ what a call inferred — all over the same passes the compiler runs.
 | `wasm32-gc` | WasmGC via `wasm-encoder` | Every construct the language has. `--emit wasm` refuses nothing it can express |
 | `kbc` | Register bytecode and a VM | The dev loop, the embedding target, and the differential oracle |
 | bundle | This compiler with the program appended | One file, nothing installed, starts in about a millisecond |
-| `native-*` | Cranelift, AOT and JIT | Machine code, with a precise collector in `kite-rt`. `--emit native` writes an object file; `run --native` needs no linker. macOS and Linux; Windows is refused, and says why |
+| `native-*` | Cranelift, AOT and JIT | Machine code, with a precise collector in `kite-rt`. `--emit native` writes an object file and links it into an executable with `cc`, against a runtime `kitec` carries inside itself; `run --native` needs no linker. macOS and Linux; Windows is refused, and says why |
 
 Every program in the differential corpus is compiled to **all three** real
 backends, run on all three, and the outputs compared. Three independent
@@ -309,17 +325,6 @@ python3 -m http.server -d site 8000
 
 Recorded here rather than left to be discovered:
 
-- **An error carries its message, not its value.** `impl Error for MyType` now
-  works and a concrete type may be returned in an error slot — but the
-  conversion renders the message and drops the value, so `cause`,
-  `errors.chain`, `errors.is<T>` and `errors.as<T>` are still absent. Carrying
-  the value needs a change to the error representation in all three backends:
-  [Phase 24's remaining half](docs/06-roadmap.md#phase-24--concrete-error-types).
-- **No line breaking outside the browser.** `ui.wrap` was the only one, and it
-  went with `std/ui`. The browser wraps its own text, so this only matters to a
-  program painting into a `<canvas>` — `std/text` has the UAX #14 break
-  opportunities and `canvas.width_of` has the measurement, so it is a small
-  function nobody has written rather than a missing capability.
 - **No real parallelism, on any target.** A WasmGC reference cannot cross a
   thread boundary until shared-everything-threads ships, and the VM's values
   are `Rc`-based. `Share` is enforced now so that the day either changes, no
@@ -333,23 +338,27 @@ Recorded here rather than left to be discovered:
   layout engine that fed them. `std/text`'s bidi, joining and line breaking keep
   their direct tests; the end-to-end comparison does not exist, and pixels never
   did — that needs a browser and a dependency this does not have.
-- **No native backend on Windows.** The collector finds roots by walking frame
-  pointers, and Cranelift's Win64 prologue puts the frame record where that
-  walk does not expect it. `--native` refuses there rather than corrupting the
-  heap. Finishing it wants a Windows machine.
+- **No native backend on Windows.** The collector finds roots by walking the
+  frame-pointer chain, and nobody has shown that chain holds on Win64, where
+  LLVM may point a frame pointer into the middle of a frame for its unwind
+  tables. `--native` refuses there rather than risk corrupting the heap.
+  Finishing it wants a Windows machine.
 - **No `wasi:http/incoming-handler`.** A Kite program listens on a port through
   a generated Node adapter. WASI's version is a component-model export, and
   `kitec` emits a core module.
-- **Nothing published.** The release pipeline is signed, packaged for Homebrew,
-  Scoop and the AUR, and has never run: no tag has been pushed.
+- **No package-manager listing.** Releases are tagged, signed and published —
+  on GitHub and on npm — and each renders Homebrew, Scoop and AUR manifests
+  from its own checksums, but none has been submitted: a tap, a bucket and an
+  AUR account are decisions about identity and hosting, not code.
 - **No Argon2.** It is not in WebCrypto, so it waits on a runtime that has it.
 
-834 tests: unit tests per crate, an annotated compile-fail corpus, a
-differential corpus that runs every program on **three** backends and compares,
-the standard library's own suite on two of them, the host boundary and a real
+More than a thousand tests: unit tests per crate, an annotated compile-fail
+corpus, a differential corpus that runs every program on **three** backends and
+compares, the standard library's own suite on all three, the host boundary and a real
 socket under Node, the DOM layer and the typed door driven under Node — with
-real `tsc` type-checking the generated declarations where it is installed — both
-string representations compared against each other and against the VM, size
+real `tsc` type-checking the generated declarations where it is installed — the
+one string representation compared against the VM and across the JavaScript
+boundary, size
 budgets that fail the build when a module grows, every example on the site, the
 specification's own Appendix A, and the brand assets, which are checked for
 drift because the mark is drawn once and copied three times.

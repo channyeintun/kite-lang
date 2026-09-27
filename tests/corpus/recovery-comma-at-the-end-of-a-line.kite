@@ -1,0 +1,42 @@
+// A `,` left out at the end of a line of a list laid out over several is one
+// error, and the list goes on as if it were there. The next line used to be
+// read as the next statement, so the statement holding the list was lost:
+// `nums` did not return, and the list's `]` closed the function.
+
+struct P {
+    x: int
+    y: int
+}
+
+fn add3(a: int, b: int, c: int) -> int {
+    return a + b + c
+}
+
+fn nums() -> [int] {
+    return [
+        1, 2,
+        3, 4 //~ ERROR E0100
+        5, 6,
+    ]
+}
+
+fn main() {
+    io.print(nums().len())
+    let x = add3(
+        1,
+        2 //~ ERROR E0100
+        3,
+    )
+    io.print(x)
+    let m = {
+        "a": 1,
+        "b": 2 //~ ERROR E0100
+        "c": 3,
+    }
+    io.print(m.len())
+    let p = P{
+        x: 1 //~ ERROR E0100
+        y: 2,
+    }
+    io.print(p.x + p.y)
+}

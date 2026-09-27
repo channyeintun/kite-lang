@@ -1,6 +1,6 @@
 # Publishing the extension
 
-`RELEASING.md` step 6 is two commands. This is what is behind them, because
+`RELEASING.md` step 5 is two commands. This is what is behind them, because
 the first publish is not the same job as the ones after it, and almost
 everything that goes wrong here fails quietly.
 
@@ -96,7 +96,7 @@ exist first — the login fails even with a perfectly good token otherwise.
 
 `vsce publish` publishes whatever `package.json` says, and the Marketplace
 refuses a version it already has. The number is set by the release, not here:
-`RELEASING.md` step 2 moves it in five places at once, and
+`RELEASING.md` step 2 moves it in ten files at once, and
 `every_version_stays_on_the_one_line` fails the build if they disagree. Do not
 bump it in this directory alone.
 

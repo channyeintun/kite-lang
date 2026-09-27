@@ -230,6 +230,39 @@ fn unicode_checks() -> [error] {
     return out
 }
 
+/// `n` copies of `s`, end to end.
+fn repeat(s: str, n: int) -> str {
+    var parts: [str] = []
+    for i in 0..n {
+        parts.push(s)
+    }
+    return join(parts, "")
+}
+
+/// A document chooses how deep it nests, and the parser recurses once per
+/// level: three thousand `[`, six kilobytes, ran a WebAssembly host out of
+/// stack, a trap rather than an error. Past 128 levels — each key segment,
+/// array and inline table one — a document is refused, as `std/json` refuses
+/// one.
+fn depth_checks() -> [error] {
+    var out: [error] = []
+    let (_, deep) = toml.parse("a = " + repeat("[", 3000) + repeat("]", 3000) + "\n")
+    out.push(test.failed(deep, "arrays nested three thousand deep are refused"))
+    if deep != nil {
+        out.push(test.is_true(deep.message().index_of("nested deeper than 128") >= 0, "and say why"))
+    }
+    out.push(refuses("a = " + repeat("{ b = ", 2000) + "1" + repeat(" }", 2000) + "\n", "inline tables two thousand deep"))
+    out.push(refuses(repeat("a.", 200) + "b = 1\n", "a key of two hundred segments"))
+    out.push(refuses("[" + repeat("a.", 200) + "b]\n", "a header of two hundred segments"))
+    out.push(refuses("[" + repeat("a.", 100) + "b]\n" + repeat("c.", 100) + "d = 1\n", "a header and a key deeper together"))
+    out.push(refuses("a = { " + repeat("b.", 200) + "c = 1 }\n", "a dotted key inside an inline table"))
+    // Up to the limit is a document like any other.
+    out.push(accepts("a = " + repeat("[", 127) + repeat("]", 127) + "\n", "arrays 127 deep under a key"))
+    out.push(refuses("a = " + repeat("[", 128) + repeat("]", 128) + "\n", "and one more"))
+    out.push(accepts(repeat("a.", 127) + "b = 1\n", "a key of 128 segments"))
+    return out
+}
+
 /// The cases where being lenient would be being wrong.
 fn refusal_checks() -> [error] {
     var out: [error] = []
@@ -258,8 +291,10 @@ fn refusal_checks() -> [error] {
     let (_, too_many_digits) = toml.parse("n = 99999999999999999999\n")
     out.push(test.failed(too_many_digits, "an int too long to hold is an error, not a trap"))
 
+    // It returns promptly, and is refused rather than read as an infinity:
+    // Kite has no value for one, which is why `inf` is refused too.
     let (_, huge_exponent) = toml.parse("x = 1e999999999999\n")
-    out.push(test.ok(huge_exponent, "an enormous exponent parses instead of hanging"))
+    out.push(test.failed(huge_exponent, "an enormous exponent is refused instead of hanging"))
 
     // The trip count was clamped after being made positive rather than
     // before, and the one exponent with no positive counterpart is the one
@@ -291,8 +326,268 @@ fn refusal_checks() -> [error] {
     return out
 }
 
+/// Whether a document is accepted, as a check.
+fn accepts(src: str, what: str) -> error {
+    let (_, err) = toml.parse(src)
+    return test.ok(err, what)
+}
+
+/// Whether a document is refused, as a check.
+fn refuses(src: str, what: str) -> error {
+    let (_, err) = toml.parse(src)
+    return test.failed(err, what)
+}
+
+/// The specification's own examples of sub-tables inside an array of tables,
+/// which were refused, and what `emit` wrote for such an element, which lost
+/// everything but the header.
+fn nested_array_checks() -> [error] {
+    var out: [error] = []
+    let src = "[[fruit]]\nname = \"apple\"\n\n[fruit.physical]\ncolor = \"red\"\nshape = \"round\"\n\n[[fruit.variety]]\nname = \"red delicious\"\n\n[[fruit.variety]]\nname = \"granny smith\"\n\n[[fruit]]\nname = \"banana\"\n\n[[fruit.variety]]\nname = \"plantain\"\n"
+    let (doc, err) = toml.parse(src)
+    out.push(test.ok(err, "the specification's array-of-tables example parses"))
+    if err != nil {
+        return out
+    }
+    let written = toml.emit(doc)
+    out.push(test.equal_str(written, "\n" + src, "and emits back as it was written"))
+    let fruit = toml.at(doc, "fruit")
+    out.push(test.is_true(fruit != nil, "the array is there"))
+    let (again, again_err) = toml.parse(written)
+    out.push(test.ok(again_err, "what was emitted parses"))
+    if again_err != nil {
+        return out
+    }
+    out.push(test.equal_str(toml.emit(again), written, "and emits the same again"))
+
+    // A table inside an element, written inline or with a dotted key: the
+    // element's tables were skipped on the way out.
+    let (inline, inline_err) = toml.parse("[[a]]\nb = { c = 1 }\n")
+    out.push(test.ok(inline_err, "an inline table in an element parses"))
+    if inline_err != nil {
+        return out
+    }
+    let (inline_again, inline_again_err) = toml.parse(toml.emit(inline))
+    out.push(test.ok(inline_again_err, "and its emitted form parses"))
+    if inline_again_err != nil {
+        return out
+    }
+    out.push(test.is_true(toml.emit(inline_again).index_of("c = 1") >= 0, "and keeps the table"))
+    let (dotted, dotted_err) = toml.parse("[[a]]\nb.c = 1\nb.d = 2\n[[a]]\nb.c = 3\n")
+    out.push(test.ok(dotted_err, "dotted keys in two elements parse"))
+    if dotted_err != nil {
+        return out
+    }
+    out.push(test.equal_str(
+            toml.emit(dotted),
+            "\n[[a]]\n\n[a.b]\nc = 1\nd = 2\n\n[[a]]\n\n[a.b]\nc = 3\n",
+            "and emit into their own elements",
+        ))
+
+    out.push(accepts("[[a]]\n[a.b]\nx = 1\n[[a]]\n[a.b]\nx = 2\n", "the same sub-table in each element"))
+    out.push(accepts("[a]\n[[a.b]]\n[[a.b]]\n", "an array of tables inside a table"))
+    out.push(accepts("[[a.b]]\nx = 1\n[a]\ny = 2\n", "a table made on the way to an array, defined after"))
+    return out
+}
+
+/// How a table came to exist decides what may add to it later.
+fn table_rule_checks() -> [error] {
+    var out: [error] = []
+    out.push(refuses("[a]\nb = 1\n[a]\nc = 2\n", "a table defined twice"))
+    out.push(refuses("a = { b = 1 }\n[a]\nc = 2\n", "an inline table extended by a header"))
+    out.push(refuses("a = { b = 1 }\na.c = 2\n", "an inline table extended by a dotted key"))
+    out.push(refuses("a = { b = { c = 1 } }\n[a.b]\n", "a table inside an inline one, extended"))
+    out.push(refuses("x = { a = { b = 1 }, a.c = 2 }\n", "an inline table extended inside another"))
+    out.push(refuses("a = [1, 2]\n[[a]]\nb = 1\n", "a static array appended to"))
+    out.push(refuses("a = [{ b = 1 }]\n[[a]]\n", "a static array of tables appended to"))
+    out.push(refuses("[[a]]\n[a]\n", "an array of tables named as a table"))
+    out.push(refuses("[a]\n[[a]]\n", "a table named as an array of tables"))
+    out.push(refuses("[fruit]\napple.color = \"red\"\n[fruit.apple]\n", "a header over a table dotted keys defined"))
+    out.push(refuses("a.b = 1\n[a]\n", "a header over a top-level dotted table"))
+    out.push(refuses("[a.b.c]\nz = 9\n[a]\nb.c.t = 1\n", "a dotted key into a table a header defined"))
+    out.push(refuses("[[a.b]]\n[a]\nb.x = 1\n", "a dotted key into an array of tables"))
+    // What the rules allow, and must go on allowing.
+    out.push(accepts(
+            "[fruit]\napple.color = \"red\"\napple.taste.sweet = true\n[fruit.apple.texture]\nsmooth = true\n",
+            "a sub-table under a table dotted keys defined",
+        ))
+    out.push(accepts("[a.b.c]\n[a.b]\nx = 1\n[a]\ny = 2\n", "tables made on the way, defined afterwards"))
+    out.push(accepts("a.b = 1\na.c = 2\n", "dotted keys add to the table they made"))
+    out.push(accepts("[a]\nb.c = 1\n[x]\n[a.b.d]\n", "a sub-table under a dotted table, from later"))
+    out.push(accepts("[ a . b ]\n[ a ]\n", "space in a header"))
+    return out
+}
+
+fn radix_checks() -> [error] {
+    var out: [error] = []
+    let (doc, err) = toml.parse("h = 0xDEADBEEF\nl = 0xdead_beef\no = 0o755\nb = 0b1101\nz = 0x0\nbig = 0x7FFFFFFFFFFFFFFF\n")
+    out.push(test.ok(err, "hexadecimal, octal and binary parse"))
+    if err != nil {
+        return out
+    }
+    out.push(test.equal_int(toml.int_at(doc, "h", 0), 3735928559, "0xDEADBEEF is an integer, not a float"))
+    out.push(test.equal_int(toml.int_at(doc, "l", 0), 3735928559, "lower case, with an underscore"))
+    out.push(test.equal_int(toml.int_at(doc, "o", 0), 493, "octal"))
+    out.push(test.equal_int(toml.int_at(doc, "b", 0), 13, "binary"))
+    out.push(test.equal_int(toml.int_at(doc, "z", 1), 0, "zero"))
+    out.push(test.equal_int(toml.int_at(doc, "big", 0), 9223372036854775807, "the largest int"))
+    out.push(refuses("n = 0x8000000000000000\n", "past the largest int"))
+    out.push(refuses("n = -0x1\n", "a sign on a hexadecimal integer"))
+    out.push(refuses("n = 0X1F\n", "an upper-case prefix"))
+    out.push(refuses("n = 0o8\n", "an octal eight"))
+    out.push(refuses("n = 0b2\n", "a binary two"))
+    out.push(refuses("n = 0x\n", "a prefix with no digits"))
+    out.push(refuses("n = 0x_1\n", "an underscore after the prefix"))
+    return out
+}
+
+/// Spellings that looked like numbers and were read as the nearest one.
+fn strict_number_checks() -> [error] {
+    var out: [error] = []
+    out.push(refuses("n = 007\n", "a leading zero"))
+    out.push(refuses("n = -01\n", "a leading zero after a sign"))
+    out.push(refuses("n = 1__2\n", "two underscores"))
+    out.push(refuses("n = _1\n", "a leading underscore"))
+    out.push(refuses("n = 1_\n", "a trailing underscore"))
+    out.push(refuses("n = 1.\n", "a point with nothing after it"))
+    out.push(refuses("n = .5\n", "a point with nothing before it"))
+    out.push(refuses("n = 1._5\n", "an underscore after the point"))
+    out.push(refuses("n = 1e\n", "an exponent with no digits"))
+    out.push(refuses("n = 1.5e_3\n", "an underscore starting the exponent"))
+    out.push(refuses("n = nan\n", "nan"))
+    out.push(accepts("n = 0\nm = -0\no = +0\np = 0.5\nq = 0e3\nr = 1_2.3_4e5_6\n", "what is allowed"))
+    return out
+}
+
+/// Floats are the prelude's, correctly rounded: adding up digit values made
+/// `1e-7`, `0.035` and `5e-324` come out wrong.
+fn float_rounding_checks() -> [error] {
+    var out: [error] = []
+    let (doc, err) = toml.parse("a = 1e-7\nb = 0.035\nc = 5e-324\nd = 0.3\ne = 3.14159\nf = 1e23\ng = +1_000.5\nz = -0.0\n")
+    out.push(test.ok(err, "floats parse"))
+    if err != nil {
+        return out
+    }
+    out.push(test.equal_float(toml.float_at(doc, "a", 0.0), 0.0000001, 0.0, "1e-7"))
+    out.push(test.equal_float(toml.float_at(doc, "b", 0.0), 0.035, 0.0, "0.035"))
+    out.push(test.equal_float(toml.float_at(doc, "c", 0.0), 5e-324, 0.0, "5e-324"))
+    out.push(test.equal_float(toml.float_at(doc, "d", 0.0), 0.3, 0.0, "0.3"))
+    out.push(test.equal_float(toml.float_at(doc, "e", 0.0), 3.14159, 0.0, "3.14159"))
+    out.push(test.equal_float(toml.float_at(doc, "f", 0.0), 1e23, 0.0, "1e23"))
+    out.push(test.equal_float(toml.float_at(doc, "g", 0.0), 1000.5, 0.0, "a plus and an underscore"))
+    let zero = toml.float_at(doc, "z", 1.0)
+    out.push(test.is_true(zero == 0.0 && 1.0 / zero < 0.0, "-0.0 keeps its sign"))
+    return out
+}
+
+fn multiline_checks() -> [error] {
+    var out: [error] = []
+    // TOML 1.0 allows one or two quotes right before the closing three.
+    let (doc, err) = toml.parse("a = \"\"\"x\"\"\"\"\nb = \"\"\"x\"\"\"\"\"\nc = '''x''''\nd = '''x'''''\n")
+    out.push(test.ok(err, "quotes against the closing delimiter parse"))
+    if err != nil {
+        return out
+    }
+    out.push(test.equal_str(text_of(doc, "a"), "x\"", "one quote"))
+    out.push(test.equal_str(text_of(doc, "b"), "x\"\"", "two quotes"))
+    out.push(test.equal_str(text_of(doc, "c"), "x'", "one apostrophe"))
+    out.push(test.equal_str(text_of(doc, "d"), "x''", "two apostrophes"))
+    out.push(refuses("a = \"\"\"x\"\"\"\"\"\"\n", "six quotes are one too many"))
+    // A file saved with CRLF: the newline after the opener is one newline.
+    let (crlf, crlf_err) = toml.parse("a = \"\"\"\r\nhello\"\"\"\r\nb = '''\r\nworld'''\r\n")
+    out.push(test.ok(crlf_err, "a CRLF document parses"))
+    if crlf_err != nil {
+        return out
+    }
+    out.push(test.equal_str(text_of(crlf, "a"), "hello", "the CRLF after the opener is trimmed"))
+    out.push(test.equal_str(text_of(crlf, "b"), "world", "in a literal string too"))
+    // A line-ending backslash folds away whitespace and line breaks, and
+    // nothing else: a `#` after it is the string's, not a comment. Skipping it
+    // as one lost the rest of the line, so the first of these read as `x y`
+    // and the second, whose closing quotes that line held, was refused.
+    let (hash, hash_err) = toml.parse("a = \"\"\"x \\\n  # kept\n  y\"\"\"\nb = \"\"\"x \\\n  # kept\"\"\"\n")
+    out.push(test.ok(hash_err, "a # after a line-ending backslash parses"))
+    if hash_err != nil {
+        return out
+    }
+    out.push(test.equal_str(text_of(hash, "a"), "x # kept\n  y", "and is kept, with the lines after it"))
+    out.push(test.equal_str(text_of(hash, "b"), "x # kept", "and with the closing quotes on its line"))
+    let (blank, blank_err) = toml.parse("a = \"\"\"x \\\r\n\r\n  \t\n  # kept\"\"\"\r\n")
+    out.push(test.ok(blank_err, "a fold across blank lines and CRLFs parses"))
+    if blank_err != nil {
+        return out
+    }
+    out.push(test.equal_str(text_of(blank, "a"), "x # kept", "and folds them all away"))
+    return out
+}
+
+fn control_checks() -> [error] {
+    var out: [error] = []
+    out.push(refuses("# a \u{10} comment\na = 1\n", "a control character in a comment"))
+    out.push(refuses("# a \u{7f} comment\n", "DEL in a comment"))
+    out.push(accepts("# a comment\r\na = 1 # another\r\n", "comments in a CRLF document"))
+    out.push(refuses("\"\"\"long\nkey\"\"\" = 1\n", "a multi-line string as a key"))
+    // What passes as a date is kept as text and never looked at again, so it
+    // is checked in full here.
+    out.push(refuses("d = 2006-01-50\n", "the fiftieth of January"))
+    out.push(refuses("d = 2023-02-29\n", "February 29th of a common year"))
+    out.push(refuses("d = 1987-7-05T17:45:00Z\n", "a month without its leading zero"))
+    out.push(refuses("d = 1987-07-05T17:45Z\n", "a time without seconds"))
+    out.push(refuses("d = 2006-01-30T\n", "a T with no time after it"))
+    out.push(refuses("d = 1979-05-27T07:32:00+7:00\n", "an offset without its leading zero"))
+    out.push(refuses("n = --99\n", "two signs"))
+    out.push(accepts(
+            "a = 2024-02-29\nb = 07:32:00.999\nc = 1979-05-27t07:32:00z\nd = 1979-05-27 07:32:00+05:30\ne = 1990-12-31T23:59:60Z\n",
+            "the four forms, a leap day and a leap second",
+        ))
+    out.push(refuses("a = \"x\u{1}y\"\n", "a raw control character in a string"))
+    out.push(refuses("a = 'x\u{7f}y'\n", "DEL in a literal string"))
+    out.push(refuses("a = \"\"\"x\u{0}y\"\"\"\n", "a raw control character in a multi-line string"))
+    out.push(refuses("a = \"\"\"x\ry\"\"\"\n", "a carriage return not ending a line"))
+    out.push(accepts("a = \"x\ty\"\nb = \"\"\"x\r\ny\"\"\"\n", "a tab, and a CRLF inside a multi-line string"))
+    // Whitespace is a space or a tab, and a carriage return belongs only to
+    // the CRLF that ends a line. A lone one was skipped as whitespace
+    // wherever whitespace was, so each of these parsed.
+    out.push(refuses("[a\r]\nx = 1\n", "a carriage return in a header"))
+    out.push(refuses("a = \r1\n", "a carriage return before a value"))
+    out.push(refuses("t = \r17:45:00\n", "a carriage return before a time"))
+    out.push(refuses("a\r= 1\n", "a carriage return before the equals sign"))
+    out.push(refuses("a = [1,\r2]\n", "a carriage return in an array"))
+    out.push(refuses("a = [1\r]\n", "a carriage return before an array closes"))
+    out.push(refuses("a = {b = 1,\rc = 2}\n", "a carriage return in an inline table"))
+    out.push(refuses("a = {\rb = 1}\n", "a carriage return after an inline table opens"))
+    out.push(refuses("a .\rb = 1\n", "a carriage return in a dotted key"))
+    out.push(refuses("a = 1\r# note\n", "a carriage return before a comment"))
+    out.push(refuses("a = \"\"\"x\\\r y\"\"\"\n", "a carriage return after a line-ending backslash"))
+    out.push(accepts("a = [\r\n  1,\r\n  2, # two\r\n]\r\nb = {c = 1}\r\n", "CRLF inside an array"))
+    let (folded, folded_err) = toml.parse("a = \"\"\"x \\\r\n   y\"\"\"\r\n")
+    out.push(test.ok(folded_err, "a line-ending backslash before a CRLF"))
+    if folded_err == nil {
+        out.push(test.equal_str(text_of(folded, "a"), "x y", "folds the line"))
+    }
+    // What this writes, it reads: control characters go out as escapes.
+    var table: { str: toml.Toml } = { }
+    table["k"] = toml.Toml.Text("a\u{1}b\u{7f}c\u{8}")
+    let written = toml.emit(toml.Toml.Table(table))
+    out.push(test.equal_str(written, "k = \"a\\u0001b\\u007Fc\\u0008\"\n", "control characters are escaped"))
+    let (back, back_err) = toml.parse(written)
+    out.push(test.ok(back_err, "and read back"))
+    if back_err != nil {
+        return out
+    }
+    out.push(test.equal_str(text_of(back, "k"), "a\u{1}b\u{7f}c\u{8}", "as themselves"))
+    return out
+}
+
 fn main() {
     var results: [error] = []
+    results = concat(results, nested_array_checks())
+    results = concat(results, table_rule_checks())
+    results = concat(results, radix_checks())
+    results = concat(results, strict_number_checks())
+    results = concat(results, float_rounding_checks())
+    results = concat(results, multiline_checks())
+    results = concat(results, control_checks())
     results = concat(results, manifest_checks())
     results = concat(results, key_checks())
     results = concat(results, number_checks())
@@ -301,6 +596,7 @@ fn main() {
     results = concat(results, array_of_tables_checks())
     results = concat(results, unicode_checks())
     results = concat(results, refusal_checks())
+    results = concat(results, depth_checks())
     var failed = 0
     for e in results {
         if e != nil {

@@ -162,6 +162,26 @@ Do the diagnostic rendering *now*, not later. Every subsequent phase is easier
 when errors are readable, and retrofitting spans into an IR that lacks them is
 miserable.
 
+*Reviewed later:* the depth ceiling (E0102), added so that a file could not
+exhaust the compiler's stack, counted each link of a chain — each `+`, each
+call of `x.f().g()`, each `else if` — as a level of nesting, against the same
+256. It refused a table of three hundred `else if` and a text joined from three
+hundred pieces, which had always compiled. Chains now have a ceiling of their
+own, 8,192 links (1,024 in the compiler built for WebAssembly, whose stack is
+the JavaScript engine's), and `kitec` and the language server give the
+compiler a 512 MiB stack, because every pass still recurses as deep as a chain
+is long: on a main thread's 8 MiB a release build had run out at under two
+thousand method calls, and a debug build at under three hundred.
+
+The same review found the search for a missing `}` refusing valid programs. It
+took any declaration at the margin of braces whose members are indented as the
+place the author thought they closed — including a method at the margin of an
+`impl` and a `pub` field at the margin of a struct, both of which are members
+and compiled before. It now asks only of declarations the braces cannot hold,
+and a method there that takes no `self` counts only once the declaration has
+proved to be missing a brace. A method body that lost its `}` stopped closing
+its `impl` along with it, too.
+
 ---
 
 ## Phase 2 — The type system
@@ -197,6 +217,15 @@ a *virtual* call rather than a direct one. It is correct — after specialisatio
 the receiver is concrete and the vtable finds the right body — but the tag
 comparison is avoidable, and devirtualising after monomorphisation is a
 worthwhile follow-up.
+
+**Later: a runaway is told from a large program.** Specialisation stopped at
+absolute caps — arguments 48 levels deep or 1,024 nodes large, 4,096 copies in
+all — and called every one of them `E0220`, "instantiates itself without end",
+so `wrap(wrap(…))` fifty deep and one function used at 4,200 types were told
+they recursed. A runaway is recognised by its growth now: a declaration
+reached again from a chain of its own specialisations 64 times, or at arguments
+past the caps while on that chain. The caps remain, raised to 256 levels,
+65,536 nodes and 65,536 copies, as limits a finite program is told it passed.
 
 **Also done:** closures. The body is lifted into a function of its own whose
 leading parameters are what it captured, so nothing after the type checker
@@ -236,6 +265,46 @@ associated function has no receiver, so its arguments come from the type the
 result is used as: `let s: Stack<int> = Stack.empty()`.
 
 **Phase 2 is complete.**
+
+**Reviewed later, by compiling what the specification says about traits,
+generics and patterns rather than what the tests happened to cover.** The
+methods on generic types above did not extend to a trait's *default* methods:
+one inherited by `impl<T> Show for Box<T>` had no `T`, so a default calling
+another method on `self` could not be checked at all, and one that could took
+the template `Box`, which Wasm refused to validate. They now take their
+block's parameters. `Self` was known to a signature and not to a body. A call
+of an `async` method was typed as its bare result, and so was a call of a
+fallible or `async` trait method through a bound or a `dyn`; an implementation
+could bound a generic method's parameter more tightly than its trait did, or
+disagree about `async`, and a caller through the trait paid for it. `==`
+inside a generic function was allowed on a bare `T` only, and a comparison
+made in a trait's implementation held no caller through the trait. The type
+arguments in an `impl` header were never read — `impl Named for Pair<int,
+str>` was an `impl` for every `Pair` — and are now refused unless they are the
+block's own parameters: honouring them would need impls matched against
+receivers by unification. An or-pattern could not bind a name in any
+alternative but the first, which the checker's own rule made useless; a
+pattern against an optional worked for literals and not for tuples or generic
+variants; a refused pattern read as a catch-all and made every later arm
+"unreachable". §7.3's R3 was enforced at the end of a scope and at the end of
+a branch, but not at a `return`, `break` or `continue` that left an error
+behind, and a failure assigned into an existing binding was never an
+obligation at all. Each is fixed with a test that fails without it: the
+`TYPE_CHECKER` programs of the differential test and the corpus.
+
+A second pass over the same ground found the holes those fixes left. The calls
+the compiler writes itself — `show` for `io.print` and interpolation, `message`
+for a conversion to `error` — were not held to what their bodies compare. A
+write over an unchecked error dropped it unseen, the new R7 rule having made
+`e = nil` clear the obligation. An `impl` header with no type arguments slipped
+past the header rule, and five notes still advised the header it refuses. A
+trait's default method was checked once per `impl`, so a mistake in it was
+reported per `impl` and a default no `impl` took was never checked. `Self`
+named the block's type in an annotation but not in a literal or a path, and an
+alias of a struct or an enum was not that type where a type is found by name.
+A tuple literal was not typed through an expected optional, and a `(T, error)`
+result where a written tuple was wanted read "expected `(int, error)`, found
+`(int, error)`".
 
 ---
 
@@ -1044,6 +1113,32 @@ corrupted the heap on the other two — which is the argument for running CI on
 three operating systems, and for the differential corpus being the thing that
 noticed.
 
+**Correction: "plus sixteen" was not true on AArch64 either — not on Linux.**
+The paragraph above says the walk's assumption holds on AArch64, and it holds
+only on Apple's. The frame a Kite function calls is usually a Rust function in
+`kite-rt`, and on AArch64 Linux LLVM puts that function's frame record *below*
+the registers it saves, so the caller's stack pointer is the record plus 16
+plus the save area — every stack-map slot was read 32 to 80 bytes low, the
+collector rewrote saved registers as references and missed the real ones.
+`aarch64-unknown-linux-musl` was a shipped target, and no CI job ran it; a
+review found it by reading the assembly LLVM emits for that triple. The walk
+no longer derives a stack pointer from the callee at all: the code generator
+records each slot as a distance below the Kite frame's *own* frame pointer,
+using the frame layout Cranelift reports, and the walk subtracts it from the
+frame pointer the callee's record holds — which is the same on every target.
+A unit test lays out that platform's stack by hand. The same review found the
+walk gave up silently after a million frames, losing every root above them,
+and that the check the comments promised — that the walk reaches the program's
+entry — did not exist; both are traps now. Windows stays refused: its
+explanation had blamed the same assumption, but what may be left there is the
+frame-pointer chain itself, and that still wants a Windows machine to settle.
+
+The same pass made `kitec build --emit native` link out of the box — the
+runtime is compiled into `kitec` rather than looked for beside it, where Cargo
+never put it and no release shipped it — made `kitec run --native` print as it
+goes instead of collecting everything until exit, and gave the native runtime
+the `std/fs` host the VM already had, so `fs_test` passes on both.
+
 **What the collector does not do**, said plainly because a collector's gaps are
 where the surprises live:
 
@@ -1063,6 +1158,48 @@ and that difference is the backend's, not the language's. And the runtime is
 **single-threaded by design**, like the VM and the Wasm host: real parallelism
 is not this phase's to give, and the `Share` marker is still what will make it
 free when the platform allows it.
+
+**Later: slices grow in place, so the barrier covers two mutations.** "Everything
+else is copy-on-write and allocates afresh" was true, and it made every `push`
+and `xs[i] = v` copy the whole slice: a hundred thousand pushes took 4.1 s under
+`--native` against the VM's 16 ms, and a hundred thousand index writes 10.8 s.
+The Wasm backend had the same problem and fixed it first, and this is its fix on
+this heap: a slice object carries a capacity beside its length, and each slice
+local a function writes into has an owned flag the compiler keeps — set when the
+function made the slice, cleared wherever the reference could be kept — so a
+write into an owned slice goes in place and a write into a shared one copies,
+as `Rc::make_mut` decides on the VM. The same loops take a few milliseconds.
+Writing in place means a young reference can be stored into a promoted slice,
+so the write barrier has two callers now; it is still one function, which is
+the part of the claim above that mattered. §8 of `03-compiler-architecture.md`
+has the details.
+
+**Later: a literal of any length.** A slice or map literal past the 4,096 words
+of the native staging window was refused with `E0204` — a generated table that
+ran on the VM and in the browser did not build natively. It is built a window
+at a time now, and `literals_past_ten_thousand_elements_agree` compares all
+three backends where it compared two.
+
+**Later: the native runtime held to the VM at the edges.** A review of the
+backends against each other found five places where a valid program meant
+something different natively:
+
+- A recursion ran as deep as the stack the program was started on, past the
+  VM's 100,000 frames and then into a Rust stack overflow. Every compiled
+  function now counts itself against the VM's limit and the call past it traps
+  in the VM's words, on a 512 MB stack the runtime starts the program on. A
+  Wasm host's stack is shallower, and the glue makes its end a trap too.
+- `==` made a heap worklist for every comparison, two `int`s included, so a map
+  lookup — a scan comparing keys — ran several times slower on both runtimes.
+  A flat pair answers without one now.
+- A function of tens of thousands of `let`s took gigabytes to compile, because
+  the SSA builder's table per variable grows with the block count and a debug
+  build splits a block at every checked `+`. A local made and read within one
+  block is carried as a value.
+- A host function declared with the wrong result trapped here and ran on the
+  VM; the VM checks the declaration as the native host does.
+- A float exactly between two shortest decimals printed its upper neighbour,
+  where `Number#toString` — and so Wasm — prints the even one.
 
 ---
 
@@ -1236,6 +1373,17 @@ the caller add a `Set-Cookie` of their own. Joining the lines inside
 meant two headers" and "somebody else added one" distinguishable at all; from
 the joined string it is not. A value carrying a line break is refused rather
 than stripped, because there is no escaping that keeps the meaning.
+
+**Reviewed later: a response carries its own headers.** `http.header` asked
+the host by the response's handle, so the glue kept every request that
+succeeded, status and headers and all, for as long as the page lived — nothing
+could tell it a response would never be asked about again. The headers now
+cross once, as `name: value` lines read beside the status, and travel in the
+`Response` as data; the body is the last thing `std/http` reads of a request,
+and reading it is where the glue lets the request go. `header` answers as it
+did, which is as `fetch`'s `headers.get` answers — the name ignoring case, a
+repeated header's values joined by `, ` — and the glue's `requestsHeld()` is
+how a test sees the table empty after the headers are read.
 
 **Remaining: WASI.** `wasi:http/incoming-handler` is the other implementation
 this boundary was shaped for, and it is not written — it is a component-model
@@ -1493,7 +1641,7 @@ using.
 
 ---
 
-## Phase 15 — Distribution 🟡 **signed, packaged, and not yet published**
+## Phase 15 — Distribution 🟡 **signed, released, and not in a package manager**
 
 `.github/workflows/release.yml` cross-compiles `kitec` and `kite-lsp` for macOS
 (arm64, x86-64), Linux (x86-64 and arm64, static musl) and Windows on a tag,
@@ -1599,6 +1747,14 @@ person doing a demolition would get wrong the same way:
   UAX #14 opportunities and `canvas.width_of` has the measurement, so this is a
   small function that has not been written rather than a missing capability —
   but it is a gap, and it belongs to canvas rather than to the document.
+  **Since written:** `text.wrap(body, width, measure)` takes the opportunities
+  greedily against a measurement the caller hands in, so it wraps for a canvas
+  and a terminal alike, and it is tested on both backends in
+  `tests/std/wrap_test.kite`. Writing it found that `CR LF` was reported as two
+  breaks rather than one (LB5), which would have given every CRLF paragraph an
+  empty line per line. A later review found that a paragraph's indentation,
+  which hangs, made its line count as empty, so a first word that did not fit
+  after it was cut between characters rather than moved to the next line.
 
 ---
 
@@ -1634,7 +1790,7 @@ protocol, no ownership rules, no release calls.
 
 The plumbing exists already: `JsValue` is an `externref`, and `task_spawn`
 passes a Kite closure to the host as a reference and receives it back through
-`kite_poll`.
+`$kite.poll`.
 
 **Exit criterion:** a Kite program holds an element across an await point, drops
 it, and the browser collects it.
@@ -1802,6 +1958,19 @@ until Phase 20 gives the host a way to call a Kite closure. A wake-up during a
 pump sets a flag and the pump goes round again rather than recursing, which is
 what keeps a handler that spawns a task from mutating the list underneath the
 loop walking it.
+
+**Reviewed later, and three things were still wrong.** `drive` was not in fact
+untouched by the page's problems: the generated server, `serve.mjs`, ran through
+it, so an idle server still spun on `setTimeout(0)` — the fault this phase
+fixed, one file over — and while any task waited on the host the batch clock
+did not move at all, so a `task.timeout` around a slow request waited for the
+request. `serve.mjs` now uses `resident`, and every host event it owns calls
+`wake`; `drive` waits for `wake` or the earliest deadline, whichever is first,
+and moves its clock by the real time that took. A program that only sleeps
+still costs no real time. And a trap ended nothing: the task that trapped stayed
+in the list and ran again at the next `wake`. A trap now ends the program, as it
+does on the VM — the list is emptied, nothing is scheduled, handlers the page
+still holds do not re-enter, and `stopped()` says why.
 
 ---
 
@@ -2015,8 +2184,8 @@ JavaScript file, and nobody ships three hundred kilobytes for that.
 
 WasmGC is the reason this is winnable. A linear-memory module ships its own
 allocator and a chunk of runtime; a WasmGC module ships neither, because the
-collector belongs to the browser. The existing dead-code elimination and
-identical-code-folding do the rest.
+collector belongs to the browser. The existing dead-code elimination does the
+rest.
 
 But it only stays winnable if it is measured from the start, which is why this
 is numbered here and not last. A budget adopted after the fact is a budget that
@@ -2206,6 +2375,15 @@ worse than absent.
   by `--release`: they were more than half of a hello world, and debug
   information is not semantics.
 
+  *Reviewed later:* the map resolved nowhere. It named a source as the command
+  line had — `src/main.kite`, which a browser looks for beside the map, in
+  `dist/src/` — or by an absolute path from the builder's machine; the
+  standard library was `<std/http>`, and the compiler-as-Wasm never wrote the
+  map its module names, so a Vite dev server answered it with a 404. Sources
+  are now named relative to where the map is written, the library as
+  `kite-std/…`, every source's text travels in `sourcesContent`, and the Wasm
+  compiler writes the map too.
+
 - **`[N]T`, the fixed-length array §3.2 listed.** Struck from the
   specification rather than built, because the document already said twice that
   it should not be there. §1.1 lists the composite types a reader must hold and
@@ -2302,6 +2480,18 @@ segment naming a declared dependency roots there.
 - **A slice in a struct field still cannot be pushed to in place.** Copy to a
   `var` local, push, assign back — which is what the compiler would have to
   generate anyway, and the diagnostic says so.
+
+  *Closed later:* the compiler generates it, for every change to a slice or map
+  held anywhere but a plain binding — `b.cells.push(x)`, `grid[i][j] += 1`,
+  `boards[0].cells[2] = v`, `ms[0].remove(k)`, to any depth. The operands are
+  evaluated once, into hidden locals, before each level is copied out; the
+  innermost is changed and every level written back, so nothing the program
+  wrote runs between a copy and its write-back. Each level is checked as the
+  assignment to it would be (§5.4). The same code found that a narrowed
+  optional — `if xs != nil { xs[0] = 5 }` — had been writing into an unwrapped
+  copy on all three backends, and the change went nowhere. What it costs is a
+  copy of each level per change, as the hand-written version cost: a loop
+  pushing through a field is still quicker on a local assigned back once.
 
 ---
 
@@ -2475,6 +2665,104 @@ not say that a `use` is required to reach one.
 
 ---
 
+## Phase 30 — A review of the boundary, and what it found
+
+**Goal:** the claims Phases 26, 28 and 29 made about modules and packages are
+true, and so are the tools' claims about themselves.
+
+A review compiled what §13 says rather than reading the loader, and found that
+three of those phases had closed the case they were written against and left
+its neighbours open. The history above stands as it was written; this is what
+was wrong with it.
+
+**A module was still its `use` path, as the importer wrote it.** Phase 26 made
+the *whole* path count, which kept `dep/utils` and `utils` apart — but the path
+was the importer's, so `use util` inside `a/` and `use util` inside `b/` were
+one module. Two directories each with a `util` were `E0404`; a nested `lib/x`
+beside a top-level `x` was a false cycle; and a `use` that found nothing was
+compared against whatever had been loaded under that spelling first and
+answered by it. So Phase 28's exit criterion was met only in the order its test
+happened to import things: when the application imported its own `helper`
+*first*, a package's `use helper` with no `helper` of its own bound to the
+application's, silently. A module is now identified by where its source is and
+named by its path within its package (`a/util`, `md/util`), and a `use` that
+finds nothing is always `E0400`.
+
+**Dependencies were one table**, read from the program's manifest. A package
+could not use what it declared and could use what only the program declared —
+the transitive hoisting §13.2 says there is none of. Each package now resolves
+against its own manifest; a git dependency any package declares is read from
+the program's `.kite/vendor`; and a manifest that does not parse is `E0405` at
+its line rather than `cannot find module` at every `use` of a dependency.
+
+**Phase 29's gate had a door in the entry file.** Its declarations are the only
+unqualified ones, so its "own" `secret.describe` was module `secret`'s item —
+reached before the gate was asked. Appendix A had been leaning on it for
+`errors.wrap`, and now writes `use std/errors`. The unqualified variant index
+had the same shape: one table for the program, so a program's `Token.Number`
+made `Number` ambiguous inside `std/json` itself, and a bare `Magic` reached a
+private variant in a module nothing imported. A body now sees its own module's
+variants and the prelude's.
+
+`@derive` had been depending on both holes: its `Encode` and `Decode` bodies
+said `json.…`, which resolved only in a module importing `std/json` under
+exactly that name — or in the entry file, through the door. They now use the
+module's own spelling, or one of the compiler's where it wrote none.
+
+**The tools, measured against their own descriptions:**
+
+- `kitec bundle` carried the entry file alone, so a program with a `use`
+  bundled cleanly and failed where it was sent; it carries every file the build
+  read now, manifests and dependencies included, and keeps its build mode.
+- `kitec test` ran every compiled function whose name began `test_` — a
+  lifted closure, the resume half of an `async` test, a helper taking an
+  argument — and could not find a private test at all. It reads the
+  declarations now, keeps private tests, and drives an `async` one.
+- An option a command does not take is an error: `kitec test --native` had
+  written an object file and exited 0.
+- `kitec pkg` compared its lockfile as one string, so adding a dependency
+  failed with a false claim that bytes had moved; it compares entry by entry,
+  prefers the locked versions, fetches again under `--update`, and takes back
+  what a backtracked candidate's manifest taught the resolver.
+
+**Not built, and why.** §4.3 lists enum variants and modules among the things
+`pub` applies to, but nothing says what a private variant of a public enum
+means, or what `pub use` would export; the compiler refuses both spellings, and
+inventing either semantics here would be the specification being written by
+the implementation.
+
+**Exit criterion:** every finding reproduced by a test that fails without its
+fix — `tests/modules.rs`, `cli_paths.rs`, `bundle.rs`, and the unit tests of the
+loader, the derive, the solver, the manifest and `kitec pkg`.
+
+### A second pass over the same ground
+
+A second review checked this phase's fixes and found them partial:
+
+- **A package the program never declared took its name from the program.**
+  Dependency modules were identified by the package's name, so an
+  application's own `log.kite` and a `log` package only its `web` dependency
+  declared were both `log`, and whichever loaded second was `E0404`. Such a
+  package's modules are now `@log/…`; one the program declares keeps its name.
+- **An unsaved buffer answered `use` lines that were not about it.** The
+  language server handed every open buffer over as a provided module, and a
+  provided key is consulted first — so opening `md.kite` took `use md` from a
+  declared dependency, opening `config.kite` hid `config/`, and a dependency's
+  own `use util` was answered by the application's `md/util.kite`. The server
+  now reads through the disk with each buffer in place of its own file, and a
+  cycle back to the open file is reported in it rather than in a copy.
+- The lockfile hash skipped `node_modules`, which a `use` can name; a failed
+  `--update` fetch deleted the checkout it was replacing; a manifest that was
+  not UTF-8 was taken for none; and `@derive` bound locals — `doc`, `src_1` —
+  that shadowed the module's own spellings.
+- The server's rename edited a `pub` name's declaration and none of its
+  importers, took an NFD spelling of a bound name as a new one, and went ahead
+  in a file whose unparsed lines it could not see. Its framing panicked on a
+  huge `Content-Length` and overflowed the stack on deep JSON, and the VS Code
+  extension kept a dead server and never settled what it asked of it.
+
+---
+
 ## Where the implementation actually stands
 
 Recorded honestly, because a roadmap that overstates progress is worse than
@@ -2488,7 +2776,7 @@ none.
 | 3 — Error handling | ✅ complete |
 | 4 — WebAssembly backend | ✅ every construct the language has; `str` is a language-owned WasmGC Unicode-scalar array with bounded JavaScript boundary conversion |
 | 5 — Concurrency | ✅ `async`/`await`, the state machine, `Task<T>`, the combinators, `Share`. ❌ real parallelism on any target — the platform forbids it today |
-| 6 — Standard library | ✅ thirteen modules written in Kite, tested on both backends, and `@derive(Debug, Hash, Encode, Decode)` as a source-to-source expansion |
+| 6 — Standard library | ✅ twenty modules written in Kite, tested on all three backends, and `@derive(Debug, Hash, Encode, Decode)` as a source-to-source expansion |
 | 7 — Layout and DOM renderer | ⬛ built, then removed at Phase 16. The renderer painted positioned elements, which is what made a Kite application unstylable by anyone else's CSS |
 | 8 — Canvas renderer | ⬛ partly removed at Phase 16. Drawing, the glyph atlas and `std/text` stay; canvas as a whole-application renderer, with its parallel accessibility tree and damage tracking, does not |
 | 9 — Native backend | ✅ Cranelift AOT and JIT on macOS and Linux, with a precise generational collector over Cranelift's stack maps; three backends compared. ❌ Windows, which the collector's frame walk cannot read yet and which is refused rather than left to corrupt |
@@ -2497,27 +2785,28 @@ none.
 | 12 — Cryptography | ✅ hashing, HMAC, PBKDF2, randomness, constant-time comparison, E0600, and AES-GCM, Ed25519 and X25519 over opaque key handles. ❌ Argon2, which no host has |
 | 13 — Documentation site | ✅ four pages, the reference generated from the library, and a playground that is the compiler |
 | 14 — Editor support | ✅ the language server and a VS Code extension over it, with rename, references, and inlay hints for solved generic arguments |
-| 15 — Distribution | 🟡 CI, cross-compiled builds, Sigstore signing, Homebrew/Scoop/AUR manifests rendered from the release's own checksums, `kitec.wasm` as an artefact. ❌ nothing published: no tag has been pushed |
+| 15 — Distribution | 🟡 CI, cross-compiled builds, Sigstore signing, Homebrew/Scoop/AUR manifests rendered from the release's own checksums, `kitec.wasm` as an artefact. Tagged releases, v0.1.1 through v0.1.9, on GitHub, and the compiler on npm. ❌ the three manifests are not submitted: no tap, no bucket, no AUR package |
 | 16 — Demolition | ✅ complete — 19,700 lines out; build and tests green with nothing rendering |
 | 17 — `JsValue` / `externref` | ✅ complete — crosses, is held, survives an `await`, refused off the web. ❌ collection asserted, which needs a heap snapshot |
-| 18 — `std/js` primitives | ✅ complete — 23 primitives, a fixed ~90-line host block, throws caught as errors. `js.func` moved to 20, `js.await` to 21 |
+| 18 — `std/js` primitives | ✅ complete — about thirty primitives, a fixed host block of about a hundred lines, throws caught as errors. `js.func` moved to 20, `js.await` to 21 |
 | 19 — Resident runtime, real clock | ✅ complete — `resident` beside `drive`, real clock, zero timers when idle |
 | 20 — `std/dom` | ✅ complete — no externs, `Option` for absence, events with cancel, and a real page in `examples/page` |
 | 21 — Rejections as errors | ✅ complete, and the phase was rescoped: promises never needed language support. The straight-line `await` form is open, and marked as comfort |
 | 22 — Interop backwards | ✅ `api.js` and `api.d.ts` from `kitec build`, verified with real `tsc`, and a Vite plugin that compiles a `.kite` import through the compiler-as-Wasm. `@export` proved unnecessary |
-| 23 — Size gate | ✅ complete — four budgets in CI; 388 B for hello world, 2 KB for a DOM change, 5.7 KB for the island |
+| 23 — Size gate | ✅ complete — four budgets in `size.rs`: hello world under 1 KB, a four-function library under 2 KB, a DOM class change under 4 KB, and the `examples/page` island under 32 KB |
 | 24 — Concrete error types | ✅ complete — an error carries the value it was made from, its type tag and the error it wrapped, on all three backends. `err.cause()`, `errors.chain`, `errors.root`, and `NotFound.is(err)` / `NotFound.as(err)` — the type names itself, because §11 has no turbofish |
 | 25 — `std/html` | ✅ complete — descriptions, a keyed diff that writes only what changed, and `examples/page` written against it |
 | 26 — Specification gaps | ✅ subslices, `enumerate` and pair-destructuring over a slice, doc-comment tests, a name section and source map, `js.func` at any shape, `check` in a bare-`error` function, a calling convention for any function-typed value, errors that carry their value, modules identified by their whole path; `[N]T` struck from the specification and `--a11y` removed |
 | 27 — `std/window` | 🟡 the module is built and tested — window events, timers, both storages, the address bar, history, the wall clock — and `std/time` gained a portable calendar under it. ❌ the two applications cannot import it until a compiler carrying it is published |
 | 28 — Packages from a bundler | ✅ `vite-plugin-kite` and the WebAssembly `kitec` read `kite.toml` and compile what it declares; provided modules are keyed by their whole path and a package resolves its own imports inside itself; a one-file module reads its imports from its own directory; `kitec run` sees modules |
 | 29 — Imports are the boundary | ✅ a qualified name resolves only in a module that imported it, and the entry file is reachable from nowhere. ❌ two sibling *directory* modules still cannot import each other by any spelling — exposed by this, not caused by it |
+| 30 — The boundary, reviewed | ✅ a module is where its source is; each package's dependencies are its own; the entry file and bare variants are gated too; `bundle`, `test`, `pkg` and the option parser do what they say. ❌ `pub` on an enum variant and `pub use`, which §4.3 names and nothing defines |
 
-834 tests: unit tests per crate, an annotated compile-fail corpus, a
-differential corpus that runs every program on **three** backends and compares,
-the standard library's own suite on two of them, the standard library's own
-documentation examples, the host boundary and a real socket under Node, both
-string representations compared against each other and against the VM, the
+More than a thousand tests: unit tests per crate, an annotated compile-fail
+corpus, a differential corpus that runs every program on **three** backends and
+compares, the standard library's own suite on all three, the standard library's own
+documentation examples, the host boundary and a real socket under Node, the one
+string representation compared against the VM and across the JavaScript boundary, the
 source map's offsets checked against the module's real function bodies, every
 example on the site, size budgets, and the specification's own Appendix A.
 

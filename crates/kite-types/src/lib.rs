@@ -139,6 +139,9 @@ pub fn check_recording(
 
     // Now fill in fields and variants, resolving their types against the
     // arena, which already knows every name.
+    let mut type_generics: Vec<Vec<GenericDef>> = vec![Vec::new(); resolved.types.len()];
+    let mut trait_method_generics: std::collections::HashMap<(hir::TraitId, usize), Vec<GenericDef>> =
+        std::collections::HashMap::new();
     for (i, decl) in resolved.types.iter().enumerate() {
         // Types named inside a module mean that module's, so its own name is
         // tried first everywhere a type is written.
@@ -150,9 +153,12 @@ pub fn check_recording(
             ast::Item::Trait(tr) => &tr.generics,
             _ => &[][..],
         };
-        let defs = declare_generics(own_generics, resolved, module, &type_ids, &mut types, diags);
+        let defs = declare_generics(own_generics, &[], resolved, module, &type_ids, &mut types, diags);
         let generics: &[(String, TyId)] =
             &defs.iter().map(|g| (g.name.clone(), g.ty)).collect::<Vec<_>>();
+        // Kept, because a bound on a struct's or an enum's parameter holds at
+        // every place one is built — not only where the declaration is read.
+        type_generics[i] = defs.clone();
         match type_ids[i] {
             Some(TypeTarget::Struct(sid)) => types.set_struct_generics(sid, defs.len()),
             Some(TypeTarget::Enum(eid)) => types.set_enum_generics(eid, defs.len()),
@@ -207,30 +213,56 @@ pub fn check_recording(
                 types.set_enum_variants(eid, variants);
             }
             (Some(TypeTarget::Trait(tid)), ast::Item::Trait(tr)) => {
-                let methods = tr
-                    .methods
-                    .iter()
-                    .map(|m| kite_hir::TraitMethodDef {
+                // Inside a trait, `Self` is whichever type implements it, and
+                // a method may have type parameters of its own after the
+                // trait's.
+                let self_ty = types.self_param();
+                let mut methods = Vec::with_capacity(tr.methods.len());
+                for (mi, m) in tr.methods.iter().enumerate() {
+                    let own = declare_generics(
+                        &m.generics, &defs, resolved, module, &type_ids, &mut types, diags,
+                    );
+                    let mut names: Vec<(String, TyId)> = generics.to_vec();
+                    names.extend(own.iter().map(|g| (g.name.clone(), g.ty)));
+                    names.push(("Self".to_string(), self_ty));
+                    let params = m
+                        .params
+                        .iter()
+                        .map(|p| {
+                            resolve_named_ty(&p.ty, resolved, module, &type_ids, &names, &mut types, diags)
+                        })
+                        .collect();
+                    let value = match &m.ret {
+                        None => TyId::UNIT,
+                        Some(r) => resolve_named_ty(
+                            r.value_type(), resolved, module, &type_ids, &names, &mut types, diags,
+                        ),
+                    };
+                    // What a call through the trait yields, which is what a
+                    // backend types the dispatch by: the `(T, error)` pair of
+                    // a fallible method, and the task of an `async` one.
+                    let fallible = m.ret.as_ref().is_some_and(|r| r.is_fallible());
+                    let ret = if fallible { types.fallible_of(value) } else { value };
+                    let ret = if m.is_async {
+                        let task = types.task_of(ret, m.name.span);
+                        types.struct_ty(task)
+                    } else {
+                        ret
+                    };
+                    methods.push(kite_hir::TraitMethodDef {
                         name: m.name.name.clone(),
-                        params: m
-                            .params
-                            .iter()
-                            .map(|p| {
-                                resolve_named_ty(&p.ty, resolved, module, &type_ids, generics, &mut types, diags)
-                            })
-                            .collect(),
-                        ret: match &m.ret {
-                            None => TyId::UNIT,
-                            Some(r) => resolve_named_ty(
-                                r.value_type(), resolved, module, &type_ids, generics, &mut types, diags,
-                            ),
-                        },
-                        fallible: m.ret.as_ref().is_some_and(|r| r.is_fallible()),
+                        params,
+                        ret,
+                        fallible,
                         takes_self: m.self_param.is_some(),
+                        var_self: m.self_param.as_ref().is_some_and(|s| s.is_var),
                         has_default: m.body.is_some(),
+                        is_async: m.is_async,
+                        generic_count: own.len(),
                         span: m.name.span,
-                    })
-                    .collect();
+                    });
+                    trait_method_generics.insert((tid, mi), own);
+                }
                 types.set_trait_methods(tid, methods);
             }
             (Some(TypeTarget::Struct(sid)), ast::Item::Struct(s)) => {
@@ -263,27 +295,80 @@ pub fn check_recording(
     // later would be matching a module-qualified name against a host-facing
     // one, which is how a stub ends up calling the wrong import.
     let mut extern_of_sig: Vec<Option<u32>> = Vec::new();
+    // An `impl` block's `<T: Bound>` list belongs to every method in it, so
+    // it is declared once per block — which is also what keeps a mistake in
+    // it to one diagnostic rather than one per method.
+    let mut impl_generics: std::collections::HashMap<usize, Vec<GenericDef>> =
+        std::collections::HashMap::new();
+    // Per function, the type `Self` names inside it: a method's or an
+    // associated function's own type, at its block's parameters.
+    let mut self_types: Vec<Option<TyId>> = Vec::with_capacity(resolved.fns.len());
     for sig in &resolved.fns {
         let module = resolved.module_of_item(sig.decl_index);
-        // A function's own type parameters are in scope for its signature.
-        let ast_generics: &[ast::GenericParam] = match sig.owner {
+        // A function's own type parameters are in scope for its signature. A
+        // method has its block's first, then its own: `fn map<U>` inside
+        // `impl<T> Box<T>` is generic over `T` and `U`, in that order, which
+        // is the order a call supplies them in — the receiver's arguments,
+        // then whatever the call solves.
+        let generic_defs = match sig.owner {
             None => match &file.items[sig.decl_index] {
-                ast::Item::Fn(f) => &f.generics,
-                _ => &[],
+                ast::Item::Fn(f) => {
+                    declare_generics(&f.generics, &[], resolved, module, &type_ids, &mut types, diags)
+                }
+                _ => Vec::new(),
             },
-            // A method's parameters come from its `impl` block; per-method
-            // parameters are not supported yet.
-            Some(owner) => match &file.items[owner.impl_index] {
-                ast::Item::Impl(i) => &i.generics,
-                _ => &[],
-            },
+            Some(owner) => {
+                // The block's parameters are the `impl`'s, for a default
+                // method the trait supplied as much as for one written in the
+                // block: a default reached with no `T` of its own could not
+                // call another method on a `Box<T>`, and took a `Box` its
+                // callers' `Box<int>` was not.
+                let module_of_block = resolved.module_of_item(owner.block_index);
+                let mut defs = impl_generics
+                    .entry(owner.block_index)
+                    .or_insert_with(|| match &file.items[owner.block_index] {
+                        ast::Item::Impl(i) => declare_generics(
+                            &i.generics, &[], resolved, module_of_block, &type_ids, &mut types, diags,
+                        ),
+                        _ => Vec::new(),
+                    })
+                    .clone();
+                let own: &[ast::GenericParam] = match &file.items[owner.impl_index] {
+                    ast::Item::Impl(i) => &i.methods[owner.method_index].generics,
+                    ast::Item::Trait(tr) => &tr.methods[owner.method_index].generics,
+                    _ => &[],
+                };
+                let more = declare_generics(own, &defs, resolved, module, &type_ids, &mut types, diags);
+                defs.extend(more);
+                defs
+            }
         };
-        let generic_defs =
-            declare_generics(ast_generics, resolved, module, &type_ids, &mut types, diags);
-        let generics: &[(String, TyId)] = &generic_defs
-            .iter()
-            .map(|g| (g.name.clone(), g.ty))
-            .collect::<Vec<_>>();
+        // `Self` in a method's signature is the type the method is on, at the
+        // block's own parameters — `Box<T>` inside `impl<T> Box<T>`.
+        let owner_ty = sig.owner.map(|owner| {
+            let own: Vec<TyId> = impl_generics
+                .get(&owner.block_index)
+                .map(|defs| defs.iter().map(|g| g.ty).collect())
+                .unwrap_or_default();
+            match type_ids[owner.type_index as usize] {
+                Some(TypeTarget::Struct(s)) if !own.is_empty() => {
+                    let id = types.instantiate_struct(s, &own);
+                    types.struct_ty(id)
+                }
+                Some(TypeTarget::Enum(e)) if !own.is_empty() => {
+                    let id = types.instantiate_enum(e, &own);
+                    types.enum_ty(id)
+                }
+                other => named_ty(other, &mut types),
+            }
+        });
+        self_types.push(owner_ty);
+        let mut named: Vec<(String, TyId)> =
+            generic_defs.iter().map(|g| (g.name.clone(), g.ty)).collect();
+        if let Some(ty) = owner_ty {
+            named.push(("Self".to_string(), ty));
+        }
+        let generics: &[(String, TyId)] = &named;
         if let ast::Item::Extern(e) = &file.items[sig.decl_index] {
             let params: Vec<TyId> = e
                 .params
@@ -376,26 +461,11 @@ pub fn check_recording(
                         resolve_named_ty(r.value_type(), resolved, module, &type_ids, generics, &mut types, diags)
                     }
                 };
-                let self_ty = if owner.takes_self {
-                    // On a generic type, `self` is the declaration at its own
-                    // parameters — `Box<T>`, not `Box`. Without that, the copy
-                    // made for `Box<int>` would still take a `Box` and the
-                    // call would not type-check where types are checked.
-                    let own: Vec<TyId> = generic_defs.iter().map(|g| g.ty).collect();
-                    Some(match type_ids[owner.type_index as usize] {
-                        Some(TypeTarget::Struct(s)) if !own.is_empty() => {
-                            let id = types.instantiate_struct(s, &own);
-                            types.struct_ty(id)
-                        }
-                        Some(TypeTarget::Enum(e)) if !own.is_empty() => {
-                            let id = types.instantiate_enum(e, &own);
-                            types.enum_ty(id)
-                        }
-                        other => named_ty(other, &mut types),
-                    })
-                } else {
-                    None
-                };
+                // On a generic type, `self` is the declaration at its own
+                // parameters — `Box<T>`, not `Box`. Without that, the copy
+                // made for `Box<int>` would still take a `Box` and the call
+                // would not type-check where types are checked.
+                let self_ty = if owner.takes_self { owner_ty } else { None };
                 let fallible = m.ret.as_ref().is_some_and(|r| r.is_fallible());
                 let ret = if fallible { types.fallible_of(ret) } else { ret };
                 (params, ret, fallible, m.name.span, self_ty)
@@ -421,7 +491,21 @@ pub fn check_recording(
         });
     }
 
-    check_impls(file, resolved, &type_ids, &types, &sigs, diags);
+    // An `impl` whose methods are all inherited defaults declared none of its
+    // own, so its `<T: Bound>` list was never reached above — and its bounds
+    // are still part of whether its type implements the trait.
+    for (i, item) in file.items.iter().enumerate() {
+        if let ast::Item::Impl(imp) = item {
+            if let std::collections::hash_map::Entry::Vacant(slot) = impl_generics.entry(i) {
+                let module = resolved.module_of_item(i);
+                slot.insert(declare_generics(
+                    &imp.generics, &[], resolved, module, &type_ids, &mut types, diags,
+                ));
+            }
+        }
+    }
+    let refused_blocks = check_impl_headers(file, resolved, &type_ids, &types, diags);
+    let trait_impls = check_impls(file, resolved, &type_ids, &mut types, &sigs, &trait_method_generics, diags);
 
     // Constants are worked out before any body, because a body naming one gets
     // the value itself rather than a reference to it — by the time a use is
@@ -429,18 +513,98 @@ pub fn check_recording(
     let const_table = consts::evaluate(file, resolved, sources, diags);
     check_const_annotations(file, resolved, &const_table, &type_ids, &mut types, diags);
 
-    for (i, sig) in resolved.fns.iter().enumerate() {
+    // A default method no block takes is checked once all the same, against
+    // what every implementation has in common: `Self` is a parameter of its
+    // own, after the trait's and the method's, bounded by the trait. Its
+    // signature is numbered after every function's, as its locals are in
+    // `ResolveMap::defaults`. The signature was read already, where the
+    // trait's methods were; what it would report again is dropped.
+    for d in &resolved.defaults {
+        let ast::Item::Trait(tr) = &file.items[d.item_index] else {
+            unreachable!("a default body belongs to a trait")
+        };
+        let m = &tr.methods[d.method_index];
+        let module = resolved.module_of_item(d.item_index);
+        let tid = match type_ids.get(d.trait_index as usize) {
+            Some(Some(TypeTarget::Trait(t))) => Some(*t),
+            _ => None,
+        };
+        let mut defs = type_generics[d.trait_index as usize].clone();
+        if let Some(own) = tid.and_then(|t| trait_method_generics.get(&(t, d.method_index))) {
+            defs.extend(own.iter().cloned());
+        }
+        let self_ty = types.param_ty(defs.len() as u32, "Self");
+        defs.push(GenericDef {
+            name: "Self".to_string(),
+            ty: self_ty,
+            bounds: tid.into_iter().collect(),
+            span: tr.name.span,
+        });
+        let names: Vec<(String, TyId)> = defs.iter().map(|g| (g.name.clone(), g.ty)).collect();
+        let mut again = DiagBag::new();
+        let params = m
+            .params
+            .iter()
+            .map(|p| resolve_named_ty(&p.ty, resolved, module, &type_ids, &names, &mut types, &mut again))
+            .collect();
+        let value = match &m.ret {
+            None => TyId::UNIT,
+            Some(r) => resolve_named_ty(r.value_type(), resolved, module, &type_ids, &names, &mut types, &mut again),
+        };
+        let fallible = m.ret.as_ref().is_some_and(|r| r.is_fallible());
+        sigs.push(Signature {
+            params,
+            ret: if fallible { types.fallible_of(value) } else { value },
+            is_async: m.is_async,
+            fallible,
+            name_span: m.name.span,
+            self_ty: m.self_param.as_ref().map(|_| self_ty),
+            generics: defs,
+        });
+    }
+
+    let mut facts = GenericFacts {
+        compared: sigs.iter().map(|s| vec![None; s.generics.len()]).collect(),
+        calls: Vec::new(),
+        bound_calls: Vec::new(),
+    };
+    // What each default method's copies have reported, by the method. A
+    // default is checked once per block that takes it, `Self` being that
+    // block's type, and a mistake that is not about the type was reported
+    // once per `impl`.
+    let mut default_reports: std::collections::HashMap<(usize, usize), std::collections::HashSet<DiagKey>> =
+        std::collections::HashMap::new();
+    for i in 0..sigs.len() {
+        let unowned = i.checked_sub(resolved.fns.len()).map(|k| &resolved.defaults[k]);
+        let decl_index = match unowned {
+            Some(d) => d.item_index,
+            None => resolved.fns[i].decl_index,
+        };
+        let reported = diags.len();
         let mut checker = Checker {
+            facts: &mut facts,
+            type_generics: &type_generics,
+            impl_generics: &impl_generics,
+            trait_method_generics: &trait_method_generics,
+            trait_impls: &trait_impls,
             consts: &const_table,
             resolved,
-            module: resolved.module_of_item(sig.decl_index).to_string(),
+            module: resolved.module_of_item(decl_index).to_string(),
             sigs: &sigs,
             lifted: Vec::new(),
             lifted_base: lifted.len(),
             closure_span: None,
             captures: Vec::new(),
             generic_defs: sigs[i].generics.clone(),
-            generics: sigs[i].generics.iter().map(|g| (g.name.clone(), g.ty)).collect(),
+            // `Self` names the same type in a body as in the signature (§8.2,
+            // §10.1): `let y: Self = self`, or a closure's `|x: Self|`. It was
+            // known only to the signature, so a body naming it was E0204.
+            generics: sigs[i]
+                .generics
+                .iter()
+                .map(|g| (g.name.clone(), g.ty))
+                .chain(self_types.get(i).copied().flatten().map(|t| ("Self".to_string(), t)))
+                .collect(),
             type_ids: &type_ids,
             types: &mut types,
             sources,
@@ -452,11 +616,37 @@ pub fn check_recording(
             guards: std::collections::HashMap::new(),
             narrowed: std::collections::HashMap::new(),
             error_nonnil: std::collections::HashSet::new(),
-            loop_depth: 0,
-            deferred: Vec::new(),
+            loops: Vec::new(),
+            loop_writes: Vec::new(),
+            closure_sig: None,
+            closure_ret_unknown: None,
+            reported_unchecked: std::collections::HashSet::new(),
+            defers: None,
             release,
             solved: &mut *solved,
         };
+        if let Some(d) = unowned {
+            let ast::Item::Trait(tr) = &file.items[d.item_index] else {
+                unreachable!("a default body belongs to a trait")
+            };
+            let m = &tr.methods[d.method_index];
+            let body_span = m.body.as_ref().map(|b| b.span).unwrap_or(m.span);
+            // Checked for what it reports, and then dropped with anything
+            // lifted out of it: nothing can call it.
+            let _ = checker.check_body(
+                &m.name.name,
+                m.is_pub,
+                m.is_async,
+                &m.params,
+                m.body.as_ref(),
+                body_span,
+                m.span,
+                &sigs[i],
+                m.self_param.is_some(),
+            );
+            continue;
+        }
+        let sig = &resolved.fns[i];
         if let ast::Item::Extern(e) = &file.items[sig.decl_index] {
             // A host function becomes an ordinary one whose whole body is the
             // call across the boundary. Nothing after this point needs to know
@@ -532,12 +722,20 @@ pub fn check_recording(
                 };
                 let m = &methods[owner.method_index];
                 let body_span = m.body.as_ref().map(|b| b.span).unwrap_or(m.span);
+                // A block whose header was refused types its bodies against
+                // a declaration it does not describe; what they would report
+                // is the header's mistake again.
+                let body = if refused_blocks.contains(&owner.block_index) {
+                    None
+                } else {
+                    m.body.as_ref()
+                };
                 checker.check_body(
                     &m.name.name,
                     m.is_pub,
                     m.is_async,
                     &m.params,
-                    m.body.as_ref(),
+                    body,
                     body_span,
                     m.span,
                     &sigs[i],
@@ -550,8 +748,13 @@ pub fn check_recording(
         // handed out assuming they land after every declared function, so they
         // are collected here and appended once all declarations are checked.
         lifted.append(&mut checker.lifted);
+        if let Some(o) = sig.owner.filter(|o| o.is_default) {
+            let seen = default_reports.entry((o.impl_index, o.method_index)).or_default();
+            keep_first_reports(diags, reported, seen);
+        }
     }
     fns.append(&mut lifted);
+    check_compared_params(&mut facts, resolved, &sigs, &types, diags);
 
     let vtables = build_vtables(resolved, &type_ids, &types);
 
@@ -667,6 +870,39 @@ enum TypeTarget {
     Alias(TyId),
 }
 
+/// Where a slice or map that is about to change in place is kept. See
+/// `Checker::container_place`, which builds one, and `Checker::change_at`,
+/// which changes what it holds.
+struct Place {
+    root: PlaceRoot,
+    /// The slices between the root and the value being changed, outermost
+    /// first: each is the element at `.0` of the one before it, and `.1` is
+    /// that element's type.
+    steps: Vec<(hir::Expr, TyId)>,
+}
+
+enum PlaceRoot {
+    /// A `var` binding holding the value.
+    Local { id: u32, ty: TyId },
+    /// A `var` binding holding it as an optional, proved present here.
+    Narrowed { id: u32, declared: TyId, ty: TyId },
+    /// A `var` field of the struct `holder` reads.
+    Field { holder: hir::Expr, index: u32, ty: TyId },
+}
+
+impl Place {
+    /// The binding to change where it lies, when the value is a plain
+    /// binding's own — every change this compiler could make before it
+    /// understood places.
+    fn binding(&self) -> Option<u32> {
+        match self.root {
+            PlaceRoot::Local { id, .. } if self.steps.is_empty() => Some(id),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone)]
 struct Signature {
     params: Vec<TyId>,
     /// What the body returns. A call to an `async fn` yields `Task<ret>`; the
@@ -693,14 +929,13 @@ struct Signature {
 /// sides — and every one costs a trampoline in the module.
 pub const JS_FUNC_MAX_ARITY: usize = 4;
 
-/// A registered `defer`: what to run, and the flag that says whether it was
-/// ever reached.
-#[derive(Clone)]
-struct Deferred {
-    flag: u32,
-    call: hir::Expr,
-    span: Span,
-}
+/// What `return _, err` traps with when `err` turns out nil at run time.
+///
+/// It is a `require` the checker writes in front of the `return`, so every
+/// backend reports it through the one path they already share, and says the
+/// same thing. Written only where the checker cannot prove the error present.
+pub const NIL_FAILURE: &str = "`return _, err` was handed a nil error: `_` stands for no value, \
+                                so the error beside it must be a failure";
 
 /// One declared type parameter.
 #[derive(Clone, Debug)]
@@ -759,8 +994,13 @@ fn missing_args(p: &ast::TypePath, want: usize, diags: &mut DiagBag) -> TyId {
 }
 
 /// Turn a declaration's `<T: Bound, U>` list into parameter types.
+///
+/// `before` is the list this one continues: a method's own parameters follow
+/// its `impl` block's, so they are numbered after them and may not reuse a
+/// name the block already declared.
 fn declare_generics(
     params: &[ast::GenericParam],
+    before: &[GenericDef],
     resolved: &ResolveMap,
     module: &str,
     type_ids: &[Option<TypeTarget>],
@@ -768,8 +1008,8 @@ fn declare_generics(
     diags: &mut DiagBag,
 ) -> Vec<GenericDef> {
     let mut out: Vec<GenericDef> = Vec::new();
-    for (i, p) in params.iter().enumerate() {
-        if let Some(prev) = out.iter().find(|g| g.name == p.name.name) {
+    for p in params.iter() {
+        if let Some(prev) = before.iter().chain(out.iter()).find(|g| g.name == p.name.name) {
             diags.push(
                 Diagnostic::error(
                     codes::E0208,
@@ -780,13 +1020,14 @@ fn declare_generics(
             );
             continue;
         }
-        let ty = types.param_ty(i as u32, &p.name.name);
+        let ty = types.param_ty((before.len() + out.len()) as u32, &p.name.name);
         let mut bounds = Vec::new();
         for b in &p.bounds {
-            match resolved
-                .type_by_name_in(module, &b.text())
-                .and_then(|i| type_ids[i as usize])
-            {
+            let found = resolved.type_by_name_in(module, &b.text());
+            if let Some(i) = found {
+                check_type_visible(resolved, module, i, b.span, &b.text(), diags);
+            }
+            match found.and_then(|i| type_ids[i as usize]) {
                 Some(TypeTarget::Trait(tr)) => bounds.push(tr),
                 _ => diags.push(
                     Diagnostic::error(
@@ -811,10 +1052,20 @@ struct Checker<'a> {
     /// The module whose body is being checked. Names written unqualified mean
     /// this module's first.
     module: String,
-    /// `defer`red calls, in registration order, each with the flag that says
-    /// whether control ever reached it. A `defer` inside an `if` that did not
-    /// run must not run at exit, and a flag is the only thing that knows.
-    deferred: Vec<Deferred>,
+    /// The local holding the body's `defer`red calls, when it has any.
+    ///
+    /// A registration is a run-time event, not a place in the text: a `defer`
+    /// inside a loop registers once per iteration, one inside an `if` only
+    /// when the branch runs, and a `return` above a `defer` in a loop body can
+    /// follow one registered on an earlier iteration. So the calls are kept
+    /// where the running program can see them — a slice of closures, pushed at
+    /// each registration and run backwards at each exit — rather than decided
+    /// here from what the text has shown so far.
+    ///
+    /// It is set before the body is checked, from a scan for `defer`, so that
+    /// every exit knows whether there is anything to run — including one
+    /// written above the first `defer`.
+    defers: Option<u32>,
     /// Built for release. The only thing it changes is that `assert` is
     /// dropped; everything else about the program is the same, because a
     /// build mode that changed semantics would make testing meaningless.
@@ -823,6 +1074,21 @@ struct Checker<'a> {
     /// here rather than re-derived later, because a second derivation is a
     /// second checker waiting to disagree with this one.
     solved: &'a mut Solved,
+    /// What generic bodies demand of their arguments beyond their bounds, and
+    /// the calls to hold to it. See [`GenericFacts`].
+    facts: &'a mut GenericFacts,
+    /// Each declared type's own `<T: Bound>` list, parallel to
+    /// `resolved.types`. A bound there holds wherever a value is built.
+    type_generics: &'a [Vec<GenericDef>],
+    /// Each `impl` block's `<T: Bound>` list, by item index. Its methods take
+    /// these first, from the receiver's own type.
+    impl_generics: &'a std::collections::HashMap<usize, Vec<GenericDef>>,
+    /// A trait method's own type parameters, by trait and position.
+    trait_method_generics: &'a std::collections::HashMap<(hir::TraitId, usize), Vec<GenericDef>>,
+    /// Which `impl` block implements a trait for a type: `(type index, trait
+    /// index)` to item index. Its bounds are what a generic type needs of
+    /// its arguments to implement the trait at all.
+    trait_impls: &'a std::collections::HashMap<(u32, u32), usize>,
     sigs: &'a [Signature],
     /// Functions lifted out of this function's closure literals.
     lifted: Vec<hir::Function>,
@@ -878,31 +1144,56 @@ struct Checker<'a> {
     /// answers by not letting the call be written until the error is known to
     /// be present.
     error_nonnil: std::collections::HashSet<u32>,
-    loop_depth: u32,
+    /// The loops enclosing the statement being checked, innermost last, with
+    /// their labels. A closure starts with none: a loop around the place it
+    /// is written is not one its body runs in.
+    loops: Vec<(Span, Option<String>)>,
+    /// While a loop's body is checked on trial to learn which narrowings
+    /// survive it: per such loop, innermost last, every local a write in the
+    /// body may have made nil.
+    loop_writes: Vec<Vec<u32>>,
+    /// The signature of the closure being checked, which is what a `return`
+    /// inside it answers to — not the function the closure is written in.
+    closure_sig: Option<Signature>,
+    /// Set inside a closure whose body is an expression and whose return
+    /// type nothing states. A `return` there has nothing to be checked
+    /// against until the body's type is known, which is after the `return`.
+    closure_ret_unknown: Option<Span>,
+    /// Error locals already reported by E0302, so that a local reported where
+    /// it left scope on one path is not reported again where the function
+    /// ends.
+    reported_unchecked: std::collections::HashSet<u32>,
 }
 
 /// Whether a local certainly holds a value at this point.
 ///
 /// The specification permits `let x: int` followed by assignment in branches,
 /// "provided the compiler can prove exactly one assignment occurs on every path
-/// before first use". This is that proof: a two-element lattice, merged at
-/// every branch join, which is the same machinery as the error-taint analysis
-/// arriving in Phase 3.
+/// before first use". This is that proof: a lattice merged at every branch
+/// join, which is the same machinery as the error-taint analysis.
+///
+/// It takes three states because the rule has two halves. A read needs the
+/// local assigned on every path; a write to an immutable one needs it
+/// assigned on *none*. A local written on some paths only satisfies neither,
+/// and with two states it was indistinguishable from one written on no path —
+/// so `if c { x = 1 }` followed by `x = 2` wrote an immutable binding twice.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Init {
     /// Declared without a value and not yet assigned on this path.
     Unassigned,
+    /// Assigned on some paths to here and not on others.
+    Maybe,
     Assigned,
 }
 
 impl Init {
-    /// A local is assigned after a join only when it is assigned on *every*
-    /// incoming path.
+    /// A local keeps a state across a join only when every incoming path
+    /// agrees on it.
     fn merge(self, other: Init) -> Init {
-        if self == Init::Assigned && other == Init::Assigned {
-            Init::Assigned
+        if self == other {
+            self
         } else {
-            Init::Unassigned
+            Init::Maybe
         }
     }
 }
@@ -951,17 +1242,55 @@ enum Flow {
     Diverges,
 }
 
-/// Whether an expression is a call — the only initialiser that can *produce*
-/// a failure, as opposed to naming one that already exists.
-fn is_call(kind: &ExprKind) -> bool {
-    matches!(
-        kind,
-        ExprKind::Call { .. }
-            | ExprKind::CallVirtual { .. }
-            | ExprKind::CallClosure { .. }
-            | ExprKind::CallBuiltin { .. }
-            | ExprKind::CallExtern { .. }
-    )
+/// What the flow analysis knows at one point in a body, for a branch to start
+/// from and a join to merge.
+#[derive(Clone)]
+struct FlowState {
+    init: Vec<Init>,
+    taint: Vec<Taint>,
+    narrowed: std::collections::HashMap<u32, TyId>,
+    error_nonnil: std::collections::HashSet<u32>,
+}
+
+/// What a trial check may change, kept to be put back.
+struct Trial {
+    diags: DiagBag,
+    flow: FlowState,
+    guards: std::collections::HashMap<u32, u32>,
+    captures: Vec<u32>,
+    reported: std::collections::HashSet<u32>,
+    locals: usize,
+    lifted: usize,
+    /// The lengths of what [`Solved`] had recorded.
+    solved: [usize; 4],
+    /// The lengths of the generic calls recorded, which the real check
+    /// records again: a trial's copy reported every E0201 about them twice.
+    facts: [usize; 2],
+}
+
+/// The enclosing function's flow state, set aside while a closure's body is
+/// checked and put back afterwards.
+struct Enclosing {
+    init: Vec<Init>,
+    taint: Vec<Taint>,
+    narrowed: std::collections::HashMap<u32, TyId>,
+    error_nonnil: std::collections::HashSet<u32>,
+    defers: Option<u32>,
+    loops: Vec<(Span, Option<String>)>,
+    sig: Option<Signature>,
+    ret_unknown: Option<Span>,
+}
+
+/// Whether an `error` or `(T, error)` value put into a binding may be a
+/// failure nobody has looked at yet.
+///
+/// Everything may, except `nil` — a deliberate absence, with nothing in it to
+/// drop — and a read of another binding, which carries its own obligation and
+/// had it discharged by being read. Asking the question the other way round,
+/// "is this a call", let a failure through whenever the call was wrapped:
+/// `await f()`, `if c { f() } else { g() }`.
+fn produces_failure(kind: &ExprKind) -> bool {
+    !matches!(kind, ExprKind::Nil | ExprKind::Local(_) | ExprKind::Error)
 }
 
 impl Flow {
@@ -977,6 +1306,28 @@ impl Flow {
 impl<'a> Checker<'a> {
     // ---- functions --------------------------------------------------------
 
+    /// The locals the resolver found in the body being checked: a
+    /// function's, or those of a default method no block takes, which are
+    /// numbered after every function's (`ResolveMap::defaults`).
+    fn local_infos(&self) -> &'a [kite_resolve::LocalInfo] {
+        match self.resolved.locals.get(self.fn_index) {
+            Some(infos) => infos,
+            None => &self.resolved.defaults[self.fn_index - self.resolved.fns.len()].locals,
+        }
+    }
+
+    /// The name of the function being checked, or of the trait whose default
+    /// method it is when no block takes that method.
+    fn body_name(&self) -> &'a str {
+        match self.resolved.fns.get(self.fn_index) {
+            Some(f) => &f.name,
+            None => {
+                let d = &self.resolved.defaults[self.fn_index - self.resolved.fns.len()];
+                &self.resolved.types[d.trait_index as usize].name
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn check_body(
         &mut self,
@@ -990,7 +1341,7 @@ impl<'a> Checker<'a> {
         sig: &Signature,
         takes_self: bool,
     ) -> hir::Function {
-        let infos = &self.resolved.locals[self.fn_index];
+        let infos = self.local_infos();
 
         // Every local gets a slot up front. A method's `self` is local 0, so
         // its declared parameters are offset by one.
@@ -1029,41 +1380,25 @@ impl<'a> Checker<'a> {
 
         self.taint = vec![Taint::Clean; self.locals.len()];
 
-        let (mut hir_body, flow) = match body {
-            Some(b) => self.block(b, sig),
+        let (hir_body, flow) = match body {
+            Some(b) => {
+                self.defers = self.defer_stack_for(b.stmts.iter().any(stmt_defers), b.span);
+                let (hir_body, flow) = self.block(b, sig);
+                (self.with_defers(hir_body, flow, b.span), flow)
+            }
             // A trait method with no default body. Nothing to check.
             None => (hir::Block::default(), Flow::Diverges),
         };
-        // Falling off the end is an exit like any other. A function that
-        // always returns explicitly has already run them, and the flags stop
-        // any of them running twice.
-        if flow == Flow::Falls {
-            hir_body.stmts.extend(self.run_deferred());
-        }
-        // Every guard is false on entry, whether or not its `defer` was
-        // reached. The registration sets it true; an exit that runs before any
-        // registration sees false and skips the call.
-        if !self.deferred.is_empty() {
-            let entry: Vec<hir::Stmt> = self
-                .deferred
-                .iter()
-                .map(|d| hir::Stmt::Let {
-                    local: hir::LocalId(d.flag),
-                    init: Some(hir::Expr {
-                        kind: ExprKind::Bool(false),
-                        ty: TyId::BOOL,
-                        span: d.span,
-                    }),
-                    span: d.span,
-                })
-                .collect();
-            hir_body.stmts.splice(0..0, entry);
-        }
-        self.deferred.clear();
+        self.defers = None;
 
-        self.report_unchecked_errors();
+        self.report_unchecked_errors(None);
 
-        if body.is_some() && sig.ret != TyId::UNIT && flow == Flow::Falls {
+        // A body the parser could not read to its end — its last statement
+        // failed, or its `}` was never found — has had its syntax error
+        // reported already, and whether the rest would have returned is not
+        // something to guess at in a second diagnostic.
+        let cut_short = matches!(body.and_then(|b| b.stmts.last()), Some(ast::Stmt::Error(_)));
+        if body.is_some() && sig.ret != TyId::UNIT && flow == Flow::Falls && !cut_short {
             self.diags.push(
                 Diagnostic::error(codes::E0203, "not every path returns a value")
                     .with_primary(
@@ -1080,7 +1415,7 @@ impl<'a> Checker<'a> {
         hir::Function {
             generic_count: sig.generics.len(),
             name: name.to_string(),
-            is_free: self.resolved.fns[self.fn_index].owner.is_none(),
+            is_free: self.resolved.fns.get(self.fn_index).is_some_and(|f| f.owner.is_none()),
             is_pub,
             is_async,
             param_count,
@@ -1097,10 +1432,18 @@ impl<'a> Checker<'a> {
         let mut out = hir::Block::default();
         let mut flow = Flow::Falls;
         // A guard clause narrows for the rest of *this* block and no further,
-        // so the set is restored on the way out.
+        // so the set is restored on the way out — less whatever the block
+        // disproved, by assigning to what was narrowed.
         let entry_narrowed = self.narrowed.clone();
+        let entry_nonnil = self.error_nonnil.clone();
 
         for s in &b.stmts {
+            // What did not parse has been reported already. The parser also
+            // ends a block cut short by a missing `}` with one of these, and
+            // after a `return` that is not unreachable code anybody wrote.
+            if flow == Flow::Diverges && matches!(s, ast::Stmt::Error(_)) {
+                break;
+            }
             if flow == Flow::Diverges {
                 self.diags.push(
                     Diagnostic::warning(codes::E0116, "unreachable code")
@@ -1114,7 +1457,11 @@ impl<'a> Checker<'a> {
                 flow = f;
             }
         }
-        self.narrowed = entry_narrowed;
+        self.narrowed = entry_narrowed
+            .into_iter()
+            .filter(|(id, ty)| self.narrowed.get(id) == Some(ty))
+            .collect();
+        self.error_nonnil = entry_nonnil.intersection(&self.error_nonnil).copied().collect();
         (out, flow)
     }
 
@@ -1135,14 +1482,23 @@ impl<'a> Checker<'a> {
                 Some((hir::Stmt::Expr(e), flow))
             }
 
-            ast::Stmt::Break { label, span } => Some((
-                hir::Stmt::Break { label: label.as_ref().map(|l| l.name.clone()), span: *span },
-                Flow::Diverges,
-            )),
-            ast::Stmt::Continue { label, span } => Some((
-                hir::Stmt::Continue { label: label.as_ref().map(|l| l.name.clone()), span: *span },
-                Flow::Diverges,
-            )),
+            ast::Stmt::Break { label, span } => {
+                self.leave_loop(label.as_ref().map(|l| l.name.as_str()), *span, "break");
+                Some((
+                    hir::Stmt::Break { label: label.as_ref().map(|l| l.name.clone()), span: *span },
+                    Flow::Diverges,
+                ))
+            }
+            ast::Stmt::Continue { label, span } => {
+                self.leave_loop(label.as_ref().map(|l| l.name.as_str()), *span, "continue");
+                Some((
+                    hir::Stmt::Continue {
+                        label: label.as_ref().map(|l| l.name.clone()),
+                        span: *span,
+                    },
+                    Flow::Diverges,
+                ))
+            }
 
             ast::Stmt::Expr(e) => {
                 self.inert_closure(e);
@@ -1163,8 +1519,23 @@ impl<'a> Checker<'a> {
 
             ast::Stmt::Check { expr, span } => self.check_stmt(expr, *span, sig),
             ast::Stmt::Defer { expr, span } => self.defer_stmt(expr, *span),
-            ast::Stmt::Error(_) => None,
+            ast::Stmt::Error(_) => {
+                self.unread();
+                None
+            }
         }
+    }
+
+    /// Note that some of this body could not be read: the parser reported
+    /// it, and left an error in its place.
+    ///
+    /// Whether an error bound in the body was checked is then not known —
+    /// the `check`, or the call it was handed to, may be in what was not
+    /// read — so none is reported as unchecked (E0302). `f(err "…")` is an
+    /// error node, arguments and all, and it was E0302 at the next `return`
+    /// as well.
+    fn unread(&mut self) {
+        self.reported_unchecked.extend(0..self.locals.len() as u32);
     }
 
     fn let_stmt(&mut self, l: &ast::LetStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
@@ -1220,10 +1591,11 @@ impl<'a> Checker<'a> {
             self.solved.bindings.push((name.span, self.types.name(ty)));
         }
         // A `let` with an initialiser holds a value from here on; one without
-        // stays unassigned until a branch writes it.
-        if init.is_some() {
-            self.init[local_id as usize] = Init::Assigned;
-        }
+        // is unassigned until a branch writes it. Said explicitly rather than
+        // left to the state every local starts in, because a loop body runs
+        // this declaration afresh on every iteration.
+        self.init[local_id as usize] =
+            if init.is_some() { Init::Assigned } else { Init::Unassigned };
         // **A failure bound to a name is still a failure.** `let (v, err) = f()`
         // has always marked `err`, and a bare `f()` on its own line is caught
         // too — but a function returning `error` alone, bound and never looked
@@ -1233,16 +1605,19 @@ impl<'a> Checker<'a> {
         // `--explain E0302` recommends exactly that spelling — "bind it and
         // test it" — for the half of the rule that was enforced.
         //
-        // Only a *call* is marked. `let e: error = nil` is a deliberate
-        // absence and there is nothing there to drop; reading the binding
-        // anywhere clears it, because reading an error is inspecting it.
-        if ty == TyId::ERR {
-            if let Some(i) = &init {
-                if is_call(&i.kind) {
-                    self.taint[local_id as usize] = Taint::Unchecked;
-                }
-            }
-        }
+        // `let e: error = nil` is not marked: it is a deliberate absence and
+        // there is nothing there to drop. Nor is a copy of another binding.
+        // Reading the binding anywhere clears the mark, because reading an
+        // error is inspecting it.
+        //
+        // A whole `(T, error)` bound to one name is the same hole one level
+        // up: `let p = load()` never destructures, so R1 never marks an error
+        // and the failure inside `p` went out of scope in silence. Taking it
+        // apart later, or returning it, reads it and clears the mark.
+        self.taint[local_id as usize] = match &init {
+            Some(i) if self.may_hold_failure(ty) && produces_failure(&i.kind) => Taint::Unchecked,
+            _ => Taint::Clean,
+        };
         let _ = sig;
         Some((
             hir::Stmt::Let { local: hir::LocalId(local_id), init, span: l.span },
@@ -1269,6 +1644,15 @@ impl<'a> Checker<'a> {
         if v.ty.is_none() && !self.types.is_poisoned(ty) {
             self.solved.bindings.push((v.name.span, self.types.name(ty)));
         }
+        // The same obligation a `let` takes on: `var e = f()` holds a failure
+        // just as surely, and being able to reassign it later does not mean
+        // anybody looked at this one.
+        self.taint[local_id as usize] =
+            if self.may_hold_failure(ty) && produces_failure(&init.kind) {
+                Taint::Unchecked
+            } else {
+                Taint::Clean
+            };
 
         Some((
             hir::Stmt::Let { local: hir::LocalId(local_id), init: Some(init), span: v.span },
@@ -1324,65 +1708,181 @@ impl<'a> Checker<'a> {
         let mutable = self.locals[slot].mutable;
         let decl_span = self.locals[slot].span;
         let name = self.locals[slot].name.clone();
-        let already_assigned = self.init[slot] == Init::Assigned;
 
-        // An immutable binding may be written exactly once, and only if it was
-        // declared without an initialiser. That is what makes
-        // `let z: int` followed by branch assignment legal.
-        if !mutable && already_assigned {
-            let mut d = Diagnostic::error(
-                codes::E0114,
-                format!("cannot assign to immutable binding `{}`", name),
-            )
-            .with_secondary(decl_span, "declared immutable here")
-            .with_primary(p.span, "cannot assign");
-
-            if let Some(kw) = self.let_keyword_span(decl_span) {
-                d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
+        // A closure's captures are copies taken when it was made, so a write
+        // to one inside the closure would change the copy and nothing else —
+        // and the lifted body has no slot for a local it never captured, so
+        // the write used to land wherever that number pointed. A `var` is the
+        // capture §4.5 already refuses; a `let` is refused for the same
+        // reason, since even a first write would be invisible outside.
+        if let Some(region) = self.closure_span {
+            if !self.declared_inside(local_id, region) {
+                if mutable {
+                    self.note_capture(local_id, p.span);
+                } else {
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0211,
+                            format!("a closure cannot assign to `{}`, which it captures", name),
+                        )
+                        .with_primary(p.span, "assigned inside the closure")
+                        .with_secondary(decl_span, "declared outside it")
+                        .with_note(
+                            "a closure holds copies of what it captures, taken when it is \
+                             made, so the write would change the copy and nothing else",
+                        )
+                        .with_note(
+                            "assign it before making the closure, or have the closure return \
+                             the value",
+                        ),
+                    );
+                }
+                let _ = self.expr(&a.value, Some(local_ty));
+                return None;
             }
-            self.diags.push(d);
-        } else if !mutable && self.loop_depth > 0 {
-            // Inside a loop the assignment could run more than once, which
-            // would be a second write to an immutable binding.
-            self.diags.push(
-                Diagnostic::error(
-                    codes::E0114,
-                    format!("cannot assign to immutable binding `{}` inside a loop", name),
-                )
-                .with_primary(p.span, "this assignment may run more than once")
-                .with_secondary(decl_span, "declared immutable here")
-                .with_note("declare it `var` if it is meant to change"),
-            );
         }
 
-        self.init[slot] = Init::Assigned;
-
+        // The right-hand side is evaluated before the write, so it is checked
+        // against the state before it: `let x: int` then `x = x + 1` reads an
+        // `x` that has no value yet.
+        let before = self.init[slot];
         let value = self.expr(&a.value, Some(local_ty));
-
-        let value = match a.op.to_binary() {
+        let (value, written) = match a.op.to_binary() {
             None => {
+                let written = value.ty;
                 // Subsumption applies to an assignment as to an initialiser:
                 // `found = frame` where `found` is an `Option<Frame>` wraps.
                 let value = self.coerce(value, Some(local_ty));
                 self.expect_ty(value.ty, local_ty, value.span, Some(decl_span));
-                value
+                (value, written)
             }
             Some(binop) => {
                 // `n += 1` is checked as `n = n + 1`, so the operand rules and
-                // their messages are shared.
-                let lhs = hir::Expr {
-                    kind: ExprKind::Local(hir::LocalId(local_id)),
-                    ty: local_ty,
-                    span: p.span,
-                };
-                self.binary(binop, lhs, value, a.span)
+                // their messages are shared — and so is the read: the old
+                // value has to be there, and has to be one whose error was
+                // checked, exactly as if `n` had been written on the right.
+                let lhs = self.path_expr(p);
+                let sum = self.binary(binop, lhs, value, a.span);
+                let written = sum.ty;
+                let sum = self.coerce(sum, Some(local_ty));
+                self.expect_ty(sum.ty, local_ty, sum.span, Some(decl_span));
+                (sum, written)
             }
         };
+
+        // An immutable binding may be written exactly once, and only if it was
+        // declared without an initialiser. That is what makes
+        // `let z: int` followed by branch assignment legal — and why a write
+        // after a branch that *may* have written it is refused too.
+        // A compound assignment's read has already reported a binding that
+        // may have no value, and that is the one mistake here.
+        let compound = a.op.to_binary().is_some();
+        if !mutable {
+            match before {
+                Init::Assigned => self.immutable_write(&name, decl_span, p.span, None),
+                Init::Maybe if compound => {}
+                Init::Maybe => self.immutable_write(
+                    &name,
+                    decl_span,
+                    p.span,
+                    Some("on some path to here it has been assigned already"),
+                ),
+                Init::Unassigned if compound => {}
+                Init::Unassigned => {
+                    // Inside a loop the assignment could run more than once,
+                    // which would be a second write to an immutable binding —
+                    // unless the binding is declared inside that same loop,
+                    // when each iteration has a fresh one.
+                    let in_loop = self
+                        .loops
+                        .last()
+                        .is_some_and(|(l, _)| !self.declared_inside(local_id, *l));
+                    if in_loop {
+                        self.diags.push(
+                            Diagnostic::error(
+                                codes::E0114,
+                                format!(
+                                    "cannot assign to immutable binding `{}` inside a loop",
+                                    name
+                                ),
+                            )
+                            .with_primary(p.span, "this assignment may run more than once")
+                            .with_secondary(decl_span, "declared immutable here")
+                            .with_note("declare it `var` if it is meant to change"),
+                        );
+                    }
+                }
+            }
+        }
+        self.init[slot] = Init::Assigned;
+        // Writing a new failure into an error binding is a new obligation,
+        // as binding one is (R7): `var e: error = nil` then `e = f()`, or a
+        // `let e: error` assigned in a branch, dropped `f`'s failure unseen.
+        // `nil` and a copy of another binding stay checked, as in a `let`.
+        //
+        // That is the state of the value written, and says nothing about the
+        // one it replaces. A failure nobody has looked at is dropped by being
+        // written over exactly as by going out of scope (R3): `var e = f()`
+        // then `e = nil` lost `f`'s failure unseen. The right-hand side was
+        // checked first, so `e = errors.wrap(e, "…")` has read the old value
+        // and is not reported.
+        if !compound && self.may_hold_failure(local_ty) {
+            if self.taint[slot] == Taint::Unchecked
+                && !self.locals[slot].synthetic
+                && self.reported_unchecked.insert(local_id)
+            {
+                self.overwritten_unchecked(&name, decl_span, a.span, local_ty);
+            }
+            self.taint[slot] =
+                if produces_failure(&value.kind) { Taint::Unchecked } else { Taint::Clean };
+        }
+
+        // A write replaces the value every earlier test was about. `x != nil`
+        // said nothing about what `x = nil` put there, and a narrowing kept
+        // past it unwrapped a nil. A value that is itself not optional keeps
+        // an existing narrowing, since it cannot be nil either.
+        let keeps_narrowing = matches!(
+            *self.types.kind(local_ty),
+            TyKind::Optional(inner) if inner == written && !self.types.is_poisoned(written)
+        );
+        if !keeps_narrowing {
+            self.narrowed.remove(&local_id);
+            for writes in &mut self.loop_writes {
+                writes.push(local_id);
+            }
+        }
+        self.error_nonnil.remove(&local_id);
 
         Some((
             hir::Stmt::Assign { local: hir::LocalId(local_id), value, span: a.span },
             Flow::Falls,
         ))
+    }
+
+    /// Whether a binding of this type carries the obligation to be checked:
+    /// an `error`, or a whole `(T, error)`.
+    fn may_hold_failure(&self, ty: TyId) -> bool {
+        ty == TyId::ERR || self.types.fallible_value(ty).is_some()
+    }
+
+    /// A second write to an immutable binding.
+    fn immutable_write(&mut self, name: &str, decl: Span, at: Span, why: Option<&str>) {
+        let mut d = Diagnostic::error(
+            codes::E0114,
+            format!("cannot assign to immutable binding `{}`", name),
+        )
+        .with_secondary(decl, "declared immutable here")
+        .with_primary(at, "cannot assign");
+        if let Some(why) = why {
+            d = d.with_note(format!(
+                "a `let` without an initialiser is assigned exactly once; {}",
+                why
+            ));
+        }
+        if let Some(kw) = self.let_keyword_span(decl) {
+            d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
+        }
+        self.diags.push(d);
     }
 
     /// `defer file.close()` — run this when the function returns, by any path.
@@ -1406,23 +1906,112 @@ impl<'a> Checker<'a> {
             return None;
         }
         let mut call = self.expr(expr, None);
+        if matches!(call.kind, ExprKind::Error) {
+            return None;
+        }
+        // Set before the body was checked, by the same scan that found this
+        // statement; absent only if the two disagree about what a `defer` is.
+        let stack = self.defers?;
+        // What reaches here has to be a call the exit can make later. A few
+        // things written as calls are operations on a local — `xs.push(v)`,
+        // `m.remove(k)` — and those change the binding in place, which is
+        // meaningless once the function has left and wrong to do to a copy.
+        if !matches!(
+            call.kind,
+            ExprKind::Call { .. }
+                | ExprKind::CallVirtual { .. }
+                | ExprKind::CallBuiltin { .. }
+                | ExprKind::CallExtern { .. }
+                | ExprKind::StrOp { .. }
+                | ExprKind::CallClosure { .. }
+        ) {
+            self.diags.push(
+                Diagnostic::error(codes::E0200, "`defer` takes a call to a function")
+                    .with_primary(expr.span(), "this is not something an exit can call")
+                    .with_note(
+                        "a deferred call runs after the body has finished, so it has to be \
+                         a function or a method; an operation on a local — `push`, `remove` \
+                         — would change a binding nothing can read any more",
+                    ),
+            );
+            return None;
+        }
         // Evaluate the receiver and arguments *now*, into hidden locals the
         // deferred call reads at exit. That is what makes `defer f.close()`
         // close the file `f` names here rather than whatever `f` names by the
-        // time the function returns.
+        // time the function returns — and in a loop, what makes each
+        // iteration's registration keep that iteration's values.
         let mut stmts = self.hoist_deferred_operands(&mut call, span);
-        // The flag is initialised at function entry, not here: a `defer` inside
-        // an `if` that never runs still has its flag read at every exit, and a
-        // register that was never written is `Unit` in the VM and zero in Wasm
-        // — the same source deciding differently per backend.
-        let flag = self.synthetic_local("deferred", TyId::BOOL, span);
-        self.deferred.push(Deferred { flag, call, span });
-        stmts.push(hir::Stmt::Assign {
-            local: hir::LocalId(flag),
-            value: hir::Expr { kind: ExprKind::Bool(true), ty: TyId::BOOL, span },
+        let captures: Vec<u32> = stmts
+            .iter()
+            .filter_map(|s| match s {
+                hir::Stmt::Let { local, .. } => Some(local.0),
+                _ => None,
+            })
+            .collect();
+        // The call becomes a closure over those values, pushed onto the
+        // body's stack; the exits run the stack backwards.
+        let func = self.lift(
+            &captures,
+            &[],
+            hir::Block { stmts: vec![hir::Stmt::Expr(call)] },
+            TyId::UNIT,
+            span,
+        );
+        let ty = self.types.fn_of(Vec::new(), TyId::UNIT);
+        let captured = captures
+            .iter()
+            .map(|id| hir::Expr {
+                kind: ExprKind::Local(hir::LocalId(*id)),
+                ty: self.locals[*id as usize].ty,
+                span,
+            })
+            .collect();
+        let targs = self.generic_defs.iter().map(|g| g.ty).collect();
+        stmts.push(hir::Stmt::SlicePush {
+            local: hir::LocalId(stack),
+            value: hir::Expr {
+                kind: ExprKind::ClosureNew { func, captures: captured, targs },
+                ty,
+                span,
+            },
             span,
         });
         Some((hir::Stmt::Block(hir::Block { stmts }), Flow::Falls))
+    }
+
+    /// The local a body's `defer`s are pushed onto, if it has any.
+    ///
+    /// `span` is the body's own, which is what puts a closure's stack inside
+    /// the closure — so it moves with the closure when the closure is lifted.
+    fn defer_stack_for(&mut self, has_defer: bool, span: Span) -> Option<u32> {
+        if !has_defer {
+            return None;
+        }
+        let call = self.types.fn_of(Vec::new(), TyId::UNIT);
+        let ty = self.types.slice_of(call);
+        Some(self.synthetic_local("deferred", ty, span))
+    }
+
+    /// A finished body, with its `defer` stack created on entry and run where
+    /// control falls off the end. A body that always returns has run it at
+    /// every `return` already.
+    fn with_defers(&mut self, mut body: hir::Block, flow: Flow, span: Span) -> hir::Block {
+        let Some(stack) = self.defers else { return body };
+        if flow == Flow::Falls {
+            let run = self.run_deferred(span);
+            body.stmts.extend(run);
+        }
+        let ty = self.locals[stack as usize].ty;
+        body.stmts.insert(
+            0,
+            hir::Stmt::Let {
+                local: hir::LocalId(stack),
+                init: Some(hir::Expr { kind: ExprKind::SliceNew { elems: Vec::new() }, ty, span }),
+                span,
+            },
+        );
+        body
     }
 
     /// Bind a deferred call's operands to hidden locals, leaving the call
@@ -1489,7 +2078,12 @@ impl<'a> Checker<'a> {
     /// would be evaluated after the deferred stack had run, and a deferred
     /// mutation could change the answer.
     fn returning(&mut self, ret: hir::Stmt, span: Span) -> hir::Stmt {
-        if self.deferred.is_empty() {
+        // Every error still unchecked here goes out of scope on this path,
+        // whatever the path that falls through goes on to do with it (R3).
+        // A closure's `return` leaves only what the closure declared.
+        let region = self.closure_span;
+        self.report_unchecked_errors_at(region, Some((span, "return")));
+        if self.defers.is_none() {
             return ret;
         }
         let mut stmts = Vec::new();
@@ -1509,31 +2103,102 @@ impl<'a> Checker<'a> {
             }
             other => other,
         };
-        stmts.extend(self.run_deferred());
+        let run = self.run_deferred(span);
+        stmts.extend(run);
         stmts.push(ret);
         hir::Stmt::Block(hir::Block { stmts })
     }
 
-    /// The deferred calls, in reverse registration order, each guarded by its
-    /// flag. Emitted before every `return` and at the end of the body.
-    fn run_deferred(&self) -> Vec<hir::Stmt> {
-        self.deferred
-            .iter()
-            .rev()
-            .map(|d| hir::Stmt::If {
-                cond: hir::Expr {
-                    kind: ExprKind::Local(hir::LocalId(d.flag)),
-                    ty: TyId::BOOL,
-                    span: d.span,
-                },
-                then: hir::Block { stmts: vec![hir::Stmt::Expr(d.call.clone())] },
-                else_: None,
-                span: d.span,
+    /// Every call registered so far on this run, newest first. Emitted before
+    /// every `return` and at the end of the body.
+    ///
+    /// `for k in 0..n { stack[n - 1 - k]() }`, written out in the forms the
+    /// backends already lower, so a `defer` needs nothing of its own below
+    /// this pass. `span` must lie inside the body, so the counter moves with
+    /// a closure's body when it is lifted.
+    fn run_deferred(&mut self, span: Span) -> Vec<hir::Stmt> {
+        let Some(stack) = self.defers else { return Vec::new() };
+        let stack_ty = self.locals[stack as usize].ty;
+        let call_ty = self.types.slice_elem(stack_ty).unwrap_or(TyId::ERROR);
+        let k = self.synthetic_local("deferred_index", TyId::INT, span);
+        let int = |kind: ExprKind| hir::Expr { kind, ty: TyId::INT, span };
+        let len = || {
+            int(ExprKind::SliceLen {
+                base: Box::new(hir::Expr {
+                    kind: ExprKind::Local(hir::LocalId(stack)),
+                    ty: stack_ty,
+                    span,
+                }),
             })
-            .collect()
+        };
+        // Neither subtraction can overflow — `k < n` — so the checked form is
+        // as good as the wrapping one in either build.
+        let last = int(ExprKind::Binary {
+            op: hir::BinOp::SubInt,
+            lhs: Box::new(len()),
+            rhs: Box::new(int(ExprKind::Int(1))),
+        });
+        let index = int(ExprKind::Binary {
+            op: hir::BinOp::SubInt,
+            lhs: Box::new(last),
+            rhs: Box::new(int(ExprKind::Local(hir::LocalId(k)))),
+        });
+        let callee = hir::Expr {
+            kind: ExprKind::Index {
+                base: Box::new(hir::Expr {
+                    kind: ExprKind::Local(hir::LocalId(stack)),
+                    ty: stack_ty,
+                    span,
+                }),
+                index: Box::new(index),
+            },
+            ty: call_ty,
+            span,
+        };
+        let call = hir::Expr {
+            kind: ExprKind::CallClosure { callee: Box::new(callee), args: Vec::new() },
+            ty: TyId::UNIT,
+            span,
+        };
+        vec![hir::Stmt::ForRange {
+            var: hir::LocalId(k),
+            start: int(ExprKind::Int(0)),
+            end: len(),
+            inclusive: false,
+            body: hir::Block { stmts: vec![hir::Stmt::Expr(call)] },
+            label: None,
+            span,
+        }]
     }
 
     fn return_stmt(&mut self, r: &ast::ReturnStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
+        if let Some(closure) = self.closure_ret_unknown {
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0211,
+                    "this `return` needs the closure's return type written",
+                )
+                .with_primary(r.span, "returns from a closure whose type is not known yet")
+                .with_secondary(closure, "the closure's body is an expression, and nothing says what it returns")
+                .with_note(
+                    "a closure's result type comes from its body, which is only known once \
+                     the whole body is checked — write it, as in `|x: int| -> int …`",
+                ),
+            );
+            // Still a way out, so the arm it ends is not also reported as
+            // producing `()`.
+            match &r.value {
+                Some(ast::ReturnValue::Single(e)) | Some(ast::ReturnValue::Fail { error: e, .. }) => {
+                    let _ = self.expr(e, None);
+                }
+                Some(ast::ReturnValue::Pair { value, error, .. }) => {
+                    let _ = self.expr(value, None);
+                    let _ = self.expr(error, None);
+                }
+                None => {}
+            }
+            return Some((hir::Stmt::Return { value: None, span: r.span }, Flow::Diverges));
+        }
         match &r.value {
             None => {
                 if sig.ret != TyId::UNIT {
@@ -1553,7 +2218,11 @@ impl<'a> Checker<'a> {
                 // only valid when its error is nil, and the caller's taint
                 // analysis is what enforces that, so nothing is lost by not
                 // taking it apart here.
-                if self.types.fallible_value(value.ty) == Some(inner) {
+                //
+                // A value that is already an error has been reported, and is
+                // a way out all the same: said to be one value short, and the
+                // function then not to return, it was the same mistake twice.
+                if self.types.fallible_value(value.ty) == Some(inner) || value.ty == TyId::ERROR {
                     let ret = hir::Stmt::Return { value: Some(value), span: r.span };
                     return Some((self.returning(ret, r.span), Flow::Diverges));
                 }
@@ -1643,10 +2312,92 @@ impl<'a> Checker<'a> {
                     );
                     return None;
                 }
+                // `return _, nil` is neither a value nor a failure. It used to
+                // compile, and the caller — holding a nil error — was allowed
+                // to read the hole: the VM trapped, native code printed a zero
+                // or crashed, and Wasm printed a zero or dereferenced null.
+                // The statement is still built below, so the one mistake is
+                // not also reported as a missing return.
+                let mut literal = error;
+                while let ast::Expr::Paren { inner, .. } = literal {
+                    literal = inner;
+                }
+                if let ast::Expr::Nil(nil) = literal {
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0200,
+                            "`_` stands for no value, so the error beside it must be a failure",
+                        )
+                        .with_primary(*nil, "this error is nil")
+                        .with_note(
+                            "a caller that finds the error nil is allowed to read the value, \
+                             and `_` has none to give it",
+                        )
+                        .with_note(
+                            "return a value with `return value, nil`, or a failure with \
+                             `return _, errors.new(\"…\")`",
+                        ),
+                    );
+                }
                 let e = self.expr(error, Some(TyId::ERR));
                 let e = self.coerce(e, Some(TyId::ERR));
                 self.expect_ty(e.ty, TyId::ERR, e.span, None);
                 self.mark_checked(error);
+                // An error that is not the literal `nil` may still be nil when
+                // it runs: `let e = lookup()` then `return _, e`. That is a
+                // trap here, at the `return`, and the same one on every
+                // backend, rather than a hole the caller reads later. An error
+                // built on the spot, or one control flow has proved present —
+                // `if err != nil { return _, err }`, the shape nearly every one
+                // of these has — needs no test.
+                let present = match &e.kind {
+                    ExprKind::ErrorNew { .. } => true,
+                    ExprKind::Local(hir::LocalId(id)) => self.error_nonnil.contains(id),
+                    _ => false,
+                };
+                let mut claim = Vec::new();
+                let e = if present || e.ty != TyId::ERR {
+                    e
+                } else {
+                    let at = e.span;
+                    let id = self.synthetic_local("failure", TyId::ERR, *span);
+                    let read = hir::Expr {
+                        kind: ExprKind::Local(hir::LocalId(id)),
+                        ty: TyId::ERR,
+                        span: at,
+                    };
+                    claim.push(hir::Stmt::Let {
+                        local: hir::LocalId(id),
+                        init: Some(e),
+                        span: *span,
+                    });
+                    let is_failure = hir::Expr {
+                        kind: ExprKind::Unary {
+                            op: hir::UnOp::Not,
+                            operand: Box::new(hir::Expr {
+                                kind: ExprKind::IsNil { value: Box::new(read.clone()) },
+                                ty: TyId::BOOL,
+                                span: at,
+                            }),
+                        },
+                        ty: TyId::BOOL,
+                        span: at,
+                    };
+                    let message = hir::Expr {
+                        kind: ExprKind::Str(NIL_FAILURE.to_string()),
+                        ty: TyId::STR,
+                        span: at,
+                    };
+                    claim.push(hir::Stmt::Expr(hir::Expr {
+                        kind: ExprKind::CallBuiltin {
+                            builtin: Builtin::Require,
+                            args: vec![is_failure, message],
+                        },
+                        ty: TyId::UNIT,
+                        span: *span,
+                    }));
+                    read
+                };
                 let ret = hir::Stmt::Return {
                     value: Some(hir::Expr {
                         kind: ExprKind::PairNew {
@@ -1662,7 +2413,12 @@ impl<'a> Checker<'a> {
                     }),
                     span: r.span,
                 };
-                Some((self.returning(ret, r.span), Flow::Diverges))
+                let ret = self.returning(ret, r.span);
+                if claim.is_empty() {
+                    return Some((ret, Flow::Diverges));
+                }
+                claim.push(ret);
+                Some((hir::Stmt::Block(hir::Block { stmts: claim }), Flow::Diverges))
             }
         }
     }
@@ -1685,32 +2441,28 @@ impl<'a> Checker<'a> {
         // Each branch is checked from the same entry state, and the states are
         // merged at the join. A branch that diverges contributes nothing to the
         // join, because control never arrives from it.
-        let entry_init = self.init.clone();
-
-        let entry_taint = self.taint.clone();
-        // Inside `if err != nil { … }` the value is still not valid.
-        let narrowed = self.apply_narrowing(narrowing, true);
-        let present = self.apply_error_nonnil(tested, true);
-        let mut then_entry = self.taint.clone();
-        self.clean_guarded(&mut then_entry, tested, true);
-        self.taint = then_entry;
+        let entry = self.flow_state();
+        self.enter_branch(narrowing, tested, true);
         let (then, then_flow) = self.block(&i.then, sig);
-        self.undo_narrowing(narrowed);
-        self.undo_error_nonnil(present);
-        let then_init = std::mem::replace(&mut self.init, entry_init.clone());
-        let then_taint = std::mem::replace(&mut self.taint, entry_taint.clone());
+        if then_flow == Flow::Diverges {
+            self.report_unchecked_errors(Some(i.then.span));
+        }
+        let then_exit = self.flow_state();
+        self.set_flow_state(entry);
 
+        // The else path exists whether or not it is written: without an
+        // `else`, control arrives at the join having skipped the `then`, and
+        // it arrives knowing the condition was false. An `else if` starts from
+        // that knowledge too, so `if x == nil { … } else if c { … }` has `x`
+        // narrowed in the second test's branches.
+        self.enter_branch(narrowing, tested, false);
         let (else_, else_flow) = match i.else_.as_deref() {
             None => (None, Flow::Falls),
             Some(ast::ElseBranch::Block(b)) => {
-                let narrowed = self.apply_narrowing(narrowing, false);
-                let present = self.apply_error_nonnil(tested, false);
-                let mut else_entry = entry_taint.clone();
-                self.clean_guarded(&mut else_entry, tested, false);
-                self.taint = else_entry;
                 let (blk, f) = self.block(b, sig);
-                self.undo_narrowing(narrowed);
-                self.undo_error_nonnil(present);
+                if f == Flow::Diverges {
+                    self.report_unchecked_errors(Some(b.span));
+                }
                 (Some(blk), f)
             }
             Some(ast::ElseBranch::If(nested)) => {
@@ -1718,42 +2470,24 @@ impl<'a> Checker<'a> {
                 (Some(hir::Block { stmts: vec![stmt] }), f)
             }
         };
-        let else_init = std::mem::take(&mut self.init);
-        let else_taint = std::mem::take(&mut self.taint);
+        let else_exit = self.flow_state();
 
-        // A guarded value becomes clean after `if err != nil { return … }`,
-        // because control only reaches here when the error was nil.
-        let merged_taint = match (then_flow, else_flow, i.else_.is_some()) {
-            // `if err != nil { return … }` — control continues only when the
-            // error was nil, so the value it guards is now valid.
-            (Flow::Diverges, _, false) => {
-                let mut merged = entry_taint.clone();
-                self.clean_guarded(&mut merged, tested, false);
-                merged
-            }
-            (Flow::Diverges, _, true) => else_taint.clone(),
-            (_, Flow::Diverges, true) => then_taint.clone(),
-            // No `else`: control arrives either through the branch or around
-            // it, so both states count. Taking the entry state alone would let
-            // an error declared inside the branch escape uninspected.
-            (_, _, false) => self.join_taint(&entry_taint, &then_taint),
-            _ => self.join_taint(&then_taint, &else_taint),
+        // `if err != nil { return … }` leaves only the path where the error
+        // was nil, so the value it guards is clean after it; `if x == nil {
+        // return }` leaves only the path where `x` is present, so the
+        // narrowing holds for the rest of the block. That guard clause is the
+        // shape people actually write — test the bad case, leave, and get on
+        // with it — and it falls out of the join: the branch that left is not
+        // one of the ways in.
+        //
+        // Both leaving means nothing follows, but the end of the function
+        // still asks what was left unchecked on the way out — on either way.
+        let merged = match (then_flow, else_flow) {
+            (Flow::Diverges, Flow::Falls) => else_exit,
+            (Flow::Falls, Flow::Diverges) => then_exit,
+            _ => self.join_flow(&then_exit, &else_exit),
         };
-
-        self.restore_taint(merged_taint);
-        let merged_init = match (then_flow, else_flow, i.else_.is_some()) {
-            // No `else`: control can arrive having skipped the `then` entirely.
-            (_, _, false) => entry_init,
-            (Flow::Diverges, Flow::Diverges, _) => else_init,
-            (Flow::Diverges, Flow::Falls, _) => else_init,
-            (Flow::Falls, Flow::Diverges, _) => then_init,
-            (Flow::Falls, Flow::Falls, _) => then_init
-                .iter()
-                .zip(&else_init)
-                .map(|(a, b)| a.merge(*b))
-                .collect(),
-        };
-        self.restore_init(merged_init);
+        self.set_flow_state(merged);
 
         // Without an `else`, control can always fall through.
         let flow = if i.else_.is_none() {
@@ -1762,45 +2496,128 @@ impl<'a> Checker<'a> {
             then_flow.merge(else_flow)
         };
 
-        // A guard clause: `if x == nil { return }` leaves only the path where
-        // `x` is present, so the narrowing holds for the rest of the block.
-        //
-        // This is the shape people actually write — test the bad case, leave,
-        // and get on with it — and without it the narrowing had to be spelled
-        // as a positive `if` wrapping everything that followed.
-        if then_flow == Flow::Diverges && i.else_.is_none() {
-            self.apply_narrowing(narrowing, false);
-            // `if err == nil { return … }` is the standard-library shape: past
-            // it, the error is present and its message can be read.
-            self.apply_error_nonnil(tested, false);
-        }
-
         Some((hir::Stmt::If { cond, then, else_, span: i.span }, flow))
     }
 
     fn for_stmt(&mut self, f: &ast::ForStmt, sig: &Signature) -> Option<(hir::Stmt, Flow)> {
-        let label = f.label.as_ref().map(|l| l.name.clone());
-        self.loop_depth += 1;
+        self.loops.push((f.span, f.label.as_ref().map(|l| l.name.clone())));
 
         // A loop body may run zero times, so nothing it assigns can be assumed
-        // assigned afterwards. The entry state is restored at the end.
+        // assigned afterwards, and it may run more than once, so a write in it
+        // may already have happened when control returns to its top.
         let entry_init = self.init.clone();
         // Taint needs the same treatment for the same reason: a `check` in a
         // body that never runs proves nothing, so the state after the loop is
         // the entry state joined with whatever the body left. Without this, a
         // `for false { check err }` makes the value it guards readable.
         let entry_taint = self.taint.clone();
+        // The body is checked once, but runs again from its own end: a local
+        // it assigns may hold, on the second pass, whatever the first pass
+        // put there. So nothing proved about such a local before the loop is
+        // true inside it — `if x == nil { return }` above a loop that ends
+        // with `x = nil` said nothing about the loop's second iteration.
+        let mut assigned = Vec::new();
+        for s in &f.body.stmts {
+            visit_stmts(s, true, &mut |s| {
+                if let ast::Stmt::Assign(a) = s {
+                    if let ast::Expr::Path(p) = &a.target {
+                        if let Some(Res::Local(id)) = self.resolved.lookup_use(p.span) {
+                            assigned.push(id);
+                        }
+                    }
+                }
+            });
+        }
+        // A write of a value that cannot be nil keeps a narrowing, in a loop
+        // as in straight-line code, but which writes those are is known only
+        // once the body is checked. So a body writing a narrowed local is
+        // checked on trial with the narrowing kept, and it is dropped for the
+        // real check where a write there may have stored a nil. Dropping one
+        // can make another write nil-able — `x = z` once `z` is no longer
+        // proved present — so the trial is repeated until nothing more is
+        // dropped; each round drops at least one, or is the last.
+        let mut kept: Vec<u32> =
+            assigned.iter().copied().filter(|id| self.narrowed.contains_key(id)).collect();
+        loop {
+            for id in &assigned {
+                if !kept.contains(id) {
+                    self.narrowed.remove(id);
+                }
+            }
+            if kept.is_empty() {
+                break;
+            }
+            let defers = self.defers;
+            self.loop_writes.push(Vec::new());
+            let trial = self.begin_trial();
+            let _ = self.loop_parts(f, sig);
+            self.end_trial(trial);
+            self.defers = defers;
+            let writes = self.loop_writes.pop().unwrap_or_default();
+            let before = kept.len();
+            kept.retain(|id| !writes.contains(id));
+            if kept.len() == before {
+                break;
+            }
+        }
+        for id in &assigned {
+            self.error_nonnil.remove(id);
+        }
+        let entry_narrowed = self.narrowed.clone();
+        let entry_nonnil = self.error_nonnil.clone();
 
-        let result = match &f.header {
+        let (result, runs) = self.loop_parts(f, sig);
+
+        self.loops.pop();
+        let merged: Vec<Init> = self
+            .init
+            .iter()
+            .enumerate()
+            .map(|(i, now)| entry_init.get(i).map_or(*now, |before| before.merge(*now)))
+            .collect();
+        self.restore_init(merged);
+        // A body that certainly runs, and can only leave through its end or a
+        // `return`, hands on exactly the state it ends in: there is no path
+        // around it. That is the shape of a bounded walk — `for i in 0..64`
+        // testing what it walks on every turn — and without it the path that
+        // runs the body zero times, which does not exist, made the walk's
+        // subject look unread.
+        if !runs {
+            self.merge_loop_taint(&entry_taint);
+        }
+        // What the body proved is not known after it, which may be after zero
+        // runs of it; what it disproved was removed before it started.
+        self.narrowed = entry_narrowed;
+        self.error_nonnil = entry_nonnil;
+
+        let result = result?;
+        // `for { … }` with nothing that breaks out of it never falls through.
+        // That is worth knowing here rather than leaving to MIR, because a
+        // function whose every exit is a `return` inside such a loop is
+        // otherwise reported as missing a return — and writing an unreachable
+        // one to satisfy the compiler is exactly the sort of dead code a
+        // reader has to puzzle over.
+        let diverges = matches!(f.header, ast::ForHeader::Loop)
+            && !breaks_out(&f.body, f.label.as_ref().map(|l| l.name.as_str()));
+        Some((result, if diverges { Flow::Diverges } else { Flow::Falls }))
+    }
+
+    /// A loop's header and body, and whether the body certainly runs at least
+    /// once and can leave only by finishing or returning.
+    fn loop_parts(&mut self, f: &ast::ForStmt, sig: &Signature) -> (Option<hir::Stmt>, bool) {
+        let label = f.label.as_ref().map(|l| l.name.clone());
+        let mut jumps = false;
+        for s in &f.body.stmts {
+            visit_stmts(s, false, &mut |s| {
+                jumps |= matches!(s, ast::Stmt::Break { .. } | ast::Stmt::Continue { .. })
+            });
+        }
+        match &f.header {
             ast::ForHeader::In { binding, iter } => {
                 let ast::Binding::Name(name) = binding else {
                     // `for (k, v) in m` — the only tuple binding a loop takes,
                     // because a map is the only thing that yields pairs.
-                    let result = self.for_map(f, binding, iter, sig);
-                    self.loop_depth -= 1;
-                    self.restore_init(entry_init);
-                    self.merge_loop_taint(&entry_taint);
-                    return result;
+                    return (self.for_map(f, binding, iter, sig).map(|(s, _)| s), false);
                 };
                 let ast::Expr::Range { start, end, inclusive, .. } = iter else {
                     // Iterating a slice. The `Iterate` trait generalises this
@@ -1821,43 +2638,44 @@ impl<'a> Checker<'a> {
                                 ),
                             );
                         }
-                        self.loop_depth -= 1;
-                        self.restore_init(entry_init);
-                        self.merge_loop_taint(&entry_taint);
-                        return None;
+                        return (None, false);
                     };
-                    let local_id = self.resolved.lookup_binding(name.span)?;
+                    let Some(local_id) = self.resolved.lookup_binding(name.span) else {
+                        return (None, false);
+                    };
                     self.locals[local_id as usize].ty = elem;
                     self.init[local_id as usize] = Init::Assigned;
 
                     let (body, _) = self.block(&f.body, sig);
-                    self.loop_depth -= 1;
-                    self.restore_init(entry_init);
-                    self.merge_loop_taint(&entry_taint);
-                    return Some((
-                        hir::Stmt::ForSlice {
-                            var: hir::LocalId(local_id),
-                            slice: seq,
-                            body,
-                            label,
-                            span: f.span,
-                        },
-                        Flow::Falls,
-                    ));
+                    let stmt = hir::Stmt::ForSlice {
+                        var: hir::LocalId(local_id),
+                        slice: seq,
+                        body,
+                        label,
+                        span: f.span,
+                    };
+                    return (Some(stmt), false);
                 };
 
                 let start_e = self.expr(start, Some(TyId::INT));
                 let end_e = self.expr(end, Some(TyId::INT));
                 self.expect_ty(start_e.ty, TyId::INT, start_e.span, None);
                 self.expect_ty(end_e.ty, TyId::INT, end_e.span, None);
+                // Two literal ends, the first before the second: the body runs.
+                let runs = match (&start_e.kind, &end_e.kind) {
+                    (ExprKind::Int(a), ExprKind::Int(b)) => a < b || (*inclusive && a == b),
+                    _ => false,
+                };
 
-                let local_id = self.resolved.lookup_binding(name.span)?;
+                let Some(local_id) = self.resolved.lookup_binding(name.span) else {
+                    return (None, false);
+                };
                 self.locals[local_id as usize].ty = TyId::INT;
                 // The loop itself supplies the counter's value.
                 self.init[local_id as usize] = Init::Assigned;
 
                 let (body, _) = self.block(&f.body, sig);
-                hir::Stmt::ForRange {
+                let stmt = hir::Stmt::ForRange {
                     var: hir::LocalId(local_id),
                     start: start_e,
                     end: end_e,
@@ -1865,40 +2683,25 @@ impl<'a> Checker<'a> {
                     body,
                     label,
                     span: f.span,
-                }
+                };
+                (Some(stmt), runs && !jumps)
             }
             ast::ForHeader::While(c) => {
                 let cond = self.condition(c);
                 let (body, _) = self.block(&f.body, sig);
-                hir::Stmt::While { cond, body, label, span: f.span }
+                (Some(hir::Stmt::While { cond, body, label, span: f.span }), false)
             }
             ast::ForHeader::Loop => {
                 let (body, _) = self.block(&f.body, sig);
-                hir::Stmt::Loop { body, label, span: f.span }
+                (Some(hir::Stmt::Loop { body, label, span: f.span }), false)
             }
-        };
-
-        self.loop_depth -= 1;
-        self.restore_init(entry_init);
-        self.merge_loop_taint(&entry_taint);
-        // `for { … }` with nothing that breaks out of it never falls through.
-        // That is worth knowing here rather than leaving to MIR, because a
-        // function whose every exit is a `return` inside such a loop is
-        // otherwise reported as missing a return — and writing an unreachable
-        // one to satisfy the compiler is exactly the sort of dead code a
-        // reader has to puzzle over.
-        let diverges = matches!(f.header, ast::ForHeader::Loop)
-            && !breaks_out(&f.body, f.label.as_ref().map(|l| l.name.as_str()));
-        Some((result, if diverges { Flow::Diverges } else { Flow::Falls }))
+        }
     }
 
     /// `for (key, value) in m`.
     ///
-    /// Lowered to a loop over `m.keys()` with the value looked up per key,
-    /// which is exactly what a reader would write by hand — and it keeps
-    /// insertion order, which the specification guarantees. The lookup yields
-    /// an optional and is unwrapped, because the key came out of the map one
-    /// line earlier and cannot be missing.
+    /// Lowered to a walk over `m.keys()` and `m.values()` side by side, in
+    /// insertion order, which the specification guarantees.
     fn for_map(
         &mut self,
         f: &ast::ForStmt,
@@ -1949,71 +2752,81 @@ impl<'a> Checker<'a> {
             return None;
         }
 
-        // The map is bound once: iterating re-reads it per key, and an
-        // expression with side effects must not run per iteration.
-        let holder = self.synthetic_local("map", map.ty, *span);
+        // The map is read once, into its keys and its values — both in
+        // insertion order, so element `i` of one belongs with element `i` of
+        // the other — and the loop walks the two side by side. Looking each
+        // value up by its key instead was a second search per entry, and it
+        // was wrong for a key that is not equal to itself: a NaN key found no
+        // entry, and the unwrap of that missing value is what each backend
+        // then disagreed about.
         let keys_ty = self.types.slice_of(key_ty);
-        let key_local = match &elems[0] {
-            ast::BindElem::Name(n) => self.resolved.lookup_binding(n.span)?,
-            ast::BindElem::Wildcard(w) => self.synthetic_local("key", key_ty, *w),
-        };
-        self.locals[key_local as usize].ty = key_ty;
-        self.init[key_local as usize] = Init::Assigned;
-
-        let map_expr = |this: &Self| hir::Expr {
-            kind: ExprKind::Local(hir::LocalId(holder)),
-            ty: this.locals[holder as usize].ty,
+        let values_ty = self.types.slice_of(value_ty);
+        let holder = self.synthetic_local("map", map.ty, *span);
+        let keys = self.synthetic_local("keys", keys_ty, *span);
+        let values = self.synthetic_local("values", values_ty, *span);
+        let index = self.synthetic_local("entry", TyId::INT, *span);
+        let local = |id: u32, ty: TyId| hir::Expr {
+            kind: ExprKind::Local(hir::LocalId(id)),
+            ty,
             span: *span,
         };
-        let lookup = hir::Expr {
-            kind: ExprKind::Unwrap {
-                value: Box::new(hir::Expr {
-                    kind: ExprKind::MapGet {
-                        base: Box::new(map_expr(self)),
-                        key: Box::new(hir::Expr {
-                            kind: ExprKind::Local(hir::LocalId(key_local)),
-                            ty: key_ty,
-                            span: *span,
-                        }),
-                    },
-                    ty: self.types.optional_of(value_ty),
-                    span: *span,
-                }),
+        let element = |slice: u32, slice_ty: TyId, ty: TyId| hir::Expr {
+            kind: ExprKind::Index {
+                base: Box::new(local(slice, slice_ty)),
+                index: Box::new(local(index, TyId::INT)),
             },
-            ty: value_ty,
+            ty,
             span: *span,
         };
 
         let mut body_stmts = Vec::new();
-        if let ast::BindElem::Name(n) = &elems[1] {
-            let value_local = self.resolved.lookup_binding(n.span)?;
-            self.locals[value_local as usize].ty = value_ty;
-            self.init[value_local as usize] = Init::Assigned;
+        for (elem, (from, from_ty, ty)) in
+            elems.iter().zip([(keys, keys_ty, key_ty), (values, values_ty, value_ty)])
+        {
+            let ast::BindElem::Name(n) = elem else { continue };
+            let Some(bound) = self.resolved.lookup_binding(n.span) else { continue };
+            self.locals[bound as usize].ty = ty;
+            self.init[bound as usize] = Init::Assigned;
             body_stmts.push(hir::Stmt::Let {
-                local: hir::LocalId(value_local),
-                init: Some(lookup),
+                local: hir::LocalId(bound),
+                init: Some(element(from, from_ty, ty)),
                 span: n.span,
             });
         }
         let (body, _) = self.block(&f.body, sig);
         body_stmts.extend(body.stmts);
 
-        let keys = hir::Expr {
-            kind: ExprKind::MapKeys { base: Box::new(map_expr(self)) },
-            ty: keys_ty,
-            span: *span,
-        };
-        let loop_stmt = hir::Stmt::ForSlice {
-            var: hir::LocalId(key_local),
-            slice: keys,
+        let whole = |kind| hir::Expr { kind, ty: TyId::INT, span: *span };
+        let loop_stmt = hir::Stmt::ForRange {
+            var: hir::LocalId(index),
+            start: whole(ExprKind::Int(0)),
+            end: whole(ExprKind::SliceLen { base: Box::new(local(keys, keys_ty)) }),
+            inclusive: false,
             body: hir::Block { stmts: body_stmts },
             label: f.label.as_ref().map(|l| l.name.clone()),
             span: f.span,
         };
+        let read = |kind, ty| hir::Expr { kind, ty, span: *span };
         Some((
             hir::Stmt::Block(hir::Block {
                 stmts: vec![
                     hir::Stmt::Let { local: hir::LocalId(holder), init: Some(map), span: *span },
+                    hir::Stmt::Let {
+                        local: hir::LocalId(keys),
+                        init: Some(read(
+                            ExprKind::MapKeys { base: Box::new(local(holder, self.locals[holder as usize].ty)) },
+                            keys_ty,
+                        )),
+                        span: *span,
+                    },
+                    hir::Stmt::Let {
+                        local: hir::LocalId(values),
+                        init: Some(read(
+                            ExprKind::MapValues { base: Box::new(local(holder, self.locals[holder as usize].ty)) },
+                            values_ty,
+                        )),
+                        span: *span,
+                    },
                     loop_stmt,
                 ],
             }),
@@ -2160,45 +2973,122 @@ impl<'a> Checker<'a> {
             .then_some((id, is_eq))
     }
 
-    /// Narrow a local out of its optional for the branch where it cannot be
-    /// nil. Returns the id to un-narrow afterwards.
-    fn apply_narrowing(&mut self, narrowing: Option<(u32, bool)>, in_then: bool) -> Option<u32> {
-        let (id, is_eq) = narrowing?;
-        // `x == nil` narrows in the *else*; `x != nil` narrows in the *then*.
-        if is_eq == in_then {
-            return None;
+    /// Start a branch of a test: narrow what the test proved present on this
+    /// side of it, and clean the value an error guards where the error is
+    /// known nil.
+    ///
+    /// `x == nil` narrows in the *else*, `x != nil` in the *then*; `err !=
+    /// nil` proves the error present in the *then*, `err == nil` in the
+    /// *else*. The branch's state is thrown away or joined at the end, so
+    /// nothing here has to be undone.
+    fn enter_branch(
+        &mut self,
+        narrowing: Option<(u32, bool)>,
+        tested: Option<(u32, bool)>,
+        in_then: bool,
+    ) {
+        if let Some((id, is_eq)) = narrowing {
+            if is_eq != in_then {
+                if let TyKind::Optional(inner) = *self.types.kind(self.locals[id as usize].ty) {
+                    self.narrowed.insert(id, inner);
+                }
+            }
         }
-        let TyKind::Optional(inner) = *self.types.kind(self.locals[id as usize].ty) else {
-            return None;
-        };
-        self.narrowed.insert(id, inner);
-        Some(id)
+        if let Some((id, is_eq)) = tested {
+            if is_eq != in_then {
+                self.error_nonnil.insert(id);
+            }
+        }
+        let mut taint = std::mem::take(&mut self.taint);
+        self.clean_guarded(&mut taint, tested, in_then);
+        self.taint = taint;
     }
 
-    fn undo_narrowing(&mut self, saved: Option<u32>) {
-        if let Some(id) = saved {
-            self.narrowed.remove(&id);
+    /// Start checking something only to learn its type.
+    ///
+    /// Inference sometimes checks an expression twice: once to see what type
+    /// it has, and again for real against what that settled. Everything the
+    /// first check does is thrown away, not only its diagnostics — a read
+    /// that reports a tainted value marks it clean, so that one mistake is one
+    /// diagnostic, and with the report discarded that mark let the value
+    /// through unreported on the real check. So a trial works on the checker
+    /// as it is, and [`Self::end_trial`] puts back everything it changed.
+    fn begin_trial(&mut self) -> Trial {
+        Trial {
+            diags: std::mem::replace(self.diags, DiagBag::new()),
+            flow: self.flow_state(),
+            guards: self.guards.clone(),
+            captures: self.captures.clone(),
+            reported: self.reported_unchecked.clone(),
+            locals: self.locals.len(),
+            lifted: self.lifted.len(),
+            solved: [
+                self.solved.bindings.len(),
+                self.solved.calls.len(),
+                self.solved.locals.len(),
+                self.solved.methods.len(),
+            ],
+            facts: [self.facts.calls.len(), self.facts.bound_calls.len()],
         }
     }
 
-    /// The mirror of [`Self::apply_narrowing`] for errors: `err != nil` proves
-    /// the error present in the *then*, `err == nil` in the *else*.
-    fn apply_error_nonnil(&mut self, tested: Option<(u32, bool)>, in_then: bool) -> Option<u32> {
-        let (id, is_eq) = tested?;
-        if is_eq == in_then {
-            return None;
-        }
-        // Already proved by an enclosing test: leave that proof to its owner
-        // rather than removing it when this branch ends.
-        if !self.error_nonnil.insert(id) {
-            return None;
-        }
-        Some(id)
+    fn end_trial(&mut self, t: Trial) {
+        *self.diags = t.diags;
+        // A temporary the trial made is referred to only by what the trial
+        // built, which is being thrown away; so is a closure it lifted, whose
+        // number the real check hands out again.
+        self.locals.truncate(t.locals);
+        self.lifted.truncate(t.lifted);
+        self.set_flow_state(t.flow);
+        self.guards = t.guards;
+        self.captures = t.captures;
+        self.reported_unchecked = t.reported;
+        self.solved.bindings.truncate(t.solved[0]);
+        self.solved.calls.truncate(t.solved[1]);
+        self.solved.locals.truncate(t.solved[2]);
+        self.solved.methods.truncate(t.solved[3]);
+        self.facts.calls.truncate(t.facts[0]);
+        self.facts.bound_calls.truncate(t.facts[1]);
     }
 
-    fn undo_error_nonnil(&mut self, saved: Option<u32>) {
-        if let Some(id) = saved {
-            self.error_nonnil.remove(&id);
+    /// Everything the flow analysis knows at this point.
+    fn flow_state(&self) -> FlowState {
+        FlowState {
+            init: self.init.clone(),
+            taint: self.taint.clone(),
+            narrowed: self.narrowed.clone(),
+            error_nonnil: self.error_nonnil.clone(),
+        }
+    }
+
+    fn set_flow_state(&mut self, state: FlowState) {
+        self.restore_init(state.init);
+        self.restore_taint(state.taint);
+        self.narrowed = state.narrowed;
+        self.error_nonnil = state.error_nonnil;
+    }
+
+    /// The state at a point control reaches from either of two others: what
+    /// both agree on, and nothing either alone proved.
+    fn join_flow(&self, a: &FlowState, b: &FlowState) -> FlowState {
+        let n = a.init.len().max(b.init.len());
+        let init = (0..n)
+            .map(|i| match (a.init.get(i), b.init.get(i)) {
+                (Some(x), Some(y)) => x.merge(*y),
+                (Some(x), None) | (None, Some(x)) => *x,
+                (None, None) => Init::Assigned,
+            })
+            .collect();
+        FlowState {
+            init,
+            taint: self.join_taint(&a.taint, &b.taint),
+            narrowed: a
+                .narrowed
+                .iter()
+                .filter(|(id, ty)| b.narrowed.get(id) == Some(ty))
+                .map(|(id, ty)| (*id, *ty))
+                .collect(),
+            error_nonnil: a.error_nonnil.intersection(&b.error_nonnil).copied().collect(),
         }
     }
 
@@ -2277,6 +3167,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            ast::Expr::ImpliedInt { value, span } => self.lit(ExprKind::Int(*value), TyId::INT, *span),
             ast::Expr::Float(span) => {
                 let text = self.text(*span);
                 match parse_float(text) {
@@ -2297,10 +3188,26 @@ impl<'a> Checker<'a> {
             ast::Expr::Bool { value, span } => self.lit(ExprKind::Bool(*value), TyId::BOOL, *span),
             ast::Expr::Interpolated { parts, span } => self.interpolated(parts, *span),
 
-            ast::Expr::Path(p) => self.path_expr(p),
+            // A unit variant of a generic enum says nothing about its
+            // arguments, so the type the context expects is what settles them:
+            // `let m: Maybe<str> = None`.
+            ast::Expr::Path(p) => match self.resolved.lookup_use(p.span) {
+                Some(Res::Variant(ti, vi)) => {
+                    self.variant_value(ti, vi, &[], &[], p.span, p.span, expected)
+                }
+                _ => self.path_expr(p),
+            },
             ast::Expr::Paren { inner, .. } => self.expr(inner, expected),
 
             ast::Expr::Unary { op, operand, span } => {
+                // `-9223372036854775808` is `int`'s minimum, but the literal
+                // after the `-` is one past its maximum and would be refused
+                // on its own. Written together they are one constant.
+                if let (ast::UnaryOp::Neg, ast::Expr::Int(digits)) = (op, operand.as_ref()) {
+                    if is_int_min_magnitude(self.text(*digits)) {
+                        return self.lit(ExprKind::Int(i64::MIN), TyId::INT, *span);
+                    }
+                }
                 let val = self.expr(operand, expected);
                 self.unary(*op, val, *span)
             }
@@ -2380,7 +3287,9 @@ impl<'a> Checker<'a> {
                 self.call(callee, args, arg_names, *span, expected)
             }
 
-            ast::Expr::If { cond, then, else_, span } => self.if_expr(cond, then, else_, *span),
+            ast::Expr::If { cond, then, else_, span } => {
+                self.if_expr(cond, then, else_, *span, expected)
+            }
 
             ast::Expr::Range { span, .. } => {
                 self.diags.push(
@@ -2435,7 +3344,7 @@ impl<'a> Checker<'a> {
                     self.diags.push(
                         Diagnostic::error(codes::E0204, "cannot infer a type for `nil`")
                             .with_primary(*span, "no expected type here")
-                            .with_note("annotate the binding, as in `let x: ?int = nil`"),
+                            .with_note("annotate the binding, as in `let x: Option<int> = nil`"),
                     );
                     self.lit(ExprKind::Error, TyId::ERROR, *span)
                 }
@@ -2443,11 +3352,13 @@ impl<'a> Checker<'a> {
             // A method's receiver is local 0, which is what makes a method
             // call and a plain call the same thing after checking.
             ast::Expr::SelfExpr(span) => match self.sigs[self.fn_index].self_ty {
-                Some(ty) => hir::Expr {
-                    kind: ExprKind::Local(hir::LocalId(0)),
-                    ty,
-                    span: *span,
-                },
+                Some(ty) => {
+                    // Inside a closure the receiver is a capture like any
+                    // other. Not noting it left the lifted body reading its
+                    // own first slot, which holds whatever it captured first.
+                    self.note_capture(0, *span);
+                    hir::Expr { kind: ExprKind::Local(hir::LocalId(0)), ty, span: *span }
+                }
                 None => {
                     self.diags.push(
                         Diagnostic::error(codes::E0111, "`self` outside a method")
@@ -2472,6 +3383,7 @@ impl<'a> Checker<'a> {
                     Some(Res::Variant(ti, vi)) => {
                         self.variant_value(ti, vi, &[], &[], *span, *span, expected)
                     }
+                    Some(Res::Type(ti)) => self.type_member_value(ti, base, name, *span),
                     _ => self.field_access(base, name, *span),
                 }
             }
@@ -2481,7 +3393,9 @@ impl<'a> Checker<'a> {
             ast::Expr::Match(m) => self.match_expr(m, expected),
 
             ast::Expr::Map { entries, span } => {
-                let hint = expected.and_then(|e| match self.types.kind(e) {
+                // Where an `Option<{K: V}>` is wanted, the map inside it is,
+                // so an empty `{}` takes its types from that too.
+                let hint = expected.and_then(|e| match self.types.kind(self.types.present(e)) {
                     TyKind::Map(k, v) => Some((*k, *v)),
                     _ => None,
                 });
@@ -2507,33 +3421,33 @@ impl<'a> Checker<'a> {
                 let mut val_ty = hint.map(|(_, v)| v);
                 for e in entries {
                     let k = self.expr(&e.key, key_ty);
-                    match key_ty {
-                        None if !self.types.is_poisoned(k.ty) => key_ty = Some(k.ty),
-                        Some(want) => self.expect_ty(k.ty, want, k.span, None),
-                        None => {}
-                    }
+                    let k = match key_ty {
+                        None => {
+                            if !self.types.is_poisoned(k.ty) {
+                                key_ty = Some(k.ty);
+                            }
+                            k
+                        }
+                        Some(want) => self.accept(k, want, None),
+                    };
                     let v = self.expr(&e.value, val_ty);
-                    let v = self.coerce(v, val_ty);
-                    match val_ty {
-                        None if !self.types.is_poisoned(v.ty) => val_ty = Some(v.ty),
-                        Some(want) => self.expect_ty(v.ty, want, v.span, None),
-                        None => {}
-                    }
+                    let v = match val_ty {
+                        None => {
+                            if !self.types.is_poisoned(v.ty) {
+                                val_ty = Some(v.ty);
+                            }
+                            v
+                        }
+                        Some(want) => self.accept(v, want, None),
+                    };
                     flat.push(k);
                     flat.push(v);
                 }
 
                 let k = key_ty.unwrap_or(TyId::ERROR);
                 let v = val_ty.unwrap_or(TyId::ERROR);
-                if !self.types.is_equatable(k) && !self.types.is_poisoned(k) {
-                    self.diags.push(
-                        Diagnostic::error(
-                            codes::E0200,
-                            format!("`{}` cannot be a map key", self.types.name(k)),
-                        )
-                        .with_primary(*span, "a key must be equatable")
-                        .with_note("lookup compares keys, so every field must itself compare"),
-                    );
+                if check_map_key(self.types, k, *span, self.diags) {
+                    self.note_compared(k, *span);
                 }
                 let ty = self.types.map_of(k, v);
                 hir::Expr { kind: ExprKind::MapNew { entries: flat }, ty, span: *span }
@@ -2547,8 +3461,12 @@ impl<'a> Checker<'a> {
                 }
                 // The expected type steers each element, which is what lets a
                 // tuple literal supply a `(int, str)` without annotation.
+                // Where an `Option<(…)>` is wanted, the tuple inside it is,
+                // as for a slice or a map literal: `(4, 1)` for an
+                // `Option<(Option<int>, int)>` wraps its `4` as it would for
+                // the bare tuple, and the whole is wrapped after.
                 let hint: Option<Vec<TyId>> = expected.and_then(|e| {
-                    match self.types.kind(e) {
+                    match self.types.kind(self.types.present(e)) {
                         TyKind::Tuple(ts) if ts.len() == elems.len() => Some(ts.clone()),
                         _ => None,
                     }
@@ -2572,7 +3490,10 @@ impl<'a> Checker<'a> {
             ast::Expr::Closure { params, ret, body, span } => {
                 self.closure(params, ret.as_deref(), body, expected, *span)
             }
-            ast::Expr::Error(span) => self.lit(ExprKind::Error, TyId::ERROR, *span),
+            ast::Expr::Error(span) => {
+                self.unread();
+                self.lit(ExprKind::Error, TyId::ERROR, *span)
+            }
         }
     }
 
@@ -2652,34 +3573,73 @@ impl<'a> Checker<'a> {
             (Some(a), None) => Some(a),
             (None, c) => c,
         };
+        // `-> (T, error)` on a closure is the fallible form, exactly as it is
+        // on a named function, and is kept as one: without this the closure
+        // returned a plain tuple, `return v, nil` was refused as a pair from
+        // a function that is not fallible, and `let (v, err) = f(x)` could
+        // not take its result apart.
+        let expected_ret = expected_ret.map(|r| fallible_form(r, self.types));
+        let sig = Signature {
+            params: Vec::new(),
+            // A block body's `return` statements are checked against the
+            // signature the context asked for; with no context there is
+            // nothing to check them against, so the closure returns unit.
+            ret: expected_ret.unwrap_or(match body {
+                ast::ClosureBody::Expr(_) => TyId::ERROR,
+                ast::ClosureBody::Block(_) => TyId::UNIT,
+            }),
+            // A closure cannot be `async`: it has no signature of its own to
+            // declare it on, and a suspension point inside one would suspend a
+            // function that never said it could.
+            is_async: false,
+            fallible: expected_ret.is_some_and(|r| self.types.fallible_value(r).is_some()),
+            name_span: span,
+            self_ty: None,
+            generics: Vec::new(),
+        };
+
+        // The body is a function of its own, and is checked as one. It starts
+        // from what is true where the closure is made — its captures are
+        // copies taken there, so a narrowing or a checked error there holds
+        // for them — but nothing it proves or does reaches back out. It has
+        // no loop around it to leave, its own `defer`s run at its own exits,
+        // and its `return` answers to its own signature. Sharing any of that
+        // with the enclosing function let `if err != nil { return }` inside a
+        // closure clean a value outside it, a `return` inside one run the
+        // enclosing function's deferred calls, and a `break` inside one leave
+        // a loop that had long finished.
+        let outer = Enclosing {
+            init: self.init.clone(),
+            taint: self.taint.clone(),
+            narrowed: self.narrowed.clone(),
+            error_nonnil: self.error_nonnil.clone(),
+            defers: self.defers.take(),
+            loops: std::mem::take(&mut self.loops),
+            sig: self.closure_sig.replace(sig.clone()),
+            ret_unknown: std::mem::replace(
+                &mut self.closure_ret_unknown,
+                match body {
+                    ast::ClosureBody::Expr(_) if expected_ret.is_none() => Some(span),
+                    _ => None,
+                },
+            ),
+        };
+
         let (hir_body, ret) = match body {
             ast::ClosureBody::Expr(e) => {
+                self.defers = self.defer_stack_for(expr_defers(e), e.span());
                 let v = self.expr(e, expected_ret);
                 let v = self.coerce(v, expected_ret);
                 let ty = v.ty;
-                let block = hir::Block {
-                    stmts: vec![hir::Stmt::Return { value: Some(v), span }],
-                };
+                let ret = self.returning(hir::Stmt::Return { value: Some(v), span }, e.span());
+                let block = self.with_defers(hir::Block { stmts: vec![ret] }, Flow::Diverges, e.span());
                 (block, ty)
             }
             ast::ClosureBody::Block(b) => {
-                // A block body's `return` statements are checked against the
-                // signature the context asked for; with no context there is
-                // nothing to check them against, so the closure returns unit.
-                let ret = expected_ret.unwrap_or(TyId::UNIT);
-                let sig = Signature {
-                    params: Vec::new(),
-                    ret,
-                    // A closure cannot be `async`: it has no signature of its
-                    // own to declare it on, and a suspension point inside one
-                    // would suspend a function that never said it could.
-                    is_async: false,
-                    fallible: false,
-                    name_span: span,
-                    self_ty: None,
-                    generics: Vec::new(),
-                };
+                let ret = sig.ret;
+                self.defers = self.defer_stack_for(b.stmts.iter().any(stmt_defers), b.span);
                 let (block, flow) = self.block(b, &sig);
+                let block = self.with_defers(block, flow, b.span);
                 // Falling off the end of a closure that promised a value is
                 // the same mistake as in a named function.
                 if ret != TyId::UNIT && flow != Flow::Diverges {
@@ -2695,8 +3655,29 @@ impl<'a> Checker<'a> {
                 (block, ret)
             }
         };
+        // What the body declared goes out of scope here, so an error in it
+        // nobody looked at is reported here: the state that knew about it is
+        // about to be put back.
+        self.report_unchecked_errors(Some(span));
         let captures = std::mem::replace(&mut self.captures, outer_captures);
         self.closure_span = outer_region;
+        self.restore_init(outer.init);
+        // Reading an error is inspecting it, and a closure that reads one has
+        // been handed it. The closure may run later or not at all, but that
+        // is the same as passing it to a function: somebody is responsible.
+        let mut taint = outer.taint;
+        for id in &captures {
+            if taint.get(*id as usize) == Some(&Taint::Unchecked) {
+                taint[*id as usize] = Taint::Clean;
+            }
+        }
+        self.restore_taint(taint);
+        self.narrowed = outer.narrowed;
+        self.error_nonnil = outer.error_nonnil;
+        self.defers = outer.defers;
+        self.loops = outer.loops;
+        self.closure_sig = outer.sig;
+        self.closure_ret_unknown = outer.ret_unknown;
         // A capture of a capture: what an inner closure took from outside the
         // enclosing one is something the enclosing one must take too, so that
         // it has a value to hand on.
@@ -2769,7 +3750,7 @@ impl<'a> Checker<'a> {
             is_free: false,
             // Named per enclosing function, so two closures in different
             // functions do not both come out as `closure#0` in a dump.
-            name: format!("{}#closure{}", self.resolved.fns[self.fn_index].name, index),
+            name: format!("{}#closure{}", self.body_name(), index),
             // A closure written inside `f<T>` mentions `T`, so its lifted body
             // is a template exactly as `f` is.
             generic_count: self.generic_defs.len(),
@@ -2813,7 +3794,11 @@ impl<'a> Checker<'a> {
         if self.declared_inside(id, region) || self.captures.contains(&id) {
             return;
         }
-        if self.locals[id as usize].mutable {
+        // `var self` is the one mutable binding a capture cannot go stale on:
+        // nothing can assign to `self`, only to its fields, and a struct is a
+        // reference — so the copy and the original are one value.
+        let receiver = id == 0 && self.locals[0].name == "self";
+        if self.locals[id as usize].mutable && !receiver {
             let name = self.locals[id as usize].name.clone();
             let decl = self.locals[id as usize].span;
             self.diags.push(
@@ -2830,8 +3815,9 @@ impl<'a> Checker<'a> {
                 )
                 .with_note("copy it into a `let` first, or pass it as a parameter"),
             );
-            return;
         }
+        // Recorded even when refused, so a closure that uses the `var` twice
+        // is told once.
         self.captures.push(id);
     }
 
@@ -2937,7 +3923,7 @@ impl<'a> Checker<'a> {
                 if self.taint[id as usize] == Taint::Unchecked {
                     self.taint[id as usize] = Taint::Clean;
                 }
-                if self.init[id as usize] == Init::Unassigned {
+                if self.init[id as usize] != Init::Assigned {
                     let local = &self.locals[id as usize];
                     let (name, decl) = (local.name.clone(), local.span);
                     self.diags.push(
@@ -3049,6 +4035,22 @@ impl<'a> Checker<'a> {
     /// scheduler out of the middle of an ordinary call.
     fn await_expr(&mut self, inner: &ast::Expr, span: Span) -> hir::Expr {
         let value = self.expr(inner, None);
+        // A closure is a function of its own, and never an async one — so an
+        // `await` in it is outside an async function wherever the closure is
+        // written. Letting the enclosing `async fn` answer for it put a
+        // suspension into a body the state-machine transform never sees.
+        if let Some(closure) = self.closure_span {
+            self.diags.push(
+                Diagnostic::error(codes::E0521, "`await` inside a closure")
+                    .with_primary(span, "this would suspend the closure")
+                    .with_secondary(closure, "a closure cannot be `async`")
+                    .with_note(
+                        "await the task before making the closure, or make the closure \
+                         return the task and await it where it is called",
+                    ),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
         if !self.sigs[self.fn_index].is_async {
             self.diags.push(
                 Diagnostic::error(codes::E0521, "`await` outside an async function")
@@ -3114,30 +4116,22 @@ impl<'a> Checker<'a> {
         // it. Seeding only ever fills a parameter that was unknown, so a call
         // that compiles without a context compiles the same way with one.
         let mut subst: Vec<Option<TyId>> = vec![None; generics.len()];
+        let mut hints = Vec::new();
         if !generics.is_empty() {
             if let Some(want) = expected {
-                self.unify(ret, want, &generics, &mut subst, span);
+                let is_async = self.sigs[id as usize].is_async;
+                hints = self.seed_result(ret, want, is_async, &generics, &mut subst, span);
             }
         }
-        let mut hargs = Vec::with_capacity(args.len());
-        for (i, a) in args.iter().enumerate() {
-            let declared = sig_params.get(i).copied();
-            // An argument is checked against the parameter type only once that
-            // type is fully known; until then it is checked on its own and used
-            // to fill parameters in.
-            let want = declared.and_then(|d| self.apply_subst_opt(d, &subst));
-            let e = self.expr(a, want);
-            let e = self.coerce(e, want);
-            if let Some(d) = declared {
-                self.unify(d, e.ty, &generics, &mut subst, e.span);
-                let expected = self.apply_subst(d, &subst);
-                self.expect_ty(e.ty, expected, e.span, Some(decl_span));
-            }
-            hargs.push(e);
+        let hargs =
+            self.check_args(&sig_params, &generics, &mut subst, &hints, args, Some(decl_span));
+        if self.unsolved_by_error(&hargs, &subst) {
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
 
         let targs = self.finish_subst(&generics, &subst, span);
         self.check_bounds(&generics, &targs, span);
+        self.note_generic_call(id, &targs, span);
         // What the call inferred, once it inferred all of it. A partial answer
         // would be a hint that lies, so an unsolved parameter records nothing.
         if !targs.is_empty() && !targs.iter().any(|t| self.types.is_poisoned(*t)) {
@@ -3145,20 +4139,158 @@ impl<'a> Checker<'a> {
             self.solved.calls.push((callee_span, names.join(", ")));
         }
         let ret = self.apply_subst(ret, &subst);
-        // Calling an `async fn` starts it and yields the task. That is how
-        // concurrency is expressed: two calls then one `await` of each runs
-        // both at once, and there is no second keyword for it.
-        let ret = if self.sigs[id as usize].is_async {
-            let task = self.types.task_of(ret, span);
-            self.types.struct_ty(task)
-        } else {
-            ret
-        };
+        let ret = self.call_result(id, ret, span);
 
         hir::Expr {
             kind: ExprKind::Call { callee: hir::FnId(id), args: hargs, targs },
             ty: ret,
             span,
+        }
+    }
+
+    /// Check a call's arguments against a signature, solving its type
+    /// parameters as they go.
+    ///
+    /// Shared by every call that can be generic — a function, a method, an
+    /// associated function, a trait's method reached through a bound — so
+    /// they infer, convert and report alike. `subst` arrives holding whatever
+    /// is already known, such as the arguments a receiver's own type fixes.
+    fn check_args(
+        &mut self,
+        sig_params: &[TyId],
+        generics: &[GenericDef],
+        subst: &mut Vec<Option<TyId>>,
+        hints: &[Option<TyId>],
+        args: &[ast::Expr],
+        decl_span: Option<Span>,
+    ) -> Vec<hir::Expr> {
+        // A callee that demands `Share` of its type arguments is one that
+        // hands values to another task — and a function it is given goes with
+        // them, along with everything that function captured.
+        let crosses = generics
+            .iter()
+            .any(|g| g.bounds.iter().any(|b| self.is_share_bound(*b)));
+        let mut hargs = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let declared = sig_params.get(i).copied();
+            // An argument is checked against the parameter type only once that
+            // type is fully known; until then it is checked on its own and used
+            // to fill parameters in.
+            // A hint stands in for a parameter nothing has settled yet, so an
+            // argument is typed by it without the parameter being fixed.
+            let want = if hints.iter().any(Option::is_some) {
+                let hinted: Vec<Option<TyId>> = subst
+                    .iter()
+                    .zip(hints.iter().chain(std::iter::repeat(&None)))
+                    .map(|(s, h)| s.or(*h))
+                    .collect();
+                declared.and_then(|d| self.apply_subst_opt(d, &hinted))
+            } else {
+                declared.and_then(|d| self.apply_subst_opt(d, subst))
+            };
+            let e = self.expr(a, want);
+            let e = self.coerce(e, want);
+            let e = match declared {
+                Some(d) => {
+                    // A conflict is its own diagnostic, naming both sides;
+                    // a mismatch reported on top of it would say the same
+                    // thing again, less clearly.
+                    let before = self.diags.error_count();
+                    self.unify(d, e.ty, generics, subst, e.span);
+                    if self.diags.error_count() != before {
+                        e
+                    } else {
+                        // Converted again now the parameter is known: `get(7,
+                        // 3)` against `x: Option<T>` only learns that the
+                        // `7` must be wrapped once `T` is `int`, which is
+                        // after it was checked.
+                        let expected = self.apply_subst(d, subst);
+                        self.accept(e, expected, decl_span)
+                    }
+                }
+                None => e,
+            };
+            if crosses && declared.is_some_and(|d| matches!(self.types.kind(d), TyKind::Fn { .. })) {
+                self.require_share_captures(&e);
+            }
+            hargs.push(e);
+        }
+        for (slot, hint) in subst.iter_mut().zip(hints) {
+            if slot.is_none() {
+                *slot = *hint;
+            }
+        }
+        hargs
+    }
+
+    /// A function handed to another task takes its captures with it, so each
+    /// must be `Share` exactly as an argument would (§4.5, §12.3). A closure
+    /// capturing a `Counter` with a `var` field, or a `JsValue`, would
+    /// otherwise carry one across the boundary that the arguments are checked
+    /// at.
+    fn require_share_captures(&mut self, e: &hir::Expr) {
+        match &e.kind {
+            ExprKind::ClosureNew { captures, .. } => {
+                for c in captures {
+                    if self.types.is_poisoned(c.ty) || self.share_given_params(c.ty) {
+                        continue;
+                    }
+                    let ExprKind::Local(id) = c.kind else { continue };
+                    let (name, decl) = {
+                        let l = &self.locals[id.0 as usize];
+                        (l.name.clone(), l.span)
+                    };
+                    let what = self.types.with_article(c.ty);
+                    let mut d = Diagnostic::error(
+                        codes::E0520,
+                        "this closure cannot be moved to another task",
+                    )
+                    .with_primary(e.span, format!("it captures `{}`, which is {}", name, what))
+                    .with_secondary(decl, format!("`{}` is declared here", name));
+                    d = if self.types.mentions_host_value(c.ty) {
+                        d.with_note(
+                            "a `JsValue` belongs to the isolate that created it, and the \
+                             closure would carry it to one where it names nothing",
+                        )
+                    } else {
+                        d.with_note(format!(
+                            "{} is not `Share`, and a closure takes what it captures along \
+                             with it: two tasks would hold one mutable value",
+                            what
+                        ))
+                    };
+                    self.diags.push(d.with_note(
+                        "pass what the work needs as the items instead, or capture a value \
+                         that is `Share`",
+                    ));
+                }
+            }
+            // A function value whose closure is out of sight here — held in a
+            // binding, returned from a call — could be carrying anything.
+            ExprKind::Local(_)
+            | ExprKind::Call { .. }
+            | ExprKind::CallClosure { .. }
+            | ExprKind::FieldGet { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Match { .. } => {
+                if self.types.is_poisoned(e.ty) {
+                    return;
+                }
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0520,
+                        "a function handed to another task must be written where it is handed",
+                    )
+                    .with_primary(e.span, "what this captured cannot be seen here")
+                    .with_note(
+                        "a closure takes what it captures to the other task, and each capture \
+                         must be `Share`; write the closure literal here, or name a function, \
+                         so the captures can be checked",
+                    ),
+                );
+            }
+            _ => {}
         }
     }
 
@@ -3216,7 +4348,7 @@ impl<'a> Checker<'a> {
                     Some(Res::Variant(ti, vi)) => {
                         self.variant_value(ti, vi, args, arg_names, *fspan, span, expected)
                     }
-                    _ => self.method_call(base, name, args, span),
+                    _ => self.method_call(base, name, args, span, expected),
                 };
             }
         }
@@ -3316,11 +4448,19 @@ impl<'a> Checker<'a> {
                         span,
                     };
                 }
-                self.diags.push(
-                    Diagnostic::error(codes::E0205, format!("`{}` is not a function", p.text()))
-                        .with_primary(p.span, format!("this is {}", self.types.with_article(ty)))
-                        .with_secondary(decl, "declared here"),
-                );
+                // A local whose initialiser was already reported has no type
+                // to be wrong about: `let f = Rect.square` then `f(2)` is one
+                // mistake, and it is on the first line.
+                if !self.types.is_poisoned(ty) {
+                    self.diags.push(
+                        Diagnostic::error(codes::E0205, format!("`{}` is not a function", p.text()))
+                            .with_primary(
+                                p.span,
+                                format!("this is {}", self.types.with_article(ty)),
+                            )
+                            .with_secondary(decl, "declared here"),
+                    );
+                }
                 self.lit(ExprKind::Error, TyId::ERROR, span)
             }
 
@@ -3891,7 +5031,7 @@ impl<'a> Checker<'a> {
                 let m = self.expr(&args[0], Some(TyId::STR));
                 self.expect_ty(m.ty, TyId::STR, m.span, None);
                 let c = self.expr(&args[1], Some(TyId::ERR));
-                self.expect_ty(c.ty, TyId::ERR, c.span, None);
+                let c = self.accept(c, TyId::ERR, None);
                 let span_of = m.span;
                 hir::Expr {
                     kind: ExprKind::ErrorNew {
@@ -3937,9 +5077,11 @@ impl<'a> Checker<'a> {
                     // A type with `Display` prints through it, so `io.print(p)`
                     // and `"\(p)"` agree by construction rather than by
                     // everyone remembering to keep them the same.
-                    if !self.types.is_printable(e.ty) && self.display_method(e.ty).is_some() {
-                        hargs.push(self.render(e));
-                        continue;
+                    if !self.types.is_printable(e.ty) && !self.types.is_poisoned(e.ty) {
+                        if let Some(shown) = self.show_through_display(e.clone()) {
+                            hargs.push(shown);
+                            continue;
+                        }
                     }
                     if !self.types.is_printable(e.ty) && !self.types.is_poisoned(e.ty) {
                         let article = self.types.with_article(e.ty);
@@ -3961,8 +5103,8 @@ impl<'a> Checker<'a> {
                                 ),
                             )
                             .with_note(format!(
-                                "write `impl Display for {} {{ fn show(self) -> str {{ … }} }}`",
-                                self.types.name(e.ty)
+                                "write `{} {{ fn show(self) -> str {{ … }} }}`",
+                                self.impl_to_write("Display", e.ty)
                             )),
                         );
                     }
@@ -3989,6 +5131,7 @@ impl<'a> Checker<'a> {
     /// trait, so checking is entirely static.
     fn virtual_call(
         &mut self,
+        base: &ast::Expr,
         receiver: hir::Expr,
         tr: hir::TraitId,
         name: &ast::Ident,
@@ -4014,24 +5157,60 @@ impl<'a> Checker<'a> {
             self.diags.push(d);
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         };
-        let (params, ret) = (method.params.clone(), method.ret);
+        // `ret` is what the call yields, a fallible method's pair and an
+        // `async` one's task included; it used to be the bare value, so
+        // `let (v, err) = x.get()` through a bound or a `dyn` was refused.
+        let (params, ret, var_self) = (method.params.clone(), method.ret, method.var_self);
         let method = index as u32;
+        // The trait's receiver is the one every implementation agreed to, so
+        // `var self` asks the same of a call through a `dyn` or a bound as it
+        // does of a direct call.
+        if var_self {
+            self.require_mutable_receiver(base, &name.name);
+        }
+
+        // `Self` is the receiver's type. Through a bound that is the
+        // parameter, and monomorphisation makes it the concrete type; through
+        // a `dyn` no method mentioning it is callable at all, which is what
+        // object safety is (§10.3).
+        let self_param = self.types.self_param();
+        let map = [(self_param, receiver.ty)];
+        let params: Vec<TyId> = params.iter().map(|p| replace_types(self.types, *p, &map)).collect();
+        let ret = replace_types(self.types, ret, &map);
+
+        // A method generic in its own right solves its parameters from its
+        // arguments, as a generic function does. They are numbered after the
+        // trait's own, so the substitution has a slot for those too.
+        let mut generics: Vec<GenericDef> = self
+            .trait_index_of(tr)
+            .and_then(|ti| self.type_generics.get(ti as usize).cloned())
+            .unwrap_or_default();
+        let before = generics.len();
+        generics.extend(self.trait_method_generics.get(&(tr, index)).cloned().unwrap_or_default());
+        let mut subst: Vec<Option<TyId>> = vec![None; generics.len()];
 
         if args.len() != params.len() {
             self.arity_error(&name.name, args.len(), params.len(), span, None);
         }
         let mut lowered = vec![receiver];
-        for (i, a) in args.iter().enumerate() {
-            let want = params.get(i).copied();
-            let e = self.expr(a, want);
-            if let Some(w) = want {
-                self.expect_ty(e.ty, w, e.span, None);
+        lowered.extend(self.check_args(&params, &generics, &mut subst, &[], args, None));
+        let own = generics[before..].to_vec();
+        let targs = self.finish_subst(&own, &subst[before..], span);
+        self.check_bounds(&own, &targs, span);
+        if !targs.is_empty() {
+            if let Some(trait_index) = self.trait_index_of(tr) {
+                self.facts.bound_calls.push(BoundCall {
+                    caller: self.fn_index,
+                    trait_index,
+                    method: name.name.clone(),
+                    targs: targs.clone(),
+                    span,
+                });
             }
-            let e = self.coerce(e, want);
-            lowered.push(e);
         }
+        let ret = self.apply_subst(ret, &subst);
         hir::Expr {
-            kind: ExprKind::CallVirtual { trait_id: tr, method, args: lowered },
+            kind: ExprKind::CallVirtual { trait_id: tr, method, args: lowered, targs },
             ty: ret,
             span,
         }
@@ -4098,6 +5277,7 @@ impl<'a> Checker<'a> {
         name: &ast::Ident,
         args: &[ast::Expr],
         span: Span,
+        expected: Option<TyId>,
     ) -> hir::Expr {
         let receiver = self.expr(base, None);
         if self.types.is_poisoned(receiver.ty) {
@@ -4105,6 +5285,9 @@ impl<'a> Checker<'a> {
         }
 
         if receiver.ty == TyId::ERR {
+            // `errors.new(…)` and its kin build an error on the spot, and a
+            // built error is never nil.
+            let built = matches!(receiver.kind, ExprKind::ErrorNew { .. });
             let (kind, ty) = match name.name.as_str() {
                 "message" => (
                     ExprKind::ErrorMessage { base: Box::new(receiver) },
@@ -4134,7 +5317,9 @@ impl<'a> Checker<'a> {
             if !args.is_empty() {
                 self.arity_error(&name.name, args.len(), 0, span, None);
             }
-            self.require_error_present(base, name.span);
+            if !built {
+                self.require_error_present(base, name.span);
+            }
             return hir::Expr { kind, ty, span };
         }
 
@@ -4152,15 +5337,27 @@ impl<'a> Checker<'a> {
                     self.arity_error("remove", args.len(), 1, span, None);
                     return self.lit(ExprKind::Error, TyId::ERROR, span);
                 }
-                let Some(local) = self.require_mutable_value_binding(base, "removed from", "map") else {
+                let mut stmts = Vec::new();
+                let Some(place) =
+                    self.container_place(base, receiver, "removed from", None, &mut stmts, span)
+                else {
                     return self.lit(ExprKind::Error, TyId::ERROR, span);
                 };
                 let key = self.expr(&args[0], Some(k));
-                self.expect_ty(key.ty, k, key.span, None);
-                return self.as_statement(
-                    hir::Stmt::MapRemove { local: hir::LocalId(local), key, span },
-                    span,
-                );
+                let key = self.accept(key, k, None);
+                self.note_compared(k, key.span);
+                let remove = match place.binding() {
+                    Some(local) => hir::Stmt::MapRemove { local: hir::LocalId(local), key, span },
+                    None => {
+                        let key = self.hoist(key, &mut stmts, span);
+                        self.change_at(place, stmts, span, |_, local, _| hir::Stmt::MapRemove {
+                            local: hir::LocalId(local),
+                            key,
+                            span,
+                        })
+                    }
+                };
+                return self.as_statement(remove, span);
             }
             let (kind, ty) = match name.name.as_str() {
                 "len" => (ExprKind::MapLen { base: Box::new(receiver) }, TyId::INT),
@@ -4211,7 +5408,7 @@ impl<'a> Checker<'a> {
         }
 
         if let TyKind::Dyn(tr) = *self.types.kind(receiver.ty) {
-            return self.virtual_call(receiver, tr, name, args, span);
+            return self.virtual_call(base, receiver, tr, name, args, span);
         }
 
         // A method on a type parameter. Only its bounds say what it can do —
@@ -4227,7 +5424,7 @@ impl<'a> Checker<'a> {
                 .find(|tr| self.types.trait_def(**tr).method(&name.name).is_some())
                 .copied();
             match found {
-                Some(tr) => return self.virtual_call(receiver, tr, name, args, span),
+                Some(tr) => return self.virtual_call(base, receiver, tr, name, args, span),
                 None => {
                     let mut d = Diagnostic::error(
                         codes::E0205,
@@ -4285,6 +5482,7 @@ impl<'a> Checker<'a> {
                     .map(|(i, f)| (i as u32, f.ty));
                 if let Some((index, field_ty)) = field {
                     if let TyKind::Fn { params, ret } = self.types.kind(field_ty).clone() {
+                        self.check_field_visible(sid, index as usize, name.span);
                         let callee = hir::Expr {
                             kind: ExprKind::FieldGet { base: Box::new(receiver), index },
                             ty: field_ty,
@@ -4367,17 +5565,55 @@ impl<'a> Checker<'a> {
             self.require_mutable_receiver(base, &name.name);
         }
 
+        self.check_method_visible(fn_index, "method", &name.name, name.span);
+
         // A method on a generic type is written once against the parameters
-        // and specialised per receiver: the arguments come off the receiver's
-        // own type, so there is nothing at a call site to infer.
-        let targs = self.receiver_args(receiver.ty);
-        let subst: Vec<Option<TyId>> = targs.iter().map(|t| Some(*t)).collect();
+        // and specialised per receiver: its block's arguments come off the
+        // receiver's own type. Its own parameters, if it has any, are solved
+        // from its arguments exactly as a generic function's are.
+        let generics = self.sigs[fn_index as usize].generics.clone();
+        let block = self.block_generic_count(owner.block_index);
+        let mut subst: Vec<Option<TyId>> = vec![None; generics.len()];
+        for (slot, t) in subst.iter_mut().zip(self.receiver_args(receiver.ty)).take(block) {
+            *slot = Some(t);
+        }
         let raw_params = self.sigs[fn_index as usize].params.clone();
+        let raw_ret = self.sigs[fn_index as usize].ret;
+        let decl_span = self.sigs[fn_index as usize].name_span;
+        let is_async = self.sigs[fn_index as usize].is_async;
+        let hints =
+            self.seed_from_expected(raw_ret, expected, is_async, &generics, &mut subst, span);
+
+        if args.len() != raw_params.len() {
+            self.arity_error(&name.name, args.len(), raw_params.len(), span, Some(decl_span));
+        }
+
+        // The receiver becomes the first argument, which is exactly how `self`
+        // is stored: local 0.
+        let receiver_ty = receiver.ty;
+        let mut hargs = vec![receiver];
+        hargs.extend(self.check_args(
+            &raw_params,
+            &generics,
+            &mut subst,
+            &hints,
+            args,
+            Some(decl_span),
+        ));
+        if self.unsolved_by_error(&hargs, &subst) {
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+        let targs = self.finish_subst(&generics, &subst, span);
+        // A bound on the block holds for the receiver as for anything else.
+        // One the declaration itself carries was checked where the value was
+        // built, so it is not reported a second time here.
+        let owned = self.block_bounds_to_check(ti, &generics, block);
+        self.check_bounds(&owned, &targs, span);
+        self.note_generic_call(fn_index, &targs, span);
+        let value = self.apply_subst(raw_ret, &subst);
+        let ret = self.call_result(fn_index, value, span);
         let sig_params: Vec<TyId> =
             raw_params.iter().map(|p| self.apply_subst(*p, &subst)).collect();
-        let raw_ret = self.sigs[fn_index as usize].ret;
-        let ret = self.apply_subst(raw_ret, &subst);
-        let decl_span = self.sigs[fn_index as usize].name_span;
 
         // What an editor says when the method name is hovered. Recorded here
         // because this is the only place that knows: finding a method needs
@@ -4388,46 +5624,381 @@ impl<'a> Checker<'a> {
         // has.
         let shown_params: Vec<String> =
             sig_params.iter().map(|p| self.types.name(*p)).collect();
-        let shown = if ret == TyId::UNIT {
+        let shown = if value == TyId::UNIT {
             format!(
-                "fn {}.{}({})",
-                self.types.name(receiver.ty),
+                "{}fn {}.{}({})",
+                if is_async { "async " } else { "" },
+                self.types.name(receiver_ty),
                 name.name,
                 shown_params.join(", ")
             )
         } else {
             format!(
-                "fn {}.{}({}) -> {}",
-                self.types.name(receiver.ty),
+                "{}fn {}.{}({}) -> {}",
+                if is_async { "async " } else { "" },
+                self.types.name(receiver_ty),
                 name.name,
                 shown_params.join(", "),
-                self.types.name(ret)
+                self.types.name(value)
             )
         };
         self.solved.methods.push((name.span, shown));
-
-        if args.len() != sig_params.len() {
-            self.arity_error(&name.name, args.len(), sig_params.len(), span, Some(decl_span));
-        }
-
-        // The receiver becomes the first argument, which is exactly how `self`
-        // is stored: local 0.
-        let mut hargs = vec![receiver];
-        for (i, a) in args.iter().enumerate() {
-            let want = sig_params.get(i).copied();
-            let e = self.expr(a, want);
-            let e = self.coerce(e, want);
-            if let Some(w) = want {
-                self.expect_ty(e.ty, w, e.span, Some(decl_span));
-            }
-            hargs.push(e);
-        }
 
         hir::Expr {
             kind: ExprKind::Call { callee: hir::FnId(fn_index), args: hargs, targs },
             ty: ret,
             span,
         }
+    }
+
+    /// The module declaring a struct, which is where its private fields may
+    /// be reached. `None` for one the compiler declared, such as a task.
+    fn module_of_struct(&self, sid: kite_hir::StructId) -> Option<String> {
+        let template = self.types.struct_template_of(sid).unwrap_or(sid);
+        let i = self
+            .type_ids
+            .iter()
+            .position(|t| matches!(t, Some(TypeTarget::Struct(s)) if *s == template))?;
+        Some(self.resolved.module_of_item(self.resolved.types[i].decl_index).to_string())
+    }
+
+    /// A field reached from outside its struct's module must be `pub`
+    /// (§4.3). Reported at the name; false when it was not visible.
+    fn check_field_visible(&mut self, sid: kite_hir::StructId, index: usize, span: Span) -> bool {
+        let Some(module) = self.module_of_struct(sid) else { return true };
+        let f = &self.types.struct_def(sid).fields[index];
+        let (is_pub, name, decl) = (f.is_pub, f.name.clone(), f.span);
+        self.check_member_visible(module, is_pub, "field", &name, span, decl)
+    }
+
+    /// A struct literal outside the struct's module needs every field to be
+    /// `pub`: a private one cannot be named, and a literal cannot leave one
+    /// out.
+    fn check_constructible(&mut self, sid: kite_hir::StructId, span: Span) {
+        let Some(module) = self.module_of_struct(sid) else { return };
+        if module == self.module {
+            return;
+        }
+        let private: Vec<(String, Span)> = self
+            .types
+            .struct_def(sid)
+            .fields
+            .iter()
+            .filter(|f| !f.is_pub)
+            .map(|f| (f.name.clone(), f.span))
+            .collect();
+        let Some((_, first)) = private.first().cloned() else { return };
+        let name = self.types.struct_def(sid).name.clone();
+        let fields: Vec<String> = private.iter().map(|(n, _)| format!("`{}`", n)).collect();
+        self.diags.push(
+            Diagnostic::error(
+                codes::E0401,
+                format!("`{}` cannot be built outside module `{}`", name, module),
+            )
+            .with_primary(span, "not visible here")
+            .with_secondary(first, "this field is not marked `pub`")
+            .with_note(format!(
+                "{} {} private, and a literal — even one starting from `..` — has to \
+                 give every field",
+                fields.join(", "),
+                if fields.len() == 1 { "is" } else { "are" }
+            ))
+            .with_note(format!(
+                "build one with a function module `{}` exports, which is what a private \
+                 field is asking for",
+                module
+            )),
+        );
+    }
+
+    /// The bounds a generic struct or enum declares, held against the type
+    /// arguments of a value being built.
+    fn check_type_bounds(&mut self, ti: u32, ty: TyId, span: Span) {
+        let Some(defs) = self.type_generics.get(ti as usize).cloned() else { return };
+        if defs.iter().all(|g| g.bounds.is_empty()) {
+            return;
+        }
+        let args = self.receiver_args(ty);
+        self.check_bounds(&defs, &args, span);
+    }
+
+    /// How many of a method's type parameters its `impl` block declares —
+    /// the ones a receiver's own type supplies. The rest are the method's.
+    fn block_generic_count(&self, impl_index: usize) -> usize {
+        self.impl_generics.get(&impl_index).map_or(0, |g| g.len())
+    }
+
+    /// A method's parameters with the bounds still to be checked at a call:
+    /// all of the method's own, and the block's except those the type's
+    /// declaration already demands of whatever builds a value of it.
+    fn block_bounds_to_check(&self, ti: u32, generics: &[GenericDef], block: usize) -> Vec<GenericDef> {
+        let declared = self.type_generics.get(ti as usize);
+        generics
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                let mut g = g.clone();
+                if i < block {
+                    if let Some(d) = declared.and_then(|d| d.get(i)) {
+                        g.bounds.retain(|b| !d.bounds.contains(b));
+                    }
+                }
+                g
+            })
+            .collect()
+    }
+
+    /// Fill in type parameters from the type a call's result is used as,
+    /// where it says more than the arguments will.
+    ///
+    /// A trial: any disagreement is reported by the argument or the use that
+    /// has it, where it can be explained, rather than here.
+    /// What a call yields. Calling an `async fn` starts it and yields the
+    /// task — a method or an associated function as much as a free function
+    /// (§12.1). That is how concurrency is expressed: two calls then one
+    /// `await` of each runs both at once, and there is no second keyword for
+    /// it. Only free functions used to be wrapped, so `await p.later()` was
+    /// refused and `p.later() + 1` added to a task.
+    fn call_result(&mut self, callee: u32, ret: TyId, span: Span) -> TyId {
+        if !self.sigs[callee as usize].is_async {
+            return ret;
+        }
+        let task = self.types.task_of(ret, span);
+        self.types.struct_ty(task)
+    }
+
+    /// Solve a generic function's parameters from the type its call is used
+    /// as, before its arguments are checked.
+    ///
+    /// Calling an `async fn` yields a `Task` of what it returns, so for one
+    /// it is the task's payload that says what the declared return type is:
+    /// `let t: Task<int> = job(1)` makes `job`'s `T` an `int`. Unifying the
+    /// declared `T` with the whole `Task<int>` made the call a
+    /// `Task<Task<int>>`, and the argument a conflict.
+    fn seed_result(
+        &mut self,
+        ret: TyId,
+        want: TyId,
+        is_async: bool,
+        generics: &[GenericDef],
+        subst: &mut Vec<Option<TyId>>,
+        span: Span,
+    ) -> Vec<Option<TyId>> {
+        let want = if is_async {
+            match self.types.task_payload(want) {
+                Some(value) => value,
+                None => return Vec::new(),
+            }
+        } else {
+            want
+        };
+        let before = subst.clone();
+        self.unify(ret, want, generics, subst, span);
+        self.soften_seeds(ret, want, &before, subst)
+    }
+
+    /// Take out of `subst` what the expected type settled only up to an
+    /// optional, to be handed back as hints.
+    ///
+    /// An optional of an optional is the optional (§3.3), so a declared
+    /// `Option<T>` against an expected `Option<int>` makes `T` an `int` or
+    /// an `Option<int>` alike, and only an argument can say which. Seeding
+    /// `T` as `int` refused the argument that said otherwise:
+    /// `let r: Option<Option<int>> = first(fs)`, with `fs: [Option<int>]`,
+    /// was "conflicting types for `T`". A hint still types an argument that
+    /// has nothing else to go on, such as an empty `[]`; a parameter no
+    /// argument settles takes it at the end.
+    fn soften_seeds(
+        &mut self,
+        ret: TyId,
+        want: TyId,
+        before: &[Option<TyId>],
+        subst: &mut [Option<TyId>],
+    ) -> Vec<Option<TyId>> {
+        let mut slots = Vec::new();
+        self.optional_ambiguity(ret, want, &mut slots);
+        let mut hints = vec![None; subst.len()];
+        for slot in slots {
+            if slot < subst.len() && before[slot].is_none() {
+                hints[slot] = subst[slot].take();
+            }
+        }
+        hints
+    }
+
+    /// The parameters a declared type holds directly inside an optional,
+    /// where the type it is matched against has an optional too.
+    fn optional_ambiguity(&self, declared: TyId, actual: TyId, out: &mut Vec<usize>) {
+        match (self.types.kind(declared).clone(), self.types.kind(actual).clone()) {
+            (TyKind::Optional(d), TyKind::Optional(a)) => match *self.types.kind(d) {
+                TyKind::Param { index, .. } => out.push(index as usize),
+                _ => self.optional_ambiguity(d, a, out),
+            },
+            (TyKind::Slice(d), TyKind::Slice(a)) => self.optional_ambiguity(d, a, out),
+            (TyKind::Map(dk, dv), TyKind::Map(ak, av)) => {
+                self.optional_ambiguity(dk, ak, out);
+                self.optional_ambiguity(dv, av, out);
+            }
+            (TyKind::Tuple(d), TyKind::Tuple(a)) if d.len() == a.len() => {
+                for (x, y) in d.iter().zip(&a) {
+                    self.optional_ambiguity(*x, *y, out);
+                }
+            }
+            (TyKind::Struct(d), TyKind::Struct(a)) => {
+                if let (Some((dt, da)), Some((at, aa))) =
+                    (self.types.struct_origin_of(d), self.types.struct_origin_of(a))
+                {
+                    if dt == at {
+                        for (x, y) in da.iter().zip(&aa) {
+                            self.optional_ambiguity(*x, *y, out);
+                        }
+                    }
+                }
+            }
+            (TyKind::Enum(d), TyKind::Enum(a)) => {
+                if let (Some((dt, da)), Some((at, aa))) =
+                    (self.types.enum_origin_of(d), self.types.enum_origin_of(a))
+                {
+                    if dt == at {
+                        for (x, y) in da.iter().zip(&aa) {
+                            self.optional_ambiguity(*x, *y, out);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn seed_from_expected(
+        &mut self,
+        ret: TyId,
+        expected: Option<TyId>,
+        is_async: bool,
+        generics: &[GenericDef],
+        subst: &mut Vec<Option<TyId>>,
+        span: Span,
+    ) -> Vec<Option<TyId>> {
+        let Some(want) = expected else { return Vec::new() };
+        if subst.iter().all(|s| s.is_some()) {
+            return Vec::new();
+        }
+        // An `async` method's call is the task of its result, as a function's
+        // is; see `seed_result`.
+        let want = if is_async {
+            match self.types.task_payload(want) {
+                Some(value) => value,
+                None => return Vec::new(),
+            }
+        } else {
+            want
+        };
+        let mut scratch = DiagBag::new();
+        std::mem::swap(self.diags, &mut scratch);
+        let before = subst.clone();
+        self.unify(ret, want, generics, subst, span);
+        let hints = self.soften_seeds(ret, want, &before, subst);
+        // A `T` is acceptable where an `Option<T>` is wanted, so an optional
+        // context says what the value inside it is.
+        if let TyKind::Optional(inner) = *self.types.kind(want) {
+            if !matches!(self.types.kind(ret), TyKind::Optional(_)) {
+                self.unify(ret, inner, generics, subst, span);
+            }
+        }
+        std::mem::swap(self.diags, &mut scratch);
+        hints
+    }
+
+    /// A method or associated function reached from outside its module must
+    /// be `pub` — or, for one implementing a trait, the trait must be: the
+    /// methods of a trait implementation are as visible as the trait (§4.3).
+    /// Treating every trait method as `pub` let another module call a
+    /// private trait's method, which it could not have named in a bound.
+    fn check_method_visible(&mut self, fn_index: u32, what: &str, name: &str, span: Span) -> bool {
+        let f = &self.resolved.fns[fn_index as usize];
+        let Some(tr) = f.owner.and_then(|o| o.trait_index) else {
+            return self.check_member_visible(
+                self.resolved.module_of_fn(fn_index).to_string(),
+                f.is_pub,
+                what,
+                name,
+                span,
+                self.sigs[fn_index as usize].name_span,
+            );
+        };
+        let decl = self.resolved.type_decl(tr);
+        let module = self.resolved.module_of_item(decl.decl_index).to_string();
+        if decl.is_pub || module == self.module {
+            return true;
+        }
+        let already = self
+            .diags
+            .iter()
+            .any(|d| d.code == Some(codes::E0401) && d.primary_span() == Some(span));
+        if already {
+            return false;
+        }
+        let trait_name = last_segment(&decl.name).to_string();
+        let trait_span = decl.span;
+        self.diags.push(
+            Diagnostic::error(
+                codes::E0401,
+                format!("{} `{}` is private to module `{}`", what, name, module),
+            )
+            .with_primary(span, "not visible here")
+            .with_secondary(
+                trait_span,
+                format!("it implements `{}`, which is not marked `pub`", trait_name),
+            )
+            .with_note(
+                "the methods of a trait's implementations are as visible as the trait; write \
+                 `pub trait` to export them",
+            ),
+        );
+        false
+    }
+
+    /// Reject reaching into another module for a member it did not mark
+    /// `pub` — a field, a method, an associated function.
+    ///
+    /// The same two levels of visibility the resolver enforces for top-level
+    /// names (§4.3), applied where a member is found, which is here: which
+    /// field or method a `.name` means depends on the type of what is to its
+    /// left, and only the checker knows that.
+    fn check_member_visible(
+        &mut self,
+        decl_module: String,
+        is_pub: bool,
+        what: &str,
+        name: &str,
+        span: Span,
+        decl: Span,
+    ) -> bool {
+        if is_pub || decl_module == self.module {
+            return true;
+        }
+        // A `let (a, b) = …` initialiser is checked twice, once to see which
+        // kind of binding it is; one mistake is still one diagnostic.
+        let already = self
+            .diags
+            .iter()
+            .any(|d| d.code == Some(codes::E0401) && d.primary_span() == Some(span));
+        if already {
+            return false;
+        }
+        self.diags.push(
+            Diagnostic::error(
+                codes::E0401,
+                format!("{} `{}` is private to module `{}`", what, name, decl_module),
+            )
+            .with_primary(span, "not visible here")
+            .with_secondary(decl, format!("this {} is not marked `pub`", what))
+            .with_note(
+                "unmarked members are visible only within the module that declares their \
+                 type; write `pub` to export one",
+            ),
+        );
+        false
     }
 
     /// The type arguments a receiver's own type was specialised with, or none
@@ -4461,6 +6032,7 @@ impl<'a> Checker<'a> {
     /// message. `is` compares it; `as` compares it and, where it matches,
     /// hands back the value — so the cast is only ever reached on a path the
     /// comparison has already proved.
+    #[allow(clippy::too_many_arguments)]
     fn error_downcast(
         &mut self,
         ti: u32,
@@ -4469,6 +6041,7 @@ impl<'a> Checker<'a> {
         args: &[ast::Expr],
         p_span: Span,
         span: Span,
+        expected: Option<TyId>,
     ) -> hir::Expr {
         let Some(target) = self.type_ids[ti as usize] else {
             self.diags.push(
@@ -4483,8 +6056,16 @@ impl<'a> Checker<'a> {
         let ty = match target {
             TypeTarget::Struct(s) => self.types.struct_ty(s),
             TypeTarget::Enum(e) => self.types.enum_ty(e),
-            // A trait or an alias has no run-time identity of its own to
-            // compare a tag against; only a concrete type does.
+            // An alias of one instantiation of a generic type,
+            // `type IntWrapped = Wrapped<int>`, names a concrete type, and
+            // asks about it as `Wrapped.as` used as a `Wrapped<int>` does.
+            TypeTarget::Alias(ty)
+                if matches!(*self.types.kind(ty), TyKind::Struct(_) | TyKind::Enum(_)) =>
+            {
+                ty
+            }
+            // A trait or any other alias has no run-time identity of its own
+            // to compare a tag against; only a concrete type does.
             _ => {
                 self.diags.push(
                     Diagnostic::error(
@@ -4499,6 +6080,57 @@ impl<'a> Checker<'a> {
                 );
                 return self.lit(ExprKind::Error, TyId::ERROR, span);
             }
+        };
+        // A generic type's values carry the tag of their specialisation, so
+        // there is no one tag for the declaration to be compared with: the
+        // test against the template's answered `false` for every `Wrapped<T>`
+        // an error ever held, and `as` gave back `nil` typed with a free `T`.
+        // `as` can be told which specialisation by the type it is used as,
+        // which is the one place a generic type's arguments can be written;
+        // `is` has nowhere to be told, and is refused.
+        let generic = match target {
+            TypeTarget::Struct(s) => self.types.struct_def(s).generic_count > 0,
+            TypeTarget::Enum(e) => self.types.enum_def(e).generic_count > 0,
+            _ => false,
+        };
+        let ty = if generic {
+            let wanted = expected.map(|w| self.types.present(w)).filter(|w| match *self.types.kind(*w) {
+                TyKind::Struct(s) => matches!(target, TypeTarget::Struct(t) if self.types.struct_template_of(s) == Some(t)),
+                TyKind::Enum(e) => matches!(target, TypeTarget::Enum(t) if self.types.enum_template_of(e) == Some(t)),
+                _ => false,
+            });
+            match wanted {
+                Some(w) if method_name == "as" => w,
+                _ => {
+                    let d = Diagnostic::error(
+                        codes::E0209,
+                        format!("`{}.{}` cannot tell which `{}` it asks about", type_name, method_name, type_name),
+                    )
+                    .with_primary(p_span, format!("`{}` is generic", type_name))
+                    .with_note(format!(
+                        "each specialisation of `{}` is its own type, and an error carries the \
+                         one it was made from",
+                        type_name
+                    ));
+                    let d = if method_name == "as" {
+                        d.with_note(format!(
+                            "say which by the type it is used as: `let w: Option<{}<int>> = \
+                             {}.as(err)`",
+                            type_name, type_name
+                        ))
+                    } else {
+                        d.with_note(format!(
+                            "ask with `as` where the type is written, and test that for `nil`: \
+                             `let w: Option<{}<int>> = {}.as(err)`",
+                            type_name, type_name
+                        ))
+                    };
+                    self.diags.push(d);
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
+                }
+            }
+        } else {
+            ty
         };
         let Some(tag) = self.type_tag_of(ty) else {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
@@ -4561,6 +6193,111 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `Color.Blue` in value position, where the resolver found the type but
+    /// not the member.
+    ///
+    /// The resolver cannot tell `Color.Blue` from `Rect.square`: a dotted name
+    /// whose head is a type and whose tail is not one of its variants might be
+    /// an associated function, which only the checker can look up. So it hands
+    /// over the type, and this is where the tail has to be accounted for. It
+    /// used to fall through to a field read of the type's name, which had no
+    /// resolution of its own and so came back as the error type with nothing
+    /// said: `let c = Color.Blue` compiled, and `c == Color.Red` printed `()`.
+    fn type_member_value(
+        &mut self,
+        ti: u32,
+        base: &ast::Expr,
+        name: &ast::Ident,
+        span: Span,
+    ) -> hir::Expr {
+        let owner = expr_text(base);
+        let declared = self.resolved.type_decl(ti).name.clone();
+        let simple = declared.rsplit('.').next().unwrap_or(&declared).to_string();
+        if let Some(fn_index) = self.resolved.method_on(ti, &name.name) {
+            let takes_self = self.resolved.fns[fn_index as usize]
+                .owner
+                .is_some_and(|o| o.takes_self);
+            let kind = if takes_self { "a method" } else { "an associated function" };
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0200,
+                    format!("`{}.{}` is {}, not a value", owner, name.name, kind),
+                )
+                .with_primary(span, "named here without being called")
+                .with_note(if takes_self {
+                    format!("call it on a value: `value.{}(…)`", name.name)
+                } else {
+                    format!(
+                        "call it — `{}.{}(…)` — or, to pass it on, wrap the call in a closure",
+                        owner, name.name
+                    )
+                }),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+        // `json.Json` — the whole path is the type, reached through its
+        // module, and a type is no more a value spelled this way than bare.
+        if simple == name.name && owner != simple {
+            let full = format!("{}.{}", owner, name.name);
+            let build = match self.type_ids[ti as usize] {
+                Some(TypeTarget::Enum(_)) => format!("to make one, name a variant: `{}.…`", full),
+                _ => format!("to build one, write a struct literal such as `{}{{ … }}`", full),
+            };
+            self.diags.push(
+                Diagnostic::error(codes::E0200, format!("`{}` is a type, not a value", full))
+                    .with_primary(span, "a type name cannot stand alone here")
+                    .with_note(build),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+        if !self.no_such_variant(ti, &owner, &name.name, span) {
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0205,
+                    format!("`{}` has no associated function `{}`", owner, name.name),
+                )
+                .with_primary(name.span, "no such function"),
+            );
+        }
+        self.lit(ExprKind::Error, TyId::ERROR, span)
+    }
+
+    /// Report `Enum.Name` naming a variant the enum does not have, worded as
+    /// the resolver words the same mistake in a pattern: one mistake, one
+    /// message, wherever it is written. Answers whether the type was one that
+    /// has variants to be missing — an enum, or an alias, which reaches none.
+    fn no_such_variant(&mut self, ti: u32, owner: &str, member: &str, span: Span) -> bool {
+        let decl_span = self.resolved.type_decl(ti).span;
+        let d = match self.type_ids[ti as usize] {
+            Some(TypeTarget::Enum(eid)) => {
+                let names: Vec<String> =
+                    self.types.enum_def(eid).variants.iter().map(|v| v.name.clone()).collect();
+                let mut d = Diagnostic::error(
+                    codes::E0111,
+                    format!("`{}` has no variant `{}`", owner, member),
+                )
+                .with_primary(span, "no such variant")
+                .with_secondary(decl_span, "declared here");
+                if !names.is_empty() {
+                    d = d.with_note(format!("`{}` has: {}", owner, names.join(", ")));
+                }
+                d
+            }
+            // An alias of a plain enum is the enum, and was resolved as it;
+            // this is one of something else, or of one instantiation of a
+            // generic enum, whose variants are reached through the enum.
+            Some(TypeTarget::Alias(ty)) => Diagnostic::error(
+                codes::E0111,
+                format!("`{}` is a type alias, not an enum", owner),
+            )
+            .with_primary(span, "no such variant")
+            .with_secondary(decl_span, format!("an alias of `{}`", self.types.name(ty))),
+            _ => return false,
+        };
+        self.diags.push(d);
+        true
+    }
+
     fn associated_call_named(
         &mut self,
         ti: u32,
@@ -4587,17 +6324,27 @@ impl<'a> Checker<'a> {
         if (method_name == "is" || method_name == "as")
             && self.resolved.method_on(ti, &method_name).is_none()
         {
-            return self.error_downcast(ti, &type_name, &method_name, args, p_span, span);
+            return self.error_downcast(ti, &type_name, &method_name, args, p_span, span, expected);
         }
 
         let Some(fn_index) = self.resolved.method_on(ti, &method_name) else {
-            self.diags.push(
-                Diagnostic::error(
-                    codes::E0205,
-                    format!("`{}` has no associated function `{}`", type_name, method_name),
-                )
-                .with_primary(p_span, "no such function"),
-            );
+            // `Shape.Square(1.0)` on an enum is a variant that is not there
+            // far more often than a function that is not, and it is reported
+            // as the same line without its arguments is.
+            let written = self.text(p_span);
+            let owner = match written.rsplit_once('.') {
+                Some((owner, _)) => owner.trim().to_string(),
+                None => type_name.clone(),
+            };
+            if !self.no_such_variant(ti, &owner, &method_name, p_span) {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0205,
+                        format!("`{}` has no associated function `{}`", type_name, method_name),
+                    )
+                    .with_primary(p_span, "no such function"),
+                );
+            }
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         };
 
@@ -4616,56 +6363,52 @@ impl<'a> Checker<'a> {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
 
+        self.check_method_visible(fn_index, "associated function", &method_name, p_span);
+
         // An associated function on a generic type has no receiver to take
-        // arguments from, so they come from the type the result is used as:
-        // `let s: Stack<int> = Stack.empty()`.
+        // arguments from, so they come from the type the result is used as —
+        // `let s: Stack<int> = Stack.empty()` — or failing that from its
+        // arguments, as any generic call's do: `Stack.of(5)` is a
+        // `Stack<int>`. Its own parameters, if it has any, come from the
+        // arguments too.
         let generics = self.sigs[fn_index as usize].generics.clone();
-        let targs = if generics.is_empty() {
-            Vec::new()
-        } else {
-            match expected.map(|e| self.receiver_args(e)).filter(|a| a.len() == generics.len()) {
-                Some(a) => a,
-                None => {
-                    let names: Vec<&str> = generics.iter().map(|g| g.name.as_str()).collect();
-                    self.diags.push(
-                        Diagnostic::error(
-                            codes::E0209,
-                            format!("cannot infer {} for `{}`", names.join(", "), type_name),
-                        )
-                        .with_primary(span, "nothing here says what this returns")
-                        .with_note(format!(
-                            "annotate the binding: `let x: {}<...> = ...`",
-                            type_name
-                        )),
-                    );
-                    return self.lit(ExprKind::Error, TyId::ERROR, span);
-                }
-            }
-        };
-        let subst: Vec<Option<TyId>> = targs.iter().map(|t| Some(*t)).collect();
+        let block = self.block_generic_count(owner.block_index);
+        let mut subst: Vec<Option<TyId>> = vec![None; generics.len()];
 
         let raw_params = self.sigs[fn_index as usize].params.clone();
-        let sig_params: Vec<TyId> =
-            raw_params.iter().map(|p| self.apply_subst(*p, &subst)).collect();
         let raw_ret = self.sigs[fn_index as usize].ret;
-        let ret = self.apply_subst(raw_ret, &subst);
         let decl_span = self.sigs[fn_index as usize].name_span;
+        let is_async = self.sigs[fn_index as usize].is_async;
+        let hints =
+            self.seed_from_expected(raw_ret, expected, is_async, &generics, &mut subst, span);
 
-        if args.len() != sig_params.len() {
+        if args.len() != raw_params.len() {
             let full = format!("{}.{}", type_name, method_name);
-            self.arity_error(&full, args.len(), sig_params.len(), span, Some(decl_span));
+            self.arity_error(&full, args.len(), raw_params.len(), span, Some(decl_span));
         }
 
-        let mut hargs = Vec::with_capacity(args.len());
-        for (i, a) in args.iter().enumerate() {
-            let want = sig_params.get(i).copied();
-            let e = self.expr(a, want);
-            let e = self.coerce(e, want);
-            if let Some(w) = want {
-                self.expect_ty(e.ty, w, e.span, Some(decl_span));
-            }
-            hargs.push(e);
+        let hargs =
+            self.check_args(&raw_params, &generics, &mut subst, &hints, args, Some(decl_span));
+        if self.unsolved_by_error(&hargs, &subst) {
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
+        if subst.iter().take(block).any(|s| s.is_none()) {
+            let names: Vec<&str> = generics.iter().take(block).map(|g| g.name.as_str()).collect();
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0209,
+                    format!("cannot infer {} for `{}`", names.join(", "), type_name),
+                )
+                .with_primary(span, "nothing here says what this returns")
+                .with_note(format!("annotate the binding: `let x: {}<...> = ...`", type_name)),
+            );
+            return self.lit(ExprKind::Error, TyId::ERROR, span);
+        }
+        let targs = self.finish_subst(&generics, &subst, span);
+        self.check_bounds(&generics, &targs, span);
+        self.note_generic_call(fn_index, &targs, span);
+        let ret = self.apply_subst(raw_ret, &subst);
+        let ret = self.call_result(fn_index, ret, span);
 
         hir::Expr {
             kind: ExprKind::Call { callee: hir::FnId(fn_index), args: hargs, targs },
@@ -4685,9 +6428,10 @@ impl<'a> Checker<'a> {
     ) -> Option<kite_hir::StructId> {
         let count = self.types.struct_def(template).generic_count;
 
-        // An annotation settles it outright: `let p: Pair<int, str> = Pair{..}`.
+        // An annotation settles it outright: `let p: Pair<int, str> = Pair{..}`,
+        // or an `Option<Pair<int, str>>` the value will be wrapped into.
         if let Some(want) = expected {
-            if let TyKind::Struct(s) = *self.types.kind(want) {
+            if let TyKind::Struct(s) = *self.types.kind(self.types.present(want)) {
                 if self.instance_of(s) == Some(template) {
                     return Some(s);
                 }
@@ -4708,10 +6452,9 @@ impl<'a> Checker<'a> {
         // so this look is a trial like the field pass below: its diagnostics
         // are discarded rather than reported twice.
         if let Some(base) = &lit.base {
-            let mut scratch = DiagBag::new();
-            std::mem::swap(self.diags, &mut scratch);
+            let trial = self.begin_trial();
             let seen = self.expr(base, None);
-            std::mem::swap(self.diags, &mut scratch);
+            self.end_trial(trial);
             if let TyKind::Struct(s) = *self.types.kind(seen.ty) {
                 if self.instance_of(s) == Some(template) {
                     return Some(s);
@@ -4730,8 +6473,7 @@ impl<'a> Checker<'a> {
         // until the parameter is known, and complaining about it here would
         // report a problem that the real check — which runs against the
         // specialisation — does not have. Its diagnostics are discarded.
-        let mut scratch = DiagBag::new();
-        std::mem::swap(self.diags, &mut scratch);
+        let trial = self.begin_trial();
         for init in &lit.fields {
             let Some(declared) =
                 self.types.struct_def(template).field(&init.name.name).map(|(_, f)| f.ty)
@@ -4741,7 +6483,7 @@ impl<'a> Checker<'a> {
             let v = self.expr(&init.value, None);
             self.unify(declared, v.ty, &generics, &mut subst, v.span);
         }
-        std::mem::swap(self.diags, &mut scratch);
+        self.end_trial(trial);
 
         let mut args = Vec::with_capacity(count);
         for (i, s) in subst.iter().enumerate() {
@@ -4787,12 +6529,91 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether a concrete value may stand where a trait object is wanted.
-    fn coerces_to_dyn(&self, found: TyId, expected: TyId) -> bool {
+    fn coerces_to_dyn(&mut self, found: TyId, expected: TyId) -> bool {
         let TyKind::Dyn(tr) = *self.types.kind(expected) else { return false };
-        let (Some(ti), Some(tri)) = (self.type_index_of(found), self.trait_index_of(tr)) else {
+        self.type_implements(found, tr)
+    }
+
+    /// Whether a type implements a trait.
+    ///
+    /// A type parameter does exactly when its bounds say so — inside
+    /// `fn outer<T: Show>`, `T` is a `Show` and may be handed to anything
+    /// that asks for one. A generic type implements a trait through a block
+    /// that may itself be bounded: after `impl<T: Show> Named for Box<T>`, a
+    /// `Box<int>` is not `Named` at all, and a call that treated it as one
+    /// reached a body calling `show` on an `int`.
+    fn type_implements(&mut self, ty: TyId, tr: hir::TraitId) -> bool {
+        if let TyKind::Param { index, .. } = *self.types.kind(ty) {
+            return self.generic_defs.get(index as usize).is_some_and(|d| d.bounds.contains(&tr));
+        }
+        let (Some(ti), Some(tri)) = (self.type_index_of(ty), self.trait_index_of(tr)) else {
             return false;
         };
-        self.resolved.implements(ti, tri)
+        if !self.resolved.implements(ti, tri) {
+            return false;
+        }
+        let Some(defs) = self
+            .trait_impls
+            .get(&(ti, tri))
+            .and_then(|block| self.impl_generics.get(block))
+            .cloned()
+        else {
+            return true;
+        };
+        let args = self.receiver_args(ty);
+        for (g, a) in defs.iter().zip(args) {
+            for b in &g.bounds {
+                let held = if self.is_share_bound(*b) {
+                    self.share_given_params(a)
+                } else {
+                    self.type_implements(a, *b)
+                };
+                if !held {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Whether a trait is `Share`, the one bound nobody implements.
+    ///
+    /// The prelude is a module, so its trait is `prelude.Share` — and a
+    /// program that declares its own `Share` gets the same treatment, exactly
+    /// as it does for `Display`.
+    fn is_share_bound(&self, tr: hir::TraitId) -> bool {
+        last_segment(&self.types.trait_def(tr).name) == "Share"
+    }
+
+    /// Whether a type may cross a task boundary, where it may mention the
+    /// enclosing function's type parameters.
+    ///
+    /// A parameter bounded by `Share` is as good as any type that is; one
+    /// that is not might turn out to be anything, and so is taken to be the
+    /// worst case. Standing each in for a representative type lets the one
+    /// structural rule in `Types::is_share` answer, rather than a second copy
+    /// of it that knows about parameters.
+    fn share_given_params(&mut self, ty: TyId) -> bool {
+        let mut params = Vec::new();
+        params_in(self.types, ty, &mut params);
+        params.retain(|p| *p != kite_hir::ty::SELF_INDEX);
+        let Some(max) = params.iter().max().copied() else {
+            return self.types.is_share(ty);
+        };
+        let stand_ins: Vec<TyId> = (0..=max)
+            .map(|i| {
+                let bounded = self.generic_defs.get(i as usize).is_some_and(|d| {
+                    d.bounds.iter().any(|b| last_segment(&self.types.trait_def(*b).name) == "Share")
+                });
+                if bounded {
+                    TyId::INT
+                } else {
+                    TyId::JS_VALUE
+                }
+            })
+            .collect();
+        let concrete = self.types.substitute(ty, &stand_ins);
+        self.types.is_share(concrete)
     }
 
     fn type_index_of(&self, ty: TyId) -> Option<u32> {
@@ -4821,22 +6642,13 @@ impl<'a> Checker<'a> {
     /// Unchecked; neither is usable until the error is tested.
     /// `let (a, b) = pair` for an ordinary tuple.
     ///
-    /// Returns `None` when the initialiser is not a tuple, which is how the
-    /// fallible-result path — the other meaning of the same syntax — gets its
-    /// turn. The initialiser is checked here either way; the fallible path
-    /// checks it again, which is one wasted walk on a path that is about to
-    /// build different statements from it anyway.
+    /// Called with the initialiser already checked, and found to be a tuple.
     fn let_tuple(
         &mut self,
-        l: &ast::LetStmt,
         elems: &[ast::BindElem],
-        init: &ast::Expr,
+        value: hir::Expr,
         span: Span,
     ) -> Option<(hir::Stmt, Flow)> {
-        let annotated = l.ty.as_ref().map(|t| self.resolve_type(t));
-        // A peek: the expression is checked once, here, and reused whichever
-        // path takes it.
-        let value = self.expr(init, annotated);
         let TyKind::Tuple(parts) = self.types.kind(value.ty).clone() else {
             return None;
         };
@@ -4900,12 +6712,30 @@ impl<'a> Checker<'a> {
         // A tuple binding is either a fallible result being split into its
         // value and its error, or an ordinary tuple being taken apart. Which
         // one it is comes from the initialiser's type, so that is checked
-        // first and the two paths diverge after.
-        if let Some(init) = &l.init {
-            if let Some(stmt) = self.let_tuple(l, elems, init, span) {
-                return Some(stmt);
+        // first — once, for both paths: checking it again on the second
+        // reported every mistake in it twice.
+        let annotated = l.ty.as_ref().map(|t| self.resolve_type(t));
+        let checked = l.init.as_ref().map(|init| self.expr(init, annotated));
+        let checked = match checked {
+            Some(value) if matches!(self.types.kind(value.ty), TyKind::Tuple(_)) => {
+                return self.let_tuple(elems, value, span);
             }
-        }
+            // A value that is already an error — most often what the parser
+            // could not read — has been reported. Each name is still bound,
+            // to the error, or every use of it was E0110 as well.
+            Some(value) if value.ty == TyId::ERROR => {
+                for e in elems {
+                    if let ast::BindElem::Name(n) = e {
+                        if let Some(id) = self.resolved.lookup_binding(n.span) {
+                            self.locals[id as usize].ty = TyId::ERROR;
+                            self.init[id as usize] = Init::Assigned;
+                        }
+                    }
+                }
+                return None;
+            }
+            other => other,
+        };
 
         if elems.len() != 2 {
             self.diags.push(
@@ -4932,15 +6762,13 @@ impl<'a> Checker<'a> {
             );
         }
 
-        let Some(init) = &l.init else {
+        let Some(call) = checked else {
             self.diags.push(
                 Diagnostic::error(codes::E0204, "a tuple binding needs an initialiser")
                     .with_primary(span, "nothing to destructure"),
             );
             return None;
         };
-
-        let call = self.expr(init, None);
         let Some(inner) = self.types.fallible_value(call.ty) else {
             if !self.types.is_poisoned(call.ty) {
                 let found = self.types.with_article(call.ty);
@@ -5167,6 +6995,11 @@ impl<'a> Checker<'a> {
                 span,
             }
         };
+        // The propagation is a `return` like any other, so what was deferred
+        // runs on the way out. This is §6.3's own example — `check err` above
+        // a `defer file.close()` is exactly where the file has to be closed —
+        // and it used to leave without running anything.
+        let leave = self.returning(hir::Stmt::Return { value: Some(propagated), span }, span);
         Some((
             hir::Stmt::If {
                 cond: hir::Expr {
@@ -5181,9 +7014,7 @@ impl<'a> Checker<'a> {
                     ty: TyId::BOOL,
                     span,
                 },
-                then: hir::Block {
-                    stmts: vec![hir::Stmt::Return { value: Some(propagated), span }],
-                },
+                then: hir::Block { stmts: vec![leave] },
                 else_: None,
                 span,
             },
@@ -5236,7 +7067,13 @@ impl<'a> Checker<'a> {
                     self.taint[guarded as usize] = Taint::Clean;
                 }
             }
-            ast::Expr::Call { args, .. } => {
+            // Only a wrapper that answers nil exactly when what it wrapped was
+            // nil can speak for its argument, and the standard library's is
+            // the one known to. `check ignore(err)` falls past the `check`
+            // whenever `ignore` answers nil, whatever `err` was, so reading
+            // through any call made the value readable on the failure path.
+            // The callee is known by what it resolves to, not by its name.
+            ast::Expr::Call { callee, args, .. } if self.preserves_nil(callee) => {
                 for a in args {
                     if self.is_error_operand(a) {
                         self.mark_checked(a);
@@ -5244,6 +7081,18 @@ impl<'a> Checker<'a> {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Whether a callee is `errors.wrap`, which answers nil for nil and
+    /// nothing else.
+    fn preserves_nil(&self, callee: &ast::Expr) -> bool {
+        match self.resolved.lookup_use(callee.span()) {
+            Some(Res::Fn(id)) => {
+                let f = &self.resolved.fns[id as usize];
+                f.name == "errors.wrap" && self.resolved.module_of_item(f.decl_index) == "errors"
+            }
+            _ => false,
         }
     }
 
@@ -5262,28 +7111,109 @@ impl<'a> Checker<'a> {
     /// Report every error binding that was never inspected.
     ///
     /// Run once at the end of the body, where all paths have merged, so a
-    /// single error is reported once rather than per branch.
-    fn report_unchecked_errors(&mut self) {
-        let mut pending: Vec<(String, Span)> = Vec::new();
+    /// single error is reported once rather than per branch — and, for the
+    /// locals declared inside `region`, wherever the state that knows about
+    /// them is about to be discarded: at the end of a closure's body, and
+    /// after a branch that never reaches the join.
+    /// A `break` or a `continue` leaves the body of the loop it names, and
+    /// every error declared inside that loop and still unchecked goes out of
+    /// scope on the way (R3). An error declared before the loop is still in
+    /// scope after it, where it can be checked.
+    fn leave_loop(&mut self, label: Option<&str>, span: Span, how: &'static str) {
+        let region = match label {
+            None => self.loops.last().map(|(s, _)| *s),
+            Some(l) => self.loops.iter().rev().find(|(_, n)| n.as_deref() == Some(l)).map(|(s, _)| *s),
+        };
+        if let Some(region) = region {
+            self.report_unchecked_errors_at(Some(region), Some((span, how)));
+        }
+    }
+
+    fn report_unchecked_errors(&mut self, region: Option<Span>) {
+        self.report_unchecked_errors_at(region, None);
+    }
+
+    /// Report every unchecked error declared inside `region` — anywhere, for
+    /// `None`. With an `exit`, they are left behind by that `return`, `break`
+    /// or `continue`, which is where the report points: the path that falls
+    /// through may check them, and it was the early exits that dropped an
+    /// error bound above them in silence.
+    fn report_unchecked_errors_at(&mut self, region: Option<Span>, exit: Option<(Span, &str)>) {
+        let mut pending: Vec<(String, Span, bool)> = Vec::new();
         for (i, state) in self.taint.iter().enumerate() {
-            if *state == Taint::Unchecked && !self.locals[i].synthetic {
-                pending.push((self.locals[i].name.clone(), self.locals[i].span));
+            if *state == Taint::Unchecked
+                && !self.locals[i].synthetic
+                && region.is_none_or(|r| self.declared_inside(i as u32, r))
+                && self.reported_unchecked.insert(i as u32)
+            {
+                let local = &self.locals[i];
+                let pair = self.types.fallible_value(local.ty).is_some();
+                pending.push((local.name.clone(), local.span, pair));
             }
         }
-        for (name, span) in pending {
-            self.diags.push(
-                Diagnostic::error(codes::E0302, format!("`{}` is never checked", name))
-                    .with_primary(span, "this error goes out of scope uninspected")
-                    .with_note(
-                        "silently dropping errors is the single most common source of \
-                         production failures in languages that permit it",
-                    )
-                    .with_note(
-                        "to propagate, write `check` on its own line; to handle it here, \
-                         test `err != nil`",
-                    ),
+        for (name, span, pair) in pending {
+            let d = match exit {
+                Some((at, how)) => Diagnostic::error(
+                    codes::E0302,
+                    format!("`{}` is not checked before this `{}`", name, how),
+                )
+                .with_primary(at, format!("`{}` goes out of scope here unchecked", name))
+                .with_secondary(span, "bound here"),
+                None => {
+                    let d = Diagnostic::error(codes::E0302, format!("`{}` is never checked", name));
+                    if pair {
+                        d.with_primary(span, "the error in this result goes out of scope uninspected")
+                    } else {
+                        d.with_primary(span, "this error goes out of scope uninspected")
+                    }
+                }
+            };
+            let d = d.with_note(
+                "silently dropping errors is the single most common source of \
+                 production failures in languages that permit it",
             );
+            let d = if pair {
+                d.with_note(
+                    "take the result apart where it is bound — `let (value, err) = …` — \
+                     and then check `err`",
+                )
+            } else {
+                d.with_note(
+                    "to propagate, write `check` on its own line; to handle it here, \
+                     test `err != nil`",
+                )
+            };
+            self.diags.push(d);
         }
+    }
+
+    /// An error binding written over while it still held a failure nobody
+    /// had looked at: the write is where that failure is dropped (R3).
+    fn overwritten_unchecked(&mut self, name: &str, decl: Span, at: Span, ty: TyId) {
+        let pair = self.types.fallible_value(ty).is_some();
+        let d = Diagnostic::error(
+            codes::E0302,
+            format!("`{}` is overwritten before it is checked", name),
+        )
+        .with_primary(at, "the failure it may hold is dropped here, unseen")
+        .with_secondary(decl, "declared here")
+        .with_note(
+            "silently dropping errors is the single most common source of \
+             production failures in languages that permit it",
+        );
+        let d = if pair {
+            d.with_note(
+                "take the result apart before writing over it — `let (value, err) = …` — \
+                 and check `err`",
+            )
+        } else {
+            d.with_note(format!(
+                "test `{} != nil` or `check {}` before the write; to pass it on instead, \
+                 write `{} = errors.wrap({}, \"…\")`",
+                name, name, name, name
+            ))
+        };
+        self.diags.push(d);
     }
 
     fn synthetic_local(&mut self, name: &str, ty: TyId, span: Span) -> u32 {
@@ -5310,7 +7240,8 @@ impl<'a> Checker<'a> {
         expected: Option<TyId>,
         span: Span,
     ) -> hir::Expr {
-        let hint = expected.and_then(|e| self.types.slice_elem(e));
+        // An `Option<[T]>` wanted is a `[T]` wanted, as for a map.
+        let hint = expected.and_then(|e| self.types.slice_elem(self.types.present(e)));
 
         if elems.is_empty() {
             let Some(elem) = hint else {
@@ -5329,11 +7260,15 @@ impl<'a> Checker<'a> {
         let mut elem_ty = hint;
         for e in elems {
             let v = self.expr(e, elem_ty);
-            match elem_ty {
-                None if !self.types.is_poisoned(v.ty) => elem_ty = Some(v.ty),
-                Some(want) => self.expect_ty(v.ty, want, v.span, None),
-                None => {}
-            }
+            let v = match elem_ty {
+                None => {
+                    if !self.types.is_poisoned(v.ty) {
+                        elem_ty = Some(v.ty);
+                    }
+                    v
+                }
+                Some(want) => self.accept(v, want, None),
+            };
             out.push(v);
         }
 
@@ -5360,7 +7295,8 @@ impl<'a> Checker<'a> {
         // Map indexing always yields an optional, never a zero value.
         if let TyKind::Map(key_ty, value_ty) = *self.types.kind(seq.ty) {
             let k = self.expr(index, Some(key_ty));
-            self.expect_ty(k.ty, key_ty, k.span, None);
+            let k = self.accept(k, key_ty, None);
+            self.note_compared(key_ty, k.span);
             let ty = self.types.optional_of(value_ty);
             return hir::Expr {
                 kind: ExprKind::MapGet { base: Box::new(seq), key: Box::new(k) },
@@ -5482,21 +7418,47 @@ impl<'a> Checker<'a> {
             return None;
         }
         if let TyKind::Map(key_ty, value_ty) = *self.types.kind(seq.ty) {
-            let local = self.require_mutable_value_binding(base, "assigned into", "map")?;
+            let mut stmts = Vec::new();
+            let place = self.container_place(base, seq, "assigned into", None, &mut stmts, span)?;
+            // `m[k] += 1` has nothing to add to when `k` is missing, and a map
+            // entry is read as an optional for exactly that reason. The
+            // operator used to be dropped and the entry overwritten with the
+            // right-hand side alone.
+            if a.op.to_binary().is_some() {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0201,
+                        format!("`{}` cannot update a map entry", a.op.text()),
+                    )
+                    .with_primary(a.span, "the entry may be missing")
+                    .with_note(
+                        "read it with `m[k]`, which is optional, decide what a missing entry \
+                         counts as, and write the result back with `m[k] = …`",
+                    ),
+                );
+                return None;
+            }
             let k = self.expr(index, Some(key_ty));
-            self.expect_ty(k.ty, key_ty, k.span, None);
+            let k = self.accept(k, key_ty, None);
+            self.note_compared(key_ty, k.span);
             let v = self.expr(&a.value, Some(value_ty));
             let v = self.coerce(v, Some(value_ty));
             self.expect_ty(v.ty, value_ty, v.span, None);
-            return Some((
-                hir::Stmt::MapSet {
-                    local: hir::LocalId(local),
-                    key: k,
-                    value: v,
-                    span: a.span,
-                },
-                Flow::Falls,
-            ));
+            if let Some(local) = place.binding() {
+                return Some((
+                    hir::Stmt::MapSet { local: hir::LocalId(local), key: k, value: v, span: a.span },
+                    Flow::Falls,
+                ));
+            }
+            let key = self.hoist(k, &mut stmts, span);
+            let value = self.hoist(v, &mut stmts, span);
+            let set = self.change_at(place, stmts, span, |_, local, _| hir::Stmt::MapSet {
+                local: hir::LocalId(local),
+                key,
+                value,
+                span: a.span,
+            });
+            return Some((set, Flow::Falls));
         }
 
         let Some(elem) = self.types.slice_elem(seq.ty) else {
@@ -5508,86 +7470,391 @@ impl<'a> Checker<'a> {
             return None;
         };
 
-        // A slice is a copy-on-write value, so writing into it changes the
-        // binding, which must therefore be mutable.
-        self.require_mutable_slice_binding(base, "assigned into")?;
+        // A slice is a copy-on-write value, so writing into it changes
+        // whatever holds it, which must therefore be able to change.
+        let mut stmts = Vec::new();
+        let place = self.container_place(base, seq, "assigned into", None, &mut stmts, span)?;
 
         let i = self.expr(index, Some(TyId::INT));
         self.expect_ty(i.ty, TyId::INT, i.span, None);
 
         let value = self.expr(&a.value, Some(elem));
-        let value = match a.op.to_binary() {
-            None => {
-                self.expect_ty(value.ty, elem, value.span, None);
-                value
-            }
-            Some(binop) => {
-                let current = hir::Expr {
-                    kind: ExprKind::Index {
-                        base: Box::new(self.expr(base, None)),
-                        index: Box::new(self.expr(index, Some(TyId::INT))),
-                    },
-                    ty: elem,
-                    span,
+        let Some(local) = place.binding() else {
+            // Held anywhere but a plain binding, the slice is changed as a
+            // copy that is then written back, so the index and the value are
+            // worked out first. Nothing the program wrote runs between taking
+            // the copy and putting it back, so nothing it does can be lost.
+            let at = self.hoist(i, &mut stmts, span);
+            let op = a.op.to_binary();
+            let value = match op {
+                None => self.accept(value, elem, None),
+                Some(_) => value,
+            };
+            let value = self.hoist(value, &mut stmts, span);
+            let set = self.change_at(place, stmts, span, |this, local, ty| {
+                let base = hir::Expr { kind: ExprKind::Local(hir::LocalId(local)), ty, span };
+                let value = match op {
+                    None => value,
+                    Some(binop) => {
+                        let current = hir::Expr {
+                            kind: ExprKind::Index {
+                                base: Box::new(base.clone()),
+                                index: Box::new(at.clone()),
+                            },
+                            ty: elem,
+                            span,
+                        };
+                        let sum = this.binary(binop, current, value, a.span);
+                        this.accept(sum, elem, None)
+                    }
                 };
-                self.binary(binop, current, value, a.span)
-            }
+                hir::Stmt::SetIndex { base, index: at, value, span: a.span }
+            });
+            return Some((set, Flow::Falls));
         };
-
+        let seq = hir::Expr {
+            kind: ExprKind::Local(hir::LocalId(local)),
+            ty: self.locals[local as usize].ty,
+            span: base.span(),
+        };
+        let Some(binop) = a.op.to_binary() else {
+            // An element slot typed `Option<T>` takes a `T` by subsumption,
+            // and the `Wrap` has to be written for that, as it is everywhere
+            // else a value is stored.
+            let value = self.accept(value, elem, None);
+            return Some((
+                hir::Stmt::SetIndex { base: seq, index: i, value, span: a.span },
+                Flow::Falls,
+            ));
+        };
+        // `xs[i] += v` reads and writes one element, so the index is worked
+        // out once, into a hidden local both sides use. Checking the index
+        // expression twice evaluated it twice: `xs[next()] += 1` called
+        // `next` twice and added the second element to the first.
+        let slot = self.synthetic_local("index", TyId::INT, span);
+        let at = hir::Expr { kind: ExprKind::Local(hir::LocalId(slot)), ty: TyId::INT, span: i.span };
+        let current = hir::Expr {
+            kind: ExprKind::Index { base: Box::new(seq.clone()), index: Box::new(at.clone()) },
+            ty: elem,
+            span,
+        };
+        let sum = self.binary(binop, current, value, a.span);
+        let sum = self.accept(sum, elem, None);
         Some((
-            hir::Stmt::SetIndex { base: seq, index: i, value, span: a.span },
+            hir::Stmt::Block(hir::Block {
+                stmts: vec![
+                    hir::Stmt::Let { local: hir::LocalId(slot), init: Some(i), span },
+                    hir::Stmt::SetIndex { base: seq, index: at, value: sum, span: a.span },
+                ],
+            }),
             Flow::Falls,
         ))
     }
 
-    /// Mutating a slice or a map changes the binding that holds it, because
-    /// both have value semantics. Report when that binding is immutable.
+    /// Where a slice or map that is about to change in place is kept.
     ///
-    /// The two share this because they share the reason. Which one it is comes
-    /// from the receiver's type rather than from the call site, so a caller
-    /// cannot get the noun wrong — and a map used to be told it was a slice.
-    fn require_mutable_slice_binding(&mut self, base: &ast::Expr, what: &str) -> Option<u32> {
-        self.require_mutable_value_binding(base, what, "slice")
-    }
-
-    fn require_mutable_value_binding(
+    /// Both are copy-on-write values, so changing one's contents changes
+    /// whatever holds it. A plain `var` binding is changed where it lies, as
+    /// it always was. Anything deeper — `grid[i][j] = v`, `b.cells.push(x)` —
+    /// becomes what the roadmap used to tell people to write by hand: copy
+    /// the value out into a hidden local, change that, and assign it back
+    /// through the same place, level by level. Each level is checked as an
+    /// assignment to it would be, so this accepts exactly what the
+    /// hand-written version would and no more.
+    ///
+    /// The sub-expressions the place is built from — the struct a field is
+    /// read from, each index — are evaluated here, once and in the order they
+    /// were written, into hidden locals bound by `stmts`. `top` is the span
+    /// of the value being changed, when this call is for something holding
+    /// it rather than for that value itself.
+    fn container_place(
         &mut self,
         base: &ast::Expr,
+        seq: hir::Expr,
         what: &str,
-        noun: &str,
-    ) -> Option<u32> {
-        let ast::Expr::Path(p) = base else {
-            self.not_yet(
-                base.span(),
-                &format!("mutating a {} that is not a plain binding", noun),
-                "assign it to a `var` first",
-            );
-            return None;
-        };
-        let Some(Res::Local(id)) = self.resolved.lookup_use(p.span) else {
-            return None;
-        };
-        if !self.locals[id as usize].mutable {
-            let name = self.locals[id as usize].name.clone();
-            let decl = self.locals[id as usize].span;
-            let mut d = Diagnostic::error(
-                codes::E0114,
-                format!("`{}` cannot be {}", name, what),
-            )
-            .with_primary(p.span, "this binding is immutable")
-            .with_secondary(decl, "declared with `let` here")
-            .with_note(format!(
-                "a {} is a copy-on-write value, so changing its contents changes the \
-                 binding; declare it `var`",
-                noun
-            ));
-            if let Some(kw) = self.let_keyword_span(decl) {
-                d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
-            }
-            self.diags.push(d);
-            return None;
+        top: Option<Span>,
+        stmts: &mut Vec<hir::Stmt>,
+        span: Span,
+    ) -> Option<Place> {
+        let mut written = base;
+        while let ast::Expr::Paren { inner, .. } = written {
+            written = inner;
         }
-        Some(id)
+        let ty = seq.ty;
+        match seq.kind {
+            ExprKind::Local(id) => {
+                self.require_mutable_holder(id.0, written.span(), what, top)?;
+                Some(Place { root: PlaceRoot::Local { id: id.0, ty }, steps: Vec::new() })
+            }
+            // An optional binding narrowed to its value. The value is taken
+            // out, changed, and put back present: changing the unwrapped
+            // copy where it stood is how `xs[0] = 5` inside `if xs != nil`
+            // used to go missing.
+            ExprKind::Unwrap { value } if matches!(value.kind, ExprKind::Local(_)) => {
+                let ExprKind::Local(id) = value.kind else { return None };
+                self.require_mutable_holder(id.0, written.span(), what, top)?;
+                let root = PlaceRoot::Narrowed { id: id.0, declared: value.ty, ty };
+                Some(Place { root, steps: Vec::new() })
+            }
+            ExprKind::FieldGet { base: obj, index } => {
+                let struct_id = match self.types.kind(obj.ty) {
+                    TyKind::Struct(sid) => Some(*sid),
+                    _ => None,
+                };
+                let (ast::Expr::Field { base: obj_written, name, .. }, Some(sid)) =
+                    (written, struct_id)
+                else {
+                    // A tuple is held, but it is a value whose elements are
+                    // fixed once it is built: `t.0 = …` is refused, so the
+                    // write back this would need is too.
+                    if matches!(self.types.kind(obj.ty), TyKind::Tuple(_)) {
+                        let noun = self.container_noun(ty);
+                        self.diags.push(
+                            Diagnostic::error(
+                                codes::E0200,
+                                format!("a {} in a tuple cannot be {}", noun, what),
+                            )
+                            .with_primary(written.span(), "an element of a tuple")
+                            .with_note(
+                                "a tuple's elements are fixed once it is built; build a new \
+                                 one, or keep the value in a struct's `var` field",
+                            ),
+                        );
+                        return None;
+                    }
+                    self.not_a_place(written, ty, what);
+                    return None;
+                };
+                let (mutable, fty, decl) = {
+                    let f = &self.types.struct_def(sid).fields[index as usize];
+                    (f.mutable, f.ty, f.span)
+                };
+                if !mutable {
+                    let sname = self.types.struct_def(sid).name.clone();
+                    let noun = self.container_noun(ty);
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0114,
+                            format!("cannot change immutable field `{}`", name.name),
+                        )
+                        .with_primary(name.span, "this field cannot change")
+                        .with_secondary(decl, "declared immutable here")
+                        .with_note(format!(
+                            "a {} held in a field is changed by writing the field back, so the \
+                             field must be `var`: write `var {}: {}` on `{}`",
+                            noun,
+                            name.name,
+                            self.types.name(fty),
+                            sname
+                        )),
+                    );
+                    return None;
+                }
+                // The field is written through the struct, which is a
+                // reference, so nothing above it needs writing back — but the
+                // binding it is reached through must allow the write, exactly
+                // as it must for `b.cells = …`.
+                if !self.require_mutable_base(obj_written) {
+                    return None;
+                }
+                let holder = self.hoist(*obj, stmts, span);
+                Some(Place { root: PlaceRoot::Field { holder, index, ty }, steps: Vec::new() })
+            }
+            ExprKind::Index { base: outer, index } if self.types.slice_elem(outer.ty).is_some() => {
+                let ast::Expr::Index { base: outer_written, .. } = written else {
+                    self.not_a_place(written, ty, what);
+                    return None;
+                };
+                // Putting the changed element back is an assignment into the
+                // slice holding it, whatever was done to the element.
+                let top = top.or(Some(written.span()));
+                let mut place =
+                    self.container_place(outer_written, *outer, "assigned into", top, stmts, span)?;
+                let at = self.hoist(*index, stmts, span);
+                place.steps.push((at, ty));
+                Some(place)
+            }
+            _ => {
+                self.not_a_place(written, ty, what);
+                None
+            }
+        }
+    }
+
+    /// "slice" or "map", for a message about changing one.
+    fn container_noun(&self, ty: TyId) -> &'static str {
+        match self.types.kind(ty) {
+            TyKind::Map(..) => "map",
+            _ => "slice",
+        }
+    }
+
+    /// A slice or map is changed in place only where the change has somewhere
+    /// to go. A call's result or a literal is a value nothing holds, so
+    /// changing it would change nothing anybody could see.
+    fn not_a_place(&mut self, written: &ast::Expr, ty: TyId, what: &str) {
+        let noun = self.container_noun(ty);
+        let name = if noun == "map" { "m" } else { "xs" };
+        self.diags.push(
+            Diagnostic::error(
+                codes::E0200,
+                format!("this {} cannot be {}: nothing holds it", noun, what),
+            )
+            .with_primary(written.span(), "a value, not a place the change could be kept")
+            .with_note(format!(
+                "a {} is a copy-on-write value, so changing it in place changes what holds \
+                 it: a `var` binding, a `var` field, or an element of a slice held by one \
+                 of those",
+                noun
+            ))
+            .with_note(format!("bind it first — `var {} = …` — and change that", name)),
+        );
+    }
+
+    /// The binding a slice or map is changed through must be `var`.
+    ///
+    /// `top` is set when what changes is inside the binding's value rather
+    /// than the value itself: `grid[0].push(1)` changes `grid`.
+    fn require_mutable_holder(
+        &mut self,
+        id: u32,
+        at: Span,
+        what: &str,
+        top: Option<Span>,
+    ) -> Option<()> {
+        let local = &self.locals[id as usize];
+        if local.mutable {
+            return Some(());
+        }
+        let (name, decl, ty) = (local.name.clone(), local.span, local.ty);
+        let noun = match *self.types.kind(ty) {
+            TyKind::Optional(inner) => self.container_noun(inner),
+            _ => self.container_noun(ty),
+        };
+        let mut d = Diagnostic::error(codes::E0114, format!("`{}` cannot be {}", name, what))
+            .with_primary(at, "this binding is immutable")
+            .with_secondary(decl, "declared with `let` here")
+            .with_note(match top {
+                None => format!(
+                    "a {} is a copy-on-write value, so changing its contents changes the \
+                     binding; declare it `var`",
+                    noun
+                ),
+                Some(inner) => format!(
+                    "`{}` is held in `{}`, and a {} is a copy-on-write value: changing \
+                     anything inside it changes the binding; declare it `var`",
+                    self.text(inner),
+                    name,
+                    noun
+                ),
+            });
+        if let Some(kw) = self.let_keyword_span(decl) {
+            d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
+        }
+        self.diags.push(d);
+        None
+    }
+
+    /// Bind an operand to a hidden local, so it is evaluated once and before
+    /// anything is copied out. A literal or a local is left where it is:
+    /// nothing between here and its use can change either.
+    fn hoist(&mut self, e: hir::Expr, stmts: &mut Vec<hir::Stmt>, span: Span) -> hir::Expr {
+        if matches!(
+            e.kind,
+            ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Str(_)
+                | ExprKind::Bool(_)
+                | ExprKind::Nil
+                | ExprKind::Local(_)
+        ) {
+            return e;
+        }
+        let (ty, at) = (e.ty, e.span);
+        let id = self.synthetic_local("place", ty, span);
+        stmts.push(hir::Stmt::Let { local: hir::LocalId(id), init: Some(e), span });
+        hir::Expr { kind: ExprKind::Local(hir::LocalId(id)), ty, span: at }
+    }
+
+    /// Change the value a place holds by changing a copy of it and writing
+    /// the copy back. `change` is handed the local holding the copy, and its
+    /// type; `stmts` already binds the operands, which run first.
+    fn change_at(
+        &mut self,
+        place: Place,
+        mut stmts: Vec<hir::Stmt>,
+        span: Span,
+        change: impl FnOnce(&mut Self, u32, TyId) -> hir::Stmt,
+    ) -> hir::Stmt {
+        let local = |(id, ty): (u32, TyId)| hir::Expr {
+            kind: ExprKind::Local(hir::LocalId(id)),
+            ty,
+            span,
+        };
+        // Copy out each value from the root to the one being changed,
+        // outermost first. A binding at the root is its own copy.
+        let first = match &place.root {
+            PlaceRoot::Local { id, ty } => (*id, *ty),
+            PlaceRoot::Narrowed { id, declared, ty } => {
+                let value = Box::new(local((*id, *declared)));
+                let read = hir::Expr { kind: ExprKind::Unwrap { value }, ty: *ty, span };
+                (self.copy_of(read, &mut stmts, span), *ty)
+            }
+            PlaceRoot::Field { holder, index, ty } => {
+                let base = Box::new(holder.clone());
+                let read = hir::Expr { kind: ExprKind::FieldGet { base, index: *index }, ty: *ty, span };
+                (self.copy_of(read, &mut stmts, span), *ty)
+            }
+        };
+        let mut chain = vec![first];
+        for (at, elem) in &place.steps {
+            let outer = chain[chain.len() - 1];
+            let read = hir::Expr {
+                kind: ExprKind::Index { base: Box::new(local(outer)), index: Box::new(at.clone()) },
+                ty: *elem,
+                span,
+            };
+            chain.push((self.copy_of(read, &mut stmts, span), *elem));
+        }
+
+        let (inner, ty) = chain[chain.len() - 1];
+        stmts.push(change(self, inner, ty));
+
+        // And write each copy back where it came from, innermost first.
+        for (k, (at, _)) in place.steps.iter().enumerate().rev() {
+            stmts.push(hir::Stmt::SetIndex {
+                base: local(chain[k]),
+                index: at.clone(),
+                value: local(chain[k + 1]),
+                span,
+            });
+        }
+        match place.root {
+            PlaceRoot::Local { .. } => {}
+            PlaceRoot::Narrowed { id, declared, .. } => stmts.push(hir::Stmt::Assign {
+                local: hir::LocalId(id),
+                value: hir::Expr {
+                    kind: ExprKind::Wrap { value: Box::new(local(chain[0])) },
+                    ty: declared,
+                    span,
+                },
+                span,
+            }),
+            PlaceRoot::Field { holder, index, .. } => stmts.push(hir::Stmt::SetField {
+                base: holder,
+                index,
+                value: local(chain[0]),
+                span,
+            }),
+        }
+        hir::Stmt::Block(hir::Block { stmts })
+    }
+
+    /// Bind a read to a new hidden local and answer the local.
+    fn copy_of(&mut self, read: hir::Expr, stmts: &mut Vec<hir::Stmt>, span: Span) -> u32 {
+        let id = self.synthetic_local("held", read.ty, span);
+        stmts.push(hir::Stmt::Let { local: hir::LocalId(id), init: Some(read), span });
+        id
     }
 
     /// The local a place expression is ultimately rooted at: `a.b.c[0]` is
@@ -5610,11 +7877,12 @@ impl<'a> Checker<'a> {
 
     /// Report when what is about to be modified is rooted at an immutable
     /// binding. `self` is the same rule wearing a different word: the receiver
-    /// is mutable exactly when the method declared `var self`.
-    fn require_mutable_base(&mut self, base: &ast::Expr) {
-        let Some(id) = self.root_binding(base) else { return };
+    /// is mutable exactly when the method declared `var self`. Answers
+    /// whether the modification may go ahead.
+    fn require_mutable_base(&mut self, base: &ast::Expr) -> bool {
+        let Some(id) = self.root_binding(base) else { return true };
         if self.locals[id as usize].mutable {
-            return;
+            return true;
         }
         let name = self.locals[id as usize].name.clone();
         let decl = self.locals[id as usize].span;
@@ -5632,7 +7900,7 @@ impl<'a> Checker<'a> {
                      the call site rather than hidden inside the method",
                 ),
             );
-            return;
+            return false;
         }
         let mut d = Diagnostic::error(
             codes::E0114,
@@ -5644,6 +7912,7 @@ impl<'a> Checker<'a> {
             d = d.with_fix(Fix::replace("make the binding mutable", kw, "var"));
         }
         self.diags.push(d);
+        false
     }
 
     /// `err.message()` needs an error that is there.
@@ -5653,11 +7922,41 @@ impl<'a> Checker<'a> {
     /// error was never checked — and it is one the backends cannot even agree
     /// to get wrong the same way.
     fn require_error_present(&mut self, base: &ast::Expr, span: Span) {
-        // A call answering an `error` cannot be nil-tested by a binding, and a
-        // nil literal is caught by its own diagnostic. Only a local can be
-        // proved, so only a local is required to be.
-        let ast::Expr::Path(p) = base else { return };
-        let Some(Res::Local(id)) = self.resolved.lookup_use(p.span) else {
+        let mut inner = base;
+        while let ast::Expr::Paren { inner: i, .. } = inner {
+            inner = i;
+        }
+        // Only a local can be proved present, so an error reached any other
+        // way — a field, a call, an element — has to be bound and tested
+        // first. Waving those through was how `r.e.message()` on a nil field
+        // and `err.cause().message()` on an error with no cause reached a
+        // backend, which answered with an empty string or a trap depending on
+        // which one it was.
+        let local = match inner {
+            ast::Expr::Path(p) => match self.resolved.lookup_use(p.span) {
+                Some(Res::Local(id)) => Some(id),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(id) = local else {
+            let what = self.text(inner.span()).to_string();
+            self.diags.push(
+                Diagnostic::error(
+                    codes::E0301,
+                    format!("`{}` may be nil, so it has no message", what),
+                )
+                .with_primary(span, "reading the message needs an error that is present")
+                .with_secondary(inner.span(), "only a binding can be proved non-nil")
+                .with_note(format!(
+                    "bind it and test it: `let e = {}` then `if e != nil {{ … e.message() … }}`",
+                    what
+                ))
+                .with_note(
+                    "an `error` is either nil or a failure; there is no message on the nil side, \
+                     and no zero value standing in for one",
+                ),
+            );
             return;
         };
         if self.error_nonnil.contains(&id) {
@@ -5755,38 +8054,24 @@ impl<'a> Checker<'a> {
                     self.arity_error("push", args.len(), 1, span, None);
                     return Some(self.lit(ExprKind::Error, TyId::ERROR, span));
                 }
-                let id = self.require_mutable_slice_binding(base, "pushed to")?;
+                let mut stmts = Vec::new();
+                let place = self.container_place(base, seq, "pushed to", None, &mut stmts, span)?;
                 let v = self.expr(&args[0], Some(elem));
-                self.expect_ty(v.ty, elem, v.span, None);
+                let v = self.accept(v, elem, None);
                 // `push` is a statement, not an expression; the checker returns
                 // unit and MIR emits the mutation.
-                Some(hir::Expr {
-                    kind: ExprKind::Match {
-                        scrutinee: Box::new(hir::Expr {
-                            kind: ExprKind::Bool(true),
-                            ty: TyId::BOOL,
+                let push = match place.binding() {
+                    Some(id) => hir::Stmt::SlicePush { local: hir::LocalId(id), value: v, span },
+                    None => {
+                        let value = self.hoist(v, &mut stmts, span);
+                        self.change_at(place, stmts, span, |_, local, _| hir::Stmt::SlicePush {
+                            local: hir::LocalId(local),
+                            value,
                             span,
-                        }),
-                        arms: vec![hir::MatchArm {
-                            pattern: hir::Pattern::Wildcard,
-                            guard: None,
-                            body: hir::Expr {
-                                kind: ExprKind::Block(hir::Block {
-                                    stmts: vec![hir::Stmt::SlicePush {
-                                        local: hir::LocalId(id),
-                                        value: v,
-                                        span,
-                                    }],
-                                }),
-                                ty: TyId::UNIT,
-                                span,
-                            },
-                            span,
-                        }],
-                    },
-                    ty: TyId::UNIT,
-                    span,
-                })
+                        })
+                    }
+                };
+                Some(self.as_statement(push, span))
             }
 
             _ => {
@@ -5823,8 +8108,10 @@ impl<'a> Checker<'a> {
     ) -> Option<kite_hir::EnumId> {
         let count = self.types.enum_def(template).generic_count;
 
+        // An `Option<Msg<int>>` wanted settles a `Msg` as surely as a
+        // `Msg<int>` does: the value will be wrapped into it.
         if let Some(want) = expected {
-            if let TyKind::Enum(e) = *self.types.kind(want) {
+            if let TyKind::Enum(e) = *self.types.kind(self.types.present(want)) {
                 if self.types.enum_template_of(e) == Some(template) {
                     return Some(e);
                 }
@@ -5845,14 +8132,13 @@ impl<'a> Checker<'a> {
             .collect();
         // A trial pass, as for struct literals: its diagnostics belong to the
         // real check against the specialisation, not to inference.
-        let mut scratch = DiagBag::new();
-        std::mem::swap(self.diags, &mut scratch);
+        let trial = self.begin_trial();
         for (i, a) in args.iter().enumerate() {
             let Some(d) = declared.get(i).copied() else { continue };
             let v = self.expr(a, None);
             self.unify(d, v.ty, &generics, &mut subst, v.span);
         }
-        std::mem::swap(self.diags, &mut scratch);
+        self.end_trial(trial);
 
         let mut solved = Vec::with_capacity(count);
         for (i, s) in subst.iter().enumerate() {
@@ -5907,6 +8193,7 @@ impl<'a> Checker<'a> {
             eid
         };
         let enum_ty = self.types.enum_ty(eid);
+        self.check_type_bounds(ti, enum_ty, span);
 
         let (enum_name, variant_name, field_tys, named, decl_span) = {
             let def = self.types.enum_def(eid);
@@ -5978,8 +8265,7 @@ impl<'a> Checker<'a> {
             };
             let want = field_tys[index];
             let e = self.expr(a, Some(want));
-            self.expect_ty(e.ty, want, e.span, Some(decl_span));
-            slots[index] = Some(e);
+            slots[index] = Some(self.accept(e, want, Some(decl_span)));
         }
 
         let mut fields = Vec::with_capacity(field_tys.len());
@@ -6035,13 +8321,19 @@ impl<'a> Checker<'a> {
             return (self.lit(ExprKind::Error, TyId::ERROR, m.span), Flow::Falls);
         }
 
-        let entry_init = self.init.clone();
         // Arms are alternatives, not a sequence: each starts from the state the
         // match was entered in, and what survives is the join of the arms that
         // can fall out. Letting one arm's `check` leak into the next would make
-        // an error checked in one case clean in every other.
-        let entry_taint = self.taint.clone();
-        let mut exit_taint: Option<Vec<Taint>> = None;
+        // an error checked in one case clean in every other — and taking the
+        // entry state for what survives, as definite assignment once did,
+        // refused a `let` that every arm assigns.
+        let entry = self.flow_state();
+        let mut exit: Option<FlowState> = None;
+        // The arms that leave, joined, stand for the match when every arm
+        // does: nothing follows it, but the end of the function still asks
+        // what was left unchecked on the way out.
+        let mut left: Option<FlowState> = None;
+        let mut poisoned = false;
         let mut arms = Vec::with_capacity(m.arms.len());
         let mut result_ty: Option<TyId> = None;
         let mut arm_spans: Vec<(Span, TyId)> = Vec::new();
@@ -6051,16 +8343,29 @@ impl<'a> Checker<'a> {
         // one, so it binds the unwrapped type — which is what
         // SPECIFICATION.md section 3.3 shows.
         let mut nil_covered = false;
+        // The arms whose pattern was refused. Each stands in the HIR as a
+        // wildcard, which the coverage analysis would read as matching
+        // everything: every later arm then drew "unreachable", and a missing
+        // variant nothing, for a mistake already reported once.
+        let mut rejected = Vec::with_capacity(m.arms.len());
 
         for arm in &m.arms {
-            self.restore_init(entry_init.clone());
-            self.restore_taint(entry_taint.clone());
+            self.set_flow_state(entry.clone());
             let bind_ty = match *self.types.kind(scrut_ty) {
                 TyKind::Optional(inner) if nil_covered => inner,
                 _ => scrut_ty,
             };
             let pattern = self.pattern_with(&arm.pattern, scrut_ty, bind_ty);
-            if arm.guard.is_none() && covers_nil(&arm.pattern) {
+            // Refused here or by the resolver, which reports a variant that
+            // does not exist before any of this runs.
+            let region = arm.pattern.span();
+            rejected.push(self.diags.iter().any(|d| {
+                d.severity == kite_diag::Severity::Error
+                    && d.primary_span().is_some_and(|at| {
+                        at.file == region.file && at.start >= region.start && at.end <= region.end
+                    })
+            }));
+            if arm.guard.is_none() && covers_nil(&pattern) {
                 nil_covered = true;
             }
 
@@ -6088,13 +8393,21 @@ impl<'a> Checker<'a> {
             let body = self.coerce(body, want);
 
             // An arm that diverges contributes nothing to the join: control
-            // never arrives at the join from it.
-            if body.ty != TyId::NEVER {
-                exit_taint = Some(match exit_taint {
-                    None => self.taint.clone(),
-                    Some(acc) => self.join_taint(&acc, &self.taint),
-                });
-            }
+            // never arrives at the join from it. What it declared goes out of
+            // scope where it leaves, so that is where an error in it nobody
+            // looked at is reported.
+            let here = self.flow_state();
+            let into = if body.ty == TyId::NEVER {
+                self.report_unchecked_errors(Some(arm.span));
+                &mut left
+            } else {
+                &mut exit
+            };
+            *into = Some(match into.take() {
+                None => here,
+                Some(acc) => self.join_flow(&acc, &here),
+            });
+            poisoned |= body.ty == TyId::ERROR;
 
             if body.ty != TyId::NEVER && !self.types.is_poisoned(body.ty) {
                 match result_ty {
@@ -6125,15 +8438,11 @@ impl<'a> Checker<'a> {
             });
         }
 
-        // A binding introduced by one arm's pattern is not in scope after the
-        // match, so the entry state is what survives.
-        self.restore_init(entry_init);
-        // Every arm diverging means the match does too; the entry state is then
-        // the honest answer for the code that cannot be reached.
-        let merged = exit_taint.unwrap_or_else(|| entry_taint.clone());
-        self.restore_taint(merged);
+        // A binding one arm's pattern introduced is out of scope after the
+        // match, so what the join says about it is never asked.
+        self.set_flow_state(exit.or(left).unwrap_or(entry));
 
-        let exhaustive = self.check_exhaustive(m, &arms, scrut_ty);
+        let exhaustive = self.check_exhaustive(m, &arms, &rejected, scrut_ty);
 
         // Every arm left, and control had to enter one of them — that is what
         // exhaustiveness proves — so nothing after the match runs. A guard does
@@ -6153,7 +8462,10 @@ impl<'a> Checker<'a> {
             Flow::Falls
         };
 
-        let ty = result_ty.unwrap_or(TyId::UNIT);
+        // No arm produced a type, and one of them could not: the match's type
+        // is unknown, not `()`, or binding it reports the one mistake again as
+        // "cannot bind a value of type `()`".
+        let ty = result_ty.unwrap_or(if poisoned { TyId::ERROR } else { TyId::UNIT });
         let expr = hir::Expr {
             kind: ExprKind::Match {
                 scrutinee: Box::new(scrutinee),
@@ -6392,7 +8704,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    #[allow(dead_code)]
     fn mentions_param(&self, ty: TyId) -> bool {
         match self.types.kind(ty) {
             TyKind::Param { .. } => true,
@@ -6410,6 +8721,30 @@ impl<'a> Checker<'a> {
             TyKind::Fn { params, ret } => {
                 params.iter().any(|p| self.mentions_param(*p)) || self.mentions_param(*ret)
             }
+            _ => false,
+        }
+    }
+
+    /// Whether a type parameter a call left unsolved was left so by an
+    /// argument that is already an error.
+    ///
+    /// That argument has been reported — most often it is something the
+    /// parser could not read — and it is what would have said what the
+    /// parameter is. The call is then an error too, and says nothing more:
+    /// `cannot infer T` was the same mistake again, and a result typed as the
+    /// bare `T` went on to be refused wherever it was used.
+    fn unsolved_by_error(&self, args: &[hir::Expr], subst: &[Option<TyId>]) -> bool {
+        subst.iter().any(Option::is_none) && args.iter().any(|a| self.made_of_error(a.ty))
+    }
+
+    /// Whether `ty` is the error type or is built from it, as the type of
+    /// `[P{ x 1 }]` is.
+    fn made_of_error(&self, ty: TyId) -> bool {
+        match self.types.kind(ty) {
+            TyKind::Error => true,
+            TyKind::Slice(e) | TyKind::Optional(e) | TyKind::Fallible(e) => self.made_of_error(*e),
+            TyKind::Map(k, v) => self.made_of_error(*k) || self.made_of_error(*v),
+            TyKind::Tuple(es) => es.iter().any(|e| self.made_of_error(*e)),
             _ => false,
         }
     }
@@ -6442,6 +8777,30 @@ impl<'a> Checker<'a> {
         out
     }
 
+    /// The header of the `impl` a note tells the reader to write, so that
+    /// `ty` implements `trait_name`.
+    ///
+    /// A generic type's is for every instantiation at once, at its
+    /// declaration's own parameters, because a header for the one in hand is
+    /// E0208 (§8.2): a `One<int>` gets `impl<T> Display for One<T>`, not the
+    /// `impl Display for One<int>` these notes used to advise. The prelude's
+    /// traits are written unqualified, as a program names them.
+    fn impl_to_write(&self, trait_name: &str, ty: TyId) -> String {
+        let trait_name = trait_name.strip_prefix("prelude.").unwrap_or(trait_name);
+        let shown = self.types.name(ty);
+        let params: Vec<&str> = self
+            .type_index_of(ty)
+            .and_then(|ti| self.type_generics.get(ti as usize))
+            .map(|defs| defs.iter().map(|g| g.name.as_str()).collect())
+            .unwrap_or_default();
+        if params.is_empty() {
+            return format!("impl {} for {}", trait_name, shown);
+        }
+        let base = shown.split('<').next().unwrap_or(&shown);
+        let params = params.join(", ");
+        format!("impl<{}> {} for {}<{}>", params, trait_name, base, params)
+    }
+
     /// Every bound must hold for the type chosen.
     fn check_bounds(&mut self, generics: &[GenericDef], targs: &[TyId], span: Span) {
         for (g, t) in generics.iter().zip(targs.iter()) {
@@ -6454,32 +8813,70 @@ impl<'a> Checker<'a> {
                 // Most types satisfy it without their author knowing it
                 // exists, which is what makes data races impossible here
                 // without an annotation burden.
-                // The prelude is a module, so its trait is `prelude.Share` —
-                // and a program that declares its own `Share` gets the same
-                // treatment, exactly as it does for `Display`.
-                if last_segment(&self.types.trait_def(*bound).name) == "Share" {
-                    if !self.types.is_share(*t) {
+                if self.is_share_bound(*bound) {
+                    if !self.share_given_params(*t) {
                         self.report_not_share(*t, &g.name, span, g.span);
                     }
                     continue;
                 }
-                let ok = match (self.type_index_of(*t), self.trait_index_of(*bound)) {
-                    (Some(ti), Some(tri)) => self.resolved.implements(ti, tri),
-                    _ => false,
-                };
-                if !ok {
-                    let (tn, bn) =
-                        (self.types.name(*t), self.types.trait_def(*bound).name.clone());
-                    self.diags.push(
-                        Diagnostic::error(
-                            codes::E0208,
-                            format!("`{}` does not implement `{}`", tn, bn),
-                        )
-                        .with_primary(span, format!("`{}` is required to be `{}`", g.name, bn))
-                        .with_secondary(g.span, "the bound is declared here")
-                        .with_note(format!("write `impl {} for {}`", bn, tn)),
-                    );
+                if self.type_implements(*t, *bound) {
+                    self.note_impl_use(*t, *bound, span);
+                    continue;
                 }
+                let (tn, bn) = (self.types.name(*t), self.types.trait_def(*bound).name.clone());
+                let mut d = Diagnostic::error(
+                    codes::E0208,
+                    format!("`{}` does not implement `{}`", tn, bn),
+                )
+                .with_primary(span, format!("`{}` is required to be `{}`", g.name, bn))
+                .with_secondary(g.span, "the bound is declared here");
+                d = match *self.types.kind(*t) {
+                    // A parameter is known only by its bounds, so the fix is
+                    // to say more about it where it is declared.
+                    TyKind::Param { index, .. } => {
+                        match self.generic_defs.get(index as usize).map(|d| d.span) {
+                            Some(decl) => d
+                                .with_secondary(decl, format!("`{}` is declared here", tn))
+                                .with_note(format!("add the bound: `{}: {}`", tn, bn)),
+                            None => d,
+                        }
+                    }
+                    _ if self.type_index_of(*t).is_some_and(|ti| {
+                        self.trait_index_of(*bound).is_some_and(|tri| self.resolved.implements(ti, tri))
+                    }) =>
+                    {
+                        d.with_note(format!(
+                            "`{}` implements `{}` only where its type arguments meet the \
+                             bounds of that `impl`",
+                            tn, bn
+                        ))
+                    }
+                    // An `impl` names a struct or an enum, so for anything
+                    // else — a trait object included — suggesting one would
+                    // send the reader to write something that does not parse.
+                    TyKind::Dyn(tr) if tr == *bound => d.with_note(format!(
+                        "`{}` stands for a type that implements `{}`, and `{}` is not \
+                         one: it holds a value whose type is known only by its trait. \
+                         Take a `{}` parameter instead, or pass the value before it \
+                         became one",
+                        g.name, bn, tn, tn
+                    )),
+                    TyKind::Dyn(tr) => d.with_note(format!(
+                        "{} has only what `{}` declares",
+                        self.types.with_article(*t),
+                        self.types.trait_def(tr).name
+                    )),
+                    _ if self.type_index_of(*t).is_some() => {
+                        d.with_note(format!("write `{}`", self.impl_to_write(&bn, *t)))
+                    }
+                    _ => d.with_note(format!(
+                        "an `impl` is written for a struct or an enum, so {} cannot \
+                         implement `{}`; wrap it in a struct that does",
+                        self.types.with_article(*t),
+                        bn
+                    )),
+                };
+                self.diags.push(d);
             }
         }
     }
@@ -6509,6 +8906,24 @@ impl<'a> Checker<'a> {
                  number, a copy — and leave the host object here",
             ));
             return;
+        }
+        // A type parameter is not known to be anything, so it is not known to
+        // be Share either — until its declaration says so.
+        let mut params = Vec::new();
+        params_in(self.types, ty, &mut params);
+        if let Some(p) = params.first() {
+            if let Some(def) = self.generic_defs.get(*p as usize) {
+                let (pname, pspan) = (def.name.clone(), def.span);
+                self.diags.push(
+                    d.with_secondary(pspan, format!("`{}` is declared here", pname))
+                        .with_note(format!(
+                            "`{}` could be any type, and not every type may cross; write \
+                             `{}: Share` to accept only the ones that can",
+                            pname, pname
+                        )),
+                );
+                return;
+            }
         }
         if let Some((field, owner)) = self.first_mutable_field(ty) {
             d = d.with_secondary(
@@ -6574,8 +8989,11 @@ impl<'a> Checker<'a> {
     }
 
     /// The enclosing function's signature, so a nested block still checks
-    /// `return` against the right type.
+    /// `return` against the right type — the closure's own, inside one.
     fn current_signature(&self) -> Signature {
+        if let Some(sig) = &self.closure_sig {
+            return sig.clone();
+        }
         let s = &self.sigs[self.fn_index];
         Signature {
             params: s.params.clone(),
@@ -6599,6 +9017,57 @@ impl<'a> Checker<'a> {
     /// scrutinee's type. The two differ only when an optional has already had
     /// its nil case matched by an earlier arm.
     fn pattern_with(&mut self, p: &ast::Pattern, scrut: TyId, bind_ty: TyId) -> hir::Pattern {
+        let checked = self.pattern_shape(p, scrut, bind_ty);
+        // A pattern refused as a whole binds nothing, but the arm still reads
+        // the names written in it. Poisoning them keeps the one diagnostic
+        // that was reported from turning into one more per use.
+        if matches!(checked, hir::Pattern::Wildcard) && !matches!(p, ast::Pattern::Wildcard(_)) {
+            self.bind_poisoned(p);
+        }
+        checked
+    }
+
+    /// Give every name a pattern binds the poisoned type, as if assigned.
+    fn bind_poisoned(&mut self, p: &ast::Pattern) {
+        match p {
+            ast::Pattern::Binding(name) => {
+                if let Some(local) = self.resolved.lookup_binding(name.span) {
+                    self.set_local_ty(local, TyId::ERROR);
+                }
+            }
+            ast::Pattern::Variant { args: ast::PatternArgs::Positional(ps), .. }
+            | ast::Pattern::Tuple { elems: ps, .. }
+            | ast::Pattern::Or { alts: ps, .. } => {
+                for x in ps {
+                    self.bind_poisoned(x);
+                }
+            }
+            ast::Pattern::Variant { args: ast::PatternArgs::Named(ps), .. } => {
+                for (_, x) in ps {
+                    self.bind_poisoned(x);
+                }
+            }
+            ast::Pattern::Struct { fields, .. } => {
+                for f in fields {
+                    match &f.pattern {
+                        Some(x) => self.bind_poisoned(x),
+                        None => {
+                            if let Some(local) = self.resolved.lookup_binding(f.name.span) {
+                                self.set_local_ty(local, TyId::ERROR);
+                            }
+                        }
+                    }
+                }
+            }
+            ast::Pattern::Wildcard(_)
+            | ast::Pattern::Nil(_)
+            | ast::Pattern::Literal(_)
+            | ast::Pattern::Range { .. }
+            | ast::Pattern::Error(_) => {}
+        }
+    }
+
+    fn pattern_shape(&mut self, p: &ast::Pattern, scrut: TyId, bind_ty: TyId) -> hir::Pattern {
         match p {
             ast::Pattern::Wildcard(_) => hir::Pattern::Wildcard,
 
@@ -6642,15 +9111,25 @@ impl<'a> Checker<'a> {
             },
 
             ast::Pattern::Literal(e) => {
-                let lit = self.expr(e, Some(scrut));
-                self.expect_ty(lit.ty, scrut, lit.span, None);
+                // Against an optional, a literal is one for the value inside:
+                // `1` matches a present `1`, as a variant's name matches a
+                // present value of that variant.
+                let want = match *self.types.kind(scrut) {
+                    TyKind::Optional(inner) => inner,
+                    _ => scrut,
+                };
+                let lit = self.expr(e, Some(want));
+                self.expect_ty(lit.ty, want, lit.span, None);
                 match lit.kind {
                     ExprKind::Int(v) => hir::Pattern::Int(v),
                     ExprKind::Float(v) => hir::Pattern::Float(v),
                     ExprKind::Str(s) => hir::Pattern::Str(s),
                     ExprKind::Bool(b) => hir::Pattern::Bool(b),
-                    ExprKind::Unary { op: hir::UnOp::NegInt, operand } => match operand.kind {
-                        ExprKind::Int(v) => hir::Pattern::Int(-v),
+                    ExprKind::Unary {
+                        op: hir::UnOp::NegInt | hir::UnOp::NegIntWrap,
+                        operand,
+                    } => match operand.kind {
+                        ExprKind::Int(v) => hir::Pattern::Int(v.wrapping_neg()),
                         _ => hir::Pattern::Wildcard,
                     },
                     ExprKind::Unary { op: hir::UnOp::NegFloat, operand } => match operand.kind {
@@ -6671,19 +9150,61 @@ impl<'a> Checker<'a> {
             ast::Pattern::Range { start, end, inclusive, span } => {
                 let a = self.expr(start, Some(TyId::INT));
                 let b = self.expr(end, Some(TyId::INT));
-                match (&a.kind, &b.kind) {
-                    (ExprKind::Int(x), ExprKind::Int(y)) => {
+                // `-5..=-1`: a negative end is a negation of a literal, which
+                // the literal pattern above already folds. A range has to as
+                // well, or it rejects the one spelling a negative bound has.
+                // A release build negates with `NegIntWrap`, and a pattern
+                // means the same in both builds, so both are folded.
+                let bound = |e: &hir::Expr| match &e.kind {
+                    ExprKind::Int(v) => Some(*v),
+                    ExprKind::Unary {
+                        op: hir::UnOp::NegInt | hir::UnOp::NegIntWrap,
+                        operand,
+                    } => match operand.kind {
+                        ExprKind::Int(v) => v.checked_neg(),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                // The range is compared against the scrutinee as integers, so
+                // the scrutinee has to be one. Nothing checked that before: a
+                // `float` or a `str` reached the backends compared as an
+                // integer, and the native one refused to verify what it made.
+                //
+                // An `Option<int>` is accepted too: a range against an
+                // optional matches a present value whose payload is in range,
+                // which MIR lowers by testing for `nil` and unwrapping first,
+                // as it does for every literal and variant pattern.
+                let over_int = scrut == TyId::INT
+                    || matches!(self.types.kind(scrut), TyKind::Optional(inner) if *inner == TyId::INT);
+                if !over_int && !self.types.is_poisoned(scrut) {
+                    let found = self.types.with_article(scrut);
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0200,
+                            format!("a range pattern cannot match {}", found),
+                        )
+                        .with_primary(*span, "this range matches integers")
+                        .with_note(
+                            "a float range would have to decide what its ends do about \
+                             rounding, and there is no answer right for every program — \
+                             test the bounds in a guard instead",
+                        ),
+                    );
+                    return hir::Pattern::Wildcard;
+                }
+                match (bound(&a), bound(&b)) {
+                    (Some(x), Some(y)) => {
                         if x > y {
                             self.diags.push(
                                 Diagnostic::warning(codes::E0210, "this range is empty")
                                     .with_primary(*span, format!("{}..{} matches nothing", x, y)),
                             );
                         }
-                        hir::Pattern::IntRange {
-                            start: *x,
-                            end: *y,
-                            inclusive: *inclusive,
-                        }
+                        hir::Pattern::IntRange { start: x, end: y, inclusive: *inclusive }
+                    }
+                    _ if self.types.is_poisoned(a.ty) || self.types.is_poisoned(b.ty) => {
+                        hir::Pattern::Wildcard
                     }
                     _ => {
                         self.diags.push(
@@ -6724,15 +9245,66 @@ impl<'a> Checker<'a> {
                             );
                             hir::Pattern::Wildcard
                         }
-                        _ => hir::Pattern::Wildcard,
+                        // `Shape(r)`, naming the enum where one of its variants
+                        // belongs. This used to become a wildcard in silence —
+                        // a catch-all that satisfied exhaustiveness on its own
+                        // and bound nothing it claimed to — so it is refused.
+                        _ => {
+                            let decl = self.resolved.type_decl(ti);
+                            let (name, kind) = (decl.name.clone(), decl.kind.describe());
+                            let a = if kind.starts_with('e') { "an" } else { "a" };
+                            let mut d = Diagnostic::error(
+                                codes::E0200,
+                                format!("`{}` is {} {}, not a variant", name, a, kind),
+                            )
+                            .with_primary(*span, "a pattern here names one variant");
+                            if let Some(TypeTarget::Enum(eid)) = self.type_ids[ti as usize] {
+                                let names: Vec<String> = self
+                                    .types
+                                    .enum_def(eid)
+                                    .variants
+                                    .iter()
+                                    .map(|v| v.name.clone())
+                                    .collect();
+                                d = d.with_note(format!(
+                                    "write one of its variants, such as `{}.{}(…)`: {}",
+                                    name,
+                                    names.first().map(String::as_str).unwrap_or("Variant"),
+                                    names.join(", ")
+                                ));
+                            }
+                            self.diags.push(d);
+                            hir::Pattern::Wildcard
+                        }
                     },
+                    // Resolution has already said what is wrong with the path.
                     _ => hir::Pattern::Wildcard,
                 }
             }
 
             ast::Pattern::Struct { path, fields, span, .. } => {
-                let Some(Res::Type(ti)) = self.resolved.lookup_use(path.span) else {
-                    return hir::Pattern::Wildcard;
+                let ti = match self.resolved.lookup_use(path.span) {
+                    Some(Res::Type(ti)) => ti,
+                    // `Circle{ radius }` names a variant with a struct's
+                    // braces. Taking it as a wildcard would match every value
+                    // and bind nothing, so it is refused.
+                    Some(Res::Variant(..)) => {
+                        self.diags.push(
+                            Diagnostic::error(
+                                codes::E0200,
+                                format!("`{}` is a variant, not a struct", path.name()),
+                            )
+                            .with_primary(*span, "a variant pattern takes parentheses")
+                            .with_note(format!(
+                                "write `{}(…)`, naming its fields as `{}(field: pattern)` \
+                                 if it declares them",
+                                path.name(),
+                                path.name()
+                            )),
+                        );
+                        return hir::Pattern::Wildcard;
+                    }
+                    _ => return hir::Pattern::Wildcard,
                 };
                 let Some(TypeTarget::Struct(sid)) = self.type_ids[ti as usize] else {
                     self.diags.push(
@@ -6746,7 +9318,7 @@ impl<'a> Checker<'a> {
                 };
                 // As for variants: the pattern names the declaration and the
                 // scrutinee says which specialisation.
-                let sid = match *self.types.kind(scrut) {
+                let sid = match *self.types.kind(self.types.present(scrut)) {
                     TyKind::Struct(actual)
                         if self.types.struct_template_of(actual) == Some(sid) =>
                     {
@@ -6786,6 +9358,9 @@ impl<'a> Checker<'a> {
                         );
                         continue;
                     };
+                    // Taking a value apart reads its fields, so a private one
+                    // is as out of reach here as through `.`.
+                    self.check_field_visible(sid, index, f.name.span);
                     let sub = match &f.pattern {
                         Some(p) => self.pattern(p, fty),
                         // `Point{ x }` binds `x` to the field's value.
@@ -6807,11 +9382,106 @@ impl<'a> Checker<'a> {
             }
 
             ast::Pattern::Or { alts, .. } => {
-                hir::Pattern::Or(alts.iter().map(|a| self.pattern(a, scrut)).collect())
+                // A name repeated across alternatives is one local — the
+                // resolver gives the later ones the first one's — so each
+                // alternative's type for it is read as that alternative is
+                // checked, before the next one sets it again.
+                let mut pats = Vec::with_capacity(alts.len());
+                let mut names: Vec<Vec<(String, u32, TyId)>> = Vec::with_capacity(alts.len());
+                for a in alts {
+                    let p = self.pattern(a, scrut);
+                    let mut ids = Vec::new();
+                    pattern_bindings(&p, &mut ids);
+                    let mut named: Vec<(String, u32, TyId)> = ids
+                        .into_iter()
+                        .map(|id| {
+                            let l = &self.locals[id as usize];
+                            (l.name.clone(), id, l.ty)
+                        })
+                        .collect();
+                    named.sort();
+                    names.push(named);
+                    pats.push(p);
+                }
+                // Whichever alternative matched, the arm runs with every name
+                // the pattern binds — so every alternative has to bind them.
+                // `A(x) | B => x + 1` reached `B` with `x` never written, and
+                // the arm read a register nothing had put a value in.
+                //
+                // One missing name explains the pattern; listing every name it
+                // affects would be the same mistake again.
+                let missing = names.iter().flatten().find_map(|(name, id, _)| {
+                    names
+                        .iter()
+                        .position(|other| !other.iter().any(|(n, _, _)| n == name))
+                        .map(|j| (name.clone(), *id, j))
+                });
+                if let Some((name, id, j)) = missing {
+                    self.diags.push(
+                        Diagnostic::error(
+                            codes::E0200,
+                            format!("`{}` is not bound in every alternative", name),
+                        )
+                        .with_primary(self.locals[id as usize].span, "bound here")
+                        .with_secondary(alts[j].span(), format!("`{}` is not bound here", name))
+                        .with_note(
+                            "the arm runs whichever alternative matched, so a name it reads \
+                             has to be bound by all of them",
+                        ),
+                    );
+                }
+                // Where two alternatives bind the same name, the types have to
+                // agree as well, or the arm would read one slot two ways.
+                if let Some(first) = names.first() {
+                    for (j, other) in names.iter().enumerate().skip(1) {
+                        for (name, id, b) in other {
+                            let Some(&(_, want, a)) = first.iter().find(|(n, _, _)| n == name) else {
+                                continue;
+                            };
+                            if a != *b && !self.types.is_poisoned(a) && !self.types.is_poisoned(*b) {
+                                let (an, bn) = (self.types.name(a), self.types.name(*b));
+                                let region = alts[j].span();
+                                let here = self
+                                    .resolved
+                                    .bindings
+                                    .iter()
+                                    .filter(|(sp, i)| {
+                                        **i == *id
+                                            && sp.file == region.file
+                                            && sp.start >= region.start
+                                            && sp.end <= region.end
+                                    })
+                                    .map(|(sp, _)| *sp)
+                                    .next()
+                                    .unwrap_or(region);
+                                self.diags.push(
+                                    Diagnostic::error(
+                                        codes::E0200,
+                                        format!("`{}` is bound with two different types", name),
+                                    )
+                                    .with_primary(here, format!("a `{}` here", bn))
+                                    .with_secondary(self.locals[want as usize].span, format!("a `{}` here", an)),
+                                );
+                            }
+                        }
+                    }
+                    // The arm reads the local as the first alternative bound
+                    // it, whatever a later one that disagreed set it to.
+                    for &(_, id, ty) in first {
+                        if let Some(l) = self.locals.get_mut(id as usize) {
+                            l.ty = ty;
+                        }
+                    }
+                }
+                hir::Pattern::Or(pats)
             }
 
             ast::Pattern::Tuple { elems, span } => {
-                let TyKind::Tuple(element_tys) = self.types.kind(scrut).clone() else {
+                // Against an optional, a tuple pattern is one for the tuple
+                // present, as a literal or a variant is (§9.2); MIR tests for
+                // `nil` and unwraps before it looks at the elements.
+                let tuple = self.types.present(scrut);
+                let TyKind::Tuple(element_tys) = self.types.kind(tuple).clone() else {
                     if !self.types.is_poisoned(scrut) {
                         let found = self.types.with_article(scrut);
                         self.diags.push(
@@ -6844,7 +9514,7 @@ impl<'a> Checker<'a> {
                     .zip(&element_tys)
                     .map(|(p, ty)| self.pattern(p, *ty))
                     .collect();
-                hir::Pattern::Tuple { ty: scrut, elems: subs }
+                hir::Pattern::Tuple { ty: tuple, elems: subs }
             }
             ast::Pattern::Nil(span) => {
                 if !matches!(self.types.kind(scrut), TyKind::Optional(_))
@@ -6898,8 +9568,9 @@ impl<'a> Checker<'a> {
         };
         // A pattern names the declaration, not a specialisation: `Some(n)` is
         // written the same whatever the enum holds. The scrutinee says which
-        // specialisation is meant.
-        let eid = match *self.types.kind(scrut) {
+        // specialisation is meant — the value inside it, against an optional,
+        // since a pattern written against one is for the value present.
+        let eid = match *self.types.kind(self.types.present(scrut)) {
             TyKind::Enum(actual) if self.types.enum_template_of(actual) == Some(eid) => actual,
             _ => eid,
         };
@@ -6978,6 +9649,9 @@ impl<'a> Checker<'a> {
                         span,
                         Some(decl_span),
                     );
+                    for p in ps {
+                        self.bind_poisoned(p);
+                    }
                     field_tys.iter().map(|_| hir::Pattern::Wildcard).collect()
                 } else {
                     ps.iter()
@@ -7006,6 +9680,7 @@ impl<'a> Checker<'a> {
                                     field_names.join(", ")
                                 )),
                             );
+                            self.bind_poisoned(p);
                         }
                     }
                 }
@@ -7022,6 +9697,7 @@ impl<'a> Checker<'a> {
         &mut self,
         m: &ast::MatchExpr,
         arms: &[hir::MatchArm],
+        rejected: &[bool],
         scrut: TyId,
     ) -> bool {
         if self.types.is_poisoned(scrut) {
@@ -7035,6 +9711,14 @@ impl<'a> Checker<'a> {
             .map(|a| &a.pattern)
             .collect();
 
+        self.report_unreachable_arms(m, arms, rejected, scrut);
+
+        // A refused pattern was meant to cover something, and what it was
+        // meant to cover is anybody's guess, so nothing is said to be missing
+        // on top of the mistake already reported.
+        if rejected.iter().any(|r| *r) {
+            return true;
+        }
         let missing = exhaustive::missing_patterns(scrut, &unguarded, self.types);
         if missing.is_empty() {
             return true;
@@ -7063,6 +9747,82 @@ impl<'a> Checker<'a> {
         }
         self.diags.push(d);
         false
+    }
+
+    /// Warn about every arm the ones above it leave nothing for.
+    ///
+    /// The usual cause is a name meant as a variant that is not one — `Dir`
+    /// where the enum says `Directory` — which is a binding, takes every value,
+    /// and silently makes each arm after it dead. So when a catch-all binding
+    /// above is spelled almost like a variant, the warning says which.
+    fn report_unreachable_arms(
+        &mut self,
+        m: &ast::MatchExpr,
+        arms: &[hir::MatchArm],
+        rejected: &[bool],
+        scrut: TyId,
+    ) {
+        // A refused arm covers nothing, as a guarded one covers nothing for
+        // certain, and is not itself reported: its pattern is the mistake.
+        let rows: Vec<(&hir::Pattern, bool)> = arms
+            .iter()
+            .zip(rejected)
+            .map(|(a, r)| (&a.pattern, a.guard.is_some() || *r))
+            .collect();
+        for i in exhaustive::unreachable_arms(scrut, &rows, self.types) {
+            if rejected.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            let Some(arm) = m.arms.get(i) else { continue };
+            let mut d = Diagnostic::warning(codes::E0116, "unreachable match arm")
+                .with_primary(arm.pattern.span(), "no value can reach this arm")
+                .with_note("every value it matches is taken by an arm above it");
+            if let Some((at, name, variant)) = self.near_miss_binding(m, arms, scrut, i) {
+                d = d
+                    .with_secondary(at, format!("`{}` takes every value that reaches it", name))
+                    .with_note(format!(
+                        "`{}` is not a variant, so it is a binding; did you mean `{}`?",
+                        name, variant
+                    ));
+            }
+            self.diags.push(d);
+        }
+    }
+
+    /// An arm above `before` that is a bare, unguarded binding spelled almost
+    /// like a variant of the scrutinee's enum: its span, its name, and the
+    /// variant.
+    fn near_miss_binding(
+        &self,
+        m: &ast::MatchExpr,
+        arms: &[hir::MatchArm],
+        scrut: TyId,
+        before: usize,
+    ) -> Option<(Span, String, String)> {
+        let inner = match *self.types.kind(scrut) {
+            TyKind::Optional(inner) => inner,
+            _ => scrut,
+        };
+        let TyKind::Enum(e) = *self.types.kind(inner) else { return None };
+        let variants: Vec<String> =
+            self.types.enum_def(e).variants.iter().map(|v| v.name.clone()).collect();
+        for (arm, checked) in m.arms.iter().zip(arms).take(before) {
+            let ast::Pattern::Binding(name) = &arm.pattern else { continue };
+            // Only a name written like a variant — capitalised — is taken for
+            // one that was misspelled; `other` and `x` mean what they say.
+            if checked.guard.is_some() || !name.name.starts_with(char::is_uppercase) {
+                continue;
+            }
+            let close = variants.iter().find(|v| {
+                v.starts_with(name.name.as_str())
+                    || name.name.starts_with(v.as_str())
+                    || edit_distance(&name.name.to_lowercase(), &v.to_lowercase()) <= 2
+            });
+            if let Some(v) = close {
+                return Some((name.span, name.name.clone(), v.clone()));
+            }
+        }
+        None
     }
 
     // ---- structs ----------------------------------------------------------
@@ -7107,6 +9867,16 @@ impl<'a> Checker<'a> {
 
         let struct_ty = self.types.struct_ty(sid);
         let field_count = self.types.struct_def(sid).fields.len();
+        // A bound on the declaration's parameters holds for every value that
+        // is built, which is here: `struct Holder<T: Show>` is a promise that
+        // a `Holder`'s `T` can be shown, and a body relying on it would call
+        // `show` on whatever was put in if nothing kept the promise.
+        self.check_type_bounds(ti, struct_ty, lit.span);
+
+        // A struct with a private field can only be built where the field
+        // can be named — `..base` included, which would copy a value its
+        // author meant nobody outside to be able to forge or alter.
+        self.check_constructible(sid, lit.path.span);
 
         // `Point{ ..p, y: 5.0 }` starts from an existing value.
         let base = lit.base.as_ref().map(|b| self.expr(b, Some(struct_ty)));
@@ -7290,6 +10060,7 @@ impl<'a> Checker<'a> {
 
         match self.types.struct_def(sid).field(&name.name).map(|(i, f)| (i, f.ty)) {
             Some((index, ty)) => {
+                self.check_field_visible(sid, index, name.span);
                 // The third of the family the editor could not describe, and
                 // for the same reason: a field is found through the receiver's
                 // type, which only the checker has.
@@ -7318,7 +10089,10 @@ impl<'a> Checker<'a> {
                     format!("`{}` has no field `{}`", sname, name.name),
                 )
                 .with_primary(name.span, "no such field");
-                if self.resolved.method_on(0, &name.name).is_some() {
+                if self
+                    .type_index_of(obj.ty)
+                    .is_some_and(|ti| self.resolved.method_on(ti, &name.name).is_some())
+                {
                     d = d.with_note("this is a method; call it with `()`");
                 }
                 d = d.with_note(if known.is_empty() {
@@ -7370,6 +10144,9 @@ impl<'a> Checker<'a> {
             );
             return None;
         };
+        if !self.check_field_visible(sid, index, name.span) {
+            return None;
+        }
 
         if !mutable {
             let sname = self.types.struct_def(sid).name.clone();
@@ -7398,35 +10175,38 @@ impl<'a> Checker<'a> {
         // `self` receiver promises the caller nothing was modified, and
         // honouring the field's `var` while ignoring the receiver's would let
         // it be modified anyway.
-        self.require_mutable_base(base);
+        let _ = self.require_mutable_base(base);
 
         let value = self.expr(&a.value, Some(ty));
-        let value = match a.op.to_binary() {
-            None => {
-                let value = self.coerce(value, Some(ty));
-                self.expect_ty(value.ty, ty, value.span, Some(decl_span));
-                value
-            }
-            Some(binop) => {
-                let current = hir::Expr {
-                    kind: ExprKind::FieldGet {
-                        base: Box::new(self.expr(base, None)),
-                        index: index as u32,
-                    },
-                    ty,
-                    span,
-                };
-                self.binary(binop, current, value, a.span)
-            }
+        let Some(binop) = a.op.to_binary() else {
+            let value = self.coerce(value, Some(ty));
+            self.expect_ty(value.ty, ty, value.span, Some(decl_span));
+            return Some((
+                hir::Stmt::SetField { base: obj, index: index as u32, value, span: a.span },
+                Flow::Falls,
+            ));
         };
-
+        // `make().n += 1` reads and writes one field of one struct, so the
+        // struct is worked out once, into a hidden local both sides use —
+        // a struct is a reference, so the write lands in the same one.
+        // Checking the base twice called `make` twice.
+        let holder = self.synthetic_local("base", obj.ty, span);
+        let read = hir::Expr { kind: ExprKind::Local(hir::LocalId(holder)), ty: obj.ty, span: obj.span };
+        let current = hir::Expr {
+            kind: ExprKind::FieldGet { base: Box::new(read.clone()), index: index as u32 },
+            ty,
+            span,
+        };
+        let sum = self.binary(binop, current, value, a.span);
+        let sum = self.coerce(sum, Some(ty));
+        self.expect_ty(sum.ty, ty, sum.span, Some(decl_span));
         Some((
-            hir::Stmt::SetField {
-                base: obj,
-                index: index as u32,
-                value,
-                span: a.span,
-            },
+            hir::Stmt::Block(hir::Block {
+                stmts: vec![
+                    hir::Stmt::Let { local: hir::LocalId(holder), init: Some(obj), span },
+                    hir::Stmt::SetField { base: read, index: index as u32, value: sum, span: a.span },
+                ],
+            }),
             Flow::Falls,
         ))
     }
@@ -7437,42 +10217,80 @@ impl<'a> Checker<'a> {
         then: &ast::Block,
         else_: &ast::ElseBranch,
         span: Span,
+        expected: Option<TyId>,
     ) -> hir::Expr {
         // An inline `if` narrows an optional exactly as the statement form
-        // does, which is why no `?.` or `??` operator is needed.
+        // does, which is why no `?.` or `??` operator is needed — and a test
+        // of an error cleans the value it guards in the branch where it is
+        // nil, which is §7.5's own `if err != nil { 8080 } else { port }`.
         let narrowing = self.nil_test(cond);
         let tested = self.error_tested_by(cond);
         let c = self.condition(cond);
 
-        let narrowed = self.apply_narrowing(narrowing, true);
-        let present = self.apply_error_nonnil(tested, true);
-        let t = self.block_value(then);
-        self.undo_narrowing(narrowed);
-        self.undo_error_nonnil(present);
+        // The branches are alternatives, joined afterwards, exactly as the
+        // statement form's are: a branch is one expression, but a `match` in
+        // it can hold statements, and what they do happens on one side only.
+        let entry = self.flow_state();
+        self.enter_branch(narrowing, tested, true);
+        // The type the context wants steers both branches, as it does a
+        // `let`'s initialiser — `let x: Option<int> = if c { 5 } else { nil }`
+        // has no other place to learn what the `nil` is. Failing that, the
+        // first branch steers the second, as the first arm of a `match` does.
+        let t = self.block_value(then, expected);
+        let t = self.coerce(t, expected);
+        let then_exit = self.flow_state();
+        self.set_flow_state(entry);
 
+        self.enter_branch(narrowing, tested, false);
+        let want = expected.or((!self.types.is_poisoned(t.ty)).then_some(t.ty));
         let e = match else_ {
-            ast::ElseBranch::Block(b) => {
-                let narrowed = self.apply_narrowing(narrowing, false);
-                let present = self.apply_error_nonnil(tested, false);
-                let v = self.block_value(b);
-                self.undo_narrowing(narrowed);
-                self.undo_error_nonnil(present);
-                v
-            }
-            ast::ElseBranch::If(nested) => {
-                let Some(inner_else) = nested.else_.as_deref() else {
-                    return self.lit(ExprKind::Error, TyId::ERROR, span);
-                };
-                self.if_expr(&nested.cond, &nested.then, inner_else, nested.span)
-            }
+            ast::ElseBranch::Block(b) => self.block_value(b, want),
+            ast::ElseBranch::If(nested) => match nested.else_.as_deref() {
+                Some(inner_else) => {
+                    self.if_expr(&nested.cond, &nested.then, inner_else, nested.span, want)
+                }
+                // `if a { 1 } else if b { 2 }` has no value when neither test
+                // holds. It used to become an error node with nothing said,
+                // and the program ran with a hole where the value should be.
+                None => {
+                    self.diags.push(
+                        Diagnostic::error(codes::E0200, "an `if` used as a value needs an `else`")
+                            .with_primary(nested.span, "no value when this test is false")
+                            .with_note(
+                                "every path through a value `if` has to produce one: end the \
+                                 chain with `else { … }`",
+                            ),
+                    );
+                    self.lit(ExprKind::Error, TyId::ERROR, nested.span)
+                }
+            },
         };
+        let e = self.coerce(e, want);
+        let else_exit = self.flow_state();
+        let merged = match (t.ty == TyId::NEVER, e.ty == TyId::NEVER) {
+            (true, _) => else_exit,
+            (_, true) => then_exit,
+            (false, false) => self.join_flow(&then_exit, &else_exit),
+        };
+        self.set_flow_state(merged);
 
+        // One branch may need converting to the other's type — an `int` beside
+        // an `Option<int>`, a concrete value beside a `dyn` — and the
+        // conversion has to be in the tree for the backends to lay the two
+        // out alike. Either side may be the one converted.
+        let (t, e) = if t.ty == e.ty || self.types.is_poisoned(t.ty) || self.types.is_poisoned(e.ty) {
+            (t, e)
+        } else {
+            let e = self.coerce(e, Some(t.ty));
+            let t = if e.ty == t.ty { t } else { self.coerce(t, Some(e.ty)) };
+            (t, e)
+        };
         let ty = if t.ty == TyId::NEVER {
             e.ty
         } else if e.ty == TyId::NEVER {
             t.ty
         } else {
-            if !self.types.satisfies(e.ty, t.ty) && !self.types.is_poisoned(t.ty) && !self.types.is_poisoned(e.ty) {
+            if e.ty != t.ty && !self.types.is_poisoned(t.ty) && !self.types.is_poisoned(e.ty) {
                 self.diags.push(
                     Diagnostic::error(codes::E0200, "`if` branches have different types")
                         .with_primary(e.span, format!("this branch is {}", self.types.with_article(e.ty)))
@@ -7480,7 +10298,10 @@ impl<'a> Checker<'a> {
                         .with_note("every branch of a value `if` must produce the same type"),
                 );
             }
-            t.ty
+            // One poisoned branch poisons the whole: its type is unknown, and
+            // taking the other's would let the one mistake be reported again
+            // wherever the value goes.
+            if self.types.is_poisoned(e.ty) { e.ty } else { t.ty }
         };
 
         hir::Expr {
@@ -7492,9 +10313,9 @@ impl<'a> Checker<'a> {
 
     /// A block used for its value must be a single expression. Kite has no
     /// implicit tail expression in statement blocks.
-    fn block_value(&mut self, b: &ast::Block) -> hir::Expr {
+    fn block_value(&mut self, b: &ast::Block, expected: Option<TyId>) -> hir::Expr {
         match b.stmts.as_slice() {
-            [ast::Stmt::Expr(e)] => self.expr(e, None),
+            [ast::Stmt::Expr(e)] => self.expr(e, expected),
             _ => {
                 self.diags.push(
                     Diagnostic::error(codes::E0200, "this block must produce a value")
@@ -7513,6 +10334,9 @@ impl<'a> Checker<'a> {
             return hir::Expr { kind: ExprKind::Error, ty: TyId::ERROR, span };
         }
         let (hop, ty) = match (op, val.ty) {
+            // Negating `int`'s minimum overflows: a trap in a debug build and
+            // a wrap in a release one, like every other overflow.
+            (ast::UnaryOp::Neg, TyId::INT) if self.release => (hir::UnOp::NegIntWrap, TyId::INT),
             (ast::UnaryOp::Neg, TyId::INT) => (hir::UnOp::NegInt, TyId::INT),
             (ast::UnaryOp::Neg, TyId::FLOAT) => (hir::UnOp::NegFloat, TyId::FLOAT),
             (ast::UnaryOp::Not, TyId::BOOL) => (hir::UnOp::Not, TyId::BOOL),
@@ -7552,6 +10376,22 @@ impl<'a> Checker<'a> {
             return hir::Expr { kind: ExprKind::Error, ty: TyId::ERROR, span };
         }
 
+        // Equality is structural for all types (§5.2), and a `T` stands
+        // wherever an `Option<T>` does — so `found == 5` asks whether `found`
+        // is present and five, by comparing two optionals.
+        let optional_of = |types: &Types, outer: TyId, inner: TyId| {
+            matches!(types.kind(outer), TyKind::Optional(t) if *t == inner)
+        };
+        let (l, r) = if matches!(op, B::Eq | B::Ne) && optional_of(self.types, l.ty, r.ty) {
+            let want = l.ty;
+            (l, self.coerce(r, Some(want)))
+        } else if matches!(op, B::Eq | B::Ne) && optional_of(self.types, r.ty, l.ty) {
+            let want = r.ty;
+            (self.coerce(l, Some(want)), r)
+        } else {
+            (l, r)
+        };
+
         if l.ty != r.ty {
             self.mismatched_operands(op, &l, &r, span);
             return hir::Expr { kind: ExprKind::Error, ty: TyId::ERROR, span };
@@ -7579,6 +10419,10 @@ impl<'a> Checker<'a> {
             (B::BitAnd, TyId::INT) => Some((H::BitAnd, TyId::INT)),
             (B::BitOr, TyId::INT) => Some((H::BitOr, TyId::INT)),
             (B::BitXor, TyId::INT) => Some((H::BitXor, TyId::INT)),
+            // A shift count outside `0..=63` traps in a debug build and is
+            // taken modulo 64 in a release one — the overflow rule again.
+            (B::Shl, TyId::INT) if self.release => Some((H::ShlWrap, TyId::INT)),
+            (B::Shr, TyId::INT) if self.release => Some((H::ShrWrap, TyId::INT)),
             (B::Shl, TyId::INT) => Some((H::Shl, TyId::INT)),
             (B::Shr, TyId::INT) => Some((H::Shr, TyId::INT)),
 
@@ -7612,15 +10456,24 @@ impl<'a> Checker<'a> {
             // Aggregates compare structurally, per the specification.
             (B::Eq, _) if self.types.is_equatable(t) => Some((H::EqValue, TyId::BOOL)),
             (B::Ne, _) if self.types.is_equatable(t) => Some((H::NeValue, TyId::BOOL)),
-            // Two values of the same type parameter. `Eq` is derived for
-            // every type structurally, so this holds for whatever the
-            // parameter turns out to be — and monomorphisation has replaced it
-            // with a concrete type long before any backend sees it.
-            (B::Eq, _) if matches!(self.types.kind(t), TyKind::Param { .. }) => {
-                Some((H::EqValue, TyId::BOOL))
-            }
-            (B::Ne, _) if matches!(self.types.kind(t), TyKind::Param { .. }) => {
-                Some((H::NeValue, TyId::BOOL))
+            // Two values of a type mentioning type parameters: a `T`, or an
+            // `Option<T>`, a `[T]`, a `(T, T)`, a `Box<T>`. `Eq` is derived
+            // for every type structurally, so this holds for whatever the
+            // parameters turn out to be — and monomorphisation has replaced
+            // them with concrete types long before any backend sees it.
+            //
+            // Every type but a function, a trait object and a host value, that
+            // is — so the comparison is written down against each parameter
+            // the type mentions, and each call is held to it once every body
+            // has been seen. Only a bare `T` used to be accepted, so
+            // `a == b` on two `Option<T>` was refused although the same
+            // comparison through `fn eq<T>(a: T, b: T)` was not.
+            (B::Eq | B::Ne, _)
+                if self.mentions_param(t)
+                    && equatable_given_params(self.types, t, &mut Vec::new()) =>
+            {
+                self.note_compared(t, span);
+                Some((if op == B::Eq { H::EqValue } else { H::NeValue }, TyId::BOOL))
             }
 
             _ => None,
@@ -7697,8 +10550,8 @@ impl<'a> Checker<'a> {
                 Diagnostic::warning(codes::E0201, "comparing floats for exact equality")
                     .with_primary(span, "floating-point equality is rarely what you want")
                     .with_note(
-                        "compare within a tolerance instead: `abs(a - b) < epsilon`. \
-                         `math.approx_eq` arrives with the standard library in Phase 6",
+                        "compare within a tolerance instead: the prelude's \
+                         `approx_eq(a, b, tolerance)`",
                     ),
             );
         }
@@ -7708,6 +10561,61 @@ impl<'a> Checker<'a> {
             ty,
             span,
         }
+    }
+
+    /// `==` on values whose type is a parameter: the parameter is compared,
+    /// and every caller will be held to it.
+    fn note_compared(&mut self, ty: TyId, span: Span) {
+        let mut params = Vec::new();
+        params_in(self.types, ty, &mut params);
+        if let Some(row) = self.facts.compared.get_mut(self.fn_index) {
+            for p in params {
+                if let Some(slot) = row.get_mut(p as usize) {
+                    slot.get_or_insert(span);
+                }
+            }
+        }
+    }
+
+    /// A generic type standing for a trait, for a bound or as a `dyn`, makes
+    /// every method of its implementation callable without the type being
+    /// named again — `a.same(b)` inside `fn via<Q: Same>` — so what those
+    /// bodies compare of the type's own arguments is held to them here, as
+    /// a direct call on the type holds it. `Box<dyn Show>` passed for a `Q`
+    /// used to reach a `self.v == other.v` that no check had seen.
+    fn note_impl_use(&mut self, ty: TyId, tr: hir::TraitId, span: Span) {
+        let args = self.receiver_args(ty);
+        if args.is_empty() {
+            return;
+        }
+        let (Some(ti), Some(tri)) = (self.type_index_of(ty), self.trait_index_of(tr)) else {
+            return;
+        };
+        for (f, sig) in self.resolved.fns.iter().enumerate() {
+            if !sig.owner.is_some_and(|o| o.type_index == ti && o.trait_index == Some(tri)) {
+                continue;
+            }
+            // The implementing type's arguments come first; the method's own,
+            // if it has any, are not known until it is called.
+            let count = self.sigs[f].generics.len();
+            let mut targs = args.clone();
+            targs.resize(count, TyId::ERROR);
+            self.facts.calls.push(GenericCall { caller: self.fn_index, callee: f, targs, span });
+        }
+    }
+
+    /// A call that chose a generic callee's type arguments, kept to be held
+    /// to whatever the callee's body turns out to compare.
+    fn note_generic_call(&mut self, callee: u32, targs: &[TyId], span: Span) {
+        if targs.is_empty() {
+            return;
+        }
+        self.facts.calls.push(GenericCall {
+            caller: self.fn_index,
+            callee: callee as usize,
+            targs: targs.to_vec(),
+            span,
+        });
     }
 
     /// Whether a value came straight from `crypto`.
@@ -7857,9 +10765,26 @@ impl<'a> Checker<'a> {
         self.resolved.trait_method(type_index, trait_index, "message")
     }
 
+    /// The prelude's `Error` trait, found by name as `error_method` finds it.
+    fn error_trait(&self) -> Option<hir::TraitId> {
+        let trait_index = self.resolved.type_by_name("Error")?;
+        match self.type_ids.get(trait_index as usize)? {
+            Some(TypeTarget::Trait(t)) => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// A type parameter bounded by `Error`, which is an `Error` exactly as a
+    /// bounded parameter is anything its bounds say (§11).
+    fn param_is_error(&self, ty: TyId) -> bool {
+        let TyKind::Param { index, .. } = *self.types.kind(ty) else { return false };
+        let Some(tr) = self.error_trait() else { return false };
+        self.generic_defs.get(index as usize).is_some_and(|d| d.bounds.contains(&tr))
+    }
+
     /// Whether a value of this type may stand where an `error` is wanted.
     fn coerces_to_error(&self, found: TyId) -> bool {
-        found != TyId::ERR && self.error_method(found).is_some()
+        found != TyId::ERR && (self.error_method(found).is_some() || self.param_is_error(found))
     }
 
     /// The "carries nothing" operand, for an error slot with no value or no
@@ -7870,7 +10795,8 @@ impl<'a> Checker<'a> {
     }
 
     /// The run-time identity of a concrete type, as a vtable row would carry
-    /// it. Zero for anything with no tag, which is why zero can mean "carries
+    /// it, or `None` for a type with no tag. `TypeTag::encode` never yields
+    /// zero — structs count from one — which is what lets zero mean "carries
     /// nothing" without colliding with a real type.
     fn type_tag_of(&self, ty: TyId) -> Option<u32> {
         Some(match *self.types.kind(ty) {
@@ -7893,32 +10819,80 @@ impl<'a> Checker<'a> {
             let span = v.span;
             return hir::Expr { span, kind: ExprKind::ToStr { value: Box::new(v) }, ty: TyId::STR };
         }
-        if let Some(show) = self.display_method(v.ty) {
-            let span = v.span;
-            let targs = self.receiver_args(v.ty);
-            return hir::Expr {
-                kind: ExprKind::Call { callee: hir::FnId(show), args: vec![v], targs },
-                ty: TyId::STR,
-                span,
-            };
+        if let Some(shown) = self.show_through_display(v.clone()) {
+            return shown;
         }
         let name = self.types.name(v.ty);
-        self.diags.push(
-            Diagnostic::error(
-                codes::E0207,
-                format!("`{}` has no text form", name),
-            )
+        let mut d = Diagnostic::error(codes::E0207, format!("`{}` has no text form", name))
             .with_primary(v.span, "this cannot be rendered")
             .with_note(
                 "`int`, `float`, `bool` and `str` render themselves. Anything else needs \
                  `Display`",
-            )
-            .with_note(format!(
-                "write `impl Display for {} {{ fn show(self) -> str {{ … }} }}`",
-                name
+            );
+        d = match *self.types.kind(v.ty) {
+            // Neither of these can be given an `impl`: a parameter is known by
+            // its bounds, and a trait object by its trait.
+            TyKind::Param { .. } => d.with_note(format!("add the bound: `{}: Display`", name)),
+            TyKind::Dyn(_) => d.with_note(format!(
+                "{} shows only what its trait declares; call one of its methods, or \
+                 make the trait `Display` itself and hold a `dyn Display`",
+                self.types.with_article(v.ty)
             )),
-        );
+            _ => d.with_note(format!(
+                "write `{} {{ fn show(self) -> str {{ … }} }}`",
+                self.impl_to_write("Display", v.ty)
+            )),
+        };
+        self.diags.push(d);
         hir::Expr { span: v.span, kind: ExprKind::Error, ty: TyId::STR }
+    }
+
+    /// The `Display` trait, found by name as `display_method` finds it.
+    fn display_trait(&self) -> Option<hir::TraitId> {
+        let index = self.resolved.type_by_name("Display")?;
+        match self.type_ids.get(index as usize)? {
+            Some(TypeTarget::Trait(tr)) => Some(*tr),
+            _ => None,
+        }
+    }
+
+    /// A value rendered through its `Display`, if it has one.
+    ///
+    /// A concrete type calls its own `show`. A `dyn Display`, and a type
+    /// parameter bounded by it, have none to name here, so they call through
+    /// the trait — the same dispatch any other method of theirs gets, which
+    /// monomorphisation turns into a direct call for the parameter.
+    fn show_through_display(&mut self, v: hir::Expr) -> Option<hir::Expr> {
+        let tr = self.display_trait()?;
+        let span = v.span;
+        let through_trait = match *self.types.kind(v.ty) {
+            TyKind::Dyn(t) => t == tr,
+            TyKind::Param { .. } => self.type_implements(v.ty, tr),
+            _ => false,
+        };
+        if through_trait {
+            let method = self.types.trait_def(tr).method("show")?.0 as u32;
+            return Some(hir::Expr {
+                kind: ExprKind::CallVirtual { trait_id: tr, method, args: vec![v], targs: Vec::new() },
+                ty: TyId::STR,
+                span,
+            });
+        }
+        if !self.type_implements(v.ty, tr) {
+            return None;
+        }
+        let show = self.display_method(v.ty)?;
+        let targs = self.receiver_args(v.ty);
+        // The call is the compiler's, not the program's, but it runs the same
+        // body `p.show()` would, so it is held to what that body compares as
+        // a written call is. `io.print(Box{ v: f })` otherwise reached a
+        // `self.v == self.v` on a function that `Box{ v: f }.show()` refused.
+        self.note_generic_call(show, &targs, span);
+        Some(hir::Expr {
+            kind: ExprKind::Call { callee: hir::FnId(show), args: vec![v], targs },
+            ty: TyId::STR,
+            span,
+        })
     }
 
     fn string_value(&mut self, span: Span) -> String {
@@ -7953,7 +10927,8 @@ impl<'a> Checker<'a> {
         if e.ty == want || self.types.is_poisoned(e.ty) {
             return e;
         }
-        match *self.types.kind(want) {
+        let kind = self.types.kind(want).clone();
+        match kind {
             TyKind::Optional(inner) if inner == e.ty => hir::Expr {
                 span: e.span,
                 kind: ExprKind::Wrap { value: Box::new(e) },
@@ -7961,11 +10936,14 @@ impl<'a> Checker<'a> {
             },
             // A concrete value becoming a trait object. Nothing about the value
             // changes; the node records that dispatch is now dynamic.
-            TyKind::Dyn(tr) if self.coerces_to_dyn(e.ty, want) => hir::Expr {
-                span: e.span,
-                kind: ExprKind::ToDyn { value: Box::new(e), trait_id: tr },
-                ty: want,
-            },
+            TyKind::Dyn(tr) if self.coerces_to_dyn(e.ty, want) => {
+                self.note_impl_use(e.ty, tr, e.span);
+                hir::Expr {
+                    span: e.span,
+                    kind: ExprKind::ToDyn { value: Box::new(e), trait_id: tr },
+                    ty: want,
+                }
+            }
             // A value implementing `Error`, standing where an `error` is
             // wanted. The `message` call is inserted **here**, at the point of
             // conversion, so it is an ordinary call in the IR that every
@@ -7980,18 +10958,37 @@ impl<'a> Checker<'a> {
             // than matching on the text.
             TyKind::Err if self.coerces_to_error(e.ty) => {
                 let span = e.span;
-                let message = self.error_method(e.ty).expect("checked");
-                let targs = self.receiver_args(e.ty);
                 let tag = self.type_tag_of(e.ty).unwrap_or(0);
                 // The value is read twice — once to render it, once to keep it
                 // — so it goes into a local first. Rendering may run arbitrary
                 // Kite, and evaluating the operand twice would run it twice.
                 let carried = e.clone();
-                let rendered = hir::Expr {
-                    kind: ExprKind::Call { callee: hir::FnId(message), args: vec![e], targs },
-                    ty: TyId::STR,
-                    span,
+                let call = match self.error_method(e.ty) {
+                    Some(message) => {
+                        let targs = self.receiver_args(e.ty);
+                        // Held to what `message` compares, as `w.message()`
+                        // written out would be: the conversion runs that body
+                        // with the value's own type arguments.
+                        self.note_generic_call(message, &targs, span);
+                        ExprKind::Call { callee: hir::FnId(message), args: vec![e], targs }
+                    }
+                    // A parameter bounded by `Error` has no `message` of its
+                    // own until it is specialised: the call goes through the
+                    // bound, and monomorphisation makes it the concrete
+                    // type's, and gives the tag (zero here) the concrete
+                    // type's too.
+                    None => {
+                        let tr = self.error_trait().expect("the parameter's bound");
+                        let method = self.types.trait_def(tr).method("message").map(|(i, _)| i);
+                        ExprKind::CallVirtual {
+                            trait_id: tr,
+                            method: method.expect("`Error` declares `message`") as u32,
+                            args: vec![e],
+                            targs: Vec::new(),
+                        }
+                    }
                 };
+                let rendered = hir::Expr { kind: call, ty: TyId::STR, span };
                 hir::Expr {
                     kind: ExprKind::ErrorNew {
                         message: Box::new(rendered),
@@ -8011,8 +11008,45 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A value standing where a `want` is required: converted, then checked.
+    ///
+    /// The two halves belong together. A value that is acceptable only
+    /// because of a conversion — a `T` into an `Option<T>`, a concrete type
+    /// into a `dyn Trait` or an `error` — is acceptable only *once converted*,
+    /// and a site that checked it without converting it handed a bare `int`
+    /// to a slot the backends lay out as a boxed optional: the VM shrugged,
+    /// native code crashed, and the Wasm module did not validate. Every site
+    /// that takes a value goes through here so that cannot be forgotten.
+    fn accept(&mut self, e: hir::Expr, want: TyId, because: Option<Span>) -> hir::Expr {
+        let e = self.coerce(e, Some(want));
+        self.expect_ty(e.ty, want, e.span, because);
+        e
+    }
+
+    /// Report a value whose type is not the one required.
+    ///
+    /// Strict: the conversions are [`Self::coerce`]'s job, and a value that
+    /// needed one and did not get it is a mismatch here rather than something
+    /// waved through for the backends to disagree about. Only poison and
+    /// `!` — which never produce a value — stand in for anything.
     fn expect_ty(&mut self, found: TyId, expected: TyId, span: Span, because: Option<Span>) {
-        if self.types.satisfies(found, expected) || self.coerces_to_dyn(found, expected) {
+        if found == expected || self.types.is_poisoned(found) || self.types.is_poisoned(expected) {
+            return;
+        }
+        // A type built around one that was already reported — `[Foo]` where
+        // `Foo` does not exist — is as poisoned as the bare error, and
+        // comparing it would print `expected [<error>]` for the mistake that
+        // was reported where `Foo` was written.
+        if self.mentions_error(found) || self.mentions_error(expected) {
+            return;
+        }
+        // A `(T, error)` written as a type is a tuple, and a fallible call's
+        // result is a pair, which prints the same. The message both would
+        // give, "expected `(int, error)`, found `(int, error)`", named no
+        // difference at all; this one names it and says what to write.
+        let pair = |t: TyId| self.types.fallible_value(t).is_some();
+        if pair(found) != pair(expected) && self.types.name(found) == self.types.name(expected) {
+            self.pair_is_not_a_tuple(found, expected, span, because);
             return;
         }
         let mut d = Diagnostic::error(
@@ -8028,9 +11062,10 @@ impl<'a> Checker<'a> {
             if self.type_index_of(found).is_some() {
                 let (tn, fname) =
                     (self.types.trait_def(tr).name.clone(), self.types.name(found));
+                let header = self.impl_to_write(&tn, found);
                 d = d.with_note(format!(
-                    "`{}` does not implement `{}`; write `impl {} for {}` to use it here",
-                    fname, tn, tn, fname
+                    "`{}` does not implement `{}`; write `{}` to use it here",
+                    fname, tn, header
                 ));
             }
         }
@@ -8038,11 +11073,10 @@ impl<'a> Checker<'a> {
         // slot is almost always a type that meant to be an error and has not
         // said so yet.
         if expected == TyId::ERR && self.type_index_of(found).is_some() {
-            let name = self.types.name(found);
             d = d.with_note(format!(
                 "a type may stand here once it implements `Error`: write \
-                 `impl Error for {} {{ fn message(self) -> str {{ … }} }}`",
-                name
+                 `{} {{ fn message(self) -> str {{ … }} }}`",
+                self.impl_to_write("Error", found)
             ));
             d = d.with_note("or build one from text with `errors.new(\"…\")`");
         }
@@ -8053,6 +11087,64 @@ impl<'a> Checker<'a> {
             ));
         }
         self.diags.push(d);
+    }
+
+    /// A fallible call's result where a written `(T, error)` is wanted, or
+    /// the other way round. The result is a pair whose value exists only once
+    /// its error is known to be nil (§7.3), and a tuple would let the value be
+    /// read without that, so neither becomes the other: a result is taken
+    /// apart, or bound whole under a name the checker follows (R7).
+    fn pair_is_not_a_tuple(&mut self, found: TyId, expected: TyId, span: Span, because: Option<Span>) {
+        let name = self.types.name(found);
+        let to_tuple = self.types.fallible_value(found).is_some();
+        let (headline, primary, required) = if to_tuple {
+            (
+                format!("expected the tuple `{}`, found the result of a fallible call", name),
+                "this is a result whose error has to be checked, not a tuple",
+                format!("a tuple `{}` required here", name),
+            )
+        } else {
+            (
+                format!("expected the result of a fallible call, found the tuple `{}`", name),
+                "this is a tuple, not a result",
+                format!("the result of a fallible call `{}` required here", self.types.name(expected)),
+            )
+        };
+        let mut d = Diagnostic::error(codes::E0200, headline).with_primary(span, primary);
+        if let Some(b) = because {
+            d = d.with_secondary(b, required);
+        }
+        d = d.with_note(format!(
+            "`{}` written as a type is a plain tuple, and the result of a fallible call is \
+             not one: neither becomes the other",
+            name
+        ));
+        d = if to_tuple {
+            d.with_note(
+                "take the result apart where it is made, `let (value, err) = …`, or bind it \
+                 whole without writing its type, `let p = …`",
+            )
+        } else {
+            d.with_note(
+                "a binding holding a whole result takes only another result; to keep the \
+                 tuple's parts, give them a binding of their own",
+            )
+        };
+        self.diags.push(d);
+    }
+
+    /// Whether a type is, or is built from, one that failed to check.
+    fn mentions_error(&self, ty: TyId) -> bool {
+        match self.types.kind(ty) {
+            _ if ty == TyId::ERROR => true,
+            TyKind::Slice(e) | TyKind::Optional(e) | TyKind::Fallible(e) => self.mentions_error(*e),
+            TyKind::Map(k, v) => self.mentions_error(*k) || self.mentions_error(*v),
+            TyKind::Tuple(es) => es.iter().any(|e| self.mentions_error(*e)),
+            TyKind::Fn { params, ret } => {
+                params.iter().any(|p| self.mentions_error(*p)) || self.mentions_error(*ret)
+            }
+            _ => false,
+        }
     }
 
     fn arity_error(
@@ -8114,22 +11206,52 @@ impl<'a> Checker<'a> {
                 .with_note("wrap it in a closure, which names the types it works on"),
         );
     }
+}
 
-    fn not_yet(&mut self, span: Span, what: &str, when: &str) {
-        self.diags.push(
-            Diagnostic::error(codes::E0200, format!("{} is not implemented yet", what))
-                .with_primary(span, "not supported by this compiler version")
-                .with_note(when.to_string()),
-        );
+/// Whether a checked pattern matches `nil`.
+///
+/// Read off the checked pattern rather than the surface one, because only the
+/// checker knows what a bare name is: `A` against an `Option<E>` names the
+/// variant, which is never nil, while the surface form is indistinguishable
+/// from a binding that catches everything. Deciding from the surface let a
+/// later arm bind the unwrapped `E` from a scrutinee that was still `nil`.
+fn covers_nil(p: &hir::Pattern) -> bool {
+    match p {
+        hir::Pattern::Nil | hir::Pattern::Wildcard | hir::Pattern::Binding { .. } => true,
+        hir::Pattern::Or(alts) => alts.iter().any(covers_nil),
+        _ => false,
     }
 }
 
-/// Whether a surface pattern matches `nil`.
-fn covers_nil(p: &ast::Pattern) -> bool {
+/// The locals a checked pattern binds, in the order they appear.
+///
+/// An alternation is read through its first alternative: the checker has
+/// already required every alternative to bind the same names.
+fn pattern_bindings(p: &hir::Pattern, out: &mut Vec<u32>) {
     match p {
-        ast::Pattern::Nil(_) | ast::Pattern::Wildcard(_) | ast::Pattern::Binding(_) => true,
-        ast::Pattern::Or { alts, .. } => alts.iter().any(covers_nil),
-        _ => false,
+        hir::Pattern::Binding { local, .. } => out.push(local.0),
+        hir::Pattern::Variant { fields, .. } | hir::Pattern::Tuple { elems: fields, .. } => {
+            for f in fields {
+                pattern_bindings(f, out);
+            }
+        }
+        hir::Pattern::Struct { fields, .. } => {
+            for (_, f) in fields {
+                pattern_bindings(f, out);
+            }
+        }
+        hir::Pattern::Or(alts) => {
+            if let Some(first) = alts.first() {
+                pattern_bindings(first, out);
+            }
+        }
+        hir::Pattern::Wildcard
+        | hir::Pattern::Int(_)
+        | hir::Pattern::Float(_)
+        | hir::Pattern::Str(_)
+        | hir::Pattern::Bool(_)
+        | hir::Pattern::IntRange { .. }
+        | hir::Pattern::Nil => {}
     }
 }
 
@@ -8143,26 +11265,41 @@ fn short_circuit(op: ast::BinaryOp) -> Option<hir::BinOp> {
 
 /// Verify every `impl Trait for Type` block: the trait is implemented once,
 /// every required method is present, and each signature matches.
+///
+/// Returns which block implements each trait for each type — `(type index,
+/// trait index)` to item index — because a block's own bounds are part of
+/// whether a generic type implements the trait at all.
 fn check_impls(
     file: &ast::SourceFile,
     resolved: &ResolveMap,
     type_ids: &[Option<TypeTarget>],
-    types: &Types,
+    types: &mut Types,
     sigs: &[Signature],
+    trait_method_generics: &std::collections::HashMap<(hir::TraitId, usize), Vec<GenericDef>>,
     diags: &mut DiagBag,
-) {
+) -> std::collections::HashMap<(u32, u32), usize> {
     // (trait index, type index) -> the span that first claimed it. Exactly one
     // implementation per pair is what makes trait resolution decidable.
     let mut claimed: std::collections::HashMap<(u32, u32), Span> =
         std::collections::HashMap::new();
+    let mut blocks: std::collections::HashMap<(u32, u32), usize> =
+        std::collections::HashMap::new();
 
-    for item in &file.items {
+    for (item_index, item) in file.items.iter().enumerate() {
         let ast::Item::Impl(imp) = item else { continue };
         let Some(tp) = &imp.trait_path else { continue };
 
+        // Both names mean what they mean where the `impl` is written — which
+        // is how the resolver registered its methods. Looking them up from
+        // the root instead found nothing for an `impl` inside any module, and
+        // an implementation nothing checked was one a `dyn` call could reach
+        // with the wrong signature.
+        let module = resolved.module_of_item(item_index);
+        // A header naming an alias of a plain struct or enum is for that type,
+        // as the resolver registered it.
         let (Some(ti), Some(target)) = (
-            resolved.type_by_name(tp.name()),
-            resolved.type_by_name(imp.self_ty.name()),
+            resolved.type_by_name_in(module, &tp.text()),
+            resolved.type_by_name_in(module, &imp.self_ty.text()).and_then(|t| resolved.aliased_type(file, t)),
         ) else {
             continue;
         };
@@ -8190,6 +11327,7 @@ fn check_impls(
             continue;
         }
         claimed.insert((ti, target), imp.span);
+        blocks.insert((target, ti), item_index);
 
         let def = types.trait_def(tid);
 
@@ -8225,7 +11363,8 @@ fn check_impls(
 
         // Every provided method must belong to the trait, and match its shape.
         for m in &imp.methods {
-            let Some((_, decl)) = def.method(&m.name.name) else {
+            let def = types.trait_def(tid);
+            let Some((di, decl)) = def.method(&m.name.name) else {
                 diags.push(
                     Diagnostic::error(
                         codes::E0200,
@@ -8239,6 +11378,14 @@ fn check_impls(
                 );
                 continue;
             };
+            let (decl_params, decl_ret, decl_fallible, decl_span, decl_generics, decl_async) = (
+                decl.params.clone(),
+                decl.ret,
+                decl.fallible,
+                decl.span,
+                decl.generic_count,
+                decl.is_async,
+            );
 
             if decl.takes_self != m.self_param.is_some() {
                 diags.push(
@@ -8251,11 +11398,64 @@ fn check_impls(
                     } else {
                         "the trait declares this without `self`"
                     })
-                    .with_secondary(decl.span, "declared here"),
+                    .with_secondary(decl_span, "declared here"),
+                );
+            } else if decl.takes_self
+                && decl.var_self != m.self_param.as_ref().is_some_and(|s| s.is_var)
+            {
+                // A caller reaching the method through the trait — a `dyn`, or
+                // a bound — sees the trait's receiver and nothing else. An
+                // implementation that quietly took `var self` would modify a
+                // value its caller holds in a `let`, which is the change the
+                // rule exists to keep visible at the call site; one that took
+                // plain `self` where the trait promised `var self` would be
+                // refusing a permission every caller already paid for.
+                diags.push(
+                    Diagnostic::error(
+                        codes::E0200,
+                        format!("`{}` has the wrong receiver", m.name.name),
+                    )
+                    .with_primary(
+                        m.sig_span,
+                        if decl.var_self {
+                            "the trait declares this with `var self`"
+                        } else {
+                            "the trait declares this with `self`, which may not modify it"
+                        },
+                    )
+                    .with_secondary(decl_span, "declared here")
+                    .with_note(
+                        "whether a method may modify its receiver is part of the signature \
+                         every caller through the trait relies on, so the two must agree",
+                    ),
                 );
             }
 
-            if decl.params.len() != m.params.len() {
+            // A caller through the trait is typed from the declaration, so an
+            // implementation that returned a task where the trait promised a
+            // value, or the reverse, would hand it the wrong kind of thing.
+            if decl.is_async != m.is_async {
+                diags.push(
+                    Diagnostic::error(
+                        codes::E0200,
+                        format!(
+                            "`{}` is {}`async`, but the trait declares it {}`async`",
+                            m.name.name,
+                            if m.is_async { "" } else { "not " },
+                            if decl.is_async { "" } else { "not " },
+                        ),
+                    )
+                    .with_primary(m.sig_span, "signature does not match")
+                    .with_secondary(decl_span, "declared here")
+                    .with_note(
+                        "calling an `async fn` yields a `Task`, so whether a method is \
+                         `async` is part of the signature every caller through the trait \
+                         relies on",
+                    ),
+                );
+            }
+
+            if decl_params.len() != m.params.len() {
                 diags.push(
                     Diagnostic::error(
                         codes::E0113,
@@ -8264,11 +11464,28 @@ fn check_impls(
                             m.name.name,
                             m.params.len(),
                             if m.params.len() == 1 { "" } else { "s" },
-                            decl.params.len()
+                            decl_params.len()
                         ),
                     )
                     .with_primary(m.sig_span, "signature does not match")
-                    .with_secondary(decl.span, "declared here"),
+                    .with_secondary(decl_span, "declared here"),
+                );
+                continue;
+            }
+            if decl_generics != m.generics.len() {
+                diags.push(
+                    Diagnostic::error(
+                        codes::E0208,
+                        format!(
+                            "`{}` has {} type parameter{}, but the trait declares {}",
+                            m.name.name,
+                            m.generics.len(),
+                            if m.generics.len() == 1 { "" } else { "s" },
+                            decl_generics
+                        ),
+                    )
+                    .with_primary(m.sig_span, "signature does not match")
+                    .with_secondary(decl_span, "declared here"),
                 );
                 continue;
             }
@@ -8283,7 +11500,64 @@ fn check_impls(
             };
             let sig = &sigs[fi as usize];
 
-            for (i, (&want, &got)) in decl.params.iter().zip(sig.params.iter()).enumerate() {
+            // The declaration speaks of `Self` and of its own type parameters;
+            // the implementation, of its type and of its parameters. Those are
+            // the same things by position, so the declaration is translated
+            // before the two are compared.
+            let block = sig.generics.len().saturating_sub(m.generics.len());
+            let own: Vec<TyId> = sig.generics[..block].iter().map(|g| g.ty).collect();
+            let implementing = match type_ids[target as usize] {
+                Some(TypeTarget::Struct(s)) if !own.is_empty() => {
+                    let id = types.instantiate_struct(s, &own);
+                    types.struct_ty(id)
+                }
+                Some(TypeTarget::Enum(e)) if !own.is_empty() => {
+                    let id = types.instantiate_enum(e, &own);
+                    types.enum_ty(id)
+                }
+                other => named_ty(other, types),
+            };
+            let mut map = vec![(types.self_param(), implementing)];
+            if let Some(declared) = trait_method_generics.get(&(tid, di)) {
+                for (d, g) in declared.iter().zip(&sig.generics[block..]) {
+                    map.push((d.ty, g.ty));
+                    // A caller through a bound is checked against the trait's
+                    // bounds, and monomorphisation then hands its arguments
+                    // to this body. A bound the trait does not state is one
+                    // no such caller was held to: `u.show()` on an `int` ran
+                    // on every backend. A weaker one asks nothing of them.
+                    for b in &g.bounds {
+                        if d.bounds.contains(b) {
+                            continue;
+                        }
+                        let bound = types.trait_def(*b).name.clone();
+                        diags.push(
+                            Diagnostic::error(
+                                codes::E0208,
+                                format!(
+                                    "`{}` requires its `{}` to be `{}`, but the trait does not",
+                                    m.name.name,
+                                    g.name,
+                                    last_segment(&bound)
+                                ),
+                            )
+                            .with_primary(g.span, "a bound the trait does not declare")
+                            .with_secondary(d.span, format!("the trait declares `{}` here", d.name))
+                            .with_note(
+                                "a call through the trait is checked against the trait's \
+                                 bounds, so an implementation may ask no more of a type \
+                                 parameter than they do; add the bound to the trait's \
+                                 method instead",
+                            ),
+                        );
+                    }
+                }
+            }
+            let decl_params: Vec<TyId> =
+                decl_params.iter().map(|p| replace_types(types, *p, &map)).collect();
+            let decl_ret = replace_types(types, decl_ret, &map);
+
+            for (i, (&want, &got)) in decl_params.iter().zip(sig.params.iter()).enumerate() {
                 if want == got || types.is_poisoned(want) || types.is_poisoned(got) {
                     continue;
                 }
@@ -8299,7 +11573,7 @@ fn check_impls(
                         ),
                     )
                     .with_primary(span, format!("this is {}", types.with_article(got)))
-                    .with_secondary(decl.span, "declared here")
+                    .with_secondary(decl_span, "declared here")
                     .with_note(
                         "a call through `dyn Trait` is checked against the trait, so an \
                          implementation that takes something else would receive a value of \
@@ -8308,13 +11582,25 @@ fn check_impls(
                 );
             }
 
+            // The declaration's `ret` is what a call yields; an `async`
+            // method's own signature is the value its body returns, whose task
+            // the call yields, so the two are compared inside the task.
+            let decl_ret = match types.task_payload(decl_ret) {
+                Some(value) if decl_async => value,
+                _ => decl_ret,
+            };
+            let decl_ret = if decl_fallible {
+                types.fallible_value(decl_ret).unwrap_or(decl_ret)
+            } else {
+                decl_ret
+            };
             let got_ret = if sig.fallible {
                 types.fallible_value(sig.ret).unwrap_or(sig.ret)
             } else {
                 sig.ret
             };
             let ret_span = m.ret.as_ref().map_or(m.sig_span, |r| r.span());
-            if sig.fallible != decl.fallible {
+            if sig.fallible != decl_fallible {
                 diags.push(
                     Diagnostic::error(
                         codes::E0200,
@@ -8322,19 +11608,19 @@ fn check_impls(
                             "`{}` {} an error, but the trait declares it {}",
                             m.name.name,
                             if sig.fallible { "returns" } else { "does not return" },
-                            if decl.fallible { "fallible" } else { "infallible" },
+                            if decl_fallible { "fallible" } else { "infallible" },
                         ),
                     )
                     .with_primary(ret_span, "fallibility does not match")
-                    .with_secondary(decl.span, "declared here")
+                    .with_secondary(decl_span, "declared here")
                     .with_note(
                         "whether a call can fail is part of the signature every caller sees, \
                          so the trait and its implementations must agree",
                     ),
                 );
-            } else if got_ret != decl.ret
+            } else if got_ret != decl_ret
                 && !types.is_poisoned(got_ret)
-                && !types.is_poisoned(decl.ret)
+                && !types.is_poisoned(decl_ret)
             {
                 diags.push(
                     Diagnostic::error(
@@ -8343,43 +11629,210 @@ fn check_impls(
                             "`{}` returns {}, but the trait declares {}",
                             m.name.name,
                             types.with_article(got_ret),
-                            types.with_article(decl.ret)
+                            types.with_article(decl_ret)
                         ),
                     )
                     .with_primary(ret_span, format!("this is {}", types.with_article(got_ret)))
-                    .with_secondary(decl.span, "declared here"),
+                    .with_secondary(decl_span, "declared here"),
                 );
             }
         }
     }
+    blocks
 }
 
-/// The arena type for a declared name.
-/// A trait is usable as an object only when every method dispatches on a
-/// receiver. A method without `self` has no value to dispatch from, so a trait
-/// object could never supply one — the rule belongs at every place a `dyn` is
-/// written, which is why it lives beside type resolution rather than in one
-/// caller.
+/// A diagnostic as far as saying it twice goes: its code, its message and
+/// where it points.
+type DiagKey = (Option<&'static str>, String, Option<Span>);
+
+/// Drop what a default method's copy reported after `from` that an earlier
+/// copy of the same method reported already, and remember the rest. A
+/// mistake that depends on the implementing type — `self.x` where one `impl`
+/// is for a type without an `x` — reads differently for each, and is kept.
+fn keep_first_reports(
+    diags: &mut DiagBag,
+    from: usize,
+    seen: &mut std::collections::HashSet<DiagKey>,
+) {
+    let all = diags.take();
+    for (i, d) in all.into_iter().enumerate() {
+        let key = (d.code.map(|c| c.0), d.message.clone(), d.primary_span());
+        if i < from || seen.insert(key) {
+            diags.push(d);
+        }
+    }
+}
+
+/// An `impl` is for its type at the block's own parameters, in order:
+/// `impl<A, B> Named for Pair<A, B>`, or a type without any.
+///
+/// The type arguments of a header were never read. `impl Named for Pair<int,
+/// str>` was taken as `impl Named for Pair`: its bodies were typed with the
+/// declaration's `A` and `B`, it applied to a `Pair<str, int>` too, a second
+/// one for `Pair<str, int>` was "implemented more than once", and on Wasm
+/// every call was an invalid module. `impl<X, Y> Named for Pair<Y, X>` read
+/// `self.a` as an `X`. Until a header's arguments mean what they say, one
+/// that says anything else is refused; the blocks refused are returned.
+///
+/// A generic type written with no arguments at all is read as the block's own
+/// parameters, `impl<T> Named for Box` as `impl<T> Named for Box<T>`, and so
+/// is accepted only when the block declares one for each of the type's.
+/// `impl Named for Box` declares none: its bodies were typed against the
+/// declaration's `T`, which the block does not have, and Wasm refused the
+/// module that came out while the VM and native code ran it.
+fn check_impl_headers(
+    file: &ast::SourceFile,
+    resolved: &ResolveMap,
+    type_ids: &[Option<TypeTarget>],
+    types: &Types,
+    diags: &mut DiagBag,
+) -> Vec<usize> {
+    let mut refused = Vec::new();
+    for (item_index, item) in file.items.iter().enumerate() {
+        let ast::Item::Impl(imp) = item else { continue };
+        let target = &imp.self_ty;
+        let module = resolved.module_of_item(item_index);
+        let Some(written) = resolved.type_by_name_in(module, &target.text()) else { continue };
+        let Some(ti) = resolved.aliased_type(file, written) else { continue };
+        // An alias of one instantiation, `type IntStr = Pair<int, str>`, is
+        // that instantiation's header written out, and is never the block's
+        // own parameters.
+        if resolved.nominal(written) != ti {
+            refused.push(item_index);
+            let generic = resolved.type_decl(ti).name.clone();
+            let params = declared_param_names(file, resolved, ti).join(", ");
+            let header = match &imp.trait_path {
+                Some(tp) => format!("impl<{}> {} for {}<{}>", params, tp.text(), generic, params),
+                None => format!("impl<{}> {}<{}>", params, generic, params),
+            };
+            diags.push(
+                Diagnostic::error(
+                    codes::E0208,
+                    format!("an `impl` is for every `{}`, at its own type parameters", generic),
+                )
+                .with_primary(
+                    target.span,
+                    format!("`{}` is one instantiation of `{}`", target.text(), generic),
+                )
+                .with_note(format!(
+                    "write `{}`, and let a bound on a parameter say which instantiations it covers",
+                    header
+                )),
+            );
+            continue;
+        }
+        let count = match type_ids.get(ti as usize).copied().flatten() {
+            Some(TypeTarget::Struct(s)) => types.struct_def(s).generic_count,
+            Some(TypeTarget::Enum(e)) => types.enum_def(e).generic_count,
+            _ => continue,
+        };
+        let own: Vec<&str> = imp.generics.iter().map(|g| g.name.name.as_str()).collect();
+        let bare = target.args.is_empty();
+        if bare && (count == 0 || own.len() == count) {
+            continue;
+        }
+        let written: Vec<Option<&str>> = target
+            .args
+            .iter()
+            .map(|a| match a {
+                ast::Type::Path(p) if p.is_simple() => Some(p.name()),
+                _ => None,
+            })
+            .collect();
+        let exact = written.len() == count
+            && written.len() == own.len()
+            && written.iter().zip(&own).all(|(w, o)| *w == Some(*o));
+        if exact {
+            continue;
+        }
+        refused.push(item_index);
+        let decl = declared_param_names(file, resolved, ti);
+        let suggested = if decl.len() == count && count > 0 {
+            let params = decl.join(", ");
+            match &imp.trait_path {
+                Some(tp) => format!("impl<{}> {} for {}<{}>", params, tp.text(), target.text(), params),
+                None => format!("impl<{}> {}<{}>", params, target.text(), params),
+            }
+        } else {
+            String::new()
+        };
+        let mut d = Diagnostic::error(
+            codes::E0208,
+            format!("an `impl` is for every `{}`, at its own type parameters", target.text()),
+        );
+        d = if bare {
+            let takes = match count {
+                1 => "one type parameter".to_string(),
+                n => format!("{} type parameters", n),
+            };
+            let declares = match own.len() {
+                0 => "none".to_string(),
+                n => n.to_string(),
+            };
+            d.with_primary(
+                target.span,
+                format!("`{}` takes {}, and this block declares {}", target.text(), takes, declares),
+            )
+            .with_note(
+                "a header without type arguments stands for the type at the block's own \
+                 parameters, so the block must declare one for each of the type's",
+            )
+        } else {
+            d.with_primary(target.span, "these type arguments must be the block's parameters, in order")
+                .with_note(
+                    "an `impl` for one instantiation, or with its parameters reordered, is not \
+                     supported: its methods would be typed as if written for the declaration",
+                )
+        };
+        if !suggested.is_empty() {
+            d = d.with_note(format!(
+                "write `{}`, and let a bound on a parameter say which instantiations it covers",
+                suggested
+            ));
+        }
+        diags.push(d);
+    }
+    refused
+}
+
+/// The names a generic type's declaration gives its parameters.
+fn declared_param_names(file: &ast::SourceFile, resolved: &ResolveMap, ti: u32) -> Vec<String> {
+    let generics = match &file.items[resolved.types[ti as usize].decl_index] {
+        ast::Item::Struct(s) => &s.generics,
+        ast::Item::Enum(e) => &e.generics,
+        _ => return Vec::new(),
+    };
+    generics.iter().map(|g| g.name.name.clone()).collect()
+}
+
+/// A trait is usable as an object only when every method can be called
+/// through one (§10.3): it takes `self`, so there is a value to dispatch on;
+/// it is not generic, so there is one body to call rather than one per type
+/// argument; and it does not mention `Self`, which is a different type behind
+/// every `dyn`. The rule belongs at every place a `dyn` is written, which is
+/// why it lives beside type resolution rather than in one caller.
 fn check_object_safe(tr: kite_hir::TraitId, span: Span, types: &Types, diags: &mut DiagBag) {
     let def = types.trait_def(tr);
-    let offenders: Vec<&str> = def
+    let offenders: Vec<String> = def
         .methods
         .iter()
-        .filter(|m| !m.takes_self)
-        .map(|m| m.name.as_str())
+        .filter_map(|m| types.not_dispatchable(m).map(|why| format!("`{}` {}", m.name, why)))
         .collect();
     if offenders.is_empty() {
         return;
     }
-    diags.push(
-        Diagnostic::error(
-            codes::E0206,
-            format!("`{}` cannot be a trait object", def.name),
-        )
-        .with_primary(span, "this trait has a method that does not take `self`")
-        .with_note(format!("`{}` has no receiver to dispatch on", offenders.join("`, `")))
-        .with_note("give every method a `self` parameter, or take the concrete type"),
-    );
+    let mut d = Diagnostic::error(
+        codes::E0206,
+        format!("`{}` cannot be a trait object", def.name),
+    )
+    .with_primary(span, "not every method of this trait can be called through a `dyn`");
+    for o in offenders {
+        d = d.with_note(o);
+    }
+    diags.push(d.with_note(
+        "take a type parameter bounded by the trait instead — `fn f<T: Trait>(x: T)` — \
+         or move what a `dyn` needs into a trait of its own",
+    ));
 }
 
 fn named_ty(target: Option<TypeTarget>, types: &mut Types) -> TyId {
@@ -8620,9 +12073,11 @@ fn resolve_named_ty(
                 let id = types.task_of(args[0], p.span);
                 return types.struct_ty(id);
             }
-            let target = resolved
-                .type_by_name_in(module, &p.text())
-                .and_then(|i| type_ids[i as usize]);
+            let found = resolved.type_by_name_in(module, &p.text());
+            if let Some(i) = found {
+                check_type_visible(resolved, module, i, p.span, &p.text(), diags);
+            }
+            let target = found.and_then(|i| type_ids[i as usize]);
             match target {
                 Some(TypeTarget::Struct(s)) => {
                     let want = types.struct_def(s).generic_count;
@@ -8665,7 +12120,11 @@ fn resolve_named_ty(
                     return prim;
                 }
             }
-            match resolved.type_by_name_in(module, &p.text()) {
+            let found = resolved.type_by_name_in(module, &p.text());
+            if let Some(i) = found {
+                check_type_visible(resolved, module, i, p.span, &p.text(), diags);
+            }
+            match found {
                 Some(i) => match type_ids[i as usize] {
                     Some(TypeTarget::Trait(_)) => {
                         diags.push(
@@ -8707,6 +12166,7 @@ fn resolve_named_ty(
         ast::Type::Map { key, value, .. } => {
             let k = resolve_named_ty(key, resolved, module, type_ids, generics, types, diags);
             let v = resolve_named_ty(value, resolved, module, type_ids, generics, types, diags);
+            check_map_key(types, k, key.span(), diags);
             types.map_of(k, v)
         }
         ast::Type::Optional { inner, .. } => {
@@ -8733,11 +12193,13 @@ fn resolve_named_ty(
                 Some(r) => resolve_named_ty(r, resolved, module, type_ids, generics, types, diags),
                 None => TyId::UNIT,
             };
+            let r = fallible_form(r, types);
             types.fn_of(ps, r)
         }
         ast::Type::Dyn { path, span } => match resolved.type_by_name_in(module, &path.text()) {
             Some(i) => match type_ids[i as usize] {
                 Some(TypeTarget::Trait(tr)) => {
+                    check_type_visible(resolved, module, i, path.span, &path.text(), diags);
                     check_object_safe(tr, *span, types, diags);
                     types.dyn_ty(tr)
                 }
@@ -8762,6 +12224,61 @@ fn resolve_named_ty(
         },
         other => resolve_ty(other, types, diags),
     }
+}
+
+/// A map compares its keys with `==`, so a key type is one `==` is defined
+/// on: not a function, a trait object or a host value, nor anything holding
+/// one. A type parameter is taken on trust here and held to it by whoever
+/// chooses it. Returns whether the key may be used.
+fn check_map_key(types: &Types, key: TyId, span: Span, diags: &mut DiagBag) -> bool {
+    if types.is_poisoned(key) || equatable_given_params(types, key, &mut Vec::new()) {
+        return true;
+    }
+    let name = types.name(key);
+    let mut d = Diagnostic::error(codes::E0201, format!("`{}` cannot be a map key", name))
+        .with_primary(span, "a map compares its keys with `==`, which this does not have");
+    d = if types.mentions_host_value(key) {
+        d.with_note(
+            "a host object has no structure Kite can see, so there is nothing to compare \
+             field by field; keep a key the host object is known by — an id, a name — instead",
+        )
+    } else {
+        d.with_note(
+            "equality is structural, so every field must itself be equatable; functions and \
+             trait objects are not",
+        )
+    };
+    diags.push(d);
+    false
+}
+
+/// Reject naming another module's private type in a type — a parameter, a
+/// field, an annotation, a bound. The resolver holds expressions to §4.3;
+/// types are resolved here, so they are held to it here.
+fn check_type_visible(
+    resolved: &ResolveMap,
+    module: &str,
+    index: u32,
+    span: Span,
+    written: &str,
+    diags: &mut DiagBag,
+) {
+    let decl = &resolved.types[index as usize];
+    let home = resolved.module_of_item(decl.decl_index);
+    // The root module is the program's own, and the prelude is in scope
+    // everywhere by construction — the same two exemptions the resolver makes.
+    if decl.is_pub || home.is_empty() || home == kite_resolve::PRELUDE || home == module {
+        return;
+    }
+    diags.push(
+        Diagnostic::error(codes::E0401, format!("`{}` is private to module `{}`", written, home))
+            .with_primary(span, "not visible here")
+            .with_secondary(decl.span, format!("this {} is not marked `pub`", decl.kind.describe()))
+            .with_note(
+                "unmarked declarations are visible only within their own module; write `pub` \
+                 to export one",
+            ),
+    );
 }
 
 /// Resolve a surface type to a [`TyId`], interning composite types as it goes.
@@ -8885,6 +12402,205 @@ fn breaks_out(block: &ast::Block, label: Option<&str>) -> bool {
     in_block(block, label, false)
 }
 
+/// `(T, error)` as a function's result: the fallible form, which is what the
+/// same words mean on a declaration's `->`. Anywhere a result is written as a
+/// type — a closure's `->`, a function type's — the tuple is read this way
+/// too, so that a fallible closure, a fallible function used as a value and
+/// the type naming either are all one type.
+fn fallible_form(ty: TyId, types: &mut Types) -> TyId {
+    match types.kind(ty) {
+        TyKind::Tuple(parts) if parts.len() == 2 && parts[1] == TyId::ERR => {
+            let value = parts[0];
+            types.fallible_of(value)
+        }
+        _ => ty,
+    }
+}
+
+/// Call `f` on every statement nested anywhere under `s`, `s` included — in
+/// a branch, a loop, a `match` arm, or an arm of a `match` inside an
+/// expression. A closure's body is only entered when `closures` is set: it is
+/// a function of its own, and most questions asked this way are about one
+/// function.
+fn visit_stmts(s: &ast::Stmt, closures: bool, f: &mut dyn FnMut(&ast::Stmt)) {
+    f(s);
+    let expr = |e: &ast::Expr, f: &mut dyn FnMut(&ast::Stmt)| visit_expr_stmts(e, closures, f);
+    match s {
+        ast::Stmt::Let(l) => {
+            if let Some(e) = &l.init {
+                expr(e, f);
+            }
+        }
+        ast::Stmt::Var(v) => expr(&v.init, f),
+        ast::Stmt::Assign(a) => {
+            expr(&a.target, f);
+            expr(&a.value, f);
+        }
+        ast::Stmt::Return(r) => match &r.value {
+            Some(ast::ReturnValue::Single(e)) | Some(ast::ReturnValue::Fail { error: e, .. }) => {
+                expr(e, f)
+            }
+            Some(ast::ReturnValue::Pair { value, error, .. }) => {
+                expr(value, f);
+                expr(error, f);
+            }
+            None => {}
+        },
+        ast::Stmt::Check { expr: e, .. }
+        | ast::Stmt::Defer { expr: e, .. }
+        | ast::Stmt::Discard { value: e, .. }
+        | ast::Stmt::Expr(e) => expr(e, f),
+        ast::Stmt::If(i) => visit_if_stmts(i, closures, f),
+        ast::Stmt::For(l) => {
+            match &l.header {
+                ast::ForHeader::In { iter, .. } => expr(iter, f),
+                ast::ForHeader::While(c) => expr(c, f),
+                ast::ForHeader::Loop => {}
+            }
+            for s in &l.body.stmts {
+                visit_stmts(s, closures, f);
+            }
+        }
+        ast::Stmt::Match(m) => visit_match_stmts(m, closures, f),
+        ast::Stmt::Break { .. } | ast::Stmt::Continue { .. } | ast::Stmt::Error(_) => {}
+    }
+}
+
+fn visit_if_stmts(i: &ast::IfStmt, closures: bool, f: &mut dyn FnMut(&ast::Stmt)) {
+    visit_expr_stmts(&i.cond, closures, f);
+    for s in &i.then.stmts {
+        visit_stmts(s, closures, f);
+    }
+    match i.else_.as_deref() {
+        Some(ast::ElseBranch::Block(b)) => {
+            for s in &b.stmts {
+                visit_stmts(s, closures, f);
+            }
+        }
+        Some(ast::ElseBranch::If(next)) => visit_if_stmts(next, closures, f),
+        None => {}
+    }
+}
+
+fn visit_match_stmts(m: &ast::MatchExpr, closures: bool, f: &mut dyn FnMut(&ast::Stmt)) {
+    visit_expr_stmts(&m.scrutinee, closures, f);
+    for arm in &m.arms {
+        if let Some(g) = &arm.guard {
+            visit_expr_stmts(g, closures, f);
+        }
+        match &arm.body {
+            ast::MatchBody::Expr(e) => visit_expr_stmts(e, closures, f),
+            ast::MatchBody::Block(b) => {
+                for s in &b.stmts {
+                    visit_stmts(s, closures, f);
+                }
+            }
+        }
+    }
+}
+
+/// The statements inside an expression: those of a `match` arm written as a
+/// block, of the branches of a value `if`, and of a closure when asked.
+fn visit_expr_stmts(e: &ast::Expr, closures: bool, f: &mut dyn FnMut(&ast::Stmt)) {
+    let sub = |e: &ast::Expr, f: &mut dyn FnMut(&ast::Stmt)| visit_expr_stmts(e, closures, f);
+    match e {
+        ast::Expr::Int(_)
+        | ast::Expr::Float(_)
+        | ast::Expr::Str(_)
+        | ast::Expr::Char(_)
+        | ast::Expr::Bool { .. }
+        | ast::Expr::Nil(_)
+        | ast::Expr::Path(_)
+        | ast::Expr::SelfExpr(_)
+        | ast::Expr::ImpliedInt { .. }
+        | ast::Expr::Error(_) => {}
+        ast::Expr::Interpolated { parts, .. } => {
+            for part in parts {
+                if let ast::StrPart::Hole(h) = part {
+                    sub(h, f);
+                }
+            }
+        }
+        ast::Expr::Unary { operand: x, .. }
+        | ast::Expr::Field { base: x, .. }
+        | ast::Expr::Cast { expr: x, .. }
+        | ast::Expr::Await { expr: x, .. }
+        | ast::Expr::Paren { inner: x, .. } => sub(x, f),
+        ast::Expr::Binary { lhs: a, rhs: b, .. }
+        | ast::Expr::Index { base: a, index: b, .. }
+        | ast::Expr::Range { start: a, end: b, .. } => {
+            sub(a, f);
+            sub(b, f);
+        }
+        ast::Expr::Call { callee, args, .. } => {
+            sub(callee, f);
+            for a in args {
+                sub(a, f);
+            }
+        }
+        ast::Expr::If { cond, then, else_, .. } => {
+            sub(cond, f);
+            for s in &then.stmts {
+                visit_stmts(s, closures, f);
+            }
+            match else_.as_ref() {
+                ast::ElseBranch::Block(b) => {
+                    for s in &b.stmts {
+                        visit_stmts(s, closures, f);
+                    }
+                }
+                ast::ElseBranch::If(i) => visit_if_stmts(i, closures, f),
+            }
+        }
+        ast::Expr::Tuple { elems, .. } | ast::Expr::Slice { elems, .. } => {
+            for x in elems {
+                sub(x, f);
+            }
+        }
+        ast::Expr::Map { entries, .. } => {
+            for entry in entries {
+                sub(&entry.key, f);
+                sub(&entry.value, f);
+            }
+        }
+        ast::Expr::StructLit(lit) => {
+            if let Some(b) = &lit.base {
+                sub(b, f);
+            }
+            for field in &lit.fields {
+                sub(&field.value, f);
+            }
+        }
+        ast::Expr::Match(m) => visit_match_stmts(m, closures, f),
+        ast::Expr::Closure { body, .. } => {
+            if closures {
+                match body.as_ref() {
+                    ast::ClosureBody::Expr(x) => sub(x, f),
+                    ast::ClosureBody::Block(b) => {
+                        for s in &b.stmts {
+                            visit_stmts(s, closures, f);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Whether a statement registers a `defer` for the function it is in.
+fn stmt_defers(s: &ast::Stmt) -> bool {
+    let mut found = false;
+    visit_stmts(s, false, &mut |s| found |= matches!(s, ast::Stmt::Defer { .. }));
+    found
+}
+
+/// The same for a closure whose body is an expression.
+fn expr_defers(e: &ast::Expr) -> bool {
+    let mut found = false;
+    visit_expr_stmts(e, false, &mut |s| found |= matches!(s, ast::Stmt::Defer { .. }));
+    found
+}
+
 /// A block string's body, with the indentation the closing delimiter sets
 /// removed from every line.
 ///
@@ -8910,6 +12626,273 @@ pub(crate) fn dedent_block(body: &str) -> String {
         .map(|line| line.strip_prefix(indent).unwrap_or(line.trim_start_matches([' ', '\t'])))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A type with some of the types inside it replaced — `Self` by the type
+/// implementing a trait, or one declaration's parameters by another's.
+fn replace_types(types: &mut Types, ty: TyId, map: &[(TyId, TyId)]) -> TyId {
+    if let Some((_, to)) = map.iter().find(|(from, _)| *from == ty) {
+        return *to;
+    }
+    match types.kind(ty).clone() {
+        TyKind::Slice(e) => {
+            let e = replace_types(types, e, map);
+            types.slice_of(e)
+        }
+        TyKind::Optional(e) => {
+            let e = replace_types(types, e, map);
+            types.optional_of(e)
+        }
+        TyKind::Fallible(e) => {
+            let e = replace_types(types, e, map);
+            types.fallible_of(e)
+        }
+        TyKind::Map(k, v) => {
+            let (k, v) = (replace_types(types, k, map), replace_types(types, v, map));
+            types.map_of(k, v)
+        }
+        TyKind::Tuple(es) => {
+            let es = es.iter().map(|e| replace_types(types, *e, map)).collect();
+            types.tuple_of(es)
+        }
+        TyKind::Fn { params, ret } => {
+            let ps = params.iter().map(|p| replace_types(types, *p, map)).collect();
+            let r = replace_types(types, ret, map);
+            types.fn_of(ps, r)
+        }
+        TyKind::Struct(s) => match types.struct_origin_of(s) {
+            Some((template, args)) => {
+                let args: Vec<TyId> = args.iter().map(|a| replace_types(types, *a, map)).collect();
+                let id = types.instantiate_struct(template, &args);
+                types.struct_ty(id)
+            }
+            None => ty,
+        },
+        TyKind::Enum(e) => match types.enum_origin_of(e) {
+            Some((template, args)) => {
+                let args: Vec<TyId> = args.iter().map(|a| replace_types(types, *a, map)).collect();
+                let id = types.instantiate_enum(template, &args);
+                types.enum_ty(id)
+            }
+            None => ty,
+        },
+        _ => ty,
+    }
+}
+
+/// What generic bodies ask of their type arguments that no bound says.
+///
+/// `==` on a type parameter is the one such demand. Equality is structural and
+/// defined for every type except functions, trait objects and host values, so
+/// `fn eq<T>(a: T, b: T) -> bool { return a == b }` is sound for almost every
+/// `T` and meaningless for those three — where the backends used to disagree
+/// about what it answered. A bound would make every caller say so; recording
+/// the comparison and checking each call's arguments against it asks nothing
+/// of the programs that were already right.
+#[derive(Default)]
+struct GenericFacts {
+    /// Per function, per type parameter: where its body compares one with `==`.
+    compared: Vec<Vec<Option<Span>>>,
+    /// Every call that chose a generic callee's type arguments.
+    calls: Vec<GenericCall>,
+    /// Every call through a bound that chose a generic trait method's own
+    /// type arguments. Which body it reaches is known only once the receiver
+    /// is, so it is held to every implementation's: a trait method has no
+    /// body of its own to record a comparison in, and `q.has([d], d)` with a
+    /// `dyn` for `T` compared trait objects wherever `has`'s body did.
+    bound_calls: Vec<BoundCall>,
+}
+
+struct BoundCall {
+    caller: usize,
+    /// The trait, as a `resolved.types` index.
+    trait_index: u32,
+    method: String,
+    /// The method's own type arguments, without the implementing type's.
+    targs: Vec<TyId>,
+    span: Span,
+}
+
+struct GenericCall {
+    caller: usize,
+    callee: usize,
+    targs: Vec<TyId>,
+    span: Span,
+}
+
+/// Every type parameter a type mentions, by index.
+fn params_in(types: &Types, ty: TyId, out: &mut Vec<u32>) {
+    match types.kind(ty) {
+        TyKind::Param { index, .. } => {
+            if !out.contains(index) {
+                out.push(*index);
+            }
+        }
+        TyKind::Struct(s) => {
+            if let Some((_, args)) = types.struct_origin_of(*s) {
+                for a in args {
+                    params_in(types, a, out);
+                }
+            }
+        }
+        TyKind::Enum(e) => {
+            if let Some((_, args)) = types.enum_origin_of(*e) {
+                for a in args {
+                    params_in(types, a, out);
+                }
+            }
+        }
+        TyKind::Slice(e) | TyKind::Optional(e) | TyKind::Fallible(e) => params_in(types, *e, out),
+        TyKind::Map(k, v) => {
+            params_in(types, *k, out);
+            params_in(types, *v, out);
+        }
+        TyKind::Tuple(es) => {
+            for e in es {
+                params_in(types, *e, out);
+            }
+        }
+        TyKind::Fn { params, ret } => {
+            for p in params {
+                params_in(types, *p, out);
+            }
+            params_in(types, *ret, out);
+        }
+        _ => {}
+    }
+}
+
+/// Whether `==` is defined on a type once its parameters are chosen — taking
+/// each parameter to be something comparable, which the parameter's own
+/// callers are then held to.
+fn equatable_given_params(types: &Types, ty: TyId, seen: &mut Vec<TyId>) -> bool {
+    let mut params = Vec::new();
+    params_in(types, ty, &mut params);
+    if params.is_empty() {
+        return types.is_equatable(ty);
+    }
+    if seen.contains(&ty) {
+        return true;
+    }
+    seen.push(ty);
+    let ok = match types.kind(ty).clone() {
+        TyKind::Param { .. } => true,
+        TyKind::Slice(e) | TyKind::Optional(e) => equatable_given_params(types, e, seen),
+        TyKind::Tuple(es) => es.iter().all(|e| equatable_given_params(types, *e, seen)),
+        TyKind::Map(k, v) => {
+            equatable_given_params(types, k, seen) && equatable_given_params(types, v, seen)
+        }
+        TyKind::Struct(s) => {
+            let fields: Vec<TyId> = types.struct_def(s).fields.iter().map(|f| f.ty).collect();
+            fields.into_iter().all(|t| equatable_given_params(types, t, seen))
+        }
+        TyKind::Enum(e) => {
+            let fields: Vec<TyId> = types
+                .enum_def(e)
+                .variants
+                .iter()
+                .flat_map(|v| v.fields.iter().map(|f| f.ty))
+                .collect();
+            fields.into_iter().all(|t| equatable_given_params(types, t, seen))
+        }
+        // Whatever the arguments, a function is not compared, and neither is
+        // anything else that mentions a parameter but is not an aggregate.
+        _ => false,
+    };
+    seen.pop();
+    ok
+}
+
+/// Hold every call to a generic function to the comparisons its body makes.
+///
+/// Run once every body has been checked, because a call may be checked before
+/// the body it reaches. A caller forwarding its own parameter to one that is
+/// compared inherits the comparison, so the facts are closed over the call
+/// graph before anything is reported.
+fn check_compared_params(
+    facts: &mut GenericFacts,
+    resolved: &ResolveMap,
+    sigs: &[Signature],
+    types: &Types,
+    diags: &mut DiagBag,
+) {
+    // A call through a bound reaches whichever implementation the receiver
+    // turns out to have, so it stands for a call to each of them. The
+    // implementing type's own parameters come from the receiver, which is
+    // not known here; they are left poisoned, which holds nothing to them.
+    for c in std::mem::take(&mut facts.bound_calls) {
+        for ty in resolved.impls_of(c.trait_index) {
+            let Some(f) = resolved.trait_method(ty, c.trait_index, &c.method) else { continue };
+            let block = sigs[f as usize].generics.len().saturating_sub(c.targs.len());
+            let mut targs = vec![TyId::ERROR; block];
+            targs.extend(c.targs.iter().copied());
+            facts.calls.push(GenericCall { caller: c.caller, callee: f as usize, targs, span: c.span });
+        }
+    }
+    loop {
+        let mut changed = false;
+        for call in &facts.calls {
+            for (i, t) in call.targs.iter().enumerate() {
+                if facts.compared[call.callee].get(i).copied().flatten().is_none() {
+                    continue;
+                }
+                let mut params = Vec::new();
+                params_in(types, *t, &mut params);
+                for p in params {
+                    if let Some(slot) = facts.compared[call.caller].get_mut(p as usize) {
+                        if slot.is_none() {
+                            *slot = Some(call.span);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    // A default method's body is checked once per block that takes it, and
+    // each copy records the calls it makes: the same call, at the same place,
+    // choosing the same type, is one mistake however many copies made it.
+    let mut said: std::collections::HashSet<(Span, String)> = std::collections::HashSet::new();
+    for call in &facts.calls {
+        for (i, t) in call.targs.iter().enumerate() {
+            let Some(at) = facts.compared[call.callee].get(i).copied().flatten() else {
+                continue;
+            };
+            if types.is_poisoned(*t) || equatable_given_params(types, *t, &mut Vec::new()) {
+                continue;
+            }
+            let name = last_segment(&resolved.fns[call.callee].name).to_string();
+            let param = sigs[call.callee].generics.get(i).map(|g| g.name.clone()).unwrap_or_default();
+            let message = format!(
+                "`{}` compares its `{}` with `==`, and {} cannot be compared",
+                name,
+                param,
+                types.with_article(*t)
+            );
+            if !said.insert((call.span, message.clone())) {
+                continue;
+            }
+            let mut d = Diagnostic::error(codes::E0201, message)
+            .with_primary(call.span, format!("`{}` is {} here", param, types.with_article(*t)))
+            .with_secondary(at, "compared here");
+            d = if types.mentions_host_value(*t) {
+                d.with_note(
+                    "a host object has no structure Kite can see, so there is nothing to \
+                     compare field by field; `js.same(a, b)` asks the host whether two are \
+                     the same object",
+                )
+            } else {
+                d.with_note(
+                    "equality is structural, so every field must itself be equatable; \
+                     functions and trait objects are not",
+                )
+            };
+            diags.push(d);
+        }
+    }
 }
 
 /// The last segment of a possibly-qualified name.
@@ -9033,6 +13016,23 @@ pub(crate) fn parse_int(text: &str) -> Option<i64> {
         return i64::from_str_radix(b, 2).ok();
     }
     text.parse().ok()
+}
+
+/// Whether an integer literal's digits are `2^63`: out of range alone, and
+/// `int`'s minimum when a `-` is written in front of them.
+pub(crate) fn is_int_min_magnitude(text: &str) -> bool {
+    let text: String = text.chars().filter(|c| *c != '_').collect();
+    let text = strip_int_suffix(&text);
+    let magnitude = if let Some(h) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        u64::from_str_radix(h, 16).ok()
+    } else if let Some(o) = text.strip_prefix("0o").or_else(|| text.strip_prefix("0O")) {
+        u64::from_str_radix(o, 8).ok()
+    } else if let Some(b) = text.strip_prefix("0b").or_else(|| text.strip_prefix("0B")) {
+        u64::from_str_radix(b, 2).ok()
+    } else {
+        text.parse::<u64>().ok()
+    };
+    magnitude == Some(i64::MIN.unsigned_abs())
 }
 
 pub(crate) fn parse_float(text: &str) -> Option<f64> {

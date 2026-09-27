@@ -15,9 +15,17 @@ use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
 
-/// The maximum call depth before the VM reports a trap rather than exhausting
-/// the host stack.
-pub const MAX_FRAMES: usize = 2048;
+/// The maximum call depth before the VM reports a trap.
+///
+/// Frames live in a vector on the heap and a Kite call is not a Rust call, so
+/// this bounds memory rather than guarding the host's stack. It was 2,048,
+/// which made a recursion three thousand deep trap here and nowhere else.
+///
+/// The native runtime counts its calls against the same number
+/// (`kite_rt::MAX_FRAMES`) and traps at the same call with the same words,
+/// which is what lets the two be compared at depth at all. A WebAssembly
+/// host's stack is shallower, and its end is a trap too; see §7.7.
+pub const MAX_FRAMES: usize = 100_000;
 
 #[derive(Clone, Debug)]
 pub enum Value {
@@ -99,35 +107,214 @@ pub struct EnumValue {
     pub fields: Vec<Value>,
 }
 
-/// Structural equality, per the specification: two structs are equal when
-/// their fields are. Reference identity is `ptr.same`, not `==`.
-impl PartialEq for Value {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Value::Unit, Value::Unit) => true,
-            (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a == b,
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Str(a), Value::Str(b)) => a == b,
-            (Value::Struct(a), Value::Struct(b)) => {
-                a.struct_id == b.struct_id && *a.fields.borrow() == *b.fields.borrow()
+// ---------------------------------------------------------------------------
+// Deep values
+// ---------------------------------------------------------------------------
+//
+// A Kite value can be as deep as the program makes it: a list of a million
+// `Cons` cells is a million nested `Rc`s. Everything that walks one — dropping
+// it, comparing it, rendering it — must therefore walk with a worklist on the
+// heap rather than by recursion, or a perfectly valid program aborts the VM
+// with a Rust stack overflow, which is not a trap and cannot be reported as
+// one. It happened somewhere between a hundred thousand and three hundred
+// thousand cells.
+
+/// Drop values without recursing.
+///
+/// Each value whose last reference this is gives up its children to the
+/// worklist before it is freed, so the aggregate itself is dropped holding
+/// nothing and every level is handled by this one loop. A value still shared
+/// elsewhere is not freed at all — only its count falls — so the walk stops
+/// there.
+fn drop_iteratively(mut work: Vec<Value>) {
+    while let Some(v) = work.pop() {
+        match v {
+            Value::Struct(rc) => {
+                if let Ok(s) = Rc::try_unwrap(rc) {
+                    work.append(&mut s.fields.borrow_mut());
+                }
             }
-            (Value::Enum(a), Value::Enum(b)) => {
-                a.enum_id == b.enum_id && a.variant == b.variant && a.fields == b.fields
+            Value::Enum(rc) => {
+                if let Ok(mut e) = Rc::try_unwrap(rc) {
+                    work.append(&mut e.fields);
+                }
             }
-            (Value::Slice(a), Value::Slice(b)) => a == b,
-            (Value::Tuple(a), Value::Tuple(b)) => a == b,
-            (Value::Map(a), Value::Map(b)) => a == b,
-            (Value::Pair(a), Value::Pair(b)) => a == b,
-            // Two errors are equal when they say the same thing. What they
-            // carry is provenance rather than identity: a caller comparing
-            // errors is comparing failures, and two failures that read alike
-            // are alike.
-            (Value::Err(a), Value::Err(b)) => a.message == b.message,
-            (Value::Nil, Value::Nil) => true,
-            _ => false,
+            Value::Closure(rc) => {
+                if let Ok(mut c) = Rc::try_unwrap(rc) {
+                    work.append(&mut c.captures);
+                }
+            }
+            Value::Err(rc) => {
+                if let Ok(mut e) = Rc::try_unwrap(rc) {
+                    work.push(std::mem::replace(&mut e.value, Value::Nil));
+                    work.push(std::mem::replace(&mut e.cause, Value::Nil));
+                }
+            }
+            Value::Slice(rc) | Value::Tuple(rc) => {
+                if let Ok(items) = Rc::try_unwrap(rc) {
+                    work.extend(items);
+                }
+            }
+            Value::Map(rc) => {
+                if let Ok(entries) = Rc::try_unwrap(rc) {
+                    for (k, v) in entries {
+                        work.push(k);
+                        work.push(v);
+                    }
+                }
+            }
+            Value::Pair(rc) => {
+                if let Ok((a, b)) = Rc::try_unwrap(rc) {
+                    work.push(a);
+                    work.push(b);
+                }
+            }
+            Value::Unit
+            | Value::Int(_)
+            | Value::Float(_)
+            | Value::Bool(_)
+            | Value::Str(_)
+            | Value::Nil => {}
         }
     }
+}
+
+// The four records that hold other values each hand them to the worklist when
+// they go. A slice, tuple, map or pair is a plain `Rc` of a vector or a tuple,
+// which cannot have a `Drop` of its own; but a recursive type is always a
+// struct or an enum somewhere along its cycle, and the worklist unwraps the
+// plain ones it meets on the way, so none of them nests unboundedly.
+
+impl Drop for StructValue {
+    fn drop(&mut self) {
+        drop_iteratively(std::mem::take(self.fields.get_mut()));
+    }
+}
+
+impl Drop for EnumValue {
+    fn drop(&mut self) {
+        drop_iteratively(std::mem::take(&mut self.fields));
+    }
+}
+
+impl Drop for ClosureValue {
+    fn drop(&mut self) {
+        drop_iteratively(std::mem::take(&mut self.captures));
+    }
+}
+
+impl Drop for ErrorValue {
+    fn drop(&mut self) {
+        let value = std::mem::replace(&mut self.value, Value::Nil);
+        let cause = std::mem::replace(&mut self.cause, Value::Nil);
+        drop_iteratively(vec![value, cause]);
+    }
+}
+
+/// Structural equality, per the specification: two structs are equal when
+/// their fields are. Reference identity is `ptr.same`, not `==`.
+///
+/// Walked with a worklist of pairs still to compare, for the reason
+/// [`drop_iteratively`] gives — but only once there is an aggregate to
+/// descend into. A map is a scan comparing its key with each entry's, so
+/// `==` on two `int`s or two `str`s is what every lookup runs per entry; a
+/// worklist made and dropped for each of those made map-heavy programs six
+/// times slower. Scalars answer on the spot, at the top and wherever they
+/// appear as fields, and the worklist starts empty, which allocates nothing,
+/// so a struct of scalars compares without allocating either.
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match shallow_eq(self, other) {
+            Some(same) => same,
+            None => deep_eq(self, other),
+        }
+    }
+}
+
+/// The answer for a pair that needs no descent — scalars, strings, errors,
+/// and two values of different kinds — or `None` for two aggregates of one
+/// kind, whose contents decide.
+#[inline]
+fn shallow_eq(a: &Value, b: &Value) -> Option<bool> {
+    Some(match (a, b) {
+        (Value::Unit, Value::Unit) => true,
+        (Value::Int(a), Value::Int(b)) => a == b,
+        (Value::Float(a), Value::Float(b)) => a == b,
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::Str(a), Value::Str(b)) => a == b,
+        (Value::Nil, Value::Nil) => true,
+        // Two errors are equal when they say the same thing. What they carry
+        // is provenance rather than identity: a caller comparing errors is
+        // comparing failures, and two failures that read alike are alike.
+        (Value::Err(a), Value::Err(b)) => a.message == b.message,
+        (Value::Struct(_), Value::Struct(_))
+        | (Value::Enum(_), Value::Enum(_))
+        | (Value::Slice(_), Value::Slice(_))
+        | (Value::Tuple(_), Value::Tuple(_))
+        | (Value::Map(_), Value::Map(_))
+        | (Value::Pair(_), Value::Pair(_)) => return None,
+        _ => false,
+    })
+}
+
+/// Two aggregates of one kind, compared without recursing.
+#[inline(never)]
+fn deep_eq(a: &Value, b: &Value) -> bool {
+    let mut work: Vec<(Value, Value)> = Vec::new();
+    if !level(a, b, &mut work) {
+        return false;
+    }
+    while let Some((a, b)) = work.pop() {
+        if !level(&a, &b, &mut work) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Compare one level of two aggregates of one kind: their shapes, and each
+/// pair of children that is not itself an aggregate. The pairs that are go on
+/// the worklist, as clones — for an aggregate, a reference count.
+fn level(a: &Value, b: &Value, work: &mut Vec<(Value, Value)>) -> bool {
+    match (a, b) {
+        (Value::Struct(a), Value::Struct(b)) => {
+            let (fa, fb) = (a.fields.borrow(), b.fields.borrow());
+            a.struct_id == b.struct_id && pairs(work, &fa, &fb)
+        }
+        (Value::Enum(a), Value::Enum(b)) => {
+            a.enum_id == b.enum_id && a.variant == b.variant && pairs(work, &a.fields, &b.fields)
+        }
+        (Value::Slice(a), Value::Slice(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
+            pairs(work, a, b)
+        }
+        // In insertion order, which is part of what a map is.
+        (Value::Map(a), Value::Map(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|((ka, va), (kb, vb))| pair(work, ka, kb) && pair(work, va, vb))
+        }
+        (Value::Pair(a), Value::Pair(b)) => pair(work, &a.0, &b.0) && pair(work, &a.1, &b.1),
+        _ => shallow_eq(a, b).unwrap_or(false),
+    }
+}
+
+/// Compare two children, answering now if they are not aggregates and
+/// queueing them if they are.
+fn pair(work: &mut Vec<(Value, Value)>, a: &Value, b: &Value) -> bool {
+    match shallow_eq(a, b) {
+        Some(same) => same,
+        None => {
+            work.push((a.clone(), b.clone()));
+            true
+        }
+    }
+}
+
+/// Compare two sequences element by element, as [`pair`] does, answering
+/// whether they can still be equal.
+fn pairs(work: &mut Vec<(Value, Value)>, a: &[Value], b: &[Value]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| pair(work, x, y))
 }
 
 impl Value {
@@ -163,7 +350,7 @@ const NOMINAL_ADVANCE: f64 = 8.0;
 fn string_op(
     op: kite_hir::StrKind,
     s: &str,
-    arg: impl Fn(u8) -> Value,
+    arg: impl Fn(u16) -> Value,
 ) -> Result<Value, Trap> {
     use kite_hir::StrKind;
     let chars: Vec<char> = s.chars().collect();
@@ -219,85 +406,80 @@ fn saturating_trunc(f: f64) -> i64 {
     f as i64
 }
 
-impl fmt::Display for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Value::Unit => write!(f, "()"),
-            Value::Int(v) => write!(f, "{}", v),
-            Value::Float(v) => {
-                // Print floats so they read back as Kite floats: `1.0`, not `1`.
-                if v.fract() == 0.0 && v.is_finite() {
-                    write!(f, "{:.1}", v)
-                } else {
-                    write!(f, "{}", v)
-                }
-            }
-            Value::Bool(v) => write!(f, "{}", v),
-            Value::Str(s) => write!(f, "{}", s),
-            // A closure has no text form; `io.print` rejects one long before
-            // this, so this only ever appears in a debug dump.
-            Value::Closure(c) => write!(f, "closure#{}", c.func),
-            Value::Struct(s) => {
-                // Debug-shaped output until the `Display` trait lands.
-                write!(f, "{{")?;
-                for (i, v) in s.fields.borrow().iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "}}")
-            }
-            Value::Enum(e) => {
-                write!(f, "#{}", e.variant)?;
-                if e.fields.is_empty() {
-                    return Ok(());
-                }
-                write!(f, "(")?;
-                for (i, v) in e.fields.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, ")")
-            }
-            Value::Slice(items) => {
-                write!(f, "[")?;
-                for (i, v) in items.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            Value::Pair(p) => write!(f, "({}, {})", p.0, p.1),
-            Value::Err(e) => write!(f, "{}", e.message),
-            Value::Tuple(items) => {
-                write!(f, "(")?;
-                for (i, v) in items.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, ")")
-            }
-            Value::Map(entries) => {
-                write!(f, "{{")?;
-                for (i, (k, v)) in entries.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}: {}", k, v)?;
-                }
-                write!(f, "}}")
-            }
-            Value::Nil => write!(f, "nil"),
+/// One step of rendering a value: a value still to render, or text already
+/// decided.
+enum Piece {
+    Value(Value),
+    Text(&'static str),
+}
+
+/// Push a bracketed, comma-separated sequence onto the render stack, last
+/// piece first so the stack pops it in reading order.
+fn bracketed(stack: &mut Vec<Piece>, open: &'static str, items: &[Value], close: &'static str) {
+    stack.push(Piece::Text(close));
+    for (i, v) in items.iter().enumerate().rev() {
+        stack.push(Piece::Value(v.clone()));
+        if i > 0 {
+            stack.push(Piece::Text(", "));
         }
     }
+    stack.push(Piece::Text(open));
 }
+
+/// Rendered with a stack of pieces rather than by recursion, for the reason
+/// [`drop_iteratively`] gives.
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut stack = vec![Piece::Value(self.clone())];
+        while let Some(piece) = stack.pop() {
+            let v = match piece {
+                Piece::Text(t) => {
+                    f.write_str(t)?;
+                    continue;
+                }
+                Piece::Value(v) => v,
+            };
+            match &v {
+                Value::Unit => write!(f, "()")?,
+                Value::Int(v) => write!(f, "{}", v)?,
+                // The rule the native runtime and the Wasm glue follow too.
+                Value::Float(v) => f.write_str(&kite_float::float_text(*v))?,
+                Value::Bool(v) => write!(f, "{}", v)?,
+                Value::Str(s) => write!(f, "{}", s)?,
+                // A closure has no text form; `io.print` rejects one long
+                // before this, so this only ever appears in a debug dump.
+                Value::Closure(c) => write!(f, "closure#{}", c.func)?,
+                // Debug-shaped output until the `Display` trait lands.
+                Value::Struct(s) => bracketed(&mut stack, "{", &s.fields.borrow(), "}"),
+                Value::Enum(e) => {
+                    write!(f, "#{}", e.variant)?;
+                    if !e.fields.is_empty() {
+                        bracketed(&mut stack, "(", &e.fields, ")");
+                    }
+                }
+                Value::Slice(items) => bracketed(&mut stack, "[", items, "]"),
+                Value::Pair(p) => bracketed(&mut stack, "(", &[p.0.clone(), p.1.clone()], ")"),
+                Value::Err(e) => write!(f, "{}", e.message)?,
+                Value::Tuple(items) => bracketed(&mut stack, "(", items, ")"),
+                Value::Map(entries) => {
+                    stack.push(Piece::Text("}"));
+                    for (i, (k, v)) in entries.iter().enumerate().rev() {
+                        stack.push(Piece::Value(v.clone()));
+                        stack.push(Piece::Text(": "));
+                        stack.push(Piece::Value(k.clone()));
+                        if i > 0 {
+                            stack.push(Piece::Text(", "));
+                        }
+                    }
+                    stack.push(Piece::Text("{"));
+                }
+                Value::Nil => write!(f, "nil")?,
+            }
+        }
+        Ok(())
+    }
+}
+
 
 #[derive(Debug, PartialEq)]
 pub enum Trap {
@@ -444,8 +626,13 @@ pub fn run_function(chunk: &Chunk, name: &str, out: &mut dyn Write) -> Result<Va
         font_scale: 1.0,
     };
     vm.execute(index)?;
+    // What the function answered, taken before the scheduler runs: every poll
+    // of a task it started writes the same slot, so reading it afterwards
+    // handed back whatever the last poll returned. For an `async fn` that is
+    // not its task — the one thing the caller needs to read its answer from.
+    let answer = std::mem::replace(&mut vm.result, Value::Unit);
     vm.drive()?;
-    Ok(std::mem::replace(&mut vm.result, Value::Unit))
+    Ok(answer)
 }
 
 struct Vm<'a> {
@@ -493,6 +680,20 @@ struct Vm<'a> {
 pub trait Host {
     fn call(&mut self, name: &str, args: &[Value]) -> Result<Value, Trap>;
 
+    /// What the function `name` reads and answers, in the encoding of
+    /// `kite_mir::Program::extern_sigs` (a code per parameter, `:`, a code
+    /// for the result), and the name a trap about it gives the call — or
+    /// `None`, and the program's declaration goes unchecked.
+    ///
+    /// A host that says is held to it before the call, as the native runtime
+    /// holds its own: a parameter the host reads must be declared as what it
+    /// reads it as, and the declared result must be what it answers. Without
+    /// that, `extern fn path_kind(path: str) -> bool` printed `2` as a `bool`
+    /// here and trapped natively.
+    fn signature(&self, _name: &str) -> Option<(&'static [u8], &'static str)> {
+        None
+    }
+
     /// Give the host a turn when every task is waiting on it.
     ///
     /// Returns whether anything happened. A host with nothing outstanding
@@ -500,6 +701,64 @@ pub trait Host {
     /// spinning — which is the truth: nothing was ever going to arrive.
     fn wait(&mut self) -> Result<bool, Trap> {
         Ok(false)
+    }
+}
+
+/// Hold a program's declaration of a host function to what the host says it
+/// reads and answers — `kite-rt`'s `host_params`, in the same order and the
+/// same words, so a wrong declaration traps alike on both backends.
+///
+/// Extra declared parameters are ignored, as they are there: a host reads
+/// what it reads.
+fn check_host_signature(name: &str, declared: &[u8], wants: &[u8], op: &'static str) -> Result<(), Trap> {
+    let split = |sig: &[u8]| -> (Vec<u8>, Option<u8>) {
+        match sig.iter().position(|c| *c == b':') {
+            Some(at) => (sig[..at].to_vec(), sig.get(at + 1).copied()),
+            None => (sig.to_vec(), None),
+        }
+    };
+    let (want_params, want_ret) = split(wants);
+    let (have_params, have_ret) = split(declared);
+    for (i, want) in want_params.iter().enumerate() {
+        if have_params.get(i) != Some(want) {
+            return Err(Trap::TypeConfusion { op, found: not_a(*want) });
+        }
+    }
+    if have_ret != want_ret {
+        return Err(Trap::Failed {
+            message: format!(
+                "`{}` is declared to return {}, and the host returns {}",
+                name,
+                type_name_of(have_ret.unwrap_or(b'u')),
+                type_name_of(want_ret.unwrap_or(b'u'))
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// A signature code as the type it stands for.
+fn type_name_of(code: u8) -> &'static str {
+    match code {
+        b's' => "str",
+        b'i' => "int",
+        b'f' => "float",
+        b'b' => "bool",
+        b'u' => "()",
+        _ => "reference",
+    }
+}
+
+/// What a trap says a wrongly declared parameter was — `kite-rt` writes
+/// `not a ` before the type's name, the way this VM's own checks do.
+fn not_a(code: u8) -> &'static str {
+    match code {
+        b's' => "not a str",
+        b'i' => "not a int",
+        b'f' => "not a float",
+        b'b' => "not a bool",
+        b'u' => "not a ()",
+        _ => "not a reference",
     }
 }
 
@@ -733,12 +992,17 @@ impl<'a> Vm<'a> {
                         x.checked_div(y).ok_or(Trap::IntegerOverflow("/"))
                     }
                 }),
+                // `min % -1` is 0, which is representable, so it is not an
+                // overflow even though `min / -1` is. Every remainder by -1 is
+                // 0; saying so directly keeps the one input where the
+                // hardware's answer and the arithmetic one differ from
+                // mattering.
                 Op::RemInt { dst, a, b } => arith!(self, base, dst, a, b, "%", Int, Int, |x: i64,
                                                                                           y: i64| {
-                    if y == 0 {
-                        Err(Trap::DivideByZero)
-                    } else {
-                        x.checked_rem(y).ok_or(Trap::IntegerOverflow("%"))
+                    match y {
+                        0 => Err(Trap::DivideByZero),
+                        -1 => Ok(0),
+                        _ => Ok(x % y),
                     }
                 }),
 
@@ -802,6 +1066,18 @@ impl<'a> Vm<'a> {
                         }
                     })
                 }
+                // The release forms take the count's low six bits, which is
+                // what `wrapping_shl` does and what Wasm's `i64.shl` does.
+                Op::ShlWrap { dst, a, b } => {
+                    arith!(self, base, dst, a, b, "<<", Int, Int, |x: i64, y: i64| {
+                        Ok(x.wrapping_shl(y as u32))
+                    })
+                }
+                Op::ShrWrap { dst, a, b } => {
+                    arith!(self, base, dst, a, b, ">>", Int, Int, |x: i64, y: i64| {
+                        Ok(x.wrapping_shr(y as u32))
+                    })
+                }
 
                 // ---- unary -----------------------------------------------
                 Op::NegInt { dst, a } => match self.get(base, a) {
@@ -809,6 +1085,12 @@ impl<'a> Vm<'a> {
                         let r = v.checked_neg().ok_or(Trap::IntegerOverflow("-"))?;
                         self.set(base, dst, Value::Int(r));
                     }
+                    other => {
+                        return Err(Trap::TypeConfusion { op: "-", found: other.type_name() })
+                    }
+                },
+                Op::NegIntWrap { dst, a } => match self.get(base, a) {
+                    Value::Int(v) => self.set(base, dst, Value::Int(v.wrapping_neg())),
                     other => {
                         return Err(Trap::TypeConfusion { op: "-", found: other.type_name() })
                     }
@@ -1071,7 +1353,13 @@ impl<'a> Vm<'a> {
                         .map(|i| self.regs[base + arg_base as usize + i].clone())
                         .collect();
                     let value = match self.host.as_mut() {
-                        Some(h) => h.call(&name, &args)?,
+                        Some(h) => {
+                            let declared = self.chunk.extern_sigs.get(index as usize);
+                            if let (Some(declared), Some((wants, op))) = (declared, h.signature(&name)) {
+                                check_host_signature(&name, declared, wants, op)?;
+                            }
+                            h.call(&name, &args)?
+                        }
                         None => return Err(Trap::NoHostFunction { name }),
                     };
                     self.set(base, dst, value);
@@ -1229,7 +1517,7 @@ impl<'a> Vm<'a> {
                 }
 
                 Op::StrOp { dst, op, base: arg_base, argc } => {
-                    let a = |i: u8| self.get(base, arg_base + i as Reg);
+                    let a = |i: u16| self.get(base, arg_base + i as Reg);
                     let subject = a(0);
                     let Value::Str(s) = &subject else {
                         return Err(Trap::TypeConfusion {
@@ -1289,9 +1577,11 @@ impl<'a> Vm<'a> {
                     // the body, which is the whole of dynamic dispatch: the
                     // value carries its type, so nothing extra is stored.
                     let receiver = self.get(base, arg_base);
+                    // The same encoding the vtable rows were built with, from
+                    // the one place that defines it.
                     let tag = match &receiver {
-                        Value::Struct(s) => s.struct_id,
-                        Value::Enum(e) => 0x8000_0000 | e.enum_id,
+                        Value::Struct(s) => kite_hir::TypeTag::struct_tag(s.struct_id),
+                        Value::Enum(e) => kite_hir::TypeTag::enum_tag(e.enum_id),
                         other => {
                             return Err(Trap::TypeConfusion {
                                 op: "call.virtual",
@@ -1338,7 +1628,7 @@ impl<'a> Vm<'a> {
         callee: u32,
         base: usize,
         arg_base: Reg,
-        argc: u8,
+        argc: u16,
         dst: Reg,
     ) -> Result<(), Trap> {
         self.call_with(callee, base, arg_base, argc, dst, &[])
@@ -1352,7 +1642,7 @@ impl<'a> Vm<'a> {
         callee: u32,
         base: usize,
         arg_base: Reg,
-        argc: u8,
+        argc: u16,
         dst: Reg,
         leading: &[Value],
     ) -> Result<(), Trap> {
@@ -1505,7 +1795,7 @@ impl<'a> Vm<'a> {
         native: Native,
         base: usize,
         arg_base: Reg,
-        argc: u8,
+        argc: u16,
     ) -> Result<Value, Trap> {
         match native {
             // The VM has no window. Writing each call out is what lets the
@@ -1633,7 +1923,7 @@ impl<'a> Vm<'a> {
                 // The label goes last, and it is the only field that may
                 // contain a space — so everything before it is fixed and
                 // whatever follows is the label, empty or not. That is what
-                // makes this line parseable by `kite check --a11y`, which is
+                // makes the line parseable by whatever reads it back, which is
                 // the whole reason it is written down.
                 let _ = writeln!(
                     self.out,

@@ -7,7 +7,7 @@ otherwise. Where this document and the compiler disagree, the compiler is
 right and the disagreement is a bug in this file — and five of them were,
 found by an audit that compiled what each section claimed rather than reading
 a status table. Four were built and one was struck, which is recorded in
-[Phase 26](../docs/06-roadmap.md#phase-26--the-gaps-between-the-specification-and-the-compiler).
+[Phase 26](docs/06-roadmap.md#phase-26--the-gaps-between-the-specification-and-the-compiler).
 
 ---
 
@@ -99,7 +99,8 @@ This decision, made once, pays three times:
 
 ### 2.1 Source encoding
 
-Source files are UTF-8. The file extension is `.kite`. Identifiers may contain
+Source files are UTF-8. The file extension is `.kite`. A file may begin with a
+byte-order mark, which is not part of the program. Identifiers may contain
 any Unicode `XID_Start` / `XID_Continue` characters, so non-Latin identifiers are
 supported. Source is normalised to NFC before comparison, so visually identical
 identifiers are the same identifier.
@@ -119,11 +120,15 @@ type     use      var
 ### 2.3 Comments
 
 ```kite
+//! Module documentation: the file's own overview, written at its top.
+
 // Line comment.
 
 /// Documentation comment. Attaches to the following declaration.
 /// Markdown is permitted. Code fences are extracted and compiled as tests.
 ```
+
+There is no block comment: `/*` is `E0005`.
 
 A ` ```kite ` fence is compiled and run by `kitec test`, alongside the file's
 `test_…` functions. It is appended to the module it was written in, so
@@ -137,7 +142,7 @@ A fence tagged anything else is prose.
 
 ```kite
 42            // int
-1_000_000     // underscores permitted as separators
+1_000_000     // underscores permitted as separators, between two digits
 0xFF  0o755  0b1010_1101
 3.14          // float
 1e10  1.5e-3
@@ -147,6 +152,7 @@ A fence tagged anything else is prose.
 multi-line string, leading indentation stripped
 to match the closing delimiter
 """
+t.0.1         // a tuple index after a tuple index, not the float `0.1`
 true  false
 nil
 ```
@@ -159,7 +165,11 @@ io.print("hello, \(name), you are \(age) years old")
 ```
 
 Interpolation calls `Display.show` on the operand: a hole is an ordinary
-expression, evaluated where it stands.
+expression, evaluated where it stands, and holds exactly one.
+
+A block string is dedented the same way with holes in it as without: the line
+break after the opening `"""` goes, the closing delimiter's line goes, and that
+line's indentation comes off the front of every line.
 
 `int`, `float`, `bool` and `str` render themselves; every other type renders
 through its own `Display`. Because a hole is an expression,
@@ -171,7 +181,9 @@ the language.
 Statements are newline-terminated. Semicolons are never written. A statement
 continues onto the next line when the line ends in an operator, an open
 delimiter, or a comma. The same rule as Swift and Kotlin, and unambiguous here
-because a statement never begins with `(` or `[`.
+because a statement never begins with `(` or `[`. `>` and `>>` continue a line
+as the other operators do, and the `>` that closes `Option<int>` ends one;
+`return` is not an operator, and a line ending in it ends there.
 
 **The operator ends the line it continues, and `||` is why that is a rule and
 not a style.** A line opening with `||` is not the tail of the expression
@@ -210,6 +222,28 @@ and a numeric literal may not carry a type suffix: `42i32` is `E0004`.
 
 Integer overflow traps in debug builds and wraps in release builds, matching
 the default most users expect while keeping release performance predictable.
+The rule covers every operation that can overflow, on every target:
+
+| Operation | Debug build | Release build |
+|---|---|---|
+| `a + b`, `a - b`, `a * b` past the range | traps | wraps |
+| `-a` where `a` is `int`'s minimum | traps | wraps: `-min` is `min` |
+| `a << n`, `a >> n` with `n` outside `0..=63` | traps | `n` is taken modulo 64, its low six bits: `1 << 65` is `2` |
+| `a / 0`, `a % 0` | traps | traps |
+| `min / -1` | traps | traps |
+| `min % -1` | `0` | `0` |
+
+Division is the exception to wrapping: there is no quotient to wrap to when
+the divisor is zero, and `min / -1` traps with it so that a quotient is always
+the true one. A remainder by `-1` is always `0`, `min`'s included — the answer
+fits, so it is not an overflow. `>>` is arithmetic, keeping the sign. A
+module-level constant ([§4.2](#42-module-level-constants)) is the same in
+every build, so a shift count outside `0..=63` in one is a compile error,
+`E0118`, as a division by zero is.
+
+`-9223372036854775808` is `int`'s minimum. The digits alone are one past the
+largest `int` and are refused (`E0004`), but a `-` written directly in front
+of them is read with them as one constant.
 `math.wrapping_add` wraps in both, and `math.checked_add` answers `Option<int>`
 in both, for the code that has to mean one of the two regardless of how it was
 built. Both are ordinary Kite over `math.max_int()` and `math.min_int()`, and
@@ -302,7 +336,9 @@ match maybe {
 optional against `nil` narrows it to the unwrapped type on the branch where it
 cannot be absent — in the `else` of `x == nil`, and in the `then` of `x != nil`.
 The same narrowing applies in a `match` arm once an earlier arm has covered
-`nil`.
+`nil`. A write to a `var` ends its narrowing unless the value written cannot be
+nil either; inside a loop, that holds for every write the loop's body makes,
+since the body runs again after each of them.
 
 ### 3.4 Type declarations
 
@@ -326,7 +362,14 @@ pub enum Status {
 An alias is *replaced* by the type it names before anything else is checked, so
 the two are the same type everywhere — a `UserId` adds no safety over an `int`,
 and is not a way to get one. Aliases may name each other and may be declared in
-any order.
+any order. An alias of a struct or an enum stands for it where its name is
+written in a body or a header too: `type Pt = Point` makes `Pt{ x: 1.0, y: 2.0 }`,
+`impl Display for Pt` and, for an enum, `S.Active` mean what `Point` and
+`Status` would. An alias of one instantiation of a generic type,
+`type Ints = Box<int>`, names a concrete type for `Ints.is(err)` and
+`Ints.as(err)`; as an `impl` header it is that instantiation written out, and
+`E0208` ([§8.2](#82-methods)). An alias of anything else, `impl Display for
+UserId`, is no type an `impl` is for (`E0204`).
 
 Two forms are rejected, both because the replacement is the whole feature. A
 circular alias (`type A = B` with `type B = A`) names nothing to be replaced
@@ -402,12 +445,30 @@ A constant shares the value name space with functions, so a module cannot
 declare both `fn limit` and `let limit`; a cycle among constants is
 [E0119](#16-diagnostics).
 
-One restriction is worth stating outright: **a `float` may not be interpolated
-into a constant**. The browser and the native runtime write a float differently
-at the exponent boundary — `1e21` against `1000000000000000000000` — so folding
-one at compile time would give the same program a different string depending on
-which backend built it. Interpolate it in a function, where the running host
-decides.
+A `float` interpolated into a constant is written the way every backend writes
+one at run time, so `let LABEL = "max \(1e21)"` is `"max 1e+21"` everywhere:
+
+- `NaN` is `NaN`, and the infinities are `inf` and `-inf`.
+- Zero is `0.0`, and negative zero `-0.0` — it is a different value, and
+  `1.0 / -0.0` says so.
+- A whole number below `1e21` in magnitude is written with all its digits and
+  `.0`, so that it reads back as a `float`: `3.0`, `100000000000000000000.0`.
+- Anything else is the shortest decimal that reads back as the same value,
+  written plainly from `1e-7` up to `1e21` and in exponent form outside it:
+  `0.30000000000000004`, `0.000001`, `1e-7`, `1.5e-7`, `1e+21`, `5e-324`,
+  `1.7976931348623157e+308`. Every one is a valid float literal. Of two
+  shortest decimals, the closer is written, and of two exactly as close, the
+  one whose last digit is even: `1125899906842624.25` is
+  `1125899906842624.2`.
+
+This is also the text of `io.print(x)` and `"\(x)"` for any `float`, on every
+target. It is ECMAScript's `Number#toString` except for Kite's own spellings —
+`inf`, `-inf` and `-0.0` — and a whole number below `1e21`, which is written
+with its exact digits and `.0` (`123456789012345683968.0` where JavaScript
+writes `123456789012345680000`). It was not always: the bytecode VM and the
+native runtime once wrote `inf`, `-0.0` and `0.0000001` where the browser wrote
+`Infinity`, `0.0` and `1e-7`, and a float in a constant was refused because
+folding it would have had to pick one.
 
 ### 4.3 Visibility
 
@@ -418,7 +479,14 @@ decides.
 
 `pub` applies to modules, functions, types, struct fields, enum variants, traits,
 and trait methods. A `pub struct` with unmarked fields is an opaque type: callers
-can hold it and pass it, but cannot read, construct, or destructure it.
+can hold it and pass it, but cannot read, construct, or destructure it — not
+with a literal, not with a `..base` update, not in a pattern.
+
+Methods and associated functions in an `impl` block are unmarked, and so
+private to the module, unless they say `pub`. The methods of a trait
+implementation are as visible as the trait. A type that is not `pub` cannot be
+named outside its module at all — not in an expression, and not in a signature,
+a field or an annotation either. Each of these is `E0401`.
 
 ```kite
 pub struct Connection {
@@ -456,36 +524,49 @@ default arguments, no variadic parameters, no named arguments at call sites, and
 no overloading. If a function needs many optional inputs, it takes a struct:
 
 ```kite
-pub struct RequestOptions {
-    method: str
-    /// Milliseconds. There is no `Duration` type: `std/time` names the units
-    /// in the functions that build one — `time.seconds(30)` is `30000` — and a
-    /// wrapper around an `int` would buy nothing the name does not.
-    timeout: int
-    headers: {str: str}
+// std/http
+pub struct Options {
+    /// `name: value` pairs, one per line.
+    pub headers: str
+    pub credentials: Credentials
+    pub redirect: Redirect
 }
 
-pub fn request(url: str, opts: RequestOptions) -> (Response, error)
+/// The defaults, to be changed where a caller cares.
+pub fn sending() -> Options
+
+pub async fn send_with(method: str, url: str, body: str, options: Options) -> (Response, error)
 
 // call site
-let (res, err) = http.request(url, RequestOptions{
-    method:  "POST",
-    timeout: time.seconds(30),
-    headers: {"content-type": "application/json"},
+let (res, err) = await http.send_with("POST", url, body, http.Options{
+    ..http.sending(),
+    headers: "content-type: application/json",
+    credentials: http.Credentials.Include,
 })
 ```
 
 Struct literals require field names, so this reads as well as named arguments
-would, using machinery the language already has.
+would, using machinery the language already has — and a functional update from
+a function that returns the defaults makes every field optional, with the call
+site naming only what it changes.
+
+A length of time is an `int` of milliseconds. There is no `Duration` type:
+`std/time` names the units in the functions that build one — `time.seconds(30)`
+is `30000` — and a wrapper around an `int` would buy nothing the name does not.
 
 ### 4.5 Closures
 
 ```kite
 let double = |x: int| -> int { return x * 2 }
-let double = |x| x * 2                       // types inferred, expression body
+let triple: fn(int) -> int = |x| x * 3       // types from the annotation, expression body
 
-let total = items.fold(0, |acc, item| acc + item.price)
+let total = fold(items, 0, |acc, item| acc + item.price)   // types from `fold`'s other arguments
 ```
+
+A closure's parameter types come from the place it is used: an annotated
+binding, or the parameter it is passed to once the other arguments have fixed
+that parameter's type. Where nothing fixes them, `|x| x * 2` is
+[E0211](#16-diagnostics), and the parameter is annotated instead.
 
 **Closures capture by value, taken when the closure is made.** Because `let`
 bindings are immutable, the vast majority of captures are trivially safe: the
@@ -504,6 +585,10 @@ avoiding.
 var total = 0
 let add = |n: int| { total = total + n }    // error[E0211]
 ```
+
+For the same reason a closure may not **assign** to a binding it captures, `let`
+or `var` ([E0211](#16-diagnostics)): it holds a copy, and a write to the copy is
+seen by nothing.
 
 To let a closure change something, **capture a `let` handle to a struct and pass
 it to a function that takes it as `var`.** Structs are references
@@ -563,7 +648,12 @@ is how it reads. It is non-associative too: `a..b..c` has no meaning to give.
 ### 5.2 Equality
 
 `==` is structural for all types: two structs are equal when their fields are
-equal, two slices when their elements are. There is no reference equality
+equal, two slices when their elements are, two maps when they hold equal
+entries in the same insertion order. Order counts for a map because it is part
+of what a map is — iteration, `keys()` and a derived `hash()` all observe it —
+so `{"a": 1, "b": 2} != {"b": 2, "a": 1}`. A recursive type — a list whose
+tail is another list, a tree whose children are trees — is compared the same
+way, as deep as the values go. There is no reference equality
 operator in the surface language; `ptr.same(a, b)` is a compiler builtin, for
 the rare case that needs it.
 
@@ -581,9 +671,26 @@ The motivating case is a fixpoint. A loop that repeats while a value keeps
 changing must ask "is this the value I passed in?", and structural equality
 answers a different question at the cost of walking the whole value.
 
+Structural means a `T` compares with an `Option<T>` as it would be passed to
+one: `found == 5` is true exactly when `found` is present and five.
+
+`==` is defined on everything but a function, a `dyn Trait` and a `JsValue`, or a
+value holding one ([E0201](#16-diagnostics)): a function has no identity to
+compare, a trait object is a record made where it was converted, and a host
+object has no structure Kite can see. A map compares its keys, so the same three
+cannot be keys. A generic function that compares its `T` with `==` is held to
+that at every call — `T` may not be chosen as one of the three — and so is a
+generic function that passes its own parameter on to one that compares it. A
+trait's generic method called through a bound is held to what any of its
+implementations compares, and a generic type standing for a trait, for a bound
+or as a `dyn`, to what its implementation's methods compare of its own
+arguments. A call the compiler writes counts as one the program writes:
+`io.print(b)` and `"\(b)"` call `b`'s `show`, and a value becoming an `error`
+calls its `message`.
+
 Floating-point `==` follows IEEE-754, so `nan != nan`. The compiler emits a
 warning when both operands of `==` are statically known to be floats and neither
-is a literal, suggesting `math.approx_eq`.
+is a literal, suggesting the prelude's `approx_eq(a, b, tolerance)`.
 
 ### 5.3 Struct literals
 
@@ -610,6 +717,9 @@ xs[0]                 // int — bounds-checked, traps on failure
 xs.get(0)             // Option<int> — bounds-checked, nil on failure
 xs[1..3]              // [int] — subslice, half-open, clamped
 xs[1..=2]             // [int] — the same subslice, inclusive
+xs[1..]               // [int] — from index 1 to the end
+xs[..2]               // [int] — the first two
+xs[..]                // [int] — all of it
 xs.len()              // int
 m["a"]                // Option<int> — map indexing always yields an optional
 m.remove("a")         // takes the entry out; a key that is not there is not an error
@@ -619,10 +729,11 @@ Map indexing returns `Option<V>`, never a zero value.
 
 `remove` shifts the entries after it down, so insertion order keeps meaning what
 it says and `keys()` and `values()` still line up element for element. Its
-receiver must be a plain `var` binding, exactly as `xs.push(v)`'s must: both are
-copy-on-write values, so changing the contents changes the binding. Assigning
-`nil` is not the same thing — on a `{str: Option<int>}` it leaves the key in
-place with a `nil` value, and `len()` does not move. Slice indexing with `[]` traps on
+receiver must be somewhere a change can be kept, exactly as `xs.push(v)`'s
+must: both are copy-on-write values, so changing the contents changes what
+holds them (below). Assigning `nil` is not the same thing — on a
+`{str: Option<int>}` it leaves the key in place with a `nil` value, and `len()`
+does not move. Slice indexing with `[]` traps on
 out-of-bounds because that is a program bug, not a runtime condition; `.get()` is
 provided for the case where it genuinely is a runtime condition.
 
@@ -636,9 +747,47 @@ same rule `s.slice(from, to)` has had all along ([§3.1](#31-primitives)), and
 `s[a..b]` is that call written as an index: one syntax with two answers about
 its edges is precisely the drift this language spends its omissions avoiding.
 
+**Either end of a range index may be left out**: `xs[a..]` runs to the end,
+`xs[..b]` starts at the beginning, and `xs[..]` is the whole sequence, a `str`
+as much as a slice. A missing start is `0` and a missing end the largest `int`,
+which the clamp turns into the edge of the data — so an open end is not a
+second rule, only the first one written shorter. An inclusive range has to say
+what it includes: `xs[..=b]` is allowed, `xs[a..=]` is not. Only an index may
+leave an end out; `0..` alone has nothing to stop at.
+
 A slice is the only sequence a range indexes other than a `str`. A map has no
 order over its keys for a range to name, so `m[a..b]` is an error rather than a
 guess.
+
+**A slice or map is changed where it is held.** `xs[i] = v`, `xs[i] += v`,
+`xs.push(v)`, `m[k] = v` and `m.remove(k)` change a copy-on-write value, and so
+change whatever holds it — which must therefore be able to change: a `var`
+binding; a `var` field (§8.1) of a struct reached through a binding that may
+change it; or an element of a slice that is itself held one of these ways. The
+nesting goes as deep as the data does. `grid[i][j] = v` means exactly
+
+```kite
+let at = i              // the operands, once each and in order
+let slot = j
+let value = v
+var row = grid[at]      // copy out
+row[slot] = value       // change
+grid[at] = row          // write back
+```
+
+and `b.cells.push(x)` means `var c = b.cells` / `c.push(x)` / `b.cells = c`:
+each level is copied out, the innermost is changed, and each is written back
+through the same place. The operands — every index, the struct a field is read
+from, and the right-hand side — are evaluated once, left to right, before
+anything is copied, so no code the program wrote runs between taking a copy and
+writing it back, and a call in an index that changes the same field is not
+undone by the write. Because these are values, a copy of `grid` or of `grid[i]`
+taken before the write still holds what it did.
+
+A `let` binding at the root, or a field not declared `var`, is `E0114`, as the
+same assignment written out would be. A call's result is held by nothing, so
+there is nowhere to keep the change, and a tuple's elements are fixed once it
+is built; both are `E0200`. Bind the value to a `var` and change that.
 
 ---
 
@@ -710,17 +859,26 @@ outer: for row in grid {
 ### 6.3 `defer`
 
 ```kite
-fn process(path: str) -> (Data, error) {
-    let (file, err) = fs.open(path)
-    check err
-    defer file.close()
+use std/socket
 
-    // ... any return from here closes the file
+async fn greeting(url: str) -> (str, error) {
+    let (sock, err) = await socket.connect(url)
+    check err
+    defer socket.close(sock)
+
+    // ... any return from here closes the socket
+    let (first, rerr) = await socket.receive(sock)
+    check rerr
+    return first, nil
 }
 ```
 
 Deferred calls run in reverse order of registration when the enclosing function
-returns, by any path. Unlike Go, `defer` cannot modify the return value — it is
+returns, by any path — `check` propagating an error included. A `defer` registers
+when control reaches it, so one inside a loop registers once per iteration, each
+with the operands that iteration evaluated, and one in a branch not taken never
+registers. A closure is a function of its own: a `defer` in its body runs when
+the closure returns. Unlike Go, `defer` cannot modify the return value — it is
 purely for release of resources, which is the only use that survives scrutiny.
 
 ### 6.4 `match`
@@ -782,6 +940,12 @@ if NotFound.is(err) {
 let missing = NotFound.as(err)      // Option<NotFound>
 ```
 
+Each specialisation of a generic type is its own type, and an error carries the
+one it was made from. So `as` on a generic type is told which by the type it is
+used as — `let w: Option<Wrapped<int>> = Wrapped.as(err)` — and `is`, which has
+nowhere to be told, is refused on one, as is an `as` nothing says the arguments
+of (`E0209`).
+
 **The type names itself.** [§11](#11-generics) has no turbofish, so
 `errors.is<T>(err)` — which this document used to promise — has nowhere to
 write its type argument. `NotFound.is(err)` says the same thing in a place the
@@ -820,6 +984,11 @@ The rules:
 > **R2.** Reading a Tainted binding is a compile error (`E0301`).
 >
 > **R3.** An Unchecked binding going out of scope is a compile error (`E0302`).
+> A `return`, `check`, `break` or `continue` is a way out of scope for every
+> binding it leaves behind, on its own path: an error bound above
+> `if n > 0 { return 1 }` has to be checked before that `return` as well as
+> after it. So is a write over it: `var e = f()` then `e = nil`, `e = other` or
+> `e = g()` drops `f`'s failure, and is `E0302` at the write.
 >
 > **R4.** On any path where the compiler proves `e == nil`, `e` becomes Checked
 > and `v` becomes Clean.
@@ -831,8 +1000,17 @@ The rules:
 > **R6.** A call left as a bare statement, whose type is `error` or `(T,
 > error)`, is a compile error (`E0302`). Binding nothing is not a way out of
 > binding an error.
+>
+> **R7.** An `error`, or a whole `(T, error)`, bound to a single name makes
+> that binding Unchecked — by `let` or by `var`, whether it came straight from
+> a call or through `await`, a branch of a value `if`, or anything else that
+> can hold a new failure. Assigning one to an existing binding, `e = f()`,
+> does the same. Only `nil` and a copy of another binding, which
+> carries its own obligation, leave it Checked. Reading it — testing it,
+> checking it, returning it, taking it apart — inspects it, and R3 applies
+> otherwise. Binding everything under one name is not a way out either.
 
-R1–R5 are about bindings, and R6 is what closes the shape they leave open: a
+R1–R5 are about bindings, and R6 and R7 close the shapes they leave open: a
 call written as a statement makes no binding, so nothing in R1–R5 ever sees it,
 and `dom.set_text(e, "hi")` would drop its failure in silence. That is
 [§7.1](#71-the-problem-being-solved)'s first flaw arriving through the one door
@@ -880,22 +1058,31 @@ fn broken(document: str) -> str {
 }
 ```
 
+The `return` leaves `err` behind unchecked (R3) and reads `parsed` while it is
+still tainted (R2), so there are two errors:
+
 ```
-error[E0301]: `parsed` is used before `err` has been checked
-   ┌─ titles.kite:3:31
-   │
- 2 │     let (parsed, err) = json.parse(document)
-   │          ------  --- this error is never checked
-   │          │
-   │          `parsed` is only valid when `err` is nil
- 3 │     return json.text_or(parsed, "title", "untitled")
-   │                         ^^^^^^ used here while still tainted
-   │
-help: check the error first
-   │
- 3 │     check err
- 4 │     return json.text_or(parsed, "title", "untitled"), nil
-   │
+error[E0302]: `err` is not checked before this `return`
+  ┌─ titles.kite:3:5
+  │
+2 │     let (parsed, err) = json.parse(document)
+  │                  --- bound here
+3 │     return json.text_or(parsed, "title", "untitled")
+  │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `err` goes out of scope here unchecked
+  │
+  = note: silently dropping errors is the single most common source of production failures in languages that permit it
+  = note: to propagate, write `check` on its own line; to handle it here, test `err != nil`
+
+error[E0301]: `parsed` is used before its error is checked
+  ┌─ titles.kite:3:25
+  │
+2 │     let (parsed, err) = json.parse(document)
+  │          ------ this value is only valid when the error is nil
+3 │     return json.text_or(parsed, "title", "untitled")
+  │                         ^^^^^^ used here while still tainted
+  │
+  = note: check it first: write `check err`, or test `err != nil`
+  = note: in Go the value on a failure path is the zero value and flows onward looking valid; in Kite there is no value on that path at all
 ```
 
 ### 7.4 The `check` keyword
@@ -917,7 +1104,9 @@ if err != nil {
 
 `check` is only valid inside a function whose last return component is `error`.
 `_` in a return's value position means *no value*; it is not a zero value and
-the correlated pair records the error branch.
+the correlated pair records the error branch. So the error beside it must be a
+failure: `return _, nil` is `E0200`, and an error that is nil when
+`return _, err` runs is a trap at that `return`.
 
 This is deliberately **not** Rust's `?`. A postfix `?` disappears into the middle
 of an expression and permits nesting failures inside a larger expression. `check`
@@ -949,8 +1138,8 @@ To handle a failure rather than propagate it, test the error. In the branch wher
 it is nil, the value becomes readable:
 
 ```kite
-let (port, err) = config.get_int("port")
-let port = if err != nil { 8080 } else { port }
+let (value, err) = config.get_int("port")
+let port = if err != nil { 8080 } else { value }
 ```
 
 The branch is written out, on the line where the failure happens, which is what
@@ -964,7 +1153,11 @@ check errors.wrap(err, "loading config from \(path)")
 ```
 
 `errors.wrap` returns nil when given nil, so this composes with `check`
-directly. The context goes in front of the message, so a failure that crosses
+directly — and because it returns nil *only* when given nil, passing the
+`check` proves `err` nil and makes the value it guards readable (R4). That is
+known of `errors.wrap` alone: a function of the program's own may answer nil
+for anything, so `check` of what it returned proves nothing about what it was
+handed. The context goes in front of the message, so a failure that crosses
 four layers reads as the four sentences that produced it.
 
 **It keeps what it wrapped**, rather than flattening it into text. `err.cause()`
@@ -993,6 +1186,15 @@ catchable. There is no `recover`, no panic handler, and no unwinding.
 
 `assert(cond, msg)` traps when `cond` is false. It is compiled out in release
 builds; `require(cond, msg)` is the always-on variant.
+
+A call chain deeper than the target allows traps too, with `call depth
+exceeded`. The bytecode VM and the native target allow 100,000 frames, and
+agree to the call. A WebAssembly program's frames are its host's stack, which
+in a browser or Node holds a few thousand frames of an ordinary function —
+fewer the more values each holds across its call — and running out of it ends
+the program as a trap, not as the host's `RangeError`. A recursion whose depth
+input decides, such as a parser's, should bound it and fail with an `error`
+instead, as `std/json` and `std/toml` do past 128 levels.
 
 This is a deliberate rejection of Go's `panic`/`recover`, which creates a second,
 invisible error-propagation channel alongside the visible one.
@@ -1044,10 +1246,39 @@ self` cannot be called on a binding the caller does not own mutably.
 
 `Rect.square(2.0)` calls the associated function; `r.area()` calls the method.
 
-Multiple `impl` blocks for the same type are permitted within a module. A type's
+Multiple `impl` blocks for the same type are permitted within a module, and a
+type has one method of each name across all of them (`E0112`). A type's
 inherent methods must be declared in the module that declares the type — there
 are no extension methods, so `x.foo()` can always be resolved by looking at where
-`x`'s type is defined.
+`x`'s type is defined. An `impl` block for another module's type is `E0406`,
+and one for anything but a struct or an enum — a trait, or an alias of `int` —
+is `E0204`.
+
+A method may declare type parameters of its own, after its block's:
+
+```kite
+impl<T> Box<T> {
+    pub fn map<U>(self, f: fn(T) -> U) -> Box<U> {
+        return Box{ value: f(self.value) }
+    }
+}
+```
+
+The block's parameters come from the receiver's type and the method's own from
+its arguments, as a generic function's do. `Self` inside an `impl` block is the
+type the block is for, in its body as in its signatures, and wherever a body
+writes the type's name: a literal `Self{ n: 1 }`, a pattern, `Self.make(3)`,
+`Self.Off`. In a trait's default method it is whichever type implements the
+trait, known only by the trait's methods, so it names no literal or path there.
+
+An `impl` block is for every instantiation of a generic type at once: its header
+names the type at the block's own parameters, in order — `impl<A, B> Pair<A,
+B>`, `impl<T: Show> Display for Box<T>`. A header for one instantiation,
+`impl Display for Pair<int, str>`, or with the parameters reordered, is `E0208`;
+a bound on a parameter is how a block says which instantiations it covers. A
+header that leaves the arguments out stands for the type at the block's own
+parameters, so `impl<A, B> Display for Pair` is the same block, and one that
+declares none or too few for them, `impl Display for Pair`, is `E0208` too.
 
 ---
 
@@ -1091,17 +1322,31 @@ let description = match shape {
 missing variants:
 
 ```
-error[E0210]: non-exhaustive match
-   ┌─ shapes.kite:4:22
-   │
- 4 │     let d = match shape {
-   │                   ^^^^^ variants `Point` and `Rect` not covered
-   │
-help: add the missing arms, or a catch-all `_ =>`
+error[E0210]: non-exhaustive match: `Rect(_, _)`, `Point` not covered
+  ┌─ shapes.kite:4:19
+  │
+4 │     let d = match shape {
+  │                   ^^^^^ this value is not fully matched
+  │
+  = note: exhaustiveness is what makes adding a variant safe: the compiler shows you every place that must change
 ```
 
 Exhaustiveness is what makes adding an enum variant safe: the compiler shows you
 every place that must change.
+
+Coverage is decided through nested patterns, not just the outermost one:
+`On(true)`, `On(false)` and `Off` cover an `enum Light { On(bool) Off }`,
+`(true, _)` and `(false, _)` cover a `(bool, int)`, and `nil`, `A` and `B` cover
+an `Option<E>` — a pattern written against an optional is one for the value
+inside it, present, whether a literal, a tuple, a struct or a variant of a
+generic enum. A missing case is named however deep it is: `Add(Num(_),
+_)`. Numbers and strings have no finite set of values, so a match on one needs a
+catch-all. A guarded arm counts towards nothing, since its guard may fail.
+
+An arm no value can reach — everything it matches is taken by an unguarded arm
+above it — is a warning (`E0116`). The usual cause is a name meant as a variant
+that is not one: `Dir` where the enum says `Directory` is a binding, which takes
+every value.
 
 An arm is an expression or a block. A block arm **runs for its effects**: it
 produces a value only when it is a single expression, because there are no tail
@@ -1160,6 +1405,19 @@ match pair {
 Bindings introduced by patterns are immutable. There is no `ref` or `mut` in
 patterns because there are no references to bind.
 
+The alternatives of an alternation may bind names, and then each must bind the
+same names with the same types (`E0200`): the arm runs whichever one matched,
+and reads each name as that one bound it. `Circle(r) | Square(r) => r * r`
+binds one `r`, not two.
+
+A variant pattern may be written bare, `Circle(r)`, or qualified,
+`Shape.Circle(r)`, and the two name the same variant; another module's is
+qualified by its module as well, `shapes.Shape.Circle(r)` (§13.1). A bare unit
+pattern is looked up among the scrutinee's variants, so two enums may each
+declare `Slow`. A bare pattern with a payload is looked up by name, as a bare
+constructor is, so once two enums in scope declare `Circle`, `Circle(r)` is
+`E0111` and is written `Shape.Circle(r)`.
+
 ---
 
 ## 10. Traits
@@ -1172,11 +1430,12 @@ pub trait Display {
 }
 
 pub trait Comparable {
-    fn compare(self, other: Self) -> Ordering
+    // Negative, zero or positive, as `self` sorts before, with or after `other`.
+    fn compare(self, other: Self) -> int
 
     // Default methods
     fn less_than(self, other: Self) -> bool {
-        return self.compare(other) == Ordering.Less
+        return self.compare(other) < 0
     }
 }
 
@@ -1194,14 +1453,34 @@ satisfaction possible. `impl Display for Rect` is a statement the author made on
 purpose, and the compiler can say "`Rect` does not implement `Display`" with a
 precise place to point at.
 
-`Self` inside a trait refers to the implementing type.
+`Self` inside a trait refers to the implementing type. An implementation is
+checked against the trait with `Self` read as its own type, so `Rect` writes
+`fn compare(self, other: Rect) -> int` or, equally, `other: Self`. It must also
+agree about the receiver: a method the trait declares with `self` may not take
+`var self`, and the reverse, because a call through the trait — a bound or a
+`dyn` — sees only the trait's. For the same reason it must agree about whether
+the method can fail and whether it is `async`: a call through the trait yields
+what the declaration says, a `(T, error)` pair or a `Task`, as a direct call
+does. A generic method's type parameters may be bounded no more tightly than
+the trait's are (`E0208`): a caller through the trait meets the trait's bounds
+and no others.
+
+A default method's body is checked for each implementation that takes it, with
+`Self` read as that implementation's type, and a mistake in it is reported
+once, not once per implementation. A default no implementation takes — the
+trait has none yet, or each writes its own — is checked all the same, with
+`Self` standing for any implementation: what the trait declares is known of it,
+and nothing else.
 
 ### 10.2 Coherence
 
 A trait implementation is permitted only in the module that declares the trait or
-the module that declares the type. This is the orphan rule, and it guarantees
-that a given (trait, type) pair has exactly one implementation program-wide,
-which is what makes trait resolution decidable and separate compilation possible.
+the module that declares the type (`E0406`). This is the orphan rule, and it
+guarantees that a given (trait, type) pair has exactly one implementation
+program-wide, which is what makes trait resolution decidable and separate
+compilation possible. A trait of your own may therefore be implemented for an
+imported type, and an imported trait for a type of your own; implementing an
+imported trait for an imported type is the one thing refused.
 
 ### 10.3 Static and dynamic dispatch
 
@@ -1226,10 +1505,12 @@ struct holding the data reference plus a vtable of typed function references
 indirect call is type-checked by the engine rather than through a signature
 table.
 
-Not every trait can be made `dyn`. A trait is **object-safe** when no method
-takes or returns `Self` by value and no method is generic. Non-object-safe traits
-can still be used as generic bounds; the error message says which method is
-responsible.
+Not every trait can be made `dyn`. A trait is **object-safe** when every method
+takes `self`, no method mentions `Self` otherwise, and no method is generic — a
+`dyn` holds some type the call cannot know, so each method must mean the same
+thing whichever it is (`E0206`). Non-object-safe traits can still be used as
+generic bounds, where the type *is* known and every method is an ordinary call;
+the error message says which method is responsible.
 
 ### 10.4 Built-in traits
 
@@ -1347,18 +1628,35 @@ Generics are **monomorphised**: each distinct instantiation produces its own
 specialised code. This gives static dispatch and full inlining, at the cost of
 binary size when a generic function is instantiated at many types.
 
-Because binary size is a first-order concern on the web, the compiler applies
-**identical-code-folding** after monomorphisation: instantiations whose generated
-Wasm bodies are byte-identical (very common — `[User]` and `[Post]` produce the
-same code when the operations are all reference moves) are merged into one
-function. Where folding is not possible and the instantiation count is large, the
-compiler emits a size warning naming the function, and `dyn` is the suggested
-remedy.
+Because binary size is a first-order concern on the web, that cost is measured
+rather than hidden: a WebAssembly build reports the module's size, and CI holds
+a set of programs to a size budget. Identical-code-folding — merging
+instantiations whose generated bodies are byte-identical, as `[User]` and
+`[Post]` often are when every operation is a reference move — is not built yet
+([docs/03 §6](docs/03-compiler-architecture.md#not-built)), and there is no
+per-function size warning. Where a generic function is instantiated at many
+types, `dyn` is the remedy.
+
+A generic function that calls itself at a larger type — `depth([x], n - 1)`
+inside `depth<T>` — or a generic type that holds itself at one needs a copy per
+level without end, and is [E0220](#16-diagnostics). So, in its own words, is a
+program that finishes but asks for more than the compiler makes: a type argument
+nested more than 256 levels deep or holding more than 65,536 parts, or more than
+65,536 specialisations in all.
 
 Bounds are trait names, and a parameter satisfies one by implementing it. That
 is the whole of the system: a generic function is a function whose parameter
 types are named rather than fixed, and monomorphisation makes each use an
 ordinary call.
+
+A bound holds wherever it is written. On a function, it is checked at every call
+(`E0208`). On a struct or an enum, it is checked wherever a value is built — a
+`Cache<fn(), int>` cannot come into existence — and on an `impl` block, at every
+call of its methods and wherever the type is used as the trait the block
+implements. A generic type implements a trait only where its arguments meet
+that block's bounds. Inside a generic function a parameter is known only by its
+bounds, and it satisfies exactly those: `fn outer<T: Show>(x: T)` may pass `x`
+to `fn inner<T: Show>`, and an unbounded `T` may not.
 
 ---
 
@@ -1381,7 +1679,9 @@ pub async fn fetch_user(id: UserId) -> (User, error) {
 }
 ```
 
-An `async fn` returns a `Task<T>`. `await` suspends until it completes.
+An `async fn` returns a `Task<T>`. `await` suspends until it completes. A
+method or an associated function may be `async` too, and calling one yields
+its `Task` in the same way: `await conn.fetch()`.
 
 **Calling an `async fn` does not run its body.** It yields the `Task` and
 returns; the body runs when something drives it, which is `await`. Two calls
@@ -1401,8 +1701,10 @@ check err
 // Concurrent — 100ms total
 let ta = fetch_user(1)
 let tb = fetch_user(2)
-let ((a, ea), (b, eb)) = await task.both(ta, tb)
+let (ra, rb) = await task.both(ta, tb)
+let (a, ea) = ra
 check ea
+let (b, eb) = rb
 check eb
 ```
 
@@ -1474,7 +1776,17 @@ A type is **not** `Share` when it has a `var` field anywhere in its transitive
 structure, or when it holds a `JsValue` — a DOM node, a canvas context, a file
 handle ([§15.1](#151-jsvalue)). A host reference belongs to the isolate that
 created it, and an integer standing in for one would carry none of that: it
-would satisfy every rule above and mean nothing on the other side.
+would satisfy every rule above and mean nothing on the other side. A lock does
+not change that — it settles races, not isolates — so a `sync.Mutex` holding a
+`JsValue` is not `Share` either. Nor is a function or a `dyn Trait`, whose
+contents are not known where the type is.
+
+A function handed to a `Share`-bounded parameter — `task.parallel`'s mapper —
+goes to the other task with everything it captured, so each capture must be
+`Share` too; a closure holding a `Counter` with a `var` field, or a `JsValue`,
+is refused where it is written. So is a function value whose closure is out of
+sight there, such as one read from a binding. A type parameter bounded by
+`Share` is `Share`, and may be passed on to another such bound.
 
 Because struct fields are immutable by default, **most user types are `Share`
 without the author doing anything or knowing the trait exists.** The marker only
@@ -1551,9 +1863,17 @@ use std/http
 use std/json as j
 
 fn main() {
+    let err = start()
+    if err != nil {
+        io.print("cannot start: \(err.message())")
+    }
+}
+
+fn start() -> error {
     let (cfg, err) = config.load("app.toml")
     check err
     ui.run(ui.App{ config: cfg })
+    return nil
 }
 ```
 
@@ -1564,11 +1884,13 @@ declares without the `use money`.
 
 Imports are always qualified by module name at the use site. There is no
 wildcard import and no way to bring a bare name into scope. `config.load` always
-tells you where `load` came from.
+tells you where `load` came from. That holds for enum variants too: a bare
+`Circle` is a variant of one of the module's own enums, or of the prelude's,
+and another module's is written `shapes.Shape.Circle`.
 
 **And a module reaches only what it imports.** Writing `config.load` in a file
 whose module has no `use config` is an error even when another module in the
-program does import it. Declarations are merged under their qualified names, so
+program does import it — the entry file included. Declarations are merged under their qualified names, so
 without this rule `config.load` would exist for the whole program the moment
 anybody loaded `config` — whether a name resolved in one file would depend on a
 `use` line in a file that had nothing to do with it, and a dependency could
@@ -1580,15 +1902,18 @@ program-wide table, so `use leak as crypto` written anywhere — including insid
 a dependency — rewrote every `crypto.…` call in every other module, silently
 and with no diagnostic. An alias is a convenience for the file that writes it.
 
-**A module is its whole path.** `use dep/utils` and `use utils` are two
-different modules, and every segment is honoured when the files are found:
-`dep/utils` is that directory, not whichever `utils` was reached first. A first
-segment naming a declared dependency roots there instead, so
-`use markdown/render` reaches inside the package.
+**A module is where its source is.** Two `use` lines reach one module exactly
+when they reach one file or directory: `use utils` inside `a/` and `use utils`
+inside `b/` are two modules, and `use dep/utils` and `use utils` are two
+modules, because every segment is honoured when the files are found. A `use`
+that finds nothing is `E0400` — never answered by some other module that
+happens to be spelled alike. A first segment naming one of the importing
+package's declared dependencies roots there instead, so `use markdown/render`
+reaches inside the package.
 
 What a use site writes is a **spelling**, and by default it is the last
-segment. A spelling belongs to the module that writes it, so two files may
-spell different modules the same way; what one file may not do is spell two
+segment. A spelling belongs to the module that writes it, so two modules may
+spell different modules the same way; what one module may not do is spell two
 modules the same way:
 
 ```kite
@@ -1600,13 +1925,19 @@ Two rules, both errors rather than a silent choice:
 
 - **The standard library's names are its own.** A non-`std` module may not take
   one (`E0403`). The reserved names are `buffer`, `canvas`, `crypto`, `dom`,
-  `errors`, `fmt`, `fs`, `html`, `http`, `js`, `json`, `math`, `prelude`,
-  `socket`, `sync`, `task`, `test`, `text`, `time`, `toml` and `window`. Full
-  paths keep `dep/crypto` and `std/crypto` apart on their own, but a *sibling*
-  `crypto` would still be spelled `crypto` in the file that imported it and
-  shadow the standard library there.
-- **One file may not spell two modules alike** (`E0404`). `use utils` followed
-  by `use dep/utils` is refused, because every `utils.…` above the second line
+  `draw`, `errors`, `fmt`, `fs`, `html`, `http`, `io`, `js`, `json`, `math`,
+  `prelude`, `ptr`, `socket`, `sync`, `task`, `test`, `text`, `time`, `toml`
+  and `window` — its modules, the modules its builtins are reached through,
+  and the prelude. The check is on the last segment of the path, alias or
+  not, so `use dep/crypto` is refused as a sibling `crypto` is: a module named
+  `crypto` is spelled `crypto` by default, and would shadow the standard
+  library in the file that imported it. The name after `as` is a spelling
+  too, and may not be a reserved name either unless it is the `std` module's
+  own: `use util as errors` would make `errors.new` the standard library's
+  and every other `errors.…` this module's.
+- **One module may not spell two modules alike** (`E0404`). The files of a
+  directory module share their imports, so `use utils` followed by
+  `use dep/utils` — in one file or in two — is refused, because every `utils.…`
   would quietly change meaning. Give one of them an alias.
 
 ### 13.2 Manifest
@@ -1624,16 +1955,44 @@ native = { entry = "src/main.kite" }
 markdown = { git = "https://github.com/example/kite-markdown", tag = "v1.2.0" }
 ```
 
+**A package's dependencies are its own.** A module inside a package resolves
+`use` against that package's manifest — the one in its own directory, never
+one above it — so a package uses what it declares and nothing the program
+declared for itself. A `path` is relative to the manifest that writes it; a
+`git` dependency is read from the program's `.kite/vendor`, where `kitec pkg`
+puts every package in the graph. A name — package or dependency — is an
+identifier, because it is written in a `use`. A key the manifest does not
+define is an error rather than something ignored, and a manifest that does not
+parse — or does not read at all, as one that is not UTF-8 — is `E0405` in every
+command that reads it.
+
+A package name means one thing across the whole program: two manifests naming
+one package from two places is an error. It does not take the name from the
+program's own modules, though. A package only a dependency declares may share
+its name with one of the program's files — the program's `use log` is its own
+`log.kite`, and the dependency's `use log` is the package it declared — because
+a module is where its source is.
+
 Dependencies are resolved to a lockfile of **SHA-256** content hashes, and the
 lockfile is **checked, not just written**: a dependency whose contents changed
-under the same version — a moved tag, a re-pushed repository — makes `kitec pkg`
-fail rather than quietly recording the new bytes. `--update` accepts a change,
-which is a decision someone makes rather than something a build does on its way
-past.
+under the same version and source — a moved tag, a re-pushed repository —
+makes `kitec pkg` fail rather than quietly recording the new bytes. `--update`
+accepts a change, which is a decision someone makes rather than something a
+build does on its way past, and fetches every checkout again to make it —
+beside the one it replaces, so a fetch that fails leaves that one in place.
+Anything else that changed — a dependency added or removed, a new version
+because the manifest now asks for one — is reported rather than refused, and
+resolution tries the versions the lockfile records before any newer one.
 
 The digest is cryptographic because the party it is checked against is the one
 who chooses the bytes. It was FNV-1a, which is invertible, so a dependency's
 author could have made any change land on the recorded hash.
+
+It covers every `.kite` file in the package a `use` could reach, `node_modules/`
+included — a directory whose name is an identifier is one a `use` can name.
+`.git` and `.kite/` are left out, and no `use` can name either. A symbolic link
+a build would follow — a `.kite` file, or a directory a `use` can name — is
+refused rather than hashed, since what it leads to is not the package's.
 
 `kitec pkg` is where that check happens, and it is the only place: `kitec build`,
 `run` and `test` compile whatever is in `.kite/vendor` without consulting
@@ -1659,14 +2018,14 @@ broken by extracting the shared part.
 
 ## 14. Memory model
 
-Kite is garbage-collected on every target. There is no manual allocation, no
+Kite's memory is managed on every target. There is no manual allocation, no
 `free`, no ownership, no borrowing, and no lifetimes.
 
 | Target | Collector |
 |---|---|
 | `wasm32-gc` | **The host engine's collector.** WasmGC objects are allocated with `struct.new` / `array.new` and traced by V8, SpiderMonkey, or JavaScriptCore directly. Kite ships no collector in the binary. |
-| `native-*` | Precise tracing collector: generational, non-moving in v1. Type maps emitted by the compiler give exact root and field information. |
-| `kbc` | Same collector as native. |
+| `native-*` | Precise tracing collector, generational. New objects are bump-allocated in a nursery, and a minor collection **moves** the survivors into the old generation, updating every reference to them; the old generation does not move, and is collected by mark-and-sweep. Stack maps emitted by the compiler give exact root and field information. |
+| `kbc` | **Reference counting**, not a tracing collector. The bytecode VM is the development loop, the embedding target and the differential-testing oracle, and a value is freed when its last reference goes. A cycle of references — two structs whose `var` fields point at each other — is never freed while the program runs. That is a leak in a long-running embedding and harmless in a test run; programs meant to run for a long time with cyclic data belong on the native or Wasm target. |
 
 Delegating collection to the browser engine on the web target is the single
 largest binary-size win available in 2026, and it is why this design was not
@@ -1678,9 +2037,11 @@ viable before WasmGC reached cross-browser baseline in Safari 18.2.
   Kite has no `&x.field`, so this is unobservable.
 - **No unboxed aggregates inside arrays.** `[Point]` is an array of references to
   `Point` objects, not a flat buffer of `(f64, f64)`. For numeric work where the
-  layout matters, `buffer.F64` provides a flat typed buffer over linear memory,
-  which is the escape hatch for anything holding a great many numbers — a
-  simulation, a signal, a mesh.
+  layout matters, `buffer.F64` provides a flat typed buffer, which is the escape
+  hatch for anything holding a great many numbers — a simulation, a signal, a
+  mesh. It is a `[float]` with the record's shape written down beside it, so
+  WasmGC stores the numbers themselves in one `f64` array. It is not over
+  linear memory, which the Wasm backend does not have.
 - **No weak references or finalizers.** A `Cache` that must not retain its
   entries uses an explicit eviction policy rather than weak keys.
 
@@ -1792,7 +2153,13 @@ anything it calls often enough for a name lookup to matter. Drawing does not use
 it at all: the drawing calls are compiler builtins, so a program that paints
 needs no `extern`.
 
-**`std/js` declares nothing.** It is a fixed set of about twenty primitives
+A runtime that answers a host function itself — the bytecode VM and the native
+runtime both answer `@host("fs")` — holds the declaration to what it reads and
+returns. A parameter declared as other than what the host reads, or a result
+declared as other than what it answers, is a trap before the call is made, in
+the same words on both.
+
+**`std/js` declares nothing.** It is a fixed set of about thirty primitives
 through which any host object can be reached:
 
 | | |
@@ -1960,6 +2327,9 @@ Requirements on the implementation:
 - **Type errors name the source of the expectation**, not just the mismatch —
   the parameter or return type that created the constraint gets a secondary span.
 - **`--explain E0301`** prints the full rationale for the rule.
+- **One cause, one code, however it is reached.** Visibility is `E0401` for a
+  function, a type, a field or a method alike; an `impl` in the wrong module is
+  `E0406`, whether it adds methods or implements a trait.
 - **`kitec fix`** applies every machine-applicable suggestion.
 - **A name section and source map** are emitted for the Wasm target so browser
   stack traces name `.kite` files and lines. The name section is what gives a
@@ -1988,6 +2358,7 @@ away: `LoadError` below is a real concrete error type, and the test is what says
 so.
 
 ```kite
+use std/errors
 use std/fs
 use std/json
 use std/http
@@ -2006,9 +2377,9 @@ impl Display for Task {
     }
 }
 
-// `Absent` rather than `Missing`: a pattern names a variant without its enum,
-// so two enums in scope may not share a variant name — and `std/fs` already has
-// a `Missing`. The rule is in §9.3, and this is what it looks like in practice.
+// A bare variant names one of this module's own enums or the prelude's (§13.1),
+// so `std/fs`'s `Missing` could not be taken for one here. A pattern may also be
+// written qualified, `LoadError.Absent(path)` (§9.3).
 pub enum LoadError {
     Absent(path: str)
     Malformed(path: str, detail: str)

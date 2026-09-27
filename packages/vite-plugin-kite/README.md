@@ -88,8 +88,19 @@ call and scalars cross, which is what the starter does.
 
 | | |
 |---|---|
-| `bin` | The compiler. `kitec` on `PATH` by default. |
 | `release` | `--release`: `assert` is dropped, `require` is not. Follows Vite's mode when not given. |
+
+There is no `bin` option: the compiler is `@kite-lang/compiler-wasm`, a
+dependency of this plugin, so there is no binary to point at.
+
+## What the dev server will serve
+
+The same files Vite will: a `.kite` file inside the project root or
+`server.fs.allow`. A request naming a file anywhere else on disk is answered as
+though it were not there, where it used to be compiled and served with a
+wrapper that made its `pub fn`s callable. A module of your own importing a
+`.kite` from outside those directories is an error saying which setting to
+widen. A build reads whatever the project imports.
 
 ## What it does about `.wasm`
 
@@ -106,6 +117,6 @@ this plugin yet — declare the module for now:
 
 ```ts
 declare module "*.kite" {
-  export function load(source?: string | Uint8Array): Promise<unknown>;
+  export function load(source?: string | URL | Uint8Array): Promise<unknown>;
 }
 ```

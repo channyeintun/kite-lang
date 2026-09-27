@@ -56,6 +56,9 @@ pub fn chain(err: error) -> [str] {
         out.push(next.message())
         next = next.cause()
     }
+    // A chain deeper than the bound is cut here, and what lies below the cut
+    // is left unread on purpose.
+    _ = next
     return out
 }
 
@@ -76,6 +79,8 @@ pub fn root(err: error) -> error {
         here = next
         next = next.cause()
     }
+    // As in `chain`: past the bound, the rest of the chain is not followed.
+    _ = next
     return here
 }
 

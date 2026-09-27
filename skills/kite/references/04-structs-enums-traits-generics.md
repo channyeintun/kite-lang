@@ -5,12 +5,12 @@ Everything here was checked against `target/release/kitec`. Where SPECIFICATION.
 
 ## Surprises, first
 
-- **There is no `Self` type.** The spec uses it (`fn compare(self, other: Self)`);
-  the compiler rejects it with `E0204: unknown type 'Self'`, in traits and in
-  inherent `impl` blocks alike. Write the concrete type name.
-- **A method cannot have its own type parameters.** `fn pick<T>(self, x: T)` is
-  `E0204: unknown type 'T'`. Type parameters live on free functions and on the
-  `impl` block header only.
+- **`Self` is the implementing type**, in a trait and in an `impl` block alike:
+  `fn compare(self, other: Self) -> int`. A trait whose methods mention `Self`
+  works through a bound (`T: Compare`) but cannot be a `dyn` (`E0206`).
+- **A method may have type parameters of its own**, after its block's:
+  `fn map<U>(self, f: fn(T) -> U) -> Box<U>`. The block's come from the
+  receiver, the method's from its arguments — still no turbofish.
 - **No turbofish, anywhere.** A type argument is inferred from the arguments, or
   from the annotation on the binding being assigned. When neither can say, the
   *type names itself* at the front of the call: `User.decode(doc)`,
@@ -23,18 +23,24 @@ Everything here was checked against `target/release/kitec`. Where SPECIFICATION.
   tail expressions. A single-expression block arm does produce a value.
 - **`impl Trait for Type` may contain only that trait's methods** — anything else
   is `E0200` and belongs in an inherent `impl`.
-- **A `Display` bound does not make a type parameter printable.** `io.print(x)`
-  and `"\(x)"` reject a `T`; call `x.show()`.
+- **A `Display` bound makes a type parameter printable**, and so does holding a
+  `dyn Display`: `io.print(x)` and `"\(x)"` both work on either.
 - **`==` is structural on every value and is not a trait.** There is no `Eq` to
   implement or derive, no `Ord` at all, and no operator overloading.
-- **Extension methods work.** An `impl` block may be written in any module that
-  can *name* the type — another module's type, or a standard library one — so
-  `x.foo()` is not answerable from the type's own module alone. Only a primitive
-  is refused. The orphan rule the spec states is not enforced.
-- **A qualified pattern is a silent wildcard.** `Shape.Point` is a variant in
-  expression position and a catch-all in *pattern* position — it matches
-  everything and passes exhaustiveness alone, with no diagnostic. Patterns are
-  written unqualified.
+- **There are no extension methods and no orphan impls.** An `impl` block
+  belongs to the module that declares its type — or, for a trait
+  implementation, the trait's module. Anything else is `E0406`: a trait of your
+  own may be implemented for an imported type, but an imported trait for an
+  imported type may not.
+- **Unmarked fields and methods are private to their module** (`E0401`), as
+  unmarked types and functions are: another module cannot read or write one,
+  build the struct with a literal or `..base`, destructure it, or call the
+  method.
+- **A pattern may be qualified.** `Shape.Point` means the same variant in a
+  pattern as in an expression, and is how a payload variant two enums share is
+  matched. A qualified name the enum does not have is `E0111` — in a pattern,
+  a value or a call alike; the enum's own name where a variant belongs,
+  `Shape(r)`, is `E0200`.
 
 ---
 
@@ -235,17 +241,22 @@ fn main() {
 }
 ```
 
-Several `impl` blocks for one type are allowed. `Self` is not a type — name the
-type:
+Several `impl` blocks for one type are allowed. `Self` names the type the block
+is for, in a signature and wherever the body writes the type's name — a
+literal, a pattern, an associated call:
 
-```kite fails
+```kite
 struct P {
     n: int
 }
 
 impl P {
-    fn twin(self) -> Self { //~ E0204
-        return P{ n: self.n }
+    fn make(n: int) -> Self {
+        return Self{ n: n }
+    }
+
+    fn twin(self) -> Self {
+        return Self.make(self.n)
     }
 }
 
@@ -254,7 +265,29 @@ fn main() {
 }
 ```
 
-A method may not introduce type parameters of its own:
+In a trait's default method `Self` is whichever type implements the trait,
+known only by the trait's methods, so `Self{ … }` there is `E0204`.
+
+A method may introduce type parameters of its own, solved from its arguments:
+
+```kite
+struct P {
+    n: int
+}
+
+impl P {
+    fn pick<T>(self, x: T) -> T {
+        return x
+    }
+}
+
+fn main() {
+    io.print(P{ n: 1 }.pick(3))
+}
+```
+
+A type has one method of each name, across all its `impl` blocks — a second
+`fn who` is `E0112`:
 
 ```kite fails
 struct P {
@@ -262,13 +295,19 @@ struct P {
 }
 
 impl P {
-    fn pick<T>(self, x: T) -> T { //~ E0204
-        return x
+    fn who(self) -> str {
+        return "first"
+    }
+}
+
+impl P {
+    fn who(self) -> str { //~ E0112
+        return "second"
     }
 }
 
 fn main() {
-    io.print(P{ n: 1 }.pick(3))
+    io.print(P{ n: 1 }.who())
 }
 ```
 
@@ -294,22 +333,24 @@ fn main() {
 }
 ```
 
-Two gaps worth knowing, because the compiler is silent about both: two inherent
-`impl` blocks may define the same method name (the first one wins, no
-diagnostic), and an inherent method shadows a derived one of the same name.
+A derive writes methods of its own, and an inherent method may not share a name
+with one: `@derive(Debug)` beside a hand-written `fn debug` is `E0701` (see
+"What does not derive").
 
 ### `pub`, and how far it reaches
 
 `pub` is accepted on a struct, an enum, a trait, a free function, a field and a
-method. On a **type or a free function** it is enforced: naming an unmarked one
-from another module is `E0401`, "`thing.Hidden` is private to module `thing`".
+method, and it is enforced on all of them: naming an unmarked one from another
+module is `E0401`, "`thing.Hidden` is private to module `thing`" — for a type
+that includes naming it in a signature or an annotation.
 
-On a **field or a method** it is currently not enforced at all. Once the type
-itself is `pub`, every field is readable and every method callable from any
-module that imports it, `pub` or not — so `pub` on a field documents intent
-rather than protecting anything, and a struct is not a place to hide an
-invariant. (Writing a field still needs `var` and a `var` binding; that gate is
-real.)
+A `pub struct` with an unmarked field is **opaque** outside its module: the
+field cannot be read or written, the struct cannot be built with a literal —
+`..base` included — and it cannot be taken apart in a pattern. That is what
+makes a struct a place to keep an invariant; the module exports functions that
+build and read it. An unmarked method or associated function is callable only
+inside the module; the methods of a trait implementation are as visible as the
+trait.
 
 ---
 
@@ -361,16 +402,15 @@ fn main() {
 
 ### Construction and name resolution
 
-A variant is written `Enum.Variant(…)` when qualified — but that spelling is for
-**expression** position only. Unqualified `Variant(…)` in expression position
-works when exactly one enum in scope declares the name; with two candidates it is
-`E0111: cannot find`.
+A variant is written `Enum.Variant(…)` when qualified, in an expression or a
+pattern. Unqualified `Variant(…)` in expression position works when exactly one
+enum in scope declares the name; with two candidates it is `E0111: cannot find`.
 
-Patterns go the other way: a pattern is always written **unqualified**, and a
-variant *with a payload* is looked up by name across every enum in scope rather
-than against the scrutinee's type. So two enums declaring `Circle` make
-`Circle(r)` `E0111` even in a match whose scrutinee is unambiguous. (A *unit*
-variant does resolve against the scrutinee, and a shared name is fine.)
+An unqualified pattern for a variant *with a payload* is looked up by name across
+every enum in scope rather than against the scrutinee's type. So two enums
+declaring `Circle` make `Circle(r)` `E0111` even in a match whose scrutinee is
+unambiguous — write `Shape.Circle(r)`. (A *unit* variant does resolve against the
+scrutinee, and a shared name is fine.)
 
 ```kite
 enum Shape {
@@ -427,11 +467,10 @@ fn main() {
 }
 ```
 
-Qualifying is **not** the way out of that, because a qualified path is not a
-variant pattern at all: one that fails to resolve as a variant silently becomes a
-wildcard. `Shape.Point` as a pattern matches every `Shape`, and an arm holding it
-is exhaustive on its own. Nothing is reported — this compiles, and prints `0`
-then `7`:
+Qualifying is the way out of that. `Shape.Circle(r)` is looked up on `Shape`,
+whatever else shares the name, and is checked exactly like the bare form: it
+matches that variant and nothing else, so the arms that follow are still reachable
+and still required. This prints `7` then `0`:
 
 ```kite
 enum Shape {
@@ -439,22 +478,59 @@ enum Shape {
     Point
 }
 
-fn bad(s: Shape) -> int {
+enum Hole {
+    Circle(radius: int)
+    Slot
+}
+
+fn f(s: Shape) -> int {
     return match s {
+        Shape.Circle(r) => r
         Shape.Point => 0
     }
 }
 
-fn good(s: Shape) -> int {
+fn main() {
+    io.print(f(Shape.Circle(radius: 7)))
+    io.print(f(Shape.Point))
+}
+```
+
+A qualified name that is not a variant of that enum is `E0111`, and the enum's own
+name where a variant belongs is `E0200` — neither is a catch-all:
+
+```kite fails
+enum Shape {
+    Circle(radius: int)
+    Point
+}
+
+fn f(s: Shape) -> int {
     return match s {
-        Point => 0
-        Circle(r) => r
+        Shape.Square(r) => r //~ E0111
+        Shape(r) => 0 //~ E0200
     }
 }
 
 fn main() {
-    io.print(bad(Shape.Circle(radius: 7)))
-    io.print(good(Shape.Circle(radius: 7)))
+    io.print(f(Shape.Point))
+}
+```
+
+The same name in an expression is the same `E0111`, called or not. (Before it
+was, `let s = Shape.Square` compiled to a value of no type at all, and
+`s == Shape.Point` printed `()`.)
+
+```kite fails
+enum Shape {
+    Circle(radius: int)
+    Point
+}
+
+fn main() {
+    let s = Shape.Square //~ E0111
+    let t = Shape.Oval(2) //~ E0111
+    io.print(s == Shape.Point)
 }
 ```
 
@@ -505,6 +581,64 @@ fn f(e: E) -> int {
 
 fn main() {
     io.print(f(E.A))
+}
+```
+
+Coverage is worked out through nested patterns, not just the outermost one
+(Maranget's usefulness algorithm). Each of these is exhaustive with no `_`, and
+a pattern written against an optional is one for the value inside it:
+
+```kite
+enum Light {
+    On(bool)
+    Off
+}
+
+enum E {
+    A
+    B
+}
+
+fn main() {
+    let l = Light.On(true)
+    io.print(match l {
+        On(true) => "bright",
+        On(false) => "dim",
+        Off => "off",
+    })
+    io.print(match (true, 1) {
+        (true, _) => "t",
+        (false, _) => "f",
+    })
+    let o: Option<E> = E.B
+    io.print(match o {
+        nil => "none",
+        A => "a",
+        B => "b",
+    })
+}
+```
+
+A missing case is named however deep it is — ``non-exhaustive match:
+`Add(Num(_), _)` not covered``. An arm that no value can reach, because the arms
+above it already take everything it matches, is a **warning**, `E0116`. The
+commonest cause is a variant name spelled wrong, which makes it a binding that
+catches everything:
+
+```kite
+enum Kind {
+    Missing
+    File
+    Directory
+}
+
+fn main() {
+    let k = Kind.File
+    match k {
+        Dir => io.print("dir"),       // warning: `Dir` is a binding; did you mean `Directory`?
+        File => io.print("file"),     // warning: unreachable match arm
+        Missing => io.print("missing"),
+    }
 }
 ```
 
@@ -763,29 +897,38 @@ fn main() {
 }
 ```
 
-…but only **per file**. `check_impls` in `crates/kite-types` walks one
-`ast::SourceFile`, so the check never sees across a module. Two files of one
-module directory may each write `impl Display for Item` and nothing at all is
-reported: the block in the file that sorts first wins, silently, exactly as two
-inherent blocks do (§2). Move one of them into a sibling file and an `E0112` you
-were relying on disappears. Duplicate *names* across siblings are still caught —
-two files declaring `pub fn helper` is ``E0112: `m.helper` is defined more than
-once`` — so the module-wide check exists and implementations are simply outside
-it. The same silence covers an `impl` in an importing file for an imported type,
-which collides with the declaring module's own (extension methods, below, are
-what make that reachable). Keep a trait's implementation for a type in one file,
-and grep the module before adding one.
+The check is module-wide: two files of one module directory that each write
+`impl Display for Item` are the same `E0112`.
 
-A trait may not be implemented for a primitive — `impl Doubler for int` is
-`E0204`, "an `impl` block needs a type declared in this module". The note
-overstates it: any type this module can *name* will do, including another
-module's. An `impl` block for an imported type is how you write an extension
-method, and it needs no cooperation from the module that declared the type.
+**An `impl` belongs to the module of its type** — or, for a trait
+implementation, the module of its trait (§10.2's orphan rule). There are no
+extension methods: an `impl` block for an imported type is `E0406`, and so is
+implementing an imported trait for an imported type. A trait of your own may be
+implemented for an imported type, which is the way to give one new behaviour; a
+plain function taking it is the other.
+
+```kite fails
+use std/json
+
+impl json.Json { //~ E0406
+    fn tag(self) -> str {
+        return "?"
+    }
+}
+
+fn main() {
+    io.print(json.Json.Null.tag())
+}
+```
 
 ```kite
 use std/json
 
-impl json.Json {
+trait Tagged {
+    fn tag(self) -> str
+}
+
+impl Tagged for json.Json {
     fn tag(self) -> str {
         return match self {
             Null => "null"
@@ -798,6 +941,9 @@ fn main() {
     io.print(json.Json.Null.tag())
 }
 ```
+
+A trait may not be implemented for a primitive — `impl Doubler for int` is
+`E0204`, "an `impl` block needs a type declared in this module".
 
 When a type has both an inherent method and a trait method of the same name, the
 one that wins on the concrete type is whichever `impl` block comes **first in the
@@ -1074,10 +1220,10 @@ fn main() {
 }
 ```
 
-**Object safety, as the compiler actually checks it:** every method of the trait
-must take `self`. That is the whole rule. (The spec's extra conditions — no
-`Self` by value, no generic methods — are unreachable, because neither `Self` nor
-a generic method exists.)
+**Object safety** (§10.3): a trait can be a `dyn` only when every method takes
+`self`, none mentions `Self` otherwise, and none is generic — a `dyn` holds a
+type the call cannot know, so each method has to mean the same thing whichever
+it is. The diagnostic names the method and which rule it breaks.
 
 ```kite fails
 trait Factory {
@@ -1107,8 +1253,53 @@ fn main() {
 }
 ```
 
-A non-object-safe trait is still usable as a generic bound. And `==` does not
-reach through a trait object:
+A non-object-safe trait is still usable as a generic bound, where the type is
+known and every method is an ordinary call — `Self` included:
+
+```kite
+trait Same {
+    fn same(self, other: Self) -> bool
+}
+
+struct A {
+    x: int
+}
+
+impl Same for A {
+    fn same(self, other: A) -> bool {
+        return self.x == other.x
+    }
+}
+
+fn all_same<T: Same>(xs: [T]) -> bool {
+    for x in xs {
+        if !x.same(xs[0]) {
+            return false
+        }
+    }
+    return true
+}
+
+fn main() {
+    io.print(all_same([A{ x: 1 }, A{ x: 1 }]))
+}
+```
+
+```kite fails
+trait Same {
+    fn same(self, other: Self) -> bool
+}
+
+fn first(xs: [dyn Same]) -> int { //~ E0206
+    return xs.len()
+}
+
+fn main() {
+    io.print(1)
+}
+```
+
+And `==` does not reach through a trait object:
 
 ```kite fails
 trait Shape {
@@ -1136,8 +1327,8 @@ fn main() {
 
 ## 7. Generics
 
-Type parameters go on free functions and on `impl` block headers. Bounds are
-trait names joined with `+`. Instantiations are monomorphised — one specialised
+Type parameters go on free functions, on `impl` block headers, and on methods
+(after the block's). Bounds are trait names joined with `+`. Instantiations are monomorphised — one specialised
 copy per set of type arguments, so no backend ever sees a type parameter.
 
 ```kite
@@ -1223,6 +1414,10 @@ fn main() {
 }
 ```
 
+A parameter satisfies exactly the bounds it was declared with, so a bounded one
+may be passed on to the same bound — `fn outer<T: Shape>(x: T)` may call
+`inner<T: Shape>(x)` — and an unbounded one may not.
+
 A bound is checked at every call site of a generic **function**:
 
 ```kite fails
@@ -1274,10 +1469,13 @@ fn main() {
 }
 ```
 
-Inference does not flow *into* a closure literal from a generic parameter type.
-A `fn(T) -> U` parameter takes a named function, or a closure whose own
-parameters are annotated; a bare `|n| …` leaves `T` unsolved and reports
-``expected `fn(int) -> str`, found `fn(<error>) -> str` ``.
+A closure's parameter types come from the parameter it is passed to, once that
+parameter's type is fully known. `fold(items, 0, |acc, item| acc + item.price)`
+and `filter(xs, |n| n > 0)` need no annotation, because every type parameter in
+the function type is fixed by the other arguments. When the closure is the only
+thing that could fix one — `U` in `fn(T) -> U` — a bare `|n| …` is `E0211`,
+"cannot infer the type of `n`", even though `T` is known. Annotate the
+parameter, or pass a named function.
 
 ```kite
 fn apply<T, U>(items: [T], f: fn(T) -> U) -> [U] {
@@ -1312,7 +1510,7 @@ fn apply<T, U>(items: [T], f: fn(T) -> U) -> [U] {
 }
 
 fn main() {
-    for s in apply([1, 2, 3], |n| "n\(n)") { //~ E0200
+    for s in apply([1, 2, 3], |n| "n\(n)") { //~ E0211
         io.print(s)
     }
 }
@@ -1390,7 +1588,7 @@ fn main() {
     io.print(size(Tree{ label: 1, children: [leaf, leaf] }))
 
     // An associated function has no receiver, so the arguments come from the
-    // type the result is used as. The annotation is doing real work here.
+    // type the result is used as, or from its own arguments.
     let made: Box<bool> = Box.of(true)
     io.print(made.get())
 
@@ -1399,10 +1597,10 @@ fn main() {
 }
 ```
 
-A bound on the `impl` **header** is the one place a bound on a generic type does
-any work: it is what lets the body call the bound's methods. The identical bound
-on the `struct` header does not (§9, divergence 5) — write it on both, and rely
-on the `impl` one.
+A bound on a generic type holds everywhere. On the `struct` or `enum` header it
+is checked wherever a value is built, so a `Holder<int>` cannot exist; on the
+`impl` header it is checked at every call of the block's methods, and it is what
+lets their bodies call the bound's methods. Write it on both:
 
 ```kite
 struct Holder<T: Display> {
@@ -1432,7 +1630,23 @@ fn main() {
 
 Drop the `: Display` from the `impl` header and `self.value.show()` becomes
 ``E0205: `T` has no method `show` `` — even though the `struct` header still
-carries the bound.
+carries the bound. Build a `Holder` of something that is not `Display` and the
+literal is `E0208`:
+
+```kite fails
+struct Holder<T: Display> {
+    value: T
+}
+
+fn main() {
+    let h = Holder{ value: 5 } //~ E0208
+    io.print(1)
+}
+```
+
+A generic type implements a trait only where its arguments meet the bounds of
+the `impl` that says so: after `impl<T: Display> Named for Holder<T>`, a
+`Holder<int>` is not `Named`, as a bound or as a `dyn`.
 
 A generic name used without arguments, or with the wrong number, is `E0208`:
 
@@ -1450,8 +1664,34 @@ fn main() {
 }
 ```
 
+An `impl` is for every instantiation at once, so its header names the type at
+the block's own parameters, in order: `impl<T> Named for Box<T>`. A header for
+one instantiation, `impl Named for Box<int>`, or one that names no parameters
+for the type's, `impl Named for Box`, is `E0208`; a bound on the block's
+parameter says which instantiations it covers:
+
+```kite fails
+trait Named {
+    fn name(self) -> str
+}
+
+struct Box<T> {
+    value: T
+}
+
+impl Named for Box { //~ E0208
+    fn name(self) -> str {
+        return "box"
+    }
+}
+
+fn main() {
+    io.print(Box{ value: 1 }.name())
+}
+```
+
 A unit variant of a generic enum says nothing about the arguments, so the binding
-must:
+must — and when it does, the bare variant is enough, `let m: Maybe<int> = None`:
 
 ```kite fails
 enum Maybe<T> {
@@ -1484,28 +1724,8 @@ An associated function on a generic type with nothing to infer from behaves the
 same way — `let s = Stack.empty()` is `E0209`, `let s: Stack<int> = Stack.empty()`
 compiles.
 
-**A `Display` bound does not make the parameter printable.** `io.print` and
-interpolation know about the concrete types and `Display`, and a `T` is neither:
-
-```kite fails
-struct P {
-    x: int
-}
-
-impl Display for P {
-    fn show(self) -> str {
-        return "P(\(self.x))"
-    }
-}
-
-fn tell<T: Display>(x: T) {
-    io.print("\(x)") //~ E0207
-}
-
-fn main() {
-    tell(P{ x: 1 })
-}
-```
+**A `Display` bound makes the parameter printable**, and so does a `dyn
+Display`: `io.print` and interpolation show either through the trait.
 
 ```kite
 struct P {
@@ -1519,11 +1739,31 @@ impl Display for P {
 }
 
 fn tell<T: Display>(x: T) {
-    io.print(x.show())
+    io.print("\(x)")
+    io.print(x)
 }
 
 fn main() {
     tell(P{ x: 1 })
+    let d: dyn Display = P{ x: 2 }
+    io.print("\(d)")
+}
+```
+
+**`==` on a type parameter holds every caller to it.** Equality is defined on
+everything but a function, a `dyn Trait` and a `JsValue`, so a generic body may
+compare its `T` — and a call choosing one of those three for `T` is `E0201`, as
+is a call passing its own parameter on to such a body:
+
+```kite fails
+fn same<T>(a: T, b: T) -> bool {
+    return a == b
+}
+
+fn main() {
+    io.print(same(1, 1))
+    let f = |x: int| x + 1
+    io.print(same(f, f)) //~ E0201
 }
 ```
 
@@ -1584,24 +1824,28 @@ true
 
 ### `Encode` / `Decode`
 
-Both expand to code that mentions `json.Json`, so **the file must
-`use std/json`** or the expansion fails on a name the source never wrote:
+Both expand to code written against `std/json`, and the expansion names it
+however the module does — `use std/json as j` makes it `j.Encode` — or, in a
+module that never imports it, by a spelling of its own. So the derive itself
+needs no `use`; what needs one is *your* code calling `json.stringify` or
+`json.parse` on the result:
 
-```kite fails
-@derive(Encode)
-struct U { //~ E0204
+```kite
+@derive(Encode, Decode)
+struct U {
     n: int
 }
 
 fn main() {
-    io.print(1)
+    let (back, err) = U.decode(U{ n: 1 }.encode())
+    if err != nil {
+        return
+    }
+    io.print(back.n)
 }
 ```
 
-> ``error[E0204]: unknown trait `Encode` `` — pointing into `<derive>`, at the
-> line `impl json.Encode for U {` that the expansion wrote.
-
-With the import, the round trip is an ordinary pair of calls. `decode` is named
+The round trip is an ordinary pair of calls. `decode` is named
 on the type because there is no turbofish to write `json.decode<User>(text)`
 with, and it returns `(T, error)` — a missing field is an error, never a zero:
 
@@ -1698,49 +1942,22 @@ fn main() {
 ```
 
 Deriving a trait the type also implements by hand is `E0701`
-("`U` already implements `Debug`"). An *inherent* method of the same name is not
-caught, and silently shadows the derived one.
+("`U` already implements `Debug`"), and so is an inherent method with the name
+the derive writes: `@derive(Debug)` beside `impl U { fn debug(self) -> str }` is
+`E0701`, "`U` already has a `debug`".
 
 ---
 
 ## 9. Where the compiler and SPECIFICATION.md disagree
 
-The compiler is authoritative. Six divergences, all verified:
-
-1. **§10.1 `Self`.** The spec's `Comparable` example uses `Self` in a signature
-   and says "`Self` inside a trait refers to the implementing type". The compiler
-   has no `Self` type at all: `E0204`. (The same example also names an `Ordering`
-   type, which does not exist either.)
-2. **§10.3 object safety.** The spec's rule is "no method takes or returns `Self`
-   by value and no method is generic". The compiler's rule is "every method takes
-   `self`" (`E0206`) — the other two clauses describe features that do not exist.
-3. **§10.2 coherence.** The spec states the orphan rule. Nothing enforces it: a
-   third module may write `impl foreign.Trait for other.Type` and it compiles.
-   Only `impl Trait for int` is refused, and for a different reason ("an `impl`
-   block needs a type declared in this module").
-4. **§8 extension methods.** The spec: "A type's inherent methods must be
-   declared in the module that declares the type — there are no extension
-   methods, so `x.foo()` can always be resolved by looking at where `x`'s type is
-   defined." Nothing enforces this either. `impl json.Json { fn tag(self) … }`
-   in your own file compiles and runs, so `x.foo()` may be declared in any module
-   that imported the type.
-5. **§11 bounds on generic types.** A bound on a generic *function* is checked at
-   the call site (`E0208`). A bound on a generic *struct or enum* is not checked
-   at instantiation: `struct Box<T: Display>` accepts a non-`Display` `T`, `kitec
-   check` passes, and calling `self.value.show()` traps at run time with
-   "`call.virtual` received a `struct`".
-6. **§11 generic methods.** The grammar admits `MethodDecl … [Generics]`, and
-   §10.3 speaks of generic trait methods. The type checker binds no such
-   parameters: any method-level `<T>` is `E0204`.
+The compiler is authoritative. On §8, §10 and §11 it now agrees with the spec:
+`Self` is the implementing type (§10.1), a trait is a `dyn` only when every
+method takes `self`, is not generic and does not mention `Self` (§10.3), the
+orphan rule and the ban on extension methods are enforced (`E0406`, §8.2 and
+§10.2), a bound on a generic struct or enum holds wherever a value is built
+(§11), and a method may declare type parameters of its own.
 
 Two spec omissions worth knowing: `@derive(Encode)`/`@derive(Decode)` silently
 require `use std/json` in the deriving file, and `Decode` is emitted as an
 inherent associated function rather than a trait implementation, so there is no
 `Decode` trait to name in a bound.
-
-And one outright compiler bug, which the spec cannot be blamed for because it
-never writes a qualified pattern: `Enum.Variant` in pattern position resolves to
-nothing and is lowered to a wildcard, with no diagnostic. It silently matches
-every value and satisfies exhaustiveness by itself (§3). Write patterns
-unqualified; two enums sharing a payload variant name means neither spelling
-works, and the enum must be renamed.

@@ -279,6 +279,14 @@ pub enum BuiltinFn {
     JsFunc,
 }
 
+/// The modules a builtin is reached through: the head of every dotted path
+/// [`BuiltinFn::from_path`] answers. They are in scope in every file, `use` or
+/// not — `io.print` needs no import — so a module a file spells like one of
+/// them would share the spelling with it, and `io.print` would stay the
+/// builtin while `io.anything_else` reached the module. The loader refuses
+/// that spelling (`E0403`).
+pub const BUILTIN_MODULES: &[&str] = &["io", "errors", "draw", "text", "task", "time", "ptr", "js"];
+
 impl BuiltinFn {
     pub fn from_path(path: &str) -> Option<BuiltinFn> {
         match path {
@@ -520,6 +528,11 @@ pub struct MethodOwner {
     /// Index into `SourceFile::items` for the block holding the body — an
     /// `impl`, or the `trait` itself when this is an inherited default.
     pub impl_index: usize,
+    /// Index into `SourceFile::items` for the `impl` block that gives the
+    /// method to its type. The same as `impl_index` but for an inherited
+    /// default, whose body is the trait's while its type parameters — the
+    /// `T` of `impl<T> Show for Box<T>` — are the block's.
+    pub block_index: usize,
     /// Position within that block's method list.
     pub method_index: usize,
     pub takes_self: bool,
@@ -542,6 +555,22 @@ pub struct LocalInfo {
     pub synthetic: bool,
 }
 
+/// A trait's default method that no `impl` block takes, with the locals its
+/// body declares. See [`ResolveMap::defaults`].
+#[derive(Debug)]
+pub struct DefaultBody {
+    /// Index into [`ResolveMap::types`] for the trait.
+    pub trait_index: u32,
+    /// Index into `SourceFile::items` for the trait.
+    pub item_index: usize,
+    /// Position within the trait's method list.
+    pub method_index: usize,
+    pub locals: Vec<LocalInfo>,
+}
+
+/// A variant's name, with its enum's type index and its own position.
+type NamedVariant = (String, (u32, u32));
+
 #[derive(Debug, Default)]
 pub struct ResolveMap {
     pub fns: Vec<FnSig>,
@@ -551,6 +580,18 @@ pub struct ResolveMap {
     pub modules: Modules,
     /// Per function, in the same order as `fns`.
     pub locals: Vec<Vec<LocalInfo>>,
+    /// A trait's default methods that no `impl` block takes, because the
+    /// trait has none or each writes its own. A default is otherwise a
+    /// function only as a copy per implementing block, so one nobody takes
+    /// has no entry in `fns`, and is resolved here, once, for its body to be
+    /// checked all the same.
+    pub defaults: Vec<DefaultBody>,
+    /// For a type alias naming a struct or an enum that takes no type
+    /// arguments, `type Pt = Point`, the type it names, through any aliases
+    /// of aliases. An alias is the type it names everywhere (§3.4), and where
+    /// a type is found by name — an `impl` header, a literal, a pattern, a
+    /// path's head — that is this. See [`ResolveMap::nominal`].
+    pub alias_of: HashMap<u32, u32>,
     /// Every resolved name, keyed by the span of its use. Spans are unique per
     /// source position, which makes them a serviceable node identity until a
     /// later phase introduces real node ids.
@@ -563,8 +604,16 @@ pub struct ResolveMap {
     /// touch these, or the field stops matching its declaration.
     pub pinned: Vec<Span>,
     /// Unqualified variant names, so `match shape { Circle(r) => … }` works
-    /// without writing `Shape.Circle`. Ambiguous names are removed and must be
-    /// qualified.
+    /// without writing `Shape.Circle` — **as the module being resolved sees
+    /// them**: its own enums' variants, then the prelude's. Ambiguous names
+    /// are removed and must be qualified. [`FnResolver::new`] installs the
+    /// view for the module whose body it resolves.
+    ///
+    /// It used to be one table for the whole program. So a program declaring
+    /// `enum Token { Number(float) }` made `Number` ambiguous inside
+    /// `std/json`, which then could not compile its own `match` — and a
+    /// module could name another module's private variant, unimported and
+    /// unqualified, because nothing in the table said whose it was.
     variant_index: HashMap<String, (u32, u32)>,
     /// Variant names per enum, so a qualified `Shape.Circle` resolves against
     /// that enum rather than against the unqualified index — which drops any
@@ -572,12 +621,61 @@ pub struct ResolveMap {
     /// exactly where it is most needed.
     variants_of: HashMap<u32, HashMap<String, u32>>,
     ambiguous_variants: Vec<String>,
+    /// Every enum's variants, grouped by the module that declares the enum:
+    /// what `variant_index` is cut from.
+    variants_by_module: HashMap<String, Vec<NamedVariant>>,
+    /// The module `variant_index` currently describes.
+    variant_scope: Option<String>,
 }
 
 impl ResolveMap {
     /// The index of a variant on one enum.
     pub fn variant_of(&self, type_index: u32, name: &str) -> Option<u32> {
         self.variants_of.get(&type_index)?.get(name).copied()
+    }
+
+    /// Make the unqualified variant index the one `module` sees: its own
+    /// enums' variants, then the prelude's for any name it does not declare.
+    ///
+    /// Another module's variants are not in it, imported or not. A use site
+    /// reaches those qualified — `shapes.Shape.Circle` — which is §13.1's
+    /// rule that there is no way to bring a bare name into scope; and a
+    /// module's own variants are its own, so a name two modules share is not
+    /// ambiguous in either.
+    fn scope_variants(&mut self, module: &str) {
+        if self.variant_scope.as_deref() == Some(module) {
+            return;
+        }
+        let mut index: HashMap<String, (u32, u32)> = HashMap::new();
+        let mut ambiguous: Vec<String> = Vec::new();
+        let own = self.variants_by_module.get(module).cloned().unwrap_or_default();
+        for (name, at) in &own {
+            if index.insert(name.clone(), *at).is_some() && !ambiguous.contains(name) {
+                ambiguous.push(name.clone());
+            }
+        }
+        if module != PRELUDE {
+            let mut prelude: HashMap<String, (u32, u32)> = HashMap::new();
+            let mut shared: Vec<String> = Vec::new();
+            for (name, at) in self.variants_by_module.get(PRELUDE).into_iter().flatten() {
+                // The module's own declaration shadows the prelude's, as a
+                // module's own `take` shadows the prelude's function.
+                if own.iter().any(|(n, _)| n == name) {
+                    continue;
+                }
+                if prelude.insert(name.clone(), *at).is_some() && !shared.contains(name) {
+                    shared.push(name.clone());
+                }
+            }
+            index.extend(prelude);
+            ambiguous.extend(shared);
+        }
+        for name in &ambiguous {
+            index.remove(name);
+        }
+        self.variant_index = index;
+        self.ambiguous_variants = ambiguous;
+        self.variant_scope = Some(module.to_string());
     }
 
     pub fn lookup_use(&self, span: Span) -> Option<Res> {
@@ -605,7 +703,9 @@ impl ResolveMap {
     pub fn fn_by_name_in(&self, module: &str, name: &str) -> Option<u32> {
         let written = name;
         let name = self.modules.canonical(module, name);
-        self.find_fn(&qualify(module, &name))
+        own_step(module, written)
+            .then(|| self.find_fn(&qualify(module, &name)))
+            .flatten()
             .or_else(|| self.reachable(module, written).then(|| self.find_fn(&name)).flatten())
             // The prelude is last, so a program's own `take` wins — and the
             // prelude's own calls to `take` find the prelude's, because its
@@ -643,7 +743,9 @@ impl ResolveMap {
     pub fn const_by_name_in(&self, module: &str, name: &str) -> Option<u32> {
         let written = name;
         let name = self.modules.canonical(module, name);
-        self.find_const(&qualify(module, &name))
+        own_step(module, written)
+            .then(|| self.find_const(&qualify(module, &name)))
+            .flatten()
             .or_else(|| self.reachable(module, written).then(|| self.find_const(&name)).flatten())
             .or_else(|| self.find_const(&qualify(PRELUDE, &name)))
     }
@@ -655,13 +757,40 @@ impl ResolveMap {
     pub fn type_by_name_in(&self, module: &str, name: &str) -> Option<u32> {
         let written = name;
         let name = self.modules.canonical(module, name);
-        self.find_type(&qualify(module, &name))
+        own_step(module, written)
+            .then(|| self.find_type(&qualify(module, &name)))
+            .flatten()
             .or_else(|| self.reachable(module, written).then(|| self.find_type(&name)).flatten())
             .or_else(|| self.find_type(&qualify(PRELUDE, &name)))
     }
 
     fn find_type(&self, name: &str) -> Option<u32> {
         self.types.iter().position(|t| t.name == name).map(|i| i as u32)
+    }
+
+    /// The struct or enum a type found by name stands for: the type itself,
+    /// or the one an alias names ([`ResolveMap::alias_of`]).
+    pub fn nominal(&self, type_index: u32) -> u32 {
+        self.alias_of.get(&type_index).copied().unwrap_or(type_index)
+    }
+
+    /// The struct or enum an `impl` header naming this type is for: as
+    /// [`Self::nominal`], and for an alias of one instantiation of a generic
+    /// type, `type IntStr = Pair<int, str>`, that generic type, whose header
+    /// the checker then refuses as it refuses `Pair<int, str>` written out
+    /// (E0208). `None` for an alias of anything else.
+    pub fn aliased_type(&self, file: &SourceFile, type_index: u32) -> Option<u32> {
+        let mut at = self.nominal(type_index);
+        for _ in 0..self.types.len() {
+            let decl = &self.types[at as usize];
+            if decl.kind != TypeKind::Alias {
+                return matches!(decl.kind, TypeKind::Struct | TypeKind::Enum).then_some(at);
+            }
+            let Item::TypeAlias(a) = &file.items[decl.decl_index] else { return None };
+            let Type::Path(p) = &a.ty else { return None };
+            at = self.nominal(self.type_by_name_in(self.modules.of(decl.decl_index), &p.text())?);
+        }
+        None
     }
 
     /// The module an item was declared in.
@@ -744,6 +873,29 @@ impl ResolveMap {
 /// lets a program shadow one of its names without breaking it.
 pub const PRELUDE: &str = "prelude";
 
+/// Whether a name written in `module` may be looked for among that module's
+/// own declarations — the first of the three lookup steps.
+///
+/// Not for a dotted name written in the entry file. The entry's declarations
+/// are the only unqualified ones, so its "own" form of `secret.describe` is
+/// `secret.describe` itself: the very name module `secret` declared. That
+/// step is ungated, so the entry reached any module some *other* module had
+/// imported — `use helper` alone was enough to call `helper`'s private
+/// dependency. A dotted name in the entry goes through the gate like
+/// anyone's.
+fn own_step(module: &str, written: &str) -> bool {
+    !(module.is_empty() && written.contains('.'))
+}
+
+/// A module's name as a diagnostic shows it; the root module has none.
+fn display_module(module: &str) -> &str {
+    if module.is_empty() {
+        "the program's own file"
+    } else {
+        module
+    }
+}
+
 /// The qualified form of a name declared in `module`.
 fn qualify(module: &str, name: &str) -> String {
     if module.is_empty() {
@@ -764,6 +916,7 @@ pub fn resolve_modules(file: &SourceFile, modules: Modules, diags: &mut DiagBag)
     let mut map = ResolveMap { modules, ..ResolveMap::default() };
 
     collect_types(file, &mut map, diags);
+    index_aliases(file, &mut map);
     index_variants(file, &mut map);
     collect_functions(file, &mut map, diags);
     resolve_bodies(file, &mut map, diags);
@@ -807,10 +960,48 @@ fn collect_types(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) {
     }
 }
 
-/// Build the unqualified variant index. A name carried by two enums is
-/// ambiguous and must be written qualified.
+/// Record what each alias of a plain struct or enum names
+/// ([`ResolveMap::alias_of`]). An alias of a generic type's instantiation,
+/// `type IntBox = Box<int>`, is not recorded: `Box` found in its place would
+/// lose the `int`. A cycle is left for the checker, which reports it where
+/// it expands aliases.
+fn index_aliases(file: &SourceFile, map: &mut ResolveMap) {
+    for index in 0..map.types.len() {
+        if map.types[index].kind != TypeKind::Alias {
+            continue;
+        }
+        let mut at = index;
+        for _ in 0..map.types.len() {
+            let decl = &map.types[at];
+            let named = match (&decl.kind, &file.items[decl.decl_index]) {
+                (TypeKind::Alias, Item::TypeAlias(a)) => match &a.ty {
+                    Type::Path(p) if p.args.is_empty() && a.generics.is_empty() => {
+                        map.type_by_name_in(map.modules.of(decl.decl_index), &p.text())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            match named {
+                Some(next) => at = next as usize,
+                None => break,
+            }
+        }
+        let plain = match &file.items[map.types[at].decl_index] {
+            Item::Struct(st) => st.generics.is_empty(),
+            Item::Enum(e) => e.generics.is_empty(),
+            _ => false,
+        };
+        if plain && map.types[at].kind != TypeKind::Alias {
+            map.alias_of.insert(index as u32, at as u32);
+        }
+    }
+}
+
+/// Record every enum's variants, per enum and per declaring module. The
+/// unqualified index is cut from the second for each module as its bodies are
+/// resolved; see [`ResolveMap::scope_variants`].
 fn index_variants(file: &SourceFile, map: &mut ResolveMap) {
-    let mut ambiguous = Vec::new();
     for (type_index, decl) in map.types.iter().enumerate() {
         if decl.kind != TypeKind::Enum {
             continue;
@@ -818,31 +1009,29 @@ fn index_variants(file: &SourceFile, map: &mut ResolveMap) {
         let Item::Enum(e) = &file.items[decl.decl_index] else {
             continue;
         };
+        let module = map.modules.of(decl.decl_index).to_string();
         for (vi, v) in e.variants.iter().enumerate() {
             let key = v.name.name.clone();
             map.variants_of
                 .entry(type_index as u32)
                 .or_default()
                 .insert(key.clone(), vi as u32);
-            // A name two enums share is ambiguous and must be written
-            // qualified, so the first one in does not win.
-            match map.variant_index.entry(key.clone()) {
-                std::collections::hash_map::Entry::Occupied(_) => ambiguous.push(key),
-                std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert((type_index as u32, vi as u32));
-                }
-            }
+            map.variants_by_module
+                .entry(module.clone())
+                .or_default()
+                .push((key, (type_index as u32, vi as u32)));
         }
     }
-    for name in &ambiguous {
-        map.variant_index.remove(name);
-    }
-    map.ambiguous_variants = ambiguous;
+    map.variant_scope = None;
 }
 
 /// Pass 2: free functions and methods.
 fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) {
     let mut seen: HashMap<&str, Span> = HashMap::new();
+    // Inherent methods per type. One name, one method: a second of the same
+    // name — in the same block or another — used to be accepted and never
+    // reached, since a call finds the first.
+    let mut inherent: HashMap<(u32, &str), Span> = HashMap::new();
 
     for (i, item) in file.items.iter().enumerate() {
         match item {
@@ -926,12 +1115,19 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                 let module = map.modules.of(i).to_string();
                 let target = imp.self_ty.text();
                 let _ = &seen;
-                let Some(type_index) = map.type_by_name_in(&module, &target) else {
+                let Some(written) = map.type_by_name_in(&module, &target) else {
                     diags.push(
                         Diagnostic::error(codes::E0204, format!("unknown type `{}`", target))
                             .with_primary(imp.self_ty.span, "no such type in this module")
                             .with_note("an `impl` block needs a type declared in this module"),
                     );
+                    continue;
+                };
+                // An alias is the type it names, so the block is for that
+                // type. It was taken as a type of its own that nothing could
+                // reach, and the block was dropped unseen.
+                let Some(type_index) = map.aliased_type(file, written) else {
+                    diags.push(not_for_an_alias(file, map, written, &imp.self_ty));
                     continue;
                 };
 
@@ -965,7 +1161,67 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                     },
                 };
 
+                // Coherence (§8.2, §10.2): an inherent `impl` is written where
+                // its type is declared, and a trait's where the trait or the
+                // type is. The methods are still registered, so a call to one
+                // is not reported a second time as a method that is missing.
+                let home_of = |t: u32| map.modules.of(map.types[t as usize].decl_index).to_string();
+                let owns_type = home_of(type_index) == module;
+                let owns_trait = trait_index.is_some_and(|t| home_of(t) == module);
+                if !owns_type && !owns_trait {
+                    let type_home = home_of(type_index);
+                    let mut d = match (&imp.trait_path, trait_index) {
+                        (Some(tp), Some(t)) => Diagnostic::error(
+                            codes::E0406,
+                            format!(
+                                "`{}` cannot be implemented for `{}` here",
+                                tp.text(),
+                                target
+                            ),
+                        )
+                        .with_primary(imp.span, "neither the trait nor the type is declared in this module")
+                        .with_note(format!(
+                            "a trait is implemented in the module that declares it (`{}`) or the \
+                             one that declares the type (`{}`), so that only one `impl` can exist",
+                            display_module(&home_of(t)),
+                            display_module(&type_home)
+                        )),
+                        _ => Diagnostic::error(
+                            codes::E0406,
+                            format!("`{}` cannot be given methods outside module `{}`", target, display_module(&type_home)),
+                        )
+                        .with_primary(imp.self_ty.span, "declared in another module")
+                        .with_note(
+                            "Kite has no extension methods: a type's methods are all declared \
+                             where the type is, which is what makes `x.foo()` answerable by \
+                             looking in one place",
+                        ),
+                    };
+                    d = d.with_note(
+                        "write a function that takes the value, or implement a trait of this \
+                         module's own for it",
+                    );
+                    diags.push(d);
+                }
+
                 for (mi, m) in imp.methods.iter().enumerate() {
+                    if trait_index.is_none() {
+                        if let Some(&prev) = inherent.get(&(type_index, m.name.name.as_str())) {
+                            diags.push(
+                                Diagnostic::error(
+                                    codes::E0112,
+                                    format!("`{}` is defined more than once for `{}`", m.name.name, target),
+                                )
+                                .with_primary(m.name.span, "redefined here")
+                                .with_secondary(prev, "first defined here")
+                                .with_note(
+                                    "Kite has no overloading: a type has one method of each name",
+                                ),
+                            );
+                            continue;
+                        }
+                        inherent.insert((type_index, m.name.name.as_str()), m.name.span);
+                    }
                     map.fns.push(FnSig {
                         name: m.name.name.clone(),
                         param_count: m.params.len(),
@@ -974,6 +1230,7 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                         owner: Some(MethodOwner {
                             type_index,
                             impl_index: i,
+                            block_index: i,
                             method_index: mi,
                             takes_self: m.self_param.is_some(),
                             var_self: m.self_param.as_ref().is_some_and(|s| s.is_var),
@@ -1008,6 +1265,7 @@ fn collect_functions(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBa
                                 owner: Some(MethodOwner {
                                     type_index,
                                     impl_index: trait_item,
+                                    block_index: i,
                                     method_index: mi,
                                     takes_self: m.self_param.is_some(),
                                     var_self: m.self_param.as_ref().is_some_and(|s| s.is_var),
@@ -1043,9 +1301,16 @@ fn resolve_bodies(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) 
         r.expr(&c.value);
     }
 
+    // A default method's body is resolved once per block that takes it, and
+    // every copy is the same text in the same module, so what resolving one
+    // reports is the same as well: the first copy's is kept, and the rest
+    // would have said it again for each `impl`.
+    let mut taken: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
     for sig_index in 0..map.fns.len() {
         let decl_index = map.fns[sig_index].decl_index;
         let owner = map.fns[sig_index].owner;
+        let reported = diags.len();
+        let again = owner.is_some_and(|o| o.is_default && !taken.insert((o.impl_index, o.method_index)));
 
         // A body is resolved in the module that declares it, so a file in
         // `math` reaching for `abs` finds its own module's before anything
@@ -1075,11 +1340,41 @@ fn resolve_bodies(file: &SourceFile, map: &mut ResolveMap, diags: &mut DiagBag) 
                 };
                 let m = &methods[o.method_index];
                 let mut r = FnResolver::new(map, diags, module);
+                if matches!(file.items[o.impl_index], Item::Impl(_)) {
+                    r.self_type = Some(o.type_index);
+                }
                 r.resolve_fn(&m.params, m.body.as_ref(), o.takes_self, o.var_self);
                 r.locals
             }
         };
+        if again {
+            diags.truncate(reported);
+        }
         map.locals.push(locals);
+    }
+
+    // A default no block takes was never resolved above, and so never
+    // checked: `let y: str = 5` in the body of a trait nobody implements
+    // compiled.
+    for trait_index in 0..map.types.len() {
+        let item_index = map.types[trait_index].decl_index;
+        let Item::Trait(tr) = &file.items[item_index] else { continue };
+        for (mi, m) in tr.methods.iter().enumerate() {
+            if m.body.is_none() || taken.contains(&(item_index, mi)) {
+                continue;
+            }
+            let module = map.modules.of(item_index).to_string();
+            let mut r = FnResolver::new(map, diags, module);
+            let var_self = m.self_param.as_ref().is_some_and(|s| s.is_var);
+            r.resolve_fn(&m.params, m.body.as_ref(), m.self_param.is_some(), var_self);
+            let locals = r.locals;
+            map.defaults.push(DefaultBody {
+                trait_index: trait_index as u32,
+                item_index,
+                method_index: mi,
+                locals,
+            });
+        }
     }
 }
 
@@ -1093,10 +1388,28 @@ struct FnResolver<'a> {
     /// The module this body was declared in. Its own names win over everything
     /// but locals.
     module: String,
+    /// While an or-pattern's later alternatives are resolved: the names its
+    /// first alternative bound, each with its local, and the names this
+    /// alternative has bound so far. Innermost last.
+    alternatives: Vec<(HashMap<String, u32>, Vec<String>)>,
+    /// Every name a pattern bound while inside an or-pattern, in order, so
+    /// the or-pattern can tell what its first alternative bound — including
+    /// names that alternative took from an enclosing or-pattern's first.
+    or_bound: Vec<(String, u32)>,
+    /// How many or-patterns are being resolved, one inside another.
+    or_depth: usize,
+    /// The type `Self` names in this body: the one its `impl` block is for.
+    /// None in a free function, and in a trait's default method, where
+    /// `Self` is whichever type implements the trait and is known only by
+    /// the trait's methods.
+    self_type: Option<u32>,
 }
 
 impl<'a> FnResolver<'a> {
     fn new(map: &'a mut ResolveMap, diags: &'a mut DiagBag, module: String) -> Self {
+        // A body sees its own module's variants unqualified, and no one
+        // else's.
+        map.scope_variants(&module);
         FnResolver {
             map,
             diags,
@@ -1105,12 +1418,22 @@ impl<'a> FnResolver<'a> {
             loop_depth: 0,
             labels: Vec::new(),
             module,
+            alternatives: Vec::new(),
+            or_bound: Vec::new(),
+            or_depth: 0,
+            self_type: None,
         }
     }
 
-    /// A type visible from the module being resolved.
+    /// A type visible from the module being resolved. Inside an `impl`
+    /// block, `Self` is the type the block is for (§8.2) wherever a body
+    /// writes a type's name: a literal `Self{ … }`, a pattern, the head of
+    /// `Self.make(…)` or `Self.Variant`.
     fn find_type(&self, name: &str) -> Option<u32> {
-        self.map.type_by_name_in(&self.module, name)
+        match self.self_type {
+            Some(ti) if name == "Self" => Some(ti),
+            _ => self.map.type_by_name_in(&self.module, name).map(|ti| self.map.nominal(ti)),
+        }
     }
 
     /// A free function visible from the module being resolved.
@@ -1155,7 +1478,8 @@ impl<'a> FnResolver<'a> {
             .with_primary(span, "not visible here")
             .with_secondary(decl, format!("this {} is not marked `pub`", what))
             .with_note(
-                "unmarked declarations are visible only within their own module;                  write `pub` to export one",
+                "unmarked declarations are visible only within their own module; \
+                 write `pub` to export one",
             ),
         );
     }
@@ -1217,6 +1541,48 @@ impl<'a> FnResolver<'a> {
     /// It is safe because each `err` gets its own local slot, so the taint
     /// analysis still reports the earlier one if it was never checked.
     fn declare_maybe_shadowing(
+        &mut self,
+        name: &Ident,
+        mutable: bool,
+        synthetic: bool,
+        allow_shadow: bool,
+    ) -> u32 {
+        // A later alternative of an or-pattern binds the first one's names:
+        // whichever alternative matched, the arm reads one local per name.
+        // Declaring each alternative's `x` afresh in the one arm scope made
+        // `A(x) | B(x)` "already declared", so no or-pattern could bind.
+        let shared = self
+            .alternatives
+            .iter()
+            .rev()
+            .find_map(|(first, _)| first.get(&name.name).copied());
+        if let Some(id) = shared {
+            let (_, seen) = self.alternatives.last_mut().unwrap();
+            if seen.contains(&name.name) {
+                self.diags.push(
+                    Diagnostic::error(
+                        codes::E0112,
+                        format!("`{}` is already declared in this scope", name.name),
+                    )
+                    .with_primary(name.span, "bound twice in this alternative"),
+                );
+            } else {
+                seen.push(name.name.clone());
+            }
+            self.map.bindings.insert(name.span, id);
+            if self.or_depth > 0 {
+                self.or_bound.push((name.name.clone(), id));
+            }
+            return id;
+        }
+        let id = self.declare_in_scope(name, mutable, synthetic, allow_shadow);
+        if self.or_depth > 0 {
+            self.or_bound.push((name.name.clone(), id));
+        }
+        id
+    }
+
+    fn declare_in_scope(
         &mut self,
         name: &Ident,
         mutable: bool,
@@ -1486,10 +1852,22 @@ impl<'a> FnResolver<'a> {
             }
 
             // Every alternative must bind the same names; the checker verifies
-            // that once it knows the types.
+            // that once it knows the types. The first alternative declares
+            // them, and each later one binds the same locals by name.
             Pattern::Or { alts, .. } => {
-                for x in alts {
-                    self.pattern(x);
+                let Some((first, rest)) = alts.split_first() else { return };
+                self.or_depth += 1;
+                let start = self.or_bound.len();
+                self.pattern(first);
+                let bound: HashMap<String, u32> = self.or_bound[start..].iter().cloned().collect();
+                for alt in rest {
+                    self.alternatives.push((bound.clone(), Vec::new()));
+                    self.pattern(alt);
+                    self.alternatives.pop();
+                }
+                self.or_depth -= 1;
+                if self.or_depth == 0 {
+                    self.or_bound.clear();
                 }
             }
         }
@@ -1505,7 +1883,30 @@ impl<'a> FnResolver<'a> {
             let owner = segments_text(&path.segments[..path.segments.len() - 1]);
             if let Some(ti) = self.find_type(&owner) {
                 self.check_visible(Res::Type(ti), path.span, &owner);
-                self.map.uses.insert(path.span, Res::Type(ti));
+                // The last segment is looked up on that enum, exactly as the
+                // same path is in an expression. Recording the owner instead
+                // left the checker holding a type where it wanted a variant,
+                // and it made the arm a wildcard: `Color.Red` matched green.
+                if let Some(vi) = self.map.variant_of(ti, name) {
+                    self.map.uses.insert(path.span, Res::Variant(ti, vi));
+                    return;
+                }
+                let decl = &self.map.types[ti as usize];
+                let message = if decl.kind == TypeKind::Enum {
+                    format!("`{}` has no variant `{}`", owner, name)
+                } else {
+                    format!("`{}` is a {}, not an enum", owner, decl.kind.describe())
+                };
+                let mut d = Diagnostic::error(codes::E0111, message)
+                    .with_primary(path.span, "no such variant")
+                    .with_secondary(decl.span, "declared here");
+                if let Some(names) = self.map.variants_of.get(&ti) {
+                    let mut names: Vec<(&u32, &String)> = names.iter().map(|(n, i)| (i, n)).collect();
+                    names.sort();
+                    let names: Vec<&str> = names.iter().map(|(_, n)| n.as_str()).collect();
+                    d = d.with_note(format!("`{}` has: {}", owner, names.join(", ")));
+                }
+                self.diags.push(d);
                 return;
             }
         }
@@ -1536,6 +1937,7 @@ impl<'a> FnResolver<'a> {
     fn expr(&mut self, e: &Expr) {
         match e {
             Expr::Int(_)
+            | Expr::ImpliedInt { .. }
             | Expr::Float(_)
             | Expr::Str(_)
             | Expr::Char(_)
@@ -1632,10 +2034,18 @@ impl<'a> FnResolver<'a> {
                 for p in params {
                     self.declare(&p.name, false, false);
                 }
+                // A closure body is a function of its own: a loop around the
+                // place it is written is not a loop it can leave. Without
+                // this, `break` inside one was accepted and lowered to
+                // nothing, because by the time it runs there is no loop.
+                let loop_depth = std::mem::take(&mut self.loop_depth);
+                let labels = std::mem::take(&mut self.labels);
                 match body.as_ref() {
                     ClosureBody::Expr(e) => self.expr(e),
                     ClosureBody::Block(b) => self.block(b),
                 }
+                self.loop_depth = loop_depth;
+                self.labels = labels;
                 self.pop_scope();
             }
         }
@@ -1699,7 +2109,9 @@ impl<'a> FnResolver<'a> {
                 let mut d =
                     Diagnostic::error(codes::E0204, format!("unknown type `{}`", path.name()))
                         .with_primary(path.span, "no such type in this module");
-                if let Some(near) = self.suggest_type(path.name()) {
+                if path.text() == "Self" {
+                    d = d.with_note(SELF_OUTSIDE_AN_IMPL);
+                } else if let Some(near) = self.suggest_type(path.name()) {
                     d = d.with_note(format!("a similar type is in scope: `{}`", near));
                 }
                 self.diags.push(d);
@@ -1771,6 +2183,10 @@ impl<'a> FnResolver<'a> {
             return;
         }
         if let Some(&(ty, vi)) = self.map.variant_index.get(name) {
+            // The index holds only this module's variants and the prelude's,
+            // both always visible here; checked anyway, so that what makes a
+            // bare variant reachable is stated where it is used.
+            self.check_visible(Res::Variant(ty, vi), p.span, name);
             self.map.uses.insert(p.span, Res::Variant(ty, vi));
             return;
         }
@@ -1781,7 +2197,9 @@ impl<'a> FnResolver<'a> {
 
         let mut d = Diagnostic::error(codes::E0111, format!("cannot find `{}`", name))
             .with_primary(p.span, "not found in this scope");
-        if let Some(sugg) = self.suggest(name) {
+        if name == "Self" {
+            d = d.with_note(SELF_OUTSIDE_AN_IMPL);
+        } else if let Some(sugg) = self.suggest(name) {
             d = d.with_note(format!("a similar name is in scope: `{}`", sugg));
         }
         self.diags.push(d);
@@ -1806,6 +2224,35 @@ impl<'a> FnResolver<'a> {
     }
 }
 
+/// Why `Self` names no type where a body wrote one.
+const SELF_OUTSIDE_AN_IMPL: &str = "`Self` names a type inside an `impl` block, the one the block is \
+     for; in a trait's default method it is whichever type implements the trait, which is \
+     known only by the trait's methods, so reach it through one of those";
+
+/// An `impl` header naming something that is not a struct or an enum: an
+/// alias of one, such as `type Id = int`, or a trait. Either was accepted and
+/// its block never reached, since nothing has the alias or the trait itself
+/// as its type.
+fn not_for_an_alias(file: &SourceFile, map: &ResolveMap, named: u32, header: &TypePath) -> Diagnostic {
+    let decl = &map.types[named as usize];
+    let d = Diagnostic::error(
+        codes::E0204,
+        format!("`{}` is not a struct or an enum", header.text()),
+    )
+    .with_primary(header.span, "an `impl` is for a struct or an enum");
+    match &file.items[decl.decl_index] {
+        Item::TypeAlias(a) => d
+            .with_secondary(a.ty.span(), format!("`{}` names this", header.text()))
+            .with_note("to give it methods, wrap it in a struct of its own and implement those"),
+        _ => d.with_note(format!(
+            "`{}` is a {}; a method every implementation shares is a default method in the \
+             trait itself",
+            header.text(),
+            decl.kind.describe()
+        )),
+    }
+}
+
 /// A run of plain names, dotted. `None` for anything else, which is then an
 /// ordinary field access.
 fn dotted_text(e: &Expr) -> Option<String> {
@@ -1827,9 +2274,12 @@ fn segments_text(segments: &[Ident]) -> String {
 
 fn nearest(name: &str, candidates: &[&str]) -> Option<String> {
     let mut best: Option<(usize, &str)> = None;
-    for cand in candidates {
+    for &cand in candidates {
         let d = edit_distance(name, cand);
-        if best.is_none_or(|(bd, _)| d < bd) {
+        // A tie goes to the name that sorts first. The candidates come from
+        // hash-map scopes, in no order that holds from one run to the next,
+        // and keeping the first one seen made the note differ between runs.
+        if best.is_none_or(|best| (d, cand) < best) {
             best = Some((d, cand));
         }
     }

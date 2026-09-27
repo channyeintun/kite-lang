@@ -53,6 +53,45 @@ async fn lock_checks() -> [error] {
     return out
 }
 
+struct Shared {
+    lock: sync.Mutex<int>
+}
+
+/// Hold the lock across a sleep, then put back one more than was there.
+async fn sleepy_holder(s: Shared) -> int {
+    var m = s.lock
+    let v = await sync.lock(m)
+    await task.sleep(10)
+    sync.release(m, v + 1)
+    return time.now()
+}
+
+/// Wait for the lock, and say when it came and what it held.
+async fn patient_waiter(s: Shared) -> (int, int) {
+    var m = s.lock
+    let v = await sync.lock(m)
+    let at = time.now()
+    sync.release(m, v + 1)
+    return (at, v)
+}
+
+/// A waiter used to only yield, which is not waiting as far as the clock is
+/// concerned: the clock never jumped to the holder's deadline, the holder never
+/// woke to release, and the program hung.
+async fn sleeping_holder_checks() -> [error] {
+    var out: [error] = []
+    let s = Shared{ lock: sync.mutex(0) }
+    let start = time.now()
+    let h = sleepy_holder(s)
+    let w = patient_waiter(s)
+    let (released, got) = await task.both(h, w)
+    let (at, seen) = got
+    out.push(test.equal_int(released - start, 10, "the holder sleeps, and releases"))
+    out.push(test.equal_int(at - start, 10, "the waiter gets the lock when it is released"))
+    out.push(test.equal_int(seen, 1, "holding what the holder put back"))
+    return out
+}
+
 fn try_lock_checks() -> [error] {
     var out: [error] = []
     let m = sync.mutex(7)
@@ -104,6 +143,7 @@ async fn main() {
     var results: [error] = []
     results = concat(results, await race_checks())
     results = concat(results, await lock_checks())
+    results = concat(results, await sleeping_holder_checks())
     results = concat(results, try_lock_checks())
     results = concat(results, atomic_checks())
     var failed = 0

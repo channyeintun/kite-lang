@@ -2,10 +2,10 @@
 // way.
 //
 // Everything an editor shows about Kite — diagnostics, hover, go to
-// definition, formatting — comes from `kite-lsp`, which runs the same passes
-// the compiler runs. An extension that implemented its own analysis would be
-// an analysis that only ever worked in one editor, and one that disagreed with
-// the build.
+// definition, references, rename, inlay hints, formatting — comes from
+// `kite-lsp`, which runs the same passes the compiler runs. An extension that
+// implemented its own analysis would be an analysis that only ever worked in
+// one editor, and one that disagreed with the build.
 //
 // It uses no npm dependency, not even the LSP client library: the protocol is
 // Content-Length-framed JSON over stdio, which is a hundred lines to speak,
@@ -22,6 +22,23 @@ const pending = new Map();
 /// Set while the extension is shutting down, so a kill is not read as a crash.
 let stopping = false;
 let diagnostics;
+
+/// The documents the server is told about: files, and buffers not yet saved.
+///
+/// A `git:` or diff-view copy of a file is also a `kite` document, and
+/// compiling it meant a second set of diagnostics for an old version of the
+/// file, published against a URI the server cannot read siblings beside.
+const SELECTOR = [
+  { language: "kite", scheme: "file" },
+  { language: "kite", scheme: "untitled" },
+];
+
+function tracked(document) {
+  return (
+    document.languageId === "kite" &&
+    (document.uri.scheme === "file" || document.uri.scheme === "untitled")
+  );
+}
 
 /// Where the language server is.
 ///
@@ -42,6 +59,29 @@ function serverPath() {
   return "kite-lsp";
 }
 
+function cannotStart(path, why) {
+  vscode.window.showErrorMessage(
+    `Kite: cannot start \`${path}\` (${why}). Install the compiler — ` +
+      "`npm install --save-dev @kite-lang/cli` — or set `kite.server.path`.",
+  );
+}
+
+/// Launch the binary.
+///
+/// On Windows, npm's `.bin` entry is a `kite-lsp.cmd` script, and since the
+/// fix for CVE-2024-27980 Node refuses to spawn a `.cmd` or `.bat` without a
+/// shell: `spawn` throws `EINVAL` synchronously. The shell is also what finds
+/// a bare `kite-lsp` that npm installed globally as a `.cmd`. The path is
+/// quoted because the shell splits on the spaces a user profile directory
+/// usually has.
+function launch(path) {
+  const stdio = ["pipe", "pipe", "pipe"];
+  if (process.platform === "win32" && !/\.exe$/i.test(path)) {
+    return spawn(`"${path}"`, [], { stdio, shell: true });
+  }
+  return spawn(path, [], { stdio });
+}
+
 /// Start the server, and notice when it stops.
 ///
 /// A server that dies took every diagnostic in the window with it, and the
@@ -49,18 +89,38 @@ function serverPath() {
 /// stopped saying anything about Kite, which reads as *no problems* rather
 /// than as *no answers*. It restarts once, and says so if that fails too.
 function start(path, context, retried = false) {
-  server = spawn(path, [], { stdio: ["pipe", "pipe", "pipe"] });
+  try {
+    server = launch(path);
+  } catch (e) {
+    // A synchronous failure escaped `activate` before, and the extension
+    // failed to load with no word about why.
+    server = undefined;
+    cannotStart(path, e.message);
+    return false;
+  }
+  const self = server;
+  // Whether this process ever answered. One that exits without a word never
+  // started — which is how a missing command looks through a shell, where
+  // there is no `error` event, only `cmd` exiting with 1.
+  self.heard = false;
 
-  server.on("error", (e) => {
-    vscode.window.showErrorMessage(
-      `Kite: cannot start \`${path}\` (${e.message}). Install the compiler — ` +
-        "`npm install --save-dev @kite-lang/cli` — or set `kite.server.path`.",
-    );
+  self.on("error", (e) => {
+    self.failed = true;
+    if (self === server) gone();
+    cannotStart(path, e.message);
   });
+  // Writing to a server that has gone is reported by `exit`; the pipe's own
+  // error would otherwise be thrown as an unhandled event.
+  self.stdin.on("error", () => {});
 
-  server.on("exit", (code, signal) => {
-    if (stopping) return;
+  self.on("exit", (code, signal) => {
+    if (stopping || self.failed || self !== server) return;
     diagnostics.clear();
+    gone();
+    if (!self.heard) {
+      cannotStart(path, `it exited with ${signal ?? code} before answering`);
+      return;
+    }
     if (retried) {
       vscode.window.showErrorMessage(
         `Kite: the language server stopped again (${signal ?? code}). ` +
@@ -71,25 +131,58 @@ function start(path, context, retried = false) {
     vscode.window.showWarningMessage(
       `Kite: the language server stopped (${signal ?? code}). Restarting.`,
     );
-    start(path, context, true);
-    request("initialize", { processId: process.pid, rootUri: null, capabilities: {} })
-      .then((result) => checkVersion(result, path));
-    notify("initialized", {});
-    for (const open of vscode.workspace.textDocuments) {
-      if (open.languageId === "kite") {
-        notify("textDocument/didOpen", {
-          textDocument: {
-            uri: open.uri.toString(),
-            languageId: "kite",
-            version: open.version,
-            text: open.getText(),
-          },
-        });
-      }
+    if (start(path, context, true)) {
+      initialize(path);
+      for (const open of vscode.workspace.textDocuments) send(open, "textDocument/didOpen");
     }
   });
 
-  read(server.stdout);
+  read(self);
+  return true;
+}
+
+/// Forget a server that has stopped, and fail everything waiting on it.
+///
+/// `server` stayed set to the dead process — after a spawn that failed, one
+/// that exited before answering, and the second crash — so `request` wrote
+/// to a closed pipe and registered a promise nothing would ever settle. Hover,
+/// completion, definition and the rename box waited forever. With it cleared,
+/// `request` refuses at once, and a restart sets it again.
+function gone() {
+  server = undefined;
+  for (const [, waiting] of pending) waiting.reject(new Error("the language server stopped"));
+  pending.clear();
+}
+
+function initialize(path) {
+  request("initialize", { processId: process.pid, rootUri: null, capabilities: {} })
+    .then((result) => checkVersion(result, path))
+    .catch(() => {});
+  notify("initialized", {});
+}
+
+/// Tell the server what a document says now.
+function send(document, method) {
+  if (!tracked(document)) return;
+  const uri = document.uri.toString();
+  if (method === "textDocument/didOpen") {
+    notify(method, {
+      textDocument: {
+        uri,
+        languageId: "kite",
+        version: document.version,
+        text: document.getText(),
+      },
+    });
+  } else if (method === "textDocument/didChange") {
+    notify(method, {
+      textDocument: { uri, version: document.version },
+      contentChanges: [{ text: document.getText() }],
+    });
+  } else {
+    // `didSave` and `didClose` name the document and nothing else.
+    notify(method, { textDocument: { uri } });
+  }
 }
 
 function activate(context) {
@@ -97,37 +190,21 @@ function activate(context) {
   context.subscriptions.push(diagnostics);
 
   const path = serverPath();
-  start(path, context);
-
-  request("initialize", { processId: process.pid, rootUri: null, capabilities: {} })
-    .then((result) => checkVersion(result, path));
-  notify("initialized", {});
-
-  const send = (document, method) => {
-    if (document.languageId !== "kite") return;
-    if (method === "textDocument/didOpen") {
-      notify(method, {
-        textDocument: {
-          uri: document.uri.toString(),
-          languageId: "kite",
-          version: document.version,
-          text: document.getText(),
-        },
-      });
-    } else {
-      notify(method, {
-        textDocument: { uri: document.uri.toString(), version: document.version },
-        contentChanges: [{ text: document.getText() }],
-      });
-    }
-  };
+  if (!start(path, context)) return;
+  initialize(path);
 
   context.subscriptions.push(
     vscode.workspace.onDidOpenTextDocument((d) => send(d, "textDocument/didOpen")),
     vscode.workspace.onDidChangeTextDocument((e) =>
       send(e.document, "textDocument/didChange"),
     ),
-    vscode.workspace.onDidSaveTextDocument((d) => send(d, "textDocument/didChange")),
+    vscode.workspace.onDidSaveTextDocument((d) => send(d, "textDocument/didSave")),
+    // Without this the server kept every file ever opened, and read a closed
+    // one's last buffer in preference to what was saved on disk.
+    vscode.workspace.onDidCloseTextDocument((d) => {
+      send(d, "textDocument/didClose");
+      if (tracked(d)) diagnostics.delete(d.uri);
+    }),
   );
   vscode.workspace.textDocuments.forEach((d) => send(d, "textDocument/didOpen"));
 
@@ -137,33 +214,86 @@ function activate(context) {
   });
 
   context.subscriptions.push(
-    vscode.languages.registerHoverProvider("kite", {
+    vscode.languages.registerHoverProvider(SELECTOR, {
       async provideHover(document, pos) {
-        const r = await request("textDocument/hover", position(document, pos));
+        const r = await answer("textDocument/hover", position(document, pos));
         if (!r || !r.contents) return null;
         return new vscode.Hover(new vscode.MarkdownString(r.contents.value));
       },
     }),
-    vscode.languages.registerDefinitionProvider("kite", {
+    vscode.languages.registerDefinitionProvider(SELECTOR, {
       async provideDefinition(document, pos) {
-        const r = await request("textDocument/definition", position(document, pos));
+        const r = await answer("textDocument/definition", position(document, pos));
         if (!r || !r.uri) return null;
         return new vscode.Location(vscode.Uri.parse(r.uri), toRange(r.range));
       },
     }),
-    vscode.languages.registerCompletionItemProvider("kite", {
+    vscode.languages.registerReferenceProvider(SELECTOR, {
+      async provideReferences(document, pos, context) {
+        const r = await answer("textDocument/references", {
+          ...position(document, pos),
+          context: { includeDeclaration: context.includeDeclaration },
+        });
+        return (r ?? []).map(
+          (l) => new vscode.Location(vscode.Uri.parse(l.uri), toRange(l.range)),
+        );
+      },
+    }),
+    // A refusal is the server's answer, with its reason, and throwing it is
+    // how VS Code shows that reason in the rename box rather than nothing.
+    vscode.languages.registerRenameProvider(SELECTOR, {
+      async prepareRename(document, pos) {
+        const r = await request("textDocument/prepareRename", position(document, pos));
+        return { range: toRange(r.range), placeholder: r.placeholder };
+      },
+      async provideRenameEdits(document, pos, newName) {
+        const r = await request("textDocument/rename", {
+          ...position(document, pos),
+          newName,
+        });
+        const edit = new vscode.WorkspaceEdit();
+        for (const [uri, edits] of Object.entries(r?.changes ?? {})) {
+          for (const e of edits) {
+            edit.replace(vscode.Uri.parse(uri), toRange(e.range), e.newText);
+          }
+        }
+        return edit;
+      },
+    }),
+    vscode.languages.registerInlayHintsProvider(SELECTOR, {
+      async provideInlayHints(document, range) {
+        const r = await answer("textDocument/inlayHint", {
+          textDocument: { uri: document.uri.toString() },
+          range: {
+            start: { line: range.start.line, character: range.start.character },
+            end: { line: range.end.line, character: range.end.character },
+          },
+        });
+        return (r ?? []).map(
+          (h) =>
+            new vscode.InlayHint(
+              new vscode.Position(h.position.line, h.position.character),
+              h.label,
+              h.kind === 1 ? vscode.InlayHintKind.Type : vscode.InlayHintKind.Parameter,
+            ),
+        );
+      },
+    }),
+    vscode.languages.registerCompletionItemProvider(SELECTOR, {
       async provideCompletionItems(document, pos) {
-        const r = await request("textDocument/completion", position(document, pos));
+        const r = await answer("textDocument/completion", position(document, pos));
         return (r?.items ?? []).map((item) => {
           const c = new vscode.CompletionItem(item.label);
           c.detail = item.detail;
+          // The protocol counts kinds from 1 and VS Code from 0.
+          if (item.kind) c.kind = item.kind - 1;
           return c;
         });
       },
     }),
-    vscode.languages.registerDocumentSymbolProvider("kite", {
+    vscode.languages.registerDocumentSymbolProvider(SELECTOR, {
       async provideDocumentSymbols(document) {
-        const r = await request("textDocument/documentSymbol", {
+        const r = await answer("textDocument/documentSymbol", {
           textDocument: { uri: document.uri.toString() },
         });
         return (r ?? []).map(
@@ -177,9 +307,9 @@ function activate(context) {
         );
       },
     }),
-    vscode.languages.registerDocumentFormattingEditProvider("kite", {
+    vscode.languages.registerDocumentFormattingEditProvider(SELECTOR, {
       async provideDocumentFormattingEdits(document) {
-        const r = await request("textDocument/formatting", {
+        const r = await answer("textDocument/formatting", {
           textDocument: { uri: document.uri.toString() },
         });
         return (r ?? []).map((edit) =>
@@ -200,6 +330,7 @@ function toRange(range) {
 }
 
 function write(message) {
+  if (!server) return;
   const body = JSON.stringify({ jsonrpc: "2.0", ...message });
   server.stdin.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
 }
@@ -208,10 +339,35 @@ function notify(method, params) {
   write({ method, params });
 }
 
+/// Ask the server, and settle with its result — or fail with its error.
+///
+/// Every reply used to resolve with `message.result`, so a refusal arrived as
+/// `undefined` and the reason the server gave was dropped on the floor.
 function request(method, params) {
+  if (!server) return Promise.reject(new Error("the language server is not running"));
   const id = nextId++;
+  const settled = new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
   write({ id, method, params });
-  return new Promise((resolve) => pending.set(id, resolve));
+  return settled;
+}
+
+/// An error the server sent, as opposed to one about the server being gone —
+/// which `exit` has already reported once.
+function refusal(message) {
+  const e = new Error(message);
+  e.fromServer = true;
+  return e;
+}
+
+/// A request whose failure is worth a message but not an exception: a hover
+/// the server refused should say why, not break the hover.
+async function answer(method, params) {
+  try {
+    return await request(method, params);
+  } catch (e) {
+    if (e.fromServer) vscode.window.showWarningMessage(`Kite: ${e.message}`);
+    return null;
+  }
 }
 
 /// Say so when the server is not the version this extension was built for.
@@ -242,9 +398,9 @@ function checkVersion(result, path) {
 }
 
 // Content-Length framing, in the one place it belongs.
-function read(stream) {
+function read(child) {
   let buffer = Buffer.alloc(0);
-  stream.on("data", (chunk) => {
+  child.stdout.on("data", (chunk) => {
     buffer = Buffer.concat([buffer, chunk]);
     for (;;) {
       const split = buffer.indexOf("\r\n\r\n");
@@ -256,15 +412,18 @@ function read(stream) {
       if (buffer.length < split + 4 + length) return;
       const body = buffer.slice(split + 4, split + 4 + length).toString();
       buffer = buffer.slice(split + 4 + length);
+      child.heard = true;
       handle(JSON.parse(body));
     }
   });
 }
 
 function handle(message) {
-  if (message.id !== undefined && pending.has(message.id)) {
-    pending.get(message.id)(message.result);
+  if (message.id !== undefined && message.id !== null && pending.has(message.id)) {
+    const waiting = pending.get(message.id);
     pending.delete(message.id);
+    if (message.error) waiting.reject(refusal(message.error.message));
+    else waiting.resolve(message.result);
     return;
   }
   if (message.method === "textDocument/publishDiagnostics") {
@@ -277,7 +436,9 @@ function handle(message) {
           d.message,
           d.severity === 1
             ? vscode.DiagnosticSeverity.Error
-            : vscode.DiagnosticSeverity.Warning,
+            : d.severity === 3
+              ? vscode.DiagnosticSeverity.Information
+              : vscode.DiagnosticSeverity.Warning,
         );
         item.code = d.code;
         item.source = "kite";

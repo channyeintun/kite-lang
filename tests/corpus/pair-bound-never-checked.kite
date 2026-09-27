@@ -1,0 +1,29 @@
+// A whole `(T, error)` bound to one name and never taken apart.
+//
+// R1 marks the error of a destructuring, and R6 catches a bare call — but
+// `let p = load()` does neither, so the failure inside `p` used to leave scope
+// in silence. Returning the pair, or destructuring it later, reads it and is
+// fine; dropping it is the same E0302 as dropping a bare `error`.
+
+fn load() -> (int, error) {
+    return 1, nil
+}
+
+fn passes_it_on() -> (int, error) {
+    let p = load()
+    return p
+}
+
+fn takes_it_apart() -> (int, error) {
+    let p = load()
+    let (v, err) = p
+    check err
+    return v, nil
+}
+
+fn main() {
+    let dropped = load() //~ ERROR E0302
+    _ = passes_it_on()
+    _ = takes_it_apart()
+    io.print("done")
+}

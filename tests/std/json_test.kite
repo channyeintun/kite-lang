@@ -135,7 +135,96 @@ fn checks() -> [error] {
     let (shallow, shallow_err) = json.parse(nested(max_nesting() - 1))
     out.push(test.ok(shallow_err, "nesting just under the ceiling still parses"))
 
+    // ---- numbers are the float nearest what was written ----
+    //
+    // Summing digit values as floats made seven of these seventeen common
+    // literals come out a unit or two away, `0.3` as 0.30000000000000004.
+    out.push(number("0.3", 0.3))
+    out.push(number("0.7", 0.7))
+    out.push(number("3.14159", 3.14159))
+    out.push(number("9.95", 9.95))
+    out.push(number("0.035", 0.035))
+    out.push(number("1e-7", 0.0000001))
+    out.push(number("123.456", 123.456))
+    out.push(number("1234.5678", 1234.5678))
+    out.push(number("0.1234567890123", 0.1234567890123))
+    out.push(number("1e23", 1e23))
+    out.push(number("5e-324", 5e-324))
+    out.push(number("-2.5E+3", -2500.0))
+    out.push(number("9223372036854775808", 9223372036854775808.0))
+    out.push(number("0.30000000000000004", 0.1 + 0.2))
+    // Written back as the same number. The writer cast to an `int` to drop
+    // the `.0`, and the cast saturates: 2⁶³ came out as 9223372036854775807,
+    // which is a different number to anything reading it as an integer.
+    out.push(test.equal_str(roundtrip("9223372036854775808"), "9223372036854775808.0", "2^63 is written as itself"))
+    out.push(number(roundtrip("9223372036854775808"), 9223372036854775808.0))
+    out.push(test.equal_str(roundtrip("-9223372036854775808"), "-9223372036854775808", "-2^63 is a whole int"))
+    out.push(test.equal_str(roundtrip("9223372036854774784"), "9223372036854774784", "the largest float below 2^63"))
+    let zero = or_else(json.number_of(parsed("-0")), 1.0)
+    out.push(test.is_true(zero == 0.0 && 1.0 / zero < 0.0, "-0 keeps its sign"))
+    // JSON has no infinity and no NaN. They went out as interpolation spells
+    // them, `inf`, `-inf` and `NaN`, which no reader takes back, this one
+    // included. `JSON.stringify` writes `null` for each, and so does this.
+    let inf = 1.0 / 0.0
+    let odd = json.Json.Array([json.Json.Number(inf), json.Json.Number(-inf), json.Json.Number(inf - inf)])
+    out.push(test.equal_str(json.stringify(odd), "[null,null,null]", "an infinity or a NaN is written null"))
+    out.push(test.equal_str(json.pretty(odd), "[\n  null,\n  null,\n  null\n]", "in pretty output too"))
+    let (_, odd_err) = json.parse(json.stringify(odd))
+    out.push(test.ok(odd_err, "and reads back as JSON"))
+    out.push(test.equal_str(json.stringify(json.Json.Number(1.5)), "1.5", "a finite fraction is unchanged"))
+
+    // ---- RFC 8259, and nothing looser ----
+    for loose in ["01", "-01", "00", "1.", "-", "1e", "1e+", "1E-", ".5", "+1", "1.e5", "0x10", "\"\\x\"", "\"\\a\"", "\"a\tb\"", "\"a\nb\"", "\"\u{1}\""] {
+        let (_, lerr) = json.parse(loose)
+        out.push(test.failed(lerr, "`\(loose)` is not JSON"))
+    }
+    for strict in ["0", "-0", "0.5", "10", "1E+2", "1e-2", "\"\\/\"", "\"a\\tb\""] {
+        let (_, serr) = json.parse(strict)
+        out.push(test.ok(serr, "`\(strict)` is JSON"))
+    }
+    out.push(test.equal_str(roundtrip("\"\\/\""), "\"/\"", "an escaped solidus is itself"))
+
+    // ---- a whole number is whole and fits ----
+    //
+    // `int_of` was a cast, which truncated 3.7 and saturated 1e30, and
+    // `@derive(Decode)` reads an `int` field through it.
+    out.push(test.is_true(json.int_of(parsed("3.7")) == nil, "3.7 is not a whole number"))
+    out.push(test.is_true(json.int_of(parsed("1e30")) == nil, "1e30 does not fit in an int"))
+    out.push(test.is_true(json.int_of(parsed("9223372036854775808")) == nil, "2^63 does not fit"))
+    out.push(test.equal_int(or_else(json.int_of(parsed("3.0")), 0), 3, "3.0 is the whole number 3"))
+    out.push(test.equal_int(or_else(json.int_of(parsed("-12")), 0), -12, "a negative whole number"))
+    out.push(test.equal_int(
+            or_else(json.int_of(parsed("-9223372036854775808")), 0),
+            -9223372036854775807 - 1,
+            "the smallest int",
+        ))
+    out.push(test.equal_int(json.int_or(parsed("{\"n\": 2.5}"), "n", -1), -1, "int_or falls back on a fraction"))
+    let (_, fraction_err) = Row.decode(parsed("{\"id\": 3.7}"))
+    out.push(test.equal_str(
+            if fraction_err == nil { "decoded" } else { fraction_err.message() },
+            "Row.id: expected a whole number",
+            "Decode refuses a fraction for an int",
+        ))
+    let (_, huge_id_err) = Row.decode(parsed("{\"id\": 1e30}"))
+    out.push(test.failed(huge_id_err, "Decode refuses an int past the range"))
+    let (row, row_err) = Row.decode(parsed("{\"id\": 42}"))
+    out.push(test.ok(row_err, "Decode takes a whole number"))
+
     return out
+}
+
+@derive(Decode)
+struct Row {
+    id: int
+}
+
+/// `doc` parses to exactly `want`, bit for bit.
+fn number(doc: str, want: float) -> error {
+    let (value, err) = json.parse(doc)
+    if err != nil {
+        return test.fail("\(doc): \(err.message())")
+    }
+    return test.equal_float(or_else(json.number_of(value), -1.0), want, 0.0, doc)
 }
 
 /// The ceiling `std/json` enforces, repeated here so the two tests below sit

@@ -38,23 +38,39 @@ extern fn path_kind(path: str) -> int
 @host("fs")
 extern fn temp_path() -> str
 
-/// How the host reports a failure.
+/// How the host reports a failure: a leading `\u{1}`, then the reason.
 ///
-/// A leading `\u{1}` marks an error, because a path, a file's contents and a
-/// directory listing are all ordinary strings and none of them may be confused
-/// with a failure. A sentinel byte no text file starts with is the cheapest
-/// discriminator that crosses a boundary carrying only `str`.
+/// A path, a file's contents and a directory listing are all ordinary strings,
+/// and one `str` is all an `extern` carries back, so the answer is marked
+/// rather than paired.
 fn FAILURE_MARK() -> str {
     return "\u{1}"
 }
 
+/// How the host reports that a call which can fail did not: a leading
+/// `\u{2}`, then the answer.
+///
+/// Marking only failures was not sound. A file may begin with any character,
+/// and one beginning with U+0001 read back as an error whose message was the
+/// rest of the file. With both marks, the first character of an answer is
+/// always a mark and never the answer's own, so nothing a file contains can be
+/// mistaken for one.
+fn SUCCESS_MARK() -> str {
+    return "\u{2}"
+}
+
 fn unwrap(answer: str, what: str) -> (str, error) {
-    if answer.len() > 0 {
-        if answer.slice(0, 1) == FAILURE_MARK() {
-            return _, errors.new("fs: \(what): \(answer.slice(1, answer.len()))")
-        }
+    let mark = answer.slice(0, 1)
+    if mark == FAILURE_MARK() {
+        return _, errors.new("fs: \(what): \(answer.slice(1, answer.len()))")
     }
-    return answer, nil
+    if mark == SUCCESS_MARK() {
+        return answer.slice(1, answer.len()), nil
+    }
+    // Every host this library runs on marks its answers. One that does not is
+    // a host from before the success mark, and guessing which kind of answer
+    // it meant is the bug the mark exists to prevent.
+    return _, errors.new("fs: \(what): the host's answer carries no mark")
 }
 
 /// The whole of a file, as text.

@@ -408,9 +408,10 @@ section p:last-child { margin-bottom: 0; }
    blocks that sit under a column of prose and measure it, not pills tucked
    against the left margin. */
 .button {
-  /* 48px, the same figure `kitec check --a11y` holds a Kite program's controls
-     to. These were 38px, which is under it everywhere the padding did not make
-     up the difference — and eight buttons on this page landed at 41. */
+  /* 48px, the touch target Material, WCAG 2.2's target-size rule and Apple
+     all settle on. These were 38px, which is under it everywhere the padding
+     did not make up the difference — and eight buttons on this page landed at
+     41. */
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -768,10 +769,8 @@ button:disabled:hover { border-color: var(--rule); }
 .samples a {
   font-size: 1.2rem;
   border-radius: 999px;
-  /* 48px, which is what `kitec check --a11y` holds a Kite program's controls
-     to — Material's figure, WCAG 2.2's target-size rule and Apple's. A site
-     that fails the rule its own compiler enforces has no business shipping
-     the rule. These were 35px and awkward to hit. */
+  /* 48px — Material's figure, WCAG 2.2's target-size rule and Apple's. These
+     were 35px and awkward to hit. */
   min-height: 48px;
   padding: 0 18px;
   display: inline-flex;

@@ -33,13 +33,17 @@
 //! and reloaded afterwards, which is what lets the nursery move objects. The
 //! maps are serialised into a data section next to the code (with relocated
 //! function addresses, so the same bytes work under the JIT and the linker)
-//! and registered with the runtime before `main` runs.
+//! and registered with the runtime before `main` runs. Each slot is recorded
+//! as a distance below its own frame's frame pointer, which is the one
+//! address the runtime's frame-pointer walk has for that frame on every
+//! target — see `collect_maps` for why not the stack pointer.
 //!
 //! Allocation and mutation all cross into the runtime: variadic constructions
 //! stage their operands in `KITE_RT_STAGE` — the native shape of the bytecode
-//! VM's consecutive argument window — and the one in-place heap mutation the
-//! language has, a `var` field write, is a runtime call so the write barrier
-//! lives in exactly one place.
+//! VM's consecutive argument window, and a literal longer than the window is
+//! built a window at a time — and the in-place heap mutations, a `var` field
+//! write and a write into a slice this function owns (see `slices`), are
+//! runtime calls so the write barrier lives in exactly one place.
 
 use cranelift_codegen::ir::{types, AbiParam, ArgumentExtension, InstBuilder, MemFlagsData, Signature, TrapCode, Type, Value};
 use cranelift_codegen::isa::{CallConv, TargetIsa};
@@ -50,6 +54,7 @@ use kite_hir::{BinOp, Builtin, StrKind, TyId, TyKind, Types, UnOp};
 use kite_mir as mir;
 use std::collections::HashMap;
 
+mod slices;
 mod support;
 pub use support::{unsupported, Unsupported};
 
@@ -106,9 +111,14 @@ const I64: Type = types::I64;
 const F64: Type = types::F64;
 const I8: Type = types::I8;
 
+// A map literal is staged a window at a time as alternating keys and values,
+// and a pair split across two windows would stage a key with no value.
+const _: () = assert!(kite_rt::STAGE_WORDS % 2 == 0);
+
 #[rustfmt::skip]
 const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_startup", &[], None),
+    ("kite_rt_run", &[I64], Some(types::I32)),
     ("kite_rt_trap", &[I64, I64, I64], None),
     ("kite_rt_register_string", &[I64, I64, I64], None),
     ("kite_rt_register_struct_shape", &[I64, I64, I64], None),
@@ -117,14 +127,17 @@ const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_register_closure", &[I64, I64, I64, I64], None),
     ("kite_rt_register_fn_name", &[I64, I64, I64], None),
     ("kite_rt_register_extern", &[I64, I64, I64], None),
+    ("kite_rt_register_extern_sig", &[I64, I64, I64], None),
     ("kite_rt_register_vtable_method", &[I64, I64, I64, I64], None),
     ("kite_rt_register_stack_maps", &[I64], None),
     ("kite_rt_struct_new", &[I64, I64], Some(I64)),
     ("kite_rt_enum_new", &[I64, I64, I64], Some(I64)),
     ("kite_rt_tuple_new", &[I64, I64], Some(I64)),
-    ("kite_rt_slice_new", &[I64, I64], Some(I64)),
+    ("kite_rt_slice_new", &[I64, I64, I64], Some(I64)),
+    ("kite_rt_slice_extend", &[I64, I64], Some(I64)),
     ("kite_rt_closure_new", &[I64, I64], Some(I64)),
     ("kite_rt_map_new", &[I64, I64, I64], Some(I64)),
+    ("kite_rt_map_extend", &[I64, I64], Some(I64)),
     ("kite_rt_box_new", &[I64, I64], Some(I64)),
     ("kite_rt_pair_new", &[I64, I64, I64], Some(I64)),
     ("kite_rt_error_new", &[I64, I64, I64, I64], Some(I64)),
@@ -134,8 +147,8 @@ const RUNTIME: &[(&str, &[Type], Option<Type>)] = &[
     ("kite_rt_error_as", &[I64, I64, I64], Some(I64)),
     ("kite_rt_set_field", &[I64, I64, I64, I64], None),
     ("kite_rt_index_get", &[I64, I64], Some(I64)),
-    ("kite_rt_set_index", &[I64, I64, I64], Some(I64)),
-    ("kite_rt_slice_push", &[I64, I64], Some(I64)),
+    ("kite_rt_set_index", &[I64, I64, I64, I8], Some(I64)),
+    ("kite_rt_slice_push", &[I64, I64, I8], Some(I64)),
     ("kite_rt_slice_len", &[I64], Some(I64)),
     ("kite_rt_slice_get", &[I64, I64, I64], Some(I64)),
     ("kite_rt_map_len", &[I64], Some(I64)),
@@ -203,10 +216,10 @@ mod trap_code {
     pub const OVERFLOW_SUB: i64 = 3;
     pub const OVERFLOW_MUL: i64 = 4;
     pub const OVERFLOW_DIV: i64 = 5;
-    pub const OVERFLOW_REM: i64 = 6;
     pub const OVERFLOW_SHL: i64 = 7;
     pub const OVERFLOW_SHR: i64 = 8;
     pub const UNREACHABLE: i64 = 10;
+    pub const CALL_DEPTH: i64 = 11;
 }
 
 /// Everything the per-function lowering needs from the module scan.
@@ -283,6 +296,8 @@ struct ModuleCx<'a, M: Module> {
     fns: Vec<FuncId>,
     thunks: HashMap<u32, FuncId>,
     stage: DataId,
+    /// `KITE_RT_DEPTH`, the count of calls in progress. See `kite_rt::MAX_FRAMES`.
+    depth: DataId,
     call_conv: CallConv,
 }
 
@@ -322,6 +337,9 @@ fn build<M: Module>(
     let stage = module
         .declare_data("KITE_RT_STAGE", Linkage::Import, true, false)
         .map_err(|e| e.to_string())?;
+    let depth = module
+        .declare_data("KITE_RT_DEPTH", Linkage::Import, true, false)
+        .map_err(|e| e.to_string())?;
 
     let mut cx = ModuleCx {
         module,
@@ -332,6 +350,7 @@ fn build<M: Module>(
         fns: Vec::new(),
         thunks: HashMap::new(),
         stage,
+        depth,
         call_conv,
     };
 
@@ -500,7 +519,13 @@ fn define_init<M: Module>(
     let mut extern_names = Vec::new();
     for (i, e) in cx.program.externs.iter().enumerate() {
         let name = format!("{}.{}", e.host, e.name);
-        extern_names.push((define_bytes(cx, &format!("kite_extern_{}", i), name.as_bytes())?, name.len()));
+        let sig = mir::extern_signature(e, cx.types);
+        extern_names.push((
+            define_bytes(cx, &format!("kite_extern_{}", i), name.as_bytes())?,
+            name.len(),
+            define_bytes(cx, &format!("kite_extern_sig_{}", i), &sig)?,
+            sig.len(),
+        ));
     }
 
     let cfg = cx.module.target_config();
@@ -533,6 +558,7 @@ fn define_init<M: Module>(
         "kite_rt_register_closure",
         "kite_rt_register_fn_name",
         "kite_rt_register_extern",
+        "kite_rt_register_extern_sig",
         "kite_rt_register_vtable_method",
         "kite_rt_register_stack_maps",
     ] {
@@ -589,11 +615,15 @@ fn define_init<M: Module>(
         let (idx, n) = (init.i(i as u64), init.i(*len as u64));
         init.call("kite_rt_register_fn_name", &[idx, ptr, n]);
     }
-    for (i, (data, len)) in extern_names.iter().enumerate() {
+    for (i, (data, len, sig, sig_len)) in extern_names.iter().enumerate() {
         let gv = cx.module.declare_data_in_func(*data, init.b.func);
         let ptr = init.b.ins().symbol_value(I64, gv);
         let (idx, n) = (init.i(i as u64), init.i(*len as u64));
         init.call("kite_rt_register_extern", &[idx, ptr, n]);
+        let gv = cx.module.declare_data_in_func(*sig, init.b.func);
+        let ptr = init.b.ins().symbol_value(I64, gv);
+        let n = init.i(*sig_len as u64);
+        init.call("kite_rt_register_extern_sig", &[idx, ptr, n]);
     }
     for (t, table) in cx.program.vtables.iter().enumerate() {
         for entry in &table.entries {
@@ -626,6 +656,11 @@ fn define_init<M: Module>(
 /// The entry the outside world calls: start the runtime, register the
 /// program, run `main`, then drive the scheduler until nothing is left —
 /// because `main` returning is not the program ending.
+///
+/// That is a local function, `kite_program`; the exported `main` hands it to
+/// `kite_rt_run`, which runs it on a stack of the runtime's own, so every
+/// frame the program makes and the collector walks is on a stack deep enough
+/// for `kite_rt::MAX_FRAMES` calls.
 fn define_wrapper<M: Module>(
     cx: &mut ModuleCx<M>,
     fbcx: &mut FunctionBuilderContext,
@@ -633,12 +668,12 @@ fn define_wrapper<M: Module>(
 ) -> Result<FuncId, String> {
     let cfg = cx.module.target_config();
     let sig = make_sig(cx.call_conv, &[], Some(types::I32));
-    let id = cx
+    let program = cx
         .module
-        .declare_function("main", Linkage::Export, &sig)
+        .declare_function("kite_program", Linkage::Local, &sig)
         .map_err(|e| e.to_string())?;
     let mut ctx = cx.module.make_context();
-    ctx.func.signature = sig;
+    ctx.func.signature = sig.clone();
     let mut b = FunctionBuilder::new(&mut ctx.func, fbcx);
     let entry = b.create_block();
     b.append_block_params_for_function_params(entry);
@@ -659,6 +694,28 @@ fn define_wrapper<M: Module>(
     b.ins().call(f, &[]);
     let zero = b.ins().iconst(types::I32, 0);
     b.ins().return_(&[zero]);
+    b.finalize(cfg);
+    cx.module.define_function(program, &mut ctx).map_err(|e| e.to_string())?;
+    cx.module.clear_context(&mut ctx);
+
+    // `main` hands the program to the runtime, which runs it on a stack deep
+    // enough for `kite_rt::MAX_FRAMES` calls and answers what it answered.
+    let id = cx
+        .module
+        .declare_function("main", Linkage::Export, &sig)
+        .map_err(|e| e.to_string())?;
+    ctx.func.signature = sig;
+    let mut b = FunctionBuilder::new(&mut ctx.func, fbcx);
+    let entry = b.create_block();
+    b.switch_to_block(entry);
+    b.seal_block(entry);
+    let program_ref = cx.module.declare_func_in_func(program, b.func);
+    let address = b.ins().func_addr(I64, program_ref);
+    let run = cx.rt("kite_rt_run");
+    let run_ref = cx.module.declare_func_in_func(run, b.func);
+    let call = b.ins().call(run_ref, &[address]);
+    let status = b.inst_results(call)[0];
+    b.ins().return_(&[status]);
     b.finalize(cfg);
     cx.module.define_function(id, &mut ctx).map_err(|e| e.to_string())?;
     cx.module.clear_context(&mut ctx);
@@ -706,23 +763,65 @@ fn define_thunk<M: Module>(
     b.ins().return_(&results);
     b.finalize(cfg);
     cx.module.define_function(id, &mut ctx).map_err(|e| e.to_string())?;
-    let maps = collect_maps(&ctx);
+    let maps = collect_maps(&ctx)?;
     cx.module.clear_context(&mut ctx);
     Ok(maps)
 }
 
-/// The safepoints Cranelift recorded for the function just defined.
-fn collect_maps(ctx: &cranelift_codegen::Context) -> FnMaps {
+/// The safepoints Cranelift recorded for the function just defined, each
+/// entry turned into a distance *below this function's own frame pointer*.
+///
+/// Cranelift reports an entry as an offset from the stack pointer at the
+/// safepoint. The collector cannot use that as it stands: it walks frame
+/// pointers, and the only way to get this frame's stack pointer back from a
+/// frame pointer is through the frame it called — which means assuming where
+/// the *callee* keeps its frame record. The callee is usually a Rust function
+/// in `kite-rt`, and that assumption ("the record is at the top, so the
+/// caller's stack pointer is the record plus 16") holds on x86-64 and Apple
+/// AArch64 and is false on AArch64 Linux, where LLVM puts the record below
+/// the saved registers. Measured from this frame's own frame pointer, an entry
+/// needs nothing from the callee at all.
+///
+/// The conversion is exact because this frame's layout is Cranelift's and is
+/// known here: the frame record sits at the top of the frame, directly above
+/// the callee-saved registers, and `frame_to_fp_offset` is the distance from
+/// the stack pointer — the bottom of the frame while it is active — up to it.
+/// Each map also carries its own `span`, Cranelift's figure for the same
+/// distance at that safepoint; they agree, and if a future Cranelift ever let
+/// them differ, neither could be trusted, so that is an error rather than a
+/// guess.
+fn collect_maps(ctx: &cranelift_codegen::Context) -> Result<FnMaps, String> {
     let compiled = ctx.compiled_code().expect("the function was just compiled");
-    compiled
-        .buffer
-        .user_stack_maps()
-        .iter()
-        .map(|(ret_off, _, map)| {
-            let offsets: Vec<u32> = map.entries().map(|(_, off)| off).collect();
-            (*ret_off, offsets)
-        })
-        .collect()
+    let maps = compiled.buffer.user_stack_maps();
+    if maps.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(layout) = compiled.buffer.frame_layout() else {
+        return Err("Cranelift recorded stack maps without a frame layout".to_string());
+    };
+    let fp_above_sp = layout.frame_to_fp_offset;
+    let mut out = Vec::with_capacity(maps.len());
+    for (ret_off, span, map) in maps {
+        if *span != fp_above_sp {
+            return Err(format!(
+                "a stack map spans {} bytes of a frame whose pointer is {} above its bottom",
+                span, fp_above_sp
+            ));
+        }
+        let mut below = Vec::new();
+        for (_, sp_off) in map.entries() {
+            // A spill slot is inside the frame, so strictly under its record.
+            if sp_off >= fp_above_sp {
+                return Err(format!(
+                    "a stack-map slot at sp+{} is not below the frame pointer at sp+{}",
+                    sp_off, fp_above_sp
+                ));
+            }
+            below.push(fp_above_sp - sp_off);
+        }
+        out.push((*ret_off, below));
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -735,6 +834,15 @@ struct FnLower<'a, 'b, M: Module> {
     fn_index: usize,
     b: FunctionBuilder<'a>,
     vars: Vec<Variable>,
+    /// By local index: whether the local is carried as the value that
+    /// defined it rather than through its variable. See [`direct_locals`].
+    direct: Vec<bool>,
+    /// The value each direct local was given, once it has been.
+    values: Vec<Option<Value>>,
+    /// One `i8` owned flag per slice local the function writes into, by
+    /// local index: whether nothing but that local can reach its slice, so a
+    /// write may go straight in. See the `slices` module.
+    owned: HashMap<usize, Variable>,
     blocks: Vec<cranelift_codegen::ir::Block>,
     /// Function references imported into this function, on first use.
     rt_refs: HashMap<&'static str, cranelift_codegen::ir::FuncRef>,
@@ -756,12 +864,14 @@ fn define_fn<M: Module>(
 
     // One variable per MIR local. A reference-typed local is declared as
     // needing a stack map, which is the whole precise-roots story: Cranelift
-    // spills it at each safepoint, records where, and reloads after.
+    // spills it at each safepoint, records where, and reloads after. A direct
+    // local's value is declared so itself, when it is made.
+    let direct = direct_locals(f);
     let mut vars = Vec::with_capacity(f.locals.len());
-    for l in &f.locals {
+    for (l, is_direct) in f.locals.iter().zip(&direct) {
         let ty = cl_type(l.ty, cx.types);
         let var = b.declare_var(ty);
-        if kind_of(l.ty, cx.types) == kite_rt::kind::REF {
+        if !is_direct && kind_of(l.ty, cx.types) == kite_rt::kind::REF {
             b.declare_var_needs_stack_map(var);
         }
         vars.push(var);
@@ -778,8 +888,12 @@ fn define_fn<M: Module>(
     }
     // Every other local starts as its type's all-zero value — `nil`, 0, 0.0 —
     // so a use on a path the checker knows is impossible still reads a value
-    // of the right type rather than tripping the SSA builder.
+    // of the right type rather than tripping the SSA builder. A direct local
+    // has no such path: it is read only after it is made.
     for (i, l) in f.locals.iter().enumerate().skip(f.param_count) {
+        if direct[i] {
+            continue;
+        }
         let ty = cl_type(l.ty, cx.types);
         let zero = if ty == types::F64 {
             b.ins().f64const(0.0)
@@ -788,7 +902,15 @@ fn define_fn<M: Module>(
         };
         b.def_var(vars[i], zero);
     }
-    b.ins().jump(blocks[0], &[]);
+    // Every flag starts clear: a parameter's slice is the caller's too, and
+    // any other local has not been given one yet.
+    let mut owned = HashMap::new();
+    for l in slices::written(f) {
+        let flag = b.declare_var(I8);
+        let clear = b.ins().iconst(I8, 0);
+        b.def_var(flag, clear);
+        owned.insert(l.index(), flag);
+    }
 
     let mut lower = FnLower {
         cx,
@@ -796,11 +918,25 @@ fn define_fn<M: Module>(
         fn_index,
         b,
         vars,
+        values: vec![None; direct.len()],
+        direct,
+        owned,
         blocks,
         rt_refs: HashMap::new(),
         fn_refs: HashMap::new(),
         stage_base: None,
     };
+    // This call is one more in progress, and the one past the VM's limit
+    // traps as the VM's does. Counted out again at every `return`.
+    let depth = lower.count_depth(1);
+    let limit = lower.b.ins().icmp_imm_u(
+        cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThan,
+        depth,
+        kite_rt::MAX_FRAMES as i64,
+    );
+    lower.trap_if(limit, trap_code::CALL_DEPTH, 0, 0);
+    let first = lower.blocks[0];
+    lower.b.ins().jump(first, &[]);
 
     let reachable = mir::reachable_blocks(f);
     for (i, block) in f.blocks.iter().enumerate() {
@@ -825,12 +961,89 @@ fn define_fn<M: Module>(
     let FnLower { b, .. } = lower;
     b.finalize(cfg);
 
-    cx.module.define_function(id, &mut ctx).map_err(|e| {
-        format!("compiling `{}`: {}", f.name, e)
+    cx.module.define_function(id, &mut ctx).map_err(|e| match e {
+        cranelift_module::ModuleError::Allocation { .. } => format!(
+            "`{}` is too large for the native JIT: the program's machine code does not fit \
+             in the {} MiB it reserves\n\
+             note: a function holding thousands of values across calls grows with the square \
+             of their number, since each call saves every one of them for the collector: \
+             split it, or keep fewer values alive at once",
+            f.name,
+            JIT_RESERVE >> 20
+        ),
+        e => format!("compiling `{}`: {}", f.name, e),
     })?;
-    let maps = collect_maps(&ctx);
+    let maps = collect_maps(&ctx).map_err(|e| format!("compiling `{}`: {}", f.name, e))?;
     cx.module.clear_context(&mut ctx);
     Ok(maps)
+}
+
+/// The locals a function may carry as the SSA value that defined them, with
+/// no Cranelift variable in between: each is assigned once, in one block, and
+/// read only later in that same block.
+///
+/// Cranelift's SSA builder keeps, for every variable, a table indexed by
+/// block number, grown to the highest block the variable is defined or read
+/// in. A debug build splits a block at every checked `+`, so a function of
+/// twenty thousand `let v = i + 1` had forty thousand blocks and twenty
+/// thousand variables defined across them: 1.5 GB to compile, and 52,000 of
+/// them ran out of memory. Almost every local in such a function is a value
+/// made and used on the spot, which needs no variable at all; everything the
+/// checks split off from a block is dominated by what came before in it, so
+/// the value that defined the local is valid wherever it is read. Anything
+/// else — a parameter, a local assigned twice or written in place, one read
+/// in another block, or before it is assigned on some path — keeps its
+/// variable.
+fn direct_locals(f: &mir::Function) -> Vec<bool> {
+    let mut direct = vec![true; f.locals.len()];
+    let mut defined: Vec<Option<(usize, usize)>> = vec![None; f.locals.len()];
+    for d in direct.iter_mut().take(f.param_count) {
+        *d = false;
+    }
+    for (bi, block) in f.blocks.iter().enumerate() {
+        for (si, stmt) in block.stmts.iter().enumerate() {
+            let written = match stmt {
+                mir::Inst::Assign { dst, .. } => {
+                    if defined[dst.index()].is_some() {
+                        direct[dst.index()] = false;
+                    }
+                    defined[dst.index()] = Some((bi, si));
+                    continue;
+                }
+                mir::Inst::SlicePush { local, .. }
+                | mir::Inst::MapSet { local, .. }
+                | mir::Inst::MapRemove { local, .. } => *local,
+                mir::Inst::SetIndex { base: mir::Operand::Local(l), .. } => *l,
+                mir::Inst::SetIndex { .. } | mir::Inst::SetField { .. } => continue,
+            };
+            direct[written.index()] = false;
+        }
+    }
+    for (i, d) in defined.iter().enumerate() {
+        if d.is_none() {
+            direct[i] = false;
+        }
+    }
+    // A read counts at its statement, and a terminator's after all of them.
+    let mut read = |o: &mir::Operand, at: (usize, usize)| {
+        if let mir::Operand::Local(l) = o {
+            match defined[l.index()] {
+                Some((bi, si)) if bi == at.0 && si < at.1 => {}
+                _ => direct[l.index()] = false,
+            }
+        }
+    };
+    for (bi, block) in f.blocks.iter().enumerate() {
+        for (si, stmt) in block.stmts.iter().enumerate() {
+            for o in stmt.operands() {
+                read(o, (bi, si));
+            }
+        }
+        if let Some(o) = block.term.operand() {
+            read(o, (bi, usize::MAX));
+        }
+    }
+    direct
 }
 
 impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
@@ -870,6 +1083,17 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
         v
     }
 
+    /// Add `by` to the count of calls in progress, answering the new count.
+    fn count_depth(&mut self, by: i64) -> Value {
+        let gv = self.cx.module.declare_data_in_func(self.cx.depth, self.b.func);
+        let at = self.b.ins().symbol_value(I64, gv);
+        let flags = MemFlagsData::trusted();
+        let now = self.b.ins().load(I64, flags, at, 0);
+        let next = self.b.ins().iadd_imm_s(now, by);
+        self.b.ins().store(flags, next, at, 0);
+        next
+    }
+
     fn iconst(&mut self, v: i64) -> Value {
         self.b.ins().iconst(I64, v)
     }
@@ -903,6 +1127,12 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
 
     fn operand(&mut self, o: &mir::Operand) -> Value {
         match o {
+            mir::Operand::Local(l) if self.direct[l.index()] => match self.values[l.index()] {
+                Some(v) => v,
+                // Read before it is made only in a block nothing reaches,
+                // which is never lowered; a zero is what a variable held.
+                None => self.zero(self.local_ty(*l)),
+            },
             mir::Operand::Local(l) => self.b.use_var(self.vars[l.index()]),
             mir::Operand::Int(v) => self.b.ins().iconst(I64, *v),
             mir::Operand::Float(v) => self.b.ins().f64const(*v),
@@ -955,6 +1185,20 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
         }
     }
 
+    /// Give a local its value: a direct local keeps it, and any other defines
+    /// its variable.
+    fn set_local(&mut self, dst: mir::Local, v: Value) {
+        let i = dst.index();
+        if self.direct[i] {
+            if self.kind(self.f.locals[i].ty) == kite_rt::kind::REF {
+                self.b.declare_value_needs_stack_map(v);
+            }
+            self.values[i] = Some(v);
+        } else {
+            self.b.def_var(self.vars[i], v);
+        }
+    }
+
     fn def(&mut self, dst: mir::Local, v: Value) {
         // Whatever the shape of the producing expression, the local's own
         // type decides its representation.
@@ -973,17 +1217,22 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
         } else {
             v
         };
-        self.b.def_var(self.vars[dst.index()], v);
+        self.set_local(dst, v);
     }
 
     fn def_zero(&mut self, dst: mir::Local) {
-        let ty = cl_type(self.local_ty(dst), self.cx.types);
-        let v = if ty == F64 {
+        let v = self.zero(self.local_ty(dst));
+        self.set_local(dst, v);
+    }
+
+    /// The all-zero value of a type: `nil`, 0, 0.0.
+    fn zero(&mut self, ty: TyId) -> Value {
+        let ty = cl_type(ty, self.cx.types);
+        if ty == F64 {
             self.b.ins().f64const(0.0)
         } else {
             self.b.ins().iconst(ty, 0)
-        };
-        self.b.def_var(self.vars[dst.index()], v);
+        }
     }
 
     /// Write operands into the staging window, for a variadic construction.
@@ -995,6 +1244,32 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 .ins()
                 .store(MemFlagsData::trusted(), w, base, (8 * i) as i32);
         }
+    }
+
+    /// The rest of a literal longer than the staging window, a window at a
+    /// time: stage each, and have `extend` add it to the value built so far.
+    /// A slice or map literal of any length compiles; a window is
+    /// `STAGE_WORDS` words, and this used to refuse anything past one.
+    ///
+    /// The value under construction lives in a variable of its own rather
+    /// than an SSA value: staging a string constant is a runtime call, each
+    /// `extend` may collect, and only a stack-mapped variable is reloaded
+    /// where a collection may have moved it.
+    fn in_windows(&mut self, built: Value, rest: &[mir::Operand], extend: &'static str) -> Value {
+        if rest.is_empty() {
+            return built;
+        }
+        let held = self.b.declare_var(I64);
+        self.b.declare_var_needs_stack_map(held);
+        self.b.def_var(held, built);
+        for window in rest.chunks(kite_rt::STAGE_WORDS) {
+            self.stage(window);
+            let so_far = self.b.use_var(held);
+            let n = self.iconst(window.len() as i64);
+            let v = self.call_rt(extend, &[so_far, n]).unwrap();
+            self.b.def_var(held, v);
+        }
+        self.b.use_var(held)
     }
 
     /// Branch to a fresh trap block when `cond` is true.
@@ -1013,9 +1288,55 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
 
     // ---- statements ------------------------------------------------------
 
+    /// Clear the owned flag of every written slice local this instruction
+    /// reads in a way that can keep the reference — before the instruction,
+    /// so a local passed to a call is already unowned when the call returns.
+    ///
+    /// This is the whole of the rule that lets a write skip the copy. What
+    /// cannot keep a reference is a read of its length or an element, a
+    /// comparison, or a range (which copies); see `slices::escaping_operands`.
+    fn release(&mut self, s: &mir::Inst) {
+        if self.owned.is_empty() {
+            return;
+        }
+        for o in slices::escaping_operands(s) {
+            if let mir::Operand::Local(l) = o {
+                if let Some(&flag) = self.owned.get(&l.index()) {
+                    let clear = self.b.ins().iconst(I8, 0);
+                    self.b.def_var(flag, clear);
+                }
+            }
+        }
+    }
+
+    /// `xs.push(v)` or `xs[i] = v`: the runtime writes in place when the
+    /// flag says the local owns its slice and copies when it does not, and
+    /// either way answers the slice the local keeps — which it then owns.
+    fn slice_write(&mut self, local: mir::Local, name: &'static str, args: &[Value]) {
+        let cur = self.b.use_var(self.vars[local.index()]);
+        let flag = self.owned[&local.index()];
+        let owned = self.b.use_var(flag);
+        let mut all = vec![cur];
+        all.extend_from_slice(args);
+        all.push(owned);
+        let new = self.call_rt(name, &all).unwrap();
+        self.b.def_var(self.vars[local.index()], new);
+        let set = self.b.ins().iconst(I8, 1);
+        self.b.def_var(flag, set);
+    }
+
     fn stmt(&mut self, s: &mir::Inst) {
+        self.release(s);
         match s {
-            mir::Inst::Assign { dst, value } => self.rvalue(*dst, value),
+            mir::Inst::Assign { dst, value } => {
+                self.rvalue(*dst, value);
+                // A slice made here is the destination's alone; one read from
+                // anywhere else may be shared with where it came from.
+                if let Some(&flag) = self.owned.get(&dst.index()) {
+                    let fresh = self.b.ins().iconst(I8, i64::from(slices::fresh(value)));
+                    self.b.def_var(flag, fresh);
+                }
+            }
             mir::Inst::SetField { base, index, value } => {
                 let obj = self.operand(base);
                 let w = self.operand_word(value);
@@ -1023,23 +1344,27 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 let args = [obj, self.iconst(*index as i64), w, self.iconst(i64::from(is_ref))];
                 self.call_rt("kite_rt_set_field", &args);
             }
-            // Slices are copy-on-write values: the runtime copies, mutates
-            // the copy, and the local is rebound — the same observable
-            // behaviour as the VM's clone-if-shared.
+            // Slices are values: the write goes into the slice itself only
+            // when the local's owned flag says nothing else can see it, and
+            // into a copy the local is rebound to otherwise — the VM's
+            // `Rc::make_mut`, decided by the compiler instead of a count.
             mir::Inst::SetIndex { base, index, value } => {
-                let cur = self.operand(base);
                 let idx = self.operand(index);
                 let w = self.operand_word(value);
-                let new = self.call_rt("kite_rt_set_index", &[cur, idx, w]).unwrap();
-                if let mir::Operand::Local(l) = base {
-                    self.b.def_var(self.vars[l.index()], new);
+                match base {
+                    mir::Operand::Local(l) => self.slice_write(*l, "kite_rt_set_index", &[idx, w]),
+                    // Not a place, so nothing can see the write; it still
+                    // traps on a bad index, as the VM's does.
+                    _ => {
+                        let cur = self.operand(base);
+                        let unowned = self.b.ins().iconst(I8, 0);
+                        self.call_rt("kite_rt_set_index", &[cur, idx, w, unowned]);
+                    }
                 }
             }
             mir::Inst::SlicePush { local, value } => {
-                let cur = self.b.use_var(self.vars[local.index()]);
                 let w = self.operand_word(value);
-                let new = self.call_rt("kite_rt_slice_push", &[cur, w]).unwrap();
-                self.b.def_var(self.vars[local.index()], new);
+                self.slice_write(*local, "kite_rt_slice_push", &[w]);
             }
             mir::Inst::MapSet { local, key, value } => {
                 let cur = self.b.use_var(self.vars[local.index()]);
@@ -1065,8 +1390,13 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
 
     fn rvalue(&mut self, dst: mir::Local, value: &mir::Rvalue) {
         match value {
+            // Replaced by the state-machine transform, and reported by the
+            // driver (`kite_mir::internal_errors`) when one was not. Anything
+            // that lowers without asking gets a trap rather than a panic.
             mir::Rvalue::Await { .. } | mir::Rvalue::Yield => {
-                unreachable!("`await` survived the state-machine transform")
+                let always = self.iconst(1);
+                self.trap_if(always, trap_code::UNREACHABLE, self.fn_index as i64, 0);
+                self.def_zero(dst);
             }
             mir::Rvalue::Use(o) => {
                 let v = self.operand(o);
@@ -1085,6 +1415,7 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                         self.trap_if(min, trap_code::OVERFLOW_SUB, 0, 0);
                         self.b.ins().ineg(v)
                     }
+                    UnOp::NegIntWrap => self.b.ins().ineg(v),
                     UnOp::NegFloat => self.b.ins().fneg(v),
                     UnOp::Not => self.b.ins().bxor_imm_s(v, 1),
                 };
@@ -1239,14 +1570,22 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 let v = self.call_rt("kite_rt_tuple_new", &a).unwrap();
                 self.def(dst, v);
             }
+            // Room for the whole literal is allocated up front, so the windows
+            // after the first go straight in.
             mir::Rvalue::SliceNew { elems } => {
                 let elem_kind = match self.cx.types.kind(self.local_ty(dst)) {
                     TyKind::Slice(e) => self.kind(*e),
                     _ => kite_rt::kind::REF,
                 };
-                self.stage(elems);
-                let a = [self.iconst(elem_kind as i64), self.iconst(elems.len() as i64)];
+                let (first, rest) = elems.split_at(elems.len().min(kite_rt::STAGE_WORDS));
+                self.stage(first);
+                let a = [
+                    self.iconst(elem_kind as i64),
+                    self.iconst(first.len() as i64),
+                    self.iconst(elems.len() as i64),
+                ];
                 let v = self.call_rt("kite_rt_slice_new", &a).unwrap();
+                let v = self.in_windows(v, rest, "kite_rt_slice_extend");
                 self.def(dst, v);
             }
             mir::Rvalue::MapNew { entries } => {
@@ -1254,13 +1593,17 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                     TyKind::Map(k, v) => (self.kind(*k), self.kind(*v)),
                     _ => (kite_rt::kind::REF, kite_rt::kind::REF),
                 };
-                self.stage(entries);
+                // The window holds an even number of words, so no pair is
+                // split between two.
+                let (first, rest) = entries.split_at(entries.len().min(kite_rt::STAGE_WORDS));
+                self.stage(first);
                 let a = [
                     self.iconst(kk as i64),
                     self.iconst(vk as i64),
-                    self.iconst(entries.len() as i64),
+                    self.iconst(first.len() as i64),
                 ];
                 let v = self.call_rt("kite_rt_map_new", &a).unwrap();
+                let v = self.in_windows(v, rest, "kite_rt_map_extend");
                 self.def(dst, v);
             }
             // Struct fields, tuple elements and known-variant payloads all
@@ -1384,9 +1727,12 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 let v = self.word_as(w, ty);
                 self.def(dst, v);
             }
+            // The low half of the second header word; the high half is the
+            // room the slice has to grow into, which is not its length.
             mir::Rvalue::SliceLen { base } => {
                 let s = self.operand(base);
-                let v = self.b.ins().load(I64, MemFlagsData::trusted(), s, 8);
+                let v = self.b.ins().load(types::I32, MemFlagsData::trusted(), s, 8);
+                let v = self.b.ins().uextend(I64, v);
                 self.def(dst, v);
             }
             mir::Rvalue::SliceGet { base, index } => {
@@ -1489,9 +1835,17 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 self.div_guards(a, b, trap_code::OVERFLOW_DIV);
                 self.b.ins().sdiv(a, b)
             }
+            // `min % -1` is 0 and representable, so unlike `min / -1` it is
+            // not an overflow. Every remainder by -1 is 0, so a divisor of -1
+            // is swapped for 1 — whose remainder is 0 as well — rather than
+            // leaving the one input the hardware faults on to it.
             BinOp::RemInt => {
-                self.div_guards(a, b, trap_code::OVERFLOW_REM);
-                self.b.ins().srem(a, b)
+                let zero = self.b.ins().icmp_imm_s(IntCC::Equal, b, 0);
+                self.trap_if(zero, trap_code::DIV_ZERO, 0, 0);
+                let m1 = self.b.ins().icmp_imm_s(IntCC::Equal, b, -1);
+                let one = self.b.ins().iconst(types::I64, 1);
+                let safe = self.b.ins().select(m1, one, b);
+                self.b.ins().srem(a, safe)
             }
             BinOp::AddFloat => self.b.ins().fadd(a, b),
             BinOp::SubFloat => self.b.ins().fsub(a, b),
@@ -1509,7 +1863,7 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 } else {
                     trap_code::OVERFLOW_SHR
                 };
-                // The VM refuses a shift outside 0..64 rather than masking.
+                // A count outside 0..64 traps; the release forms below mask.
                 let lo = self.b.ins().icmp_imm_s(IntCC::SignedLessThan, b, 0);
                 self.trap_if(lo, code, 0, 0);
                 let hi = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, b, 64);
@@ -1518,6 +1872,16 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                     self.b.ins().ishl(a, b)
                 } else {
                     self.b.ins().sshr(a, b)
+                }
+            }
+            // The count's low six bits, stated rather than left to the
+            // instruction's own masking, so all three backends plainly agree.
+            BinOp::ShlWrap | BinOp::ShrWrap => {
+                let count = self.b.ins().band_imm_u(b, 63);
+                if op == BinOp::ShlWrap {
+                    self.b.ins().ishl(a, count)
+                } else {
+                    self.b.ins().sshr(a, count)
                 }
             }
             BinOp::EqInt | BinOp::EqBool => self.b.ins().icmp(IntCC::Equal, a, b),
@@ -1755,6 +2119,7 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
                 self.b.ins().brif(c, tb, &[], eb, &[]);
             }
             mir::Terminator::Return(v) => {
+                self.count_depth(-1);
                 if self.f.ret == TyId::UNIT {
                     self.b.ins().return_(&[]);
                 } else {
@@ -1789,30 +2154,32 @@ impl<'a, 'b, M: Module> FnLower<'a, 'b, M> {
 // Entry points
 // ---------------------------------------------------------------------------
 
-/// Compile to a relocatable object file, for the linker.
 /// Whether this host can run the native backend at all.
 ///
 /// **Windows x86-64 cannot, yet, and the reason is the collector rather than
-/// the code generator.** Roots are found by walking the frame-pointer chain,
-/// and that walk assumes the caller's stack pointer at a call is the frame
-/// record's address plus sixteen — which holds on the System V ABI and on
-/// AArch64, and is what makes macOS and Linux work. Cranelift's Win64
-/// prologue establishes the frame pointer differently, so the offsets the
-/// stack maps are relative to do not land where the walk expects, and the
-/// collector traces a stack word that was never a reference. It shows up as
-/// a corrupted heap under a small nursery, which is exactly the failure a
-/// precise collector must never have.
+/// the code generator.** Roots are found by walking the frame-pointer chain
+/// through the runtime's own Rust frames and the compiled ones, and on Win64
+/// that walk corrupted the heap under a small nursery — which is exactly the
+/// failure a precise collector must never have.
 ///
-/// Refusing is the honest answer until someone with a Windows machine can
-/// read the prologue and fix the offset. A backend that emitted code which
-/// corrupts memory on one in three platforms would be worse than one that
-/// says where it does not work.
+/// The first explanation was that the walk found a Kite frame's stack
+/// pointer as "the frame record of the function it called, plus sixteen",
+/// and that Win64 prologues break that. The walk no longer does that at all:
+/// each stack-map slot is recorded as a distance below its own frame's frame
+/// pointer (see `collect_maps`), which is what made AArch64 Linux — where
+/// "plus sixteen" was also false — correct. What may be left on Win64 is the
+/// chain itself: LLVM may point a Win64 frame pointer into the middle of a
+/// frame, where its unwind tables want it, rather than at the saved
+/// register, and a chain of such pointers is not a chain of records. Nobody
+/// has checked either on a Windows machine, and guessing from a distance is
+/// how a collector acquires a second bug — so this refuses until someone
+/// does. A backend that emitted code which corrupts memory on one in three
+/// platforms would be worse than one that says where it does not work.
 pub fn supported_here() -> Result<(), String> {
     if cfg!(all(windows, target_arch = "x86_64")) {
         return Err(
             "the native backend does not support Windows yet: the collector finds roots by \
-             walking frame pointers, and Cranelift's Win64 prologue puts the frame record \
-             where that walk does not expect it\n\
+             walking frame pointers, and that walk has not been shown to hold on Win64\n\
              note: the bytecode and WebAssembly targets work here — run without `--native`"
                 .to_string(),
         );
@@ -1820,6 +2187,7 @@ pub fn supported_here() -> Result<(), String> {
     Ok(())
 }
 
+/// Compile to a relocatable object file, for the linker.
 pub fn compile_object(program: &mir::Program, types: &Types) -> Result<Vec<u8>, String> {
     supported_here()?;
     let isa = host_isa(true)?;
@@ -1834,16 +2202,50 @@ pub fn compile_object(program: &mir::Program, types: &Types) -> Result<Vec<u8>, 
     module.finish().emit().map_err(|e| e.to_string())
 }
 
-/// Compile into this process and run to completion, writing the program's
-/// output to `out`. This is `kitec run --native`, and it is also how the
-/// differential suite runs the corpus without needing a linker.
+pub use kite_rt::{RunConfig, RunStats, MAX_FRAMES};
+
+/// The address space a JIT run reserves for its code and data: as much as a
+/// 32-bit PC-relative reference can span, less a little. See `run_jit_with`.
+const JIT_RESERVE: usize = (i32::MAX as usize) & !0xFFFF;
+
+/// Compile into this process and run to completion, collecting the program's
+/// output and writing it to `out` when the run is over. This is how the
+/// differential suite and the backend's own tests run programs without a
+/// linker, and compare what they print.
+///
+/// Collected, not streamed, which is right for a harness and wrong for a
+/// person: nothing appears until the program ends, and nothing at all if it
+/// crashes. `kitec run --native` uses [`run_jit_stdout`].
 ///
 /// A trap ends the process, exactly as it would in a linked executable — the
-/// runtime prints the message first, so nothing is quieter than the VM.
+/// runtime prints the message first, after whatever was collected so far, so
+/// nothing is quieter than the VM.
 pub fn run_jit(program: &mir::Program, types: &Types, out: &mut dyn std::io::Write) -> Result<(), String> {
+    run_jit_with(program, types, RunConfig::default(), Some(out)).map(|_| ())
+}
+
+/// Compile into this process and run to completion, printing straight to
+/// standard output as the program goes — `kitec run --native`, which should
+/// behave like the executable `kitec build --emit native` links: a line
+/// printed is a line on the terminal, in order with standard error, before a
+/// prompt reads input and before a crash, however long the program runs.
+pub fn run_jit_stdout(program: &mir::Program, types: &Types) -> Result<(), String> {
+    run_jit_with(program, types, RunConfig::default(), None).map(|_| ())
+}
+
+/// The general form of [`run_jit`] and [`run_jit_stdout`]: a run with the
+/// collector configured, its output collected into `out` or streamed when
+/// there is none, and what the collector did reported back — read under the
+/// same lock as the run, so a test's count is its own program's and not a
+/// neighbour's.
+pub fn run_jit_with(
+    program: &mir::Program,
+    types: &Types,
+    config: RunConfig,
+    out: Option<&mut dyn std::io::Write>,
+) -> Result<RunStats, String> {
     supported_here()?;
     let _guard = kite_rt::run_lock();
-    kite_rt::begin_capture();
 
     let isa = host_isa(false)?;
     let mut builder = cranelift_jit::JITBuilder::with_isa(
@@ -1853,15 +2255,44 @@ pub fn run_jit(program: &mir::Program, types: &Types, out: &mut dyn std::io::Wri
     for (name, ptr) in kite_rt::jit_symbols() {
         builder.symbol(name, ptr);
     }
+    // Code and data in one reserved range, so that every reference between
+    // them is within the ±2 GiB a PC-relative relocation can span. Mapped
+    // separately, as they were, a function of a gigabyte of machine code put
+    // the next mapping further away than that, and patching the reference
+    // panicked inside the JIT. Here the same program runs out of the range
+    // instead, and says so. Reserving address space commits no memory; where
+    // even that is refused, the separate mappings are what is left.
+    if let Ok(arena) = cranelift_jit::ArenaMemoryProvider::new_with_size(JIT_RESERVE) {
+        builder.memory_provider(Box::new(arena));
+    }
     let mut module = cranelift_jit::JITModule::new(builder);
-    let arts = build(&mut module, program, types)?;
-    module.finalize_definitions().map_err(|e| e.to_string())?;
+    let built = build(&mut module, program, types)
+        .and_then(|arts| module.finalize_definitions().map(|()| arts).map_err(|e| e.to_string()));
+    let arts = match built {
+        Ok(arts) => arts,
+        Err(e) => {
+            // SAFETY: nothing from this module was ever called, so no
+            // function pointer into its memory exists to outlive it.
+            unsafe { module.free_memory() };
+            return Err(e);
+        }
+    };
     let entry = module.get_finalized_function(arts.wrapper);
+    // SAFETY: the wrapper is declared with exactly this signature in
+    // `define_wrapper`, and `finalize_definitions` succeeded.
     let entry: extern "C" fn() -> i32 = unsafe { std::mem::transmute(entry) };
+    // Set up immediately before the entry, under the lock, so a compilation
+    // that failed above leaves nothing behind for another run to inherit.
+    let capture = out.is_some();
+    kite_rt::prepare_run(config, capture);
     entry();
-    out.write_all(&kite_rt::take_capture()).map_err(|e| e.to_string())?;
-    // The code pages hold nothing live once the run is over; the next
-    // startup resets the runtime's pointers into them.
+    let (captured, stats) = kite_rt::finish_run();
+    // SAFETY: the run is over. The runtime held the only pointers into this
+    // code — thunk addresses in closures, vtable rows, stack maps — and
+    // `finish_run` dropped all of them with the heap.
     unsafe { module.free_memory() };
-    Ok(())
+    if let Some(out) = out {
+        out.write_all(&captured).map_err(|e| e.to_string())?;
+    }
+    Ok(stats)
 }

@@ -1,0 +1,105 @@
+// An error bound above an early exit goes out of scope unchecked on that
+// path, whatever the path that falls through goes on to do with it (R3). Only
+// an error bound inside the branch that left used to be reported. A new
+// failure written into an error binding is an obligation too (R7), and a
+// copy of another binding is not.
+
+fn f(n: int) -> error {
+    if n > 0 {
+        return errors.new("boom")
+    }
+    return nil
+}
+
+fn h(n: int) -> (int, error) {
+    if n > 0 {
+        return 0, errors.new("bad")
+    }
+    return n, nil
+}
+
+fn early(n: int) -> int {
+    let e = f(n)
+    if n > 0 {
+        return 1 //~ ERROR E0302
+    }
+    if e != nil {
+        io.print(e.message())
+    }
+    return 0
+}
+
+fn in_a_loop() {
+    for i in 0..3 {
+        let e = f(i)
+        if i > 1 {
+            break //~ ERROR E0302
+        }
+        if e != nil {
+            io.print("x")
+        }
+    }
+}
+
+fn skipping() {
+    for i in 0..2 {
+        let (v, err) = h(i)
+        if i == 1 {
+            continue //~ ERROR E0302
+        }
+        if err != nil {
+            return
+        }
+        io.print(v)
+    }
+}
+
+fn to_an_outer_label() {
+    outer: for i in 0..2 {
+        let e = f(i)
+        for j in 0..2 {
+            if j == i {
+                continue outer //~ ERROR E0302
+            }
+        }
+        if e != nil {
+            return
+        }
+    }
+}
+
+// A `break` leaves an error bound before the loop in scope, to be checked
+// after it.
+fn still_in_scope() {
+    let e = f(1)
+    for i in 0..3 {
+        if i == 1 {
+            break
+        }
+    }
+    if e != nil {
+        io.print(e.message())
+    }
+}
+
+fn written_later() {
+    var e: error = nil //~ ERROR E0302
+    e = f(1)
+    io.print("dropped")
+}
+
+fn copied() {
+    let e = f(1)
+    let again = e
+    io.print("inspected by the copy")
+}
+
+fn main() {
+    io.print(early(1))
+    in_a_loop()
+    skipping()
+    to_an_outer_label()
+    still_in_scope()
+    written_later()
+    copied()
+}

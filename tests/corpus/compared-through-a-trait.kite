@@ -1,0 +1,90 @@
+// A generic body comparing its `T` with `==` holds every call to it to a `T`
+// that can be compared. A call through a bound reaches an implementation's
+// body nothing had held to that, and so did a generic type standing for a
+// trait: all three backends then compared trait objects or functions, and
+// disagreed about the answer.
+
+trait Show {
+    fn show(self) -> str
+}
+
+struct P {
+    a: int
+}
+
+impl Show for P {
+    fn show(self) -> str {
+        return "p"
+    }
+}
+
+trait Finder {
+    fn has<T>(self, xs: [T], x: T) -> bool
+}
+
+struct F {
+    n: int
+}
+
+impl Finder for F {
+    fn has<T>(self, xs: [T], x: T) -> bool {
+        for y in xs {
+            if y == x {
+                return true
+            }
+        }
+        return false
+    }
+}
+
+fn via<Q: Finder>(q: Q, d: dyn Show) -> bool {
+    return q.has([d], d) //~ ERROR E0201
+}
+
+fn via_fn<Q: Finder>(q: Q, f: fn(int) -> int) -> bool {
+    return q.has([f], f) //~ ERROR E0201
+}
+
+fn via_int<Q: Finder>(q: Q) -> bool {
+    return q.has([1, 2], 2)
+}
+
+trait Same {
+    fn same(self, other: Self) -> bool
+}
+
+struct Box<T> {
+    v: T
+}
+
+impl<T> Same for Box<T> {
+    fn same(self, other: Box<T>) -> bool {
+        return self.v == other.v
+    }
+}
+
+fn both<Q: Same>(a: Q, b: Q) -> bool {
+    return a.same(b)
+}
+
+trait Twin {
+    fn twin(self) -> bool
+}
+
+impl<T> Twin for Box<T> {
+    fn twin(self) -> bool {
+        return self.v == self.v
+    }
+}
+
+fn main() {
+    let d: dyn Show = P{ a: 1 }
+    io.print(via(F{ n: 0 }, d))
+    io.print(via_fn(F{ n: 0 }, |x: int| -> int { return x }))
+    io.print(via_int(F{ n: 0 }))
+    io.print(both(Box{ v: d }, Box{ v: d })) //~ ERROR E0201
+    io.print(both(Box{ v: 1 }, Box{ v: 1 }))
+    let t: dyn Twin = Box{ v: d } //~ ERROR E0201
+    let u: dyn Twin = Box{ v: 2 }
+    io.print(t.twin() && u.twin())
+}

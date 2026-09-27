@@ -27,18 +27,86 @@
 //! Two tokens mean two things, and both are decided by what came immediately
 //! before: `-` after an operator or an open bracket is a negation, and `|`
 //! where a value is expected opens a closure. A third, `<`, cannot be settled
-//! that way — `Option<int>` and `count < n` are the same three tokens — so it
-//! is decided by reading forward instead, in `opens_type_arguments`.
+//! that way — `Option<int>` and `count < n` are the same three tokens — so
+//! the parser, which knows, says which are type brackets. Inside a
+//! declaration that does not parse it is read forward from each `<` instead,
+//! in `opens_type_arguments`.
 
-use kite_diag::DiagBag;
+use kite_diag::{DiagBag, Severity};
 use kite_lexer::{Comment, Token, TokenKind as T};
-use kite_span::{FileId, Span};
+use kite_span::{FileId, SourceMap, Span};
+use std::collections::HashSet;
+use std::fmt;
 
-/// Format a file's text. Never fails: a file that does not parse still has
-/// tokens, and a token stream is all this needs.
-pub fn format(src: &str) -> String {
+/// Why a file was handed back unformatted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FormatError {
+    /// The lexer could not read the whole file. `message` is the first thing
+    /// it could not read, at `line`:`col` (both 1-based).
+    Lexical { message: String, line: u32, col: u32 },
+    /// The layout came out holding different tokens from the ones that went
+    /// in. That is a bug in the formatter, and it is caught here rather than
+    /// written over someone's file.
+    Unfaithful,
+}
+
+impl fmt::Display for FormatError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FormatError::Lexical { message, line, col } => write!(
+                f,
+                "cannot format a file with lexical errors; the first is at {}:{}: {}",
+                line, col, message
+            ),
+            FormatError::Unfaithful => f.write_str(
+                "the formatter could not lay this file out without changing what it says; \
+                 it has been left as it was (this is a bug in `kitec fmt`)",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FormatError {}
+
+/// Format a file's text.
+///
+/// A file that does not *parse* still formats: tokens are all the layout
+/// needs, and a half-written file is exactly when someone reaches for this.
+/// A file that does not *lex* is refused. The lexer skips what it cannot read
+/// — a stray `$`, a `;`, the whole rest of the file after an unterminated
+/// `/*` — and a layout rebuilt from the tokens that survived is a layout with
+/// those bytes deleted. The formatter used to do exactly that and report
+/// success, so `let x = a ?? b` came back as `let x = a b`.
+pub fn format(src: &str) -> Result<String, FormatError> {
     let mut diags = DiagBag::new();
     let (tokens, comments) = kite_lexer::tokenize_with_comments(FileId(0), src, &mut diags);
+    if let Some(first) = diags.iter().find(|d| d.severity == Severity::Error) {
+        let mut map = SourceMap::new();
+        let file = map.add("", src);
+        let at = first.primary_span().map(|s| map.line_col(s)).unwrap_or_else(|| {
+            map.file(file).line_col(0)
+        });
+        return Err(FormatError::Lexical {
+            message: first.message.clone(),
+            line: at.line,
+            col: at.col,
+        });
+    }
+    // The parser knows which `<` and `>` are type brackets and which `{`
+    // opens a struct literal. Inside a declaration that does not parse, the
+    // tokens around each one are read instead — there and only there, so a
+    // mistake being typed at the end of a file costs the rest of it nothing.
+    let mut layout = kite_parser::layout(FileId(0), src, &tokens);
+    let mut brackets: HashSet<u32> = std::mem::take(&mut layout.type_brackets)
+        .into_iter()
+        .filter(|&at| layout.answers_for(at))
+        .collect();
+    for &(start, end) in &layout.unparsed {
+        let from = tokens.partition_point(|t| t.span.start < start);
+        let to = tokens.partition_point(|t| t.span.start < end);
+        brackets.extend(guessed_type_brackets(&tokens[from..to]));
+    }
+    let literal_braces = std::mem::take(&mut layout.literal_braces).into_iter().collect();
     let mut f = Formatter {
         src,
         out: String::with_capacity(src.len() + src.len() / 8),
@@ -47,18 +115,94 @@ pub fn format(src: &str) -> String {
         depth: 0,
         line_started: false,
         closure_params: false,
-        type_depth: 0,
+        brackets,
+        literal_braces,
+        layout,
         prev: None,
         prev2: None,
+        prev_bracket: false,
+        last_line_end: None,
+        line_start: 0,
+        prev_text: (0, 0),
         prev_end: 0,
     };
     f.run(&tokens);
-    f.out
+    // A byte-order mark is not a token, so the layout does not carry it. It
+    // goes back where it was: the formatter moves whitespace, and a mark the
+    // author's editor wrote is not its to take away.
+    if src.starts_with(kite_lexer::BYTE_ORDER_MARK) {
+        f.out.insert(0, kite_lexer::BYTE_ORDER_MARK);
+    }
+    if !faithful(src, &tokens, &f.out) {
+        return Err(FormatError::Unfaithful);
+    }
+    Ok(f.out)
 }
 
-/// Whether formatting would change the file.
-pub fn is_formatted(src: &str) -> bool {
-    format(src) == src
+/// Whether formatting would change the file. A file that cannot be formatted
+/// answers with the reason instead.
+pub fn is_formatted(src: &str) -> Result<bool, FormatError> {
+    format(src).map(|out| out == src)
+}
+
+/// Whether `out` says what `src` says.
+///
+/// The formatter moves whitespace and nothing else, so two things have to
+/// hold, and both are checked because either alone lets a real mistake
+/// through:
+///
+/// * **With the whitespace taken out, the two texts are identical.** This is
+///   what catches a deletion — a comment dropped, a token skipped.
+/// * **The output lexes to the same tokens.** Whitespace is what separates
+///   tokens, so taking it out cannot see two of them glued into a third:
+///   `- ==` written as `-==`, or `t.0 .1` as `t.0.1`, which reads as a float.
+///   Line breaks count, since they end statements.
+///
+/// Any difference is a formatter bug. Refusing costs a file that stays as it
+/// was; not refusing costs a file that no longer means what its author wrote.
+fn faithful(src: &str, tokens: &[Token], out: &str) -> bool {
+    let squeeze = |s: &str| -> String { s.chars().filter(|c| !c.is_whitespace()).collect() };
+    if squeeze(src) != squeeze(out) {
+        return false;
+    }
+    let mut diags = DiagBag::new();
+    let again = kite_lexer::tokenize(FileId(0), out, &mut diags);
+    if diags.has_errors() {
+        return false;
+    }
+    // The one line break the formatter adds on purpose is the file's last,
+    // and a newline before the end of input separates nothing.
+    let meaningful = |tokens: &[Token]| -> Vec<Token> {
+        let mut kept: Vec<Token> = tokens.to_vec();
+        if let [.., newline, eof] = kept.as_slice() {
+            if newline.kind == T::Newline && eof.kind == T::Eof {
+                kept.remove(kept.len() - 2);
+            }
+        }
+        kept
+    };
+    let (before, after) = (meaningful(tokens), meaningful(&again));
+    before.len() == after.len()
+        && before.iter().zip(&after).all(|(a, b)| {
+            a.kind == b.kind
+                && src[a.span.start as usize..a.span.end as usize]
+                    == out[b.span.start as usize..b.span.end as usize]
+        })
+}
+
+/// Whether two tokens written with nothing between them would lex as
+/// something else — `-` and `=` as `-=`, `>` and `>` as `>>`, `.` and `..`
+/// as `...`.
+///
+/// Every rule that removes a space is written for code that parses, and a
+/// formatter runs on code that does not. Asking the lexer is the one check
+/// that holds for every pair, including ones no rule anticipated.
+fn glues(left: &str, left_kind: T, right: &str, right_kind: T) -> bool {
+    let joined = format!("{}{}", left, right);
+    let mut diags = DiagBag::new();
+    let tokens = kite_lexer::tokenize(FileId(0), &joined, &mut diags);
+    let kinds: Vec<T> = tokens.iter().map(|t| t.kind).filter(|k| *k != T::Eof).collect();
+    diags.has_errors() || kinds != [left_kind, right_kind]
 }
 
 struct Formatter<'a> {
@@ -70,33 +214,76 @@ struct Formatter<'a> {
     line_started: bool,
     /// Between the two `|` of a closure's parameter list.
     closure_params: bool,
-    /// Open type-argument lists at this point. Set by the forward scan at
-    /// the `<`, so the tokens inside and the `>` that closes them do not
-    /// each have to work it out again.
-    type_depth: usize,
+    /// The byte offset of every `<` and `>` that brackets type arguments or
+    /// generic parameters, rather than comparing two values.
+    brackets: HashSet<u32>,
+    /// The byte offset of every `{` that opens a struct literal or a struct
+    /// pattern, where the parser could say.
+    literal_braces: HashSet<u32>,
+    /// The parser's layout with its answers taken out into the two sets
+    /// above: what is left says which declarations it could not read, where
+    /// those answers are not to be taken.
+    layout: kite_parser::Layout,
     prev: Option<T>,
     /// The token before that. `{` needs it: `Point{` is a literal and
     /// `struct Point {` is a declaration, and only the token two back tells
     /// them apart.
     prev2: Option<T>,
+    /// Whether the previous token was a type bracket.
+    prev_bracket: bool,
+    /// The last token of the line before this one.
+    last_line_end: Option<T>,
+    /// Where in `out` the line being written begins.
+    line_start: usize,
+    /// Where the previous token's text is, for asking whether the next one
+    /// would glue to it.
+    prev_text: (u32, u32),
     prev_end: u32,
 }
 
+/// The type brackets among tokens that do not parse, found by reading
+/// forward from each `<` after a name.
+///
+/// Only a parser really knows — `Option<int>` and `count < n` are the same
+/// three tokens — and for a declaration that parses, one does. This is the
+/// fallback for one half written, where a guess that is right for ordinary
+/// code is what there is.
+fn guessed_type_brackets(tokens: &[Token]) -> HashSet<u32> {
+    let mut brackets = HashSet::new();
+    let mut depth = 0usize;
+    let mut prev: Option<T> = None;
+    for (i, token) in tokens.iter().enumerate() {
+        if token.kind == T::Newline {
+            continue;
+        }
+        if token.kind == T::Lt
+            && matches!(prev, Some(T::Ident) | Some(T::Impl))
+            && opens_type_arguments(&tokens[i + 1..])
+        {
+            brackets.insert(token.span.start);
+            depth += 1;
+        } else if depth > 0 {
+            match token.kind {
+                T::Gt | T::Ge => {
+                    brackets.insert(token.span.start);
+                    depth -= 1;
+                }
+                T::Shr => {
+                    brackets.insert(token.span.start);
+                    brackets.insert(token.span.start + 1);
+                    depth = depth.saturating_sub(2);
+                }
+                _ => {}
+            }
+        }
+        prev = Some(token.kind);
+    }
+    brackets
+}
+
 /// Whether the `<` just reached opens a type argument list rather than
-/// beginning a comparison.
-///
-/// This is the one genuine ambiguity in the token stream, and nothing behind
-/// the `<` settles it: `Option<int>` and `count < n` are an identifier, a `<`
-/// and an identifier either way. What settles it is what comes after — a type
-/// argument list closes on a `>` with nothing between but more type — so this
-/// reads forward until it finds the closing bracket or something that could
-/// not be in a type.
-///
-/// It replaced a rule that guessed from the text of the line so far, which was
-/// wrong in both directions: it spaced out `type Doc = Option<json.Json>`
-/// because a value supposedly begins after `=`, and it tightened
-/// `tone: if low > 0` into `low> 0` because the line held a `:` and a struct
-/// literal's field separator looks exactly like a type annotation's.
+/// beginning a comparison, judging by what follows it: a type argument list
+/// closes on a `>` with nothing between but more type.
 fn opens_type_arguments(ahead: &[Token]) -> bool {
     // Long enough for any real type, short enough that a `<` with no `>` after
     // it costs nothing. A comparison chain hits a disqualifying token within a
@@ -108,7 +295,8 @@ fn opens_type_arguments(ahead: &[Token]) -> bool {
             // Nesting. `>>` closes two at once, which is how `Box<Box<int>>`
             // reaches zero without a space in the middle.
             T::Lt => depth += 1,
-            T::Gt => {
+            // `>=` is a `>` against an `=`: `Option<int>= nil`.
+            T::Gt | T::Ge => {
                 depth -= 1;
                 if depth == 0 {
                     return true;
@@ -125,13 +313,15 @@ fn opens_type_arguments(ahead: &[Token]) -> bool {
                 depth -= 2;
             }
             // Everything a type is made of: names and paths, the brackets of
-            // `[T]`, `(A, B)` and `{K: V}`, the `,` between arguments, and the
-            // pieces of `fn(A) -> B`. `dyn` is in here too — the lexer hands
-            // it over as an identifier rather than a keyword of its own.
+            // `[T]`, `(A, B)` and `{K: V}`, the `,` between arguments, the
+            // pieces of `fn(A) -> B`, and the `+` between a generic
+            // parameter's bounds. `dyn` is in here too — the lexer hands it
+            // over as an identifier rather than a keyword of its own.
             T::Ident
             | T::Comma
             | T::Dot
             | T::Colon
+            | T::Plus
             | T::LBracket
             | T::RBracket
             | T::LParen
@@ -153,7 +343,7 @@ fn opens_type_arguments(ahead: &[Token]) -> bool {
 
 impl Formatter<'_> {
     fn run(&mut self, tokens: &[Token]) {
-        for (i, token) in tokens.iter().enumerate() {
+        for token in tokens {
             // The lexer emits a newline only where one separates statements.
             // The formatter wants every line break the author wrote — inside
             // an argument list too — so it reads them from the source gap
@@ -181,39 +371,32 @@ impl Formatter<'_> {
                 self.end_line();
                 // One blank line survives; more collapse. None is kept against
                 // a closing bracket, where it is padding rather than
-                // separation.
-                if gap.breaks > 1 && !closing {
+                // separation, and none at the top of the file, where it would
+                // be gone the second time round.
+                if gap.breaks > 1 && !closing && !self.out.is_empty() {
                     self.out.push('\n');
                 }
             }
 
             self.start_line();
-            let opens_types = token.kind == T::Lt
-                && matches!(self.prev, Some(T::Ident) | Some(T::Impl))
-                && opens_type_arguments(&tokens[i + 1..]);
-            if self.needs_space(token.kind, opens_types) {
+            let bracket = self.brackets.contains(&token.span.start);
+            let text = &self.src[token.span.start as usize..token.span.end as usize];
+            let space = self.needs_space(token.kind, bracket, token.span.start);
+            if space || self.would_glue(text, token.kind) {
                 self.out.push(' ');
             }
-            let text = &self.src[token.span.start as usize..token.span.end as usize];
             self.out.push_str(text);
 
             if matches!(token.kind, T::LBrace | T::LBracket | T::LParen) {
                 self.depth += 1;
-            }
-            if opens_types {
-                self.type_depth += 1;
-            } else if self.type_depth > 0 {
-                match token.kind {
-                    T::Gt => self.type_depth -= 1,
-                    T::Shr => self.type_depth = self.type_depth.saturating_sub(2),
-                    _ => {}
-                }
             }
             if token.kind == T::Pipe {
                 self.closure_params = !self.closure_params && self.is_value_position();
             }
             self.prev2 = self.prev;
             self.prev = Some(token.kind);
+            self.prev_bracket = bracket;
+            self.prev_text = (token.span.start, token.span.end);
             self.prev_end = token.span.end;
         }
         while self.out.ends_with('\n') {
@@ -224,16 +407,37 @@ impl Formatter<'_> {
         }
     }
 
+    /// Whether the token about to be written would run into the one before it
+    /// with no space between.
+    fn would_glue(&self, text: &str, kind: T) -> bool {
+        let Some(prev) = self.prev else { return false };
+        if !self.line_started || self.out.ends_with(' ') {
+            return false;
+        }
+        let (start, end) = self.prev_text;
+        glues(&self.src[start as usize..end as usize], prev, text, kind)
+    }
+
     // ---- spacing ------------------------------------------------------------
 
-    fn needs_space(&self, kind: T, opens_types: bool) -> bool {
+    /// `bracket` says the token is a `<` or `>` of a type argument list, and
+    /// `at` is where it starts.
+    fn needs_space(&self, kind: T, bracket: bool, at: u32) -> bool {
         let Some(prev) = self.prev else { return false };
         if !self.line_started {
             return false;
         }
+        // The `>` closing type arguments or generic parameters, and the `(`
+        // after `fn f<T>`, are part of the name they follow.
+        let after_type = self.prev_bracket && matches!(prev, T::Gt | T::Shr);
         // Nothing between a name and its argument list, its index, or a dot.
+        // A tuple's element is a name too, though it is spelled as a number:
+        // `t.0[0]`, `t.0.1(x)`.
+        let element = prev == T::Int && self.prev2 == Some(T::Dot);
         if matches!(kind, T::LParen | T::LBracket)
-            && matches!(prev, T::Ident | T::RParen | T::RBracket | T::SelfKw | T::Gt)
+            && (matches!(prev, T::Ident | T::RParen | T::RBracket | T::SelfKw)
+                || after_type
+                || element)
         {
             return false;
         }
@@ -241,6 +445,25 @@ impl Formatter<'_> {
         // straight after `fn` is always a function type.
         if kind == T::LParen && prev == T::Fn {
             return false;
+        }
+        // `NotFound.as(err)`: after a `.`, `as` is a member's name (§7.2)
+        // and its arguments hug it as any name's do. It was spaced like the
+        // cast, `NotFound.as (err)`.
+        //
+        // The `.` is the token before, not the byte before: `NotFound. as(err)`
+        // came out `NotFound.as (err)`, and only a second run tightened it —
+        // so one run of `kitec fmt` left a file `--check` refused.
+        if kind == T::LParen && prev == T::As && self.prev2 == Some(T::Dot) {
+            return false;
+        }
+        // `..` in a struct literal's base, `P{ ..p }`, and a struct pattern's
+        // rest, `P{ x, .. }`, stands apart like the fields around it. Only a
+        // range hugs its ends.
+        if kind == T::DotDot && matches!(prev, T::LBrace | T::Comma) {
+            return true;
+        }
+        if kind == T::RBrace && prev == T::DotDot {
+            return true;
         }
         if matches!(kind, T::Comma | T::Colon | T::Dot | T::DotDot | T::DotDotEq) {
             return false;
@@ -271,27 +494,31 @@ impl Formatter<'_> {
             return false;
         }
         // Type arguments are tight: `Option<int>`, `Box<Box<int>>`, and the
-        // parameter list of `impl<T>` or `fn f<T>`. Whether this `<` is one of
-        // those or the start of `a < b` was decided by `opens_type_arguments`,
-        // which read forward to find out; `type_depth` then carries the answer
-        // to the tokens inside and to the `>` that closes them.
-        if kind == T::Lt && opens_types {
+        // parameter list of `impl<T>` or `fn f<T>`. Which `<` and `>` those
+        // are is the parser's answer, or failing one, the forward scan's.
+        if bracket || (self.prev_bracket && prev == T::Lt) {
             return false;
         }
-        if self.type_depth > 0 && (prev == T::Lt || matches!(kind, T::Gt | T::Shr)) {
-            return false;
-        }
-        // `Point{ … }` is a literal and `struct Point {` is a declaration. The
-        // token two back is what tells them apart: a literal appears where a
-        // value does.
+        // `Point{ … }` is a literal and `struct Point {` is a declaration.
+        // The parser says which is which when the file parses — including a
+        // struct pattern opening a match arm, which has nothing before it on
+        // its line to go by. Otherwise what precedes the name decides: a
+        // literal appears where a value does.
         if kind == T::LBrace && matches!(prev, T::Ident | T::Gt) {
-            return !self.is_literal_head();
+            return if self.layout.answers_for(at) {
+                !self.literal_braces.contains(&at)
+            } else {
+                !self.is_literal_head()
+            };
         }
         true
     }
 
     /// Whether a value could begin here, which is what makes a `-` a negation
     /// and a `|` a closure.
+    ///
+    /// `nil` and `_` are values too, in a pattern: `nil | _` is two
+    /// alternatives, and read as a closure opening it came out `nil |_`.
     fn is_value_position(&self) -> bool {
         !matches!(
             self.prev,
@@ -306,10 +533,15 @@ impl Formatter<'_> {
                 | Some(T::SelfKw)
                 | Some(T::True)
                 | Some(T::False)
+                | Some(T::Nil)
+                | Some(T::Underscore)
         )
     }
 
     /// Whether the `-` just written was a negation.
+    ///
+    /// A `}` ends a value as well as a block — `if a { 1 } else { 2 } - 3` —
+    /// and a `-` after one on the same line is a subtraction.
     fn minus_was_prefix(&self) -> bool {
         !matches!(
             self.prev2,
@@ -320,6 +552,7 @@ impl Formatter<'_> {
                 | Some(T::Char)
                 | Some(T::RParen)
                 | Some(T::RBracket)
+                | Some(T::RBrace)
                 | Some(T::SelfKw)
                 | Some(T::True)
                 | Some(T::False)
@@ -340,7 +573,14 @@ impl Formatter<'_> {
             .trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '.')
             .trim_end();
         if head.is_empty() {
-            return false;
+            // The name begins its line, so the line before decides. After a
+            // binary operator or `in`, a condition was split across lines and
+            // this `{` opens its block; after anything else — a `,` in a
+            // list, the `=>` of an arm, the arm before — it is a literal or a
+            // pattern. The parser answers this for a file that parses, and
+            // the two have to agree, or saving a file with a typo elsewhere
+            // in it would respace every literal that starts a line.
+            return !self.last_line_end.is_some_and(continues_a_condition);
         }
         // `=` ends an assignment, but `<=`, `>=`, `==` and `!=` end a
         // comparison — and `if a <= b {` opens a block. A struct literal in a
@@ -361,11 +601,12 @@ impl Formatter<'_> {
             .any(|token| head.ends_with(token))
     }
 
+    /// The line being written. Kept as an offset rather than found by
+    /// searching back for the last line break, which is a search the length
+    /// of the line on every token: a file written on one long line took the
+    /// formatter a time proportional to the square of it.
     fn current_line(&self) -> &str {
-        match self.out.rfind('\n') {
-            Some(i) => &self.out[i + 1..],
-            None => &self.out,
-        }
+        &self.out[self.line_start..]
     }
 
     // ---- lines and comments --------------------------------------------------
@@ -374,6 +615,7 @@ impl Formatter<'_> {
         if self.line_started {
             return;
         }
+        self.line_start = self.out.len();
         for _ in 0..self.depth {
             self.out.push_str("    ");
         }
@@ -386,6 +628,7 @@ impl Formatter<'_> {
         if self.line_started {
             self.out.push('\n');
             self.line_started = false;
+            self.last_line_end = self.prev;
             self.prev = None;
             self.prev2 = None;
         }
@@ -424,7 +667,9 @@ impl Formatter<'_> {
             self.out.push(' ');
         } else {
             self.end_line();
-            if gap.breaks > 1 {
+            // Blank lines above a comment are kept, except above the first
+            // thing in the file, where the second pass would not see them.
+            if gap.breaks > 1 && !self.out.is_empty() {
                 self.out.push('\n');
             }
             self.start_line();
@@ -444,6 +689,37 @@ impl Formatter<'_> {
     fn text(&self, span: Span) -> &str {
         &self.src[span.start as usize..span.end as usize]
     }
+}
+
+/// Whether a line ending in `kind` leaves a condition unfinished, so that a
+/// `{` on the next line opens the block the condition guards.
+fn continues_a_condition(kind: T) -> bool {
+    matches!(
+        kind,
+        T::AmpAmp
+            | T::PipePipe
+            | T::EqEq
+            | T::Ne
+            | T::Lt
+            | T::Le
+            | T::Gt
+            | T::Ge
+            | T::Plus
+            | T::Minus
+            | T::Star
+            | T::Slash
+            | T::Percent
+            | T::Amp
+            | T::Pipe
+            | T::Caret
+            | T::Shl
+            | T::Shr
+            | T::DotDot
+            | T::DotDotEq
+            | T::In
+            | T::As
+            | T::Bang
+    )
 }
 
 struct Gap {

@@ -45,24 +45,186 @@ pub fn ellipsis(s: str, width: int) -> str {
 
 /// A float with exactly `places` digits after the point.
 ///
-/// Rounds half away from zero, which is what most people mean, and does the
-/// work in integers so the result does not depend on how the host prints a
-/// float.
+/// Rounds the float's own value half away from zero, which is what most
+/// people mean. Every place asked for is a digit of that value, past the
+/// seventeenth significant one too, so the answer is `%.Nf`'s except at an
+/// exact half, which `%.Nf` rounds to even. The float written `2.005` is
+/// 2.00499999999999989…, so it gives `2.00`, as `1.005` gives `1.00`;
+/// `2.125` is exactly that and gives `2.13`.
+///
+/// Worked out in integers from the float's exact decimal expansion rather
+/// than by scaling it, for two reasons. The result does not depend on how the
+/// host prints a float, which the backends do not agree about past about
+/// 1e21. And a scaled float is rounded before it is split into whole and
+/// fraction: `1000000000000000.25` scaled by 100 is already
+/// 100000000000000032, `0.49999999999999994 + 0.5` is already 1, and an
+/// `int` cannot hold the scaled value of `fixed(1e20, 2)` at all.
+///
+/// A negative number keeps its sign when it rounds to zero, `-0.00`, and so
+/// does -0.0 itself, as `%.Nf` writes both. JavaScript's `toFixed` writes
+/// `-0` for the one and `0` for the other.
+///
+/// An infinity is written `inf` or `-inf`, and a NaN `nan`.
 pub fn fixed(x: float, places: int) -> str {
-    var scale = 1
-    for i in 0..places {
-        scale = scale * 10
-    }
-    let negative = x < 0.0
-    let magnitude = absf(x) * (scale as float) + 0.5
-    let units = magnitude as int
-    let whole = units / scale
-    let frac = units % scale
+    let wanted = if places < 0 { 0 } else { places }
+    // -0.0 is not below zero; only dividing by it tells it from 0.0.
+    let negative = x < 0.0 || (x == 0.0 && 1.0 / x < 0.0)
     let sign = if negative { "-" } else { "" }
-    if places <= 0 {
-        return "\(sign)\(whole)"
+    let size = absf(x)
+    if !(size < size * 2.0) && size > 0.0 {
+        return "\(sign)inf"
     }
-    return "\(sign)\(whole).\(pad_zeros(frac, places))"
+    if !(size >= 0.0) {
+        return "nan"
+    }
+    let exact = decimal(size)
+    // The digits before the point and the ones after it, which there are
+    // `exact.after` of. Padding to one more than that keeps a `0` in front
+    // of the point for a value below one.
+    var digits = exact.digits
+    for digits.len() <= exact.after {
+        digits = "0" + digits
+    }
+    let point = digits.len() - exact.after
+    var kept = digits.slice(0, point)
+    if exact.after <= wanted {
+        kept = kept + digits.slice(point, digits.len()) + zeros(wanted - exact.after)
+    } else {
+        kept = kept + digits.slice(point, point + wanted)
+        // Every digit of the value is known, so the first one dropped decides:
+        // 5 or more is at least half a unit of the last place kept.
+        if digits.code_at(point + wanted) >= 0x35 {
+            kept = increment(kept)
+        }
+    }
+    let whole = kept.slice(0, kept.len() - wanted)
+    if wanted == 0 {
+        return sign + whole
+    }
+    return sign + whole + "." + kept.slice(kept.len() - wanted, kept.len())
+}
+
+/// A non-negative float's exact value in decimal: `digits`, of which the last
+/// `after` come after the point.
+struct Decimal {
+    digits: str
+    after: int
+}
+
+/// Every float is a whole number `n` times a power of two. A whole float,
+/// which every one from 2⁵³ up is, has only a whole part. Otherwise it is
+/// `n / 2ᵏ`, which is `n · 5ᵏ / 10ᵏ`: the digits of `n · 5ᵏ` with the point
+/// `k` places from the right. Nothing in this is rounded.
+fn decimal(size: float) -> Decimal {
+    if size >= 9007199254740992.0 {
+        return Decimal{ digits: integral_digits(size), after: 0 }
+    }
+    // Doubling a float is exact, and `m` stays below 2⁵³ throughout: a
+    // float with a fraction is below 2⁵², so doubling it cannot pass 2⁵³.
+    // Below one, 2³² at a time, since the smallest float takes 1074 doublings.
+    var m = size
+    var k = 0
+    for m > 0.0 && m < 1.0 {
+        m = m * 4294967296.0
+        k += 32
+    }
+    for ((m as int) as float) < m {
+        m = m * 2.0
+        k += 1
+    }
+    // `n · 5ᵏ` in base-10⁹ limbs, least significant first. 5¹³ is the
+    // largest power of five that, times a limb, still fits an `int`.
+    let base = 1000000000
+    let n = m as int
+    var limbs: [int] = [n % base, (n / base) % base, n / (base * base)]
+    var left = k
+    for left > 0 {
+        var factor = 1
+        var times = 0
+        for times < 13 && times < left {
+            factor = factor * 5
+            times += 1
+        }
+        left -= times
+        var carry = 0
+        for i in 0..limbs.len() {
+            let t = limbs[i] * factor + carry
+            limbs[i] = t % base
+            carry = t / base
+        }
+        for carry > 0 {
+            limbs.push(carry % base)
+            carry = carry / base
+        }
+    }
+    return Decimal{ digits: limb_digits(limbs), after: k }
+}
+
+/// A string of decimal digits plus one in its last place.
+fn increment(digits: str) -> str {
+    var i = digits.len() - 1
+    for i >= 0 {
+        let d = digits.code_at(i) - 0x30
+        if d < 9 {
+            return digits.slice(0, i) + "\(d + 1)" + zeros(digits.len() - 1 - i)
+        }
+        i -= 1
+    }
+    return "1" + zeros(digits.len())
+}
+
+fn zeros(count: int) -> str {
+    var out = ""
+    for i in 0..count {
+        out = out + "0"
+    }
+    return out
+}
+
+/// The exact decimal digits of a whole float at or above 2⁵³.
+///
+/// Written out rather than interpolated, because interpolation is where the
+/// backends differ: one writes every digit and the other an exponent. The
+/// float is a whole number below 2⁵³ times a power of two, and doubling a
+/// number held in base-10⁹ limbs is exact.
+fn integral_digits(x: float) -> str {
+    var m = x
+    var twos = 0
+    for m >= 9007199254740992.0 {
+        m = m / 2.0
+        twos = twos + 1
+    }
+    let base = 1000000000
+    let start = m as int
+    var limbs: [int] = [start % base, (start / base) % base, start / (base * base)]
+    for i in 0..twos {
+        var carry = 0
+        for k in 0..limbs.len() {
+            let t = limbs[k] * 2 + carry
+            limbs[k] = t % base
+            carry = t / base
+        }
+        if carry > 0 {
+            limbs.push(carry)
+        }
+    }
+    return limb_digits(limbs)
+}
+
+/// The decimal digits of a number held in base-10⁹ limbs, least significant
+/// first, without leading zeros.
+fn limb_digits(limbs: [int]) -> str {
+    var top = limbs.len() - 1
+    for top > 0 && limbs[top] == 0 {
+        top = top - 1
+    }
+    var out = "\(limbs[top])"
+    var k = top - 1
+    for k >= 0 {
+        out = out + pad_zeros(limbs[k], 9)
+        k = k - 1
+    }
+    return out
 }
 
 /// A percentage, to one decimal place.

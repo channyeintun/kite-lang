@@ -20,5 +20,8 @@
       "action": { "indentAction": "none", "appendText": "/// " }
     }
   ],
-  "wordPattern": "[A-Za-z_][A-Za-z0-9_]*"
+  "wordPattern": {
+    "pattern": "[\\p{XID_Start}_][\\p{XID_Continue}]*",
+    "flags": "u"
+  }
 }

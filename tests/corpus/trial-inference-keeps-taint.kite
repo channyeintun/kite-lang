@@ -1,0 +1,33 @@
+// A generic literal's arguments are checked once to learn its type, and again
+// for real. The first check's diagnostics are thrown away — and so must be
+// everything else it did, or a read it reported and marked clean reaches the
+// real check already clean, and nothing is reported at all.
+
+struct Box<T> {
+    v: T
+}
+
+enum Maybe<T> {
+    Some(T)
+    None
+}
+
+fn fails() -> (int, error) {
+    return _, errors.new("boom")
+}
+
+fn main() {
+    let (v, err) = fails()
+    if err != nil {
+        io.print("failed")
+    }
+    let b = Box{ v: v } //~ ERROR E0301
+    io.print("\(b.v)")
+
+    let x: int
+    let m = Maybe.Some(x) //~ ERROR E0110
+    match m {
+        Some(y) => io.print("\(y)"),
+        None => io.print("none"),
+    }
+}
