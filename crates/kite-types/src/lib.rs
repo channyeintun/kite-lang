@@ -8069,7 +8069,30 @@ impl<'a> Checker<'a> {
                             tn, bn
                         ))
                     }
-                    _ => d.with_note(format!("write `impl {} for {}`", bn, tn)),
+                    // An `impl` names a struct or an enum, so for anything
+                    // else — a trait object included — suggesting one would
+                    // send the reader to write something that does not parse.
+                    TyKind::Dyn(tr) if tr == *bound => d.with_note(format!(
+                        "`{}` stands for a type that implements `{}`, and `{}` is not \
+                         one: it holds a value whose type is known only by its trait. \
+                         Take a `{}` parameter instead, or pass the value before it \
+                         became one",
+                        g.name, bn, tn, tn
+                    )),
+                    TyKind::Dyn(tr) => d.with_note(format!(
+                        "{} has only what `{}` declares",
+                        self.types.with_article(*t),
+                        self.types.trait_def(tr).name
+                    )),
+                    _ if self.type_index_of(*t).is_some() => {
+                        d.with_note(format!("write `impl {} for {}`", bn, tn))
+                    }
+                    _ => d.with_note(format!(
+                        "an `impl` is written for a struct or an enum, so {} cannot \
+                         implement `{}`; wrap it in a struct that does",
+                        self.types.with_article(*t),
+                        bn
+                    )),
                 };
                 self.diags.push(d);
             }
@@ -8348,9 +8371,14 @@ impl<'a> Checker<'a> {
                 // `-5..=-1`: a negative end is a negation of a literal, which
                 // the literal pattern above already folds. A range has to as
                 // well, or it rejects the one spelling a negative bound has.
+                // A release build negates with `NegIntWrap`, and a pattern
+                // means the same in both builds, so both are folded.
                 let bound = |e: &hir::Expr| match &e.kind {
                     ExprKind::Int(v) => Some(*v),
-                    ExprKind::Unary { op: hir::UnOp::NegInt, operand } => match operand.kind {
+                    ExprKind::Unary {
+                        op: hir::UnOp::NegInt | hir::UnOp::NegIntWrap,
+                        operand,
+                    } => match operand.kind {
                         ExprKind::Int(v) => v.checked_neg(),
                         _ => None,
                     },

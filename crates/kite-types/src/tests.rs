@@ -22,6 +22,12 @@ impl Ctx {
 }
 
 fn run(src: &str) -> Ctx {
+    run_in(src, false)
+}
+
+/// Check in a named build mode: a few rules, such as how `-` on an `int` is
+/// lowered, differ in a release build, and what they feed must not.
+fn run_in(src: &str, release: bool) -> Ctx {
     let mut sources = SourceMap::new();
     let f = sources.add("t.kite", src);
     let mut diags = DiagBag::new();
@@ -33,7 +39,7 @@ fn run(src: &str) -> Ctx {
         diags.render_all(&sources)
     );
     let resolved = kite_resolve::resolve(&ast, &mut diags);
-    let program = check(&ast, &resolved, &sources, &mut diags);
+    let program = check_with(&ast, &resolved, &sources, &mut diags, release);
     Ctx { program, diags, sources }
 }
 
@@ -1896,13 +1902,16 @@ fn a_closure_sees_what_was_proved_where_it_was_made() {
 }
 
 /// A negative bound is a negated literal, and a range folds it as the
-/// literal pattern does.
+/// literal pattern does — in a release build too, where the negation is the
+/// wrapping one and was once not recognised as a bound at all.
 #[test]
 fn a_range_pattern_takes_negative_bounds() {
-    ok_body(
-        "  let n = -3\n  let s = match n {\n    -5..=-1 => \"neg\",\n    _ => \"other\",\n  }\n\
-         \x20 io.print(s)",
-    );
+    let src = "fn main() {\n  let n = -3\n  let s = match n {\n    -5..=-1 => \"neg\",\n\
+               \x20   -7 => \"minus seven\",\n    _ => \"other\",\n  }\n  io.print(s)\n}\n";
+    for release in [false, true] {
+        let c = run_in(src, release);
+        assert!(c.diags.is_empty(), "release: {}\n{}", release, c.render());
+    }
 }
 
 /// `Color.Red` is the qualified spelling of `Red`, and a qualified pattern
@@ -1946,4 +1955,22 @@ fn a_tuple_bindings_initialiser_is_checked_once() {
         fn main() {\n  let (v, err) = f(1 + \"a\")\n  if err != nil {\n    return\n  }\n  io.print(v)\n}\n");
     let reported = c.codes().iter().filter(|code| **code == "E0201").count();
     assert_eq!(reported, 1, "{}", c.render());
+}
+
+/// A bound's note suggests an `impl` only for a type one can be written for.
+/// It told the reader of a `dyn Show` passed for `T: Show` to write
+/// `impl Show for dyn Show`, which does not parse.
+#[test]
+fn a_bound_note_suggests_an_impl_only_where_one_can_be_written() {
+    let c = run("trait Show {\n  fn show(self) -> str\n}\nstruct P {\n  a: int\n}\nstruct Q {\n  a: int\n}\n\
+        impl Show for P {\n  fn show(self) -> str {\n    return \"P\"\n  }\n}\n\
+        fn show_it<T: Show>(x: T) -> str {\n  return x.show()\n}\n\
+        fn main() {\n  let d: dyn Show = P{ a: 9 }\n  io.print(show_it(d))\n\
+        \x20 io.print(show_it([1]))\n  io.print(show_it(Q{ a: 1 }))\n}\n");
+    assert_eq!(c.codes(), vec!["E0208", "E0208", "E0208"], "{}", c.render());
+    let text = c.render();
+    assert!(!text.contains("impl Show for dyn"), "{}", text);
+    assert!(!text.contains("impl Show for [int]"), "{}", text);
+    assert!(text.contains("Take a `dyn Show` parameter instead"), "{}", text);
+    assert!(text.contains("write `impl Show for Q`"), "{}", text);
 }
