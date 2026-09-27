@@ -7854,6 +7854,11 @@ impl<'a> Checker<'a> {
         // one, so it binds the unwrapped type — which is what
         // SPECIFICATION.md section 3.3 shows.
         let mut nil_covered = false;
+        // The arms whose pattern was refused. Each stands in the HIR as a
+        // wildcard, which the coverage analysis would read as matching
+        // everything: every later arm then drew "unreachable", and a missing
+        // variant nothing, for a mistake already reported once.
+        let mut rejected = Vec::with_capacity(m.arms.len());
 
         for arm in &m.arms {
             self.set_flow_state(entry.clone());
@@ -7862,6 +7867,15 @@ impl<'a> Checker<'a> {
                 _ => scrut_ty,
             };
             let pattern = self.pattern_with(&arm.pattern, scrut_ty, bind_ty);
+            // Refused here or by the resolver, which reports a variant that
+            // does not exist before any of this runs.
+            let region = arm.pattern.span();
+            rejected.push(self.diags.iter().any(|d| {
+                d.severity == kite_diag::Severity::Error
+                    && d.primary_span().is_some_and(|at| {
+                        at.file == region.file && at.start >= region.start && at.end <= region.end
+                    })
+            }));
             if arm.guard.is_none() && covers_nil(&pattern) {
                 nil_covered = true;
             }
@@ -7939,7 +7953,7 @@ impl<'a> Checker<'a> {
         // match, so what the join says about it is never asked.
         self.set_flow_state(exit.or(left).unwrap_or(entry));
 
-        let exhaustive = self.check_exhaustive(m, &arms, scrut_ty);
+        let exhaustive = self.check_exhaustive(m, &arms, &rejected, scrut_ty);
 
         // Every arm left, and control had to enter one of them — that is what
         // exhaustiveness proves — so nothing after the match runs. A guard does
@@ -9141,6 +9155,7 @@ impl<'a> Checker<'a> {
         &mut self,
         m: &ast::MatchExpr,
         arms: &[hir::MatchArm],
+        rejected: &[bool],
         scrut: TyId,
     ) -> bool {
         if self.types.is_poisoned(scrut) {
@@ -9154,8 +9169,14 @@ impl<'a> Checker<'a> {
             .map(|a| &a.pattern)
             .collect();
 
-        self.report_unreachable_arms(m, arms, scrut);
+        self.report_unreachable_arms(m, arms, rejected, scrut);
 
+        // A refused pattern was meant to cover something, and what it was
+        // meant to cover is anybody's guess, so nothing is said to be missing
+        // on top of the mistake already reported.
+        if rejected.iter().any(|r| *r) {
+            return true;
+        }
         let missing = exhaustive::missing_patterns(scrut, &unguarded, self.types);
         if missing.is_empty() {
             return true;
@@ -9192,10 +9213,24 @@ impl<'a> Checker<'a> {
     /// where the enum says `Directory` — which is a binding, takes every value,
     /// and silently makes each arm after it dead. So when a catch-all binding
     /// above is spelled almost like a variant, the warning says which.
-    fn report_unreachable_arms(&mut self, m: &ast::MatchExpr, arms: &[hir::MatchArm], scrut: TyId) {
-        let rows: Vec<(&hir::Pattern, bool)> =
-            arms.iter().map(|a| (&a.pattern, a.guard.is_some())).collect();
+    fn report_unreachable_arms(
+        &mut self,
+        m: &ast::MatchExpr,
+        arms: &[hir::MatchArm],
+        rejected: &[bool],
+        scrut: TyId,
+    ) {
+        // A refused arm covers nothing, as a guarded one covers nothing for
+        // certain, and is not itself reported: its pattern is the mistake.
+        let rows: Vec<(&hir::Pattern, bool)> = arms
+            .iter()
+            .zip(rejected)
+            .map(|(a, r)| (&a.pattern, a.guard.is_some() || *r))
+            .collect();
         for i in exhaustive::unreachable_arms(scrut, &rows, self.types) {
+            if rejected.get(i).copied().unwrap_or(false) {
+                continue;
+            }
             let Some(arm) = m.arms.get(i) else { continue };
             let mut d = Diagnostic::warning(codes::E0116, "unreachable match arm")
                 .with_primary(arm.pattern.span(), "no value can reach this arm")

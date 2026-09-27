@@ -1972,6 +1972,29 @@ fn a_call_checked_on_trial_is_held_to_its_comparisons_once() {
     assert_eq!(c.codes(), vec!["E0201", "E0201"], "{}", c.render());
 }
 
+/// A pattern refused — by the resolver for naming no variant, or here for
+/// the wrong shape — was lowered as a wildcard and so covered everything:
+/// each later arm drew "unreachable", and a variant left uncovered went
+/// unmentioned, for one mistake already reported.
+#[test]
+fn a_refused_pattern_covers_nothing_and_is_the_one_diagnostic() {
+    let c = run("enum Color {\n  Red\n  Green\n}\n\
+        fn name(c: Color) -> str {\n  return match c {\n    Color.Red => \"red\",\n\
+        \x20   Color.Purple => \"purple\",\n    Color.Green => \"green\",\n  }\n}\n\
+        fn main() {\n  io.print(name(Color.Green))\n}\n");
+    assert_eq!(c.codes(), vec!["E0111"], "{}", c.render());
+    let c = body(
+        "  let f = 2.5\n  let s = match f {\n    1..=5 => \"in\",\n    2.5 => \"exact\",\n\
+         \x20   _ => \"out\",\n  }\n  io.print(s)",
+    );
+    assert_eq!(c.codes(), vec!["E0200"], "{}", c.render());
+    let c = run("enum Color {\n  Red\n  Green\n}\n\
+        fn name(c: Color) -> str {\n  return match c {\n    Color.Red => \"red\",\n\
+        \x20   Color.Purple => \"purple\",\n  }\n}\n\
+        fn main() {\n  io.print(name(Color.Green))\n}\n");
+    assert_eq!(c.codes(), vec!["E0111"], "{}", c.render());
+}
+
 /// A bound's note suggests an `impl` only for a type one can be written for.
 /// It told the reader of a `dyn Show` passed for `T: Show` to write
 /// `impl Show for dyn Show`, which does not parse.
