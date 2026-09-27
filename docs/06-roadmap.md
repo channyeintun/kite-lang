@@ -292,6 +292,20 @@ behind, and a failure assigned into an existing binding was never an
 obligation at all. Each is fixed with a test that fails without it: the
 `TYPE_CHECKER` programs of the differential test and the corpus.
 
+A second pass over the same ground found the holes those fixes left. The calls
+the compiler writes itself — `show` for `io.print` and interpolation, `message`
+for a conversion to `error` — were not held to what their bodies compare. A
+write over an unchecked error dropped it unseen, the new R7 rule having made
+`e = nil` clear the obligation. An `impl` header with no type arguments slipped
+past the header rule, and five notes still advised the header it refuses. A
+trait's default method was checked once per `impl`, so a mistake in it was
+reported per `impl` and a default no `impl` took was never checked. `Self`
+named the block's type in an annotation but not in a literal or a path, and an
+alias of a struct or an enum was not that type where a type is found by name.
+A tuple literal was not typed through an expected optional, and a `(T, error)`
+result where a written tuple was wanted read "expected `(int, error)`, found
+`(int, error)`".
+
 ---
 
 ## Phase 6 — Standard library (started)
