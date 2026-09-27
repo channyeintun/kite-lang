@@ -1,5 +1,5 @@
 use crate::json::{parse, Json};
-use crate::server::Server;
+use crate::server::{uri_of_path, Server};
 
 fn open(server: &mut Server, uri: &str, text: &str) -> Vec<Json> {
     let message = Json::object(vec![
@@ -609,7 +609,13 @@ impl Project {
             std::fs::create_dir_all(parent).expect("a directory for it");
         }
         std::fs::write(&path, text).expect("written");
-        format!("file://{}", path.display())
+        self.uri(name)
+    }
+
+    /// The URI an editor names a file in the project by, written or not —
+    /// `file:///C%3A/…` on Windows, where `file://` and a path is not a URI.
+    fn uri(&self, name: &str) -> String {
+        uri_of_path(&self.dir.join(name).to_string_lossy())
     }
 }
 
@@ -944,7 +950,7 @@ fn an_unsaved_file_in_a_directory_module_is_part_of_it() {
     let mut s = Server::new();
     open(&mut s, &main, main_text);
     assert_eq!(messages_for(&mut s, &main).len(), 1, "`extra` is nowhere yet");
-    let fresh = format!("file://{}", p.dir.join("config/extra.kite").display());
+    let fresh = p.uri("config/extra.kite");
     open(&mut s, &fresh, "pub fn extra() -> int {\n    return 1\n}\n");
     assert_eq!(messages_for(&mut s, &main), Vec::<String>::new());
 }

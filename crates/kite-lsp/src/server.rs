@@ -677,7 +677,7 @@ fn path_from_uri(uri: &str, windows: bool) -> String {
 }
 
 /// The `file://` URI for a path: the way back from [`path_of`].
-fn uri_of_path(path: &str) -> String {
+pub(crate) fn uri_of_path(path: &str) -> String {
     uri_from_path(path, cfg!(windows))
 }
 
