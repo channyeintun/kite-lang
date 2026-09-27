@@ -16,12 +16,18 @@
 //!   (loop $dispatch
 //!     (block $bb2 (block $bb1 (block $bb0
 //!       (br_table 0 1 2 (local.get $pc)))
-//!       ;; bb0 body — sets $pc and branches back to $dispatch
+//!       ;; bb0 body — ends in `br $bb1` or `br $bb2`, which lands on that body
 //!     )
-//!     ;; bb1 body
+//!     ;; bb1 body — a jump back to bb0 sets $pc and branches to $dispatch
 //!   )
 //! ))
 //! ```
+//!
+//! A jump forward is a plain `br` out to the block holding its target; only a
+//! jump back — a loop's — goes round the dispatch loop, and the `br_table`
+//! names only the blocks one returns to. Code without a loop in it is then
+//! nothing but blocks and forward branches, which is what an engine's
+//! optimising compiler is built for.
 //!
 //! This handles an arbitrary CFG, including irreducible ones, and engines
 //! optimise the shape well. A relooper that recovers `if`/`loop` structure
@@ -2354,15 +2360,38 @@ fn compile_fn(
     func.instruction(&Instruction::Loop(BlockType::Empty)); // $dispatch
 
     // One block per basic block, innermost first, so `br_table` can select any
-    // of them by depth.
+    // of them by depth. They are laid out in the order `emission_order`
+    // gives, and a block's place in it is what `$pc` holds and what a branch
+    // counts from.
     for _ in 0..n {
         func.instruction(&Instruction::Block(BlockType::Empty));
     }
+    let order = emission_order(f);
+    let mut place = vec![0u32; order.len()];
+    for (at, &b) in order.iter().enumerate() {
+        place[b] = at as u32;
+    }
+    // The `br_table` names only the blocks the loop is ever re-entered for:
+    // the first, and each one a jump goes back to. Every other entry goes to
+    // the first, which is never taken, since nothing sets the counter to one
+    // of those. See [`Emitter::jump`].
+    let mut entered = vec![false; n as usize];
+    if let Some(first) = entered.first_mut() {
+        *first = true;
+    }
+    for (at, &b) in order.iter().enumerate() {
+        for next in f.blocks[b].term.successors() {
+            let to = place[next.index()] as usize;
+            if to <= at {
+                entered[to] = true;
+            }
+        }
+    }
     func.instruction(&Instruction::LocalGet(pc));
-    let targets: Vec<u32> = (0..n).collect();
-    func.instruction(&Instruction::BrTable(targets.into(), n));
+    let targets: Vec<u32> = (0..n).map(|at| if entered[at as usize] { at } else { 0 }).collect();
+    func.instruction(&Instruction::BrTable(targets.into(), 0));
 
-    for (i, block) in f.blocks.iter().enumerate() {
+    for (at, &b) in order.iter().enumerate() {
         // Close the block whose body follows.
         func.instruction(&Instruction::End);
 
@@ -2392,10 +2421,11 @@ fn compile_fn(
             arith_scratch,
             range_scratch,
             invoke_shapes,
-            block_index: i,
+            place: &place,
+            at,
             total: n as usize,
         };
-        e.block(&mut func, block);
+        e.block(&mut func, &f.blocks[b]);
     }
 
     func.instruction(&Instruction::End); // loop
@@ -2404,6 +2434,48 @@ fn compile_fn(
     func.instruction(&Instruction::End); // function
     // Every local's index, parameters first, is below this.
     (func, next_local)
+}
+
+/// The order a function's blocks are laid out in: reverse postorder from the
+/// entry, then any block nothing reaches, as numbered.
+///
+/// In this order every jump goes forward but a loop's jump back to its head,
+/// and a jump forward is one `br` (see [`Emitter::jump`]). MIR numbers blocks
+/// as lowering makes them, which is not that order: a value `if` makes the
+/// block its arms join at before the arms of the `else if` inside it, so each
+/// join of a value `else if` chain came before the blocks that go to it.
+fn emission_order(f: &mir::Function) -> Vec<usize> {
+    let n = f.blocks.len();
+    let mut seen = vec![false; n];
+    let mut post = Vec::with_capacity(n);
+    // Each block on the path from the entry, with how many of its successors
+    // have been looked at. A loop rather than recursion, because a chain of
+    // eight thousand `else if` is a path as long.
+    let mut path: Vec<(usize, usize)> = Vec::new();
+    if n > 0 {
+        seen[0] = true;
+        path.push((0, 0));
+    }
+    while let Some((b, looked)) = path.last_mut() {
+        // The `else` side first, so the `then` side comes first once the
+        // order is reversed, as it was written.
+        let next = f.blocks[*b].term.successors().into_iter().rev().nth(*looked);
+        *looked += 1;
+        match next {
+            Some(s) if !seen[s.index()] => {
+                seen[s.index()] = true;
+                path.push((s.index(), 0));
+            }
+            Some(_) => {}
+            None => {
+                post.push(*b);
+                path.pop();
+            }
+        }
+    }
+    post.reverse();
+    post.extend((0..n).filter(|&b| !seen[b]));
+    post
 }
 
 fn push_local(locals: &mut Vec<(u32, ValType)>, ty: ValType) {
@@ -2463,17 +2535,22 @@ struct Emitter<'a> {
     /// Handler shapes given to `js.func`, in the order the trampolines and the
     /// glue's table are built from. A call site sends the host this index.
     invoke_shapes: &'a [TyId],
-    block_index: usize,
+    /// Where each block is laid out, by block number (see
+    /// [`emission_order`]).
+    place: &'a [u32],
+    /// Where this block is laid out.
+    at: usize,
     total: usize,
 }
 
 impl<'a> Emitter<'a> {
     /// Branch depth from this block's body out to the dispatch loop.
     ///
-    /// At the body of block `i` the blocks `0..=i` are closed, so those still
-    /// open are `i+1..n` — that many, and then the loop itself.
+    /// At the body of the block laid out `i`th the blocks `0..=i` are
+    /// closed, so those still open are `i+1..n` — that many, and then the
+    /// loop itself.
     fn dispatch_depth(&self) -> u32 {
-        (self.total - 1 - self.block_index) as u32
+        (self.total - 1 - self.at) as u32
     }
 
     fn block(&mut self, func: &mut Function, block: &mir::BasicBlock) {
@@ -4865,10 +4942,28 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Set the program counter and branch back to the dispatch loop. `extra`
-    /// accounts for blocks opened since the body started, such as the `if` in a
-    /// conditional terminator.
+    /// Go to block `target`. `extra` accounts for blocks opened since the
+    /// body started, such as the `if` in a conditional terminator.
+    ///
+    /// A block later in the function is still open around this one, and
+    /// branching out of it lands on the target's body, so a jump forward is
+    /// one `br`. Only a jump back — a loop's — sets the program counter and
+    /// goes round the dispatch loop.
+    ///
+    /// Every jump used to go round the loop. To the engine that made each
+    /// block a successor of the loop's head and each jump an edge back to it,
+    /// so the head merged every local the function has from every block in
+    /// it. A chain of two thousand `||` is four thousand blocks and as many
+    /// locals: the program ran in a third of a second, and then V8's
+    /// optimising compiler, given the function to compile in the background,
+    /// took gigabytes and most of a minute, and Node would not exit until it
+    /// was done. Jumping forward, code without loops has no edge back at all.
     fn jump(&mut self, func: &mut Function, target: u32, extra: u32) {
+        let (here, target) = (self.at as u32, self.place[target as usize]);
+        if target > here {
+            func.instruction(&Instruction::Br(target - here - 1 + extra));
+            return;
+        }
         func.instruction(&Instruction::I32Const(target as i32));
         func.instruction(&Instruction::LocalSet(self.pc));
         func.instruction(&Instruction::Br(self.dispatch_depth() + extra));

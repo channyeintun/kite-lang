@@ -196,16 +196,33 @@ again, ending there. A comma missing between parameters is supplied, and a
 comma between struct fields read as a line break, so the declaration survives
 for the code that uses it. One missing between two arguments on a line is
 reported without a fix — `f("sum " n)` wanted a `+` — and the call becomes an
-`Error` node rather than a call with a guessed number of arguments; after a
-line break it is the `)` that is missing, and that is what is reported. A bracket whose closer was reported missing
-counts as closed from then on, so recovery resumes at the next line instead of
-taking the function's `}` for the literal's, and a binding whose value did not
-parse is kept, with an `Error` for a value. A struct literal, a `match`, a
-value `if` or a closure cut short by a missing `}` becomes an `Error` node
-too, rather than being checked as though what was written so far were the
-whole of it; a declaration cut short is kept, because the rest of the program
-names it. An index the parser already refused, such as `xs[a..b..c]`, makes
-the whole indexing an `Error`.
+`Error` node rather than a call with a guessed number of arguments. At the end
+of a line, a list, a call or a literal laid out over several lines is missing a
+comma when the next line is indented past the one it opened on, and it goes on
+as if the comma were there; a line no further in is the next statement, and it
+is the closer that is missing, which is what is reported. A bracket whose
+closer was reported missing there — or before the end of the input, or before
+the closer of a bracket around it — counts as closed from then on, so recovery
+resumes at the next line instead of taking the function's `}` for the
+literal's. A mistake further along the line leaves the bracket open for
+recovery to skip to its closer. Inside a struct or map literal a mistake is
+recovered from inside the braces: the member is skipped to the next `,`, the
+next member's line or the literal's own `}`, and the literal becomes an
+`Error`. A binding whose value did not parse is kept, with an `Error` for a
+value, and if skipping the value took the rest of the block with it, the block
+ends in an `Error` statement. A struct literal, a `match`, a value `if` or a
+closure cut short by a missing `}` becomes an `Error` node too, rather than
+being checked as though what was written so far were the whole of it; a
+declaration cut short is kept, because the rest of the program names it. An
+index the parser already refused, such as `xs[a..b..c]`, makes the whole
+indexing an `Error`.
+
+The type checker gives an `Error` node the error type and reports nothing
+against it or what is made from it: a pair taken apart from one binds both
+names, returned from a fallible function it is a return, a generic call it
+leaves nothing to infer from is an error too, and in a body holding one no
+error binding is reported unchecked, since the `check` may be in what was not
+read.
 
 Recursion depth is bounded (`E0102`): brackets, blocks and prefix operators
 may nest 256 levels. A left-deep chain — `a + b + …`, `x.f().g()…`, `else if`
@@ -513,7 +530,13 @@ kilobytes.
 MIR is a control-flow graph and Wasm has structured control flow with no
 `goto`, so each function is a **dispatch loop**: one `loop` containing nested
 `block`s, entered through a `br_table` on a program-counter local. It handles an
-arbitrary graph, irreducible ones included, and engines optimise the shape well.
+arbitrary graph, irreducible ones included. The blocks are laid out in reverse
+postorder, so every jump goes forward but a loop's jump back to its head; a
+jump forward is a plain `br` out to the block holding its target, and only a
+jump back goes round the dispatch loop. Code without a loop is then nothing but
+blocks and forward branches. When every jump went round the loop, V8's
+optimising compiler merged every local at the loop's head from every block, and
+a chain of two thousand `||` took it gigabytes after the program had finished.
 A relooper that recovered `if` and `loop` structure would produce tighter code
 and is the obvious later improvement.
 

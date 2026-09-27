@@ -160,6 +160,67 @@ fn short_circuit_operators_validate() {
     );
 }
 
+/// The MIR of a program, as `build` lowers it.
+fn lowered(src: &str) -> kite_mir::Program {
+    let mut sources = SourceMap::new();
+    let f = sources.add("t.kite", src);
+    let mut diags = kite_diag::DiagBag::new();
+    let tokens = kite_lexer::tokenize(f, src, &mut diags);
+    let ast = kite_parser::parse(f, src, &tokens, &mut diags);
+    let resolved = kite_resolve::resolve(&ast, &mut diags);
+    let mut hir = kite_types::check(&ast, &resolved, &sources, &mut diags);
+    assert!(!diags.has_errors(), "{}", diags.render_all(&sources));
+    kite_hir::mono::monomorphise(&mut hir).expect("specialisation terminates");
+    kite_mir::lower(&hir)
+}
+
+/// How many jumps in `name` go back, laid out as the backend lays it out.
+fn jumps_back(program: &kite_mir::Program, name: &str) -> usize {
+    let f = program.fns.iter().find(|f| f.name == name).expect("the function is there");
+    let order = emission_order(f);
+    let mut place = vec![0; order.len()];
+    for (at, &b) in order.iter().enumerate() {
+        place[b] = at;
+    }
+    order
+        .iter()
+        .enumerate()
+        .flat_map(|(at, &b)| f.blocks[b].term.successors().into_iter().map(move |s| (at, s)))
+        .filter(|&(at, s)| place[s.index()] <= at)
+        .count()
+}
+
+/// Code with no loop in it is laid out so that every jump goes forward, and
+/// none goes round the dispatch loop.
+///
+/// Every jump used to, which made each block a successor of the loop's head
+/// and each jump an edge back to it. V8's optimising compiler, given a chain
+/// of two thousand `||`, merged every local at that head from every block,
+/// and took gigabytes and most of a minute after the program had finished.
+/// A value `else if` chain jumps back even in MIR's own numbering, which
+/// makes each arm's join before the arms inside it.
+#[test]
+fn code_without_a_loop_only_jumps_forward() {
+    let src = "fn main() {\n  let c = 7\n  let b = c == 0 || c == 1 || c == 2 || c == 3\n\
+               \x20 let v = if c == 0 { 0 } else if c == 1 { 1 } else if c == 2 { 2 } else { 3 }\n\
+               \x20 io.print(b)\n  io.print(v)\n}\n";
+    let program = lowered(src);
+    let main = program.fns.iter().find(|f| f.name == "main").expect("main");
+    let numbered_back = main
+        .blocks
+        .iter()
+        .enumerate()
+        .any(|(i, b)| b.term.successors().iter().any(|s| s.index() <= i));
+    assert!(numbered_back, "the value `else if` chain jumps back in MIR's numbering");
+    assert_eq!(jumps_back(&program, "main"), 0);
+    valid(src);
+    // A loop still goes back to its head, and only there.
+    let src = "fn main() {\n  var i = 0\n  for i < 3 {\n    if i == 1 {\n      io.print(i)\n    }\n\
+               \x20   i = i + 1\n  }\n}\n";
+    assert_eq!(jumps_back(&lowered(src), "main"), 1);
+    valid(src);
+}
+
 #[test]
 fn an_if_expression_validates() {
     valid("fn main() {\n  let n = if 1 < 2 { 10 } else { 20 }\n  io.print(n)\n}\n");

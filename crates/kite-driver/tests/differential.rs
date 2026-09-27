@@ -3918,6 +3918,25 @@ fn long_chains_agree_across_backends() {
     }
 }
 
+/// An `else if` chain nearly as long as the parser takes compiles, and in
+/// memory in proportion to it.
+///
+/// Pruning after specialisation walked each function body through a copy,
+/// made afresh at every block — so each block was copied once for every
+/// block around it, and an `else if` chain is one block inside the next. A
+/// chain of 4,000 took gigabytes to check, and one of 8,000 was killed for
+/// memory though the parser had accepted it.
+#[test]
+fn an_else_if_chain_at_the_ceiling_compiles() {
+    let mut branches = String::from("  if c == 0 {\n    io.print(0)\n  }");
+    for i in 1..8000 {
+        branches.push_str(&format!(" else if c == {} {{\n    io.print({})\n  }}", i, i));
+    }
+    let src = format!("fn main() {{\n  let c = 7999\n{}\n}}\n", branches);
+    let out = kite_driver::on_compiler_stack(move || run_on_vm("else-if-ceiling", &src));
+    assert_eq!(out, "7999\n");
+}
+
 /// The object-file path, through the system linker: one program built into a
 /// real executable and run. The JIT above covers the codegen; this covers the
 /// relocations, the symbol names and the `staticlib` runtime — the parts only

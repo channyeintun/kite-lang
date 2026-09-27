@@ -858,7 +858,7 @@ pub fn prune_keeping(program: &mut Program, keep: impl Fn(&Function) -> bool) {
             continue;
         }
         *seen = true;
-        collect_callees(&fns[i as usize].body, &mut queue);
+        collect_callees(&mut fns[i as usize].body, &mut queue);
     }
 
     if reachable.iter().all(|r| *r) {
@@ -893,10 +893,16 @@ pub fn prune_keeping(program: &mut Program, keep: impl Fn(&Function) -> bool) {
     *fns = kept;
 }
 
-fn collect_callees(b: &Block, out: &mut Vec<u32>) {
-    // The walks take `&mut`, and this only reads; cloning a body to reuse them
-    // would cost more than the second walk.
-    let mut b = b.clone();
+/// Every function `b` names, pushed onto `out`.
+///
+/// It only reads, but takes the block mutably because the walks it shares
+/// with the passes that write do. It used to take a shared reference and
+/// walk a copy — made again at each level, so every block was copied once
+/// for each block around it. An `else if` chain is one block inside the
+/// next, and one of four thousand links copied gigabytes here, in a pass
+/// that looks at each call once: `kitec check` was killed for memory on a
+/// chain the parser accepts.
+fn collect_callees(b: &mut Block, out: &mut Vec<u32>) {
     for s in &mut b.stmts {
         for e in stmt_exprs(s) {
             collect_expr_callees(e, out);

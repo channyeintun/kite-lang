@@ -466,6 +466,12 @@ fn a_member_named_as_is_called_like_any_other() {
     same("let w = NotFound.as(err)\n");
     same("let f = n as float\n");
     assert_eq!(fmt("let w = NotFound.as (err)\n"), "let w = NotFound.as(err)\n");
+    // Whatever the spacing around the dot, in one run: the first used to
+    // come out `NotFound.as (err)`, and only a second run tightened it.
+    for spaced in ["NotFound. as(err)", "NotFound .as (err)", "NotFound . as ( err )"] {
+        let src = format!("let w = {}\n", spaced);
+        assert_eq!(idempotent(&src), "let w = NotFound.as(err)\n", "{}", spaced);
+    }
 }
 
 /// A byte-order mark is kept: it is not the formatter's to take away.
