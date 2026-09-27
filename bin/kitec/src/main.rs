@@ -65,12 +65,10 @@ fn command() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
-        print!("{}", USAGE);
-        return ExitCode::SUCCESS;
+        return answer(USAGE);
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("kitec {}", env!("CARGO_PKG_VERSION"));
-        return ExitCode::SUCCESS;
+        return answer(&format!("kitec {}\n", env!("CARGO_PKG_VERSION")));
     }
 
     if let Some(i) = args.iter().position(|a| a == "--explain") {
@@ -223,8 +221,7 @@ fn command() -> ExitCode {
             .and_then(|s| s.to_str())
             .unwrap_or("module");
         let docs = kite_doc::extract(name, &src);
-        print!("{}", kite_doc::markdown(&docs, !include_private));
-        return ExitCode::SUCCESS;
+        return answer(&kite_doc::markdown(&docs, !include_private));
     }
 
     if command == "fix" {
@@ -264,7 +261,9 @@ fn command() -> ExitCode {
     }
 
     if !result.output.is_empty() {
-        print!("{}", result.output);
+        if let Err(end) = say(&result.output) {
+            return end;
+        }
     }
     // A stage that prints is the whole answer: `run --emit hir` asked to see
     // the program, not to run it.
@@ -827,11 +826,7 @@ fn format_file(path: &str, src: &str, check_only: bool) -> ExitCode {
 fn explain(code: &str) -> ExitCode {
     let code = code.to_uppercase();
     match kite_diag::codes::explain(&code) {
-        Some((summary, body)) => {
-            println!("{}: {}\n", code, summary);
-            println!("{}", body);
-            ExitCode::SUCCESS
-        }
+        Some((summary, body)) => answer(&format!("{}: {}\n\n{}\n", code, summary, body)),
         None => {
             eprintln!("error: `{}` is not a known diagnostic code", code);
             let known: Vec<&str> = kite_diag::codes::all().iter().map(|(c, _)| *c).collect();
@@ -916,4 +911,25 @@ fn misplaced_flags(
 fn fail(message: &str) -> ExitCode {
     eprintln!("error: {}", message);
     ExitCode::FAILURE
+}
+
+/// Write the command's own answer to standard output: `Err` with how the
+/// command ends when it has to end here.
+///
+/// `print!` panics when the reader has gone — `kitec --explain E0302 | head`
+/// — and a compiler that panics reads as a broken compiler. A reader that
+/// stopped reading has had what it wanted, so that ends the command cleanly;
+/// any other failure to write is an error, said as one.
+fn say(text: &str) -> Result<(), ExitCode> {
+    let mut out = io::stdout().lock();
+    match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Err(ExitCode::SUCCESS),
+        Err(e) => Err(fail(&format!("cannot write to standard output: {}", e))),
+    }
+}
+
+/// [`say`], as the whole of a command.
+fn answer(text: &str) -> ExitCode {
+    say(text).err().unwrap_or(ExitCode::SUCCESS)
 }
