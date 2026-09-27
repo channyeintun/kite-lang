@@ -29,7 +29,14 @@ use std::process::{Command, ExitCode};
 const VENDOR: &str = ".kite/vendor";
 
 pub fn run(dir: &Path, offline: bool, update: bool) -> ExitCode {
-    match sync(dir, offline, update) {
+    let manifest = match root_manifest(dir) {
+        Ok(manifest) => manifest,
+        Err(said) => {
+            eprint!("{}", said);
+            return ExitCode::FAILURE;
+        }
+    };
+    match sync(dir, manifest, offline, update) {
         Ok(manifest) => check_entries(&manifest, dir),
         Err(message) => {
             eprintln!("error: {}", message);
@@ -38,18 +45,22 @@ pub fn run(dir: &Path, offline: bool, update: bool) -> ExitCode {
     }
 }
 
+/// The package's own manifest, or all there is to print about why not. One
+/// that is there and does not read is the `E0405` every other command reports
+/// for it, at its line; this used to say the same thing as a bare `error:`.
+fn root_manifest(dir: &Path) -> Result<Manifest, String> {
+    match kite_driver::modules::read_manifest(&dir.join("kite.toml"))? {
+        Some(manifest) => Ok(manifest),
+        None => Err(format!(
+            "error: no `kite.toml` in {}\n\nnote: a package is a directory with a manifest in it\n",
+            dir.display()
+        )),
+    }
+}
+
 /// Resolve, compare against `kite.lock`, and — only if that comparison
 /// passes — install what was resolved and write the lockfile.
-fn sync(dir: &Path, offline: bool, update: bool) -> Result<Manifest, String> {
-    let manifest_path = dir.join("kite.toml");
-    let Some(text) = read_package_file(&manifest_path)? else {
-        return Err(format!(
-            "no `kite.toml` in {}\n\nnote: a package is a directory with a manifest in it",
-            dir.display()
-        ));
-    };
-    let manifest = manifest::parse(&text).map_err(|e| e.to_string())?;
-
+fn sync(dir: &Path, manifest: Manifest, offline: bool, update: bool) -> Result<Manifest, String> {
     // **The lockfile is an input**, not only an output. It is read before
     // resolution, so the versions it records are preferred over newer ones
     // nobody asked for, and compared entry by entry afterwards.
@@ -1140,6 +1151,11 @@ mod tests {
 
     // ---- path-only resolution, end to end, with no network ----------------
 
+    /// [`sync`] from the package's own manifest, offline, as [`run`] calls it.
+    fn sync_here(dir: &Path, update: bool) -> Result<Manifest, String> {
+        sync(dir, root_manifest(dir)?, true, update)
+    }
+
     fn fixture(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("kite-pkg-{}-{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1282,10 +1298,10 @@ mod tests {
         package(&dir, "a", "1.0.0", "");
         package(&dir, "b", "1.0.0", "");
         let app = dir.join("app");
-        sync(&app, true, false).expect("the first lock");
+        sync_here(&app, false).expect("the first lock");
 
         package(&dir, "app", "0.1.0", "a = { path = \"../a\" }\nb = { path = \"../b\" }");
-        sync(&app, true, false).expect("an added dependency is not a moved one");
+        sync_here(&app, false).expect("an added dependency is not a moved one");
         let lock = std::fs::read_to_string(app.join("kite.lock")).expect("read");
         assert!(lock.contains("name = \"b\""), "{}", lock);
 
@@ -1300,11 +1316,11 @@ mod tests {
         package(&dir, "app", "0.1.0", "a = { path = \"../a\" }");
         package(&dir, "a", "1.0.0", "");
         let app = dir.join("app");
-        sync(&app, true, false).expect("the first lock");
+        sync_here(&app, false).expect("the first lock");
         let agreed = std::fs::read_to_string(app.join("kite.lock")).expect("read");
 
         write(dir.join("a/src/lib.kite"), "fn a() {\n    io.print(1)\n}\n");
-        let err = sync(&app, true, false).expect_err("the bytes moved");
+        let err = sync_here(&app, false).expect_err("the bytes moved");
         assert!(err.contains("does not match what resolution produced"), "{}", err);
         assert!(err.contains("a 1.0.0"), "names the dependency: {}", err);
         assert_eq!(
@@ -1313,7 +1329,7 @@ mod tests {
             "a refused lockfile is left as it was"
         );
 
-        sync(&app, true, true).expect("--update accepts it");
+        sync_here(&app, true).expect("--update accepts it");
         assert_ne!(std::fs::read_to_string(app.join("kite.lock")).expect("read"), agreed);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1396,10 +1412,33 @@ mod tests {
             b"[package]\nname = \"app\"\nversion = \"0.1.0\"\n# caf\xe9\n".as_slice(),
         )
         .expect("write");
-        let why = sync(&dir, true, false).expect_err("it does not read");
+        let why = root_manifest(&dir).expect_err("it does not read");
+        assert!(why.starts_with("error[E0405]: "), "{}", why);
         assert!(why.contains("kite.toml:4"), "{}", why);
         assert!(why.contains("not UTF-8"), "{}", why);
         assert!(!why.contains("no `kite.toml`"), "{}", why);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A manifest that does not parse is the `E0405` `kitec check` reports for
+    /// it, at its line. It was a bare `error:` with no code.
+    #[test]
+    fn a_manifest_that_does_not_parse_is_e0405() {
+        let dir = fixture("bogus");
+        write(dir.join("kite.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nbogus = 1\n");
+        let why = root_manifest(&dir).expect_err("it does not parse");
+        assert!(why.starts_with("error[E0405]: "), "{}", why);
+        assert!(why.contains("kite.toml:4:1"), "points at the line: {}", why);
+        assert!(why.contains("`[package]` has no `bogus`"), "{}", why);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No manifest at all is not an `E0405`: there is nothing to read.
+    #[test]
+    fn a_missing_manifest_says_so() {
+        let dir = fixture("missing");
+        let why = root_manifest(&dir).expect_err("there is none");
+        assert!(why.starts_with("error: no `kite.toml` in "), "{}", why);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

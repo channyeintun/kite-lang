@@ -4422,6 +4422,40 @@ fn main() {
 }
 ",
     ),
+    // `_` stands for no value, so the error beside it has to be a failure.
+    // One that is nil at run time traps at the `return`. It used to leave a
+    // hole the caller was allowed to read: the VM trapped at the read, native
+    // code printed a zero or crashed on a `str`, and Wasm printed a zero or
+    // dereferenced null. `a_nil_error_beside_a_hole_traps_with_one_message`
+    // compares what each says.
+    (
+        "a-nil-error-beside-a-hole-traps",
+        "\
+fn lookup(found: bool) -> error {
+  if found {
+    return nil
+  }
+  return errors.new(\"missing\")
+}
+
+fn fetch(found: bool) -> (str, error) {
+  return _, lookup(found)
+}
+
+fn main() {
+  let (_, err) = fetch(false)
+  if err != nil {
+    io.print(\"failed: \" + err.message())
+  }
+  io.print(\"before\")
+  let (s, serr) = fetch(true)
+  if serr != nil {
+    return
+  }
+  io.print(\"len \\(s.len())\")
+}
+",
+    ),
 ];
 
 /// What a run printed, and whether it ended in a trap.
@@ -4436,6 +4470,11 @@ fn trap_on_vm(name: &str, src: &str) -> Outcome {
 }
 
 fn trap_on_wasm(name: &str, src: &str, dir: &std::path::Path) -> Outcome {
+    trap_on_wasm_with_stderr(name, src, dir).0
+}
+
+/// [`trap_on_wasm`], and what the run wrote to standard error.
+fn trap_on_wasm_with_stderr(name: &str, src: &str, dir: &std::path::Path) -> (Outcome, String) {
     let c = compile(format!("{}.kite", name), src, Emit::Wasm);
     assert!(!c.failed(), "{} does not compile to wasm:\n{}", name, c.render_diagnostics());
     let module = c.wasm.as_ref().expect("a wasm module");
@@ -4470,7 +4509,10 @@ fn trap_on_wasm(name: &str, src: &str, dir: &std::path::Path) -> Outcome {
             String::from_utf8_lossy(&output.stderr)
         ),
     };
-    (String::from_utf8(output.stdout).expect("output is valid UTF-8"), trapped)
+    (
+        (String::from_utf8(output.stdout).expect("output is valid UTF-8"), trapped),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
 }
 
 /// Where the child's program output begins and, for a run that finishes,
@@ -4482,6 +4524,11 @@ const CHILD_END: &str = "\n<<kite-native-end>>\n";
 /// so each program runs in a child: this test binary again, asked through the
 /// environment to run one program and nothing else.
 fn trap_on_native(name: &str) -> Outcome {
+    trap_on_native_with_stderr(name).0
+}
+
+/// [`trap_on_native`], and what the child wrote to standard error.
+fn trap_on_native_with_stderr(name: &str) -> (Outcome, String) {
     let exe = std::env::current_exe().expect("the test binary");
     let output = Command::new(exe)
         .args(["native_trap_child", "--exact", "--nocapture", "--test-threads=1"])
@@ -4497,11 +4544,12 @@ fn trap_on_native(name: &str) -> Outcome {
             String::from_utf8_lossy(&output.stderr)
         );
     };
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     match printed.split_once(CHILD_END) {
-        Some((printed, _)) => (printed.to_string(), false),
+        Some((printed, _)) => ((printed.to_string(), false), stderr),
         None => {
             assert!(!output.status.success(), "{}: no end marker and a clean exit", name);
-            (printed.to_string(), true)
+            ((printed.to_string(), true), stderr)
         }
     }
 }
@@ -4568,6 +4616,40 @@ fn every_backend_traps_alike() {
         mismatches.len(),
         mismatches.join("\n\n")
     );
+}
+
+/// `return _, err` with a nil `err` traps at the `return`, and here what each
+/// backend *says* is compared too: it is one `require` the checker wrote, so
+/// there is one message, and it names the mistake rather than whatever the
+/// caller happened to do with the hole next.
+#[test]
+fn a_nil_error_beside_a_hole_traps_with_one_message() {
+    const MESSAGE: &str = "`return _, err` was handed a nil error: `_` stands for no value, \
+                           so the error beside it must be a failure";
+    let name = "a-nil-error-beside-a-hole-traps";
+    let (_, src) = TRAPPING.iter().find(|(n, _)| *n == name).expect("the program");
+    let printed = "failed: missing\nbefore\n".to_string();
+
+    let c = compile(format!("{}.kite", name), src, Emit::Check);
+    assert!(!c.failed(), "{}", c.render_diagnostics());
+    let mut out = Vec::new();
+    let trap = c.run(&mut out).expect_err("a trap on the VM");
+    assert_eq!(String::from_utf8(out).unwrap(), printed);
+    assert_eq!(trap.to_string(), MESSAGE);
+
+    if native_available() {
+        let (outcome, stderr) = trap_on_native_with_stderr(name);
+        assert_eq!(outcome, (printed.clone(), true));
+        assert!(stderr.contains(&format!("error: {}\n", MESSAGE)), "native said:\n{}", stderr);
+    }
+    if node_available() {
+        let dir = std::env::temp_dir().join(format!("kite-nil-failure-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create work directory");
+        let (outcome, stderr) = trap_on_wasm_with_stderr(name, src, &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(outcome, (printed, true));
+        assert!(stderr.contains(&format!("{}\n", MESSAGE)), "wasm said:\n{}", stderr);
+    }
 }
 
 /// Programs whose output is known, not merely agreed on.

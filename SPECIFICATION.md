@@ -1104,7 +1104,9 @@ if err != nil {
 
 `check` is only valid inside a function whose last return component is `error`.
 `_` in a return's value position means *no value*; it is not a zero value and
-the correlated pair records the error branch.
+the correlated pair records the error branch. So the error beside it must be a
+failure: `return _, nil` is `E0200`, and an error that is nil when
+`return _, err` runs is a trap at that `return`.
 
 This is deliberately **not** Rust's `?`. A postfix `?` disappears into the middle
 of an expression and permits nesting failures inside a larger expression. `check`
