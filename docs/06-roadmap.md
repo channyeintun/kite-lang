@@ -237,6 +237,32 @@ result is used as: `let s: Stack<int> = Stack.empty()`.
 
 **Phase 2 is complete.**
 
+**Reviewed later, by compiling what the specification says about traits,
+generics and patterns rather than what the tests happened to cover.** The
+methods on generic types above did not extend to a trait's *default* methods:
+one inherited by `impl<T> Show for Box<T>` had no `T`, so a default calling
+another method on `self` could not be checked at all, and one that could took
+the template `Box`, which Wasm refused to validate. They now take their
+block's parameters. `Self` was known to a signature and not to a body. A call
+of an `async` method was typed as its bare result, and so was a call of a
+fallible or `async` trait method through a bound or a `dyn`; an implementation
+could bound a generic method's parameter more tightly than its trait did, or
+disagree about `async`, and a caller through the trait paid for it. `==`
+inside a generic function was allowed on a bare `T` only, and a comparison
+made in a trait's implementation held no caller through the trait. The type
+arguments in an `impl` header were never read — `impl Named for Pair<int,
+str>` was an `impl` for every `Pair` — and are now refused unless they are the
+block's own parameters: honouring them would need impls matched against
+receivers by unification. An or-pattern could not bind a name in any
+alternative but the first, which the checker's own rule made useless; a
+pattern against an optional worked for literals and not for tuples or generic
+variants; a refused pattern read as a catch-all and made every later arm
+"unreachable". §7.3's R3 was enforced at the end of a scope and at the end of
+a branch, but not at a `return`, `break` or `continue` that left an error
+behind, and a failure assigned into an existing binding was never an
+obligation at all. Each is fixed with a test that fails without it: the
+`TYPE_CHECKER` programs of the differential test and the corpus.
+
 ---
 
 ## Phase 6 — Standard library (started)
