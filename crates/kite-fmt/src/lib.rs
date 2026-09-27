@@ -449,11 +449,11 @@ impl Formatter<'_> {
         // `NotFound.as(err)`: after a `.`, `as` is a member's name (§7.2)
         // and its arguments hug it as any name's do. It was spaced like the
         // cast, `NotFound.as (err)`.
-        if kind == T::LParen
-            && prev == T::As
-            && self.prev_text.0 > 0
-            && self.src.as_bytes()[self.prev_text.0 as usize - 1] == b'.'
-        {
+        //
+        // The `.` is the token before, not the byte before: `NotFound. as(err)`
+        // came out `NotFound.as (err)`, and only a second run tightened it —
+        // so one run of `kitec fmt` left a file `--check` refused.
+        if kind == T::LParen && prev == T::As && self.prev2 == Some(T::Dot) {
             return false;
         }
         // `..` in a struct literal's base, `P{ ..p }`, and a struct pattern's
