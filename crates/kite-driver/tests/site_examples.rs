@@ -172,6 +172,51 @@ fn the_sites_own_program_compiles_for_the_web() {
     );
 }
 
+/// What the site's renderer makes of a document, run on the VM beside the
+/// renderer's own source.
+fn rendered(document: &str) -> String {
+    let entry = site().join("src/render_probe.kite");
+    let src = format!(
+        "use markdown\n\nfn main() {{\n    io.print(markdown.render({:?}))\n}}\n",
+        document
+    );
+    let compiled = kite_driver::compile(&entry, &src, Emit::Check);
+    assert!(!compiled.failed(), "{}", compiled.render_diagnostics());
+    let mut out = Vec::new();
+    compiled.run(&mut out).expect("the renderer runs");
+    String::from_utf8(out).expect("utf-8")
+}
+
+/// A repeated heading is numbered the way the tables of contents link to it.
+///
+/// `kitec doc` writes the second of two same-slug headings as `#kind-1`, as
+/// GitHub does, and the renderer gave both `id="kind"` — so nine links in the
+/// reference's contents went nowhere.
+#[test]
+fn a_repeated_heading_gets_the_anchor_its_contents_link_to() {
+    let html = rendered("- [`Kind`](#kind)\n- [`kind`](#kind-1)\n\n## Kind\n\n## kind\n\n## kind\n");
+    assert!(html.contains("<h2 id=\"kind\">"), "{}", html);
+    assert!(html.contains("<h2 id=\"kind-1\">"), "{}", html);
+    assert!(html.contains("<h2 id=\"kind-2\">"), "{}", html);
+}
+
+/// A line that is one `<img>` is an image. README.md opens with the mark
+/// written that way, and the page opened with the tag escaped into a line of
+/// text. Nothing but the tag's own attributes gets through, and a `src` goes
+/// where a link would.
+#[test]
+fn a_standalone_image_tag_is_an_image() {
+    let html = rendered("<img src=\"site/kite-mark.svg\" alt=\"\" width=\"64\">\n\n# Kite\n");
+    assert!(!html.contains("&lt;img"), "{}", html);
+    assert!(html.contains("<img src=\"../kite-mark.svg\" alt=\"\" width=\"64\">"), "{}", html);
+    let html = rendered("<img src=\"javascript:alert(1)\" onerror=\"x()\" alt=\"a\">\n");
+    assert!(html.contains("<img src=\"#\" alt=\"a\">"), "{}", html);
+    assert!(!html.contains("onerror"), "{}", html);
+    // Anything more than the one tag is still text.
+    let html = rendered("<img src=\"a.svg\"><script>x()</script>\n");
+    assert!(html.contains("&lt;script&gt;"), "{}", html);
+}
+
 /// The Vite starter's Kite compiles, and every export crosses the boundary.
 ///
 /// The starter is the adoption story made concrete: a normal web project that
