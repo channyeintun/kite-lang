@@ -3713,19 +3713,39 @@ fn a_linked_executable_agrees() {
     assert_eq!(vm, native, "the linked executable disagrees with the VM");
 }
 
-/// The runtime's static library, next to the test binary in the target
-/// directory — where Cargo put it when it built the workspace.
+/// The runtime's static library, from the target directory the test binary
+/// was built into — the newest one there.
+///
+/// Cargo writes the archive under `deps/` with a hash in its name and copies
+/// it up beside the binaries only on some builds, so the copy without a hash
+/// can be older than the runtime the code generator was just built from — a
+/// change of profile flags is enough to leave it behind. Linking against a
+/// stale runtime fails on every symbol added since, which reads as a broken
+/// backend rather than a stale file, so every candidate is looked at and the
+/// most recently written wins.
 fn find_runtime_lib() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let mut dir = exe.parent()?.to_path_buf();
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    let mut consider = |path: std::path::PathBuf| {
+        let Ok(written) = std::fs::metadata(&path).and_then(|m| m.modified()) else { return };
+        if best.as_ref().is_none_or(|(when, _)| written > *when) {
+            best = Some((written, path));
+        }
+    };
     for _ in 0..3 {
-        let candidate = dir.join("libkite_rt.a");
-        if candidate.exists() {
-            return Some(candidate);
+        consider(dir.join("libkite_rt.a"));
+        if let Ok(entries) = std::fs::read_dir(dir.join("deps")) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("libkite_rt-") && name.ends_with(".a") {
+                    consider(entry.path());
+                }
+            }
         }
         dir = dir.parent()?.to_path_buf();
     }
-    None
+    best.map(|(_, path)| path)
 }
 
 // ---------------------------------------------------------------------------
