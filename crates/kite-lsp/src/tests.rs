@@ -1076,6 +1076,58 @@ fn a_malformed_message_is_answered_and_the_session_goes_on() {
     assert_eq!(code, 0);
 }
 
+/// The other ways a message could end the session: a length the server
+/// allocated before reading (a panic on the capacity, or an abort on the
+/// allocation), nesting it recursed into until the stack ran out, and a header
+/// line that was not UTF-8, which read as the stream closing. Each is answered,
+/// and the next message is read.
+#[test]
+fn no_malformed_message_ends_the_session() {
+    let deep = format!(
+        r#"{{"jsonrpc":"2.0","id":5,"method":"foo","params":{}{}}}"#,
+        "[".repeat(50_000),
+        "]".repeat(50_000)
+    );
+    let oversized = "Content-Length: 1000000000000\r\n\r\n{}";
+    let input = [
+        frame(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).into_bytes(),
+        frame(&deep).into_bytes(),
+        b"X-Junk: \xff\xfe\r\n".to_vec(),
+        frame(r#"{"jsonrpc":"2.0","id":7,"method":"shutdown"}"#).into_bytes(),
+        oversized.as_bytes().to_vec(),
+    ]
+    .concat();
+    let mut output = Vec::new();
+    // The stream ends inside the oversized body, which is the stream ending.
+    let code = crate::serve(&mut std::io::Cursor::new(input), &mut output);
+    let said = String::from_utf8(output).expect("utf-8");
+    assert!(said.contains(r#""id":1"#), "{}", said);
+    assert!(said.contains(r#""id":7"#), "the header did not end the session: {}", said);
+    assert_eq!(said.matches(r#""code":-32700"#).count(), 2, "{}", said);
+    assert!(said.contains("1000000000000 bytes"), "{}", said);
+    assert_eq!(code, 0);
+
+    // A length past the limit, followed by the body it states: the body is
+    // passed over and the session goes on.
+    let body = "x".repeat(70 << 20);
+    let input = [
+        format!("Content-Length: {}\r\n\r\n{}", body.len(), body),
+        frame(r#"{"jsonrpc":"2.0","id":3,"method":"shutdown"}"#),
+        frame(r#"{"jsonrpc":"2.0","method":"exit"}"#),
+    ]
+    .concat();
+    let mut output = Vec::new();
+    let code = crate::serve(&mut std::io::Cursor::new(input), &mut output);
+    let said = String::from_utf8(output).expect("utf-8");
+    assert!(said.contains(r#""id":3"#), "{}", said);
+    assert_eq!(code, 0);
+    // And one no buffer could hold, which panicked on the capacity.
+    let huge = "Content-Length: 18446744073709551615\r\n\r\n{}";
+    let mut output = Vec::new();
+    crate::serve(&mut std::io::Cursor::new(huge.as_bytes().to_vec()), &mut output);
+    assert!(String::from_utf8(output).expect("utf-8").contains("-32700"));
+}
+
 /// `exit` without a `shutdown` first is the editor stopping a server it did
 /// not ask to stop, and the protocol says that exits with 1.
 #[test]

@@ -128,15 +128,25 @@ fn write_string(out: &mut String, s: &str) {
 /// Parse a JSON document. Returns `None` on anything malformed — a language
 /// server that guesses at a broken message is a language server that hangs.
 pub fn parse(text: &str) -> Option<Json> {
-    let mut p = Parser { chars: text.chars().collect(), at: 0 };
+    let mut p = Parser { chars: text.chars().collect(), at: 0, depth: 0 };
     p.space();
     let value = p.value()?;
     Some(value)
 }
 
+/// How deeply arrays and objects may nest. The protocol's own messages are a
+/// handful of levels deep; this is far past any of them and far short of the
+/// stack.
+const MAX_DEPTH: usize = 512;
+
 struct Parser {
     chars: Vec<char>,
     at: usize,
+    /// Arrays and objects open around the current value. The parser recurses
+    /// once per level, so fifty thousand `[` overflowed the stack and ended
+    /// the session on one message; past [`MAX_DEPTH`] the message is refused
+    /// like any other that does not read.
+    depth: usize,
 }
 
 impl Parser {
@@ -165,8 +175,15 @@ impl Parser {
     fn value(&mut self) -> Option<Json> {
         self.space();
         match self.peek()? {
-            '{' => self.object(),
-            '[' => self.array(),
+            '{' | '[' => {
+                if self.depth >= MAX_DEPTH {
+                    return None;
+                }
+                self.depth += 1;
+                let nested = if self.peek() == Some('{') { self.object() } else { self.array() };
+                self.depth -= 1;
+                nested
+            }
             '"' => self.string().map(Json::Str),
             't' => self.word("true").map(|_| Json::Bool(true)),
             'f' => self.word("false").map(|_| Json::Bool(false)),
@@ -337,6 +354,18 @@ mod tests {
         assert_eq!(value.get("b").unwrap().as_str(), Some("x\u{FFFD}y"));
         assert_eq!(value.get("c").unwrap().as_str(), Some("\u{FFFD}A"));
         assert_eq!(value.get("d").unwrap().as_str(), Some("😀"));
+    }
+
+    /// Nesting past the limit is refused rather than recursed into until the
+    /// stack runs out — which ended the session over one message.
+    #[test]
+    fn nesting_past_the_limit_is_refused_not_overflowed() {
+        let deep = format!("{}{}", "[".repeat(50_000), "]".repeat(50_000));
+        assert!(parse(&deep).is_none());
+        let objects = format!("{}1{}", "{\"a\":".repeat(50_000), "}".repeat(50_000));
+        assert!(parse(&objects).is_none());
+        let fine = format!("{}{}", "[".repeat(MAX_DEPTH), "]".repeat(MAX_DEPTH));
+        assert!(parse(&fine).is_some());
     }
 
     #[test]
