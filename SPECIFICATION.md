@@ -1245,7 +1245,10 @@ An `impl` block is for every instantiation of a generic type at once: its header
 names the type at the block's own parameters, in order — `impl<A, B> Pair<A,
 B>`, `impl<T: Show> Display for Box<T>`. A header for one instantiation,
 `impl Display for Pair<int, str>`, or with the parameters reordered, is `E0208`;
-a bound on a parameter is how a block says which instantiations it covers.
+a bound on a parameter is how a block says which instantiations it covers. A
+header that leaves the arguments out stands for the type at the block's own
+parameters, so `impl<A, B> Display for Pair` is the same block, and one that
+declares none or too few for them, `impl Display for Pair`, is `E0208` too.
 
 ---
 

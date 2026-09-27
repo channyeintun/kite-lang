@@ -11283,6 +11283,13 @@ fn check_impls(
 /// every call was an invalid module. `impl<X, Y> Named for Pair<Y, X>` read
 /// `self.a` as an `X`. Until a header's arguments mean what they say, one
 /// that says anything else is refused; the blocks refused are returned.
+///
+/// A generic type written with no arguments at all is read as the block's own
+/// parameters, `impl<T> Named for Box` as `impl<T> Named for Box<T>`, and so
+/// is accepted only when the block declares one for each of the type's.
+/// `impl Named for Box` declares none: its bodies were typed against the
+/// declaration's `T`, which the block does not have, and Wasm refused the
+/// module that came out while the VM and native code ran it.
 fn check_impl_headers(
     file: &ast::SourceFile,
     resolved: &ResolveMap,
@@ -11294,9 +11301,6 @@ fn check_impl_headers(
     for (item_index, item) in file.items.iter().enumerate() {
         let ast::Item::Impl(imp) = item else { continue };
         let target = &imp.self_ty;
-        if target.args.is_empty() {
-            continue;
-        }
         let module = resolved.module_of_item(item_index);
         let Some(ti) = resolved.type_by_name_in(module, &target.text()) else { continue };
         let count = match type_ids.get(ti as usize).copied().flatten() {
@@ -11305,6 +11309,10 @@ fn check_impl_headers(
             _ => continue,
         };
         let own: Vec<&str> = imp.generics.iter().map(|g| g.name.name.as_str()).collect();
+        let bare = target.args.is_empty();
+        if bare && (count == 0 || own.len() == count) {
+            continue;
+        }
         let written: Vec<Option<&str>> = target
             .args
             .iter()
@@ -11333,12 +11341,31 @@ fn check_impl_headers(
         let mut d = Diagnostic::error(
             codes::E0208,
             format!("an `impl` is for every `{}`, at its own type parameters", target.text()),
-        )
-        .with_primary(target.span, "these type arguments must be the block's parameters, in order")
-        .with_note(
-            "an `impl` for one instantiation, or with its parameters reordered, is not \
-             supported: its methods would be typed as if written for the declaration",
         );
+        d = if bare {
+            let takes = match count {
+                1 => "one type parameter".to_string(),
+                n => format!("{} type parameters", n),
+            };
+            let declares = match own.len() {
+                0 => "none".to_string(),
+                n => n.to_string(),
+            };
+            d.with_primary(
+                target.span,
+                format!("`{}` takes {}, and this block declares {}", target.text(), takes, declares),
+            )
+            .with_note(
+                "a header without type arguments stands for the type at the block's own \
+                 parameters, so the block must declare one for each of the type's",
+            )
+        } else {
+            d.with_primary(target.span, "these type arguments must be the block's parameters, in order")
+                .with_note(
+                    "an `impl` for one instantiation, or with its parameters reordered, is not \
+                     supported: its methods would be typed as if written for the declaration",
+                )
+        };
         if !suggested.is_empty() {
             d = d.with_note(format!(
                 "write `{}`, and let a bound on a parameter say which instantiations it covers",

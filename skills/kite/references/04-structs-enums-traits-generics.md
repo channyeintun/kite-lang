@@ -1652,6 +1652,32 @@ fn main() {
 }
 ```
 
+An `impl` is for every instantiation at once, so its header names the type at
+the block's own parameters, in order: `impl<T> Named for Box<T>`. A header for
+one instantiation, `impl Named for Box<int>`, or one that names no parameters
+for the type's, `impl Named for Box`, is `E0208`; a bound on the block's
+parameter says which instantiations it covers:
+
+```kite fails
+trait Named {
+    fn name(self) -> str
+}
+
+struct Box<T> {
+    value: T
+}
+
+impl Named for Box { //~ E0208
+    fn name(self) -> str {
+        return "box"
+    }
+}
+
+fn main() {
+    io.print(Box{ value: 1 }.name())
+}
+```
+
 A unit variant of a generic enum says nothing about the arguments, so the binding
 must — and when it does, the bare variant is enough, `let m: Maybe<int> = None`:
 

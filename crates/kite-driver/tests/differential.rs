@@ -3185,6 +3185,53 @@ fn main() {
 }
 "#,
     ),
+    // A header that writes a generic type with no arguments stands for it at
+    // the block's own parameters, so `impl<X, Y> Named for Pair` is
+    // `impl<X, Y> Named for Pair<X, Y>`, directly, through a bound and as a
+    // `dyn`. The same header with no parameters, `impl Named for Pair`, is
+    // E0208: its bodies were typed against the declaration's `A` and `B`, and
+    // Wasm refused the module while the VM and native code ran it.
+    (
+        "a-bare-header-stands-for-the-blocks-parameters",
+        r#"trait Named {
+    fn name(self) -> str
+}
+
+struct Pair<A, B> {
+    a: A
+    b: B
+}
+
+impl<X: Display, Y: Display> Named for Pair {
+    fn name(self) -> str {
+        let first: X = self.a
+        return "\(first)/\(self.b)"
+    }
+}
+
+struct P {
+    n: int
+}
+
+impl Display for P {
+    fn show(self) -> str {
+        return "P\(self.n)"
+    }
+}
+
+fn via<T: Named>(x: T) -> str {
+    return x.name()
+}
+
+fn main() {
+    let p = Pair{ a: P{ n: 1 }, b: P{ n: 2 } }
+    io.print(p.name())
+    io.print(via(Pair{ a: P{ n: 3 }, b: P{ n: 4 } }))
+    let d: dyn Named = Pair{ a: P{ n: 5 }, b: P{ n: 6 } }
+    io.print(d.name())
+}
+"#,
+    ),
 ];
 
 /// Programs above that need a rule of the checker's which may not have landed:

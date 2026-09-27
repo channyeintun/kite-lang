@@ -36,7 +36,45 @@ impl<X, Y> Pair<Y, X> { //~ ERROR E0208
     }
 }
 
+// A generic type written with no arguments stands for itself at the block's
+// own parameters, so a block that declares none, or too few, is refused as
+// well: `impl Named for Cell` was an `impl` for every `Cell`, typed against the
+// declaration's `T`, and on Wasm an invalid module too.
+struct Cell<T> {
+    v: T
+}
+
+impl Named for Cell { //~ ERROR E0208
+    fn name(self) -> str {
+        return "cell"
+    }
+}
+
+struct Trio<A, B, C> {
+    a: A
+    b: B
+    c: C
+}
+
+impl<A, B> Display for Trio { //~ ERROR E0208
+    fn show(self) -> str {
+        return "trio"
+    }
+}
+
+struct Wrap<T> {
+    v: T
+}
+
+impl<T> Named for Wrap {
+    fn name(self) -> str {
+        return "wrap"
+    }
+}
+
 fn main() {
     io.print(Pair{ a: 1, b: "x" }.name())
     io.print(Box{ v: 2 }.name())
+    io.print(Cell{ v: 3 }.name())
+    io.print(Wrap{ v: 4 }.name())
 }
