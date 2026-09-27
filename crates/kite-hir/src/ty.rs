@@ -233,27 +233,73 @@ pub struct Types {
     enum_origin: HashMap<EnumId, (EnumId, Vec<TyId>)>,
     /// The `Task<T>` template, declared the first time a task is needed.
     task_template: Option<StructId>,
-    /// The first generic declaration refused a specialisation because its
-    /// arguments had grown past [`MAX_TYPE_DEPTH`] or [`MAX_TYPE_SIZE`]: a
+    /// The first generic declaration refused a specialisation, and why: a
     /// type that contains itself at a larger type, which has no finite
-    /// expansion. Reported by the driver as `E0220`.
-    unbounded: Option<(String, Span)>,
+    /// expansion, or one asked for at arguments past [`MAX_TYPE_DEPTH`] or
+    /// [`MAX_TYPE_SIZE`]. Reported by the driver as `E0220`.
+    unbounded: Option<(String, Span, Refusal)>,
+    /// The templates whose specialisations are being made right now, as the
+    /// fields of one ask for another: the chain a runaway grows along.
+    expanding: Vec<TypeTemplate>,
 }
+
+/// A generic struct or enum declaration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum TypeTemplate {
+    Struct(StructId),
+    Enum(EnumId),
+}
+
+/// Why a specialisation was refused. Each is `E0220`, in its own words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// A declaration asked, through its own fields or its own body, for a
+    /// copy of itself at a larger type — and each such copy asks for the
+    /// next. That has no finite expansion.
+    Runaway,
+    /// The type arguments are past [`MAX_TYPE_DEPTH`] or [`MAX_TYPE_SIZE`],
+    /// though nothing asked for them from inside the declaration itself: a
+    /// finite program, and one too large to specialise.
+    TooLarge,
+    /// More specialisations in all than [`crate::mono::MAX_INSTANTIATIONS`].
+    TooMany,
+}
+
+/// A refused specialisation's fields: the template's, by name, each of the
+/// error type, which the checker says nothing further about.
+fn poisoned(fields: &[FieldDef]) -> Vec<FieldDef> {
+    fields.iter().map(|f| FieldDef { ty: TyId::ERROR, ..f.clone() }).collect()
+}
+
+/// How many times one declaration may appear in a chain of specialisations
+/// each asked for by the last: the fields of `Nested<int>` asking for
+/// `Nested<[int]>`, whose fields ask for `Nested<[[int]]>`, or a function's
+/// copy calling another copy of itself.
+///
+/// This is how a runaway is told from a large program. In a program that
+/// terminates, a declaration that reaches itself again does so at a type
+/// that does not grow, and so finds the copy it is already making; one that
+/// reaches itself at a larger type does so again from there, forever. A
+/// finite chain can repeat a declaration only once per distinct call path
+/// that leads back to it with a fixed type, which no program has dozens of.
+pub const MAX_NESTING: usize = 64;
 
 /// How deeply a specialisation's type arguments may nest.
 ///
-/// `struct Nested<T> { inner: Option<Nested<[T]>> }` asks for `Nested<[T]>`,
-/// which asks for `Nested<[[T]]>`, and so on without end; so does a generic
-/// function calling itself at `[T]`. Every step of that recursion is a Rust
-/// call, and it used to run until the checker's stack was gone. No program
-/// writes a type argument nested this deeply on purpose, and a runaway
-/// reaches it in a few dozen steps.
-pub const MAX_TYPE_DEPTH: usize = 48;
+/// A resource limit rather than a test for a runaway: [`MAX_NESTING`] is
+/// that, and stops `Nested<[T]>` long before this. It is what keeps a finite
+/// but absurd argument — a `Box<Box<…>>` built two hundred levels deep —
+/// from outgrowing the compiler's own stack, since every walk over a type
+/// recurses on its depth. It was 48, and a program nesting `wrap(wrap(…))`
+/// fifty levels deep, which terminates, was told it instantiated itself
+/// without end.
+pub const MAX_TYPE_DEPTH: usize = 256;
 
 /// How many nodes a specialisation's type arguments may hold between them.
 /// The depth cap alone would let `P<(T, T)>` double at every step, and naming
-/// that specialisation renders every node.
-pub const MAX_TYPE_SIZE: usize = 1024;
+/// that specialisation renders every node. It was 1,024, which a pair nested
+/// eleven levels deep in the source reached.
+pub const MAX_TYPE_SIZE: usize = 1 << 16;
 
 impl Default for Types {
     fn default() -> Self {
@@ -307,6 +353,7 @@ impl Types {
             enum_origin: HashMap::new(),
             task_template: None,
             unbounded: None,
+            expanding: Vec::new(),
         }
     }
 
@@ -500,14 +547,18 @@ impl Types {
         if let Some(&existing) = self.struct_instances.get(&key) {
             return existing;
         }
-        if self.too_large(args) {
+        if let Some(why) = self.refusal(TypeTemplate::Struct(template), args) {
             let def = &self.structs[template.index()];
             let (name, is_pub, span) = (def.name.clone(), def.is_pub, def.span);
-            // A placeholder with no fields and no origin, so nothing expands
-            // it further — neither substitution nor `refresh_instances`. The
-            // program never runs: the driver reports the refusal.
-            self.unbounded.get_or_insert((name.clone(), span));
+            // A placeholder with no origin, so nothing expands it further —
+            // neither substitution nor `refresh_instances`. The program never
+            // runs: the driver reports the refusal. It has the template's
+            // fields, each of the error type, so that `b.v` on one is not a
+            // second error after the refusal: it had no fields, and was.
+            self.unbounded.get_or_insert((name.clone(), span, why));
+            let fields = poisoned(&self.structs[template.index()].fields);
             let id = self.declare_struct(format!("{}<…>", name), is_pub, span);
+            self.structs[id.index()].fields = fields;
             self.struct_instances.insert(key, id);
             return id;
         }
@@ -520,10 +571,12 @@ impl Types {
         // itself — `struct Node<T> { next: Option<Node<T>> }` — terminates.
         self.struct_instances.insert(key, id);
         self.struct_origin.insert(id, (template, args.to_vec()));
+        self.expanding.push(TypeTemplate::Struct(template));
         let fields: Vec<FieldDef> = fields
             .into_iter()
             .map(|f| FieldDef { ty: self.substitute(f.ty, args), ..f })
             .collect();
+        self.expanding.pop();
         self.structs[id.index()].fields = fields;
         id
     }
@@ -534,12 +587,18 @@ impl Types {
         if let Some(&existing) = self.enum_instances.get(&key) {
             return existing;
         }
-        if self.too_large(args) {
+        if let Some(why) = self.refusal(TypeTemplate::Enum(template), args) {
             let def = &self.enums[template.index()];
             let (name, is_pub, span) = (def.name.clone(), def.is_pub, def.span);
-            // A placeholder, for the reason `instantiate_struct` gives.
-            self.unbounded.get_or_insert((name.clone(), span));
+            // A placeholder, for the reasons `instantiate_struct` gives.
+            self.unbounded.get_or_insert((name.clone(), span, why));
+            let variants: Vec<VariantDef> = self.enums[template.index()]
+                .variants
+                .iter()
+                .map(|v| VariantDef { fields: poisoned(&v.fields), ..v.clone() })
+                .collect();
             let id = self.declare_enum(format!("{}<…>", name), is_pub, span);
+            self.enums[id.index()].variants = variants;
             self.enum_instances.insert(key, id);
             return id;
         }
@@ -550,6 +609,7 @@ impl Types {
         let id = self.declare_enum(name, is_pub, span);
         self.enum_instances.insert(key, id);
         self.enum_origin.insert(id, (template, args.to_vec()));
+        self.expanding.push(TypeTemplate::Enum(template));
         let variants: Vec<VariantDef> = variants
             .into_iter()
             .map(|v| VariantDef {
@@ -561,14 +621,32 @@ impl Types {
                 ..v
             })
             .collect();
+        self.expanding.pop();
         self.enums[id.index()].variants = variants;
         id
     }
 
-    /// The generic type that asked for a specialisation of itself without
-    /// end, and where it is declared, if any did.
-    pub fn unbounded_instantiation(&self) -> Option<(&str, Span)> {
-        self.unbounded.as_ref().map(|(name, span)| (name.as_str(), *span))
+    /// Whether a new specialisation of `template` at `args` is refused, and
+    /// why. A declaration already being specialised further up this chain
+    /// [`MAX_NESTING`] times is a runaway; so is one whose arguments are too
+    /// large while it is being specialised further up, since that is how a
+    /// runaway that doubles at each step shows itself first. Arguments too
+    /// large for any other reason are only that.
+    fn refusal(&self, template: TypeTemplate, args: &[TyId]) -> Option<Refusal> {
+        let repeats = self.expanding.iter().filter(|t| **t == template).count();
+        if repeats >= MAX_NESTING {
+            return Some(Refusal::Runaway);
+        }
+        if self.too_large(args) {
+            return Some(if repeats > 0 { Refusal::Runaway } else { Refusal::TooLarge });
+        }
+        None
+    }
+
+    /// The generic type whose specialisation was refused, where it is
+    /// declared, and why, if any was.
+    pub fn unbounded_instantiation(&self) -> Option<(&str, Span, Refusal)> {
+        self.unbounded.as_ref().map(|(name, span, why)| (name.as_str(), *span, *why))
     }
 
     /// Whether a set of type arguments is past what any program writes on
@@ -1423,7 +1501,8 @@ mod tests {
         // runaway: the type has no finite expansion whatever it is used at.
         t.refresh_instances();
         t.instantiate_struct(nested, &[TyId::INT]);
-        let (name, _) = t.unbounded_instantiation().expect("the runaway is reported");
+        let (name, _, why) = t.unbounded_instantiation().expect("the runaway is reported");
+        assert_eq!(why, Refusal::Runaway);
         assert_eq!(name, "Nested");
     }
 

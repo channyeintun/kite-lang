@@ -708,8 +708,8 @@ fn run_passes(
     // A generic type that contains itself at a larger type has no finite
     // expansion. The arena stops making it past a cap rather than recursing
     // until the stack is gone, and says which declaration asked.
-    if let Some((name, span)) = hir.types.unbounded_instantiation() {
-        diags.push(unbounded_instantiation("type", name, span));
+    if let Some((name, span, why)) = hir.types.unbounded_instantiation() {
+        diags.push(unbounded_instantiation("type", name, span, why));
     }
 
     if emit == Emit::Hir {
@@ -754,11 +754,11 @@ fn run_passes(
     // level, forever; monomorphisation refuses rather than stopping partway
     // and handing on calls into copies it never made.
     if let Err(u) = kite_hir::mono::monomorphise(&mut hir) {
-        diags.push(unbounded_instantiation("function", &u.template, u.span));
+        diags.push(unbounded_instantiation("function", &u.template, u.span, u.why));
         return (String::new(), None, None, None, index);
     }
-    if let Some((name, span)) = hir.types.unbounded_instantiation() {
-        diags.push(unbounded_instantiation("type", name, span));
+    if let Some((name, span, why)) = hir.types.unbounded_instantiation() {
+        diags.push(unbounded_instantiation("type", name, span, why));
         return (String::new(), None, None, None, index);
     }
     // The prelude is in every program; without this a `hello world` would
@@ -944,20 +944,48 @@ fn run_passes(
     (String::new(), Some(chunk), None, None, index)
 }
 
-/// `E0220`: a generic `what` (a function or a type) named `name` asked for
-/// specialisations of itself without end.
-fn unbounded_instantiation(what: &str, name: &str, span: Span) -> Diagnostic {
-    Diagnostic::error(
-        kite_diag::codes::E0220,
-        format!("the generic {} `{}` instantiates itself without end", what, name),
-    )
-    .with_primary(span, "each copy asks for another at a larger type argument")
-    .with_note(
-        "generics are specialised: every set of type arguments gets its own copy, \
-         so recursion at `[T]` from inside `T` needs infinitely many — polymorphic \
-         recursion has no finite expansion",
-    )
-    .with_note("recurse at the same type, or hold the growing part in a type that does not grow")
+/// `E0220`: a generic `what` (a function or a type) named `name` could not
+/// be specialised — because it asks for copies of itself without end, or
+/// because what a finite program asks for is past what the compiler makes.
+/// Only the first is a claim about the program's recursion, so only it makes
+/// one.
+fn unbounded_instantiation(what: &str, name: &str, span: Span, why: kite_hir::Refusal) -> Diagnostic {
+    use kite_hir::Refusal;
+    let specialised = "generics are specialised: every set of type arguments gets its own copy";
+    match why {
+        Refusal::Runaway => Diagnostic::error(
+            kite_diag::codes::E0220,
+            format!("the generic {} `{}` instantiates itself without end", what, name),
+        )
+        .with_primary(span, "each copy asks for another at a larger type argument")
+        .with_note(format!(
+            "{}, so recursion at `[T]` from inside `T` needs infinitely many — \
+             polymorphic recursion has no finite expansion",
+            specialised
+        ))
+        .with_note("recurse at the same type, or hold the growing part in a type that does not grow"),
+        Refusal::TooLarge => Diagnostic::error(
+            kite_diag::codes::E0220,
+            format!("the generic {} `{}` is used at a type argument too large to specialise", what, name),
+        )
+        .with_primary(
+            span,
+            format!(
+                "a type argument nests deeper than {} levels or holds more than {} parts",
+                kite_hir::ty::MAX_TYPE_DEPTH,
+                kite_hir::ty::MAX_TYPE_SIZE
+            ),
+        )
+        .with_note(format!("{}, and each is named for its arguments", specialised))
+        .with_note("hold the value in a type that does not nest, or in a slice of it"),
+        Refusal::TooMany => Diagnostic::error(
+            kite_diag::codes::E0220,
+            format!("the program needs more than {} specialisations", kite_hir::mono::MAX_INSTANTIATIONS),
+        )
+        .with_primary(span, format!("the generic {} `{}` asked for the one past the limit", what, name))
+        .with_note(format!("{}, and each is compiled", specialised))
+        .with_note("take a `dyn` of a trait where one copy can serve every type"),
+    }
 }
 
 /// What an editor needs, from the resolution the checker already ran.
@@ -1228,6 +1256,93 @@ fn signature_text(sources: &SourceMap, at: Span, param_count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `wrap(wrap(…(x)))`, `depth` calls deep.
+    fn nested(call: &str, depth: usize, core: &str) -> String {
+        let mut s = core.to_string();
+        for _ in 0..depth {
+            s = format!("{}({})", call, s);
+        }
+        s
+    }
+
+    const BOX: &str = "struct Box<T> {\n  v: T\n}\n\n\
+                       fn wrap<T>(x: T) -> Box<T> {\n  return Box{ v: x }\n}\n\n";
+
+    /// Programs that finish are specialised however much they ask for within
+    /// the limits, and past them are told that they asked for too much —
+    /// not that they recurse without end, which is what `E0220` said of
+    /// `wrap` nested fifty deep, a pair of pairs eleven deep, and one
+    /// function specialised at 4,200 types, all of which finish.
+    #[test]
+    fn a_finite_program_is_specialised_or_told_it_is_too_large() {
+        let run = |src: &str| {
+            let c = compile("t.kite", src, Emit::Check);
+            assert!(!c.failed(), "{}", c.render_diagnostics());
+            let mut out = Vec::new();
+            c.run(&mut out).expect("runs");
+            String::from_utf8(out).unwrap()
+        };
+        let fifty = format!(
+            "{}fn main() {{\n  let b = {}\n  io.print(b{})\n}}\n",
+            BOX,
+            nested("wrap", 50, "1"),
+            ".v".repeat(50)
+        );
+        assert_eq!(run(&fifty), "1\n");
+
+        let pairs = format!(
+            "fn pair<T>(x: T) -> (T, T) {{\n  return (x, x)\n}}\n\n\
+             fn main() {{\n  let p = {}\n  io.print(\"made\")\n}}\n",
+            nested("pair", 12, "1")
+        );
+        assert_eq!(run(&pairs), "made\n");
+
+        let mut many = String::from("fn ident<T>(x: T) -> T {\n  return x\n}\n\n");
+        let mut body = String::from("fn main() {\n  var t = 0\n");
+        for i in 0..4200 {
+            many.push_str(&format!("struct S{} {{\n  v: int\n}}\n\n", i));
+            body.push_str(&format!("  t = t + ident(S{}{{ v: 1 }}).v\n", i));
+        }
+        many.push_str(&body);
+        many.push_str("  io.print(t)\n}\n");
+        assert_eq!(run(&many), "4200\n");
+
+        // Past the limits: one error, which says what it is, and nothing
+        // after it about the placeholder that stands in for the refused type.
+        let refused = |src: &str| {
+            let c = compile("t.kite", src, Emit::Check);
+            let errors: Vec<String> = c
+                .diags
+                .iter()
+                .filter(|d| d.severity == kite_diag::Severity::Error)
+                .map(|d| format!("{}: {}", d.code.map(|x| x.0).unwrap_or(""), d.message))
+                .collect();
+            assert_eq!(errors.len(), 1, "{:#?}", errors);
+            errors.into_iter().next().unwrap()
+        };
+        let three_hundred = format!(
+            "{}fn main() {{\n  let a = {}\n  let b = {}\n  let c = {}\n  io.print(c.v{})\n}}\n",
+            BOX,
+            nested("wrap", 100, "1"),
+            nested("wrap", 100, "a"),
+            nested("wrap", 100, "b"),
+            ".v".repeat(99)
+        );
+        assert_eq!(
+            refused(&three_hundred),
+            "E0220: the generic type `Box` is used at a type argument too large to specialise"
+        );
+        let pairs = format!(
+            "fn pair<T>(x: T) -> (T, T) {{\n  return (x, x)\n}}\n\n\
+             fn main() {{\n  let p = {}\n  io.print(\"made\")\n}}\n",
+            nested("pair", 17, "1")
+        );
+        assert_eq!(
+            refused(&pairs),
+            "E0220: the generic function `pair` is used at a type argument too large to specialise"
+        );
+    }
 
     #[test]
     fn every_emit_stage_produces_output_for_a_valid_program() {

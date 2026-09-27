@@ -1542,6 +1542,13 @@ function. Where folding is not possible and the instantiation count is large, th
 compiler emits a size warning naming the function, and `dyn` is the suggested
 remedy.
 
+A generic function that calls itself at a larger type — `depth([x], n - 1)`
+inside `depth<T>` — or a generic type that holds itself at one needs a copy per
+level without end, and is [E0220](#16-diagnostics). So, in its own words, is a
+program that finishes but asks for more than the compiler makes: a type argument
+nested more than 256 levels deep or holding more than 65,536 parts, or more than
+65,536 specialisations in all.
+
 Bounds are trait names, and a parameter satisfies one by implementing it. That
 is the whole of the system: a generic function is a function whose parameter
 types are named rather than fixed, and monomorphisation makes each use an

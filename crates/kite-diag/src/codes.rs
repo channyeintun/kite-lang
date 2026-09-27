@@ -321,7 +321,12 @@ codes! {
          copies that were never made.\n\n\
          Recurse at the same type, or hold the growing part in something whose \
          type does not grow — a slice of the original type, say, rather than a \
-         nesting of slices.";
+         nesting of slices.\n\n\
+         The same code, in other words, reports a program that does finish but \
+         asks for more than the compiler makes: a type argument nested more \
+         than 256 levels deep or holding more than 65,536 parts, or more than \
+         65,536 specialisations in all. The message says which, and only a \
+         runaway is said to instantiate itself without end.";
 
     // ---- error handling ---------------------------------------------------
     E0301 = "E0301", "value used before its error was checked",

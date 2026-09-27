@@ -14,8 +14,8 @@ use std::fmt;
 pub mod mono;
 pub mod ty;
 pub use ty::{
-    EnumDef, EnumId, FieldDef, StructDef, StructId, TraitDef, TraitId, TraitMethodDef, TyId,
-    TyKind, Types, VariantDef,
+    EnumDef, EnumId, FieldDef, Refusal, StructDef, StructId, TraitDef, TraitId, TraitMethodDef,
+    TyId, TyKind, Types, VariantDef,
 };
 
 // ---------------------------------------------------------------------------

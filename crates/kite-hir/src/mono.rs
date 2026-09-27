@@ -14,28 +14,29 @@
 //! Substituting here is one pass over expression trees, rather than a
 //! substitution threaded through every step of lowering.
 
-use crate::{BinOp, Block, EnumId, Expr, ExprKind, FnId, Function, Local, Pattern, Program, Stmt,
-            StructId, TraitId, TyId, TyKind, TypeTag, Types, VTable, VTableEntry};
+use crate::{BinOp, Block, EnumId, Expr, ExprKind, FnId, Function, Local, Pattern, Program, Refusal,
+            Stmt, StructId, TraitId, TyId, TyKind, TypeTag, Types, VTable, VTableEntry};
+use crate::ty::MAX_NESTING;
 use std::collections::HashMap;
 
-/// A generic function that instantiates itself with a larger type on each call
-/// never terminates. The cap is far above any real program and low enough that
-/// a runaway stops in well under a second.
+/// How many specialisations a program may make in all.
 ///
-/// It counts specialisations made, not functions walked: a program of five
-/// thousand ordinary functions and one generic one is not a runaway, and used
-/// to be treated as one — the walk stopped partway, leaving calls into
-/// functions that had moved and generic calls never specialised, and nothing
-/// said so.
-const MAX_INSTANTIATIONS: usize = 4096;
+/// Not the test for a runaway — [`MAX_NESTING`] is that, and stops one in a
+/// few dozen copies — but a bound on the work a program can ask for: a
+/// runaway that branches makes copies faster than it nests. It counts
+/// specialisations made, not functions walked: a program of five thousand
+/// ordinary functions and one generic one is not a runaway, and used to be
+/// treated as one. It was 4,096, which a program passing 4,200 structs to
+/// one `fn ident<T>` reached, and was told it recursed without end.
+pub const MAX_INSTANTIATIONS: usize = 1 << 16;
 
-/// A generic function that asked for copies of itself without end, which
-/// monomorphisation cannot finish.
+/// A generic function monomorphisation refused to specialise, and why.
 #[derive(Clone, Debug)]
 pub struct Unbounded {
     /// The template, by its source name.
     pub template: String,
     pub span: kite_span::Span,
+    pub why: Refusal,
 }
 
 /// Specialise every generic function for the argument sets its callers use, and
@@ -73,6 +74,9 @@ pub fn monomorphise(program: &mut Program) -> Result<(), Unbounded> {
     }
 
     let mut made: HashMap<(u32, Vec<TyId>), u32> = HashMap::new();
+    // For each function made, the template it is a copy of and the function
+    // whose body first asked for it; nothing, for one that was written.
+    let mut lineage: Vec<Option<(u32, usize)>> = vec![None; out.len()];
     let mut pending: Vec<usize> = (0..out.len()).collect();
     let mut unbounded: Option<Unbounded> = None;
     let mut rows: Vec<(TraitId, VTableEntry)> = Vec::new();
@@ -90,6 +94,8 @@ pub fn monomorphise(program: &mut Program) -> Result<(), Unbounded> {
                 moved: &moved,
                 made: &mut made,
                 out: &mut out,
+                lineage: &mut lineage,
+                current: index,
                 pending: &mut pending,
                 unbounded: &mut unbounded,
                 vtables,
@@ -142,6 +148,12 @@ struct Mono<'a> {
     moved: &'a HashMap<u32, u32>,
     made: &'a mut HashMap<(u32, Vec<TyId>), u32>,
     out: &'a mut Vec<Function>,
+    /// By index into `out`: the template each copy was made from, and the
+    /// function whose body asked for it.
+    lineage: &'a mut Vec<Option<(u32, usize)>>,
+    /// The function whose body is being walked, which asks for whatever is
+    /// made now.
+    current: usize,
     pending: &'a mut Vec<usize>,
     /// Set by the first specialisation refused; the walk stops there.
     unbounded: &'a mut Option<Unbounded>,
@@ -160,16 +172,28 @@ impl Mono<'_> {
         if let Some(&existing) = self.made.get(&key) {
             return existing;
         }
-        // A runaway shows itself two ways: arguments nesting deeper with each
-        // copy, which is polymorphic recursion and is caught within a few
-        // dozen levels, or simply too many copies. Either way the template is
-        // named and nothing more is made; the index handed back is never
-        // lowered, because the caller stops at the error.
-        if self.made.len() >= MAX_INSTANTIATIONS || self.types.too_large(targs) {
+        // A copy asked for from a chain of copies that already holds this
+        // template MAX_NESTING times is polymorphic recursion, for the reason
+        // MAX_NESTING gives, and so is one at arguments too large while the
+        // template is on the chain at all. Arguments too large otherwise, or
+        // too many copies, are limits on a program that would finish. Either
+        // way the template is named and nothing more is made; the index handed
+        // back is never lowered, because the caller stops at the error.
+        let repeats = self.repeats(template);
+        let refused = if repeats >= MAX_NESTING {
+            Some(Refusal::Runaway)
+        } else if self.types.too_large(targs) {
+            Some(if repeats > 0 { Refusal::Runaway } else { Refusal::TooLarge })
+        } else if self.made.len() >= MAX_INSTANTIATIONS {
+            Some(Refusal::TooMany)
+        } else {
+            None
+        };
+        if let Some(why) = refused {
             if self.unbounded.is_none() {
                 let source = &self.fns[template as usize];
                 *self.unbounded =
-                    Some(Unbounded { template: source.name.clone(), span: source.span });
+                    Some(Unbounded { template: source.name.clone(), span: source.span, why });
             }
             return template;
         }
@@ -177,6 +201,7 @@ impl Mono<'_> {
         // Claim the slot before the body is built, so a recursive call to the
         // same instantiation finds it instead of making a second one.
         self.made.insert(key, index);
+        self.lineage.push(Some((template, self.current)));
 
         let source = &self.fns[template as usize];
         let mut copy = Function {
@@ -203,6 +228,20 @@ impl Mono<'_> {
         self.out.push(copy);
         self.pending.push(index as usize);
         index
+    }
+
+    /// How many copies of `template` are on the chain that asked for the
+    /// function being walked, that function included.
+    fn repeats(&self, template: u32) -> usize {
+        let mut count = 0;
+        let mut at = self.lineage[self.current];
+        while let Some((made_from, asked_by)) = at {
+            if made_from == template {
+                count += 1;
+            }
+            at = self.lineage[asked_by];
+        }
+        count
     }
 
     fn block(&mut self, b: &mut Block) {
@@ -1063,6 +1102,35 @@ mod tests {
 
         let err = monomorphise(&mut p).expect_err("an unbounded instantiation");
         assert_eq!(err.template, "depth");
+        assert_eq!(err.why, Refusal::Runaway);
+    }
+
+    /// A program that specialises one function thousands of times, or at an
+    /// argument nested a hundred deep, finishes — and was once told that the
+    /// function instantiated itself without end, past 4,096 copies or 48
+    /// levels.
+    #[test]
+    fn a_large_finite_specialisation_is_not_a_runaway() {
+        let mut p = Program::default();
+        let param = p.types.param_ty(0, "T");
+        p.fns.push(template("id", 1, param));
+        let mut main = template("main", 0, TyId::UNIT);
+        let span = kite_span::Span::new(kite_span::FileId(0), 0, 0);
+        for i in 0..5000 {
+            let s = p.types.declare_struct(format!("S{}", i), true, span);
+            let ty = p.types.struct_ty(s);
+            main.body.stmts.push(Stmt::Expr(call(0, vec![ty])));
+        }
+        let mut deep = TyId::INT;
+        for _ in 0..100 {
+            deep = p.types.slice_of(deep);
+        }
+        main.body.stmts.push(Stmt::Expr(call(0, vec![deep])));
+        p.fns.push(main);
+        p.entry = Some(FnId(1));
+
+        monomorphise(&mut p).unwrap();
+        assert_eq!(p.fns.len(), 5002);
     }
 
     /// Substitution rebuilds composite types around the parameter rather than
