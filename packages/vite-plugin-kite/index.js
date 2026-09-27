@@ -357,6 +357,11 @@ export default function kite(options = {}) {
     /// tag written that way used to be left alone, so the page loaded a
     /// program that never started and said nothing.
     ///
+    /// A quoted value runs to its closing quote and may hold a space, as in
+    /// `src="/src/my file.kite"`; only an unquoted one ends at whitespace. One
+    /// pattern for all three stopped a quoted value at its first space too,
+    /// and that page was left alone again.
+    ///
     /// **`order: "pre"`**, and it is not a preference. Vite reads the HTML for
     /// its entry points before the default transforms run, so a rewrite that
     /// happened afterwards changed the markup and not the build: the original
@@ -369,8 +374,13 @@ export default function kite(options = {}) {
         return html.replace(/<script\b[^>]*>/gi, (tag) =>
           /\stype\s*=\s*(["']?)module\1(?=[\s>/])/i.test(tag)
             ? tag.replace(
-                /(\ssrc\s*=\s*)(["']?)([^"'\s>]+\.kite)\2(?=[\s>/])/i,
-                `$1$2$3${ENTRY}$2`,
+                /(\ssrc\s*=\s*)(?:"([^"]+\.kite)"|'([^']+\.kite)'|([^"'\s>]+\.kite)(?=[\s>/]))/i,
+                (_, name, double, single, bare) =>
+                  double !== undefined
+                    ? `${name}"${double}${ENTRY}"`
+                    : single !== undefined
+                      ? `${name}'${single}${ENTRY}'`
+                      : `${name}${bare}${ENTRY}`,
               )
             : tag,
         );
