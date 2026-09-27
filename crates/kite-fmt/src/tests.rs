@@ -242,23 +242,43 @@ fn a_comparison_in_a_field_value_is_not_a_type_argument() {
     );
 }
 
+/// Every `.kite` file in the tree is formatted already, and formatting it
+/// again changes nothing — what CI's `kitec fmt --check` asks of each file,
+/// asked here too so that `cargo test` sees it. The recovery corpus is in
+/// here: its files are broken on purpose, and formatting has to leave them
+/// broken the same way.
+///
+/// This walked four directories, not the tree, and only asked that
+/// formatting be idempotent — so a file could drift from the formatter's
+/// layout, and the corpus, the site and two examples were never looked at.
 #[test]
 fn the_whole_tree_survives_formatting() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut files = Vec::new();
-    for dir in ["std", "examples", "tests/std", "examples/inventory"] {
-        let Ok(entries) = std::fs::read_dir(root.join(dir)) else { continue };
+    fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|e| e == "kite") {
+            let name = entry.file_name();
+            // What a build or a package manager put there is not the tree's.
+            if ["node_modules", "dist", "target", ".kite"].iter().any(|n| name == *n) {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, files);
+            } else if path.extension().is_some_and(|e| e == "kite") {
                 files.push(path);
             }
         }
     }
-    assert!(files.len() > 15, "only {} files found", files.len());
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = Vec::new();
+    for dir in ["std", "examples", "tests", "site"] {
+        walk(&root.join(dir), &mut files);
+    }
+    assert!(files.len() > 150, "only {} files found", files.len());
     for path in files {
         let src = std::fs::read_to_string(&path).expect("read");
         let once = fmt(&src);
+        assert!(once == src, "{} is not formatted", path.display());
         let twice = fmt(&once);
         assert_eq!(once, twice, "formatting {} is not idempotent", path.display());
     }
