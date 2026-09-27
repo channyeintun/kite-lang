@@ -16,6 +16,14 @@ fn exactly(found: float, want: float, what: str) -> error {
     return test.equal_float(found, want, 0.0, what)
 }
 
+fn zeros(n: int) -> str {
+    var out = ""
+    for i in 0..n {
+        out = out + "0"
+    }
+    return out
+}
+
 /// Within a few units in the last place.
 fn near(found: float, want: float) -> bool {
     return math.abs(found - want) <= math.abs(want) * 0.000000000000001
@@ -118,8 +126,34 @@ fn checks() -> [error] {
     out.push(test.equal_str(fmt.ellipsis("abcdef", 4), "abc…", "ellipsis"))
     out.push(test.equal_str(fmt.ellipsis("abc", 4), "abc", "ellipsis leaves short text alone"))
     out.push(test.equal_str(fmt.fixed(3.14159, 2), "3.14", "fixed"))
-    out.push(test.equal_str(fmt.fixed(2.005, 2), "2.01", "fixed rounds"))
+    out.push(test.equal_str(fmt.fixed(2.125, 2), "2.13", "fixed rounds a half away from zero"))
     out.push(test.equal_str(fmt.fixed(-1.25, 1), "-1.3", "fixed keeps the sign"))
+    // The float written `2.005` is 2.00499999999999989…, below the half, as
+    // `1.005` is. Rounding the scaled product in floating point made 200.5 of
+    // it and so rounded one up and not the other.
+    out.push(test.equal_str(fmt.fixed(2.005, 2), "2.00", "fixed rounds the float's own value"))
+    out.push(test.equal_str(fmt.fixed(1.005, 2), "1.00", "the same for 1.005"))
+    // Between 2⁵³ and 9e18 units of the last place, the scaled product was
+    // rounded to a float before being split, and `+ 0.5` rounded again.
+    out.push(test.equal_str(fmt.fixed(1000000000000000.25, 2), "1000000000000000.25", "a quarter past 2^53 units"))
+    out.push(test.equal_str(fmt.fixed(123456789.123, 10), "123456789.1229999959", "ten places of a float's digits"))
+    out.push(test.equal_str(fmt.fixed(0.49999999999999994, 0), "0", "the float below a half rounds down"))
+    out.push(test.equal_str(fmt.fixed(-0.49999999999999994, 0), "-0", "and keeps its sign"))
+    out.push(test.equal_str(fmt.fixed(4503599627370497.0, 0), "4503599627370497", "a whole number is itself"))
+    out.push(test.equal_str(fmt.fixed(-4503599627370497.0, 1), "-4503599627370497.0", "with places too"))
+    out.push(test.equal_str(fmt.fixed(4503599627370495.5, 0), "4503599627370496", "a half below 2^52 rounds up"))
+    out.push(test.equal_str(fmt.fixed(90071992547409.93, 2), "90071992547409.94", "two places near 2^53 units"))
+    out.push(test.equal_str(fmt.fixed(9.995, 2), "9.99", "no carry when the float is below the half"))
+    out.push(test.equal_str(fmt.fixed(9.9999, 2), "10.00", "a carry into a new digit"))
+    // Past seventeen significant digits the float's own, as `%.20f` writes
+    // them, where this once wrote zeros.
+    out.push(test.equal_str(fmt.fixed(0.1, 20), "0.10000000000000000555", "twenty places of 0.1"))
+    out.push(test.equal_str(fmt.fixed(5e-324, 3), "0.000", "the smallest float"))
+    let tiny = fmt.fixed(5e-324, 1075)
+    out.push(test.equal_int(tiny.len(), 1077, "every digit of the smallest float"))
+    out.push(test.is_true(starts_with(tiny, "0.\(zeros(323))49406564584124654417"), "from its first"))
+    out.push(test.is_true(ends_with(tiny, "197182655334472656250"), "to its last"))
+    out.push(test.equal_str(fmt.fixed(0.0, 2), "0.00", "zero"))
     // Past what an `int` holds once scaled: the cast saturated, and 1e20 came
     // out as 92233720368547758.07.
     out.push(test.equal_str(fmt.fixed(100000000000000000000.0, 2), "100000000000000000000.00", "fixed of 1e20"))
