@@ -46,10 +46,11 @@ pub fn ellipsis(s: str, width: int) -> str {
 /// A float with exactly `places` digits after the point.
 ///
 /// Rounds the float's own value half away from zero, which is what most
-/// people mean, and the digits are the ones `%.Nf` writes — every place
-/// asked for, past the seventeenth significant digit too. The float written
-/// `2.005` is 2.00499999999999989…, so it gives `2.00`, as `1.005` gives
-/// `1.00`; `2.125` is exactly that and gives `2.13`.
+/// people mean. Every place asked for is a digit of that value, past the
+/// seventeenth significant one too, so the answer is `%.Nf`'s except at an
+/// exact half, which `%.Nf` rounds to even. The float written `2.005` is
+/// 2.00499999999999989…, so it gives `2.00`, as `1.005` gives `1.00`;
+/// `2.125` is exactly that and gives `2.13`.
 ///
 /// Worked out in integers from the float's exact decimal expansion rather
 /// than by scaling it, for two reasons. The result does not depend on how the

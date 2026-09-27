@@ -475,8 +475,8 @@ pub fn cbrt(x: float) -> float {
 /// gives 1.0000000000000002.
 ///
 /// The remainder is `r + tail`, two floats, because it is the difference of
-/// two numbers that can agree in almost every bit: a float can lie within
-/// 2⁻⁶¹ of its own size of a multiple of `π/2`. Held in one float it would be
+/// two numbers that can agree in almost every bit: a float can be a multiple
+/// of `π/2` to within 2⁻⁶¹ of its own size. Held in one float it would be
 /// rounded after the cancellation, which is the rounding that matters.
 ///
 /// This used to subtract `π/2` in two pieces whose product with the count was

@@ -884,6 +884,11 @@ interpolation already renders. What it cannot do is *align*.
 `pad(s, width)` `pad_left` `centre` `ellipsis(s, width)` `fixed(x, places)`
 `percent(part, whole)` `grouped(n)` `row(cells, widths)`
 
+`fixed` writes the float's own digits, as many places as asked for, and rounds
+its exact value half away from zero: `fixed(2.125, 2)` is `2.13`, and
+`fixed(2.005, 2)` is `2.00`, because the float written `2.005` is a little
+below it.
+
 ### fs — files and directories. **Not on the web**
 
 Every fallible call returns `(T, error)`; there is no errno.
@@ -1208,7 +1213,9 @@ chain without unwrapping and a `Json` passes where an `Option<Json>` is wanted.
 `parse` reads RFC 8259 and nothing looser — `01`, `1.`, `\x` and a raw control
 character in a string are errors — and each number is the float nearest what
 was written. `int_of` is nil unless the number is whole and fits an `int`, so
-`@derive(Decode)` refuses `3.7` for an `int` field.
+`@derive(Decode)` refuses `3.7` for an `int` field. `stringify` writes a number
+that is whole and fits an `int` without a `.0`, and any other as the float it
+is: 2⁶³ is `9223372036854775808.0`.
 
 ```kite
 use std/json
@@ -1243,7 +1250,9 @@ integers: `max_int()` `min_int()` `checked_add(a, b) -> Option<int>`
 
 `sqrt` is correctly rounded over the whole range; `trunc`, `floor`, `ceil` and
 `round` hand back a float that is already whole (anything from 2⁵²) rather than
-casting it through `int`.
+casting it through `int`. `sin`, `cos` and `tan` take whole quarter turns off
+an argument exactly however large it is, so `sin(1e300)` is right to a few
+units in the last place.
 
 There is no `math.approx_eq`: the prelude's `approx_eq(a, b, tolerance)` is
 the one that exists, and it is what the float-equality warning suggests.
@@ -1512,7 +1521,10 @@ stated.
 `wrap(body, width: float, measure: fn(str) -> float) -> [str]` — greedy lines
 over those opportunities, measured by the caller (`canvas.width_of` on a
 canvas, a character count in a terminal); trailing spaces hang, a mandatory
-break ends a line, and a run wider than the line is cut between characters.
+break ends a line, and a run wider than the line is cut between characters. A
+paragraph's indentation is kept, unless the first word does not fit after it:
+then the indentation ends a line of its own, empty since spaces hang, rather
+than the word being cut.
 
 UAX #9 rules P2–P3, X1–X10, W1–W7, N0–N2, I1–I2, L1–L2 (not L3, L4, HL1–HL6);
 UAX #14 as of Unicode 15.0, LB1–LB31, with SA treated as AL, CB unimplemented,
@@ -1579,9 +1591,11 @@ literal and multi-line strings, integers with `_` separators and `0x`/`0o`/`0b`
 prefixes, floats with exponents (`inf` and `nan` are refused), booleans,
 arrays, inline tables. TOML 1.0's rules about tables are enforced: a table is
 defined once, an inline table or a `[…]` array is closed, and dotted keys do not
-reopen a table a header defined. **Dates and times are not implemented** — a
-date is checked to be one of TOML's four forms and parses as the string it was
-written as, losslessly, rather than being half-mapped onto `std/time`.
+reopen a table a header defined. Whitespace is a space or a tab, and a carriage
+return is accepted only in the CRLF that ends a line. **Dates and times are not
+implemented** — a date is checked to be one of TOML's four forms and parses as
+the string it was written as, losslessly, rather than being half-mapped onto
+`std/time`.
 
 ```kite
 use std/toml
