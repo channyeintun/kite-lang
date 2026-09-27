@@ -2266,9 +2266,12 @@ fn segments_text(segments: &[Ident]) -> String {
 
 fn nearest(name: &str, candidates: &[&str]) -> Option<String> {
     let mut best: Option<(usize, &str)> = None;
-    for cand in candidates {
+    for &cand in candidates {
         let d = edit_distance(name, cand);
-        if best.is_none_or(|(bd, _)| d < bd) {
+        // A tie goes to the name that sorts first. The candidates come from
+        // hash-map scopes, in no order that holds from one run to the next,
+        // and keeping the first one seen made the note differ between runs.
+        if best.is_none_or(|best| (d, cand) < best) {
             best = Some((d, cand));
         }
     }

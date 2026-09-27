@@ -110,6 +110,24 @@ fn a_typo_suggests_the_nearest_name() {
     assert!(c.render().contains("`total`"), "{}", c.render());
 }
 
+/// Two names one edit from `ea` tie, and the note named whichever a hash map
+/// yielded first, so it changed between runs. The tie goes to the one that
+/// sorts first, whatever order the candidates arrive in.
+#[test]
+fn a_tie_between_suggestions_is_broken_the_same_way_every_time() {
+    assert_eq!(nearest("ea", &["ta", "a"]).as_deref(), Some("a"));
+    assert_eq!(nearest("ea", &["a", "ta"]).as_deref(), Some("a"));
+    // Distance still comes first: a nearer name wins over one that sorts
+    // earlier.
+    assert_eq!(nearest("counter", &["aounter2", "countr"]).as_deref(), Some("countr"));
+
+    let src = "fn f() {\n    let ta = 1\n    let a = 2\n    let x = ea\n}\n";
+    for _ in 0..8 {
+        let c = run(src);
+        assert!(c.render().contains("a similar name is in scope: `a`"), "{}", c.render());
+    }
+}
+
 #[test]
 fn io_print_resolves_to_a_builtin() {
     let c = ok("fn f() {\n    io.print(1)\n}\n");
