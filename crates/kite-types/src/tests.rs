@@ -1957,6 +1957,21 @@ fn a_tuple_bindings_initialiser_is_checked_once() {
     assert_eq!(reported, 1, "{}", c.render());
 }
 
+/// A generic call inside a generic struct literal or variant payload is
+/// checked twice, once on trial to solve the literal's type arguments. The
+/// trial's record of the call was kept, so a comparison it broke was
+/// reported once per pass.
+#[test]
+fn a_call_checked_on_trial_is_held_to_its_comparisons_once() {
+    let c = run("trait Show {\n  fn show(self) -> str\n}\nstruct P {\n  a: int\n}\n\
+        impl Show for P {\n  fn show(self) -> str {\n    return \"p\"\n  }\n}\n\
+        struct Box<T> {\n  v: T\n}\nenum Maybe<T> {\n  Some(T)\n  None\n}\n\
+        fn eq<T>(a: T, b: T) -> bool {\n  return a == b\n}\n\
+        fn main() {\n  let d: dyn Show = P{ a: 1 }\n  let b = Box{ v: eq(d, d) }\n\
+        \x20 let m = Maybe.Some(eq(d, d))\n  io.print(b.v)\n}\n");
+    assert_eq!(c.codes(), vec!["E0201", "E0201"], "{}", c.render());
+}
+
 /// A bound's note suggests an `impl` only for a type one can be written for.
 /// It told the reader of a `dyn Show` passed for `T: Show` to write
 /// `impl Show for dyn Show`, which does not parse.

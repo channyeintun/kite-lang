@@ -505,6 +505,7 @@ pub fn check_recording(
     let mut facts = GenericFacts {
         compared: sigs.iter().map(|s| vec![None; s.generics.len()]).collect(),
         calls: Vec::new(),
+        bound_calls: Vec::new(),
     };
     for (i, sig) in resolved.fns.iter().enumerate() {
         let mut checker = Checker {
@@ -1134,6 +1135,9 @@ struct Trial {
     lifted: usize,
     /// The lengths of what [`Solved`] had recorded.
     solved: [usize; 4],
+    /// The lengths of the generic calls recorded, which the real check
+    /// records again: a trial's copy reported every E0201 about them twice.
+    facts: [usize; 2],
 }
 
 /// The enclosing function's flow state, set aside while a closure's body is
@@ -2693,6 +2697,7 @@ impl<'a> Checker<'a> {
                 self.solved.locals.len(),
                 self.solved.methods.len(),
             ],
+            facts: [self.facts.calls.len(), self.facts.bound_calls.len()],
         }
     }
 
@@ -2711,6 +2716,8 @@ impl<'a> Checker<'a> {
         self.solved.calls.truncate(t.solved[1]);
         self.solved.locals.truncate(t.solved[2]);
         self.solved.methods.truncate(t.solved[3]);
+        self.facts.calls.truncate(t.facts[0]);
+        self.facts.bound_calls.truncate(t.facts[1]);
     }
 
     /// Everything the flow analysis knows at this point.
@@ -4827,6 +4834,17 @@ impl<'a> Checker<'a> {
         let own = generics[before..].to_vec();
         let targs = self.finish_subst(&own, &subst[before..], span);
         self.check_bounds(&own, &targs, span);
+        if !targs.is_empty() {
+            if let Some(trait_index) = self.trait_index_of(tr) {
+                self.facts.bound_calls.push(BoundCall {
+                    caller: self.fn_index,
+                    trait_index,
+                    method: name.name.clone(),
+                    targs: targs.clone(),
+                    span,
+                });
+            }
+        }
         let ret = self.apply_subst(ret, &subst);
         hir::Expr {
             kind: ExprKind::CallVirtual { trait_id: tr, method, args: lowered, targs },
@@ -8140,6 +8158,7 @@ impl<'a> Checker<'a> {
                     continue;
                 }
                 if self.type_implements(*t, *bound) {
+                    self.note_impl_use(*t, *bound, span);
                     continue;
                 }
                 let (tn, bn) = (self.types.name(*t), self.types.trait_def(*bound).name.clone());
@@ -9839,6 +9858,33 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A generic type standing for a trait, for a bound or as a `dyn`, makes
+    /// every method of its implementation callable without the type being
+    /// named again — `a.same(b)` inside `fn via<Q: Same>` — so what those
+    /// bodies compare of the type's own arguments is held to them here, as
+    /// a direct call on the type holds it. `Box<dyn Show>` passed for a `Q`
+    /// used to reach a `self.v == other.v` that no check had seen.
+    fn note_impl_use(&mut self, ty: TyId, tr: hir::TraitId, span: Span) {
+        let args = self.receiver_args(ty);
+        if args.is_empty() {
+            return;
+        }
+        let (Some(ti), Some(tri)) = (self.type_index_of(ty), self.trait_index_of(tr)) else {
+            return;
+        };
+        for (f, sig) in self.resolved.fns.iter().enumerate() {
+            if !sig.owner.is_some_and(|o| o.type_index == ti && o.trait_index == Some(tri)) {
+                continue;
+            }
+            // The implementing type's arguments come first; the method's own,
+            // if it has any, are not known until it is called.
+            let count = self.sigs[f].generics.len();
+            let mut targs = args.clone();
+            targs.resize(count, TyId::ERROR);
+            self.facts.calls.push(GenericCall { caller: self.fn_index, callee: f, targs, span });
+        }
+    }
+
     /// A call that chose a generic callee's type arguments, kept to be held
     /// to whatever the callee's body turns out to compare.
     fn note_generic_call(&mut self, callee: u32, targs: &[TyId], span: Span) {
@@ -10166,11 +10212,14 @@ impl<'a> Checker<'a> {
             },
             // A concrete value becoming a trait object. Nothing about the value
             // changes; the node records that dispatch is now dynamic.
-            TyKind::Dyn(tr) if self.coerces_to_dyn(e.ty, want) => hir::Expr {
-                span: e.span,
-                kind: ExprKind::ToDyn { value: Box::new(e), trait_id: tr },
-                ty: want,
-            },
+            TyKind::Dyn(tr) if self.coerces_to_dyn(e.ty, want) => {
+                self.note_impl_use(e.ty, tr, e.span);
+                hir::Expr {
+                    span: e.span,
+                    kind: ExprKind::ToDyn { value: Box::new(e), trait_id: tr },
+                    ty: want,
+                }
+            }
             // A value implementing `Error`, standing where an `error` is
             // wanted. The `message` call is inserted **here**, at the point of
             // conversion, so it is an ordinary call in the IR that every
@@ -11699,6 +11748,22 @@ struct GenericFacts {
     compared: Vec<Vec<Option<Span>>>,
     /// Every call that chose a generic callee's type arguments.
     calls: Vec<GenericCall>,
+    /// Every call through a bound that chose a generic trait method's own
+    /// type arguments. Which body it reaches is known only once the receiver
+    /// is, so it is held to every implementation's: a trait method has no
+    /// body of its own to record a comparison in, and `q.has([d], d)` with a
+    /// `dyn` for `T` compared trait objects wherever `has`'s body did.
+    bound_calls: Vec<BoundCall>,
+}
+
+struct BoundCall {
+    caller: usize,
+    /// The trait, as a `resolved.types` index.
+    trait_index: u32,
+    method: String,
+    /// The method's own type arguments, without the implementing type's.
+    targs: Vec<TyId>,
+    span: Span,
 }
 
 struct GenericCall {
@@ -11801,6 +11866,19 @@ fn check_compared_params(
     types: &Types,
     diags: &mut DiagBag,
 ) {
+    // A call through a bound reaches whichever implementation the receiver
+    // turns out to have, so it stands for a call to each of them. The
+    // implementing type's own parameters come from the receiver, which is
+    // not known here; they are left poisoned, which holds nothing to them.
+    for c in std::mem::take(&mut facts.bound_calls) {
+        for ty in resolved.impls_of(c.trait_index) {
+            let Some(f) = resolved.trait_method(ty, c.trait_index, &c.method) else { continue };
+            let block = sigs[f as usize].generics.len().saturating_sub(c.targs.len());
+            let mut targs = vec![TyId::ERROR; block];
+            targs.extend(c.targs.iter().copied());
+            facts.calls.push(GenericCall { caller: c.caller, callee: f as usize, targs, span: c.span });
+        }
+    }
     loop {
         let mut changed = false;
         for call in &facts.calls {
