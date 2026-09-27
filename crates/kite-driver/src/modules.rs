@@ -88,15 +88,44 @@ pub enum Files {
     /// Path to contents. Paths are compared after `.` and `..` are folded
     /// away, because there is no filesystem here to ask what they mean.
     Memory(BTreeMap<PathBuf, String>),
+    /// The disk, with some files' contents given: an editor's open buffers.
+    /// Build it with [`Files::edited`].
+    ///
+    /// **A buffer stands in for exactly the file it is a buffer of.** The
+    /// editor used to hand its buffers over as provided modules, keyed by
+    /// their path below the entry file — and a provided key is consulted
+    /// before a directory module, before a declared dependency and before the
+    /// importer's own directory. So opening `md.kite` beside the entry took
+    /// `use md` away from the dependency of that name, opening `config.kite`
+    /// hid the directory `config/`, and a dependency's own `use util` was
+    /// answered by the application's open `md/util.kite`. Merely opening a
+    /// file changed what the program meant, and the editor reported errors
+    /// `kitec check` did not have. Here every `use` resolves exactly as it does
+    /// on disk, and only then is the file it found read from the buffer.
+    ///
+    /// Keyed by [`located`], so two spellings of one file are one buffer.
+    Edited(BTreeMap<PathBuf, String>),
 }
 
 impl Files {
+    /// The disk, read through the given buffers: each path's contents replace
+    /// that file's, and a buffer for a file not yet saved is a file there.
+    pub fn edited(buffers: impl IntoIterator<Item = (PathBuf, String)>) -> Files {
+        Files::Edited(buffers.into_iter().map(|(path, text)| (located(&path), text)).collect())
+    }
+
     fn is_dir(&self, path: &Path) -> bool {
         match self {
             Files::Disk => path.is_dir(),
             Files::Memory(files) => {
                 let path = normalise(path);
                 files.keys().any(|k| *k != path && k.starts_with(&path))
+            }
+            Files::Edited(buffers) => {
+                path.is_dir() || {
+                    let path = located(path);
+                    buffers.keys().any(|k| *k != path && k.starts_with(&path))
+                }
             }
         }
     }
@@ -105,6 +134,7 @@ impl Files {
         match self {
             Files::Disk => path.is_file(),
             Files::Memory(files) => files.contains_key(&normalise(path)),
+            Files::Edited(buffers) => path.is_file() || buffers.contains_key(&located(path)),
         }
     }
 
@@ -114,16 +144,23 @@ impl Files {
             Files::Memory(files) => files.get(&normalise(path)).cloned().ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "not among the bundled files")
             }),
+            Files::Edited(buffers) => match buffers.get(&located(path)) {
+                Some(text) => Ok(text.clone()),
+                None => std::fs::read_to_string(path),
+            },
         }
     }
 
     /// The `.kite` files directly inside a directory, sorted, so a module's
     /// meaning does not depend on the order a filesystem hands them back.
     fn kite_files(&self, dir: &Path) -> Vec<PathBuf> {
-        let mut found: Vec<PathBuf> = match self {
-            Files::Disk => std::fs::read_dir(dir)
+        let on_disk = |dir: &Path| -> Vec<PathBuf> {
+            std::fs::read_dir(dir)
                 .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
-                .unwrap_or_default(),
+                .unwrap_or_default()
+        };
+        let mut found: Vec<PathBuf> = match self {
+            Files::Disk => on_disk(dir),
             Files::Memory(files) => {
                 let folded = normalise(dir);
                 files
@@ -131,6 +168,21 @@ impl Files {
                     .filter(|k| k.parent() == Some(folded.as_path()))
                     .filter_map(|k| k.file_name().map(|name| dir.join(name)))
                     .collect()
+            }
+            // A buffer not yet saved is part of its directory's module, as it
+            // will be once it is saved.
+            Files::Edited(buffers) => {
+                let mut found = on_disk(dir);
+                let here = located(dir);
+                for key in buffers.keys().filter(|k| k.parent() == Some(here.as_path())) {
+                    if let Some(name) = key.file_name() {
+                        let path = dir.join(name);
+                        if !found.contains(&path) {
+                            found.push(path);
+                        }
+                    }
+                }
+                found
             }
         };
         found.retain(|p| p.extension().is_some_and(|e| e == "kite"));
@@ -144,6 +196,7 @@ impl Files {
         match self {
             Files::Disk => std::fs::canonicalize(path).unwrap_or_else(|_| normalise(path)),
             Files::Memory(_) => normalise(path),
+            Files::Edited(_) => located(path),
         }
     }
 
@@ -152,17 +205,35 @@ impl Files {
     /// can lay the same tree out again.
     fn absolute(&self, path: &Path) -> PathBuf {
         match self {
-            Files::Disk if path.is_relative() => match std::env::current_dir() {
-                Ok(here) => normalise(&here.join(path)),
-                Err(_) => normalise(path),
-            },
+            Files::Disk | Files::Edited(_) if path.is_relative() => {
+                match std::env::current_dir() {
+                    Ok(here) => normalise(&here.join(path)),
+                    Err(_) => normalise(path),
+                }
+            }
             _ => normalise(path),
         }
     }
 }
 
+/// Where a file is, asked of the filesystem: links followed and `..` taken
+/// where it really leads. A file that does not exist yet — an editor's buffer
+/// never saved — is its directory's real location and its own name.
+pub fn located(path: &Path) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => match std::fs::canonicalize(dir) {
+            Ok(dir) => dir.join(name),
+            Err(_) => normalise(path),
+        },
+        _ => normalise(path),
+    }
+}
+
 /// `.` and `..` folded away by reading the path, not the disk.
-fn normalise(path: &Path) -> PathBuf {
+pub fn normalise(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for part in path.components() {
         match part {

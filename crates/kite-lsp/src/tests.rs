@@ -605,6 +605,9 @@ impl Project {
     /// Write a file, and answer the URI an editor would name it by.
     fn file(&self, name: &str, text: &str) -> String {
         let path = self.dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("a directory for it");
+        }
         std::fs::write(&path, text).expect("written");
         format!("file://{}", path.display())
     }
@@ -811,6 +814,180 @@ fn rename_rewrites_every_spelling_of_the_name() {
         panic!("no edits");
     };
     assert_eq!(edits.len(), 3, "{:?}", edits);
+}
+
+/// The diagnostics a file has now, as the messages the editor would show.
+fn messages_for(server: &mut Server, uri: &str) -> Vec<String> {
+    let reply = server.handle("textDocument/didSave", &at(uri, 0, 0));
+    let published: Vec<Json> = reply.notifications.into_iter().map(|(_, p)| p).collect();
+    let Some(Json::Array(items)) = published.first().and_then(|p| p.get("diagnostics")).cloned()
+    else {
+        panic!("nothing published for {}", uri);
+    };
+    items
+        .iter()
+        .map(|d| d.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string())
+        .collect()
+}
+
+// ---- an open buffer is the file it is a buffer of, and nothing else ----------
+//
+// The editor handed every open buffer over as a provided module, keyed by its
+// path below the file being compiled, and a provided key was consulted before
+// anything on disk. Merely opening a file changed what `use` lines meant, and
+// the editor showed errors `kitec check` did not have. In each of these the
+// buffers opened hold exactly what is on disk, so the editor and the build
+// must agree.
+
+/// A declared dependency is what `use md` reaches, however many files called
+/// `md.kite` are open beside the entry.
+#[test]
+fn an_open_sibling_does_not_take_a_declared_dependencys_name() {
+    let p = Project::new("dep-over-buffer");
+    p.file("lib/md/kite.toml", "[package]\nname = \"md\"\nversion = \"1.0.0\"\n");
+    let dependency =
+        p.file("lib/md/md.kite", "pub fn render() -> str {\n    return \"from dependency\"\n}\n");
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nmd = { path = \"../lib/md\" }\n",
+    );
+    let sibling_text = "pub fn render() -> int {\n    return 1\n}\n";
+    let sibling = p.file("app/md.kite", sibling_text);
+    let main_text = "use md\n\nfn main() {\n    let s: str = md.render()\n    io.print(s)\n}\n";
+    let main = p.file("app/main.kite", main_text);
+    let mut s = Server::new();
+    open(&mut s, &main, main_text);
+    open(&mut s, &sibling, sibling_text);
+    assert_eq!(messages_for(&mut s, &main), Vec::<String>::new());
+    // And definition goes where the build went.
+    let reply = s.handle("textDocument/definition", &at(&main, 3, 20));
+    let result = reply.result.expect("an answer");
+    assert_eq!(result.get("uri").and_then(|u| u.as_str()), Some(dependency.as_str()));
+}
+
+/// A dependency's own `use util` is its own `util`, not a buffer of the
+/// application's that happens to sit where the dependency's name would put
+/// it.
+#[test]
+fn a_dependencys_import_is_not_answered_by_an_application_buffer() {
+    let p = Project::new("dep-import-buffer");
+    p.file("md/kite.toml", "[package]\nname = \"md\"\nversion = \"1.0.0\"\n");
+    p.file("md/md.kite", "use util\n\npub fn render() -> util.Thing {\n    return util.make()\n}\n");
+    p.file(
+        "md/util.kite",
+        "pub struct Thing {\n    pub v: int\n}\n\npub fn make() -> Thing {\n    return Thing{ v: 7 }\n}\n",
+    );
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nmd = { path = \"../md\" }\n",
+    );
+    let stray_text = "pub struct Thing {\n    pub v: str\n}\n\n\
+                      pub fn make() -> Thing {\n    return Thing{ v: \"app\" }\n}\n";
+    let stray = p.file("app/md/util.kite", stray_text);
+    let main_text = "use md\n\nfn main() {\n    let n: int = md.render().v\n    io.print(n)\n}\n";
+    let main = p.file("app/main.kite", main_text);
+    let mut s = Server::new();
+    open(&mut s, &main, main_text);
+    open(&mut s, &stray, stray_text);
+    assert_eq!(messages_for(&mut s, &main), Vec::<String>::new());
+}
+
+/// Inside `a/`, `use x/y` is `a/x/y.kite`, whether or not an `x/y.kite`
+/// beside the entry is open.
+#[test]
+fn a_nested_modules_import_is_not_answered_by_an_entry_level_buffer() {
+    let p = Project::new("nested-import-buffer");
+    p.file("a/m.kite", "use x/y\n\npub fn f() -> y.Thing {\n    return y.make()\n}\n");
+    p.file(
+        "a/x/y.kite",
+        "pub struct Thing {\n    pub v: int\n}\n\npub fn make() -> Thing {\n    return Thing{ v: 5 }\n}\n",
+    );
+    let top_text = "pub struct Thing {\n    pub v: str\n}\n\n\
+                    pub fn make() -> Thing {\n    return Thing{ v: \"top\" }\n}\n";
+    let top = p.file("x/y.kite", top_text);
+    let main_text = "use a/m\n\nfn main() {\n    let n: int = m.f().v\n    io.print(n)\n}\n";
+    let main = p.file("main.kite", main_text);
+    let mut s = Server::new();
+    open(&mut s, &main, main_text);
+    open(&mut s, &top, top_text);
+    assert_eq!(messages_for(&mut s, &main), Vec::<String>::new());
+}
+
+/// `use config` is the directory `config/` when there is one (§13.1), and an
+/// open `config.kite` beside it does not change that.
+#[test]
+fn an_open_file_does_not_hide_a_directory_module() {
+    let p = Project::new("dir-over-buffer");
+    p.file("config/load.kite", "pub fn port() -> int {\n    return 80\n}\n");
+    let file_text = "pub fn other() -> int {\n    return 1\n}\n";
+    let file = p.file("config.kite", file_text);
+    let main_text = "use config\n\nfn main() {\n    io.print(config.port())\n}\n";
+    let main = p.file("main.kite", main_text);
+    let mut s = Server::new();
+    open(&mut s, &main, main_text);
+    open(&mut s, &file, file_text);
+    assert_eq!(messages_for(&mut s, &main), Vec::<String>::new());
+    let reply = s.handle("textDocument/definition", &at(&main, 3, 21));
+    let result = reply.result.expect("an answer");
+    let uri = result.get("uri").and_then(|u| u.as_str()).unwrap_or_default();
+    assert!(uri.ends_with("/config/load.kite"), "{}", uri);
+}
+
+/// An unsaved file in a directory module is part of the module, as it will
+/// be once saved — and an edit to it is what the module's importers see.
+#[test]
+fn an_unsaved_file_in_a_directory_module_is_part_of_it() {
+    let p = Project::new("dir-unsaved");
+    p.file("config/load.kite", "pub fn port() -> int {\n    return 80\n}\n");
+    let main_text = "use config\n\nfn main() {\n    io.print(config.port() + config.extra())\n}\n";
+    let main = p.file("main.kite", main_text);
+    let mut s = Server::new();
+    open(&mut s, &main, main_text);
+    assert_eq!(messages_for(&mut s, &main).len(), 1, "`extra` is nowhere yet");
+    let fresh = format!("file://{}", p.dir.join("config/extra.kite").display());
+    open(&mut s, &fresh, "pub fn extra() -> int {\n    return 1\n}\n");
+    assert_eq!(messages_for(&mut s, &main), Vec::<String>::new());
+}
+
+/// A cycle back to the open file is shown in it, as `kitec check` reports it.
+/// It was reported inside a second copy of the file, read as a module, and
+/// the editor — which shows only the file's own diagnostics — showed nothing.
+#[test]
+fn a_cycle_back_to_the_open_file_is_shown_in_it() {
+    let p = Project::new("cycle");
+    let a_text = "use b\n\npub fn fa() -> int {\n    return b.fb()\n}\n\nfn main() {\n    io.print(fa())\n}\n";
+    let a = p.file("a.kite", a_text);
+    p.file("b.kite", "use a\n\npub fn fb() -> int {\n    return 1\n}\n");
+    let mut s = Server::new();
+    let published = open(&mut s, &a, a_text);
+    assert_eq!(codes_for(&published, &a), Some(vec!["E0402".to_string()]), "{:?}", published);
+}
+
+/// Definition into a path dependency answers with the open buffer's URI. The
+/// loader names the file `app/../lib/md/md.kite`, which matched no open URI,
+/// and the editor opened the file a second time.
+#[test]
+fn definition_into_a_path_dependency_lands_in_its_open_buffer() {
+    let p = Project::new("dep-definition");
+    p.file("lib/md/kite.toml", "[package]\nname = \"md\"\nversion = \"1.0.0\"\n");
+    let dependency_text = "pub fn render() -> str {\n    return \"from dependency\"\n}\n";
+    let dependency = p.file("lib/md/md.kite", dependency_text);
+    p.file(
+        "app/kite.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nmd = { path = \"../lib/md\" }\n",
+    );
+    let main_text = "use md\n\nfn main() {\n    io.print(md.render())\n}\n";
+    let main = p.file("app/main.kite", main_text);
+    let mut s = Server::new();
+    open(&mut s, &main, main_text);
+    // Closed, the URI is still the file's own path, folded.
+    let reply = s.handle("textDocument/definition", &at(&main, 3, 17));
+    let result = reply.result.expect("an answer");
+    assert_eq!(result.get("uri").and_then(|u| u.as_str()), Some(dependency.as_str()));
+    open(&mut s, &dependency, dependency_text);
+    let reply = s.handle("textDocument/definition", &at(&main, 3, 17));
+    let result = reply.result.expect("an answer");
+    assert_eq!(result.get("uri").and_then(|u| u.as_str()), Some(dependency.as_str()));
 }
 
 fn frame(body: &str) -> String {

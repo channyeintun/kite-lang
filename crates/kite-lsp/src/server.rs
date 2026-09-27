@@ -7,10 +7,11 @@
 
 use crate::json::Json;
 use kite_diag::Severity;
-use kite_driver::{compile_provided, Binding, Compilation, Emit};
+use kite_driver::modules::{located, normalise, Files};
+use kite_driver::{compile_files, Binding, Compilation, Emit};
 use kite_span::{FileId, Span};
 use std::collections::HashMap;
-use std::path::{Component, Path};
+use std::path::{Path, PathBuf};
 
 /// Files the editor has open, by URI. The editor's copy is the truth while a
 /// file is open — it may hold edits that are not on disk yet.
@@ -146,46 +147,41 @@ impl Server {
         self.open.get(uri).cloned().unwrap_or_default()
     }
 
-    /// Compile an open file, with the other open buffers it could import
-    /// handed over rather than read from disk.
+    /// Compile an open file the way `kitec check` would if every open buffer
+    /// were saved.
     ///
-    /// Reading them from disk meant an edit to `config.kite` was invisible to
-    /// `main.kite` until it was saved: the editor reported a function missing
-    /// while showing it on screen.
+    /// Reading the others from disk meant an edit to `config.kite` was
+    /// invisible to `main.kite` until it was saved: the editor reported a
+    /// function missing while showing it on screen.
     fn compile(&self, uri: &str) -> Compiled {
         let text = self.text(uri);
         let path = path_of(uri);
-        let compilation =
-            compile_provided(&path, &text, Emit::Check, false, self.buffers_for(&path));
+        let compilation = compile_files(&path, &text, Emit::Check, false, self.edited());
         let own = file_of(&compilation, &path);
         Compiled { uri: uri.to_string(), path, text, compilation, own }
     }
 
-    /// The open buffers `path` could import, keyed the way a `use` names them:
-    /// the path below its directory, without `.kite`.
+    /// The disk as the editor sees it: each open buffer in place of the file
+    /// it is a buffer of, and of nothing else.
     ///
-    /// The loader takes a handed-over module as one file, so a module that is
-    /// a whole directory is still read from disk. What this covers is the
-    /// common case, a module that is one sibling file.
-    fn buffers_for(&self, path: &str) -> HashMap<String, String> {
-        let mut provided = HashMap::new();
-        let Some(dir) = Path::new(path).parent().filter(|d| !d.as_os_str().is_empty()) else {
-            return provided;
-        };
-        for (uri, text) in &self.open {
-            if !uri.starts_with("file://") {
-                continue;
-            }
-            let other = path_of(uri);
-            if other == path {
-                continue;
-            }
-            let Ok(below) = Path::new(&other).strip_prefix(dir) else { continue };
-            if let Some(key) = module_key(below) {
-                provided.insert(key, text.clone());
-            }
-        }
-        provided
+    /// The buffers used to be handed over as provided modules, keyed by their
+    /// path below the file being compiled. A provided key is consulted before
+    /// anything on disk, so opening `md.kite` took `use md` from the declared
+    /// dependency of that name, opening `config.kite` hid the directory
+    /// module `config/`, a nested module's `use x/y` was answered by the
+    /// entry's `x/y.kite`, and a dependency's own `use util` by the
+    /// application's `md/util.kite`. Opening a file — changing nothing in it
+    /// — changed what the program meant. Now every `use` resolves as it does
+    /// on disk, and the file it finds is read from its buffer when there is
+    /// one. The file being compiled is among them, so a module that imports
+    /// it back reads what is on screen.
+    fn edited(&self) -> Files {
+        Files::edited(
+            self.open
+                .iter()
+                .filter(|(uri, _)| uri.starts_with("file://"))
+                .map(|(uri, text)| (PathBuf::from(path_of(uri)), text.clone())),
+        )
     }
 
     /// The other open files that could import `uri`: those in its directory or
@@ -341,25 +337,28 @@ impl Server {
         if name.to_string_lossy().starts_with('<') {
             return Json::Null;
         }
-        // A module read from disk is named by its path. One handed over from
-        // an open buffer is named by its key, which is relative to this file's
-        // directory.
+        // A module is named by the path it was read from, which is joined
+        // rather than resolved: a path dependency's file is
+        // `app/../lib/md/md.kite`. Folded, so the URI is one an editor opens
+        // as the file it is rather than as a second tab.
         let path = match Path::new(&c.path).parent() {
             Some(dir) if name.is_relative() && Path::new(&c.path).is_absolute() => dir.join(&name),
             _ => name,
         };
-        let mut path = path.to_string_lossy().to_string();
+        let mut shown = normalise(&path).to_string_lossy().to_string();
         if cfg!(windows) {
-            path = path.replace('/', "\\");
+            shown = shown.replace('/', "\\");
         }
         // The editor's own spelling of the URI when the file is open, so the
-        // answer lands in the buffer it already has.
+        // answer lands in the buffer it already has. Compared by where each
+        // file really is, which is also how the buffer was matched to it.
+        let here = located(&path);
         let uri = self
             .open
             .keys()
-            .find(|u| u.starts_with("file://") && path_of(u) == path)
+            .find(|u| u.starts_with("file://") && located(Path::new(&path_of(u))) == here)
             .cloned()
-            .unwrap_or_else(|| uri_of_path(&path));
+            .unwrap_or_else(|| uri_of_path(&shown));
         Json::object(vec![
             ("uri", Json::str(uri)),
             ("range", range_of(c.compilation.sources.text(span.file), span)),
@@ -639,22 +638,6 @@ fn uri_of(message: &Json) -> Option<String> {
         .path("params.textDocument.uri")
         .and_then(|u| u.as_str())
         .map(|s| s.to_string())
-}
-
-/// The key a `use` reaches an open file by: its path below the importer's
-/// directory, segments joined with `/` and `.kite` dropped. Nothing for a file
-/// that is not a `.kite` file or is not below the directory at all.
-fn module_key(below: &Path) -> Option<String> {
-    let mut segments = Vec::new();
-    for part in below.components() {
-        match part {
-            Component::Normal(s) => segments.push(s.to_str()?),
-            _ => return None,
-        }
-    }
-    let last = segments.pop()?.strip_suffix(".kite")?;
-    segments.push(last);
-    Some(segments.join("/"))
 }
 
 /// The file path a `file://` URI names.

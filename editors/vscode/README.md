@@ -44,7 +44,10 @@ this directory into `~/.vscode/extensions/kite-lang` and reload the window.
 | `textDocument/formatting` | the file, laid out by `kitec fmt` |
 
 A file that imports another open file sees the editor's copy of it, saved or
-not. Only files on disk and unsaved buffers are sent to the server: the copy
+not — and only of that file. The server resolves every `use` exactly as
+`kitec check` would with every open buffer saved, so opening a file never
+changes which module a `use` reaches. Only files on disk and unsaved buffers
+are sent to the server: the copy
 of a file a diff view or source control shows is also Kite, and compiling it
 would report an old version's problems.
 
