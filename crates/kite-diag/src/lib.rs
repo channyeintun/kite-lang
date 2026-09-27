@@ -192,6 +192,12 @@ impl DiagBag {
         std::mem::take(&mut self.diagnostics)
     }
 
+    /// Forget everything pushed after the first `len`: what a pass reported
+    /// about an attempt it has since abandoned and is making again.
+    pub fn truncate(&mut self, len: usize) {
+        self.diagnostics.truncate(len);
+    }
+
     /// Drop warnings pointing into files the user did not write.
     ///
     /// A warning is advice about a choice someone made. The standard library's

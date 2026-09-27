@@ -185,7 +185,14 @@ anything else counts, and a declaration beginning a line always stops it. A
 missing closing brace produces **one** diagnostic: a declaration keyword at the
 indentation of an open `{`, in braces whose members are indented past it, is
 where the author thought the braces had closed, and the report points at the
-first `{` whose `}` was indented for an outer block. A comma missing between
+first `{` whose `}` was indented for an outer block. Only a declaration those
+braces cannot hold says so. A method at the margin of an `impl`, or a `pub`
+field at the margin of a struct, is a member laid out unusually — indentation
+means nothing to Kite — and the braces that do hold it are where unwinding from
+a method body's missing `}` stops. A method there that takes no `self` could
+also be a function of its own; it is remembered, and if the declaration then
+turns out to have a brace missing from before it, the declaration is read
+again, ending there. A comma missing between
 parameters is supplied, and a comma between struct fields read as a line
 break, so the declaration survives for the code that uses it.
 

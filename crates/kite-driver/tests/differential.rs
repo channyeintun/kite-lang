@@ -1358,6 +1358,21 @@ fn main() {
          \x20 io.print(s.code_at(99))\n  io.print(hash_str(\"abc\") == hash_str(\"abc\"))\n\
          \x20 io.print(hash_str(\"abc\") == hash_str(\"abd\"))\n}\n",
     ),
+    // Members at the margin of braces whose other members are indented. Kite's
+    // indentation means nothing (§2.5); the parser's search for a missing `}`
+    // once took each of these for one.
+    (
+        "members-at-the-margin",
+        "struct Foo {\n    v: int\npub w: int\n}\n\n\
+         impl Foo {\n    fn a(self) -> int {\n        return self.v\n    }\n\
+         fn b(self) -> int {\n    return self.w + 1\n}\n\
+         pub fn make(v: int) -> Foo {\n    return Foo{ v: v, w: v * 10 }\n}\n}\n\n\
+         trait Named {\n    fn name(self) -> str\nfn loud(self) -> str\n}\n\n\
+         impl Named for Foo {\n    fn name(self) -> str {\n        return \"foo\"\n    }\n\
+         fn loud(self) -> str {\n    return \"FOO\"\n}\n}\n\n\
+         fn main() {\n    let f = Foo.make(2)\n    io.print(f.a() + f.b())\n\
+         \x20   io.print(f.name() + f.loud())\n}\n",
+    ),
 ];
 
 /// Programs pinning down what the middle of the compiler — HIR, MIR and the

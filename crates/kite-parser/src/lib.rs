@@ -46,6 +46,29 @@ struct Open {
     indent: usize,
     /// How far in the first member that begins a line is indented.
     members: Option<usize>,
+    /// Which declarations are members here.
+    holds: Holds,
+}
+
+/// Which declarations a pair of braces holds as members — and so which ones,
+/// written inside them, say nothing about whether they have closed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Holds {
+    /// A block, a `match`, an enum or a literal: none.
+    Nothing,
+    /// A struct: its fields, of which `pub x: int` starts like a declaration.
+    Fields,
+    /// An `impl` or a `trait`: `fn`, `pub fn`, `async fn`, `pub async fn`.
+    Methods,
+}
+
+/// Where a declaration began, for reading it a second time.
+struct Checkpoint {
+    diags: usize,
+    type_brackets: usize,
+    literal_braces: usize,
+    last_error_at: Option<usize>,
+    depth_reported: bool,
 }
 
 /// Whether a piece of a string is text with nothing in it.
@@ -203,6 +226,21 @@ struct Parser<'a> {
     /// The token index of the last syntax error reported, so a construct
     /// found unclosed at a token that already has an error says nothing more.
     last_error_at: Option<usize>,
+    /// The first method in the current declaration that is indented as if
+    /// its `impl` had closed before it — a `fn` at the margin of an `impl`
+    /// whose methods are indented — and could be a function of its own.
+    ///
+    /// Indentation means nothing to Kite, so that is a method like any other,
+    /// and it is read as one. But if a brace of the declaration opened before
+    /// it turns out never to be closed, this is where the author thought the
+    /// `impl` ended, and the declaration is read again, ending there
+    /// ([`Parser::cut_at`]).
+    suspect: Option<usize>,
+    /// A brace opened before [`Parser::suspect`] has been found unclosed, so
+    /// the declaration is to be read again.
+    rewind: bool,
+    /// On that second reading, the token at which the braces end.
+    cut_at: Option<usize>,
     /// See [`layout`].
     layout: Layout,
     /// The byte offset each line of the file starts at. Finding a line's start
@@ -320,6 +358,9 @@ impl<'a> Parser<'a> {
             unwinding: false,
             misaligned: None,
             last_error_at: None,
+            suspect: None,
+            rewind: false,
+            cut_at: None,
             layout: Layout::default(),
             line_starts,
             depth: 0,
@@ -728,7 +769,7 @@ impl<'a> Parser<'a> {
 
     /// A `{` that has just been consumed, whose members are about to be read.
     fn open_brace(&self, brace: Span) -> Open {
-        Open { brace, indent: self.line_indent(brace.start), members: None }
+        Open { brace, indent: self.line_indent(brace.start), members: None, holds: Holds::Nothing }
     }
 
     /// Note where a member of `open` begins, before parsing it.
@@ -738,30 +779,110 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Whether the declaration about to be read is one of the members `holds`
+    /// allows.
+    fn is_member(&self, holds: Holds) -> bool {
+        match holds {
+            Holds::Nothing => false,
+            Holds::Fields => self.at(T::Pub) && matches!(self.peek_at(1), T::Ident | T::Var),
+            Holds::Methods => match self.peek() {
+                T::Fn | T::Async => true,
+                T::Pub => matches!(self.peek_at(1), T::Fn | T::Async),
+                _ => false,
+            },
+        }
+    }
+
+    /// Whether the method about to be read takes `self`, which no function
+    /// of its own can: `fn`, a name, type parameters perhaps, then `(self` or
+    /// `(var self`.
+    fn takes_self(&self) -> bool {
+        let mut i = 0;
+        while matches!(self.peek_at(i), T::Pub | T::Async | T::Fn | T::Ident) {
+            i += 1;
+        }
+        if self.peek_at(i) == T::Lt {
+            let mut depth = 0usize;
+            loop {
+                match self.peek_at(i) {
+                    T::Lt => depth += 1,
+                    T::Gt => depth -= 1,
+                    T::Shr => depth = depth.saturating_sub(2),
+                    T::Eof | T::LBrace => return false,
+                    _ => {}
+                }
+                i += 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+        }
+        if self.peek_at(i) != T::LParen {
+            return false;
+        }
+        i += 1;
+        while self.peek_at(i) == T::Newline {
+            i += 1;
+        }
+        if self.peek_at(i) == T::Var {
+            i += 1;
+        }
+        self.peek_at(i) == T::SelfKw
+    }
+
     /// Whether `open` was left unclosed, judging by the token about to be
     /// read. Reports it the first time.
     ///
-    /// A declaration keyword beginning a line no further in than the `{`, in
-    /// braces whose members are indented past it, is where the author
-    /// thought the braces had already closed. Nothing inside a block, a
-    /// struct or an `impl` is written at that indentation, so the parser has
-    /// found the end the author meant, and everything enclosing it returns
-    /// quietly. What used to happen is that `fn b` was read as a statement
+    /// A declaration beginning a line no further in than the `{`, in braces
+    /// whose members are indented past it, is where the author thought the
+    /// braces had already closed — when it is not something those braces
+    /// hold. Nothing inside a block, a `match`, an enum or a literal is a
+    /// declaration, so the parser has found the end the author meant, and
+    /// everything enclosing it returns quietly, as far as the braces it does
+    /// belong to. What used to happen is that `fn b` was read as a statement
     /// of `fn a`, then everything after it too — eight errors for one brace.
+    ///
+    /// A method at the margin of an `impl`, or a `pub` field at the margin of
+    /// a struct, is only a member laid out unusually: Kite's indentation is
+    /// not significant (§2.5), and such a file compiles. It is read as the
+    /// member it is. A method that could as well be a function of its own is
+    /// remembered, though, in case the declaration later turns out to have a
+    /// brace missing before it ([`Parser::suspect`]).
     ///
     /// Braces whose members are not indented past them say nothing either
     /// way, and are left to the ordinary rules — and so do braces with no
     /// member yet, since the first one is what says how they are indented.
     /// An unindented `impl` has its methods at the margin.
     fn left_open(&mut self, open: &Open) -> bool {
-        if self.unwinding {
-            return true;
-        }
         if !self.declaration_starts_line() {
-            return false;
+            return self.unwinding;
         }
         let here = self.line_indent(self.span().start);
-        if here > open.indent || open.members.is_none_or(|m| m <= open.indent) {
+        let inside = here > open.indent || open.members.is_none_or(|m| m <= open.indent);
+        let member = self.is_member(open.holds);
+        if self.unwinding {
+            // Braces within these were found unclosed at this declaration,
+            // and these are the braces it belongs to: a method after a method
+            // whose body lost its `}`. The rest of them is read as usual.
+            if member && inside {
+                self.unwinding = false;
+                self.misaligned = None;
+                return false;
+            }
+            return true;
+        }
+        if self.cut_at == Some(self.pos) {
+            let at = self.span();
+            self.report_unclosed(open, Some(at));
+            return true;
+        }
+        if inside {
+            return false;
+        }
+        if member {
+            if open.holds == Holds::Methods && self.suspect.is_none() && !self.takes_self() {
+                self.suspect = Some(self.pos);
+            }
             return false;
         }
         let at = self.span();
@@ -773,18 +894,27 @@ impl<'a> Parser<'a> {
     fn report_unclosed(&mut self, open: &Open, declaration: Option<Span>) {
         self.unwinding = true;
         self.panicking = false;
-        // The token that showed the braces open already has an error of its
-        // own — the `fn` after an unclosed `f(1, 2` is where `)` was expected
-        // — and it is the same mistake.
-        if self.last_error_at == Some(self.pos) {
-            return;
-        }
         // The `}` whose indentation gave the missing one away, if there is
         // one inside these braces.
         let (brace, closer) = match self.misaligned {
             Some((brace, closer)) if brace.start > open.brace.start => (brace, Some(closer)),
             _ => (open.brace, None),
         };
+        // A brace missing from before a method at the margin of its `impl`
+        // was most likely missing right there, and the declaration is read
+        // again to end at it.
+        if self.cut_at.is_none()
+            && self.suspect.is_some_and(|at| brace.start < self.tokens[at].span.start)
+        {
+            self.rewind = true;
+            return;
+        }
+        // The token that showed the braces open already has an error of its
+        // own — the `fn` after an unclosed `f(1, 2` is where `)` was expected
+        // — and it is the same mistake.
+        if self.last_error_at == Some(self.pos) {
+            return;
+        }
         let mut d = Diagnostic::error(codes::E0101, "unclosed delimiter").with_primary(
             brace,
             if closer.is_some() {
@@ -797,6 +927,10 @@ impl<'a> Parser<'a> {
             d = d.with_secondary(closer, "this `}` is indented to close an outer block instead");
         }
         d = match declaration {
+            Some(at) if self.cut_at == Some(self.pos) => d.with_secondary(
+                at,
+                "this function is written at the margin, where the braces around it had closed",
+            ),
             Some(at) => d.with_secondary(
                 at,
                 "a declaration cannot be inside braces, so they must have closed before here",
@@ -875,8 +1009,21 @@ impl<'a> Parser<'a> {
             // unclosed has been reported, and ends where this one begins.
             self.unwinding = false;
             self.misaligned = None;
+            self.suspect = None;
             let before = self.pos;
-            match self.parse_item() {
+            let saved = self.checkpoint();
+            let mut item = self.parse_item();
+            if std::mem::take(&mut self.rewind) {
+                // A brace went missing before a method written at the margin
+                // of its `impl`: read the declaration again, ending there.
+                let cut = self.suspect.take();
+                self.restore(before, saved);
+                self.cut_at = cut;
+                item = self.parse_item();
+                self.cut_at = None;
+                self.rewind = false;
+            }
+            match item {
                 Some(item) => file.items.push(item),
                 None => {
                     let span = self.span();
@@ -892,6 +1039,32 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
         }
         file
+    }
+
+    /// What a second reading of a declaration has to start again from.
+    fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            diags: self.diags.len(),
+            type_brackets: self.layout.type_brackets.len(),
+            literal_braces: self.layout.literal_braces.len(),
+            last_error_at: self.last_error_at,
+            depth_reported: self.depth_reported,
+        }
+    }
+
+    /// Go back to `pos`, forgetting what was reported and recorded since
+    /// `saved`.
+    fn restore(&mut self, pos: usize, saved: Checkpoint) {
+        self.pos = pos;
+        self.diags.truncate(saved.diags);
+        self.layout.type_brackets.truncate(saved.type_brackets);
+        self.layout.literal_braces.truncate(saved.literal_braces);
+        self.last_error_at = saved.last_error_at;
+        self.depth_reported = saved.depth_reported;
+        self.unwinding = false;
+        self.panicking = false;
+        self.misaligned = None;
+        self.split = None;
     }
 
     fn parse_use(&mut self) -> Option<Use> {
@@ -1011,6 +1184,7 @@ impl<'a> Parser<'a> {
         let generics = self.parse_generics()?;
         let brace = self.expect(T::LBrace)?;
         let mut open = self.open_brace(brace);
+        open.holds = Holds::Fields;
 
         let mut fields = Vec::new();
         let mut commas = false;
@@ -1199,6 +1373,7 @@ impl<'a> Parser<'a> {
         let generics = self.parse_generics()?;
         let brace = self.expect(T::LBrace)?;
         let mut open = self.open_brace(brace);
+        open.holds = Holds::Methods;
         let methods = self.parse_method_list(&mut open);
         let end = self.close(&open)?;
         Some(TraitDecl { is_pub, name, generics, methods, span: start.to(end) })
@@ -1219,6 +1394,7 @@ impl<'a> Parser<'a> {
 
         let brace = self.expect(T::LBrace)?;
         let mut open = self.open_brace(brace);
+        open.holds = Holds::Methods;
         let methods = self.parse_method_list(&mut open);
         let end = self.close(&open)?;
         Some(ImplDecl { generics, trait_path, self_ty, methods, span: start.to(end) })

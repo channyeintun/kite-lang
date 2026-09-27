@@ -179,6 +179,23 @@ fn a_brace_missing_before_a_declaration_is_one_diagnostic() {
              fn main() {\n    io.print(P{ n: 1 }.get())\n}\n",
             5,
         ),
+        // A method's body: the methods after it are still the `impl`'s, so
+        // calling one is not a second error.
+        (
+            "struct Counter {\n    n: int\n}\n\nimpl Counter {\n    fn get(self) -> int {\n\
+             \x20       if self.n > 0 {\n            return self.n\n        }\n        return 0\n\n\
+             \x20   fn twice(self) -> int {\n        return self.get() * 2\n    }\n}\n\n\
+             fn main() {\n    let c = Counter{ n: 2 }\n    io.print(c.twice())\n}\n",
+            6,
+        ),
+        // A method's, before a function at the margin: that function is not
+        // one more method of the `impl`, and neither is `main`.
+        (
+            "struct P {\n    n: int\n}\n\nimpl P {\n    fn get(self) -> int {\n        return self.n\n\n}\n\n\
+             fn helper() -> int {\n    return 2\n}\n\n\
+             fn main() {\n    io.print(P{ n: 1 }.get() + helper())\n}\n",
+            6,
+        ),
     ];
     for (src, line) in cases {
         let result = compile(Path::new("t.kite"), src, Emit::Check);
@@ -194,4 +211,17 @@ fn a_brace_missing_before_a_declaration_is_one_diagnostic() {
             result.render_diagnostics()
         );
     }
+}
+
+/// A body cut short by a missing `}` ends in the parser's error statement,
+/// and after a `return` that is not unreachable code: nobody wrote it. It was
+/// reported as E0116 beside the E0101, at the next method's `pub`.
+#[test]
+fn a_body_cut_short_after_a_return_is_not_unreachable_code() {
+    let src = "struct B {\n    v: int\n}\n\nimpl B {\n    pub fn get(self) -> int {\n        return self.v\n\n\
+               \x20   pub fn put(self, v: int) -> B {\n        return B{ v: v }\n    }\n}\n\n\
+               fn main() {\n    io.print(B{ v: 1 }.put(2).get())\n}\n";
+    let result = compile(Path::new("t.kite"), src, Emit::Check);
+    let codes: Vec<&str> = result.diags.iter().filter_map(|d| d.code.map(|c| c.0)).collect();
+    assert_eq!(codes, vec!["E0101"], "{}", result.render_diagnostics());
 }

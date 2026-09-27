@@ -1272,6 +1272,12 @@ impl<'a> Checker<'a> {
         let entry_nonnil = self.error_nonnil.clone();
 
         for s in &b.stmts {
+            // What did not parse has been reported already. The parser also
+            // ends a block cut short by a missing `}` with one of these, and
+            // after a `return` that is not unreachable code anybody wrote.
+            if flow == Flow::Diverges && matches!(s, ast::Stmt::Error(_)) {
+                break;
+            }
             if flow == Flow::Diverges {
                 self.diags.push(
                     Diagnostic::warning(codes::E0116, "unreachable code")

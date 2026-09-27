@@ -173,6 +173,15 @@ compiler a 512 MiB stack, because every pass still recurses as deep as a chain
 is long: on a main thread's 8 MiB a release build had run out at under two
 thousand method calls, and a debug build at under three hundred.
 
+The same review found the search for a missing `}` refusing valid programs. It
+took any declaration at the margin of braces whose members are indented as the
+place the author thought they closed — including a method at the margin of an
+`impl` and a `pub` field at the margin of a struct, both of which are members
+and compiled before. It now asks only of declarations the braces cannot hold,
+and a method there that takes no `self` counts only once the declaration has
+proved to be missing a brace. A method body that lost its `}` stopped closing
+its `impl` along with it, too.
+
 ---
 
 ## Phase 2 — The type system

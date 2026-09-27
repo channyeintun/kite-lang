@@ -1004,6 +1004,108 @@ fn unindented_code_is_not_mistaken_for_a_missing_brace() {
     assert_eq!(i.methods.len(), 2);
 }
 
+/// A member written at the margin of braces whose other members are indented
+/// is still a member: indentation means nothing to Kite (§2.5), and each of
+/// these compiled before the parser learned to find a missing brace by it —
+/// then each was refused as one.
+#[test]
+fn a_member_at_the_margin_is_still_a_member() {
+    let methods = |p: &Parsed| -> Vec<usize> {
+        p.file
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Impl(i) => Some(i.methods.len()),
+                Item::Trait(t) => Some(t.methods.len()),
+                _ => None,
+            })
+            .collect()
+    };
+    let p = ok("impl Foo {\n    fn a(self) -> int {\n        return self.v\n    }\n\
+                fn b(self) -> int {\n    return self.v + 1\n}\n}\n");
+    assert_eq!(methods(&p), vec![2]);
+    let p = ok("impl Foo {\n    fn a(self) -> int {\n        return self.v\n    }\n\
+                pub fn b(self) -> int {\n    return 1\n}\npub async fn c(self) {\n}\n}\n");
+    assert_eq!(methods(&p), vec![3]);
+    // An associated function has no `self` to tell it from a function of its
+    // own, and is still the `impl`'s when the `impl` closes after it.
+    let p = ok("impl Foo {\n    fn a(self) -> int {\n        return 1\n    }\n\
+                fn make() -> Foo {\n    return Foo{ v: 1 }\n}\n}\n");
+    assert_eq!(methods(&p), vec![2]);
+    assert_eq!(p.fns().len(), 0);
+    let p = ok("trait T {\n    fn a(self) -> int\nfn b(self) -> int\n}\n");
+    assert_eq!(methods(&p), vec![2]);
+    let p = ok("struct P {\n    x: int\npub y: int\n}\n");
+    assert!(matches!(&p.file.items[0], Item::Struct(s) if s.fields.len() == 2));
+}
+
+/// A method whose body lost its `}` is one error, and the methods after it
+/// are still the `impl`'s. The report used to close the `impl` too, so the
+/// next method was read as a function of its own — `fn twice(self)` was an
+/// error at `self`, and every call of it a method that did not exist.
+#[test]
+fn a_method_missing_its_brace_leaves_the_impl_open() {
+    let src = "\
+impl Counter {
+    fn get(self) -> int {
+        if self.n > 0 {
+            return self.n
+        return 0
+    }
+
+    fn twice(self) -> int {
+        return self.get() * 2
+    }
+}
+
+fn main() {
+}
+";
+    let p = parse_src(src);
+    assert_eq!(p.codes(), vec!["E0101"], "{}", p.render());
+    assert!(p.render().contains("3 │         if self.n > 0 {"), "{}", p.render());
+    let Item::Impl(i) = &p.file.items[0] else { panic!() };
+    let names: Vec<_> = i.methods.iter().map(|m| m.name.name.clone()).collect();
+    assert_eq!(names, vec!["get", "twice"]);
+    assert_eq!(p.fns().len(), 1);
+}
+
+/// A method's or an `impl`'s `}` missing before a function at the margin is
+/// found there, although a function at the margin of an `impl` could be a
+/// method: once the `impl` turns out to be unclosed, that is where it ended.
+#[test]
+fn a_brace_missing_before_a_function_at_the_margin_is_found_there() {
+    // The method's `}`: the one after it is indented for the `impl`.
+    let src = "impl Foo {\n    fn a(self) -> int {\n        return self.v\n\n}\n\n\
+               fn main() {\n    io.print(1)\n}\n";
+    let p = parse_src(src);
+    assert_eq!(p.codes(), vec!["E0101"], "{}", p.render());
+    assert!(p.render().contains("2 │     fn a(self) -> int {"), "{}", p.render());
+    let Item::Impl(i) = &p.file.items[0] else { panic!() };
+    assert_eq!(i.methods.len(), 1);
+    assert_eq!(p.fns().len(), 1);
+    // The `impl`'s own.
+    let src = "impl Foo {\n    fn a(self) -> int {\n        return 1\n    }\n\n\
+               fn helper() -> int {\n    return 2\n}\n\nfn main() {\n}\n";
+    let p = parse_src(src);
+    assert_eq!(p.codes(), vec!["E0101"], "{}", p.render());
+    assert!(p.render().contains("1 │ impl Foo {"), "{}", p.render());
+    let names: Vec<_> = p.fns().iter().map(|f| f.name.name.clone()).collect();
+    assert_eq!(names, vec!["helper", "main"]);
+    // A method at the margin that takes `self` cannot be a function of its
+    // own, and is not where the brace went: a brace missing after it is
+    // found where it is.
+    let src = "impl Foo {\n    fn a(self) -> int {\n        return 1\n    }\n\
+               fn b(self) -> int {\n    return 2\n}\n    fn c(self) -> int {\n        return 3\n\n\
+               fn main() {\n}\n";
+    let p = parse_src(src);
+    assert_eq!(p.codes(), vec!["E0101"], "{}", p.render());
+    assert!(p.render().contains("8 │     fn c(self) -> int {"), "{}", p.render());
+    let Item::Impl(i) = &p.file.items[0] else { panic!() };
+    assert_eq!(i.methods.len(), 3);
+    assert_eq!(p.fns().len(), 1);
+}
+
 /// A declaration inside a block is one error, and skipped whole.
 #[test]
 fn a_declaration_inside_a_block_is_one_error() {
