@@ -1469,9 +1469,8 @@ file as the code they test, and that file is self-contained — one file *is* a
 module `kitec test` can run, which is why the block below works. Or a Node
 runner drives `compiler().build({ entry, siblings })` from
 `@kite-lang/compiler-wasm`, hands over the sibling sources by module name,
-instantiates the result and calls a `main` that is itself the list of claims;
-that is `test/run-kite.mjs` in the POS app, and it is the same thing
-`vite-plugin-kite` does to build a page.
+instantiates the result and calls a `main` that is itself the list of claims —
+the same thing `vite-plugin-kite` does to build a page.
 
 `is_true(cond, what)` `is_false` `equal_int` `equal_str` `equal_bool`
 `equal_float(found, want, tolerance, what)` `equal_ints` `equal_strs`
@@ -1965,8 +1964,8 @@ on the path.
 | `vite-plugin-kite` | a Vite plugin over `compiler-wasm` | you are building a **web page** |
 
 For a terminal program `kitec` is the whole answer. For a page there are two
-routes, and the plugin is the one a project takes — `examples/vite-starter` and
-the POS app both do. `<script type="module" src="/src/main.kite">` is the
+routes, and the plugin is the one a project takes, as `examples/vite-starter`
+does. `<script type="module" src="/src/main.kite">` is the
 entire wiring: the plugin compiles the file, instantiates it, registers it
 resident and calls `main`, so there is no JavaScript in the project at all and
 no generated `index.html` to work around. Without a bundler, the other route is

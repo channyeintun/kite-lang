@@ -2500,9 +2500,9 @@ segment naming a declared dependency roots there.
 **Goal:** the parts of the browser that are not the document.
 
 Found the way Phase 20 said to find things — by writing applications. Two real
-ones (a Mastodon client and a shop's till) had each grown a hand-written
-`browser.kite`, and diffing them separated three piles: what `std` already had
-and they had rewritten, what neither had, and what was genuinely theirs.
+ones had each grown a hand-written `browser.kite`, and diffing them separated
+three piles: what `std` already had and they had rewritten, what neither had,
+and what was genuinely theirs.
 
 The first pile was small and embarrassing, and it is now deleted from both:
 `dom.checked`, `dom.set_value`, and `crypto.token` — the last of which one of
