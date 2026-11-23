@@ -529,6 +529,20 @@ fn a_source_with_a_backslash_or_a_quote_reads_back() {
     assert_eq!(back, entries);
 }
 
+/// A key written twice in one `[[locked]]` entry is refused at the second, as
+/// the manifest refuses one. The last one won.
+#[test]
+fn a_lockfile_entry_takes_each_key_once() {
+    let text = "[[locked]]\nname = \"a\"\nversion = \"1.0.0\"\nsource = \"../a\"\n\
+                hash = \"00\"\nhash = \"11\"\n";
+    let err = parse_lockfile(text).expect_err("two hashes");
+    assert_eq!(err.line, 6, "{}", err);
+    assert!(err.message.contains("`hash` is written twice"), "{}", err);
+    // Two entries each with their own keys are fine.
+    let one = text.replace("hash = \"11\"\n", "");
+    assert_eq!(parse_lockfile(&format!("{}\n{}", one, one)).expect("reads").len(), 2);
+}
+
 #[test]
 fn a_unicode_escape_is_hex_digits_only() {
     let err = parse("[package]\nname = \"a\\u+041\"\n").expect_err("a sign is not a digit");

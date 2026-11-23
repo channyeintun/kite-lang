@@ -2189,7 +2189,8 @@ build does on its way past, and fetches every checkout again to make it —
 beside the one it replaces, so a fetch that fails leaves that one in place.
 Anything else that changed — a dependency added or removed, a new version
 because the manifest now asks for one — is reported rather than refused, and
-resolution tries the versions the lockfile records before any newer one.
+resolution tries the versions the lockfile records before any newer one. A
+lockfile entry that writes a key twice is refused, as a manifest that does is.
 
 The digest is cryptographic because the party it is checked against is the one
 who chooses the bytes. It was FNV-1a, which is invertible, so a dependency's

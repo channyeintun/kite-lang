@@ -593,7 +593,18 @@ pub fn parse_lockfile(text: &str) -> Result<Vec<Locked>, ManifestError> {
                 message: "a key outside any `[[locked]]` entry".to_string(),
             });
         };
-        fields.insert(key.trim().to_string(), unquote(value, i + 1)?);
+        // **A key written twice is refused, as the manifest refuses one.**
+        // The last one won, so a hand-edited or merge-mangled entry with two
+        // `hash` lines was checked against whichever came second and the
+        // other was dropped when the file was written back.
+        let key = key.trim().to_string();
+        if fields.contains_key(&key) {
+            return Err(ManifestError {
+                line: i + 1,
+                message: format!("`{}` is written twice in one `[[locked]]` entry", key),
+            });
+        }
+        fields.insert(key, unquote(value, i + 1)?);
     }
     finish(entry, &mut out)?;
     Ok(out)
