@@ -166,6 +166,23 @@ fn every_std_module_compiles_without_a_warning_as_its_own_entry() {
         let compiled = compile(&path, &src, Emit::Check);
         let shown = compiled.render_diagnostics();
         assert!(shown.trim().is_empty(), "{}:\n{}", path.display(), shown);
+        // Silencing must not hide new advice: a copy one comment away from
+        // the library's text is the user's, and the only warning the
+        // library may give itself is the truncating cast it means.
+        let edited = format!("{}\n// edited\n", src);
+        let shown = compile(&path, &edited, Emit::Check).render_diagnostics();
+        for line in shown.lines().filter(|l| l.starts_with("warning") || l.starts_with("error")) {
+            assert_eq!(
+                line,
+                "warning[E0212]: this cast discards the fractional part",
+                "{}:\n{}",
+                path.display(),
+                shown
+            );
+        }
+        if path.ends_with("math.kite") {
+            assert!(shown.contains("E0212"), "an edited std/math is advised:\n{}", shown);
+        }
         checked += 1;
     }
     assert!(checked >= 20, "only {} modules found", checked);
