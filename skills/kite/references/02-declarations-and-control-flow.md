@@ -74,7 +74,9 @@ fn split_at(n: int) -> (int, int) {
 Destructuring is a `let` feature only — `var (a, b) = …` is a parse error, because the
 grammar's `VarStmt` takes a single identifier.
 
-Shadowing is allowed in a *nested* scope and rejected in the *same* scope.
+Shadowing is allowed in a *nested* scope and rejected in the *same* scope. A function body
+is nested in its parameters' scope and a loop body in its header's, so `let x = x + 1` on a
+parameter and `let i = i * 2` on a loop variable are both fine.
 
 ```kite
 fn main() {

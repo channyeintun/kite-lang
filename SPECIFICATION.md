@@ -418,6 +418,11 @@ main reason people reach for `var`.
 Shadowing within a nested scope is permitted. Shadowing within the *same* scope
 is an error — it is almost always a typo.
 
+A function's parameters, and a `for` loop's bindings, live in a scope of their
+own that the body is nested in. So the body may shadow either — `let x = x + 1`
+on a parameter `x`, `let i = i * 2` on a loop variable `i` — and the binding it
+makes lasts to the end of the body.
+
 ### 4.2 Module-level constants
 
 A `let` at the top of a module names a value the compiler works out while

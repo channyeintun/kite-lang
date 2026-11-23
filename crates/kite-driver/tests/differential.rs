@@ -5554,6 +5554,32 @@ fn main() {
 "#,
         "zero\nf ran\ng ran\nmany\n",
     ),
+    // A loop body is a scope nested in its header's, as a function body is
+    // in its parameters', so it may shadow the loop variable as it may a
+    // parameter. It was E0112 for the one and fine for the other.
+    (
+        "a-loop-body-may-shadow-its-loop-variable",
+        r#"fn f(x: int) -> int {
+  let x = x + 1
+  return x
+}
+
+fn main() {
+  for i in 0..3 {
+    let i = i * 10
+    io.print(i)
+  }
+  let m = {"a": 1}
+  for (k, v) in m {
+    let v = v + 1
+    let k = "\(k)!"
+    io.print("\(k) \(v)")
+  }
+  io.print(f(1))
+}
+"#,
+        "0\n10\n20\na! 2\n2\n",
+    ),
 ];
 
 #[test]

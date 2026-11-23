@@ -1876,10 +1876,11 @@ impl<'a> FnResolver<'a> {
             ForHeader::Loop => {}
         }
 
-        // The body shares the header's scope, so the loop variable is visible.
-        for s in &f.body.stmts {
-            self.stmt(s);
-        }
+        // The body is a scope nested in the header's, as a function's body is
+        // in its parameters': the loop variable is visible, and the body may
+        // shadow it — `let i = i * 2` — exactly as it may a parameter. Sharing
+        // the header's scope made the one a redeclaration and the other not.
+        self.block(&f.body);
 
         self.pop_scope();
         self.loop_depth -= 1;
