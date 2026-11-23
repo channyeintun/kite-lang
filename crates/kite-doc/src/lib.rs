@@ -565,6 +565,9 @@ fn prose(doc: &str, shift: usize) -> String {
                     let shifted = format!("{}{}", "#".repeat((hashes + shift).min(6)), &line[hashes..]);
                     out.push(escape_markup(&shifted));
                 } else {
+                    if kite_lexer::fence::starts_own_block(line) {
+                        flush(&mut paragraph, &mut out);
+                    }
                     paragraph.push(line);
                 }
             }

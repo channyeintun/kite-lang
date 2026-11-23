@@ -114,6 +114,14 @@ impl Scanner {
     }
 }
 
+/// Whether `line` begins a block of its own that ends the paragraph above it
+/// — a list item or a block quote — so that a code span cannot run into it.
+/// Markdown pairs backticks within one block only: a stray one in a list item
+/// does not open a span that the next item's backtick closes.
+pub fn starts_own_block(line: &str) -> bool {
+    line.trim_start().starts_with('>') || list_item(line, columns(line)).is_some()
+}
+
 /// Leading columns of whitespace, a tab as four.
 fn columns(line: &str) -> usize {
     let mut n = 0;

@@ -144,9 +144,10 @@ A fence tagged anything else is prose, and what is inside it is text whatever it
 looks like: fences are read as CommonMark reads them, so one closes only on a
 fence of the same character at least as long as its opener (a ` ````text `
 fence can show a ` ```kite ` example without running it), and `~~~` fences and
-indented blocks are code too. `kitec doc` leaves code and `<https://…>` links
-as written, and backslash-escapes a `<` or `&` in the prose around them that a
-Markdown reader would take for HTML.
+indented blocks are code too — so a `~~~kite` fence, or a longer backtick
+fence tagged `kite`, is an example like a ` ```kite ` one. `kitec doc` leaves
+code and `<https://…>` links as written, and backslash-escapes a `<` or `&` in
+the prose around them that a Markdown reader would take for HTML.
 
 ### 2.4 Literals
 

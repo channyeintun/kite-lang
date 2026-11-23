@@ -276,6 +276,10 @@ fn escaping_follows_markdown_on_what_is_code() {
     // An autolink is a link.
     let out = doc("See <https://example.com/x> and <b>.");
     assert!(out.contains("See <https://example.com/x> and \\<b>."), "{}", out);
+    // A span does not run from one list item into the next: a stray backtick
+    // in one item leaves the next item's `<int>` prose, and so escaped.
+    let out = doc("- a ` stray\n- then Option<int> and `x`");
+    assert!(out.contains("- then Option\\<int> and `x`"), "{}", out);
     // Four spaces under a list item are the item's own text, not code.
     let out = doc("- item\n\n    more of <b> it");
     assert!(out.contains("more of \\<b> it"), "{}", out);
