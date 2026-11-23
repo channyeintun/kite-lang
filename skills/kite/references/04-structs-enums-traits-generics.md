@@ -414,7 +414,8 @@ An unqualified pattern for a variant *with a payload* is looked up by name acros
 every enum in scope rather than against the scrutinee's type. So two enums
 declaring `Circle` make `Circle(r)` `E0111` even in a match whose scrutinee is
 unambiguous — write `Shape.Circle(r)`. (A *unit* variant does resolve against the
-scrutinee, and a shared name is fine.)
+scrutinee, and a shared name is fine — against an `Option<E>` too, and twice in
+one tuple pattern, `(Slow, Slow)`.)
 
 ```kite
 enum Shape {

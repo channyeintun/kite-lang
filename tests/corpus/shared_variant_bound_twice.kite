@@ -1,0 +1,22 @@
+// A name two enums declare as a variant is resolved by the scrutinee's type.
+// Where neither enum is being matched, it is a binding, and binding it twice
+// in one pattern is still a name declared twice.
+enum Speed {
+    Slow
+    Fast
+}
+
+enum Pace {
+    Slow
+    Quick
+}
+
+fn both(p: (int, int)) -> int {
+    return match p {
+        (Slow, Slow) => Slow, //~ ERROR E0112
+    }
+}
+
+fn main() {
+    io.print(both((1, 2)))
+}

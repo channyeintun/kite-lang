@@ -5427,6 +5427,56 @@ fn main() {
 "#,
         "other\nat the limit\nminus one or twenty\nten\nsome\nname\nno\noff\nbound 4\n",
     ),
+    // A unit variant two enums share is resolved against the scrutinee's
+    // type, through an optional too: `Slow` against an `Option<Pace>` was a
+    // binding that took every value, so `Pace.Quick` printed "slow". And a
+    // tuple naming it twice, `(Slow, Slow)`, was "already declared".
+    (
+        "a-shared-variant-name-resolves-by-the-scrutinee",
+        r#"enum Speed {
+  Slow
+  Fast
+}
+
+enum Pace {
+  Slow
+  Quick
+}
+
+fn name(o: Option<Pace>) -> str {
+  return match o {
+    nil => "none",
+    Slow => "slow",
+    Quick => "quick",
+  }
+}
+
+fn pair(s: Speed, p: Pace) -> str {
+  return match (s, p) {
+    (Slow, Slow) => "ss",
+    (Fast, Slow) => "fs",
+    (_, Quick) => "q",
+  }
+}
+
+fn mixed(p: (Speed, int)) -> int {
+  return match p {
+    (Slow, Slow) => Slow,
+    (Fast, _) => 0,
+  }
+}
+
+fn main() {
+  io.print(name(Pace.Quick))
+  io.print(name(Pace.Slow))
+  io.print(name(nil))
+  io.print(pair(Speed.Slow, Pace.Slow))
+  io.print(pair(Speed.Fast, Pace.Quick))
+  io.print(mixed((Speed.Slow, 4)))
+}
+"#,
+        "quick\nslow\nnone\nss\nq\n4\n",
+    ),
 ];
 
 #[test]

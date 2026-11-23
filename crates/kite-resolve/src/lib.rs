@@ -598,6 +598,13 @@ pub struct ResolveMap {
     pub uses: HashMap<Span, Res>,
     /// Binding occurrences, keyed by the span of the introduced name.
     pub bindings: HashMap<Span, u32>,
+    /// A name in a pattern that is a unit variant of more than one enum, met
+    /// a second time in the same pattern — `(Slow, Slow)`. Which each one is
+    /// depends on the scrutinee's type, so resolution cannot call the second
+    /// a redeclaration: it shares the first one's local, and the checker
+    /// reports `E0112` at it only if both turn out to be bindings. Keyed by
+    /// the second's span; the value is the first's.
+    pub rebound: HashMap<Span, Span>,
     /// Spans that also spell a struct field: the `x` of a shorthand
     /// `Point{ x }`, in a literal or a pattern. The one identifier serves two
     /// roles, so a tool that rewrites the binding's name — rename — must not
@@ -1515,6 +1522,11 @@ struct FnResolver<'a> {
     or_bound: Vec<(String, u32)>,
     /// How many or-patterns are being resolved, one inside another.
     or_depth: usize,
+    /// Set while a pattern declares a name that is a unit variant of more
+    /// than one enum, and the locals declared that way: see
+    /// [`ResolveMap::rebound`].
+    ambiguous_pattern: bool,
+    provisional: Vec<u32>,
     /// The type `Self` names in this body: the one its `impl` block is for.
     /// None in a free function, and in a trait's default method, where
     /// `Self` is whichever type implements the trait and is known only by
@@ -1538,6 +1550,8 @@ impl<'a> FnResolver<'a> {
             alternatives: Vec::new(),
             or_bound: Vec::new(),
             or_depth: 0,
+            ambiguous_pattern: false,
+            provisional: Vec::new(),
             self_type: None,
         }
     }
@@ -1675,7 +1689,10 @@ impl<'a> FnResolver<'a> {
             .find_map(|(first, _)| first.get(&name.name).copied());
         if let Some(id) = shared {
             let (_, seen) = self.alternatives.last_mut().unwrap();
-            if seen.contains(&name.name) {
+            if seen.contains(&name.name) && self.ambiguous_pattern {
+                let first = self.locals[id as usize].span;
+                self.map.rebound.insert(name.span, first);
+            } else if seen.contains(&name.name) {
                 self.diags.push(
                     Diagnostic::error(
                         codes::E0112,
@@ -1707,6 +1724,12 @@ impl<'a> FnResolver<'a> {
         allow_shadow: bool,
     ) -> u32 {
         if let Some(&prev_id) = self.scopes.last().unwrap().get(&name.name) {
+            if self.ambiguous_pattern && self.provisional.contains(&prev_id) {
+                let first = self.locals[prev_id as usize].span;
+                self.map.rebound.insert(name.span, first);
+                self.map.bindings.insert(name.span, prev_id);
+                return prev_id;
+            }
             if allow_shadow {
                 let id = self.locals.len() as u32;
                 self.locals.push(LocalInfo {
@@ -1938,6 +1961,13 @@ impl<'a> FnResolver<'a> {
                 {
                     self.check_visible(Res::Const(ci), name.span, &name.name);
                     self.map.uses.insert(name.span, Res::Const(ci));
+                } else if self.map.ambiguous_variants.contains(&name.name) {
+                    // `Slow`, which two enums declare: the checker decides
+                    // which, if either, from the scrutinee's type.
+                    self.ambiguous_pattern = true;
+                    let id = self.declare(name, false, false);
+                    self.ambiguous_pattern = false;
+                    self.provisional.push(id);
                 } else {
                     self.declare(name, false, false);
                 }

@@ -627,6 +627,7 @@ pub fn check_recording(
             closure_ret_unknown: None,
             reported_unchecked: std::collections::HashSet::new(),
             copies: std::collections::BTreeSet::new(),
+            arm_bound: Vec::new(),
             defers: None,
             release,
             solved: &mut *solved,
@@ -1193,6 +1194,9 @@ struct Checker<'a> {
     /// inspecting one inspects both, and one left behind while the other is
     /// still in scope has dropped nothing. Each pair is written lowest first.
     copies: std::collections::BTreeSet<(u32, u32)>,
+    /// The locals the current `match` arm's pattern has bound so far, for
+    /// [`ResolveMap::rebound`].
+    arm_bound: Vec<u32>,
 }
 
 /// Whether a local certainly holds a value at this point.
@@ -9193,6 +9197,7 @@ impl<'a> Checker<'a> {
                 TyKind::Optional(inner) if nil_covered => inner,
                 _ => scrut_ty,
             };
+            self.arm_bound.clear();
             let pattern = self.pattern_with(&arm.pattern, scrut_ty, bind_ty);
             if let (true, hir::Pattern::Binding { local, .. }) = (held, &pattern) {
                 self.forget_copies(local.0);
@@ -10006,6 +10011,22 @@ impl<'a> Checker<'a> {
 
             ast::Pattern::Binding(name) => match self.resolved.lookup_binding(name.span) {
                 Some(local) => {
+                    // `(Slow, Slow)` shares one local between the two names,
+                    // which is right when they are variants. When both are
+                    // bindings, it is a name bound twice.
+                    if let Some(&first) = self.resolved.rebound.get(&name.span) {
+                        if self.arm_bound.contains(&local) {
+                            self.diags.push(
+                                Diagnostic::error(
+                                    codes::E0112,
+                                    format!("`{}` is already declared in this scope", name.name),
+                                )
+                                .with_primary(name.span, "redeclared here")
+                                .with_secondary(first, "first declared here"),
+                            );
+                        }
+                    }
+                    self.arm_bound.push(local);
                     self.locals[local as usize].ty = bind_ty;
                     self.init[local as usize] = Init::Assigned;
                     hir::Pattern::Binding {
@@ -10471,7 +10492,11 @@ impl<'a> Checker<'a> {
     /// The declaration index and variant index of a unit variant with this
     /// name on the scrutinee's enum, if there is one.
     fn unit_variant_of(&self, scrut: TyId, name: &str) -> Option<(u32, u32)> {
-        let TyKind::Enum(eid) = *self.types.kind(scrut) else { return None };
+        // Against an optional, a pattern is one for the value inside, so a
+        // name is that enum's variant there too. Asking only of the
+        // scrutinee itself made `Slow` against an `Option<Pace>` a binding
+        // whenever another enum also declared a `Slow`.
+        let TyKind::Enum(eid) = *self.types.kind(self.types.present(scrut)) else { return None };
         let vi = self
             .types
             .enum_def(eid)
