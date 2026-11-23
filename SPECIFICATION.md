@@ -1685,6 +1685,12 @@ is the whole of the system: a generic function is a function whose parameter
 types are named rather than fixed, and monomorphisation makes each use an
 ordinary call.
 
+The built-in `int`, `float`, `bool` and `str` satisfy the prelude's `Display`,
+`Debug` and `Hash` (§10.4) — what those ask of them is what interpolation and
+`@derive` already do with one — so `Cache<str, int>` above is a cache with
+string keys. They do so only as bounds: a primitive has no methods of its own
+to call directly, and is not a `dyn` of any trait.
+
 A bound holds wherever it is written. On a function, it is checked at every call
 (`E0208`). On a struct or an enum, it is checked wherever a value is built — a
 `Cache<fn(), int>` cannot come into existence — and on an `impl` block, at every

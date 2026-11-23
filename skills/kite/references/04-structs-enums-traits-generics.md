@@ -1422,6 +1422,29 @@ A parameter satisfies exactly the bounds it was declared with, so a bounded one
 may be passed on to the same bound — `fn outer<T: Shape>(x: T)` may call
 `inner<T: Shape>(x)` — and an unbounded one may not.
 
+`int`, `float`, `bool` and `str` meet the prelude's `Display`, `Debug` and
+`Hash` bounds, so `Cache<K: Hash, V>` takes a `str` key and `fn tell<T:
+Display>` takes a `3`; through the bound, `x.hash()` and `x.debug()` are what
+`@derive` does with a field of that type, and `x.show()` is interpolation.
+That is all a primitive has: `3.hash()` written directly is still `E0205`, a
+`dyn Display` cannot hold one (`E0200`), and slices, maps, tuples and optionals
+meet none of these bounds.
+
+```kite
+fn tell<T: Display>(x: T) -> str {
+    return "<\(x)>"
+}
+
+fn key<K: Hash>(k: K) -> int {
+    return k.hash()
+}
+
+fn main() {
+    io.print(tell(3) + tell("s"))
+    io.print(key("a") == hash_str("a"))
+}
+```
+
 A bound is checked at every call site of a generic **function**:
 
 ```kite fails
@@ -1602,7 +1625,7 @@ fn main() {
 ```
 
 A bound on a generic type holds everywhere. On the `struct` or `enum` header it
-is checked wherever a value is built, so a `Holder<int>` cannot exist; on the
+is checked wherever a value is built, so a `Holder<[int]>` cannot exist; on the
 `impl` header it is checked at every call of the block's methods, and it is what
 lets their bodies call the bound's methods. Write it on both:
 
@@ -1643,14 +1666,14 @@ struct Holder<T: Display> {
 }
 
 fn main() {
-    let h = Holder{ value: 5 } //~ E0208
+    let h = Holder{ value: [5] } //~ E0208
     io.print(1)
 }
 ```
 
 A generic type implements a trait only where its arguments meet the bounds of
 the `impl` that says so: after `impl<T: Display> Named for Holder<T>`, a
-`Holder<int>` is not `Named`, as a bound or as a `dyn`.
+`Holder<[int]>` is not `Named`, as a bound or as a `dyn`.
 
 A generic name used without arguments, or with the wrong number, is `E0208`:
 

@@ -1420,6 +1420,43 @@ fn signature_text(sources: &SourceMap, at: Span, param_count: usize) -> String {
 mod tests {
     use super::*;
 
+    /// The built-in types meet the prelude's `Display`, `Debug` and `Hash` as
+    /// bounds and nowhere else; and a type whose `impl Display` is bounded is
+    /// told which bound its arguments miss, not to write the `impl` it has.
+    #[test]
+    fn primitives_meet_prelude_bounds_and_notes_name_the_unmet_one() {
+        let codes = |c: &Compilation| -> Vec<&'static str> {
+            c.diags.iter().filter_map(|d| d.code.map(|x| x.0)).collect()
+        };
+        let c = compile(
+            "t.kite",
+            "struct Cache<K: Hash, V> {\n  var entries: {K: V}\n  capacity: int\n}\n\
+             fn tell<T: Display>(x: T) -> str {\n  return \"\\(x)\"\n}\n\
+             fn dbg<T: Debug>(x: T) -> str {\n  return x.debug()\n}\n\
+             fn main() {\n  let c = Cache{ entries: {\"a\": 1}, capacity: 3 }\n  io.print(c.capacity)\n\
+             \x20 io.print(tell(3) + tell(1.5) + tell(true) + dbg(\"s\"))\n}\n",
+            Emit::Check,
+        );
+        assert!(!c.failed(), "{}", c.render_diagnostics());
+        let c = compile("t.kite", "fn main() {\n  let d: dyn Display = 3\n  io.print(d.show())\n}\n", Emit::Check);
+        assert_eq!(codes(&c), vec!["E0200"], "{}", c.render_diagnostics());
+        let c = compile(
+            "t.kite",
+            "struct S<T> {\n  v: T\n}\n\
+             impl<T: Display> Display for S<T> {\n  fn show(self) -> str {\n    return \"S\"\n  }\n}\n\
+             fn need<T: Display>(x: T) -> str {\n  return x.show()\n}\n\
+             fn main() {\n  io.print(S{ v: 1 })\n  io.print(S{ v: [1] })\n  io.print(\"\\(S{ v: [2] })\")\n\
+             \x20 io.print(need(S{ v: [3] }))\n  io.print([4])\n}\n",
+            Emit::Check,
+        );
+        assert_eq!(codes(&c), vec!["E0200", "E0207", "E0208", "E0200"], "{}", c.render_diagnostics());
+        let text = c.render_diagnostics();
+        assert!(!text.contains("write `impl<T> Display for S<T>"), "{}", text);
+        assert!(text.contains("only where `T: Display`, and `[int]` is not one"), "{}", text);
+        assert!(text.contains("only where `T: prelude.Display`, and `[int]` is not one"), "{}", text);
+        assert!(text.contains("a `[int]` cannot be given an `impl`"), "{}", text);
+    }
+
     /// `wrap(wrap(…(x)))`, `depth` calls deep.
     fn nested(call: &str, depth: usize, core: &str) -> String {
         let mut s = core.to_string();

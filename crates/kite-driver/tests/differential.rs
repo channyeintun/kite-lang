@@ -5081,6 +5081,86 @@ fn main() {
         "[greet 1][greet 1]\n[greet 2][greet 2]\n[greet 5][greet 5]\n\
          [greet 6][greet 6]\n[q][q]\n",
     ),
+    // The built-in types meet the prelude's `Display`, `Debug` and `Hash`
+    // bounds, and a call through one is what `@derive` and interpolation do
+    // with a field of that type. They met none, so the specification's own
+    // `Cache<K: Hash, V>` could not have a `str` key.
+    (
+        "primitives-meet-the-prelude-bounds",
+        r#"pub struct Cache<K: Hash, V> {
+  var entries: {K: V}
+  capacity: int
+}
+
+impl<K: Hash, V> Cache<K, V> {
+  pub fn get(self, key: K) -> Option<V> {
+    return self.entries[key]
+  }
+
+  pub fn slot(self, key: K) -> int {
+    return key.hash() % self.capacity
+  }
+}
+
+struct S<T> {
+  v: T
+}
+
+impl<T: Display> Display for S<T> {
+  fn show(self) -> str {
+    return "S(\(self.v))"
+  }
+}
+
+fn tell<T: Display>(x: T) -> str {
+  return "\(x)|" + x.show()
+}
+
+fn dbg<T: Debug>(x: T) -> str {
+  return x.debug()
+}
+
+fn h<T: Hash>(x: T) -> int {
+  return x.hash()
+}
+
+@derive(Hash, Debug)
+struct Row {
+  i: int
+  f: float
+  b: bool
+  s: str
+}
+
+fn main() {
+  let c = Cache{ entries: {"a": 1}, capacity: 7 }
+  io.print(c.get("a") == 1)
+  io.print(c.slot("a") == hash_str("a") % 7)
+  let n = Cache{ entries: {3: "x"}, capacity: 5 }
+  io.print(n.slot(3) == hash_int(3) % 5)
+  io.print(tell(3))
+  io.print(tell(2.5))
+  io.print(tell(true))
+  io.print(tell("s"))
+  io.print(S{ v: 1 })
+  io.print(S{ v: "two" })
+  io.print(dbg(3))
+  io.print(dbg(1.5))
+  io.print(dbg(false))
+  io.print(dbg("a\"b"))
+  let r = Row{ i: 4, f: 0.5, b: true, s: "q" }
+  io.print(r.debug() == "Row{ i: \(dbg(4)), f: \(dbg(0.5)), b: \(dbg(true)), s: \(dbg("q")) }")
+  var want = hash_seed()
+  want = hash_combine(want, h(4))
+  want = hash_combine(want, h(0.5))
+  want = hash_combine(want, h(true))
+  want = hash_combine(want, h("q"))
+  io.print(r.hash() == want)
+  io.print(h(0.0) == h(-0.0))
+}
+"#,
+        "true\ntrue\ntrue\n3|3\n2.5|2.5\ntrue|true\ns|s\nS(1)\nS(two)\n3\n1.5\nfalse\n\"a\\\"b\"\ntrue\ntrue\ntrue\n",
+    ),
 ];
 
 #[test]

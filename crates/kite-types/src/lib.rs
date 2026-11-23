@@ -5654,6 +5654,7 @@ impl<'a> Checker<'a> {
                     }
                     if !self.types.is_printable(e.ty) && !self.types.is_poisoned(e.ty) {
                         let article = self.types.with_article(e.ty);
+                        let fix = self.display_fix(e.ty);
                         self.diags.push(
                             Diagnostic::error(
                                 codes::E0200,
@@ -5671,10 +5672,7 @@ impl<'a> Checker<'a> {
                                     name
                                 ),
                             )
-                            .with_note(format!(
-                                "write `{} {{ fn show(self) -> str {{ … }} }}`",
-                                self.impl_to_write("Display", e.ty)
-                            )),
+                            .with_note(fix),
                         );
                     }
                     hargs.push(e);
@@ -7144,7 +7142,9 @@ impl<'a> Checker<'a> {
     /// Whether a concrete value may stand where a trait object is wanted.
     fn coerces_to_dyn(&mut self, found: TyId, expected: TyId) -> bool {
         let TyKind::Dyn(tr) = *self.types.kind(expected) else { return false };
-        self.type_implements(found, tr)
+        // A built-in type meets the prelude's bounds, but has no table row
+        // for a `dyn` to dispatch through.
+        kite_hir::mono::primitive_trait(self.types, found, tr).is_none() && self.type_implements(found, tr)
     }
 
     /// Whether a type implements a trait.
@@ -7155,9 +7155,13 @@ impl<'a> Checker<'a> {
     /// that may itself be bounded: after `impl<T: Show> Named for Box<T>`, a
     /// `Box<int>` is not `Named` at all, and a call that treated it as one
     /// reached a body calling `show` on an `int`.
+    /// A built-in type is the prelude's `Display`, `Debug` and `Hash`.
     fn type_implements(&mut self, ty: TyId, tr: hir::TraitId) -> bool {
         if let TyKind::Param { index, .. } = *self.types.kind(ty) {
             return self.generic_defs.get(index as usize).is_some_and(|d| d.bounds.contains(&tr));
+        }
+        if kite_hir::mono::primitive_trait(self.types, ty, tr).is_some() {
+            return true;
         }
         let (Some(ti), Some(tri)) = (self.type_index_of(ty), self.trait_index_of(tr)) else {
             return false;
@@ -9632,11 +9636,21 @@ impl<'a> Checker<'a> {
                         self.trait_index_of(*bound).is_some_and(|tri| self.resolved.implements(ti, tri))
                     }) =>
                     {
-                        d.with_note(format!(
-                            "`{}` implements `{}` only where its type arguments meet the \
-                             bounds of that `impl`",
-                            tn, bn
-                        ))
+                        match self.unmet_impl_bound(*t, *bound) {
+                            Some((param, arg, unmet)) => d.with_note(format!(
+                                "`{}` implements `{}` only where `{}: {}`, and `{}` is not one",
+                                tn,
+                                bn,
+                                param,
+                                self.types.trait_def(unmet).name,
+                                self.types.name(arg)
+                            )),
+                            None => d.with_note(format!(
+                                "`{}` implements `{}` only where its type arguments meet the \
+                                 bounds of that `impl`",
+                                tn, bn
+                            )),
+                        }
                     }
                     // An `impl` names a struct or an enum, so for anything
                     // else — a trait object included — suggesting one would
@@ -11592,6 +11606,70 @@ impl<'a> Checker<'a> {
         })
     }
 
+    /// What a note says to do about a type that has no text form, so that
+    /// `io.print` and interpolation say the same, and say something that
+    /// compiles. A struct whose `impl Display` is bounded used to be told to
+    /// write the `impl` it already had, and a slice an `impl` no slice can
+    /// have.
+    fn display_fix(&mut self, ty: TyId) -> String {
+        let name = self.types.name(ty);
+        match *self.types.kind(ty) {
+            // Neither of these can be given an `impl`: a parameter is known by
+            // its bounds, and a trait object by its trait.
+            TyKind::Param { .. } => return format!("add the bound: `{}: Display`", name),
+            TyKind::Dyn(_) => {
+                return format!(
+                    "{} shows only what its trait declares; call one of its methods, or \
+                     make the trait `Display` itself and hold a `dyn Display`",
+                    self.types.with_article(ty)
+                )
+            }
+            _ => {}
+        }
+        if self.type_index_of(ty).is_none() {
+            return format!(
+                "{} cannot be given an `impl`; render its parts, or hold it in a struct \
+                 that implements `Display`",
+                self.types.with_article(ty)
+            );
+        }
+        if let Some(tr) = self.display_trait() {
+            if let Some((param, arg, bound)) = self.unmet_impl_bound(ty, tr) {
+                return format!(
+                    "`{}` implements `Display` only where `{}: {}`, and `{}` is not one",
+                    name,
+                    param,
+                    last_segment(&self.types.trait_def(bound).name),
+                    self.types.name(arg)
+                );
+            }
+        }
+        format!("write `{} {{ fn show(self) -> str {{ … }} }}`", self.impl_to_write("Display", ty))
+    }
+
+    /// The first bound of the `impl` through which `ty` would implement `tr`
+    /// that `ty`'s type arguments do not meet: the block's parameter, the
+    /// argument standing for it, and the bound.
+    fn unmet_impl_bound(&mut self, ty: TyId, tr: hir::TraitId) -> Option<(String, TyId, hir::TraitId)> {
+        let (ti, tri) = (self.type_index_of(ty)?, self.trait_index_of(tr)?);
+        let block = *self.trait_impls.get(&(ti, tri))?;
+        let defs = self.impl_generics.get(&block)?.clone();
+        let args = self.receiver_args(ty);
+        for (g, a) in defs.iter().zip(args) {
+            for b in &g.bounds {
+                let held = if self.is_share_bound(*b) {
+                    self.share_given_params(a)
+                } else {
+                    self.type_implements(a, *b)
+                };
+                if !held {
+                    return Some((g.name.clone(), a, *b));
+                }
+            }
+        }
+        None
+    }
+
     /// A value as text. Primitives render themselves; anything else needs
     /// `Display`.
     fn render(&mut self, v: hir::Expr) -> hir::Expr {
@@ -11615,20 +11693,7 @@ impl<'a> Checker<'a> {
                 "`int`, `float`, `bool` and `str` render themselves. Anything else needs \
                  `Display`",
             );
-        d = match *self.types.kind(v.ty) {
-            // Neither of these can be given an `impl`: a parameter is known by
-            // its bounds, and a trait object by its trait.
-            TyKind::Param { .. } => d.with_note(format!("add the bound: `{}: Display`", name)),
-            TyKind::Dyn(_) => d.with_note(format!(
-                "{} shows only what its trait declares; call one of its methods, or \
-                 make the trait `Display` itself and hold a `dyn Display`",
-                self.types.with_article(v.ty)
-            )),
-            _ => d.with_note(format!(
-                "write `{} {{ fn show(self) -> str {{ … }} }}`",
-                self.impl_to_write("Display", v.ty)
-            )),
-        };
+        d = d.with_note(self.display_fix(v.ty));
         self.diags.push(d);
         hir::Expr { span: v.span, kind: ExprKind::Error, ty: TyId::STR }
     }
