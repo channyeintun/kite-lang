@@ -653,6 +653,12 @@ pub struct ResolveMap {
     /// reports `E0112` at it only if both turn out to be bindings. Keyed by
     /// the second's span; the value is the first's.
     pub rebound: HashMap<Span, Span>,
+    /// The error slot of a tuple binding that redeclared a name already in
+    /// the same scope — `let (text, err) = …` after `let (bytes, err) = …`.
+    /// That is allowed only when the earlier binding is an `error` (§7.4),
+    /// which is a type, so the checker decides; keyed by the new binding's
+    /// span, the value is the local it shadows.
+    pub shadowed: HashMap<Span, u32>,
     /// Spans that also spell a struct field: the `x` of a shorthand
     /// `Point{ x }`, in a literal or a pattern. The one identifier serves two
     /// roles, so a tool that rewrites the binding's name — rename — must not
@@ -814,6 +820,11 @@ impl ResolveMap {
         self.consts.iter().position(|c| c.name == name).map(|i| i as u32)
     }
 
+    /// Whether a declaration's merged name is the prelude's.
+    fn is_prelude(&self, merged: &str) -> bool {
+        merged.strip_prefix(PRELUDE).is_some_and(|rest| rest.starts_with('.'))
+    }
+
     pub fn type_by_name_in(&self, module: &str, name: &str) -> Option<u32> {
         let written = name;
         let name = self.modules.canonical(module, name);
@@ -826,6 +837,84 @@ impl ResolveMap {
 
     fn find_type(&self, name: &str) -> Option<u32> {
         self.type_names.get(name).copied()
+    }
+
+    /// Every type `module` can name, as it would write it: its own and the
+    /// prelude's bare, an imported module's public ones under the spelling
+    /// the module imported it by. Traits are left out, and sorted, so a note
+    /// listing them reads the same every run.
+    pub fn nameable_types(&self, module: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for decl in self.types.iter().filter(|t| t.kind != TypeKind::Trait) {
+            let home = self.modules.of(decl.decl_index);
+            let bare = |home: &str| {
+                if home.is_empty() {
+                    decl.name.clone()
+                } else {
+                    decl.name.strip_prefix(&format!("{}.", home)).unwrap_or(&decl.name).to_string()
+                }
+            };
+            if home == module || home == PRELUDE {
+                out.push(bare(home));
+                continue;
+            }
+            if !decl.is_pub {
+                continue;
+            }
+            for ((asking, spelling), target) in &self.modules.aliases {
+                if asking == module && target == home {
+                    out.push(format!("{}.{}", spelling, bare(home)));
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// The diagnostic for `m.Name` naming a type, where `m` is a module
+    /// `asking` imported and `Name` is no type in it: ``cannot find `Name` in
+    /// module `m` ``, at the member, with the nearest public type of `m` when
+    /// one is close. `None` when the head is not a module `asking` imported,
+    /// for the caller's own message.
+    ///
+    /// **The value case's message, for types.** A misspelt type through an
+    /// imported module asked ``is that module imported?`` of a module the
+    /// first line imports, or said `no such type in this module`, and named no
+    /// near type — the value case was fixed alone. A trait is not offered: no
+    /// position that reaches here takes one.
+    pub fn missing_type_member(
+        &self,
+        asking: &str,
+        segments: &[Ident],
+        code: kite_diag::Code,
+    ) -> Option<Diagnostic> {
+        let [head, member] = segments else {
+            return None;
+        };
+        let module = self.modules.aliases.get(&(asking.to_string(), head.name.clone()))?;
+        let prefix = format!("{}.", module);
+        let members: Vec<&str> = self
+            .types
+            .iter()
+            .filter(|t| t.is_pub && t.kind != TypeKind::Trait)
+            .filter_map(|t| t.name.strip_prefix(&prefix))
+            .collect();
+        let d = Diagnostic::error(
+            code,
+            format!("cannot find `{}` in module `{}`", member.name, head.name),
+        )
+        .with_primary(
+            member.span,
+            format!("`{}` declares no public type of this name", module.trim_start_matches('@')),
+        );
+        Some(match nearest(&member.name, &members) {
+            Some(near) => d.with_note(format!("a similar type is in `{}`: `{}`", head.name, near)),
+            None => d.with_note(format!(
+                "`{}` is imported here; only what it marks `pub` can be reached from outside it",
+                head.name
+            )),
+        })
     }
 
     /// The struct or enum a type found by name stands for: the type itself,
@@ -1810,6 +1899,7 @@ impl<'a> FnResolver<'a> {
                 return prev_id;
             }
             if allow_shadow {
+                self.map.shadowed.insert(name.span, prev_id);
                 let id = self.locals.len() as u32;
                 self.locals.push(LocalInfo {
                     name: name.name.clone(),
@@ -1920,8 +2010,13 @@ impl<'a> FnResolver<'a> {
                 for (i, e) in elems.iter().enumerate() {
                     if let BindElem::Name(n) = e {
                         // The error slot may shadow an earlier one in the same
-                        // scope; see `declare_maybe_shadowing`.
-                        let is_error_slot = elems.len() == 2 && i == 1;
+                        // scope; see `declare_maybe_shadowing`. Not the value
+                        // slot beside it: `let (a, a) = …` names one thing
+                        // twice, and kept the last.
+                        let twice = elems[..i]
+                            .iter()
+                            .any(|p| matches!(p, BindElem::Name(m) if m.name == n.name));
+                        let is_error_slot = elems.len() == 2 && i == 1 && !twice;
                         self.declare_maybe_shadowing(n, mutable, false, is_error_slot);
                     }
                 }
@@ -2189,6 +2284,10 @@ impl<'a> FnResolver<'a> {
             }
         }
 
+        if let Some(d) = self.map.missing_type_member(&self.module, &path.segments, codes::E0111) {
+            self.diags.push(d);
+            return;
+        }
         let mut d = Diagnostic::error(codes::E0111, format!("cannot find `{}`", name))
             .with_primary(path.span, "no such type or variant");
         if self.map.ambiguous_variants.iter().any(|a| a == name) {
@@ -2231,7 +2330,10 @@ impl<'a> FnResolver<'a> {
                 self.expr(rhs);
             }
             Expr::Call { callee, args, .. } => {
-                self.expr(callee);
+                match callee.as_ref() {
+                    Expr::Field { .. } => self.field_chain(callee, true),
+                    _ => self.expr(callee),
+                }
                 for a in args {
                     self.expr(a);
                 }
@@ -2241,17 +2343,7 @@ impl<'a> FnResolver<'a> {
             // associated function (`Rect.square`) — but only when its head is
             // not a local. Locals win, so a field named `print` on a value
             // called `io` still works.
-            Expr::Field { base, name, span } => {
-                if let Some(res) = self.try_dotted(base, name) {
-                    self.map.uses.insert(*span, res);
-                    return;
-                }
-                if let Some(d) = self.missing_member(base, name) {
-                    self.diags.push(d);
-                    return;
-                }
-                self.expr(base)
-            }
+            Expr::Field { .. } => self.field_chain(e, false),
             Expr::Index { base, index, .. } => {
                 self.expr(base);
                 self.expr(index);
@@ -2323,8 +2415,77 @@ impl<'a> FnResolver<'a> {
         }
     }
 
+    /// A run of field accesses, `a.b.c`, from the outside in: the longest
+    /// prefix that names something dotted wins, and what is left is fields.
+    ///
+    /// Walked as a loop over the links, and each link asked whether it can
+    /// be a dotted name only when it is short enough to be one: the head is
+    /// the same for every link, and a name has no more segments than the
+    /// longest declared, plus a variant or an associated function. Asking
+    /// every link, each spelling out its whole text, made `x.a.a.a…` of
+    /// 8,000 links take ten seconds.
+    ///
+    /// `called` when the chain is the callee of a call: only its outermost
+    /// link is what is called.
+    fn field_chain(&mut self, e: &Expr, called: bool) {
+        let mut links = Vec::new();
+        let mut head = e;
+        while let Expr::Field { base, name, span } = head {
+            links.push((&**base, name, *span));
+            head = base;
+        }
+        let head_segments = match head {
+            Expr::Path(p) if self.lookup(&p.segments[0].name).is_none() => Some(p.segments.len()),
+            _ => None,
+        };
+        // Only a long chain is worth the count of the longest name.
+        let limit = match head_segments {
+            Some(n) if n + links.len() > 8 => Some(self.longest_dotted_name() + 1),
+            _ => None,
+        };
+        for (i, &(base, name, span)) in links.iter().enumerate() {
+            let segments = head_segments.map(|n| n + links.len() - i);
+            let may_be_dotted = match (segments, limit) {
+                (None, _) => false,
+                (Some(n), Some(limit)) => n <= limit,
+                (Some(_), None) => true,
+            };
+            if may_be_dotted {
+                if let Some(res) = self.try_dotted(base, name) {
+                    self.map.uses.insert(span, res);
+                    return;
+                }
+            }
+            if let Some(d) = self.missing_member(base, name, called && i == 0) {
+                self.diags.push(d);
+                return;
+            }
+        }
+        self.expr(head)
+    }
+
+    /// How many segments the longest dotted name a body can reach has.
+    fn longest_dotted_name(&self) -> usize {
+        let segments = |n: &str| n.split('.').count();
+        let map = &*self.map;
+        map.fns
+            .iter()
+            .map(|f| segments(&f.name))
+            .chain(map.consts.iter().map(|c| segments(&c.name)))
+            .chain(map.types.iter().map(|t| segments(&t.name)))
+            .chain(BUILTIN_PATHS.iter().map(|p| segments(p)))
+            .max()
+            .unwrap_or(1)
+    }
+
     /// The `E0111` for `m.name` where `m` is a module this one imported and
     /// `name` is nothing in it.
+    ///
+    /// **The near name is one that fits where it is written.** Every public
+    /// name was a candidate, so `m.outer()` was offered `Outer`, a trait, and
+    /// `json.encode(v)` the trait `Encode` — fixes that do not compile. A
+    /// call is offered functions; anything else functions, constants and the
+    /// types a path can go on through (`m.Shape.Circle`), never a trait.
     ///
     /// The path fell through to being read as a field of a value called `m`,
     /// so a misspelled member — `m.on()` for `m.one()` — said ``cannot find
@@ -2334,7 +2495,7 @@ impl<'a> FnResolver<'a> {
     ///
     /// The modules in scope without a `use` — `io.prnt` — are the same
     /// mistake, and said the same way when one of their builtins is near.
-    fn missing_member(&self, base: &Expr, name: &Ident) -> Option<Diagnostic> {
+    fn missing_member(&self, base: &Expr, name: &Ident, called: bool) -> Option<Diagnostic> {
         let Expr::Path(p) = base else { return None };
         if !p.is_simple() || self.lookup(&p.text()).is_some() {
             return None;
@@ -2351,8 +2512,12 @@ impl<'a> FnResolver<'a> {
         let mut names: Vec<&str> = Vec::new();
         if imported.is_some() {
             names.extend(self.map.fns.iter().filter(|f| f.is_pub).map(|f| f.name.as_str()));
-            names.extend(self.map.consts.iter().filter(|c| c.is_pub).map(|c| c.name.as_str()));
-            names.extend(self.map.types.iter().filter(|t| t.is_pub).map(|t| t.name.as_str()));
+            if !called {
+                let consts = self.map.consts.iter().filter(|c| c.is_pub);
+                names.extend(consts.map(|c| c.name.as_str()));
+                let types = self.map.types.iter().filter(|t| t.is_pub && t.kind != TypeKind::Trait);
+                names.extend(types.map(|t| t.name.as_str()));
+            }
         }
         if builtin {
             names.extend(BUILTIN_PATHS.iter().copied());
@@ -2435,6 +2600,12 @@ impl<'a> FnResolver<'a> {
             }
             None if path.segments.len() > 1 && self.failed_use(&path.segments[0].name) => {}
             None => {
+                if let Some(d) =
+                    self.map.missing_type_member(&self.module, &path.segments, codes::E0204)
+                {
+                    self.diags.push(d);
+                    return;
+                }
                 let mut d =
                     Diagnostic::error(codes::E0204, format!("unknown type `{}`", path.name()))
                         .with_primary(path.span, "no such type in this module");
@@ -2498,7 +2669,16 @@ impl<'a> FnResolver<'a> {
             self.map.uses.insert(p.span, Res::Local(id));
             return;
         }
+        // A program's own constant shadows a prelude function, exactly as its
+        // own function does: `let max = 100` then `max + 1` is the constant.
+        // It was the prelude's `max` here and the constant in a pattern, so
+        // one name meant two things in one function.
+        let own_const = self.find_const(name).filter(|&c| !self.map.is_prelude(&self.map.consts[c as usize].name));
         if let Some(id) = self.find_fn(name) {
+            if let (Some(c), true) = (own_const, self.map.is_prelude(&self.map.fns[id as usize].name)) {
+                self.map.uses.insert(p.span, Res::Const(c));
+                return;
+            }
             self.map.uses.insert(p.span, Res::Fn(id));
             return;
         }

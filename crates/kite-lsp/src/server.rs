@@ -1091,18 +1091,25 @@ fn position_of(message: &Json, text: &str) -> Option<u32> {
     Some(offset_in(text, line, character))
 }
 
+/// The byte offset of an LSP position (a line, and a character counted in
+/// UTF-16 units). A `character` past the end of its line is the end of the
+/// line — before the line break, not after it, which would be the start of the
+/// next line: the protocol says to clamp, and a client that sends one is
+/// asking about the line it named.
 fn offset_in(text: &str, line: u32, character: u32) -> u32 {
     let mut offset = 0usize;
     for (n, line_text) in text.split_inclusive('\n').enumerate() {
         if n as u32 == line {
+            let content = line_text.strip_suffix('\n').unwrap_or(line_text);
+            let content = content.strip_suffix('\r').unwrap_or(content);
             let mut units = 0u32;
-            for (i, c) in line_text.char_indices() {
+            for (i, c) in content.char_indices() {
                 if units >= character {
                     return (offset + i) as u32;
                 }
                 units += c.len_utf16() as u32;
             }
-            return (offset + line_text.len()) as u32;
+            return (offset + content.len()) as u32;
         }
         offset += line_text.len();
     }
@@ -1404,5 +1411,26 @@ mod uri_tests {
         ] {
             assert_eq!(path_from_uri(&uri_from_path(path, windows), windows), path);
         }
+    }
+}
+
+#[cfg(test)]
+mod offset_tests {
+    use super::offset_in;
+
+    /// A character past the end of a line is the end of that line, not the
+    /// start of the next one (which is where adding the line break put it).
+    #[test]
+    fn a_character_past_the_line_is_the_end_of_the_line() {
+        let text = "ab\ncd\r\nef";
+        assert_eq!(offset_in(text, 0, 1), 1);
+        assert_eq!(offset_in(text, 0, 2), 2);
+        assert_eq!(offset_in(text, 0, 99), 2, "before the line break");
+        assert_eq!(offset_in(text, 1, 99), 5, "before the CR LF");
+        assert_eq!(offset_in(text, 2, 99), 9, "the last line, which has no break");
+        assert_eq!(offset_in(text, 7, 0), 9, "a line past the end is the end");
+        // UTF-16 units: an emoji is two.
+        assert_eq!(offset_in("😀x\n", 0, 2), 4);
+        assert_eq!(offset_in("😀x\n", 0, 3), 5);
     }
 }

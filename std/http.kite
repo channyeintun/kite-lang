@@ -150,7 +150,8 @@ pub fn not_found() -> Response {
 
 /// A response with any status code. Nothing is checked here, so that a
 /// handler can be tested whatever it builds; [`respond`] refuses a code outside
-/// 100 to 599, and [`run`] answers 500 in its place.
+/// 200 to 599 (a 1xx is never the last word) and a body on a 204 or a 304,
+/// and [`run`] answers 500 in its place.
 pub fn status(code: int, body: str) -> Response {
     return Response{ status: code, body: body, headers: "", outgoing: [] }
 }
@@ -161,8 +162,13 @@ pub fn status(code: int, body: str) -> Response {
 /// through [`respond`], so the same rules hold: a name that is not a token, or
 /// a line break, a control character or a character past U+00FF in a value, is
 /// not sent — `respond` says why, and [`run`] answers 500 instead of putting it
-/// on the wire. A name added twice goes out twice, which is what `Set-Cookie` needs, and a
-/// `Content-Type` here replaces the default `text/plain`. This is not what
+/// on the wire. A name that frames the message — `Content-Length`,
+/// `Transfer-Encoding`, `Connection`, `Keep-Alive`, `Upgrade`, `TE`, `Trailer`,
+/// `Proxy-Connection` — is refused the same way: the host knows the body's
+/// length in bytes and a handler does not, and a wrong one lets the body be
+/// read as the next response on the connection. A name added twice goes out
+/// twice, which is what `Set-Cookie` needs, and a `Content-Type` here replaces
+/// the default `text/plain`. This is not what
 /// [`header`] reads: that is what arrived, and a response built in Kite
 /// arrived from nowhere.
 ///
@@ -315,8 +321,10 @@ pub fn sending_with(headers: str) -> Options {
 /// Joined here from parts that arrive separately, which is what makes "the
 /// program meant two headers" and "a value added one" decidable, as it is for
 /// [`respond`]. A name that is not an HTTP token, or a value carrying a line
-/// break, is refused rather than stripped: there is no escaping that keeps
-/// the meaning.
+/// break, a NUL or another control character, or a character past U+00FF, is
+/// refused rather than stripped — as `respond` refuses it:
+/// there is no escaping that keeps the meaning, and the host would otherwise
+/// fail with its own wording.
 ///
 /// ```kite ignore
 /// let (opts, err) = http.sending_pairs([http.Header{ name: "x-user", value: name }])
@@ -334,6 +342,11 @@ pub fn sending_pairs(headers: [Header]) -> (Options, error) {
         }
         if has_nul(h.value) {
             return _, errors.new("http: the value of `\(h.name)` contains a NUL byte")
+        }
+        if !carriable(h.value) {
+            return _, errors.new(
+                "http: the value of `\(h.name)` contains a control character or one past U+00FF, which a header cannot carry; encode it first, with encode_component",
+            )
         }
         lines.push("\(h.name): \(h.value)")
     }
@@ -363,7 +376,15 @@ fn is_token(name: str) -> bool {
 /// The host drops a line with no colon without a word, so a value carrying a
 /// newline and then something that is not a header vanished rather than
 /// failing. A line break at the very end of a line is allowed, since `\r\n`
-/// between lines is a habit worth tolerating; one anywhere else is not.
+/// between lines is a habit worth tolerating; one anywhere else is not. A value
+/// the host cannot put on the wire is refused here, in Kite's words, rather than
+/// failing in the host's.
+///
+/// ```kite
+/// assert(header_lines_error("x-a: b\r\nx-c: d\r\n") == nil, "ordinary lines")
+/// assert(header_lines_error("x-price: 5\u{20AC}") != nil, "a character past U+00FF")
+/// assert(header_lines_error("x-name: caf\u{E9}\tok") == nil, "Latin-1 and a tab")
+/// ```
 fn header_lines_error(text: str) -> error {
     var n = 0
     for raw in split(text, "\n") {
@@ -378,6 +399,11 @@ fn header_lines_error(text: str) -> error {
         let at = line.index_of(":")
         if line.index_of("\r") >= 0 || at <= 0 || !is_token(line.slice(0, at).trim()) {
             return errors.new("http: header line \(n) is not `name: value`")
+        }
+        if !carriable(line.slice(at + 1, line.len())) {
+            return errors.new(
+                "http: header line \(n) has a control character or one past U+00FF in its value, which a header cannot carry; encode it first, with encode_component",
+            )
         }
     }
     return nil
@@ -1018,9 +1044,17 @@ pub fn request_header(request: Request, name: str) -> Option<str> {
     return nil
 }
 
-/// Every value of a request header that was sent more than once, in order,
+/// The value of every line of a request that names this header, in order,
 /// where [`request_header`] answers with the first. Names are compared ignoring
 /// case. Empty when the request carried none.
+///
+/// What counts as a line is the host's: the Node server joins a header sent
+/// twice into one line with a comma (`1, 2`, which RFC 9110 §5.3 says is the
+/// same header), so there it is one entry to split at the commas, and a host
+/// that keeps each line gives one entry for each. Node also joins `Cookie`
+/// with `; `, and keeps only the first of a header that may appear once
+/// (`Host`, `Content-Type`, `User-Agent`, `Authorization` and their kin). Do not
+/// split a header whose single value may hold a comma (`Date`, `User-Agent`).
 ///
 /// ```kite
 /// let r = Request{ method: "GET", path: "/", body: "", headers: "X-Tag: a\nx-tag: b\nOther: c" }
@@ -1235,6 +1269,10 @@ pub struct Header {
 /// else added one" decidable. It cannot be decided from the joined string, and
 /// the host is handed nothing else.
 ///
+/// A name that frames the message (`Content-Length`, `Transfer-Encoding`,
+/// `Connection` and their kin, see [`with_header`]) is refused too: the host
+/// writes the length, from the bytes it sends.
+///
 /// A name that is not a token, a name or value carrying a carriage return or a
 /// newline, and a value carrying a NUL byte, another control character or a
 /// character past U+00FF are refused rather than stripped:
@@ -1243,8 +1281,9 @@ pub struct Header {
 /// [`sending_pairs`] holds a request's to — a colon in a name would otherwise
 /// end it early and make the rest of it a header of its own.
 pub fn respond(incoming: Incoming, response: Response, headers: [Header]) -> error {
-    if !sendable_status(response.status) {
-        return errors.new("http.respond: `\(response.status)` is not a status HTTP sends (100 to 599)")
+    let unsent = status_refused(response)
+    if unsent != nil {
+        return unsent
     }
     var all = headers
     for h in response.outgoing {
@@ -1264,11 +1303,35 @@ pub fn respond(incoming: Incoming, response: Response, headers: [Header]) -> err
     return errors.new("http.respond: that request was already answered")
 }
 
-/// Whether a status is one the host will write: three digits, 100 to 599.
-/// Anything else made it refuse the whole response, and `respond` then blamed a
-/// header or an answer already given for what was a bad number.
+/// Whether a status is one a response can end with: 200 to 599. A 1xx is an
+/// interim answer, after which the real one is still to come, so a connection
+/// that was given one as the last word has its next answer taken for this
+/// request's; and anything outside three digits made the host refuse the whole
+/// response, and `respond` then blamed a header or an answer already given for
+/// what was a bad number.
 fn sendable_status(code: int) -> bool {
-    return code >= 100 && code <= 599
+    return code >= 200 && code <= 599
+}
+
+/// Why a response cannot be sent for its status and body, or nil: a status that
+/// is not a final one, or a body on a 204 or a 304, which by definition have
+/// none (the host would drop it, and the program should hear that it was not
+/// sent).
+///
+/// ```kite
+/// assert(status_refused(ok("x")) == nil, "an ordinary answer")
+/// assert(status_refused(status(100, "")) != nil, "an interim one is not final")
+/// assert(status_refused(status(204, "")) == nil, "no content, and none given")
+/// assert(status_refused(status(304, "stale")) != nil, "a body where there is none")
+/// ```
+fn status_refused(response: Response) -> error {
+    if !sendable_status(response.status) {
+        return errors.new("http.respond: `\(response.status)` is not a status HTTP sends (200 to 599)")
+    }
+    if (response.status == 204 || response.status == 304) && response.body.len() > 0 {
+        return errors.new("http.respond: a \(response.status) has no body, and this one has \(response.body.len()) characters")
+    }
+    return nil
 }
 
 /// The headers as the `name: value` lines the host takes, or why they cannot go.
@@ -1280,6 +1343,11 @@ fn header_lines(headers: [Header]) -> (str, error) {
         }
         if !is_token(h.name) {
             return _, errors.new("http.respond: `\(h.name)` is not a header name")
+        }
+        if frames_the_message(h.name) {
+            return _, errors.new(
+                "http.respond: `\(h.name)` frames the message, which only the host can do, from the body's length in bytes; leave it out",
+            )
         }
         if breaks_a_line(h.value) {
             return _, errors.new("http.respond: the value of `\(h.name)` contains a line break")
@@ -1295,6 +1363,22 @@ fn header_lines(headers: [Header]) -> (str, error) {
         lines.push("\(h.name): \(h.value)")
     }
     return join(lines, "\n"), nil
+}
+
+/// Whether a header name is one that says where a message ends or how the
+/// connection is used. A handler that wrote one could make the end of its own
+/// body the start of the next response (a `Content-Length` shorter than the
+/// body, or counted in characters), so the host alone writes them.
+///
+/// ```kite
+/// assert(frames_the_message("Content-Length"), "in any case")
+/// assert(!frames_the_message("content-type"), "a type is the handler's")
+/// let (_, why) = header_lines([Header{ name: "transfer-encoding", value: "gzip" }])
+/// assert(why != nil, "and a response that names one is refused")
+/// ```
+fn frames_the_message(name: str) -> bool {
+    let n = lower(name)
+    return n == "content-length" || n == "transfer-encoding" || n == "connection" || n == "keep-alive" || n == "upgrade" || n == "te" || n == "trailer" || n == "proxy-connection"
 }
 
 /// Whether every character of a value is one a header can carry: a tab, a
@@ -1337,7 +1421,8 @@ fn has_nul(text: str) -> bool {
 /// that way.
 ///
 /// A handler's headers — those it added with [`with_header`] — are sent. One
-/// the host would refuse, or a status outside 100 to 599 (see [`respond`]),
+/// the host would refuse, or a status outside 200 to 599 or a body on a 204 or
+/// 304 (see [`respond`]),
 /// makes the answer a 500 and the server carries on.
 ///
 /// Shutting the server is how this ends well: once it is shut and every
@@ -1362,7 +1447,7 @@ pub async fn run(server: Server, routes: [Route]) -> (int, error) {
         // server's: say 500 to this one caller and go on serving, rather than
         // let one bad route end the loop for everybody.
         let (_, unsendable) = header_lines(answer.outgoing)
-        if unsendable != nil || !sendable_status(answer.status) {
+        if unsendable != nil || status_refused(answer) != nil {
             answer = status(500, "the handler produced a response this server will not send")
         }
         let none: [Header] = []

@@ -580,7 +580,7 @@ WasmGC structs.**
 
 ```bash
 kitec build examples/hello.kite --emit wasm --out dist
-# wrote dist/app.wasm (1009 bytes) and dist/app.js
+# wrote dist/app.wasm (1009 bytes), dist/app.js and dist/app.wasm.map
 ```
 
 **1,009 bytes**, against a 10 KB budget. Shipping no garbage collector is what
@@ -2680,7 +2680,9 @@ Nesting or a declared dependency is the answer until there is a syntax for it.
 *Later:* no syntax was needed. A `use` is looked for beside the importing
 module's own files first, then in each enclosing directory outward, stopping at
 the package's root — the entry file's directory, or the dependency's own — and
-the nearest match wins. So `ui/` reaches `config/` beside it, §13.1's own tree
+the nearest match wins. (The program's root was later made the directory of its
+`kite.toml` when it has one, so a file tested on its own resolves what it
+resolves when `main.kite` is the entry.) So `ui/` reaches `config/` beside it, §13.1's own tree
 compiles and is a test, a module's own nested `config/` still comes first, and
 a dependency still cannot resolve into the program that imports it. A module is
 still where its source is: `use config` from `ui/` and from the entry reach the

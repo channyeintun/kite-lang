@@ -807,8 +807,7 @@ refreshes the module beside it:
 
 ```
 $ kitec build main.kite --emit wasm --out .
-  and ./api.js with ./api.d.ts
-wrote ./app.wasm (2743 bytes) and ./app.js
+wrote ./app.wasm (2743 bytes), ./app.js, ./app.wasm.map, ./api.js and ./api.d.ts
 note: ./index.html was already there and was left alone
 ```
 
@@ -1110,7 +1109,10 @@ Server: `open(port) -> (Server, error)` async (port 0 asks the host to choose),
 text**, because a newline in a value would otherwise become a separator; it
 refuses a name that is not a token, a line break in either, a NUL, another
 control character or a character past U+00FF in a value (percent-encode it
-first), and a status outside 100 to 599 ·
+first), a name that frames the message (`Content-Length`, `Transfer-Encoding`,
+`Connection`, `Keep-Alive`, `Upgrade`, `TE`, `Trailer`, `Proxy-Connection`: the host writes
+the length), and a
+status outside 200 to 599 (a 1xx is interim, never the last word) or a body on a 204 or 304 ·
 `run(server, [Route]) -> (int, error)` sends the headers a handler added with
 `with_header(response, name, value)`, and answers 500 (and carries on) to a
 handler whose header or status `respond` would refuse · `serve_closed` · `shut`. Once a
@@ -1512,7 +1514,11 @@ no tests in `proj/src/main.kite`: a test is a `fn test_…()` taking no argument
 
 Pointing `kitec test` at the module file instead recompiles that file alone, so
 everything it took from its siblings is gone —
-`error[E0204]: unknown type 'Amount'` for a struct declared next door.
+`error[E0204]: unknown type 'Amount'` for a struct declared next door. (What it
+*imports* is still found as the program finds it, when the package has a
+`kite.toml`: the walk outward stops at the manifest's directory, not at the
+file's. Without a manifest the file's own directory is the root.) `kitec test`
+and `kitec doc` take a file, not a directory: `kitec test lib` is `cannot read`.
 
 So a module's tests are runnable exactly two ways. Either they live in the same
 file as the code they test, and that file is self-contained — one file *is* a
@@ -1948,6 +1954,11 @@ obeyed: `kitec test --native`, `kitec check --emit wasm` and `kitec fmt
 
 Notes worth having:
 
+- **`kitec fmt` is idempotent for every input, or it refuses.** A file that
+  does not parse still formats (the layout reads tokens), but its brackets are
+  guesses, so the formatter lays a file out again until it stops changing and
+  writes that; a file that never settles is refused with a message and left as
+  it was.
 - **`kitec run` is the bytecode VM.** It supplies the `fs` host group and
   nothing else. `--native` runs the same program as machine code under a JIT.
   It exits 1 on a trap and 0 on everything else — see *The whole command-line

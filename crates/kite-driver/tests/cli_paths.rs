@@ -414,3 +414,24 @@ fn a_source_reached_through_a_link_is_named_as_it_is_on_disk() {
     assert!(map.contains("\"sources\":[\"../src/main.kite\""), "{}", &map[..map.len().min(200)]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A program whose `kite.toml` is above its entry names its imported modules'
+/// files as the entry was named: relative to where `kitec` runs.
+///
+/// The package's root became the manifest's directory, spelled from the top,
+/// so every diagnostic in a module beside `src/main.kite` named its file by
+/// an absolute path, while the entry's own were relative.
+#[test]
+fn a_module_beside_an_entry_below_its_manifest_is_named_relatively() {
+    let dir = scratch("manifest-above", "kite.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n");
+    std::fs::create_dir_all(dir.join("src")).expect("src");
+    std::fs::write(dir.join("src/main.kite"), "use money\n\nfn main() {\n    io.print(money.one())\n}\n")
+        .expect("write");
+    std::fs::write(dir.join("src/money.kite"), "pub fn one() -> int {\n    return \"one\"\n}\n").expect("write");
+    let Some((ok, _, from_above)) = kitec_in(&dir, &["check", "src/main.kite"]) else { return };
+    assert!(!ok);
+    assert!(from_above.contains("─ src/money.kite:2:"), "{}", from_above);
+    let Some((_, _, from_inside)) = kitec_in(&dir.join("src"), &["check", "main.kite"]) else { return };
+    assert!(from_inside.contains("─ ../src/money.kite:2:"), "{}", from_inside);
+    let _ = std::fs::remove_dir_all(&dir);
+}

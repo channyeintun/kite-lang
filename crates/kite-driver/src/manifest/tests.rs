@@ -510,6 +510,9 @@ fn an_inline_table_takes_no_trailing_comma_and_no_repeated_key() {
     assert!(err.message.contains("trailing comma"), "{}", err);
     let err = parse(&format!("{head}x = {{ path = \"p\",, version = \"1\" }}\n")).expect_err("empty");
     assert!(err.message.contains("empty field"), "{}", err);
+    // One comma, before the first field: not "between two commas".
+    let err = parse(&format!("{head}x = {{ , path = \"p\" }}\n")).expect_err("leading comma");
+    assert!(err.message.contains("no comma before its first field"), "{}", err);
     let err = parse(&format!("{head}x = {{ path = \"p\", path = \"q\" }}\n")).expect_err("twice");
     assert!(err.message.contains("`path` is written twice"), "{}", err);
 }
@@ -527,6 +530,20 @@ fn a_source_with_a_backslash_or_a_quote_reads_back() {
     }];
     let back = parse_lockfile(&lockfile(&entries)).expect("reads");
     assert_eq!(back, entries);
+}
+
+/// A key written twice in one `[[locked]]` entry is refused at the second, as
+/// the manifest refuses one. The last one won.
+#[test]
+fn a_lockfile_entry_takes_each_key_once() {
+    let text = "[[locked]]\nname = \"a\"\nversion = \"1.0.0\"\nsource = \"../a\"\n\
+                hash = \"00\"\nhash = \"11\"\n";
+    let err = parse_lockfile(text).expect_err("two hashes");
+    assert_eq!(err.line, 6, "{}", err);
+    assert!(err.message.contains("`hash` is written twice"), "{}", err);
+    // Two entries each with their own keys are fine.
+    let one = text.replace("hash = \"11\"\n", "");
+    assert_eq!(parse_lockfile(&format!("{}\n{}", one, one)).expect("reads").len(), 2);
 }
 
 #[test]

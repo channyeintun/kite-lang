@@ -355,6 +355,11 @@ pub async fn password_hash(password: str) -> (str, error) {
 }
 
 /// Whether a password matches something `password_hash` produced.
+///
+/// A stored hash that is not what `password_hash` writes — a part missing, an
+/// iteration count that is not a positive number, a salt that is not hex, a
+/// digest that is not 64 hex characters — is an error, so that a damaged record
+/// is told apart from a wrong password.
 pub async fn password_verify(password: str, stored: str) -> (bool, error) {
     let parts = split(stored, "$")
     if parts.len() != 4 {
@@ -367,9 +372,21 @@ pub async fn password_verify(password: str, stored: str) -> (bool, error) {
     if iterations <= 0 {
         return _, errors.new("crypto: stored hash has no iteration count")
     }
+    // A stored hash that is damaged is an error and never an answer: the host
+    // reads a pair that is not hex as zero, so a salt of `zz` verified as the
+    // salt `00` did, and a damaged digest could only say "no" to the right
+    // password, which is not the same as the hash being unreadable.
+    let (_, salt_err) = bytes_of_hex(parts[2])
+    if salt_err != nil {
+        return _, errors.new("crypto: stored hash's salt is not hex")
+    }
+    let (_, digest_err) = bytes_of_hex(parts[3])
+    if digest_err != nil || parts[3].len() != 64 {
+        return _, errors.new("crypto: stored hash's digest is not 64 hex characters")
+    }
     let (digest, err) = await finish(derive_start(password, parts[2], iterations), "pbkdf2")
     check err
-    return equal(digest, parts[3]), nil
+    return equal(digest, lower(parts[3])), nil
 }
 
 // ---- keys -------------------------------------------------------------------

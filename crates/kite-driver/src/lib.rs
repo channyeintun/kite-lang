@@ -631,6 +631,8 @@ struct Input {
 struct Found {
     inputs: Vec<(std::path::PathBuf, String)>,
     tests: Vec<TestFn>,
+    /// See [`modules::shown`].
+    marked: Vec<String>,
 }
 
 fn compile_reading(
@@ -647,7 +649,11 @@ fn compile_reading(
     let path = path.as_ref().to_path_buf();
     let file = sources.add(&path, src);
     let mut diags = DiagBag::new();
-    let mut found = Found { inputs: vec![(path.clone(), src.to_string())], tests: Vec::new() };
+    let mut found = Found {
+        inputs: vec![(path.clone(), src.to_string())],
+        tests: Vec::new(),
+        marked: Vec::new(),
+    };
     let (output, chunk, wasm, native, index) = run_passes(
         prelude,
         file,
@@ -660,7 +666,19 @@ fn compile_reading(
         &mut diags,
     );
 
-    let Found { inputs, tests: test_fns } = found;
+    let Found { inputs, tests: test_fns, marked } = found;
+    if !marked.is_empty() {
+        for i in 0..diags.len() {
+            let Some(d) = diags.get_mut(i) else { continue };
+            d.message = modules::shown(&d.message, &marked);
+            for label in &mut d.labels {
+                label.message = modules::shown(&label.message, &marked);
+            }
+            for note in &mut d.notes {
+                *note = modules::shown(note, &marked);
+            }
+        }
+    }
     let mut c =
         Compilation { sources, diags, output, chunk, wasm, native, index, inputs, test_fns };
     // The standard library's own advice is not the user's to act on.
@@ -787,6 +805,7 @@ fn run_passes(
         None => modules::Loader::load_from(&ast, dir, input.provided, input.files, sources, diags),
     };
     found.inputs.append(&mut loader.inputs);
+    found.marked = loader.marked();
 
     // Every item's module, aligned with the merged item list. The program's own
     // items and the prelude's are the root module.

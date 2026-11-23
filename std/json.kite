@@ -23,6 +23,8 @@
 // float nearest what the document wrote — `0.3` is 0.3 — and one too large
 // for a float is an error.
 
+use std/math
+
 /// A JSON value.
 ///
 /// Recursive with no boxing annotation, because every Kite aggregate is
@@ -806,8 +808,12 @@ fn whole_number(n: float) -> Option<int> {
     if !(n >= -9223372036854775808.0 && n < 9223372036854775808.0) {
         return nil
     }
-    let whole = n as int
-    if (whole as float) != n {
+    // `trunc_to` and a subtraction, which say the truncation and the exact
+    // comparison are meant: a bare `as int` or `!=` on floats warns, and the
+    // warning showed whenever this file was itself the test entry.
+    let whole = math.trunc_to(n)
+    let rest = n - (whole as float)
+    if rest > 0.0 || rest < 0.0 {
         return nil
     }
     return whole
@@ -937,17 +943,21 @@ pub fn keys(value: Option<Json>) -> [str] {
 /// The value at a dotted path, or nil: `path(doc, "users.0.name")`.
 ///
 /// Each segment is a key of an object, or, when the value so far is an array
-/// and the segment is a whole number, an index into it. A key that itself
-/// contains a dot, or that is a number on an object, cannot be named this way;
-/// chain [`field`] and [`at`] for those. An empty path is the value itself.
+/// and the segment is a whole number, an index into it. On an object a segment
+/// is always a key, so `"1"` names the key `"1"`; on an array a segment is read
+/// as a whole number, so `"01"` is the index 1. A key that itself contains a
+/// dot cannot be named this way; chain [`field`] and [`at`] for it. An empty
+/// path is the value itself, and a trailing dot names the key `""`.
 ///
 /// ```kite
-/// let (doc, err) = parse("{\"users\": [{\"name\": \"ada\"}]}")
+/// let (doc, err) = parse("{\"users\": [{\"name\": \"ada\"}], \"1\": \"one\"}")
 /// if err != nil {
 ///     return
 /// }
 /// assert(text(path(doc, "users.0.name")) == "ada", "through an object, an array, an object")
 /// assert(path(doc, "users.1.name") == nil, "past the end")
+/// assert(text(path(doc, "1")) == "one", "a number on an object is a key")
+/// assert(text(path(doc, "users.00.name")) == "ada", "and on an array, an index with zeros")
 /// ```
 pub fn path(value: Option<Json>, dotted: str) -> Option<Json> {
     var here = value

@@ -30,6 +30,7 @@
 //! that is not.
 
 use kite_hir::{Pattern, TyId, TyKind, Types};
+use std::collections::{HashMap, HashSet};
 
 /// How many missing cases one diagnostic names. Past a handful a list stops
 /// being read; the first few say what kind of case was forgotten.
@@ -39,7 +40,7 @@ const MAX_WITNESSES: usize = 16;
 pub struct Missing(pub String);
 
 /// A constructor: what the first step of matching a value decides.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Ctor {
     Variant(u32),
     Bool(bool),
@@ -52,7 +53,7 @@ enum Ctor {
     Lit(Lit),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Lit {
     Int(i64),
     Float(u64),
@@ -111,14 +112,23 @@ fn signature(ty: TyId, types: &Types) -> Signature {
 }
 
 /// The types of a constructor's fields, for a column of type `ty`.
+///
+/// Looked up directly rather than found in [`signature`], which lists every
+/// variant: this is asked once per row a match is checked against, and for
+/// an enum of thousands of variants building that list each time made the
+/// check quadratic.
 fn fields_of(ctor: &Ctor, ty: TyId, types: &Types) -> Vec<TyId> {
-    match signature(ty, types) {
-        Signature::Finite(all) => all
-            .into_iter()
-            .find(|(c, _)| c == ctor)
-            .map(|(_, fs)| fs)
+    match (ctor, types.kind(ty)) {
+        (Ctor::Variant(v), TyKind::Enum(e)) => types
+            .enum_def(*e)
+            .variants
+            .get(*v as usize)
+            .map(|v| v.fields.iter().map(|f| f.ty).collect())
             .unwrap_or_default(),
-        Signature::Infinite => Vec::new(),
+        (Ctor::Present, TyKind::Optional(inner)) => vec![*inner],
+        (Ctor::Single, TyKind::Tuple(elems)) => elems.clone(),
+        (Ctor::Single, TyKind::Struct(s)) => types.struct_def(*s).fields.iter().map(|f| f.ty).collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -203,7 +213,14 @@ fn push_expanded(row: Row, out: &mut Vec<Row>) {
 /// or a `5..=7` reaches nothing new.
 fn specialise(rows: &[Row], ctor: &Ctor, arity: usize) -> Vec<Row> {
     let mut out = Vec::new();
-    for r in expand(rows) {
+    // Only a row that has an or-pattern first is expanded, and only a row
+    // that reaches `ctor` is copied: copying every row for each constructor
+    // made a match of thousands of arms quadratic in allocations.
+    for r in rows {
+        if matches!(r[0], Pat::Or(_)) {
+            out.extend(specialise(&expand(std::slice::from_ref(r)), ctor, arity));
+            continue;
+        }
         let fields: Vec<Pat> = match &r[0] {
             Pat::Any => vec![Pat::Any; arity],
             Pat::Ctor(c, _) if covers(c, ctor) => Vec::new(),
@@ -247,24 +264,42 @@ fn covers(row: &Ctor, q: &Ctor) -> bool {
 /// The rows whose first column matches anything, without that column: what
 /// is left for a constructor no row names.
 fn default(rows: &[Row]) -> Vec<Row> {
-    expand(rows)
-        .into_iter()
-        .filter(|r| matches!(r[0], Pat::Any))
-        .map(|r| r[1..].to_vec())
-        .collect()
-}
-
-/// The constructors named in the first column.
-fn heads(rows: &[Row]) -> Vec<Ctor> {
-    let mut out: Vec<Ctor> = Vec::new();
-    for r in expand(rows) {
-        if let Pat::Ctor(c, _) = &r[0] {
-            if !out.contains(c) {
-                out.push(c.clone());
-            }
+    let mut out = Vec::new();
+    for r in rows {
+        match r[0] {
+            Pat::Any => out.push(r[1..].to_vec()),
+            Pat::Or(_) => out.extend(default(&expand(std::slice::from_ref(r)))),
+            Pat::Ctor(..) => {}
         }
     }
     out
+}
+
+/// The constructors named in the first column. A set, because what is asked
+/// of it is whether one is named, once per constructor of the column's type:
+/// a list made that quadratic in the arms of a large `match`.
+fn heads(rows: &[Row]) -> HashSet<Ctor> {
+    let mut out = HashSet::new();
+    collect_heads(rows, &mut out);
+    out
+}
+
+fn names_every(named: &HashSet<Ctor>, all: &[(Ctor, Vec<TyId>)]) -> bool {
+    all.iter().all(|(c, _)| named.contains(c))
+}
+
+fn collect_heads(rows: &[Row], out: &mut HashSet<Ctor>) {
+    for r in rows {
+        match &r[0] {
+            Pat::Ctor(c, _) => {
+                if !out.contains(c) {
+                    out.insert(c.clone());
+                }
+            }
+            Pat::Or(_) => collect_heads(&expand(std::slice::from_ref(r)), out),
+            Pat::Any => {}
+        }
+    }
 }
 
 /// How many steps the algorithm may take on one `match`. Far beyond what a
@@ -302,7 +337,7 @@ fn useful(rows: &[Row], q: &[Pat], tys: &[TyId], types: &Types, work: &mut usize
         Pat::Any => match signature(ty, types) {
             // Every constructor is named somewhere, so a value is uncovered
             // only if it is uncovered under one of them.
-            Signature::Finite(all) if all.iter().all(|(c, _)| heads(rows).contains(c)) => {
+            Signature::Finite(all) if names_every(&heads(rows), &all) => {
                 all.iter().any(|(c, ftys)| {
                     let mut next = vec![Pat::Any; ftys.len()];
                     next.extend(q[1..].iter().cloned());
@@ -346,11 +381,27 @@ fn missing(rows: &[Row], tys: &[TyId], types: &Types, top: bool, work: &mut usiz
             } else {
                 Vec::new()
             };
+            // The rows each constructor reaches: those naming it, and the
+            // catch-alls, in order. Found once, rather than by a pass over
+            // every row for each of the type's constructors. A finite type
+            // has no ranges, so naming it is the only way to cover it.
+            let mut naming: HashMap<&Ctor, Vec<usize>> = HashMap::new();
+            let mut catch_all = Vec::new();
+            for (i, r) in rows.iter().enumerate() {
+                match &r[0] {
+                    Pat::Ctor(c, _) => naming.entry(c).or_default().push(i),
+                    _ => catch_all.push(i),
+                }
+            }
             for (c, ftys) in &all {
                 let found: Vec<Vec<Wit>> = if present.contains(c) {
                     let mut next_tys = ftys.clone();
                     next_tys.extend_from_slice(&tys[1..]);
-                    missing(&specialise(&rows, c, ftys.len()), &next_tys, types, false, work)
+                    let mut reach: Vec<usize> = naming.get(c).cloned().unwrap_or_default();
+                    reach.extend_from_slice(&catch_all);
+                    reach.sort_unstable();
+                    let reached: Vec<Row> = reach.iter().map(|&i| rows[i].clone()).collect();
+                    missing(&specialise(&reached, c, ftys.len()), &next_tys, types, false, work)
                         .into_iter()
                         .map(|w| {
                             let (fields, rest) = w.split_at(ftys.len());
@@ -461,16 +512,50 @@ pub fn missing_patterns(scrutinee: TyId, patterns: &[&Pattern], types: &Types) -
 /// arm above it already took. Indices into `arms`, whose flag says whether an
 /// arm has a guard — a guarded arm may be unreachable itself, but it shadows
 /// nothing, because its guard may fail.
+///
+/// An arm that names a constructor is asked about only against the rows
+/// that can reach it — those naming the same one, the catch-alls and
+/// or-patterns, and the ranges — which is all its usefulness looks at
+/// anyway. Asking against every arm above it made a generated `match` of
+/// thousands of arms take seconds to check.
 pub fn unreachable_arms(scrutinee: TyId, arms: &[(&Pattern, bool)], types: &Types) -> Vec<usize> {
     let mut rows: Vec<Row> = Vec::new();
+    let mut naming: HashMap<Ctor, Vec<usize>> = HashMap::new();
+    let mut others: Vec<usize> = Vec::new();
     let mut out = Vec::new();
     let mut work = WORK;
     for (i, (p, guarded)) in arms.iter().enumerate() {
         let row = vec![lower(p, scrutinee, types)];
-        if !useful(&rows, &row, &[scrutinee], types, &mut work) {
+        let reachable = match &row[0] {
+            Pat::Ctor(c, _) => {
+                let mut reach = others.clone();
+                reach.extend(naming.get(c).into_iter().flatten());
+                // A literal is covered by the same value spelled as a
+                // one-value range too, and the other way round.
+                if let Some((v, w)) = int_span(c) {
+                    if v == w {
+                        let as_lit = Ctor::Lit(Lit::Int(v));
+                        if as_lit != *c {
+                            reach.extend(naming.get(&as_lit).into_iter().flatten());
+                        }
+                    }
+                }
+                reach.sort_unstable();
+                let rows: Vec<Row> = reach.iter().map(|&r| rows[r].clone()).collect();
+                useful(&rows, &row, &[scrutinee], types, &mut work)
+            }
+            _ => useful(&rows, &row, &[scrutinee], types, &mut work),
+        };
+        if !reachable {
             out.push(i);
         }
         if !guarded {
+            match &row[0] {
+                Pat::Ctor(c, _) if !matches!(c, Ctor::Lit(Lit::Range(..))) => {
+                    naming.entry(c.clone()).or_default().push(rows.len())
+                }
+                _ => others.push(rows.len()),
+            }
             rows.push(row);
         }
     }
@@ -850,6 +935,39 @@ mod tests {
         let point = variant(eid, 2, 0);
         let arms = [(&point, true), (&point, false)];
         assert!(unreachable_arms(ty, &arms, &types).is_empty());
+    }
+
+    /// Each arm is asked only against the arms that can reach it; these are
+    /// the ones a lookup by constructor could miss — a one-value range after
+    /// its literal and the other way round, an or-pattern, a catch-all.
+    #[test]
+    fn a_large_match_finds_what_shadows_each_arm_whatever_its_form() {
+        let types = Types::new();
+        let mut ps: Vec<Pattern> = (0..2000).map(Pattern::Int).collect();
+        ps.push(Pattern::IntRange { start: 7, end: 7, inclusive: true });
+        ps.push(Pattern::IntRange { start: 5000, end: 5001, inclusive: false });
+        ps.push(Pattern::Int(5000));
+        ps.push(Pattern::Or(vec![Pattern::Int(6000), Pattern::Int(6001)]));
+        ps.push(Pattern::Int(6001));
+        ps.push(Pattern::Int(1999));
+        ps.push(any());
+        ps.push(Pattern::Int(7000));
+        assert_eq!(unreachable(TyId::INT, &ps, &types), vec![2000, 2002, 2004, 2005, 2007]);
+
+        let mut ps: Vec<Pattern> = (0..2000).map(|i| Pattern::Str(format!("k{}", i))).collect();
+        ps.push(Pattern::Str("k3".to_string()));
+        ps.push(any());
+        assert_eq!(unreachable(TyId::STR, &ps, &types), vec![2000]);
+
+        let mut types = Types::new();
+        let (eid, ty) = shape(&mut types);
+        let ps = [
+            Pattern::Or(vec![variant(eid, 2, 0), variant(eid, 0, 1)]),
+            variant(eid, 2, 0),
+            variant(eid, 1, 2),
+            variant(eid, 0, 1),
+        ];
+        assert_eq!(unreachable(ty, &ps, &types), vec![1, 3]);
     }
 
     /// Literals compare exactly, and a range above one holding every value it

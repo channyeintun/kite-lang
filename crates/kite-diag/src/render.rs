@@ -199,20 +199,24 @@ fn render_snippet(
     let _ = writeln!(out, "{}", bar);
 
     let mut prev_line: Option<u32> = None;
+    let mut view = View::whole();
     for p in placed {
+        let on_line = |q: &&Placed| q.line == p.line;
+        let spans: Vec<(usize, usize)> =
+            placed.iter().filter(on_line).map(|q| (q.col, q.width)).collect();
         match prev_line {
             // Same line as the previous label: the source line is already
             // printed, so only add the underline.
             Some(prev) if prev == p.line => {}
             Some(prev) if p.line == prev + 1 => {
-                print_source_line(out, file, p.line, gutter);
+                view = print_source_line(out, file, p.line, gutter, &spans);
             }
             Some(prev) if p.line > prev + 1 => {
                 let _ = writeln!(out, "{:>w$}⋮", "", w = gutter + 1);
-                print_source_line(out, file, p.line, gutter);
+                view = print_source_line(out, file, p.line, gutter, &spans);
             }
             _ => {
-                print_source_line(out, file, p.line, gutter);
+                view = print_source_line(out, file, p.line, gutter, &spans);
             }
         }
 
@@ -220,8 +224,9 @@ fn render_snippet(
             LabelStyle::Primary => '^',
             LabelStyle::Secondary => '-',
         };
+        let (col, width) = view.place(p.col, p.width);
         let _ = write!(out, "{:>w$}│ ", "", w = gutter + 1);
-        let _ = write!(out, "{}{}", " ".repeat(p.col), mark.to_string().repeat(p.width));
+        let _ = write!(out, "{}{}", " ".repeat(col), mark.to_string().repeat(width));
         if p.message.is_empty() {
             let _ = writeln!(out);
         } else {
@@ -234,14 +239,107 @@ fn render_snippet(
     let _ = writeln!(out, "{}", bar);
 }
 
-fn print_source_line(out: &mut String, file: &kite_span::SourceFile, line: u32, gutter: usize) {
-    let _ = writeln!(
-        out,
-        "{:>w$} │ {}",
-        line,
-        expand_tabs(file.line_text(line)),
-        w = gutter
-    );
+/// Print a source line, cut to a window if it is wider than a terminal, and
+/// say which window so the underline can follow it. `labels` are the drawn
+/// `(column, width)` of what is underlined on the line.
+fn print_source_line(
+    out: &mut String,
+    file: &kite_span::SourceFile,
+    line: u32,
+    gutter: usize,
+    labels: &[(usize, usize)],
+) -> View {
+    let (text, view) = windowed(&expand_tabs(file.line_text(line)), labels);
+    let _ = writeln!(out, "{:>w$} │ {}", line, text, w = gutter);
+    view
+}
+
+/// The widest a quoted source line is drawn. A diagnostic quotes the line it is
+/// about once per label, so without a limit a one-line file of 9 KB with 3,000
+/// errors printed 40 MB, and a minified or generated file is the ordinary
+/// case of that. Past this the line is shown as a window around what the
+/// diagnostic points at, with `…` on each side that was cut.
+const MAX_LINE_WIDTH: usize = 140;
+
+/// Which part of a drawn line is shown: the columns `start..end` of it, and
+/// whether an ellipsis stands before it (which moves everything one column).
+#[derive(Clone, Copy)]
+struct View {
+    start: usize,
+    end: usize,
+    left: bool,
+}
+
+impl View {
+    /// The whole line.
+    fn whole() -> View {
+        View { start: 0, end: usize::MAX, left: false }
+    }
+
+    /// Where a label drawn at `col` for `width` columns lands in the view, as
+    /// a column and a width. One that lies outside is drawn as a single mark
+    /// at the nearer edge, so its message is still printed.
+    fn place(&self, col: usize, width: usize) -> (usize, usize) {
+        let shift = usize::from(self.left);
+        let from = col.max(self.start);
+        let to = (col + width).min(self.end);
+        if self.end == usize::MAX {
+            return (col, width);
+        }
+        if to > from {
+            (from - self.start + shift, to - from)
+        } else if col >= self.end {
+            (self.end - self.start + shift, 1)
+        } else {
+            (0, 1)
+        }
+    }
+}
+
+/// `text` (already drawn: no tabs) cut to a window of at most
+/// [`MAX_LINE_WIDTH`] columns that holds the first of `labels` — and the rest
+/// of them where that fits — and the view that says what was kept.
+fn windowed(text: &str, labels: &[(usize, usize)]) -> (String, View) {
+    let total = drawn_width(text);
+    if total <= MAX_LINE_WIDTH {
+        return (text.to_string(), View::whole());
+    }
+    let first = labels.first().copied().unwrap_or((0, 1));
+    let lo = labels.iter().map(|l| l.0).min().unwrap_or(0);
+    let hi = labels.iter().map(|l| l.0 + l.1).max().unwrap_or(1);
+    let (lo, hi) = if hi - lo <= MAX_LINE_WIDTH - 24 {
+        (lo, hi)
+    } else {
+        (first.0, (first.0 + first.1).min(first.0 + MAX_LINE_WIDTH - 24))
+    };
+    let room = MAX_LINE_WIDTH.saturating_sub(hi - lo);
+    let mut start = lo.saturating_sub(room / 2);
+    let mut end = (start + MAX_LINE_WIDTH).min(total);
+    start = end.saturating_sub(MAX_LINE_WIDTH).min(start);
+    end = end.max(start);
+    let mut kept = String::new();
+    let (mut col, mut shown) = (0usize, true);
+    for c in text.chars() {
+        let w = column_width(c);
+        // A mark that combines with the character before it goes with it.
+        if w > 0 {
+            shown = col >= start && col + w <= end;
+        }
+        if shown {
+            kept.push(c);
+        }
+        col += w;
+    }
+    let (left, right) = (start > 0, end < total);
+    let mut out = String::with_capacity(kept.len() + 6);
+    if left {
+        out.push('…');
+    }
+    out.push_str(&kept);
+    if right {
+        out.push('…');
+    }
+    (out, View { start, end, left })
 }
 
 /// How wide a tab is drawn. A tab is printed as this many spaces rather than
@@ -296,7 +394,11 @@ fn column_width(c: char) -> usize {
         (0x1F900, 0x1F9FF), (0x1FA70, 0x1FAFF), (0x20000, 0x3FFFD),
     ];
     let n = c as u32;
-    if c == '\t' {
+    // Nothing below U+0300 is wide or combining, and a long line is nearly all
+    // of it: the tables are for the rest.
+    if n < 0x300 && c != '\t' {
+        1
+    } else if c == '\t' {
         TAB_WIDTH
     } else if NONE.iter().any(|&(lo, hi)| (lo..=hi).contains(&n)) {
         0
@@ -334,14 +436,17 @@ fn render_fix(out: &mut String, sources: &SourceMap, fix: &crate::Fix, gutter: u
     }
 
     let _ = writeln!(out, "{:>w$}│", "", w = gutter + 1);
-    let _ = writeln!(out, "{:>w$} │ {}", start.line, expand_tabs(&patched), w = gutter);
     let new_width = drawn_width(&edit.replacement).max(1);
+    let (text, view) =
+        windowed(&expand_tabs(&patched), &[(drawn_width(&expand_tabs(&before)), new_width)]);
+    let _ = writeln!(out, "{:>w$} │ {}", start.line, text, w = gutter);
+    let (col, width) = view.place(drawn_width(&before), new_width);
     let _ = writeln!(
         out,
         "{:>w$}│ {}{}",
         "",
-        " ".repeat(drawn_width(&before)),
-        "~".repeat(new_width),
+        " ".repeat(col),
+        "~".repeat(width),
         w = gutter + 1
     );
 }
@@ -569,5 +674,48 @@ error[E0200]: mismatched types
         for form in ["`//`", "`///`", "`//!`"] {
             assert!(text.contains(form), "{} is missing from: {}", form, text);
         }
+    }
+
+    /// A source line far wider than a terminal is quoted as a window around
+    /// the span, with `…` on each side that was cut, and the underline stays
+    /// under the right text. Every one of 3,000 errors on a 9 KB line used to
+    /// repeat the line whole: 40 MB.
+    #[test]
+    fn a_very_long_line_is_a_window_around_the_span() {
+        let line = format!("let x = [{}]\n", vec!["aaaaaaaa"; 1000].join(", "));
+        let mut m = SourceMap::new();
+        let f = m.add("wide.kite", &line);
+        let width = |out: &str| out.lines().map(|l| l.chars().count()).max().unwrap_or(0);
+        for (at, left, right) in [(5, false, true), (4000, true, true), (line.len() - 40, true, false)] {
+            // Put the label on a word of its own.
+            let at = at as u32;
+            let d = Diagnostic::error(codes::E0111, "unknown name `y`")
+                .with_primary(Span::new(f, at, at + 3), "here");
+            let out = d.render(&m);
+            assert!(width(&out) < 170, "{} columns:\n{}", width(&out), out);
+            let src_line = out.lines().find(|l| l.contains(" │ ")).expect("a source line");
+            assert_eq!(src_line.contains("│ …"), left, "{}", out);
+            assert_eq!(src_line.ends_with('…'), right, "{}", out);
+            // The caret is under the three characters the span names.
+            let src_at = src_line.chars().position(|c| c == '│').unwrap();
+            let caret_line = out.lines().find(|l| l.contains('^')).unwrap();
+            let caret_at = caret_line.chars().position(|c| c == '^').unwrap();
+            let under: String =
+                src_line.chars().skip(src_at + (caret_at - caret_line.chars().position(|c| c == '│').unwrap())).take(3).collect();
+            assert_eq!(under, line[at as usize..at as usize + 3], "{}", out);
+        }
+        // Many errors on the one line stay small.
+        let mut d = crate::DiagBag::new();
+        for i in 0..300u32 {
+            d.push(
+                Diagnostic::error(codes::E0111, "unknown name")
+                    .with_primary(Span::new(f, 9 + i * 10, 9 + i * 10 + 8), ""),
+            );
+        }
+        assert!(d.render_all(&m).len() < 300 * 700, "{}", d.render_all(&m).len());
+        // A line that fits is untouched.
+        let (m, f) = setup();
+        let out = Diagnostic::error(codes::E0111, "x").with_primary(Span::new(f, 3, 8), "").render(&m);
+        assert!(!out.contains('…'), "{}", out);
     }
 }

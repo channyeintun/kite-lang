@@ -134,9 +134,20 @@ A ` ```kite ` fence is compiled and run by `kitec test`, alongside the file's
 `test_…` functions. It is appended to the module it was written in, so
 everything the comment documents is in scope with no import to get wrong; a
 fence that declares a type or a function lands at file scope and is checked by
-compiling. ` ```kite ignore ` marks an illustration instead — a fence naming
+compiling. `kitec test` and `kitec doc` take one file: a file of a directory
+module tested on its own is compiled as that file alone, so its fences and
+`test_…` functions do not see what its sibling files declare — a directory
+module's tests that need them belong in a test file that imports the module.
+` ```kite ignore ` marks an illustration instead — a fence naming
 types the reader supplies, which most module headers do — and is not compiled.
-A fence tagged anything else is prose.
+A fence tagged anything else is prose, and what is inside it is text whatever it
+looks like: fences are read as CommonMark reads them, so one closes only on a
+fence of the same character at least as long as its opener (a ` ````text `
+fence can show a ` ```kite ` example without running it), and `~~~` fences and
+indented blocks are code too — so a `~~~kite` fence, or a longer backtick
+fence tagged `kite`, is an example like a ` ```kite ` one. `kitec doc` leaves
+code and `<https://…>` links as written, and backslash-escapes a `<` or `&` in
+the prose around them that a Markdown reader would take for HTML.
 
 ### 2.4 Literals
 
@@ -211,7 +222,11 @@ call and no `await` anywhere in it computes a value and throws it away, so it is
 `E0117` too: a line opening with `-` (a negation, not a subtraction carried
 over), one opening with `[` (a slice literal, not an index), and `done == true`
 written for `done = true`. A statement that holds a call, such as `f() + 1`, is
-something happening and is left alone.
+something happening and is left alone. An arm of a `match` statement is a
+statement in this sense too ([§9.2](#92-match)). An index that can trap, or an
+interpolation whose hole runs `show`, does not count as an effect — `n + 1` can
+overflow too — so a statement kept for that alone is written `_ = xs[i]` (as an
+arm, `{ _ = xs[i] }`), and the diagnostic says so.
 
 ---
 
@@ -478,7 +493,9 @@ a struct and pass it to what changes it.
 
 A constant shares the value name space with functions, so a module cannot
 declare both `fn limit` and `let limit`; a cycle among constants is
-[E0119](#16-diagnostics).
+[E0119](#16-diagnostics). A module's own constant shadows a prelude function of
+the same name, exactly as its own function would: after `let max = 100`, `max`
+is that constant everywhere in the module, and `max(1, 2)` there is an error.
 
 In a `match` pattern a constant's name is its value too, so `LIMIT => …` and
 `limits.MAX_BODY => …` match that one value, exactly as the literal would — they
@@ -755,8 +772,14 @@ becomes `0`, `""`, or `nil`.
 
 The fields of a struct literal, and the named payload of a variant such as
 `Rect(h: f(), w: g())`, are evaluated in the order they are written, not the
-order they are declared in. `..base` is written first, so it is evaluated
-first, and once; the fields it supplies are read from that one value.
+order they are declared in. Every operand list runs in written order — a call's
+arguments, the elements of a tuple, slice or map literal, the two sides of an
+operator — and each operand's value is fixed when it is evaluated: a later one
+that assigns a local, as a `match` arm block can, does not change what an
+earlier one read from it. `..base` is written first, so it is evaluated
+first, and once; the fields it supplies are read from that one value, before
+any written field is evaluated — so a written field whose call changes the
+base through a `var` parameter does not change what the new value copies.
 
 ### 5.4 Slices and maps
 
@@ -779,9 +802,15 @@ m.remove("a")         // takes the entry out; a key that is not there is not an 
 
 Map indexing returns `Option<V>`, never a zero value.
 
-A map literal that gives one key twice keeps the later entry. Where the two
-keys are literals or constants, so the compiler can see they are equal, that is
-a warning ([E0112](#16-diagnostics)): the earlier value is never seen.
+A map literal that gives one key twice holds one entry for it: the later value,
+under the key as it was first written. That is what `m[k] = v` does to a key
+already there — the value changes and the stored key stays — and it shows only
+for keys that are equal without being the same: `{-0.0: 1, 0.0: 2}` holds
+`-0.0` with `2`. A NaN equals nothing, itself included, so two NaN keys are two
+entries. Where the two keys are literals or constants — a negated number, a
+float compared by value, and a tuple of them included — so the compiler can see
+they are equal, that is a warning ([E0112](#16-diagnostics)): the earlier value
+is never seen.
 
 `remove` shifts the entries after it down, so insertion order keeps meaning what
 it says and `keys()` and `values()` still line up element for element. Its
@@ -839,6 +868,14 @@ anything is copied, so no code the program wrote runs between taking a copy and
 writing it back, and a call in an index that changes the same field is not
 undone by the write. Because these are values, a copy of `grid` or of `grid[i]`
 taken before the write still holds what it did.
+
+**`target op= value` reads its target last**, by the same rule. The target's
+operands and the right-hand side are evaluated first, in the order written; then
+the target's current value is read, combined and stored. That holds for a local
+and a field as for an element: `c.count += f(c)`, where `f` sets `c.count`
+through a `var` parameter, adds to what `f` stored — as `xs[0] += f(h)` does —
+and is not the same as `c.count = c.count + f(c)`, which reads `c.count` where it
+is written, first.
 
 A `let` binding at the root, or a field not declared `var`, is `E0114`, as the
 same assignment written out would be. A call's result is held by nothing, so
@@ -1259,7 +1296,10 @@ pub fn load_config(path: str) -> (Config, error) {
 
 Rebinding `err` in the same scope is permitted, and is the one exception to the
 same-scope shadowing rule in [§4.1](#41-bindings) — but only because the previous
-`err` is provably Checked at that point.
+`err` is provably Checked at that point. The exception is the error slot of a
+two-name tuple binding, over an earlier binding that is an `error`; anything
+else a tuple binding redeclares in its own scope is [E0112](#16-diagnostics),
+as is a tuple binding that names one identifier twice, `let (a, a) = …`.
 
 ### 7.5 Handling a failure in place
 
@@ -1514,9 +1554,14 @@ the function needs no `return` after it.
 
 A `match` in statement position discards its arms' values, so its arms need not
 agree in type: `0 => io.print("zero")` beside `_ => count()`, where `count`
-returns an `int`, is fine. An arm whose value is an `error` is still one dropped
-([E0302](#16-diagnostics)), as a bare call's would be. A `match` used as a value
-needs every arm to produce the same type.
+returns an `int`, is fine. Each arm is in statement position too: a `match` or
+`if` written as an arm discards its own branches' values, so they need not
+agree either, and an arm that does nothing — `0 => 1`, or `{ done == true }` —
+is [E0117](#16-diagnostics), exactly as the same line on its own is; `0 => ()`
+says that nothing happens, as `0 => {}` does, and is fine. An arm
+whose value is an `error` is still one dropped ([E0302](#16-diagnostics)), as a
+bare call's would be. A `match` used as a value needs every arm to produce the
+same type.
 
 ### 9.3 Patterns
 
@@ -2058,8 +2103,12 @@ fn start() -> error {
 outward.** The first place is the importing module's own directory — the
 directory a one-file module sits in, or a directory module itself — and then
 each directory enclosing it in turn, stopping at the root of the package the
-importing module belongs to: the entry file's directory for the program, the
-dependency's own directory for a module inside a dependency. The nearest match
+importing module belongs to: for the program, the nearest directory at or
+above the entry file that holds a `kite.toml`, or the entry file's own
+directory when none does; for a module inside a dependency, the dependency's
+own directory. So whichever file of a package is the entry — `kitec run
+main.kite`, or `kitec test ui/app.kite` on its own — a module finds the same
+modules, and is named by the same path below that root. The nearest match
 wins. So `ui/app.kite` above writing `use config` finds `ui/config/` if `ui`
 has one of its own and `config/` beside `ui/` otherwise, and a dependency never
 resolves a `use` into the program that imports it. A `use` that matches
@@ -2094,11 +2143,21 @@ and with no diagnostic. An alias is a convenience for the file that writes it.
 when they reach one file or directory: `use utils` inside `a/` and `use utils`
 inside `b/` are two modules when each finds a `utils` of its own, and one when
 both find the `utils` beside them, and `use dep/utils` and `use utils` are two
-modules, because every segment is honoured when the files are found. A `use`
+modules, because every segment is honoured when the files are found. A
+segment matches a file's or a directory's name exactly, case included, on
+every system — `use Util` does not find `util.kite`, even where the file
+system ignores case; it is `E0400`, with a note naming what is there. A `use`
 that finds nothing is `E0400` — never answered by some other module that
-happens to be spelled alike. A first segment naming one of the importing
+happens to be spelled alike. A module's own `use`s are looked for from where
+its source is, too — its real directory, past any symbolic link — so the route
+a `use` took to reach it does not change what its imports mean; and it
+belongs to one package, so reaching one module both through a dependency's
+name and by a path from the program is `E0404`. A first segment naming one of the importing
 package's declared dependencies roots there instead, so `use markdown/render`
-reaches inside the package.
+reaches inside the package. `use markdown` alone is the package's root
+module, which is its own directory and only that: a directory with no `.kite`
+file directly in it has no root module, and `use markdown` is then `E0400` —
+never a `markdown.kite` beside the package, which is not part of it.
 
 What a use site writes is a **spelling**, and by default it is the last
 segment. A spelling belongs to the module that writes it, so two modules may
@@ -2155,7 +2214,8 @@ define is an error rather than something ignored; so is a key or a table written
 twice, and a trailing comma in an inline table, as TOML says. Strings are TOML's
 two forms, `"…"` with its escapes and `'…'` as written. And a manifest that does not
 parse — or does not read at all, as one that is not UTF-8 — is `E0405` in every
-command that reads it.
+command that reads it, and the one error: a `use` it leaves unresolvable is not
+reported again.
 
 A package name means one thing across the whole program: two manifests naming
 one package from two places is an error. It does not take the name from the
@@ -2173,7 +2233,8 @@ build does on its way past, and fetches every checkout again to make it —
 beside the one it replaces, so a fetch that fails leaves that one in place.
 Anything else that changed — a dependency added or removed, a new version
 because the manifest now asks for one — is reported rather than refused, and
-resolution tries the versions the lockfile records before any newer one.
+resolution tries the versions the lockfile records before any newer one. A
+lockfile entry that writes a key twice is refused, as a manifest that does is.
 
 The digest is cryptographic because the party it is checked against is the one
 who chooses the bytes. It was FNV-1a, which is invertible, so a dependency's
@@ -2207,7 +2268,8 @@ broken by extracting the shared part.
 
 That holds between packages too: a package that depends on itself, directly or
 through others, is an error — `kitec pkg` names the chain (`a -> b -> a`) and
-writes no lockfile.
+writes no lockfile, and `kitec run`, `check`, `build` and `test` refuse to
+compile the program, with the same chain (`E0402`, at the program's manifest).
 
 ---
 
