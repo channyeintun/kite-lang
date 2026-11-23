@@ -2034,6 +2034,10 @@ impl<'a> FnResolver<'a> {
                     self.map.uses.insert(*span, res);
                     return;
                 }
+                if let Some(d) = self.missing_member(base, name) {
+                    self.diags.push(d);
+                    return;
+                }
                 self.expr(base)
             }
             Expr::Index { base, index, .. } => {
@@ -2105,6 +2109,43 @@ impl<'a> FnResolver<'a> {
                 self.pop_scope();
             }
         }
+    }
+
+    /// The `E0111` for `m.name` where `m` is a module this one imported and
+    /// `name` is nothing in it.
+    ///
+    /// The path fell through to being read as a field of a value called `m`,
+    /// so a misspelled member — `m.on()` for `m.one()` — said ``cannot find
+    /// `m` ``, with the caret on a module the first line imports, and no
+    /// similar name: the one diagnostic most likely to send someone to fix
+    /// the import rather than the member.
+    fn missing_member(&self, base: &Expr, name: &Ident) -> Option<Diagnostic> {
+        let Expr::Path(p) = base else { return None };
+        if !p.is_simple() || self.lookup(&p.text()).is_some() {
+            return None;
+        }
+        let spelled = p.text();
+        let module = self.map.modules.aliases.get(&(self.module.clone(), spelled.clone()))?;
+        let prefix = format!("{}.", module);
+        let mut names: Vec<&str> = Vec::new();
+        names.extend(self.map.fns.iter().filter(|f| f.is_pub).map(|f| f.name.as_str()));
+        names.extend(self.map.consts.iter().filter(|c| c.is_pub).map(|c| c.name.as_str()));
+        names.extend(self.map.types.iter().filter(|t| t.is_pub).map(|t| t.name.as_str()));
+        let members: Vec<&str> = names.into_iter().filter_map(|n| n.strip_prefix(&prefix)).collect();
+        let shown = module.trim_start_matches('@');
+        let mut d = Diagnostic::error(
+            codes::E0111,
+            format!("cannot find `{}` in module `{}`", name.name, spelled),
+        )
+        .with_primary(name.span, format!("`{}` declares nothing public of this name", shown));
+        d = match nearest(&name.name, &members) {
+            Some(near) => d.with_note(format!("a similar name is in `{}`: `{}`", spelled, near)),
+            None => d.with_note(format!(
+                "`{}` is imported here; only what it marks `pub` can be reached from outside it",
+                spelled
+            )),
+        };
+        Some(d)
     }
 
     /// Try to read `base.name` as a static path rather than a field access.

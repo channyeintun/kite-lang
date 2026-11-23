@@ -700,12 +700,13 @@ dependency whose module is named after any of the reserved names is
 unreachable; rename it. (`use std/prelude` is `E0400`: the prelude is ambient,
 not a module you import.)
 
-### `E0111` blames the module even when the module is fine
+### `E0111` says which: the module, or the member
 
-The caret lands on the module segment and the message is `cannot find 'dom'` in
-both cases: `dom` was never imported, **and** `dom` was imported and the
-*member* does not exist. A misspelled function therefore reads like a broken
-import, and the `use` line is the wrong place to look first.
+When `dom` was never imported, the caret lands on `dom` and the message is
+`cannot find 'dom'`. When `dom` was imported and the *member* does not exist,
+the message is ``cannot find `tag_of` in module `dom` ``, the caret is on the
+member, and a note names the nearest `pub` member when one is close — so a
+misspelled function reads as a misspelled function, not a broken import.
 
 ```kite fails
 use std/dom
@@ -734,9 +735,9 @@ fn main() {
 }
 ```
 
-Same for a user module: with `use m`, where `m` exports `one` and not `two`,
-`m.two()` is `cannot find 'm'` with the caret on `m`. Check the member against
-the module's `pub fn` list before you touch the import.
+Same for a user module: with `use m`, where `m` exports `one`, `m.on()` is
+``cannot find `on` in module `m` `` with the caret on `on` and the note "a
+similar name is in `m`: `one`".
 
 ### The other module codes
 
@@ -749,7 +750,7 @@ the module's `pub fn` list before you touch the import.
 | `E0403` | Reserved standard-library name (above). |
 | `E0404` | One module spelling two modules alike — give one an alias — or two packages of one name reached from two different places, or one file reached as two modules: a file of a directory module imported on its own (`use shape` inside `lib/`, or `use lib/shape` beside `use lib`). |
 | `E0405` | A `kite.toml` that does not read. Reported at the offending line; a build no longer treats a broken manifest as no manifest. |
-| `E0111` | A qualified name whose module this module never imported — **or** an unknown member of one it did (above). |
+| `E0111` | A qualified name whose module this module never imported — **or** an unknown member of one it did, reported at the member (above). |
 
 **An unmarked field makes a `pub struct` opaque outside its module**
 (SPECIFICATION.md §4.3, §15.4): reading or writing it, building the struct with a

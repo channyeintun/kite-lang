@@ -194,6 +194,22 @@ fn a_pub_alias_cannot_name_a_private_type() {
     assert_eq!(p.run(&main).expect("compiles"), "4\n");
 }
 
+/// A misspelled member of an imported module is reported at the member, with
+/// the name it probably meant. It was ``cannot find `m` `` with the caret on
+/// `m` — a module the first line imports — and no suggestion.
+#[test]
+fn a_misspelled_member_is_not_reported_as_a_missing_module() {
+    let p = Project::new("misspelled-member");
+    p.file("m.kite", "pub fn one() -> int {\n  return 1\n}\n\nfn onf() -> int {\n  return 2\n}\n");
+    let main = p.file("main.kite", "use m as mm\n\nfn main() {\n  io.print(mm.on())\n}\n");
+    let said = p.run(&main).expect_err("no `on` in `m`").replace('\\', "/");
+    assert!(said.contains("cannot find `on` in module `mm`"), "{}", said);
+    assert!(said.contains("main.kite:4:15"), "at the member: {}", said);
+    // The private `onf` is as near, and not a name that would compile.
+    assert!(said.contains("a similar name is in `mm`: `one`"), "{}", said);
+    assert_eq!(said.matches("error[").count(), 1, "{}", said);
+}
+
 #[test]
 fn an_unmarked_declaration_is_private_to_its_module() {
     let p = Project::new("private");

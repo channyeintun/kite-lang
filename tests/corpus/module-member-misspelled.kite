@@ -1,0 +1,12 @@
+// A misspelled member of an imported module is reported as that, at the
+// member, with the name it probably meant. It was `cannot find `math``, with
+// the caret on a module the first line imports.
+
+use std/math
+use std/json as j
+
+fn main() {
+    io.print(math.flor(1.5)) //~ ERROR E0111
+    io.print(j.stringfy(j.Json.Null)) //~ ERROR E0111
+    io.print(math.floor(1.5))
+}
