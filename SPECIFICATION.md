@@ -1257,7 +1257,10 @@ The rules:
 > against `nil`, which asks only whether a failure is there: where it is nil
 > there is none, and where it is present the optional, narrowed to what it
 > holds, is still Unchecked — `if r == nil { return }` is followed by a test of
-> the error or a destructuring of the pair.
+> the error or a destructuring of the pair. Nor does finding the optional
+> present prove the error in it present, since a task that came in time with a
+> nil `error` gives a present optional: `r.message()` reads only where that
+> second test, `r != nil` on the narrowed `r`, held (`E0301` otherwise).
 
 R1–R5 are about bindings, and R6 and R7 close the shapes they leave open: a
 call written as a statement makes no binding, so nothing in R1–R5 ever sees it,

@@ -3973,6 +3973,13 @@ impl<'a> Checker<'a> {
         for id in self.nil_results(cond, in_then) {
             self.inspect(id);
         }
+        // What the condition proves about errors is read before it narrows
+        // anything. A test of an optional result that finds it present says
+        // the task came in time, not that the error it gave is a failure:
+        // read after the narrowing, `if r == nil { return }` let `r.message()`
+        // through on a nil error. Once `r` is narrowed, a later `r != nil`
+        // tests the error itself and proves it present.
+        let facts = self.error_facts(cond, in_then);
         if let Some((id, is_eq)) = narrowing {
             if is_eq != in_then {
                 if let TyKind::Optional(inner) = *self.types.kind(self.locals[id as usize].ty) {
@@ -3980,7 +3987,6 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        let facts = self.error_facts(cond, in_then);
         self.assume_error_facts(&facts);
     }
 
@@ -10019,19 +10025,28 @@ impl<'a> Checker<'a> {
             return;
         }
         let name = self.locals[id as usize].name.clone();
+        let mut d = Diagnostic::error(
+            codes::E0301,
+            format!("`{}` may be nil here, so it has no message", name),
+        )
+        .with_primary(span, "reading the message needs an error that is present")
+        .with_secondary(base.span(), format!("`{}` has not been proved non-nil", name))
+        .with_note(format!(
+            "test it first: `if {} != nil {{ … {}.message() … }}`, or leave early with \
+             `if {} == nil {{ return … }}`",
+            name, name, name
+        ));
+        // An optional result narrowed to its error: the test that narrowed
+        // it found the optional present, which is not the error being so.
+        if matches!(self.types.kind(self.locals[id as usize].ty), TyKind::Optional(_)) {
+            d = d.with_note(format!(
+                "`{}` is an optional result: the nil test that found it present says a \
+                 result is there, and the error it holds may still be nil",
+                name
+            ));
+        }
         self.diags.push(
-            Diagnostic::error(
-                codes::E0301,
-                format!("`{}` may be nil here, so it has no message", name),
-            )
-            .with_primary(span, "reading the message needs an error that is present")
-            .with_secondary(base.span(), format!("`{}` has not been proved non-nil", name))
-            .with_note(format!(
-                "test it first: `if {} != nil {{ … {}.message() … }}`, or leave early with \
-                 `if {} == nil {{ return … }}`",
-                name, name, name
-            ))
-            .with_note(
+            d.with_note(
                 "an `error` is either nil or a failure; there is no message on the nil side, \
                  and no zero value standing in for one",
             ),

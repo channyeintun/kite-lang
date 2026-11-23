@@ -114,7 +114,9 @@ async fn nil_on_one_side_of_or(late: bool) {
         return //~ ERROR E0302
     }
     if r != nil {
-        io.print(r.message())
+        if r != nil {
+            io.print(r.message())
+        }
     }
 }
 

@@ -465,7 +465,11 @@ async fn main() {
 Testing a `task.timeout` result against `nil` only asks whether the work came in
 time. Where it did, what it gave is still unread: after
 `if r == nil { return }`, `r` is the `error` (or the pair) and has to be tested
-(or taken apart) in turn:
+(or taken apart) in turn. That second test is the one that proves the error
+present: a task that came in time with a `nil` error gives a present optional,
+so `r.message()` straight after `if r == nil { return }`, or inside
+`if r != nil { … }` on the optional, is `E0301`. The same goes for an
+`Option<error>` from anywhere else — `m[k]` on a map of errors, `xs.get(i)`. In full:
 
 ```kite
 use std/task
