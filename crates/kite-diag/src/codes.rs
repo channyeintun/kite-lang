@@ -704,8 +704,10 @@ codes! {
          \x20   // shared.kite holds what a and b both use\n\
          \x20   // a.kite:  use shared        b.kite:  use shared\n\
          \n\
-         A cycle among packages in `kite.toml` is not this code: `kitec \
-         pkg` refuses it and names the chain of packages.";
+         A cycle among packages — a `kite.toml` whose dependencies lead \
+         back to it — is this code too, at the program's manifest, naming \
+         the chain of packages (`app -> a -> b -> app`) as `kitec pkg` \
+         does when it refuses the same graph.";
 
     E0406 = "E0406", "implementation outside its type's module",
         "An `impl` block belongs to the module that declares its type — or, \

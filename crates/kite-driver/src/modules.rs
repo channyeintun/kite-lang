@@ -861,11 +861,86 @@ impl Loader {
                 self.vendor = Some(directory.join(VENDOR));
                 package.dependencies = self.package_dependencies(directory, sources, diags);
                 package.manifest = Some(directory.to_path_buf());
+                self.package_cycle(directory, sources, diags);
                 break;
             }
             here = directory.parent();
         }
         package
+    }
+
+    /// The `E0402` for a package that depends on itself, directly or through
+    /// others, found over the manifests reachable from the program's own in
+    /// `directory`: what `kitec pkg` says, at the program's dependency the
+    /// chain begins with.
+    ///
+    /// **Refused by every command, not only `kitec pkg`.** §13.3 makes a
+    /// package cycle an error, and `kitec pkg` refused one while `kitec run`
+    /// compiled and ran the same program: the loader reads a manifest only
+    /// when a `use` reaches its package, so a cycle through packages nothing
+    /// imports was never seen. The whole graph is walked here. A manifest
+    /// that does not read is passed over: it is reported where it is used,
+    /// and a cycle through it is `kitec pkg`'s to find.
+    fn package_cycle(&mut self, directory: &Path, sources: &mut SourceMap, diags: &mut DiagBag) {
+        let vendor = self.vendor.clone().unwrap_or_else(|| directory.join(VENDOR));
+        let node = |files: &Files, dir: &Path| files.canonical(dir).to_string_lossy().to_string();
+        let root = node(&self.files, directory);
+        let mut names: HashMap<String, String> = HashMap::new();
+        let mut edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut text_of_root = None;
+        let mut queue = vec![(directory.to_path_buf(), None::<String>)];
+        while let Some((dir, reached_as)) = queue.pop() {
+            let here = node(&self.files, &dir);
+            if edges.contains_key(&here) {
+                continue;
+            }
+            let Ok(text) = self.files.read(&dir.join("kite.toml")) else { continue };
+            let Ok(parsed) = crate::manifest::parse(&text) else { continue };
+            names.entry(here.clone()).or_insert(reached_as.unwrap_or(parsed.name.clone()));
+            let mut out = Vec::new();
+            for dependency in &parsed.dependencies {
+                let at = match &dependency.source {
+                    crate::manifest::Source::Path(p) => dir.join(p),
+                    crate::manifest::Source::Git { .. } => vendor.join(&dependency.name),
+                };
+                let there = node(&self.files, &at);
+                names.entry(there.clone()).or_insert(dependency.name.clone());
+                out.push(there);
+                queue.push((at, Some(dependency.name.clone())));
+            }
+            edges.insert(here.clone(), out);
+            if here == root {
+                text_of_root = Some((text, parsed));
+            }
+        }
+        let Some(chain) = crate::solve::find_cycle(&root, &edges) else { return };
+        let Some((text, parsed)) = text_of_root else { return };
+        let chain: Vec<String> =
+            chain.iter().map(|n| names.get(n).cloned().unwrap_or_default()).collect();
+        let (message, why) = crate::solve::cycle_message(&chain);
+        let path = directory.join("kite.toml");
+        // At the line declaring the program's dependency the chain begins
+        // with, which is the line to change from here.
+        let first = chain.get(1).cloned().unwrap_or_default();
+        let declares = |l: &str| {
+            l.trim_start()
+                .strip_prefix(first.as_str())
+                .is_some_and(|rest| rest.trim_start().starts_with('='))
+        };
+        let line = match parsed.dependencies.iter().any(|d| d.name == first) {
+            true => text.lines().position(declares).map(|i| i as u32 + 1).unwrap_or(1),
+            false => 1,
+        };
+        let id = sources.add(&path, text);
+        let file = sources.file(id);
+        let start = file.line_start(line);
+        let end = start + file.line_text(line).len() as u32;
+        diags.push(
+            Diagnostic::error(codes::E0402, message)
+                .with_primary(Span::new(id, start, end), "this dependency leads back here")
+                .with_note(why)
+                .with_note("`kitec pkg` refuses the same graph and writes no lockfile for it"),
+        );
     }
 
     /// Where the program's package begins, when its manifest is in a

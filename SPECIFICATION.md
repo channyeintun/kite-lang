@@ -2223,7 +2223,8 @@ broken by extracting the shared part.
 
 That holds between packages too: a package that depends on itself, directly or
 through others, is an error — `kitec pkg` names the chain (`a -> b -> a`) and
-writes no lockfile.
+writes no lockfile, and `kitec run`, `check`, `build` and `test` refuse to
+compile the program, with the same chain (`E0402`, at the program's manifest).
 
 ---
 

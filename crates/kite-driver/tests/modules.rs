@@ -1967,6 +1967,30 @@ fn an_opaque_struct_cannot_be_destructured_by_its_public_fields() {
     assert_eq!(p.run(&main).expect("compiles"), "1\n");
 }
 
+/// A package that depends on itself through others is refused by `kitec
+/// run` and `check` as `kitec pkg` refuses it — even when no `use` reaches
+/// the package that closes the cycle, whose manifest the loader never read.
+#[test]
+fn a_package_cycle_is_refused_by_every_command() {
+    let p = Project::new("package-cycle");
+    let manifest = |name: &str, dependency: &str| {
+        format!("[package]\nname = \"{}\"\nversion = \"1.0.0\"\n\n[dependencies]\n{}\n", name, dependency)
+    };
+    p.file("a/kite.toml", &manifest("a", "b = \"../b\""));
+    p.file("a/a.kite", "pub fn f() -> int {\n  return 1\n}\n");
+    p.file("b/kite.toml", &manifest("b", "app = \"../app\""));
+    p.file("b/b.kite", "pub fn g() -> int {\n  return 2\n}\n");
+    p.file("app/kite.toml", &manifest("app", "a = \"../a\""));
+    let main = p.file("app/main.kite", "use a\n\nfn main() {\n  io.print(a.f())\n}\n");
+    let said = p.run(&main).expect_err("a package cycle");
+    assert!(said.contains("E0402"), "{}", said);
+    assert!(said.contains("dependency cycle: app -> a -> b -> app"), "{}", said);
+    assert!(said.contains("kite.toml:6"), "at the dependency on `a`: {}", said);
+    // Without the edge back, it compiles.
+    p.file("b/kite.toml", "[package]\nname = \"b\"\nversion = \"1.0.0\"\n");
+    assert_eq!(p.run(&main).expect("compiles"), "1\n");
+}
+
 /// A cycle back to the entry file is one error. The closing `use main`
 /// recorded a spelling for a module that does not exist — the entry is not a
 /// module — so `main.base()` behind it said `main` declares nothing public of
