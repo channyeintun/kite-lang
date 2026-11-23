@@ -250,6 +250,33 @@ fn checks() -> [error] {
             "an overridden isolate keeps the override's direction",
         ))
 
+    // ---- clusters and cell_width ----
+    let acute = text.from_code(0x301)
+    let zwj = text.from_code(0x200D)
+    let family = text.from_code(0x1F468) + zwj + text.from_code(0x1F469) + zwj + text.from_code(0x1F467)
+    let thumb = text.from_code(0x1F44D) + text.from_code(0x1F3FB)
+    let flag = text.from_code(0x1F1EF) + text.from_code(0x1F1F5)
+    out.push(test.equal_strs(text.clusters("ae\(acute)b"), ["a", "e\(acute)", "b"], "a mark stays with its letter"))
+    out.push(test.equal_strs(text.clusters("x\(family)y"), ["x", family, "y"], "a joined sequence is one"))
+    out.push(test.equal_strs(text.clusters("\(thumb)\(thumb)"), [thumb, thumb], "a modifier stays with its base"))
+    out.push(test.equal_strs(text.clusters("\(flag)\(flag)"), [flag, flag], "two regional indicators are a flag"))
+    out.push(test.equal_strs(text.clusters("x\(zwj)"), ["x\(zwj)"], "a trailing joiner stays"))
+    out.push(test.equal_int(text.clusters("").len(), 0, "nothing is no clusters"))
+    out.push(test.equal_str(join(text.clusters("é日\(family)"), ""), "é日\(family)", "joined, they are the text again"))
+    out.push(test.equal_int(text.cell_width("abc"), 3, "one column each"))
+    out.push(test.equal_int(text.cell_width("中文"), 4, "ideographs are two"))
+    out.push(test.equal_int(text.cell_width("ひらカナ"), 8, "kana are two"))
+    out.push(test.equal_int(text.cell_width("한글"), 4, "Hangul is two"))
+    out.push(test.equal_int(text.cell_width("e\(acute)"), 1, "a mark takes none"))
+    out.push(test.equal_int(text.cell_width("a\u{3099}"), 1, "nor the kana voicing mark"))
+    out.push(test.equal_int(text.cell_width(family), 2, "a family is one wide glyph"))
+    out.push(test.equal_int(text.cell_width(thumb), 2, "a modifier takes none"))
+    out.push(test.equal_int(text.cell_width(flag), 2, "a flag is two"))
+    out.push(test.equal_int(text.cell_width("ａｂ"), 4, "fullwidth forms are two"))
+    out.push(test.equal_int(text.cell_width("a\tb\u{0}"), 2, "controls take none"))
+    out.push(test.equal_int(text.cell_width("héllo"), 5, "Latin-1 is one"))
+    out.push(test.equal_int(text.cell_width(""), 0, "nothing is none"))
+
     return out
 }
 

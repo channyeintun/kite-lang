@@ -2848,6 +2848,10 @@ fn split_point(body: str, start: int, end: int, width: float, measure: fn(str) -
 /// emoji, which is several people stuck together with joiners, is one cluster.
 fn next_cluster(body: str, i: int, end: int) -> int {
     var k = i + 1
+    // Two regional indicators are one flag.
+    if k < end && within(body.code_at(i), 0x1F1E6, 0x1F1FF) && within(body.code_at(k), 0x1F1E6, 0x1F1FF) {
+        k += 1
+    }
     for k < end {
         let c = body.code_at(k)
         if c == 0x200D {
@@ -2860,4 +2864,86 @@ fn next_cluster(body: str, i: int, end: int) -> int {
         }
     }
     return k
+}
+
+/// `body` cut into clusters: each entry is one character with everything that
+/// stays with it — the combining marks and variation selectors after it, an
+/// emoji skin-tone modifier, a zero-width joiner and the character it joins
+/// on, and a pair of regional indicators (a flag). Joined, the entries are
+/// `body` again.
+///
+/// The same cut `wrap` makes when it must break inside a word. It is a
+/// reading of what the library knows as a mark (see `is_combining`), not the
+/// whole of Unicode's grapheme rules: a Hangul syllable written as separate
+/// jamo is several clusters, and so is a Devanagari conjunct.
+///
+/// ```kite
+/// let parts = clusters("ae\u{301}b")
+/// assert(parts.len() == 3, "the accent stays with its letter")
+/// assert(parts[1] == "e\u{301}", "as one entry")
+/// ```
+pub fn clusters(body: str) -> [str] {
+    var out: [str] = []
+    let n = body.len()
+    var i = 0
+    for i < n {
+        let next = next_cluster(body, i, n)
+        out.push(body.slice(i, next))
+        i = next
+    }
+    return out
+}
+
+/// How many terminal columns `body` takes: 2 for each wide character (CJK
+/// ideographs, kana, Hangul syllables, fullwidth forms, emoji), 0 for what
+/// takes no room (marks, joiners, control characters) and 1 for the rest. A
+/// cluster is as wide as its first character — a family emoji is one wide
+/// glyph, not six — and a flag is 2.
+///
+/// The wide blocks are listed rather than read from the Unicode database,
+/// as `bidi_class`'s are: the ranges below are the East Asian Wide and
+/// Fullwidth blocks and the emoji blocks, which is what a terminal draws two
+/// columns wide.
+///
+/// ```kite
+/// assert(cell_width("abc") == 3, "one each")
+/// assert(cell_width("中文") == 4, "two each")
+/// assert(cell_width("e\u{301}") == 1, "a mark takes no room")
+/// ```
+pub fn cell_width(body: str) -> int {
+    var total = 0
+    let n = body.len()
+    var i = 0
+    for i < n {
+        let c = body.code_at(i)
+        let next = next_cluster(body, i, n)
+        if within(c, 0x1F1E6, 0x1F1FF) && next > i + 1 {
+            total += 2
+        } else {
+            total += code_width(c)
+        }
+        i = next
+    }
+    return total
+}
+
+/// The columns one character takes by itself.
+fn code_width(c: int) -> int {
+    if c < 0x20 || within(c, 0x7F, 0x9F) {
+        return 0
+    }
+    if c < 0x300 {
+        return 1
+    }
+    if is_combining(c) || c == 0x200B || c == 0x200D || within(c, 0x1F3FB, 0x1F3FF) {
+        return 0
+    }
+    if within(c, 0x1100, 0x115F) || within(c, 0x2E80, 0x303E) || within(c, 0x3041, 0x33FF) ||
+    within(c, 0x3400, 0x4DBF) || within(c, 0x4E00, 0x9FFF) || within(c, 0xA000, 0xA4CF) ||
+    within(c, 0xAC00, 0xD7A3) || within(c, 0xF900, 0xFAFF) || within(c, 0xFE30, 0xFE6F) ||
+    within(c, 0xFF00, 0xFF60) || within(c, 0xFFE0, 0xFFE6) || within(c, 0x1F300, 0x1F64F) ||
+    within(c, 0x1F680, 0x1F6FF) || within(c, 0x1F900, 0x1F9FF) || within(c, 0x20000, 0x3FFFD) {
+        return 2
+    }
+    return 1
 }
