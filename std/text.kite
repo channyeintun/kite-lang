@@ -3052,9 +3052,22 @@ fn next_cluster(body: str, i: int, end: int) -> int {
     // Whether the cluster so far is an emoji and what has attached to it,
     // which is what UAX #29 rule GB11 asks before it joins across a ZWJ.
     var emoji = pictographic(body.code_at(i))
+    // Where the cluster is in an Indic conjunct, which is what GB9c asks: 0 is
+    // not in one, 1 is a consonant followed by nothing but Extend and Linker,
+    // and 2 is the same with a Linker (a virama) among them, which is the state
+    // a consonant may join from.
+    var conjunct = 0
+    if incb_consonant(body.code_at(i)) {
+        conjunct = 1
+    }
     for k < end {
         let c = body.code_at(k)
-        if c == 0x200D {
+        if conjunct == 2 && incb_consonant(c) {
+            // Consonant, virama, consonant: क्ष is one cluster, and the
+            // consonant it ends in can begin the next conjunct.
+            k += 1
+            conjunct = 1
+        } else if c == 0x200D {
             // A joiner stays with what is before it (GB9), and takes what
             // follows it only from one emoji to another (GB11). It used to
             // take whatever followed, so "a", ZWJ, "中" was one cluster one
@@ -3062,7 +3075,8 @@ fn next_cluster(body: str, i: int, end: int) -> int {
             // A joiner that joins nothing still ends no cluster: the marks
             // and joiners after it attach as well (GB9), but no emoji after
             // them is joined on, since only marks may stand between an emoji
-            // and the joiner GB11 joins across.
+            // and the joiner GB11 joins across. A joiner is Extend to GB9c,
+            // so it does not end a conjunct either.
             k += 1
             if emoji && k < end && pictographic(body.code_at(k)) {
                 k += 1
@@ -3071,11 +3085,44 @@ fn next_cluster(body: str, i: int, end: int) -> int {
             }
         } else if is_combining(c) || within(c, 0x1F3FB, 0x1F3FF) || within(c, 0xE0020, 0xE007F) {
             k += 1
+            if conjunct > 0 {
+                if incb_linker(c) {
+                    conjunct = 2
+                } else if !is_combining(c) {
+                    conjunct = 0
+                }
+            }
         } else {
             break
         }
     }
     return k
+}
+
+/// Indic_Conjunct_Break=Consonant (Unicode 15.1, the same in 16.0): the
+/// consonants of the six scripts UAX #29 rule GB9c joins into conjuncts —
+/// Devanagari, Bengali, Gujarati, Oriya, Telugu and Malayalam — as 26 ranges.
+fn incb_consonant(c: int) -> bool {
+    if c < 0x915 || c > 0xD3A {
+        return false
+    }
+    return within(c, 0x915, 0x939) || within(c, 0x958, 0x95F) || within(c, 0x978, 0x97F) ||
+    within(c, 0x995, 0x9A8) || within(c, 0x9AA, 0x9B0) || c == 0x9B2 || within(c, 0x9B6, 0x9B9) ||
+    within(c, 0x9DC, 0x9DD) || c == 0x9DF || within(c, 0x9F0, 0x9F1) || within(c, 0xA95, 0xAA8) ||
+    within(c, 0xAAA, 0xAB0) || within(c, 0xAB2, 0xAB3) || within(c, 0xAB5, 0xAB9) || c == 0xAF9 ||
+    within(c, 0xB15, 0xB28) || within(c, 0xB2A, 0xB30) || within(c, 0xB32, 0xB33) ||
+    within(c, 0xB35, 0xB39) || within(c, 0xB5C, 0xB5D) || c == 0xB5F || c == 0xB71 ||
+    within(c, 0xC15, 0xC28) || within(c, 0xC2A, 0xC39) || within(c, 0xC58, 0xC5A) ||
+    within(c, 0xD15, 0xD3A)
+}
+
+/// Indic_Conjunct_Break=Linker (Unicode 15.1): the virama of each of those
+/// scripts. Extend is not a table of its own here: it is a mark (`is_combining`)
+/// or a joiner, as it is to GB9, which differs from InCB=Extend only by a few
+/// spacing vowel signs (U+09BE, U+0B3E, U+0D3E and the like) that no real
+/// conjunct has between its virama and its consonant.
+fn incb_linker(c: int) -> bool {
+    return c == 0x94D || c == 0x9CD || c == 0xACD || c == 0xB4D || c == 0xC4D || c == 0xD4D
 }
 
 /// Extended_Pictographic, as far as GB11 needs it: the characters an emoji
@@ -3109,7 +3156,12 @@ fn pictographic(c: int) -> bool {
 /// The same cut `wrap` makes when it must break inside a word. It is a
 /// reading of what the library knows as a mark (see `is_combining`), not the
 /// whole of Unicode's grapheme rules: a Hangul syllable written as separate
-/// jamo is several clusters, and so is a Devanagari conjunct.
+/// jamo is several clusters. An Indic conjunct is one (GB9c, Unicode 15.1): a
+/// consonant, a virama, any marks or joiners, and the next consonant, in
+/// Devanagari, Bengali, Gujarati, Oriya, Telugu and Malayalam — the rule does
+/// not keep the scripts apart, so a virama of one joins a consonant of another.
+/// Marks between the virama and the consonant are read as Extend by
+/// `is_combining`, not by the property's own table.
 ///
 /// ```kite
 /// let parts = clusters("ae\u{301}b")
@@ -3118,6 +3170,9 @@ fn pictographic(c: int) -> bool {
 /// let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"
 /// assert(clusters(family).len() == 1, "joined emoji are one entry")
 /// assert(clusters("a\u{200D}b").len() == 2, "a joiner after a letter joins nothing")
+/// assert(clusters("\u{915}\u{94D}\u{937}").len() == 1, "a conjunct is one entry")
+/// assert(clusters("\u{915}\u{94D}\u{200D}\u{937}").len() == 1, "with a joiner in it")
+/// assert(clusters("\u{915}\u{94D}a").len() == 2, "a virama before a letter that is no consonant")
 /// ```
 pub fn clusters(body: str) -> [str] {
     var out: [str] = []
