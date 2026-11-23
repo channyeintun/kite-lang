@@ -1791,10 +1791,26 @@ impl<'a> Parser<'a> {
             }
             // The variant may be on the line below its `pub`: a layout as much
             // a `pub` on a variant as `pub A`, and the refusal says why.
-            let named_next = (1..).map(|i| self.peek_at(i)).find(|t| *t != T::Newline) == Some(T::Ident);
+            //
+            // A `pub` with no variant after it — before the `}`, or before
+            // another `pub` — is the same mistake, and the same refusal: the
+            // enum's braces hold variants, so it was `pub` that was meant for
+            // one, not a declaration about methods. Further `pub`s in the row
+            // are the same one cause.
+            let named_next = matches!(
+                (1..).map(|i| self.peek_at(i)).find(|t| *t != T::Newline),
+                Some(T::Ident | T::Pub | T::RBrace | T::Eof)
+            );
             if self.at(T::Pub) && named_next {
                 self.refuse_pub_on_variant(&name, is_pub, "a variant");
                 self.skip_newlines();
+                while self.at(T::Pub) {
+                    self.bump();
+                    self.skip_newlines();
+                }
+                if self.at(T::RBrace) || self.at_end() {
+                    continue;
+                }
             }
             if self.declaration_starts_line() {
                 self.misplaced_declaration(
@@ -2814,6 +2830,30 @@ impl<'a> Parser<'a> {
 
     fn parse_for(&mut self, label: Option<Ident>, start: Span) -> Option<ForStmt> {
         self.bump(); // `for`
+
+        // `for _ in xs` is refused: a walk names what it walks. That used to
+        // be a bare "expected an expression" with nothing to say what to
+        // write instead. The rest of the statement is read, so the body is
+        // not reported again for want of a header.
+        if self.at(T::Underscore) && self.peek_at(1) == T::In {
+            let at = self.span();
+            self.diags.push(
+                Diagnostic::error(codes::E0100, "a `for` loop needs a name for what it walks")
+                    .with_primary(at, "`_` is not a binding on its own")
+                    .with_note(
+                        "name the variable and leave it unread, as in `for item in xs`; `_` \
+                         stands for an element only inside a tuple binding, `for (_, v) in m`",
+                    ),
+            );
+            self.bump();
+            self.bump();
+            self.no_struct_literal += 1;
+            let iter = self.parse_expr();
+            self.no_struct_literal -= 1;
+            iter?;
+            self.parse_block()?;
+            return None;
+        }
 
         let header = if self.at(T::LBrace) {
             ForHeader::Loop

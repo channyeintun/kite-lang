@@ -1,0 +1,22 @@
+// A `pub` in an enum's braces with no variant after it — before the `}`,
+// before another `pub`, before a doc comment — is the one refusal a `pub` on a
+// variant gets, not "expected a variant" with a note about methods.
+
+enum A {
+    One
+    pub //~ ERROR E0100
+}
+
+enum B {
+    pub pub //~ ERROR E0100
+    Two
+}
+
+enum C {
+    pub //~ ERROR E0100
+    /// the variant
+    Three
+}
+
+fn main() {
+}

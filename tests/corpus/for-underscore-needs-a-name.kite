@@ -1,0 +1,16 @@
+// `for _ in xs` is refused, and the error says what to write: a walk needs a
+// name. `_` is fine inside a tuple binding. The note's fix compiles.
+
+fn main() {
+    let xs = [1, 2, 3]
+    for _ in xs { //~ ERROR E0100
+        io.print("x")
+    }
+    for item in xs {
+        io.print("y")
+    }
+    let m = { 1: 2 }
+    for (_, v) in m {
+        io.print(v)
+    }
+}

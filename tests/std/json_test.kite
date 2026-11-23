@@ -338,7 +338,30 @@ fn checks() -> [error] {
     out.push(test.equal_str(shelf("{\"id\":1,\"tags\":[],\"counts\":5}"), "Shelf.counts: expected an object", "nor is a number a map"))
     out.push(test.equal_str(shelf("[1]"), "Shelf: expected an object with the keys id, tags, counts", "a struct is an object"))
 
+    // ---- a nested derived type is named by the field that held it ----
+    out.push(test.equal_str(shed("{\"shelf\":null,\"kind\":\"Plain\",\"all\":[]}"), "Shed.shelf: Shelf: expected an object with the keys id, tags, counts", "a null where a struct belongs names the field"))
+    out.push(test.equal_str(shed("{\"shelf\":5,\"kind\":\"Plain\",\"all\":[]}"), "Shed.shelf: Shelf: expected an object with the keys id, tags, counts", "so does a number"))
+    out.push(test.equal_str(shed("{\"shelf\":{\"tags\":[],\"counts\":{}},\"kind\":\"Plain\",\"all\":[]}"), "Shelf.id: missing", "an error from further in keeps its own path"))
+    out.push(test.equal_str(shed("{\"shelf\":{\"id\":1,\"tags\":[],\"counts\":{}},\"kind\":\"Zed\",\"all\":[]}"), "Shed.kind: Kind: no variant named Zed", "an enum field is named too"))
+    out.push(test.equal_str(shed("{\"shelf\":{\"id\":1,\"tags\":[],\"counts\":{}},\"kind\":\"Plain\",\"all\":[null]}"), "Shed.all: Shelf: expected an object with the keys id, tags, counts", "and so is a slice of them"))
+
     return out
+}
+
+@derive(Debug, Decode)
+struct Shed {
+    shelf: Shelf
+    kind: Kind
+    all: [Shelf]
+}
+
+/// What decoding `doc` as a `Shed` says: the value, or the error.
+fn shed(doc: str) -> str {
+    let (s, err) = Shed.decode(parsed(doc))
+    if err != nil {
+        return err.message()
+    }
+    return s.debug()
 }
 
 @derive(Debug, Decode)
