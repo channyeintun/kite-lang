@@ -553,11 +553,14 @@ fn a_projected_tuple_element_is_not_called_a_call() {
     let dir = scratch(
         "projection-label",
         "t.kite",
-        "fn f(n: int) -> (int, error) {\n    return n, nil\n}\n\nfn main() {\n    (f(1), f(2)).0\n}\n",
+        "fn f(n: int) -> (int, error) {\n    return n, nil\n}\n\nfn main() {\n    (f(1), f(2)).0\n    ((f(3), f(4)).0)\n    \
+         match 1 {\n        1 => (f(5), f(6)).0\n        _ => {}\n    }\n}\n",
     );
     let Some((ok, _, err)) = kitec_in(&dir, &["check", "t.kite"]) else { return };
     assert!(!ok, "{}", err);
     assert!(err.contains("this tuple element holds a value and an error"), "{}", err);
+    // In parentheses, and as the arm of a statement `match`, it is the same.
+    assert_eq!(err.matches("this tuple element holds").count(), 3, "{}", err);
     assert!(!err.contains("this call returns"), "{}", err);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1717,7 +1717,7 @@ impl<'a> Checker<'a> {
                 // that does nothing is not also an error dropped.
                 let inert = !self.types.is_poisoned(expr.ty) && self.inert_statement(e, false);
                 if !inert {
-                    self.dropped_error(&expr, matches!(e, ast::Expr::Field { name, .. } if name.name.bytes().all(|b| b.is_ascii_digit())));
+                    self.dropped_error(&expr, is_tuple_projection(e));
                 }
                 let flow = if expr.ty == TyId::NEVER { Flow::Diverges } else { Flow::Falls };
                 Some((hir::Stmt::Expr(expr), flow))
@@ -10469,6 +10469,7 @@ impl<'a> Checker<'a> {
         // what its value holds was already settled where it was checked —
         // reported as having no effect, or a statement in its own right.
         let mut inert = Vec::new();
+        let mut projected = Vec::new();
 
         for arm in &m.arms {
             self.set_flow_state(start.clone());
@@ -10563,6 +10564,7 @@ impl<'a> Checker<'a> {
                 ast::MatchBody::Block(b) => (self.match_block(b, want, discard), false),
             };
             inert.push(settled);
+            projected.push(matches!(&arm.body, ast::MatchBody::Expr(e) if is_tuple_projection(e)));
             // An arm producing a `T` where a `?T` is wanted is subsumption,
             // exactly as it is for a `let` or an argument — so `Text(s) => s`
             // and `other => nil` are arms of one `Option<str>` match rather
@@ -10668,9 +10670,9 @@ impl<'a> Checker<'a> {
         // or not the arms agree: `0 => fails(), _ => fails()` agrees on
         // `error`, and throws it away just the same.
         if discard {
-            for (arm, settled) in arms.iter().zip(&inert) {
+            for ((arm, settled), projected) in arms.iter().zip(&inert).zip(&projected) {
                 if !settled {
-                    self.dropped_error(&arm.body, false);
+                    self.dropped_error(&arm.body, *projected);
                 }
             }
         }
@@ -16285,6 +16287,17 @@ fn check_compared_params(
             )
         };
         diags.push(d);
+    }
+}
+
+/// Whether an expression is a tuple projection, `(f(1), f(2)).0`, through
+/// any parentheses: what a statement of it throws away is an element, not
+/// what a call returned.
+fn is_tuple_projection(e: &ast::Expr) -> bool {
+    match e {
+        ast::Expr::Paren { inner, .. } => is_tuple_projection(inner),
+        ast::Expr::Field { name, .. } => name.name.bytes().all(|b| b.is_ascii_digit()),
+        _ => false,
     }
 }
 
