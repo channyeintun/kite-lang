@@ -791,6 +791,10 @@ solver   = { git = "https://github.com/example/solver", version = "^1.2" }
 shortcut = "../shortcut"
 ```
 
+- Strings are TOML's two forms: `"…"` with its escapes (`\"`, `\\`, `\n`,
+  `\uXXXX`, …) and `'…'` taken literally. A key or a table written twice is
+  `E0405` at the second one, as is a trailing comma in an inline table; a
+  leading byte-order mark is ignored.
 - `[package]` accepts `name` and `version` and nothing else, and the version
   must be a version (`1.2.0`, no leading zeros).
 - A target needs an `entry`; `renderer` is optional; nothing else.
