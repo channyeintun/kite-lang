@@ -248,17 +248,16 @@ survived rather than the text on disk.
 Loading is `kite-driver`'s, not the resolver's. Starting from the entry file's
 `use` lines, it finds each module — a directory or a single `.kite` file,
 looked for beside the importer and then in each enclosing directory up to its
-package's root, a dependency the package's `kite.toml` names, a standard library module,
-or a source a host handed over (the playground, a bundler) — and follows that
-module's own imports, reporting a cycle as `E0402`. An editor's unsaved buffer
-is not handed over as a module: the files are found exactly as on disk, and
-only then is a file that is open read from its buffer, so a buffer stands in
-for the file it is a buffer of and for nothing else.
-Each module's declarations are then merged into one item list under their
-qualified names: `load` in module `config` is declared as `config.load`, which
-cannot be forged as an identifier and is exactly what an importer writes. The
-prelude is merged the same way, as a module whose names are searched without
-being written.
+package's root, a dependency the package's `kite.toml` names, a standard library
+module, or a source a host handed over (the playground, a bundler) — and follows
+that module's own imports, reporting a cycle as `E0402`. An editor's unsaved
+buffer is not handed over as a module: the files are found exactly as on disk,
+and only then is a file that is open read from its buffer, so a buffer stands in
+for the file it is a buffer of and for nothing else. Each module's declarations
+are then merged into one item list under their qualified names: `load` in module
+`config` is declared as `config.load`, which cannot be forged as an identifier
+and is exactly what an importer writes. The prelude is merged the same way, as a
+module whose names are searched without being written.
 
 `@derive` runs last, once every declaration is in the list. It is a
 source-to-source expansion: the bodies it writes are ordinary Kite, parsed like
@@ -724,9 +723,9 @@ element that reads a local stored in place with `array.set`; identical runs
 are one function. No function holds more than one chunk of a literal's
 constants, however long it is. This bounds the literal, not the code around
 it: an element that is not a constant — a string in a `[Option<str>]`, which
-is wrapped first, a struct literal, an interpolation — is computed by a statement of the literal's
-function before the literal is built, and a hundred thousand such statements
-are still one function that V8 may fail to compile.
+is wrapped first, a struct literal, an interpolation — is computed by a
+statement of the literal's function before the literal is built, and a hundred
+thousand such statements are still one function that V8 may fail to compile.
 
 Not every MIR local is a Wasm local. One that lives within a single block,
 written there before anything reads it, shares a Wasm local of its type with
@@ -903,7 +902,8 @@ What holds these to their rules:
 - **`--explain E0301`** prints the full rationale, including *why* the rule
   exists, and a test fails if any code lacks one. An unknown code prints the
   whole list.
-- **`kitec fix`** applies every machine-applicable suggestion, then checks the file again and exits non-zero if errors remain.
+- **`kitec fix`** applies every machine-applicable suggestion, then checks the
+  file again and exits non-zero if errors remain.
 - **Source maps** are emitted for the Wasm target so browser stack traces name
   `.kite` files and lines — one entry per function, at the line it was declared
   on, because a MIR instruction has no span to do better with.

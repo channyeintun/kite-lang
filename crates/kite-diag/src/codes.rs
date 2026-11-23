@@ -1203,6 +1203,11 @@ codes! {
          \n\
          - A path with nothing at it: `use shape` when the file is \
          `shapes.kite`, or a file in another directory.\n\
+         - A path that matches a name on disk only when case is ignored: \
+         `use Shapes` beside `shapes.kite`. A `use` matches a file or \
+         directory's name exactly, case included, on every system, so a \
+         program that compiles on macOS does not fail on Linux; the note \
+         names the file that is there.\n\
          - A directory that is not a module. A directory is a module when \
          a `.kite` file is directly in it; one that holds only other \
          directories is found, refused, and said to be refused in the \

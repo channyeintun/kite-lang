@@ -684,11 +684,11 @@ is generated per key type and agrees with the generated `==`: `-0.0` as
 as the other two do; an enum by its variant and that variant's payload. It
 reads a key three levels deep, into at most eight aggregates, and an enum
 inside its own payload by its variant alone, which bounds its code and stack;
-keys that differ only beyond that share a bucket and are compared. All of it is helper functions, one per map
-type and operation a program uses, so a program with no map is not a byte
-bigger. A small program with one `{str: int}` grew from 1,221 to 2,093 bytes
-released. 100,000 inserts, lookups and removals take a tenth of a second under
-Node, where they did not finish in a minute.
+keys that differ only beyond that share a bucket and are compared. All of it is
+helper functions, one per map type and operation a program uses, so a program
+with no map is not a byte bigger. A small program with one `{str: int}` grew
+from 1,221 to 2,093 bytes released. 100,000 inserts, lookups and removals take a
+tenth of a second under Node, where they did not finish in a minute.
 
 A trait object is a reference to a one-field root record holding the concrete
 type's identity, and each trait method gets a dispatcher that compares that
@@ -2705,11 +2705,11 @@ module's own files first, then in each enclosing directory outward, stopping at
 the package's root — the entry file's directory, or the dependency's own — and
 the nearest match wins. (The program's root was later made the directory of its
 `kite.toml` when it has one, so a file tested on its own resolves what it
-resolves when `main.kite` is the entry.) So `ui/` reaches `config/` beside it, §13.1's own tree
-compiles and is a test, a module's own nested `config/` still comes first, and
-a dependency still cannot resolve into the program that imports it. A module is
-still where its source is: `use config` from `ui/` and from the entry reach the
-one module.
+resolves when `main.kite` is the entry.) So `ui/` reaches `config/` beside it,
+§13.1's own tree compiles and is a test, a module's own nested `config/` still
+comes first, and a dependency still cannot resolve into the program that imports
+it. A module is still where its source is: `use config` from `ui/` and from the
+entry reach the one module.
 
 §13.1 was amended twice with this: it defined a module as a directory and never
 mentioned the single-file form that nearly every module actually is, and it did
@@ -2818,6 +2818,177 @@ A second review checked this phase's fixes and found them partial:
 
 ---
 
+## Phase 31 — Three rounds of fixes, and what a program notices
+
+**Goal:** the language made better without a feature added to it — its bugs
+fixed, the standard library's gaps filled, and what the specification promised
+made true.
+
+This was not a phase of the plan. Eight audits read the specification, the
+library and the tools against the compiler and found a few hundred faults; the
+fixes landed as twelve workstreams, a re-check of those fixes found what they
+had left and sent nine more, and a third round took what the second left. Each
+workstream's merge on `complete-kite` says what is true after it. This section
+is the one place that gathers what a program written against v0.1.9 will meet,
+and it is written as that program's author would want it: what stops
+compiling, what runs differently, what the library does now, and what was
+accepted as it is rather than fixed.
+
+### Programs that compiled and are now refused
+
+- **A statement that does nothing** — no call and no `await` in it — is
+  `E0117`: `done == true` typed for `done = true`, a line opening with `-` or
+  `[`, a bare `xs[i]`, and an arm of a `match` statement that is a value
+  (`0 => 1`). `_ = xs[i]` keeps one on purpose, and the note says so.
+- **An error dropped in a way the analysis used not to follow** is `E0302`: a
+  copy `let e = err` with neither name read, a bare call of an `async fn` that
+  returns one, an unread `task.timeout` result, a `defer` of a fallible call,
+  returning on the first of several started tasks' failures while the others
+  are unread, a projection `(f(1), f(2)).0` of a temporary that throws the
+  other failure away, and a nil test of an `Option<error>` taken as handling
+  the error inside it.
+- **`task.park()` and `task.wait_host()`** outside an `async fn` are `E0521`,
+  as `task.yield()` was.
+- **One name, one meaning.** A type with an inherent method and a trait method
+  of one name, or two traits' methods of one name, is `E0112`. So is
+  `let (a, a)`, a tuple binding that re-declares a name of its own scope
+  (other than a checked error), and an inner loop reusing an outer label; a key
+  written twice in a map literal is an `E0112` warning in every literal form. A
+  module's own constant hides a prelude function of its name: beside
+  `let max = 100`, `max(1, 2)` is `E0205`.
+- **A trait default** may use only what the trait declares, not the
+  implementing type's fields.
+- **Generic code refused where it used to crash**: a bounded generic type
+  converted to an `error` or a `dyn` where its `impl`'s bound does not hold,
+  and a map keyed by `fn` or `dyn` through a type argument. A named `async fn`
+  used as a value is `fn(..) -> Task<T>`, which a program relying on the old
+  `fn(..) -> T` no longer satisfies.
+- **Modules and packages.** A `use` that matches a file only ignoring case is
+  `E0400`; a file already part of a directory module cannot also be `use`d on
+  its own; a pattern that takes apart another module's opaque struct by its
+  `pub` fields is `E0401`; one module reached through two packages is
+  `E0404`; a package dependency cycle is refused by `run`, `check`, `test` and
+  `build` as `kitec pkg` refuses it; and a `kite.toml` that repeats a key or a
+  table, or ends an inline table with a comma, is `E0405`. `pub use` and `pub`
+  on an enum variant are one diagnostic each.
+- **Lexical.** `"\u{41"` and `\u{+41}` are `E0003`, and an escaped quote never
+  closes a block string.
+
+### Programs that run differently
+
+- **Evaluation order.** A struct literal's fields and a named payload's run in
+  the order written, and `..base` runs once, first. Every operand's value is
+  fixed where it is evaluated, so a later `match` arm assigning a local does not
+  change an earlier argument. `c.f op= v` reads `c.f` after `v` has run, as
+  `xs[i] op= v` already did.
+- **A module constant in a pattern** matches its value, where it was a fresh
+  binding that matched everything.
+- **`xs[a..=max_int]`** clamps rather than trapping or wrapping.
+- **Block strings** read CRLF as LF and are dedented by the closing line's
+  indentation, and an empty indented one is `""`.
+- **`{K: V}` is a hash map on all three targets**, and a slice or a map held in
+  a struct field is written in place when nothing else holds it. Iteration
+  order, `==`, `Debug` output and value semantics are as they were; loops that
+  were quadratic are linear.
+- **On the VM, an `Option<error>` holding a nil error is present**, as it was
+  natively and on Wasm — so a `task.timeout` around a task that finished with
+  no error is no longer `nil` there.
+- **A `Task` is equal only to itself.**
+- `io.read_line` decodes invalid UTF-8 lossily; `js.func` under `kitec run`
+  traps before anything runs; and a host declaration with a parameter the host
+  does not take traps on the VM and natively.
+- **A `use` that found nothing may now resolve** in an enclosing directory, up
+  to the package's root, the nearest match winning — so a use that resolved
+  before keeps its meaning. An entry file inside a package has the package's
+  `kite.toml` directory as its root, so a file tested on its own resolves
+  what it resolves when `main.kite` is the entry.
+
+### The standard library
+
+Existing functions that answer differently:
+
+- **The prelude.** `words` splits on any whitespace; `pad_start` cuts a filler
+  of several characters at the width; `debug_str`, and so `@derive(Debug)`,
+  escapes control, bidirectional and invisible characters.
+- **`std/text`.** `bidi_class` answers NSM for every mark of Unicode 15.1, and
+  such marks are line-break class CM; `wrap` and `clusters` keep combining
+  marks, ZWJ sequences, skin tones, flags, tag sequences and Indic conjuncts
+  whole.
+- **`std/math`.** `exp` overflows to infinity; `min`, `max` and `clamp` — and
+  the prelude's `minf`, `maxf` and `clampf` — carry a NaN whichever side it is
+  on; `round`, `trunc`, `floor` and `ceil` keep a zero's sign; `powf` of a
+  negative base and a whole exponent is the real answer; `ipow`, new in the
+  first round, is `checked_pow`. The prelude's `divides(x, 0)` answers
+  `x == 0` rather than trapping, and its `approx_eq` and `test.equal_float`
+  pass equal infinities.
+- **`std/json` and `std/toml`.** An `int` at or past 2⁵³ in magnitude encodes
+  as a string of its digits and decodes only from one; `stringify`, `pretty`
+  and `stringify_sorted` trap past 128 levels (`check_nesting` asks first); a
+  derived `Decode` names a missing key as `S.f: missing`, the same for a
+  struct field and a named payload. `toml.emit` writes a date-shaped string
+  bare. `fmt` spells NaN `NaN`.
+- **`std/buffer`** traps on a record of the wrong length, a field outside the
+  stride and a record outside the buffer.
+- **The web modules.** `http.respond` and `http.run` refuse a header name that
+  is not a token, a value the host cannot carry, the framing headers, a status
+  outside 200 to 599 and a body on a 204 or 304; `run` sends the headers
+  `with_header` added and answers 500 to a handler whose response it cannot
+  send, and carries on; a `:name` route segment needs a character;
+  `send_with` refuses a value it cannot send. `window.parameter` decodes as
+  `http.query_parameter` does, and `window.unescaped` no longer goes through
+  `decodeURIComponent`. `html.update` rebuilds the view after a DOM call fails
+  partway. `crypto.password_verify` is an error for a stored hash of the wrong
+  shape, and `fs.read_lines` splits exactly as `lines` does.
+
+About 130 functions were added, to the prelude and to every one of the twenty
+modules; `skills/kite/references/06-stdlib-and-diagnostics.md` lists them
+module by module.
+
+### The tools
+
+- `kitec fix` exits non-zero while errors remain, and names the other files
+  whose errors have fixes of their own.
+- `kitec doc` refuses a file that does not parse, and escapes what a Markdown
+  reader would take for HTML.
+- `kitec test` says so when it found nothing to run, and reads fences as
+  CommonMark does, so a `~~~kite` fence or a longer one is a test too.
+- `kitec fmt` returns a fixed point or refuses the file, and refuses brackets
+  nested past 320.
+- A diagnostic quotes a source line wider than 140 columns as a window of it,
+  and underlines by display column; a module is named as the `use` writes it.
+- `kitec --explain` with two codes exits 1, a misspelt command is an unknown
+  command, and every explained code has an example and a fix that compiles.
+
+### Accepted rather than fixed
+
+Each is stated where a reader of that part looks:
+
+- `kitec test` and `kitec doc` take a file, not a directory module (§2.3); a
+  doc fence that declares a function is compiled and not run (§2.3).
+- Narrowing does not cross `&&` or `||` and does not follow `assert` or
+  `require`, and `for _ in` is refused (§3.3, §6.2).
+- A present `nil` in a map of optional values reads as absent (§3.3).
+- Slices, maps, tuples and optionals meet no `Display`, `Debug` or `Hash`
+  bound (§11).
+- The VM and the native runtime keep the character index of the four long
+  strings read most recently; a loop over five or more long non-ASCII strings
+  in turn walks each from the front again (§3.1).
+- `toml.emit` writes a date-shaped string bare, since `Toml` has no date
+  variant; the Node host joins a request header that came more than once.
+- A second route to a module through another package is `E0404` whatever it
+  resolves to, and a module's name in a type's name and in the Wasm name
+  section is measured from `kite.toml`.
+- Not bounded yet: the number of diagnostics one file can produce, the native
+  compile time of a map literal of tens of thousands of entries, a function
+  large enough to abort V8 below `E0902`'s limits, and the Wasm size of a
+  program that only writes TOML or JSON.
+
+**Exit criterion:** every finding reproduced by a test that fails without its
+fix, the whole suite green on all three backends, and every document —
+SPECIFICATION.md, the skill and this log — saying what the compiler does.
+
+---
+
 ## Where the implementation actually stands
 
 Recorded honestly, because a roadmap that overstates progress is worse than
@@ -2856,8 +3027,9 @@ none.
 | 28 — Packages from a bundler | ✅ `vite-plugin-kite` and the WebAssembly `kitec` read `kite.toml` and compile what it declares; provided modules are keyed by their whole path and a package resolves its own imports inside itself; a one-file module reads its imports from its own directory; `kitec run` sees modules |
 | 29 — Imports are the boundary | ✅ a qualified name resolves only in a module that imported it, and the entry file is reachable from nowhere; a `use` is looked for outward from the importer as far as its package's root, so sibling directory modules import each other |
 | 30 — The boundary, reviewed | ✅ a module is where its source is; each package's dependencies are its own; the entry file and bare variants are gated too; `bundle`, `test`, `pkg` and the option parser do what they say. §4.3 no longer names `pub` on an enum variant or `pub use`: a variant is as visible as its enum, there is no `pub use`, and each is refused with one diagnostic |
+| 31 — Three rounds of fixes | ✅ an audit, a re-check and a third round: bugs fixed on all three backends, about 130 library functions added, and the specification's claims checked by compiling them; maps are hash maps and field-held slices and maps are written in place on every target. What a v0.1.9 program notices is listed in the phase |
 
-More than a thousand tests: unit tests per crate, an annotated compile-fail
+More than 1,300 tests: unit tests per crate, an annotated compile-fail
 corpus, a differential corpus that runs every program on **three** backends and
 compares, the standard library's own suite on all three, the standard library's own
 documentation examples, the host boundary and a real socket under Node, the one

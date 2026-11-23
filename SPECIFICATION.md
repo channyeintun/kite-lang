@@ -134,7 +134,9 @@ A ` ```kite ` fence is compiled and run by `kitec test`, alongside the file's
 `test_…` functions. It is appended to the module it was written in, so
 everything the comment documents is in scope with no import to get wrong; a
 fence that declares a type or a function lands at file scope and is checked by
-compiling. `kitec test` and `kitec doc` take one file: a file of a directory
+compiling — it is not run, so an `assert` inside a function it declares is
+never evaluated; a fence holds declarations or statements, not both. `kitec
+test` and `kitec doc` take one file: a file of a directory
 module tested on its own is compiled as that file alone, so its fences and
 `test_…` functions do not see what its sibling files declare — a directory
 module's tests that need them belong in a test file that imports the module.
@@ -216,9 +218,14 @@ Statements are newline-terminated. Semicolons are never written. A statement
 continues onto the next line when the line ends in an operator, an open
 delimiter, or a comma. The same rule as Swift and Kotlin. A line that begins
 with `(` or `[` starts a statement of its own — `(g)()` is a call — so it is
-never an index into, or a call on, the line above. `>` and `>>` continue a line
-as the other operators do, and the `>` that closes `Option<int>` ends one;
-`return` is not an operator, and a line ending in it ends there.
+never an index into, or a call on, the line above. Two leading tokens work the
+other way: a line that begins with `.` continues the line above, so a method
+chain may put each call on a line of its own, and a line that begins with
+`else` belongs to the `if` whose `}` ends the line above; a line that begins
+with `)` or `]` closes what the line above left open. `>` and `>>`
+continue a line as the other operators do, and the `>` that closes
+`Option<int>` ends one; `return` is not an operator, and a line ending in it
+ends there.
 
 **The operator ends the line it continues, and `||` is why that is a rule and
 not a style.** A line opening with `||` is not the tail of the expression
@@ -310,10 +317,12 @@ generated glue converts synchronously through one fixed 64 KiB scratch page in
 and bytecode targets the storage is GC-managed UTF-8, indexed so that a loop
 over a string's characters is linear on every target: an ASCII string is
 indexed by byte, natively a string's length is counted once and kept, and for
-the few long strings a program has read most recently, its length and where
-every 64th character starts are found once and kept. Kite programs observe
-the same rule everywhere: indexing and length count Unicode scalar values,
-never bytes or UTF-16 code units.
+the four long strings a program has read most recently, its length and where
+every 64th character starts are found once and kept. A loop that reads five
+or more long strings that are not ASCII in turn finds each one forgotten, and
+walks it from the front again. Kite programs observe the same rule
+everywhere: indexing and length count Unicode scalar values, never bytes or
+UTF-16 code units.
 
 **What a `str` can do**, and it is deliberately little:
 
@@ -326,15 +335,20 @@ never bytes or UTF-16 code units.
 | `s.code_at(i)` | The code point at character `i`, or -1 past the end |
 
 Everything else — `split`, `starts_with`, `replace`, `join`, `words`,
-`parse_int`, case folding — is written in Kite on top of these and lives in the
-prelude, where it can be read. Each of these is a boundary two runtimes have to
-agree about, and every one added is a thing that can drift.
+`parse_int`, ASCII case mapping — is written in Kite on top of these and lives
+in the prelude, where it can be read. Each of these is a boundary two runtimes
+have to agree about, and every one added is a thing that can drift.
 
 `code_at` is the one that is not a string operation at all, and it is here
 because it is the one thing nothing else can be built from: without a way to
 see a character as a number, a hash, an ordering and a number parser each have
 to become a boundary of their own. One general primitive is cheaper than three
 special ones.
+
+A `str` is immutable, so `s + t` is a new string holding both. A loop that
+builds text with `s = s + piece` copies everything built so far at every step,
+which is quadratic in the length; the linear way is to push the pieces onto a
+`[str]` and `join` them once.
 
 ### 3.2 Composite types
 
@@ -398,10 +412,24 @@ optional against `nil` narrows it to the unwrapped type on the branch where it
 cannot be absent — in the `else` of `x == nil`, and in the `then` of `x != nil`.
 A `for` condition narrows the same way: its body runs where the condition held,
 and a loop with no `break` is left only where it failed, so `for x == nil { … }`
-leaves `x` present. The same narrowing applies in a `match` arm once an earlier
-arm has covered `nil`. A write to a `var` ends its narrowing unless the value written cannot be
-nil either; inside a loop, that holds for every write the loop's body makes,
-since the body runs again after each of them.
+leaves `x` present. An `if x == nil` whose branch always leaves — by `return`,
+`break` or `continue` — narrows `x` for the rest of the block. The same
+narrowing applies in a `match` arm once an earlier arm has covered `nil`. A
+write to a `var` ends its narrowing unless the value written cannot be nil
+either; inside a loop, that holds for every write the loop's body makes, since
+the body runs again after each of them.
+
+Those are the only places narrowing happens. It does not reach the right
+operand of `&&` or `||` — `x != nil && x.n > 2` reads `x.n` from an optional
+and is an error; nest the `if` — and `assert(x != nil, …)` and `require(x !=
+nil, …)` narrow nothing after them. (An `error` is different: the analysis of
+[§7.3](#73-correlated-results-and-taint-analysis) follows a test of one through
+`&&` and `||`.)
+
+An optional inside an optional reads as one. On a map whose values are
+optional, `m[k]` is `nil` both for a key that is absent and for a key present
+with the value `nil`, and so `has_key` and `get_or` cannot tell the two apart
+either; `m.keys()` lists the key that is present.
 
 ### 3.4 Type declarations
 
@@ -556,9 +584,10 @@ folding it would have had to pick one.
 variant and its payload's fields are exactly as visible as their enum, and
 cannot be marked on their own: `pub` on either is an error. There
 is no `pub use`: a module's imports are its own (§13.1) and are not exported, so
-`pub` on a `use` is an error. A `pub struct` with unmarked fields is an opaque type: callers
-can hold it and pass it, but cannot read, construct, or destructure it — not
-with a literal, not with a `..base` update, not in a pattern.
+`pub` on a `use` is an error. A `pub struct` with unmarked fields is an opaque
+type: callers can hold it and pass it, but cannot read, construct, or
+destructure it — not with a literal, not with a `..base` update, not in a
+pattern.
 
 Methods and associated functions in an `impl` block are unmarked, and so
 private to the module, unless they say `pub`. The methods of a trait
@@ -799,8 +828,8 @@ arguments. A call the compiler writes counts as one the program writes:
 calls its `message`. An `impl` block's parameter given one such type is one
 mistake however many calls reach it — every method of `impl<K> W<K>` that
 compares `K` shares that `K` — so it is reported once in each file, at the
-first call there, with the file's others labelled; a function's own parameter is chosen by each call, so
-each call that chooses one of the three is reported.
+first call there, with the file's others labelled; a function's own parameter is
+chosen by each call, so each call that chooses one of the three is reported.
 
 Floating-point `==` follows IEEE-754, so `nan != nan`. The compiler emits a
 warning when both operands of `==` are statically known to be floats and neither
@@ -836,7 +865,7 @@ base through a `var` parameter does not change what the new value copies.
 ```kite
 let xs = [1, 2, 3]
 let ys: [int] = []
-let m = {"a": 1, "b": 2}
+var m = {"a": 1, "b": 2}
 
 xs[0]                 // int — bounds-checked, traps on failure
 xs.get(0)             // Option<int> — bounds-checked, nil on failure
@@ -924,8 +953,8 @@ operands and the right-hand side are evaluated first, in the order written; then
 the target's current value is read, combined and stored. That holds for a local
 and a field as for an element: `c.count += f(c)`, where `f` sets `c.count`
 through a `var` parameter, adds to what `f` stored — as `xs[0] += f(h)` does —
-and is not the same as `c.count = c.count + f(c)`, which reads `c.count` where it
-is written, first.
+and is not the same as `c.count = c.count + f(c)`, which reads `c.count` where
+it is written, first.
 
 A `let` binding at the root, or a field not declared `var`, is `E0114`, as the
 same assignment written out would be. A call's result is held by nothing, so
@@ -948,8 +977,9 @@ if x > 10 {
 }
 ```
 
-Parentheses around the condition are not permitted. Braces are always required.
-The condition must be `bool` — there is no truthiness.
+Parentheses around the condition are not needed: `if (x > 1)` compiles, and
+the parentheses are part of the expression. Braces are always required. The
+condition must be `bool` — there is no truthiness.
 
 `if` is also an expression when every branch yields a value and an `else` is
 present:
@@ -992,8 +1022,11 @@ for {
 ```
 
 The three headers above are the whole of iteration: over a sequence, while a
-condition holds, and forever. Labelled
-`break` and `continue` are supported for nested loops:
+condition holds, and forever. The binding of the first is a name or a tuple of
+names, in which `_` may stand for an element — `for (_, v) in m` — but `_` is
+not a name on its own: a loop that does not read its element still names it,
+`for i in 0..3`, and `for _ in 0..3` is a syntax error. Labelled `break` and
+`continue` are supported for nested loops:
 
 ```kite
 outer: for row in grid {
@@ -1184,33 +1217,32 @@ The rules:
 > binding's failure: the two names share one obligation, met by inspecting
 > either. A value `if` whose branches are each such a binding or `nil` adds
 > no obligation of its own — `let e = if x { c } else { nil }` holds `c`'s
-> failure or nothing, so `c` still answers for it. Reading it — testing it, checking it, returning it, taking it
-> apart, passing it on — inspects it, and R3 applies otherwise; a test
-> inspects it wherever it is written, so one in the right operand of `&&`
-> or `||` meets the obligation on every path, though it runs only on some —
-> as `if e1 != nil || e2 != nil { … }` needs it to; copying it
-> is not reading it, and nor is a `match` whose every arm is `_` or a bare
-> name. Binding everything under one name is not a way out either, and nor
-> is a tuple literal: `let (n, e) = (1, f())` makes `e` Unchecked. The same
-> holds one level further out: a tuple, a slice or an optional with one of
-> these in it — what `task.both`, `task.all` and `task.timeout` answer
-> with — is Unchecked when bound, taking it apart or walking it with `for`
-> hands each failure in it to the name it is bound to, and counting it with
-> `len` is not reading it. A projection `r.0` takes one element of a tuple:
-> its failure goes where it lands, and the others are still owed, so the
-> tuple is settled once each has been taken; taken apart after that, it
-> binds only the failures not yet taken. A projection of a tuple no binding
-> holds — `(f(1), f(2)).0`, `pair().0` — leaves nothing that could take the
-> other elements later, so each failure among them is `E0302` at the
-> projection: at its element in a literal, at the call otherwise. A binding
-> written into the literal and not taken is not thrown away with it, and still
-> answers for its failure — unless the element taken holds that same failure,
-> as in `(c, c).0`. A slice cannot be followed
-> element by element, so `rs[0]` counts as reading all of it. Nor is testing an optional against `nil`, which
-> asks only whether a failure is there: where it is nil there is none, and
-> where it is present the optional, narrowed to what it holds, is still
-> Unchecked — `if r == nil { return }` is followed by a test of the error
-> or a destructuring of the pair.
+> failure or nothing, so `c` still answers for it. Reading it — testing it,
+> checking it, returning it, taking it apart, passing it on — inspects it, and
+> R3 applies otherwise; a test inspects it wherever it is written, so one in the
+> right operand of `&&` or `||` meets the obligation on every path, though it
+> runs only on some — as `if e1 != nil || e2 != nil { … }` needs it to; copying
+> it is not reading it, and nor is a `match` whose every arm is `_` or a bare
+> name. Binding everything under one name is not a way out either, and nor is a
+> tuple literal: `let (n, e) = (1, f())` makes `e` Unchecked. The same holds one
+> level further out: a tuple, a slice or an optional with one of these in it —
+> what `task.both`, `task.all` and `task.timeout` answer with — is Unchecked
+> when bound, taking it apart or walking it with `for` hands each failure in it
+> to the name it is bound to, and counting it with `len` is not reading it. A
+> projection `r.0` takes one element of a tuple: its failure goes where it
+> lands, and the others are still owed, so the tuple is settled once each has
+> been taken; taken apart after that, it binds only the failures not yet taken.
+> A projection of a tuple no binding holds — `(f(1), f(2)).0`, `pair().0` —
+> leaves nothing that could take the other elements later, so each failure among
+> them is `E0302` at the projection: at its element in a literal, at the call
+> otherwise. A binding written into the literal and not taken is not thrown away
+> with it, and still answers for its failure — unless the element taken holds
+> that same failure, as in `(c, c).0`. A slice cannot be followed element by
+> element, so `rs[0]` counts as reading all of it. Nor is testing an optional
+> against `nil`, which asks only whether a failure is there: where it is nil
+> there is none, and where it is present the optional, narrowed to what it
+> holds, is still Unchecked — `if r == nil { return }` is followed by a test of
+> the error or a destructuring of the pair.
 
 R1–R5 are about bindings, and R6 and R7 close the shapes they leave open: a
 call written as a statement makes no binding, so nothing in R1–R5 ever sees it,
@@ -1252,12 +1284,13 @@ there when the next writes over it: `var e: error = nil` then
 around a loop one way at a time: after `var e: error = nil` and
 `for i in 0..n { e = c }`, `e` holds `c`'s failure or nothing, so the next
 iteration's `e = c` drops nothing, but testing `e` after the loop does not
-answer for `c` on the way that skipped it, and that is `E0302` at `c`. A body whose end changes
-nothing is checked once; one that does is checked again from the join, which
-ends because the lattice has height two and a state can only get worse. What
-follows a loop is reached from its top and from every `break` — except after a
-`for { }`, which has no header to leave from and is left only by `break`, so
-`for { if err == nil { break } … }` leaves only where `err` was tested.
+answer for `c` on the way that skipped it, and that is `E0302` at `c`. A body
+whose end changes nothing is checked once; one that does is checked again from
+the join, which ends because the lattice has height two and a state can only get
+worse. What follows a loop is reached from its top and from every `break` —
+except after a `for { }`, which has no header to leave from and is left only by
+`break`, so `for { if err == nil { break } … }` leaves only where `err` was
+tested.
 
 In practice:
 
@@ -1341,15 +1374,16 @@ scan the left margin of a function and see every place it can fail.
 
 ```kite
 pub fn load_config(path: str) -> (Config, error) {
-    let (bytes, err) = fs.read(path)
+    let (text, err) = fs.read(path)
     check err
 
-    let (text, err) = str.from_utf8(bytes)
+    let (doc, err) = toml.parse(text)
     check err
 
-    let (cfg, err) = toml.parse(text)
-    check err
-
+    let cfg = Config{
+        name: toml.text_at(doc, "server.name", "kite"),
+        port: toml.int_at(doc, "server.port", 8080),
+    }
     return cfg, nil
 }
 ```
@@ -1423,7 +1457,9 @@ in a browser or Node holds a few thousand frames of an ordinary function —
 fewer the more values each holds across its call — and running out of it ends
 the program as a trap, not as the host's `RangeError`. A recursion whose depth
 input decides, such as a parser's, should bound it and fail with an `error`
-instead, as `std/json` and `std/toml` do past 128 levels.
+instead, as the parsers of `std/json` and `std/toml` do past 128 levels.
+(`json.stringify` and `json.pretty` trap at that depth, since what they are
+handed is the program's own value; `json.check_nesting` asks first.)
 
 This is a deliberate rejection of Go's `panic`/`recover`, which creates a second,
 invisible error-propagation channel alongside the visible one.
@@ -1480,12 +1516,12 @@ type has one method of each name across all of them (`E0112`) — trait
 implementations, and the default methods they take, included. So an inherent
 method and a trait's of the same name, or two traits', cannot both be on one
 type, and `x.foo()` never depends on which block came first; a type parameter
-bounded by two traits that both declare `foo` makes `x.foo()` `E0112` too. A type's
-inherent methods must be declared in the module that declares the type — there
-are no extension methods, so `x.foo()` can always be resolved by looking at where
-`x`'s type is defined. An `impl` block for another module's type is `E0406`,
-and one for anything but a struct or an enum — a trait, or an alias of `int` —
-is `E0204`.
+bounded by two traits that both declare `foo` makes `x.foo()` `E0112` too. A
+type's inherent methods must be declared in the module that declares the type —
+there are no extension methods, so `x.foo()` can always be resolved by looking
+at where `x`'s type is defined. An `impl` block for another module's type is
+`E0406`, and one for anything but a struct or an enum — a trait, or an alias of
+`int` — is `E0204`.
 
 A method may declare type parameters of its own, after its block's:
 
@@ -1593,17 +1629,17 @@ So an arm that needs several statements *and* a result returns from the function
 instead, with the `match` in statement position:
 
 ```kite
-fn area(s: Shape) -> int {
+fn area(s: Shape) -> float {
     match s {
         Circle(r) => {
-            let d = r * 2
-            return 3 * d * d / 4
+            let d = r * 2.0
+            return 3.14159 * d * d / 4.0
         },
         Rect(w, h) => {
             return w * h
         },
         Point => {
-            return 0
+            return 0.0
         },
     }
 }
@@ -1650,6 +1686,13 @@ match pair {
 
 Bindings introduced by patterns are immutable. There is no `ref` or `mut` in
 patterns because there are no references to bind.
+
+A struct pattern tests and binds the fields it lists, and a field it leaves out
+is not looked at — `Point{ x }` matches every `Point` — whether or not the
+pattern ends in `..`. A variant's payload is matched by position unless the
+pattern names the fields, `Rect(height: h, width: w)`: a positional pattern
+binds the payload in declared order whatever its names are, so `Rect(h, w)`
+gives `h` the width.
 
 The alternatives of an alternation may bind names, and then each must bind the
 same names with the same types (`E0200`): the arm runs whichever one matched,
@@ -1822,20 +1865,23 @@ them.
 
 The walk handles primitives, slices, maps, optionals, tuples, and other types
 that derive the same trait; `Encode` writes a tuple as a JSON array of its
-elements in order, and `Decode` reads back an array of exactly its length.
-A struct, like a named payload, is read from an object, and its failures are
-worded one way: a key that is absent is `S.f: missing`, and one that is there
-with the wrong type — `null` included, unless the field is optional — says
-what was expected, as `S.f: expected a whole number` or `S.f: expected an
-array`. Where it cannot go — a function field, a `dyn Trait` — it says which field
-stopped it and what would fix it, and the hand-written implementation is
-still there to write. That one error is the only one: the method is still
-declared, so a call to it elsewhere is not refused again. `Debug` and `Hash` derive
-for a generic type as well: a field of a parameter's type is walked through
-the parameter's own method, and the derived `impl` bounds that parameter by
-the trait, `impl<T: Debug> Debug for Box<T>`. `Encode` and `Decode` derive only
-for a type without parameters, because `Decode` builds each field through an
-associated function, which no bound can reach.
+elements in order, and `Decode` reads back an array of exactly its length. An
+`int` whose magnitude is below 2⁵³ is written as a JSON number; one at or past
+it, where a float no longer holds every integer, is written as a string of its
+digits, and `Decode` reads it back from that string and refuses a JSON number
+that large as inexact. A struct, like a named payload, is read from an object,
+and its failures are worded one way: a key that is absent is `S.f: missing`,
+and one that is there with the wrong type — `null` included, unless the field
+is optional — says what was expected, as `S.f: expected a whole number` or
+`S.f: expected an array`. Where it cannot go — a function field, a `dyn Trait`
+— it says which field stopped it and what would fix it, and the hand-written
+implementation is still there to write. That one error is the only one: the
+method is still declared, so a call to it elsewhere is not refused again.
+`Debug` and `Hash` derive for a generic type as well: a field of a parameter's
+type is walked through the parameter's own method, and the derived `impl` bounds
+that parameter by the trait, `impl<T: Debug> Debug for Box<T>`. `Encode` and
+`Decode` derive only for a type without parameters, because `Decode` builds each
+field through an associated function, which no bound can reach.
 
 `Decode` is an **associated function**, not a trait method: it produces the
 implementing type, and a trait method cannot say that without `Self` in return
@@ -1922,7 +1968,10 @@ The built-in `int`, `float`, `bool` and `str` satisfy the prelude's `Display`,
 string keys. They do so only as bounds: a primitive has no methods of its own
 to call directly, and is not a `dyn` of any trait — so a generic function
 that converts its `T` to a `dyn` cannot have a primitive for that `T`, which is
-`E0200` at the conversion in the copy that would do it.
+`E0200` at the conversion in the copy that would do it. No other built-in type
+meets them: a slice, a map, a tuple or an optional passed for a `T: Hash` is
+`E0208`, even of `int`s, and a struct holding it is what can implement the
+trait.
 
 A bound holds wherever it is written. On a function, it is checked at every call
 (`E0208`). On a struct or an enum, it is checked wherever a value is built — a
@@ -1989,10 +2038,11 @@ check eb
 ```
 
 Both results arrive together, so both errors are in scope together, and a way
-out taken for one leaves the other behind ([§7.3](#73-correlated-results-and-taint-analysis)
-R3): checking `ea` with `check` while `rb` is still unread drops `rb`'s
-failure, and is `E0302`. `task.all` answers with a slice of results, and
-walking it hands each one to the loop's binding to be checked.
+out taken for one leaves the other behind
+([§7.3](#73-correlated-results-and-taint-analysis) R3): checking `ea` with
+`check` while `rb` is still unread drops `rb`'s failure, and is `E0302`.
+`task.all` answers with a slice of results, and walking it hands each one to the
+loop's binding to be checked.
 
 `task.all([...])`, `task.race([...])`, and `task.timeout(t, ms)` cover the
 remaining combinators. There is no channel type; a `Task<T>` *is* the
@@ -2136,8 +2186,9 @@ are two types.
 
 `use x` takes the directory `x/` when there is one holding a `.kite` file,
 and the file `x.kite` otherwise — a directory of data, `config/` holding only
-`app.toml`, is not a module and does not hide the `config.kite` beside it. The directory is the general form; a file is the one-file case, and
-is what most modules are and what nearly all of them start as.
+`app.toml`, is not a module and does not hide the `config.kite` beside it. The
+directory is the general form; a file is the one-file case, and is what most
+modules are and what nearly all of them start as.
 
 ```
 myapp/
@@ -2238,12 +2289,13 @@ happens to be spelled alike. A module's own `use`s are looked for from where
 its source is, too — its real directory, past any symbolic link — so the route
 a `use` took to reach it does not change what its imports mean; and it
 belongs to one package, so reaching one module both through a dependency's
-name and by a path from the program is `E0404`. A first segment naming one of the importing
-package's declared dependencies roots there instead, so `use markdown/render`
-reaches inside the package. `use markdown` alone is the package's root
-module, which is its own directory and only that: a directory with no `.kite`
-file directly in it has no root module, and `use markdown` is then `E0400` —
-never a `markdown.kite` beside the package, which is not part of it.
+name and by a path from the program is `E0404`. A first segment naming one of
+the importing package's declared dependencies roots there instead, so
+`use markdown/render` reaches inside the package. `use markdown` alone is the
+package's root module, which is its own directory and only that: a directory
+with no `.kite` file directly in it has no root module, and `use markdown` is
+then `E0400` — never a `markdown.kite` beside the package, which is not part of
+it.
 
 What a use site writes is a **spelling**, and by default it is the last
 segment. A spelling belongs to the module that writes it, so two modules may
@@ -2298,10 +2350,10 @@ puts every package in the graph. A name — package or dependency — is an
 identifier, because it is written in a `use`. A key the manifest does not
 define is an error rather than something ignored; so is a key or a table written
 twice, and a trailing comma in an inline table, as TOML says. Strings are TOML's
-two forms, `"…"` with its escapes and `'…'` as written. And a manifest that does not
-parse — or does not read at all, as one that is not UTF-8 — is `E0405` in every
-command that reads it, and the one error: a `use` it leaves unresolvable is not
-reported again.
+two forms, `"…"` with its escapes and `'…'` as written. And a manifest that does
+not parse — or does not read at all, as one that is not UTF-8 — is `E0405` in
+every command that reads it, and the one error: a `use` it leaves unresolvable
+is not reported again.
 
 A package name means one thing across the whole program: two manifests naming
 one package from two places is an error. It does not take the name from the
@@ -2686,7 +2738,8 @@ Requirements on the implementation:
 - **One cause, one code, however it is reached.** Visibility is `E0401` for a
   function, a type, a field or a method alike; an `impl` in the wrong module is
   `E0406`, whether it adds methods or implements a trait.
-- **`kitec fix`** applies every machine-applicable suggestion, then checks the file again and exits non-zero if errors remain.
+- **`kitec fix`** applies every machine-applicable suggestion, then checks the
+  file again and exits non-zero if errors remain.
 - **A name section and source map** are emitted for the Wasm target so browser
   stack traces name `.kite` files and lines. The name section is what gives a
   frame its *name*; the map, written beside the module as `app.wasm.map` and

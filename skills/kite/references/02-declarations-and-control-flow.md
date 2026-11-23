@@ -15,12 +15,13 @@ Everything below is checked against `target/release/kitec`, not against the pros
 - **An `if` used as a value takes exactly one expression per branch.** No statements, no
   trailing-expression block. `let x = if c { let y = 1  y } else { 0 }` is `E0200`.
   A `match` arm follows the same rule: `{ 1 }` is still the value `1`, but the moment the
-  block holds a statement the arm is `()`. An `if` or `match` is one expression, so
-  `if a { if b { 1 } else { 2 } } else { 3 }` and `2 => { if a { 1 } else { 0 } }` are values.
+  block holds a statement the arm is `()`. An `if` or `match` is one expression,
+  so `if a { if b { 1 } else { 2 } } else { 3 }` and
+  `2 => { if a { 1 } else { 0 } }` are values.
 - **`;` is not a token.** Newlines end statements. A statement continues only when the
   previous line *ends* in an operator, an open delimiter, or a comma. A line that *starts*
-  with `||` is a zero-parameter closure, and one that starts with `-` is a negation; both
-  are statements that do nothing, which is `E0117`.
+  with `||` is a zero-parameter closure, and one that starts with `-` is a
+  negation; both are statements that do nothing, which is `E0117`.
 - **`xs[a..b]` clamps; `xs[i]` traps.** A window may run off the end; an element may not.
 - **Map indexing always yields `Option<V>`** — never a zero value, and `io.print` will not
   take it.
@@ -74,9 +75,10 @@ fn split_at(n: int) -> (int, int) {
 Destructuring is a `let` feature only — `var (a, b) = …` is a parse error, because the
 grammar's `VarStmt` takes a single identifier.
 
-Shadowing is allowed in a *nested* scope and rejected in the *same* scope. A function body
-is nested in its parameters' scope and a loop body in its header's, so `let x = x + 1` on a
-parameter and `let i = i * 2` on a loop variable are both fine.
+Shadowing is allowed in a *nested* scope and rejected in the *same* scope. A
+function body is nested in its parameters' scope and a loop body in its
+header's, so `let x = x + 1` on a parameter and `let i = i * 2` on a loop
+variable are both fine.
 
 ```kite
 fn main() {
@@ -133,18 +135,20 @@ pub let MAX_BODY: int = 1 << 20
 ```
 
 The right-hand side has to be one the compiler can work out: a literal, an operator applied
-to constants (`as` included: `let HALF = 1 as float / 2.0`), an interpolation whose holes are all constants, or another constant —
-including an imported one, `limits.MAX_BODY`. A **call is not** (`E0118`), even one that
-would always return the same answer. The types are `bool`, `int`, `float` and `str`; a
-slice or map constant would be an allocation, so it stays an ordinary `let` inside the
-function that wants it. A `float` interpolated into a constant is written as every
-backend writes it at run time: `"\(1e21)"` is `"1e+21"`.
+to constants (`as` included: `let HALF = 1 as float / 2.0`), an interpolation
+whose holes are all constants, or another constant — including an imported one,
+`limits.MAX_BODY`. A **call is not** (`E0118`), even one that would always
+return the same answer. The types are `bool`, `int`, `float` and `str`; a slice
+or map constant would be an allocation, so it stays an ordinary `let` inside the
+function that wants it. A `float` interpolated into a constant is written as
+every backend writes it at run time: `"\(1e21)"` is `"1e+21"`.
 
-In a `match` pattern a constant is its value as well: `LIMIT => …` (or `limits.MAX_BODY =>
-…`) matches that one value, like the literal would, and is never a binding that takes
-everything. A constant of the wrong type for the scrutinee is `E0200` at the pattern.
-A constant named like a prelude function (`let max = 100`) shadows it in that module, as
-your own function would: `max + 1` is `101`, and `max(1, 2)` is `E0205`.
+In a `match` pattern a constant is its value as well: `LIMIT => …` (or
+`limits.MAX_BODY => …`) matches that one value, like the literal would, and is
+never a binding that takes everything. A constant of the wrong type for the
+scrutinee is `E0200` at the pattern. A constant named like a prelude function
+(`let max = 100`) shadows it in that module, as your own function would:
+`max + 1` is `101`, and `max(1, 2)` is `E0205`.
 
 ```kite
 let LIMIT = 10
@@ -408,21 +412,23 @@ fn main() {
 ## 4. Closures
 
 A closure is `|params| body`. The body is either a single expression or a block. A block
-body that *produces* a value needs an explicit `-> T` unless the context states it (an
-annotated binding, a field, a parameter of type `fn() -> int`), because there is nothing
-else to check its `return` statements against; a block that only acts —
-`|| { increment(state) }` — needs nothing. The one place a block body's result is learned
-from its `return`s is a generic parameter (or a generic struct's field, in its literal)
-whose result nothing has fixed yet: against
-`run<T>(g: fn() -> T)`, `run(|| { return 6 })` makes `T` an `int`, and a body returning
-`n, nil` or `_, err` makes it fallible for `fn() -> (T, error)`. Parameter types come from
-the context the closure is used in, so `apply(|x| x * 2, 21)` infers `x` from `apply`'s
-signature — through an `Option<fn(int) -> int>` too; where there is no context, annotate
-them. The argument that fixes them may come after the closure: against
+body that *produces* a value needs an explicit `-> T` unless the context states
+it (an annotated binding, a field, a parameter of type `fn() -> int`), because
+there is nothing else to check its `return` statements against; a block that
+only acts — `|| { increment(state) }` — needs nothing. The one place a block
+body's result is learned from its `return`s is a generic parameter (or a generic
+struct's field, in its literal) whose result nothing has fixed yet: against
+`run<T>(g: fn() -> T)`, `run(|| { return 6 })` makes `T` an `int`, and a body
+returning `n, nil` or `_, err` makes it fallible for `fn() -> (T, error)`.
+Parameter types come from the context the closure is used in, so
+`apply(|x| x * 2, 21)` infers `x` from `apply`'s signature — through an
+`Option<fn(int) -> int>` too; where there is no context, annotate them. The
+argument that fixes them may come after the closure: against
 `ap<T>(f: fn(T) -> T, x: T)`, `ap(|n| n + 1, 41)` types `n` from the `41`, and
-`r(|| { return _, errors.new("no") }, 6)` against `r<T>(g: fn() -> (T, error), x: T)`
-takes `T` from the `6` — the checker types such a closure after the other arguments (the
-call still evaluates them in the order written).
+`r(|| { return _, errors.new("no") }, 6)` against
+`r<T>(g: fn() -> (T, error), x: T)` takes `T` from the `6` — the checker types
+such a closure after the other arguments (the call still evaluates them in the
+order written).
 
 ```kite
 fn apply(f: fn(int) -> int, x: int) -> int {
@@ -784,7 +790,8 @@ fn main() {
 
 `if` is also an expression when an `else` is present and **every branch is a single
 expression**. This is the delta from Rust: a value-`if` branch is not a block with a
-trailing expression, it is one expression — which may itself be an `if` or a `match`.
+trailing expression, it is one expression — which may itself be an `if` or a
+`match`.
 
 ```kite
 fn main() {
@@ -863,8 +870,8 @@ fn main() {
 ```
 
 The loop variable is a `let`: assigning to it is `E0114`. Labelled `break` and `continue`
-work on nested loops; the label goes before the `for` with a colon. An inner loop may not
-reuse the label of a loop around it (`E0112`).
+work on nested loops; the label goes before the `for` with a colon. An inner
+loop may not reuse the label of a loop around it (`E0112`).
 
 ```kite
 fn main() {
@@ -875,6 +882,19 @@ fn main() {
             if cell == 4 { break outer }
             io.print(cell)
         }
+    }
+}
+```
+
+`_` stands for an element inside a tuple binding, `for (_, v) in m`, but is not
+a binding on its own: `for _ in 0..3` is `E0100` (`expected an expression`).
+Name the variable and leave it unread — an unread loop variable is not a
+warning.
+
+```kite fails
+fn main() {
+    for _ in 0..3 { //~ E0100
+        io.print("x")
     }
 }
 ```
@@ -939,9 +959,9 @@ fn main() {
 ```
 
 A deferred call's result goes nowhere, so a call that answers with an `error`, a
-`(T, error)` or the `Task` of one cannot be deferred: it runs after the function has
-returned, and its failure would reach nobody (`E0302`). Defer a function that handles
-the error itself:
+`(T, error)` or the `Task` of one cannot be deferred: it runs after the function
+has returned, and its failure would reach nobody (`E0302`). Defer a function
+that handles the error itself:
 
 ```kite fails
 fn close(name: str) -> error {
@@ -1016,9 +1036,10 @@ fn main() {
 }
 ```
 
-An arm inside a range above it — `5` or `5..=7` after `4..=9` — can never run, and is the
-`E0116` warning, as is a range that matches nothing (`9..=4`, or `5..5`, which leaves out
-its end). A range that only overlaps a later arm leaves it alone.
+An arm inside a range above it — `5` or `5..=7` after `4..=9` — can never run,
+and is the `E0116` warning, as is a range that matches nothing (`9..=4`, or
+`5..5`, which leaves out its end). A range that only overlaps a later arm leaves
+it alone.
 
 Patterns also cover `nil`, tuples, and struct fields with `..` for the rest:
 
@@ -1214,6 +1235,9 @@ fn main() {
     assert(1 == 1) //~ E0113
 }
 ```
+
+Neither narrows: after `require(x != nil, "…")`, `x` is still an `Option`.
+Guard with `if x == nil { return }` instead.
 
 Being builtins, they have no value form — you cannot pass `assert` around.
 
