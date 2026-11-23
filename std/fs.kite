@@ -182,8 +182,9 @@ pub fn temp_dir() -> str {
 
 /// The lines of a text file, without their line endings.
 ///
-/// Split on `\n`, with a `\r` before it removed too, so a file written on
-/// Windows reads the same. A last line with no ending is a line; the empty
+/// Exactly the prelude's [`lines`] of the file's text: a line ends at `\n`,
+/// `\r\n` or a lone `\r`, so a file written on Windows or on an old Mac reads
+/// the same, and a `\r` in the middle of a line is an ending, not text. A last line with no ending is a line; the empty
 /// string after a final `\n` is not, so `"a\nb\n"` and `"a\nb"` are both `a`
 /// and `b`, and an empty file has none. Empty lines in the middle are kept.
 ///
@@ -200,26 +201,7 @@ pub fn temp_dir() -> str {
 pub fn read_lines(path: str) -> ([str], error) {
     let (body, err) = read(path)
     check err
-    var out: [str] = []
-    var start = 0
-    for i in 0..body.len() {
-        if body.code_at(i) == 10 {
-            var end = i
-            if end > start && body.code_at(end - 1) == 13 {
-                end = end - 1
-            }
-            out.push(body.slice(start, end))
-            start = i + 1
-        }
-    }
-    if start < body.len() {
-        var end = body.len()
-        if body.code_at(end - 1) == 13 {
-            end = end - 1
-        }
-        out.push(body.slice(start, end))
-    }
-    return out, nil
+    return lines(body), nil
 }
 
 /// Write `lines` to `path`, each followed by `\n`, replacing what was there.
