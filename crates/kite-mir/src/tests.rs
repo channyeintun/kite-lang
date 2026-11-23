@@ -551,12 +551,13 @@ fn nested_and_suspending_long_literals_lower_well_formed() {
 /// A write through a field takes the field, and a read of the field only
 /// glances when what it read is finished with before anything could write
 /// in place: a length read and compared before the push does; a binding
-/// read after a call, or after the push, does not.
+/// read after a call that could run code of the program's, or after the
+/// push, does not.
 #[test]
 fn a_field_read_glances_only_while_nothing_can_write() {
     let b = build(
         "struct Q {\n    var items: [int]\n}\n\n\
-         fn touch() {\n}\n\n\
+         fn touch() {\n    io.print(0)\n}\n\n\
          fn main() {\n    var q = Q{ items: [] }\n\
          \x20   if q.items.len() < 3 {\n        q.items.push(1)\n    }\n\
          \x20   let kept = q.items\n    q.items.push(2)\n    io.print(kept.len())\n\
@@ -579,7 +580,169 @@ fn a_field_read_glances_only_while_nothing_can_write() {
             _ => None,
         })
         .collect();
-    let glances = held_reads(f);
+    let glances = held_reads(f, &Kept::of(&b.mir));
     let glancing: Vec<bool> = reads.iter().map(|l| glances[l.index()].is_some()).collect();
     assert_eq!(glancing, vec![true, false, false], "{}", b.show());
+}
+
+/// Which parameters a function may keep: every way of keeping one counts,
+/// directly, two calls deep, round a recursion, and on one branch only; a
+/// function that only reads a parameter, writes its own copy of it, or
+/// passes it round a cycle that keeps nothing does not keep it. An `async`
+/// function keeps everything, because its starter stores it in the frame.
+#[test]
+fn a_parameter_is_kept_unless_nothing_can_keep_it() {
+    let (mir, _) = lower_async(
+        "struct H {\n    xs: [int]\n}\n\n\
+         enum E {\n    A([int])\n}\n\n\
+         fn reads(xs: [int], m: { str: int }) -> int {\n\
+         \x20   var t = xs.len() + m.len()\n\
+         \x20   if xs.len() > 0 {\n        t += xs[0]\n    }\n\
+         \x20   for x in xs {\n        t += x\n    }\n\
+         \x20   let w = xs[0..1]\n    let k = m.keys()\n\
+         \x20   return t + w.len() + k.len()\n}\n\n\
+         fn writes(var xs: [int]) -> int {\n    xs.push(1)\n    xs[0] = 2\n    return xs.len()\n}\n\n\
+         fn ret(xs: [int]) -> [int] {\n    return xs\n}\n\n\
+         fn moved(xs: [int]) -> [int] {\n    var t = xs\n    let u = t\n    return u\n}\n\n\
+         fn field(xs: [int]) -> H {\n    return H{ xs: xs }\n}\n\n\
+         fn elem(xs: [int]) -> [[int]] {\n    return [xs]\n}\n\n\
+         fn entry(m: { str: int }) -> { int: { str: int } } {\n\
+         \x20   var out: { int: { str: int } } = { }\n    out[1] = m\n    return out\n}\n\n\
+         fn tuple(xs: [int]) -> ([int], int) {\n    return (xs, 1)\n}\n\n\
+         fn optional(xs: [int]) -> Option<[int]> {\n    return xs\n}\n\n\
+         fn variant(xs: [int]) -> E {\n    return E.A(xs)\n}\n\n\
+         fn closure(xs: [int]) -> fn() -> int {\n    return || xs.len()\n}\n\n\
+         fn branch(xs: [int], b: bool) -> [int] {\n    if b {\n        return xs\n    }\n    return []\n}\n\n\
+         fn deep(xs: [int]) -> [int] {\n    return ret(xs)\n}\n\n\
+         fn deep_reads(xs: [int], m: { str: int }) -> int {\n    return reads(xs, m)\n}\n\n\
+         fn rec(xs: [int], n: int) -> [int] {\n    if n == 0 {\n        return xs\n    }\n    return rec(xs, n - 1)\n}\n\n\
+         fn ping(xs: [int], n: int) -> int {\n    if n == 0 {\n        return xs.len()\n    }\n    return pong(xs, n - 1)\n}\n\n\
+         fn pong(xs: [int], n: int) -> int {\n    return ping(xs, n)\n}\n\n\
+         fn even(xs: [int], n: int) -> [int] {\n    if n == 0 {\n        return xs\n    }\n    return odd(xs, n - 1)\n}\n\n\
+         fn odd(xs: [int], n: int) -> [int] {\n    return even(xs, n)\n}\n\n\
+         fn value(xs: [int]) -> int {\n    let f = |ys: [int]| ys.len()\n    return f(xs)\n}\n\n\
+         async fn later(xs: [int]) -> int {\n    return xs.len()\n}\n\n\
+         fn main() {\n}\n",
+    );
+    let kept = Kept::of(&mir);
+    let keeps = |name: &str, p: usize| {
+        let i = mir.fns.iter().position(|f| f.name == name).unwrap_or_else(|| panic!("no `{}`", name));
+        kept.keeps(FnId(i as u32), p)
+    };
+    for (name, p) in [
+        ("reads", 0),
+        ("reads", 1),
+        ("writes", 0),
+        ("deep_reads", 0),
+        ("deep_reads", 1),
+        ("ping", 0),
+        ("pong", 0),
+    ] {
+        assert!(!keeps(name, p), "`{}` keeps its parameter {}", name, p);
+    }
+    for name in [
+        "ret", "moved", "field", "elem", "entry", "tuple", "optional", "variant", "closure",
+        "branch", "deep", "rec", "even", "odd", "value", "later",
+    ] {
+        assert!(keeps(name, 0), "`{}` does not keep its parameter", name);
+    }
+}
+
+/// A keep or a stir at the far end of a long chain of calls reaches its first
+/// caller, and finding that out does not sweep the whole program once per
+/// link: a chain of three thousand functions, each declared before the one
+/// it calls, took 3 s when every function was re-examined until nothing
+/// changed (it takes a few milliseconds now), and the compiler works it out
+/// for each backend.
+#[test]
+fn a_keep_at_the_end_of_a_long_chain_reaches_its_start() {
+    let n = 3000;
+    let mut src = String::new();
+    for i in 0..n {
+        if i == n - 1 {
+            src.push_str(&format!(
+                "fn f{i}(xs: [int], n: int) -> [int] {{\n    io.print(n)\n    return xs\n}}\n\n"
+            ));
+        } else {
+            src.push_str(&format!(
+                "fn f{i}(xs: [int], n: int) -> [int] {{\n    return f{}(xs, n + 1)\n}}\n\n",
+                i + 1
+            ));
+        }
+    }
+    src.push_str("fn main() {\n    _ = f0([1], 0)\n}\n");
+    let (mir, _) = lower_async(&src);
+    let started = std::time::Instant::now();
+    let kept = Kept::of(&mir);
+    let took = started.elapsed();
+    let f0 = mir.fns.iter().position(|f| f.name == "f0").expect("f0");
+    assert!(kept.keeps(FnId(f0 as u32), 0), "`f0` does not keep what `f{}` returns", n - 1);
+    assert!(!kept.keeps(FnId(f0 as u32), 1), "`f0` keeps an int");
+    assert!(!kept.quiet(FnId(f0 as u32)), "`f0` is quiet though `f{}` prints", n - 1);
+    assert!(took < std::time::Duration::from_secs(1), "Kept::of took {:?}", took);
+}
+
+/// A field's map passed to a call glances at it only when the callee keeps
+/// nothing of it and is quiet: one that keeps it, or that writes through a
+/// field itself, or renders a value, ends the field's being the one holder.
+#[test]
+fn a_field_passed_to_a_quiet_reader_only_glances() {
+    let b = build(
+        "struct Q {\n    var m: { str: int }\n}\n\n\
+         fn seen(m: { str: int }) -> bool {\n    return m.len() > 0\n}\n\n\
+         fn deep(m: { str: int }) -> bool {\n    return seen(m)\n}\n\n\
+         fn keep(m: { str: int }) -> { str: int } {\n    return m\n}\n\n\
+         fn stir(m: { str: int }, var q: Q) -> bool {\n    q.m[\"x\"] = 1\n    return m.len() > 0\n}\n\n\
+         fn shows(m: { str: int }, n: int) -> bool {\n    io.print(n)\n    return m.len() > 0\n}\n\n\
+         fn main() {\n    var q = Q{ m: { } }\n\
+         \x20   if seen(q.m) {\n        q.m[\"a\"] = 1\n    }\n\
+         \x20   if deep(q.m) {\n        q.m[\"b\"] = 1\n    }\n\
+         \x20   _ = keep(q.m)\n\
+         \x20   _ = stir(q.m, q)\n\
+         \x20   _ = shows(q.m, 1)\n}\n",
+    );
+    let kept = Kept::of(&b.mir);
+    let f = b.main();
+    let reads: Vec<Local> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.stmts)
+        .filter_map(|s| match s {
+            Inst::Assign { dst, value: Rvalue::FieldGet { .. } } => Some(*dst),
+            _ => None,
+        })
+        .collect();
+    let glances = held_reads(f, &kept);
+    let glancing: Vec<bool> = reads.iter().map(|l| glances[l.index()].is_some()).collect();
+    assert_eq!(glancing, vec![true, true, false, false, false], "{}", b.show());
+}
+
+/// Rendering an `int` between reading a field and its last glance is quiet:
+/// `if !seen(q.m, "k\(i)")` evaluates the field, then the key, then calls.
+/// Only the four types that render themselves are let off.
+#[test]
+fn rendering_a_number_does_not_end_a_glance() {
+    let b = build(
+        "struct Q {\n    var m: { str: int }\n}\n\n\
+         struct P {\n    n: int\n}\n\n\
+         fn seen(m: { str: int }, k: str) -> bool {\n    return m[k] != nil\n}\n\n\
+         fn main() {\n    var q = Q{ m: { } }\n    let i = 3\n    let p = P{ n: 1 }\n\
+         \x20   if !seen(q.m, \"k\\(i)\") {\n        q.m[\"a\"] = 1\n    }\n\
+         \x20   _ = seen(q.m, \"\\(p.n)\")\n}\n",
+    );
+    let kept = Kept::of(&b.mir);
+    let f = b.main();
+    let reads: Vec<Local> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.stmts)
+        .filter_map(|s| match s {
+            Inst::Assign { dst, value: Rvalue::FieldGet { .. } } => Some(*dst),
+            _ => None,
+        })
+        .collect();
+    let glances = held_reads(f, &kept);
+    assert!(glances[reads[0].index()].is_some(), "{}", b.show());
+    assert!(glances[reads[1].index()].is_some(), "{}", b.show());
+    assert!(renders_itself(TyId::INT) && !renders_itself(f.locals[0].ty), "{}", b.show());
 }

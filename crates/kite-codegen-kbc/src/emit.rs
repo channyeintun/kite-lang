@@ -15,7 +15,12 @@ pub fn compile(program: &mir::Program, types: &kite_hir::Types) -> Chunk {
     // sides walk `program.vtables` in the same order, so position is the index.
     let traits: Vec<u32> = program.vtables.iter().map(|v| v.trait_id.0).collect();
     Chunk {
-        functions: program.fns.iter().map(|f| compile_fn(f, &traits, types)).collect(),
+        functions: {
+            // Which parameters each function keeps, and which calls are
+            // quiet, decide which reads of a field only glance at it.
+            let kept = mir::Kept::of(program);
+            program.fns.iter().map(|f| compile_fn(f, &traits, types, &kept)).collect()
+        },
         externs: program
             .externs
             .iter()
@@ -118,7 +123,12 @@ fn widest_window(func: &mir::Function) -> usize {
         .unwrap_or(0)
 }
 
-fn compile_fn(func: &mir::Function, traits: &[u32], types: &kite_hir::Types) -> FnProto {
+fn compile_fn(
+    func: &mir::Function,
+    traits: &[u32],
+    types: &kite_hir::Types,
+    kept: &mir::Kept,
+) -> FnProto {
     // Registers: one per MIR local, then a window wide enough for the largest
     // call in the body.
     let max_args = widest_window(func);
@@ -142,7 +152,7 @@ fn compile_fn(func: &mir::Function, traits: &[u32], types: &kite_hir::Types) -> 
         arg_base: func.locals.len() as Reg,
         scratch: (func.locals.len() + max_args) as Reg,
         extra_registers: 0,
-        emptied: emptied_after(func),
+        emptied: emptied_after(func, kept, types),
         taken: taken_locals(func),
     };
     e.run();
@@ -194,12 +204,31 @@ struct Emitter<'a> {
 /// was quadratic for that reason alone. Emptying the register after its last
 /// read leaves the field the one holder. Only a local some length, element or
 /// lookup reads is emptied — that is a slice's or a map's; one compared and
-/// nothing else is left alone, which costs a copy, not a wrong answer.
-fn emptied_after(func: &mir::Function) -> Vec<Vec<(usize, Reg)>> {
+/// nothing else is left alone, which costs a copy, not a wrong answer. A
+/// slice or map passed to a quiet call that keeps nothing of it is emptied
+/// too: the call has moved it out of the staging window and given it back.
+fn emptied_after(
+    func: &mir::Function,
+    kept: &mir::Kept,
+    types: &kite_hir::Types,
+) -> Vec<Vec<(usize, Reg)>> {
     let mut container = vec![false; func.locals.len()];
     for b in &func.blocks {
         for s in &b.stmts {
             if let mir::Inst::Assign { value, .. } = s {
+                if let mir::Rvalue::Call { args, .. } = value {
+                    for a in args {
+                        if let mir::Operand::Local(l) = a {
+                            if matches!(
+                                types.kind(func.locals[l.index()].ty),
+                                kite_hir::TyKind::Slice(_) | kite_hir::TyKind::Map(..)
+                            ) {
+                                container[l.index()] = true;
+                            }
+                        }
+                    }
+                    continue;
+                }
                 let base = match value {
                     mir::Rvalue::SliceLen { base }
                     | mir::Rvalue::MapLen { base }
@@ -217,7 +246,7 @@ fn emptied_after(func: &mir::Function) -> Vec<Vec<(usize, Reg)>> {
         }
     }
     let mut out = vec![Vec::new(); func.blocks.len()];
-    for (l, at) in mir::held_reads(func).into_iter().enumerate() {
+    for (l, at) in mir::held_reads(func, kept).into_iter().enumerate() {
         if let (Some((b, s)), true) = (at, container[l]) {
             out[b].push((s, l as Reg));
         }

@@ -548,6 +548,178 @@ fn main() {
     );
 }
 
+/// A slice or map handed to a function that only reads it, then written, is
+/// written in place on all three backends: asked about through a generic
+/// prelude function two calls down, read element by element, and taken
+/// through a `var` parameter only read on the way. Passing a
+/// local to any function cleared its owned flag natively and on Wasm, and
+/// on the VM the call's staging register kept a second count, so each write
+/// after a call copied the whole value: at twenty thousand the map loop
+/// took 5.5 s natively and 10 s on the VM, and two hundred thousand would
+/// take minutes on every backend. A callee proved not to keep its argument
+/// leaves the caller the one holder now (`kite_mir::Kept`), and a call moves
+/// its arguments out of the staging window.
+#[test]
+fn a_slice_or_map_passed_to_a_reader_is_written_in_place() {
+    let src = r#"fn seen(m: { str: int }, w: str) -> bool {
+    return has_key(m, w)
+}
+
+fn first(xs: [int]) -> int {
+    if xs.len() == 0 {
+        return 0
+    }
+    return xs[0] + xs[xs.len() - 1]
+}
+
+fn last(var xs: [int]) -> int {
+    if xs.len() > 0 {
+        return xs[xs.len() - 1]
+    }
+    return 0
+}
+
+fn main() {
+    let n = 200000
+    var m: { str: int } = { }
+    var xs: [int] = []
+    var ys: [int] = []
+    var t = 0
+    for i in 0..n {
+        let w = "k\(i % (n / 2))"
+        if !seen(m, w) {
+            m[w] = i
+        }
+        t += first(xs)
+        xs.push(i)
+        t += last(ys) % 2
+        ys.push(i)
+        ys[i] = i * 2
+    }
+    io.print("\(m.len()) \(xs.len()) \(ys[n - 1]) \(t)")
+}
+"#;
+    agrees_within(
+        "passed-to-a-reader",
+        src,
+        "100000 200000 399998 19999700001\n",
+        Duration::from_secs(20),
+        true,
+    );
+}
+
+/// A method that asks a helper about its own field's map or slice between
+/// writes through the field is linear on all three backends. The read of
+/// the field into the helper's argument counted as keeping it, so the next
+/// write through the field copied the whole map: at forty thousand that
+/// took 40 s on the VM. A call to a function that keeps nothing of the
+/// argument, and can write in place nothing that was there before it ran,
+/// only glances at the field now (`kite_mir::held_reads`), and so does a
+/// read of it followed by rendering a number for the key, as `"j\(i)"` is.
+#[test]
+fn a_field_passed_to_a_reader_is_written_in_place() {
+    let src = r#"fn seen(m: { str: int }, w: str) -> bool {
+    return has_key(m, w)
+}
+
+fn count(xs: [int]) -> int {
+    return xs.len()
+}
+
+struct Set {
+    var m: { str: int }
+    var order: [int]
+}
+
+impl Set {
+    fn add(var self, w: str) {
+        if !seen(self.m, w) {
+            self.m[w] = count(self.order)
+        }
+        self.order.push(count(self.order))
+    }
+
+    fn add_at(var self, i: int) {
+        if self.m["j\(i)"] == nil && !seen(self.m, "i\(i)") {
+            self.m["j\(i)"] = i
+        }
+    }
+}
+
+fn main() {
+    let n = 200000
+    var s = Set{ m: { }, order: [] }
+    for i in 0..n {
+        s.add("k\(i % (n / 2))")
+        s.add_at(i)
+    }
+    io.print("\(s.m.len()) \(s.order.len()) \(or_else(s.m["k7"], -1))")
+}
+"#;
+    agrees_within(
+        "field-passed-to-a-reader",
+        src,
+        "300000 200000 7\n",
+        Duration::from_secs(20),
+        true,
+    );
+}
+
+/// `toml.parse` is linear in the shapes that were quadratic: forty thousand
+/// sections, forty thousand dotted keys under one table, one inline table of
+/// forty thousand keys, and — linear already, kept so — forty thousand plain
+/// keys in one section. The document was nested `Toml` while it was read,
+/// and a map is a value, so placing a key rebuilt every table on its path,
+/// the root's included: this program took 51 s on Wasm and minutes natively.
+/// It is read into flat tables written in place now, and nested once at the
+/// end. Natively and on Wasm only: the debug VM's constant, a quarter of a
+/// millisecond a section, leaves no bound that both a linear run meets and
+/// the old one misses by a margin; its output is the differential suite's.
+#[test]
+fn toml_parse_is_linear_in_sections_dotted_keys_and_inline_tables() {
+    let src = r#"use std/toml
+
+fn count(text: str, path: str) -> int {
+    let (doc, err) = toml.parse(text)
+    if err != nil {
+        io.print(err.message())
+        return -1
+    }
+    return toml.keys_at(doc, path).len()
+}
+
+fn main() {
+    let n = 40000
+    var sections: [str] = []
+    var dotted: [str] = ["[d]"]
+    var inline: [str] = ["t = { "]
+    var plain: [str] = ["[p]"]
+    for i in 0..n {
+        sections.push("[s\(i)]\na = \(i)")
+        dotted.push("e.k\(i) = \(i)")
+        inline.push("k\(i) = \(i), ")
+        plain.push("k\(i) = \"v\(i)\"")
+    }
+    inline.push("last = 0 }")
+    let a = count(join(sections, "\n"), "")
+    let b = count(join(dotted, "\n"), "d.e")
+    let c = count(join(inline, ""), "t")
+    let d = count(join(plain, "\n"), "p")
+    io.print("\(a) \(b) \(c) \(d)")
+}
+"#;
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let expected = "40000 40000 40001 40000\n";
+    if let Some((out, took)) = on_native("toml-at-scale", src) {
+        assert_eq!(out, expected, "the native backend");
+        assert!(took < Duration::from_secs(30), "the native backend took {:?}", took);
+    }
+    if let Some((out, took)) = on_wasm("toml-at-scale", src) {
+        assert_eq!(out, expected, "wasm");
+        assert!(took < Duration::from_secs(10), "wasm took {:?}", took);
+    }
+}
+
 /// A deep chain of awaits — a recursive `async fn`, the shape of a recursive
 /// walk — is linear on all three backends. An `await` that had to wait parked
 /// with no target, and every task finishing woke every parked task, so each

@@ -3118,7 +3118,1152 @@ pub async fn main() {
     // slice, and across `await` and `task.yield()`. None of them may see the
     // write. Its output is also pinned in `EXPECTED`.
     ("fields-are-written-in-place-unseen", FIELD_ALIASING),
+    // A slice or map passed to a function that keeps nothing stays the
+    // caller's to write in place. Here every way a callee can keep one is
+    // tried, then the caller writes: returned, moved and returned, stored in
+    // a struct, a slice, a map, a tuple, an optional, an enum payload, a
+    // closure and a task, kept on one branch only, two calls deep, round a
+    // recursion and a mutual one, through a `dyn` method, a function value
+    // and a closure. None of them may see the write. Its output is also
+    // pinned in `EXPECTED`.
+    ("passed-slices-are-written-in-place-unseen", CALL_ALIASING),
+    // A field's slice or map passed to a function between writes through
+    // the field: kept by the callee, or passed to one that writes through a
+    // copy of the struct, or through the struct itself two calls down, or
+    // calls a closure, or prints — and passed to readers that do none of
+    // these, in a `var self` method, a nested field and a struct in a slice.
+    // Its output is also pinned in `EXPECTED`.
+    ("passed-fields-are-written-in-place-unseen", PASSED_FIELDS),
 ];
+
+/// See `toml-reads-what-it-read` in [`EXPECTED`]. Each document's parse is
+/// written out in full: keys in their order with their lengths, values with
+/// their types, then `toml.emit`'s text of it.
+const TOML_DOCUMENTS: &str = r##"use std/toml
+
+fn dump(v: toml.Toml) -> str {
+    return match v {
+        toml.Toml.Bool(b) => if b { "T" } else { "F" }
+        toml.Toml.Int(n) => "I\(n)"
+        toml.Toml.Float(f) => "D\(f)"
+        toml.Toml.Text(s) => "S" + "\(s.len())" + ":" + s
+        toml.Toml.Array(items) => dump_items(items)
+        toml.Toml.Table(t) => dump_table(t)
+    }
+}
+
+fn dump_items(items: [toml.Toml]) -> str {
+    var out: [str] = []
+    for item in items {
+        out.push(dump(item))
+    }
+    return "[" + join(out, ",") + "]"
+}
+
+fn dump_table(t: { str: toml.Toml }) -> str {
+    var out: [str] = []
+    for (k, v) in t {
+        out.push("\(k.len())" + ":" + k + "=" + dump(v))
+    }
+    return "{" + join(out, ",") + "}"
+}
+
+fn main() {
+    let docs = ["", "# just a comment\n", "a = 1", "a = 1\r\nb = 2\r\n", "a = 1 # trailing\nb = 'x' # y", "\"quoted key\" = 1\n'lit key' = 2\nbare-key_1 = 3", "a.b.c = 1\na.b.d = 2\na.e = 3", "a . b = 1", "\"a.b\".c = 1", "[t]\nx = 1\n[t.u]\ny = 2\n[v]\nz = 3", "[a.b.c]\nx = 1\n[a]\ny = 2", "[a]\n[a]", "[a]\nb = 1\n[a.b]", "[a.b]\n[a]\n[a.b]", "[[fruit]]\nname = \"apple\"\n[fruit.physical]\ncolor = \"red\"\n[[fruit.variety]]\nname = \"red delicious\"\n[[fruit.variety]]\nname = \"granny\"\n[[fruit]]\nname = \"banana\"\n[[fruit.variety]]\nname = \"plantain\"", "[[a]]\n[a]", "[a]\n[[a]]", "a = [1]\n[[a]]", "a = 1\n[a]", "a = {}\n[a]", "a = { b = 1 }\n[a.c]", "a = { b = 1 }\na.c = 2", "[a]\nb.c = 1\n[a.b]", "[a]\nb.c = 1\n[a.b.d]\nx = 1", "a.b = 1\n[a]\nc = 2", "[x]\na.b = 1\n[y]\n[x.a]", "[x]\na.b = 1\n[x.a.c]", "a.b = 1\na = 2", "a = 2\na.b = 1", "a = 1\na = 2", "[[a]]\nb.c = 1\n[[a]]\nb.c = 2", "[[a]]\nx = 1\n[a.b]\ny = 2\n[[a]]\n[a.b]\nz = 3", "[[a.b]]\n[[a.b]]\n[a]\nc = 1", "[[a]]\n[[a.b]]\nx = 1\n[[a]]\n[[a.b]]\ny = 2", "[a]\n[[a.b]]\nc = 1\nd.e = 2", "a = [[1, 2], [\"x\"], [{ b = 1 }]]\n[[a]]", "a = []\n[[a]]", "t = { a = 1, b.c = 2, b.d = 3 }", "t = { a = 1, a = 2 }", "t = { a = { b = 1 }, a.c = 2 }", "t = { a.b = 1, a = 2 }", "t = { a = [1], a.b = 2 }", "t = { }", "t = {a=1}", "t = { a = 1, }", "t = { a = 1", "t = { a = 1 b = 2 }", "a = [\n 1,\n 2, # c\n]", "a = [1,,2]", "a = [", "a = ]", "s = \"tab\\there\\n\\u00e9\\U0001F600 \\\\ \\\"\"", "s = 'C:\\\\no\\\\escape'", "s = \"\"\"\nline1\nline2 \\\n   folded\"\"\"", "s = '''\nraw \\n\nx'''", "s = \"\\x\"", "s = \"open", "s = \"\"\"open", "s = '''open", "s = \"a\nb\"", "n = [0, -1, +2, 1_000, 0xdead_BEEF, 0o755, 0b1101, -0]", "f = [1.0, -3.5e2, 6.02E23, 1e-3, 0.1]", "n = 1__0", "n = _1", "n = 1_", "n = 0x", "n = 00", "n = 9223372036854775808", "n = -9223372036854775808", "f = 1.", "f = .5", "f = inf", "f = nan", "f = 1e", "b = [true, false]", "b = True", "d = [1979-05-27, 07:32:00, 1979-05-27T07:32:00Z, 1979-05-27 07:32:00.999-07:00, 1979-05-27T00:32:00.5]", "d = 1979-13-27", "d = 1979-05-27T25:00:00", "= 1", "a", "a b = 1", "a = 1 2", "[a", "[[a]", "[a]]", "[]", "[ a . b ]\nx=1", "a.= 1", ".a = 1", "a.. b = 1", "\"\" = 1", "'' = 2", "a = \"\u{1}\"", "a = 1\u{7f}", "[k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k]", "[k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k]\nx = 1", "k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k = 1", "a = [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]", "a = [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]", "[k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k.k]\nj.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j.j = 1", "t = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = 1 } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } }", "[a.\"b.c\".'d']\nx = 1", "[ \"x\" ]\n[\"x\".y]", "[a]\nb = 1\n[c]\nd = 2\n[a.e]\nf = 3", "x.y.z = 1\nx.y.w = 2\n[x.v]\nq = 1", "[s1]\na = 1\n[s2]\na = 2\n[s1.t]\nb = 1", "name = \"kite\"\n[package]\nname = \"x\"\nversion = \"0.1.0\"\n[dependencies]\nfoo = { version = \"1\", path = \"../foo\" }\nbar = \"2\"", "[a]\nx = 1\n\n\n   [b]   # comment\n   y = 2", "a = 1\n\t[b]\n\tc = 2", "[a]b = 1", "a = 1 # comment with \"quote", "[[a]]\nb = { c = 1 }\n[a.b.d]", "[[a]]\n[a.b]\n[[a.b.c]]\nx = 1\n[[a.b.c]]\nx = 2", "a = { b = [ { c = 1 } ] }\n[a.b]"]
+    for d in docs {
+        let (doc, err) = toml.parse(d)
+        if err != nil {
+            io.print("E " + err.message())
+        } else {
+            io.print("O " + dump(doc))
+            io.print("M " + toml.emit(doc))
+        }
+    }
+}
+"##;
+
+const TOML_DOCUMENTS_READ: &str = r##"O {}
+M 
+O {}
+M 
+O {1:a=I1}
+M a = 1
+
+O {1:a=I1,1:b=I2}
+M a = 1
+b = 2
+
+O {1:a=I1,1:b=S1:x}
+M a = 1
+b = "x"
+
+O {10:quoted key=I1,7:lit key=I2,10:bare-key_1=I3}
+M "quoted key" = 1
+"lit key" = 2
+bare-key_1 = 3
+
+O {1:a={1:b={1:c=I1,1:d=I2},1:e=I3}}
+M 
+[a]
+e = 3
+
+[a.b]
+c = 1
+d = 2
+
+O {1:a={1:b=I1}}
+M 
+[a]
+b = 1
+
+O {3:a.b={1:c=I1}}
+M 
+["a.b"]
+c = 1
+
+O {1:t={1:x=I1,1:u={1:y=I2}},1:v={1:z=I3}}
+M 
+[t]
+x = 1
+
+[t.u]
+y = 2
+
+[v]
+z = 3
+
+O {1:a={1:b={1:c={1:x=I1}},1:y=I2}}
+M 
+[a]
+y = 2
+
+[a.b]
+
+[a.b.c]
+x = 1
+
+E toml: `[a]` defines a table that is already defined
+E toml: `a.b` is already a value, not a table
+E toml: `[a.b]` defines a table that is already defined
+O {5:fruit=[{4:name=S5:apple,8:physical={5:color=S3:red},7:variety=[{4:name=S13:red delicious},{4:name=S6:granny}]},{4:name=S6:banana,7:variety=[{4:name=S8:plantain}]}]}
+M 
+[[fruit]]
+name = "apple"
+
+[fruit.physical]
+color = "red"
+
+[[fruit.variety]]
+name = "red delicious"
+
+[[fruit.variety]]
+name = "granny"
+
+[[fruit]]
+name = "banana"
+
+[[fruit.variety]]
+name = "plantain"
+
+E toml: `a` is an array of tables, not a table
+E toml: `a` is a table, not an array of tables
+E toml: `a` is already a value; an array written with `[…]` cannot be appended to
+E toml: `a` is already a value, not a table
+E toml: `a` is already a value, not a table
+E toml: `a` is already a value, not a table
+E toml: `a` is already a value, not a table
+E toml: `[a.b]` defines a table that is already defined
+O {1:a={1:b={1:c=I1,1:d={1:x=I1}}}}
+M 
+[a]
+
+[a.b]
+c = 1
+
+[a.b.d]
+x = 1
+
+E toml: `[a]` defines a table that is already defined
+E toml: `[x.a]` defines a table that is already defined
+O {1:x={1:a={1:b=I1,1:c={}}}}
+M 
+[x]
+
+[x.a]
+b = 1
+
+[x.a.c]
+
+E toml: `a` is set twice
+E toml: `a` is already a value, not a table
+E toml: `a` is set twice
+O {1:a=[{1:b={1:c=I1}},{1:b={1:c=I2}}]}
+M 
+[[a]]
+
+[a.b]
+c = 1
+
+[[a]]
+
+[a.b]
+c = 2
+
+O {1:a=[{1:x=I1,1:b={1:y=I2}},{1:b={1:z=I3}}]}
+M 
+[[a]]
+x = 1
+
+[a.b]
+y = 2
+
+[[a]]
+
+[a.b]
+z = 3
+
+O {1:a={1:b=[{},{}],1:c=I1}}
+M 
+[a]
+c = 1
+
+[[a.b]]
+
+[[a.b]]
+
+O {1:a=[{1:b=[{1:x=I1}]},{1:b=[{1:y=I2}]}]}
+M 
+[[a]]
+
+[[a.b]]
+x = 1
+
+[[a]]
+
+[[a.b]]
+y = 2
+
+O {1:a={1:b=[{1:c=I1,1:d={1:e=I2}}]}}
+M 
+[a]
+
+[[a.b]]
+c = 1
+
+[a.b.d]
+e = 2
+
+E toml: `a` is already a value; an array written with `[…]` cannot be appended to
+E toml: `a` is already a value; an array written with `[…]` cannot be appended to
+O {1:t={1:a=I1,1:b={1:c=I2,1:d=I3}}}
+M 
+[t]
+a = 1
+
+[t.b]
+c = 2
+d = 3
+
+E toml: `a` is set twice
+E toml: `a` is already a value, not a table
+E toml: `a` is set twice
+E toml: `a` is already a value, not a table
+O {1:t={}}
+M 
+[t]
+
+O {1:t={1:a=I1}}
+M 
+[t]
+a = 1
+
+E toml: expected a key at 13
+E toml: expected `,` or `}` at 11
+E toml: `1 b = 2` is not a number
+O {1:a=[I1,I2]}
+M a = [1, 2]
+
+E toml: expected a value at 7
+E toml: unterminated array at 4
+E toml: expected a value at 4
+O {1:s=S15:tab	here
+é😀 \ "}
+M s = "tab\there\né😀 \\ \""
+
+O {1:s=S14:C:\\no\\escape}
+M s = "C:\\\\no\\\\escape"
+
+O {1:s=S18:line1
+line2 folded}
+M s = "line1\nline2 folded"
+
+O {1:s=S8:raw \n
+x}
+M s = "raw \\n\nx"
+
+E toml: unknown escape `\x` at 5
+E toml: unterminated string at 4
+E toml: unterminated multi-line string at 7
+E toml: unterminated multi-line string at 7
+E toml: newline in a single-line string at 6
+O {1:n=[I0,I-1,I2,I1000,I3735928559,I493,I13,I0]}
+M n = [0, -1, 2, 1000, 3735928559, 493, 13, 0]
+
+O {1:f=[D1.0,D-350.0,D6.02e+23,D0.001,D0.1]}
+M f = [1.0, -350.0, 6.02e+23, 0.001, 0.1]
+
+E toml: `1__0` is not a number
+E toml: `_1` is not a number
+E toml: `1_` is not a number
+E toml: `0x` is not a number
+E toml: `00` starts with a zero, which only `0` itself may
+E toml: `9223372036854775808` does not fit in an int
+O {1:n=I-9223372036854775808}
+M n = -9223372036854775808
+
+E toml: `1.` needs a digit after its point
+E toml: `.5` is not a number
+E toml: `inf` has no value in Kite
+E toml: `nan` has no value in Kite
+E toml: `1e` needs digits in its exponent
+O {1:b=[T,F]}
+M b = [true, false]
+
+E toml: `True` is not a number
+O {1:d=[S10:1979-05-27,S8:07:32:00,S20:1979-05-27T07:32:00Z,S29:1979-05-27 07:32:00.999-07:00,S21:1979-05-27T00:32:00.5]}
+M d = [1979-05-27, 07:32:00, 1979-05-27T07:32:00Z, 1979-05-27 07:32:00.999-07:00, 1979-05-27T00:32:00.5]
+
+E toml: `1979-13-27` is not a date or a time TOML can write
+E toml: `1979-05-27T25:00:00` is not a date or a time TOML can write
+E toml: expected a key at 0
+E toml: expected `=` at 1
+E toml: expected `=` at 2
+E toml: `1 2` is not a number
+E toml: expected `]` at 2
+E toml: expected `]` at 4
+E toml: unexpected text at 3
+E toml: expected a key at 1
+O {1:a={1:b={1:x=I1}}}
+M 
+[a]
+
+[a.b]
+x = 1
+
+E toml: expected a key at 2
+E toml: expected a key at 0
+E toml: expected a key at 2
+O {0:=I1}
+M "" = 1
+
+O {0:=I2}
+M "" = 2
+
+E toml: a control character in a string must be escaped, at 5
+E toml: unexpected control character at 5
+E toml: nested deeper than 128 at 0
+E toml: nested deeper than 128 at 258
+E toml: nested deeper than 128 at 0
+E toml: nested deeper than 128 at 131
+O {1:a=[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}
+M a = [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
+
+E toml: nested deeper than 128 at 202
+O {1:t={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a={1:a=I1}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}
+M 
+[t]
+
+[t.a]
+
+[t.a.a]
+
+[t.a.a.a]
+
+[t.a.a.a.a]
+
+[t.a.a.a.a.a]
+
+[t.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+
+[t.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a]
+a = 1
+
+O {1:a={3:b.c={1:d={1:x=I1}}}}
+M 
+[a]
+
+[a."b.c"]
+
+[a."b.c".d]
+x = 1
+
+O {1:x={1:y={}}}
+M 
+[x]
+
+[x.y]
+
+O {1:a={1:b=I1,1:e={1:f=I3}},1:c={1:d=I2}}
+M 
+[a]
+b = 1
+
+[a.e]
+f = 3
+
+[c]
+d = 2
+
+O {1:x={1:y={1:z=I1,1:w=I2},1:v={1:q=I1}}}
+M 
+[x]
+
+[x.y]
+z = 1
+w = 2
+
+[x.v]
+q = 1
+
+O {2:s1={1:a=I1,1:t={1:b=I1}},2:s2={1:a=I2}}
+M 
+[s1]
+a = 1
+
+[s1.t]
+b = 1
+
+[s2]
+a = 2
+
+O {4:name=S4:kite,7:package={4:name=S1:x,7:version=S5:0.1.0},12:dependencies={3:foo={7:version=S1:1,4:path=S6:../foo},3:bar=S1:2}}
+M name = "kite"
+
+[package]
+name = "x"
+version = "0.1.0"
+
+[dependencies]
+bar = "2"
+
+[dependencies.foo]
+version = "1"
+path = "../foo"
+
+O {1:a={1:x=I1},1:b={1:y=I2}}
+M 
+[a]
+x = 1
+
+[b]
+y = 2
+
+O {1:a=I1,1:b={1:c=I2}}
+M a = 1
+
+[b]
+c = 2
+
+E toml: unexpected text at 3
+O {1:a=I1}
+M a = 1
+
+E toml: `a.b` is already a value, not a table
+O {1:a=[{1:b={1:c=[{1:x=I1},{1:x=I2}]}}]}
+M 
+[[a]]
+
+[a.b]
+
+[[a.b.c]]
+x = 1
+
+[[a.b.c]]
+x = 2
+
+E toml: `a` is already a value, not a table
+"##;
+
+/// See `passed-fields-are-written-in-place-unseen` in [`NATIVE_TARGET`].
+const PASSED_FIELDS: &str = r#"// A field's slice or map passed to a function between writes through the
+// field: whatever the function kept, or saw while it ran, must not see a
+// write that came after it read.
+
+struct Q {
+    var items: [int]
+    var m: { str: int }
+}
+
+struct Box {
+    var q: Q
+}
+
+fn sl(xs: [int]) -> str {
+    return "[" + join_ints(xs, ",") + "]"
+}
+
+fn mp(m: { str: int }) -> str {
+    var parts: [str] = []
+    for k in m.keys() {
+        parts.push("\(k)=\(or_else(m[k], 0))")
+    }
+    return "{" + join(parts, ",") + "}"
+}
+
+fn seen(m: { str: int }, w: str) -> bool {
+    return has_key(m, w)
+}
+
+fn count(xs: [int]) -> int {
+    return xs.len()
+}
+
+fn keep(xs: [int]) -> [int] {
+    return xs
+}
+
+fn keep_map(m: { str: int }) -> { str: int } {
+    return m
+}
+
+// Writes through a copy of the struct while it holds the field's map.
+fn write_through(m: { str: int }, q: Q) -> str {
+    var t = q
+    t.m["w"] = 9
+    t.items.push(9)
+    return mp(m) + " " + mp(t.m)
+}
+
+// Writes through the struct it was given while holding its slice.
+fn push_through(xs: [int], var q: Q) -> str {
+    q.items.push(7)
+    return sl(xs) + " " + sl(q.items)
+}
+
+fn deeper(xs: [int], q: Q) -> str {
+    return push_through(xs, q)
+}
+
+fn via_closure(xs: [int], f: fn() -> int) -> int {
+    return xs.len() + f()
+}
+
+fn printed(xs: [int]) -> int {
+    io.print("printed \(sl(xs))")
+    return xs.len()
+}
+
+impl Q {
+    fn add(var self, w: str) {
+        if !seen(self.m, w) {
+            self.m[w] = self.m.len()
+        }
+        self.items.push(count(self.items))
+    }
+
+    fn add_kept(var self, w: str) -> { str: int } {
+        let k = keep_map(self.m)
+        self.m[w] = 1
+        return k
+    }
+}
+
+fn main() {
+    var q = Q{ items: [1], m: { "a": 1 } }
+    for i in 0..5 {
+        q.add("k\(i % 3)")
+    }
+    io.print("add \(sl(q.items)) \(mp(q.m))")
+
+    let k1 = keep(q.items)
+    q.items.push(100)
+    let k2 = q.add_kept("z")
+    q.m["y"] = 2
+    io.print("kept \(sl(k1)) \(mp(k2)) now \(sl(q.items)) \(mp(q.m))")
+
+    let w1 = write_through(q.m, q)
+    q.m["after"] = 3
+    io.print("write_through \(w1) now \(mp(q.m))")
+
+    let p1 = push_through(q.items, q)
+    q.items.push(200)
+    let p2 = deeper(q.items, q)
+    q.items.push(300)
+    io.print("push_through \(p1) | \(p2) now \(sl(q.items))")
+
+    let n = 5
+    let c1 = via_closure(q.items, || n)
+    q.items.push(400)
+    let c2 = printed(q.items)
+    q.items.push(500)
+    io.print("closure \(c1) \(c2) now \(sl(q.items))")
+
+    var b = Box{ q: Q{ items: [], m: { } } }
+    var log: [int] = []
+    for i in 0..6 {
+        if count(b.q.items) % 2 == 0 {
+            b.q.items.push(i)
+        } else {
+            log.push(count(keep(b.q.items)))
+            b.q.items.push(i * 10)
+        }
+        if !seen(b.q.m, "x\(i % 2)") {
+            b.q.m["x\(i % 2)"] = i
+        }
+    }
+    io.print("box \(sl(b.q.items)) \(sl(log)) \(mp(b.q.m))")
+
+    var qs = [Q{ items: [5], m: { } }]
+    for i in 0..4 {
+        if count(qs[0].items) < 10 {
+            qs[0].items.push(i)
+        }
+        let snap = keep(qs[0].items)
+        qs[0].items[0] = i
+        io.print("qs \(sl(snap)) \(sl(qs[0].items))")
+    }
+}
+"#;
+
+/// See `passed-slices-are-written-in-place-unseen` in [`NATIVE_TARGET`].
+const CALL_ALIASING: &str = r#"use std/task
+
+// A slice or map handed to a function, then written by the caller: whatever
+// the function kept, in any way, must not see the write.
+
+struct Holder {
+    xs: [int]
+}
+
+struct Box {
+    var xs: [int]
+    var m: { str: int }
+}
+
+enum Kept {
+    Slice([int])
+    Table({ str: int })
+}
+
+trait Keeper {
+    fn keep(self, xs: [int]) -> [int]
+}
+
+struct K {
+    n: int
+}
+
+impl Keeper for K {
+    fn keep(self, xs: [int]) -> [int] {
+        return xs
+    }
+}
+
+fn sl(xs: [int]) -> str {
+    return "[" + join_ints(xs, ",") + "]"
+}
+
+fn mp(m: { str: int }) -> str {
+    var parts: [str] = []
+    for k in m.keys() {
+        parts.push("\(k)=\(or_else(m[k], 0))")
+    }
+    return "{" + join(parts, ",") + "}"
+}
+
+fn id(xs: [int]) -> [int] {
+    return xs
+}
+
+fn id_map(m: { str: int }) -> { str: int } {
+    return m
+}
+
+fn via_var(xs: [int]) -> [int] {
+    var t = xs
+    let u = t
+    return u
+}
+
+fn hold(xs: [int]) -> Holder {
+    return Holder{ xs: xs }
+}
+
+fn wrap(xs: [int]) -> [[int]] {
+    return [xs]
+}
+
+fn in_map(xs: [int]) -> { str: [int] } {
+    return { "a": xs }
+}
+
+fn as_value(m: { str: int }) -> { str: { str: int } } {
+    var out: { str: { str: int } } = { }
+    out["m"] = m
+    return out
+}
+
+fn pair(xs: [int]) -> ([int], int) {
+    return (xs, xs.len())
+}
+
+fn opt(xs: [int]) -> Option<[int]> {
+    if xs.len() > 100 {
+        return nil
+    }
+    return xs
+}
+
+fn tagged(xs: [int]) -> Kept {
+    return Kept.Slice(xs)
+}
+
+fn tagged_map(m: { str: int }) -> Kept {
+    return Kept.Table(m)
+}
+
+fn captured(xs: [int]) -> fn() -> [int] {
+    return || xs
+}
+
+fn maybe(xs: [int], keep: bool) -> [int] {
+    if keep {
+        return xs
+    }
+    return []
+}
+
+fn outer(xs: [int]) -> [int] {
+    return id(xs)
+}
+
+fn outer2(xs: [int]) -> Holder {
+    let ys = xs
+    return hold(ys)
+}
+
+fn rec(xs: [int], n: int) -> [int] {
+    if n == 0 {
+        return xs
+    }
+    return rec(xs, n - 1)
+}
+
+fn even(xs: [int], n: int) -> [int] {
+    if n == 0 {
+        return xs
+    }
+    return odd(xs, n - 1)
+}
+
+fn odd(xs: [int], n: int) -> [int] {
+    if n == 0 {
+        return []
+    }
+    return even(xs, n - 1)
+}
+
+fn count(xs: [int], n: int) -> int {
+    if n == 0 {
+        return xs.len()
+    }
+    return count(xs, n - 1)
+}
+
+fn ping(xs: [int], n: int) -> int {
+    if n == 0 {
+        return xs.len()
+    }
+    return pong(xs, n - 1)
+}
+
+fn pong(xs: [int], n: int) -> int {
+    return ping(xs, n)
+}
+
+fn into_box(var b: Box, xs: [int]) -> Box {
+    b.xs = xs
+    return b
+}
+
+fn put_into(var b: Box, m: { str: int }) -> Box {
+    b.m = m
+    return b
+}
+
+fn bump(var xs: [int]) -> int {
+    xs.push(99)
+    xs[0] = -1
+    return xs.len()
+}
+
+fn bump_map(var m: { str: int }) -> int {
+    m["zz"] = 26
+    m.remove("a")
+    return m.len()
+}
+
+fn first_row(g: [[int]]) -> [int] {
+    return g[0]
+}
+
+fn lookup(m: { str: [int] }) -> [int] {
+    return or_else(m["a"], [])
+}
+
+fn both(a: [int], b: [int]) -> [int] {
+    if a.len() > 0 {
+        return b
+    }
+    return a
+}
+
+fn reads(xs: [int]) -> int {
+    var t = 0
+    for x in xs {
+        t += x
+    }
+    return t
+}
+
+fn window(xs: [int]) -> [int] {
+    return xs[0..1]
+}
+
+fn keys_of(m: { str: int }) -> [str] {
+    return m.keys()
+}
+
+fn show(xs: [int]) -> str {
+    return join_ints(xs, "+")
+}
+
+async fn later(xs: [int]) -> int {
+    task.yield()
+    return xs.len()
+}
+
+async fn later_back(xs: [int]) -> [int] {
+    task.yield()
+    return xs
+}
+
+async fn run_tasks() {
+    var xs = [1, 2]
+    let t = later(xs)
+    xs.push(3)
+    io.print("task len \(await t) now \(sl(xs))")
+    let u = later_back(xs)
+    xs.push(4)
+    xs[0] = 100
+    io.print("task back \(sl(await u)) now \(sl(xs))")
+}
+
+async fn main() {
+    var a = [1, 2]
+    let a1 = id(a)
+    a.push(3)
+    a[0] = 10
+    io.print("id \(sl(a1)) \(sl(a))")
+
+    var b = [1, 2]
+    let b1 = via_var(b)
+    b.push(3)
+    io.print("via_var \(sl(b1)) \(sl(b))")
+
+    var c = [1, 2]
+    let c1 = hold(c)
+    c.push(3)
+    c[1] = 20
+    io.print("hold \(sl(c1.xs)) \(sl(c))")
+
+    var d = [1, 2]
+    let d1 = wrap(d)
+    d.push(3)
+    io.print("wrap \(sl(d1[0])) \(sl(d))")
+
+    var e = [1, 2]
+    let e1 = in_map(e)
+    e.push(3)
+    io.print("in_map \(sl(or_else(e1["a"], []))) \(sl(e))")
+
+    var f = [1, 2]
+    let f1 = pair(f)
+    f.push(3)
+    io.print("pair \(sl(f1.0)) \(f1.1) \(sl(f))")
+
+    var g = [1, 2]
+    let g1 = opt(g)
+    g.push(3)
+    io.print("opt \(sl(or_else(g1, []))) \(sl(g))")
+
+    var h = [1, 2]
+    let h1 = tagged(h)
+    h.push(3)
+    let h2 = match h1 {
+        Slice(xs) => sl(xs),
+        Table(m) => mp(m),
+    }
+    io.print("tagged \(h2) \(sl(h))")
+
+    var i = [1, 2]
+    let i1 = captured(i)
+    i.push(3)
+    io.print("captured \(sl(i1())) \(sl(i))")
+
+    var j = [1, 2]
+    let j1 = maybe(j, false)
+    j.push(3)
+    let j2 = maybe(j, true)
+    j.push(4)
+    io.print("maybe \(sl(j1)) \(sl(j2)) \(sl(j))")
+
+    var k = [1, 2]
+    let k1 = outer(k)
+    k.push(3)
+    let k2 = outer2(k)
+    k.push(4)
+    io.print("outer \(sl(k1)) \(sl(k2.xs)) \(sl(k))")
+
+    var l = [1, 2]
+    let l1 = rec(l, 5)
+    l.push(3)
+    let l2 = even(l, 4)
+    l.push(4)
+    let l3 = count(l, 7)
+    l.push(5)
+    let l4 = ping(l, 3)
+    l.push(6)
+    io.print("rec \(sl(l1)) \(sl(l2)) \(l3) \(l4) \(sl(l))")
+
+    var bx = Box{ xs: [], m: { } }
+    var n = [1, 2]
+    bx = into_box(bx, n)
+    n.push(3)
+    var mm = { "a": 1 }
+    bx = put_into(bx, mm)
+    mm["b"] = 2
+    io.print("box \(sl(bx.xs)) \(sl(n)) \(mp(bx.m)) \(mp(mm))")
+
+    var o = [1, 2]
+    let o1 = bump(o)
+    o.push(3)
+    var om = { "a": 1, "b": 2 }
+    let om1 = bump_map(om)
+    om["c"] = 3
+    io.print("bump \(o1) \(sl(o)) \(om1) \(mp(om))")
+
+    var rows = [[1], [2]]
+    let r1 = first_row(rows)
+    rows[0] = [7, 7]
+    rows.push([3])
+    let r2 = first_row(rows)
+    rows[0].push(8)
+    io.print("rows \(sl(r1)) \(sl(r2)) \(sl(rows[0])) \(rows.len())")
+
+    var lm = { "a": [1] }
+    let lm1 = lookup(lm)
+    lm["a"] = [5]
+    lm["b"] = [6]
+    io.print("lookup \(sl(lm1)) \(lm.len())")
+
+    var p = [1]
+    var q = [2]
+    let pq = both(p, q)
+    q.push(3)
+    p.push(4)
+    let pp = both(p, p)
+    p.push(5)
+    io.print("both \(sl(pq)) \(sl(pp)) \(sl(p)) \(sl(q))")
+
+    var s = [1, 2, 3]
+    var tot = 0
+    var w: [int] = []
+    var ks: [str] = []
+    var shown = ""
+    var ms = { "x": 1 }
+    for z in 0..5 {
+        tot += reads(s)
+        w = window(s)
+        shown = show(s)
+        s.push(z)
+        s[0] = z
+        ks = keys_of(ms)
+        ms["k\(z)"] = z
+    }
+    io.print("reads \(tot) \(sl(w)) \(shown) \(sl(s)) \(join(ks, ",")) \(ms.len())")
+
+    var t1 = { "a": 1 }
+    let t2 = id_map(t1)
+    t1["b"] = 2
+    t1.remove("a")
+    let t3 = as_value(t1)
+    t1["c"] = 3
+    let t4 = tagged_map(t1)
+    t1["d"] = 4
+    let t5 = match t4 {
+        Slice(xs) => sl(xs),
+        Table(m) => mp(m),
+    }
+    io.print("maps \(mp(t2)) \(mp(or_else(t3["m"], { }))) \(t5) \(mp(t1))")
+
+    let kp: dyn Keeper = K{ n: 1 }
+    var u = [1, 2]
+    let u1 = kp.keep(u)
+    u.push(3)
+    let fv = id
+    let u2 = fv(u)
+    u.push(4)
+    let cl = |ys: [int]| ys
+    let u3 = cl(u)
+    u.push(5)
+    io.print("indirect \(sl(u1)) \(sl(u2)) \(sl(u3)) \(sl(u))")
+
+    var big = [0]
+    var kept: [[int]] = []
+    for z in 0..20 {
+        if z % 3 == 0 {
+            kept.push(maybe(big, true))
+        }
+        big.push(z)
+        if z % 4 == 0 {
+            kept.push(rec(big, z % 3))
+        }
+        big[0] = z
+    }
+    var lines: [str] = []
+    for r in kept {
+        lines.push(sl(r))
+    }
+    io.print("loop \(join(lines, ";")) \(sl(big))")
+
+    await run_tasks()
+}
+"#;
 
 /// See `fields-are-written-in-place-unseen` in [`NATIVE_TARGET`].
 const FIELD_ALIASING: &str = r#"// Every way a slice or map read out of a field can be kept, each followed by
@@ -4853,6 +5998,8 @@ fn slices_agree_natively_with_a_page_of_nursery() {
         "maps-are-indexed-and-keep-their-order",
         "slices-and-maps-move-across-a-suspension",
         "fields-are-written-in-place-unseen",
+        "passed-slices-are-written-in-place-unseen",
+        "passed-fields-are-written-in-place-unseen",
     ] {
         let (_, src) = WASM_TARGET
             .iter()
@@ -7170,6 +8317,52 @@ await kept: [100,2,0,1,2,7,8] {k0=0,k1=1,k2=2,y=7} now [100,2,0,1,2,7,8,9] {k0=0
 in place then kept: [100,2,0,1,2,7,8,9,0,1,2,3] now [100,2,0,1,2,7,8,9,0,1,2,3,10,11]\n\
 nested across: [0,1,2] {n0=0,n1=1,n2=2} now [0,1,2,5] {n1=1,n2=2}\n\
 "),
+    // What a caller's slice or map holds after it was passed on, and what
+    // every function that kept it holds: as it was before a call to one that
+    // keeps nothing stopped ending the caller's right to write in place.
+    ("passed-slices-are-written-in-place-unseen", CALL_ALIASING, "id [1,2] [10,2,3]\n\
+via_var [1,2] [1,2,3]\n\
+hold [1,2] [1,20,3]\n\
+wrap [1,2] [1,2,3]\n\
+in_map [1,2] [1,2,3]\n\
+pair [1,2] 2 [1,2,3]\n\
+opt [1,2] [1,2,3]\n\
+tagged [1,2] [1,2,3]\n\
+captured [1,2] [1,2,3]\n\
+maybe [] [1,2,3] [1,2,3,4]\n\
+outer [1,2] [1,2,3] [1,2,3,4]\n\
+rec [1,2] [1,2,3] 4 5 [1,2,3,4,5,6]\n\
+box [1,2] [1,2,3] {a=1} {a=1,b=2}\n\
+bump 3 [1,2,3] 2 {a=1,b=2,c=3}\n\
+rows [1] [7,7] [7,7,8] 3\n\
+lookup [1] 2\n\
+both [2] [1,4] [1,4,5] [2,3]\n\
+reads 42 [3] 3+2+3+0+1+2+3 [4,2,3,0,1,2,3,4] x,k0,k1,k2,k3 6\n\
+maps {a=1} {b=2} {b=2,c=3} {b=2,c=3,d=4}\n\
+indirect [1,2] [1,2,3] [1,2,3,4] [1,2,3,4,5]\n\
+loop [0];[0,0];[2,0,1,2];[3,0,1,2,3,4];[5,0,1,2,3,4,5];[7,0,1,2,3,4,5,6,7,8];[8,0,1,2,3,4,5,6,7,8];[11,0,1,2,3,4,5,6,7,8,9,10,11];[11,0,1,2,3,4,5,6,7,8,9,10,11,12];[14,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14];[15,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16];[17,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17] [19,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]\n\
+task len 2 now [1,2,3]\n\
+task back [1,2,3] now [100,2,3,4]\n\
+"),
+    // What a field's slice or map, and everything that kept it, holds
+    // after it was passed to a function and written through the field.
+    ("passed-fields-are-written-in-place-unseen", PASSED_FIELDS, "add [1,1,2,3,4,5] {a=1,k0=1,k1=2,k2=3}\n\
+kept [1,1,2,3,4,5] {a=1,k0=1,k1=2,k2=3} now [1,1,2,3,4,5,100] {a=1,k0=1,k1=2,k2=3,z=1,y=2}\n\
+write_through {a=1,k0=1,k1=2,k2=3,z=1,y=2} {a=1,k0=1,k1=2,k2=3,z=1,y=2,w=9} now {a=1,k0=1,k1=2,k2=3,z=1,y=2,w=9,after=3}\n\
+push_through [1,1,2,3,4,5,100,9] [1,1,2,3,4,5,100,9,7] | [1,1,2,3,4,5,100,9,7,200] [1,1,2,3,4,5,100,9,7,200,7] now [1,1,2,3,4,5,100,9,7,200,7,300]\n\
+printed [1,1,2,3,4,5,100,9,7,200,7,300,400]\n\
+closure 17 13 now [1,1,2,3,4,5,100,9,7,200,7,300,400,500]\n\
+box [0,10,2,30,4,50] [1,3,5] {x0=0,x1=1}\n\
+qs [5,0] [0,0]\n\
+qs [0,0,1] [1,0,1]\n\
+qs [1,0,1,2] [2,0,1,2]\n\
+qs [2,0,1,2,3] [3,0,1,2,3]\n\
+"),
+    // What `toml.parse` makes of a hundred and fifteen documents — every
+    // form the module reads, every rule about how a table comes to exist, and
+    // every error it reports — pinned to what it answered while it still
+    // built the document as nested `Toml`, before it read into flat tables.
+    ("toml-reads-what-it-read", TOML_DOCUMENTS, TOML_DOCUMENTS_READ),
     // An `Option<error>` that holds a nil error is present: `task.timeout` of
     // a task that finished in time has its result, whatever it is. The VM,
     // which does not box an optional's payload, read every one of these as

@@ -110,27 +110,15 @@ fn too_deep(at: int) -> error {
 /// The top level of a TOML document is always a table, which is the one way it
 /// differs from JSON at the root.
 pub fn parse(input: str) -> (Toml, error) {
-    var root: { str: Toml } = { }
-    // The table that bare `key = value` lines currently belong to. `[a.b]`
-    // moves it; the top of the document starts at the root. When the path
-    // passes through an array of tables it means that array's last element,
-    // which is what [`change`] and [`spots`] both read it as.
+    // Every table and key of the document, numbered and written in place, and
+    // made into nested `Toml` once at the end — see [`Doc`].
+    var doc = blank_doc()
+    // The table that bare `key = value` lines currently belong to: the root,
+    // or the one the last header named. When a header's path passes through an
+    // array of tables it means that array's last element, which is the one the
+    // header itself walked into.
     var section: [str] = []
-    // What the parser knows about how each table came to exist, by the id
-    // [`spots`] gives it — `defined()` and `closed()` — and the tables dotted
-    // keys created or passed through in the current section, which become
-    // defined when it ends.
-    var flags: { str: int } = { }
-    var pending: [str] = []
-    // The current section's table while plain `key = value` lines are being
-    // written into it, held apart from `root` and put back before anything
-    // else reads `root`. A map is a value, so writing a key through `change`
-    // rebuilt every table on the way — the root's included — and a document
-    // of `n` keys cost `n²`: 32 s at 30,000 keys. A table held in a local is
-    // written in place.
-    var current: { str: Toml } = { }
-    var current_id = ""
-    var taken = false
+    var current = 0
     var at = 0
     for {
         at = skip_blank(input, at)
@@ -141,31 +129,16 @@ pub fn parse(input: str) -> (Toml, error) {
         if c == "[" {
             let (header, err) = parse_header(input, at)
             check err
-            if taken {
-                root = put_section(root, section, 0, current)
-                taken = false
-            }
             if header.path.len() > max_depth() {
                 return _, too_deep(at)
             }
             at = header.next
             // A table dotted keys made is defined by them, and a header may
             // not define it again — not even one naming it from elsewhere.
-            for id in pending {
-                flags[id] = flag_of(flags, id) | defined()
-            }
-            pending = []
-            let where = spots(root, header.path, flags)
-            let allowed = header_allowed(where, header, flags)
-            check allowed
-            let op = if header.repeated { push_op() } else { open_op() }
-            let (changed, change_err) = change(root, header.path, 0, op, Toml.Bool(false))
-            check change_err
-            root = changed
-            if !header.repeated {
-                let target = where[where.len() - 1]
-                flags[target.inner] = flag_of(flags, target.inner) | defined()
-            }
+            doc.end_section()
+            let (target, header_err) = doc.header(header)
+            check header_err
+            current = target
             section = header.path
             continue
         }
@@ -175,114 +148,19 @@ pub fn parse(input: str) -> (Toml, error) {
         if eq >= input.len() || input.slice(eq, eq + 1) != "=" {
             return _, errors.new("toml: expected `=` at \(eq)")
         }
-        let full = concat(section, key.path)
-        if full.len() > max_depth() {
+        let depth = section.len() + key.path.len()
+        if depth > max_depth() {
             return _, too_deep(at)
         }
-        let (step, value_err) = parse_value(input, skip_inline(input, eq + 1), full.len())
+        let (step, value_err) = parse_value(input, skip_inline(input, eq + 1), depth)
         check value_err
-        if key.path.len() == 1 {
-            // A plain key: the section's table is the only one it can change,
-            // and it may not be there already — `assignment_allowed`'s whole
-            // rule for one segment.
-            if !taken {
-                current = section_table(root, section)
-                current_id = section_id(root, section, flags)
-                taken = true
-            }
-            let name = key.path[0]
-            if current[name] != nil {
-                return _, errors.new("toml: `\(name)` is set twice")
-            }
-            current[name] = step.value
-            if is_closed_value(step.value) {
-                flags[current_id + "/\(name.len()):" + name] = closed()
-            }
-            let (after, line_err) = end_of_line(input, step.next)
-            check line_err
-            at = after
-            continue
-        }
-        if taken {
-            root = put_section(root, section, 0, current)
-            taken = false
-        }
-        let where = spots(root, full, flags)
-        let allowed = assignment_allowed(where, section.len(), flags)
-        check allowed
-        let (placed, place_err) = change(root, full, 0, set_op(), step.value)
-        check place_err
-        root = placed
-        let last = full.len() - 1
-        let first = section.len()
-        for k in first..last {
-            pending.push(where[k].inner)
-        }
-        if is_closed_value(step.value) {
-            flags[where[last].id] = closed()
-        }
-        at = step.next
-        let (after, line_err) = end_of_line(input, at)
+        let placed = doc.assign(current, key.path, step.value, true)
+        check placed
+        let (after, line_err) = end_of_line(input, step.next)
         check line_err
         at = after
     }
-    if taken {
-        root = put_section(root, section, 0, current)
-    }
-    return Toml.Table(root), nil
-}
-
-/// The table a section's plain keys go into: the one [`spots`] walks to,
-/// through the last element of an array of tables on the way.
-fn section_table(root: { str: Toml }, section: [str]) -> { str: Toml } {
-    var here = root
-    for segment in section {
-        let held = here[segment]
-        if held == nil {
-            return { }
-        }
-        let into = walk_into(held)
-        if into == nil {
-            return { }
-        }
-        here = into
-    }
-    return here
-}
-
-/// The id [`spots`] gives the table a section names, which a key in it
-/// extends: empty for the root.
-fn section_id(root: { str: Toml }, section: [str], flags: { str: int }) -> str {
-    if section.len() == 0 {
-        return ""
-    }
-    let where = spots(root, section, flags)
-    return where[where.len() - 1].inner
-}
-
-/// `here` with the section's table from `section[at]` on, taken out by
-/// [`section_table`], put back.
-fn put_section(here: { str: Toml }, section: [str], at: int, table: { str: Toml }) -> { str: Toml } {
-    if at == section.len() {
-        return table
-    }
-    var out = here
-    let key = section[at]
-    let held = out[key]
-    var inner: { str: Toml } = { }
-    if held != nil {
-        let into = walk_into(held)
-        if into != nil {
-            inner = into
-        }
-    }
-    let filled = put_section(inner, section, at + 1, table)
-    if held == nil {
-        out[key] = Toml.Table(filled)
-    } else {
-        out[key] = put_back(held, filled)
-    }
-    return out
+    return Toml.Table(doc.assemble(0)), nil
 }
 
 /// A `[table]` or `[[array of tables]]` header, and which of the two it was.
@@ -595,13 +473,13 @@ fn parse_array(input: str, at: int, depth: int) -> (Step, error) {
 }
 
 fn parse_inline_table(input: str, at: int, depth: int) -> (Step, error) {
-    var table: { str: Toml } = { }
     // An inline table is its own little document: `{ a = { b = 1 }, a.c = 2 }`
-    // extends a closed table just as a later line would.
-    var flags: { str: int } = { }
+    // extends a closed table just as a later line would. It has no headers,
+    // so no table in it is ever defined, and every key goes into its root.
+    var doc = blank_doc()
     var i = skip_inline(input, at + 1)
     if i < input.len() && input.slice(i, i + 1) == "}" {
-        return Step{ value: Toml.Table(table), next: i + 1 }, nil
+        return Step{ value: Toml.Table({ }), next: i + 1 }, nil
     }
     for {
         let (key, key_err) = parse_key(input, i)
@@ -617,22 +495,15 @@ fn parse_inline_table(input: str, at: int, depth: int) -> (Step, error) {
         }
         let (step, err) = parse_value(input, skip_inline(input, eq + 1), inner)
         check err
-        let where = spots(table, key.path, flags)
-        let allowed = assignment_allowed(where, 0, flags)
-        check allowed
-        let (placed, place_err) = change(table, key.path, 0, set_op(), step.value)
-        check place_err
-        table = placed
-        if is_closed_value(step.value) {
-            flags[where[where.len() - 1].id] = closed()
-        }
+        let placed = doc.assign(0, key.path, step.value, false)
+        check placed
         i = skip_inline(input, step.next)
         if i < input.len() && input.slice(i, i + 1) == "," {
             i = skip_inline(input, i + 1)
             continue
         }
         if i < input.len() && input.slice(i, i + 1) == "}" {
-            return Step{ value: Toml.Table(table), next: i + 1 }, nil
+            return Step{ value: Toml.Table(doc.assemble(0)), next: i + 1 }, nil
         }
         return _, errors.new("toml: expected `,` or `}` at \(i)")
     }
@@ -753,56 +624,9 @@ fn is_table(value: Toml) -> bool {
     return out
 }
 
-/// What a table's id may carry in `flags`.
-///
-/// **Defined**: a header named it, or dotted keys made or passed through it in
-/// a section that has ended. A header may not name it again, and dotted keys
-/// may not add to it.
-fn defined() -> int {
-    return 1
-}
-
-/// **Closed**: an inline table or an array written as a value. Nothing is
-/// added to it afterwards, by a header or by a dotted key.
-fn closed() -> int {
-    return 2
-}
-
-fn flag_of(flags: { str: int }, id: str) -> int {
-    let found = flags[id]
-    if found == nil {
-        return 0
-    }
-    return found
-}
-
-fn has(flags: { str: int }, id: str, flag: int) -> bool {
-    return (flag_of(flags, id) & flag) != 0
-}
-
-fn is_closed_value(value: Toml) -> bool {
-    return is_table(value) || as_array(value) != nil
-}
-
-/// One step of a path through the document as it stands.
-///
-/// `id` names the key — the path so far, each segment prefixed by its length,
-/// so no two paths share one — and `inner` the table a walk continues into:
-/// the key's own table, or for an array of tables its last element, whose id
-/// carries its index. So `[fruit.physical]` under the second `[[fruit]]` is a
-/// different table from the one under the first, as it should be.
-struct Spot {
-    name: str
-    id: str
-    inner: str
-    kind: int
-}
-
-/// Nothing there yet.
-fn absent() -> int {
-    return 0
-}
-
+/// What a key in a document being read holds: a table, an array of tables
+/// (one `[[…]]` header per element), or a value — a scalar, or an array or
+/// inline table written as one, which is closed to anything added later.
 fn a_table() -> int {
     return 1
 }
@@ -811,213 +635,274 @@ fn tables() -> int {
     return 2
 }
 
-/// A value, or a closed inline table or array.
 fn a_value() -> int {
     return 3
 }
 
-/// Where each segment of `path` leads, read without changing anything.
-fn spots(root: { str: Toml }, path: [str], flags: { str: int }) -> [Spot] {
-    var out: [Spot] = []
-    var here = root
-    var id = ""
-    var walking = true
-    for segment in path {
-        let key = id + "/\(segment.len()):" + segment
-        id = key
-        if !walking {
-            out.push(Spot{ name: segment, id: key, inner: key, kind: absent() })
-            continue
-        }
-        let held = here[segment]
-        if held == nil {
-            walking = false
-            out.push(Spot{ name: segment, id: key, inner: key, kind: absent() })
-            continue
-        }
-        if has(flags, key, closed()) {
-            walking = false
-            out.push(Spot{ name: segment, id: key, inner: key, kind: a_value() })
-            continue
-        }
-        if is_table(held) {
-            here = as_table(held)
-            out.push(Spot{ name: segment, id: key, inner: key, kind: a_table() })
-            continue
-        }
-        let items = as_array(held)
-        if items != nil {
-            if items.len() > 0 {
-                // An array that is not closed is one `[[…]]` made.
-                let inner = key + "#\(items.len() - 1)"
-                here = as_table(items[items.len() - 1])
-                id = inner
-                out.push(Spot{ name: segment, id: key, inner: inner, kind: tables() })
-                continue
-            }
-        }
-        walking = false
-        out.push(Spot{ name: segment, id: key, inner: key, kind: a_value() })
-    }
-    return out
+/// A document as it is being read.
+///
+/// Every table is a number, every key in one a *node*, and the keys of each
+/// table a list of *entries* in the order they were added; a key is found by
+/// its table's number and its name. All of it lives in flat slices and one
+/// map, written in place, and becomes nested `Toml` once, at the end
+/// ([`Doc::assemble`]).
+///
+/// The document was nested `Toml` all along once. A map is a value, so adding
+/// a key three tables down rebuilt each table on the way and put it back
+/// into the one above, root included — and a document of many headers, many
+/// dotted keys under one table, or one large inline table cost the square of
+/// its size: 15,000 `[sN]` sections took 23 s on the VM. Here no table is
+/// rebuilt until the document is complete, and each is built exactly once.
+///
+/// Table 0 is the root.
+struct Doc {
+    // By node.
+    var kinds: [int]
+    var values: [Toml]
+    // A table node's table; an array of tables' last element.
+    var inners: [int]
+    // An array of tables' first element.
+    var heads: [int]
+    // By table: its first and last entries, or -1; the next element of the
+    // array of tables it is in, or -1; and whether a header or dotted keys in
+    // a section that has ended defined it — then a header may not name it
+    // again, and dotted keys may not add to it.
+    var firsts: [int]
+    var lasts: [int]
+    var nexts: [int]
+    var defined: [bool]
+    // By entry: its key, its node, and the next entry of the same table, or -1.
+    var names: [str]
+    var nodes: [int]
+    var follows: [int]
+    // A node by `"<table>:<key>"`; a table's number has no colon in it, so no
+    // two keys share one.
+    var slots: { str: int }
+    // The tables dotted keys made or passed through in the current section,
+    // which become defined when it ends.
+    var pending: [int]
 }
 
-/// Whether a header may name the path `where` describes.
-///
-/// Every table along the way may be walked through, whoever made it — the
-/// specification's own example adds `[fruit.apple.texture]` under a table
-/// dotted keys defined. Only the last segment is being defined, so only it is
-/// held to "once".
-fn header_allowed(where: [Spot], header: Header, flags: { str: int }) -> error {
-    let name = join_dots(header.path)
-    let last = where.len() - 1
-    for k in 0..last {
-        if where[k].kind == a_value() {
-            return errors.new("toml: `\(join_dots(take(header.path, k + 1)))` is already a value, not a table")
+fn blank_doc() -> Doc {
+    return Doc{
+        kinds: [],
+        values: [],
+        inners: [],
+        heads: [],
+        firsts: [-1],
+        lasts: [-1],
+        nexts: [-1],
+        defined: [false],
+        names: [],
+        nodes: [],
+        follows: [],
+        slots: { },
+        pending: [],
+    }
+}
+
+impl Doc {
+    /// A new table, empty, and its number.
+    fn table(var self) -> int {
+        self.firsts.push(-1)
+        self.lasts.push(-1)
+        self.nexts.push(-1)
+        self.defined.push(false)
+        return self.firsts.len() - 1
+    }
+
+    /// The node `key` names in `table`, or -1.
+    fn find(self, table: int, key: str) -> int {
+        // The slot's name is made before the map is read: made between, its
+        // rendering would count as something that could write the map, and
+        // the next key added would copy it.
+        let slot = "\(table):" + key
+        let found = self.slots[slot]
+        if found == nil {
+            return -1
+        }
+        return found
+    }
+
+    /// `key` added to `table` as a new node, which is answered.
+    fn add(var self, table: int, key: str, kind: int, value: Toml, inner: int) -> int {
+        let node = self.kinds.len()
+        self.kinds.push(kind)
+        self.values.push(value)
+        self.inners.push(inner)
+        self.heads.push(inner)
+        let slot = "\(table):" + key
+        self.slots[slot] = node
+        let entry = self.names.len()
+        self.names.push(key)
+        self.nodes.push(node)
+        self.follows.push(-1)
+        if self.lasts[table] < 0 {
+            self.firsts[table] = entry
+        } else {
+            self.follows[self.lasts[table]] = entry
+        }
+        self.lasts[table] = entry
+        return node
+    }
+
+    /// A new table under `key` in `table`, and its number.
+    fn add_table(var self, table: int, key: str) -> int {
+        let inner = self.table()
+        _ = self.add(table, key, a_table(), Toml.Bool(false), inner)
+        return inner
+    }
+
+    /// The end of a section: what its dotted keys made or passed through is
+    /// defined now.
+    fn end_section(var self) {
+        let ended = self.pending
+        self.pending = []
+        for t in ended {
+            self.defined[t] = true
         }
     }
-    let target = where[last]
-    if header.repeated {
-        if target.kind == a_table() {
-            return errors.new("toml: `\(name)` is a table, not an array of tables")
+
+    /// Make the table or array of tables a header names, and answer the table
+    /// its plain keys go into: the table, or the array's new element.
+    ///
+    /// Every table along the way may be walked through, whoever made it — the
+    /// specification's own example adds `[fruit.apple.texture]` under a table
+    /// dotted keys defined — and an array of tables is walked through its last
+    /// element. Only the last segment is being defined, so only it is held to
+    /// "once". Tables not there yet are made.
+    fn header(var self, header: Header) -> (int, error) {
+        let path = header.path
+        let name = join_dots(path)
+        let last = path.len() - 1
+        var here = 0
+        var made = false
+        for k in 0..last {
+            let segment = path[k]
+            if !made {
+                let node = self.find(here, segment)
+                if node >= 0 {
+                    if self.kinds[node] == a_value() {
+                        return _, errors.new("toml: `\(join_dots(take(path, k + 1)))` is already a value, not a table")
+                    }
+                    here = self.inners[node]
+                    continue
+                }
+                made = true
+            }
+            here = self.add_table(here, segment)
         }
-        if target.kind == a_value() {
-            return errors.new("toml: `\(name)` is already a value; an array written with `[…]` cannot be appended to")
+        var node = -1
+        if !made {
+            node = self.find(here, path[last])
         }
+        if header.repeated {
+            if node >= 0 && self.kinds[node] == a_table() {
+                return _, errors.new("toml: `\(name)` is a table, not an array of tables")
+            }
+            if node >= 0 && self.kinds[node] == a_value() {
+                return _, errors.new("toml: `\(name)` is already a value; an array written with `[…]` cannot be appended to")
+            }
+            let element = self.table()
+            if node < 0 {
+                _ = self.add(here, path[last], tables(), Toml.Bool(false), element)
+            } else {
+                self.nexts[self.inners[node]] = element
+                self.inners[node] = element
+            }
+            return element, nil
+        }
+        if node >= 0 && self.kinds[node] == tables() {
+            return _, errors.new("toml: `\(name)` is an array of tables, not a table")
+        }
+        if node >= 0 && self.kinds[node] == a_value() {
+            return _, errors.new("toml: `\(name)` is already a value, not a table")
+        }
+        var target = 0
+        if node >= 0 {
+            target = self.inners[node]
+            if self.defined[target] {
+                return _, errors.new("toml: `[\(name)]` defines a table that is already defined")
+            }
+        } else {
+            target = self.add_table(here, path[last])
+        }
+        self.defined[target] = true
+        return target, nil
+    }
+
+    /// `key = value` placed in `table`, a dotted key making the tables it
+    /// names on the way; `pend` says whether those tables are the section's,
+    /// to be defined when it ends.
+    ///
+    /// The tables a dotted key passes through are being added to, so each must
+    /// be one dotted keys may add to: not a value, not an array of tables, and
+    /// not a table a header — or dotted keys in an earlier section — already
+    /// defined. The key itself may not be there already.
+    fn assign(var self, table: int, path: [str], value: Toml, pend: bool) -> error {
+        let last = path.len() - 1
+        var here = table
+        var made = false
+        for k in 0..last {
+            let segment = path[k]
+            if !made {
+                let node = self.find(here, segment)
+                if node >= 0 {
+                    let kind = self.kinds[node]
+                    if kind == a_value() {
+                        return errors.new("toml: `\(segment)` is already a value, not a table")
+                    }
+                    if kind == tables() {
+                        return errors.new("toml: `\(segment)` is an array of tables; a dotted key cannot add to it")
+                    }
+                    here = self.inners[node]
+                    if self.defined[here] {
+                        return errors.new("toml: `\(segment)` is a table defined already; a dotted key cannot add to it")
+                    }
+                    if pend {
+                        self.pending.push(here)
+                    }
+                    continue
+                }
+                made = true
+            }
+            here = self.add_table(here, segment)
+            if pend {
+                self.pending.push(here)
+            }
+        }
+        if !made && self.find(here, path[last]) >= 0 {
+            return errors.new("toml: `\(path[last])` is set twice")
+        }
+        _ = self.add(here, path[last], a_value(), value, -1)
         return nil
     }
-    if target.kind == tables() {
-        return errors.new("toml: `\(name)` is an array of tables, not a table")
-    }
-    if target.kind == a_value() {
-        return errors.new("toml: `\(name)` is already a value, not a table")
-    }
-    if target.kind == a_table() && has(flags, target.inner, defined()) {
-        return errors.new("toml: `[\(name)]` defines a table that is already defined")
-    }
-    return nil
-}
 
-/// Whether `key = value` may be placed where `where` describes, the first
-/// `section` segments being the current header's.
-///
-/// The tables a dotted key passes through are being added to, so each must be
-/// one dotted keys may add to: not a value, not an array of tables, and not a
-/// table a header — or dotted keys in an earlier section — already defined.
-fn assignment_allowed(where: [Spot], section: int, flags: { str: int }) -> error {
-    let last = where.len() - 1
-    for k in section..last {
-        let spot = where[k]
-        if spot.kind == a_table() && has(flags, spot.inner, defined()) {
-            return errors.new("toml: `\(spot.name)` is a table defined already; a dotted key cannot add to it")
-        }
-        if spot.kind == a_value() {
-            return errors.new("toml: `\(spot.name)` is already a value, not a table")
-        }
-        if spot.kind == tables() {
-            return errors.new("toml: `\(spot.name)` is an array of tables; a dotted key cannot add to it")
-        }
-    }
-    if where[last].kind != absent() {
-        return errors.new("toml: `\(where[last].name)` is set twice")
-    }
-    return nil
-}
-
-fn open_op() -> int {
-    return 0
-}
-
-fn push_op() -> int {
-    return 1
-}
-
-fn set_op() -> int {
-    return 2
-}
-
-/// `here` with the path from `path[at]` on changed: a table made to exist
-/// (`open_op`), a fresh element appended to an array of tables (`push_op`),
-/// or `value` set (`set_op`). Tables that are not there yet are created on
-/// the way, and a walk through an array of tables goes into its last element.
-///
-/// A map is a value, so each table on the way is rebuilt and put back into
-/// the one above it. What is allowed was decided by [`spots`] beforehand; the
-/// errors here are for a shape that should have been refused already.
-fn change(here: { str: Toml }, path: [str], at: int, op: int, value: Toml) -> ({ str: Toml }, error) {
-    var table = here
-    let key = path[at]
-    let held = table[key]
-    if at == path.len() - 1 {
-        if op == open_op() {
-            if held == nil {
-                table[key] = Toml.Table({ })
-            }
-            return table, nil
-        }
-        if op == push_op() {
-            var items: [Toml] = []
-            if held != nil {
-                let existing = as_array(held)
-                if existing == nil {
-                    return _, errors.new("toml: `\(key)` is already a value, not an array of tables")
+    /// Table `table` as `Toml`, with its keys in the order they were added and
+    /// each array of tables in the order its headers came.
+    fn assemble(self, table: int) -> { str: Toml } {
+        var out: { str: Toml } = { }
+        var entry = self.firsts[table]
+        for entry >= 0 {
+            let node = self.nodes[entry]
+            let kind = self.kinds[node]
+            if kind == a_value() {
+                out[self.names[entry]] = self.values[node]
+            } else if kind == a_table() {
+                out[self.names[entry]] = Toml.Table(self.assemble(self.inners[node]))
+            } else {
+                var items: [Toml] = []
+                var element = self.heads[node]
+                for element >= 0 {
+                    items.push(Toml.Table(self.assemble(element)))
+                    element = self.nexts[element]
                 }
-                items = existing
+                out[self.names[entry]] = Toml.Array(items)
             }
-            items.push(Toml.Table({ }))
-            table[key] = Toml.Array(items)
-            return table, nil
+            entry = self.follows[entry]
         }
-        if held != nil {
-            return _, errors.new("toml: `\(key)` is set twice")
-        }
-        table[key] = value
-        return table, nil
+        return out
     }
-    var inner: { str: Toml } = { }
-    if held != nil {
-        let into = walk_into(held)
-        if into == nil {
-            return _, errors.new("toml: `\(key)` is already a value, not a table")
-        }
-        inner = into
-    }
-    let (filled, err) = change(inner, path, at + 1, op, value)
-    check err
-    if held == nil {
-        table[key] = Toml.Table(filled)
-    } else {
-        table[key] = put_back(held, filled)
-    }
-    return table, nil
-}
-
-/// The table a walk continues into from `held`: a table itself, or the last
-/// element of an array of tables. Nil for anything else.
-fn walk_into(held: Toml) -> Option<{ str: Toml }> {
-    if is_table(held) {
-        return as_table(held)
-    }
-    let items = as_array(held)
-    if items != nil {
-        if items.len() > 0 && is_table(items[items.len() - 1]) {
-            return as_table(items[items.len() - 1])
-        }
-    }
-    return nil
-}
-
-/// `held` with `inner` put back where [`walk_into`] found it.
-fn put_back(held: Toml, inner: { str: Toml }) -> Toml {
-    let items = as_array(held)
-    if items != nil {
-        if items.len() > 0 {
-            var elements = items
-            elements[elements.len() - 1] = Toml.Table(inner)
-            return Toml.Array(elements)
-        }
-    }
-    return Toml.Table(inner)
 }
 
 // ---- reading a document ------------------------------------------------------
