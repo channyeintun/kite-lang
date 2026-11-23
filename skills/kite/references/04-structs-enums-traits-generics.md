@@ -1956,7 +1956,9 @@ A tuple, wherever it stands, is an array of its elements in order. Decoding
 holds to that: a positional payload or a tuple must be an array of exactly its
 length, an object with two keys is an error, and a unit variant written as an
 object (or a payload variant written as a string) is refused with a message that
-says which form to write. An `int` too big for a JSON number to carry exactly
+says which form to write. A field whose type derives `Decode` too, given `null` or
+the wrong shape, is named by its path: `S.inner: Inner: expected an object with the
+keys a`. An `int` too big for a JSON number to carry exactly
 (2⁵³ and up) is encoded as its decimal text in a string, and decoded back.
 
 ### What does not derive

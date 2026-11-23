@@ -1524,6 +1524,32 @@ impl<'a> Writer<'a, '_> {
                             "{}let ({}, {}) = {}.decode({})",
                             pad, value, err, name, held
                         ));
+                        // What the inner type says of a document of the wrong
+                        // shape begins with its own name — `Inner: expected an
+                        // object …` — which leaves the reader hunting for the
+                        // field that held it. Said with the field's path in
+                        // front, as the other fields' messages are. An error
+                        // from further in already has its own path, and a
+                        // hand-written `decode` has its own wording: both
+                        // pass through as they were.
+                        if let Some(inner) = self.derived_bare(other) {
+                            let lead = format!("{}: ", inner);
+                            out.push(format!("{}if {} != nil {{", pad, err));
+                            out.push(format!("{}    let said = {}.message()", pad, err));
+                            out.push(format!(
+                                "{}    if said.len() >= {} && said.slice(0, {}) == \"{}\" {{",
+                                pad,
+                                lead.len(),
+                                lead.len(),
+                                lead
+                            ));
+                            out.push(format!(
+                                "{}        return _, errors.new(\"{}: \\(said)\")",
+                                pad, where_
+                            ));
+                            out.push(format!("{}    }}", pad));
+                            out.push(format!("{}}}", pad));
+                        }
                         out.push(format!("{}check {}", pad, err));
                         return value;
                     }
@@ -1845,6 +1871,17 @@ impl<'a> Writer<'a, '_> {
 
     /// The name to reach a nested type's derived function by, or empty when
     /// the field cannot be walked — having reported why.
+    /// The bare name of a type that derives the trait being derived — the
+    /// name its own messages begin with — or `None` for one written by hand.
+    fn derived_bare(&self, name: &str) -> Option<String> {
+        let qualified = declared_name(self.aliases, &self.lookup, name);
+        let decl = self.known.get(&qualified).map(|i| &self.decls[*i])?;
+        decl.derives
+            .iter()
+            .any(|(t, _)| *t == self.trait_)
+            .then(|| decl.bare.clone())
+    }
+
     fn recurse_type_name(&mut self, name: &str, ty: &Type) -> String {
         // The declaration the field names, read through the spellings of the
         // module it was written in: `m.Point` under `use models as m` is
