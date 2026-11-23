@@ -1173,7 +1173,36 @@ fn split_dots(path: str) -> [str] {
 /// Scalars first and tables afterwards, which is not a style preference: a
 /// key written after a `[table]` header belongs to that table, so a top-level
 /// key emitted after one would be read back into the wrong place. Emitting in
-/// this order is what makes `parse(emit(doc))` give back `doc`.
+/// this order is what makes `parse(emit(doc))` hold every value of `doc`, each
+/// under its own key.
+///
+/// What comes back is the same document with its tables moved after its
+/// scalars, at every level. A map compares in insertion order, so
+/// `parse(emit(doc)) == doc` holds exactly when `doc` already had its scalars
+/// before its tables (and an array of tables counts as a table). A text that
+/// reads as a date is written bare, and reads back as the same text.
+///
+/// ```kite
+/// let (d, e1) = parse("a = 1\nc = { d = 1 }\ne = 2\n")
+/// if e1 != nil {
+///     return
+/// }
+/// let (back, e2) = parse(emit(d))
+/// if e2 != nil {
+///     return
+/// }
+/// assert(back != d, "the table moved after the scalar, so the maps differ in order")
+/// assert(emit(back) == emit(d), "and from there on it is stable")
+/// let (flat, e3) = parse("a = 1\ne = 2\n\n[c]\nd = 1\n")
+/// if e3 != nil {
+///     return
+/// }
+/// let (again, e4) = parse(emit(flat))
+/// if e4 != nil {
+///     return
+/// }
+/// assert(again == flat, "a document with its scalars first comes back equal")
+/// ```
 pub fn emit(doc: Toml) -> str {
     return emit_section(as_table(doc), [], "")
 }
