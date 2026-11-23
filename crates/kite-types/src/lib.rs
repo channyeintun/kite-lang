@@ -1583,7 +1583,14 @@ impl<'a> Checker<'a> {
         // reported already, and whether the rest would have returned is not
         // something to guess at in a second diagnostic.
         let cut_short = matches!(body.and_then(|b| b.stmts.last()), Some(ast::Stmt::Error(_)));
-        if body.is_some() && sig.ret != TyId::UNIT && flow == Flow::Falls && !cut_short {
+        // Nor is it where the return type is one the parser could not read:
+        // whether it wanted a value at all is not known.
+        if body.is_some()
+            && sig.ret != TyId::UNIT
+            && sig.ret != TyId::ERROR
+            && flow == Flow::Falls
+            && !cut_short
+        {
             self.diags.push(
                 Diagnostic::error(codes::E0203, "not every path returns a value")
                     .with_primary(
@@ -2829,7 +2836,7 @@ impl<'a> Checker<'a> {
         match &r.value {
             None => {
                 let ret = self.learn_ret(sig.ret, TyId::UNIT);
-                if ret != TyId::UNIT {
+                if ret != TyId::UNIT && ret != TyId::ERROR {
                     self.diags.push(
                         Diagnostic::error(codes::E0203, "missing return value")
                             .with_primary(r.span, format!("expected a `{}`", self.types.name(ret)))
@@ -2939,6 +2946,10 @@ impl<'a> Checker<'a> {
                 Some((self.returning(ret, r.span), Flow::Diverges))
             }
             Some(ast::ReturnValue::Pair { value, error, span }) => {
+                // A return type that did not parse may have been a pair's.
+                if !sig.fallible && sig.ret == TyId::ERROR {
+                    return None;
+                }
                 if !sig.fallible {
                     self.diags.push(
                         Diagnostic::error(
@@ -2988,6 +2999,9 @@ impl<'a> Checker<'a> {
             // `return _, err` — the failure arm. There is deliberately no
             // value on this path, which is what stops Go's zero-value leak.
             Some(ast::ReturnValue::Fail { error, span }) => {
+                if !sig.fallible && sig.ret == TyId::ERROR {
+                    return None;
+                }
                 if !sig.fallible {
                     self.diags.push(
                         Diagnostic::error(
@@ -4674,6 +4688,10 @@ impl<'a> Checker<'a> {
             }),
         };
 
+        // Wanted where the type is one already reported — a parameter whose
+        // type the parser could not read — the closure is not known to be
+        // anything, and nothing more is said of what it cannot be.
+        let unknown = wanted.is_none() && expected == Some(TyId::ERROR);
         let mut param_ids = Vec::with_capacity(params.len());
         for (i, p) in params.iter().enumerate() {
             let annotated = p.ty.as_ref().map(|t| self.resolve_type(t));
@@ -4685,6 +4703,7 @@ impl<'a> Checker<'a> {
                 }
                 (Some(a), None) => a,
                 (None, Some(c)) => c,
+                (None, None) if unknown => TyId::ERROR,
                 (None, None) => {
                     self.diags.push(
                         Diagnostic::error(
@@ -4761,6 +4780,7 @@ impl<'a> Checker<'a> {
             // nothing to check them against, so the closure returns unit.
             ret: expected_ret.unwrap_or(match body {
                 ast::ClosureBody::Expr(_) => TyId::ERROR,
+                ast::ClosureBody::Block(_) if unknown => TyId::ERROR,
                 ast::ClosureBody::Block(_) => TyId::UNIT,
             }),
             // A closure cannot be `async`: it has no signature of its own to
@@ -5350,7 +5370,7 @@ impl<'a> Checker<'a> {
         }
         let hargs =
             self.check_args(&sig_params, &generics, &mut subst, &hints, args, Some(decl_span));
-        if self.unsolved_by_error(&hargs, &subst) {
+        if self.unsolved_by_error(&hargs, &sig_params, ret, &subst) {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
 
@@ -7032,7 +7052,7 @@ impl<'a> Checker<'a> {
             args,
             Some(decl_span),
         ));
-        if self.unsolved_by_error(&hargs, &subst) {
+        if self.unsolved_by_error(&hargs, &raw_params, raw_ret, &subst) {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
         let targs = self.finish_subst(&generics, &subst, span);
@@ -7324,7 +7344,10 @@ impl<'a> Checker<'a> {
     /// it. Only free functions used to be wrapped, so `await p.later()` was
     /// refused and `p.later() + 1` added to a task.
     fn call_result(&mut self, callee: u32, ret: TyId, span: Span) -> TyId {
-        if !self.sigs[callee as usize].is_async {
+        // A result type the parser could not read is not known to be a task
+        // of anything, and a `Task<…>` of the error said so once more at
+        // every call.
+        if !self.sigs[callee as usize].is_async || ret == TyId::ERROR {
             return ret;
         }
         let task = self.types.task_of(ret, span);
@@ -7681,6 +7704,13 @@ impl<'a> Checker<'a> {
             });
             match wanted {
                 Some(w) if method_name == "as" => w,
+                // Used as a type the parser could not read, which would have
+                // said: that is the one mistake, and what the call was handed
+                // is not known to be read or not.
+                None if expected == Some(TyId::ERROR) => {
+                    self.unread();
+                    return self.lit(ExprKind::Error, TyId::ERROR, span);
+                }
                 _ => {
                     let d = Diagnostic::error(
                         codes::E0209,
@@ -8006,7 +8036,7 @@ impl<'a> Checker<'a> {
 
         let hargs =
             self.check_args(&raw_params, &generics, &mut subst, &hints, args, Some(decl_span));
-        if self.unsolved_by_error(&hargs, &subst) {
+        if self.unsolved_by_error(&hargs, &raw_params, raw_ret, &subst) {
             return self.lit(ExprKind::Error, TyId::ERROR, span);
         }
         if subst.iter().take(block).any(|s| s.is_none()) {
@@ -8114,7 +8144,11 @@ impl<'a> Checker<'a> {
                 continue;
             }
             self.field_closure_context(init, declared, &subst);
-            let v = self.expr(&init.value, None);
+            // A field whose type the parser could not read wants a value it
+            // cannot say anything about, which a closure is told (see
+            // [`Self::closure`]).
+            let unread = (declared == TyId::ERROR).then_some(TyId::ERROR);
+            let v = self.expr(&init.value, unread);
             self.closure_context = None;
             if matches!(init.value, ast::Expr::Closure { .. }) && self.made_of_error(v.ty) {
                 poisoned.push((init, declared));
@@ -8135,7 +8169,7 @@ impl<'a> Checker<'a> {
                         let again = self.begin_trial();
                         for &(init, declared) in &poisoned {
                             self.field_closure_context(init, declared, &subst);
-                            self.expr(&init.value, None);
+                            self.expr(&init.value, (declared == TyId::ERROR).then_some(TyId::ERROR));
                             self.closure_context = None;
                         }
                         let found = std::mem::replace(self.diags, DiagBag::new()).take();
@@ -8785,7 +8819,8 @@ impl<'a> Checker<'a> {
         sig: &Signature,
     ) -> Option<(hir::Stmt, Flow)> {
         let bare_error = sig.ret == TyId::ERR;
-        if !sig.fallible && !bare_error {
+        // A return type that did not parse was reported where it is written.
+        if !sig.fallible && !bare_error && sig.ret != TyId::ERROR {
             self.diags.push(
                 Diagnostic::error(codes::E0303, "`check` outside a fallible function")
                     .with_primary(span, "this would return an error")
@@ -11062,15 +11097,26 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether a type parameter a call left unsolved was left so by an
-    /// argument that is already an error.
+    /// argument that is already an error, or by a parameter or a result
+    /// whose declared type is one (the parser could not read it, and kept
+    /// the function).
     ///
     /// That argument has been reported — most often it is something the
     /// parser could not read — and it is what would have said what the
     /// parameter is. The call is then an error too, and says nothing more:
     /// `cannot infer T` was the same mistake again, and a result typed as the
     /// bare `T` went on to be refused wherever it was used.
-    fn unsolved_by_error(&self, args: &[hir::Expr], subst: &[Option<TyId>]) -> bool {
-        subst.iter().any(Option::is_none) && args.iter().any(|a| self.made_of_error(a.ty))
+    fn unsolved_by_error(
+        &self,
+        args: &[hir::Expr],
+        params: &[TyId],
+        ret: TyId,
+        subst: &[Option<TyId>],
+    ) -> bool {
+        subst.iter().any(Option::is_none)
+            && (args.iter().any(|a| self.made_of_error(a.ty))
+                || params.iter().any(|&p| self.made_of_error(p))
+                || self.made_of_error(ret))
     }
 
     /// Whether `ty` is the error type or is built from it, as the type of
@@ -12047,6 +12093,14 @@ impl<'a> Checker<'a> {
                 v.fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
                 v.span,
             )
+        };
+        // Against a value whose type is already an error, the specialisation
+        // is not known: what a field holds of the enum's parameters is not a
+        // bare `T` to be refused wherever it is used, but unknown as well.
+        let field_tys = if self.types.is_poisoned(scrut) {
+            field_tys.into_iter().map(|t| if self.mentions_param(t) { TyId::ERROR } else { t }).collect()
+        } else {
+            field_tys
         };
 
         let sub = match args {
@@ -14729,6 +14783,12 @@ fn check_impl_headers(
         let own: Vec<&str> = imp.generics.iter().map(|g| g.name.name.as_str()).collect();
         let bare = target.args.is_empty();
         if bare && (count == 0 || own.len() == count) {
+            continue;
+        }
+        // A type argument the parser could not read has been reported, and
+        // what it was to be is not known; refusing the block made every
+        // call of its methods one more error.
+        if target.args.iter().any(|a| matches!(a, ast::Type::Error(_))) {
             continue;
         }
         let written: Vec<Option<&str>> = target

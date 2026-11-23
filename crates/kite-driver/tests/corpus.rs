@@ -386,3 +386,60 @@ fn a_character_kite_does_not_have_is_one_diagnostic() {
         assert_eq!(errors, vec!["E0002".to_string()], "{}\n{}", src, result.render_diagnostics());
     }
 }
+
+/// A type that does not parse and leaves a bracket open is one diagnostic,
+/// and the declaration it is in is kept: a parameter's, a return type's, a
+/// payload's, an `impl` header's, a closure's. Each was an error at every use
+/// of the name the declaration lost.
+///
+/// Here rather than in `tests/corpus` for the reason above: `kitec fmt`
+/// indents what follows an unclosed bracket.
+#[test]
+fn a_type_that_does_not_parse_keeps_its_declaration() {
+    let cases = [
+        (
+            "fn total(xs: [int) -> int {\n    return xs.len()\n}\n\n\
+             fn main() {\n    io.print(total([1]))\n    io.print(total([2]))\n}\n",
+            1,
+        ),
+        (
+            "fn first() -> [int {\n    return [1]\n}\n\n\
+             fn main() {\n    io.print(first().len())\n    io.print(first().len())\n}\n",
+            1,
+        ),
+        (
+            "enum Path {\n    Step(int, [int))\n    Stop\n}\n\n\
+             fn main() {\n    match Path.Stop {\n        Step(_, _) => io.print(1),\n        \
+             Stop => io.print(2),\n    }\n}\n",
+            2,
+        ),
+        (
+            "struct Box<T> {\n    v: T\n}\n\nimpl Box<1.5> {\n    fn get(self) -> int {\n        \
+             return 1\n    }\n}\n\nfn main() {\n    io.print(Box{ v: 1 }.get())\n}\n",
+            5,
+        ),
+        (
+            "use std/task\n\nasync fn save() ->> error {\n    return nil\n}\n\n\
+             async fn main() {\n    let r = await task.timeout(save(), 10)\n    io.print(r == nil)\n}\n",
+            3,
+        ),
+        (
+            "fn main() {\n    let g = |x: int| -> [int { return [x] }\n    io.print(g(1))\n}\n",
+            2,
+        ),
+    ];
+    for (src, line) in cases {
+        let result = compile(Path::new("t.kite"), src, Emit::Check);
+        let errors: Vec<(u32, String)> = actual(&result)
+            .into_iter()
+            .flat_map(|(line, codes)| codes.into_iter().map(move |c| (line, c)))
+            .collect();
+        assert_eq!(
+            errors,
+            vec![(line, "E0100".to_string())],
+            "{}\n{}",
+            src,
+            result.render_diagnostics()
+        );
+    }
+}

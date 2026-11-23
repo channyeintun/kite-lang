@@ -73,6 +73,101 @@ struct Checkpoint {
     depth_reported: bool,
 }
 
+/// Where a declaration's type ends, for reading past one that did not
+/// parse (see [`Parser::read_past_type`]).
+#[derive(Clone, Copy)]
+struct TypeEnd {
+    /// Tokens that end it outside any bracket it opened: the `,` between
+    /// parameters.
+    stops: &'static [T],
+    /// Tokens that end it anywhere: the `=` of a `let`, the `{` of a body.
+    hard: &'static [T],
+    /// It is one of a list of `name: type`, so the next `name:` ends it,
+    /// with its `,` left out.
+    named: bool,
+    /// The end of a line ends it, as it ends a statement or a field.
+    line: bool,
+    /// The closer of the list it is in: the `)` of a parameter list.
+    closer: Option<T>,
+    /// A `{` in it is a map type's, as no body follows it.
+    braces: bool,
+}
+
+impl TypeEnd {
+    /// A `let`'s, a `var`'s or a constant's, before its `=`.
+    const BINDING: TypeEnd = TypeEnd {
+        stops: &[],
+        hard: &[T::Eq],
+        named: false,
+        line: true,
+        closer: None,
+        braces: true,
+    };
+    /// An alias's, which the line ends.
+    const LINE: TypeEnd = TypeEnd {
+        stops: &[],
+        hard: &[],
+        named: false,
+        line: true,
+        closer: None,
+        braces: true,
+    };
+    /// A struct field's.
+    const FIELD: TypeEnd = TypeEnd {
+        stops: &[T::Comma],
+        hard: &[],
+        named: true,
+        line: true,
+        closer: Some(T::RBrace),
+        braces: true,
+    };
+    /// A parameter's, or a variant's named field's.
+    const PARAM: TypeEnd = TypeEnd {
+        stops: &[T::Comma],
+        hard: &[],
+        named: true,
+        line: false,
+        closer: Some(T::RParen),
+        braces: true,
+    };
+    /// A variant's positional field's.
+    const PAYLOAD: TypeEnd = TypeEnd {
+        stops: &[T::Comma],
+        hard: &[],
+        named: false,
+        line: false,
+        closer: Some(T::RParen),
+        braces: true,
+    };
+    /// A closure parameter's.
+    const CLOSURE_PARAM: TypeEnd = TypeEnd {
+        stops: &[T::Comma, T::Pipe],
+        hard: &[],
+        named: true,
+        line: false,
+        closer: None,
+        braces: true,
+    };
+    /// A type argument's, in an `impl` header.
+    const TYPE_ARG: TypeEnd = TypeEnd {
+        stops: &[T::Comma, T::Gt, T::Shr, T::Ge],
+        hard: &[],
+        named: false,
+        line: false,
+        closer: None,
+        braces: false,
+    };
+    /// A return type's, which the body's `{` ends.
+    const BODY: TypeEnd = TypeEnd {
+        stops: &[],
+        hard: &[T::LBrace],
+        named: false,
+        line: false,
+        closer: None,
+        braces: false,
+    };
+}
+
 /// The assignment a token begins, if it is `=` or a compound one.
 fn assign_op(k: T) -> Option<AssignOp> {
     Some(match k {
@@ -1703,7 +1798,7 @@ impl<'a> Parser<'a> {
         let is_var = self.eat(T::Var);
         let name = self.ident()?;
         self.expect(T::Colon)?;
-        let ty = self.parse_type()?;
+        let ty = self.annotation(TypeEnd::FIELD)?;
         let span = start.to(self.prev_span());
         self.end_member("struct fields", commas);
         Some(FieldDecl { is_pub, is_var, name, ty, span })
@@ -1940,7 +2035,7 @@ impl<'a> Parser<'a> {
                     let f_start = self.span();
                     let f_name = self.ident()?;
                     self.expect(T::Colon)?;
-                    let ty = self.parse_type()?;
+                    let ty = self.annotation(TypeEnd::PARAM)?;
                     fields.push(FieldDecl {
                         is_pub: true,
                         is_var: false,
@@ -1961,7 +2056,7 @@ impl<'a> Parser<'a> {
                     if self.at(T::Pub) {
                         self.refuse_pub_on_variant(enum_name, enum_is_pub, "a variant's field");
                     }
-                    tys.push(self.parse_type()?);
+                    tys.push(self.annotation(TypeEnd::PAYLOAD)?);
                     self.skip_newlines();
                     if !self.eat(T::Comma) {
                         break;
@@ -1996,11 +2091,11 @@ impl<'a> Parser<'a> {
     fn parse_impl(&mut self, start: Span) -> Option<ImplDecl> {
         self.bump(); // `impl`
         let generics = self.parse_generics()?;
-        let first = self.parse_type_path()?;
+        let first = self.parse_type_path_with(Some(TypeEnd::TYPE_ARG))?;
 
         // `impl Trait for Type` versus an inherent `impl Type`.
         let (trait_path, self_ty) = if self.eat(T::For) {
-            let target = self.parse_type_path()?;
+            let target = self.parse_type_path_with(Some(TypeEnd::TYPE_ARG))?;
             (Some(first), target)
         } else {
             (None, first)
@@ -2089,7 +2184,7 @@ impl<'a> Parser<'a> {
         self.expect(T::RParen)?;
 
         let ret = if self.eat(T::Arrow) {
-            Some(self.parse_return_type()?)
+            Some(self.declared_return_type()?)
         } else {
             None
         };
@@ -2123,7 +2218,7 @@ impl<'a> Parser<'a> {
         let name = self.ident()?;
         let generics = self.parse_generics()?;
         self.expect(T::Eq)?;
-        let ty = self.parse_type()?;
+        let ty = self.annotation(TypeEnd::LINE)?;
         let span = start.to(self.prev_span());
         self.expect_terminator();
         Some(TypeAlias { is_pub, name, generics, ty, span })
@@ -2138,20 +2233,25 @@ impl<'a> Parser<'a> {
     fn parse_const(&mut self, is_pub: bool, start: Span) -> Option<ConstDecl> {
         self.bump(); // `let` or `var`
         let name = self.ident()?;
-        let ty = if self.eat(T::Colon) { Some(self.parse_type()?) } else { None };
+        let ty = if self.eat(T::Colon) { Some(self.annotation(TypeEnd::BINDING)?) } else { None };
+        let unread = matches!(ty, Some(Type::Error(_)));
         if !self.eat(T::Eq) {
-            // One diagnostic, the one that names the rule. The declaration is
+            // One diagnostic, the one that names the rule — or the one that
+            // said its type could not be read, which was read to the line's
+            // end. The declaration is
             // still built, with a value that is already an error, so the name
             // exists for everything that uses it — which used to be a second
             // report of a missing `=` and a third of an unknown name.
-            self.diags.push(
-                Diagnostic::error(codes::E0118, "a module-level `let` must have a value")
-                    .with_primary(name.span, "declared here, with nothing to be")
-                    .with_note(
-                        "a constant is a name for a value the compiler knows, so there is \
-                         nowhere else the value could come from",
-                    ),
-            );
+            if !unread {
+                self.diags.push(
+                    Diagnostic::error(codes::E0118, "a module-level `let` must have a value")
+                        .with_primary(name.span, "declared here, with nothing to be")
+                        .with_note(
+                            "a constant is a name for a value the compiler knows, so there is \
+                             nowhere else the value could come from",
+                        ),
+                );
+            }
             let span = start.to(self.prev_span());
             let value = Expr::Error(Span::empty_at(self.file, span.end));
             self.expect_terminator();
@@ -2207,7 +2307,7 @@ impl<'a> Parser<'a> {
             let is_var = allow_var && self.eat(T::Var);
             let p_name = self.ident()?;
             self.expect(T::Colon)?;
-            let ty = self.parse_type()?;
+            let ty = self.annotation(TypeEnd::PARAM)?;
             params.push(Param { is_var, name: p_name, ty, span: p_start.to(self.prev_span()) });
             self.skip_newlines();
             if self.eat(T::Comma) {
@@ -2347,7 +2447,7 @@ impl<'a> Parser<'a> {
         self.expect(T::RParen)?;
 
         let ret = if self.eat(T::Arrow) {
-            Some(self.parse_return_type()?)
+            Some(self.declared_return_type()?)
         } else {
             None
         };
@@ -2365,7 +2465,7 @@ impl<'a> Parser<'a> {
         self.expect(T::RParen)?;
 
         let ret = if self.eat(T::Arrow) {
-            Some(self.parse_return_type()?)
+            Some(self.declared_return_type()?)
         } else {
             None
         };
@@ -2400,6 +2500,139 @@ impl<'a> Parser<'a> {
     }
 
     // ---- types ------------------------------------------------------------
+
+    /// The type a declaration is annotated with: a binding's, a parameter's,
+    /// a field's, an alias's. One that does not parse is reported and read
+    /// past to where `end` says it ends, and the declaration is kept with an
+    /// error type — dropping it made every later use of the name `cannot
+    /// find` once more, and a one-token slip in a long file a hundred
+    /// reports of one mistake.
+    fn annotation(&mut self, end: TypeEnd) -> Option<Type> {
+        let from = self.pos;
+        let start = self.span();
+        match self.parse_type() {
+            Some(ty) => Some(ty),
+            None => self.read_past_type(from, start, end),
+        }
+    }
+
+    /// After a type that started at token `from` did not parse: what is left
+    /// of it read past, and an error type in its place. It never goes past
+    /// the end of the line, nor past a bracket it did not open.
+    ///
+    /// It gives up, as every type did before, where what follows is not
+    /// where such a type ends — the declaration is then not one it can tell
+    /// the shape of — and, where a body follows the type, where it has a `{`
+    /// in it: the body taken for a map type, or a map type for the body.
+    fn read_past_type(&mut self, from: usize, start: Span, end: TypeEnd) -> Option<Type> {
+        if self.unwinding {
+            return None;
+        }
+        let failed = self.pos;
+        // The brackets the type opened and has not closed, by token. A type
+        // is written on the line of its declaration: one read on into the
+        // next — `-> ` at the end of a line, and then the `fn` below — is a
+        // declaration whose type is missing, and what was read is not it.
+        let mut open: Vec<usize> = Vec::new();
+        for i in from..=failed.min(self.tokens.len() - 1) {
+            if self.starts_line(i) && !matches!(self.tokens[i].kind, T::Newline | T::Eof) {
+                return None;
+            }
+            if i == failed {
+                break;
+            }
+            match self.tokens[i].kind {
+                T::LBrace if !end.braces => return None,
+                T::LParen | T::LBracket | T::LBrace if !self.abandoned.contains(&i) => open.push(i),
+                k @ (T::RParen | T::RBracket | T::RBrace) => {
+                    if open.last().is_some_and(|&o| self.tokens[o].kind == opener_of(k)) {
+                        open.pop();
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut given_up = Vec::new();
+        let ended = loop {
+            let k = self.peek();
+            // A line break inside a bracket the type opened is not a token,
+            // and that line's end says nothing of where the type was to end.
+            if matches!(k, T::Eof | T::Newline) {
+                break end.line && open.is_empty();
+            }
+            // The next `name:` begins the next element wherever it stands:
+            // no type holds one outside a map type's braces. `[T, f: fn(T)`
+            // is a slice type whose `]` was left out, and `f` the parameter
+            // after it.
+            let next_name = end.named
+                && self.pos > from
+                && k == T::Ident
+                && self.peek_at(1) == T::Colon
+                && !open.iter().any(|&o| self.tokens[o].kind == T::LBrace);
+            // A body's `{` ends its line. One that does not — `(i{ n: 1 }` —
+            // is a struct literal or a map, and what was written is not a
+            // return type and a body.
+            if k == T::LBrace && end.hard.contains(&k) {
+                break matches!(self.peek_at(1), T::Newline | T::RBrace)
+                    || self.starts_line(self.pos + 1);
+            }
+            if end.hard.contains(&k)
+                || next_name
+                || (open.is_empty() && (end.stops.contains(&k) || end.closer == Some(k)))
+            {
+                break true;
+            }
+            if self.pos > from && self.starts_line(self.pos) {
+                break end.line && open.is_empty();
+            }
+            match k {
+                T::LBrace if !end.braces => break false,
+                // Before a body, only what is left of the type is read past:
+                // a bracket opened after it is another declaration's.
+                T::LParen | T::LBracket if end.hard.contains(&T::LBrace) => break false,
+                T::LParen | T::LBracket | T::LBrace => open.push(self.pos),
+                T::RParen | T::RBracket | T::RBrace => {
+                    // `[(]` closes the `[`, and the `(` inside it with it.
+                    let Some(at) = open.iter().rposition(|&o| self.tokens[o].kind == opener_of(k))
+                    else {
+                        break end.closer == Some(k);
+                    };
+                    given_up.extend(open.drain(at + 1..));
+                    open.pop();
+                }
+                _ => {}
+            }
+            self.bump();
+        };
+        // A `{` left open would take the `}` that closes the block around
+        // the declaration for its own.
+        if !ended || open.iter().any(|&o| self.tokens[o].kind == T::LBrace) {
+            self.pos = failed;
+            return None;
+        }
+        // What it left open is given up on here, where it ended, as a closer
+        // reported missing is: `-> [int {` is not still inside its `[` at the
+        // line after the body.
+        given_up.extend(open);
+        if !given_up.is_empty() {
+            self.abandoned.extend(given_up);
+            self.abandoned_at = Some(self.pos);
+        }
+        let to = if self.pos > from { self.prev_span().end } else { start.start };
+        Some(Type::Error(Span::new(self.file, start.start, to.max(start.start))))
+    }
+
+    /// The return type of a declared function, kept as an error type when it
+    /// does not parse (see [`Parser::annotation`]), so the function is still
+    /// there to be called. It ends at the body's `{`.
+    fn declared_return_type(&mut self) -> Option<RetType> {
+        let from = self.pos;
+        let start = self.span();
+        match self.parse_return_type() {
+            Some(ret) => Some(ret),
+            None => self.read_past_type(from, start, TypeEnd::BODY).map(RetType::Simple),
+        }
+    }
 
     fn parse_type(&mut self) -> Option<Type> {
         self.deeper()?;
@@ -2485,6 +2718,15 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type_path(&mut self) -> Option<TypePath> {
+        self.parse_type_path_with(None)
+    }
+
+    /// A type path, with `args` saying where a type argument that does not
+    /// parse ends, where it is read past (see [`Parser::annotation`]): in an
+    /// `impl` header, which dropped every method in the block over it.
+    /// Elsewhere a path may be read on the chance it is one, and a type
+    /// argument that is not one says it was not.
+    fn parse_type_path_with(&mut self, args_end: Option<TypeEnd>) -> Option<TypePath> {
         let start = self.span();
         let mut segments = vec![self.ident()?];
         while self.at(T::Dot) && self.peek_at(1) == T::Ident {
@@ -2495,7 +2737,10 @@ impl<'a> Parser<'a> {
         if self.at(T::Lt) {
             self.bump_opening_lt();
             while !self.at(T::Gt) && !self.at_end() {
-                args.push(self.parse_type()?);
+                args.push(match args_end {
+                    Some(end) => self.annotation(end)?,
+                    None => self.parse_type()?,
+                });
                 if !self.eat(T::Comma) {
                     break;
                 }
@@ -2716,7 +2961,7 @@ impl<'a> Parser<'a> {
         self.bump();
         let binding = self.parse_binding()?;
         let ty = if self.eat(T::Colon) {
-            Some(self.parse_type()?)
+            Some(self.annotation(TypeEnd::BINDING)?)
         } else {
             None
         };
@@ -2737,7 +2982,7 @@ impl<'a> Parser<'a> {
         self.bump();
         let name = self.ident()?;
         let ty = if self.eat(T::Colon) {
-            Some(self.parse_type()?)
+            Some(self.annotation(TypeEnd::BINDING)?)
         } else {
             None
         };
@@ -2748,7 +2993,15 @@ impl<'a> Parser<'a> {
         // an error, so the binding exists for the lines after it. Returning
         // nothing used to add a missing `=` to the report, and then an unknown
         // name for every use of the variable.
+        // One whose type could not be read, and was read past to the end of
+        // its line, has said what was wrong with it.
         if !self.eat(T::Eq) {
+            if matches!(ty, Some(Type::Error(_))) {
+                let span = start.to(self.prev_span());
+                let init = Expr::Error(Span::empty_at(self.file, span.end));
+                self.expect_terminator();
+                return Some(Stmt::Var(VarStmt { name, ty, init, span }));
+            }
             self.diags.push(
                 Diagnostic::error(codes::E0110, "`var` must be initialised")
                     .with_primary(name.span, "declared here without a value")
@@ -4368,7 +4621,7 @@ impl<'a> Parser<'a> {
             while !self.at(T::Pipe) && !self.at_end() {
                 let name = self.ident()?;
                 let ty = if self.eat(T::Colon) {
-                    Some(self.parse_type()?)
+                    Some(self.annotation(TypeEnd::CLOSURE_PARAM)?)
                 } else {
                     None
                 };
@@ -4389,7 +4642,7 @@ impl<'a> Parser<'a> {
         // context supplies one, so `-> T` is available for the cases it does
         // not — `let f = |x: int| -> str { … }`.
         let ret = if self.eat(T::Arrow) {
-            Some(Box::new(self.parse_type()?))
+            Some(Box::new(self.annotation(TypeEnd::BODY)?))
         } else {
             None
         };
