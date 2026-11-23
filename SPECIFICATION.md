@@ -482,7 +482,9 @@ a struct and pass it to what changes it.
 
 A constant shares the value name space with functions, so a module cannot
 declare both `fn limit` and `let limit`; a cycle among constants is
-[E0119](#16-diagnostics).
+[E0119](#16-diagnostics). A module's own constant shadows a prelude function of
+the same name, exactly as its own function would: after `let max = 100`, `max`
+is that constant everywhere in the module, and `max(1, 2)` there is an error.
 
 In a `match` pattern a constant's name is its value too, so `LIMIT => …` and
 `limits.MAX_BODY => …` match that one value, exactly as the literal would — they

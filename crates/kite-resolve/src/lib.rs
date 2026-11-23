@@ -814,6 +814,11 @@ impl ResolveMap {
         self.consts.iter().position(|c| c.name == name).map(|i| i as u32)
     }
 
+    /// Whether a declaration's merged name is the prelude's.
+    fn is_prelude(&self, merged: &str) -> bool {
+        merged.strip_prefix(PRELUDE).is_some_and(|rest| rest.starts_with('.'))
+    }
+
     pub fn type_by_name_in(&self, module: &str, name: &str) -> Option<u32> {
         let written = name;
         let name = self.modules.canonical(module, name);
@@ -2498,7 +2503,16 @@ impl<'a> FnResolver<'a> {
             self.map.uses.insert(p.span, Res::Local(id));
             return;
         }
+        // A program's own constant shadows a prelude function, exactly as its
+        // own function does: `let max = 100` then `max + 1` is the constant.
+        // It was the prelude's `max` here and the constant in a pattern, so
+        // one name meant two things in one function.
+        let own_const = self.find_const(name).filter(|&c| !self.map.is_prelude(&self.map.consts[c as usize].name));
         if let Some(id) = self.find_fn(name) {
+            if let (Some(c), true) = (own_const, self.map.is_prelude(&self.map.fns[id as usize].name)) {
+                self.map.uses.insert(p.span, Res::Const(c));
+                return;
+            }
             self.map.uses.insert(p.span, Res::Fn(id));
             return;
         }

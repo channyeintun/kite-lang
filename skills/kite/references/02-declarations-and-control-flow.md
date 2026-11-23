@@ -143,6 +143,8 @@ backend writes it at run time: `"\(1e21)"` is `"1e+21"`.
 In a `match` pattern a constant is its value as well: `LIMIT => …` (or `limits.MAX_BODY =>
 …`) matches that one value, like the literal would, and is never a binding that takes
 everything. A constant of the wrong type for the scrutinee is `E0200` at the pattern.
+A constant named like a prelude function (`let max = 100`) shadows it in that module, as
+your own function would: `max + 1` is `101`, and `max(1, 2)` is `E0205`.
 
 ```kite
 let LIMIT = 10
