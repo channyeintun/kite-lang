@@ -197,12 +197,128 @@ fn sign_checks() -> [error] {
     return out
 }
 
+/// Within `units` units in the last place of `want`.
+fn near(found: float, want: float, units: float, what: str) -> error {
+    if math.abs(found - want) <= math.abs(want) * 0.0000000000000002220446049250313 * units {
+        return nil
+    }
+    return errors.new("\(what): expected \(want), found \(found)")
+}
+
+fn addition_checks() -> [error] {
+    var out: [error] = []
+    // Naming the values a literal cannot write, and asking about them without
+    // float equality.
+    out.push(same(math.inf(), inf(), "inf()"))
+    out.push(same(math.nan(), nan(), "nan()"))
+    out.push(test.is_true(math.is_nan(nan()) && !math.is_nan(inf()) && !math.is_nan(0.0), "is_nan"))
+    out.push(test.is_true(math.is_inf(inf()) && math.is_inf(-inf()), "is_inf"))
+    out.push(test.is_true(!math.is_inf(nan()) && !math.is_inf(1.7976931348623157e308), "is_inf, of a NaN and the largest float"))
+    out.push(test.is_true(math.is_finite(-1.7976931348623157e308) && math.is_finite(-0.0), "is_finite"))
+    out.push(test.is_true(!math.is_finite(inf()) && !math.is_finite(nan()), "is_finite, of inf and NaN"))
+    out.push(same(math.copysign(3.0, -0.0), -3.0, "copysign(3, -0)"))
+    out.push(same(math.copysign(-3.0, 2.0), 3.0, "copysign(-3, 2)"))
+    out.push(same(math.copysign(0.0, -1.0), -0.0, "copysign(0, -1)"))
+    out.push(same(math.copysign(inf(), -1.0), -inf(), "copysign(inf, -1)"))
+    out.push(same(math.fract(2.75), 0.75, "fract(2.75)"))
+    out.push(same(math.fract(-1.5), -0.5, "fract(-1.5)"))
+    out.push(same(math.fract(-3.0), -0.0, "fract(-3)"))
+    out.push(same(math.fract(1e300), 0.0, "fract(1e300)"))
+    out.push(same(math.fract(-inf()), -0.0, "fract(-inf)"))
+    out.push(same(math.fract(nan()), nan(), "fract(NaN)"))
+
+    // Logarithms to other bases: an exact power is exact, and the rest is
+    // correctly rounded in practice — every one of 500 checked against a
+    // 240-bit reference.
+    out.push(same(math.log2(8.0), 3.0, "log2(8)"))
+    out.push(same(math.log2(5e-324), -1074.0, "log2 of the smallest float"))
+    out.push(same(math.log2(1.0), 0.0, "log2(1)"))
+    out.push(same(math.log2(10.0), 3.321928094887362, "log2(10)"))
+    out.push(same(math.log10(1000.0), 3.0, "log10(1000)"))
+    out.push(same(math.log10(1e-300), -300.0, "log10(1e-300)"))
+    out.push(same(math.log10(2.0), 0.3010299956639812, "log10(2)"))
+    out.push(same(math.log10(0.0), 0.0, "log10(0) answers zero, as ln does"))
+    out.push(same(math.log10(inf()), inf(), "log10(inf)"))
+    out.push(same(math.log2(nan()), nan(), "log2(NaN)"))
+    out.push(same(math.log(3.0, 81.0), 4.0, "log(3, 81)"))
+    out.push(same(math.log(2.0, 1024.0), 10.0, "log(2, 1024)"))
+    out.push(same(math.log(1.0, 5.0), 0.0, "log to base one"))
+    out.push(same(math.log(-2.0, 5.0), 0.0, "log to a negative base"))
+    out.push(same(math.log(nan(), 5.0), nan(), "log to a NaN base"))
+    out.push(same(math.exp2(10.0), 1024.0, "exp2(10)"))
+    out.push(same(math.exp2(-1074.0), 5e-324, "exp2(-1074)"))
+    out.push(same(math.exp2(0.5), 1.4142135623730951, "exp2(0.5)"))
+
+    // Hyperbolic functions, each within two units of libm.
+    out.push(same(math.sinh(0.0), 0.0, "sinh(0)"))
+    out.push(same(math.sinh(-0.0), -0.0, "sinh(-0)"))
+    out.push(same(math.sinh(-inf()), -inf(), "sinh(-inf)"))
+    out.push(near(math.sinh(0.00000001), 0.00000001, 1.0, "sinh(1e-8), where the difference of exponentials cancels"))
+    out.push(near(math.sinh(1.0), 1.1752011936438014, 2.0, "sinh(1)"))
+    out.push(near(math.sinh(-30.0), -5343237290762.231, 2.0, "sinh(-30)"))
+    out.push(near(math.sinh(710.0), 1.1169973830808557e308, 2.0, "sinh(710), finite"))
+    out.push(same(math.sinh(711.0), inf(), "sinh(711) overflows"))
+    out.push(same(math.cosh(0.0), 1.0, "cosh(0)"))
+    out.push(near(math.cosh(-1.0), 1.5430806348152437, 2.0, "cosh(-1)"))
+    out.push(near(math.cosh(710.0), 1.1169973830808557e308, 2.0, "cosh(710), finite"))
+    out.push(same(math.cosh(-inf()), inf(), "cosh(-inf)"))
+    out.push(same(math.tanh(-0.0), -0.0, "tanh(-0)"))
+    out.push(near(math.tanh(0.25), 0.24491866240370913, 2.0, "tanh(0.25)"))
+    out.push(near(math.tanh(-2.0), -0.9640275800758169, 2.0, "tanh(-2)"))
+    out.push(same(math.tanh(800.0), 1.0, "tanh(800)"))
+    out.push(same(math.tanh(-inf()), -1.0, "tanh(-inf)"))
+    out.push(same(math.tanh(nan()), nan(), "tanh(NaN)"))
+
+    // Integers. checked_ and wrapping_ for the other two operations that
+    // overflow, an integer power, the floored modulo and gcd.
+    out.push(test.is_true(math.checked_sub(5, 7) == -2, "checked_sub"))
+    out.push(test.is_true(math.checked_sub(math.min_int(), 1) == nil, "checked_sub below"))
+    out.push(test.is_true(math.checked_sub(0, math.min_int()) == nil, "checked_sub of the smallest int"))
+    out.push(test.is_true(math.checked_sub(-1, math.min_int()) == math.max_int(), "checked_sub to the largest"))
+    out.push(test.is_true(math.checked_mul(-3, 4) == -12, "checked_mul"))
+    out.push(test.is_true(math.checked_mul(math.min_int(), -1) == nil, "checked_mul(min, -1)"))
+    out.push(test.is_true(math.checked_mul(-1, math.min_int()) == nil, "checked_mul(-1, min)"))
+    out.push(test.is_true(math.checked_mul(math.min_int(), 1) == math.min_int(), "checked_mul(min, 1)"))
+    out.push(test.is_true(math.checked_mul(-4611686018427387904, 2) == math.min_int(), "checked_mul to the smallest"))
+    out.push(test.is_true(math.checked_mul(4611686018427387904, 2) == nil, "checked_mul past the largest"))
+    out.push(test.is_true(math.checked_mul(3037000499, 3037000499) == 9223372030926249001, "checked_mul just under"))
+    out.push(test.is_true(math.checked_mul(3037000500, 3037000500) == nil, "checked_mul just over"))
+    out.push(test.equal_int(math.wrapping_sub(math.min_int(), 1), math.max_int(), "wrapping_sub"))
+    out.push(test.equal_int(math.wrapping_sub(0, math.min_int()), math.min_int(), "wrapping_sub of the smallest int"))
+    out.push(test.equal_int(math.wrapping_sub(5, 7), -2, "wrapping_sub in range"))
+    out.push(test.equal_int(math.wrapping_mul(math.max_int(), 2), -2, "wrapping_mul"))
+    out.push(test.equal_int(math.wrapping_mul(math.min_int(), -1), math.min_int(), "wrapping_mul(min, -1)"))
+    out.push(test.equal_int(math.wrapping_mul(math.max_int(), math.max_int()), 1, "wrapping_mul(max, max)"))
+    out.push(test.equal_int(math.wrapping_mul(-6148914691236517205, 3), 1, "wrapping_mul, the inverse of 3"))
+    out.push(test.equal_int(math.wrapping_mul(4294967296, 4294967296), 0, "2³² · 2³² wraps to zero"))
+    out.push(test.is_true(math.ipow(3, 4) == 81, "ipow"))
+    out.push(test.is_true(math.ipow(-2, 63) == math.min_int(), "ipow to the smallest int"))
+    out.push(test.is_true(math.ipow(2, 63) == nil, "ipow past the largest"))
+    out.push(test.is_true(math.ipow(10, 18) == 1000000000000000000, "ipow(10, 18)"))
+    out.push(test.is_true(math.ipow(10, 19) == nil, "ipow(10, 19)"))
+    out.push(test.is_true(math.ipow(-1, math.max_int()) == -1, "ipow(-1, max_int)"))
+    out.push(test.is_true(math.ipow(0, 0) == 1, "ipow(0, 0)"))
+    out.push(test.is_true(math.ipow(2, -1) == nil, "ipow of a negative power"))
+    out.push(test.equal_int(math.mod_floor(-1, 5), 4, "mod_floor(-1, 5)"))
+    out.push(test.equal_int(math.mod_floor(7, -3), -2, "mod_floor(7, -3)"))
+    out.push(test.equal_int(math.mod_floor(-6, 3), 0, "mod_floor(-6, 3)"))
+    out.push(test.equal_int(math.mod_floor(math.min_int(), -1), 0, "mod_floor(min, -1)"))
+    out.push(test.equal_int(math.mod_floor(math.min_int(), math.max_int()), math.max_int() - 1, "mod_floor(min, max)"))
+    out.push(test.equal_int(math.gcd(12, -18), 6, "gcd"))
+    out.push(test.equal_int(math.gcd(0, 0), 0, "gcd(0, 0)"))
+    out.push(test.equal_int(math.gcd(0, -5), 5, "gcd(0, -5)"))
+    out.push(test.equal_int(math.gcd(math.min_int(), 6), 2, "gcd(min, 6)"))
+    out.push(test.equal_int(math.gcd(math.max_int(), math.min_int()), 1, "gcd(max, min)"))
+    return out
+}
+
 fn main() {
     var results: [error] = []
     results = concat(results, pow_checks())
     results = concat(results, exp_checks())
     results = concat(results, edge_checks())
     results = concat(results, sign_checks())
+    results = concat(results, addition_checks())
     var failed = 0
     for e in results {
         if e != nil {

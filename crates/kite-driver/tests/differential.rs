@@ -4402,6 +4402,19 @@ fn main() {
 }
 ",
     ),
+    // The one gcd an `int` cannot hold is 2⁶³, and `math.gcd` says so rather
+    // than overflowing as it negates.
+    (
+        "a-gcd-of-two-to-the-63-traps",
+        "\
+use std/math
+
+fn main() {
+  io.print(math.gcd(math.min_int(), 6))
+  io.print(math.gcd(math.min_int(), 0))
+}
+",
+    ),
     (
         "a-negative-buffer-field-traps",
         "\

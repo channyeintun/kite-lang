@@ -432,6 +432,201 @@ pub fn wrapping_add(a: int, b: int) -> int {
     return (a - min_int()) + (b - min_int())
 }
 
+/// `a - b`, or nil when that does not fit.
+///
+/// ```kite
+/// assert(checked_sub(5, 7) == -2, "in range")
+/// assert(checked_sub(min_int(), 1) == nil, "below the smallest int")
+/// ```
+///
+/// The mirror of [`checked_add`]: `max_int() + b` is in range when `b` is
+/// negative, and `min_int() + b` when it is positive.
+pub fn checked_sub(a: int, b: int) -> Option<int> {
+    if b < 0 && a > max_int() + b {
+        return nil
+    }
+    if b > 0 && a < min_int() + b {
+        return nil
+    }
+    return a - b
+}
+
+/// `a · b`, or nil when that does not fit.
+///
+/// ```kite
+/// assert(checked_mul(-3, 4) == -12, "in range")
+/// assert(checked_mul(min_int(), -1) == nil, "2⁶³ is not an int")
+/// assert(checked_mul(4611686018427387904, 2) == nil, "nor is 2⁶³ this way")
+/// ```
+///
+/// Decided by dividing the bound by one factor, which cannot overflow: the
+/// only overflowing division is `min_int() / -1`, and the divisor here is
+/// always the other factor with the bound's sign worked out first.
+pub fn checked_mul(a: int, b: int) -> Option<int> {
+    if a == 0 || b == 0 {
+        return 0
+    }
+    if a > 0 {
+        if b > 0 && a > max_int() / b {
+            return nil
+        }
+        if b < 0 && b < min_int() / a {
+            return nil
+        }
+    } else {
+        if b > 0 && a < min_int() / b {
+            return nil
+        }
+        if b < 0 && b < max_int() / a {
+            return nil
+        }
+    }
+    return a * b
+}
+
+/// `a - b`, wrapped into the range of an `int` — in every build.
+///
+/// ```kite
+/// assert(wrapping_sub(min_int(), 1) == max_int(), "wraps around")
+/// assert(wrapping_sub(0, min_int()) == min_int(), "0 − (−2⁶³) is 2⁶³, which wraps to −2⁶³")
+/// ```
+///
+/// `a + (−b)`, except that `−min_int()` is itself an overflow: subtracting
+/// −2⁶³ is adding 2⁶³, which is the same as adding −2⁶³ once wrapped.
+pub fn wrapping_sub(a: int, b: int) -> int {
+    if b == min_int() {
+        return wrapping_add(a, min_int())
+    }
+    return wrapping_add(a, 0 - b)
+}
+
+/// `a · b`, wrapped into the range of an `int` — in every build: the low 64
+/// bits of the product, as two's complement.
+///
+/// ```kite
+/// assert(wrapping_mul(max_int(), 2) == -2, "the low 64 bits")
+/// assert(wrapping_mul(min_int(), -1) == min_int(), "2⁶³ wraps to −2⁶³")
+/// assert(wrapping_mul(-3, 4) == -12, "in range, the product")
+/// ```
+///
+/// Long multiplication in 16-bit pieces, which is what keeps it in range:
+/// each piece of each factor is below 2¹⁶, so every product of two pieces is
+/// below 2³², and the sums below 2³⁵. Only the four lowest pieces of the
+/// product are kept, which is the wrapping.
+pub fn wrapping_mul(a: int, b: int) -> int {
+    let fits = checked_mul(a, b)
+    if fits != nil {
+        return fits
+    }
+    var x: [int] = []
+    var y: [int] = []
+    for i in 0..4 {
+        x.push((a >> (16 * i)) & 65535)
+        y.push((b >> (16 * i)) & 65535)
+    }
+    var pieces: [int] = [0, 0, 0, 0]
+    for i in 0..4 {
+        for j in 0..4 - i {
+            pieces[i + j] = pieces[i + j] + x[i] * y[j]
+        }
+    }
+    var carry = 0
+    for i in 0..4 {
+        let t = pieces[i] + carry
+        pieces[i] = t & 65535
+        carry = t >> 16
+    }
+    // The top piece holds the sign bit; from 2¹⁵ up it is a negative number.
+    var top = pieces[3]
+    if top >= 32768 {
+        top = top - 65536
+    }
+    return top * 281474976710656 + pieces[2] * 4294967296 + pieces[1] * 65536 + pieces[0]
+}
+
+/// `base` raised to a power, or nil when the answer does not fit an `int` or
+/// the power is negative — an `int` has no reciprocals.
+///
+/// ```kite
+/// assert(ipow(3, 4) == 81, "ipow")
+/// assert(ipow(-2, 63) == min_int(), "exactly the smallest int")
+/// assert(ipow(2, 63) == nil, "one past the largest")
+/// assert(ipow(0, 0) == 1, "anything to the zero is one")
+/// ```
+///
+/// By squaring, with every product checked. The square is not taken after
+/// the last bit of the power is used, so an answer that fits is never
+/// refused because a square it did not need would have overflowed.
+pub fn ipow(base: int, exponent: int) -> Option<int> {
+    if exponent < 0 {
+        return nil
+    }
+    var out = 1
+    var square = base
+    var n = exponent
+    for n > 0 {
+        if n % 2 == 1 {
+            let next = checked_mul(out, square)
+            if next == nil {
+                return nil
+            }
+            out = next
+        }
+        n = n / 2
+        if n > 0 {
+            let squared = checked_mul(square, square)
+            if squared == nil {
+                return nil
+            }
+            square = squared
+        }
+    }
+    return out
+}
+
+/// The remainder of `a / b` with the sign of `b`: the floored modulo, where
+/// `%` truncates. `mod_floor(-1, 5)` is 4 where `-1 % 5` is -1, which is
+/// what wrapping an index around a ring wants. A zero `b` traps, as `%` does.
+///
+/// ```kite
+/// assert(mod_floor(-1, 5) == 4, "wraps an index")
+/// assert(mod_floor(7, -3) == -2, "the sign of b")
+/// assert(mod_floor(min_int(), -1) == 0, "no overflow")
+/// ```
+pub fn mod_floor(a: int, b: int) -> int {
+    let r = a % b
+    if r != 0 && (r < 0) != (b < 0) {
+        return r + b
+    }
+    return r
+}
+
+/// The greatest common divisor, never negative, by Euclid. `gcd(0, 0)` is 0.
+///
+/// ```kite
+/// assert(gcd(12, -18) == 6, "gcd")
+/// assert(gcd(0, 5) == 5, "gcd with zero")
+/// ```
+///
+/// Worked on the remainders as they come, which `%` keeps within the
+/// divisor's size whatever the signs, so nothing is negated until the end.
+/// That end traps for the one answer an `int` cannot hold: 2⁶³, the gcd of
+/// `min_int()` with zero or with itself.
+pub fn gcd(a: int, b: int) -> int {
+    var x = a
+    var y = b
+    for y != 0 {
+        let r = x % y
+        x = y
+        y = r
+    }
+    require(x != min_int(), "math.gcd: the answer is 2⁶³, which is not an int")
+    if x < 0 {
+        return 0 - x
+    }
+    return x
+}
+
 /// The length of the hypotenuse — the distance from the origin to (x, y).
 ///
 /// `sqrt(x * x + y * y)` overflows to infinity once either side passes about
@@ -503,6 +698,95 @@ pub fn tau() -> float {
 
 pub fn ln2() -> float {
     return 0.6931471805599453
+}
+
+/// Positive infinity, which a literal cannot write.
+///
+/// ```kite
+/// assert(inf() > max_float(), "past every finite float")
+/// ```
+pub fn inf() -> float {
+    return 1.0 / 0.0
+}
+
+/// A NaN, which a literal cannot write either. It is not equal to anything,
+/// itself included: test for one with [`is_nan`].
+///
+/// ```kite
+/// assert(is_nan(nan()), "nan")
+/// ```
+pub fn nan() -> float {
+    return 0.0 / 0.0
+}
+
+/// Whether `x` is a NaN.
+///
+/// A NaN is the one float not ordered against itself, so `x >= x` is false
+/// for it alone. Written out here so that a program does not have to: the
+/// obvious `x != x` is float equality, which the compiler rightly warns about.
+///
+/// ```kite
+/// assert(is_nan(0.0 / 0.0), "0/0")
+/// assert(!is_nan(inf()), "an infinity is a number")
+/// ```
+pub fn is_nan(x: float) -> bool {
+    return !(x >= x)
+}
+
+/// Whether `x` is an infinity, of either sign.
+///
+/// ```kite
+/// assert(is_inf(-inf()), "-inf")
+/// assert(!is_inf(max_float()) && !is_inf(nan()), "neither the largest float nor a NaN")
+/// ```
+pub fn is_inf(x: float) -> bool {
+    return x > max_float() || x < -max_float()
+}
+
+/// Whether `x` is neither an infinity nor a NaN.
+///
+/// ```kite
+/// assert(is_finite(max_float()), "the largest float")
+/// assert(!is_finite(inf()) && !is_finite(nan()), "inf and NaN")
+/// ```
+pub fn is_finite(x: float) -> bool {
+    return abs(x) <= max_float()
+}
+
+/// The size of `x` with the sign of `y`, a zero's sign included: what it takes
+/// to make a -0.0 on purpose. A NaN `y` counts as positive, since a NaN's
+/// sign cannot be read in Kite.
+///
+/// ```kite
+/// assert(copysign(3.0, -0.0) == -3.0, "the sign of -0.0")
+/// assert(1.0 / copysign(0.0, -1.0) < 0.0, "a negative zero")
+/// ```
+pub fn copysign(x: float, y: float) -> float {
+    let size = abs(x)
+    if y < 0.0 || (y == 0.0 && 1.0 / y < 0.0) {
+        return -size
+    }
+    return size
+}
+
+/// What is left of `x` after its whole part: `x − trunc(x)`, with `x`'s sign,
+/// exact for every float. An infinity has no fraction and answers a zero of
+/// its sign; a NaN answers a NaN.
+///
+/// ```kite
+/// assert(fract(2.75) == 0.75, "fract")
+/// assert(fract(-1.5) == -0.5, "with the sign of x")
+/// assert(1.0 / fract(-3.0) < 0.0, "a whole negative leaves -0.0")
+/// ```
+pub fn fract(x: float) -> float {
+    if is_inf(x) {
+        return copysign(0.0, x)
+    }
+    let f = x - trunc(x)
+    if f == 0.0 {
+        return x * 0.0
+    }
+    return f
 }
 
 // ---- transcendentals -------------------------------------------------------
@@ -798,6 +1082,157 @@ pub fn powf(base: float, exponent: float) -> float {
     let lost = product_error(exponent, high, p) + exponent * low
     let (z, z_low) = two_sum(p, lost)
     return exp_split(z, z_low)
+}
+
+/// The base-2 logarithm, with `ln`'s edges: zero and negatives answer zero,
+/// an infinity is its own, a NaN answers a NaN.
+///
+/// ```kite
+/// assert(log2(8.0) == 3.0, "an exact power is exact")
+/// assert(log2(0.5) == -1.0, "below one")
+/// ```
+///
+/// Not `ln(x) / ln2()`, which rounds twice and makes `log2(8)`
+/// 2.9999999999999996 or 3.0000000000000004 by luck: the logarithm is
+/// divided while still in two floats, by `ln 2` in two floats, so a power of
+/// two comes out exactly and the rest is correctly rounded in practice.
+pub fn log2(x: float) -> float {
+    return log_by(x, 0.6931471805599453, 2.3190468138462996e-17)
+}
+
+/// The base-10 logarithm, the same way as [`log2`]: `log10(1000.0)` is
+/// exactly 3.
+///
+/// ```kite
+/// assert(log10(1000.0) == 3.0, "log10(1000)")
+/// assert(log10(0.001) == -3.0, "log10(0.001)")
+/// ```
+pub fn log10(x: float) -> float {
+    return log_by(x, 2.302585092994046, -2.1707562233822494e-16)
+}
+
+/// The logarithm of `x` to any base, `ln x / ln base`, both carried in two
+/// floats as [`log2`]'s are. A base that has no logarithms — zero or less, or
+/// one — answers zero, as `ln` does for what it cannot answer; so does an `x`
+/// of zero or less. A NaN in either answers a NaN.
+///
+/// ```kite
+/// assert(log(3.0, 81.0) == 4.0, "log(3, 81)")
+/// assert(log(1.0, 5.0) == 0.0, "base one has no logarithms")
+/// ```
+pub fn log(base: float, x: float) -> float {
+    if is_nan(base) || is_nan(x) {
+        return base + x
+    }
+    if base <= 0.0 || base == 1.0 || x <= 0.0 {
+        return 0.0
+    }
+    if !is_finite(base) || !is_finite(x) {
+        return ln(x) / ln(base)
+    }
+    let (high, low) = ln_split(base)
+    return log_by(x, high, low)
+}
+
+/// `ln x / (high + low)`, divided in two floats so it rounds once.
+fn log_by(x: float, high: float, low: float) -> float {
+    if x <= 0.0 {
+        return 0.0
+    }
+    if !(x < x * 2.0) {
+        return x
+    }
+    let (h, l) = ln_split(x)
+    let q = h / high
+    // The remainder `h + l − q · (high + low)`, its leading part exact: `q ·
+    // high` is within a factor of two of `h`, and Dekker's product gives what
+    // its rounding lost.
+    let p = q * high
+    let remainder = (((h - p) - product_error(q, high, p)) + l) - q * low
+    return q + remainder / high
+}
+
+/// 2 raised to `x`: [`powf`] with base 2, so a whole `x` is an exact power of
+/// two and a fractional one is within a unit in the last place.
+///
+/// ```kite
+/// assert(exp2(10.0) == 1024.0, "exp2(10)")
+/// assert(exp2(-1074.0) == 5e-324, "down to the smallest float")
+/// ```
+pub fn exp2(x: float) -> float {
+    return powf(2.0, x)
+}
+
+/// The hyperbolic sine. Within a few units in the last place; odd, so -0.0
+/// and the sign of an infinity are kept; a NaN answers a NaN.
+///
+/// ```kite
+/// assert(sinh(0.0) == 0.0, "sinh(0)")
+/// assert(sinh(-710.0) > -inf() && sinh(-710.0) < -max_float() / 2.0, "finite though e^710 is not")
+/// ```
+///
+/// Below one in size by its series, `x + x³/3! + …`, because `(eˣ − e⁻ˣ)/2`
+/// is the difference of two numbers near one and has lost most of its
+/// digits by `x = 1e-8`. Past 22, `e⁻ˣ` is below a unit in the last place of
+/// `eˣ`, and `eˣ/2` is taken as `(e^(x/2)/2) · e^(x/2)`, which stays finite
+/// up to where the answer itself is not — `sinh(710)` is about 1.1e308.
+pub fn sinh(x: float) -> float {
+    let size = abs(x)
+    if size < 1.0 {
+        let squared = x * x
+        var s = 1.0
+        var n = 10
+        for n >= 1 {
+            s = 1.0 + s * squared / ((2 * n * (2 * n + 1)) as float)
+            n -= 1
+        }
+        return x * s
+    }
+    if size > 22.0 {
+        let half = exp(size / 2.0)
+        return copysign(half / 2.0 * half, x)
+    }
+    let e = exp(size)
+    return copysign((e - 1.0 / e) / 2.0, x)
+}
+
+/// The hyperbolic cosine, `(eˣ + e⁻ˣ)/2`, within a few units in the last
+/// place. Even, so `cosh(-x)` is `cosh(x)`; a NaN answers a NaN.
+///
+/// ```kite
+/// assert(cosh(0.0) == 1.0, "cosh(0)")
+/// assert(cosh(-710.0) < inf(), "finite though e^710 is not")
+/// ```
+pub fn cosh(x: float) -> float {
+    let size = abs(x)
+    if size > 22.0 {
+        let half = exp(size / 2.0)
+        return half / 2.0 * half
+    }
+    let e = exp(size)
+    return (e + 1.0 / e) / 2.0
+}
+
+/// The hyperbolic tangent, in [-1, 1], within a few units in the last place.
+/// Odd, so -0.0 is kept; a NaN answers a NaN.
+///
+/// ```kite
+/// assert(tanh(30.0) == 1.0, "tanh(30) rounds to one")
+/// assert(tanh(-inf()) == -1.0, "tanh(-inf)")
+/// ```
+///
+/// `1 − 2/(e²ˣ + 1)` from a half up, which never overflows into `inf / inf`
+/// as `sinh / cosh` would past 710; below a half, `sinh / cosh`, whose
+/// series keeps the digits the subtraction would cancel.
+pub fn tanh(x: float) -> float {
+    let size = abs(x)
+    if size > 22.0 {
+        return copysign(1.0, x)
+    }
+    if size < 0.5 {
+        return sinh(x) / cosh(x)
+    }
+    return copysign(1.0 - 2.0 / (exp(2.0 * size) + 1.0), x)
 }
 
 /// The cube root, keeping the sign — unlike `powf`, which cannot.
